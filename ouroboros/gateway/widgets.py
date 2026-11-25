@@ -44,11 +44,11 @@ class WidgetTab(TypedDict):
     title: str
     icon: str
     ws_prefix: str
-    render: Dict[str, Any]
+    render: Dict[str, Any]  # carries the frame geometry
     span: int
     grid_span: int
     revision: str
-    generation: NotRequired[str]
+    generation: NotRequired[str]  # live publication identity; changes on same-content reload too.
     pinned_card: NotRequired[bool]
 
 

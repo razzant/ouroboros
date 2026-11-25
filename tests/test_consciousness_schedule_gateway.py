@@ -268,12 +268,10 @@ def test_the_legacy_delete_contract_name_survives_beside_the_action_one():
     for name in ("ScheduleDeleteResponse", "ScheduleActionResponse",
                  "ScheduleUpsertResponse", "ScheduledTasksResponse"):
         assert name in contracts.__all__, name
-    mirror = pathlib.Path("web/modules/api_types.js").read_text(encoding="utf-8")
-    assert "@typedef {Object} ScheduleDeleteResponse" in mirror
 
 
-def test_the_action_outcome_contract_and_its_js_mirror_name_the_same_fields(tmp_path, monkeypatch):
-    """Item 17 parity: the Python TypedDict and the JS typedef stay one contract."""
+def test_the_action_outcome_contract_names_the_fields_the_runtime_emits(tmp_path, monkeypatch):
+    """Item 17: the runtime outcome carries exactly the contract's declared fields."""
     from ouroboros.gateway.contracts import ScheduleActionResponse
 
     _bind(monkeypatch, tmp_path)
@@ -285,11 +283,6 @@ def test_the_action_outcome_contract_and_its_js_mirror_name_the_same_fields(tmp_
     declared = set(ScheduleActionResponse.__annotations__)
     assert set(outcome) <= declared, sorted(set(outcome) - declared)
     assert {"ok", "changed", "status", "schedule_id", "audit"} <= set(outcome)
-    mirror = pathlib.Path("web/modules/api_types.js").read_text(encoding="utf-8")
-    block = mirror.split("@typedef {Object} ScheduleActionResponse", 1)[1].split("*/", 1)[0]
-    mirrored = {line.split("}", 1)[1].split()[0].rstrip("=")
-                for line in block.splitlines() if "@property" in line}
-    assert mirrored == declared, sorted(mirrored ^ declared)
 
 
 def test_a_missed_schedule_lock_is_a_typed_refusal_not_a_bare_timeout(tmp_path, monkeypatch):

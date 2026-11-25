@@ -1,6 +1,6 @@
 """The MCP import preview (``POST /api/mcp/import/preview``): its own module beside ``contracts.py``.
 
-Descriptive TypedDicts, the twin of ``web/modules/mcp_import_types.js``. The producer is
+Descriptive TypedDicts. The producer is
 ``ouroboros/mcp_import.py`` behind ``gateway.mcp.api_mcp_import_preview``. The request carries
 the draft's matching metadata only; header values and addresses stay in the browser, and only
 an entry's ``patch`` carries pasted values back to the draft."""

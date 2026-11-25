@@ -31,12 +31,8 @@ from ouroboros.gateway.schema import (
     validate_ingress,
 )
 from tests._source_scan import parse
-from tests.test_gateway_parity import _js_typedef_fields
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-TWIN = REPO / "web" / "modules" / "client_contract_types.js"
-PLACE_TWIN = REPO / "web" / "modules" / "place_contract_types.js"
-RECALL_TWIN = REPO / "web" / "modules" / "recall_contract_types.js"  # the door's envelopes; no builtin consumer
 
 
 def _all_shapes() -> dict:
@@ -51,60 +47,37 @@ def _body_names(spec: str) -> list[str]:
     return names
 
 
-def test_every_client_envelope_has_a_field_identical_browser_twin():
-    from ouroboros.gateway import history_contracts
-
-    facade = TWIN.read_text(encoding="utf-8")
-    places = PLACE_TWIN.read_text(encoding="utf-8")
-    recall = RECALL_TWIN.read_text(encoding="utf-8")
-    text = facade + "\n" + places + "\n" + recall
-    for module in (client_contracts, history_contracts):
-        for name in module.__all__:
-            cls = getattr(module, name)
-            assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"client contract twins lack {name}"
-            assert _js_typedef_fields(text, name) == set(typing.get_type_hints(cls, include_extras=True)), name
-    for name in re.findall(r"@typedef \{Object\} (\w+)", places):
-        assert f"@typedef {{import('./place_contract_types.js').{name}}} {name}" in facade, name
-    index = (REPO / "web" / "modules" / "api_types.js").read_text(encoding="utf-8")
-    assert "./client_contract_types.js" in index.splitlines()[0]
-    assert "import('./client_contract_types.js').ServedUiState" in index
-    # `notice` rides NESTED: every carrier — the live frame (api_types.js), the history row and the search
-    # candidate (their twins) — holds the one HostNotice object, never a flattened field set, and that object's
-    # own fields, with the variable phrase's `template` (string) and `values` (string → string map), match
-    # between the Python TypedDict and the JSDoc twin, each optional as the whole object is.
+def test_host_notice_is_nested_and_optional_in_live_history_and_search(tmp_path):
     from ouroboros import host_notice
     from ouroboros.gateway.contracts import ChatOutbound
     from ouroboros.gateway.history_contracts import ChatHistoryMessage, ChatSearchCandidate
     from ouroboros.gateway.reference_contracts import HostNotice, HostNoticeField
 
+    with TestClient(_contract_app(tmp_path)) as client:
+        response = client.get("/api/contract")
+    assert response.status_code == 200
+    document = response.json()
+    live = next(frame["outbound"] for frame in document["ws"]["messages"] if frame["type"] == "chat")
+    assert live == "ChatOutbound"
+    schemas = document["schemas"]
+    carriers = (
+        (ChatOutbound, schemas[live]),
+        (ChatHistoryMessage, schemas["ChatHistoryResponse"]["properties"]["messages"]["items"]),
+        (ChatSearchCandidate, schemas["ChatSearchResponse"]["properties"]["candidates"]["items"]),
+    )
     assert typing.get_type_hints(HostNoticeField, include_extras=True)["notice"] is HostNotice
-    for cls in (ChatOutbound, ChatHistoryMessage, ChatSearchCandidate):
+    notice_schema = json_schema_for(HostNotice)
+    for cls, schema in carriers:
         hints = typing.get_type_hints(cls, include_extras=True)
         assert hints["notice"] is HostNotice, f"{cls.__name__}.notice must stay the nested HostNotice object"
-        assert "notice" not in json_schema_for(cls).get("required", ()), f"{cls.__name__}.notice must stay optional"
-    for source, name, notice_type in (
-        (index, "ChatOutbound", "HostNotice="),
-        (facade, "ChatHistoryMessage", "import('./api_types.js').HostNotice="),
-        (facade, "ChatSearchCandidate", "import('./api_types.js').HostNotice="),
-    ):
-        typedef = re.search(rf"@typedef \{{Object\}} {name}(?=\s|\*/)(.*?)\*/", source, re.S)
-        assert typedef is not None, f"{name} JSDoc typedef is missing"
-        field = rf"^[ \t]*\* @property \{{{re.escape(notice_type)}\}} notice(?=\s|$)"
-        assert re.search(field, typedef[1], re.M), f"{name}.notice must stay an optional nested HostNotice"
+        assert schema["properties"]["notice"] == notice_schema, cls.__name__
+        assert "notice" not in schema.get("required", ()), cls.__name__
+        assert not {"template", "values"} & schema["properties"].keys(), cls.__name__
     notice_hints = typing.get_type_hints(HostNotice, include_extras=True)
-    assert _js_typedef_fields(index, "HostNotice") == set(notice_hints), "HostNotice Python and JSDoc mirrors drifted"
-    assert typing.get_args(notice_hints["values"]) == (str, str)
-    # A simple scoped check, not a JSDoc type extractor: the HostNotice typedef declares the variable
-    # phrase's fields as an optional string and an optional string→string map.
-    notice_body = re.search(r"@typedef \{Object\} HostNotice\b(?P<body>.*?)\n \*/", index, re.S)
-    assert notice_body, "api_types.js missing the HostNotice typedef"
-    assert re.search(r"@property \{string=\} template\b", notice_body.group("body")), (
-        "api_types.js HostNotice.template must stay an optional string"
-    )
-    assert re.search(r"@property \{Object\.<string,string>=\} values\b", notice_body.group("body")), (
-        "api_types.js HostNotice.values must stay an optional string→string map"
-    )
-    assert not json_schema_for(HostNotice).get("required"), "every HostNotice field stays optional"
+    assert notice_hints["template"] is str and notice_hints["values"] == dict[str, str]
+    assert not notice_schema.get("required"), "every HostNotice field stays optional"
+    assert notice_schema["properties"]["template"] == {"type": "string"}
+    assert notice_schema["properties"]["values"] == {"type": "object"}
     # The real shapes the wire carries: the variable phrase's own producer — the same call history.py makes for
     # an omitted Project origin — fills the row's text with its values and carries the template (what gets
     # translated) beside them (never translated); an older row's plain string carries neither, and the schema
@@ -128,6 +101,9 @@ def test_every_client_envelope_has_a_field_identical_browser_twin():
     assert not validate_ingress(row, ChatHistoryMessage), validate_ingress(row, ChatHistoryMessage)
     assert validate_ingress({**row, "notice": {**projected["notice"], "template": 3}}, ChatHistoryMessage), (
         "typed nested: a non-string template is refused on the nested object"
+    )
+    assert validate_ingress({**row, "notice": {**projected["notice"], "values": []}}, ChatHistoryMessage), (
+        "typed nested: values must be an object"
     )
     old = host_notice.notice("task_reaper_wedged", step="restart", details="worker slot 3, deadline")
     assert not validate_ingress(old, HostNotice) and not {"template", "values"} & set(old), (
@@ -317,7 +293,21 @@ def test_the_contract_is_served_derived_and_self_consistent(tmp_path):
     by_token = {f"{e['method']} {e['path']}": e for e in document["http"]}
     assert by_token["GET /onboarding"]["query"] == ["builtin"]
     assert by_token["GET /auth/login"]["query"] == ["next", "builtin"]
-    assert set(by_token["GET /auth/login"]["responses"]) == {"200"}
+    assert by_token["GET /auth/login"]["responses"] == {"200": {"content_type": "text/html", "schemas": []}}
+    auth_login = by_token["POST /auth/login"]
+    assert auth_login["request"] == {
+        "content_type": "application/json | application/x-www-form-urlencoded", "schemas": ["AuthLoginRequest"],
+    }
+    assert auth_login["responses"] == {
+        "200": {"content_type": "application/json", "schemas": ["AuthLoginResponse"]},
+        "303": {"content_type": "", "schemas": []},
+        "401": {"content_type": "application/json | text/html", "schemas": ["ErrorResponse"]},
+    }
+    assert document["schemas"]["AuthLoginRequest"]["required"] == ["password"]
+    assert document["schemas"]["AuthLoginResponse"]["required"] == ["next", "ok"]
+    assert document["schemas"]["AuthLoginResponse"]["properties"] == {
+        "next": {"type": "string"}, "ok": {"type": "boolean"},
+    }
     assert by_token["GET /api/onboarding/bootstrap"]["responses"]["200"]["schemas"] == ["OnboardingBootstrapResponse"]
     assert by_token["GET /api/tasks/{task_id}/events"]["responses"]["200"] == {
         "content_type": "text/event-stream", "schemas": ["TaskEvent"]}
@@ -343,6 +333,27 @@ def test_the_contract_is_served_derived_and_self_consistent(tmp_path):
     assert "served_ui" in document["schemas"]["StateResponse"]["properties"]
     history = document["schemas"]["ChatHistoryResponse"]["properties"]["messages"]["items"]
     assert {"text", "role", "ts", "is_progress", "system_type", "task_id"} <= set(history["required"])
+
+
+def test_published_update_status_letter_matches_the_real_projection(tmp_path):
+    from ouroboros.gateway.management_contracts import UpdateLetter
+    from ouroboros.update_letter import project_letter
+
+    with TestClient(_contract_app(tmp_path)) as client:
+        reply = client.get("/api/contract")
+    assert reply.status_code == 200
+    document = reply.json()
+    entry = next(row for row in document["http"] if row["method"] == "GET" and row["path"] == "/api/update/status")
+    assert entry["responses"]["200"]["schemas"] == ["UpdateStatusResponse"]
+    shape = json_schema_for(UpdateLetter)
+    assert document["schemas"]["UpdateStatusResponse"]["properties"]["letter"]["anyOf"] == [shape, {"type": "null"}]
+
+    view = project_letter({"state": "ready", "text": "A new settings page", "revision": 1},
+                          head_sha="", latest_sha="")
+    assert view is not None and view["text"] == "A new settings page"
+    assert set(view) == set(shape["properties"])
+    assert not validate_ingress(view, UpdateLetter)
+    assert project_letter(None, head_sha="", latest_sha="") is None
 
 
 def test_contract_modules_name_typed_dicts_only():

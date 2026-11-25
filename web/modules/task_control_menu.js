@@ -531,7 +531,7 @@ export function taskControlBusy(taskId) {
  * anywhere on this path. Resolves with the acknowledgement (duplicate=true is
  * the idempotent success shape); a typed refusal rejects.
  * @param {string} taskId
- * @returns {Promise<import('./api_types.js').TaskHurryResponse>}
+ * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::TaskHurryResponse`.
  */
 export async function requestHurry(taskId) {
     const id = String(taskId || '').trim();
@@ -568,7 +568,7 @@ export async function hurryTaskAction(taskId) {
  * Both surfaces cancel the task AND its live subtree (v6.82 semantics kept).
  * @param {string} taskId
  * @param {string} action
- * @returns {Promise<import('./api_types.js').TaskCancelResponse>}
+ * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::TaskCancelResponse`.
  */
 const pendingStopActions = new Map();
 

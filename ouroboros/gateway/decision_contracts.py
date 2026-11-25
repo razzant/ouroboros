@@ -111,7 +111,7 @@ class DecisionResponse(TypedDict, total=False):
     latest_status: str
     reason: str
     detail: str
-    cause: str
+    cause: str  # on the 409 dispatch_rejected
     reasoning_effort: str
     request_id: str
     applied: bool
@@ -121,7 +121,7 @@ class DecisionResponse(TypedDict, total=False):
     delivery: Literal["delivered", "forwarded", "owed"]
     card_id: str
     revision: int
-    winner: Dict[str, Any]
+    winner: Dict[str, Any]  # {request_id, at, delivery}
 
 
 class SecretRequestField(TypedDict):
@@ -263,6 +263,7 @@ class SecretDecisionRequest(TypedDict):
     allow: NotRequired[SecretAllowRequest]
 
 
+# After `secret_save_unconfirmed`, read `status` first; only a new request saves again.
 class SecretDecisionResponse(TypedDict, total=False):
     """Secret form reply; every save and cancel reply and every refusal carries ``saved`` on both sides
     of the Settings commit, while a ``status`` read carries the lifecycle and form facts only.

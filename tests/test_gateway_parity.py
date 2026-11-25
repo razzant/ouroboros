@@ -1,3 +1,17 @@
+"""Checks for the Python gateway contract and its browser consumers.
+
+The Python TypedDicts are the one statement of the wire contract; the browser
+carries no JSDoc copy of them. What this file pins:
+
+- every wire guarantee the old mirror used to carry, read from the Python
+  contract itself (fields, requiredness, literal sets, nested shapes);
+- the release-version carrier in ``web/modules/api_types.js`` (RES-15a: it is
+  the RELEASE version, not the ABI version) and the three UI limits that live
+  modules import — that file's surviving byte-exact constants;
+- no same-name, field-identical wire copies in the shared browser type carriers.
+  A local JSDoc name is not an API claim.
+"""
+
 from __future__ import annotations
 
 import pathlib
@@ -9,95 +23,57 @@ from ouroboros.gateway.contracts import (
     WS_MESSAGE_TYPES,
     ActiveChatActivity,
     ActiveDirectTurn,
-    AttachmentManifestEntry,
-    AvailableSubagentsSettingsMeta,
     ChatInbound,
     ChatOutbound,
-    MessageAnnotationOutbound,
     ClaudexorCredentialProfileDeleteResponse,
     ClaudexorLoginJobProblem,
     ClaudexorLoginJobResponse,
+    ClaudexorPassiveReadError,
+    ClaudexorQuotaResponse,
     ClaudexorStatusReads,
     ClaudexorStatusResponse,
-    ClaudexorVendorCredentialDisposition,
-    OnboardingAttemptResponse,
-    OnboardingCompleteRequest,
-    OnboardingCompleteResponse,
-    OnboardingPresetFailureResponse,
-    OnboardingPresetProjection,
-    OnboardingSubagentsPreviewResponse,
-    OwnerHurryProjection,
-    OwnerSkillPresenceRuntimeRequest,
-    OwnerSkillPresenceRuntimeResponse,
-    DocumentOutbound,
-    LinkAction,
-    LinksOutbound,
-    QuizOption,
+    ContinuationOffer,
     DecisionRequest,
     DecisionResponse,
-    DesktopAutostartResponse,
-    EvolutionDataResponse,
-    EvolutionRefresh,
-    QuizOutbound,
-    QuizStateOutbound,
+    DocumentOutbound,
+    LinksOutbound,
     LogOutbound,
+    MessageAnnotationOutbound,
     PhotoOutbound,
     ProviderTestRequest,
-    ProviderTestResponse,
+    QuizOption,
+    QuizOutbound,
+    QuizStateOutbound,
     RequestedExecutorRoute,
     SettingsMeta,
-    SettingsPostCommitFailureResponse,
     SkillDeleteResponse,
     SkillLifecycleQueueResponse,
-    SkillPublishPreflightResponse,
     StateResponse,
     TaskCostBreakdown,
-    TaskCostSlice,
-    TaskCreateRequest,
-    TaskCreateResponse,
+    TaskContinueRequest,
+    TaskContinueResponse,
     TaskDetailResponse,
-    QuestionRoom,
     TaskEvent,
-    TaskEventCursor,
-    TaskEventsRequest,
-    TaskCancelRequest,
-    TaskPauseRequest, TaskPauseResponse, TaskContinueRequest, TaskContinueResponse, ContinuationOffer,
-    TaskHurryRequest,
-    TaskHurryResponse,
+    TaskPauseRequest,
+    TaskPauseResponse,
     TypingOutbound,
     UiPreferencesResponse,
-    UpdateApplyErrorResponse,
-    UpdateApplyRequest,
-    UpdateApplySuccessResponse,
-    UpdateDescriptionErrorResponse,
-    UpdateDescriptionLatestResponse,
-    UpdateDescriptionRequest,
-    UpdateDescriptionResponse,
-    UpdateMergePlan,
-    UpdatePreflightRequest,
     UpdatePreflightResponse,
-    UpdateStatusReadyOutbound,
-    UploadResponse,
     VideoOutbound,
 )
-from ouroboros.gateway.contracts import ClaudexorPassiveReadError, ClaudexorQuotaResponse
-from ouroboros.gateway.contracts import (
-    SecretAllow, SecretAllowRequest, SecretConsumer, SecretDecisionRequest, SecretDecisionResponse, SecretEvent,
-    SecretKeyState, SecretOutcome, SecretRequestField, SecretRequestMeta, SecretSkillFacts,
-)
 from ouroboros.gateway.router import collect_routes
-from ouroboros.gateway.widgets import WidgetFaultRequest, WidgetFaultResponse, WidgetTab, WidgetsResponse
+
+REPO = pathlib.Path(__file__).resolve().parents[1]
+API_TYPES = REPO / "web" / "modules" / "api_types.js"
 
 
-def _js_typedef_fields(text: str, name: str) -> set[str]:
-    match = re.search(rf"@typedef \{{Object\}} {name}\b(?P<body>.*?)\n \*/", text, re.S)
-    assert match, f"api_types.js missing {name}"
+def _js_typedef_fields(body: str) -> set[str]:
     # Types nest braces (``{Object<string, {project_id: string}>}``), so scan for the BALANCED
     # closing brace instead of the first one — a non-greedy ``[^}]+`` silently mis-parses those
     # properties and makes the field set look like it drifted when it has not.
     fields: set[str] = set()
-    for line in match.group("body").split("\n"):
-        head, sep, rest = line.partition("@property {")
+    for line in body.splitlines():
+        _, sep, rest = line.partition("@property {")
         if not sep:
             continue
         depth = 1
@@ -106,9 +82,7 @@ def _js_typedef_fields(text: str, name: str) -> set[str]:
             if depth == 0:
                 identifier = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)", rest[idx + 1:])
                 if identifier:
-                    field = identifier.group(1)
-                    assert field not in fields, f"{name} JSDoc declares duplicate property {field}"
-                    fields.add(field)
+                    fields.add(identifier.group(1))
                 break
     return fields
 
@@ -127,22 +101,58 @@ def _notrequired_fields(cls) -> set[str]:
     return marked
 
 
-def _js_typedef_properties(text: str, name: str) -> set[tuple[str, str]]:
-    match = re.search(rf"@typedef \{{Object\}} {name}\b(?P<body>.*?)\n \*/", text, re.S)
-    assert match, f"api_types.js missing {name}"
-    return set(re.findall(
-        r"^\s*\*\s+@property\s+\{([^}]*)\}\s+([A-Za-z_][A-Za-z0-9_]*)\s*$",
-        match.group("body"),
-        re.M,
-    ))
+# ---------------------------------------------------------------------------
+# Shared browser JSDoc must not repeat a Python wire type's name and fields.
+# ---------------------------------------------------------------------------
+
+def _copied_wire_shapes(text: str) -> set[str]:
+    from ouroboros.gateway.schema import contract_typed_dict
+    from ouroboros.physical_attempt_context import ContextAttemptFact
+
+    copies = set()
+    for name, body in re.findall(r"@typedef \{Object\} (\w+)\b(.*?)\*/", text, re.S):
+        try:
+            cls = ContextAttemptFact if name == "ContextAttemptFact" else contract_typed_dict(name)
+        except KeyError:
+            continue
+        fields = _js_typedef_fields(body)
+        if fields and fields == set(get_type_hints(cls, include_extras=True)):
+            copies.add(name)
+    return copies
 
 
-def test_requested_executor_route_schema_and_jsdoc_match():
+def test_shared_browser_types_do_not_copy_gateway_wire_shapes():
+    """The four shared carriers keep UI shapes, not a second declaration of the API."""
+    for carrier in ("api_types.js", "client_contract_types.js", "place_contract_types.js", "task_activity_types.js"):
+        copies = _copied_wire_shapes(API_TYPES.with_name(carrier).read_text(encoding="utf-8"))
+        assert not copies, f"{carrier} repeats gateway wire shapes: {sorted(copies)}"
+
+
+def test_a_shared_name_only_does_not_make_a_ui_type_a_wire_copy():
+    start = "/** @typedef {Object} AuthLoginResponse\n * @property {boolean} ok\n"
+    assert not _copied_wire_shapes(start + " * @property {string} viewLabel\n */")
+    assert _copied_wire_shapes(start + " * @property {string} next\n */") == {"AuthLoginResponse"}
+
+
+def test_release_version_carrier_stays_pinned_to_the_version_file():
+    """``api_types.js`` keeps the RELEASE version carrier (RES-15a: it is not
+    the ABI version). ``ouroboros.tools.release_sync`` rewrites it beside
+    ``pyproject.toml`` and ``web/package.json``; this pin is the carrier
+    check the parity role has always carried."""
+    version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
+    text = API_TYPES.read_text(encoding="utf-8")
+    assert f"GATEWAY_CONTRACT_VERSION = '{version}'" in text
+
+
+# ---------------------------------------------------------------------------
+# The wire guarantees the old mirror carried, read from the Python contract.
+# ---------------------------------------------------------------------------
+
+def test_requested_executor_route_schema_is_derived_from_the_single_source():
     from ouroboros.gateway.schema import json_schema_for
 
     schema = json_schema_for(ChatOutbound)
     field = "requested_executor_route"
-    typedef = "RequestedExecutorRoute"
     route = schema["properties"][field]
     assert field not in schema["required"]
     assert route == json_schema_for(RequestedExecutorRoute)
@@ -155,47 +165,43 @@ def test_requested_executor_route_schema_and_jsdoc_match():
     detail = json_schema_for(TaskDetailResponse)
     assert field not in detail.get("required", []) and detail["properties"][field] == route
 
-    text = (pathlib.Path(__file__).parents[1] / "web/modules/api_types.js").read_text(encoding="utf-8")
-    assert _js_typedef_properties(text, typedef) == {("|".join(map(repr, kinds)), "kind"), ("string", "target_id")}
-    for owner in ("ChatOutbound", "TaskDetailResponse"):
-        block = re.search(rf"@typedef \{{Object\}} {owner}\b(?P<body>.*?)\n \*/", text, re.S)
-        assert block and f"@property {{{typedef}=}} {field} " in block.group("body"), owner
-
 
 def test_provider_test_gateway_contract_shape_is_exact():
-    request_hints = get_type_hints(ProviderTestRequest, include_extras=True)
-    response_hints = get_type_hints(ProviderTestResponse, include_extras=True)
+    """The published provider-test schema keeps the frozen ABI (ARCHITECTURE §11.1): the
+    request the JS client sends and the response the runtime serves — the runtime half is
+    tests/test_provider_key_test.py, the browser half web/tests/provider_test.test.js — and
+    the route publishes exactly these shapes."""
+    from ouroboros.gateway.schema import contract_document
 
-    assert set(request_hints) == {"provider_id", "overrides", "connection", "api_key_setting"}
-    assert _notrequired_fields(ProviderTestRequest) == {"overrides", "connection", "api_key_setting"}
-    assert request_hints["provider_id"] is str
-    assert get_args(request_hints["connection"]) == (str,)
-    assert get_args(get_args(request_hints["api_key_setting"])[0]) == ("OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY")
+    document = contract_document()
+    route = next(row for row in document["http"]
+                 if row["method"] == "POST" and row["path"] == "/api/providers/test")
+    assert route["request"]["schemas"] == ["ProviderTestRequest"]
+    assert route["responses"]["200"]["schemas"] == ["ProviderTestResponse"]
+
+    request = document["schemas"]["ProviderTestRequest"]
+    response = document["schemas"]["ProviderTestResponse"]
+    assert request["type"] == response["type"] == "object"
+
+    assert request["required"] == ["provider_id"]
+    assert request["properties"] == {
+        "provider_id": {"type": "string"},
+        "overrides": {"type": "object"},
+        "connection": {"type": "string"},
+        "api_key_setting": {"enum": ["OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY"]},
+    }
+    # The published schema represents mappings as objects; Python also pins the flat string values.
+    request_hints = get_type_hints(ProviderTestRequest, include_extras=True)
     overrides_type = get_args(request_hints["overrides"])[0]
     assert get_origin(overrides_type) is dict
     assert get_args(overrides_type) == (str, str)
 
-    assert set(response_hints) == {"ok", "error", "caution", "code"}
-    assert _notrequired_fields(ProviderTestResponse) == {"error", "caution", "code"}
-    assert response_hints["ok"] is bool
-    assert get_args(response_hints["error"]) == get_args(response_hints["caution"]) == (str,)
-    assert get_args(get_args(response_hints["code"])[0]) == (
-        "ollama_guard_consent", "ollama_guard_held", "ollama_guard_unavailable")
-
-    text = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "api_types.js").read_text(
-        encoding="utf-8"
-    )
-    assert _js_typedef_properties(text, "ProviderTestRequest") == {
-        ("string", "provider_id"),
-        ("Object<string, string>=", "overrides"),
-        ("string=", "connection"),
-        ("('OPENAI_COMPATIBLE_API_KEY'|'OPENAI_API_KEY')=", "api_key_setting"),
-    }
-    assert _js_typedef_properties(text, "ProviderTestResponse") == {
-        ("boolean", "ok"),
-        ("string=", "error"),
-        ("string=", "caution"),
-        ("('ollama_guard_consent'|'ollama_guard_held'|'ollama_guard_unavailable')=", "code"),
+    assert response["required"] == ["ok"]
+    assert response["properties"] == {
+        "ok": {"type": "boolean"},
+        "error": {"type": "string"},
+        "caution": {"type": "string"},
+        "code": {"enum": ["ollama_guard_consent", "ollama_guard_held", "ollama_guard_unavailable"]},
     }
 
 
@@ -220,30 +226,12 @@ def test_claudexor_quota_view_has_separate_required_contract():
     assert get_args(errors["status_code"]) == (int,)
     assert _notrequired_fields(ClaudexorPassiveReadError) == {"status_code"}
     assert not {"view", "read_errors", "timings_ms"} & set(ClaudexorStatusResponse.__annotations__)
-    text = (pathlib.Path(__file__).resolve().parent.parent
-            / "web" / "modules" / "api_types.js").read_text(encoding="utf-8")
-    assert _js_typedef_properties(text, "ClaudexorQuotaResponse") == {
-        ("'quota'", "view"), ("Object", "profiles"),
-        ("Array<Object>", "quota"), ("Array<Object>", "quota_absences"),
-        ("boolean", "unified_accounts"), ("ClaudexorStatusReads", "reads"),
-        ("Object<'discovery'|'accounts'|'quota', ClaudexorPassiveReadError>", "read_errors"),
-        ("Object<string, number>", "timings_ms"),
-        ("Array<Object>=", "resources"),
-        ("Object=", "availability_scope"),
-    }
-    assert _js_typedef_properties(text, "ClaudexorPassiveReadError") == {
-        ("string", "code"), ("number=", "status_code"),
-    }
 
 
-def test_full_claudexor_status_scope_has_optional_typed_and_js_parity():
+def test_full_claudexor_status_scope_has_optional_typed_fields():
     hints = get_type_hints(ClaudexorStatusResponse, include_extras=True)
     assert get_origin(hints["availability_scope"]) is dict
     assert not ClaudexorStatusResponse.__total__
-    text = (pathlib.Path(__file__).resolve().parent.parent
-            / "web" / "modules" / "api_types.js").read_text(encoding="utf-8")
-    assert "availability_scope" in _js_typedef_fields(text, "ClaudexorStatusResponse")
-    assert _js_typedef_fields(text, "ClaudexorStatusResponse") == set(hints)
 
 
 def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
@@ -267,155 +255,22 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     extra = tokens - contract_tokens
     assert not missing, f"HTTP_ENDPOINTS includes routes not mounted by gateway.router: {sorted(missing)}"
     assert not extra, f"gateway.router mounts routes missing from HTTP_ENDPOINTS: {sorted(extra)}"
-    modules = pathlib.Path(__file__).resolve().parent.parent / "web" / "modules"
-    text = (modules / "api_types.js").read_text(encoding="utf-8")
-    assert "import('./task_activity_types.js').ActiveChatActivity" in text
-    text += "\n" + (modules / "task_activity_types.js").read_text(encoding="utf-8")
-    # The owner-decision ingress twin (gateway/decision_contracts.py) is re-exported the same way.
-    for name in ("DecisionRequest", "DecisionResponse"):
-        assert f"import('./decision_types.js').{name}" in text
-    text += "\n" + (modules / "decision_types.js").read_text(encoding="utf-8")
-    for name in ("CommandInbound", "PanicAcceptedOutbound", "OnboardingAttemptResponse"):
-        assert f"import('./client_contract_types.js').{name}" in text
-    text += "\n" + (modules / "client_contract_types.js").read_text(encoding="utf-8")
-    for name in ("EvolutionRefresh", "EvolutionDataResponse"):
-        assert f"import('./evolution_types.js').{name}" in text
-    text += "\n" + (modules / "evolution_types.js").read_text(encoding="utf-8")
-    for name in ("UpdateMergePlan", "UpdatePreflightRequest", "UpdatePreflightResponse", "UpdateApplyRequest",
-                 "UpdateApplySuccessResponse", "UpdateApplyErrorResponse", "UpdateDescriptionRequest",
-                 "UpdateDescriptionResponse", "UpdateDescriptionLatestResponse", "UpdateDescriptionErrorResponse",
-                 "UpdateProgressChangedOutbound", "UpdateStatusReadyOutbound"):
-        assert f"import('./update_types.js').{name}" in text
-    text += "\n" + (modules / "update_types.js").read_text(encoding="utf-8")
-    version = (pathlib.Path(__file__).resolve().parent.parent / "VERSION").read_text(encoding="utf-8").strip()
-    assert f"GATEWAY_CONTRACT_VERSION = '{version}'" in text
+
     settings_meta_fields = {
         "custom_secret_keys", "setup_contract", "available_subagents", "policy_state", "restart_state",
         "connections", "main_connection_choice", "known_spend_gaps", "partly_counted_spend", "effects", "tokens",
     }
     assert settings_meta_fields <= set(SettingsMeta.__annotations__)
-    assert _js_typedef_fields(text, "SettingsMeta") == settings_meta_fields
-    for name in (
-        "StateResponse",
-        "ActiveDirectTurn",
-        "ActiveChatActivity",
-        "ContextAttemptFact",
-        "TypingOutbound",
-        "HealthResponse",
-        "SettingsMeta",
-        "OpenAICompatibleModelsResponse",
-        "ProviderTestRequest",
-        "ProviderTestResponse",
-        "UiPreferencesResponse",
-        "DesktopAutostartResponse",
-        "ChatInbound",
-        "ChatOutbound",
-        "PhotoOutbound",
-        "VideoOutbound",
-        "DocumentOutbound",
-        "LinkAction",
-        "LinksOutbound",
-        "QuizOption",
-        "QuizOutbound",
-        "QuizStateOutbound",
-        "DecisionRequest",
-        "DecisionResponse",
-        "MessageAnnotationOutbound",
-        "UploadResponse",
-        "TaskCreateResponse",
-        "TaskEvent",
-        "TaskListResponse",
-        "TaskCostBreakdown",
-        "TaskDetailResponse",
-        "TaskCancelResponse",
-        "TaskHurryRequest",
-        "TaskHurryResponse",
-        "OwnerHurryProjection",
-        "OwnerSkillPresenceRuntimeRequest",
-        "OwnerSkillPresenceRuntimeResponse",
-        "LogTailResponse",
-        "SkillDeleteResponse",
-        "SkillPublishPreflightResponse",
-        "UpdateMergePlan",
-        "UpdatePreflightRequest",
-        "UpdatePreflightResponse",
-        "UpdateApplyRequest",
-        "UpdateApplySuccessResponse",
-        "UpdateApplyErrorResponse",
-        "UpdateStatusReadyOutbound",
-        "AvailableSubagentsSettingsMeta",
-        "OnboardingCompleteRequest",
-        "OnboardingSubagentsPreviewResponse",
-        "OnboardingPresetProjection",
-        "OnboardingCompleteResponse",
-        "OnboardingAttemptResponse",
-        "OnboardingPresetFailureResponse",
-        "SettingsPostCommitFailureResponse",
-        "ClaudexorLoginJobResponse",
-        "ClaudexorLoginJobProblem",
-        "ClaudexorPassiveReadError",
-        "ClaudexorQuotaResponse",
-        "ClaudexorCredentialProfileDeleteResponse",
-        "ClaudexorVendorCredentialDisposition",
-        "WidgetTab",
-        "WidgetsResponse",
-        "WidgetFaultRequest",
-        "WidgetFaultResponse",
-    ):
-        assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"api_types.js missing {name}"
-    api_client = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "api_client.js").read_text(
-        encoding="utf-8"
-    )
+    api_client = (REPO / "web" / "modules" / "api_client.js").read_text(encoding="utf-8")
     assert "openAICompatibleModels" in api_client
     # D-8: the wizard's ONE atomic completion call must exist on the browser client.
     assert "completeOnboarding" in api_client
     assert "'/api/onboarding/complete'" in api_client
-    # v6.80.0: the two contracts extended this release join the FIELD-level parity list. The name-level
-    # loop above cannot see a new @property, so an ABI field added on the Python side would otherwise
-    # never have to appear in the browser's typedef (ARCHITECTURE.md §11.3).
-    for cls in (ChatInbound, ChatOutbound, PhotoOutbound, VideoOutbound, DocumentOutbound,
-                # #1539: the optional root starting effort joins the request mirror field by field.
-                UploadResponse, TaskCreateRequest, TaskCreateResponse, AttachmentManifestEntry,
-                DecisionRequest, DecisionResponse, LinkAction, LinksOutbound, QuizOption, QuizOutbound, QuizStateOutbound,
-                # The integration-secret form (showSecretHitl / saveSecretToken) and its metadata.
-                SecretAllow, SecretAllowRequest, SecretConsumer, SecretDecisionRequest, SecretDecisionResponse,
-                SecretEvent, SecretKeyState, SecretOutcome, SecretRequestField, SecretRequestMeta, SecretSkillFacts,
-                # widgets-lifecycle W1b: the owner's per-card start-mode override is checked field by field.
-                UiPreferencesResponse, DesktopAutostartResponse,
-                ActiveDirectTurn, ActiveChatActivity, TypingOutbound,
-                StateResponse, UpdateMergePlan,
-                UpdatePreflightRequest, UpdatePreflightResponse, UpdateApplyRequest,
-                UpdateApplySuccessResponse, UpdateApplyErrorResponse,
-                # The owner's description request: Write/Rewrite name a range, Check and describe names none.
-                UpdateDescriptionRequest, UpdateDescriptionResponse, UpdateDescriptionLatestResponse,
-                UpdateDescriptionErrorResponse,
-                UpdateStatusReadyOutbound, TaskCostBreakdown, TaskCostSlice, TaskDetailResponse, QuestionRoom,
-                TaskCancelRequest, TaskPauseRequest, TaskPauseResponse,
-                TaskContinueRequest, TaskContinueResponse, ContinuationOffer,
-                TaskHurryRequest, TaskHurryResponse, OwnerHurryProjection,
-                TaskEvent, TaskEventCursor, TaskEventsRequest,
-                OwnerSkillPresenceRuntimeRequest, OwnerSkillPresenceRuntimeResponse,
-                OnboardingCompleteRequest, OnboardingPresetProjection,
-                OnboardingSubagentsPreviewResponse, OnboardingCompleteResponse, OnboardingAttemptResponse,
-                OnboardingPresetFailureResponse, AvailableSubagentsSettingsMeta,
-                SettingsPostCommitFailureResponse,
-                ProviderTestRequest, ProviderTestResponse,
-                SkillPublishPreflightResponse,
-                ClaudexorLoginJobResponse, ClaudexorLoginJobProblem,
-                ClaudexorCredentialProfileDeleteResponse,
-                ClaudexorVendorCredentialDisposition,
-                ClaudexorStatusReads, ClaudexorStatusResponse,
-                ClaudexorPassiveReadError, ClaudexorQuotaResponse,
-                WidgetTab, WidgetsResponse, WidgetFaultRequest, WidgetFaultResponse,
-                EvolutionDataResponse, EvolutionRefresh):
-        expected = set(get_type_hints(cls, include_extras=True))
-        actual = _js_typedef_fields(text, cls.__name__)
-        # ABI 7.0 (ABI-3): the alias JSDoc lines were cleaned up in the F3.3
-        # comma-sweep tact — the browser mirror is exact again, no excuse set.
-        assert actual == expected, f"{cls.__name__} JSDoc fields drifted: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
-    # ABI-3 removal exact pins: the five removed alias fields stay out of BOTH
-    # mirrors of the frames they were removed from — a JSDoc resurrection alone
-    # (the exact loop would catch a Python one) must go red here.
+
+    assert UpdatePreflightResponse.__required_keys__ == frozenset({"merge_plan"})
+
+    # ABI 7.0 (ABI-3) removal pins: the retired aliases never come back to the
+    # contract. The checks above cover field-identical browser copies.
     for cls, removed in (
         (ChatOutbound, ("cost_usd", "cost_usd_with_children", "telegram_chat_id")),
         (PhotoOutbound, ("telegram_chat_id",)),
@@ -424,29 +279,12 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         (UiPreferencesResponse, ("project_last_viewed", "project_hidden")),
     ):
         hints = set(get_type_hints(cls, include_extras=True))
-        js_fields = _js_typedef_fields(text, cls.__name__)
         for field in removed:
             assert field not in hints, f"{cls.__name__}.{field} resurrected in Python"
-            assert field not in js_fields, f"{cls.__name__}.{field} resurrected in JSDoc"
-    # Field-set parity alone would accept an optional marker on the two
-    # discriminators. Pin the browser mirror's requiredness as well as names.
-    success_decl = re.search(
-        r"@typedef \{Object\} ClaudexorLoginJobResponse\b([\s\S]*?)\*/", text)
-    problem_decl = re.search(
-        r"@typedef \{Object\} ClaudexorLoginJobProblem\b([\s\S]*?)\*/", text)
-    assert success_decl and "@property {Object} job" in success_decl.group(1)
-    assert problem_decl and "@property {string} error" in problem_decl.group(1)
-    delete_decl = re.search(
-        r"@typedef \{Object\} ClaudexorCredentialProfileDeleteResponse\b([\s\S]*?)\*/",
-        text,
-    )
-    assert delete_decl
-    for declaration in (
-        "@property {Object} profile",
-        "@property {boolean} removed",
-        "@property {('config_dir_removed'|'secret_deleted'|'none')} credentialCleanup",
-    ):
-        assert declaration in delete_decl.group(1)
+
+    # Requiredness the old mirror pinned on the JSDoc side, read from the contract.
+    assert "job" in get_type_hints(ClaudexorLoginJobResponse, include_extras=True)
+    assert "error" in get_type_hints(ClaudexorLoginJobProblem, include_extras=True)
     delete_optional = {
         name for name, annotation
         in ClaudexorCredentialProfileDeleteResponse.__annotations__.items()
@@ -463,17 +301,17 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     assert set(get_args(delete_hints["credentialCleanup"])) == {
         "config_dir_removed", "secret_deleted", "none",
     }
+
     # The client's own list of facets. The shared status store is the ONE reader
     # of the `reads` block (`facetReadState`), and STATUS_FACETS is the list its
     # per-facet map and every "did the daemon answer anything at all?" predicate
     # iterate — so a facet added to the contract but not there would be
     # INVISIBLE to those consumers: a payload in which only the new facet landed
     # would read as total silence, and a surface would print a dead-daemon
-    # verdict over data the daemon had just handed over. The name-level and
-    # field-level loops above cannot see this — they compare Python against the
-    # browser's typedef, never against the module that consumes it.
-    store_js = (pathlib.Path(__file__).resolve().parent.parent
-                / "web" / "modules" / "claudexor_status_store.js").read_text(encoding="utf-8")
+    # verdict over data the daemon had just handed over. There is no browser
+    # typedef to compare against: this check compares the store's exported list
+    # directly with the Python TypedDict.
+    store_js = (REPO / "web" / "modules" / "claudexor_status_store.js").read_text(encoding="utf-8")
     facets = re.search(r"export const STATUS_FACETS = \[([^\]]*)\]", store_js)
     assert facets, "claudexor_status_store.js no longer declares STATUS_FACETS"
     # Strip comments inside the literal first: a facet name mentioned in a
@@ -494,12 +332,10 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         get_type_hints(ClaudexorStatusReads, include_extras=True)
     ), "STATUS_FACETS drifted from ClaudexorStatusReads; the store's per-facet reads would go blind to a facet"
 
-    assert UpdatePreflightResponse.__required_keys__ == frozenset({"merge_plan"})
-    # In-flight turn ABI: field-set parity alone would accept requiredness
-    # drift. Snapshot rows always emit the base fields (required); typing frames
-    # stamp the typed fields only for registry-tracked turns (optional).
-    # (__required_keys__ ignores NotRequired on some 3.10 setups, so inspect
-    # the declared annotations instead.)
+    # In-flight turn ABI: snapshot rows always emit the base fields (required);
+    # typing frames stamp the typed fields only for registry-tracked turns
+    # (optional). (__required_keys__ ignores NotRequired on some 3.10 setups,
+    # so inspect the declared annotations instead.)
     assert _notrequired_fields(ActiveDirectTurn) == {"model_waits", "task_attempt", "model_activity", "turn_phase",
                                                    "executor", "carrier", "context_attempt", "lead", "processing"}, (
         "ActiveDirectTurn keeps its required base; waits, attempt, start phase, the lane's carrier facts, the "
@@ -514,11 +350,6 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     }, "ActiveChatActivity adds optional outcome/retry/review evidence without changing required activity facts"
     from ouroboros.physical_attempt_context import ContextAttemptFact
 
-    js = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "task_activity_types.js").read_text(
-        encoding="utf-8")
-    assert _js_typedef_fields(js, "ContextAttemptFact") == set(ContextAttemptFact.__annotations__)
-    assert {name for name in ("ActiveDirectTurn", "ActiveChatActivity") if "context_attempt" in _js_typedef_fields(
-        js, name)} == {"ActiveDirectTurn", "ActiveChatActivity"}
     activity_fields = get_type_hints(ActiveChatActivity, include_extras=True)
     question_keys = {"required_question", "required_question_unavailable", "project_admission_hold", "pause_cause", "owner_wait"}
     question_keys |= {"status", "outcome_axes", "reason_code", "cancel_origin", "delegated_runs_unreconciled", "root_phase_checkpoint",
@@ -557,121 +388,48 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "chat_id", "activity_id", "client_message_id", "phase", "kind",
         "project_thread",
     }, "TypingOutbound typed fields are stamped only for registry-tracked turns: keep them optional"
-    turn_decl = re.search(r"@typedef \{Object\} ActiveDirectTurn\b([\s\S]*?)\*/", text)
-    assert turn_decl and set(re.findall(
-        r"@property \{[^}]*=\} (\w+)", turn_decl.group(1)
-    )) == {"model_waits", "task_attempt", "model_activity", "context_attempt", "turn_phase", "executor", "carrier",
-           "lead", "processing"}, (
-        "ActiveDirectTurn browser mirror keeps wait/attempt/start-phase, sent-attempt, carrier facts, the lead and its tier optional"
+
+    # Field pins the old mirror carried on the JSDoc side, read from the contract.
+    assert {"force_plan", "client_surface"} <= set(get_type_hints(ChatInbound, include_extras=True))
+    chat_hints = get_type_hints(ChatOutbound, include_extras=True)
+    assert {"model_lane", "requested_model_lane", "effective_model_lane", "model", "task_group_id"} <= set(chat_hints)
+    assert {"subagent_event", "subagent_task_id", "root_task_id", "parent_task_id",
+            "delegation_role", "subagent_role", "task_event", "status", "result",
+            "trace_summary", "error", "artifact_status"} <= set(chat_hints)
+    assert {"source", "line", "root"} <= set(get_type_hints(TaskEvent, include_extras=True))
+    assert "context_mode_auto_low" in get_type_hints(StateResponse, include_extras=True), (
+        "StateResponse.context_mode_auto_low stays the frozen compatibility field"
     )
-    typing_decl = re.search(r"@typedef \{Object\} TypingOutbound\b([\s\S]*?)\*/", text)
-    assert typing_decl
-    for optional_field in ("chat_id", "activity_id", "client_message_id", "phase", "kind"):
-        assert re.search(
-            rf"@property \{{[^}}]*=\}} {optional_field}\b", typing_decl.group(1)
-        ), f"TypingOutbound.{optional_field} must stay optional in the browser mirror"
-    assert re.search(r"@property \{'auto_merge'\|'assisted'\|'manual'\|'replace'\} strategy\b", text)
-    assert re.search(r"@property \{string=\} expected_base_sha\b", text)
-    assert re.search(r"@property \{string=\} expected_target_sha\b", text)
-    assert re.search(r"@property \{boolean=\} confirm_recovery\b", text)
-    assert re.search(r"@property \{'ok'\|'restart_required'\|'assisted_started'\|'manual'\} status\b", text)
-    assert re.search(r"@typedef \{Object\} UpdateApplyErrorResponse.*?@property \{string\} error\b", text, re.S)
-    assert re.search(r"@property \{boolean\} context_mode_auto_low\b", text), (
-        "StateResponse.context_mode_auto_low must remain a JSDoc boolean compatibility field"
-    )
-    assert re.search(r"@property \{boolean=\} force_plan\b", text), "ChatInbound missing force_plan"
-    assert re.search(r"@property \{Object=\} client_surface\b", text), "ChatInbound missing client_surface"
-    for field in ("model_lane", "requested_model_lane", "effective_model_lane", "model", "task_group_id"):
-        assert re.search(rf"@property \{{string=\}} {field}\b", text), f"ChatOutbound missing {field}"
-    for field in ("source", "line", "root"):
-        assert re.search(rf"@property \{{[^}}]+=\}} {field}\b", text), f"TaskEvent missing {field}"
-    for field in (
-        "subagent_event",
-        "subagent_task_id",
-        "root_task_id",
-        "parent_task_id",
-        "delegation_role",
-        "subagent_role",
-        "task_event",
-        "status",
-        "result",
-        "trace_summary",
-        "error",
-        "artifact_status",
-    ):
-        assert re.search(rf"@property \{{string=\}} {field}\b", text), f"ChatOutbound missing {field}"
-    # The HOST names where a task-keyed System row belongs inside the task's card, so the
-    # browser reads one typed fact instead of keeping its own list of system types. Pin the
-    # literal set and the row identity beside it in BOTH mirrors: a placement only one side
-    # knows is a row the client silently drops back beside the card.
+    # The HOST names where a task-keyed System row belongs inside the task's card,
+    # so the browser reads one typed fact instead of keeping its own list of
+    # system types. Pin the literal set on the contract.
     card_row_hint = get_type_hints(ChatOutbound, include_extras=True)["card_row"]
     assert get_args(get_args(card_row_hint)[0]) == ("timeline", "reviews")
-    assert re.search(r'@property \{"timeline"\|"reviews"=\} card_row\b', text), "ChatOutbound missing card_row"
-    assert re.search(r"@property \{string=\} card_row_id\b", text), "ChatOutbound missing card_row_id"
-    assert re.search(r"@property \{\?number=\} accounted_upper_bound_usd\b", text), (
-        "ChatOutbound accounted_upper_bound_usd must be nullable"
-    )
-    assert re.search(r"@property \{number=\} chat_id\b", text), "ChatOutbound missing chat_id"
     # Main-thread fan-out stamp: every card/bubble-MINTING outbound frame family
-    # declares the same additive-optional boolean in both mirrors (message_annotation
-    # is thread-routed but no-ops on unknown ids and stays unstamped by design).
+    # declares the same additive-optional boolean (message_annotation is
+    # thread-routed but no-ops on unknown ids and stays unstamped by design).
     for cls in (ChatOutbound, PhotoOutbound, VideoOutbound, DocumentOutbound, LinksOutbound, QuizOutbound, LogOutbound, TypingOutbound):
         assert "project_thread" in get_type_hints(cls, include_extras=True), f"{cls.__name__} missing project_thread"
-    assert len(re.findall(r"@property \{boolean=\} project_thread\b", text)) >= 6, "api_types.js missing project_thread mirrors"
-    assert re.search(r"@property \{boolean=\} worker_saturation_warning\b", text), "ChatOutbound missing worker_saturation_warning"
+    assert "worker_saturation_warning" in get_type_hints(ChatOutbound, include_extras=True)
     assert "review_projection" in get_type_hints(ChatOutbound, include_extras=True)
-    assert re.search(r"@property \{Object=\} review_projection\b", text)
     assert "review_overrides" in get_type_hints(ChatOutbound, include_extras=True)  # the work's card field, on page load
-    assert re.search(r"@property \{Object=\} review_overrides\b", text)
-    assert "setup_contract" in text
-    assert re.search(r"@property \{string=\} error\b", text), "SkillDeleteResponse missing optional error"
-    assert {"chat", "command", "photo", "video", "links", "quiz", "quiz_state", "typing", "log", "heartbeat", "extension_lifecycle"} <= set(WS_MESSAGE_TYPES)
-    assert "message_annotation" in WS_MESSAGE_TYPES
-    assert "update_status_ready" in WS_MESSAGE_TYPES
-    assert _js_typedef_fields(text, "MessageAnnotationOutbound") == {
-        "type",
-        "annotation_type",
-        "chat_id",
-        "client_message_id",
-        "source_row_address",
-        "action",
-        "target",
-        "target_label",
-        "project_id",
-        "project_chat_id",
-        "routing_token",
-        "cause",
-        "reasoning_effort",
-        "routing_notice_carrier",
-        "reply_to",
-        "status",
-        "options",
-        "attachment_manifest",
-        "suppress_bubble",
-        "ts", "project_name", "target_task_ids", "target_titles"
-    }
-    # The host stamps the exact physical row of the annotated message so the browser can
-    # put the receipt on THAT message. The field is additive-optional in both mirrors
-    # (frames without it stay valid) and it is a string in both — the Python witness and
-    # the browser JSDoc mirror carry the same exact field set, neither widened nor filtered.
-    annotation_hints = get_type_hints(MessageAnnotationOutbound, include_extras=True)
-    assert set(annotation_hints) == _js_typedef_fields(text, "MessageAnnotationOutbound"), (
-        "MessageAnnotationOutbound Python and browser mirrors must carry the same exact fields"
-    )
+    # The host stamps the exact physical row of the annotated message so the
+    # browser can put the receipt on THAT message. The field is additive-optional
+    # (frames without it stay valid) and a string on the contract.
     assert "source_row_address" in _notrequired_fields(MessageAnnotationOutbound), (
         "MessageAnnotationOutbound.source_row_address must stay optional"
     )
     source_row_annotation = MessageAnnotationOutbound.__annotations__["source_row_address"]
     source_row_rendered = getattr(source_row_annotation, "__forward_arg__", None) or str(source_row_annotation)
     assert "NotRequired[str]" in source_row_rendered, source_row_rendered
-    assert ("string=", "source_row_address") in _js_typedef_properties(text, "MessageAnnotationOutbound"), (
-        "api_types.js MessageAnnotationOutbound.source_row_address must stay an optional string"
-    )
-    # The notice carrier is one literal pair in both mirrors: an ACK and the System row beside it read the same words.
+    # The notice carrier is one literal pair on the contract: an ACK and the
+    # System row beside it read the same words.
     for cls in (MessageAnnotationOutbound, ChatOutbound):
         carrier = get_type_hints(cls, include_extras=True)["routing_notice_carrier"]
         assert get_args(get_args(carrier)[0]) == ("routing_ack", "system"), cls.__name__
-    assert len(re.findall(r'@property \{"routing_ack"\|"system"=\} routing_notice_carrier\b', text)) == 2
+    assert {"chat", "command", "photo", "video", "links", "quiz", "quiz_state", "typing", "log", "heartbeat", "extension_lifecycle"} <= set(WS_MESSAGE_TYPES)
+    assert "message_annotation" in WS_MESSAGE_TYPES
+    assert "update_status_ready" in WS_MESSAGE_TYPES
 
 
 def test_gateway_money_contracts_keep_unavailable_distinct_from_zero():
@@ -696,16 +454,27 @@ def test_gateway_money_contracts_keep_unavailable_distinct_from_zero():
 
 
 def test_skill_lifecycle_queue_contract_matches_runtime_shape():
-    fields = set(SkillLifecycleQueueResponse.__annotations__)
+    """The published lifecycle-queue schema stays the runtime's answer (ABI 7.0 retired
+    ``queue``/``recent_events``/``running``); the served route is bound to this shape in
+    tests/test_client_contract_bindings.py."""
+    from ouroboros.gateway.schema import json_schema_for
 
-    assert {"active", "events"} <= fields
-    assert {"queue", "recent_events", "running"}.isdisjoint(fields)
+    schema = json_schema_for(SkillLifecycleQueueResponse)
+
+    assert schema["required"] == ["active", "events"]
+    assert {"queue", "recent_events", "running"}.isdisjoint(schema["properties"]), (
+        "the ABI 7.0 retirement must not come back to the published schema")
 
 
 def test_skill_delete_contract_matches_runtime_shape():
-    fields = set(SkillDeleteResponse.__annotations__)
-    assert "state_delete_pending" not in fields
+    """The published skill-delete answer keeps its runtime fields (``state_delete_pending``
+    retired with the lane split); the delete routes publish this shape
+    (tests/test_client_contract_coverage.py)."""
+    from ouroboros.gateway.schema import json_schema_for
 
+    schema = json_schema_for(SkillDeleteResponse)
+
+    assert "state_delete_pending" not in schema["properties"]
     assert {
         "ok",
         "skill",
@@ -715,28 +484,29 @@ def test_skill_delete_contract_matches_runtime_shape():
         "extension_action",
         "extension_reason",
         "error",
-    } <= fields
+    } <= set(schema["properties"])
 
 
-def test_v682_cancellation_contract_fields_are_mirrored_in_both_languages():
-    """The additive cancellation ABI (v6.82 + phase A) must exist in BOTH
-    mirrors: the host-attested cancelable marker, the cancel endpoint's cascade
-    echo, and the phase-A ``cancel_state`` pending projection on the task
-    detail envelope (AR2-8; the field-level parity loop above pins the exact
-    TaskDetailResponse key set in both languages)."""
-    repo = pathlib.Path(__file__).resolve().parents[1]
-    python_contract = (repo / "ouroboros" / "gateway" / "contracts.py").read_text(encoding="utf-8")
-    js_contract = (repo / "web" / "modules" / "api_types.js").read_text(encoding="utf-8")
+def test_v682_cancellation_contract_fields_are_pinned_in_python():
+    """The additive cancellation ABI (v6.82 + phase A) is pinned on the published schemas:
+    the host-attested ``cancelable`` marker, the cancel endpoint's ``cascade`` echo, and the
+    phase-A ``cancel_state`` pending projection on the task detail envelope (AR2-8; the
+    runtime projection is pinned below)."""
+    from ouroboros.gateway.contracts import TaskCancelResponse
+    from ouroboros.gateway.schema import json_schema_for
 
-    assert "cancelable: NotRequired[bool]" in python_contract
-    assert "cascade: bool" in python_contract
-    assert "@property {boolean=} cancelable" in js_contract
-    assert "@property {boolean=} cascade" in js_contract
-    assert "cancel_state: str" in python_contract
-    assert "@property {string=} cancel_state" in js_contract
-    # GR2-11: the intent's reason is public beside the state, in both mirrors.
-    assert "cancel_reason: str" in python_contract
-    assert "@property {string=} cancel_reason" in js_contract
+    chat = json_schema_for(ChatOutbound)
+    detail = json_schema_for(TaskDetailResponse)
+    cancel = json_schema_for(TaskCancelResponse)
+
+    assert chat["properties"]["cancelable"] == {"type": "boolean"}
+    assert "cancelable" not in chat.get("required", []), "the marker stays additive-optional"
+    assert cancel["properties"]["cascade"] == {"type": "boolean"}
+    assert "cascade" not in cancel.get("required", []), "the echo stays additive-optional"
+    assert cancel["properties"]["cancel_state"] == {"type": "string"}
+    # GR2-11: the intent's reason is public beside the state.
+    assert detail["properties"]["cancel_state"] == {"type": "string"}
+    assert detail["properties"]["cancel_reason"] == {"type": "string"}
 
 
 def test_task_detail_serves_the_cancel_state_projection(tmp_path):
@@ -771,8 +541,7 @@ def test_task_detail_serves_the_cancel_state_projection(tmp_path):
 
 def test_task_detail_cost_breakdown_emission_matches_contract(monkeypatch, tmp_path):
     """api_task_get's additive cost_breakdown object must carry EXACTLY the key
-    set TaskCostBreakdown declares (the JS mirror is held to the same set by the
-    field-level parity loop above), stay optional on the detail response, and be
+    set TaskCostBreakdown declares, stay optional on the detail response, and be
     omitted on non-root task details."""
     import ouroboros.usage_accounting as usage_accounting
     from ouroboros.gateway.tasks import _task_cost_breakdown_view
@@ -804,13 +573,11 @@ def test_task_detail_cost_breakdown_emission_matches_contract(monkeypatch, tmp_p
 
 def test_max_quiz_options_pinned_across_python_and_js():
     """The quiz-option cap is one number in both languages: the shared
-    validator gate (ouroboros.tools.core._MAX_QUIZ_OPTIONS) and the UI
-    contract mirror (web/modules/api_types.js MAX_QUIZ_OPTIONS)."""
-    from ouroboros.tools.core import _MAX_QUIZ_OPTIONS
+    validator gate (ouroboros.tools.core_artifacts._MAX_QUIZ_OPTIONS) and the UI
+    constant carrier (web/modules/api_types.js MAX_QUIZ_OPTIONS)."""
+    from ouroboros.tools.core_artifacts import _MAX_QUIZ_OPTIONS
 
-    text = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "api_types.js").read_text(
-        encoding="utf-8"
-    )
+    text = API_TYPES.read_text(encoding="utf-8")
     match = re.search(r"^export const MAX_QUIZ_OPTIONS = (\d+);", text, flags=re.MULTILINE)
     assert match, "api_types.js missing MAX_QUIZ_OPTIONS"
     assert int(match.group(1)) == _MAX_QUIZ_OPTIONS
@@ -819,15 +586,12 @@ def test_max_quiz_options_pinned_across_python_and_js():
 def test_decision_comment_limit_and_optional_index_pinned_across_python_and_js():
     """The verbatim-comment cap is ONE number in both languages (the ingress
     refuses a longer comment instead of truncating it, so the card must not
-    offer to send one), and the browser mirror must declare option_index as
-    OPTIONAL — the field-set parity loop cannot see requiredness, and an
-    owner's own answer (no option taken) carries no index at all."""
-    from ouroboros.gateway.contracts import DecisionRequest
+    offer to send one — api_types.js keeps the constant), and the request
+    contract must declare option_index as OPTIONAL: an owner's own answer
+    (no option taken) carries no index at all."""
     from ouroboros.gateway.task_decision import _COMMENT_MAX
 
-    text = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "api_types.js").read_text(
-        encoding="utf-8"
-    )
+    text = API_TYPES.read_text(encoding="utf-8")
     match = re.search(r"^export const MAX_DECISION_COMMENT = (\d+);", text, flags=re.MULTILINE)
     assert match, "api_types.js missing MAX_DECISION_COMMENT"
     assert int(match.group(1)) == _COMMENT_MAX
@@ -838,59 +602,39 @@ def test_decision_comment_limit_and_optional_index_pinned_across_python_and_js()
     }
     assert optional == {"option_index", "comment", "reason", "revision", "action", "auto_continue",
                         "model", "credential_profile_id", "use_local", "persist_role", "values"}
-    decisions = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "decision_types.js").read_text(
-        encoding="utf-8"
-    )
-    request_decl = re.search(r"@typedef \{Object\} DecisionRequest\b([\s\S]*?)\*/", decisions)
-    assert request_decl
-    assert "@property {number=} option_index" in request_decl.group(1)
-    assert "@property {string=} comment" in request_decl.group(1)
-    assert "@property {Object=} values" in request_decl.group(1)  # a card press's optional form values
 
     # The settled quiz card replayed from history carries the recorded answer:
     # the chosen index when there was one, and the owner's verbatim words —
-    # which, with no index, ARE the answer.
-    quiz_decl = re.search(r"@typedef \{Object\} QuizOutbound\b([\s\S]*?)\*/", text)
-    assert quiz_decl
-    assert "@property {number=} answered_index" in quiz_decl.group(1)
-    assert "@property {string=} comment" in quiz_decl.group(1)
-    # Additive: replay names the answer row its card shows; the frozen live quiz_state frame does not grow.
-    assert "@property {string=} answer_row_address" in quiz_decl.group(1)
+    # which, with no index, ARE the answer. Additive: replay names the answer
+    # row its card shows; the frozen live quiz_state frame does not grow.
+    assert "answered_index" in QuizOutbound.__annotations__
+    assert "comment" in QuizOutbound.__annotations__
     assert "answer_row_address" in QuizOutbound.__annotations__
     assert "answer_row_address" not in QuizStateOutbound.__annotations__
-    assert "answer_row_address" not in _js_typedef_fields(text, "QuizStateOutbound")
 
 
 def test_max_link_actions_pinned_across_python_and_js():
     """The links-action cap is one number in both languages: the tool gate
-    (ouroboros.tools.core._MAX_LINK_ACTIONS) and the UI contract mirror
+    (ouroboros.tools.core._MAX_LINK_ACTIONS) and the UI constant carrier
     (web/modules/api_types.js MAX_LINK_ACTIONS) must never drift apart."""
-    from ouroboros.tools.core import _MAX_LINK_ACTIONS
+    from ouroboros.tools.core_artifacts import _MAX_LINK_ACTIONS
 
-    text = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "api_types.js").read_text(
-        encoding="utf-8"
-    )
+    text = API_TYPES.read_text(encoding="utf-8")
     match = re.search(r"^export const MAX_LINK_ACTIONS = (\d+);", text, flags=re.MULTILINE)
     assert match, "api_types.js missing MAX_LINK_ACTIONS"
     assert int(match.group(1)) == _MAX_LINK_ACTIONS
 
 
-def test_quiz_option_recommendation_is_an_additive_optional_field_in_both_languages():
-    """The asker marks its recommendation on the option itself (owner batch 1, Q7=B):
-    QuizOption grows by ONE optional field in the frozen gateway contract and its
-    api_types.js typedef mirror; nothing is renamed or removed and no version moves."""
-    from ouroboros.gateway.contracts import QuizOption
+def test_quiz_option_recommendation_is_an_additive_optional_field():
+    """The asker marks its recommendation on the option itself (owner batch 1,
+    Q7=B): QuizOption grows by ONE optional field in the frozen gateway
+    contract; nothing is renamed or removed and no version moves."""
 
     optional = {
         name for name, annotation in QuizOption.__annotations__.items()
         if (getattr(annotation, "__forward_arg__", None) or str(annotation)).startswith("NotRequired[")
     }
     assert set(QuizOption.__annotations__) == {"label", "detail", "recommended"} and optional == {"detail", "recommended"}
-    text = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "api_types.js").read_text(
-        encoding="utf-8"
-    )
-    option_decl = re.search(r"@typedef \{Object\} QuizOption\b([\s\S]*?)\*/", text)
-    assert option_decl and "@property {boolean=} recommended" in option_decl.group(1)
 
 
 def test_cost_presentation_has_a_closed_nullable_wire_shape():
@@ -910,16 +654,13 @@ def test_owner_continuation_envelopes_are_exported():
         assert cls.__name__ in contracts.__all__
 
 
-def test_vendor_program_contracts_have_complete_javascript_twins():
+def test_vendor_program_contracts_are_pinned_in_python():
     from ouroboros.gateway import management_contracts as contracts
 
-    text = (pathlib.Path(__file__).resolve().parent.parent
-            / "web/modules/management_contract_types.js").read_text(encoding="utf-8")
     prefixes = ("ClaudexorSelectedProgram", "ClaudexorProgram", "ClaudexorNewest", "ClaudexorMaintenance")
     types = [value for name, value in vars(contracts).items()
              if name.startswith(prefixes) and hasattr(value, "__annotations__")]
-    for cls in types:
-        assert _js_typedef_fields(text, cls.__name__) == set(get_type_hints(cls)), cls.__name__
+    assert types, "the vendor program contract family lost its TypedDicts"
     operation = get_type_hints(contracts.ClaudexorMaintenanceOperation, include_extras=True)
     assert contracts.ClaudexorMaintenanceOperation.__total__
     assert _notrequired_fields(contracts.ClaudexorMaintenanceOperation) == {"profileCleanup"}
@@ -930,38 +671,21 @@ def test_vendor_program_contracts_have_complete_javascript_twins():
     assert not {"maintainable", "targets", "installed", "releaseTested", "previous", "available"} & entry.keys()
 
 
-def test_the_reset_receipt_names_the_accepted_reset_in_python_and_javascript():
+def test_the_reset_receipt_names_the_accepted_reset_in_python():
     from ouroboros.gateway import management_contracts as contracts
 
     hints = get_type_hints(contracts.ResetResponse, include_extras=True)
     assert "reset_id" in hints and get_args(hints["reset_id"]) == (str,)
     assert "reset_id" in _notrequired_fields(contracts.ResetResponse)
-    text = (pathlib.Path(__file__).resolve().parent.parent
-            / "web/modules/management_contract_types.js").read_text(encoding="utf-8")
-    assert _js_typedef_fields(text, "ResetResponse") == set(hints)
 
 
-def test_sign_in_contracts_have_field_identical_javascript_twins():
-    from ouroboros.gateway import sign_in_contracts as contracts
-
-    text = (pathlib.Path(__file__).resolve().parent.parent
-            / "web/modules/sign_in_contract_types.js").read_text(encoding="utf-8")
-    for name in contracts.__all__:
-        assert _js_typedef_fields(text, name) == set(get_type_hints(getattr(contracts, name))), name
-
-
-def test_quiz_answer_file_contract_shape_and_twins():
-    """Dedicated display-only QuizAnswerFile contract:
-    identical across Python contracts and JS JSDoc twins, distinct from ChatAttachmentView,
-    and free of internal storage/download locators."""
+def test_quiz_answer_file_contract_shape():
+    """Dedicated display-only QuizAnswerFile contract: closed shape on the
+    Python contract, distinct from ChatAttachmentView, and free of internal
+    storage/download locators."""
     from ouroboros.gateway import contracts
     from ouroboros.gateway.attachment_contracts import QuizAnswerFile
     from ouroboros.gateway.history_contracts import ChatHistoryQuiz, ChatSearchQuestion
-
-    repo = pathlib.Path(__file__).resolve().parents[1]
-    client_js = (repo / "web/modules/client_contract_types.js").read_text(encoding="utf-8")
-    decision_js = (repo / "web/modules/decision_types.js").read_text(encoding="utf-8")
-    api_js = (repo / "web/modules/api_types.js").read_text(encoding="utf-8")
 
     expected = {"name", "kind", "mime", "size", "sha256", "unavailable", "limit_bytes"}
     forbidden = {"upload", "mtime_ns", "url", "available", "path", "abs_path"}
@@ -970,18 +694,10 @@ def test_quiz_answer_file_contract_shape_and_twins():
     py_fields = set(get_type_hints(QuizAnswerFile, include_extras=True))
     assert py_fields == expected
     assert not (py_fields & forbidden)
-    assert _js_typedef_fields(client_js, "QuizAnswerFile") == expected
 
-    # Twin parity on every quiz-answer carrier.
-    assert _js_typedef_fields(client_js, "ChatHistoryQuiz") == set(get_type_hints(ChatHistoryQuiz, include_extras=True))
-    assert _js_typedef_fields(client_js, "ChatSearchQuestion") == set(get_type_hints(ChatSearchQuestion, include_extras=True))
+    # Every quiz-answer carrier types its attachments as the display-only shape.
     assert "attachments" in get_type_hints(ChatSearchQuestion, include_extras=True)
     for cls in (QuizOutbound, QuizStateOutbound, DecisionResponse, ChatHistoryQuiz, ChatSearchQuestion):
         ann = get_type_hints(cls, include_extras=True)["attachments"]
         assert "QuizAnswerFile" in str(ann), cls.__name__
     assert "QuizAnswerFile" in str(get_type_hints(ChatOutbound, include_extras=True)["attachments"])
-
-    assert "@property {QuizAnswerFile[]=} attachments" in client_js
-    assert "@property {Array<import('./client_contract_types.js').QuizAnswerFile>=} attachments" in decision_js
-    assert "@property {QuizAnswerFile[]=} attachments" in api_js
-    assert "@property {Array<NonNullable<UploadResponse['view']>|QuizAnswerFile>=} attachments" in api_js

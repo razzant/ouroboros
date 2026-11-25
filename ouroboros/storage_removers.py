@@ -70,7 +70,7 @@ class StorageRemover(TypedDict):
     saved_bytes: NotRequired[Optional[int]]  # record_compression: that plane's allocation saved; null where unreported
     freed_bytes: NotRequired[int]  # the engine pass
     released: NotRequired[int]  # a retirer pass: items it released; absent from a job that keeps no such count
-    holds: NotRequired[List[Dict[str, Any]]]  # a retirer pass, a job or the engine pass: typed holds {class, count, example, since}
+    holds: NotRequired[List[Dict[str, Any]]]  # a retirer pass, a job or the engine pass: typed holds {class, count, example, since}; count null: not counted
     held: NotRequired[int]  # the engine pass: folders it held (project roots and native homes); a retirer pass: items held, absent while a hold is uncounted
     held_since: NotRequired[str]  # the earliest of those holds
     errors: NotRequired[int]  # the engine pass's errors; a retirer pass's pass-level errors

@@ -19,10 +19,12 @@ from the product version: it moves when the wire contract breaks (this is the
 this constant and is not becoming one, whatever its name suggests (RES-15a):
 it is a RELEASE version carrier, pinned equal to the ``VERSION`` file by
 ``tests/test_gateway_parity.py`` and rewritten beside ``pyproject.toml`` and
-``web/package.json`` by ``ouroboros.tools.release_sync``. The JSDoc typedefs
-in that file ARE the exact browser mirror of ``gateway.contracts`` — the
-ABI-3 deferrals were paid off in the F3.3 sweep; only the version constant
-answers a different question.
+``web/package.json`` by ``ouroboros.tools.release_sync``. The gateway wire
+contract is defined by the TypedDicts in ``gateway/contracts.py`` and its
+sibling contract modules; published schemas are derived here. JSDoc does not
+mirror named wire shapes; consumers cite the Python contracts they
+read. ``web/modules/api_types.js`` also exports the three live UI limits:
+``MAX_LINK_ACTIONS``, ``MAX_QUIZ_OPTIONS`` and ``MAX_DECISION_COMMENT``.
 
 ``contract_document`` derives the published ABI (``GET /api/contract``) from the
 same owners: the router-verified ``endpoint_index`` tuples and their shape

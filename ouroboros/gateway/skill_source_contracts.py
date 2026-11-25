@@ -1,7 +1,4 @@
-"""Gateway envelopes of the skill sources, catalog and install lifecycle (``gateway/skill_sources.py``).
-
-Field-identical JSDoc twins live in ``web/modules/skill_source_contract_types.js``.
-"""
+"""Gateway envelopes of the skill sources, catalog and install lifecycle (``gateway/skill_sources.py``)."""
 
 from __future__ import annotations
 
@@ -337,6 +334,7 @@ class CompletionConnection(TypedDict, total=False):
     options: Dict[str, str]
 
 
+# The Accounts draft can update key presence, never the owner's ticks.
 class StarterSkillItem(TypedDict, total=False):
     """One skill the setup's Skills step offers. ``title`` and ``pitch`` are the catalog's optional words for people
     ("" when it has none: show ``name`` and ``description``); ``needs`` is its prerequisite in words ("" none, null
@@ -369,7 +367,7 @@ class StarterSkillsResponse(TypedDict):
     groups: List[Dict[str, Any]]  # [{category, label, items: [StarterSkillItem]}]
     hub_rows: List[Dict[str, str]]  # [{id, name, trust, part}]
     sources: List[SkillSourceRow]
-    catalog_more: Optional[int]
+    catalog_more: Optional[int]  # absent from older cores
 
 
 __all__ = [

@@ -49,10 +49,10 @@ class ClaudexorStatusResponse(TypedDict, total=False):
     profiles: Dict[str, Any]
     quota: List[Dict[str, Any]]
     quota_absences: List[Dict[str, Any]]
-    resources: List[Dict[str, Any]]
-    availability_scope: Dict[str, Any]  # Optional engine binding {model, requestKind, basis: quota_block}.
-    resource_capabilities: Dict[str, bool]
-    resource_capabilities_read: ClaudexorReadState
+    resources: List[Dict[str, Any]]  # Engine resource facets retain decimal strings, units and independent observation times.
+    availability_scope: Dict[str, Any]  # Optional engine binding {model, requestKind, basis: quota_block}; model is a string or null, requestKind text or image.
+    resource_capabilities: Dict[str, bool]  # Catalog-negotiated read, refresh, reset and inspect_reset operations.
+    resource_capabilities_read: ClaudexorReadState  # Operations-catalog evidence, independent of reads.catalog (agent capabilities).
     reads: ClaudexorStatusReads
     # True when this read's roster is the unified account model (named rows, routing in
     # `profiles.accountPools`); a pre-unified roster fails `accounts` as `account_model_unsupported`.
