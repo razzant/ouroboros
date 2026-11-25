@@ -449,22 +449,29 @@ class Acts:
 def reply_marks(root: Any, tasks: Iterable[str]) -> Dict[str, Optional[Mapping[str, Any]]]:
     """What my replies count as read, for works whose finish row is not in hand: the stamp their stored result keeps;
     ``NOTHING`` while a work has not ended; the positional rule (None) for a work that ended before stamps or is
-    not in the store. One indexed read of those works' status and stamp."""
+    not in the store. One indexed read of those works' status and stamp. A task store that cannot be read (absent,
+    as in a read-only report's root, or failing) holds none of them: every one is not in the store, with one logged
+    warning; a capture never fails on it."""
     import json
+    import sqlite3
 
-    from ouroboros.store import open_store
+    from ouroboros.store import StoreError, open_store
     from ouroboros.task_status import FINAL_STATUSES
 
     ids = sorted({str(task) for task in tasks if task})
     if not ids:
         return {}
     found = {}
-    with open_store(root, write=False) as txn:
-        for task_id, status, mark in txn.conn.execute(
-                "SELECT t.task_id, t.status, CASE WHEN json_valid(b.body) THEN json_extract(b.body, '$.read_spans') END "
-                "FROM tasks AS t LEFT JOIN task_bodies AS b ON b.task_id = t.task_id "
-                "WHERE t.task_id IN (SELECT value FROM json_each(?))", (json.dumps(ids),)):
-            stored = json.loads(mark) if isinstance(mark, str) and mark else None
-            found[str(task_id)] = (NOTHING if str(status or "") not in FINAL_STATUSES  # not ended: whatever is stored
-                                   else stored if isinstance(stored, dict) else None)
+    try:
+        with open_store(root, write=False) as txn:
+            for task_id, status, mark in txn.conn.execute(
+                    "SELECT t.task_id, t.status, CASE WHEN json_valid(b.body) THEN json_extract(b.body, '$.read_spans') "
+                    "END FROM tasks AS t LEFT JOIN task_bodies AS b ON b.task_id = t.task_id "
+                    "WHERE t.task_id IN (SELECT value FROM json_each(?))", (json.dumps(ids),)):
+                stored = json.loads(mark) if isinstance(mark, str) and mark else None
+                found[str(task_id)] = (NOTHING if str(status or "") not in FINAL_STATUSES  # not ended: whatever is stored
+                                       else stored if isinstance(stored, dict) else None)
+    except (sqlite3.Error, OSError, StoreError):
+        log.warning("stored reading stamps unreadable; %d works take the positional rule", len(ids), exc_info=True)
+        return {task: None for task in ids}
     return {task: found.get(task) for task in ids}

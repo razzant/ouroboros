@@ -159,7 +159,7 @@ def test_real_admission_hurry_and_pre_running_death_recover(pool, monkeypatch, o
         ) if key in admitted}
         assert set(row) == ({"task_id", "status", "_schema_version", "ts", "updated_at", "owner_hurry",
                              "root_task_id", "description", "task_attempt", "swarm_fanout_rollup",
-                             "swarm_fanout_basis"} | persisted)
+                             "swarm_fanout_basis", "read_spans"} | persisted)  # a new work starts with an empty stamp
         assert row["swarm_fanout_rollup"]["version"] == 2
         assert row["swarm_fanout_rollup"]["fanout_count"] == 0
         assert row["swarm_fanout_basis"] == {"base": initial_swarm_rollup(pool.root)}
@@ -211,7 +211,8 @@ def test_initializer_holds_queue_lock_and_does_not_rewrite_existing_wait(pool, m
     row = results.load_task_result(pool.root, task_id, strict=True)
     assert {key: value for key, value in calls[0].items() if key not in {"create_only", "strict_existing_dict"}} == {
         key: value for key, value in row.items() if key not in {
-            "task_id", "status", "_schema_version", "ts", "updated_at", "swarm_fanout_rollup", "swarm_fanout_basis"}}
+            "task_id", "status", "_schema_version", "ts", "updated_at", "swarm_fanout_rollup", "swarm_fanout_basis",
+            "read_spans"}}  # the writer's own: a new work starts with an empty reading stamp (``memory_reading``)
     assert row["swarm_fanout_rollup"]["version"] == 2
     assert row["swarm_fanout_rollup"]["fanout_count"] == 0
     assert row["swarm_fanout_basis"] == {"base": initial_swarm_rollup(pool.root)}

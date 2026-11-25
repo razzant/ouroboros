@@ -83,6 +83,16 @@ def test_end_page_links_only_own_later_terminal_rows_and_to_leaves_no_holes(tmp_
     store.ensure_activated()
     rows = chat(tmp_path, [{"chat_id": 1, "direction": "out", "ts": ts(i), "text": f"work {i}",
                            "task_id": "writer01"} for i in range(1, 5)])
+    if role != "root":  # a delegated writer seals only rows it was shown whole or read (``memory_coverage``)
+        from ouroboros import memory_reading
+        from ouroboros.tool_call_log import _ACTIVE_CALL
+
+        token = _ACTIVE_CALL.set({"tool_call_id": "read-1"})
+        try:
+            text = _memory_read(ctx, room_id="1", rows=True, **{"from": addr(rows[0]), "to": addr(rows[-1])})
+        finally:
+            _ACTIVE_CALL.reset(token)
+        memory_reading.note_view(ctx, None, [{"role": "tool", "tool_call_id": "read-1", "content": text}])
     first = write(ctx, kind="page", text="Middle rows", covers={"from": addr(rows[1]), "to": addr(rows[2])})
     last = write(ctx, kind="page", text="I finished; I did not reread external sources.", covers={"to": addr(rows[-1])})
     assert first["ok"] and last["ok"]
