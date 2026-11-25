@@ -1,0 +1,206 @@
+name: Main history — focused follow-up
+'on':
+  push:
+    branches: [qa/history-followup-78397685-v3]
+permissions: {contents: read}
+env:
+  PRODUCT: 'd439b791d174fe26611ee265ec8be07e841f7eb5'
+  OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS: '1'
+  OUROBOROS_PREFLIGHT_REQUIRE_NODE: '1'
+jobs:
+  observe:
+    name: ${{ matrix.suite }} on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        suite: [python, node]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run: {shell: bash}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Bind overlay, then switch to product
+        id: bind
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = razzant/ouroboros
+          test "$GITHUB_REF" = refs/heads/qa/history-followup-78397685-v3
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git show -s --format=%P HEAD)" = "$PRODUCT"
+          test "$(git diff --name-status --no-renames "$PRODUCT" HEAD --)" = $'A\t.github/workflows/history-followup-78397685-v3.yml'
+          git checkout --detach "$PRODUCT"
+          test "$(git rev-parse HEAD)" = "$PRODUCT"
+          test -z "$(git status --porcelain)"
+          printf 'Product %s; tree %s; QA overlay %s\n' "$PRODUCT" "$(git rev-parse 'HEAD^{tree}')" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Put Windows scratch on the work disk
+        if: runner.os == 'Windows'
+        run: printf 'TEMP=%s\nTMP=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        with: {interpreter: shipped, install-project: 'false'}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: {node-version: '22'}
+      - name: Verify the toolchain
+        run: |
+          python -I - <<'PY'
+          import platform, re, shutil, sqlite3, subprocess, sys
+          from pathlib import Path
+          pin = re.search(r'^PY_VERSION="([\d.]+)"', Path('scripts/download_python_standalone.sh').read_text(encoding='utf-8'), re.M)
+          if sys.prefix == sys.base_prefix or not pin or platform.python_version() != pin[1]:
+              raise SystemExit(f'Expected the shipped Python {pin and pin[1]} in a dependency-only venv; got {sys.version}')
+          node = shutil.which('node')
+          version = subprocess.check_output([node, '--version'], text=True).strip() if node else ''
+          if not version.startswith('v22.'):
+              raise SystemExit(f'Expected Node 22, got {version!r}')
+          print(f'{sys.platform}: Python {platform.python_version()}, SQLite {sqlite3.sqlite_version}, Node {version}', flush=True)
+          PY
+      - name: Run the pytest cases (one safe_test)
+        if: ${{ matrix.suite == 'python' }}
+        run: |
+          python -I - <<'PY'
+          import json, os, re, subprocess, sys
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+
+          sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+          PY_CASES = json.loads(r'''["tests/test_presence_history.py::test_a_time_ordered_page_costs_its_own_rows_newest_and_deep[distinct-times]","tests/test_presence_history.py::test_a_time_ordered_page_costs_its_own_rows_newest_and_deep[one-shared-time]","tests/test_review_overrides.py::test_a_page_load_shows_a_works_field_from_the_history_endpoint[finished]","tests/test_review_overrides.py::test_a_page_load_shows_a_works_field_from_the_history_endpoint[running]","tests/test_store_migrating.py::test_migrating_client_consumers","tests/test_history_ordinary_room.py::test_mains_unreadable_newest_read_names_main_under_the_profile","tests/test_history_ordinary_room.py::test_an_active_project_rooms_unreadable_newest_read_names_that_room","tests/test_history_ordinary_room.py::test_a_room_the_core_stops_counting_is_named_no_more","tests/test_gateway_client_contract.py::test_every_client_envelope_has_a_field_identical_browser_twin","tests/test_history_ordinary_room.py::test_a_send_again_stands_only_on_this_rooms_word_under_this_connections_own_profile[1-0123456789abcdef-]","tests/test_history_ordinary_room.py::test_a_send_again_stands_only_on_this_rooms_word_under_this_connections_own_profile[1--0123456789abcdef]","tests/test_history_ordinary_room.py::test_a_send_again_stands_only_on_this_rooms_word_under_this_connections_own_profile[2-0123456789abcdef-0123456789abcdef]","tests/test_history_ordinary_room.py::test_the_acceptance_asks_the_rooms_word_again_before_a_send_again_is_saved","tests/test_chat_references.py::test_web_reply_quotes_a_passage_of_a_saved_agent_note[False]","tests/test_chat_references.py::test_web_reply_quotes_a_passage_of_a_saved_agent_note[True]","tests/test_chat_search.py::test_a_program_note_is_searched_by_its_literal_body_under_its_author"]''')
+          if not isinstance(PY_CASES, list) or not PY_CASES or len(set(PY_CASES)) != len(PY_CASES):
+              raise SystemExit('Expected a non-empty JSON array of distinct pytest node ids')
+          want = {}
+          for node_id in PY_CASES:
+              m = isinstance(node_id, str) and re.fullmatch(
+                  r'(tests/(?:[\w-]+/)*test_[\w-]+)\.py((?:::[A-Za-z_]\w*)*)::(test_\w+)(\[[ -~]*\])?', node_id, re.A)
+              if not m:
+                  raise SystemExit(f'Expected one exact pytest case, got {node_id!r}')
+              module, classes, name, params = m.groups()
+              dotted = '.'.join([module.replace('/', '.'), *filter(None, classes.split('::'))])
+              want[(dotted, name + (params or ''))] = node_id
+
+          work = Path(os.environ['RUNNER_TEMP']) / 'observe'
+          work.mkdir(parents=True, exist_ok=True)
+          report, listing = work / 'pytest.xml', work / 'pytest-ids.txt'
+          report.unlink(missing_ok=True)
+          listing.write_bytes(('\n'.join(PY_CASES) + '\n').encode('ascii'))
+          py = sys.executable
+          print(f'pytest: {len(PY_CASES)} exact cases, read from @{listing}', flush=True)
+          code = subprocess.run([py, '-I', '-S', 'scripts/safe_test.py', '--timeout', '2400', '--',
+                                 py, '-B', '-m', 'pytest', '-o', 'addopts=', '-v', '--tb=short', '--timeout=300',
+                                 f'--junitxml={report}', f'@{listing}']).returncode
+          code = code if code >= 0 else 128 - code
+          RANK = {'error': 0, 'failed': 1, 'xfailed': 2, 'skipped': 3, 'passed': 4}
+          seen, problems = {}, []
+          try:
+              for el in ET.parse(report).getroot().iter('testcase'):
+                  key, outcome, why = (el.get('classname', ''), el.get('name', '')), 'passed', ''
+                  for child in el:
+                      label = {'failure': 'failed', 'error': 'error', 'skipped': 'skipped'}.get(child.tag)
+                      if label == 'skipped' and child.get('type') == 'pytest.xfail':
+                          label = 'xfailed'
+                      if label and RANK[label] < RANK[outcome]:
+                          outcome = label
+                          why = ' '.join((child.get('message') or '').split())[:120] if label in ('xfailed', 'skipped') else ''
+                  if key not in seen or RANK[outcome] < RANK[seen[key][0]]:
+                      seen[key] = (outcome, why)
+          except (OSError, ET.ParseError) as exc:
+              problems.append(f'no readable JUnit report ({type(exc).__name__})')
+          total = dict.fromkeys(RANK, 0)
+          for key in sorted(seen):
+              outcome, why = seen[key]
+              total[outcome] += 1
+              print(f'PYTEST {outcome:<7} {key[0]}::{key[1]}' + (f'  # {why}' if why else ''))
+          absent = [want[key] for key in sorted(want) if key not in seen]
+          extra = [f'{cls}::{name}' for cls, name in sorted(seen) if (cls, name) not in want]
+          for node_id in absent:
+              print(f'PYTEST absent  {node_id}')
+          for name in extra:
+              print(f'PYTEST extra   {name}')
+          tally = ', '.join(f'{k} {v}' for k, v in total.items())
+          line = f'pytest {sys.platform}: selected {len(PY_CASES)}, reported {len(seen)} ({tally}); absent {len(absent)}, extra {len(extra)}; exit {code}'
+          print(line, flush=True)
+          if absent:
+              problems.append(f'{len(absent)} intended cases are absent from the report')
+          if total['failed'] or total['error']:
+              problems.append('the report holds failed or error cases')
+          if not total['passed']:
+              problems.append('no intended case passed')
+          if total['skipped'] or total['xfailed']:
+              print(f"::warning title=pytest skips::{total['skipped']} skipped and {total['xfailed']} xfailed intended cases did not pass on {sys.platform}; they prove nothing there")
+          for problem in problems:
+              print(f'::error title=pytest observation::{problem}')
+          flagged = [f'{o:<7} {k[0]}::{k[1]}' for k, (o, _) in sorted(seen.items()) if o != 'passed'] + [f'absent  {n}' for n in absent]
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
+              out.write(f'### pytest on {sys.platform}\n{line}\n')
+              if problems or flagged:
+                  out.write('```\n' + '\n'.join([*problems, *flagged][:80]) + '\n```\n')
+          raise SystemExit(code or (1 if problems else 0))
+          PY
+      - name: Run the Node files (one safe_test)
+        if: ${{ matrix.suite == 'node' }}
+        run: |
+          python -I - <<'PY'
+          import json, os, re, shutil, subprocess, sys
+          from pathlib import Path
+
+          sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+          JS_FILES = json.loads(r'''["web/tests/chat_history_loading.test.js","web/tests/owner_input_saved.test.js"]''')
+          if (not isinstance(JS_FILES, list) or not JS_FILES or len(set(JS_FILES)) != len(JS_FILES)
+                  or not all(isinstance(f, str) and re.fullmatch(r'web/tests/[\w.-]+\.test\.js', f, re.A) for f in JS_FILES)):
+              raise SystemExit('Expected a non-empty JSON array of distinct literal web/tests/*.test.js paths')
+          present = [f for f in JS_FILES if Path(f).is_file()]
+          problems = [f'missing file {f}' for f in JS_FILES if f not in present]
+          work = Path(os.environ['RUNNER_TEMP']) / 'observe'
+          work.mkdir(parents=True, exist_ok=True)
+          tap = work / 'node.tap'
+          tap.unlink(missing_ok=True)
+          code = 1
+          if present:
+              print(f'node: {len(present)} of {len(JS_FILES)} files, two at a time', flush=True)
+              code = subprocess.run([sys.executable, '-I', '-S', 'scripts/safe_test.py', '--timeout', '1200', '--',
+                                     shutil.which('node'), '--test', '--test-timeout=300000', '--test-concurrency=2',
+                                     '--test-reporter=tap', '--test-reporter-destination=stdout',
+                                     '--test-reporter=tap', f'--test-reporter-destination={tap}', *present]).returncode
+              code = code if code >= 0 else 128 - code
+          text = tap.read_text(encoding='utf-8', errors='replace') if tap.is_file() else ''
+          count = {}
+          if not text:
+              problems.append('no TAP report was written')
+          for key in ('tests', 'suites', 'pass', 'fail', 'cancelled', 'skipped', 'todo') if text else ():
+              found = re.findall(rf'^# {key} (\d+)[ \t]*$', text, re.M)
+              if len(found) == 1:
+                  count[key] = int(found[0])
+              else:
+                  problems.append(f'TAP summary "# {key}" found {len(found)} times')
+          flagged = []
+          for indent, status, rest in re.findall(r'^( *)(ok|not ok) \d+ - (.*)$', text, re.M):
+              flag = 'SKIP' if ' # SKIP' in rest else 'TODO' if ' # TODO' in rest else 'FAIL' if status == 'not ok' else ''
+              if flag:
+                  flagged.append(f'NODE {flag} depth {len(indent) // 4}: {rest}')
+          if flagged:
+              print('\n'.join(flagged))
+          tally = ', '.join(f'{k} {v}' for k, v in count.items())
+          line = f'node {sys.platform}: {tally}; files {len(present)} of {len(JS_FILES)}; exit {code}'
+          print(line, flush=True)
+          if count.get('fail') or count.get('cancelled'):
+              problems.append('TAP reports failed or cancelled tests')
+          if text and not count.get('pass'):
+              problems.append('no intended Node test passed')
+          if count.get('skipped') or count.get('todo'):
+              print(f"::warning title=node skips::{count.get('skipped', 0)} skipped and {count.get('todo', 0)} todo tests did not pass on {sys.platform}; they prove nothing there")
+          for problem in problems:
+              print(f'::error title=node observation::{problem}')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
+              out.write(f'### Node on {sys.platform}\n{line}\n')
+              if problems or flagged:
+                  out.write('```\n' + '\n'.join([*problems, *flagged][:80]) + '\n```\n')
+          raise SystemExit(code or (1 if problems else 0))
+          PY
+      - name: Recheck product identity
+        if: ${{ !cancelled() && steps.bind.outcome == 'success' }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$PRODUCT"
+          git diff --exit-code HEAD --
