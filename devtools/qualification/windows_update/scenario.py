@@ -31,6 +31,7 @@ import fixture_model as fm  # noqa: E402
 import git_traces as gt  # noqa: E402
 import prepare_build as pb  # noqa: E402
 import windows_host as wh  # noqa: E402
+from uia_reading import MessageWitness, flatten_tree_nodes, visible_rect  # noqa: E402
 
 FIXTURE_DOC = "docs/qualification/windows-update-fixture-b.md"
 MAIN_SOURCE_LABEL = "Main Model source"
@@ -88,52 +89,6 @@ def parse_hwnd(raw: Any) -> int:
         return raw
     text = str(raw or "").strip()
     return int(text, 16) if text.lower().startswith("0x") else (int(text) if text.isdigit() else 0)
-
-
-def flatten_tree_nodes(root: dict[str, Any] | None) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    stack = [root] if isinstance(root, dict) else []
-    while stack:
-        node = stack.pop()
-        out.append(node)
-        children = [c for c in (node.get("children") or []) if isinstance(c, dict)]
-        stack.extend(reversed(children))
-    return out
-
-
-def visible_rect(node: dict[str, Any]) -> dict[str, Any] | None:
-    """The node's rectangle when UIA said ``IsOffscreen == false``; an unread or true flag is not visible."""
-    if (node.get("state") or {}).get("offscreen") is not False:
-        return None
-    rect = node.get("rect")
-    if not isinstance(rect, dict) or int(rect.get("width") or 0) <= 0 or int(rect.get("height") or 0) <= 0:
-        return None
-    center = rect.get("center")
-    return rect if isinstance(center, dict) and "x" in center and "y" in center else None
-
-
-def visible_leaf_texts(root: dict[str, Any] | None) -> list[str]:
-    """Extract rendered visible exact leaf ``text`` nodes; excludes ``document``, ``edit``, ``combo_box``, and ``value``."""
-    leaves: list[str] = []
-
-    def _walk(node: Any, in_input: bool) -> None:
-        if not isinstance(node, dict):
-            return
-        role = str(node.get("role") or "")
-        now_in_input = in_input or role in ("edit", "combo_box")
-        if children := (node.get("children") or []):
-            for child in children:
-                _walk(child, now_in_input)
-            return
-        if now_in_input or role != "text":
-            return
-        if node.get("children_unread") or node.get("text_truncated") or "name" in (node.get("unread") or []):
-            return
-        if visible_rect(node) is not None and isinstance(node.get("name"), str) and node["name"].strip():
-            leaves.append(node["name"].strip())
-
-    _walk(root, False)
-    return leaves
 
 
 def has_exact_subsequence(items: list[Any], expected: list[Any]) -> bool:
@@ -419,6 +374,8 @@ class UIADesktopDriver:
 
 
 class QualificationRun:
+    TURN_SEC, RETAINED_SEC = 180.0, 60.0  # a chat turn's wait; Turn 1's wait in the window after the restart
+
     def __init__(
         self, args: argparse.Namespace, *, uia_factory: Callable[[pathlib.Path], Any] | None = None,
         host_mod: Any = wh, launcher_spawn: Callable[..., subprocess.Popen[Any]] | None = None,
@@ -438,7 +395,7 @@ class QualificationRun:
             "verdict": "error", "phase": "init", "code": "not_finished",
             "reasons": [], "marks": {}, "checks": {}, "facts": {}, "declared": dict(pb.DECLARED),
         }
-        self._decided = False
+        self._decided = self._soft = False  # _soft: decided by a missing screen witness the run went on past
         self.step = "init"  # where the run is; the published phase is the first settled outcome's own
         self.proc: subprocess.Popen[Any] | None = None
         self.driver: UIADesktopDriver | None = None
@@ -722,19 +679,51 @@ class QualificationRun:
         else:
             self.driver.wait_unique_node(hwnd, phase=phase, label="chat-input", automation_id="chat-input", timeout_sec=45.0)
 
-    def _observe_chat_state(self, hwnd: int, *, phase: str, expected_durable: list[tuple[str, str]], expected_leaves: list[str], state: dict[str, Any]) -> None:
-        assert self.driver is not None
-        read_ok, _complete, dur_rows = self.durable_history()
-        if read_ok:
-            state["durable"] = has_exact_subsequence(dur_rows, expected_durable)
-        try:
-            reading = self.driver.read_tree(hwnd, phase=phase)
-            state["visible_leaf"] = has_exact_subsequence(visible_leaf_texts(reading.get("root")), expected_leaves)
-            state["uia_gap"] = ""
-        except Unconfirmed as gap:
-            state["uia_gap"] = gap.code
+    def message_witness(self, slot: int) -> MessageWitness:
+        return MessageWitness({"prompt": (fm.prompt_text(slot, self.tag), fm.prompt_token(slot, self.tag)),
+                               "reply": (fm.reply_text(slot, self.tag), fm.reply_token(slot, self.tag))})
 
-    def send_chat_turn(self, slot: int, *, expected_durable: list[tuple[str, str]], expected_visible_leaves: list[str], phase: str) -> None:
+    def _observe_chat_state(self, hwnd: int, *, phase: str, expected_durable: list[tuple[str, str]], witness: MessageWitness, state: dict[str, Any]) -> None:
+        assert self.driver is not None
+        read_ok, _complete, rows = self.durable_history()
+        state["durable"] = read_ok and has_exact_subsequence(rows, expected_durable)
+        try:
+            root = self.driver.read_tree(hwnd, phase=phase).get("root")
+            if not isinstance(root, dict):
+                raise Unconfirmed(phase, "uia_tree_root_missing")
+        except Unconfirmed as gap:
+            if gap.code in ("window_ownership_lost", "window_ownership_lost_after_read", "uia_window_identity_mismatch"):
+                raise
+            state["uia_gap"] = gap.code
+            return
+        witness.observe(root)
+        state["uia_gap"] = ""
+        if state["durable"] and state.get("answered", True) and (target := witness.next_reveal()):
+            try:
+                receipt = self.driver._element_act(hwnd, phase=phase, select={"role": "text", "name_contains": target[1]}, do="scroll_into_view", timeout_ms=10000, max_nodes=4500, max_depth=64)
+            except Unconfirmed as gap:
+                if gap.code == "window_ownership_lost_before_act":
+                    raise
+                receipt = gap.code
+            witness.revealed(target[0], receipt)
+
+    def judge_witness(self, witness: MessageWitness, *, phase: str, check: str, code: str, uia_gap: str, **fields: Any) -> None:
+        """Only a missing witness in a confirmed Main permits independent checks to continue."""
+        assert self.driver is not None
+        hwnd = self.driver.main_hwnd
+        self.driver.ensure_alive(phase)
+        if not self.wh.window_owned_by(hwnd, self.driver.root_pid):
+            uia_gap = "window_ownership_lost_before_witness_settlement"
+        if not uia_gap and witness.complete():
+            self.check(check, True, phase=phase, **witness.detail())
+            return
+        gap = uia_gap or "leaf_text_not_observed"
+        self.check(check, False, phase=phase, uia_gap=gap, main_window_foreground=self.wh.foreground_window() == hwnd, **witness.detail())
+        if uia_gap or not witness.reads:
+            raise Unconfirmed(phase, code, uia_gap=gap, **fields)
+        self.settle("unconfirmed", phase, code, {**fields, "uia_gap": gap, "continued": True}, soft=True)
+
+    def send_chat_turn(self, slot: int, *, expected_durable: list[tuple[str, str]], phase: str) -> None:
         assert self.driver is not None and self.model is not None
         hwnd = self.driver.main_hwnd
         self.driver.set_exact_text(hwnd, phase=phase, automation_id="chat-input", expected=fm.prompt_text(slot, self.tag), wizard=False)
@@ -743,7 +732,9 @@ class QualificationRun:
         cursor_before = self.model.cursor()
         self.mark(f"prompt_{slot}_before_click")
         self.driver.act_or_click(hwnd, phase=phase, label=f"Send prompt {slot}", query={"automation_id": "chat-send"})
-        settled: dict[str, Any] = {"answered": False, "durable": False, "visible_leaf": False, "uia_gap": ""}
+        settled: dict[str, Any] = {"answered": False, "durable": False, "uia_gap": ""}
+        witness = self.message_witness(slot)
+        screen = {"check": f"turn_{slot}_visible_leaf_reply_confirmed", "code": "chat_visible_leaf_text_unconfirmed", "slot": slot}
 
         def _poll_turn() -> bool:
             assert self.driver is not None and self.model is not None
@@ -753,13 +744,13 @@ class QualificationRun:
                     settled["answered"] = True
                 elif ev["kind"] == "completion" and ev["slot"] == slot:
                     raise Unconfirmed(phase, "fixture_model_refused_owner_turn", reason=ev["reason"])
-            self._observe_chat_state(hwnd, phase=phase, expected_durable=expected_durable, expected_leaves=expected_visible_leaves, state=settled)
-            return bool(settled["answered"] and settled["durable"] and settled["visible_leaf"])
+            self._observe_chat_state(hwnd, phase=phase, expected_durable=expected_durable, witness=witness, state=settled)
+            return bool(settled["answered"] and settled["durable"] and not settled["uia_gap"] and witness.complete())
 
-        if poll_until(180.0, _poll_turn, interval=0.5):
-            self.mark(f"reply_{slot}_verified")
+        if poll_until(self.TURN_SEC, _poll_turn, interval=0.5):
             self.check(f"turn_{slot}_durable_history_exact", True, phase=phase)
-            self.check(f"turn_{slot}_visible_leaf_reply_confirmed", True, phase=phase)
+            self.judge_witness(witness, phase=phase, uia_gap="", **screen)
+            self.mark(f"reply_{slot}_verified")
             return
         if not settled["answered"]:
             if refusals := [ev["reason"] for ev in self.model.events_since(cursor_before) if ev["kind"] == "completion" and ev["status"] != 200]:
@@ -768,19 +759,18 @@ class QualificationRun:
             if not read_ok or ("user", fm.prompt_text(slot, self.tag)) not in rows:  # Send never took: a harness gap
                 raise Unconfirmed(phase, "durable_history_unreadable" if not read_ok else "owner_message_not_accepted", slot=slot)
             raise Failure(phase, "prompt_never_reached_model", slot=slot)
-        read_ok, complete, _ = self.durable_history()
+        read_ok, complete, rows = self.durable_history()
+        settled["durable"] = read_ok and has_exact_subsequence(rows, expected_durable)
         if not read_ok or (complete is False and not settled["durable"]):
             raise Unconfirmed(phase, "durable_history_unreadable" if not read_ok else "durable_history_window_incomplete", slot=slot)
         self.check(f"turn_{slot}_durable_history_exact", settled["durable"], phase=phase, failure="exchange_missing_from_durable_history")
-        gap_code = settled["uia_gap"] or "leaf_text_not_observed"
-        self.check(f"turn_{slot}_visible_leaf_reply_confirmed", False, phase=phase, uia_gap=gap_code)
-        raise Unconfirmed(phase, "chat_visible_leaf_text_unconfirmed", slot=slot, durable_history_exact=True, uia_gap=gap_code)
+        self.judge_witness(witness, phase=phase, uia_gap=settled["uia_gap"], durable_history_exact=True, **screen)
 
     def run_first_chat_and_check_a(self) -> None:
         self.step = "turn_1"
         self.ensure_main_chat_open(phase="turn_1", click_sidebar=False)
         p1, r1 = fm.prompt_text(1, self.tag), fm.reply_text(1, self.tag)
-        self.send_chat_turn(1, expected_durable=[("user", p1), ("assistant", r1)], expected_visible_leaves=[p1, r1], phase="turn_1")
+        self.send_chat_turn(1, expected_durable=[("user", p1), ("assistant", r1)], phase="turn_1")
         self.init_id = self.initialization_id()
         if not self.init_id:
             raise Unconfirmed("turn_1", "initialization_id_unreadable")
@@ -882,21 +872,21 @@ class QualificationRun:
         self.ensure_main_chat_open(phase="after_update", click_sidebar=True)
 
         p1, r1 = fm.prompt_text(1, self.tag), fm.reply_text(1, self.tag)
-        retained: dict[str, Any] = {"durable": False, "visible_leaf": False, "uia_gap": ""}
-        poll_until(60.0, lambda: (self._observe_chat_state(hwnd, phase="after_update", expected_durable=[("user", p1), ("assistant", r1)], expected_leaves=[p1, r1], state=retained), bool(retained["durable"] and retained["visible_leaf"]))[1], interval=0.5)
-        read_ok, complete, _ = self.durable_history()
+        expected_t1 = [("user", p1), ("assistant", r1)]
+        retained: dict[str, Any] = {"durable": False, "uia_gap": ""}
+        witness = self.message_witness(1)
+        poll_until(self.RETAINED_SEC, lambda: (self._observe_chat_state(hwnd, phase="after_update", expected_durable=expected_t1, witness=witness, state=retained), bool(retained["durable"] and not retained["uia_gap"] and witness.complete()))[1], interval=0.5)
+        read_ok, complete, rows = self.durable_history()
+        retained["durable"] = read_ok and has_exact_subsequence(rows, expected_t1)
         if not read_ok or (complete is False and not retained["durable"]):
             raise Unconfirmed("after_update", "history_unreadable_after_update" if not read_ok else "history_window_incomplete_after_update")
         self.check("post_update_turn_1_durable_history_retained", retained["durable"], phase="after_update", failure="durable_history_not_retained")
-        if not retained["visible_leaf"]:
-            gap_code = retained["uia_gap"] or "leaf_text_not_observed"
-            self.check("post_update_turn_1_visible_leaf_retained", False, phase="after_update", uia_gap=gap_code)
-            raise Unconfirmed("after_update", "retained_visible_leaf_text_unconfirmed", durable_history_retained=True, uia_gap=gap_code)
-        self.check("post_update_turn_1_visible_leaf_retained", True, phase="after_update")
+        self.judge_witness(witness, phase="after_update", check="post_update_turn_1_visible_leaf_retained",
+                           code="retained_visible_leaf_text_unconfirmed", uia_gap=retained["uia_gap"], durable_history_retained=True)
 
         self.step = "turn_2"
         p2, r2 = fm.prompt_text(2, self.tag), fm.reply_text(2, self.tag)
-        self.send_chat_turn(2, expected_durable=[("user", p1), ("assistant", r1), ("user", p2), ("assistant", r2)], expected_visible_leaves=[p2, r2], phase="turn_2")
+        self.send_chat_turn(2, expected_durable=[("user", p1), ("assistant", r1), ("user", p2), ("assistant", r2)], phase="turn_2")
 
         state, head, init_after, status = self.state_doc(), pb.read_git_head(self.app_root / "repo" / ".git"), self.initialization_id(), self.api("/api/update/status")
         if state is None or status is None or not state.get("current_sha") or not head or not init_after or not status.get("running_sha"):
@@ -934,12 +924,13 @@ class QualificationRun:
         if require:
             self.check("git_identity_and_phase_operations_verified", True, phase="git_traces", **summary["requirements"])
 
-    def settle(self, verdict: str, phase: str, code: str, fields: dict[str, Any]) -> None:
+    def settle(self, verdict: str, phase: str, code: str, fields: dict[str, Any], *, soft: bool = False) -> None:
+        """Keep every reason; a positive failure outranks only a continued screen gap."""
         clean_fields = {k: pb._scalar(v) for k, v in fields.items()}
         self.result["reasons"].append({"verdict": verdict, "phase": phase, "code": code, **({"fields": clean_fields} if clean_fields else {})})
-        if not self._decided:
+        if not self._decided or (self._soft and verdict == "failed"):
             self.result.update(verdict=verdict, phase=phase, code=code)
-            self._decided = True
+            self._decided, self._soft = True, soft
 
     def _guarded(self, fn: Callable[[], None]) -> bool:
         try:

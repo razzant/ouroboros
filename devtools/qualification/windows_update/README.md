@@ -28,6 +28,8 @@ with no reachable system Git on the host. QA only: never a merge or release gate
   the Git trace sinks and runs the instrument's positive control.
 - `git_traces.py`: stdlib-only, platform-free interpretation of those sinks (below), so it can be
   checked anywhere on synthetic text.
+- `uia_reading.py`: stdlib-only, platform-free reading of a UIA tree (the visibility rule and the chat
+  messages' screen witness), checked on synthetic trees by `tests/test_windows_update_chat_witness.py`.
 - `scenario.py`: unpacks the verified ZIP, creates synthetic fast-forward commit B (one doc file)
   on `ouroboros` in the local bare mirror, launches `Ouroboros.exe` on a fresh
   `%USERPROFILE%\Ouroboros` profile and drives its windows with candidate A's own
@@ -36,7 +38,8 @@ with no reachable system Git on the host. QA only: never a merge or release gate
 
 ## Consumer Surfaces & Verdict Discipline
 
-The first settled outcome keeps its phase and code; Git traces read after a failure are facts only.
+The first settled outcome keeps its phase and code, except that a positive `failed` outranks a missing
+screen witness the run went on past (2. below); Git traces read after a failure are facts only.
 
 1. **Setup wizard -> fresh Main window**: clears the sticky `.wizard-footer` before acting; exact
    field readback; selects `OpenAI-compatible endpoint` from the `Main Model source` option row;
@@ -44,8 +47,14 @@ The first settled outcome keeps its phase and code; Git traces read after a fail
 2. **Chat Turn 1 & Turn 2**: `model.cursor()` is taken before `#chat-send`. Only a refusal of that
    turn's own slot ends it early; another request's refusal (the first meeting, a wake) does not.
    A turn the model never received is a product `failed` only after the owner's row is seen in
-   `GET /api/chat/history`; otherwise the Send did not take (`unconfirmed`). A reply counts as
-   visible only from an exact leaf `text` node in `Main` whose UIA `IsOffscreen` reads `false`.
+   `GET /api/chat/history`; otherwise the Send did not take (`unconfirmed`). Words and order are
+   the durable history's; the screen witnesses each message of the turn on its own, in whichever
+   `Main` reading shows it: a `text` leaf under the exposed Main `chat-messages` feed, outside every `edit`/`combo_box` whose whole name is the
+   message or holds its run-unique marker, UIA `IsOffscreen` read `false`, a non-empty rect. A
+   message on the page but off screen gets one `scroll_into_view`. A witness still missing after an
+   answered, exactly durable turn fails its check with allowlisted counts (never text) and the run
+   goes on to the Update and Turn 2, `unconfirmed` at best; an omitted feed ancestor leaves visibility unconfirmed. Continuing requires a current successful
+   read and a still-owned Main window; a lost window or a failed final read stops the step. Turn 1 in the window after the restart is judged the same way.
 3. **Plain update check & Update A->B**: first waits until the passive `GET /api/update/status` shows
    the boot's own Stable check of A (`checked_target_sha`, `checked_at`), then selects `Development`
    in `Dashboard › Updates`. A pill already showing before the plain check is `unconfirmed`. Invokes the
