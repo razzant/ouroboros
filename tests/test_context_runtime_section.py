@@ -1004,14 +1004,13 @@ def test_runtime_names_the_kept_services_custody_reads_now(tmp_path, monkeypatch
 
 # --- setup: how this install began and whether my human and I have met (context_first_hour.setup_fact) ---
 
-def _born(root, origin, **state):
-    """A data root whose first state ``origin`` minted (``first_boot`` or an owner Reset's pending identity)."""
+def _born(root, **state):
+    """A data root whose first state its first boot minted. An owner Reset's new state is read only after a Reset that
+    really ran: tests/test_settings_policy_browser.py
+    ``test_reset_from_about_shows_the_successors_completed_receipt_in_the_same_tab``."""
     from supervisor import state_initialization as witness
 
-    if origin == "owner_reset":
-        identity = witness.mark_pending(root, origin="owner_reset")
-    else:
-        identity = witness.initialization_decision(root)["initialization_id"]
+    identity = witness.initialization_decision(root)["initialization_id"]
     (root / "state" / "state.json").write_text(json.dumps({"initialization_id": identity, **state}), encoding="utf-8")
     assert witness.complete(root, identity, adopted=False)
 
@@ -1024,18 +1023,21 @@ def _said(root, *rows, chat_id=1, kind=None):
                                              "chat_id": chat_id, "text": direction, **({"type": kind} if kind else {})})
 
 
-@pytest.mark.parametrize("shape", ["first_boot", "owner_reset", "talked", "unread_binding"])
+@pytest.mark.parametrize("shape", ["first_boot", "talked", "unread_binding"])
 def test_setup_tells_a_fresh_install_from_a_reset_a_bound_one_that_talked_and_an_unreadable_binding(tmp_path, shape):
-    """Facts only, every line from its own source: a fresh first boot with an empty binding and no messages, a Reset's
-    new state (what a Reset deletes, never history), a bound install where my message followed my human's first
-    one, and a binding that cannot be read, kept apart from a known empty slot."""
+    """Facts only, every line from its own source: a fresh first boot with an empty binding and no messages, a bound
+    install where my message followed my human's first one, and a binding that cannot be read, kept apart from a known
+    empty slot; none of them says what a Reset deletes. A Reset's new state (what a Reset deletes, never history), with
+    nothing bound and no word of my human after the earlier profile's binding and words, is read after a Reset that
+    really ran: tests/test_settings_policy_browser.py
+    ``test_reset_from_about_shows_the_successors_completed_receipt_in_the_same_tab``."""
     from ouroboros.context_first_hour import setup_fact
 
     (tmp_path / "state").mkdir()
     (tmp_path / "settings.json").write_text(json.dumps({"OUROBOROS_ONBOARDING_COMPLETED_AT": "2026-11-21T09:58:12.000000+00:00"}),
                                             encoding="utf-8")
     bound = {"talked": 1, "unread_binding": 1}.get(shape)
-    _born(tmp_path, "owner_reset" if shape == "owner_reset" else "first_boot", owner_id=bound, owner_chat_id=bound,
+    _born(tmp_path, owner_id=bound, owner_chat_id=bound,
           bg_consciousness_enabled=shape != "talked",
           **({"_recovery": {"unconfirmed": ["owner_chat_id"]}} if shape == "unread_binding" else {}))
     if shape == "talked":
@@ -1044,9 +1046,8 @@ def test_setup_tells_a_fresh_install_from_a_reset_a_bound_one_that_talked_and_an
         _said(tmp_path, ("10:00", "in"))
     fact = setup_fact(tmp_path)
     assert fact["finished_at"] == "2026-11-21 09:58 UTC"
-    assert fact["state"].startswith("owner_reset: a new state born" if shape == "owner_reset"
-                                    else "first_boot: the first state of this data root, born")
-    assert ("a Reset deletes memory, chats" in fact["state"]) is (shape == "owner_reset")
+    assert fact["state"].startswith("first_boot: the first state of this data root, born")
+    assert "a Reset deletes memory, chats" not in fact["state"]
     assert fact["owner_chat"] == {"talked": "Main (chat 1)",
                                   "unread_binding": "unknown: the owner chat binding is not confirmed",
                                   }.get(shape, "none bound yet: no owner message has bound one")
@@ -1065,7 +1066,7 @@ def test_setup_names_what_setup_left_running_and_a_first_message_of_mine_before_
 
     (tmp_path / "state").mkdir()
     (tmp_path / "logs").mkdir()
-    _born(tmp_path, "first_boot", owner_id=None, owner_chat_id=None, bg_consciousness_enabled=True)
+    _born(tmp_path, owner_id=None, owner_chat_id=None, bg_consciousness_enabled=True)
     _said(tmp_path, ("10:05", "out"))
     (tmp_path / "state" / "skill_starter.json").write_text(json.dumps({"state": "pending", "requested": ["a", "b", "c"],
         "results": {"a": {"status": "installed"}, "b": {"status": "failed"}, "c": {"status": "pending"}}}), encoding="utf-8")
@@ -1218,8 +1219,8 @@ def test_setup_carries_the_owners_first_meeting_words_only_after_a_press_while_i
 
     data, repo = tmp_path / "data", tmp_path / "repo"
     (data / "state").mkdir(parents=True)
-    _born(data, "first_boot", **({} if shape == "no_press" else
-                                 {"first_meeting": {"state": "admitted", "pressed_at": "2026-11-21T10:00:00Z"}}))
+    _born(data, **({} if shape == "no_press" else
+                   {"first_meeting": {"state": "admitted", "pressed_at": "2026-11-21T10:00:00Z"}}))
     if shape == "written":
         _said(data, ("10:00", "out"))
     if shape == "no_witness":
