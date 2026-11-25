@@ -2897,21 +2897,12 @@ export function createChatInstance({
         }
         return snapshot.error ? historyPager.retry() : loadHistoryAtEdge('older');
     }
-    // `Load more history` reads older, ↓ the present (owner 2026-09-14, 10-05). Empty pages cross
-    // server read ceiling: continue to rows or chat start. Growth re-anchors unless reader walks
-    // older chain; `current` guards each request.
-    async function loadHistoryAtEdge(direction, current = () => true, tags = null) {
-        const { canNewer, canOlder } = historyPager.getState();
-        if (direction === 'older' && current() && historyWindow?.horizonGap && !canNewer && !(canOlder && readingHistory())) {
-            const rebased = await historyPager.latest(null, { ...tags, decision: 'horizon_gap' });
-            if (destroyed || rebased.status !== 'applied') return rebased;
-        }
-        let result;
-        do {
-            result = current() ? await historyPager[direction](tags) : {};
-        } while (!destroyed && result.status === 'applied' && result.messageCount === 0
-            && historyPager.getState()[direction === 'older' ? 'canOlder' : 'canNewer']);
-        return result;
+    // `Load more history` reads older, ↓ the present (owner 2026-09-14, 10-05), past empty pages (chat_history.js `edge`).
+    // Growth re-anchors unless reader walks older chain; a horizon gap under a window with nothing newer reads the
+    // present first. `current` guards each request.
+    function loadHistoryAtEdge(direction, current, tags) {
+        return historyPager.edge(direction, { current, tags, rebase: snapshot => direction === 'older'
+            && historyWindow?.horizonGap && !snapshot.canNewer && !(snapshot.canOlder && readingHistory()) });
     }
     loadOlderBtn.addEventListener('click', loadOlderHistory);
 

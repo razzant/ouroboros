@@ -423,7 +423,7 @@ export function createChatHistoryPager({
             || (result.status !== 'disposed' && alive() && readNewest({ fromReconnect, ...why({ reason, detail, ...result.leg }) }))));
     }
 
-    return {
+    const pager = {
         getState,
         read,
         arrivalsLanded: () => landedArrivals,
@@ -478,6 +478,21 @@ export function createChatHistoryPager({
         // pages still loading yield to it (`toPresent`), a read of the present already out is shared, and once the
         // reader has moved on its answer is dropped before it lands.
         latest: (stillWanted = null, tags = null) => request('latest', 0, null, true, { stillWanted, tags }),
+        // `older` or `newer` until a page brings rows or the chain ends: an empty page crosses the server's read ceiling.
+        // `rebase(state)` true first reads the present (a horizon gap below the window); `current` guards each request.
+        async edge(direction, { current = () => true, tags = null, rebase = () => false } = {}) {
+            const state = getState();
+            if (current() && rebase(state)) {
+                const rebased = await pager.latest(null, { ...tags, decision: 'horizon_gap' });
+                if (destroyed || rebased.status !== 'applied') return rebased;
+            }
+            let result;
+            do {
+                result = current() ? await pager[direction](tags) : {};
+            } while (!destroyed && result.status === 'applied' && result.messageCount === 0
+                && getState()[direction === 'older' ? 'canOlder' : 'canNewer']);
+            return result;
+        },
         toPresent,
         // One explicit navigation to one place, as a new chain: the page around `address`
         // (`task:<id>`, DESIGN "Room work status"), or a page the reader left read again by its
@@ -522,4 +537,5 @@ export function createChatHistoryPager({
             pages = [];
         },
     };
+    return pager;
 }
