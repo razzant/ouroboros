@@ -152,7 +152,7 @@ def test_exact_fit_reaches_ordinary_round_dispatch(lane, monkeypatch):
 @pytest.mark.parametrize("needs_arch,ordinary_first", [(False, False), (True, False), (True, True)])
 def test_book_map_retry_submits_each_step_to_exact_local_admission(tmp_path, monkeypatch, needs_arch, ordinary_first):
     import re
-    from ouroboros import context_fit as fit, memory_floor, loop_model_call, loop_round_limits
+    from ouroboros import context_fit as fit, loop_model_call, loop_round_limits
     from ouroboros.context_measurement import _physical_context_for_fit
     from ouroboros.local_model_server import input_fingerprint
     from ouroboros.llm_attempt import _physical_candidate, main_context_fit_refusal

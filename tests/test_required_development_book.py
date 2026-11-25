@@ -1477,6 +1477,62 @@ def test_cold_return_without_held_heads_never_newly_shortens_a_formerly_detailed
     assert any(row.get("checkpoint_kind") == "context_fit_refused" for row in _events(ctx))
 
 
+def test_cold_return_required_book_fits_unknown_reply_total_between_start_and_under_way_limits(tmp_path, fixed_density):
+    """A cold-returned task with a directly required handbook on a non-local TOTAL window with unknown reply semantics
+    (``source="metadata"``, not in ``_REPLY_INSIDE``) must succeed in the gap between the fresh-start limit
+    (``window - RESERVE``) and the under-way limit (``window - NANO_MIN_HEADROOM_TOKENS``) without newly shortening
+    maps. A fresh start at the same window, a reply-inside TOTAL (``source="refusal"``), and a TOTAL smaller than the
+    book plus reply floor must still raise ``MinimumViewUnfit``."""
+    from ouroboros import held_notes, owner_wait
+    from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
+    from ouroboros.llm_attempt import main_context_fit_refusal
+    from ouroboros.tools.compact_context import record_context_view
+    from ouroboros.usage_accounting import AttemptRequest
+
+    snapshot = syn.snapshot(
+        room_facts=syn.room("1", lane1=[{**syn.spoken(1, "human", 200), "owner_side": True, "immune": True}]),
+        story=syn.pages(2, 400),
+    )
+    core = replace(booked(_core(tmp_path, required=True, memory=False), tmp_path, body=BOOK_BODY),
+                   memory_view_json=memory_view.snapshot_json(snapshot))
+    roomy = _plan(tmp_path, core, "low", 1_000_000, source="metadata")
+    book = math.ceil(core.required_book_tokens("low") * RATIO)
+    gap_window = book + RESERVE - 10_000
+    assert gap_window - RESERVE < book < gap_window - NANO_MIN_HEADROOM_TOKENS
+
+    with pytest.raises(fit.MinimumViewUnfit, match="directly required handbook"):
+        _plan(tmp_path, core, "low", gap_window, source="metadata")
+
+    messages = [*roomy.messages_for("low"), {"role": "assistant", "content": "Read both detailed maps; continuing."}]
+    ctx = SimpleNamespace(
+        task_id="t", task_attempt=1, drive_root=tmp_path, budget_drive_root=tmp_path, repo_dir=tmp_path,
+        context_fit_plan=roomy, active_context_mode="low", active_model="fixture", active_use_local=False,
+        active_effort="medium", model_wait_context=None, _actor_loaded_tool_names=set(), task_metadata={},
+    )
+    record_context_view(ctx, messages[:-1], SCHEMAS)
+    state = json.loads(json.dumps(owner_wait.continuation_state(ctx, messages, {}, {}, 1, SCHEMAS, set())))
+    capture = held_notes.restored_capture(state)
+    assert capture["entries"] == [] and "messages" not in capture and capture.get("book_maps") == []
+
+    resumed_core = replace(core, held_note_resume=capture)
+    cold = _plan(tmp_path, resumed_core, "low", gap_window, source="metadata")
+    assert cold.initial_mode == "low" and _rows(cold) == [] and len(_book_blocks(cold, "low")) == 1
+    assert cold.window_record.input_room(RESERVE, under_way=False) == gap_window - RESERVE < book
+    assert cold.window_record.admitted == gap_window - NANO_MIN_HEADROOM_TOKENS > book
+    disposition = measure_main_fit(cold, messages, SCHEMAS, profile="owner_low", rendered_mode="low", round_id="r")
+    assert disposition.measurement.capacity_deficit_tokens == 0
+    request = AttemptRequest(model="fixture", provider="fixture", candidate_measurement_kind="canonical_json_v1",
+                             prompt_tokens_bounded_estimate=disposition.measurement.raw_input_tokens,
+                             max_completion_tokens=RESERVE,
+                             physical_context=fit._physical_context_for_fit(disposition))
+    assert main_context_fit_refusal(request) is None
+
+    with pytest.raises(fit.MinimumViewUnfit, match="directly required handbook"):
+        _plan(tmp_path, resumed_core, "low", gap_window, source="refusal")
+    with pytest.raises(fit.MinimumViewUnfit, match="directly required handbook"):
+        _plan(tmp_path, resumed_core, "low", book + NANO_MIN_HEADROOM_TOKENS - 2_000, source="metadata")
+
+
 def test_owner_max_effective_low_keeps_its_compact_development_map_on_a_wider_cold_route(tmp_path, fixed_density,
                                                                                          monkeypatch):
     """An owner-Max task that ran in effective Low with a compact Development map returns cold on a wider route where
