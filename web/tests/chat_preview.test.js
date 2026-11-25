@@ -321,7 +321,7 @@ test('storage refusal, corrupt data and unsupported versions open cold and leave
     assert.equal(g.raw(), undefined, 'the room opens cold rather than with its older words');
 });
 
-test('more than eight rooms keep their words; past the total the rooms read least recently give way first', t => {
+test('more than eight rooms keep their words; past the total the rooms saved least recently give way first', t => {
     const f = fixture(t);
     t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
     const read = (room, rows) => { f.make({ room }).save(rows); t.mock.timers.tick(1000); };
@@ -329,7 +329,7 @@ test('more than eight rooms keep their words; past the total the rooms read leas
     for (let i = 1; i <= 12; i += 1) read([i, ''], [row('chat:1', `room ${i}`)]);
     for (let i = 1; i <= 12; i += 1) assert.equal(f.make({ room: [i, ''] }).show(), true, `room ${i}`);
     // Rooms that fill their own share (five 19,000-character rows each, about 95,000): every write stays in the total,
-    // and the rooms that stand are the ones read most recently.
+    // and the rooms that stand are the ones saved most recently.
     const text = 'long exact passage '.repeat(1000), order = [], sizes = new Map();
     const big = Array.from({ length: 5 }, (_, j) => row(`chat:${j}`, text, { role: 'user' }));
     for (let i = 1; i <= 12; i += 1) {
@@ -341,16 +341,16 @@ test('more than eight rooms keep their words; past the total the rooms read leas
     }
     const standing = order.filter(key => f.values.has(key)), gone = order.filter(key => !f.values.has(key));
     assert.ok(standing.length > 8 && gone.length > 0, `${standing.length} big rooms stand, ${gone.length} gave way`);
-    assert.deepEqual(order.slice(-standing.length), standing, 'the rooms read most recently stand');
-    assert.equal(f.family().some(key => key.endsWith(',""]]')), false, 'every small room, read before them, gave way first');
+    assert.deepEqual(order.slice(-standing.length), standing, 'the rooms saved most recently stand');
+    assert.equal(f.family().some(key => key.endsWith(',""]]')), false, 'every small room, saved before them, gave way first');
     // Only as much gives way as the total needs: the last room that went would not have fit beside them.
     assert.ok(f.size() + sizes.get(gone.at(-1)) > TOTAL_CHARS);
-    // A room read again moves to the front: the next room to give way is the one read least recently after it.
+    // A room read (and so saved) again moves to the front: the next room to give way is the one saved least recently after it.
     const [oldest, second] = standing;
     read(JSON.parse(oldest.slice(PREVIEW_KEY.length + 1))[1], big);
     read([13, 'p'], big);
     assert.equal(f.values.has(oldest), true, 'read again, it stands');
-    assert.equal(f.values.has(second), false, 'the one read least recently since gave way');
+    assert.equal(f.values.has(second), false, 'the one saved least recently since gave way');
     assert.ok(f.size() <= TOTAL_CHARS);
 });
 
@@ -365,22 +365,57 @@ function tenRooms(f, t) {
 }
 const entryOf = room => previewEntryKey(PREVIEW_SCOPE, room);
 
-test('a room shown, or read with nothing new, was read then: it stands while rooms read before give way', t => {
-    // Astra 6: the order is when a room was last read, not when its rows last changed; its rows stay as they were.
+// Every write and removal `act` makes in the fixture's store.
+function writesOf(f, act) {
+    const writes = [], { setItem, removeItem } = f.storage;
+    f.storage.setItem = (key, value) => { writes.push(['set', key]); setItem(key, value); };
+    f.storage.removeItem = (key) => { writes.push(['remove', key]); removeItem(key); };
+    try { act(); } finally { Object.assign(f.storage, { setItem, removeItem }); }
+    return writes;
+}
+
+test('the order is when a room\'s copy was saved: a show or a read with nothing new writes nothing', t => {
+    // Chair, review wave 2 (astra 5): each newest read saves its room, and that save is its place in the order; a show
+    // or an arrivals read that brought no conversation row moves nothing and writes nothing.
     const f = fixture(t), read = tenRooms(f, t);
-    const before = f.rows([1, 'p']);
-    assert.equal(f.make({ room: [1, 'p'] }).show(), true, 'the room read least recently: its copy is shown');
+    const before = f.rows([2, 'p']);
+    assert.deepEqual(writesOf(f, () => assert.equal(f.make({ room: [1, 'p'] }).show(), true, 'the room saved least recently')),
+        [], 'a show writes nothing');
     t.mock.timers.tick(1000);
-    f.make({ room: [2, 'p'] }).append([row('progress:9', 'narration only', { is_progress: true })]);  // nothing new
+    assert.deepEqual(writesOf(f, () => f.make({ room: [2, 'p'] }).append([row('progress:9', 'narration only',
+        { is_progress: true })])), [], 'nothing new writes nothing');
     t.mock.timers.tick(1000);
     read([11, 'p']);
-    assert.deepEqual([1, 2, 3, 4].map(i => f.values.has(entryOf([i, 'p']))), [true, true, false, true],
-        'the room read least recently since gave way, and only it');
-    assert.deepEqual(f.rows([1, 'p']), before, 'a room shown keeps its rows');
+    assert.deepEqual([1, 2, 3, 4].map(i => f.values.has(entryOf([i, 'p']))), [false, true, true, true],
+        'the room saved least recently gave way, and only it, shown or not');
+    assert.deepEqual(f.rows([2, 'p']), before, 'a room read with nothing new keeps its rows');
     assert.ok(f.size() <= TOTAL_CHARS);
     // A room without an entry notes nothing: it keeps no fragment.
     f.make({ room: [12, 'p'] }).append([]);
     assert.equal(f.values.has(entryOf([12, 'p'])), false);
+});
+
+test('a show and what follows it never undo another tab\'s erasure, nor put older words over its newer save', t => {
+    // Astra 5: a write of this room between its read and what follows would bring back an entry another tab removed
+    // since (its word that the Project is gone) or put this tab's older words over that tab's newer save.
+    for (const [other, left] of [['removes the entry', undefined], ['saves newer words', ['Newer words of another tab']]]) {
+        const f = fixture(t), key = entryOf([2, 'p']);
+        f.make({ room: [2, 'p'] }).save([row('chat:1', 'Read by this tab')]);
+        const act = () => (left ? f.make({ room: [2, 'p'] }).save([row('chat:2', left[0])]) : f.values.delete(key));
+        // The other tab acts once, between this tab's read of the entry and the first write this tab makes to it.
+        let acted = false;
+        const { setItem } = f.storage;
+        f.storage.setItem = (name, value) => { if (name === key && !acted) { acted = true; act(); } setItem(name, value); };
+        const room = f.make({ room: [2, 'p'] });
+        assert.equal(room.show(), true, `${other}: painted from this tab's read`);
+        if (!acted) { acted = true; act(); }
+        room.append([]);
+        room.append([row('progress:3', 'narration only', { is_progress: true })]);
+        room.retire();
+        room.destroy();
+        f.storage.setItem = setItem;
+        assert.deepEqual(f.rows([2, 'p'])?.map(item => item.text), left, `another tab ${other}: that stands`);
+    }
 });
 
 test('a room\'s own entry is written before any other gives way: one that fails takes no other room\'s', t => {
@@ -460,11 +495,10 @@ test('the one v2 record moves into entries once, the order it kept by time read'
         [['Read last'], ['Read first'], ['Another profile']]);
     assert.ok(f.entry([2, 'p']).read > f.entry([1, '']).read && f.entry([1, '']).read > f.entry([1, ''], OTHER_PROFILE).read);
     assert.equal(f.values.get('ouroboros.theme'), 'dark');
-    // Once: later opens find the form in place and move nothing again (a room shown only notes when it was read).
-    const words = () => [...f.values].map(([key, value]) => [key, value.replace(/^\{"read":\d+,/, '')]);
-    const moved = words();
+    // Once: later opens find the form in place and move nothing again (a show writes nothing).
+    const moved = [...f.values];
     assert.equal(f.make({ room: [1, ''] }).show(), true);
-    assert.deepEqual(words(), moved);
+    assert.deepEqual([...f.values], moved);
 });
 
 test('entries standing without the record are erased before any is read: an older version\'s eraser took the record', t => {

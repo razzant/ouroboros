@@ -1469,8 +1469,8 @@ data profile, a bounded preview stands under one `Saved text preview · updating
 line: plain words under their speakers, no times, actions or read credit
 (`web/modules/chat_preview.js`). Every Main and Project room read in this browser keeps
 such a copy: its newest 80 whole rows within 200,000 characters, all rooms within 1,000,000
-(about 2 MB of the origin's storage), the room read least recently (its copy shown or its
-history read) giving way first. The first canonical page replaces it, a selected passage
+(about 2 MB of the origin's storage), the room saved least recently (each newest read
+saves it) giving way first. The first canonical page replaces it, a selected passage
 staying until released; after a failed read it says `not current` beside Retry, painted
 before or after; a refused session or sign-out erases only these copies, and a deleted
 Project's copy goes once this browser learns of the deletion (a `deleting` row, a lookup of
