@@ -356,6 +356,7 @@ _CONVERSATION_READERS = {
     "ouroboros/memory_view_conversations.py::_scalars": "tail facts or a row: the conversation's scalars only, for a label",
     "ouroboros/memory_view_events.py::receipt_situation": "the task document's route conversation: a string title/name/full name/username only, for a label",
     "ouroboros/tools/chronicle.py::publish_covered_page": "a page's own covers.conversation flag, never a row's conversation",
+    "ouroboros/memory_reading.py::_arrivals": "the task document's presence event: its thread snapshot's message ids only",
 }
 # Every function that decodes a stored dialogue body itself (``Row`` readers go through ``project_source``).
 _BODY_DECODERS = {

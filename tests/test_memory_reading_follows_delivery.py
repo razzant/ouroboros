@@ -331,6 +331,29 @@ def test_a_reply_whose_finish_row_is_not_in_the_room_reads_its_works_stored_stam
     assert (_rank(snapshot, room, old), _rank(snapshot, room, seen)) == expected
 
 
+def test_a_capture_whose_task_store_cannot_be_read_still_captures_and_replies_keep_the_positional_rule(
+        tmp_path, monkeypatch):
+    """A read-only report opens the task store immutable, and a root without one cannot be opened: the capture
+    still succeeds, and a reply whose finish is not in hand takes the positional rule (its work is not in the store)."""
+    import sqlite3
+
+    import ouroboros.store as store
+
+    _install(tmp_path)
+    room, said, delivered = _thread()
+    old, seen = said(20, "old words"), said(21, "words the work was shown")
+    _append(tmp_path, old, seen)
+    seed_result(tmp_path, "p1", {"status": "completed", "read_spans": _mark(room)})  # would count nothing
+    _append(tmp_path, delivered(22))
+
+    def unopenable(*_args, **_kwargs):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(store, "open_store", unopenable)
+    snapshot = _view(tmp_path, MAIN_TASK)[0]
+    assert (_rank(snapshot, room, old), _rank(snapshot, room, seen)) == (1, 1)
+
+
 @pytest.mark.parametrize("stamped", [True, False], ids=["stamped", "legacy"])
 def test_a_quiet_finish_never_counts_words_that_arrived_after_its_last_request(tmp_path, stamped):
     _install(tmp_path)
