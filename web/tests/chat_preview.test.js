@@ -14,7 +14,8 @@ import { installDom, memoryStorage, restoreDom, PREVIEW_SCOPE } from './chat_dom
 
 // A second proven data profile: its rooms are not this one's, though the installation is the same.
 const OTHER_PROFILE = '1234567890abcdef';
-const ROOM_CHARS = 100000, TOTAL_CHARS = 1000000;  // DESIGN "History edges": a room's share and every room's total
+// DESIGN "History edges": a room's share of entry text (all v2's one record held) and every room's total, keys counted.
+const ROOM_CHARS = 200000, TOTAL_CHARS = 1000000;
 
 function fixture(t) {
     const { prior, mount } = installDom();
@@ -329,14 +330,30 @@ test('more than eight rooms keep their words; past the total the rooms read leas
 test('a room over its own share keeps its newest whole rows; a person\'s text is never cut', t => {
     const f = fixture(t), text = 'long exact passage '.repeat(1000);
     f.make().save(Array.from({ length: 100 }, (_, j) => row(`chat:${j}`, text, { role: 'user' })));
-    const key = previewEntryKey(PREVIEW_SCOPE, [1, '']), kept = f.rows();
-    assert.ok(key.length + f.raw().length <= ROOM_CHARS, `${key.length + f.raw().length} characters`);
-    assert.ok(kept.length >= 4 && kept.every(item => item.text === text), `${kept.length} whole rows`);
+    const kept = f.rows();
+    assert.ok(f.raw().length <= ROOM_CHARS, `${f.raw().length} characters`);
+    assert.ok(kept.length >= 9 && kept.every(item => item.text === text), `${kept.length} whole rows`);
     assert.deepEqual(kept.map(item => item.id), Array.from({ length: kept.length }, (_, j) => `chat:${100 - kept.length + j}`),
         'its newest rows, in order');
     // One row longer than the share is not cut to fit: the room keeps none of it.
     f.make().save([row('chat:200', 'x'.repeat(ROOM_CHARS))]);
     assert.deepEqual(f.rows(), []);
+});
+
+test('no room keeps less than v2 did: the longest answer its one record could hold paints, moved or read anew', t => {
+    // Astra 4: v2 let a room alone fill its one 200,000-character record, its key and frame counted. That answer, moved
+    // into its entry or read again, is kept whole and paints.
+    const f = fixture(t), key = JSON.stringify([PREVIEW_SCOPE, [1, '']]);
+    const shell = JSON.stringify({ v: 2, rooms: [{ key, rows: [{ id: 'chat:1', role: 'assistant', text: '', speaker: 'Ouroboros' }] }] });
+    const answer = 'x'.repeat(ROOM_CHARS - shell.length);
+    f.values.set(PREVIEW_KEY, shell.replace('"text":""', `"text":"${answer}"`));
+    assert.equal(f.values.get(PREVIEW_KEY).length, ROOM_CHARS, 'a record v2 could write');
+    const moved = f.make();
+    assert.equal(moved.show(), true, 'moved into its entry, it paints');
+    assert.equal(f.painted().children[1].children[1].textContent, answer, 'whole');
+    moved.destroy();
+    f.make().save([row('chat:2', answer)]);
+    assert.deepEqual(f.rows().map(item => item.text), [answer], 'read anew, it is kept whole');
 });
 
 test('the one v2 record moves into entries once, the order it kept by time read', t => {

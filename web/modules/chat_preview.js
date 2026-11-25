@@ -33,10 +33,10 @@ export const PREVIEW_KEY = 'ouroboros.chat-preview.v1';
 export const PREVIEW_FAMILY = 'ouroboros.chat-preview.';
 export const PREVIEW_SCOPE_META = 'ouroboros-chat-preview-scope';
 const RECORD = '{"v":3}';  // the entries' form; {"v":2,"rooms":[…]} was every room in this one key
-// A room: its newest 80 rows within 100,000 characters, key included (screens of words, one long answer too). Every
-// room: 1,000,000, about 2 MB at WebKit's 2 bytes a character, under half an origin's 5 MB localStorage, the rest left
-// to the shell's own keys. The one record of v2 held 200,000 in all.
-const MAX_ROWS = 80, ROOM_CHARS = 100000, TOTAL_CHARS = 1000000, V2_CHARS = 200000;
+// v2's one record held 200,000 characters in all. A room keeps as much: its newest 80 rows within that many characters
+// of entry text, so no room keeps less than it did. Every room: 1,000,000 with their keys, about 2 MB at WebKit's 2
+// bytes a character, under half an origin's 5 MB localStorage, the rest left to the shell's own keys.
+const V2_CHARS = 200000, MAX_ROWS = 80, ROOM_CHARS = V2_CHARS, TOTAL_CHARS = 1000000;
 /** The key of one room's entry under a proven profile; `room` is chat.js's [chatId, projectId]. */
 export const previewEntryKey = (scope, room) => `${PREVIEW_KEY}:${JSON.stringify([scope, room])}`;
 // server_web.chat_preview_scope: a 16-hex digest of the profile identity the current state and its completed
@@ -77,7 +77,7 @@ export function dropPaintedPreviews() {
 
 const savedRow = row => Boolean(row) && ROLES.includes(row.role) && typeof row.id === 'string'
     && typeof row.text === 'string' && typeof row.speaker === 'string';
-// The family's keys in `store`; a store that cannot list them throws.
+// The family's keys in `store`, as its `length` and `key` list them (a store without them lists none).
 const familyOf = store => Array.from({ length: store.length }, (_, index) => store.key(index))
     .filter(name => typeof name === 'string' && name.startsWith(PREVIEW_FAMILY));
 // The record first: without it no entry is read again, even where listing the rest fails.
@@ -85,11 +85,11 @@ function erase(store) {
     store.removeItem(PREVIEW_KEY);
     for (const name of familyOf(store)) store.removeItem(name);
 }
-// `{"read":<ms>,"rows":[…]}`: the newest whole rows that keep the entry, its key counted, within ROOM_CHARS.
-function entryText(rows, name, read) {
+// `{"read":<ms>,"rows":[…]}`: the newest whole rows that keep the entry's text within ROOM_CHARS.
+function entryText(rows, read) {
     const head = `{"read":${read},"rows":[`;
     const pieces = rows.slice(-MAX_ROWS).map(row => JSON.stringify(row));
-    let budget = ROOM_CHARS - name.length - head.length - ']}'.length;
+    let budget = ROOM_CHARS - head.length - ']}'.length;
     let from = pieces.length;
     while (from > 0 && pieces[from - 1].length + 1 <= budget) budget -= pieces[--from].length + 1;
     return `${head}${pieces.slice(from).join(',')}]}`;
@@ -112,8 +112,7 @@ function current(store, create = false) {
     store.setItem(PREVIEW_KEY, RECORD);
     const read = Date.now();
     rooms.forEach(({ key, rows }, index) => {
-        const name = `${PREVIEW_KEY}:${key}`;
-        store.setItem(name, entryText(rows.filter(savedRow), name, read - index));
+        store.setItem(`${PREVIEW_KEY}:${key}`, entryText(rows.filter(savedRow), read - index));
     });
     return true;
 }
@@ -174,7 +173,7 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
         try {
             store = storage();
             if (!store || !current(store, true)) return;
-            const text = entryText(rows, entry, Date.now());
+            const text = entryText(rows, Date.now());
             const others = familyOf(store).filter(name => name !== PREVIEW_KEY && name !== entry).map((name) => {
                 const value = store.getItem(name) || '';
                 return { name, size: name.length + value.length, read: readOf(value) };
