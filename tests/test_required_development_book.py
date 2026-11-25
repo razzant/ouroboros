@@ -1076,12 +1076,16 @@ def test_body_max_numberless_refusal_with_known_window_tries_full_low_before_sho
     assert "## Body (parts & addresses)" in second_attempt
 
 
-@pytest.mark.parametrize("map_tokens", [84_302, 85_000], ids=["design-map-fits", "still-unfit-no-arch-dev-concession"])
+@pytest.mark.parametrize("map_tokens,bm_tokens", [
+    (84_302, 84_302),
+    (85_000, 84_302),
+    (85_000, 85_000),
+], ids=["design-map-fits", "body-map-yield-fits", "still-unfit-after-body-map-yield"])
 def test_local_nano_required_book_refusal_yields_optional_design_map_without_arch_dev_concessions_and_keeps_one_facts_row(
-        main_call, tmp_path, monkeypatch, map_tokens):
-    """Exact local Nano refusal from bound_reply_allowance before admission (window 92,494, reserve 8,192, full 88,090,
-    DESIGN map 84,302): takes only the one permissible optional DESIGN->map yield with no new ARCH/DEV concessions,
-    and re-preparation replaces the unsent [CONTEXT_FACTS] row in place instead of appending a second block."""
+        main_call, tmp_path, monkeypatch, map_tokens, bm_tokens):
+    """Exact local Nano refusal from bound_reply_allowance before admission (window 92,494, reserve 8,192, full 88,090):
+    yields optional DESIGN->map first; if still physically too large, steps the resident Body Map down to its compact
+    parts-and-addresses list (BIBLE P1) before refusing, keeping one [CONTEXT_FACTS] row replaced in place."""
     from ouroboros import local_model, response_limits
     from ouroboros.local_model_server import input_fingerprint
     from ouroboros.section_floor import HostSection
@@ -1134,7 +1138,12 @@ def test_local_nano_required_book_refusal_yields_optional_design_map_without_arc
 
         def measure_prepared_input(self, candidate, *, expected_port=None):
             rendered = json.dumps(candidate.get("messages") or [], ensure_ascii=False)
-            tokens = 88_090 if "DESIGN_BIBLE_FULL_EXCERPT_SENTINEL" in rendered else map_tokens
+            if "DESIGN_BIBLE_FULL_EXCERPT_SENTINEL" in rendered:
+                tokens = 88_090
+            elif "## Body (parts & addresses)" not in rendered:
+                tokens = map_tokens
+            else:
+                tokens = bm_tokens
             measurements.append((tokens, rendered.count("[CONTEXT_FACTS] ")))
             return {
                 "supported": True,
@@ -1149,7 +1158,7 @@ def test_local_nano_required_book_refusal_yields_optional_design_map_without_arc
         sent_payloads.append(json.loads(json.dumps(candidate)))
         return SimpleNamespace(model_dump=lambda: {
             "choices": [{"message": {"role": "assistant", "content": "Local Nano succeeded."}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": map_tokens, "completion_tokens": 12},
+            "usage": {"prompt_tokens": bm_tokens, "completion_tokens": 12},
         })
 
     monkeypatch.setattr(local_model, "get_manager", lambda: FakeLocalManager())
@@ -1160,17 +1169,25 @@ def test_local_nano_required_book_refusal_yields_optional_design_map_without_arc
 
     answer, _cost, mode = loop._call_round_model(ctx)
     nano_rows = [row["section_id"] for row in ctx.context_fit_plan.nano_projection.memory_facts.get("host_sections_addressed", ())]
-    assert mode == "nano" and nano_rows == ["design_bible"]
-    assert ctx.messages[0]["content"][0]["text"] == before_common  # zero new ARCH/DEV concessions
+    assert mode == "nano"
     assert len(_book_blocks(ctx.context_fit_plan, "nano")) == 1
     assert len(_facts_rows(ctx)) == 1
-    assert measurements == [(88_090, 1), (map_tokens, 1)]
     if map_tokens == 84_302:
+        assert nano_rows == ["design_bible"]
+        assert ctx.messages[0]["content"][0]["text"] == before_common
+        assert measurements == [(88_090, 1), (84_302, 1)]
         assert answer and answer["content"] == "Local Nano succeeded." and len(sent_payloads) == 1
         sent_text = json.dumps(sent_payloads[0]["messages"], ensure_ascii=False)
         assert "DESIGN_BIBLE_MAP_SENTINEL" in sent_text and "DESIGN_BIBLE_FULL_EXCERPT_SENTINEL" not in sent_text
         assert sent_text.count("[CONTEXT_FACTS] ") == 1
+    elif bm_tokens == 84_302:
+        assert nano_rows == ["design_bible", "body_map"]
+        assert "## Body (parts & addresses)" in ctx.messages[0]["content"][0]["text"]
+        assert measurements == [(88_090, 1), (85_000, 1), (84_302, 1)]
+        assert answer and answer["content"] == "Local Nano succeeded." and len(sent_payloads) == 1
     else:
+        assert nano_rows == ["design_bible", "body_map"]
+        assert measurements == [(88_090, 1), (85_000, 1), (85_000, 1)]
         assert answer is None and len(sent_payloads) == 0
 
 
@@ -2142,7 +2159,9 @@ def test_a_required_book_its_capture_cannot_read_ends_with_the_existing_source_o
     assert "AUTHORITY_SOURCE_UNAVAILABLE" in text and "docs/DEVELOPMENT.md" in text
     assert "context_capacity" not in text and "Error during processing" not in text
     assert done["ordinary"]["status"] == "completed"
-    assert "Reference book source unavailable: docs/DEVELOPMENT.md" in seen["ordinary"]
+    # Optional DEVELOPMENT.md is no longer eagerly loaded for ordinary tasks, so a broken
+    # development chapter fails only tasks that explicitly require it and never pollutes greetings.
+    assert "Reference book source unavailable: docs/DEVELOPMENT.md" not in seen["ordinary"]
 
 
 def test_the_terminal_preserves_saved_work_started_custody_and_unknown_money(tmp_path, monkeypatch):

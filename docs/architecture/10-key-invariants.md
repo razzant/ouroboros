@@ -1,6 +1,6 @@
 # 10. Key Invariants
 
-My 32 cross-cutting architectural invariants, continuity data-flow map (§10.1), and *Closed roads* (§10.2 — abandoned paths and why they stay closed). Before designing or editing any part of my own body I read this chapter whole so I never violate single-owner stores, cancellation/custody laws, steerable owner-word carriage, frozen review subjects, or reopen a closed architectural road.
+My cross-cutting architectural invariants, continuity data-flow map (§10.1), and *Closed roads* (§10.2 — abandoned paths and why they stay closed). Before designing or editing any part of my own body I read this chapter whole so I never violate single-owner stores, cancellation/custody laws, steerable owner-word carriage, frozen review subjects, or reopen a closed architectural road.
 
 1. **Constitution and identity persist.** Outside Cyber Pro neither `BIBLE.md` nor `identity.md` is deleted; content evolves.
 2. **Release metadata has one projection.** `VERSION` is canonical; `ouroboros/tools/release_sync.py::VERSION_CARRIER_SPANS` names carriers, `sync_release_metadata()` writes them, `version_carrier_desyncs()` checks them, and BIBLE P9 governs neutral commits.

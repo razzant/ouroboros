@@ -918,8 +918,15 @@ def _capture_context_core(
     bible_md, bible_source = _read_governance_source(env, "BIBLE.md")
     from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
 
-    books, book_text, book_errors = [], {}, []
-    for book_id, entrypoint in BOOK_ENTRYPOINTS.items():
+    # Unified Body Map + Reference Atlas rides across all modes and foci (BIBLE P1);
+    # load DEVELOPMENT only when the task explicitly requires the whole handbook so an
+    # unreadable optional handbook never perturbs ordinary Block A' prefixes.
+    required = development_required(task)
+    docs_need_development = False
+    books, book_text, book_errors = [], {"architecture": "", "development": ""}, []
+    wanted_books = ("architecture", "development") if required else ("architecture",)
+    for book_id in wanted_books:
+        entrypoint = BOOK_ENTRYPOINTS[book_id]
         try:
             book = load_reference_book(env.repo_dir, book_id, read_bytes=lambda path: env.repo_path(path).read_bytes())
             books.append(book)
@@ -981,11 +988,6 @@ def _capture_context_core(
 
         seen = reach(canonical_root)
     view_spec, view, view_json = _capture_memory_view(task, canonical_root, ctx, declared=declared)
-
-    # Unified Body Map + Reference Atlas rides across all modes and foci (BIBLE P1);
-    # engineering manuals are drawn on demand unless this task explicitly requires DEVELOPMENT whole.
-    required = development_required(task)
-    docs_need_development = False
 
     semi_stable_parts, subagent_catalog = [], None
     try:
@@ -1188,6 +1190,7 @@ def _capture_context_core(
         reference_books=tuple(books),
         reference_book_errors=tuple(book_errors),
         compact_reference_docs=False,
+        delegated_focus=is_child,
         dynamic_head_text="\n\n".join(head_parts),
         memory_view_json=view_json, memory_view_sequence=view.chronicle_sequence,
         supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),

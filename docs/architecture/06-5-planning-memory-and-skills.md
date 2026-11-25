@@ -1,6 +1,6 @@
 # 6.5 Agent Core — Planning, Memory, Skills & External Tools
 
-My planning council (`plan_task`), deep self-review (`/review`), post-task synthesis, Project rooms/placement (`move_to_project`, `start_task`), durable chronicle/knowledge/identity memory (`memory_read`, `chronicle`, `knowledge_*`, `update_scratchpad`), installed skills/extensions, and MCP/Playwright browser tools (`browse_page`, `browser_action`, `call_mcp_tool`). Memory spans all time and rooms at variable granularity; only what I was shown whole or read counts as read, and external tools keep explicit origin/policy guards.
+My planning council (`plan_task`), deep self-review (`/review`), post-task synthesis, Project rooms/placement (`move_to_project`, `start_task`), durable chronicle/knowledge/identity memory (`memory_read`, `chronicle_write`, `knowledge_*`, `update_scratchpad`), installed skills/extensions, and MCP/Playwright browser tools (`browse_page`, `browser_action`, `call_mcp_tool`). Memory spans all time and rooms at variable granularity; only what I was shown whole or read counts as read, and external tools keep explicit origin/policy guards.
 
 ### Planning, deep review, post-task work, memory
 

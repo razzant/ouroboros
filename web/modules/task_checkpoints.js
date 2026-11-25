@@ -7,7 +7,7 @@ import { statusMarkHtml } from './status_mark.js';
 // Producer census: loop_model_call/round_limits/nudges/budget, task_pacing,
 // transcript_prefix, loop_forced_finalization, owner_pause and agent budget-pause events.
 export const CHECKPOINT_LABELS = {
-    context_fit_low_retry: 'Books shown as chapter navigation during context-size recovery',
+    context_fit_low_retry: 'Context view narrowed during context-size recovery',
     context_fit_refused: 'Context-size check found no room for results',
     context_fit_route_rebound: 'Context fit rebound the route',
     context_fit_physical_mode: 'Context starts in a smaller mode',
@@ -178,7 +178,7 @@ export function taskCheckpointLabel(evt = {}) {
     if (kind === 'context_fit_physical_mode') {  // the start's recorded reason, in the Context capsule's words
         // A row of 17-22 Nov named Low under the owner's Max as Max with chapter maps: it reads as Low (`asSent`).
         const { applied } = asSent({ applied: evt.effective_mode, books: evt.books });
-        const why = causeOf({ preferred_at_send: evt.preferred_mode, applied, cause: evt.cause }, evt.preferred_mode);
+        const why = causeOf({ preferred_at_send: evt.preferred_mode, applied, books: evt.books, cause: evt.cause }, evt.preferred_mode);
         if (why && evt.cause === 'after_start') return why;  // a route change after the start: not how it started
         const label = fmt(CHECKPOINT_LABELS[kind]);  // in the language of the capsule's sentence beside it
         return why ? `${label}. ${why}` : label;

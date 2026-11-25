@@ -1567,8 +1567,8 @@ def book_yield_due(ctx: Any) -> bool:
             or not core.required_book_tokens(mode) or not start_unread(ctx.tools._ctx, ctx.accumulated_usage)):
         return False
     facts = plan.projection(mode).memory_facts or {}
-    if mode in ("max", "low"):
-        return _integrating(core, facts.get("role"))
+    if _integrating(core, facts.get("role")):
+        return True
     rows = {row.get("section_id") for row in facts.get("host_sections_addressed", ())}
     return any(part.section_id in memory_floor.OPTIONAL_STEPS and part.section_id not in rows
                for part in core.dynamic_head_sections)

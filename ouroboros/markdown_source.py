@@ -76,6 +76,7 @@ class MarkdownSource:
     list_items: tuple[SourceRange, ...]
     links: tuple[MarkdownLink, ...]
     code_blocks: tuple[SourceRange, ...]
+    tables: tuple[SourceRange, ...] = ()
 
     @property
     def text(self) -> str:
@@ -276,4 +277,5 @@ def _parse_markdown_source(raw: bytes, source_path: str) -> MarkdownSource:
         tuple(span(n) for n in nodes if n.type == "list"),
         tuple(span(n) for n in nodes if n.type == "list_item"), tuple(links),
         tuple(span(n) for n in nodes if n.type == "code_fence_content"),
+        tuple(span(n) for n in nodes if n.type == "pipe_table"),
     )

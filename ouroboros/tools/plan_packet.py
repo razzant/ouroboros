@@ -92,8 +92,18 @@ _ROLE = (
 _PLAN_MARKER = "## THE PLAN"
 
 
-def load_architecture_book_for_plan(system_root: Any, fallback_text: str = "") -> tuple[str, tuple[str, ...]]:
-    """Load the full composed architecture book + ordered chapter locators from one capture."""
+def load_architecture_book_for_plan(
+    system_root: Any,
+    fallback_text: str = "",
+    *,
+    fallback_reader: Any = None,
+) -> tuple[str, tuple[str, ...]]:
+    """Load the full composed architecture book + ordered chapter locators from one capture.
+
+    Multi-chapter books with a missing/unreadable chapter raise ``PlanPacketError`` instead of
+    silently falling back to a chapterless entrypoint; legacy monolithic single-file revisions
+    return ``(text, ())``.
+    """
     import pathlib
     from ouroboros.reference_books import compose_book, load_reference_book
 
@@ -101,8 +111,70 @@ def load_architecture_book_for_plan(system_root: Any, fallback_text: str = "") -
     try:
         arch_book = load_reference_book(root, "architecture")
         return compose_book(arch_book), tuple(str(root / ch.source_path) for ch in arch_book.chapters)
-    except (OSError, ValueError, KeyError):
-        return fallback_text, ()
+    except FileNotFoundError as exc:
+        # Missing entrypoint itself may fall back to caller-provided text (e.g. unit fixtures);
+        # a missing chapter listed in an existing multi-chapter entrypoint fails closed.
+        entry = root / "docs" / "ARCHITECTURE.md"
+        if entry.is_file():
+            raise PlanPacketError(f"ARCHITECTURE.md chapter unreadable: {exc}") from exc
+    except (OSError, ValueError, KeyError) as exc:
+        entry = root / "docs" / "ARCHITECTURE.md"
+        if entry.is_file():
+            raise PlanPacketError(f"ARCHITECTURE.md could not be assembled: {exc}") from exc
+    text = fallback_reader() if callable(fallback_reader) else fallback_text
+    return str(text or ""), ()
+
+
+def capture_body_plan_governance(
+    *,
+    body: bool,
+    system_root: Any,
+    read_governance_text: Any,
+) -> dict[str, Any]:
+    """Capture BIBLE, full composed ARCHITECTURE (+ chapter locators), and DESIGN map ONCE per plan ask."""
+    import pathlib
+    from ouroboros.context_layout import design_navigation
+
+    root = pathlib.Path(system_root)
+    if not body:
+        return {"bible": "", "architecture": "", "architecture_chapters": (), "design_map": None}
+    bible = read_governance_text(root, "BIBLE.md")
+    architecture, architecture_chapters = load_architecture_book_for_plan(
+        root,
+        fallback_reader=lambda: read_governance_text(root, "docs/ARCHITECTURE.md"),
+    )
+    design_map = design_navigation(
+        read_governance_text(root, "docs/DESIGN.md") or None, source=str(root / "docs/DESIGN.md"),
+    )
+    return {
+        "bible": bible,
+        "architecture": architecture,
+        "architecture_chapters": architecture_chapters,
+        "design_map": design_map,
+    }
+
+
+def build_stable_prompt_pair_for_root(
+    *,
+    checklist_section: str,
+    body: bool,
+    system_root: Any,
+    read_governance_text: Any,
+) -> tuple[str, str]:
+    """Build ``(packet_prompt, retrieving_prompt)`` from ONE shared governance capture."""
+    captured = capture_body_plan_governance(
+        body=body, system_root=system_root, read_governance_text=read_governance_text,
+    )
+    return (
+        build_stable_prompt_for_root(
+            checklist_section=checklist_section, body=body, system_root=system_root,
+            governance_by_retrieval=False, read_governance_text=read_governance_text, captured=captured,
+        ),
+        build_stable_prompt_for_root(
+            checklist_section=checklist_section, body=body, system_root=system_root,
+            governance_by_retrieval=True, read_governance_text=read_governance_text, captured=captured,
+        ),
+    )
 
 
 def build_stable_prompt_for_root(
@@ -112,28 +184,22 @@ def build_stable_prompt_for_root(
     system_root: Any,
     governance_by_retrieval: bool,
     read_governance_text: Any,
+    captured: Optional[Mapping[str, Any]] = None,
 ) -> str:
-    """Load body governance texts/chapter locators for ``system_root`` and render ``build_stable_prompt``."""
+    """Render ``build_stable_prompt`` for ``system_root``, reusing ``captured`` governance when supplied."""
     import pathlib
-    from ouroboros.context_layout import design_navigation
 
     root = pathlib.Path(system_root)
-    bible = read_governance_text(root, "BIBLE.md") if body else ""
-    architecture, architecture_chapters = (
-        load_architecture_book_for_plan(root, read_governance_text(root, "docs/ARCHITECTURE.md"))
-        if body else ("", ())
-    )
-    design_map = (
-        design_navigation(read_governance_text(root, "docs/DESIGN.md") or None, source=str(root / "docs/DESIGN.md"))
-        if body else None
+    gov = captured if captured is not None else capture_body_plan_governance(
+        body=body, system_root=root, read_governance_text=read_governance_text,
     )
     return build_stable_prompt(
         checklist_section=checklist_section, body=body,
-        bible_text=bible or None, architecture_text=architecture or None,
+        bible_text=gov.get("bible") or None, architecture_text=gov.get("architecture") or None,
         bible_locator=str(root / "BIBLE.md"),
         architecture_locator=str(root / "docs" / "ARCHITECTURE.md"),
-        architecture_chapter_locators=architecture_chapters,
-        governance_by_retrieval=governance_by_retrieval, design_nav_map=design_map,
+        architecture_chapter_locators=gov.get("architecture_chapters") or (),
+        governance_by_retrieval=governance_by_retrieval, design_nav_map=gov.get("design_map"),
     )
 
 

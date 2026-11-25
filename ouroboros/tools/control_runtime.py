@@ -75,8 +75,10 @@ def _prepare_self_change(ctx: ToolContext, resume: str = "", in_place: bool = Fa
             return _publish_tool_result(ctx, ToolResult(
                 status="blocked", code="ACCESS_BLOCKED",
                 text="⚠️ CANDIDATE_ALREADY_BOUND: this task already authors a candidate; in_place applies before it."))
+        marker = (getattr(ctx, "task_metadata", None) or {}).get("body_candidate")
+        already_in_place = isinstance(marker, dict) and bool(marker.get("in_place"))
         body_candidate.choose_in_place(ctx)
-        roads = body_candidate.closed_roads_note(ctx)
+        roads = "" if already_in_place else body_candidate.closed_roads_note(ctx)
         return ("OK: by your explicit Cyber Pro decision this task writes the serving checkout directly. "
                 "Unfinished edits are live for every reader of that tree."
                 + (f"\n\n{roads}" if roads else ""))
@@ -92,10 +94,17 @@ def _prepare_self_change(ctx: ToolContext, resume: str = "", in_place: bool = Fa
                     where = str(active_repo_dir_for(ctx))
                 except Exception:
                     where = str(getattr(ctx, "repo_dir", ""))
+                roads = ""
+                if getattr(constraint, "mode", "") == "acting_subagent" and not getattr(ctx, "_closed_roads_sent", False):
+                    roads = body_candidate.closed_roads_note(ctx)
+                    if roads:
+                        setattr(ctx, "_closed_roads_sent", True)
                 return _publish_tool_result(ctx, ToolResult(
                     status="ok", code="OK",
                     text=("OK: no separate body candidate prepared — a subagent works in the workspace/copy its parent "
-                          f"selected ({where}); the parent owns candidate preparation and integration.")))
+                          f"selected (or the serving checkout under Cyber Pro in_place): {where}; "
+                          "the parent owns candidate preparation and integration."
+                          + (f"\n\n{roads}" if roads else ""))))
         return _publish_tool_result(ctx, ToolResult(
             status="blocked", code=exc.code, text=f"⚠️ {exc.code}: {exc.text}"))
     from ouroboros.tools.plan_ask import planning_roots
@@ -128,7 +137,7 @@ def _prepare_self_change(ctx: ToolContext, resume: str = "", in_place: bool = Fa
         + (f" The earlier checkout of this task was gone; its commits remain on branch {bound['previous_branch']}."
            if bound.get("previous_branch") else "") + body_candidate.attribution_note(bound.get("attribution"))
         + (f"\n{neighbours}" if (neighbours := body_candidate.neighbour_note(ctx, with_ended=True)) else "")
-        + (f"\n\n{roads}" if (roads := body_candidate.closed_roads_note(ctx)) else "")
+        + (f"\n\n{roads}" if bound.get("state") != "bound" and (roads := body_candidate.closed_roads_note(ctx)) else "")
     )
 
 

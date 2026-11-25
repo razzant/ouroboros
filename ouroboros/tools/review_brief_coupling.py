@@ -594,11 +594,37 @@ def build_retrieving_brief(
         subject_root=repo_dir if layer != "body" else None,
         review_words=words,
     )
-    from ouroboros.tools.scope_required_sources import required_sources_ref, with_inline_sources
+    from ouroboros.tools.scope_required_sources import (
+        REQUIRED_SOURCE_ROOT, required_sources_ref, source_text_identity, with_inline_sources,
+    )
 
     tree_sha = str((brief.required_sources_ref or {}).get("staged_tree_sha") or "")
     required_rows = (with_inline_sources(brief.required_sources, governance.inline_whole_documents)
                      if brief.required_sources is not None else None)
+    if layer == "body" and required_rows is not None:
+        gov_root = pathlib.Path(brief.governance_repo_dir or repo_dir)
+        existing_paths = {str(r.get("path") or "") for r in required_rows}
+        for grow in governance.manifest:
+            if grow.get("disposition") != "required":
+                continue
+            gpath = str(grow.get("path") or "")
+            if not gpath or gpath in existing_paths:
+                continue
+            row: Dict[str, Any] = {
+                "root": REQUIRED_SOURCE_ROOT,
+                "path": gpath,
+                "disposition": "governance_required",
+                **({"governance_root": str(gov_root)} if gov_root.resolve(strict=False) != repo_dir.resolve(strict=False) else {}),
+            }
+            try:
+                row.update(source_text_identity((gov_root / gpath).read_bytes()))
+                row["coverage_basis"] = "governance_blob"
+            except (OSError, UnicodeDecodeError):
+                row["coverage_basis"] = "source_unavailable"
+                row["reason"] = "the governance tree does not carry readable text at this path"
+            required_rows.append(row)
+            existing_paths.add(gpath)
+        required_rows.sort(key=lambda r: str(r.get("path") or ""))
     preimage_sources = []
     for row in required_rows or ():
         if row.get("coverage_basis") != "preimage_unavailable":

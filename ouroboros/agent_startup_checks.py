@@ -388,6 +388,7 @@ def check_version_sync(env: Any) -> Tuple[dict, int]:
         from ouroboros.tools.release_sync import (
             _normalize_pep440,
             _shields_escape,
+            extract_architecture_header_version,
             extract_readme_badge_version,
             is_development_marker,
             is_release_version,
@@ -426,6 +427,17 @@ def check_version_sync(env: Any) -> Tuple[dict, int]:
                     issue_count += 1
         except Exception:
             log.debug("Failed to check README.md version", exc_info=True)
+
+        try:
+            arch_content = read_text(env.repo_path("docs/ARCHITECTURE.md"))
+            arch_version = extract_architecture_header_version(arch_content)
+            if arch_version:
+                result_data["architecture_version"] = arch_version
+                if version_file != arch_version:
+                    result_data["status"] = "warning"
+                    issue_count += 1
+        except Exception:
+            log.debug("Failed to check ARCHITECTURE.md version", exc_info=True)
 
         result = subprocess.run(
             ["git", "describe", "--tags", "--abbrev=0"],

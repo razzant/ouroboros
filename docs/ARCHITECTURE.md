@@ -1,6 +1,6 @@
-# Ouroboros — Body Map & Architecture Reference
+# Ouroboros v7.12.1-alpha.0 — Body Map & Architecture Reference
 
-This resident **Body Map** and **Reference Atlas** (BIBLE P1, P6) rides with me in every mode and focus so I know what my body can do, where its limits matter, and where every deeper manual lives. Before non-trivial work on my own body, I read the owning manual chapters, `docs/architecture/10-key-invariants.md` (invariants and *Closed roads*), and relevant `docs/DEVELOPMENT.md` rules with `read_file(root="system_repo", path=...)`; for live Python/`web/` module lookup I call `query_code(op="architecture", query="module_map <D01..D20|prefix|domains>")` or inspect `ouroboros/domains.toml`. Each manual stays present-tense across **Structural** flows, **Operational** state/logs/configs/paths/env/tools (code registries project from `ouroboros/domains.toml` and docstrings), and **Rationale** beside each rule. History lives in `README.md`, tags, and Git.
+This resident **Body Map** and **Reference Atlas** (BIBLE P1, P6) rides with me in every mode and focus so I know what my body can do, where its limits matter, and where every deeper manual lives. Before non-trivial work on my own body, I read the owning manual chapters, `docs/architecture/10-key-invariants.md` (invariants and *Closed roads*), and relevant `docs/DEVELOPMENT.md` rules with `read_file(root="system_repo", path=...)`; for live Python/`web/` module lookup I call `query_code(op="architecture", query="module_map <domain|prefix|domains>", root="system_repo")` or inspect `ouroboros/domains.toml`. Each manual stays present-tense across **Structural** flows, **Operational** state/logs/configs/paths/env/tools (registries project from `ouroboros/domains.toml` and docstrings), and **Rationale** beside each rule. History lives in `README.md`, tags, and Git.
 
 ## Chapters
 
@@ -24,14 +24,14 @@ This resident **Body Map** and **Reference Atlas** (BIBLE P1, P6) rides with me 
 
 ## Reference Atlas
 
-Deep manuals and standalone specifications, read on demand via `read_file(root="system_repo", path=...)`:
+Deep manuals and standalone specs (open via `read_file(root="system_repo", path=...)`):
 
-- `docs/DEVELOPMENT.md` — engineering discipline, capability placement, module complexity, governance delivery, review/commit protocol, change-class rules, managed updates, mutation attribution, process custody, platform abstraction, design system, MCP, gateway boundary, build/CI (chapters under `docs/development/01`–`14`).
+- `docs/DEVELOPMENT.md` — engineering discipline, capability placement, module complexity, governance delivery, review/commit protocol, change-class rules, managed updates, mutation attribution, process custody, platform abstraction, design system, MCP, gateway boundary, build/CI (chapters under `docs/development/`).
 - `docs/DESIGN.md` — UI/UX design bible, layout, composer controls, cards, widgets, voice controls, replies, and interaction semantics.
 - `docs/PERSISTENCE.md` — canonical registry of durable files/SQLite stores, writers, schemas, lifetime classes, and reset rules.
 - `docs/CLIENT_CONTRACT.md` — HTTP/WS client contract, living cards, sandboxed frames, and skill UI contributions.
 - `docs/CREATING_SKILLS.md` — skill manifest format, companions, connectors, hooks, review, grants, and publication protocol.
-- `docs/CHECKLISTS.md` — change review, plan review, skill review, and release verification checklists.
+- `docs/CHECKLISTS.md` & `docs/CHECKLISTS_ARCHIVE.md` — change/plan/skill/release review checklists and owner-accepted standing disclosures.
 - `docs/code-navigation.md` — `query_code` operations, syntax/architecture facts, and coverage limits.
 - `docs/DELEGATED_ADMISSION.md` — delegated run admission, workspace holds, directory mutability, and release rules.
 - `docs/DEPLOYMENT.md` — packaging, Docker/containers, systemd, headless, and production deployment.
@@ -41,5 +41,6 @@ Deep manuals and standalone specifications, read on demand via `read_file(root="
 - `docs/USAGE_STORE.md` — `state/usage.sqlite` schema, attempt settlement, and monetary accounting boundary.
 - `docs/WIDGET_HOST_PROTOCOL.md` — sandboxed widget iframe bridge, permissions, and lifecycle protocol.
 - `docs/ANDROID_INSTALL.md` & `docs/ANDROID_RECOVERY.md` — experimental ARM64 Android host provisioning, APK bridge, and recovery.
-- `ouroboros/domains.toml` — SSOT mapping Python modules to domains `D01`–`D20`, domain dependency baselines, and `[references]` manual ownership.
-- `README.md` — user-facing project overview and release highlights.
+- `docs/inventories/` — generated inventories (`UI_CONTROL_TEXT_INVENTORY.md`, data/module facts).
+- `ouroboros/domains.toml` — SSOT mapping Python modules to domains, dependency baselines, and `[references]` manual ownership.
+- `README.md` & `CONTRIBUTING.md` — user-facing project overview, release highlights, and external contribution/version policy.

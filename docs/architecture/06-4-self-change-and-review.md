@@ -1,6 +1,6 @@
 # 6.4 Agent Core — Self-Modification & Review Stack
 
-How I modify my own body safely: isolated candidates (`prepare_self_change`, `body_candidate.py`), staged Git/commit discipline, `diff_pulse`, and my multi-model immune system (`review_change` for commits/preflight/skills/system, result review, and council waves). Self-edits never mutate the live checkout directly; review scores one frozen subject under installed governance, paid cycles share `OUROBOROS_REVIEW_MAX_CYCLES`, and read coverage is diagnostic, never a veto.
+How I modify my own body safely: isolated candidates (`prepare_self_change`, `body_candidate.py`), staged Git/commit discipline, `diff_pulse`, and my multi-model immune system (`review_change` for commits/preflight/skills/system, result review, and council waves). Self-edits use an isolated candidate by default (Cyber Pro allows an explicit `in_place=True` exception); review scores one frozen subject under installed governance, paid cycles share `OUROBOROS_REVIEW_MAX_CYCLES`, and read coverage is diagnostic, never a veto.
 
 ### Review delivery
 

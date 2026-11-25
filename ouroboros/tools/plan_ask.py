@@ -282,17 +282,26 @@ def _task_objective(ctx: Any) -> str:
     return objective
 
 
-def stable_prompt(ctx: Any, *, body: bool, system_root: pathlib.Path, by_retrieval: bool) -> str:
+def _plan_checklist_section() -> str:
     from ouroboros.tools.review_checklist import load_checklist_section
 
     try:
-        checklist = load_checklist_section("Plan Review Checklist")
+        return load_checklist_section("Plan Review Checklist")
     except Exception as exc:
         log.warning("Could not load the Plan Review Checklist section: %s", exc)
-        checklist = ""
+        return ""
+
+
+def stable_prompt(ctx: Any, *, body: bool, system_root: pathlib.Path, by_retrieval: bool) -> str:
     return plan_packet.build_stable_prompt_for_root(
-        checklist_section=checklist, body=body, system_root=system_root,
+        checklist_section=_plan_checklist_section(), body=body, system_root=system_root,
         governance_by_retrieval=by_retrieval, read_governance_text=_governance_text)
+
+
+def stable_prompt_pair(ctx: Any, *, body: bool, system_root: pathlib.Path) -> tuple[str, str]:
+    return plan_packet.build_stable_prompt_pair_for_root(
+        checklist_section=_plan_checklist_section(), body=body, system_root=system_root,
+        read_governance_text=_governance_text)
 
 
 def _prior_transcript(state_root: pathlib.Path, task_id: str, participant_row: Mapping[str, Any]) -> Optional[List[Dict[str, Any]]]:
@@ -405,8 +414,7 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Optional[Mappi
     manifest = attach_own_dialogue(ctx, state_root, manifest, f"plan-ask-{task_id}-{ask_id}", persist=True)
     dialogue_section, snapshot_section = render_dialogue(manifest)  # rows before the plan, capture facts after
     try:
-        system_prompt = stable_prompt(ctx, body=body, system_root=system_root, by_retrieval=False)
-        session_prompt = stable_prompt(ctx, body=body, system_root=system_root, by_retrieval=True)
+        system_prompt, session_prompt = stable_prompt_pair(ctx, body=body, system_root=system_root)
     except plan_packet.PlanPacketError as exc:
         raise PlanAskRefused("TOOL_ERROR", f"ERROR: PLAN_ASK_PACK_INCOMPLETE: {exc}. Nothing was written.") from exc
     contents, session_tasks, slot_messages, session_threads, continued = {}, {}, {}, {}, {}

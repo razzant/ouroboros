@@ -50,9 +50,9 @@ def test_a_roomy_window_holds_max_and_names_the_measured_parts(monkeypatch):
     assert fact["unfolded"] and fact["unfolded"] <= fact["story"]  # 40 pages, none in a part or account yet
     assert dict(fact["parts"])["books"] > dict(fact["parts"])["runtime facts"] and "tool schemas" not in dict(fact["parts"])
     line = memory_facts(plan, "max")  # every start, Max held too: the measure part by part, no advice
-    assert line.startswith(f"Max room in this captured build: window 2,000,000; the gate's need {fact['need']:,}, headroom "
+    assert line.startswith(f"Max room in this captured build: window 2,000,000; the telling need {fact['need']:,}, headroom "
                            f"{2_000_000 - fact['need']:,}; the ordinary need {fact['need']:,}; with no memory ")  # no telling priced
-    assert (f"; mine: my memory at the gate's level {fact['story'] + fact['room']:,}; what the request itself carries: tool "
+    assert (f"; mine: my memory at its shortest tellings {fact['story'] + fact['room']:,}; what the request itself carries: tool "
             f"schemas {fact['schemas']:,}, runtime facts {dict(fact['parts'])['runtime facts']:,}; my human's: books "
             f"{dict(fact['parts'])['books']:,}, reply reserve {fact['reserve']:,}, work room {fact['work']:,}; core ") in line
     assert f"story {fact['story']:,} (40 pages no part or account holds yet, {fact['unfolded']:,} tokens, most in " in line
@@ -87,7 +87,7 @@ def test_the_measure_reads_each_host_section_by_whose_part_and_adds_up(monkeypat
                              - tok("a" * 700))
     assert sum(parts.values()) + fact["schemas"] + fact["story"] + fact["room"] + fact["reserve"] + fact["work"] == fact["need"]
     line = memory_facts(plan, "max")
-    assert (f"mine: my memory at the gate's level {fact['story'] + fact['room']:,}, knowledge {parts['knowledge']:,}, source "
+    assert (f"mine: my memory at its shortest tellings {fact['story'] + fact['room']:,}, knowledge {parts['knowledge']:,}, source "
             f"registry {parts['source registry']:,}, scratchpad {parts['scratchpad']:,}, held note heads "
             f"{parts['held note heads']:,}; what the request itself carries: tool schemas {fact['schemas']:,}, runtime facts "
             f"{parts['runtime facts']:,}, skills and subagents {parts['skills and subagents']:,};") in line
@@ -322,7 +322,7 @@ def test_the_settled_fact_names_cause_cuts_and_gap(mode, floor_need, cause):
     words = mf.lowered_line("low", "max", fact) + mf.measure_text(fact, parts=True)
     assert mf.lowered_cause(fact) == ("route" if floor_need > fact["window"] else "request")  # by its numbers alone
     assert ("the window holds 1,000; short by 1" if floor_need > 1_000 else "need 1,100; the window holds 1,000; short by 100") in words
-    assert "; the ordinary need 1,230; with no memory 1,100; mine: my memory at the gate's level 130; " in words
+    assert "; the ordinary need 1,230; with no memory 1,100; mine: my memory at its shortest tellings 130; " in words
     assert not any(word in words for word in ("must", "should", "please", "failure", "may bring"))  # measures only
 
 
@@ -464,8 +464,8 @@ def test_the_gate_s_shortest_telling_by_kind_sums_to_its_figure_and_rides_the_fa
     assert "telling_parts" not in fact and "telling_parts" not in held
     kinds = ", ".join(f"{kind} {tokens:,}" for kind, tokens in parts)
     line = memory_facts(plan, plan.initial_mode)
-    assert f"; mine: my memory at the gate's level {fact['telling']:,} ({kinds}); what the request " in line
-    assert f"; mine: my memory at the gate's level {held['story'] + held['room']:,}; what" in memory_facts(
+    assert f"; mine: my memory at its shortest tellings {fact['telling']:,} ({kinds}); what the request " in line
+    assert f"; mine: my memory at its shortest tellings {held['story'] + held['room']:,}; what" in memory_facts(
         _start(core, 2_000_000, monkeypatch), "max")  # a held Max priced no telling: nothing itemized
     shown = plan.projection(plan.initial_mode).system_content_json
     assert kinds not in shown
@@ -518,7 +518,7 @@ def test_the_composition_rides_the_facts_row_drawn_once_per_core_and_never_the_p
     real = facts.kind_chars
     monkeypatch.setattr(facts, "kind_chars", lambda *a, **k: (built.append(1), real(*a, **k))[1])
     line = memory_facts(plan, "low")
-    assert "my memory at the gate's level " in line and "pages whole " in line and " | " not in line
+    assert "my memory at its shortest tellings " in line and "pages whole " in line and " | " not in line
     assert memory_facts(plan, "low") == line and built == [1]  # once per core
     assert plan.low_projection.system_content_json == before and "pages whole " not in before
     failed = []
@@ -546,5 +546,5 @@ def test_two_windows_over_one_core_draw_its_telling_once_and_each_splits_its_own
     assert work.get("view_compositions") == 1 and not work.get("view_compositions_again")
     for line, plan in zip(lines, plans):
         telling = _fact(plan)["telling"]
-        kinds = line.split(f"my memory at the gate's level {telling:,} (")[1].split(")")[0]
+        kinds = line.split(f"my memory at its shortest tellings {telling:,} (")[1].split(")")[0]
         assert sum(int(n.replace(",", "")) for n in re.findall(r" (\d[\d,]*)(?=, [a-z]|$)", kinds)) == telling

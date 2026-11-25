@@ -878,7 +878,7 @@ def test_a_just_chosen_body_pays_last_and_only_what_a_providers_refusal_left(mon
         assert changed is bool(paid or chosen)
 
 
-@pytest.mark.parametrize("ceiling,mode", [(0, "low"), (200_000, "low"), (50_000, "nano")])
+@pytest.mark.parametrize("ceiling,mode", [(0, "max"), (200_000, "max"), (50_000, "nano")])
 def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_path, monkeypatch, ceiling, mode):
     from ouroboros import capability_evidence as ce, context_fit as cf, memory_view as mv
     from ouroboros.context_window import record_observation
@@ -895,7 +895,7 @@ def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_pa
             ce.CapabilityEvidence(1_000_000, "confirmed", "metadata", "books-route")))
     assert plan.initial_mode == "max"
     ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode="max", messages=plan.messages_for("max"),
-        tools=SimpleNamespace(_ctx=SimpleNamespace()), tool_schemas=[], accumulated_usage={}, task_id="books01",
+        tools=SimpleNamespace(_ctx=SimpleNamespace(), schemas=lambda **_kw: []), tool_schemas=[], accumulated_usage={}, task_id="books01",
         event_queue=None, drive_logs=tmp_path / "logs", round_idx=2)
     def measure(ctx, **_kwargs):
         return cf.measure_main_fit(ctx.context_fit_plan, ctx.messages, [],
@@ -906,14 +906,16 @@ def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_pa
     monkeypatch.setattr(lmc, "invalidate_task_cache_splits", lambda *_a: None)
     if ceiling:
         record_observation(tmp_path, plan.route_fp, refused=ceiling)
-    lmc._reproject_actual_overflow_low(ctx)
-    assert ctx.active_context_mode == ctx.tools._ctx.active_context_mode == mode
-    from ouroboros.transcript_prefix import SCOPED_SANCTION_ATTR  # the next send names this rebuild (C2 S4)
-    assert getattr(ctx.tools._ctx, SCOPED_SANCTION_ATTR) == {"system": "low_retry"}
-    assert ctx.messages[0] == ctx.context_fit_plan.projection(mode).system_message()
-    assert ctx.context_fit_plan.window_record is not None
-    # A refused total charges the whole reply reserve; the stated one, not refused yet, the reply floor
-    # (``WindowRecord.admitted``): the round's frame is that line plus the reserve.
-    fit = measure(ctx).measurement
-    assert fit.capacity_total_tokens - fit.response_reserve_tokens == (ceiling - fit.response_reserve_tokens if ceiling else 1_000_000 - 8_192)
-    assert ctx.context_fit_plan.window_record.source.startswith("refusal" if ceiling else "metadata")
+    # Exercise production books_must_save=True: non-overflowing ceilings stay Max (Low saves nothing),
+    # while a genuinely tight physical ceiling steps down to Nano without aborting early.
+    lmc._reproject_actual_overflow_low(ctx, books_must_save=True)
+    assert ctx.active_context_mode == mode
+    if mode != "max":
+        assert ctx.tools._ctx.active_context_mode == mode
+        from ouroboros.transcript_prefix import SCOPED_SANCTION_ATTR  # the next send names this rebuild (C2 S4)
+        assert getattr(ctx.tools._ctx, SCOPED_SANCTION_ATTR) == {"system": "low_retry"}
+        assert ctx.messages[0] == ctx.context_fit_plan.projection(mode).system_message()
+        assert ctx.context_fit_plan.window_record is not None
+        fit = measure(ctx).measurement
+        assert fit.capacity_total_tokens - fit.response_reserve_tokens == ceiling - fit.response_reserve_tokens
+        assert ctx.context_fit_plan.window_record.source.startswith("refusal")

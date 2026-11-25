@@ -1424,7 +1424,7 @@ def diff_pulse(
         if status is not None:
             break
     else:  # nothing to diff against here; the touched books keep whatever balance they have
-        return book_balance_note(root, [str(path) for path in paths or ()])
+        return book_balance_note(root, [str(path) for path in paths or ()], source="index" if staged else "worktree")
     changed: dict[str, tuple[int, int]] = {}
     for row in numstat.decode("utf-8", "replace").split("\0"):
         plus, _, rest = row.partition("\t")
@@ -1485,16 +1485,19 @@ def diff_pulse(
     fact = (f"Diff pulse since {since}: files {len(changed)}, lines +{added}/-{deleted} (net {added - deleted:+d}); "
             f"new files: {listed(new)}; module lines (target {TARGET_MODULE_LINES}, cap {MAX_MODULE_LINES}): "
             f"{listed(sizes)}{suite}.")
-    return "\n".join(part for part in (fact, shape, *_diff_pulse_tail_parts(root, base, staged, shown)) if part)
+    return "\n".join(part for part in (fact, shape, *_diff_pulse_tail_parts(root, base, staged, shown, list(changed))) if part)
 
 
-def _diff_pulse_tail_parts(root: pathlib.Path, base: str, staged: bool, shown: list[str]) -> tuple[str, ...]:
+def _diff_pulse_tail_parts(
+    root: pathlib.Path, base: str, staged: bool, shown: list[str], all_changed: list[str] | None = None,
+) -> tuple[str, ...]:
     from ouroboros.code_shape_facts import body_ownership_pulse, removed_governance_prose_pulse
     from ouroboros.reference_books import book_balance_note
 
+    diff_paths = shown if all_changed is None else all_changed
     return (
-        body_ownership_pulse(root, shown, staged),
-        removed_governance_prose_pulse(root, base, staged, shown, _change_texts),
+        body_ownership_pulse(root, shown, staged, all_changed=diff_paths),
+        removed_governance_prose_pulse(root, base, staged, shown, _change_texts, all_changed=diff_paths),
         book_balance_note(root, shown, source="index" if staged else "worktree"),
         DIFF_PULSE_QUESTION,
     )

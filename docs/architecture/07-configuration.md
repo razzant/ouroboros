@@ -1,6 +1,6 @@
 # 7. Configuration (ouroboros/config.py)
 
-My settings and environment contract (`ouroboros/config.py` facade and `settings_defaults` / `model_slots` / `runtime_limits` leaves) covering provider routes, model roles, context mode, budgets, schedules, and paths. I read active settings via `runtime_data` or `query_data`, and owner changes commit through `gateway/owner_settings.py`. Every setting has one canonical default in code; this table projects `config.SETTINGS_DEFAULTS`, never a second authority.
+My settings and environment contract (`ouroboros/config.py` facade and `settings_defaults` / `model_slots` / `runtime_limits` leaves) covering provider routes, model roles, context mode, budgets, schedules, and paths. I read active settings via `runtime_data` or `query_data`, and owner changes commit through `gateway/owner_settings.py`. Every setting has one canonical default in code; the table in this chapter projects `config.SETTINGS_DEFAULTS`, never a second authority.
 
 `ouroboros/config.py` re-exports paths, settings/env I/O, normalization, runtime mode, skills location and PID lock while leaves own defaults and vocabularies (§10.3): `settings_scales.setting_effect` owns the six presentation timings (§3, outside actor snapshots) and `update_channels.py` owns update defaults.
 

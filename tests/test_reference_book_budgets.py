@@ -27,11 +27,14 @@ from ouroboros.reference_books import (
     BOOK_CHAPTER_MAX_LINES,
     BOOK_ENTRYPOINTS,
     RULED_TEXTS,
+    STANDALONE_REFERENCE_DOCS,
     body_map_bytes,
     chapter_band_overages,
     compose_book,
     load_reference_book,
     ruled_text_sizes,
+    standalone_doc_over_band,
+    standalone_doc_size,
     text_name,
 )
 
@@ -140,9 +143,20 @@ def test_a_change_does_not_grow_the_body_map_or_exceed_chapter_band(capsys):
 
 @pytest.mark.size_ratchet
 def test_a_change_does_not_grow_bible_or_the_prompts(capsys):
-    _assert_no_unapproved_growth(capsys, [
+    def _standalone_bytes(rel: str, ref: str = "") -> int | None:
+        sizes = standalone_doc_size(REPO, rel, ref)
+        return None if sizes is None else sum(sizes.values())
+
+    measured = [
         (text_id, path, lambda ref, text_id=text_id: ruled_text_bytes(REPO, text_id, ref))
-        for text_id, path in RULED_TEXTS.items()])
+        for text_id, path in RULED_TEXTS.items()
+    ]
+    # Over-band standalone specs (> 2,000 lines or > 80,000 chars) retain shrink-only debt
+    # (`<= +0 B` vs contribution base) until reduced or split inside the one-default-read band.
+    for rel in STANDALONE_REFERENCE_DOCS:
+        if standalone_doc_over_band(REPO, rel):
+            measured.append((rel, rel, lambda ref, rel=rel: _standalone_bytes(rel, ref)))
+    _assert_no_unapproved_growth(capsys, measured)
 
 
 # ---------------------------------------------------------------- the decision, unmarked

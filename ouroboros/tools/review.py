@@ -189,26 +189,33 @@ def _preflight_check(commit_message: str, staged_files: str,
 
     # New logic modules require manifest membership, a module docstring lead, and
     # owning-manual documentation (BIBLE P6).
+    repo_path = pathlib.Path(repo_dir)
     new_logic_files = [
         f for f in new_files
         if f.startswith(("ouroboros/", "supervisor/")) and f.endswith(".py")
     ]
     if new_logic_files:
         import ast as _ast
+        import subprocess as _subprocess
         from ouroboros.reference_books import BOOK_ENTRYPOINTS, book_entrypoint_for, load_domain_references
 
+        def _optional_staged(rel: str) -> Optional[str]:
+            try:
+                return _git_show_staged(repo_dir, rel)
+            except (_subprocess.CalledProcessError, OSError):
+                return None
+
+        staged_manifest = _optional_staged("ouroboros/domains.toml")
+        has_manifest = staged_manifest is not None or (repo_path / "ouroboros/domains.toml").is_file()
+
         def _staged_or_disk_bytes(rel: str) -> bytes:
-            txt = _git_show_staged(repo_dir, rel)
+            txt = _optional_staged(rel)
             if txt is not None:
                 return txt.encode("utf-8")
-            return (repo_dir / rel).read_bytes()
+            return (repo_path / rel).read_bytes()
 
-        has_manifest = (
-            _git_show_staged(repo_dir, "ouroboros/domains.toml") is not None
-            or (repo_dir / "ouroboros/domains.toml").is_file()
-        )
         domains, modules, references = (
-            load_domain_references(repo_dir, _staged_or_disk_bytes) if has_manifest else ({}, {}, {})
+            load_domain_references(repo_path, _staged_or_disk_bytes) if has_manifest else ({}, {}, {})
         )
         problems: list[str] = []
         if has_manifest and modules:
@@ -222,7 +229,7 @@ def _preflight_check(commit_message: str, staged_files: str,
         for nf in new_logic_files:
             if pathlib.PurePosixPath(nf).name == "__init__.py":
                 continue
-            src_text = _git_show_staged(repo_dir, nf)
+            src_text = _optional_staged(nf)
             if src_text is None:
                 continue
             try:
@@ -237,21 +244,26 @@ def _preflight_check(commit_message: str, staged_files: str,
                 f"{missing_docstrings[:5]}."
             )
         architecture_entrypoint = BOOK_ENTRYPOINTS["architecture"]
-        missing_manual_for: list[str] = []
+        missing_owning: list[str] = []
+        missing_fallback: list[str] = []
         for nf in new_logic_files:
             dom = modules.get(nf, "")
             owning = references.get(dom, ()) if dom else ()
             if owning:
-                if not any(m in active_staged for m in owning) and architecture_entrypoint not in active_staged:
-                    missing_manual_for.append(f"{nf} ({dom} -> {', '.join(owning)})")
+                if not any(m in active_staged for m in owning):
+                    missing_owning.append(f"{nf} ({dom} -> {', '.join(owning)})")
             else:
                 if not any(book_entrypoint_for(staged) == architecture_entrypoint for staged in active_staged):
-                    missing_manual_for.append(nf)
-        if missing_manual_for:
+                    missing_fallback.append(nf)
+        if missing_owning:
             problems.append(
-                "New files added in ouroboros/ or supervisor/ without staging their owning Architecture book manual "
-                f"(or `{architecture_entrypoint}` / a `docs/architecture/` chapter, Bible P6): "
-                f"{missing_manual_for[:5]}."
+                "New runtime module(s) added without staging one of their declared owning manuals "
+                f"(from `ouroboros/domains.toml` [references], BIBLE P6): {missing_owning[:5]}."
+            )
+        if missing_fallback:
+            problems.append(
+                f"New files added in ouroboros/ or supervisor/ without updating `{architecture_entrypoint}` "
+                f"or a `docs/architecture/` chapter (BIBLE P6): {missing_fallback[:5]}."
             )
         if problems:
             return (
@@ -479,7 +491,7 @@ def _triad_governance_context(ctx: ToolContext, touched_paths: list,
                               checklist_section: str, api_models: list, api_slots: list,
                               *, delivery: str = "packet", governance_root=None,
                               layer: str = "body", subject_root: Optional[pathlib.Path] = None,
-                              review_words=None):
+                              review_words=None, module_map_root: Optional[pathlib.Path] = None):
     """The triad's shared governance tiers for either delivery class.
 
     ``governance_root`` is the installed body (a frozen subject names it; the
@@ -512,6 +524,7 @@ def _triad_governance_context(ctx: ToolContext, touched_paths: list,
         layer=layer,
         subject_root=subject_root,
         review_words=review_words,
+        module_map_root=module_map_root,
     )
 
 
@@ -710,7 +723,8 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     words_section = words.render(section_budget(_triad_governance_usable_window(api_models, api_slots))) if api_models else ""
     governance = _triad_governance_context(
         ctx, touched_paths, checklist_section, api_models, api_slots,
-        governance_root=governance_root, layer=layer, subject_root=subject_root, review_words=words)
+        governance_root=governance_root, layer=layer, subject_root=subject_root, review_words=words,
+        module_map_root=pathlib.Path(target_repo))
 
     # Build touched-file pack for full current context (managed: the reviewed
     # resolution set; binary rows carry the M0 baseline identity). A plain

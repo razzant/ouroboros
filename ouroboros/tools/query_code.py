@@ -515,7 +515,7 @@ def get_tools() -> List[ToolEntry]:
                 "separate bounded filesystem walk (Python also supports AST class names). Missing grammar or "
                 "partial coverage is disclosed. architecture reads pinned repository carriers with query='<fact> "
                 "<argument>': owner_of, domain_dependencies, facade_consumers, persistence_entities_written_by, "
-                "protected_contracts_affected. Pages rescan current files, not an immutable snapshot. "
+                "protected_contracts_affected, module_map. Pages rescan current files, not an immutable snapshot. "
                 "Use search_code for arbitrary literal/regex search; inspect source anchors to assess meaning."
             ),
             "parameters": {"type": "object", "properties": {

@@ -337,6 +337,7 @@ def book_map_section(book: ReferenceBook, section_id: str) -> str:
     if book.legacy or not book.chapters:
         return navigation
     title = book.entrypoint.headings[0].title if book.entrypoint.headings else book.book_id
+    title = re.sub(r"^(Ouroboros)\s+v\S+\s*[—-]\s*", r"\1 — ", title, count=1)
     chapters = [f"- {chapter.headings[0].title if chapter.headings else chapter.source_path}: "
                 f"`{chapter.source_path}`" for chapter in book.chapters]
     return HostSection(section_id, navigation, "\n".join([
@@ -356,6 +357,7 @@ def body_map_section(book: ReferenceBook) -> str:
     if book.legacy or not book.chapters:
         return rendered
     title = book.entrypoint.headings[0].title if book.entrypoint.headings else book.book_id
+    title = re.sub(r"^(Ouroboros)\s+v\S+\s*[—-]\s*", r"\1 — ", title, count=1)
     chapters = [f"- {chapter.headings[0].title if chapter.headings else chapter.source_path}: "
                 f"`{chapter.source_path}`" for chapter in book.chapters]
     atlas_lines = [

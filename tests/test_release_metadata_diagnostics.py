@@ -251,7 +251,7 @@ def test_free_tool_json_reports_cumulative_books_with_an_explicit_byte_source(ca
     assert result["source"] == source and result["book_balance"]["source"] == "worktree"
     note = result["book_balance"]["note"]
     assert "+18 B vs HEAD" in note and "+36 B vs refs/remotes/official-renamed/ouroboros" in note
-    assert "Architecture book" in note
+    assert "Development book balance unavailable" in note
     assert _diagnose(ctx, source, paths=["change.py"])["book_balance"]["note"] == ""
 
 
@@ -631,7 +631,7 @@ def test_missing_required_readme_is_unavailable_while_optional_older_carriers_ar
 
 
 @pytest.mark.parametrize("path,content,expected", [
-    ("ouroboros/new.py", "value = 1\n", "Architecture book"),
+    ("ouroboros/new.py", "value = 1\n", "docs/ARCHITECTURE.md"),
     ("tests/conftest.py", "def test_misplaced(): pass\n", "contains test functions"),
 ])
 def test_author_formatter_also_preserves_non_release_staged_checks(candidate, path, content, expected):
@@ -677,6 +677,7 @@ def test_index_checks_the_whole_staged_candidate_even_with_narrow_paths(candidat
 
 @pytest.mark.parametrize("path,change", [
     ("README.md", "version"), ("README.md", "delete"), ("README.md", "rename"),
+    ("docs/ARCHITECTURE.md", "version"), ("docs/ARCHITECTURE.md", "delete"),
 ])
 def test_documentation_carriers_preserved_through_all_consumers(candidate, path, change):
     repo = candidate.repo_dir
@@ -893,7 +894,7 @@ def test_managed_update_keeps_official_version_under_strict_resolver_authority(c
     assert "pyproject.toml" in preflight(), "Managed authority does not waive carrier-span coherence."
 
 
-@pytest.mark.parametrize("carrier", ["readme_badge", "readme_history", "readme_download_refs"])
+@pytest.mark.parametrize("carrier", ["readme_badge", "readme_history", "readme_download_refs", "architecture_header"])
 @pytest.mark.parametrize("change", ["edit", "remove"])
 def test_each_documentation_span_is_protected_without_a_code_change(candidate, carrier, change):
     from ouroboros.tools.release_sync import VERSION_CARRIER_SPANS, locate_carrier_span

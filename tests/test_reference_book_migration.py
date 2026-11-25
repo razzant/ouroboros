@@ -131,9 +131,9 @@ def test_the_migration_commit_reconstructs_the_base_monolith_byte_for_byte(book_
 
 @pytest.mark.parametrize("book_id", sorted(BOOK_ENTRYPOINTS))
 def test_every_base_section_is_still_exactly_one_chapter(book_id):
-    """The structural half, unbounded in time: the base's `##` titles are the
-    chapters' H1 titles, in order, one each. A later edit to a chapter body
-    cannot make this red, and a lost, merged or re-titled chapter still can."""
+    """The structural half: the base's `##` titles remain present in order as chapter H1 titles,
+    allowing the intentional split of Chapter 6 (`6. Agent Core` -> `6.1`..`6.5`) while catching
+    any lost, merged, or accidentally re-titled chapter."""
     old = _git("show", f"{MIGRATION_BASE}:{BOOK_ENTRYPOINTS[book_id]}")
     if old is None:
         pytest.skip(f"base commit {MIGRATION_BASE} is unreachable in this checkout")
@@ -148,7 +148,22 @@ def test_every_base_section_is_still_exactly_one_chapter(book_id):
 
     book = load_reference_book(REPO, book_id)
     chapter_titles = [chapter.headings[0].title for chapter in book.chapters]
-    assert chapter_titles == base_titles
+    if book_id == "architecture":
+        expected = []
+        for title in base_titles:
+            if title == "6. Agent Core":
+                expected.extend([
+                    "6.1 Agent Core — Loop, Tools & Safety",
+                    "6.2 Agent Core — Model Calls, Usage & Budget",
+                    "6.3 Agent Core — Delegated Subagents & Vendor Maintenance",
+                    "6.4 Agent Core — Self-Modification & Review Stack",
+                    "6.5 Agent Core — Planning, Memory, Skills & External Tools",
+                ])
+            else:
+                expected.append(title)
+        assert chapter_titles == expected
+    else:
+        assert chapter_titles == base_titles
 
 
 @pytest.mark.parametrize("book_id", sorted(BOOK_ENTRYPOINTS))
@@ -156,15 +171,16 @@ def test_entrypoint_keeps_its_h1_line_and_carries_only_the_membership(book_id):
     rel = BOOK_ENTRYPOINTS[book_id]
     raw = (REPO / rel).read_bytes()
     lines = raw.decode("utf-8").split("\n")
-    # The architecture h1 is a release version carrier (`release_sync` rewrites
-    # its version token on every bump): the whole line stays pinned, and only
-    # that token follows VERSION instead of the split-time 7.0.0.
+    # The architecture h1 carries the transitional release version token on disk
+    # (stripped by ``body_map_book`` for cache invariance); development keeps its static title.
     version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
-    assert lines[0] == OLD_MONOLITHS[book_id]["h1"].replace("v7.0.0", f"v{version}")
+    if book_id == "architecture":
+        assert lines[0] == f"# Ouroboros v{version} — Body Map & Architecture Reference"
+    else:
+        assert lines[0] == OLD_MONOLITHS[book_id]["h1"].replace("v7.0.0", f"v{version}")
     book = load_reference_book(REPO, book_id)
-    # One `## Chapters` heading and nothing else: the entrypoint orients, the
-    # chapters carry the book.
-    assert [h.title for h in book.entrypoint.headings] == [lines[0][2:], "Chapters"]
+    expected_headings = [lines[0][2:], "Chapters", "Reference Atlas"] if book_id == "architecture" else [lines[0][2:], "Chapters"]
+    assert [h.title for h in book.entrypoint.headings] == expected_headings
     members = [chapter.source_path for chapter in book.chapters]
     assert members == sorted(members), "membership order must be the reading order"
     for chapter in book.chapters:

@@ -371,6 +371,7 @@ class ContextCore:
     reference_books: Tuple[ReferenceBook, ...] = ()
     compact_reference_docs: bool = False
     reference_book_errors: Tuple[str, ...] = ()
+    delegated_focus: bool = False
     # Knowledge (overview, index, project journal) leading the changing block.
     dynamic_head_text: str = ""
     # The captured memory view (``memory_view.snapshot_json``); each projection renders
@@ -892,9 +893,8 @@ def _wire_room(raw, complete, *, mode, preferred, reserve, window, record, admit
 
 
 def _integrating(core: ContextCore, role: Any) -> bool:
-    """A view of a focus that integrates (BIBLE P1): no delegated child's or nanny's ``role``."""
-    del core
-    return role not in DELEGATED_FOCUS_ROLES
+    """A view of a focus that integrates (BIBLE P1): neither a delegated child/nanny core nor role."""
+    return not core.delegated_focus and role not in DELEGATED_FOCUS_ROLES
 
 
 def _mode_host_receipts(selected: str, form_mode: str, rows: Iterable[Mapping[str, Any]],
@@ -932,7 +932,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     from ouroboros.memory_view import FULL_VIEW, room_chars, snapshot_from_json, story_chars
 
     shown_mode = start or preferred
-    mode = select or shown_mode
+    # Under the unified resident Body Map, Max and Low share identical governance and tool schemas;
+    # a saving-gated `select="low"` retry keeps `shown_mode` so the physical overflow loop below
+    # steps down to Nano (whose standing toolset actually saves tokens) only when the window overflows.
+    mode = shown_mode if (books_must_save and select == "low") else (select or shown_mode)
     running = (running_limit is not None and mode == preferred == "max" and not core.compact_reference_docs
                and kept is not None and not start_work)
     whole_core, whole_governance = core, governance
@@ -1013,18 +1016,6 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             report_nano_miss=held_heads)
 
     stated: Dict[str, Optional[int]] = {}  # each walked mode's window in the start's frame (``frame`` fills it)
-
-    def books_save(level, window, boundary):
-        # Only the frame changes. A new memory/host concession may not disguise a book switch that costs tokens.
-        def price(selected):
-            sent = tools_for(selected)
-            forms = section_views(sections[selected], _mode_host_receipts(selected, form[selected], previous, low_maps, floor.BOOK_MAPS))
-            same = view(selected, sent, forms, window, boundary, kept=held, level=level) if snapshot else floor.NO_VIEW
-            return complete_price(selected, sent, forms, same)
-        return price("low") < price("max")
-
-    if books_must_save and not books_save(held, window_tokens, window_record.boundary if window_record else None):
-        return {}, shown_mode
 
     def telling_fits(selected, sent, forms, window, boundary, reserve, *, start_room):
         shown = view(selected, sent, forms, window, boundary, level=floor.telling_level(snapshot)) if snapshot else floor.NO_VIEW
@@ -1139,29 +1130,28 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     if running:
         running_shown = render(telling_floor=True)
         if misses_running_goal(running_shown):
-            if books_save(running_shown.level, window, boundary):
-                mode = "low"
-                sent, fixed, reserve, window, boundary, allowances = timed("fit.frame_low", frame, mode)
-                # Walk Low from the held level, not from the discarded Max trial's tellings.
-                running_shown = render(telling_floor=True)
-            if misses_running_goal(running_shown):
-                # An unsent trial cannot pin cuts: the unrestricted walk may give some back after a later saving.
-                running_shown = render()
+            # An unsent trial cannot pin cuts: the unrestricted walk may give some back after a later saving.
+            running_shown = render()
 
     # Step down on the frame's own price, without drawing it whole. Nano is the last physical rescue, even mid-run.
     last = stays = None
     while True:
         # A held view stays where Nano can buy no room. Without heads this can be decided before drawing Nano.
-        stays = (last is not None and not (held_heads or whole_core.development_required)
+        stays = (mode == "nano" and last is not None and not (held_heads or whole_core.development_required)
                  and window - reserve <= last[3] - last[2] and fixed >= last[1])
-        shown = floor.NO_VIEW if stays or (mode != "nano" and overflows()) else running_shown or render()
-        if mode == "nano" or not overflows(shown):
+        low_no_gain = (mode == "low" and last is not None
+                       and window - reserve <= last[3] - last[2] and fixed >= last[1])
+        shown = floor.NO_VIEW if stays or low_no_gain or (mode != "nano" and overflows()) else running_shown or render()
+        if mode == "nano" or (not low_no_gain and not overflows(shown)):
             break
         # A live trial still has to reselect tools and measure its chosen wire reserve.
-        if (running or mode in ("max", "low")) and kept is not None and admitted:
+        if not low_no_gain and (running or mode in ("max", "low")) and kept is not None and admitted:
             prior_view = (running_shown or render()) if shown is floor.NO_VIEW else shown
-            last = (sent, fixed, reserve, window, boundary, allowances, receipts, prior_view, wire_room(prior_view), mode)
-        mode, running_shown = "nano", None
+            cand = (sent, fixed, reserve, window, boundary, allowances, receipts, prior_view, wire_room(prior_view), mode)
+            if last is None or cand[-2] > last[-2]:
+                last = cand
+        mode = "low" if (mode == "max" and (low_tools is not None or tool_frames is not None)) else "nano"
+        running_shown = None
         sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
     if held_heads and mode == "nano" and overflows(shown):
         emergency_level = shown.level
@@ -1181,9 +1171,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                                fixed_tokens=fixed, memory_tokens=floor.tokens_of(shown.story_chars) + floor.tokens_of(shown.room_chars),
                                reserve_tokens=reserve, window_tokens=window, ratio=ratio,
                                work_room_tokens=work() if core_alone else 0)
-    def optional_map():  # the required handbook's next yield: optional maps, then an unread start's book maps
+    def optional_map():  # the required handbook's next yield: optional maps, then an unread start's Body Map parts list
         nonlocal receipts
-        receipts = floor.yield_for_book(sections[mode], receipts, core, retain=retain, maps=can_yield_maps and mode in ("max", "low")) or receipts
+        receipts = floor.yield_for_book(sections[mode], receipts, core, retain=retain, maps=can_yield_maps and mode in ("max", "low", "nano")) or receipts
         return measure(mode, sent, section_views(sections[mode], receipts))
     story, room, room_data, receipt = _final_view(shown, snapshot, whole_core, mode, room_fact, fixed=fixed, ratio=ratio,
         window=window, reserve=reserve, output_reserve=output_reserve, work=work, window_record=limits(mode)[3], optional_map=optional_map,
@@ -1273,15 +1263,14 @@ def _prefer_first_contact(core, preferred, normal, forms, target, tool_schemas, 
         return bounded_prompt_tokens_for_payload({"messages": _project_openai_family_system(dict(target), rows),
                                                   "tools": schemas}, 0) if schemas else 0
 
-    def noted(contents, mode, maps=False):
+    def noted(contents, mode):
         system, facts, data = contents[mode]
         tail = {**system[-1], "text": system[-1]["text"] + (
             "\n\n### First-send composition\nAn earlier request was refused on the connection this first send was "
-            f"composed for, so this view is smaller than its ordinary form{' and uses chapter maps' if maps else ''}. "
-            "The refusal stated no window.")}
-        facts = {**facts, "first_contact_preference": "maps" if maps else True}
+            "composed for, so this view is smaller than its ordinary form. The refusal stated no window.")}
+        facts = {**facts, "first_contact_preference": True}
         if room := normal[0][mode][1].get("max_room"):
-            facts["max_room"] = {**room, "cause": "first_contact", "cuts": []} if maps else room
+            facts["max_room"] = room
         return {**contents, mode: ([*system[:-1], tail], facts, data)}
 
     def safe(size):
@@ -1301,7 +1290,7 @@ def _prefer_first_contact(core, preferred, normal, forms, target, tool_schemas, 
         return normal
     ordinary_whole = ordinary(whole, contents, initial)
     reclaim = safe(ordinary_whole)  # the ordinary request pays its own margin, not the required book's
-    selected, size = contents, whole
+    selected = contents
     if (saving := ordinary_whole - goal) > 0:
         try:
             folded, mode = forms(start_saving=saving)
@@ -1310,13 +1299,7 @@ def _prefer_first_contact(core, preferred, normal, forms, target, tool_schemas, 
         if mode == initial and folded[mode][1].get("floor", {}).get("runs") != contents[mode][1].get("floor", {}).get("runs"):
             candidate = noted(folded, mode)
             if 0 < (smaller := raw(candidate, mode)) and ordinary(smaller, candidate, mode) <= reclaim:
-                selected, size = candidate, smaller
-    if (initial == preferred == "max" and before_maps and ordinary(size, selected, initial) > safe(before_maps)
-            and not core.compact_reference_docs):
-        maps = noted(selected, "low", maps=True)  # the same floor level; only the prepared governance frame changes
-        maps_size = raw(maps, "low")
-        if 0 < maps_size < min(size, max(refused, before_maps)) and ordinary(maps_size, maps, "low") <= reclaim:
-            return maps, "low"
+                selected = candidate
     return normal if selected is contents else (selected, initial)
 
 

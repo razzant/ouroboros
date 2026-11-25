@@ -1,6 +1,6 @@
 # 9. Shutdown & Process Cleanup
 
-How I handle Close, Restart, Quit, Panic, Fault, and child/service process custody (`process_custody.py`, `owned_shutdown.py`, `restart_retention.py`) across POSIX and Windows. Signals, timeouts, and engine terminal facts prove no OS exit: processes stay owned until return, Panic holds all saved work for Resume, and acknowledged owner Restart returns named active work while holding warm sleeps and paused grants for Resume.
+How I handle Close, Restart, Quit, Panic, Fault, and child/service custody (`process_custody.py`, `owned_shutdown.py`, `restart_retention.py`) across POSIX and Windows. Signals, timeouts, and engine terminal facts prove no OS exit: processes stay owned until return, cold receipts grant custody rather than Resume or survival (§6), switching restores stopped handles, Panic holds all saved work for Resume, and acknowledged owner Restart returns named active work while holding warm sleeps and paused grants for Resume.
 
 Server startup raises descriptor capacity for per-run transports (`server_process.raise_open_file_limit`; platform rules and failures: its docstring).
 

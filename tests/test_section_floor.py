@@ -559,8 +559,20 @@ def test_an_integrating_low_start_keeps_both_book_maps_while_the_window_holds_th
         assert "How part 00 works for Change" in _text(plan, preferred)
     child = dataclasses.replace(core, memory_view_json=memory_view.snapshot_json(
         syn.snapshot(role="child", story=syn.pages(40, 30_000))))  # its own whole story above Low's target
-    rows = {row["section_id"]: row for row in _host_facts(_plan(child, 1_000_000, "low"), "low")}
-    assert rows["body_map"]["start_room"] == "low"
+    # BIBLE P1: only a physically small window steps the Body Map down, never a soft mode target —
+    # delegated children and owner-Nano keep the full Body Map whole when the physical window holds it.
+    child_rows = {row["section_id"]: row for row in _host_facts(_plan(child, 1_000_000, "low"), "low")}
+    assert "body_map" not in child_rows
+    nano_rows = {row["section_id"]: row for row in _host_facts(_plan(core, 1_000_000, "nano"), "nano")}
+    assert "body_map" not in nano_rows
+    # On a genuine physical shortfall (without an 84k runtime service absorbing it first), a child's Body Map steps down.
+    small_child = booked(_core(tmp_path, snapshot=syn.snapshot(role="child")), tmp_path,
+                         body="Its whole mechanism and why. " * 60)
+    child_req = _plan(small_child, 2_000_000, "low").low_projection.estimated_tokens
+    child_saving = map_saving(small_child.reference_books[0], "body_map")
+    tight_child = _plan(small_child, child_req - child_saving // 2 + RESERVE, "low")
+    tight_rows = {row["section_id"]: row for row in _host_facts(tight_child, "low")}
+    assert "body_map" in tight_rows and "start_room" not in tight_rows["body_map"]
 
 
 def test_a_low_start_the_window_cannot_hold_shortens_only_the_book_map_it_needs(tmp_path):

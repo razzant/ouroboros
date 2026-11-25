@@ -764,18 +764,26 @@ def closed_roads_note(ctx: Any) -> str:
     """Body-gate contact fact: whole ``10.2 Closed roads`` + address of ``10-key-invariants.md``."""
     from ouroboros.reference_books import closed_roads_section
 
-    try:
-        roads = closed_roads_section(serving_repo_dir_for(ctx))
-    except Exception:
-        return ""
-    if not roads:
-        return ""
-    return (
+    repo = serving_repo_dir_for(ctx)
+    header = (
         "[Body gate — invariants & Closed roads]\n"
         "Before editing Ouroboros's body, read `docs/architecture/10-key-invariants.md` and the "
-        "owning manuals for the files you touch.\n\n"
-        + roads
+        "owning manuals for the files you touch."
     )
+    fallback = (
+        header + "\n\n"
+        "(10.2 Closed roads could not be read from `docs/architecture/10-key-invariants.md`; "
+        "open that chapter directly before editing.)"
+    )
+    try:
+        roads = closed_roads_section(repo)
+    except (OSError, ValueError):
+        return fallback
+    if not roads:
+        if (repo / "docs/architecture/10-key-invariants.md").exists() or (repo / "docs/ARCHITECTURE.md").exists():
+            return fallback
+        return ""
+    return header + "\n\n" + roads
 
 
 def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> CandidateRefused | str | None:
@@ -1288,21 +1296,37 @@ def own_body_reference_note(ctx: Any, target: Any, opened_root: str, *, active_r
     """Stateless 1-line owning-manual address for own-body code reads ONLY (BIBLE P1, P6).
 
     Strictly guarded to proven own-body roots (system_repo, bound body candidate, or system
-    copy) and code/prompt/skill paths listed in ``ouroboros/domains.toml`` ``[references]``.
-    Never fires for docs/, tests/, data/, runtime_data, user_files, or foreign repositories.
+    copy) and code/prompt/skill paths listed in ``ouroboros/domains.toml`` ``[references]``
+    plus exact-path chapter mentions. Never fires for docs/, tests/, data/, runtime_data,
+    user_files, or foreign repositories. Resolves ``active_repo`` lazily only when needed.
     """
     if opened_root not in ("system_repo", "active_workspace"):
         return ""
     try:
         from ouroboros.reference_books import resolve_body_references
+        from ouroboros.tools.tool_resolution import active_repo_dir_for, system_repo_dir_for
         from ouroboros.workspace_copies import copy_binding, same_directory
 
-        system = serving_repo_dir_for(ctx).resolve(strict=False)
         physical = pathlib.Path(target).resolve(strict=False)
         body_root: Optional[pathlib.Path] = None
         if opened_root == "system_repo":
-            body_root = system
+            candidates: List[pathlib.Path] = []
+            for raw_root in (system_repo_dir_for(ctx), serving_repo_dir_for(ctx)):
+                if raw_root is not None:
+                    resolved = pathlib.Path(raw_root).resolve(strict=False)
+                    if resolved not in candidates:
+                        candidates.append(resolved)
+            bound = descriptor(ctx) if is_bound(ctx) else None
+            if bound and bound.get("path"):
+                cand = pathlib.Path(str(bound["path"])).resolve(strict=False)
+                if cand not in candidates:
+                    candidates.insert(0, cand)
+            for cand in candidates:
+                if physical == cand or cand in physical.parents:
+                    body_root = cand
+                    break
         else:
+            system = serving_repo_dir_for(ctx).resolve(strict=False)
             bound = descriptor(ctx) if is_bound(ctx) else None
             if bound and bound.get("path"):
                 cand = pathlib.Path(str(bound["path"])).resolve(strict=False)
@@ -1314,22 +1338,29 @@ def own_body_reference_note(ctx: Any, target: Any, opened_root: str, *, active_r
                     exec_root = pathlib.Path(str(binding["execution_root"])).resolve(strict=False)
                     if physical == exec_root or exec_root in physical.parents:
                         body_root = exec_root
-            if body_root is None and active_repo is not None:
-                active = pathlib.Path(active_repo).resolve(strict=False)
-                if same_directory(active, system) and (physical == system or system in physical.parents):
-                    body_root = system
+            if body_root is None:
+                resolved_active = active_repo
+                if resolved_active is None:
+                    try:
+                        resolved_active = active_repo_dir_for(ctx)
+                    except (OSError, ValueError):
+                        resolved_active = None
+                if resolved_active is not None:
+                    active = pathlib.Path(resolved_active).resolve(strict=False)
+                    if same_directory(active, system) and (physical == system or system in physical.parents):
+                        body_root = system
         if body_root is None:
             return ""
         rel = physical.relative_to(body_root).as_posix()
         if rel.startswith(("docs/", "tests/")):
             return ""
-        refs = resolve_body_references(body_root, [rel], include_mentions=False)
+        refs = resolve_body_references(body_root, [rel], include_mentions=True)
         manuals = refs.get("manuals") or ()
         if not manuals:
             return ""
         listed = ", ".join(str(m) for m in manuals)
         inv = "docs/architecture/10-key-invariants.md"
-        tail = "" if inv in manuals else f" | invariants & Closed roads: {inv}"
+        tail = "" if inv in manuals else f" | §10: {inv}"
         return f"[Body manual: {listed}{tail}]"
-    except Exception:
+    except (OSError, ValueError):
         return ""

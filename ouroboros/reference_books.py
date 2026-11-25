@@ -305,17 +305,25 @@ def has_body_map_atlas(book: ReferenceBook) -> bool:
     return any(h.level == 2 and h.title == BODY_MAP_ATLAS_HEADING for h in book.entrypoint.headings)
 
 
+def _strip_entrypoint_version(text: str) -> str:
+    """Strip any transitional ``vX.Y.Z`` carrier token from the Architecture H1 when rendering Block A'."""
+    import re
+
+    return re.sub(r"^(#\s+Ouroboros)\s+v\S+\s*[—-]\s*", r"\1 — ", text, count=1)
+
+
 def body_map_book(book: ReferenceBook) -> BookView:
     """The cache-invariant resident Body Map + Reference Atlas (zero line numbers, zero counts).
 
-    Entrypoint (first-person orientation, Chapters list, Reference Atlas) plus each chapter's
+    Entrypoint (first-person orientation, Chapters list, Reference Atlas, with any transitional
+    H1 release-version token stripped for cross-release cache invariance) plus each chapter's
     H1 title, physical `Source:` path, and authored first-person opening paragraph. Identical
     across all modes, rooms, wakes, Presence, children, and nannies; edits inside chapter bodies
     never shift its bytes. Legacy single-file revisions fall back to ``overview_book``.
     """
     if book.legacy:
         return overview_book(book, instructions=False)
-    rows = [book.entrypoint.text]
+    rows = [_strip_entrypoint_version(book.entrypoint.text)]
     refs = [_ref(book, book.entrypoint, _whole(book.entrypoint))]
     for chapter in book.chapters:
         preamble = _preamble(chapter)
@@ -329,12 +337,21 @@ def closed_roads_section(
     repo_root: Path,
     read_bytes: Callable[[str], bytes] | None = None,
 ) -> str:
-    """The authored ``10.2 Closed roads`` section from ``docs/architecture/10-key-invariants.md``."""
+    """The authored ``10.2 Closed roads`` section read directly from ``docs/architecture/10-key-invariants.md``."""
+    rel = "docs/architecture/10-key-invariants.md"
+    reader = read_bytes if read_bytes is not None else lambda path: (Path(repo_root) / path).read_bytes()
     try:
-        book = load_reference_book(repo_root, "architecture", read_bytes)
-        return read_book_section(book, "10.2 Closed roads").text.strip()
+        source = parse_markdown_source(reader(rel), rel)
+        matches = [h for h in source.headings if h.title == "10.2 Closed roads"]
+        if len(matches) != 1:
+            return ""
+        return source.text_at(matches[0].section).strip()
     except (OSError, ValueError, KeyError):
         return ""
+
+
+_DOMAIN_REFS_CACHE: dict[tuple[str, int, int], tuple[dict[str, str], dict[str, str], dict[str, tuple[str, ...]]]] = {}
+_CHAPTER_TEXTS_CACHE: dict[tuple[str, tuple[tuple[str, int, int], ...]], tuple[tuple[str, str], ...]] = {}
 
 
 def load_domain_references(
@@ -347,7 +364,19 @@ def load_domain_references(
     except ImportError:  # pragma: no cover - 3.10 venvs ship tomli
         import tomli as tomllib
 
-    reader = read_bytes if read_bytes is not None else lambda path: (Path(repo_root) / path).read_bytes()
+    root = Path(repo_root)
+    cache_key: tuple[str, int, int] | None = None
+    if read_bytes is None:
+        manifest_path = root / "ouroboros/domains.toml"
+        try:
+            st = manifest_path.stat()
+            cache_key = (str(root.resolve(strict=False)), st.st_mtime_ns, st.st_size)
+            if cache_key in _DOMAIN_REFS_CACHE:
+                return _DOMAIN_REFS_CACHE[cache_key]
+        except OSError:
+            return {}, {}, {}
+
+    reader = read_bytes if read_bytes is not None else lambda path: (root / path).read_bytes()
     try:
         data = tomllib.loads(reader("ouroboros/domains.toml").decode("utf-8"))
     except Exception:
@@ -359,7 +388,57 @@ def load_domain_references(
         for k, vals in (data.get("references") or {}).items()
         if isinstance(vals, list)
     }
-    return domains, modules, references
+    result = (domains, modules, references)
+    if cache_key is not None:
+        if len(_DOMAIN_REFS_CACHE) >= 16:
+            _DOMAIN_REFS_CACHE.clear()
+        _DOMAIN_REFS_CACHE[cache_key] = result
+    return result
+
+
+def _load_book_chapter_texts(
+    root: Path,
+    read_bytes: Callable[[str], bytes] | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """``((source_path, text), ...)`` across Architecture and Development chapters, stat-cached for disk reads."""
+    if read_bytes is None:
+        sig_parts: list[tuple[str, int, int]] = []
+        for entry in BOOK_ENTRYPOINTS.values():
+            p = root / entry
+            try:
+                st = p.stat()
+                sig_parts.append((entry, st.st_mtime_ns, st.st_size))
+            except OSError:
+                continue
+        for sub in ("docs/architecture", "docs/development"):
+            d = root / sub
+            if d.is_dir():
+                for ch in sorted(d.glob("*.md")):
+                    try:
+                        st = ch.stat()
+                        sig_parts.append((f"{sub}/{ch.name}", st.st_mtime_ns, st.st_size))
+                    except OSError:
+                        continue
+        cache_key = (str(root.resolve(strict=False)), tuple(sig_parts))
+        if cache_key in _CHAPTER_TEXTS_CACHE:
+            return _CHAPTER_TEXTS_CACHE[cache_key]
+    else:
+        cache_key = None
+
+    chapters: list[tuple[str, str]] = []
+    for book_id in ("architecture", "development"):
+        try:
+            book = load_reference_book(root, book_id, read_bytes)
+        except (OSError, ValueError, KeyError):
+            continue
+        for chapter in book.chapters:
+            chapters.append((chapter.source_path, chapter.text))
+    result = tuple(chapters)
+    if cache_key is not None:
+        if len(_CHAPTER_TEXTS_CACHE) >= 8:
+            _CHAPTER_TEXTS_CACHE.clear()
+        _CHAPTER_TEXTS_CACHE[cache_key] = result
+    return result
 
 
 def resolve_body_references(
@@ -367,13 +446,14 @@ def resolve_body_references(
     paths: Iterable[str],
     *,
     read_bytes: Callable[[str], bytes] | None = None,
-    include_mentions: bool = False,
+    include_mentions: bool = True,
 ) -> dict[str, object]:
     """Single deterministic lookup: repo paths -> domains + owning manuals.
 
     Combines ``ouroboros/domains.toml`` (exact ``[modules]`` -> ``[references]`` and longest
-    non-Python prefix match in ``[references]``) and optionally chapter text mentions in
-    Architecture and Development books. Pure data lookup, never a heuristic router.
+    non-Python prefix match in ``[references]``) unioned with exact relative-path chapter
+    mentions in Architecture and Development books (never ambiguous basenames). Pure data
+    lookup, never a heuristic router.
     """
     import re
 
@@ -386,7 +466,9 @@ def resolve_body_references(
     norm_paths: list[str] = []
 
     for raw in paths:
-        norm = str(raw or "").strip().replace("\\", "/").lstrip("./")
+        norm = str(raw or "").strip().replace("\\", "/")
+        while norm.startswith("./"):
+            norm = norm[2:]
         if not norm or norm in by_path:
             continue
         norm_paths.append(norm)
@@ -411,23 +493,31 @@ def resolve_body_references(
                 ordered_manuals.append(manual)
 
     if include_mentions and norm_paths:
-        tokens = []
+        # Match exact repo-relative paths (and `ouroboros/`-relative qualified subpaths like
+        # `tools/control_subagent_spec.py` that still contain `/`), never bare basenames.
+        path_tokens: dict[str, tuple[str, ...]] = {}
         for norm in norm_paths:
-            base = norm.rsplit("/", 1)[-1]
-            tokens.append((norm,) if base == norm else (norm, base))
-        for book_id in ("architecture", "development"):
-            try:
-                book = load_reference_book(root, book_id, read_bytes)
-            except (OSError, ValueError, KeyError):
+            toks = [norm]
+            if norm.startswith("ouroboros/"):
+                sub = norm[len("ouroboros/"):]
+                if "/" in sub:
+                    toks.append(sub)
+            path_tokens[norm] = tuple(toks)
+        chapters = _load_book_chapter_texts(root, read_bytes)
+        for ch_path, ch_text in chapters:
+            if ch_path == "docs/architecture/10-key-invariants.md":
                 continue
-            for chapter in book.chapters:
-                if chapter.source_path in ordered_manuals:
+            for norm in norm_paths:
+                existing = by_path[norm]["manuals"]
+                if ch_path in existing:
                     continue
-                for group in tokens:
-                    if any(re.search(rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])", chapter.text)
-                           for name in group):
-                        ordered_manuals.append(chapter.source_path)
-                        break
+                if any(
+                    re.search(rf"(?<![A-Za-z0-9_./-]){re.escape(tok)}(?![A-Za-z0-9_./-])", ch_text)
+                    for tok in path_tokens[norm]
+                ):
+                    by_path[norm]["manuals"] = (*existing, ch_path)
+                    if ch_path not in ordered_manuals:
+                        ordered_manuals.append(ch_path)
 
     return {
         "by_path": by_path,
@@ -471,9 +561,10 @@ def read_book_section(book: ReferenceBook, title: str) -> BookView:
 
 BOOK_GROWTH_RULE = (
     "Always-resident texts — BIBLE.md, the prompts (prompts/*.md as one text), and the rendered "
-    "Body Map + Reference Atlas — must end no larger than at the contribution base; added text is "
-    "paid in the same text by a statement that leaves, never by a lost fact (DEVELOPMENT \"Paying "
-    "down a size cap\"). Pulled book chapters have no whole-book shrink-only cap: keep each chapter "
+    "Body Map + Reference Atlas — plus over-band standalone specs (> 2,000 lines or > 80,000 chars "
+    "in shrink-only debt) must end no larger than at the contribution base; added text is paid in "
+    "the same text by a statement that leaves, never by a lost fact (DEVELOPMENT \"Paying down a "
+    "size cap\"). Pulled book chapters have no whole-book shrink-only cap: keep each chapter "
     f"within one default read ({BOOK_CHAPTER_MAX_LINES:,} lines / {BOOK_CHAPTER_MAX_CHARS:,} chars) "
     "and split by subject with rationale intact. Manual/tag CI without a base skips comparison. "
     "The owner's book-growth label can approve an exception; local commits are not blocked."
@@ -522,13 +613,13 @@ class BookBalance:
     upstream: str                          # local official development ref, "" when unavailable
     changed: tuple[tuple[str, int], ...]   # sources whose bytes differ from HEAD, with their delta
     merge_base: str = ""                   # exact measured commit, never the feature's tracking tip
-    tier: str = "resident"                 # "resident" (Tier A <= +0 B) | "manual" (Tier B factual + band)
+    tier: str = "resident"                 # "resident" (Tier A <= +0 B) | "shrink_only" (over-band standalone <= +0 B) | "manual" (Tier B)
     chapter_overages: tuple[tuple[str, int, int], ...] = ()  # (path, lines, chars) over one-read band
 
     @property
     def owed(self) -> int:
-        """Known growth owed under Tier A; Tier B manuals carry no whole-book shrink-only debt."""
-        if self.tier != "resident":
+        """Known growth owed under Tier A or over-band standalone shrink-only debt."""
+        if self.tier not in ("resident", "shrink_only"):
             return 0
         delta = self.vs_upstream if self.vs_upstream is not None else self.vs_head
         return max(0, delta or 0)
@@ -595,7 +686,7 @@ def contribution_base(root: Path) -> tuple[str, str]:
     return upstream, base
 
 
-def _source_reader(root: Path, ref: str = "", *, source: str = "worktree") -> Callable[[str], bytes]:
+def source_reader(root: Path, ref: str = "", *, source: str = "worktree") -> Callable[[str], bytes]:
     """Byte reader for a commit ``ref``, the Git ``"index"``, or the ``"worktree"``."""
     root = Path(root)
     if ref:
@@ -613,6 +704,9 @@ def _source_reader(root: Path, ref: str = "", *, source: str = "worktree") -> Ca
             return raw
         return _at_index
     return lambda path: (root / path).read_bytes().replace(b"\r\n", b"\n")
+
+
+_source_reader = source_reader
 
 
 def book_source_sizes(
@@ -746,6 +840,17 @@ def ruled_text_paths(root: Path) -> list[str]:
     return [path for text_id in RULED_TEXTS for path in (ruled_text_sizes(root, text_id) or {})]
 
 
+def standalone_doc_over_band(
+    root: Path, relpath: str, ref: str = "", *, source: str = "worktree",
+) -> bool:
+    """Whether a standalone reference doc currently exceeds the one-default-read band."""
+    try:
+        text = source_reader(Path(root), ref, source=source)(relpath).decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return False
+    return len(text.splitlines()) > BOOK_CHAPTER_MAX_LINES or len(text) > BOOK_CHAPTER_MAX_CHARS
+
+
 def book_balances(
     root: Path, paths: Iterable[str] | None = None, *, source: str = "worktree",
 ) -> list[BookBalance]:
@@ -755,7 +860,8 @@ def book_balances(
         {book_id for book_id, entry in BOOK_ENTRYPOINTS.items()
          for path in paths if book_entrypoint_for(path) == entry})
     texts = list(RULED_TEXTS) if paths is None else sorted({ruled_text_of(path) for path in paths} - {""})
-    standalones = ([] if paths is None else sorted({standalone_reference_of(path) for path in paths} - {""}))
+    standalones = (list(STANDALONE_REFERENCE_DOCS) if paths is None
+                   else sorted({standalone_reference_of(path) for path in paths} - {""}))
     if not wanted and not texts and not standalones:
         return []
     upstream, base = contribution_base(root)
@@ -772,7 +878,7 @@ def book_balances(
         for text_id in texts
     ]
     measures += [
-        (rel, "manual",
+        (rel, "shrink_only" if standalone_doc_over_band(root, rel, source=source) else "manual",
          lambda r, tid, ref="", src=source: standalone_doc_size(r, tid, ref, source=src),
          lambda sizes: sum(sizes.values()))
         for rel in standalones
@@ -819,6 +925,8 @@ def render_book_balance(balance: BookBalance) -> str:
         line += "; contribution unknown"
     if balance.changed:
         line += " (" + ", ".join(f"{Path(path).stem} {delta:+,}" for path, delta in balance.changed) + ")"
+    if balance.tier == "shrink_only":
+        line += " [shrink-only debt until inside one-read band]"
     if balance.chapter_overages:
         ov = ", ".join(f"{Path(p).name} {lines:,}L/{chars:,}c" for p, lines, chars in balance.chapter_overages)
         line += f" [OVER one-read band: {ov}]"

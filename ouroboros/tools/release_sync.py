@@ -231,6 +231,7 @@ VERSION_CARRIER_SPANS: Tuple[VersionCarrierSpan, ...] = (
         "readme_download_refs", "README.md",
         re.compile(r'(?:^\[download-[a-z0-9_-]+\]:[^\n]*(?:\n|\Z))+', re.MULTILINE),
     ),
+    VersionCarrierSpan("architecture_header", "docs/ARCHITECTURE.md", _ARCH_HEADER_RE),
     # uv.lock mirrors the editable root package version (ARCHITECTURE "Version
     # carriers"); the descriptor rides the same structural regex sync_version
     # already writes through, so a managed-update or tactical-rebase conflict in
@@ -576,8 +577,9 @@ def version_carrier_desyncs(
         badge_token = f"version-{_shields_escape(version)}-green"
         if extract_readme_badge_version(readme_text) != version or badge_token not in readme_text:
             desync.append(f"README.md badge (expected {version} / {badge_token})" if detailed else "README.md badge")
-    # docs/ARCHITECTURE.md is no longer a version carrier (Body Map cache-invariance): ignore arch_text unless
-    # a legacy file still carries an explicit `# Ouroboros vX.Y.Z` header that disagrees with VERSION.
+    # Expand-contract: keep syncing transitional `# Ouroboros vX.Y.Z` on disk so
+    # pre-migration installations update cleanly, while tolerating a headerless
+    # entrypoint so a later release can retire the version carrier cleanly.
     if arch_text and (found_arch := extract_architecture_header_version(arch_text)) and found_arch != version:
         desync.append(f"docs/ARCHITECTURE.md header (expected # Ouroboros v{version})" if detailed else "ARCHITECTURE.md header")
     # tests/test_gateway_parity.py pins this to VERSION, so it is a release
@@ -633,7 +635,7 @@ def release_metadata_findings(texts: dict[str, str]) -> List[str]:
         uv_lock_text=texts.get("uv.lock", ""),
         web_package_text=texts.get("web/package.json", ""),
         web_package_lock_text=texts.get("web/package-lock.json", ""),
-        readme_text=readme or "",
+        readme_text=readme or "", arch_text=texts.get("docs/ARCHITECTURE.md", ""),
         api_types_text=texts.get("web/modules/api_types.js", ""),
         download_readme_text=readme or "", site_install_text=texts.get("site/install/index.html", ""),
         docs_install_text=texts.get("docs/install/index.html", ""), detailed=True,
@@ -666,6 +668,7 @@ def check_worktree_version_sync(repo_dir) -> str:
             web_package_text=_read("web/package.json"),
             web_package_lock_text=_read("web/package-lock.json"),
             readme_text=_read("README.md"),
+            arch_text=_read("docs/ARCHITECTURE.md"),
             api_types_text=_read("web/modules/api_types.js"),
             download_readme_text=_read("README.md"),
             site_install_text=_read("site/install/index.html"),
@@ -796,6 +799,17 @@ def sync_release_metadata(repo_dir: str, *, write: bool = True, published_versio
         if new_text != text:
             put(install_page, new_text)
             changed.append(relative.as_posix())
+
+    arch = root / "docs" / "ARCHITECTURE.md"
+    if arch.exists():
+        text = arch.read_text(encoding="utf-8")
+        new_text = _ARCH_HEADER_RE.sub(
+            lambda m: m.group(1) + version + m.group(3),
+            text,
+        )
+        if new_text != text:
+            put(arch, new_text)
+            changed.append("docs/ARCHITECTURE.md")
 
     return changed
 

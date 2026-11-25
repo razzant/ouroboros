@@ -1,6 +1,6 @@
 # 6.3 Agent Core — Delegated Subagents & Vendor Maintenance
 
-How I delegate parallel work to API children, nannies, and CLI agent sessions (Claude Code, Codex, Cursor, Antigravity) via `schedule_subagent` over the managed Claudexor transport, and how vendor programs are maintained. I inspect results and integrate patches explicitly (`get_task_result`, `integrate_delegated_patch`, `integrate_subagent_patch`). Children inherit parent cancellation and live owner words, never silent write authority or unreviewed promotion into my body.
+How I delegate parallel work to API children, nannies, and CLI agent sessions (Claude Code, Codex, Cursor, Antigravity) via `schedule_subagent` and `delegate_start`/`delegate_wait` over the managed Claudexor transport, and how vendor programs are maintained. I inspect results and integrate patches explicitly (`get_task_result`, `integrate_delegated_patch`, `integrate_subagent_patch`). Children inherit parent cancellation and live owner words, never silent write authority or unreviewed promotion into my body.
 
 ### Delegated subagents (Claudexor transport + the nanny)
 

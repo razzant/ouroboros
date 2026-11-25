@@ -86,7 +86,7 @@ def _build_system_text(task_overrides=None, *, context_mode="max"):
 
 def test_max_mode_inlines_architecture_and_development_in_full():
     text = _build_system_text(context_mode="max")
-    assert "## ARCHITECTURE.md (navigation map)" in text
+    assert "# Architecture (source navigation)" in text
     assert _ARCH_BODY_SENTINEL not in text  # whole manuals are drawn on demand, not preloaded in Max
     assert "## DEVELOPMENT.md\n\n" not in text
     assert "docs/DEVELOPMENT.md" in text
@@ -381,7 +381,7 @@ def test_max_mode_external_workspace_keeps_arch_full_but_drops_development():
         },
         context_mode="max",
     )
-    assert "## ARCHITECTURE.md (navigation map)" in external
+    assert "# Architecture (source navigation)" in external
     assert _ARCH_BODY_SENTINEL not in external
     assert "## DEVELOPMENT.md\n\n" not in external
     assert "docs/DEVELOPMENT.md" in external
@@ -426,7 +426,7 @@ def test_low_mode_external_workspace_gets_both_book_navigation_views():
         },
         context_mode="low",
     )
-    assert "navigation map" in external
+    assert "source navigation" in external
     assert _ARCH_BODY_SENTINEL not in external
     assert "docs/DEVELOPMENT.md" in external
 
@@ -520,16 +520,16 @@ def test_promoted_self_body_requirement_reaches_the_contract_and_context_without
 def test_max_mode_evolution_task_keeps_arch_and_development_full():
     """Unified Body Map: evolution, deep self-review, and Low all carry the same resident Body Map + pointers."""
     text = _build_system_text({"type": "evolution"}, context_mode="max")
-    assert "## ARCHITECTURE.md (navigation map)" in text
+    assert "# Architecture (source navigation)" in text
     assert _ARCH_BODY_SENTINEL not in text
     assert "## DEVELOPMENT.md\n\n" not in text
     assert "docs/DEVELOPMENT.md" in text
 
     review_text = _build_system_text({"type": "deep_self_review"}, context_mode="max")
-    assert "## ARCHITECTURE.md (navigation map)" in review_text
+    assert "# Architecture (source navigation)" in review_text
 
     low_text = _build_system_text({"type": "evolution"}, context_mode="low")
-    assert "navigation map" in low_text
+    assert "source navigation" in low_text
     assert _ARCH_BODY_SENTINEL not in low_text
     assert "docs/DEVELOPMENT.md" in low_text
 
@@ -573,11 +573,11 @@ def test_readme_and_checklists_are_on_demand_pointer_in_both_modes():
 
 def test_low_mode_architecture_is_navigation_map_not_full_body():
     text = _build_system_text(context_mode="low")
-    assert "navigation map" in text
+    assert "source navigation" in text
     assert "Section A" in text and "Section B" in text  # headings present
-    assert "- Section A — lines 3-12" in text  # parent keeps its complete subtree
-    assert "  - Section A child — lines 7-12" in text
-    assert "    - Section A detail — lines 9-12" in text
+    assert "- Section A: `docs/ARCHITECTURE.md` lines 3-12" in text  # parent keeps its complete subtree
+    assert "- Section A child: `docs/ARCHITECTURE.md` lines 7-12" in text
+    assert "- Section A detail: `docs/ARCHITECTURE.md` lines 9-12" in text
     assert _ARCH_BODY_SENTINEL not in text  # full body NOT inlined in low
 
 

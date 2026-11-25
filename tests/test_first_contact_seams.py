@@ -601,15 +601,18 @@ def test_the_required_handbook_is_counted_physically_but_never_paid_by_memory():
 
 
 def test_the_required_handbook_never_takes_the_books_to_maps():
-    """The ordinary size decides on maps: a folded view under the proven rung's goal stays Max with whole books even
-    when this task's directly required handbook puts the physical request over it."""
+    """Under the unified resident Body Map, first-contact folding keeps Max (no retired maps hop)
+    even when this task's directly required handbook adds tokens to the physical request."""
     normal = (_contents(800_000, room={"cause": "held", "cuts": [], "window": 1}), "max")
-    assert _prefer(normal, (140_000, 140_000, 140_000))[0][1] == "low"
+    plain, plain_asked = _prefer(normal, (140_000, 140_000, 140_000))
+    assert plain[1] == "max" and plain_asked and _story(plain) == 200_000
     kept, asked = _prefer(normal, (140_000, 140_000, 140_000), required=30_000)
-    assert kept[1] == "max" and asked and _story(kept) == 200_000  # its tellings folded, its books whole
+    assert kept[1] == "max" and asked and _story(kept) == 200_000
 
 
 def test_a_maps_rung_keeps_the_folded_tellings_and_says_why():
+    """Under the unified resident Body Map, a first-contact limit folds memory tellings in Max
+    with its disclosure note rather than switching to a retired maps rung."""
     from ouroboros.memory_view_work import PROGRAM_HISTORY_HEAD
 
     held = {"cause": "held", "cuts": ["F2"], "window": 1}
@@ -618,10 +621,10 @@ def test_a_maps_rung_keeps_the_folded_tellings_and_says_why():
     assert folded_data != ordinary_data
     normal = (_contents(800_000, room=held, room_data=ordinary_data), "max")
     chosen, _ = _prefer(normal, (90_000, 120_000, 90_000), story_after=200_000)
-    assert chosen[1] == "low" and _story(chosen) == 200_000  # the folded tellings, not every story body again
-    facts = chosen[0]["low"][1]
-    assert facts["first_contact_preference"] and facts["max_room"]["cause"] == "first_contact"
-    assert chosen[0]["low"][2] == folded_data and chosen[0]["low"][2].startswith(PROGRAM_HISTORY_HEAD)
+    assert chosen[1] == "max" and _story(chosen) == 200_000  # the folded tellings, not every story body again
+    facts = chosen[0]["max"][1]
+    assert facts["first_contact_preference"] and facts["max_room"] == held
+    assert chosen[0]["max"][2] == folded_data and chosen[0]["max"][2].startswith(PROGRAM_HISTORY_HEAD)
     folded, _ = _prefer(normal, (90_000, 0, 90_000), story_after=200_000)
     assert folded[1] == "max" and _story(folded) == 200_000  # still above F1, yet smaller than the whole: kept
     assert folded[0]["max"][2] == folded_data and isinstance(folded[0]["max"][2], str)

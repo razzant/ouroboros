@@ -154,7 +154,7 @@ def carrier_guidance(conflicts: List[str]) -> str:
     return (
         " Version carriers: the update lands under the official target's version — VERSION is "
         "already projected, every NON-conflicted carrier token (pyproject.toml, "
-        "web/package.json, the README badge, install pages) is "
+        "web/package.json, the README badge, the docs/ARCHITECTURE.md header, install pages) is "
         "already synced mechanically, and carrier conflicts confined to declared version spans "
         "were already resolved to the target's side. A carrier still in your list degraded to "
         "manual resolution (a broken or duplicate span anchor, or a conflict outside the spans): "

@@ -840,7 +840,7 @@ def _stamp_read_view(ctx: ToolContext, target: Any, opened: str, opened_root: st
                   ToolResult(status="ok", code="OK", text=rendered, meta={"read_view": compact}))
         rendered = _publish_tool_result(ctx, result)
         acknowledge_staged_output_read(ctx, compact, rendered)
-        if body_note := own_body_reference_note(ctx, target, opened_root, active_repo=active_repo_dir_for(ctx)):
+        if body_note := own_body_reference_note(ctx, target, opened_root):
             rendered = append_published_text(ctx, rendered, "\n" + body_note)
     elif identity_note:
         rendered = append_published_text(ctx, rendered, "\n" + identity_note)

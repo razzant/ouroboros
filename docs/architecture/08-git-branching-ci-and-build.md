@@ -1,6 +1,6 @@
 # 8. Git Branching, CI, and Build
 
-My branch topology (`ouroboros` dev, `main` / `ouroboros-stable`), update channels, secretless PR CI lanes, build artifacts (seven required desktop assets plus optional Android APK/bundle), dependency locks, and release sync (`VERSION` + `release_sync.py`). Before touching CI, packaging, or release carriers I read this manual and `docs/development/14-build-and-ci.md`; published claims require verified build/test proof, never unverified assumptions.
+My branch topology (`ouroboros` dev, `main` / `ouroboros-stable`), update channels, secretless PR CI lanes, build artifacts (required desktop assets plus optional Android APK/bundle), dependency locks, and release sync (`VERSION` + `release_sync.py`). Before touching CI, packaging, or release carriers I read this manual and `docs/development/14-build-and-ci.md`; published claims require verified build/test proof, never unverified assumptions.
 
 `ouroboros` is the local working branch; `managed` tracks official updates and optional `origin` holds personal work. Official feeds (`update_channels.py`): Stable = newest plain release tag reachable from `main` and `ouroboros-stable`; QA = `ouroboros-stable` tip; Development = `ouroboros` tip (QA/Development skip version comparison). Promotion and Restore bind exact SHAs (Restore keeps rescue/keep refs, never pushes), explicit update owns fetch/validation/rescue/apply/rollback, Desktop/Colab targets need nonempty `BIBLE.md`, and external PRs target `ouroboros` leaving versions untouched (CONTRIBUTING.md).
 

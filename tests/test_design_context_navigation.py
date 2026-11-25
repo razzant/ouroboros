@@ -527,21 +527,23 @@ def test_the_guard_asks_again_where_only_the_window_took_the_bible_to_its_map_un
         low, high = (low, middle) if starts(middle) else (middle, high)
     early, late = high, 2 * high
     _, _, rows, _, text = starts(early)
-    assert rows == ["design_bible"] and design.operative_view in text  # the window's map, above the budget's number
+    assert rows == ["design_bible", "body_map"] and design.operative_view in text  # the window's maps, above the budget's number
     plan, asked, view = build(fitted.core, early, late)
     rows, steps, text = _shown(view)
     assert asked == [early, late] and walked == [early, late] and plan.window_tokens == late
     assert not rows and design.full_text in text and text.count("A sentence of the mechanism and its why.") == 50 * 120
     assert "OWNER_UNTOLD_WHOLE" in text and "WORDS THAT STARTED THE WORK" in json.dumps(plan.messages_for("nano"))
     plan, asked, view = build(fitted.core, early, early)  # the same window: asked once more, nothing walked again
-    assert asked == [early, early] and walked == [early] and _shown(view)[0] == ["design_bible"]
-    # The budget alone, the window wide: it takes host forms and the bible's map for itself (``start_room``), asks nothing.
+    assert asked == [early, early] and walked == [early] and _shown(view)[0] == ["design_bible", "body_map"]
+    # The budget alone, the window wide: it takes host forms and the bible's map for itself (``start_room``), asks nothing;
+    # Body Map is WINDOW_ONLY so a soft Nano target never shortens it.
     monkeypatch.setattr(context_budget, "OWNER_NANO_TARGET_TOKENS", 30_000)
     mine, other = _fitting(tmp_path / "budget", monkeypatch, authored=True, others=True, required_words=30)
     plan, asked, view = build(other.core, 300_000)
     held = view.memory_facts["host_sections_addressed"]
     assert asked == [300_000] and walked == [300_000] and mine.operative_view in _shown(view)[2]
     assert {row["section_id"] for row in held} >= {"runtime", "design_bible"} and {row.get("start_room") for row in held} == {"nano"}
+    assert "body_map" not in {row["section_id"] for row in held}
 
 
 def test_without_a_measured_window_only_a_refusal_past_tellings_takes_the_bible(tmp_path, monkeypatch):
