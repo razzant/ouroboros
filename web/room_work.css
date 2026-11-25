@@ -170,7 +170,11 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     right: var(--rw-right, 0px);
     box-sizing: border-box;
     max-height: min(60svh, 28rem);
-    overflow-y: auto;
+    /* The sheet's scrollbar must not take width from its content. When it appears with the growing list it
+       shrinks the box the rows are sized against, and a row would stick out of the sheet by the scrollbar's
+       width. The scrollbar is therefore always there: the rows keep their width whether the sheet scrolls
+       or not. */
+    overflow-y: scroll;
     overscroll-behavior: contain;
     border: 1px solid transparent;
     border-radius: var(--radius-sheet);
