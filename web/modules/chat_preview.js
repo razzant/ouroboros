@@ -179,8 +179,8 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
     const doc = feed.ownerDocument;
     const profile = provenScope(scope);
     const entry = previewEntryKey(profile, room);
-    // `landed`: a canonical replay drew the room.
-    let root = null, retiring = false, disposed = false, landed = false;
+    // `landed`: a canonical replay drew the room; `stale`: its newest read failed (a copy painted since says so).
+    let root = null, retiring = false, disposed = false, landed = false, stale = false;
     // This room's entry text; '' when it has none (never read here, or it gave way to rooms read since).
     const stored = store => (store && current(store) ? store.getItem(entry) || '' : '');
     const saved = () => {
@@ -288,7 +288,7 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
             root.dataset.savedPreview = 'true';
             root.append(doc.createElement('div'));
             root.firstElementChild.className = 'chat-load-older-note';
-            note('updating');
+            note(stale ? 'not current' : 'updating');
             for (const row of rows) {
                 const bubble = doc.createElement('div');
                 bubble.className = `chat-bubble ${row.role}`;
@@ -336,10 +336,10 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
             if (refusal(error)) discard();
             else if (error?.foreignProfile && provenScope(error.servingScope)) dropPaintedPreviews();
         },
-        /** The room's newest read failed: a refusal discards, anything else leaves the text labelled. */
+        /** The room's newest read failed: a refusal discards, anything else labels the text, now or as it paints. */
         failed(error) {
             if (refusal(error)) discard();
-            else note('not current');
+            else { stale = true; note('not current'); }
         },
         destroy() {
             disposed = true;

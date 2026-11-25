@@ -1140,6 +1140,22 @@ test('an opening held back by the socket\'s missing proof paints its saved text 
     assert.equal(previewNode(f), undefined, 'once, and never over canonical history');
 });
 
+// Astra 7, neon 3: the opening's first read failed before the proof came (Retry stands); the copy painted then says
+// it is not current, never that it is updating.
+test('saved text painted on the proof after the first read failed says it is not current', async (t) => {
+    const read = held();
+    let proven = false;
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => proven });
+    await settle(() => f.calls.length === 1);
+    read.release({ httpStatus: 500, body: { error: 'Internal error' } });
+    const retry = () => f.messages.querySelector('.chat-load-older')?.querySelector('.chat-load-older-btn');
+    await settle(() => retry()?.textContent === 'Retry loading messages');
+    assert.equal(retry()?.textContent, 'Retry loading messages', 'the failed read offers Retry');
+    proven = true;
+    f.proveProfile();
+    assert.equal(previewNode(f)?.children[0].textContent, 'Saved text preview · not current');
+});
+
 test('a proof after the canonical read paints no saved text over it', async (t) => {
     let proven = false;
     const f = fixture(t, page([row('chat:6', 'Canonical answer')]), null,
