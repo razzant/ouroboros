@@ -23,10 +23,9 @@ def _framed_widget_sources() -> str:
     out of it (widget_render.js), the framed mounts (widget_module.js), the
     in-frame bootstrap (widget_frame.js and its classic bridge,
     widget_frame_bridge.js), the framed-card chrome
-    (widget_card.js), the card reorder handles (widget_reorder.js), the
-    declarative chart helpers (widget_chart.js) and Beautiful Context's frame
-    host (context_report_host.js). Negative pins run against this union so the
-    moved code never leaves their coverage."""
+    (widget_card.js), the card reorder handles (widget_reorder.js) and the
+    declarative chart helpers (widget_chart.js). Negative pins run against this
+    union so the moved code never leaves their coverage."""
     return (
         _widgets_js()
         + _render_js()
@@ -36,7 +35,6 @@ def _framed_widget_sources() -> str:
         + _read("web/modules/widget_card.js")
         + _read("web/modules/widget_reorder.js")
         + _read("web/modules/widget_chart.js")
-        + _read("web/modules/context_report_host.js")
     )
 
 
@@ -56,8 +54,9 @@ def test_widgets_use_design_radius_tokens():
 def test_context_report_page_is_admitted_by_its_own_csp_hashes():
     """Beautiful Context is one self-contained document: its policy admits its inline style and script by hash.
 
-    An edit that keeps an old hash ships a page whose style or script the browser refuses, and only the opt-in
-    browser lane opens that page (``tests/test_widgets_ui_browser.py``).
+    An edit that keeps an old hash ships a page whose style or script the browser refuses; the opt-in browser
+    lane opens it on Widgets (``tests/test_widgets_ui_browser.py``) and the Windows native window opens the
+    same file (``tests/test_context_report_native_window.py``).
     """
     import base64
     import hashlib
@@ -74,9 +73,9 @@ def test_context_report_page_is_admitted_by_its_own_csp_hashes():
 
 
 def test_context_report_page_sends_nothing_and_shares_the_readers_page_limit():
-    """The page has no way to send what it reads (its palette arrives one way: the browser lane,
-    ``tests/test_widgets_ui_browser.py``), and the page and the reader name one page limit, so a report the reader
-    writes is one the page opens."""
+    """The page has no way to send what it reads (its palette follows the inherited color scheme, which the
+    browser lane checks, ``tests/test_widgets_ui_browser.py``), and the page and the reader name one page
+    limit, so a report the reader writes is one the page opens."""
     import re
 
     from ouroboros.context_attempt_reader import PAGE_LIMIT
