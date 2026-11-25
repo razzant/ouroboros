@@ -1236,10 +1236,11 @@ def test_the_descriptions_name_where_a_finish_may_be_silent():
 
     entries = {entry.name: entry.schema for entry in get_tools()}
     finish_text = entries["finish_task"]["description"]
-    assert ("Where a finish owes no one words (a self-started run, a reply to its place or a program's note, or a root "
-            "that answered live), silent=true sends no message (any answer stays your internal note).") in finish_text
+    assert ("On a self-started run (a wake or a schedule-born root without a place), a turn answering its place or a "
+            "program's note, or a root whose answer already reached its human live in this run, the finish owes no one "
+            "words: silent=true sends no message (any answer stays your internal note).") in finish_text
     assert "Silence is refused while your human awaits a reply and changes no result, review or control." in finish_text
-    assert "where it owes no words" in entries["finish_task"]["parameters"]["properties"]["silent"]["description"]
+    assert "where allowed above and no human reply is owed" in entries["finish_task"]["parameters"]["properties"]["silent"]["description"]
     send_text = entries["send_user_message"]["description"]
     assert "Do not pre-send" not in send_text
     assert "Send the final answer here only if work goes on after it; a root then ends silently, never repeating it." in send_text
