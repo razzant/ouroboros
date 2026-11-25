@@ -1,0 +1,29 @@
+name: Direct loop read inventory
+'on':
+  push:
+    branches: ['qa/m2-4197-56b4090f']
+permissions:
+  contents: read
+jobs:
+  inventory:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: '56b4090fe9373b8365ea3ddd8aee7a69c8987356'
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+      - name: Check both readers of the declared names
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne '56b4090fe9373b8365ea3ddd8aee7a69c8987356') { throw 'Unexpected product revision' }
+          $python = (Get-Command python).Source
+          & $python scripts/safe_test.py --timeout 240 -- $python -m pytest -n 0 -p no:cacheprovider -o 'addopts=' -vv 'tests/test_module_handle_extraction.py::test_the_declared_set_is_exactly_what_the_leaf_reads_through_the_handle[ouroboros/loop_model_call.py]' 'tests/test_code_shape_facts.py::test_every_leaf_the_extraction_table_pins_reads_as_its_handle_and_its_declared_calls'
+          exit $LASTEXITCODE
