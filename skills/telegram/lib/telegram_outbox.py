@@ -43,11 +43,12 @@ def _same_api_authority(state_dir, recorded_base: str) -> bool:
     if not recorded_base:
         return True
     try:
-        live = telegram_api_base(pathlib.Path(state_dir))
+        a, b = urlsplit(recorded_base.strip()), urlsplit(telegram_api_base(pathlib.Path(state_dir)).strip())
+        pa = a.port if a.port is not None else (443 if a.scheme.lower() == "https" else 80 if a.scheme.lower() == "http" else 0)
+        pb = b.port if b.port is not None else (443 if b.scheme.lower() == "https" else 80 if b.scheme.lower() == "http" else 0)
     except (TelegramSettingsError, ValueError, OSError):
         return False
-    a, b = urlsplit(recorded_base), urlsplit(live)
-    return (a.scheme.lower(), (a.hostname or "").lower()) == (b.scheme.lower(), (b.hostname or "").lower())
+    return (a.scheme.lower(), (a.hostname or "").lower(), pa) == (b.scheme.lower(), (b.hostname or "").lower(), pb)
 
 SCHEMA = 1
 MAX_AGE_SEC = 24 * 3600  # still waiting after a day: stopped, never delivered that late
@@ -598,11 +599,11 @@ class Outbox:
             rec_chat = int(record.get("chat_id") or 0)
             rec_base = str(record.get("api_base") or "")
             topic_name = str(record.get("topic") or "")
-            if (
-                (rec_chat > 0 and not owner_matches_live(state_dir, rec_chat))
-                or (rec_chat <= 0 and topic_name != "quiz_state")
-                or (rec_base and not _same_api_authority(state_dir, rec_base))
-            ):
+            if ((rec_chat > 0 and not owner_matches_live(state_dir, rec_chat))
+                    or (rec_chat <= 0 and topic_name != "quiz_state")
+                    or (rec_base and not _same_api_authority(state_dir, rec_base))):
+                for part in record["parts"]:
+                    if part.get("state") in _ACTIVE: part.update(state="failed", reason="changed")
                 record.update(state="failed", reason="changed")
                 await self._finish(record)
                 return
@@ -656,10 +657,10 @@ class Outbox:
         except (TelegramSettingsError, ValueError, OSError):
             api_base = ""
         return {"schema": SCHEMA, "id": f"{seq:012d}-{uuid.uuid4().hex[:8]}", "seq": seq, "topic": topic,
-                "created_at": self.clock(), "state": state, "parts": [], "bot": "",
-                "chat_id": chat_id, "api_base": api_base, "next_at": 0.0,
-                "retry_delay": TELEGRAM_RETRY_INITIAL_SEC, "reason": "", "source": _source(event),
-                "subject": copies.subject_of(topic, event)}
+                "created_at": self.clock(), "state": state, "parts": [], "bot": "", "chat_id": chat_id,
+                "api_base": api_base, "next_at": 0.0, "retry_delay": TELEGRAM_RETRY_INITIAL_SEC, "reason": "",
+                "source": _source(event), "subject": copies.subject_of(topic, event),
+                **({"secret": True} if topic in {"quiz", "chat.quiz"} and isinstance(event.get("secret_request"), dict) else {})}
 
     async def _payload(self, record: dict, event: dict) -> Optional[bytes]:
         """The event as UTF-8 JSON, if the waiting bounds take it (kept copies never count there); refused (and not

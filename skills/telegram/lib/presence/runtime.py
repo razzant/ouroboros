@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio, contextlib, inspect, json, pathlib, re, sqlite3, threading, time, uuid
+import asyncio, contextlib, hashlib, inspect, json, pathlib, re, sqlite3, threading, time, uuid
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
@@ -541,7 +541,7 @@ class PresenceRuntime:
         if client is None:
             raise RuntimeError("telegram token is unavailable")
         limit, tok = client.download_limit, lease.lease_token or ""
-        attempt_dir = f"{outbox_files.safe_component(lease.event_id)}--{tok[:16]}" if tok else outbox_files.safe_component(lease.event_id)
+        attempt_dir = f"{outbox_files.safe_component(lease.event_id)}--{hashlib.sha256(tok.encode('utf-8')).hexdigest()[:16]}" if tok else outbox_files.safe_component(lease.event_id)
         event_dir = self.state_dir / "staging" / attempt_dir
         staged, settled, waiting = [], False, None
         try:
@@ -763,8 +763,12 @@ class PresenceRuntime:
             async def before_send() -> None:
                 _ensure_current()
                 await self._check_place(lease.payload, thread_id=str(lease.payload.get("topic_id") or ""))
+                verify_task = asyncio.ensure_future(asyncio.to_thread(outbox_files.open_verified, lease.payload, state_dir=self.state_dir, require_for_media=True))
                 try:
-                    fresh_fds = await asyncio.to_thread(outbox_files.open_verified, lease.payload, state_dir=self.state_dir, require_for_media=True)
+                    fresh_fds = await verify_task
+                except asyncio.CancelledError:
+                    verify_task.add_done_callback(lambda fut: not fut.cancelled() and not fut.exception() and outbox_files.close_verified(fut.result()))
+                    raise
                 except outbox_files.FrozenFileMissing as exc:
                     raise PlaceHeld(f"Held: {exc}") from exc
                 outbox_files.close_verified(verified_fds)

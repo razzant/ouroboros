@@ -885,3 +885,115 @@ def test_round14_adversarial_regressions(tmp_path, monkeypatch):
     st_store.unregister_owner()
     assert st_store.release_own_leases()["outbox"] == 1  # Retired owner lease IS released!
     st_store.close()
+
+
+def test_round15_adversarial_regressions(tmp_path, monkeypatch):
+    import hashlib, inspect, os
+
+    plugin = _load_plugin("tg_sec_r15")
+    from tg_sec_r15.lib import telegram_api, telegram_outbox, telegram_owner_auth, telegram_presence_bridge, telegram_secret_guard as sg
+    from tg_sec_r15.lib.presence import custody, custody_schema, events, file_access, transport
+    from tg_sec_r15.scripts import platform_support, telegram_menu
+    from tg_sec_r15.scripts.telegram_settings import merge_settings
+
+    # 1) Full canonical (scheme, host, port) origin check + _ACTIVE parts failed on "changed"
+    st_dir = tmp_path / "r15_origin"
+    api = _StubApi(st_dir)
+    merge_settings(st_dir, {"TELEGRAM_CHAT_ID": "18", "TELEGRAM_API_BASE": "http://localhost:8082"})
+    assert not telegram_outbox._same_api_authority(st_dir, "http://localhost:8081")
+    assert telegram_outbox._same_api_authority(st_dir, "http://localhost:8082") and not telegram_outbox._same_api_authority(st_dir, "http://localhost:80")
+    ob = telegram_outbox.Outbox(api)
+    ob._bodies["outbound"] = lambda _ev: asyncio.sleep(0)
+    rec = {"schema": 1, "id": "000000000001-deadbeef", "seq": 1, "topic": "outbound", "created_at": time.time(),
+           "state": "retry_wait", "parts": [{"n": 0, "state": "retry_wait"}], "bot": "123456",
+           "chat_id": 18, "api_base": "http://localhost:8081", "next_at": 0.0, "retry_delay": 5.0, "reason": ""}
+    ob._ops[rec["id"]] = rec
+    ob._written.add(rec["id"])
+    asyncio.run(ob._resume(rec, ahead=True))
+    assert (rec["state"], rec["reason"], rec["parts"][0]["state"]) == ("failed", "changed", "failed")
+
+    # 2) Secret quiz _Probe (_WouldSend) & OutboxDeferred never poison secret_uncertain; clear_uncertain_secret clears
+    q_api = _StubApi(tmp_path / "r15_quiz")
+    merge_settings(tmp_path / "r15_quiz", {"TELEGRAM_CHAT_ID": "18"})
+    q_handler = plugin._make_quiz(q_api, plugin._typing_cue(q_api))
+    q_ev = {"task_id": "t1", "quiz_id": "q1", "question": "Enter token", "options": [], "transport": {},
+            "secret_request": {"plugin_name": "p", "fields": [{"key": "tok"}]}}
+    tok_ctx = telegram_api.OUTBOUND_JOURNAL.set(telegram_outbox._Probe())
+    try:
+        with pytest.raises(telegram_outbox._WouldSend): asyncio.run(q_handler(q_ev))
+    finally:
+        telegram_api.OUTBOUND_JOURNAL.reset(tok_ctx)
+    assert sg.has_uncertain_secret(q_api, "123456", 18) is None
+    monkeypatch.setattr(plugin.telegram_quiz, "send_quiz_card", lambda *a, **k: (_ for _ in ()).throw(telegram_outbox.OutboxDeferred()))
+    with pytest.raises(telegram_outbox.OutboxDeferred): asyncio.run(q_handler(q_ev))
+    assert sg.has_uncertain_secret(q_api, "123456", 18) is None
+    sg.mark_secret_uncertain(q_api, "123456", 18, reason="test")
+    assert sg.has_uncertain_secret(q_api, "123456", 18) is not None
+    sg.clear_uncertain_secret(q_api, "123456", 18)
+    assert sg.has_uncertain_secret(q_api, "123456", 18) is None
+
+    # 3) Code-formatted /mode & /menu do not run locally; /main /main start offset; /m@x/restart not stripped
+    assert plugin._MAIN_CMD_RE.match("/m@x/restart") is None
+    mm_msg = {"text": "/main /main", "entities": [{"type": "code", "offset": 6, "length": 5}]}
+    assert telegram_owner_auth.is_literal_span(mm_msg, "/main", start=0) is False and telegram_owner_auth.is_literal_span(mm_msg, "/main", start=6) is True
+    mode_api = _StubApi(tmp_path / "r15_mode")
+    merge_settings(tmp_path / "r15_mode", {"TELEGRAM_CHAT_ID": "18", "TELEGRAM_OWNER_CHAT_MODE": "direct"})
+    sent_local, injected_local = [], []
+    fake_cl = types.SimpleNamespace(bot_id="123456", api_base_origin="https://api.telegram.org",
+                                    send_message=lambda cid, txt, **k: asyncio.sleep(0, result=sent_local.append(txt) or 1),
+                                    send_message_with_inline_keyboard=lambda cid, txt, kb, **k: asyncio.sleep(0, result=sent_local.append(txt) or 1))
+    monkeypatch.setattr(plugin, "_inject", lambda _a, p: asyncio.sleep(0, result=injected_local.append(p)))
+    for raw_cmd in ("/mode presence", "/menu"):
+        upd = {"update_id": 1, "message": {"chat": {"id": 18, "type": "private"}, "from": {"id": 18}, "message_id": 10,
+                                           "text": raw_cmd, "entities": [{"type": "code", "offset": 0, "length": len(raw_cmd)}]}}
+        asyncio.run(plugin._handle_owner_message_inner(mode_api, fake_cl, upd, 1, "strict", "en"))
+    assert sent_local == [] and len(injected_local) == 2 and plugin._load_settings(mode_api)["TELEGRAM_OWNER_CHAT_MODE"] == "direct"
+    assert all(p.get("literal_text") is True for p in injected_local)
+
+    # 4) external_reply user/hidden_user referencing refused_reply fails closed before Presence ingest
+    sg.record_secret_message(api, "123456", 18, 701, kind="refused_reply")
+    for origin in ({"type": "user", "sender_user": {"id": 18}}, {"type": "hidden_user", "sender_user_name": "Anon"}):
+        ext_msg = {"chat": {"id": -10055}, "message_id": 44, "external_reply": {"origin": origin}, "quote": {"text": "sk-123"}}
+        assert sg.classify_secret_exposure(api, "123456", ext_msg) is not None
+        got = []
+        rt = types.SimpleNamespace(ingest_update=lambda u, **k: asyncio.sleep(0, result=got.append(u)))
+        asyncio.run(telegram_presence_bridge.handle_non_owner_update(api, fake_cl, {"update_id": 2, "message": ext_msg}, "18", runtime_getter=lambda _a: rt))
+        assert got == []
+
+    # 5) Distinct colon-free staging directories per lease + fail-closed verified_fds + Windows-safe _pid_alive
+    cstore = custody.CustodyStore(tmp_path / "r15_c.sqlite3")
+    ev = events.parse_telegram_update({"update_id": 1, "message": {"chat": {"id": -100, "type": "supergroup", "title": "G"}, "from": {"id": 9, "first_name": "U"}, "message_id": 1, "date": 1700000000, "text": "hi"}}, bot_account_id="123456", places=True)
+    assert ev is not None and cstore.commit_update(1, ev)
+    l1 = cstore.claim_inbox(lease_sec=10.0)
+    assert l1 and cstore.release_inbox(ev.source_event_id, reason="retry", retry_after_sec=0)
+    l2 = cstore.claim_inbox(lease_sec=10.0)
+    assert l2 and l1.lease_token != l2.lease_token and l1.lease_token[:16] == l2.lease_token[:16]
+    d1, d2 = hashlib.sha256(l1.lease_token.encode()).hexdigest()[:16], hashlib.sha256(l2.lease_token.encode()).hexdigest()[:16]
+    assert d1 != d2 and ":" not in d1 and ":" not in d2
+    cstore.close()
+    assert "process_alive" in inspect.getsource(custody_schema._pid_alive) and 'os.name == "nt"' in inspect.getsource(custody_schema._pid_alive)
+    assert custody_schema._pid_alive(os.getpid()) is True and platform_support.process_alive(os.getpid()) is True
+    tmp_up = tmp_path / "f.bin"
+    tmp_up.write_bytes(b"abc")
+    with pytest.raises(transport.TelegramRequestNotSent, match="verified upload descriptor missing"):
+        transport._AsyncMultipartStream.open({}, [("document", tmp_up)], verified_fds={})
+
+    # 6) Positive binding_id in receipt_visible_to + non-ASCII/NaN/group-burn pairing + menu getMe + Host /panic
+    monkeypatch.setattr("ouroboros.presence_authority.presence_caller_binding", lambda c: getattr(c, "_bid", None))
+    c_b1 = types.SimpleNamespace(task_id="t1", _bid="bind-1", task_metadata={"presence": {"place_id": "p1", "event": {"provider": "telegram", "account_id": "123", "conversation_id": "-100", "thread_id": ""}}})
+    c_b2 = types.SimpleNamespace(task_id="t1", _bid="bind-2", task_metadata=c_b1.task_metadata)
+    p_row = {"account_id": "123", "chat_id": "-100", "topic_id": "", "_caller_scope": file_access.caller_scope(c_b1)}
+    assert p_row["_caller_scope"]["binding_id"] == "bind-1" and file_access.receipt_visible_to(c_b1, p_row) is True
+    assert file_access.receipt_visible_to(c_b2, p_row) is False and file_access.receipt_visible_to(c_b1, {**p_row, "_caller_scope": {}}) is False
+    p_api = _StubApi(tmp_path / "r15_pair")
+    pcode = telegram_owner_auth.issue_owner_pairing_code(p_api)["code"]
+    assert telegram_owner_auth.redeem_owner_pairing_code(p_api, 18, "/pair ñ") is False
+    assert telegram_owner_auth.is_pairing_command(p_api, {"chat": {"id": -100, "type": "supergroup"}, "text": f"/pair {pcode}"}) is True
+    assert not (tmp_path / "r15_pair" / "owner_pairing.json").exists()
+    (tmp_path / "r15_pair" / "owner_pairing.json").write_text(json.dumps({"code": pcode, "expires_at": float("inf"), "failed_attempts": 0}))
+    assert telegram_owner_auth.redeem_owner_pairing_code(p_api, 18, f"/pair {pcode}") is False
+    mclient = telegram_menu.TelegramMenuManager("123456:TOK", 18, tmp_path / "r15_menu")
+    with pytest.raises(telegram_menu.TelegramMenuRejectedError, match="does not match"):
+        mclient._verify_me_identity({"id": 999999})
+    assert 'startswith("/panic")' not in (_REPO_ROOT / "ouroboros" / "gateway" / "control.py").read_text(encoding="utf-8")
+    assert 'startswith("/panic")' not in (_REPO_ROOT / "ouroboros" / "gateway" / "ws.py").read_text(encoding="utf-8")

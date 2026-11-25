@@ -166,7 +166,8 @@ def test_a_card_sent_after_its_question_settled_shows_the_hosts_record(tmp_path,
                                         assumption=_MEANWHILE, task_id="work-1")
         assert ok, why
         asked = produce._one("chat.quiz")
-        bridge = _bridge(data, _closed_base())
+        closed = _closed_base()
+        bridge = _bridge(data, closed)
         await bridge.publish(*asked)  # the card waits
         if case == "closed-reload":
             assert owner_quiz.record_closed(data, "work-1", quiz_id="q1", reason="Plan changed.", actor="owner",
@@ -183,7 +184,7 @@ def test_a_card_sent_after_its_question_settled_shows_the_hosts_record(tmp_path,
             assert owner_quiz.mark_discharged(data, "work-1", "q1")
         if case.endswith("reload"):
             await bridge.stop()
-            bridge = _bridge(data, _closed_base())  # a reload: what that load kept in memory is gone
+            bridge = _bridge(data, closed)  # a reload: what that load kept in memory is gone
             other = "answered" if case == "closed-reload" else "closed"
             await bridge.publish("chat.quiz_state", {**fact[1], "state": other, "answered_index": 0,
                                                      "closed_reason": "A stale fact."})
@@ -192,8 +193,7 @@ def test_a_card_sent_after_its_question_settled_shows_the_hosts_record(tmp_path,
                 raise OSError("the task store cannot be read")
 
             monkeypatch.setattr(task_store, "read_document", unreadable)
-        async with _Origin() as origin:
-            bridge.serve(origin.base)
+        async with _Origin(port=closed) as origin:
             await bridge.drain()
         assert origin.methods() == ["sendMessage", "editMessageText"]
         edit = origin.sent("editMessageText")[0]["text"]
@@ -215,7 +215,8 @@ def test_the_queues_head_never_runs_while_its_own_decision_waits_for_its_card(tm
     not run while its decision waits: the queue's lock stays free and its handler's first real step, ending the
     Silent progress run, has not happened. Once decided, it runs once and ends that run."""
     async def scenario():
-        bridge = _Bridge(tmp_path / "state", _closed_base(), TELEGRAM_SILENT_MODE="on", TELEGRAM_MIRROR_PROGRESS="on")
+        closed = _closed_base()
+        bridge = _Bridge(tmp_path / "state", closed, TELEGRAM_SILENT_MODE="on", TELEGRAM_MIRROR_PROGRESS="on")
         await bridge.publish("chat.outbound", {"text": "Step one.", "is_progress": True, "task_id": "t1",
                                                "transport": {}})
         quiz, state = bridge.module("telegram_quiz"), bridge.module("telegram_state")
@@ -224,8 +225,7 @@ def test_the_queues_head_never_runs_while_its_own_decision_waits_for_its_card(tm
         deciding = asyncio.ensure_future(bridge.publish("chat.quiz", {
             "task_id": "task-1", "quiz_id": "q1", "question": "Keep the cache?", "options": [], "transport": {}}))
         await _until(lambda: len(bridge.records()) == 2)  # saved behind the note; its decision now waits
-        async with _Origin() as origin:
-            bridge.serve(origin.base)
+        async with _Origin(port=closed) as origin:
             bridge.start()
             bridge.now += 60
             bridge.outbox.wake()

@@ -432,12 +432,19 @@ def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
+        from ...scripts.platform_support import process_alive
+
+        return bool(process_alive(pid))
+    except Exception:
+        if os.name == "nt":
+            return True  # Indeterminate on Windows: retain lease until expiry rather than signaling.
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
 
 
 def lease_releasable(lease_until: float, lease_token: str, now: float) -> bool:

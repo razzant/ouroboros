@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import pathlib
 import re
@@ -44,6 +45,11 @@ def _pairing_path(state_dir: Any) -> pathlib.Path:
 
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _const_eq(a: str, b: str) -> bool:
+    """Constant-time UTF-8 string comparison that never raises TypeError on non-ASCII inputs."""
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
 def _write_private_json(path: pathlib.Path, payload: Dict[str, Any]) -> None:
@@ -108,6 +114,21 @@ def issue_owner_pairing_code(state_dir: Any, *, ttl_sec: float = _PAIRING_TTL_SE
     return {"code": code, "expires_at": record["expires_at"], "ttl_sec": ttl}
 
 
+def _parse_pairing_bounds(record: Dict[str, Any]) -> Optional[tuple[float, int]]:
+    raw_exp = record.get("expires_at")
+    raw_failed = record.get("failed_attempts", 0)
+    if isinstance(raw_exp, bool) or isinstance(raw_failed, bool):
+        return None
+    try:
+        expires_at = float(raw_exp)
+        failed_f = float(raw_failed)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(expires_at) or not math.isfinite(failed_f) or failed_f < 0 or int(failed_f) != failed_f:
+        return None
+    return expires_at, int(failed_f)
+
+
 def redeem_owner_pairing_code(
     state_dir: Any, chat_id: int, text: str, *, now: Optional[float] = None
 ) -> bool:
@@ -122,7 +143,6 @@ def redeem_owner_pairing_code(
     path = _pairing_path(root)
     try:
         with settings_lock(root):
-            # Refuse redemption if an owner is already bound under the same lock.
             try:
                 existing_owner = int(str(load_settings(root).get("TELEGRAM_CHAT_ID") or "").strip() or "0")
             except (TelegramSettingsError, TypeError, ValueError):
@@ -138,18 +158,16 @@ def redeem_owner_pairing_code(
             expected = str(record.get("code") or "")
             if not expected:
                 return False
-            try:
-                expires_at = float(record.get("expires_at") or 0.0)
-                failed = int(record.get("failed_attempts") or 0)
-            except (TypeError, ValueError):
+            bounds = _parse_pairing_bounds(record)
+            if bounds is None:
                 _clear_pairing_unlocked(path)
                 return False
+            expires_at, failed = bounds
             ts = time.time() if now is None else float(now)
-            if ts > expires_at or failed >= _PAIRING_MAX_ATTEMPTS:
+            if not math.isfinite(ts) or ts > expires_at or failed >= _PAIRING_MAX_ATTEMPTS:
                 _clear_pairing_unlocked(path)
                 return False
-            if not hmac.compare_digest(expected, candidate):
-                # Always count /pair attempts; count /start only for plausible token lengths so stray short /start args don't burn a code.
+            if not _const_eq(expected, candidate):
                 if cmd == "pair" or len(candidate) >= _MIN_START_PAIR_LEN:
                     failed += 1
                     if failed >= _PAIRING_MAX_ATTEMPTS:
@@ -161,7 +179,6 @@ def redeem_owner_pairing_code(
                         except OSError:
                             _clear_pairing_unlocked(path)
                 return False
-            # Atomically replace active challenge with redeemed-hash sentinel (no plaintext code) BEFORE persisting owner.
             sentinel = {"redeemed_sha256": _sha256_text(expected), "redeemed_at": ts}
             try:
                 _write_private_json(path, sentinel)
@@ -174,40 +191,48 @@ def redeem_owner_pairing_code(
 
 
 def is_pairing_command(state_dir: Any, message: Any) -> bool:
-    """True when ``message`` carries a pairing command/code that must be consumed locally, never forwarded."""
+    """True when ``message`` carries a pairing command/code that must be consumed locally, never forwarded.
+
+    If an active code is pasted in a non-private chat (or sent by an already-bound owner), the active
+    challenge is immediately burned so no observer can later redeem the exposed code in a private DM.
+    """
     if not isinstance(message, dict):
         return False
     raw, _entities = _message_text_and_entities(message)
     cleaned = raw.strip()
     if not cleaned:
         return False
-    if _PAIR_ANY_RE.match(cleaned):
-        return True
-    start_match = _START_ARG_RE.match(cleaned)
-    if not start_match:
-        return False
-    arg = start_match.group(1)
     root = _resolve_state_dir(state_dir)
     chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
     is_private = str(chat.get("type") or "") == "private"
+    pair_any = _PAIR_ANY_RE.match(cleaned)
+    start_match = _START_ARG_RE.match(cleaned)
+    if not pair_any and not start_match:
+        return False
+    arg = ""
+    if pair_any:
+        parts = cleaned.split()
+        arg = parts[1] if len(parts) >= 2 else ""
+    elif start_match:
+        arg = start_match.group(1)
+    record = _read_pairing_record(_pairing_path(root))
+    active_code = str((record or {}).get("code") or "")
+    if active_code and arg and _const_eq(active_code, arg):
+        # Burn exposed active code (pasted in a group or re-sent while already bound).
+        clear_owner_pairing(root)
+        return True
+    if pair_any:
+        return True
     owner = live_owner_chat_id(root)
     if owner <= 0 and is_private:
         return True
-    record = _read_pairing_record(_pairing_path(root))
-    if not record:
-        return False
-    active_code = str(record.get("code") or "")
-    if active_code and hmac.compare_digest(active_code, arg):
-        # Owner is already bound and sent an unused active pairing code: clear it locally and never forward.
-        clear_owner_pairing(root)
-        return True
-    redeemed_hash = str(record.get("redeemed_sha256") or "")
-    if redeemed_hash:
+    redeemed_hash = str((record or {}).get("redeemed_sha256") or "")
+    if redeemed_hash and arg:
         try:
-            redeemed_at = float(record.get("redeemed_at") or 0.0)
-        except (TypeError, ValueError):
+            redeemed_at = float((record or {}).get("redeemed_at") or 0.0)
+        except (TypeError, ValueError, OverflowError):
             redeemed_at = 0.0
-        if (time.time() - redeemed_at) <= _REDEEMED_MEMORY_SEC and hmac.compare_digest(redeemed_hash, _sha256_text(arg)):
+        if math.isfinite(redeemed_at) and (time.time() - redeemed_at) <= _REDEEMED_MEMORY_SEC and _const_eq(redeemed_hash, _sha256_text(arg)):
             return True
     return False
 
@@ -275,12 +300,13 @@ def _message_text_and_entities(message: Dict[str, Any]) -> tuple[str, Any]:
     return "", None
 
 
-def is_literal_span(message: Any, substring: str) -> bool:
+def is_literal_span(message: Any, substring: str, *, start: Optional[int] = None) -> bool:
     """True when ``substring`` inside ``message`` starts with '/' and is covered by a ``code``/``pre`` entity."""
     if not isinstance(message, dict) or not substring or not substring.strip().startswith("/"):
         return False
     raw, entities = _message_text_and_entities(message)
-    pos = raw.find(substring.strip())
+    search_from = max(0, int(start)) if start is not None else 0
+    pos = raw.find(substring.strip(), search_from)
     if pos < 0:
         return False
     return _entity_marks_literal_at(raw, entities, pos)
@@ -306,10 +332,11 @@ def is_panic_command(message: Any, *, bot_username: str = "") -> bool:
     if _entity_marks_literal(raw, entities):
         return False
     cleaned = raw.strip()
+    lead_offset = len(raw) - len(raw.lstrip())
     wrapped = _MAIN_CMD_RE.match(cleaned)
     if wrapped:
         inner = (wrapped.group(1) or "").strip()
-        if inner and is_literal_span(message, inner):
+        if inner and is_literal_span(message, inner, start=lead_offset + wrapped.start(1)):
             return False
         cleaned = inner
     match = _PANIC_CMD_RE.match(cleaned)

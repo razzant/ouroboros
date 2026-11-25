@@ -181,7 +181,8 @@ async def api_command(request: Request) -> JSONResponse:
     try:
         body = await request.json()
         cmd = body.get("cmd", "")
-        if str(cmd).strip().lower().startswith("/panic"):
+        from ouroboros.server_control import is_exact_panic_command, request_panic
+        if is_exact_panic_command(cmd):
             from ouroboros.panic_source import source_evidence
             surface = body.get("client_surface")
             kind = "web_ui_http" if isinstance(surface, dict) else "other_http"
@@ -196,9 +197,7 @@ async def api_command(request: Request) -> JSONResponse:
                 bridge = get_bridge()
             except AssertionError:
                 bridge = None
-            if str(cmd).strip().lower().startswith("/panic"):
-                from ouroboros.server_control import request_panic
-
+            if is_exact_panic_command(cmd):
                 if request_panic(bridge, cmd, evidence=panic_evidence,
                                  startup_owner_command=getattr(request.app.state, "startup_owner_command", None)):
                     return JSONResponse({"status": "ok"})

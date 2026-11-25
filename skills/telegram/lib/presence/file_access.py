@@ -141,36 +141,42 @@ def _resolve_candidate(ctx: Any, raw: str) -> pathlib.Path:
 
 
 def _open_confined_regular_fd(root: pathlib.Path, target: pathlib.Path) -> tuple[int, int]:
-    """Open ``target`` under ``root`` via dir_fd + O_NOFOLLOW traversal (zero-TOCTOU).
-
-    Returns ``(fd, st_size)``. Every intermediate directory and the leaf are opened without
-    following symlinks, guaranteeing the bytes read belong strictly to ``root``.
-    """
+    """Open ``target`` under ``root`` without following symlinks/reparse points (POSIX + Windows)."""
     root_real = pathlib.Path(root).resolve(strict=True)
     rel = pathlib.Path(target).relative_to(root_real)
     parts = rel.parts
     if not parts or any(p in ("", ".", "..") for p in parts):
         raise PermissionError("file_path must name a regular file inside an authorized root")
-    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    step_flags = dir_flags | getattr(os, "O_NOFOLLOW", 0)
-    leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
-    cur_fd = os.open(root_real, dir_flags)
-    try:
-        for segment in parts[:-1]:
-            nxt = os.open(segment, step_flags, dir_fd=cur_fd)
+    if os.name != "nt" and os.open in getattr(os, "supports_dir_fd", ()):
+        dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        step_flags = dir_flags | getattr(os, "O_NOFOLLOW", 0)
+        leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+        cur_fd = os.open(root_real, dir_flags)
+        try:
+            for segment in parts[:-1]:
+                nxt = os.open(segment, step_flags, dir_fd=cur_fd)
+                os.close(cur_fd)
+                cur_fd = nxt
+            leaf_fd = os.open(parts[-1], leaf_flags, dir_fd=cur_fd)
+        finally:
             os.close(cur_fd)
-            cur_fd = nxt
-        leaf_fd = os.open(parts[-1], leaf_flags, dir_fd=cur_fd)
-    finally:
-        os.close(cur_fd)
+        try:
+            st = os.fstat(leaf_fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise PermissionError("file_path must name a regular file")
+            return leaf_fd, int(st.st_size)
+        except BaseException:
+            os.close(leaf_fd)
+            raise
+    from ouroboros.confined_files import open_confined_file
+
+    handle, st = open_confined_file(root_real, parts)
     try:
-        st = os.fstat(leaf_fd)
         if not stat.S_ISREG(st.st_mode):
             raise PermissionError("file_path must name a regular file")
-        return leaf_fd, int(st.st_size)
-    except BaseException:
-        os.close(leaf_fd)
-        raise
+        return os.dup(handle.fileno()), int(st.st_size)
+    finally:
+        handle.close()
 
 
 def _authorize_with_root(ctx: Any, file_path: Any, state_dir: pathlib.Path) -> Tuple[pathlib.Path, pathlib.Path]:
@@ -311,6 +317,14 @@ def caller_scope(ctx: Any) -> Dict[str, str]:
     place_id = str(presence.get("place_id") or (meta.get("focus") or {}).get("place_id") or "").strip()
     if place_id:
         scope["place_id"] = place_id
+    try:
+        from ouroboros.presence_authority import presence_caller_binding
+
+        binding_id = presence_caller_binding(ctx)
+        if isinstance(binding_id, str) and binding_id.strip():
+            scope["binding_id"] = binding_id.strip()
+    except Exception:
+        pass
     if event.get("provider") == "telegram":
         for key in ("account_id", "conversation_id", "thread_id", "conversation_key"):
             val = str(event.get(key) or "").strip()
@@ -331,8 +345,8 @@ def receipt_visible_to(ctx: Any, payload: Dict[str, Any]) -> bool:
     presence = meta.get("presence") if isinstance(meta.get("presence"), dict) else {}
     focus = meta.get("focus") if isinstance(meta.get("focus"), dict) else {}
     lineage = _safe_lineage_ids(ctx)
-    # Presence focus or delegated descendant of a Presence turn: restrict strictly to own conversation tuple
-    # (and lineage when no explicit event is carried). Never bypass exact conversation isolation via lineage or place_id alone.
+    # Presence focus or delegated descendant of a Presence turn: restrict strictly to own conversation tuple,
+    # lineage, and positive binding agreement whenever the caller carries a binding id.
     caller_binding = None
     try:
         from ouroboros.presence_authority import presence_caller_binding
@@ -344,7 +358,15 @@ def receipt_visible_to(ctx: Any, payload: Dict[str, Any]) -> bool:
         event = presence.get("event") if isinstance(presence.get("event"), dict) else {}
         focus_place = str(presence.get("place_id") or focus.get("place_id") or "").strip()
         row_place = str(scope.get("place_id") or (payload.get("_place_binding") or {}).get("place_id") or "").strip()
+        row_binding = str(
+            scope.get("binding_id")
+            or (payload.get("_reporting") or {}).get("binding_id")
+            or (payload.get("_place_binding") or {}).get("binding_id")
+            or ""
+        ).strip()
         if focus_place and row_place and focus_place != row_place:
+            return False
+        if isinstance(caller_binding, str) and caller_binding and row_binding != caller_binding:
             return False
         if event.get("provider") == "telegram":
             ev_acct = str(event.get("account_id") or "").strip()
@@ -356,13 +378,9 @@ def receipt_visible_to(ctx: Any, payload: Dict[str, Any]) -> bool:
             if not (ev_acct and ev_chat):
                 return False
             return row_acct == ev_acct and row_chat == ev_chat and row_topic == ev_topic
-        # Eventless Presence focus or delegated descendant: require task-lineage ownership AND matching place/binding.
         if not (row_task and row_task in lineage):
             return False
         if focus_place and row_place != focus_place:
-            return False
-        row_binding = str((payload.get("_reporting") or {}).get("binding_id") or (payload.get("_place_binding") or {}).get("binding_id") or "").strip()
-        if isinstance(caller_binding, str) and caller_binding and row_binding and row_binding != caller_binding:
             return False
         return True
     if row_task and row_task in lineage:

@@ -125,7 +125,8 @@ def test_only_copies_outlive_refusal_unknown_expiry_reload_and_the_finished_boun
     data = tmp_path / "data"
 
     async def scenario():
-        bridge = _bridge(data, _closed_base())
+        closed = _closed_base()
+        bridge = _bridge(data, closed)
         produce = _Producer(monkeypatch, data)
         inline = produce.document(_blob(40_000, 1), captured=False, filename="notes.bin")  # no captured file
         bitmap = produce.photo(b"BM" + _blob(30_000, 2), mime="image/bmp")  # a type chat media never stores
@@ -146,8 +147,7 @@ def test_only_copies_outlive_refusal_unknown_expiry_reload_and_the_finished_boun
         assert [record["copy"] for record in bridge.records()] == ["only"] * 7
         # Expiry: still waiting after a day, none of them is sent then either.
         bridge.now += 24 * 3600 + 1
-        async with _Origin() as late:
-            bridge.serve(late.base)
+        async with _Origin(port=closed) as late:
             await bridge.drain()
         assert late.requests == []
         assert [(r["state"], r["reason"], r["held"]) for r in bridge.records()] == [("failed", "expired", True)] * 7
@@ -222,7 +222,8 @@ def test_content_with_a_verified_home_goes_once_the_home_is_read_again(tmp_path,
                                "options": [{"label": "sqlite"}, {"label": "postgres"}], "transport": {}})
         reworded = ("chat.quiz", {**asked[1], "question": "Which database, again?"})
         events = [text, document, photo, video, vanishing, other, borrowed, asked, reworded]
-        bridge = _bridge(data, _closed_base())
+        closed = _closed_base()
+        bridge = _bridge(data, closed)
         for topic, event in events:
             await bridge.publish(topic, event)
         records = bridge.records()
@@ -233,8 +234,7 @@ def test_content_with_a_verified_home_goes_once_the_home_is_read_again(tmp_path,
         from ouroboros.artifacts import resolve_chat_media_path
 
         resolve_chat_media_path(data, media["task_id"], media["name"]).unlink()  # gone before its end
-        async with _Origin(["403"] * 9) as origin:
-            bridge.serve(origin.base)
+        async with _Origin(["403"] * 9, port=closed) as origin:
             await bridge.drain()
         assert [(r["state"], bool(r.get("held"))) for r in bridge.records()] == [
             ("refused", False)] * 4 + [("refused", True), ("refused", False), ("refused", True),
@@ -269,7 +269,7 @@ def test_canonical_media_keeps_its_bytes_through_a_busy_queue_connect_error_429_
                 photo[1]["image_base64"], video[1]["video_base64"]]
             first.cancel()  # the process stops mid-request
             await asyncio.gather(first, return_exceptions=True)
-        cold = _bridge(data, _closed_base())  # restart: Telegram cannot be reached
+        cold = _bridge(data, busy.base)  # restart: Telegram cannot be reached
         on_disk = _on_disk(cold)
         cold.start()
         # Stop once the photo's wait is on disk: a stop during that write leaves its saved "sending", which the
@@ -279,7 +279,7 @@ def test_canonical_media_keeps_its_bytes_through_a_busy_queue_connect_error_429_
         states = {r["topic"]: (r["state"], [part["state"] for part in r["parts"]]) for r in cold.records()}
         assert states == {"outbound": ("unknown", ["unknown"]), "photo": ("retry_wait", ["retry_wait"]),
                           "video": ("pending", [])}  # the interrupted part is unknown; the media wait
-        async with _Origin(["429:2"]) as origin:
+        async with _Origin(["429:2"], port=busy.port) as origin:
             warm = _bridge(data, origin.base)  # restart again: flood control, then delivery
             await warm.drain()
         assert origin.methods() == ["sendPhoto", "sendPhoto", "sendVideo"]
@@ -305,13 +305,14 @@ def test_content_that_waits_while_its_filter_changes_ends_superseded_and_keeps_i
         picture = produce.photo(b"\x89PNG" + _blob(30_000, 82))  # the app's chat media holds it
         progress = ("chat.outbound", {"text": "Checking logs.", "is_progress": True, "chat_id": 1, "transport": {}})
         waiting = [reply, bitmap, inline, picture, progress]
-        bridge = _bridge(data, _closed_base(), TELEGRAM_MIRROR_PROGRESS="on")
+        closed = _closed_base()
+        bridge = _bridge(data, closed, TELEGRAM_MIRROR_PROGRESS="on")
         await bridge.publish("chat.outbound", {"text": "First, Telegram unreachable.", "chat_id": 1, "transport": {}})
         for topic, event in waiting:
             await bridge.publish(topic, event)  # each would be sent as published: saved behind the first
         assert [(r["state"], r["copy"]) for r in bridge.records()] == [("retry_wait", "only")] + [
             ("pending", "only")] * 3 + [("pending", "home"), ("pending", "replaceable")]
-        async with _Origin() as origin:  # mirroring only Telegram's own chats, without progress, after a restart
+        async with _Origin(port=closed) as origin:  # mirroring only Telegram's own chats, without progress, after a restart
             again = _bridge(data, origin.base, TELEGRAM_MIRROR_MODE="telegram_only", TELEGRAM_MIRROR_PROGRESS="off")
             await again.drain()
         assert origin.requests == []
@@ -398,14 +399,14 @@ def test_kept_copies_have_no_bound_of_their_own_and_never_hold_back_new_work(tmp
             monkeypatch.setattr(module, "MAX_ACTIVE_BYTES", 3 * size + size // 2)  # room for a head and three photos
             asked = len(origin.requests)
             # Concurrent admissions behind a waiting head: the account includes reservations before any write.
-            bridge.serve(_closed_base())
+            await origin.pause()
             await bridge.publish("chat.outbound", produce.reply("A head that waits.")[1])
             await asyncio.gather(*(bridge.publish(topic, event) for topic, event in bitmaps[6:12]))
             admitted = [r for r in bridge.records() if r["state"] in _WAITING and r["topic"] == "photo"]
             refused = [r for r in bridge.records() if r.get("reason") == "full"]
             assert len(admitted) == 3 and len(refused) == 3 and bridge.outbox._capacity == {}
             assert len(origin.requests) == asked  # refused before any request
-            bridge.serve(origin.base)
+            await origin.resume()
             await bridge.drain()
             # Then a new only copy and content the app holds, each admitted and delivered at once.
             canonical = [produce.reply("A canonical reply."), produce.photo(b"\x89PNG" + _blob(9_000, 30)),
@@ -436,7 +437,8 @@ def test_an_orphan_and_an_unreadable_record_stay_shown_and_unsent_and_a_failed_e
     data = tmp_path / "data"
 
     async def scenario():
-        bridge = _bridge(data, _closed_base())
+        closed = _closed_base()
+        bridge = _bridge(data, closed)
         outbox = bridge.state / "outbox"
         outbox.mkdir(parents=True, exist_ok=True)
         orphan = {"image_base64": base64.b64encode(b"orphan bytes").decode(), "mime": "image/png", "transport": {}}

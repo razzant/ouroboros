@@ -225,6 +225,24 @@ def mark_secret_uncertain(
             conn.close()
 
 
+def clear_uncertain_secret(api: Any, bot_id: str, chat_id: int) -> None:
+    """Clear uncertain/in-flight markers for ``(bot_id, chat_id)`` once resolved."""
+    cid = _int_or_zero(chat_id)
+    if cid == 0:
+        return
+    db = _db_path(api)
+    if not db.exists():
+        return
+    with _LOCK:
+        conn = _open(db)
+        try:
+            norm_bot = _norm_bot(bot_id)
+            for table in ("secret_uncertain", "secret_inflight"):
+                conn.execute(f"DELETE FROM {table} WHERE chat_id=? AND (bot_id=? OR bot_id='')", (cid, norm_bot))
+        finally:
+            conn.close()
+
+
 def lookup_secret_message(
     api: Any, bot_id: str, chat_id: int, message_id: int, *, api_base: str = ""
 ) -> Optional[Dict[str, Any]]:
@@ -364,8 +382,9 @@ def _referenced_targets(message: Dict[str, Any], chat_id: int) -> list[tuple[int
             targets.append((rchat, rmid, reply))
     ext = message.get("external_reply")
     if isinstance(ext, dict):
-        echat = _int_or_zero((ext.get("chat") or {}).get("id")) or chat_id
-        emid = _int_or_zero(ext.get("message_id"))
+        ext_origin = ext.get("origin") if isinstance(ext.get("origin"), dict) else {}
+        echat = _int_or_zero((ext.get("chat") or {}).get("id")) or _int_or_zero((ext_origin.get("chat") or {}).get("id")) or chat_id
+        emid = _int_or_zero(ext.get("message_id")) or _int_or_zero(ext_origin.get("message_id"))
         if emid > 0:
             targets.append((echat, emid, ext))
     fwd = message.get("forward_origin")
@@ -469,22 +488,32 @@ def classify_secret_exposure(
                     if target_mid in rec_ids:
                         return _quarantine({**rec, "secret": True})
 
-        # 4) Unresolvable forward_origin / external_reply (e.g. Telegram user/hidden_user forward lacks message_id):
-        #    fail closed whenever this bot/chat has secret cards or refused secret replies and origin cannot prove safety.
-        fwd = message.get("forward_origin")
-        if isinstance(fwd, dict) and _int_or_zero(fwd.get("message_id")) <= 0:
-            fwd_user = fwd.get("sender_user") if isinstance(fwd.get("sender_user"), dict) else {}
-            fwd_uid = _int_or_zero(fwd_user.get("id"))
-            if _ref_looks_like_bot(fwd, norm_bot) and _bot_has_secret_records(api, norm_bot):
-                return _quarantine({"chat_id": chat_id, "message_id": 0, "options": [], "secret": True, "unresolvable_forward": True})
-            if fwd_uid > 0 and _bot_has_secret_records(api, norm_bot, fwd_uid, kind="refused_reply"):
-                return _quarantine({"chat_id": chat_id, "message_id": 0, "options": [], "secret": True, "unresolvable_forward": True})
-            if str(fwd.get("type") or "") == "hidden_user" and _bot_has_secret_records(api, norm_bot, kind="refused_reply"):
-                return _quarantine({"chat_id": chat_id, "message_id": 0, "options": [], "secret": True, "unresolvable_forward": True})
-        ext = message.get("external_reply")
-        if isinstance(ext, dict) and _int_or_zero(ext.get("message_id")) <= 0:
-            if _ref_looks_like_bot(ext, norm_bot) and _bot_has_secret_records(api, norm_bot):
-                return _quarantine({"chat_id": chat_id, "message_id": 0, "options": [], "secret": True, "unresolvable_external_reply": True})
+        # 4) Unresolvable forward_origin / external_reply (e.g. Telegram user/hidden_user origins lack message_id):
+        #    apply one unified fail-closed check across both representations before any quote/text enters Presence.
+        def _unresolvable_origin(ref_obj: Dict[str, Any], flag_key: str) -> Optional[Dict[str, Any]]:
+            origin = ref_obj.get("origin") if isinstance(ref_obj.get("origin"), dict) else ref_obj
+            mid = _int_or_zero(ref_obj.get("message_id")) or _int_or_zero(origin.get("message_id"))
+            if mid > 0:
+                return None
+            sender_user = origin.get("sender_user") if isinstance(origin.get("sender_user"), dict) else (
+                ref_obj.get("sender_user") if isinstance(ref_obj.get("sender_user"), dict) else {}
+            )
+            uid = _int_or_zero(sender_user.get("id"))
+            otype = str(origin.get("type") or "").strip().lower()
+            if (_ref_looks_like_bot(ref_obj, norm_bot) or _ref_looks_like_bot(origin, norm_bot)) and _bot_has_secret_records(api, norm_bot):
+                return _quarantine({"chat_id": chat_id, "message_id": 0, "options": [], "secret": True, flag_key: True})
+            if uid > 0 and _bot_has_secret_records(api, norm_bot, uid, kind="refused_reply"):
+                return _quarantine({"chat_id": chat_id, "message_id": 0, "options": [], "secret": True, flag_key: True})
+            if otype == "hidden_user" and _bot_has_secret_records(api, norm_bot, kind="refused_reply"):
+                return _quarantine({"chat_id": chat_id, "message_id": 0, "options": [], "secret": True, flag_key: True})
+            return None
+
+        for field_name, flag_key in (("forward_origin", "unresolvable_forward"), ("external_reply", "unresolvable_external_reply")):
+            ref_obj = message.get(field_name)
+            if isinstance(ref_obj, dict):
+                blocked = _unresolvable_origin(ref_obj, flag_key)
+                if blocked is not None:
+                    return blocked
 
         # 5) Uncertain / in-flight secret card send in this chat: fail closed on replies/quotes to
         #    bot or unproven messages (not positively recorded as a non-secret message in message_refs).
@@ -518,6 +547,7 @@ __all__ = [
     "SecretGuardUnreadable",
     "begin_secret_send",
     "classify_secret_exposure",
+    "clear_uncertain_secret",
     "finish_secret_send",
     "has_uncertain_secret",
     "lookup_secret_message",

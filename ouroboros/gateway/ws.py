@@ -493,9 +493,9 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     from supervisor.message_bus import try_get_bridge
 
                     bridge = try_get_bridge()
-                    if str(payload).strip().lower().startswith("/panic"):
+                    from ouroboros.server_control import is_exact_panic_command, request_panic
+                    if is_exact_panic_command(payload):
                         from ouroboros.panic_source import source_evidence
-                        from ouroboros.server_control import request_panic
                         evidence = source_evidence(websocket, "chat_command" if msg_type == "chat" else "web_ui_ws",
                                                    client_surface=msg.get("client_surface"))
                         if request_panic(bridge, payload, evidence=evidence,

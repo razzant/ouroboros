@@ -18,20 +18,10 @@ from ouroboros.project_facts import project_display_name
 from ouroboros.utils import in_worker_process
 
 from .lib.telegram_api import (
-    TELEGRAM_RETRY_INITIAL_SEC,
-    TelegramBindingChanged,
-    TelegramClient,
-    TelegramRequestRejected,
-    TelegramTokenMissing,
-    TelegramTransportError,
-    is_transient_telegram_error,
-    markdown_to_telegram_html,
-    message_chunks,
-    replacing_request,
-    next_telegram_retry_delay,
-    _LOCALIZED_TEXTS,
-    _MAX_TELEGRAM_UPLOAD_BYTES,
-    _u16len,
+    OUTBOUND_JOURNAL, TELEGRAM_RETRY_INITIAL_SEC, TelegramBindingChanged, TelegramClient,
+    TelegramRequestRejected, TelegramTokenMissing, TelegramTransportError,
+    is_transient_telegram_error, markdown_to_telegram_html, message_chunks,
+    replacing_request, next_telegram_retry_delay, _LOCALIZED_TEXTS, _MAX_TELEGRAM_UPLOAD_BYTES, _u16len,
 )
 from .lib.telegram_state import (
     _state_file, _load_settings, _is_silent_mode_enabled,
@@ -84,7 +74,7 @@ from .lib.telegram_presence_bridge import (
 )
 from .lib.presence.tools import register_presence_tools
 from .lib.telegram_notifier import _make_notifier, _notify_enabled, _completion_text, _relay_text, _routing_notice_text
-from .lib.telegram_outbox import outbox_for
+from .lib.telegram_outbox import OutboxDeferred, OutboxStopped, outbox_for
 from .lib.telegram_share import make_prepare_share
 from .lib.telegram_typing import TypingCue, host_reply_preparation
 from .lib.telegram_poll_binding import (
@@ -154,7 +144,7 @@ def _telegram_client(api, event=None, chat_id: int = 0, server: tuple[str, str |
 _POLL_GENERATION_STARTED = time.time()
 
 _SLASH_COMMAND_RE = re.compile(r"^\s*/[A-Za-z]")
-_MAIN_CMD_RE = re.compile(r"^/(?:main|m)(?:@[^\s]+)?(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+_MAIN_CMD_RE = re.compile(r"^/(?:main|m)(?:@[A-Za-z0-9_]+)?(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 
 
 def _presence_runtime(api):
@@ -455,11 +445,20 @@ async def _sync_bot_commands(api, client, command_mode: str, lang: str, pinned_c
         api.log("warning", f"Failed to set Telegram bot commands: {exc}")
 
 
+_CMD_SYNC_TASKS: Dict[str, asyncio.Task[Any]] = {}
+
+
 def _schedule_command_sync(api, client, command_mode: str, lang: str, pinned_chat: str) -> None:
-    if not _should_sync_commands(os.path.realpath(api.get_state_dir()), client.bot_id, pinned_chat, str(getattr(client, "api_base_origin", "") or "")): return
+    state_key = os.path.realpath(api.get_state_dir())
+    if not _should_sync_commands(state_key, client.bot_id, pinned_chat, str(getattr(client, "api_base_origin", "") or "")): return
+    prev = _CMD_SYNC_TASKS.get(state_key)
+    if prev is not None and not prev.done(): return
     async def _bg() -> None:
-        with contextlib.suppress(TelegramBindingChanged, asyncio.CancelledError): await _sync_bot_commands(api, client, command_mode, lang, pinned_chat)
-    asyncio.create_task(_bg())
+        try:
+            with contextlib.suppress(TelegramBindingChanged, asyncio.CancelledError): await _sync_bot_commands(api, client, command_mode, lang, pinned_chat)
+        finally:
+            if _CMD_SYNC_TASKS.get(state_key) is asyncio.current_task(): _CMD_SYNC_TASKS.pop(state_key, None)
+    _CMD_SYNC_TASKS[state_key] = asyncio.create_task(_bg())
 
 
 async def _authorized_owner(api, client, update, pinned_chat: str, lang: str) -> str | None:
@@ -979,35 +978,24 @@ async def _handle_owner_message_inner(
     # guaranteed to equal the pinned owner chat here.
     text = str(message.get("text") or message.get("caption") or "").strip()
     caption = str(message.get("caption") or "").strip()
-    # Handle /menu command locally — always allowed
     cleaned_text = text.lower().strip()
-    is_menu_cmd = _is_exact_bot_command(cleaned_text, "/menu")
-    if is_menu_cmd:
+    literal_slash = is_literal_slash_message(message)
+    if not literal_slash and _is_exact_bot_command(cleaned_text, "/menu"):
         header, keyboard = _build_menu_keyboard(command_mode, lang)
         if keyboard:
             await client.send_message_with_inline_keyboard(chat_id, header, keyboard)
         else:
             await client.send_message(chat_id, header)
         return
-
-    # Handle /mode locally — always allowed so owner can inspect/switch DM and mirror modes in any command mode.
-    if _is_exact_bot_command(cleaned_text, "/mode") or cleaned_text.startswith("/mode ") or cleaned_text.startswith("/mode@"):
+    if not literal_slash and (_is_exact_bot_command(cleaned_text, "/mode") or cleaned_text.startswith("/mode ") or cleaned_text.startswith("/mode@")):
         await _handle_mode_command(api, client, chat_id, text, lang)
         return
-
-    # Handle /language locally — always allowed. Bare: the keyboard. With an argument
-    # ("/language Quenya", "/language pt-BR", "/language invent a language and translate
-    # everything into it"): the owner's words go to the host's one language writer.
-    is_lang_cmd = _is_exact_bot_command(cleaned_text, "/language")
-    if is_lang_cmd:
+    if not literal_slash and _is_exact_bot_command(cleaned_text, "/language"):
         header, keyboard = _build_language_keyboard(lang)
         await client.send_message_with_inline_keyboard(chat_id, header, keyboard)
         return
-    # Handle /help command locally — always allowed
-    is_help_cmd = _is_exact_bot_command(cleaned_text, "/help")
-    if is_help_cmd:
-        help_text = _LOCALIZED_TEXTS[lang]["help_text"]
-        await client.send_message(chat_id, help_text)
+    if not literal_slash and _is_exact_bot_command(cleaned_text, "/help"):
+        await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["help_text"])
         return
 
     # Never forward /pair <code...> or /start <pairing_code> into chat history or Presence custody.
@@ -1062,7 +1050,6 @@ async def _handle_owner_message_inner(
                                               request_key=update_key(update), lang=lang, post=_host_post)
         return
 
-    literal_slash = is_literal_slash_message(message)
     if not literal_slash and (cleaned_text.startswith("/language ") or cleaned_text.startswith("/language@")):
         requested = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
         if requested:
@@ -1081,10 +1068,15 @@ async def _handle_owner_message_inner(
             await client.send_message(chat_id, _MODE_TEXTS[lang]["main_empty"])
             return
         force_direct = True
+        raw_src = str(message.get("text") or "") if str(message.get("text") or "").strip() else str(message.get("caption") or "")
+        lead_off = len(raw_src) - len(raw_src.lstrip())
+        inner_start = lead_off + main_match.start(1)
         text = inner
-        if caption and _MAIN_CMD_RE.match(caption):
-            caption = (_MAIN_CMD_RE.match(caption).group(1) or "").strip()
-        literal_slash = is_literal_span(message, text) or (bool(caption) and is_literal_span(message, caption))
+        cap_match = _MAIN_CMD_RE.match(caption) if caption else None
+        if cap_match:
+            caption = (cap_match.group(1) or "").strip()
+        cap_start = (len(str(message.get("caption") or "")) - len(str(message.get("caption") or "").lstrip()) + cap_match.start(1)) if cap_match else None
+        literal_slash = is_literal_span(message, text, start=inner_start) or (bool(caption) and is_literal_span(message, caption, start=cap_start))
 
     is_slash_cmd = (not literal_slash) and bool(_SLASH_COMMAND_RE.match(text) or (caption and _SLASH_COMMAND_RE.match(caption)))
 
@@ -1449,7 +1441,8 @@ def _make_quiz(api, cue: TypingCue | None = None):
             # miss) a card mid-send.
             sent_ids: list[int] = []
             api_base = str(getattr(client, "api_base_origin", "") or "")
-            secret_op = begin_secret_send(api, client.bot_id, chat_id, api_base=api_base) if secret else ""
+            track_secret = secret and not bool(getattr(OUTBOUND_JOURNAL.get(), "probing", False))
+            secret_op = begin_secret_send(api, client.bot_id, chat_id, api_base=api_base) if track_secret else ""
             secret_confirmed = False
             try:
                 async with telegram_quiz.card_lock(token), _cue_message(cue, chat_id) as delivered:
@@ -1460,17 +1453,16 @@ def _make_quiz(api, cue: TypingCue | None = None):
                         keyboard=telegram_quiz.quiz_keyboard(token, labels),
                         reserve=telegram_quiz.answered_edit_reserve(lang) + _u16len(prefix),
                         **({"sent_ids": sent_ids, "on_part": lambda mid: telegram_quiz.remember_secret_message(
-                            api, client.bot_id, chat_id, mid, task_id, quiz_id)} if secret else {}),
+                            api, client.bot_id, chat_id, mid, task_id, quiz_id)} if track_secret else {}),
                     )
                     delivered()
-                    if secret:
+                    if track_secret:
                         all_secret_ids = [int(x or 0) for x in [*sent_ids, message_id]]
                         secret_confirmed = bool(int(message_id or 0) > 0 and all(x > 0 for x in all_secret_ids))
                         finish_secret_send(
                             api, secret_op, bot_id=client.bot_id, chat_id=chat_id, api_base=api_base,
                             confirmed_ids=all_secret_ids, uncertain=not secret_confirmed,
-                            reason="unknown_message_id" if not secret_confirmed else "",
-                            task_id=task_id, quiz_id=quiz_id,
+                            reason="unknown_message_id" if not secret_confirmed else "", task_id=task_id, quiz_id=quiz_id,
                         )
                     settled_text = (compact if overflowed else
                                     telegram_quiz.render_quiz_text(question, plain_labels, stake, "", **card)
@@ -1484,12 +1476,14 @@ def _make_quiz(api, cue: TypingCue | None = None):
                     await telegram_quiz.apply_retained_fact(
                         api, token, lang, client_factory=lambda: _telegram_client(api), published=event)
             except BaseException as exc:
-                if secret and not secret_confirmed:
-                    unsent = bool(getattr(exc, "unsent", False)) and not sent_ids
+                if track_secret and not secret_confirmed:
+                    unsent_exc = (bool(getattr(exc, "unsent", False))
+                                  or isinstance(exc, (OutboxDeferred, OutboxStopped))
+                                  or type(exc).__name__ == "_WouldSend")
+                    uncertain = not (unsent_exc and all(int(x or 0) > 0 for x in sent_ids))
                     finish_secret_send(
                         api, secret_op, bot_id=client.bot_id, chat_id=chat_id, api_base=api_base,
-                        confirmed_ids=sent_ids, uncertain=not unsent,
-                        reason=type(exc).__name__, task_id=task_id, quiz_id=quiz_id,
+                        confirmed_ids=sent_ids, uncertain=uncertain, reason=type(exc).__name__, task_id=task_id, quiz_id=quiz_id,
                     )
                 raise
         except Exception as exc:
@@ -1538,6 +1532,8 @@ def register(api):
     if callable(getattr(api, "on_unload", None)):
         def _unload() -> None:
             binding.close()
+            sync_task = _CMD_SYNC_TASKS.pop(os.path.realpath(api.get_state_dir()), None)
+            if sync_task is not None and not sync_task.done(): sync_task.cancel()
             presence.stop(wait_sec=2.0)
 
         api.on_unload(_unload)  # unload, Off or a revoked grant: no client or worker of this load sends again

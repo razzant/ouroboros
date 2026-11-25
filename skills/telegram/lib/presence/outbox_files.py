@@ -17,7 +17,7 @@ import re
 import stat
 import threading
 import uuid
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 try:
     import fcntl
@@ -59,16 +59,23 @@ def _quota_lock(state_dir: Any, name: str) -> Iterator[None]:
     with _LOCKS_GUARD:
         tlock = _THREAD_LOCKS.setdefault(key, threading.Lock())
     with tlock:
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            if fcntl is not None:
+        if fcntl is not None:
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
                 fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
-        finally:
-            if fcntl is not None:
+                yield
+            finally:
                 with contextlib.suppress(OSError):
                     fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+                os.close(fd)
+        else:
+            from ...scripts.platform_support import acquire_file_lock, release_file_lock
+
+            fd = acquire_file_lock(lock_path, timeout_sec=30.0)
+            try:
+                yield
+            finally:
+                release_file_lock(fd)
 
 
 def _dir_bytes(root: pathlib.Path) -> int:
@@ -233,16 +240,24 @@ def _open_frozen_copy_fd(path_str: str, state_dir: Optional[Any]) -> int:
         raise FrozenFileMissing("frozen copy lies outside outbox_files/") from exc
     if len(rel.parts) != 2:
         raise FrozenFileMissing("frozen copy path is not directly inside an outbox_files/ copy folder")
-    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    root_fd = os.open(root, dir_flags)
+    if os.name != "nt" and os.open in getattr(os, "supports_dir_fd", ()):
+        dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        root_fd = os.open(root, dir_flags)
+        try:
+            sub_fd = os.open(rel.parts[0], dir_flags | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
+        finally:
+            os.close(root_fd)
+        try:
+            return os.open(rel.parts[1], leaf_flags, dir_fd=sub_fd)
+        finally:
+            os.close(sub_fd)
+    from ouroboros.confined_files import open_confined_file
+
+    handle, _st = open_confined_file(root, rel.parts)
     try:
-        sub_fd = os.open(rel.parts[0], dir_flags | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
+        return os.dup(handle.fileno())
     finally:
-        os.close(root_fd)
-    try:
-        return os.open(rel.parts[1], leaf_flags, dir_fd=sub_fd)
-    finally:
-        os.close(sub_fd)
+        handle.close()
 
 
 def close_verified(verified_fds: Optional[Dict[str, Tuple[int, int]]]) -> None:
@@ -280,10 +295,15 @@ def open_verified(
                 if not isinstance(item, dict) or str(item.get("file_path") or "") != str(kept[idx].get("path") or ""):
                     raise FrozenFileMissing("album item path does not match its verified frozen copy; held")
     opened: Dict[str, Tuple[int, int]] = {}
+    verified_meta: Dict[str, Tuple[Any, Any]] = {}
     try:
         for record in kept:
             path_str = str(record["path"])
             name = pathlib.PurePath(path_str).name
+            if path_str in opened:
+                if verified_meta[path_str] != (record.get("size"), record.get("sha256")):
+                    raise ValueError(f"the copy of {name} kept when it was queued has changed since; not sent")
+                continue
             digest, size = hashlib.sha256(), 0
             try:
                 fd = _open_frozen_copy_fd(path_str, state_dir)
@@ -312,6 +332,7 @@ def open_verified(
                     pass
                 raise
             opened[path_str] = (fd, size)
+            verified_meta[path_str] = (size, digest.hexdigest())
         return opened
     except BaseException:
         close_verified(opened)

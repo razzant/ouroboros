@@ -293,7 +293,13 @@ def merge_settings_unlocked(state_dir: Path, patch: dict[str, Any]) -> dict[str,
 
 def merge_settings(state_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
     with settings_lock(state_dir):
-        return merge_settings_unlocked(state_dir, patch)
+        merged = merge_settings_unlocked(state_dir, patch)
+        if "TELEGRAM_CHAT_ID" in patch:
+            try:
+                (_settings_path(state_dir).parent / "owner_pairing.json").unlink(missing_ok=True)
+            except OSError:
+                pass
+        return merged
 
 
 def request_may_change_owner(request: Any) -> bool:
@@ -458,11 +464,6 @@ def make_settings_save(api):
                 server_ignored |= str(payload.pop("TELEGRAM_PROXY") or "").strip() != saved_proxy
         try:
             merge_settings(Path(api.get_state_dir()), payload)
-            if "TELEGRAM_CHAT_ID" in payload:
-                try:
-                    (Path(api.get_state_dir()) / "owner_pairing.json").unlink(missing_ok=True)
-                except OSError:
-                    pass
         except TelegramSettingsError as exc:
             return JSONResponse(
                 {"ok": False, "message": str(exc)},

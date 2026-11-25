@@ -548,8 +548,10 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
         try:
             for field_name, file_path in file_specs:
                 path = pathlib.Path(file_path)
-                v_entry = (verified_fds or {}).get(str(file_path)) or (verified_fds or {}).get(os.fspath(path))
-                if v_entry is not None:
+                if verified_fds is not None:
+                    v_entry = verified_fds.get(str(file_path)) or verified_fds.get(os.fspath(path))
+                    if v_entry is None:
+                        raise TelegramRequestNotSent("upload", "verified upload descriptor missing")
                     fd = os.dup(int(v_entry[0]))
                     try:
                         os.lseek(fd, 0, os.SEEK_SET)
@@ -557,6 +559,7 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
                         os.close(fd)
                         raise
                 else:
+                    v_entry = None
                     fd = os.open(path, flags)
                 try:
                     st = os.fstat(fd)
