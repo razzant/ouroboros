@@ -417,6 +417,7 @@ export function createRoomProfileLifecycle({
     const word = { room: chatId, holds: () => canonical || (proof !== null && proof === servingSocket()), confirm: confirmNow };
     // The opening's saved text waits for this socket's proof (ws.js canShowSavedProfile: after a disconnect only the
     // current socket proves the profile): `profileConfirmed` paints it then, once, unless a canonical read landed first.
+    // A room away hears no proof (room_retire.js roomSocket): its return's newest read spends it where the proof came.
     let previewOwed = false;
     const showPreview = () => { if (getPreview().show()) onPreviewShown(); };
 
@@ -438,6 +439,7 @@ export function createRoomProfileLifecycle({
 
     // Every read of this room (newest, a page, ↓, arrivals): a current one refused for authentication takes the saved text.
     async function fetchHistory(cursor, options = {}) {
+        if (cursor == null && previewOwed && ws?.canShowSavedProfile?.() === true) { previewOwed = false; showPreview(); }
         const recentVersion = cursor == null ? nextRecentVersion() : 0, sent = { socket: servingSocket(), epoch };
         try {
             return { ...await readHistory({ chatId, cursor, ...options }), recentVersion };
