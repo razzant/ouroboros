@@ -528,7 +528,7 @@ most.
 
 **Outside this rule, not exempt from others.** A producer's own leaf, a closed
 vocabulary that defines a rule at its owner, a field a schema declares, and a
-dated wire-fact row in DEVELOPMENT.md "External facts: unknown is not no" do
+dated wire fact indexed in DEVELOPMENT.md "External facts: unknown is not no" do
 not violate it by themselves, and they remain subject to every other item.
 
 **Judgment, not a scan.** No keyword, name list or lint decides this finding

@@ -80,7 +80,9 @@ _SCOPE_REVIEW_PRIOR_DEFAULTS = frozenset({
 # No table here declares an external model "retired": a saved model id is the owner's
 # choice and stays as written, and a model a provider really withdrew answers with that
 # provider's own error. Only equality with one of OUR former shipped defaults migrates
-# (the sets above), because only then is the value ours rather than the owner's.
+# (the sets above), because only then is the value ours rather than the owner's. Their
+# source is release history, under regression tests; a catalog shows availability, never
+# intent. If stale: over-broad classification overwrites an owner's choice.
 
 
 def _truthy_setting(value) -> bool:

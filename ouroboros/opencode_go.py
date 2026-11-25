@@ -1,7 +1,9 @@
 """Wire facts of OpenCode Go's official Chat Completions endpoint.
 
 Go documents an honest User-Agent and one stable session ID per coding-agent
-conversation (https://opencode.ai/docs/console/go/#where-can-i-use-it, 2026-11-18).
+conversation (https://opencode.ai/docs/console/go/#where-can-i-use-it, 2026-11-18;
+docs only, no live probe: recheck on a real tool exchange before changing either).
+If stale: a missing ID can refuse a send; a shared one can mix conversations.
 This is a facet of an existing compatible API connection, not another provider.
 """
 

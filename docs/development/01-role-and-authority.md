@@ -12,6 +12,4 @@ direction, a wider cycle group or a cross-domain literal copy is a red gate, bec
 domain boundary is the owner's call, not a manifest edit. Enforced by
 `tests/test_domain_manifest.py`; witness-level detail: `python scripts/domain_report.py`.
 
-Rules here describe current practice or a deliberately enforced standard. When code and
-prose disagree, inspect the implementation and history, repair the authoritative
-surfaces together, and keep the failure a non-obvious rule prevents.
+Rules reflect current practice or deliberate standards: when code and prose disagree, inspect implementation and history, repair the authoritative surfaces together, and keep the failure a non-obvious rule prevents.
