@@ -1,0 +1,67 @@
+# Disposable QA branch only; the product branch has no workflow change.
+name: Targeted sidebar version QA
+on:
+  push:
+    branches: [qa/sidebar-version-20261125]
+permissions:
+  contents: read
+jobs:
+  sidebar-version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      QA_SUBJECT: '2dce04db32cc62bd3e0c1f8f4f4c1388f7e49e4b'
+      OUROBOROS_RUN_UI_SMOKE: '1'
+      OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Bind the tested product tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = "$QA_SUBJECT"
+          test "$(git diff --name-only "$QA_SUBJECT" HEAD)" = '.github/workflows/qa-sidebar-version.yml'
+          printf 'SIDEBAR_VERSION_QA_SUBJECT %s\nSIDEBAR_VERSION_QA_TREE %s\n' "$QA_SUBJECT" "$(git rev-parse "$QA_SUBJECT^{tree}")"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Install pinned Chromium and WebKit
+        timeout-minutes: 30
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/sidebar-version-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
+      - name: Exercise the sidebar and updates on synthetic fixtures
+        timeout-minutes: 20
+        shell: bash
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/sidebar-version-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: |
+          set -euo pipefail
+          check_python="$(command -v python)"
+          xvfb-run -a "$check_python" -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/sidebar-version-raw" -- \
+            "$check_python" -m pytest -q -o addopts= --tb=short --junitxml="$RUNNER_TEMP/sidebar-version.xml" \
+            tests/test_sidebar_short_window_browser.py \
+            tests/test_ui_shell_legacy_browser.py \
+            tests/test_shell_interactions_browser.py::test_a_short_phone_drawer_has_one_scroller_the_whole_column \
+            tests/test_shell_interactions_browser.py::test_filtering_projects_keeps_the_pins_rail_and_version_in_place \
+            tests/test_shell_interactions_browser.py::test_off_room_call_mark_stays_inside_capped_docked_sidebar_and_leaves_composer_controls_hittable \
+            tests/test_shell_interactions_browser.py::test_off_room_call_mark_keeps_last_project_row_and_menu_reachable_without_permanent_clearance \
+            tests/test_shell_interactions_browser.py::test_phone_drawer_close_leads_dom_and_focus_order_and_yields_to_telegram_fullscreen \
+            tests/test_ui_smoke_update_progress.py::test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_panel
+          "$check_python" -I - "$RUNNER_TEMP/sidebar-version.xml" <<'PY'
+          import re
+          import sys
+          import xml.etree.ElementTree as ET
+          cases = ET.parse(sys.argv[1]).getroot().findall('.//testcase')
+          bad = [c.get('name') for c in cases if any(c.find(k) is not None for k in ('failure', 'error', 'skipped'))]
+          names = [c.get('name', '') for c in cases if c.get('classname', '').endswith('test_sidebar_short_window_browser')]
+          engines = {e for n in names for e in re.findall(r'\b(chromium|webkit)\b', n)}
+          assert cases and not bad and engines == {'chromium', 'webkit'}, (len(cases), bad, engines)
+          print(f'SIDEBAR_VERSION_HOSTED_OK: {len(cases)} cases, no skips, Chromium and WebKit')
+          PY
