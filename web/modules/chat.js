@@ -1,11 +1,10 @@
 import { escapeHtmlAttr, isoMicros } from './utils.js';
 import { tr } from './i18n.js';
 import { bindCompactMarkdown, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
-import { renderPageHeader } from './page_header.js';
 import { clearReloadParams } from './layers.js';
 import { fluentIcon, renderSkillIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
-import { createRoomHeader, mainHeaderActionsHtml } from './chat_header.js';
+import { createRoomHeader, roomBarHtml } from './chat_header.js';
 import { pageLabel } from './pages.js';
 import { showToast } from './toast.js';
 import { ORIGIN_ADDRESSED_NOTICE_TYPES, lineReplyFields, childRowPlacement, placedCardRow, createPlacedCardAnchors, replayConcludesTask } from './chat_row_placement.js';
@@ -204,20 +203,9 @@ export function createChatInstance({
     const page = document.createElement('div');
     page.id = asPanel ? `panel-${idPrefix}` : 'page-chat';
     page.className = asPanel ? 'chat-instance-panel' : 'page active';
-    // A Project panel's bar comes from app.js (page_header.js); the instance seeds only its status badge.
-    const headerHtml = asPanel
-        ? `<div class="chat-panel-statusbar"><span id="chat-status" class="status-badge offline">Connecting…</span></div>`
-        : renderPageHeader({
-            title: title,
-            variant: 'overlay',
-            className: 'chat-page-header',
-            toolbarClass: 'ui-chrome-group',
-            actionsHtml: mainHeaderActionsHtml(),
-            showMobileNav: false,  // a room's ☰ is its composer row's first control
-        });
-    // Main: a failed read or approximate restoration floats under the bar; Project keeps its status bar.
+    // Main: a failed read or approximate restoration floats under the bar (chat_header.js); Project keeps its status bar.
     page.innerHTML = `
-        ${headerHtml}${asPanel ? '' : '<div class="chat-page-note"></div>'}
+        ${roomBarHtml({ asPanel, title })}${asPanel ? '' : '<div class="chat-page-note"></div>'}
         <div id="chat-messages"></div>
         <div id="chat-input-area">
             <div class="chat-input-wrap">
