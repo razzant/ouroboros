@@ -181,6 +181,7 @@ def test_closing_a_window_that_ends_startup_is_the_owners_quit(native_guard, mon
 
     def create_window(title, **kwargs):
         assert title == {"failed": "Ouroboros — Startup Failed", "git": "Ouroboros — Setup Required"}[window]
+        assert "js_api" not in kwargs and "install-btn" not in kwargs["html"], "the Git page installs nothing"
         closed = SimpleNamespace(destroy=lambda: webview.windows.remove(closed))
         webview.windows.append(closed)
         return closed

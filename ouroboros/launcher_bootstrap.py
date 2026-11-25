@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ouroboros.desktop_media import host_environment
+from ouroboros.git_selection import selected_git
 from ouroboros.unindexed import bytecode_prefix
 
 
@@ -83,42 +84,35 @@ class _SourceHandoff:
 source_handoff = _SourceHandoff()
 
 
-def stop_bootstrap_commands(*, include_interactive=True) -> list[dict]:
+def stop_bootstrap_commands() -> list[dict]:
     """Request captured bootstrap children before early tray Panic hard-exits."""
     from ouroboros.platform_layer import request_process_tree_kill
 
     successor_stop = source_handoff.stop()
     return ([successor_stop] if successor_stop is not None else []) + [
-            request_process_tree_kill(owner["proc"], job_handle=getattr(owner["container"], "_job", None))
-            for owner in list(_BOOTSTRAP_COMMANDS) if owner["proc"] is not None
-            and (include_interactive or owner["container"] is not None)]
+            request_process_tree_kill(owner["proc"], job_handle=owner["container"]._job)
+            for owner in list(_BOOTSTRAP_COMMANDS) if owner["proc"] is not None]
 
 
-def spawn_bootstrap_command(command, shutdown, *, interactive=False, **kwargs):
+def spawn_bootstrap_command(command, shutdown, **kwargs):
     """Capture a bootstrap command in the existing Job/lifeline owner before exposing its handle."""
     from ouroboros.process_containment import ProcessContainer
-    from ouroboros.platform_layer import merge_hidden_kwargs
 
     if shutdown.is_set():
         raise InterruptedError("Launcher shutdown stopped bootstrap admission")
-    # Interactive OS installers keep their terminal and may finish after an
-    # ordinary setup-window close; Panic still has their captured Popen to stop.
     # Frozen sys.executable is the app bootloader, not a Python CLI for the
     # lifeline guardian. Keep group/token (Windows: Job) custody and Panic stops;
     # frozen POSIX has no guardian for an abrupt launcher death during bootstrap.
-    owner = {"proc": None, "container": None if interactive else
-             ProcessContainer(lifeline=not getattr(sys, "frozen", False))}
+    owner = {"proc": None, "container": ProcessContainer(lifeline=not getattr(sys, "frozen", False))}
     _BOOTSTRAP_COMMANDS.append(owner)
     try:
-        owner["proc"] = (subprocess.Popen(command, **merge_hidden_kwargs(kwargs)) if interactive
-                         else owner["container"].spawn(command, **kwargs))
+        owner["proc"] = owner["container"].spawn(command, **kwargs)
         if shutdown.is_set():
             stop_bootstrap_commands()
         return owner
     except BaseException:
-        if owner["container"] is not None:
-            owner["container"].reap()
-            owner["container"].close()
+        owner["container"].reap()
+        owner["container"].close()
         _BOOTSTRAP_COMMANDS.remove(owner)
         raise
 
@@ -187,7 +181,7 @@ def checkout_sha(repo_dir: pathlib.Path) -> str:
     from ouroboros.platform_layer import merge_hidden_kwargs
 
     try:
-        shown = subprocess.run(["git", "rev-parse", "HEAD"], **merge_hidden_kwargs(
+        shown = subprocess.run([selected_git(), "rev-parse", "HEAD"], **merge_hidden_kwargs(
             {"cwd": str(repo_dir), "capture_output": True, "text": True, "encoding": "utf-8", "check": False,
              **({"env": host_environment()} if sys.platform == "linux" else {})}))
     except OSError:
@@ -257,7 +251,7 @@ def launcher_sources_changed(repo_dir: pathlib.Path, loaded_sha: str | None = No
         relative = next((path.relative_to(root) for path in paths for root in roots if path.is_relative_to(root)), None)
         if relative is not None:
             loaded.add((relative.with_suffix(".py") if relative.suffix == ".pyc" else relative).as_posix())
-    probe = subprocess.run(["git", "diff", "--quiet", loaded_sha, head, "--", *sorted(loaded)],
+    probe = subprocess.run([selected_git(), "diff", "--quiet", loaded_sha, head, "--", *sorted(loaded)],
                            **merge_hidden_kwargs({"cwd": str(repo_dir), "capture_output": True, "check": False,
                                **({"env": host_environment()} if sys.platform == "linux" else {})}))
     return probe.returncode == 1
@@ -303,21 +297,6 @@ def embedded_python_env(data_dir: pathlib.Path, base: dict[str, str] | None = No
     env["PYTHONUSERBASE"] = str(user_base)
     env.pop("PYTHONNOUSERSITE", None)
     return env
-
-
-def check_git(is_windows: bool) -> bool:
-    if shutil.which("git") is not None:
-        return True
-    if is_windows:
-        for candidate in (
-            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "cmd", "git.exe"),
-            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Git", "cmd", "git.exe"),
-        ):
-            if os.path.isfile(candidate):
-                git_dir = os.path.dirname(candidate)
-                os.environ["PATH"] = git_dir + ";" + os.environ.get("PATH", "")
-                return True
-    return False
 
 
 def _bundle_manifest_path(context: BootstrapContext) -> pathlib.Path:
@@ -445,7 +424,7 @@ def _repo_manifest_matches(repo_dir: pathlib.Path, bundle_manifest: dict[str, An
 
 def _run_git(context: BootstrapContext, args: list[str], *, cwd: pathlib.Path, check: bool = True) -> Any:
     return context.hidden_run(
-        args,
+        [selected_git(), *args[1:]] if args[:1] == ["git"] else args,  # the chosen executable, never a cwd's git.exe
         cwd=str(cwd),
         check=check,
         capture_output=True,

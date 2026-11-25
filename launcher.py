@@ -66,7 +66,7 @@ from ouroboros.config import (
 from ouroboros.launcher_bootstrap import (
     BootstrapContext,
     bootstrap_repo as _bootstrap_repo,
-    check_git as _check_git, launcher_sources_changed, remember_loaded_checkout,
+    launcher_sources_changed, remember_loaded_checkout,
     install_deps,
     embedded_python_env, update_external_host,
     exec_source_launcher, find_embedded_python, macos_source_entry, parse_launch_options, shell_runtime_facts,
@@ -75,6 +75,7 @@ from ouroboros.launcher_bootstrap import (
 )
 from ouroboros.settings_integrity import PROJECTED_SETTINGS_ENV
 from ouroboros.desktop_media import attach_media_permissions, display_ready as _display_ready, host_environment, route_gtk_browser
+from ouroboros.git_selection import GitUnverified, select_git
 from ouroboros.runtime_venv import PREPARATION_DEPS_TIMEOUT_SEC, RuntimeVenvRefused, mark_ready, prepare_runtime_venv
 from ouroboros.launcher_onboarding import (
     prepare_first_run_settings as _prepare_first_run_settings,
@@ -99,6 +100,7 @@ from ouroboros.platform_layer import (
     IS_WINDOWS,
     assign_pid_to_job,
     close_job,
+    common_tool_directories,
     create_kill_on_close_job,
     current_process_group_id,
     force_kill_pid,
@@ -181,14 +183,10 @@ def _hidden_run(command, **kwargs):
     return run_bootstrap_command(command, _shutdown_event, **merge_hidden_kwargs(kwargs))
 
 
-def _hidden_popen(command, *, bootstrap=False, **kwargs):
+def _hidden_popen(command, **kwargs):
     """subprocess.Popen() with platform-appropriate hidden-window flags."""
     if IS_LINUX:
         kwargs.setdefault("env", host_environment())
-    if bootstrap:
-        from ouroboros.launcher_bootstrap import spawn_bootstrap_command
-
-        return spawn_bootstrap_command(command, _shutdown_event, interactive=True, **merge_hidden_kwargs(kwargs))["proc"]
     return subprocess.Popen(command, **merge_hidden_kwargs(kwargs))
 
 
@@ -206,8 +204,6 @@ body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify
 .window h2 { margin: 0 0 12px; font-size: var(--type-page, 24px); font-weight: 600; line-height: var(--line-title); }
 .window p { margin: 0; font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
 .window .muted { margin-top: 10px; font-size: var(--type-meta); line-height: var(--line-meta); }
-.window .btn { margin: 16px auto 0; }
-.window .ui-status { margin-top: 12px; }
 """
 
 
@@ -255,7 +251,25 @@ def _bootstrap_context() -> BootstrapContext:
 
 
 def check_git() -> bool:
-    return _check_git(IS_WINDOWS)
+    """Choose the Git every later command runs (ouroboros/git_selection.py); False: none works. Each probe is a
+    bootstrap command: Quit and Panic stop the running one and admit no next; that ``InterruptedError`` and a
+    ``GitUnverified`` (none judged in time) go to main. The old boundary stays: on macOS AppKit delivers Cmd+Q, the
+    Dock and the menu-bar item to no launcher hook before the first window's ``webview.start``."""
+    choice = select_git(_bundle_dir(), prepend_dirs=common_tool_directories(os.environ.get("PATH", "")),
+                        run=_hidden_run, host=host_environment if IS_LINUX else None)  # host: the Git's loader values
+    log.info("Git: %s", "stopped" if _shutdown_event.is_set() else choice)  # a probe a stop ended is no verdict
+    return choice != "missing"
+
+
+def _git_setup_notice(unverified: Optional[GitUnverified]) -> tuple[str, str, str]:
+    """Heading, message and next step of the Setup Required window (and its console and log lines) when no Git works
+    here (install one) or none answered in time (open Ouroboros again). The window names no path: ``Git: unverified``
+    and launcher.log keep it."""
+    message = "Ouroboros needs Git to manage its local repository."
+    if unverified is None:
+        return "Git is required", message, git_install_hint()
+    return ("Git did not answer in time", message,
+            "Open Ouroboros again. Check launcher.log in the Ouroboros data directory for details.")
 
 
 def bootstrap_repo() -> bool:
@@ -1197,14 +1211,10 @@ def main(argv=()):
 
     if not automatic_launch_allowed(options.launch_intent, DATA_DIR, log):
         return
-    # Record the loaded generation before bootstrap can advance the managed checkout.
-    remember_loaded_checkout(REPO_DIR, bundle_dir=_bundle_dir() if getattr(sys, "frozen", False) or pathlib.Path(
-        __file__).resolve() != (REPO_DIR / "launcher.py").resolve() else None)
-
     def _on_closing() -> None:  # Background's close body: its exit_launcher latched shutdown on the UI thread
         log.info("Window closing — graceful shutdown.")  # an owner's exit set _quit.requested, a UI failure never
         from ouroboros.launcher_bootstrap import stop_bootstrap_commands
-        stop_bootstrap_commands(include_interactive=False)
+        stop_bootstrap_commands()
         if background.panic.is_set():
             return  # Panic owns persistence and hard exit, never ordinary teardown over it
         if _webview_window is None:
@@ -1229,78 +1239,34 @@ def main(argv=()):
     if _shutdown_event.is_set():
         return  # Early Panic owns persistence and exit; bootstrap must not start beside it.
 
-    git_found = check_git()
+    unverified = None
+    try:
+        git_found = check_git()  # before any Git runs, the checkout's HEAD below included
+    except InterruptedError:  # Quit or Panic stopped the search: the latched shutdown below returns, no page
+        git_found = False
+        log.info("Git: stopped")
+    except GitUnverified as late:  # unjudged is not absent: said as such, never as an install hint
+        git_found, unverified = False, late
+        log.error("Git: unverified: %s", late)
     if _shutdown_event.is_set():
         return
-    if not git_found:
-        log.warning("Git not found.")
-        if _headless:
-            # No headless sudo flows: print the platform hint and stop.
-            log.error("Git is required; cannot run the GUI install helper in browser mode.")
-            print("Git is required to run Ouroboros.", file=sys.stderr)
-            print(git_install_hint(), file=sys.stderr)
-            sys.exit(1)
-        _hint = git_install_hint()
-        _install_status = (
-            "Installing... A system dialog may appear."
-            if IS_MACOS
-            else "Installing... Please wait."
-        )
-
-        def _git_page(window):
-            window.evaluate_js(
-                """
-                document.getElementById('install-btn').onclick = function() {
-                    document.getElementById('status').textContent = '__INSTALL_STATUS__';
-                    window.pywebview.api.install_git();
-                };
-                """.replace("__INSTALL_STATUS__", _install_status)
-            )
-
-        class GitApi:
-            def install_git(self):
-                if IS_MACOS:
-                    _hidden_popen(["xcode-select", "--install"], bootstrap=True)
-                elif IS_WINDOWS:
-                    _hidden_popen(
-                        ["winget", "install", "Git.Git", "--source", "winget", "--accept-source-agreements"], bootstrap=True
-                    )
-                else:
-                    for cmd in (
-                        ["sudo", "apt", "install", "-y", "git"],
-                        ["sudo", "dnf", "install", "-y", "git"],
-                    ):
-                        try:
-                            _hidden_popen(cmd, bootstrap=True)
-                            break
-                        except FileNotFoundError:
-                            continue
-                for _ in range(300):
-                    if _shutdown_event.wait(3):
-                        return "stopped"
-                    if shutil.which("git"):
-                        return "installed"
-                return "timeout"
-
-        git_window = webview.create_window(
-            "Ouroboros — Setup Required",
-            html=_window_page("Ouroboros — Setup Required", (
-                "<h2>Git is required</h2><p>Ouroboros needs Git to manage its local repository.</p>"
-                + ("" if IS_MACOS else f'<p class="muted">{_hint}</p>')
-                + '<button id="install-btn" class="btn btn-primary" type="button">'
-                + ("Install Git (Xcode CLI Tools)" if IS_MACOS else "Install Git")
-                + '</button><p id="status" class="ui-status" role="status"></p>')),
-            js_api=GitApi(),
-            width=520,
-            height=300,
-        )
-        paint_room(background.attach_setup(git_window))
-        webview.start(func=_git_page, args=[git_window], private_mode=False)
-        if _shutdown_event.is_set():
-            return
-        if not check_git():  # this close ended the app
-            background.ended_before_main(lambda: _quit.stop_engine(server_stopped=True))
-            sys.exit(1)
+    if not git_found:  # none runs here (a source run, a build without the copy) or none answered in time
+        heading, message, hint = _git_setup_notice(unverified)
+        log.error("%s: %s", heading, hint)  # one honest page: installing Git stays the person's, nothing installs here
+        print(f"{heading} to run Ouroboros." if unverified is None else f"{heading}: {unverified}.", hint, sep="\n",
+              file=sys.stderr)  # a terminal's own detail: the window shows none
+        if not _headless:
+            paint_room(background.attach_setup(webview.create_window("Ouroboros — Setup Required", html=_window_page(
+                "Ouroboros — Setup Required", f"<h2>{html.escape(heading)}</h2><p>{html.escape(message)}</p>"
+                f'<p class="muted">{html.escape(hint)}</p>'), width=520, height=300)))
+            webview.start(private_mode=False)
+            if _shutdown_event.is_set():
+                return
+            background.ended_before_main(lambda: _quit.stop_engine(server_stopped=True))  # this close ended the app
+        sys.exit(1)
+    # Record the loaded generation before bootstrap can advance the managed checkout.
+    remember_loaded_checkout(REPO_DIR, bundle_dir=_bundle_dir() if getattr(sys, "frozen", False) or pathlib.Path(
+        __file__).resolve() != (REPO_DIR / "launcher.py").resolve() else None)
 
     if _shutdown_event.is_set():
         return

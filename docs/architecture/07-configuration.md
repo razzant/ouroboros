@@ -202,7 +202,8 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_SKILL_LIFECYCLE_TIMEOUT_SEC | 1800 | Skill lifecycle-lane timeout |
 | OUROBOROS_CLAUDEXOR_HARNESS_INSTALL_TIMEOUT_SEC | 300 | Connect wait; expiry leaves the durable install running |
 | OUROBOROS_CLAUDEXOR_QUOTA_REFRESH_TIMEOUT_SEC | 90 | Quota-refresh POST ceiling (clamped 1-90) |
-| OUROBOROS_BUNDLE_DIR | unset | Env-only: launcher-owned bundle root passed to embedded children for Node/ripgrep discovery |
+| OUROBOROS_BUNDLE_DIR | unset | Env-only: bundle root for child Node/ripgrep discovery and autostart |
+| OUROBOROS_GIT | unset | Env-only: absolute path of selected Git (`git_selection.py`) |
 | OUROBOROS_BG_WAKEUP_MIN | 900 | Lower bound (s) of each step to the next wake (`set_next_wakeup`), re-read at each alarm |
 | OUROBOROS_BG_WAKEUP_MAX | 14400 | Upper bound (s) of each step; a named time beyond it is kept; with no chosen interval the alarm uses `runtime_limits.WAKE_DEFAULT_SEC`, below the default cache TTL to keep the shared prefix warm |
 | OUROBOROS_CONSCIOUSNESS_AUTONOMY | act | Closed enum `observe`/`act`/`full` of what a wake may do; `act` excludes own code/prompts, evolution, restart and settings, `full` adds evolution (`consciousness_authority.py`) |

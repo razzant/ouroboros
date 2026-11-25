@@ -3,9 +3,9 @@
 # packages, so Debian/Ubuntu and Fedora/RHEL users can install with their own
 # package manager instead of unpacking the tarball by hand.
 #
-# Both packages carry the exact same payload as the tarball, installed to
-# /opt/ouroboros with a /usr/bin/ouroboros symlink, a desktop entry, and an
-# opt-in systemd user unit.
+# Both packages carry the tarball's payload without its private Git (they depend
+# on the distribution's git), installed to /opt/ouroboros with a
+# /usr/bin/ouroboros symlink, a desktop entry, and an opt-in systemd user unit.
 #
 # Usage: bash build_linux_packages.sh [payload-dir] [output-dir]
 set -euo pipefail
@@ -60,6 +60,7 @@ if ! cp -al "$PAYLOAD" "$ROOT/opt/ouroboros" 2>/dev/null; then
     rm -rf "$ROOT/opt/ouroboros"
     cp -a "$PAYLOAD" "$ROOT/opt/ouroboros"
 fi
+rm -rf "$ROOT/opt/ouroboros/_internal/git-standalone"  # Depends/Requires: git below; the app selects it
 # The packaged CLI shim resolves its own symlink before locating the bundle
 # root, so a plain /usr/bin symlink is all either package needs.
 ln -s /opt/ouroboros/bin/ouroboros "$ROOT/usr/bin/ouroboros"

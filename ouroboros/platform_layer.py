@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 from typing import Any, Callable, List, Optional
+from ouroboros.git_selection import keep_reached_git
 from ouroboros.platform_peer import local_connection_peer  # noqa: F401 — platform facade
 from ouroboros.platform_process_target import (  # noqa: F401 — platform facade
     capture_process_stop_target, observe_child_exit, retained_child_group, job_members_running, release_job_members,
@@ -102,14 +103,14 @@ def is_container_env() -> bool:
 
 
 def bootstrap_process_path() -> list[str]:
-    """Add existing common user tool directories to this process PATH once, ahead of its entries."""
+    """Add existing common user tool directories to this process PATH once, ahead of it but not of a chosen Git."""
     global _PATH_BOOTSTRAPPED
     if _PATH_BOOTSTRAPPED:
         return []
     _PATH_BOOTSTRAPPED = True
     path = os.environ.get("PATH", "")
     if added := common_tool_directories(path):
-        os.environ["PATH"] = PATH_SEP.join([*added, *[part for part in path.split(PATH_SEP) if part]])
+        os.environ["PATH"] = PATH_SEP.join(keep_reached_git(added, [part for part in path.split(PATH_SEP) if part]))
     return added
 
 
@@ -128,25 +129,14 @@ def common_tool_directories(search_path: str) -> list[str]:
             home / ".npm-global" / "bin", home / "go" / "bin",
         ))
     if IS_WINDOWS:
-        def _env_path(name: str, default: str = "") -> pathlib.Path | None:
-            text = os.environ.get(name, default)
-            if not text:
-                return None
-            path = pathlib.Path(text)
-            return path if path.is_absolute() else None
-
-        program_files = _env_path("ProgramFiles", r"C:\Program Files")
-        local_app_data = _env_path("LOCALAPPDATA")
-        app_data = _env_path("APPDATA")
-        user_profile = _env_path("USERPROFILE")
-        if program_files:
-            candidates.extend([program_files / "Git" / "cmd", program_files / "nodejs"])
-        if local_app_data:
-            candidates.append(local_app_data / "Programs" / "Git" / "cmd")
-        if app_data:
-            candidates.append(app_data / "npm")
-        if user_profile:
-            candidates.append(user_profile / ".cargo" / "bin")
+        for name, default, *suffixes in (
+            ("ProgramFiles", r"C:\Program Files", ("Git", "cmd"), ("nodejs",)),
+            ("LOCALAPPDATA", "", ("Programs", "Git", "cmd")),
+            ("APPDATA", "", ("npm",)),
+            ("USERPROFILE", "", (".cargo", "bin")),
+        ):
+            if (text := os.environ.get(name, default)) and (base := pathlib.Path(text)).is_absolute():
+                candidates.extend(base.joinpath(*parts) for parts in suffixes)
 
     existing = [part for part in search_path.split(PATH_SEP) if part]
     existing_norm = {str(pathlib.Path(part)).lower() if IS_WINDOWS else str(pathlib.Path(part)) for part in existing}

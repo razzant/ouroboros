@@ -616,10 +616,14 @@ else:
         path.chmod(0o755)
     env = {**os.environ, 'PATH': str(tools) + os.pathsep + os.environ['PATH'],
            'TEST_PACKAGE_RECORDS': str(evidence)}
+    private_git = renamed_linux_payload / '_internal/git-standalone/bin/git'  # the tarball's and AppImage's own copy
+    private_git.parent.mkdir(parents=True)
+    private_git.write_text('git')
     subprocess.run(['bash', 'scripts/build_linux_packages.sh', str(renamed_linux_payload), str(dist)],
                    cwd=REPO, env=env, check=True, capture_output=True, text=True)
     stage = evidence / 'deb-root'
     installed = stage / 'opt/ouroboros'
+    assert private_git.read_text() == 'git' and not (installed / '_internal/git-standalone').exists()  # Depends: git
     for name in ('Ouroboros', 'Ouroboros.bin', '_internal/linux-gtk/desktop-env.sh'):
         assert (installed / name).read_bytes() == (renamed_linux_payload / name).read_bytes()
     assert os.access(installed / 'Ouroboros', os.X_OK) and os.access(installed / 'Ouroboros.bin', os.X_OK)
@@ -640,6 +644,7 @@ else:
         spec = (evidence / name).read_text()
         rpm_root = evidence / name.replace('.spec', '-root')
         assert (rpm_root / 'opt/ouroboros/Ouroboros.bin').read_bytes() == (installed / 'Ouroboros.bin').read_bytes()
+        assert not (rpm_root / 'opt/ouroboros/_internal/git-standalone').exists()
         assert (rpm_root / 'opt/ouroboros/Ouroboros').read_bytes() == (installed / 'Ouroboros').read_bytes()
         assert (rpm_root / 'usr/lib/systemd/user/ouroboros.service').read_bytes() == (stage / 'usr/lib/systemd/user/ouroboros.service').read_bytes()
         assert 'cp -al ' in spec and '"%{buildroot}/opt/ouroboros"' in spec

@@ -146,6 +146,98 @@ def test_git_discovery_cannot_escape_to_an_ancestor_checkout(tmp_path, monkeypat
     assert Path(result.stdout.strip()).resolve() == own.resolve()
 
 
+def test_an_isolated_shell_keeps_the_bundled_gits_helper_paths_and_no_other_git_setting(tmp_path, monkeypatch):
+    """When the bundled POSIX Git (``git-standalone/bin/git``) is first on PATH, isolated_environment
+    restores only its own GIT_EXEC_PATH and GIT_TEMPLATE_DIR while still scrubbing every other GIT_*
+    override. Uses inert non-executable files and in-memory os.access interception."""
+    bundled = tmp_path / "bundle" / "git-standalone"
+    bundled_git = bundled / "bin" / "git"
+    bundled_git.parent.mkdir(parents=True)
+    bundled_git.write_text("inert git placeholder", encoding="utf-8")
+    (bundled / "libexec" / "git-core").mkdir(parents=True)
+    (bundled / "share" / "git-core" / "templates").mkdir(parents=True)
+
+    system_git = tmp_path / "system" / "bin" / "git"
+    system_git.parent.mkdir(parents=True)
+    system_git.write_text("inert system git", encoding="utf-8")
+
+    incomplete = tmp_path / "incomplete" / "git-standalone"
+    incomplete_git = incomplete / "bin" / "git"
+    incomplete_git.parent.mkdir(parents=True)
+    incomplete_git.write_text("inert mingit or incomplete", encoding="utf-8")
+
+    real_access = os.access
+    fixture_gits = {bundled_git, system_git, incomplete_git}
+    monkeypatch.setattr(
+        os, "access",
+        lambda path, mode, *a, **kw: (
+            True if mode == os.X_OK and Path(path) in fixture_gits else real_access(path, mode, *a, **kw)
+        ),
+    )
+
+    foreign = {
+        "GIT_DIR": "/foreign/.git",
+        "GIT_WORK_TREE": "/foreign/work",
+        "GIT_AUTHOR_NAME": "Owner",
+        "GIT_EXEC_PATH": "/forged/exec",
+        "GIT_TEMPLATE_DIR": "/forged/templates",
+    }
+    bundled_env = isolated_environment(
+        tmp_path / "iso-bundled", REPO,
+        source={**foreign, "PATH": os.pathsep.join([str(bundled / "bin"), str(system_git.parent)])},
+    )
+    resolved_bundled = bundled.resolve()
+    assert bundled_env["GIT_EXEC_PATH"] == str(resolved_bundled / "libexec" / "git-core")
+    assert bundled_env["GIT_TEMPLATE_DIR"] == str(resolved_bundled / "share" / "git-core" / "templates")
+    for dropped in ("GIT_DIR", "GIT_WORK_TREE", "GIT_AUTHOR_NAME"):
+        assert dropped not in bundled_env
+    assert bundled_env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert bundled_env["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert bundled_env["GIT_OPTIONAL_LOCKS"] == "0"
+
+    system_first_env = isolated_environment(
+        tmp_path / "iso-system", REPO,
+        source={**foreign, "PATH": os.pathsep.join([str(system_git.parent), str(bundled / "bin")])},
+    )
+    assert "GIT_EXEC_PATH" not in system_first_env and "GIT_TEMPLATE_DIR" not in system_first_env
+    assert "GIT_DIR" not in system_first_env
+
+    no_helpers_env = isolated_environment(
+        tmp_path / "iso-incomplete", REPO,
+        source={**foreign, "PATH": str(incomplete / "bin")},
+    )
+    assert "GIT_EXEC_PATH" not in no_helpers_env and "GIT_TEMPLATE_DIR" not in no_helpers_env
+
+    empty_path_env = isolated_environment(tmp_path / "iso-empty", REPO, source={**foreign, "PATH": ""})
+    assert "GIT_EXEC_PATH" not in empty_path_env and "GIT_TEMPLATE_DIR" not in empty_path_env
+
+    # A test copy's own Git calls (tests/candidate_checkout.py; its --no-local clone starts git-upload-pack by name)
+    # scrub GIT_* the same way and keep the same two paths, with the copy as the only Git a bare git runs.
+    from types import SimpleNamespace
+
+    from tests import candidate_checkout
+
+    passed: list[dict] = []
+
+    def run(argv, **kwargs):  # in memory: no Git runs
+        passed.append(kwargs["env"])
+        return SimpleNamespace(returncode=0, stdout=b"")
+
+    monkeypatch.setattr(candidate_checkout.subprocess, "run", run)
+    for name, value in foreign.items():
+        monkeypatch.setenv(name, value)
+    for first in (bundled / "bin", system_git.parent):
+        monkeypatch.setenv("PATH", str(first))
+        candidate_checkout._git(tmp_path, "clone", "--no-local", "--no-checkout", "--", "source", "target")
+    only_bundled, system_first = passed
+    assert only_bundled["GIT_EXEC_PATH"] == str(resolved_bundled / "libexec" / "git-core")
+    assert only_bundled["GIT_TEMPLATE_DIR"] == str(resolved_bundled / "share" / "git-core" / "templates")
+    assert "GIT_EXEC_PATH" not in system_first and "GIT_TEMPLATE_DIR" not in system_first
+    for env in passed:
+        assert not {"GIT_DIR", "GIT_WORK_TREE", "GIT_AUTHOR_NAME"} & set(env)
+        assert env["GIT_CONFIG_GLOBAL"] == os.devnull and env["GIT_CONFIG_NOSYSTEM"] == "1"
+
+
 def test_boundary_is_established_before_runtime_imports_in_nested_collection(tmp_path):
     root = tmp_path / "boundary"
     env = isolated_environment(root, REPO)

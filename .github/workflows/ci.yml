@@ -2590,11 +2590,11 @@ jobs:
           sbom-path: dist/sbom-linux-appimage-x86_64.cdx.json
 
       # —— Linux native packages ——
-      # The .deb and .rpm wrap the same dist/Ouroboros payload the tarball
-      # smoke above already proved, so they reuse its SBOM: the bytes under
-      # /opt/ouroboros are identical to the ones inside the archive. Each
-      # package still earns its own smoke receipt, from a real install in a
-      # stock Ubuntu and Fedora container.
+      # The .deb and .rpm drop _internal/git-standalone (they depend on the
+      # distro's git) and add native integration files, so each built package
+      # is unpacked and catalogued with Syft itself rather than copying the
+      # portable tarball's SBOM. Each package also earns its own smoke receipt,
+      # from a real install in a stock Ubuntu and Fedora container.
       - name: Build Linux .deb and .rpm packages
         if: matrix.os == 'ubuntu-latest'
         shell: bash
@@ -2622,18 +2622,21 @@ jobs:
           echo "rpm=$RPM" >> "$GITHUB_OUTPUT"
           echo "rpm_red80=$RPM_RED80" >> "$GITHUB_OUTPUT"
 
-      - name: Record Linux package smoke and reuse payload SBOM
+      - name: Record Linux package smoke and generate package SBOMs
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
           set -euo pipefail
-          PAYLOAD_SBOM="dist/sbom-linux-x86_64.cdx.json"
-          test -f "$PAYLOAD_SBOM"
+          SYFT="${{ steps.syft.outputs.path }}"
+          test -x "$SYFT"
+          PKG_WORK="$(mktemp -d)"
+          trap 'rm -rf "$PKG_WORK"' EXIT
           record() {
+            local proof_id="$1" artifact="$2" root="$PKG_WORK/$1"
             python scripts/release_proof.py record-smoke \
-              --proof-id "$1" \
-              --artifact "$2" \
-              --output "dist/release-smoke-$1.json" \
+              --proof-id "$proof_id" \
+              --artifact "$artifact" \
+              --output "dist/release-smoke-$proof_id.json" \
               --commit "$GITHUB_SHA" \
               --tag "$GITHUB_REF_NAME" \
               --check package_install \
@@ -2643,7 +2646,27 @@ jobs:
               --check desktop_entry \
               --check systemd_user_unit \
               --check desktop_launcher_start
-            cp "$PAYLOAD_SBOM" "dist/sbom-$1.cdx.json"
+            rm -rf "$root"
+            mkdir -p "$root"
+            case "$artifact" in
+              *.deb)
+                dpkg-deb -x "$artifact" "$root"
+                ;;
+              *.rpm)
+                rpm2cpio "$artifact" | (cd "$root" && cpio -idmu --quiet --no-absolute-filenames)
+                ;;
+              *)
+                echo "Unsupported Linux package format: $artifact" >&2
+                exit 1
+                ;;
+            esac
+            # Drop the absolute /usr/bin/ouroboros CLI alias from the temp scan tree only
+            # (like macOS Applications) so Syft stays inside $root; the package itself is unchanged.
+            if [ -L "$root/usr/bin/ouroboros" ]; then
+              unlink "$root/usr/bin/ouroboros"
+            fi
+            "$SYFT" "dir:$root" --output "cyclonedx-json=dist/sbom-$proof_id.cdx.json"
+            rm -rf "$root"
           }
           record linux-deb-amd64 "${{ steps.linux_packages.outputs.deb }}"
           record linux-rpm-x86_64 "${{ steps.linux_packages.outputs.rpm }}"
@@ -2723,6 +2746,19 @@ jobs:
             dist/sbom-linux-deb-amd64.cdx.json
             dist/sbom-linux-rpm-x86_64.cdx.json
             dist/sbom-linux-rpm-red80-x86_64.cdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+      # Both POSIX legs write the same pinned bytes; one uploads them, so no two artifacts unpack onto one file.
+      - name: Upload the Git sources
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ouroboros-git-sources
+          overwrite: true
+          path: |
+            dist/git-sources-*.tar
+            dist/git-sources-*.tar.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -3107,9 +3143,20 @@ jobs:
                     | sort -n | tail -n 1 | cut -f2-)"
           cp "$newest/test-verdict.json" release-verdict/test-verdict.json
 
+      # The release needs the pinned MinGit sources, but neither the Windows ZIP nor its signing job does.
+      - name: Capture the Windows Git sources
+        id: git_sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          PREVIOUS_TAG="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+          python scripts/download_git_standalone.py --sources release-artifacts --layout mingit --previous-tag="$PREVIOUS_TAG"
+          printf 'previous_tag=%s\n' "$PREVIOUS_TAG" >> "$GITHUB_OUTPUT"
+
       - name: Assemble release proof capsule and notes
         id: release_proof
         env:
+          PREVIOUS_TAG: ${{ steps.git_sources.outputs.previous_tag }}
           ANDROID_BUILD_RESULT: ${{ needs.android-build.result }}
           ANDROID_ATTESTATION_RESULT: ${{ steps.verify_artifacts.outputs.android_result }}
           # Empty selects the explicitly unsigned Windows ZIP; set, the proof
@@ -3134,10 +3181,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          PREVIOUS_TAG="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
           ARGS=()
           for GATE in $RELEASE_GATE_RESULTS; do ARGS+=(--gate-result "$GATE"); done
-          if [ -n "$PREVIOUS_TAG" ]; then ARGS+=(--previous-tag "$PREVIOUS_TAG"); fi
+          if [ -n "${PREVIOUS_TAG:-}" ]; then ARGS+=(--previous-tag="$PREVIOUS_TAG"); fi
           python scripts/release_proof.py assemble \
             --directory release-artifacts \
             --repository "$GITHUB_REPOSITORY" \

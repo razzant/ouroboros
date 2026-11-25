@@ -60,12 +60,13 @@ def _run_git(
     BOUNDED per the update-flow plumbing rule: the process starts in its own
     group and the WHOLE TREE is killed on timeout (``platform_layer`` helpers,
     imported at call time to keep this module standalone-importable)."""
+    from ouroboros.git_selection import selected_git
     from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
 
-    cmd = ["git", "-C", str(worktree), *args]
+    cmd = ["git", "-C", str(worktree), *args]  # Logical command for the timeout diagnostic.
     try:
         proc = subprocess.Popen(
-            cmd,
+            [selected_git(), *cmd[1:]],
             stdin=subprocess.PIPE if input_bytes is not None else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

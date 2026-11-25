@@ -3,7 +3,9 @@
 Real here: WebKit and Chromium; the gate's own login form through ``NetworkAuthGate`` on a live socket,
 seen by a peer beyond loopback (a phone on the network), then its Unlock; the Telegram sidecar's own
 bootstrap response, script and Content-Security-Policy; the launcher's own pre-server window pages (its
-``html=`` arguments, evaluated from launcher.py). Stand-ins: the device's appearance
+``html=`` arguments, evaluated from launcher.py; the Git window twice, with the heading, message and next
+step ``launcher._git_setup_notice`` gives for no Git and for one that did not answer in time). Stand-ins:
+the device's appearance
 (``prefers-color-scheme`` emulation); storage the browser blocks (a ``localStorage`` getter that throws,
 as with blocked site data); Telegram's SDK (a stub reporting its colour scheme); the network between
 Telegram and the sidecar (routes answer with the sidecar's own responses); and the native window around a
@@ -405,36 +407,52 @@ def test_a_genuine_telegram_launch_hands_off_in_the_same_palette(engines, engine
             network.close()
 
 
-def _launcher_pages() -> dict:
-    """Each pre-server window's own page, as launcher.py builds it on macOS (its ``html=`` argument, evaluated)."""
+GIT_WINDOW = "Ouroboros — Setup Required"
+FRAMES = {"Ouroboros": "already-running", GIT_WINDOW: "setup-required",
+          "Ouroboros — Startup Failed": "startup-failed"}  # a window's name among the evidence frames
+PERSONAL_GIT = "/Users/example-owner/Library/Developer/CommandLineTools/usr/bin/git"  # a path only the log may carry
+
+
+def _launcher_pages() -> list:
+    """(frame, title, page, width, height, notice) of each pre-server window, as launcher.py builds it on macOS: its
+    ``html=`` argument, evaluated at the window's own size. The Git window comes twice, with the heading, message and
+    next step (its ``notice``) launcher.py gives for no Git and for one that did not answer in time."""
     import html as html_module
 
     import launcher
-    from ouroboros.platform_layer import git_install_hint
+    from ouroboros.git_selection import GitUnverified
 
-    # The names a window's expression reads besides the launcher's own helpers: the stdlib `html` it escapes with and
-    # the `line` its caller passes (`_already_running_window`: the sentence of launcher.py's own second-launch call).
-    names = {"_window_page": launcher._window_page, "IS_MACOS": True, "_hint": git_install_hint(),
-             "html": html_module, "line": "Only one instance can run at a time."}
-    pages = {}
+    git = {"missing": launcher._git_setup_notice(None),
+           "timeout": launcher._git_setup_notice(GitUnverified(PERSONAL_GIT))}
+    # The names a window's expression reads besides the launcher's own helpers: the stdlib `html` it escapes with, the
+    # `line` its caller passes (`_already_running_window`: the sentence of launcher.py's own second-launch call) and
+    # the Git window's notice.
+    names = {"_window_page": launcher._window_page, "html": html_module, "line": "Only one instance can run at a time."}
+    pages = []
     for node in ast.walk(ast.parse((REPO / "launcher.py").read_text(encoding="utf-8"))):
         if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "create_window":
             html = next((keyword.value for keyword in node.keywords if keyword.arg == "html"), None)
             if html is None:
                 continue
+            title = node.args[0].value
             size = {keyword.arg: keyword.value.value for keyword in node.keywords if keyword.arg in ("width", "height")}
             source = compile(ast.Expression(html), "launcher.py", "eval")
-            page = eval(source, dict(names))  # noqa: S307
-            pages[node.args[0].value] = (page, size["width"], size["height"] - 28)  # the ordinary title bar
-    assert sorted(pages) == ["Ouroboros", "Ouroboros — Setup Required", "Ouroboros — Startup Failed"]
+            for case, notice in (git if title == GIT_WINDOW else {"": ()}).items():
+                scope = {**names, **dict(zip(("heading", "message", "hint"), notice))}
+                pages.append(("-".join(filter(None, (FRAMES[title], case))), title, eval(source, scope),  # noqa: S307
+                              size["width"], size["height"] - 28, notice))  # the ordinary title bar
+    assert sorted(page[0] for page in pages) == [
+        "already-running", "setup-required-missing", "setup-required-timeout", "startup-failed"]
     return pages
 
 
 @pytest.mark.parametrize("engine", ENGINES)
 def test_windows_before_the_server_follow_the_device(engines, engine):
+    from ouroboros.platform_layer import git_install_hint
+
     pages = _launcher_pages()
     browser = engines(engine)
-    for title, (html, width, height) in pages.items():
+    for frame, title, html, width, height, notice in pages:
         for device in ("light", "dark"):
             context = browser.new_context(viewport={"width": width, "height": height}, device_scale_factor=2,
                                           color_scheme=device)
@@ -443,14 +461,23 @@ def test_windows_before_the_server_follow_the_device(engines, engine):
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.set_content(html, wait_until="load")
             painted = _painted(page)
-            assert (painted["theme"], painted["room"]) == (device, ROOMS[device]), (title, device)
-            assert not painted["wide"] and not painted["tall"], (title, device)
+            assert (painted["theme"], painted["room"]) == (device, ROOMS[device]), (frame, device)
+            assert not painted["wide"] and not painted["tall"], (frame, device)
             for selector in ("h2", ".window p"):
-                assert page.evaluate(CONTRAST, selector) >= 4.5, (title, device, selector)
-            if page.locator("#install-btn").count():
-                assert page.evaluate(CONTRAST, "#install-btn") >= 4.5, (title, device)
-                page.evaluate("document.getElementById('status').textContent = 'Installing... A system dialog may appear.'")
-                assert page.evaluate(CONTRAST, "#status") >= 4.5, (title, device)
-            _shoot(page, f"window-{title.split('—')[-1].strip().lower().replace(' ', '-')}-{engine}-{device}.png")
-            assert errors == [], (title, device)
+                assert page.evaluate(CONTRAST, selector) >= 4.5, (frame, device, selector)
+            if page.locator(".window p.muted").count():  # the next step's own line
+                assert page.evaluate(CONTRAST, ".window p.muted") >= 4.5, (frame, device)
+            else:
+                assert not notice, (frame, device)
+            if notice:  # the Git window says what launcher.py gives, and each case its own way on
+                text = page.locator(".window").inner_text()
+                assert all(part in text for part in notice), (frame, text)
+                assert "example-owner" not in html, (frame, text)
+                if frame.endswith("missing"):
+                    assert git_install_hint() in text and "Open Ouroboros again" not in text, (frame, text)
+                else:
+                    assert "Open Ouroboros again" in text and "launcher.log" in text, (frame, text)
+                    assert git_install_hint() not in text, (frame, text)
+            _shoot(page, f"window-{frame}-{engine}-{device}.png")
+            assert errors == [], (frame, device)
             context.close()
