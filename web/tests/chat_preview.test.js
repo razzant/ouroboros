@@ -583,6 +583,59 @@ test('a full origin\'s write never writes back a room that gave way: another tab
     }
 });
 
+test('a write that lands counts the others only then: another tab\'s erasure meanwhile stands, a room it took makes none give way', t => {
+    // Astra w4 2: others counted before the write lands act on what another tab changed meanwhile. A Project it erased
+    // while they were read would stand again under the write, and a room it removed just before the write would still
+    // count toward the total, so a room that fits would give way with it. Only a full origin surveys them first.
+    const { mount } = fixture(t);
+    t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+    const preview = (storage, room) => createChatPreview({ feed: mount, room, scope: PREVIEW_SCOPE, label: senderLabel,
+        mutate: fn => fn(), storage: () => storage });
+    const saving = (storage, room, rows) => { preview(storage, room).save(rows); t.mock.timers.tick(1000); };
+    const texts = (storage, room) => {
+        const kept = storage.values.get(entryOf(room));
+        return kept && JSON.parse(kept).rows.map(item => item.text);
+    };
+    // A newer read of Project two is saved; the other tab acts once, while this write reads Project one's entry.
+    for (const [other, act, left] of [['does nothing', null, ['Read again']],
+        ['erases Project two meanwhile', storage => forgetProjectPreviews(['two'], PREVIEW_SCOPE, storage), undefined]]) {
+        const storage = memoryStorage(), { getItem } = storage;
+        saving(storage, [1, 'one'], [row('chat:1', 'Project one')]);
+        saving(storage, [2, 'two'], [row('chat:1', 'Read before')]);
+        let reads = 0;
+        storage.getItem = (key) => { if (key === entryOf([1, 'one']) && !reads++) act?.(storage); return getItem(key); };
+        saving(storage, [2, 'two'], [row('chat:2', 'Read again')]);
+        storage.getItem = getItem;
+        assert.equal(reads, 1, `another tab ${other}: the write read Project one's entry`);
+        assert.deepEqual(texts(storage, [2, 'two']), left, `another tab ${other}: that stands`);
+        assert.equal(preview(storage, [2, 'two']).show(), Boolean(left),
+            `another tab ${other}: a later opening paints ${left ? 'the newer read' : 'nothing'}`);
+        assert.deepEqual(texts(storage, [1, 'one']), ['Project one'], `another tab ${other}: the room read keeps its words`);
+    }
+    // Nine rooms of about 95,000 characters, and a tenth saving 150,000: past the total only while the ninth stands.
+    // Alone, the room saved least recently gives way; with Project p9 taken just before the write lands, none does.
+    const wide = [row('chat:1', 'w'.repeat(150000))], tenth = [10, 'p10'], ninth = [9, 'p9'];
+    for (const [other, act, gone] of [['does nothing', null, 1],
+        ['erases Project p9 just before the write', storage => forgetProjectPreviews(['p9'], PREVIEW_SCOPE, storage), 9]]) {
+        const storage = memoryStorage(), { setItem } = storage, probe = memoryStorage();
+        for (let i = 1; i <= 9; i += 1) saving(storage, [i, `p${i}`], BIG);
+        preview(probe, tenth).save(wide);  // what the tenth takes, saved now
+        const need = entryOf(tenth).length + probe.values.get(entryOf(tenth)).length;
+        const nine = entryOf(ninth).length + storage.values.get(entryOf(ninth)).length;
+        assert.ok(used(storage) + need > TOTAL_CHARS && used(storage) - nine + need <= TOTAL_CHARS,
+            'past the total only while the ninth room stands');
+        let puts = 0;
+        storage.setItem = (key, value) => { if (key === entryOf(tenth) && !puts++) act?.(storage); setItem(key, value); };
+        saving(storage, tenth, wide);
+        storage.setItem = setItem;
+        assert.equal(puts, 1, `another tab ${other}: the write landed at once`);
+        const standing = Array.from({ length: 10 }, (_, i) => i + 1).filter(i => storage.values.has(entryOf([i, `p${i}`])));
+        assert.deepEqual(standing, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].filter(i => i !== gone),
+            `another tab ${other}: only room ${gone} is gone`);
+        assert.ok(used(storage) <= TOTAL_CHARS, `${used(storage)} characters`);
+    }
+});
+
 test('a room over its own share keeps its newest whole rows; a person\'s text is never cut', t => {
     const f = fixture(t), text = 'long exact passage '.repeat(1000);
     f.make().save(Array.from({ length: 100 }, (_, j) => row(`chat:${j}`, text, { role: 'user' })));

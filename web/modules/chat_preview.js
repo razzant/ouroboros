@@ -193,19 +193,21 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
             return Array.isArray(rows) ? rows.filter(savedRow) : null;
         } catch { return null; }
     };
-    // This room's entry first (an empty one too: it was read empty), stamped with when it was saved; then the entries
-    // saved least recently give way until all fit TOTAL_CHARS. An origin too full to take it: the others give way one
-    // at a time, saved least recently first, the write asked again after each, until it lands or none is left. Nothing
-    // that gave way is written back (another tab may have erased or replaced it since): a write that cannot land even
-    // then leaves them gone, and goes itself, alone: an older text never stands for a newer read. Only a save writes
-    // this entry: a show or a read with nothing new never rewrites words another tab may have replaced or erased.
+    // This room's entry first (an empty one too: it was read empty), stamped with when it was saved; once it landed,
+    // the others as they stand then (another tab may have erased or replaced any meanwhile), saved least recently
+    // first, give way until all fit TOTAL_CHARS. An origin too full to take it: the others give way one at a time,
+    // saved least recently first, the write asked again after each, until it lands or none is left. Nothing that gave
+    // way is written back (another tab may have erased or replaced it since): a write that cannot land even then leaves
+    // them gone, and goes itself, alone: an older text never stands for a newer read. Only a save writes this entry: a
+    // show or a read with nothing new never rewrites words another tab may have replaced or erased.
     const write = (rows) => {
         let store = null, written = false;
         try {
             store = storage();
             if (!store || !current(store, true)) return;
             const text = entryText(rows, Date.now());
-            const others = familyOf(store).filter(name => name !== PREVIEW_KEY && name !== entry).map((name) => {
+            // The other rooms' entries as they stand now, saved least recently first.
+            const others = () => familyOf(store).filter(name => name !== PREVIEW_KEY && name !== entry).map((name) => {
                 const value = store.getItem(name) || '';
                 return { name, size: name.length + value.length, read: readOf(value) };
             }).sort((a, b) => a.read - b.read);
@@ -214,14 +216,16 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
                 return true;
             };
             written = put();
-            while (!written && others.length) {
-                store.removeItem(others.shift().name);
+            const giving = written ? [] : others();  // only a full origin surveys them before its write lands
+            while (!written && giving.length) {
+                store.removeItem(giving.shift().name);
                 written = put();
             }
+            const rest = written ? others() : [];
             let total = PREVIEW_KEY.length + RECORD.length + entry.length + text.length
-                + others.reduce((sum, other) => sum + other.size, 0);
-            while (written && total > TOTAL_CHARS && others.length) {
-                const other = others.shift();
+                + rest.reduce((sum, other) => sum + other.size, 0);
+            while (total > TOTAL_CHARS && rest.length) {
+                const other = rest.shift();
                 store.removeItem(other.name);
                 total -= other.size;
             }
