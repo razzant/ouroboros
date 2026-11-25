@@ -67,7 +67,9 @@ def _assert_exact_restore(tmp_path, original, request, receipt):
         unit = units[ref["unit_id"]]
         assert ref["raw_sha256"] == unit.raw_sha256
         source = json.loads(_visible(row).split("\n", 2)[2])
-        assert source == original[unit.start:unit.end + 1]
+        # The view shows the rows as a send does; their outcome records stay in the exact checkpoint above.
+        assert source == [{key: value for key, value in message.items() if key != TOOL_RESULT_RECORD_KEY}
+                          for message in original[unit.start:unit.end + 1]]
         assert row["role"] == "user" and not row.get("tool_calls")  # source, never live protocol replay
 
 

@@ -36,6 +36,7 @@ from ouroboros.llm_substitution import same_route_refusal, stamp_substitutions
 from ouroboros.model_wait import (
     OWNER_WORDS_WAITING, ModelWaitInterrupted, current_model_wait, model_wait_reason, propagate_model_control,
 )
+from ouroboros.llm_stream import LATER_OUTPUT_LIMIT_USAGE_KEY
 from ouroboros.openai_chat_dispatch import CUSTOM_RECEIPTS_USAGE_KEY, pop_custom_validation_receipts
 from ouroboros.llm_attempt import PROVIDER_POLICY_REFUSAL, _is_provider_policy_refusal, is_size_refusal, single_physical_send, track_physical_attempts
 from ouroboros.observability import mark_last_answer, new_call_id, new_execution_id, persist_call
@@ -1212,7 +1213,8 @@ def _send_main_candidate(
         return llm.chat(**kwargs)
 
 
-def _take_response_facts(usage: Dict[str, Any], msg: Dict[str, Any], accumulated_usage: Dict[str, Any]) -> None:
+def _take_response_facts(usage: Dict[str, Any], msg: Dict[str, Any], accumulated_usage: Dict[str, Any]) -> str:
+    """Move one response's facts from its usage to the round; returns the Chat adapter's later output limit."""
     model_facts = usage.get("claudexor") or {}
     accumulated_usage["_model_route"] = dict(model_facts.get("route") or {})
     accumulated_usage["_model_substitutions"] = model_facts.get("substituted") or []
@@ -1221,10 +1223,11 @@ def _take_response_facts(usage: Dict[str, Any], msg: Dict[str, Any], accumulated
                   "_last_llm_provider_fields", "_last_llm_provider_answer", "_last_llm_provider_message_cut", "_last_llm_resource_refusal",
                   "_last_llm_output_exhausted", "_last_llm_attempt_custody", "_last_llm_size_refusal"):
         accumulated_usage.pop(stale, None)
-    receipts = pop_custom_validation_receipts(usage, msg.get("tool_calls") or [])
+    receipts = pop_custom_validation_receipts(usage, msg["tool_calls"] if isinstance(msg.get("tool_calls"), list) else [])
     accumulated_usage.pop(CUSTOM_RECEIPTS_USAGE_KEY, None)
     if receipts:
         accumulated_usage[CUSTOM_RECEIPTS_USAGE_KEY] = receipts
+    return usage.pop(LATER_OUTPUT_LIMIT_USAGE_KEY, "")
 
 
 def _own_capture(capture: Any, prior_attempt_id: Optional[str]) -> Any:
@@ -1251,8 +1254,10 @@ def _handle_main_llm_call_exception(
 
 def _replace_response_meta(
     target: Optional[Dict[str, Any]], usage: Optional[Dict[str, Any]] = None, msg: Optional[Dict[str, Any]] = None,
+    *, later_output_limit: str = "",
 ) -> None:
-    """Replace one caller-owned, attempt-local response fact projection."""
+    """Replace one caller-owned, attempt-local response fact projection: the first finish every reader keeps and, for
+    ordinary call admission alone, the Chat adapter's later output limit and Claudexor's stateless completion."""
     if target is None:
         return
     target.clear()
@@ -1260,9 +1265,13 @@ def _replace_response_meta(
         return
     finish_present, finish_reason = response_finish_reason(usage, msg)
     target.update(finish_reason_present=finish_present, finish_reason=finish_reason,
-                  tool_call_count=len(msg.get("tool_calls") or []))
+                  tool_call_count=len(msg["tool_calls"]) if isinstance(msg.get("tool_calls"), list) else 0)
     if usage.get("response_status") is not None:  # a provider-stated terminal (Responses); a Chat reply states none
         target["response_status"] = usage["response_status"]
+    if (later := later_output_limit.strip()).lower() in OUTPUT_LIMIT_FINISH_REASONS:
+        target["later_output_limit"] = later
+    if usage.get("provider") == "claudexor" and (usage.get("claudexor") or {}).get("stateless_completed") is True:
+        target["stateless_completed"] = True  # only the Claudexor adapter writes that provider label
 
 
 def forced_response_parts(
@@ -1437,7 +1446,7 @@ def call_llm_with_retry(
             note_prefix_answer(accumulated_usage, usage, model, use_local)  # a reply that read its input moves its route's base
             physical_context = accumulated_usage.pop(REBOUND_PHYSICAL_CONTEXT_KEY, physical_context)
             context_fit_event_fields = _context_fit_event_fields(accumulated_usage) if physical_context is not None else {}
-            _take_response_facts(usage, msg, accumulated_usage)
+            later_output_limit = _take_response_facts(usage, msg, accumulated_usage)
             cost, display_model, provider, cost_estimated = _normalize_usage_cost(usage, model=model, use_local=use_local)
             accumulated_usage["_observed_route"] = observed_route_stamp(usage)
             add_usage(accumulated_usage, usage)
@@ -1464,7 +1473,7 @@ def call_llm_with_retry(
                 _emit_main_llm_call_state(event_queue, call_identity, "failed", capture=physical)
                 return None, cost  # the reply is retained above, but cannot act for the original room
             if task_type == "presence": accumulated_usage["_presence_pre_dispatch_only"] = False  # a response reached the model
-            _replace_response_meta(response_meta_out, usage, msg)
+            _replace_response_meta(response_meta_out, usage, msg, later_output_limit=later_output_limit)
             # A provider-stated terminal that is no result reads as a reply without usable output (``reply_usability``).
             if usage_reply_usability(usage, msg) == "unusable" or (not tool_calls and (not content or not content.strip())):
                 event_type, is_provider_glitch, permanent = _record_and_emit_empty_response(
@@ -1523,7 +1532,7 @@ def call_llm_with_retry(
                     "record_contract_version", "reasoning_effort", "cost_usd", "prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens",
                     "prompt_cache_ttl", "effort", "effort_resolution", "request_wire", "claudexor", "duration_ms") if key in _round_event},
                 "response_kind": "tool_calls" if tool_calls else "message",
-                "tool_call_count": len(tool_calls), "rounds": accumulated_usage["rounds"],
+                "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0, "rounds": accumulated_usage["rounds"],
                 "has_text": bool(content and str(content).strip()),
             })
             append_jsonl(drive_logs / "events.jsonl", _round_event)

@@ -232,6 +232,29 @@ def test_running_local_dispatch_uses_serving_capacity_without_cloud_fallback(
     assert not ce._load(config.DATA_DIR)["probes"]
 
 
+@pytest.mark.parametrize("finish", [None, "length"])
+def test_a_local_servers_usage_extension_states_no_host_fact(manager, monkeypatch, finish):
+    """The local lane's finish is its choice's own, an absent one staying absent: a server's usage extension naming
+    ``response_finish_reason``, the later-limit key or ``stream_receipt`` supplies none of them (#4028)."""
+    from ouroboros._usage_response import response_finish_reason
+    from ouroboros.llm_stream import LATER_OUTPUT_LIMIT_USAGE_KEY
+
+    manager._context_length, manager._serving_context_length = 131072, 16384
+    client = LLMClient(api_key="unused")
+    extension = {"response_finish_reason": "stop", LATER_OUTPUT_LIMIT_USAGE_KEY: "length",
+                 "stream_receipt": {"later_output_limits": {"0": "length"}}}
+    monkeypatch.setattr(client, "_get_local_client", lambda: SimpleNamespace(chat=SimpleNamespace(
+        completions=SimpleNamespace(create=lambda **_payload: SimpleNamespace(model_dump=lambda: {
+            "choices": [{"message": {"role": "assistant", "content": "local answer"},
+                         **({"finish_reason": finish} if finish else {})}],
+            "usage": {"prompt_tokens": 6, "completion_tokens": 2, **extension}})))))
+    message, usage = client.chat(messages=[{"role": "user", "content": "hi"}], model="local-fixture",
+                                 max_tokens=1024, use_local=True)
+    assert message["content"] == "local answer" and usage["provider"] == "local"
+    assert response_finish_reason(usage, message) == ((True, finish) if finish else (False, None))
+    assert not {LATER_OUTPUT_LIMIT_USAGE_KEY, "stream_receipt"} & set(usage)
+
+
 @pytest.mark.parametrize(("mode", "window"), [("max", 16384), ("low", 65536), ("nano", 16384)])
 def test_local_main_forecast_keeps_real_pressure_and_nano_headroom(manager, main_plan, tmp_path, mode, window):
     from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
