@@ -1389,12 +1389,6 @@ def _assemble_history_response(
     project_chat_ids, project_source_refs, bindings_by_task, rooms, classified = (
         _project_history_context(data_dir, thread_id, strict=exact)
     )
-    try:  # each owner message's latest routing annotation: a journal history's rows read, a word search never
-        from ouroboros.chat_annotations import addressed_chat_annotations
-
-        chat_annotations = addressed_chat_annotations(data_dir)
-    except Exception:
-        chat_annotations = {}
     row_target = None
     if exact:
         from ouroboros.chat_references import history_row_anchor
@@ -1423,6 +1417,12 @@ def _assemble_history_response(
     selections, before, recent = page["selections"], page["before"], page["recent"]
     order = _reading_order(selections["chat"][0])
     n_human, n_progress = page["quotas"]["human"], page["quotas"]["progress"]
+    try:  # the routing receipts of the owner messages this page can show (its rows, its origins), never the install's
+        from ouroboros.chat_annotations import addressed_chat_annotations
+        chat_annotations = addressed_chat_annotations(data_dir, message_ids={str(row.get("client_message_id", ""))
+                                                                             for row in (*selections["chat"][0], *project_source_refs)} - {""})
+    except Exception:
+        chat_annotations = {}
     historical_terminals: Dict[str, dict] = {}
     replay_evidence: list = []
     from ouroboros.task_reads import TaskReads
