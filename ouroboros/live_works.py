@@ -2,6 +2,12 @@
 
 Focus is the model's authored account of its work. It is deliberately distinct
 from the web card's latest visible narration and never supplies routing authority.
+
+``works`` holds one row per listed root: its id, title, room, state, ``started_at``,
+open questions, waiting and hold facts, ``tails`` (what of it still runs) and focus.
+``other_live_work`` is a sibling of ``works``, present only when not empty: ended
+roots whose helpers or runs go on (``peer_roster.unlisted_live_work``, from queue and recorded task facts) and unlisted live place turns. It is never a row
+field, and ``works`` can be empty while it lists running helpers.
 """
 from __future__ import annotations
 

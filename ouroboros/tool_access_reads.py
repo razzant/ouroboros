@@ -4,6 +4,9 @@ Ordinary foci can address canonical runtime data independently of their executio
 drive. Only children inherit ancestor workspaces, through exact parent links.
 Dispatch still enforces task and Presence restrictions; writes never consult
 this projection.
+
+In every mode, settings included, absolute or omitted-root paths reach the original;
+relative paths keep execution-drive bytes.
 """
 from __future__ import annotations
 

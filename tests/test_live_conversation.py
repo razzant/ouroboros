@@ -565,7 +565,14 @@ def test_only_the_owners_own_call_speech_can_be_cited(host_world, monkeypatch, k
 
 
 
-@pytest.mark.parametrize('host_world', [('max', 400_000, 'estimator')], indirect=True)
+# The window is the one number here that follows the books. A Max start is lowered by the window when its whole books,
+# the tools, the reply reserve and the first send's eighth of the window do not fit it; the story never decides that
+# (``memory_floor.max_room_lost`` prices it at its shortest telling, a written beginning for these pages), so no page
+# length can hold the premise. In estimator tokens the premise holds for windows from 348k (below it a Low start folds
+# old pages) to 378k (above it Max fits once ARCHITECTURE, DEVELOPMENT and SYSTEM are each about a sixth lighter than at
+# 459d03b); 365k sits near the middle. A base that starts in Max: the books got lighter, lower the window. Old pages
+# folded at the base: the tools or the core grew, raise it. The 80 pages stay as they are: they pay the frame below.
+@pytest.mark.parametrize('host_world', [('max', 365_000, 'estimator')], indirect=True)
 def test_primary_voice_start_room_policy_pays_its_frames_keeps_opened_sessions_untouched(host_world, monkeypatch):
     """The original case of the book maps through the real ``session_candidate``, one world and one stub session: a story
     of long old pages a Max start lowered to Low by the window has not folded, and a voice window that refuses the first
