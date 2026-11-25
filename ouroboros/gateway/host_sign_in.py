@@ -6,7 +6,7 @@ another skill's grant whatever it holds. ``GET /sign-in/accounts`` lists its acc
 ``POST /sign-in/token`` answers a short-lived access token (one refresh under the account's lock when the
 stored one is the ``rejected`` one, expired or valid less than ``min_valid`` seconds; the refresh token,
 client secret and PKCE verifier never leave the host); ``POST /sign-in/handover`` takes over sign-ins the
-skill already held (``service_sign_in.handover``). A refresh runs on its own loop in a worker thread, so the
+skill already held (``service_sign_in.handover``) or reads one verified offer's saved receipt. A refresh runs on its own loop in a worker thread, so the
 lock never blocks this loop. Every error text is masked with the live sign-in secrets; the host logs counts
 and outcomes only. Beside ``host_service.py``; ``create_host_service_app`` mounts these routes.
 """
@@ -28,6 +28,7 @@ from ouroboros.gateway.host_service import HostServiceAuthError, _authenticated,
 log = logging.getLogger(__name__)
 
 SIGN_IN_VERSION = 1
+SIGN_IN_HANDOVER_VERSION = 2  # unknown returns, verified handover receipts and consent-bound requests
 CARD_PLACE = "Extensions › Skills"  # where the owner signs in: the skill's card
 _HINT = ("SIGN_IN_REQUIRED: {skill} needs the owner's sign-in to {label} for {account} ({reason}). "
          f"The owner can press Sign in again on its card in {CARD_PLACE}.")
@@ -38,6 +39,12 @@ def _masked(text: str) -> str:
     from ouroboros.secret_masking import redact_known_values
 
     return redact_known_values(str(text), service_sign_in.secret_values())
+
+
+def _busy() -> JSONResponse:
+    """Another sign-in step held a lock this request waited for past its limit (``sign_in_busy``): temporary, and it confirms
+    nothing this request may already have done."""
+    return JSONResponse({"ok": False, "code": "SIGN_IN_UNAVAILABLE", "reason": "sign_in_busy"}, status_code=503)
 
 
 async def _caller(request: Request, *, handover: bool = False):
@@ -67,7 +74,7 @@ def _view(skill: str, data_dir: pathlib.Path) -> list:
     from ouroboros import service_sign_in_declaration as declaration
     from ouroboros.skill_loader import find_skill
 
-    keep = ("key", "label", "subject", "verified", "state", "reason", "via", "legacy_generation", "connection_id")
+    keep = ("key", "label", "subject", "verified", "state", "reason", "via", "consent", "legacy_generation", "connection_id")
     return [{"id": service.id, "label": service.label, "accounts": [
         {**{k: row[k] for k in keep if k in row}, "scope": " ".join(row["scope"]), "client_label": row["client"]["label"]}
         for row in service_sign_in.accounts(skill, service)]}
@@ -95,14 +102,17 @@ def _number(value: Any) -> bool:
 
 
 async def api_sign_in_token(request: Request) -> JSONResponse:
-    """``{service, account?, rejected?, required_scope?, min_valid?, connection_id?}`` → ``200 {ok, access_token,
-    token_type, expires_at, scope, account: {key, label}, connection_id?}`` (an expected ``connection_id`` the account
-    lacks: ``409 connection_changed``); ``409 SIGN_IN_REQUIRED`` with ``reason``, ``note`` (the
+    """``{service, account?, rejected?, required_scope?, min_valid?, connection_id?, consent?}`` → ``200 {ok, access_token,
+    token_type, expires_at, scope, account: {key, label}, connection_id?, consent?}`` (an expected ``connection_id`` the account
+    lacks: ``409 connection_changed``; an expected ``consent`` it no longer has, sent with explicit ``account`` and
+    ``connection_id``: ``409 consent_changed``); ``409 SIGN_IN_REQUIRED`` with ``reason``, ``note`` (the
     skill's own words for that reason) and ``hint`` (one sentence for the mind); ``503 SIGN_IN_UNAVAILABLE``
-    (the provider did not answer or a saved list cannot be read; the grant is kept); ``404`` with ``reason`` and ``hint`` when there is
+    (the provider did not answer, a saved list cannot be read, or another sign-in step held the account's lock past its wait:
+    ``sign_in_busy``; the grant is kept); ``404`` with ``reason`` and ``hint`` when there is
     no account to use (an undeclared service, an unknown account, none or several signed in)."""
     from ouroboros import service_sign_in
     from ouroboros.oauth_engine import SignInRequired
+    from ouroboros.store import StoreBusy
 
     skill, body, refused = await _caller(request)
     if refused is not None:
@@ -112,6 +122,9 @@ async def api_sign_in_token(request: Request) -> JSONResponse:
     if not service or not _number(min_valid) or any(
             body.get(key) is not None and not isinstance(body[key], str) for key in ("account", "rejected", "required_scope", "connection_id")):
         return _json_error("supply service, and account, rejected, required_scope, connection_id as strings, min_valid as seconds", 400)
+    consent = body.get("consent")
+    if "consent" in body and (not isinstance(consent, str) or not consent or not account or not body.get("connection_id")):
+        return _json_error("consent must be a nonempty string with explicit account and connection_id", 400)
     ctx = request.app.state.host_service_context
     if not ctx._enter_inflight(skill):
         return _json_error("too many sign-in requests in flight", 429)
@@ -121,12 +134,14 @@ async def api_sign_in_token(request: Request) -> JSONResponse:
                 answer = await asyncio.to_thread(asyncio.run, service_sign_in.token(
                     skill, service, account, rejected=body.get("rejected") or None,
                     required_scope=str(body.get("required_scope") or ""), min_valid=min_valid,
-                    connection_id=str(body.get("connection_id") or "")))
+                    connection_id=str(body.get("connection_id") or ""), consent=consent))
                 return JSONResponse({"ok": True, **answer})
             except service_sign_in.SignInNotFound as exc:
                 return await asyncio.to_thread(_not_found, skill, service, exc)
             except SignInRequired as exc:
                 return await asyncio.to_thread(_required_response, skill, service, account, exc)
+            except StoreBusy:
+                return _busy()
             except ValueError as exc:
                 return _json_error(_masked(str(exc)), 400)
             except httpx.HTTPError as exc:
@@ -140,7 +155,7 @@ async def api_sign_in_token(request: Request) -> JSONResponse:
 def _required_response(skill: str, service: str, account: str, exc: Any) -> JSONResponse:
     from ouroboros import service_sign_in
 
-    if exc.reason == "sign_in_storage_unavailable":
+    if exc.reason in ("sign_in_storage_unavailable", "sign_in_busy"):  # temporary: the grant is kept
         return JSONResponse({"ok": False, "code": "SIGN_IN_UNAVAILABLE", "reason": exc.reason}, status_code=503)
     declared = service_sign_in.declared_service(skill, service)
     label = getattr(exc, "account_label", "") or account or "the account"
@@ -151,6 +166,7 @@ def _required_response(skill: str, service: str, account: str, exc: Any) -> JSON
         "provider_approval_required": "Choose a client approved for this provider and sign in again on the skill's card.",
         "account_selection_required": "Disconnect the other accounts on the skill's card before using this service.",
         "connection_changed": "This account is no longer the connection you expected: read GET /sign-in/accounts and follow its current connection_id.",
+        "consent_changed": "The sign-in has changed since this operation began. Confirm a new operation with its current consent.",
     }
     hint = fixes.get(exc.reason) or (
         "The token cannot be shown to last that long. Ask for a shorter min_valid interval."
@@ -184,16 +200,38 @@ def _not_found(skill: str, service: str, exc: Exception) -> JSONResponse:
 
 
 async def api_sign_in_handover(request: Request) -> JSONResponse:
-    """Import the skill's saved grants, with receipts scoped to an optional exact legacy generation.
+    """Import the skill's saved grants, with receipts scoped to an optional exact legacy generation, or read one verified
+    offer's saved receipt without the provider (``receipt``).
 
     Wire and replay rules: CREATING_SKILLS, "Signing in to a service".
     """
     from ouroboros import service_sign_in
+    from ouroboros.oauth_engine import SignInRequired
     from ouroboros.skill_loader import find_skill
+    from ouroboros.store import StoreBusy
 
     skill, body, refused = await _caller(request, handover=True)
     if refused is not None:
         return refused
+    if "receipt" in body:
+        receipt, service = body["receipt"], body.get("service")
+        if (set(body) != {"service", "receipt"} or not isinstance(service, str) or not service
+                or not isinstance(receipt, dict) or set(receipt) != {"legacy_key", "legacy_generation"}
+                or not all(isinstance(value, str) for value in receipt.values())):
+            return _json_error("supply only service and receipt with legacy_key and legacy_generation", 400)
+        with service_sign_in.at_data_dir(request.app.state.host_service_context.data_dir):
+            try:
+                answer = await asyncio.to_thread(asyncio.run, service_sign_in.read_handover_receipt(
+                    skill, service, receipt["legacy_key"], receipt["legacy_generation"]))
+            except service_sign_in.SignInNotFound as exc:
+                return _json_error(_masked(str(exc)), 404)
+            except SignInRequired as exc:
+                return JSONResponse({"ok": False, "code": "SIGN_IN_UNAVAILABLE", "reason": exc.reason}, status_code=503)
+            except StoreBusy:
+                return _busy()
+            except ValueError as exc:
+                return _json_error(_masked(str(exc)), 400)
+        return JSONResponse({"ok": True, "receipt": answer})
     clients, grants = body.get("clients") or [], body.get("grants") or []
     if not body.get("service") or not isinstance(clients, list) or not isinstance(grants, list) or not all(
             isinstance(item, dict) for item in (*clients, *grants)) or not isinstance(body.get("recover", False), bool):
@@ -211,6 +249,11 @@ async def api_sign_in_handover(request: Request) -> JSONResponse:
         except (httpx.HTTPError, ValueError) as exc:
             return JSONResponse({"ok": False, "code": "SIGN_IN_UNAVAILABLE", "reason": "provider_unreachable",
                                  "error": _masked(f"{type(exc).__name__}: {exc}")}, status_code=503)
+        except StoreBusy:  # the request may have started: recover or read its receipts
+            return _busy()
+        except (SignInRequired, OSError) as exc:  # a store its answers need could not be read or written: no receipts
+            return JSONResponse({"ok": False, "code": "SIGN_IN_UNAVAILABLE",
+                                 "reason": getattr(exc, "reason", "sign_in_storage_unavailable")}, status_code=503)
     log.info("sign-in handover for %s/%s: %s", skill, body["service"],
              [item.get("result") for item in answer.get("grants", [])])
     return JSONResponse(answer)

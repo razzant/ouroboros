@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import queue
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -28,7 +29,8 @@ import ouroboros.loop_transport as loop_transport
 from ouroboros import loop_output_exhaustion as recovery, usage_accounting as ua
 from ouroboros.loop import _output_exhausted_notice, run_llm_loop
 from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY, refusal_words
-from ouroboros.tools.registry import ToolRegistry
+from ouroboros.openai_responses_custody import RESPONSES_RECEIPT_KEY
+from ouroboros.tools.registry import ToolEntry, ToolRegistry
 from ouroboros._usage_response import output_exhaustion_facts, reported_reasoning_tokens, response_finish_reason
 from ouroboros.loop_llm_call import (
     _COOLDOWN_ERROR_KINDS,
@@ -685,6 +687,731 @@ def test_other_finishes_leave_text_the_plain_final(tmp_path, loop_env, no_sleep,
     assert recovery.UNFINISHED_KEY not in usage and "forced_finalization" not in trace
 
 
+# ------------------------------------------------------------------ a new reply's calls (#4028)
+
+NOTE = "note_fixture"
+LITERAL_NOTE = '{"note": "one\ntwo"}'
+CUT_BATCH = ('{"note": "first"}', '{"note": "sec')  # a whole first call, then one its output limit cut
+
+
+def _note_call(arguments, call_id="note-1"):
+    return {"id": call_id, "type": "function", "function": {"name": NOTE, "arguments": arguments}}
+
+
+def _cut_batch():
+    return [_note_call(CUT_BATCH[0]), _note_call(CUT_BATCH[1], "note-2")]
+
+
+def _note_tool(registry):
+    """A harmless registered tool with one required string; returns the values its handler received."""
+    saved = []
+    registry.register(ToolEntry(NOTE, {"name": NOTE, "description": "Save a short note (fixture).", "parameters": {
+        "type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}},
+        lambda _ctx, note: saved.append(note) or "saved", safety_policy="skip"))
+    return saved
+
+
+def _calls_ctx(finish="tool_calls", *, present=True, receipts=(), status=None, later=None,
+               stateless_completed=None, turn_state=None):
+    facts = {"finish_reason_present": True, "finish_reason": finish} if present else {}
+    facts.update({"response_status": status} if status else {}, **({"later_output_limit": later} if later else {}))
+    if stateless_completed is not None:
+        facts["stateless_completed"] = stateless_completed
+    return SimpleNamespace(task_id="t-calls", _request_wire_custom_receipts=receipts, _round_response_facts=facts,
+                           model_turn_state=turn_state,
+                           _current_llm_call_meta={"llm_call_id": "llm-1", "response_ref": {"call_id": "llm-1_response"}})
+
+
+def _pairs(messages):
+    """Each assistant batch's call ids beside the tool rows that follow it, in order."""
+    out = []
+    for index, row in enumerate(messages):
+        if row.get("role") == "assistant" and row.get("tool_calls"):
+            answers = []
+            for later in messages[index + 1:]:
+                if later.get("role") != "tool":
+                    break
+                answers.append(later["tool_call_id"])
+            out.append(([call["id"] for call in row["tool_calls"]], answers))
+    return out
+
+
+@pytest.mark.parametrize(("arguments", "working", "escaped"), [
+    ('{"note": "one\ntwo", "path": "C:\\\\dir\\u00e9"}', '{"note": "one\\ntwo", "path": "C:\\\\dir\\u00e9"}', 1),
+    ('{"rows": ["a\r\nb", {"cell": "x\ty"}]}', '{"rows": ["a\\r\\nb", {"cell": "x\\ty"}]}', 3),
+    ('{"note": "one\\ntwo"}', None, 0),  # strict JSON is never touched
+    ('{"no\nte": "x"}', None, 0),  # a literal control inside a key
+    ('{"note": "a\x01b\nc"}', None, 0),  # another control character
+    ('{"note": "a\\qb\nc"}', None, 0),  # a bad escape stays the parser's error
+    ('{"note": "a\\\nb"}', None, 0),  # an escaped literal line break, too
+    ('{"note": "one\ntwo"', None, 0),  # a missing brace: cut data is never completed
+    ('{"note": "one\ntwo}', None, 0),  # a missing quote
+    ('{"note": "one\ntwo", "n": NaN}', None, 0),  # a second, non-standard defect (NaN, Infinity)
+    ('{"note": "one\ntwo", "meta": {"tag": "a", "tag": "b"}}', None, 0),  # a field name repeated, nested too
+    ('["one\ntwo"]', None, 0),  # no arguments object
+])
+def test_only_literal_controls_inside_string_values_are_escaped(tmp_path, arguments, working, escaped):
+    """The repair's own seam: a literal LF, CR or TAB inside a string value of an otherwise strict object is written
+    as its escape, under the same call id, while the reply as received and its neighbouring escapes stay byte for
+    byte and one event names the repair beside the raw response. Every other shape stays the parser's error."""
+    msg = {"role": "assistant", "content": "", "tool_calls": [_note_call(arguments)]}
+    received = copy.deepcopy(msg)
+    reply, calls = recovery.admit_calls(_calls_ctx(), msg, tmp_path)
+    assert msg == received and calls == reply["tool_calls"]
+    events = _events(tmp_path, "tool_arguments_repaired")
+    if working is None:
+        assert reply is msg and events == []
+        return
+    assert reply["tool_calls"] == [_note_call(working)] and isinstance(json.loads(working), dict)
+    assert [(row["tool_call_id"], row["tool"], row["escaped_characters"], row["llm_call_id"], row["response_ref"])
+            for row in events] == [("note-1", NOTE, escaped, "llm-1", {"call_id": "llm-1_response"})]
+
+
+@pytest.mark.parametrize(("ctx", "extra", "outcome"), [
+    (_calls_ctx("length"), {}, "cut"),
+    (_calls_ctx("max_tokens"), {}, "cut"),
+    (_calls_ctx("max_output_tokens"), {}, "cut"),
+    (_calls_ctx("tool_calls", later="length"), {}, "cut"),
+    (_calls_ctx("content_filter", later="length"), {}, "cut"),
+    (_calls_ctx("refusal", later="max_tokens"), {}, "cut"),
+    (_calls_ctx("tool_calls"), {}, "repaired"),
+    (_calls_ctx("function_call"), {}, "repaired"),
+    (_calls_ctx("stop"), {}, "repaired"),  # a natural stop with calls, as a named tool choice ends
+    (_calls_ctx("tool_calls", status="completed"), {}, "repaired"),
+    (_calls_ctx(present=False, stateless_completed=True), {}, "repaired"),  # verified stateless completion, absent finish
+    (_calls_ctx(None, stateless_completed=True), {}, "repaired"),  # verified stateless completion, null finish
+    (_calls_ctx("stop", stateless_completed=True), {}, "repaired"),  # verified stateless completion, compatible finish
+    (_calls_ctx("length", stateless_completed=True), {}, "cut"),  # contradictory output limit still cuts
+    (_calls_ctx("incomplete", stateless_completed=True), {}, "kept"),  # contradictory incomplete finish never repairs
+    (_calls_ctx("eos", stateless_completed=True), {}, "kept"),  # contradictory unrecognized finish never repairs
+    (_calls_ctx(present=False, stateless_completed=True, status="incomplete"), {}, "kept"),  # non-completed status
+    (_calls_ctx(present=False, stateless_completed=True, later="length"), {}, "cut"),  # later output limit still cuts
+    (_calls_ctx(present=False, stateless_completed=True), {"nativeContinuation": {"state": "opaque"}}, "kept"),
+    (_calls_ctx(present=False, stateless_completed=True, turn_state=SimpleNamespace(envelope={"token": "x"})), {}, "kept"),
+    (_calls_ctx("tool_calls", turn_state=SimpleNamespace(envelope={"token": "x"})), {}, "kept"),  # active native envelope, compatible finish
+    (_calls_ctx("stop", stateless_completed=True, turn_state=SimpleNamespace(envelope={"token": "x"})), {}, "kept"),  # active envelope + stateless_completed
+    (_calls_ctx(None, stateless_completed=1), {}, "kept"),  # non-bool int never broadens null finish
+    (_calls_ctx(None), {}, "kept"),  # a null finish states no completion
+    (_calls_ctx(present=False), {}, "kept"),  # nor an absent one without verified stateless_completed
+    (_calls_ctx("incomplete"), {}, "kept"),  # an explicitly incomplete reply (Claudexor) is no whole one
+    (_calls_ctx("eos"), {}, "kept"),  # nor an unfamiliar label
+    (_calls_ctx("tool_calls", status="incomplete"), {}, "kept"),  # nor a terminal status other than completed
+    (_calls_ctx("stop"), {RESPONSES_RECEIPT_KEY: {}}, "kept"),  # a native receipt, bound or not, keeps its calls
+    (_calls_ctx(receipts=(SimpleNamespace(tool_call_id="note-1"),)), {}, "kept"),  # a custom call's own receipt
+])
+def test_a_repair_needs_a_stated_whole_reply_and_a_cut_starts_nothing(tmp_path, ctx, extra, outcome):
+    """Only a provider-stated whole reply (a tool-call finish or ``stop``, or an attempt-verified ``stateless_completed``
+    non-native reply with no contradictory finish or active turn state, under no terminal status but ``completed``)
+    earns the repair; an output-limit finish leaves no call to start and repairs none; a null, absent, incomplete or
+    unfamiliar finish without verified completion, a native replay receipt and a custom call judged by its own receipt
+    keep the arguments as received, and their calls take the ordinary path."""
+    msg = {"role": "assistant", "content": "", "tool_calls": [_note_call(LITERAL_NOTE)], **extra}
+    received = copy.deepcopy(msg)
+    reply, calls = recovery.admit_calls(ctx, msg, tmp_path)
+    assert msg == received
+    arguments = reply["tool_calls"][0]["function"]["arguments"]
+    assert arguments == ('{"note": "one\\ntwo"}' if outcome == "repaired" else LITERAL_NOTE)
+    assert calls == ([] if outcome == "cut" else reply["tool_calls"])
+    assert bool(_events(tmp_path, "tool_arguments_repaired")) is (outcome == "repaired")
+
+
+@pytest.mark.parametrize(("call", "repaired"), [
+    ({"id": "note-1", "function": {"name": NOTE, "arguments": LITERAL_NOTE}}, True),  # no type, as a stream assembles
+    ({"id": "note-1", "type": "custom", "function": {"name": NOTE, "arguments": LITERAL_NOTE}}, False),
+    ({"id": "note-1", "type": "", "function": {"name": NOTE, "arguments": LITERAL_NOTE}}, False),  # empty: no omission
+    ({"id": "note-1", "type": False, "function": {"name": NOTE, "arguments": LITERAL_NOTE}}, False),  # nor false
+    ({"id": "note-1", "type": None, "function": {"name": NOTE, "arguments": LITERAL_NOTE}}, False),  # nor null
+    ({"type": "function", "function": {"name": NOTE, "arguments": LITERAL_NOTE}}, False),  # no id
+    ({"id": " ", "type": "function", "function": {"name": NOTE, "arguments": LITERAL_NOTE}}, False),  # a blank id
+    ({"id": "note-1", "type": "function", "function": {"name": " ", "arguments": LITERAL_NOTE}}, False),  # no name
+])
+def test_only_a_whole_function_call_is_repaired(tmp_path, call, repaired):
+    """The repair belongs to a whole structured function call: type ``function`` or omitted, a non-blank id and name.
+    A foreign, empty, false or null type, or a missing or blank id or name is another form, kept as received."""
+    reply, _calls = recovery.admit_calls(_calls_ctx(), {"role": "assistant", "tool_calls": [call]}, tmp_path)
+    assert (reply["tool_calls"][0]["function"]["arguments"] != LITERAL_NOTE) is repaired
+
+
+def test_the_mcp_gateway_unwraps_the_working_value(tmp_path):
+    """A ``call_mcp_tool`` envelope repaired once is the call the gateway resolves, under the envelope's id."""
+    from ouroboros.tools.tool_discovery import GATEWAY_TOOL, resolve_gateway_call
+    envelope = {"id": "mcp-1", "type": "function", "function": {
+        "name": GATEWAY_TOOL, "arguments": '{"name": "mcp_fixture__note", "arguments": {"note": "one\ntwo"}}'}}
+    reply, _calls = recovery.admit_calls(_calls_ctx(), {"role": "assistant", "tool_calls": [envelope]}, tmp_path)
+    resolved = resolve_gateway_call(reply["tool_calls"][0])
+    assert (resolved["id"], resolved["function"]["name"], json.loads(resolved["function"]["arguments"])) == (
+        "mcp-1", "mcp_fixture__note", {"note": "one\ntwo"})
+
+
+@pytest.mark.parametrize(("source", "finish", "starts"), [
+    ("usage", "length", False), ("message", "max_tokens", False),  # the OpenAI-family and native Anthropic lanes
+    ("usage", "tool_calls", True), ("usage", None, True), ("none", None, True)])
+def test_a_reply_cut_at_its_output_limit_starts_none_of_its_calls(tmp_path, loop_env, no_sleep, source, finish, starts):
+    """The owner's choice (#4028): no call of a reply its provider ended at the output limit starts, its whole first
+    call included, so a repeat of both never doubles the first. The next request pairs each call with one result
+    saying NOT STARTED and why; no user row joins and nothing enters the tool trace, so no error, recovery or warning
+    follows. A null or absent finish is no such fact: the whole first call runs as before."""
+    msg, usage = _finished(source, finish, text="")
+    msg["tool_calls"] = _cut_batch()
+    llm = _ScriptedLLM((msg, usage), OK_RESPONSE)
+    kwargs = _loop_kwargs(tmp_path, llm, [])
+    saved = _note_tool(kwargs["tools"])
+    result, usage, trace = run_llm_loop(**kwargs)
+    assert result == "done" and llm.calls == 2
+    second = llm.requests[1]["messages"]
+    assert _pairs(second) == [(["note-1", "note-2"], ["note-1", "note-2"])]
+    assert not [row for row in second if row.get("role") == "user" and "finish_reason" in json.dumps(row)]
+    results = [row["content"] for row in second if row.get("role") == "tool"]
+    if starts:
+        assert saved == ["first"] and "TOOL_ARG_ERROR" in results[1]
+        return
+    assert saved == [] and trace["tool_calls"] == []
+    assert all("NOT STARTED" in text and f"(finish_reason={finish})" in text for text in results)
+    from ouroboros.outcomes import derive_loop_outcome
+    axes = derive_loop_outcome(result, usage, trace)["outcome_axes"]
+    assert axes["execution"]["unresolved_tool_errors"] == [] and not axes["objective"].get("warning")
+
+
+def test_a_cut_batch_keeps_its_whole_pairs_and_no_fragment(tmp_path, loop_env, no_sleep):
+    """A fragment of a cut batch (``function`` null, no id, a blank id, an empty type) neither stops the loop nor
+    reaches the next request: no id is invented, no user row is added, and omitted fragments plus the exact raw
+    reply reference are noted ONCE on the last NOT STARTED row without repeating fragment data; each NOT STARTED
+    row carries host ``not_started`` metadata in canonical history that stays stripped on the wire. The batch's row
+    keeps its flat ``reasoning`` in that field for the same route, a switch drops it, and no progress narrates it."""
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_messages import _MessageShapingMixin
+    from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY, read_tool_result_record
+
+    msg, usage = _finished("usage", "length", text="")
+    msg["tool_calls"] = [
+        _note_call(CUT_BATCH[0], "note-1"),
+        _note_call(CUT_BATCH[1], "note-2"),
+        {"id": "frag-1", "type": "function", "function": None},
+        {"type": "function", "function": {"name": NOTE, "arguments": '{"note": "RAW-FRAG-SENTINEL'}},
+        {"id": " ", "type": "function", "function": {"name": NOTE, "arguments": "{"}},
+        {"id": "frag-4", "type": "", "function": {"name": NOTE, "arguments": "{"}},
+    ]
+    msg.update(reasoning="FLAT-CUT-REASONING", reasoning_details=[{"type": "reasoning.text", "text": "CUT-DETAILS"}])
+    llm, notes = _ScriptedLLM((msg, usage), OK_RESPONSE), []
+    kwargs = _loop_kwargs(tmp_path, llm, notes)
+    saved = _note_tool(kwargs["tools"])
+    result, loop_usage, trace = run_llm_loop(**kwargs)
+    assert result == "done" and llm.calls == 2 and saved == [] and trace["tool_calls"] == []
+    assert not [note for note in notes if "FLAT-CUT-REASONING" in str(note) or "CUT-DETAILS" in str(note)]
+    second = llm.requests[1]["messages"]
+    wire = LLMClient.__new__(LLMClient)._build_remote_kwargs(
+        {"provider": "openrouter", "resolved_model": "fixture-vendor/note-model", "supports_openrouter_extensions": True},
+        second, "max", 64, "auto", None, None, skip_capability_fetch=True)["messages"]
+    assert [row.get("reasoning") for row in wire if row.get("tool_calls")] == ["FLAT-CUT-REASONING"]
+    assert not [row for row in _MessageShapingMixin.sanitize_reasoning_on_model_switch(
+        second, "fixture-vendor/note-model", "other-vendor/fallback-model") if "reasoning" in row]
+    assert _pairs(second) == [(["note-1", "note-2"], ["note-1", "note-2"])]
+    assert not [row for row in second if row.get("role") == "user" and "omitted" in str(row.get("content"))]
+    wire_tools = [row for row in LLMClient._copy_messages_with_cache_policy(
+        second, allow_message_cache_control=False, flatten_tool_content_blocks=False) if row.get("role") == "tool"]
+    assert [row["tool_call_id"] for row in wire_tools] == ["note-1", "note-2"]
+    assert all(TOOL_RESULT_RECORD_KEY not in row for row in wire_tools)
+    ref = loop_usage["llm_call_refs"][0]["response_ref"]
+    ref_json = json.dumps(ref, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    assert "omitted from working history" not in wire_tools[0]["content"] and ref_json not in wire_tools[0]["content"]
+    assert "4 incomplete or ambiguous tool-call entries were omitted from working history" in wire_tools[1]["content"]
+    assert f"(raw reply: {ref_json})" in wire_tools[1]["content"]
+    assert "RAW-FRAG-SENTINEL" not in json.dumps(second)
+    canonical_tools = [row for row in kwargs["tools"]._ctx.messages if row.get("role") == "tool"]
+    assert len(canonical_tools) == 2
+    for row in canonical_tools:
+        rec = read_tool_result_record(row)
+        assert rec["state"] == "not_started" and rec["kind"] == "not_started"
+        assert rec["facts"]["status"] == "not_started" and rec["facts"]["is_error"] is False
+        assert rec["source_ref"] == ref and "invocation" not in rec and "trace_ref" not in rec
+
+
+def _fragments_only(text):
+    """A reply its provider cut at its output limit whose calls are fragments alone: no id to pair."""
+    msg, usage = _finished("usage", "length", text=text)
+    msg["tool_calls"] = [{"id": "note-1", "type": "function", "function": None},
+                         {"type": "function", "function": {"name": NOTE, "arguments": '{"note": "FRAG-ONLY-SENTINEL'}}]
+    return msg, usage
+
+
+def _informed(messages):
+    return [row["content"] for row in messages if row.get("role") == "user"
+            and "The provider ended your previous reply" in str(row.get("content"))]
+
+
+@pytest.mark.parametrize("text", ["Writing both notes now.", ""])
+def test_two_cuts_of_fragments_alone_end_the_work_after_one_informed_turn(tmp_path, loop_env, no_sleep, text):
+    """A cut reply with no pairable call, with words or without, takes the bounded unfinished path: one host notice
+    says nothing of it ran and mentions omitted fragments plus the exact raw reply ref once (the reply's own words
+    kept, none invented, no call, id or fragment payload sent), and the same cut again ends the work as incomplete
+    instead of buying another first chance. Nothing started at any point."""
+    llm = _ScriptedLLM(_fragments_only(text), _fragments_only(text))
+    kwargs = _loop_kwargs(tmp_path, llm, [])
+    saved = _note_tool(kwargs["tools"])
+    result, usage, trace = run_llm_loop(**kwargs)
+    assert llm.calls == 2 and saved == [] and trace["tool_calls"] == []
+    assert (usage["reason_code"], usage["execution_status"]) == (recovery.REASON, "infra_failed")
+    assert result == text if text else result.startswith("Work is incomplete")  # its own words, or the host's notice
+    second = llm.requests[1]["messages"]
+    [notice] = _informed(second)
+    ref_json = json.dumps(usage["llm_call_refs"][0]["response_ref"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    assert "(finish_reason=length)" in notice and "none of its tool calls ran" in notice
+    assert notice.count("omitted from working history") == 1 and notice.count(ref_json) == 1
+    assert "FRAG-ONLY-SENTINEL" not in json.dumps(second)
+    assert ("it is kept above as written" in notice) is bool(text) and ("it carried no text" in notice) is not bool(text)
+    assistant = [row for row in second if row.get("role") == "assistant"]
+    assert [row["content"] for row in assistant] == ([text] if text else [])
+    assert not any(row.get("tool_calls") or row.get("role") == "tool" for row in second)
+    assert "Work is incomplete" in str(usage.get("terminal_host_notice") or "")
+
+
+def test_a_cut_of_fragments_alone_then_a_whole_answer_completes(tmp_path, loop_env, no_sleep):
+    """The legitimate end of that episode: after the one informed turn the next reply answers, the episode closes and
+    the answer is the final, with nothing started and no assistant row or id made up for the empty cut."""
+    llm = _ScriptedLLM(_fragments_only(""), OK_RESPONSE)
+    kwargs = _loop_kwargs(tmp_path, llm, [])
+    saved = _note_tool(kwargs["tools"])
+    result, usage, trace = run_llm_loop(**kwargs)
+    assert (result, llm.calls, saved, trace["tool_calls"]) == ("done", 2, [], [])
+    assert recovery.UNFINISHED_KEY not in usage and "reason_code" not in usage
+    second = llm.requests[1]["messages"]
+    assert len(_informed(second)) == 1 and not [row for row in second if row.get("role") == "assistant"]
+
+
+def test_after_a_cut_batch_the_repeated_calls_run_once_each(tmp_path, loop_env, no_sleep):
+    """The owner's case end to end: two notes, the reply cut at its output limit, then both sent again whole. Each
+    note is saved once, every request pairs each call with one result, and the outcome names no tool error."""
+    cut, usage = _finished("usage", "length", text="")
+    cut["tool_calls"] = _cut_batch()
+    again = ({"role": "assistant", "content": "", "tool_calls": [
+        _note_call('{"note": "first"}', "note-3"), _note_call('{"note": "second"}', "note-4")]},
+        {"prompt_tokens": 9, "completion_tokens": 9, "cost": 0.0, "response_finish_reason": "tool_calls"})
+    llm = _ScriptedLLM((cut, usage), again, OK_RESPONSE)
+    kwargs = _loop_kwargs(tmp_path, llm, [])
+    saved = _note_tool(kwargs["tools"])
+    result, usage, trace = run_llm_loop(**kwargs)
+    assert result == "done" and llm.calls == 3 and saved == ["first", "second"]
+    assert _pairs(llm.requests[2]["messages"]) == [(["note-1", "note-2"], ["note-1", "note-2"]),
+                                                   (["note-3", "note-4"], ["note-3", "note-4"])]
+    assert [(row["tool"], row["is_error"]) for row in trace["tool_calls"]] == [(NOTE, False), (NOTE, False)]
+    from ouroboros.outcomes import derive_loop_outcome
+    axes = derive_loop_outcome(result, usage, trace)["outcome_axes"]
+    assert axes["execution"]["status"] == "ok" and axes["execution"]["unresolved_tool_errors"] == []
+
+
+@pytest.mark.parametrize(("finish", "boundary", "tail"), [
+    ("length", "post_batch", "no_tool"), ("tool_calls", "pre_effect", "tool")])
+def test_a_cut_batch_is_saved_with_its_results_and_restores_with_no_unknown_call(tmp_path, loop_env, no_sleep,
+                                                                                monkeypatch, finish, boundary, tail):
+    """A restore reads only what was proven: a cut batch is saved together with each call's NOT STARTED result at
+    a ``post_batch`` boundary with ``budget_tail="no_tool"`` (never ``pre_effect``), so recovery keeps the spent
+    round and no-tool budget tail while closing none of its calls as UNKNOWN. A batch that may start keeps its
+    pre-effect save, whose unanswered calls a restore still closes as UNKNOWN."""
+    from ouroboros import working_checkpoint
+    saves, real = [], working_checkpoint.save_round
+
+    def save_round(limit_ctx, name):
+        written = real(limit_ctx, name)
+        if any(row.get("tool_calls") for row in limit_ctx.messages) and not saves:
+            state = working_checkpoint.read_working(tmp_path, "t-exhaust-loop", 1)[1]
+            saves.append((name, state["working"].get("budget_tail"), copy.deepcopy(state["messages"])))
+        return written
+    monkeypatch.setattr(working_checkpoint, "save_round", save_round)
+    msg, usage = _finished("usage", finish, text="")
+    msg["tool_calls"] = _cut_batch()
+    llm = _ScriptedLLM((msg, usage), OK_RESPONSE)
+    kwargs = _loop_kwargs(tmp_path, llm, [])
+    _note_tool(kwargs["tools"])
+    assert run_llm_loop(**kwargs)[0] == "done"
+    [(name, saved_tail, messages)] = saves
+    assert (name, saved_tail) == (boundary, tail)
+    closed = working_checkpoint.close_unanswered_calls(messages, "interruption")
+    assert closed == ([] if finish == "length" else ["note-1", "note-2"])
+    if finish == "length":
+        tool_rows = [row["content"] for row in messages if row.get("role") == "tool"]
+        assert all(text.startswith("[HOST NOTICE] NOT STARTED:") and "split or shorten" in text.lower()
+                   for text in tool_rows) and len(tool_rows) == 2
+
+
+@pytest.mark.parametrize("reply", ["cut_batch", "commentary"])
+def test_a_refused_write_holds_a_cut_batch_until_saved_and_never_a_commentary(tmp_path, loop_env, no_sleep,
+                                                                              monkeypatch, reply):
+    """Real loop and holder; only the file write fails, twice. A cut batch's known non-starts and its spent no-tool
+    round wait on the existing typed hold, published once, until the file lands: its update and the next request each
+    leave with them saved. Control: a completed commentary keeps an ordinary round's non-gating save, so its refused
+    writes hold nothing. The task's own Stop during the hold ends it with nothing shown or sent, and a task with no
+    durable root, its writer refused for ever, waits for nothing (#4028)."""
+    from ouroboros import budget_pause, working_checkpoint as wc
+    from tests.test_output_exhaustion_recovery import _flaky_checkpoint_file
+
+    monkeypatch.setattr(budget_pause, "_HOLD_POLL_SEC", 0.001)
+    first = _finished("usage", "length", text="Saving both notes.") if reply == "cut_batch" else _reply(
+        "Reading the files first.", COMMENTARY)
+    if reply == "cut_batch":
+        first[0]["tool_calls"] = _cut_batch()
+    failing, seen, notes = _flaky_checkpoint_file(monkeypatch), [], []
+
+    def on_disk(when):
+        seen.append((when, wc.read_working(tmp_path, "t-exhaust-loop", 1)[1]))
+
+    class _FirstSaveRefused(_ScriptedLLM):
+        def chat(self, **kwargs):
+            if self.calls:
+                on_disk("request")  # what the file holds as the next request leaves
+            answer = super().chat(**kwargs)
+            if self.calls == 1:
+                failing.extend(["refused", "refused"])  # the first reply's own save, then its retry (or the next ready)
+            return answer
+
+    llm = _FirstSaveRefused(first, OK_RESPONSE)
+    kwargs = _loop_kwargs(tmp_path, llm, notes)
+    kwargs["emit_progress"] = lambda text, **meta: (meta.get("narration") and on_disk("update"), notes.append(text))
+    saved = _note_tool(kwargs["tools"])
+    result, usage, _trace = run_llm_loop(**kwargs)
+    holds = [row["hold_reason"] for row in _events(tmp_path / "logs", "task_checkpoint")
+             if row.get("checkpoint_kind") == "budget_pause_hold" and row.get("hold_reason")]
+    assert (result, llm.calls, saved, failing) == ("done", 2, [], []) and "budget_pause_hold" not in usage
+    assert [when for when, _state in seen[:2]] == ["update", "request"]
+    for when, state in seen[:2]:
+        tool_rows = [row["content"] for row in state["messages"] if row.get("role") == "tool"]
+        if reply == "cut_batch":  # the update reads its own post_batch; the request, the next round's ready over it
+            assert len(tool_rows) == 2 and all(text.startswith("[HOST NOTICE] NOT STARTED:") for text in tool_rows)
+            assert when == "request" or (state["working"]["boundary"], state["working"]["budget_tail"]) == (
+                "post_batch", "no_tool")
+        else:  # the commentary's refused writes left the earlier ready state on disk, and the loop went on
+            assert state["working"]["boundary"] == "ready" and tool_rows == [] and not any(
+                row.get("content") == "Reading the files first." for row in state["messages"])
+    assert holds == ([wc.HOLD_UNWRITABLE] if reply == "cut_batch" else [])
+    if reply == "cut_batch":  # the task's own Stop during that hold, then a task the hold could never save
+        from ouroboros.model_wait import ModelWaitInterrupted
+        from tests._budget_pause_exact_helpers import _controls, _loop_ctx
+        cut, updates = {"finish_reason_present": True, "finish_reason": "length"}, []
+        (tmp_path / "held").mkdir()
+        held_ctx, held = _loop_ctx(tmp_path / "held")
+        held_ctx._round_response_facts, held_ctx._current_llm_call_meta, held.llm_trace = cut, {}, {"reasoning_notes": []}
+        failing.extend(["refused", "refused"])
+        monkeypatch.setattr(budget_pause, "_hold_control_reason", _controls("", "cancelled"))
+        with pytest.raises(ModelWaitInterrupted) as stopped:
+            recovery.intermediate_reply(held, copy.deepcopy(first[0]), lambda text, **_m: updates.append(text))
+        assert stopped.value.control_reason == "cancelled" and updates == [] and not failing  # nothing left
+        monkeypatch.setattr(wc, "_write", lambda *_a, **_k: pytest.fail("a task with no durable root wrote"))
+        bare = SimpleNamespace(messages=[{"role": "user", "content": "go"}], accumulated_usage={}, budget_tail="tool",
+                               llm_trace={"reasoning_notes": []}, tools=SimpleNamespace(_ctx=SimpleNamespace(
+                                   _round_response_facts=cut, _current_llm_call_meta={}, task_id="")))
+        assert recovery.intermediate_reply(bare, copy.deepcopy(first[0]), lambda text, **_m: updates.append(text))
+        assert updates == ["Saving both notes."] and bare.budget_tail == "no_tool" and not bare.accumulated_usage
+
+
+@pytest.mark.parametrize(("raw_content", "visible", "reasoning"), [
+    ("<think>PRIVATE-PLAN</think>\nVisible draft.", "Visible draft.", "PRIVATE-PLAN"),
+    ("<think>PRIVATE-ONLY</think>", "", "PRIVATE-ONLY"),
+    ("", "", ""),
+])
+def test_fragment_only_cut_preserves_display_projection_and_hides_private_reasoning(
+        tmp_path, loop_env, no_sleep, raw_content, visible, reasoning):
+    """A stateless fragment-only cut carrying flat ``reasoning`` (even with empty ``content``) and ``DISPLAY_KEY``
+    keeps both on its preserved assistant row for same-route OpenRouter history while stripping ``_display`` and
+    fragments on the wire and keeping private reasoning off owner surfaces; empty/native-state cuts add no row (#4028)."""
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_messages import DISPLAY_KEY, _MessageShapingMixin
+    from ouroboros.llm_local import stamp_display
+
+    def cut_with_think():
+        msg, usage = _fragments_only(raw_content)
+        if raw_content:
+            stamp_display(msg)
+        else:
+            msg[DISPLAY_KEY] = {"text": "", "reasoning": ""}
+        assert msg[DISPLAY_KEY] == {"text": visible, "reasoning": reasoning}
+        msg["reasoning"] = "FLAT-PRIVATE-REASONING"
+        return msg, usage
+
+    llm, notes = _ScriptedLLM(cut_with_think(), cut_with_think()), []
+    kwargs = _loop_kwargs(tmp_path, llm, notes)
+    _note_tool(kwargs["tools"])
+    result, usage, _trace = run_llm_loop(**kwargs)
+    assert llm.calls == 2 and usage["reason_code"] == recovery.REASON
+    assert all(secret not in result for secret in (reasoning, "FLAT-PRIVATE-REASONING", "<think>") if secret)
+    assert all(secret not in " ".join(str(n) for n in notes) for secret in (reasoning, "FLAT-PRIVATE-REASONING", "<think>") if secret)
+    assert result == visible if visible else result.startswith("Work is incomplete")
+    kept_rows = [row for row in kwargs["tools"]._ctx.messages if row.get("role") == "assistant"]
+    assert len(kept_rows) == 2 and all(
+        row.get("content") == raw_content and "tool_calls" not in row
+        and row.get(DISPLAY_KEY) == {"text": visible, "reasoning": reasoning}
+        and row.get("reasoning") == "FLAT-PRIVATE-REASONING"
+        for row in kept_rows)
+    # Real words kept beside flat reasoning and a lane's display stay a unit compaction folds, its source showing those
+    # words alone; a row that shows none (its plan alone, or nothing) never becomes one, so no note covers made-up words.
+    from ouroboros import context_compaction as cc
+    from tests.test_context_reclaim_materializer import _authored, _fold
+    history = kwargs["tools"]._ctx.messages
+    prose = [unit for unit in cc.context_units(history, scope="dialogue") if history[unit.start] in kept_rows]
+    assert len(prose) == (2 if visible else 0)
+    assert all(f'"content":"{visible}"' in unit.source_text and "PRIVATE" not in unit.source_text for unit in prose)
+    folded, receipt = _fold(history, _authored(history, note="I kept the visible draft."), tmp_path)
+    assert {unit.unit_id for unit in prose} <= set(receipt.selected_unit_ids) and receipt.status == "applied"
+    assert all((row in folded) is not bool(visible) for row in kept_rows)
+    [notice] = _informed(llm.requests[1]["messages"])
+    assert "split or shorten" in notice.lower()
+
+    # Offline OpenRouter request builder preserves same-route flat reasoning and drops _display and fragments;
+    # the existing model-switch scrubber still removes flat reasoning on a route switch.
+    client = LLMClient.__new__(LLMClient)
+    wire_kwargs = client._build_remote_kwargs(
+        {"provider": "openrouter", "resolved_model": "fixture-vendor/note-model",
+         "supports_openrouter_extensions": True},
+        llm.requests[1]["messages"], "max", 64, "auto", None, None, skip_capability_fetch=True,
+    )
+    wire_assistants = [row for row in wire_kwargs["messages"] if row.get("role") == "assistant"]
+    assert wire_assistants == [{"role": "assistant", "content": raw_content, "reasoning": "FLAT-PRIVATE-REASONING"}]
+    assert DISPLAY_KEY not in json.dumps(wire_kwargs["messages"])
+    assert "FRAG-ONLY-SENTINEL" not in json.dumps(wire_kwargs["messages"])
+    scrubbed = _MessageShapingMixin.sanitize_reasoning_on_model_switch(
+        llm.requests[1]["messages"], "fixture-vendor/note-model", "other-vendor/fallback-model")
+    assert all("reasoning" not in row for row in scrubbed if row.get("role") == "assistant")
+
+    if not raw_content:
+        # Empty fragment-only input with no real flat reasoning, or carrying native state, adds zero assistant rows.
+        for extra_msg, turn_state in (
+            ({"reasoning": "   ", DISPLAY_KEY: {"text": "", "reasoning": ""}}, None),
+            ({"reasoning": "FLAT-PRIVATE-REASONING", "nativeContinuation": {"state": "opaque"}}, None),
+            ({"reasoning": "FLAT-PRIVATE-REASONING"}, SimpleNamespace(envelope={"token": "x"})),
+        ):
+            empty_msg, empty_usage = _fragments_only("")
+            empty_msg.update(extra_msg)
+            u_ctx = SimpleNamespace(
+                messages=[{"role": "user", "content": "go"}], accumulated_usage={}, budget_tail="tool",
+                tools=SimpleNamespace(_ctx=SimpleNamespace(
+                    _round_response_facts={"finish_reason_present": True, "finish_reason": "length"},
+                    model_turn_state=turn_state, _owner_directives=[], _current_llm_call_meta={})),
+            )
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr("ouroboros.working_checkpoint.save_or_log", lambda *_a, **_k: None)
+                assert recovery.unfinished_reply(u_ctx, empty_msg) is None
+            assert not any(row.get("role") == "assistant" for row in u_ctx.messages)
+
+
+def test_wordless_stateless_fragment_cut_keeps_reasoning_content_as_the_only_carrier():
+    from ouroboros.llm_messages import _MessageShapingMixin
+
+    reasoning = " Fixture continuation. "
+    cases = [(reasoning, {}, True), ("   ", {}, False), ({"text": "not a string"}, {}, False),
+             (reasoning, {"nativeContinuation": {"state": "opaque"}}, False)]
+    for value, extra, retained in cases:
+        ctx = SimpleNamespace(messages=[{"role": "user", "content": "Write a note."}], accumulated_usage={},
+                              tools=SimpleNamespace(_ctx=SimpleNamespace(_round_response_facts={
+                                  "finish_reason_present": True, "finish_reason": "length"})))
+        reply, _usage = _fragments_only("")
+        reply.update(reasoning_content=value, **extra)
+        assert recovery.unfinished_reply(ctx, reply) is None
+        rows = [row for row in ctx.messages if row["role"] == "assistant"]
+        assert rows == ([{"role": "assistant", "content": "", "reasoning_content": reasoning}] if retained else [])
+        if retained:
+            same = _MessageShapingMixin.sanitize_reasoning_on_model_switch(rows, "deepseek/fixture", "deepseek/fixture")
+            assert same == rows
+            changed = _MessageShapingMixin.sanitize_reasoning_on_model_switch(rows, "deepseek/fixture", "other/fixture")
+            assert changed == [{"role": "assistant", "content": ""}]
+        assert all(reasoning not in row["content"] for row in ctx.messages if row["role"] == "user")
+
+
+@pytest.mark.parametrize("bad_calls", [
+    {"id": "note-1", "type": "function", "function": {"name": NOTE, "arguments": '{"note": "ran"}'}},
+    "not-a-list",
+    123,
+])
+@pytest.mark.parametrize("text", ["Partial before cut.", ""])
+def test_cut_with_non_list_tool_calls_never_reaches_executor_or_crashes(tmp_path, loop_env, no_sleep, bad_calls, text):
+    """A known output-limit cut with a non-list ``tool_calls`` container never reaches the executor or crashes;
+    the unusable container is ignored in working history while raw response observation keeps it intact (R2-2)."""
+    from ouroboros.observability import read_call_payload
+
+    msg, usage = _finished("usage", "length", text=text)
+    msg["tool_calls"] = bad_calls
+    llm = _ScriptedLLM((msg, usage), OK_RESPONSE)
+    kwargs = _loop_kwargs(tmp_path, llm, [])
+    saved = _note_tool(kwargs["tools"])
+    result, _usage, trace = run_llm_loop(**kwargs)
+    assert (result, llm.calls, saved, trace["tool_calls"]) == ("done", 2, [], [])
+    second = llm.requests[1]["messages"]
+    assert not any("tool_calls" in row or row.get("role") == "tool" for row in second)
+    assert [row["content"] for row in second if row.get("role") == "assistant"] == ([text] if text else [])
+    [round_ev] = [row for row in _events(tmp_path, "llm_round") if row["round"] == 1]
+    _manifest, payload, _ref = read_call_payload(
+        kwargs["drive_logs"].parent, task_id="t-exhaust-loop", call_id=f"{round_ev['llm_call_id']}_response")
+    assert payload["message"]["tool_calls"] == bad_calls
+
+
+def test_cut_batch_not_started_facts_stay_not_started_under_compaction_and_renewal_while_real_unknown_stays_unknown(
+        tmp_path, loop_env, no_sleep):
+    """Product ``not_started`` rows keep distinct ``state == "not_started"`` (preserving ``recorded`` strictly for
+    invocations), render ``not started`` + raw-reply ``source`` in ``_unit_facts`` and ``units_since_note``, are
+    never credited as reads in ``verified_contributions``, ``chosen_read_units`` or ``_exposed_units``, while
+    ordinary invocations keep ``result_view``/``invocation_sha256`` and genuine unknowns stay ``unknown``."""
+    from ouroboros import context_compaction as cc, context_renewal, working_checkpoint as wc
+    from ouroboros.context_assembly_trace import bind_contribution_input, verified_contributions
+    from ouroboros.context_source_view import _exposed_units, _unit_facts, chosen_read_units
+    from ouroboros.llm_messages import DISPLAY_KEY, project_wire_messages
+    from ouroboros.physical_attempt_context import PhysicalAttemptContext
+    from ouroboros.tool_result_record import (
+        TOOL_RESULT_RECORD_KEY, make_not_started_tool_result_record, read_tool_result_record,
+    )
+    from tests.test_context_source_view import _observation
+
+    cut_msg, cut_usage = _finished("usage", "length", text="")
+    cut_msg["tool_calls"] = _cut_batch()
+    run_msg, run_usage = _finished("usage", "tool_calls", text="")
+    run_msg["tool_calls"] = [_note_call('{"note": "actually ran"}', "note-ran")]
+    llm = _ScriptedLLM((cut_msg, cut_usage), (run_msg, run_usage), OK_RESPONSE)
+    kwargs = _loop_kwargs(tmp_path, llm, [])
+    saved = _note_tool(kwargs["tools"])
+    result, loop_usage, _trace = run_llm_loop(**kwargs)
+    assert result == "done" and saved == ["actually ran"]
+    ref = loop_usage["llm_call_refs"][0]["response_ref"]
+    ref_json = json.dumps(ref, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    messages = copy.deepcopy(kwargs["tools"]._ctx.messages)
+    tool_rows = [row for row in messages if row.get("role") == "tool"]
+    for row in tool_rows:  # neutral cache wrapper preserves logical digest and distinct states
+        row["content"] = [{"type": "text", "text": row["content"], "cache_control": {"type": "ephemeral"}}]
+    assert [read_tool_result_record(row)["state"] for row in tool_rows] == ["not_started", "not_started", "recorded"]
+    assert "invocation_id" in read_tool_result_record(tool_rows[2])["invocation"]
+
+    cut_unit, ran_unit = cc.context_units(messages, scope="tool")
+    assert ref in cut_unit.source_refs and _exposed_units(messages, [cut_unit, ran_unit], _observation(messages)) == {ran_unit.unit_id}
+    # A restored source view shows a row's visible fields: row-level host metadata (the outcome record) and route
+    # reasoning fields stay with the raw rows identity, replay and ``_unit_facts`` read, never in its text; a lane's
+    # display text, even empty, stands for content bytes that also hold its plan; a same-named key nested in data stays.
+    rows = copy.deepcopy(messages[cut_unit.start:cut_unit.end + 1])
+    rows[0].update({"content": "<think>PRIVATE-PLAN</think>\nSaving both notes.", "reasoning": "FLAT-PLAN",
+                    DISPLAY_KEY: {"text": "Saving both notes.", "reasoning": "PRIVATE-PLAN"},
+                    "reasoning_details": [{"type": "reasoning.text", "text": "DETAILS-PLAN"}],
+                    "annotations": [{TOOL_RESULT_RECORD_KEY: "data", "reasoning": "data"}]})
+    [view] = cc.context_units(rows, scope="tool")
+    assert view.raw_sha256 == cc._sha256(cc._canonical_bytes(rows)) and "NOT STARTED" in view.source_text
+    assert project_wire_messages(rows)[0]["content"] == rows[0]["content"]  # the send copy keeps the bytes
+    assert view.source_text.count(TOOL_RESULT_RECORD_KEY) == 1 and "output_limit_cut" not in view.source_text
+    assert not [secret for secret in ("PRIVATE-PLAN", "FLAT-PLAN", "DETAILS-PLAN") if secret in view.source_text]
+    assert '"content":"Saving both notes."' in view.source_text and '"reasoning":"data"' in view.source_text
+    rows[0].update({"content": "<think>PRIVATE-PLAN</think>", DISPLAY_KEY: {"text": "", "reasoning": "PRIVATE-PLAN"}})
+    [quiet] = cc.context_units(rows, scope="tool")  # a reply of its plan alone shows no words
+    assert '"content":""' in quiet.source_text and "PRIVATE-PLAN" not in quiet.source_text and ref in view.source_refs
+    rendered = _unit_facts(messages, cut_unit)
+    assert '"status":"not_started"' in rendered and '"code":"output_limit_cut"' in rendered and '"is_error":false' in rendered
+    assert "; not started (no tool invocation)" in rendered and f"; source {ref_json}" in rendered
+    assert "unknown" not in rendered.lower() and "invocation " not in rendered and "verbatim:" not in rendered
+    assert "; invocation " in _unit_facts(messages, ran_unit)
+    renewed = context_renewal.units_since_note(messages, None)
+    assert "; not started (no tool invocation)" in renewed and f"; source {ref_json}" in renewed and "outcome binding unknown" not in renewed
+
+    ns_read_text = "[HOST NOTICE] NOT STARTED: cut."
+    ns_read = [
+        {"role": "system", "content": "core"}, {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "rf-1", "type": "function", "function": {
+            "name": "read_file", "arguments": json.dumps({"path": "a.py", "start_line": 1, "end_line": 5})}}]},
+        {"role": "tool", "tool_call_id": "rf-1", "content": ns_read_text,
+         TOOL_RESULT_RECORD_KEY: make_not_started_tool_result_record("rf-1", ns_read_text, source_ref=ref)},
+    ]
+    assert chosen_read_units(ns_read, cc.context_units(ns_read, scope="tool")) == set()
+    with pytest.MonkeyPatch.context() as mp:  # a call that chose no read never has its result's record hashed
+        mp.setattr("ouroboros.context_source_view.read_tool_result_record", lambda _row: pytest.fail("hashed"))
+        assert chosen_read_units(messages, [cut_unit, ran_unit]) == set()
+
+    interrupted = [{"role": "system", "content": "core"}, {"role": "user", "content": "task"},
+                   {"role": "assistant", "content": "", "tool_calls": [_note_call('{"note": "a"}', "u-1")]}]
+    assert wc.close_unanswered_calls(interrupted, "interruption") == ["u-1"]
+    assert "outcome binding unknown (record_missing)" in _unit_facts(interrupted, cc.context_units(interrupted, scope="tool")[0])
+
+    sample = [copy.deepcopy(tool_rows[0]), copy.deepcopy(tool_rows[2]), copy.deepcopy(interrupted[-1])]
+    fit = PhysicalAttemptContext("owner_low", "low", "cold_estimate", "", "", None, None, False, False)
+    bound = bind_contribution_input(fit, {"messages": sample, "tools": []}, sample, SimpleNamespace())
+    ns_entry, rec_entry, unk_entry = verified_contributions(
+        {"messages": project_wire_messages(sample), "tools": []}, bound.contribution_input)["entries"]
+    assert ns_entry == {"family": "tool_result", "form": "not_started", "path": "$.messages[0]", "status": "carrier_located"}
+    assert (rec_entry["family"], rec_entry["form"], rec_entry["path"], rec_entry["status"]) == (
+        "tool_result", "result_view", "$.messages[1]", "carrier_located")
+    assert rec_entry["invocation_sha256"] and rec_entry["view"] in {"retained_source", "extent_unknown"}
+    assert unk_entry == {"family": "tool_result", "form": "unrecorded", "path": "$.messages[2]", "status": "carrier_located"}
+
+    for mutate, expected_reason in (
+        (lambda r: r.pop(TOOL_RESULT_RECORD_KEY), "record_missing"),
+        (lambda r: r.__setitem__("content", r["content"][0]["text"] + " edited"), "content_mismatch"),
+        (lambda r: r.__setitem__("tool_call_id", "other-id"), "tool_result_mismatch"),
+        (lambda r: r[TOOL_RESULT_RECORD_KEY].__setitem__("tool_call_id", "   "), "tool_result_mismatch"),
+        (lambda r: r[TOOL_RESULT_RECORD_KEY].__setitem__("invocation", {"invocation_id": "fake", "tool_call_id": "note-1"}), "record_unrecognized"),
+    ):
+        probe = copy.deepcopy(tool_rows[0])
+        mutate(probe)
+        assert read_tool_result_record(probe)["reason"] == expected_reason
+
+
+@pytest.mark.parametrize("sibling", [
+    {"id": "dup", "type": "function", "function": {"name": NOTE, "arguments": '{"note": "ok"}'}},
+    {"id": "dup", "type": "custom", "custom": {"name": NOTE, "input": "x"}},
+    {"id": "dup", "type": "function", "function": None},
+    {"id": "dup", "type": "", "function": {"name": NOTE, "arguments": "{}"}},
+    {"id": " dup ", "type": "function", "function": None},
+    {"id": "", "call_id": "dup", "type": "function", "function": None},
+])
+def test_duplicate_call_ids_never_repair_ambiguous_invalid_calls(tmp_path, loop_env, no_sleep, sibling):
+    """Repair requires an unambiguous call id across ALL siblings regardless of shape: a formerly invalid ambiguous
+    call stays un-repaired (never executed via repair), while an unambiguous sibling still repairs (R2-5)."""
+    msg, usage = _finished("usage", "tool_calls", text="")
+    msg["tool_calls"] = [
+        _note_call(LITERAL_NOTE, "dup"),
+        sibling,
+        _note_call(LITERAL_NOTE, "unique-ok"),
+    ]
+    tool_ctx = SimpleNamespace(_round_response_facts={"finish_reason_present": True, "finish_reason": "tool_calls"},
+                               task_id="t-exhaust-loop")
+    reply, admitted = recovery.admit_calls(tool_ctx, msg, tmp_path)
+    assert admitted[0]["function"]["arguments"] == LITERAL_NOTE  # ambiguous invalid call untouched
+    assert admitted[2]["function"]["arguments"] == '{"note": "one\\ntwo"}'  # unique sibling repaired
+    assert [ev["tool_call_id"] for ev in _events(tmp_path, "tool_arguments_repaired")] == ["unique-ok"]
+    assert reply["tool_calls"][0]["function"]["arguments"] == LITERAL_NOTE
+
+
+def test_duplicate_id_with_invalid_and_valid_whole_siblings_runs_only_strict_valid_in_loop(tmp_path, loop_env, no_sleep):
+    """End to end, a formerly invalid call sharing an id with a sibling is never repaired into execution while its
+    strict-valid sibling runs as before (R2-5)."""
+    msg, usage = _finished("usage", "tool_calls", text="")
+    msg["tool_calls"] = [_note_call(LITERAL_NOTE, "dup"), _note_call('{"note": "already-valid"}', "dup")]
+    llm = _ScriptedLLM((msg, usage), OK_RESPONSE)
+    kwargs = _loop_kwargs(tmp_path, llm, [])
+    saved = _note_tool(kwargs["tools"])
+    result, _usage, _trace = run_llm_loop(**kwargs)
+    assert result == "done" and saved == ["already-valid"] and not _events(tmp_path, "tool_arguments_repaired")
+    tool_rows = [row["content"] for row in llm.requests[1]["messages"] if row.get("role") == "tool"]
+    assert any("TOOL_ARG_ERROR" in text for text in tool_rows)
+
+
+@pytest.mark.parametrize("sibling", [
+    {"id": "dup", "type": "function", "function": {"name": NOTE, "arguments": '{"note": "second"}'}},
+    {"id": "dup", "type": "custom", "custom": {"name": NOTE, "input": "x"}},
+    {"id": "dup", "type": "function", "function": None},
+    {"id": " dup ", "type": "function", "function": None},
+])
+@pytest.mark.parametrize("with_unique", [False, True])
+def test_cut_batch_pairs_only_unambiguous_call_ids(tmp_path, loop_env, no_sleep, sibling, with_unique):
+    """Paired NOT STARTED refusals require unambiguous ids across all siblings: ambiguous siblings stay out of
+    working history (when none remain, the cut takes the bounded unfinished path; an unambiguous sibling keeps its
+    1:1 NOT STARTED pair) (R2-5)."""
+    msg, usage = _finished("usage", "length", text="Working on notes.")
+    msg["tool_calls"] = ([_note_call('{"note": "ok"}', "unique-1")] if with_unique else []) + [
+        _note_call('{"note": "first"}', "dup"), sibling]
+    llm = _ScriptedLLM((msg, usage), OK_RESPONSE)
+    kwargs = _loop_kwargs(tmp_path, llm, [])
+    saved = _note_tool(kwargs["tools"])
+    result, _usage, trace = run_llm_loop(**kwargs)
+    assert (result, llm.calls, saved, trace["tool_calls"]) == ("done", 2, [], [])
+    second = llm.requests[1]["messages"]
+    if with_unique:
+        assert _pairs(second) == [(["unique-1"], ["unique-1"])]
+        assert not _informed(second)
+    else:
+        assert not any(row.get("tool_calls") or row.get("role") == "tool" for row in second)
+        assert len(_informed(second)) == 1
+        assert [row["content"] for row in second if row.get("role") == "assistant"] == ["Working on notes."]
+
+
 # ------------------------------------------------------------------ provider-stated usability (Responses terminals)
 
 COMMENTARY = {"response_finish_reason": "commentary", "response_status": "completed"}
@@ -744,19 +1471,21 @@ def test_an_owner_stop_after_commentary_ends_the_turn_with_no_further_call(tmp_p
     assert [row["round"] for row in _events(tmp_path, "llm_round")] == [1]  # the stopped boundary bought no round
 
 
-@pytest.mark.parametrize(("facts", "latched"), [
-    (COMMENTARY, ""),
-    ({"response_finish_reason": "max_output_tokens", "response_status": "incomplete"}, ""),
-    ({"response_finish_reason": "length"}, ""),
-    ({"response_finish_reason": "stop", "response_status": "completed"}, "draft"),  # an ordinary final still latches
+@pytest.mark.parametrize(("facts", "calls", "latched"), [
+    (COMMENTARY, [], ""),
+    ({"response_finish_reason": "max_output_tokens", "response_status": "incomplete"}, [], ""),
+    ({"response_finish_reason": "length"}, [], ""),
+    ({"response_finish_reason": "length"}, [_note_call(LITERAL_NOTE)], ""),  # a cut with calls is a cut too (#4028)
+    ({"response_finish_reason": "stop", "response_status": "completed"}, [], "draft"),  # an ordinary final still latches
 ])
-def test_only_a_reply_eligible_as_a_final_latches_its_marker(tmp_path, loop_env, no_sleep, facts, latched):
+def test_only_a_reply_eligible_as_a_final_latches_its_marker(tmp_path, loop_env, no_sleep, facts, calls, latched):
     """The FINAL ANSWER latch is what a deadline, a budget end or a Stop publishes when the last text names none
     (``outcomes.selected_final_answer``, ``loop_budget``): a commentary or a cut keeps its words as progress and
     latches nothing, so a later marker-less final publishes no draft; a completed final latches as before."""
     from ouroboros.outcomes import derive_loop_outcome
 
-    llm = _ScriptedLLM(_reply("Checked the inputs.\nFINAL ANSWER: draft", facts), OK_RESPONSE)
+    message = {"tool_calls": calls} if calls else {}
+    llm = _ScriptedLLM(_reply("Checked the inputs.\nFINAL ANSWER: draft", facts, **message), OK_RESPONSE)
     result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
     assert (trace.get("best_valid_final_answer") or "") == latched
     if latched:

@@ -299,6 +299,54 @@ def test_a_client_the_host_registers_names_its_provider_and_keeps_the_note_for_a
             browser.close()
 
 
+def test_unknown_return_client_renames_without_return_and_stays_out_of_new_sign_in(skills_browser):
+    from playwright.sync_api import expect
+
+    earlier = {"id": "c-old", "label": "Imported from Calendar", "issuer": ISSUER, "client_id_tail": "9f8e",
+               "return": "unknown", "source": "handover:calendar", "secret_set": False,
+               "used_by": [{"skill": "calendar", "account": "earlier@example.test"}]}
+    renamed = {**earlier, "label": "Earlier app"}
+    listed = status([account("a-old", "earlier@example.test", "2026-11-22T09:00:00+00:00",
+                             client={"id": "c-old", "label": "Imported from Calendar"}, via="handover")])
+    listed["services"][0]["clients"] = [earlier, CLIENT]
+    browser = skills_browser.chromium.launch(headless=True)
+    skills = None
+    try:
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        skills = open_skills(page, extensions=[CALENDAR])
+        skills.answers[STATUS] = listed
+        skills.answers[SIGN_IN] = {"ok": True, "client": {key: value for key, value in renamed.items() if key != "used_by"}}
+        _meta, group = _open_sheet(page)
+        row = group.locator('[data-sign-in-row="a-old"]')
+        expect(row).to_contain_text("earlier@example.test via Imported from Calendar")
+        group.get_by_role("button", name="Clients…").click()
+        old_client = group.locator('[data-sign-in-client="c-old"]')
+        expect(old_client).to_contain_text("return address unknown")
+        expect(group.locator('[data-sign-in-client="c-1"]')).to_contain_text("returns to this computer")
+        old_client.get_by_role("button", name="Edit…").click()
+        form = group.locator('[data-sign-in-client-form="c-old"]')
+        form.locator('[data-client-field="label"]').fill("Earlier app")
+        expect(form).to_contain_text("Add a client with a known return address for new sign-ins.")
+        capture(page, "chromium", 1280, "sign-in-unknown-return-client")
+        listed["services"][0]["clients"] = [renamed, CLIENT]
+        form.get_by_role("button", name="Save").click()
+        expect(group.locator('[data-sign-in-result="clients"]')).to_have_text("Saved Earlier app.")
+        assert skills.posted(SIGN_IN) == [{"action": "client_save", "issuer": ISSUER,
+                                           "client": {"id": "c-old", "label": "Earlier app", "client_id": ""}}]
+        expect(old_client).to_contain_text("Earlier app · …9f8e · return address unknown")
+        group.get_by_role("button", name="Add account").click()
+        editor = group.locator('[data-sign-in-editor="sign_in"]')
+        clients = editor.get_by_role("radiogroup", name="Client")
+        expect(clients.get_by_role("radio")).to_have_count(1)
+        expect(clients.get_by_role("radio", name="Personal")).to_be_checked()
+        expect(editor.get_by_role("button", name="Open the sign-in page")).to_be_enabled()
+    finally:
+        if skills is not None:
+            skills.close(browser)
+        else:
+            browser.close()
+
+
 def test_revoke_asks_in_place_first_and_names_the_sibling_sign_in(skills_browser):
     from playwright.sync_api import expect
 

@@ -244,6 +244,8 @@ def _unit_facts(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit, *, err
         detail = f"; outcome {compaction._canonical_json(record['facts'])}"
         if record["state"] == "unknown":
             detail += f"; outcome binding unknown ({record['reason']})"
+        elif record["state"] == "not_started":
+            detail += "; not started (no tool invocation)"
         else:
             detail += f"; invocation {record['invocation']['invocation_id']}"
         if record.get("source_ref"):
@@ -272,7 +274,8 @@ def chosen_read_units(messages, units, *, usable_input=None, density=1.0):
             except (ValueError, TypeError, RecursionError):  # nesting past the decoder's depth chose no read
                 continue
             row = results.get(str(call.get("id") or ""))
-            if row is None or requested_call_view(str(call.get("function", {}).get("name") or ""), arguments) is None:
+            if (row is None or requested_call_view(str(call.get("function", {}).get("name") or ""), arguments) is None
+                    or read_tool_result_record(row)["state"] == "not_started"):  # only a chosen read's result is hashed
                 continue
             cost = compaction._context_tokens_for_messages([row], density) - compaction._context_tokens_for_messages(
                 [{**row, "content": ""}], density)

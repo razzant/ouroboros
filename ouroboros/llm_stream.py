@@ -4,7 +4,11 @@ Doctrine: strict about completeness, tolerant about form. Terminal framing, a
 finish reason on every choice and structurally complete tool calls are the only
 hard requirements; identity, index and shape irregularities are forgiven
 first-wins/skip, and every forgiven fact is disclosed in the stream receipt as
-``anomalies``. ``tools/search.py`` (the Responses SSE consumer behind
+``anomalies``; a choice's output-limit finish stated after its kept first one also
+stays there as a typed fact (``later_output_limits``), for call admission alone.
+A Chat call-name fragment equal to the name so far is not appended (``a,a`` reads
+``a``), a different one is, each disclosed; other deltas stay intact.
+``tools/search.py`` (the Responses SSE consumer behind
 ``web_search``) is the house precedent: it ignores unknown events, settles only
 on ``response.completed`` and never retries on form. Form forgiveness is the Chat
 assembler's doctrine; the native Messages assembler forgives only post-terminal
@@ -27,7 +31,8 @@ import re
 from typing import Any, Callable
 
 from ouroboros._usage_response import (
-    ChatUsageReceipt, merge_usage_reports, provider_cost_value, reported_price, update_snapshot as _snapshot,
+    OUTPUT_LIMIT_FINISH_REASONS, ChatUsageReceipt, merge_usage_reports, provider_cost_value, reported_price,
+    update_snapshot as _snapshot,
 )
 
 
@@ -96,6 +101,11 @@ class ProviderStreamError(IncompleteProviderStream):
         # Keep producer facts in body/private evidence. Text-only pre-routing
         # classifiers must not turn an HTTP-200 SSE failure into a free rejection.
         super().__init__("Provider reported an SSE error after stream dispatch")
+
+
+# The usage key under which the Chat adapter states its selected choice's label from the receipt's
+# ``later_output_limits``: a plain string, host-owned like ``response_finish_reason``, which it never replaces.
+LATER_OUTPUT_LIMIT_USAGE_KEY = "_chat_later_output_limit"
 
 
 class AssembledResponse:
@@ -294,6 +304,7 @@ class ChatAccumulator(_Accumulator):
         self.on_generation_id = on_generation_id
         self.usage_reports: list[dict] = []
         self.terminal_usage_start: int | None = None
+        self.later_output_limits: dict[int, str] = {}  # choice index -> an output limit stated after its kept finish
         self.token_receipt = ChatUsageReceipt(attempt_id)
 
     def accept(self, event: str, data: str) -> None:
@@ -388,6 +399,9 @@ class ChatAccumulator(_Accumulator):
                                           usage=self.body.get("usage"), prior_usage=self.usage_reports)
             elif choice.get("finish_reason") not in (None, finish):
                 self._note(f"choice {index}: finish_reason {choice['finish_reason']!r} then {finish!r}; kept first")
+                if (finish.strip().lower() in OUTPUT_LIMIT_FINISH_REASONS
+                        and choice["finish_reason"].strip().lower() not in OUTPUT_LIMIT_FINISH_REASONS):
+                    self.later_output_limits.setdefault(index, finish)  # beside the kept finish, never instead of it
             else:
                 choice["finish_reason"] = finish
         _snapshot(choice, {key: value for key, value in update.items()
@@ -823,6 +837,8 @@ class _StreamAssembly:
         facts = {"attempt_id": attempt_id, "complete": complete,
                  "generation_id": self.generation_id or self.accumulator.body.get("id", ""),
                  "anomalies": self.accumulator.anomaly_facts()}
+        if limits := getattr(self.accumulator, "later_output_limits", None):  # Chat: per choice of this attempt
+            facts["later_output_limits"] = {str(index): label for index, label in limits.items()}
         if error is not None:  # a failed reply's typed shape, never its text
             facts["model_output_received"] = self.accumulator.output_received()
             if isinstance(self.accumulator, ChatAccumulator) and getattr(error, "stream_prior_usage", None) is not None:
@@ -865,7 +881,7 @@ class _StreamAssembly:
         return self.accumulator.result()
 
     def completed_response(self, body: dict) -> AssembledResponse:
-        body["_stream_receipt"] = self.retain(complete=True)
+        body["_stream_receipt"] = self.retain(complete=True)  # this assembly's own, over any wire field of that name
         response = AssembledResponse(body)
         self.attach_token_receipt(response)
         return response

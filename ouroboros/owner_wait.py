@@ -344,9 +344,9 @@ def pause_resume_point(limit_ctx: Any, ctx: Any, *, delivery_candidate: bool = F
 def working_resume_point(state: dict) -> dict:
     """Derive the same pause program counter from an expanded working-checkpoint state."""
     working = state["working"]
-    return {**_resume_point(int(state.get("round_idx") or 0), list(working.get("pending_tool_call_ids") or []),
-                            selected=working.get("boundary") == "candidate",
-                            budget_tail=str(working.get("budget_tail") or "tool")),
+    round_idx = int(state.get("round_idx") or 0) + int(working.get("boundary") == "post_batch" and working.get("budget_tail") == "no_tool")
+    return {**_resume_point(round_idx, list(working.get("pending_tool_call_ids") or []),
+                            selected=working.get("boundary") == "candidate", budget_tail=str(working.get("budget_tail") or "tool")),
             "recovered_from_working": {"boundary": working.get("boundary"), "seq": working.get("seq")}}
 
 

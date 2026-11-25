@@ -13,8 +13,8 @@ message (the owner's and principals' words typed at delivery, review feedback, n
 any row written before host state was bound to its text, which may hold merged owner words);
 Ouroboros's outward dialogue; the mind's authored notes (actor capsules) and a predecessor's
 notes; the current review decisions; the address records the refusal passes wrote since the
-newest note; and the mind's own prose since its newest note, including the text it wrote beside
-a tool call. Chosen read units and explicitly restored sources stay whole. The record lists each removed
+newest note; and the mind's own prose since its newest note, including the visible text it wrote
+beside a tool call. Chosen read units and explicitly restored sources stay whole. The record lists each removed
 tool unit since the newest note with its typed facts, shown or never shown. Unasked tool units, replies the notes
 already cover, host state the host sends afresh (facts, clock, roster and skill snapshots,
 bound and unchanged), superseded review copies and earlier address records leave the view;
@@ -93,9 +93,11 @@ def units_since_note(messages: Sequence[Dict[str, Any]], observation: Any) -> st
 
 def renewal_seed(messages: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """``(kept rows in order, counts of the rows that leave the view)``; pure, no I/O."""
+    from ouroboros.anthropic_native_custody import custody_private_key
     from ouroboros.context_budget import host_row_intact
-    from ouroboros.context_compaction import _capsule_metadata, _plain_text
-    from ouroboros.loop_messages import CONTEXT_FACTS_NAME
+    from ouroboros.context_compaction import _capsule_metadata
+    from ouroboros.llm_messages import DISPLAY_KEY, shown_content
+    from ouroboros.loop_messages import CONTEXT_FACTS_NAME, _visible_round_text
     from ouroboros.main_context_authority import PREDECESSOR_NOTES_NAME
     from ouroboros.peer_roster import ROSTER_SNAPSHOT_NAME, ROSTER_UPDATE_NAME
     from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY, obsolete_review_index_positions
@@ -116,17 +118,22 @@ def renewal_seed(messages: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any
     newest_note = _newest_note(messages)
     superseded = set(obsolete_review_index_positions(messages))
     kept: List[Dict[str, Any]] = []
-    left = {"tool_rows": 0, "covered_replies": 0, "host_rows": 0, "restored_sources": 0}
+    left = {"tool_rows": 0, "covered_replies": 0, "host_rows": 0, "restored_sources": 0, "projected_replies": 0}
     for i, row in enumerate(messages):
         role, kind = row.get("role"), row.get(HOST_CONTEXT_KIND_KEY)
+        tool_row = role == "tool" or bool(row.get("tool_calls"))
+        projected_reply = (role == "assistant" and i > newest_note and isinstance(row.get(DISPLAY_KEY), dict)
+                           and row[DISPLAY_KEY].get("text") != row.get("content")
+                           and not any(custody_private_key(key) for key in row))
         if (i in keep_read or _restored_address(row) or (i == 0 and role == "system") or i == first_user or kind in OWNER_ROW_KINDS or note(row)
                 or kind == PREDECESSOR_NOTES_NAME or (row.get(REVIEW_CONTEXT_INDEX_KEY) and i not in superseded)):
             kept.append(row)
-        elif role == "tool" or row.get("tool_calls"):
-            left["tool_rows"] += 1
-            prose = _plain_text(row.get("content")) if role == "assistant" and i > newest_note else None
+        elif tool_row or projected_reply:
+            left["tool_rows" if tool_row else "projected_replies"] += 1
+            shown = shown_content(row) if role == "assistant" and i > newest_note else None  # a lane's view, maybe ""
+            prose = shown if isinstance(shown, str) else _visible_round_text(shown)  # blocks: their visible text alone
             if prose and prose.strip():
-                kept.append({"role": "assistant", "content": prose})  # my words beside the call stay
+                kept.append({"role": "assistant", "content": prose})  # words beside a call or its omitted fragments
         elif (_capsule_metadata(row)[0] or kind == RENEWAL_RECORD_NAME) and i > newest_note:
             kept.append(row)  # address records and earlier renewal indexes since my newest note: what left, with facts
         elif (_capsule_metadata(row)[0] or row.get(REVIEW_CONTEXT_INDEX_KEY)
@@ -198,19 +205,21 @@ def renewal_view(messages, *, observation, drive_root, task_id, measure):
     """
     from ouroboros.artifacts import actor_source_reference, store_actor_source_bytes
     seed, left = renewal_seed(messages)
-    if not (left["tool_rows"] or left["covered_replies"] or left["restored_sources"]):
+    if not (left["tool_rows"] or left["covered_replies"] or left["restored_sources"] or left["projected_replies"]):
         return messages, None
     raw = json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     args = dict(category="context_checkpoints", source_id=hashlib.sha256(raw).hexdigest(), data=raw, extension="json")
     source = actor_source_reference(**args)
     index = units_since_note(messages, observation)
+    projected = left["projected_replies"]
     seed.append(bound_host_row(RENEWAL_RECORD_NAME, (
         "[Host record: working view renewed during context-size recovery. Same task; "
         "nothing summarized; no model called.] Kept, in order: the assignment, every delivered message and "
         "outward dialogue, my notes, my replies since my newest note and the current review decisions. "
         f"Left the view: {left['tool_rows']} tool rows, {left['covered_replies']} replies before my newest note, "
-        f"{left['host_rows']} host rows, {left['restored_sources']} sources I restored. The exact transcript "
-        f"of {len(messages)} rows: {json.dumps(source, ensure_ascii=False, sort_keys=True)}."
+        f"{left['host_rows']} host rows, {left['restored_sources']} sources I restored. "
+        + (f"Kept only visible prose from {projected} replies with omitted call fragments. " if projected else "")
+        + f"The exact transcript of {len(messages)} rows: {json.dumps(source, ensure_ascii=False, sort_keys=True)}."
         + (f"\nTool units since my newest note (they left the view; each stays exact there):\n{index}" if index else ""))))
     if measure(seed) >= measure(messages):
         return messages, None
