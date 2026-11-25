@@ -1,8 +1,8 @@
 """Every history read is counted with why its client made it and what it cost (``gateway/history_attribution.py``).
 
-The route counts each GET in memory under its cause: the client's tags (``reason``, ``mode``, ``decision``,
-``detail``) as values of their closed sets, the status and the server's own refusal; each cause keeps its reads, bytes
-and time (total, longest), and the window its totals and a fixed time histogram. The window rides the next
+The route counts each GET in memory under its cause: whether it read Main, the client's tags (``reason``, ``mode``,
+``decision``, ``detail``) as values of their closed sets, the status and the server's own refusal; each cause keeps its
+reads, bytes and time (total, longest), and the window its totals and a fixed time histogram. The window rides the next
 ``supervisor_load`` row as ``history_reads`` and starts again. The tags are telemetry: the answer is byte for byte the
 same with or without them, an absent tag is ``unspecified`` and one outside its set ``invalid``, nothing a client sent
 is kept raw, and a read writes nothing (DEVELOPMENT "Passive GET").
@@ -11,6 +11,7 @@ is kept raw, and a read writes nothing (DEVELOPMENT "Passive GET").
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 from types import SimpleNamespace
@@ -20,7 +21,7 @@ import pytest
 from ouroboros import dialogue_store as ds
 from ouroboros.gateway import history_attribution, history_paging
 from ouroboros.gateway.history import make_chat_history_endpoint
-from ouroboros.gateway.history_attribution import DETAILS, GROUPS_MAX, drain, recorded
+from ouroboros.gateway.history_attribution import DECISIONS, DETAILS, GROUPS_MAX, REASONS, drain, recorded
 
 TS = "2026-10-16T10:00:{:02d}Z"
 LOGGER = "ouroboros.gateway.history_attribution"
@@ -67,10 +68,10 @@ def test_a_read_is_counted_with_its_tags_and_answers_the_same_without_them(tmp_p
     assert (section["n"], section["bytes"]) == (2, 2 * len(bare.body)) and section["max_ms"] <= section["total_ms"]
     assert sum(section["seconds"].values()) == 2 and list(section["seconds"]) == ["<0.5", "<1", "<2", "<5", "<10", ">=10"]
     assert [_cause(group) for group in section["groups"]] == [
-        {"reason": "unspecified", "mode": "newest", "status": "200"},  # a read no gate chose names no decision
-        {"reason": "settled", "mode": "newest", "decision": "after_refused", "detail": "task_settled", "status": "200"}]
+        {"room": "main", "reason": "unspecified", "mode": "newest", "status": "200"},  # no gate chose it: no decision
+        {"room": "main", "reason": "settled", "mode": "newest", "decision": "after_refused", "detail": "task_settled",
+         "status": "200"}]
     assert [group["bytes"] for group in section["groups"]] == [len(bare.body)] * 2
-    assert not any("room" in part for part in (section, *section["groups"])), "no room is counted"
     assert drain() == {}, "a drained window starts empty"
 
     # A cursor's kind is the one the server decoded, whatever its client said or left out; an `around` read and the
@@ -85,7 +86,7 @@ def test_a_read_is_counted_with_its_tags_and_answers_the_same_without_them(tmp_p
     _read(read, chat_id="1", around="task:nothing-here", mode="older")
     section = drain()
     assert _tally(section, "reason") == {"invalid": 1, "unspecified": 3}
-    assert _tally(section, "decision") == {"invalid": 1} and _tally(section, "detail") == {"http_503": 1}
+    assert _tally(section, "decision") == {"invalid": 1} and _tally(section, "detail") == {"http_5xx": 1}
     assert _tally(section, "mode") == {"after": 2, "older": 1, "around": 1}
     kept = json.dumps(section)
     assert "<b>" not in kept and "sideways" not in kept and after not in kept and older not in kept
@@ -97,12 +98,12 @@ def test_a_read_is_counted_with_its_tags_and_answers_the_same_without_them(tmp_p
     assert refused.status_code == 409
     section = drain()
     assert [_cause(group) for group in section["groups"]] == [
-        {"reason": "settled", "mode": "after", "status": "409", "code": "history_delta_reset",
+        {"room": "main", "reason": "settled", "mode": "after", "status": "409", "code": "history_delta_reset",
          "refusal": "delta_byte_limit", "stream": "chat"}]
     _read(read, chat_id="1", cursor="not-a-cursor", mode="after")
     section = drain()
     assert [_cause(group) for group in section["groups"]] == [
-        {"reason": "unspecified", "mode": "after", "status": "400", "code": "history_cursor_invalid"}]
+        {"room": "main", "reason": "unspecified", "mode": "after", "status": "400", "code": "history_cursor_invalid"}]
     assert _tally(section, "mode") == {"after": 1}, "no kind decoded: the client's word"
     assert "not-a-cursor" not in json.dumps(section)
     assert history_paging.DELTA_RESET_DETAILS <= DETAILS  # a client may echo every refusal the server names
@@ -133,7 +134,7 @@ def test_an_answer_that_is_no_error_page_still_counts_and_a_failed_count_fails_n
     assert _read(recorded(plain), chat_id="1", reason="retry").status_code == 502
     section = drain()
     assert section["n"] == 1 and [_cause(group) for group in section["groups"]] == [
-        {"reason": "retry", "mode": "newest", "status": "502"}]  # no code: the body named none
+        {"room": "main", "reason": "retry", "mode": "newest", "status": "502"}]  # no code: the body named none
 
     _say(tmp_path, "hello")
     read = recorded(make_chat_history_endpoint(tmp_path))
@@ -194,23 +195,62 @@ def test_causes_beyond_the_bound_share_one_overflow_group_and_a_drain_starts_afr
         return SimpleNamespace(status_code=200, body=b"{}")
 
     read = recorded(answer)
-    details = [f"http_{status}" for status in range(500, 500 + GROUPS_MAX + 6)]  # six causes past the bound
-    for detail in details:
-        _read(read, chat_id="1", detail=detail)
-    _read(read, chat_id="1", detail=details[0])  # a kept cause
-    _read(read, chat_id="1", detail=details[-1])  # a cause past the bound
+    causes = list(itertools.product(sorted(REASONS), sorted(DECISIONS)))[:GROUPS_MAX + 6]  # six past the bound
+    for reason, decision in causes:
+        _read(read, chat_id="1", reason=reason, decision=decision)
+    _read(read, chat_id="1", reason=causes[0][0], decision=causes[0][1])  # a kept cause
+    _read(read, chat_id="1", reason=causes[-1][0], decision=causes[-1][1])  # a cause past the bound
     section = drain()
     groups = section["groups"]
-    assert [group.get("detail") for group in groups] == [*details[:GROUPS_MAX], None]
+    assert [(group.get("reason"), group.get("decision")) for group in groups] == [*causes[:GROUPS_MAX], (None, None)]
     assert _cause(groups[-1]) == {"overflow": True} and (groups[0]["n"], groups[-1]["n"]) == (2, 7)
-    assert section["n"] == len(details) + 2
+    assert section["n"] == len(causes) + 2
     for key in ("n", "bytes", "total_ms"):
         assert sum(group[key] for group in groups) == section[key], key
     assert max(group["max_ms"] for group in groups) == section["max_ms"]
 
-    _read(read, chat_id="1", detail=details[-1])
+    _read(read, chat_id="1", reason=causes[-1][0], decision=causes[-1][1])
     assert [_cause(group) for group in drain()["groups"]] == [
-        {"reason": "unspecified", "mode": "newest", "detail": details[-1], "status": "200"}]
+        {"room": "main", "reason": causes[-1][0], "mode": "newest", "decision": causes[-1][1], "status": "200"}]
+
+
+def test_a_cause_says_whether_it_read_main_and_never_which_other_room(tmp_path):
+    """A read's room is counted as one of two words by the route's own chat id rule (``history.py``: an id it cannot
+    take as another room's reads Main): ``main`` or ``other``. The same tags in Main and in another room are two
+    causes, each with its own cost, so Main's whole re-reads stand apart; which other room never enters the row."""
+    _say(tmp_path, "in main")
+    read = recorded(make_chat_history_endpoint(tmp_path))
+    for chat_id in (None, "1", "0", "-4", "abc"):  # the route reads Main for each of these
+        answer = _read(read, **({} if chat_id is None else {"chat_id": chat_id}), reason="settled")
+        assert [message["text"] for message in json.loads(answer.body)["messages"]] == ["in main"], chat_id
+    assert [_cause(group) for group in drain()["groups"]] == [
+        {"room": "main", "reason": "settled", "mode": "newest", "status": "200"}]
+    other = [_read(read, chat_id=chat_id, reason="settled") for chat_id in ("40404", "2")]
+    assert [json.loads(answer.body)["messages"] for answer in other] == [[], []]
+    main = _read(read, chat_id="1", reason="settled")
+    section = drain()
+    assert [(group["room"], group["n"], group["bytes"]) for group in section["groups"]] == [
+        ("other", 2, sum(len(answer.body) for answer in other)), ("main", 1, len(main.body))]
+    assert "40404" not in json.dumps(section), "which other room is never counted"
+
+
+def test_a_failed_reads_http_status_is_counted_by_its_class():
+    """A client may name a failed read's status (``detail=http_<status>``); the window counts its class
+    (``http_4xx``, ``http_5xx``, ...), five words for every status there is, so the counted words stay a small closed
+    set however many statuses a client names; a word that is no status stays ``invalid``."""
+    async def answer(_request):
+        return SimpleNamespace(status_code=200, body=b"{}")
+
+    read = recorded(answer)
+    for detail in ("http_404", "http_499", "http_500", "http_503", "http_599", "http_200", "http_600", "http_50x",
+                   "http_5"):
+        _read(read, chat_id="1", detail=detail)
+    assert _tally(drain(), "detail") == {"http_4xx": 2, "http_5xx": 3, "http_2xx": 1, "invalid": 3}
+    for status in range(100, 600):
+        _read(read, chat_id="1", detail=f"http_{status}")
+    groups = drain()["groups"]
+    assert [(group["detail"], group["n"]) for group in groups] == [
+        ("http_1xx", 100), ("http_2xx", 100), ("http_3xx", 100), ("http_4xx", 100), ("http_5xx", 100)]
 
 
 def test_reads_counted_while_the_supervisor_drains_land_whole_in_one_window_each():

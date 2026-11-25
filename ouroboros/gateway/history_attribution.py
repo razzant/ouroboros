@@ -5,13 +5,14 @@ A client names on a read the action that began it (``reason``), its cursor's kin
 fallback leg that chose it (``decision``) and what the earlier leg met (``detail``) (CLIENT_CONTRACT "Reading
 history"). Telemetry only: nothing selects a page, authorizes or checks a cursor by these tags, the answer is the
 same with or without them, and a read writes nothing (DEVELOPMENT "Passive GET"). A read's cause is its counted
-words: each tag as a value of its closed set (one outside it is ``invalid``, an absent reason or cursor kind
-``unspecified``; a cursor's kind is the one the selection decoded, ``history_paging.DECODED_CURSOR``, where it
+words: whether it read Main (``room``: ``main`` or ``other``, by the route's own chat id rule), each tag as a value
+of its closed set (one outside it is ``invalid``, an absent reason or cursor kind ``unspecified``, a failed read's
+HTTP status its class; a cursor's kind is the one the selection decoded, ``history_paging.DECODED_CURSOR``, where it
 decoded one), its status and the refusal the server gave (``code``, ``refusal``, ``stream``). A window keeps one
 group per distinct cause with its reads, the answers' bytes and their milliseconds in the endpoint (total,
 longest), so each cost stays with what caused it; over all its reads, the same totals and a fixed histogram for
-their median and tail. Never a room, a tag as sent, a cursor, text, address or token. Not counted: a HEAD, and a
-request answered before the route (an expired session's 401, a refused origin's 403)."""
+their median and tail. Never which room beyond that, a tag as sent, a cursor, text, address or token. Not counted:
+a HEAD, and a request answered before the route (an expired session's 401, a refused origin's 403)."""
 
 from __future__ import annotations
 
@@ -22,6 +23,8 @@ import re
 import threading
 import time
 
+from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+from ouroboros.gateway._helpers import coerce_int
 from ouroboros.gateway.history_paging import DECODED_CURSOR, DELTA_RESET_DETAILS
 
 log = logging.getLogger(__name__)
@@ -32,7 +35,8 @@ DECISIONS = frozenset({"explicit_whole", "latest_unknown", "not_loaded", "prior_
                        "live_card_bound", "no_cursor", "window_overflow", "horizon_gap", "view_changed",
                        "archive_return", "base_superseded", "after_refused", "after_failed", "after_rejected"})
 # What an earlier leg met: the server's refusal (a changed view; an older server's reset without a cause), a 200 the
-# client could not admit or apply, a failed read (also ``http_<status>``) or a store still importing.
+# client could not admit or apply, a failed read (also ``http_<status>``, counted by its class: ``http_5xx``) or a
+# store still importing.
 DETAILS = DELTA_RESET_DETAILS | {"view_changed", "delta_reset", "bad_messages", "no_continuation", "stream_gap",
                                  "latest_unknown", "profile_mismatch", "apply_failed", "network", "migrating"}
 _CURSOR_KINDS = frozenset({"after", "older", "page"})
@@ -54,17 +58,20 @@ def _tag(value, allowed) -> str:
 
 
 def _fields(params, response, kind=None) -> dict:
-    """One read's counted words: its tags as values of their sets, its status and the refusal the server named."""
+    """One read's counted words: whether it read Main, its tags as values of their sets, its status and the refusal
+    the server named."""
     around, cursor = params.get("around"), params.get("cursor")
-    fields = {"reason": _tag(params.get("reason"), REASONS),
+    # Main is the room the route reads for a chat id it cannot take as another's (absent, 0 or less, not a number).
+    fields = {"room": "main" if coerce_int(params.get("chat_id"), WEB_UI_CHAT_ID) <= WEB_UI_CHAT_ID else "other",
+              "reason": _tag(params.get("reason"), REASONS),
               # The newest page and a page around one place are the request's own; a cursor's kind is the one the
               # selection decoded (``kind``), the client's word only where it decoded none.
               "mode": ("invalid" if cursor else "around") if around is not None
               else (kind or _tag(params.get("mode"), _CURSOR_KINDS)) if cursor else "newest"}
     for name, allowed in (("decision", DECISIONS), ("detail", DETAILS)):
         if value := params.get(name):  # where no gate or fallback chose the read, the client names none
-            fields[name] = value if value in allowed or (name == "detail" and _HTTP_STATUS.fullmatch(value)) \
-                else "invalid"
+            fields[name] = (value if value in allowed else f"http_{value[5]}xx" if name == "detail"
+                            and _HTTP_STATUS.fullmatch(value) else "invalid")
     status = getattr(response, "status_code", None)
     fields["status"] = str(status or "none")  # none: the endpoint answered nothing (an exception, a cancelled read)
     if status not in (None, 200):
