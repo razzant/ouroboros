@@ -51,7 +51,6 @@ import {
     ownerHurryProjection,
     summarizeChatLiveEvent,
     taskCancelPending,
-    taskOutcomeSeverity,
     taskPresentation,
     taskSoftStopPending,
     taskDoneIsTerminal,
