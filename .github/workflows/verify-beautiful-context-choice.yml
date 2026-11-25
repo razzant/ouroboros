@@ -1,0 +1,89 @@
+name: Beautiful Context - disposable Linux QA
+'on':
+  push:
+    branches: ['verify/beautiful-context-choice-21fe20ee']
+permissions:
+  contents: read
+jobs:
+  beautiful-context:
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        timeout-minutes: 15
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Install Chromium and WebKit
+        timeout-minutes: 70
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
+      - name: Run the two Beautiful Context browser cases
+        id: cases
+        timeout-minutes: 15
+        shell: bash
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+          OUROBOROS_UI_EVIDENCE_DIR: ${{ runner.temp }}/beautiful-context-qa/public
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          qa="$RUNNER_TEMP/beautiful-context-qa"
+          mkdir -p "$qa/private" "$OUROBOROS_UI_EVIDENCE_DIR"
+          py="$(python -c 'import sys; print(sys.executable)')"
+          "$py" -I -S scripts/safe_test.py --timeout 720 --evidence-dir "$qa/private/safe-test" \
+            -- "$py" -m pytest -o addopts= -m ui_browser -q -rs --tb=short \
+            --junitxml="$qa/private/pytest.xml" \
+            tests/test_widgets_ui_browser.py::test_ui_smoke_beautiful_context_reads_the_selected_attempt
+      - name: Require both engines and publish JUnit outcomes without raw logs
+        if: ${{ !cancelled() && steps.cases.outcome != 'skipped' }}
+        shell: bash
+        run: |
+          python -I -S - "$RUNNER_TEMP/beautiful-context-qa" <<'PY'
+          import sys
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+
+          qa = Path(sys.argv[1])
+          cases = ET.parse(qa / 'private/pytest.xml').findall('.//testcase')
+          engines = ('chromium', 'webkit')
+          stem = 'test_ui_smoke_beautiful_context_reads_the_selected_attempt'
+          wanted = {f'{stem}[{engine}]' for engine in engines}
+          seen = [case for case in cases if case.get('name') in wanted]
+          suite = ET.Element('testsuite', name='beautiful-context-linux', tests=str(len(seen)))
+          counts = dict.fromkeys(('failure', 'error', 'skipped'), 0)
+          for source in seen:
+              case = ET.SubElement(suite, 'testcase', name=source.get('name'), classname='tests.test_widgets_ui_browser')
+              for tag in counts:
+                  if source.find(tag) is not None:
+                      ET.SubElement(case, tag, message=f'pytest reported {tag}; see job log')
+                      counts[tag] += 1
+          for tag, attr in (('failure', 'failures'), ('error', 'errors'), ('skipped', 'skipped')):
+              suite.set(attr, str(counts[tag]))
+          ET.ElementTree(suite).write(qa / 'public/junit.xml', encoding='utf-8', xml_declaration=True)
+          if len(cases) != 2 or {c.get('name') for c in seen} != wanted or any(counts.values()):
+              sys.exit(f'Expected exactly one passing case per engine; saw {len(cases)} cases, {counts}')
+          for engine in engines:
+              shots = (qa / 'public/beautiful-context').glob(f'{engine}-*.png')
+              if not any(p.is_file() and p.stat().st_size for p in shots):
+                  sys.exit(f'Missing screenshot for {engine}')
+          PY
+      - name: Retain browser screenshots and JUnit outcomes
+        if: ${{ !cancelled() && steps.cases.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: beautiful-context-linux-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/beautiful-context-qa/public/junit.xml
+            ${{ runner.temp }}/beautiful-context-qa/public/beautiful-context/chromium-*.png
+            ${{ runner.temp }}/beautiful-context-qa/public/beautiful-context/webkit-*.png
+          if-no-files-found: error
+          retention-days: 7
