@@ -64,7 +64,9 @@ def advance(record: dict, event: dict, ordinal: int) -> dict:
     elif kind == STARTED:
         record.update(state="started", run_id=str(event.get("run_id") or ""), started_ordinal=ordinal)
     elif kind in (START_UNSENT, START_FAILED) and event.get("definite") is True and record["state"] != "started":
-        record["state"] = "failed_definite"
+        if not (kind == START_FAILED and event.get("pre_admission_rejected") is True
+                and (record["state"] != "pending" or not record.get("request") or record.get("resume_decisions"))):
+            record["state"] = "failed_definite"
     return record
 
 
@@ -140,9 +142,10 @@ def reduce_event(txn, event: dict, ordinal: int) -> Optional[dict]:
     return record
 
 
-def _read(txn, invocation_id: str) -> Optional[dict]:
+def _read(txn, invocation_id: str, *, bound: Optional[dict] = None) -> Optional[dict]:
     record = txn.get_row(INVOCATIONS, invocation_id)
-    bound = bound_runs(txn, invocation_id)
+    if bound is None:
+        bound = bound_runs(txn, invocation_id)
     # A rollback writer knows neither the invocation row nor the new run fact.
     # Its addressed rows remain usable only when the legacy path can prove the answer.
     if (record is None or any(facts.get("started_ts") and not facts.get("_invocation_started_ordinal")
@@ -153,6 +156,22 @@ def _read(txn, invocation_id: str) -> Optional[dict]:
     if record.get("legacy_gap"):
         return {**record, "state": LEGACY_GAP, "reason": record["legacy_gap"], "run_id": ""}
     return record
+
+
+def snapshot(root, invocation_ids):
+    """First request and bound runs of only these invocations, in one current custody read.
+
+    No request bodies, sibling history or proof cache. A missing or legacy-gap row stays in the
+    result so a carried address cannot mistake it for closed custody.
+    """
+    from ouroboros import store
+
+    with store.open_store(root, write=False) as txn:
+        result = {}
+        for iid in invocation_ids:
+            bound = bound_runs(txn, iid)
+            result[iid] = (_read(txn, iid, bound=bound), bound)
+        return result
 
 
 def _answer(root, record: Optional[dict], request_facts) -> Optional[dict]:
@@ -237,7 +256,9 @@ def invocation_record(drive_root: Any, invocation_id: str, *,
         elif kind == STARTED:
             state, run_id = "started", str(row.get("run_id") or "")
         elif kind in (START_UNSENT, START_FAILED) and row.get("definite") is True and state != "started":
-            state = "failed_definite"
+            if not (kind == START_FAILED and row.get("pre_admission_rejected") is True
+                    and (state != "pending" or found is None or found.get("resume_decisions"))):
+                state = "failed_definite"
     if found is None:
         return None
     return {**found, **({"handoff": handoff} if handoff else {}), "state": state, "run_id": run_id}

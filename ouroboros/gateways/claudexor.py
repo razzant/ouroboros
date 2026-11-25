@@ -42,7 +42,13 @@ from ouroboros.effort_evidence import validated_effort_resolution, validated_pro
 from ouroboros.gateways import claudexor_metadata as metadata
 from ouroboros.gateways.claudexor_identity import validated_catalog_match
 from ouroboros.gateways.claudexor_maintenance import ClaudexorMaintenanceGateway
-from ouroboros.gateways.claudexor_observation import ClaudexorObservationGateway, tag_absent_run_read
+from ouroboros.gateways.claudexor_observation import (
+    ClaudexorObservationGateway,
+    note_problem_provenance,
+    pre_admission_continuation_snapshot,
+    tag_absent_run_read,
+    tag_pre_admission_continuation_rejection,
+)
 from ouroboros.gateways.claudexor_threads import ClaudexorThreadGateway
 from ouroboros.gateways.claudexor_uploads import ClaudexorUploadGateway
 from ouroboros.observability import timed_phase
@@ -574,6 +580,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
                 or ClaudexorUnavailable(code, message, status_code=response.status_code,
                                         required_actions=required_actions))
         error.problem = body if isinstance(body, dict) else {"code": code, "message": message}
+        note_problem_provenance(response, body, error)
         error.retry_after = response.headers.get("Retry-After", "")
         if method == "GET" and response.status_code == 503 and code in DAEMON_BUSY_CODES:
             error.observation_timeout, error.observation_reason, error.observation_answered = True, code, True
@@ -945,13 +952,18 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
 
             return start_review_thread_turn(self, request["_thread_id"], request,
                                             idempotency_key=str(idempotency_key))
+        wire_key, sent_body = str(idempotency_key or "") or uuid.uuid4().hex, dict(request)
+        before_gen, before_store = pre_admission_continuation_snapshot(self, sent_body)
         try:
             body = self._request(
-                "POST", "/v2/runs",
-                json_body=dict(request),
-                headers={"Idempotency-Key": str(idempotency_key or "") or uuid.uuid4().hex, **metadata.STORE_IDENTITY},
+                "POST", "/v2/runs", json_body=sent_body,
+                headers={"Idempotency-Key": wire_key, **metadata.STORE_IDENTITY},
             )
         except ClaudexorUnavailable as error:  # a start refused on a limit asks the subscription census for a read
+            if before_gen is not None:
+                tag_pre_admission_continuation_rejection(
+                    self, error, request=sent_body, idempotency_key=wire_key,
+                    before_generation=before_gen, before_store=before_store)
             from ouroboros.subscription_census import note_limit_failure
             note_limit_failure(error.code, getattr(error, "problem", None))
             raise

@@ -24,6 +24,8 @@ declared (the owner's press, Ouroboros's own sentence), the app stopping, the
 spending limit, a technical problem; a Pause that declared nobody names nobody.
 ``waiting`` continues when what it waits for happens: helpers of an earlier
 attempt finishing, a model becoming available, the owner's sign-in or answer.
+A Continue's wait over a recorded unknown outcome of its earlier attempt also
+offers Resume, which only asks its door to check that outcome.
 A sleep whose chosen helper a stop holds does not: a ``held`` tail says so.
 ``turn`` names what waits for the owner; ``release`` says who can move it.
 
@@ -38,7 +40,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 ACTIVITY_ORDER = ("working", "queued", "waiting", "paused", "unknown")
 TRANSITIONS = ("none", "finalizing", "pausing")
 
-from ouroboros.work_stop import STOP_TEXT, activity_stop_view, control_identity, door_holders, last_resume
+from ouroboros.work_stop import STOP_TEXT, activity_stop_view, control_identity, door_holders, last_resume, writer_wait
 
 # One owner sentence per reason code (the TASK_CAUSE_PHRASES discipline): keyed on the code
 # only, a code with no sentence stays raw, and the raw code stays typed beside it.
@@ -249,6 +251,34 @@ def _call(row: Mapping[str, Any]) -> str:
     return "preparing" if _start_step(row) else "working"
 
 
+def earlier_starts(task_id: str, raw: Mapping[str, Any]) -> bool:
+    """A Continue's writer wait records only unconfirmed starts of its predecessor or starts it carried.
+
+    Read reconciliation's saved blockers only. The addressed Resume verifies lineage and read-only access afresh
+    (``delegate_resume.predecessor_starts``); a predecessor's decision is evidence of carriage, not approval here.
+    """
+    hold = raw.get("hold") if isinstance(raw.get("hold"), dict) else {}
+    edge = raw.get("continuation") if isinstance(raw.get("continuation"), Mapping) else {}
+    predecessor, blockers = str(hold.get("predecessor_task_id") or ""), hold.get("blockers")
+
+    def unconfirmed(entry: Any) -> bool:
+        start = entry.get("ordinary_start") if isinstance(entry, dict) else None
+        if (not isinstance(start, dict) or entry.get("kind") != "delegated_run" or entry.get("run_id")
+                or entry.get("stop_outcome") != "pending_invocation_unbound" or not start.get("invocation_id")
+                or start.get("invocation_id") != entry.get("invocation_id") or not start.get("task_id")
+                or start.get("task_id") != entry.get("task_id")):
+            return False
+        tree, decisions = start.get("root_task_id"), entry.get("resume_decisions")
+        prior = decisions.get(predecessor) if isinstance(decisions, dict) else None
+        return bool(tree and (tree == predecessor or isinstance(prior, dict)
+                              and (prior.get("successor_of"), prior.get("creation")) == (tree, "lookup_only")))
+
+    return bool(task_id and predecessor and writer_wait({"_budget_pause_hold": hold}) and hold.get("root_task_id") == task_id
+                and edge.get("predecessor_task_id") == predecessor and str(raw.get("root_task_id") or task_id) == task_id
+                and not raw.get("parent_task_id") and isinstance(blockers, list) and blockers
+                and all(map(unconfirmed, blockers)))
+
+
 def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = None,
                     names: Optional[Mapping[str, str]] = None,
                     works: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
@@ -309,9 +339,14 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
             state["turn"].append({"kind": "action", "task_id": task_id, "code": view["reason"]["code"]})
         if raw.get("execution_transport") is not None:  # a stopped call has ended; it never resumes
             state.update(release="none", turn=[], resumable=False)
+        # A Continue still waiting over unconfirmed starts of its predecessor may be asked to check them (``check``): a
+        # request to its Resume door, which releases nothing here; `controls_for` offers it when nothing outranks it.
         if (offer := row.get("close_expired")) or raw.get("deadline_expired"):  # withheld Close: Stop, never Resume
             state.update(release="none", turn=[], resumable=False, **({"close_expired": offer} if offer else {}))
             state["reasons"].insert(0, {"code": "deadline_expired", "text": "Deadline expired"})
+        elif raw.get("execution_transport") is None and state["activity"] == "waiting" and state["reasons"][0]["code"] == "earlier_work_unconfirmed" \
+                and earlier_starts(task_id, raw):
+            state["check"] = True
         return state
     wait = _owner_wait(row)
     if wait == "owner_wait":
@@ -386,12 +421,13 @@ _RUNNING_PHASES = {"working", "thinking", "preparing", "finalizing"}
 
 def controls_for(current: Optional[Mapping[str, Any]], current_row: Optional[Mapping[str, Any]], *,
                  earlier_live: Iterable[str] = (), live_roots: Iterable[str] = (),
-                 presence_turn: bool = False) -> List[Dict[str, Any]]:
+                 presence_turn: bool = False, earlier_check: bool = False) -> List[Dict[str, Any]]:
     """The actions the work's doors accept for its present state, each on its exact target.
 
     ``current``/``current_row`` are the live current episode's classified state and census row (None when the
     episode ended); ``earlier_live`` the earlier episode roots that still own live members; ``live_roots`` every
-    episode root to stop, current first. The doors stay the authority: a refusal they still return is shown."""
+    episode root to stop, current first; ``earlier_check``: the caller found nothing that outranks a waiting
+    Continue's Resume check (``earlier_starts``). The doors stay the authority: a refusal they still return is shown."""
     earlier = [str(task_id) for task_id in earlier_live if task_id]
     roots = [str(task_id) for task_id in live_roots if task_id]
     controls: List[Dict[str, Any]] = []
@@ -414,7 +450,7 @@ def controls_for(current: Optional[Mapping[str, Any]], current_row: Optional[Map
                 and current["activity"] in {"working", "queued", "waiting"} \
                 and "earlier_work_unconfirmed" not in codes and phase != "budget_paused":
             controls.append({"action": "pause", "target": target})
-        if current["activity"] == "paused" and current.get("resumable"):
+        if (current["activity"] == "paused" and current.get("resumable")) or (earlier_check and current.get("check")):
             controls.append({"action": "resume", "target": target})
     stoppable = current is not None and not (presence and current_row.get("cancelable") is False)
     for task_id in [*([str(current.get("task_id"))] if stoppable else []), *roots]:

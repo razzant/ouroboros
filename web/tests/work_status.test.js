@@ -9,7 +9,7 @@ import test from 'node:test';
 import { applyPayload, CODE_PREFIX, currentPayload, setMissTransport } from '../modules/i18n.js';
 import {
     ACTION_FINALIZE, ACTION_HURRY, ACTION_PAUSE, ACTION_RESUME, ACTION_STOP_EARLIER, ACTION_STOP_NOW,
-    TASK_CONTROL_LABELS, requestStopAll,
+    TASK_CONTROL_LABELS, requestStopAll, taskControlTriggerLabel,
 } from '../modules/task_control_menu.js';
 import {
     censusTaskPhase, desiredLiveCardPhase, observeChildPhase, pausePhaseLabel, taskActivityPresentation,
@@ -17,12 +17,12 @@ import {
 import { markView } from '../modules/status_mark.js';
 import { summarizeRoom } from '../modules/project_activity.js';
 import {
-    OUTCOME_TONES, activityWord, amberNote, applyCardWorkViews, behindWords, cardControls, cardMenuActions, cardWorkView, clock,
+    OUTCOME_TONES, activityWord, amberNote, applyCardWorkViews, behindWords, cardControlGuard, cardControls, cardMenuActions, cardWorkView, clock,
     emptyWorkState, indexDeadlineExpired, memberDeadlineExpired, memberPaused, memberState, ownStopPress, promoteChildCard, reasonText, reconcileWorkState, resumeAttemptClause,
     resumeAttemptWords,
     resumeTargets, roomAmber, roomStatusView, workControls, workLine, workMenuActions, workQuestion, workRowView,
 } from '../modules/work_status.js';
-import { SERVER_REASONS, SERVER_SLEEPS, room, serverMark, work as builtWork } from './work_fixture.js';
+import { SERVER_REASONS, SERVER_SLEEPS, projection, room, serverMark, work as builtWork } from './work_fixture.js';
 
 setMissTransport(() => Promise.resolve(null));
 const CASES = JSON.parse(readFileSync(new URL('./fixtures/work_projection_cases.json', import.meta.url), 'utf8')).cases;
@@ -315,6 +315,80 @@ test('a held Continue with three helpers of its failed earlier attempt: one work
         text: 'Continue starts when 18 subagents of the earlier attempt finish' }] };
     assert.deepEqual(Object.keys(workRowView(many)), Object.keys(row));
     assert.equal(workRowView(many).tone, row.tone);
+});
+
+test('a waiting Continue the server lets the owner check offers one Resume at its own card, in its menu beside Stop', () => {
+    const waiting = builtWork({ activity_id: 'c', chat_id: 42, kind: 'managed_task' }, {
+        activity: 'waiting',
+        because: [{ code: 'earlier_work_unconfirmed', text: "Continue starts when the earlier attempt's work is confirmed finished" }],
+        controls: [{ action: 'resume', target: 'c' }, { action: 'stop', target: 'c', scope: 'cascade' }] });
+    assert.equal(workRowView(waiting).word, 'Waiting');
+    const grouped = workControls(waiting);
+    assert.deepEqual(grouped, { stop: ['c'], stopEarlier: [], pause: '', resume: 'c', hurry: '', wrapUp: '', model: '' });
+    assert.deepEqual(workMenuActions(grouped), [ACTION_STOP_NOW], 'Resume stands as its own button');
+    assert.deepEqual(workMenuActions(grouped, { resume: true }), [ACTION_RESUME, ACTION_STOP_NOW]);
+    assert.deepEqual([...resumeTargets({ works: [waiting] })], ['c']);
+    const state = { episodes: new Map([['c', waiting]]) };
+    const card = cardControls(state, 'c');
+    assert.deepEqual([card.resume, card.menu, Boolean(card.work)], [true, true, true]);
+    assert.equal(cardControls(state, 'other').resume, false, 'only its own card carries the button');
+});
+
+test('an ended work whose latest episode is an answered Continue lays its card on that episode and keeps one Stop at the earlier root', () => {
+    const ended = builtWork({ activity_id: 'p', chat_id: 42, kind: 'managed_task' }, {
+        episode: { task_id: 's', live: false }, outcome: 'completed', members: { ids: [] }, unbound_start: true,
+        controls: [{ action: 'stop', target: 'p', scope: 'cascade' }] });
+    const state = reconcileWorkState(emptyWorkState(), { supervisor_ready: true, ...projection(42, [ended], room('working')) }, 42);
+    assert.equal(state.episodes.get('s')?.work_id, 'p', 'the answered Continue is the work\'s episode');
+    assert.equal(state.episodes.has('p'), false, 'the earlier root is no card of this work');
+    const card = cardControls(state, 's');
+    assert.deepEqual([card.resume, card.menu, card.work?.work_id], [false, true, 'p']);
+    const grouped = workControls(ended);
+    assert.deepEqual(grouped, { stop: ['p'], stopEarlier: [], pause: '', resume: '', hurry: '', wrapUp: '', model: '' });
+    assert.deepEqual(cardMenuActions(state, { groupId: 's' }), [ACTION_STOP_NOW]);
+    assert.equal(taskControlTriggerLabel(workMenuActions(grouped)), TASK_CONTROL_LABELS[ACTION_STOP_NOW],
+        'one Stop stays a direct trigger so its addressed confirmation remains intact');
+});
+
+test('answered Continue action composition keeps exact server targets, earlier Pause, independent stops and no invented targets', () => {
+    // Proven working earlier helper/run: card sits on `s`, Pause and Stop both address `p`, no duplicate Stop earlier.
+    const withEarlierPause = builtWork({ activity_id: 'p', chat_id: 42, kind: 'managed_task' }, {
+        episode: { task_id: 's', live: false }, outcome: 'completed', members: { ids: [] },
+        controls: [{ action: 'pause', target: 'p' }, { action: 'stop', target: 'p', scope: 'cascade' }] });
+    const pauseState = reconcileWorkState(emptyWorkState(),
+        { supervisor_ready: true, ...projection(42, [withEarlierPause], room('working')) }, 42);
+    assert.deepEqual(workControls(withEarlierPause),
+        { stop: ['p'], stopEarlier: [], pause: 'p', resume: '', hurry: '', wrapUp: '', model: '' });
+    assert.deepEqual(cardMenuActions(pauseState, { groupId: 's' }), [ACTION_PAUSE, ACTION_STOP_NOW]);
+    const pauseGuard = cardControlGuard({ groupId: 's' }, (rec) => cardControls(pauseState, rec.groupId));
+    assert.deepEqual([pauseGuard(ACTION_PAUSE), pauseGuard(ACTION_STOP_NOW), pauseGuard(ACTION_STOP_EARLIER), pauseGuard(ACTION_RESUME)],
+        ['p', ['p'], '', ''], 'card guard dispatches Pause and Stop strictly to proven target p, never inventing s');
+
+    // Unknown outcome behind an ended episode holding nothing: never declared Done, single Stop with no duplicate.
+    const unknownOutcome = builtWork({ activity_id: 'p', chat_id: 42, kind: 'managed_task' }, {
+        episode: { task_id: 's', live: false }, activity: 'unknown', members: { ids: [] }, unbound_start: true,
+        controls: [{ action: 'stop', target: 'p', scope: 'cascade' }] });
+    assert.equal(workRowView(unknownOutcome).word, 'Activity unconfirmed');
+    assert.deepEqual(workMenuActions(workControls(unknownOutcome)), [ACTION_STOP_NOW]);
+    assert.equal(taskControlTriggerLabel(workMenuActions(workControls(unknownOutcome))), TASK_CONTROL_LABELS[ACTION_STOP_NOW]);
+
+    // Independent targets stay independent when the latest episode owns its own tail beside the earlier root.
+    const independent = builtWork({ activity_id: 'p', chat_id: 42, kind: 'managed_task' }, {
+        episode: { task_id: 's', live: false }, outcome: 'completed', members: { ids: [] },
+        controls: [
+            { action: 'pause', target: 's' },
+            { action: 'stop', target: 's', scope: 'cascade' },
+            { action: 'stop', target: 'p', scope: 'cascade' },
+            { action: 'stop_earlier', target: 'p', scope: 'cascade' },
+        ] });
+    const bothState = reconcileWorkState(emptyWorkState(),
+        { supervisor_ready: true, ...projection(42, [independent], room('working')) }, 42);
+    assert.deepEqual(workControls(independent),
+        { stop: ['s', 'p'], stopEarlier: ['p'], pause: 's', resume: '', hurry: '', wrapUp: '', model: '' });
+    assert.deepEqual(cardMenuActions(bothState, { groupId: 's' }), [ACTION_PAUSE, ACTION_STOP_EARLIER, ACTION_STOP_NOW]);
+    const bothGuard = cardControlGuard({ groupId: 's' }, (rec) => cardControls(bothState, rec.groupId));
+    assert.deepEqual([bothGuard(ACTION_PAUSE), bothGuard(ACTION_STOP_EARLIER), bothGuard(ACTION_STOP_NOW)],
+        ['s', ['p'], ['s', 'p']]);
 });
 
 test('rows: their word, the line beside it, tone, mark and the owner\'s move from the work alone', () => {

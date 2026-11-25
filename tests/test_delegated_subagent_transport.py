@@ -632,3 +632,276 @@ def test_facade_reexports_are_the_same_objects_as_their_owners():
     assert delegate._fail is delegate_shared._fail
     assert delegate._emit is delegate_shared._emit
     assert delegate._owned_run is delegate_shared._owned_run
+
+
+# ---------------------------------------------------------------------------
+# Pre-admission continuation_superseded transport proof (Part A)
+# ---------------------------------------------------------------------------
+
+
+_PROVEN_CONTINUATION_VERSION = "6.3.0"
+_PROVEN_CONTINUATION_SHA = "0ff3df717c2e807fdbd3a233487e35d81993fdea"
+
+
+def _cont_problem(ctx=None, **overrides):
+    body = {"code": "continuation_superseded", "message": "x", "retryable": False,
+            "context": {"runId": "run-pred", "head": "run-head"} if ctx is None else ctx}
+    body.update(overrides)
+    return body
+
+
+def _bound_continuation_gateway(
+    tmp_path, handler, *, store_id="store-a", with_descriptor=True, engine_ref=None,
+    version=_PROVEN_CONTINUATION_VERSION, sha=_PROVEN_CONTINUATION_SHA, serving_mode="", do_handshake=True,
+):
+    from ouroboros.gateways import claudexor_metadata as metadata
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    descriptor = tmp_path / "control-api.json"
+    descriptor.write_text("{}", encoding="utf-8")
+    endpoint = (
+        cx.DaemonEndpoint("127.0.0.1", 1, "secret-token", str(descriptor), metadata.descriptor_stamp(descriptor))
+        if with_descriptor else cx.DaemonEndpoint("127.0.0.1", 1, "secret-token")
+    )
+
+    def dispatch(request):
+        if request.url.path == "/v2/handshake":
+            engine = {"version": version, **({"sha": sha} if sha is not None else {})}
+            body = {"protocolMajor": CLAUDEXOR_PROTOCOL_MAJOR, "compatible": True, "engine": engine,
+                    **({"servingMode": serving_mode} if serving_mode else {})}
+            if store_id and request.headers.get("x-claudexor-store-identity") == "1":
+                body["storeId"] = store_id
+            return httpx.Response(200, json=body)
+        return handler(request)
+
+    gateway = cx.ClaudexorGateway(endpoint)
+    gateway._client = httpx.Client(
+        base_url="http://127.0.0.1:1", transport=httpx.MockTransport(dispatch), headers=dict(gateway._client.headers),
+    )
+    if do_handshake:
+        gateway.handshake()
+    else:
+        gateway._engine_version, gateway._engine_build_sha, gateway._store_identity = version, sha or "", store_id
+    if engine_ref is not None:
+        gateway.engine_ref = dict(engine_ref)
+    return gateway, descriptor
+
+
+@pytest.mark.parametrize("predecessor,expected", [(None, 0), ("run-pred", 1)],
+                         ids=["ordinary-start", "direct-continuation"])
+def test_start_run_captures_one_endpoint_generation_only_for_direct_continuation(
+        tmp_path, monkeypatch, predecessor, expected):
+    from ouroboros.gateways import claudexor_metadata as metadata
+
+    generation_reads = []
+    original = metadata.endpoint_generation
+
+    def observed(endpoint):
+        generation_reads.append(endpoint.descriptor_path)
+        return original(endpoint)
+
+    def handler(request):
+        assert (request.method, request.url.path) == ("POST", "/v2/runs")
+        assert request.headers["Idempotency-Key"] == "inv-normal"
+        assert request.headers["X-Claudexor-Store-Identity"] == "1"
+        assert len(generation_reads) == expected
+        return httpx.Response(202, json={"jobId": "job-normal", "storeId": "store-a"})
+
+    gateway, _ = _bound_continuation_gateway(tmp_path, handler)
+    monkeypatch.setattr(metadata, "endpoint_generation", observed)
+    request = {"prompt": "read", "access": "readonly", "mode": "ask"}
+    if predecessor:
+        request["continueFrom"] = predecessor
+    assert gateway.start_run(request, idempotency_key="inv-normal") == {"jobId": "job-normal", "storeId": "store-a"}
+    assert len(generation_reads) == expected
+
+
+def test_start_run_tags_pre_admission_continuation_superseded_on_verified_direct_post(tmp_path):
+    from ouroboros.gateways import claudexor_metadata as metadata
+    from ouroboros.gateways.claudexor_observation import PreAdmissionContinuationRejection, canonical_request_digest
+
+    problem = _cont_problem({"runId": "run-pred", "head": "run-head-2"})
+    req = {"prompt": "continue", "continueFrom": "run-pred", "access": "readonly", "mode": "ask"}
+
+    def handler(request):
+        assert request.method == "POST" and request.url.path == "/v2/runs"
+        assert request.headers.get("Idempotency-Key") == "inv-continue-1"
+        return httpx.Response(409, json=problem)
+
+    gateway, _ = _bound_continuation_gateway(tmp_path, handler, store_id="store-a")
+    with pytest.raises(cx.ClaudexorUnavailable) as excinfo:
+        gateway.start_run(req, idempotency_key="inv-continue-1")
+    proof = getattr(excinfo.value, "pre_admission_continuation_rejection", None)
+    assert isinstance(proof, PreAdmissionContinuationRejection)
+    assert proof.route == ("POST", "/v2/runs") and proof.status_code == 409 and proof.code == "continuation_superseded"
+    assert proof.requested_predecessor_id == "run-pred" and proof.predecessor_run_id == "run-pred"
+    assert proof.predecessor_matched is True and proof.verified_on(gateway) is True
+    assert proof.engine_head == "run-head-2"
+    assert proof.store_id == "store-a" and proof.idempotency_key == "inv-continue-1"
+    assert proof.request_digest == canonical_request_digest(req)
+    assert proof.endpoint_generation == metadata.endpoint_generation(gateway._endpoint)
+    assert proof.engine_version == _PROVEN_CONTINUATION_VERSION and proof.engine_build_sha == _PROVEN_CONTINUATION_SHA
+    assert proof.engine_ref == ()
+
+    work_ref = {"kind": "work", "descriptor": "/srv/work/control-api.json", "store": "store-a"}
+    problem_with_store = _cont_problem({"runId": "run-pred", "head": "run-head-2", "storeId": "store-a"})
+    gateway_work, _ = _bound_continuation_gateway(
+        tmp_path / "work", lambda _r: httpx.Response(409, json=problem_with_store), store_id="store-a", engine_ref=work_ref,
+    )
+    with pytest.raises(cx.ClaudexorUnavailable) as work_exc:
+        gateway_work.start_run(req, idempotency_key="inv-work-1")
+    work_proof = getattr(work_exc.value, "pre_admission_continuation_rejection", None)
+    assert isinstance(work_proof, PreAdmissionContinuationRejection) and dict(work_proof.engine_ref) == work_ref
+    assert work_proof.predecessor_matched is True and work_proof.verified_on(gateway_work) is True
+
+
+def test_start_run_preserves_job_to_run_predecessor_mismatch_fact_for_core_alias_proof(tmp_path):
+    from ouroboros.gateways.claudexor_observation import PreAdmissionContinuationRejection, canonical_request_digest
+
+    seen_requests = []
+    req = {"prompt": "continue", "continueFrom": "job-pred", "access": "readonly", "mode": "ask"}
+    problem = _cont_problem({"runId": "run-pred", "head": "run-head-2"})
+
+    def handler(request):
+        seen_requests.append((request.method, request.url.path))
+        return httpx.Response(409, json=problem)
+
+    gateway, descriptor = _bound_continuation_gateway(tmp_path, handler, store_id="store-a")
+    with pytest.raises(cx.ClaudexorUnavailable) as excinfo:
+        gateway.start_run(req, idempotency_key="inv-job-1")
+    proof = getattr(excinfo.value, "pre_admission_continuation_rejection", None)
+    assert isinstance(proof, PreAdmissionContinuationRejection)
+    assert seen_requests == [("POST", "/v2/runs")]
+    assert proof.requested_predecessor_id == "job-pred" and proof.predecessor_run_id == "run-pred"
+    assert proof.predecessor_matched is False and proof.engine_head == "run-head-2"
+    assert proof.request_digest == canonical_request_digest(req)
+    assert proof.verified_on(gateway) is True
+    descriptor.write_text('{"rotated": true}', encoding="utf-8")
+    assert proof.verified_on(gateway) is False
+
+
+def test_pre_admission_continuation_producers_tracks_pinned_runtime_without_open_ended_future_versions():
+    import re
+    from ouroboros import claudexor_runtime
+    from ouroboros.gateways.claudexor_observation import PRE_ADMISSION_CONTINUATION_PRODUCERS
+
+    pin = claudexor_runtime.load_runtime_pin()
+    assert pin is not None
+    assert (pin.version, pin.build_sha) in PRE_ADMISSION_CONTINUATION_PRODUCERS, (
+        "Advancing claudexor_runtime_pin.json requires auditing POST /v2/runs pre-admission "
+        "continuation_superseded before allowlisting the new (version, build_sha) pair."
+    )
+    for version, sha in PRE_ADMISSION_CONTINUATION_PRODUCERS:
+        assert re.fullmatch(r"\d+\.\d+\.\d+", version), version
+        assert re.fullmatch(r"[0-9a-f]{40}", sha), sha
+    major, minor, patch = (int(part) for part in pin.version.split("."))
+    assert (f"{major}.{minor + 1}.0", pin.build_sha) not in PRE_ADMISSION_CONTINUATION_PRODUCERS
+    assert (f"{major}.{minor}.{patch + 1}", pin.build_sha) not in PRE_ADMISSION_CONTINUATION_PRODUCERS
+    assert (pin.version, "b" * 40) not in PRE_ADMISSION_CONTINUATION_PRODUCERS
+
+
+@pytest.mark.parametrize("case,status,raw_body,req_patch,gw_kwargs", [
+    ("retryable_true", 409, _cont_problem(retryable=True), {}, {}),
+    ("retryable_missing", 409, {k: v for k, v in _cont_problem().items() if k != "retryable"}, {}, {}),
+    ("retryable_null", 409, _cont_problem(retryable=None), {}, {}),
+    ("non_409_status", 400, _cont_problem(), {}, {}),
+    ("wrong_code", 409, _cont_problem(code="idempotency_conflict"), {}, {}),
+    ("top_level_job_id", 409, _cont_problem(jobId="job-1"), {}, {}),
+    ("top_level_state", 409, _cont_problem(state="failed"), {}, {}),
+    ("top_level_handle", 409, _cont_problem(handle={"jobId": "job-1"}), {}, {}),
+    ("top_level_run_id", 409, _cont_problem(runId="run-own"), {}, {}),
+    ("context_job_id", 409, _cont_problem({"runId": "run-pred", "head": "run-head", "jobId": "job-1"}), {}, {}),
+    ("context_state", 409, _cont_problem({"runId": "run-pred", "head": "run-head", "state": "failed"}), {}, {}),
+    ("context_missing", 409, {"code": "continuation_superseded", "message": "x", "retryable": False}, {}, {}),
+    ("context_not_dict", 409, _cont_problem(ctx=["run-pred"]), {}, {}),
+    ("empty_run_id", 409, _cont_problem({"runId": "", "head": "run-head"}), {}, {}),
+    ("whitespace_run_id", 409, _cont_problem({"runId": " run-pred ", "head": "run-head"}), {}, {}),
+    ("non_string_run_id", 409, _cont_problem({"runId": 123, "head": "run-head"}), {}, {}),
+    ("run_id_equals_key", 409, _cont_problem({"runId": "inv-1", "head": "run-head"}), {}, {}),
+    ("empty_head", 409, _cont_problem({"runId": "run-pred", "head": ""}), {}, {}),
+    ("head_equals_predecessor", 409, _cont_problem({"runId": "run-pred", "head": "run-pred"}), {}, {}),
+    ("head_equals_requested_predecessor", 409, _cont_problem({"runId": "run-canon", "head": "run-pred"}), {}, {}),
+    ("head_equals_reported_predecessor", 409, _cont_problem({"runId": "run-canon", "head": "run-canon"}), {}, {}),
+    ("head_equals_key", 409, _cont_problem({"runId": "run-pred", "head": "inv-1"}), {}, {}),
+    ("context_store_mismatch", 409, _cont_problem({"runId": "run-pred", "head": "run-head", "storeId": "store-b"}), {}, {}),
+    ("problem_store_mismatch", 409, _cont_problem(storeId="store-b"), {}, {}),
+    ("no_continue_from", 409, _cont_problem(), {"continueFrom": None}, {}),
+    ("partial_json_body", 409, b'{"code":"continuation_superseded","retryable":false', {}, {}),
+    ("non_json_body", 409, b"continuation_superseded", {}, {}),
+    ("json_array_body", 409, b'["continuation_superseded"]', {}, {}),
+    ("empty_store_identity", 409, _cont_problem(), {}, {"store_id": ""}),
+    ("no_descriptor", 409, _cont_problem(), {}, {"with_descriptor": False}),
+    ("work_ref_store_mismatch", 409, _cont_problem(), {},
+     {"engine_ref": {"kind": "work", "descriptor": "/srv/work/control-api.json", "store": "store-b"}}),
+    ("legacy_min_version", 409, _cont_problem(), {}, {"version": CLAUDEXOR_MIN_VERSION}),
+    ("unknown_future_version", 409, _cont_problem(), {}, {"version": "6.4.0"}),
+    ("short_build_sha", 409, _cont_problem(), {}, {"sha": "0ff3df717"}),
+    ("missing_build_sha", 409, _cont_problem(), {}, {"sha": None}),
+    ("unknown_build_sha", 409, _cont_problem(), {}, {"sha": "a" * 40}),
+    ("recovery_only_handshake", 409, _cont_problem(), {}, {"serving_mode": "recovery_only"}),
+    ("unhandshaken_gateway", 409, _cont_problem(), {}, {"do_handshake": False}),
+])
+def test_start_run_leaves_non_contract_continuation_refusals_untagged(
+        tmp_path, case, status, raw_body, req_patch, gw_kwargs):
+    case_dir = tmp_path / case
+    case_dir.mkdir()
+    req = {"prompt": "continue", "continueFrom": "run-pred", "access": "readonly", "mode": "ask", **req_patch}
+    if req.get("continueFrom") is None:
+        req.pop("continueFrom", None)
+
+    def handler(_request):
+        if isinstance(raw_body, bytes):
+            return httpx.Response(status, content=raw_body, headers={"content-type": "application/json"})
+        return httpx.Response(status, json=raw_body)
+
+    gateway, _ = _bound_continuation_gateway(case_dir, handler, **gw_kwargs)
+    with pytest.raises(cx.ClaudexorUnavailable) as excinfo:
+        gateway.start_run(req, idempotency_key="inv-1")
+    assert getattr(excinfo.value, "pre_admission_continuation_rejection", None) is None, case
+
+
+def test_start_run_leaves_other_routes_rotated_descriptor_lost_reply_and_unattached_problem_untagged(tmp_path):
+    problem = _cont_problem()
+    req = {"prompt": "continue", "continueFrom": "run-pred", "access": "readonly", "mode": "ask"}
+
+    # 1. Thread turn POST via _thread_id (POST /v2/threads/:id/turns) must NEVER tag.
+    gw_thread, _ = _bound_continuation_gateway(tmp_path / "thread", lambda _r: httpx.Response(409, json=problem))
+    with pytest.raises(cx.ClaudexorUnavailable) as exc_thread:
+        gw_thread.start_run({**req, "_thread_id": "thr-1"}, idempotency_key="inv-thr")
+    assert getattr(exc_thread.value, "pre_admission_continuation_rejection", None) is None
+
+    # 2. Other HTTP routes (GET /v2/runs/:id, POST /v2/runs/lookup) must NEVER tag.
+    gw_other, _ = _bound_continuation_gateway(tmp_path / "other", lambda _r: httpx.Response(409, json=problem))
+    for call in (lambda: gw_other.get_run("run-pred"), lambda: gw_other.lookup_run(req, idempotency_key="inv-1")):
+        with pytest.raises(cx.ClaudexorUnavailable) as exc_other:
+            call()
+        assert getattr(exc_other.value, "pre_admission_continuation_rejection", None) is None
+
+    # 3. Descriptor rotated/changed across POST /v2/runs must NEVER tag.
+    holder = {}
+    gw_rot, desc = _bound_continuation_gateway(
+        tmp_path / "rotated",
+        lambda _r: (holder["descriptor"].write_text('{"rotated": true}', encoding="utf-8"),
+                    httpx.Response(409, json=problem))[1],
+    )
+    holder["descriptor"] = desc
+    with pytest.raises(cx.ClaudexorUnavailable) as exc_rot:
+        gw_rot.start_run(req, idempotency_key="inv-rot")
+    assert getattr(exc_rot.value, "pre_admission_continuation_rejection", None) is None
+
+    # 4. Lost response / transport error must NEVER tag.
+    def drop(_request):
+        raise httpx.ConnectError("connection dropped after POST")
+
+    gw_drop, _ = _bound_continuation_gateway(tmp_path / "drop", drop)
+    with pytest.raises(cx.ClaudexorUnavailable) as exc_drop:
+        gw_drop.start_run(req, idempotency_key="inv-drop")
+    assert getattr(exc_drop.value, "pre_admission_continuation_rejection", None) is None
+
+    # 5. Unattached httpx.Response passed directly to _problem never raises RuntimeError or tags.
+    bare = object.__new__(cx.ClaudexorGateway)
+    unattached = bare._problem(httpx.Response(409, json=problem))
+    assert isinstance(unattached, cx.ClaudexorUnavailable)
+    assert unattached.code == "continuation_superseded" and unattached.status_code == 409
+    assert getattr(unattached, "_response_route", "missing") is None
+    assert getattr(unattached, "pre_admission_continuation_rejection", None) is None

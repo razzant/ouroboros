@@ -1082,6 +1082,197 @@ def test_a_held_continue_offers_stop_earlier_only_where_the_stop_door_reaches(st
         ("stop", "c"), ("stop", "p"), ("stop_earlier", "p")]
 
 
+# ---- a waiting Continue's Resume check (its door counts afresh, so the offer reads only what the wait recorded) ----
+
+_START = {"root_task_id": "p", "task_id": "p", "invocation_id": "lost", "choice_id": "delegate_start:p/p/lost"}
+_UNCONFIRMED = {"kind": "delegated_run", "task_id": "p", "run_id": "", "invocation_id": "lost", "state": "stop_unknown",
+                "stop_outcome": "pending_invocation_unbound", "ordinary_start": _START}
+_RUNNING_LEAF = {"kind": "delegated_run", "task_id": "p", "run_id": "run-leaf", "invocation_id": "", "state": "running",
+                 "stop_outcome": ""}
+
+
+def _writer_hold(blockers=(_UNCONFIRMED,), **changes):
+    """A never-started Continue "c" of "p" in its own writer wait, as its queue row records it."""
+    return {"reason": "continuation_writer_unsettled", "predecessor_task_id": "p", "root_task_id": "c",
+            "blockers": list(blockers), **changes}
+
+
+def _waiting_continue(hold=None, **raw):
+    held = row("c", "budget_paused", pause_cause="unknown", can_resume=False)
+    facts = {"hold": _writer_hold() if hold is None else hold, "continuation": {"predecessor_task_id": "p"},
+             "root_task_id": "c", **raw}
+    return held, ws.classify_member(held, facts)
+
+
+def test_a_continue_waiting_only_over_unconfirmed_starts_may_be_asked_to_check_them():
+    held, state = _waiting_continue()
+    assert (state["activity"], state["reasons"][0]["code"], state["release"], state["turn"]) == (
+        "waiting", "earlier_work_unconfirmed", "self", [])
+    assert state["check"] is True and not state.get("resumable"), "a check, never a release"
+    # Whether anything outranks the check is the caller's read; the wait itself never offers Pause.
+    assert _actions(ws.controls_for(state, held, earlier_check=True)) == [("resume", "c"), ("stop", "c")]
+    assert _actions(ws.controls_for(state, held)) == [("stop", "c")]
+    work = ws.roll_up_work("p", [state], episode={"task_id": "c", "state": state})
+    assert "check" not in work["members"]["states"]["c"], "the check is an offer's input, not a published fact"
+
+
+@pytest.mark.parametrize("case", [
+    "running_leaf", "running_leaf_beside_unconfirmed", "no_blockers", "blockers_unrecorded", "other_trees_start",
+    "bound_run", "other_predecessor", "other_root", "a_child", "not_a_writer_wait",
+])
+def test_a_wait_over_anything_else_offers_no_resume_check(case):
+    hold, raw = _writer_hold(), {}
+    if case == "running_leaf":
+        hold = _writer_hold([_RUNNING_LEAF])
+    elif case == "running_leaf_beside_unconfirmed":
+        hold = _writer_hold([_RUNNING_LEAF, _UNCONFIRMED])
+    elif case == "no_blockers":
+        hold = _writer_hold([])
+    elif case == "blockers_unrecorded":
+        hold = {key: value for key, value in _writer_hold().items() if key != "blockers"}
+    elif case == "other_trees_start":
+        hold = _writer_hold([{**_UNCONFIRMED, "ordinary_start": {**_START, "root_task_id": "other"}}])
+    elif case == "bound_run":
+        hold = _writer_hold([{**_UNCONFIRMED, "run_id": "run-1"}])
+    elif case == "other_predecessor":
+        hold = _writer_hold(predecessor_task_id="q")
+    elif case == "other_root":
+        hold = _writer_hold(root_task_id="x")
+    elif case == "a_child":
+        raw = {"parent_task_id": "p"}
+    elif case == "not_a_writer_wait":
+        hold = _writer_hold(reason="owner_restart_hold")
+    held, state = _waiting_continue(hold, **raw)
+    assert "check" not in state, case
+    if state["activity"] == "waiting":  # a paused member's own Resume is the existing door's, not this check's
+        assert ("resume", "c") not in _actions(ws.controls_for(state, held, earlier_check=True)), case
+
+
+def test_the_resume_check_is_offered_until_something_in_this_read_outranks_it(stored, monkeypatch, tmp_path):
+    stored["p"] = {"task_id": "p", "status": "failed", "chat_id": 42}
+    held = row("c", "budget_paused", pause_cause="unknown", can_resume=False)
+    raw = {"c": {"_budget_pause_hold": _writer_hold(), "continuation": {"predecessor_task_id": "p"}}}
+
+    def controls(*owners):
+        [work] = wp.works_snapshot(tmp_path, list(owners or [held]), raw)["works"]
+        return _actions(work["controls"])
+
+    assert controls() == [("resume", "c"), ("stop", "c")]
+    assert ("resume", "c") not in controls(held, row("h0", parent_task_id="p", root_task_id="p")), \
+        "earlier work observed at work: the Continue starts by itself"
+    # A deadline it has passed and its own end are known: nothing is left to check. A future deadline is not.
+    for record, offered in (({"deadline_at": "2020-01-01T00:00:00Z"}, False), ({"deadline_at": "2999-01-01T00:00:00Z"}, True),
+                            ({"status": "cancelled"}, False), ({"status": "scheduled"}, True)):
+        stored["c"] = {"task_id": "c", "chat_id": 42, **record}
+        assert (("resume", "c") in controls()) is offered, record
+    del stored["c"]
+    close = {"action": "close", "target": "c", "close_expired": "a" * 64}
+    expired = {**held, "close_expired": close}
+    assert controls(expired) == [("close", "c"), ("stop", "c")], "the exact Close replaces the check, not Stop"
+    with monkeypatch.context() as stopped:
+        stopped.setattr("ouroboros.cancel_intents.cancel_pending", lambda *_args, **_kwargs: True)
+        assert ("resume", "c") not in controls(), "a recorded Stop outranks it"
+    monkeypatch.setattr(wp, "_open_runs", lambda drive_root, state=None: {"p": [_run("run-1", "p-a")]})
+    assert ("resume", "c") not in controls(), "a bound run of the earlier attempt is observed: no check"
+
+
+def _claim(predecessor, successor, *, state="admitted"):
+    """The predecessor's hash-bound claim and the admission its successor's own record carries for it."""
+    from ouroboros.owner_continue import binding_sha
+
+    binding = {"verb": "continue", "predecessor_task_id": predecessor, "successor_task_id": successor,
+               "action_nonce": "nonce-1234"}
+    claim = {"successor_task_id": successor, "action_nonce": "nonce-1234", "binding": binding,
+             "binding_sha256": binding_sha(binding), "state": state}
+    return claim, {"binding": binding, "binding_sha256": binding_sha(binding)}
+
+
+def _answered_after(stored, monkeypatch, *, state="admitted", last_status="completed", hops=1):
+    """Work "p" ended and was Continued ``hops`` times (p -> s -> t); its first attempt's run is still open."""
+    chain = ["p", "s", "t"][:hops + 1]
+    for before, after in zip(chain, chain[1:]):
+        claim, admission = _claim(before, after, state=state if before == "p" else "admitted")
+        stored.setdefault(before, {}).update(task_id=before, chat_id=42, continued_by=claim)
+        stored.setdefault(after, {}).update(task_id=after, chat_id=42, continuation_admission=admission,
+                                            metadata={"continuation": {"predecessor_task_id": before}})
+    for task_id in chain:
+        stored[task_id]["status"] = "cancelled" if task_id == "p" else "completed"
+    stored[chain[-1]]["status"] = last_status
+    monkeypatch.setattr(wp, "_open_runs", lambda drive_root, state=None: {"p": [_run("run-open", "p-a")]})
+
+
+@pytest.mark.parametrize("hops", [1, 2])
+def test_an_answered_continue_is_the_works_episode_while_its_earlier_attempt_keeps_its_stop(stored, monkeypatch, tmp_path, hops):
+    _answered_after(stored, monkeypatch, hops=hops)
+    snap = wp.works_snapshot(tmp_path, [], {})
+    [work] = snap["works"]
+    latest = "s" if hops == 1 else "t"
+    assert (work["work_id"], work["episode"], work["outcome"]) == ("p", {"task_id": latest, "live": False}, "completed")
+    assert snap["works_gaps"] == []
+    # The open ordinary run keeps Pause and a single Stop at its earlier root, never at the answered episode.
+    assert work["controls"] == [{"action": "pause", "target": "p"},
+                               {"action": "stop", "target": "p", "scope": "cascade"}]
+
+
+@pytest.mark.parametrize("case, state, status", [
+    ("lagging_mark_covered_by_a_terminal_successor", "bound", "completed"),
+    ("prepared_successor_is_no_episode", "bound", "scheduled"),
+    ("claimed_successor_not_yet_written", "bound", None),
+])
+def test_a_claim_not_confirmed_admitted_moves_the_episode_only_for_a_terminal_successor(
+        stored, monkeypatch, tmp_path, case, state, status):
+    _answered_after(stored, monkeypatch, state=state, last_status=status or "completed")
+    if status is None:
+        del stored["s"]
+    [work] = wp.works_snapshot(tmp_path, [], {})["works"]
+    moved = case.startswith("lagging")
+    assert work["episode"] == {"task_id": "s" if moved else "p", "live": False}, case
+    assert work["outcome"] == ("completed" if moved else "cancelled"), "the episode's own word, never the other's"
+
+
+@pytest.mark.parametrize("case", ["admitted_successor_unreadable", "admitted_link_without_its_binding", "link_not_a_record"])
+def test_a_link_the_read_cannot_prove_leaves_the_outcome_unsaid_and_names_the_gap(stored, monkeypatch, tmp_path, case):
+    _answered_after(stored, monkeypatch)
+    if case == "admitted_successor_unreadable":
+        del stored["s"]
+    elif case == "admitted_link_without_its_binding":
+        stored["p"]["continued_by"] = {"successor_task_id": "s", "state": "admitted"}
+    else:
+        stored["p"]["continued_by"] = "s"
+    snap = wp.works_snapshot(tmp_path, [], {})
+    [work] = snap["works"]
+    assert work["episode"] == {"task_id": "p", "live": False}, "no later episode is proven"
+    assert "outcome" not in work, "never the stale outcome of an episode that is not the latest"
+    named = "p" if case == "link_not_a_record" else "s"
+    assert {"reason": "episode_record_unavailable", "task_id": named} in snap["works_gaps"]
+    assert ("stop", "p") in _actions(work["controls"]), "the earlier attempt keeps its Stop"
+
+
+def test_a_later_episode_that_owns_a_run_takes_its_own_pause_and_the_older_tail_keeps_its_stop(stored, monkeypatch, tmp_path):
+    _answered_after(stored, monkeypatch)
+    monkeypatch.setattr(wp, "_open_runs", lambda drive_root, state=None: {
+        "p": [_run("run-open", "p-a")], "s": [_run("run-own", "s-a")]})
+    [work] = wp.works_snapshot(tmp_path, [], {})["works"]
+    assert work["episode"] == {"task_id": "s", "live": False}
+    assert _actions(work["controls"]) == [("pause", "s"), ("stop", "s"), ("stop", "p"), ("stop_earlier", "p")]
+
+
+def test_a_stop_is_dropped_only_for_the_target_whose_door_has_nothing_to_reach(stored, tmp_path):
+    stored["p"] = {"task_id": "p", "status": "failed", "chat_id": 42}
+    owners = [row("c", started_at=200.0), row("p", "queued", started_at=100.0)]
+    raw = {"c": {"continuation": {"predecessor_task_id": "p"}}}
+
+    def stops(facts):
+        [work] = wp.works_snapshot(tmp_path, owners, facts)["works"]
+        return [(action, target) for action, target in _actions(work["controls"]) if action.startswith("stop")]
+
+    assert stops(raw) == [("stop", "c"), ("stop", "p"), ("stop_earlier", "p")]
+    assert stops({**raw, "p": {"nothing_to_stop": True}}) == [("stop", "c")], \
+        "the older root's door has nothing to reach: its own controls go, the current one's stay"
+    assert stops({"c": {**raw["c"], "nothing_to_stop": True}}) == [("stop", "p")], \
+        "the older root keeps one Stop when both actions would reach only that root"
+
+
 @pytest.mark.parametrize("cause, raw, resumable", [
     ("owner", {"fence": {"requested_by": "owner"}}, True),
     ("restart", {"hold": {"reason": "saved_work_hold"}}, True),
