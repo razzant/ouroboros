@@ -1377,6 +1377,14 @@ def test_a_member_whose_lookup_fails_prints_size_not_read_never_zero(tmp_path, m
     assert effect.split("\n")[1].endswith("its 2 sources' own words: size not read")
 
 
+def test_a_row_read_whole_that_has_no_words_is_zero_tokens_and_only_a_bodiless_row_is_unread():
+    from ouroboros.memory_fold_receipt import _row_words
+
+    assert _row_words({"text": ""}) == 0
+    assert _row_words({"text_chars": 40}) > 0
+    assert _row_words({}) is None
+
+
 def test_a_pages_rows_are_measured_as_their_reader_shows_them_a_programs_note_by_its_body(tmp_path):
     from ouroboros.dialogue_provenance import recorded_author, render_row_text
     from ouroboros.memory_floor import view_tokens

@@ -74,7 +74,8 @@ def _row_words(row: Mapping[str, Any]) -> Optional[int]:
     home of a row's text: a program's note is its body); a row that holds no body at all: its recorded size, else None."""
     from ouroboros.dialogue_provenance import render_row_text
 
-    if text := render_row_text(row):
+    text = render_row_text(row)
+    if text or "text" in row:  # a row read whole that has no words is zero tokens, not an unread size
         return floor.view_tokens(text)
     return floor.tokens_of(int(row["text_chars"])) if isinstance(row.get("text_chars"), int) else None
 
