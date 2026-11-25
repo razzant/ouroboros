@@ -340,10 +340,14 @@ def test_a_paid_commit_wave_on_a_tasks_own_drive_stays_counted_after_that_drive_
         return types.SimpleNamespace(repo_dir=repo, drive_root=drive, task_id=task, _current_review_tool_name="commit_reviewed",
                                      task_metadata={"budget_drive_root": str(canonical), "root_task_id": root or task})
 
-    def buy(author, retry_key):
+    def buy(author, retry_key, reserved=False):
         author._current_review_retry_key = retry_key
+        before = len(load_state(canonical).paid_code_waves)
         git._install_paid_dispatch_stamp(author, "candidate", 0.0, {"fingerprint": "fp-" + retry_key})
+        if reserved:  # the ordinary branch: the row is reserved before its first send
+            author._review_paid_stamp.reserve()
         invoke_review_paid_stamp(author._review_paid_stamp)
+        assert len(load_state(canonical).paid_code_waves) == before + 1, "the paid stamp itself notes the wave"
         for _again in range(2):  # noting the same stamped wave again adds nothing
             note_paid_code_wave(author, author.drive_root, repo_key=make_repo_key(repo), tool_name="commit_reviewed",
                                 task_id=author.task_id, attempt=1)
@@ -373,7 +377,7 @@ def test_a_paid_commit_wave_on_a_tasks_own_drive_stays_counted_after_that_drive_
     assert not drive.exists() and paid(second) == 1, "the wave outlives the drive it was bought on"
 
     child = ctx("child", prepare_task_drive(canonical, "child", "empty"), root="second")
-    buy(child, "wave-2")
+    buy(child, "wave-2", reserved=True)
     assert paid(second) == paid(child) == 2, "a child's wave on its own drive is its tree's"
     assert paid(ctx("stranger", canonical)) == 0
 

@@ -52,7 +52,7 @@ def _next_step() -> str:
     return ("When the edits are complete, run commit_reviewed(commit_message='...'): the deterministic checks, "
             "the tests and the review panel run (the outcome returns before any commit); "
             "preflight_reviewer='<enabled row>' optionally buys one early look first, from the same paid "
-            "allowance as the panel (the panel keeps the last wave).")
+            "allowance as the panel (a new panel wave keeps the last one; a matching earlier look is reused free).")
 
 
 def _predecessor_commit_rows(ctx, canonical, repo_key, task_filter, tool_name=""):
