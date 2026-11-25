@@ -1,0 +1,89 @@
+# Synthetic QA overlay: one push of the exact branch below starts it. Hosted Ubuntu, read-only token, no model keys, open synthetic data.
+name: QA native Ollama junction
+'on':
+  push:
+    branches: ['qa/native-ollama-junction-6ec1a06']
+    paths: ['.github/workflows/qa-native-ollama-junction.yml']
+permissions:
+  contents: read
+jobs:
+  junction:
+    if: ${{ github.repository == 'razzant/ouroboros' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    env:
+      PRODUCT_SHA: 6ec1a0699ee2611f0b0451799d0d1c0cde3fffbc
+      PRODUCT_TREE: 1e214bfa26eec09357c325feb32a501cd599c350
+      BASE_SHA: 09fca7723dee09b8f413608b4e0c69d3cd459d49
+      TEST_SHA256: 1d9281c8483076bbb00e2e96668bd30c03585935c7199637e7eab72e9969d387
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the QA commit, keep the test bytes, then leave the overlay
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "QA push $GITHUB_REF at $GITHUB_SHA"
+          test "$(git log -1 --format=%P HEAD)" = "$PRODUCT_SHA"
+          test "$(git log -1 --format=%P "$PRODUCT_SHA")" = "$BASE_SHA"
+          test "$(git rev-parse "$PRODUCT_SHA^{tree}")" = "$PRODUCT_TREE"
+          git diff --name-status "$PRODUCT_SHA" HEAD | sort > "$RUNNER_TEMP/overlay.txt"
+          printf 'A\t.github/workflows/qa-native-ollama-junction.yml\nA\tqa/test_native_ollama_call_admission_junction.py\n' | sort | diff - "$RUNNER_TEMP/overlay.txt"
+          echo "$TEST_SHA256  qa/test_native_ollama_call_admission_junction.py" | sha256sum -c -
+          cp qa/test_native_ollama_call_admission_junction.py "$RUNNER_TEMP/junction_test.py"
+          git switch --detach "$PRODUCT_SHA"
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$PRODUCT_TREE"
+          test -z "$(git status --porcelain)"
+          echo "PRODUCT checkout: $PRODUCT_SHA tree $PRODUCT_TREE; size base: $BASE_SHA"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Size lane against the exact base (product tree, test not yet copied)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          echo "size: product $PRODUCT_SHA against base $BASE_SHA (block on book growth)"
+          # Compare the verified pair explicitly, not the QA branch push as a release range.
+          env -u GITHUB_EVENT_NAME -u GITHUB_REF \
+            OURO_SIZE_RATCHET_BASE_REF="$BASE_SHA" OURO_BOOK_GROWTH_MODE=block \
+            python -m pytest tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py tests/test_smoke.py -m size_ratchet -o addopts="" -p no:cacheprovider -q --tb=short --junitxml="$RUNNER_TEMP/size.xml"
+      - name: Junction test (15), pooled worker (1), client contract (1) on the product tree
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          cp "$RUNNER_TEMP/junction_test.py" tests/test_native_ollama_call_admission_junction.py
+          echo "functional: product $PRODUCT_SHA plus the copied test"
+          python -m pytest -o addopts="" -p no:cacheprovider -v --tb=short --junitxml="$RUNNER_TEMP/functional.xml" \
+            tests/test_native_ollama_call_admission_junction.py \
+            "tests/test_local_context_evidence.py::test_actual_pooled_worker_reads_the_serving_instance_its_server_process_owns" \
+            "tests/test_gateway_parity.py::test_provider_test_gateway_contract_shape_is_exact"
+      - name: Prove the cases ran (7 size, 15 + 1 + 1 functional)
+        if: ${{ !cancelled() }}
+        run: |
+          python - "$RUNNER_TEMP" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          d = sys.argv[1]
+          def cases(name):
+              return list(ET.parse(f"{d}/{name}").iter("testcase"))
+          def clean(c):
+              return not any(x.tag in ("failure", "error", "skipped") for x in c)
+          size, fn = cases("size.xml"), cases("functional.xml")
+          junction = [c for c in fn if c.get("classname", "").endswith("test_native_ollama_call_admission_junction")]
+          pooled = [c for c in fn if c.get("name", "").startswith("test_actual_pooled_worker_reads_the_serving_instance")]
+          contract = [c for c in fn if c.get("name") == "test_provider_test_gateway_contract_shape_is_exact"]
+          files = sorted({c.get("classname", "").rsplit(".", 1)[-1] for c in size})
+          print(f"size clean {sum(map(clean, size))}/{len(size)} in {files}; junction {sum(map(clean, junction))}/{len(junction)}; pooled {sum(map(clean, pooled))}/{len(pooled)}; contract {sum(map(clean, contract))}/{len(contract)}")
+          assert len(size) == 7 and all(map(clean, size)), "need 7 clean size cases"
+          assert files == ["test_reference_book_budgets", "test_repo_health_smoke", "test_smoke"], files
+          assert len(junction) == 15 and all(map(clean, junction)), "need 15 clean junction cases"
+          assert len(pooled) == 1 and clean(pooled[0]) and len(contract) == 1 and clean(contract[0])
+          assert len(fn) == 17
+          PY
