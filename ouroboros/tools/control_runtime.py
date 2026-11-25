@@ -1326,15 +1326,30 @@ def _confirmed_handoff(ctx: ToolContext | None, work: str) -> bool:
             and _routing_issuer(ctx)["kind"] == ISSUER_OWNER_TURN)
 
 
+def _spoke_live_to_my_human(ctx: ToolContext | None) -> bool:
+    """A root whose live text message of this run reached a room its human reads: Main or a Project room.
+
+    The reply mark (``owner_delivery._retain_dialogue``: a live ``send_message`` only, zero included, reset per turn)
+    read with the room this run's own messages land in, by the supervisor's rule (``_lands_with_my_human``). The
+    hidden partition's reader is the caller, who would receive an empty result; an unreadable room is not proof."""
+    from ouroboros.task_results import resolve_ctx_lineage
+    from ouroboros.tools.owner_delivery import _lands_with_my_human, stamp_lineage
+
+    if getattr(ctx, "_owner_reply_revision", None) is None or not resolve_ctx_lineage(ctx)["is_root_task"]:
+        return False
+    return _lands_with_my_human(ctx, stamp_lineage(ctx, {"chat_id": getattr(ctx, "current_chat_id", None)}))
+
+
 def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  answer_sha256: str | None = None, rationale: str = "",
                  acceptance_subject: dict | None = None, pending_review: str | None = None,
                  silent: bool = False, swarm_comparison: str | None = None, summary: str = "",
                  fold_read: bool = False, about_work: str = "") -> str:
-    """Stage an author act; a self-started run (an own-clock or focused wake, a schedule-born root
-    without a Presence binding) may choose silence and may leave a gist for its human.
-    A task that answers its place conversation or a program's note may choose silence too;
-    inherited binding authority alone names no speaker."""
+    """Stage an author act; a finish that owes no one words may choose silence: a self-started run (an
+    own-clock or focused wake, a schedule-born root without a Presence binding), which may leave a gist
+    for its human, a task that answers its place conversation or a program's note, or a root whose live
+    text message of this run already reached its human (``_spoke_live_to_my_human``) and whose contract
+    owes no answer; inherited binding authority alone names no speaker."""
     request, error = completion_request(ctx, {
         "action": action, "answer": answer, "answer_sha256": answer_sha256, "rationale": rationale,
         "acceptance_subject": acceptance_subject, "pending_review": pending_review, "silent": silent,
@@ -1388,9 +1403,16 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
     ignored = ([*(["summary"] if summary else []), *(["fold_read"] if fold_read else [])]
                if summary and not (self_started or resolve_ctx_lineage(ctx)["is_root_task"]) else [])
     if silent and not (self_started or carrier_now(ctx, metadata) or getattr(ctx, "_admission_author", None)):
-        return None, ("silent is available only on a self-started run: "
-                      "a consciousness wake's own turn, or a schedule-born root without a Presence binding; "
-                      "silent also on a task answering its own place conversation or a program's note")
+        if not _spoke_live_to_my_human(ctx):
+            return None, ("silent needs a finish that owes no one words: a self-started run (a consciousness wake's "
+                          "own turn, or a schedule-born root without a Presence binding), a task answering its own place "
+                          "conversation or a program's note, or a root after its live text message of this run reached "
+                          "Main or a Project room (send_user_message, accepted live, not queued)")
+        from ouroboros.contracts.task_contract import answer_protocol_active, review_answer_required
+
+        if review_answer_required(ctx) or answer_protocol_active(ctx):
+            return None, ("answer_owed_to_contract: this task's contract requires its final answer (a review of the "
+                          "answer or an answer protocol), so it finishes visibly: give the answer in finish_task")
     work = arguments.get("about_work")
     if work is not None and not isinstance(work, str):
         return None, "about_work must name a confirmed task"

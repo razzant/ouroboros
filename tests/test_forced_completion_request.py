@@ -304,7 +304,7 @@ def test_forced_root_sentence_keeps_the_separate_silence_and_child_boundaries(at
         assert _request_fact(trace).get("ignored") == (["summary"] if child else None), "a child's sentence is named, never a veto"
     else:
         _host_fallback(text, usage, trace)
-        assert _request_fact(trace)["reason"].startswith("invalid_completion_request: silent is available only")
+        assert _request_fact(trace)["reason"].startswith("invalid_completion_request: silent needs a finish that owes no one words")
 
 
 @pytest.mark.parametrize("calls", [
@@ -852,3 +852,51 @@ def test_an_adopted_native_completion_never_reads_a_second_request_in_its_text(t
     text, usage, returned, _registry, _kept = _real_transport(tmp_path, reply, "tool_calls")
     assert (text, usage["terminal_origin"]) == (ANSWER, "model_final") and CONTENT_ANSWER not in text
     assert _request_fact(returned) == {"form": "native", "status": "selected", "tool_call_count": 1}
+
+
+# --- a root that already answered its human live: the forced rail -----------------------------
+
+OWNER = {"initiator": "owner", "usage_category": "chat"}
+SPOKEN = "Here is the answer you asked for."
+
+
+@pytest.mark.parametrize("reply", ["silent", "prose", "host"], ids=["native-silent", "prose", "host-fallback"])
+def test_a_forced_end_after_a_live_message_keeps_the_fact_that_the_run_spoke(at_limit, reply):
+    """Every forced exit carries ``owner_message_sent`` as the accepting exit does, so a run that spoke is never stored
+    as a quiet one; a run that sent nothing stays without the fact. A native silent reply of an owner root that already
+    answered live is admitted on the forced rail too, and its host notice says the message was sent."""
+    from ouroboros.task_finalization import quiet_finish
+
+    turn = at_limit
+    last = {"silent": native({"action": "finish", "silent": True, "summary": SUMMARY}),
+            "prose": {"role": "assistant", "content": "Wrap-up: answered; the fold is unfinished."},
+            "host": {"role": "assistant", "content": None, "tool_calls": [
+                tool_call("chat_history", {}, "c1"), tool_call("finish_task", {"action": "finish", "answer": ANSWER}, "c2")]}}
+    text, usage, trace, bus = turn.run([call("send_user_message", {"text": SPOKEN}), last[reply]], metadata=OWNER)
+    pending, stored = emit(turn, text, usage, trace, bus=bus, metadata=OWNER)
+    assert usage.get("owner_message_sent") is True and stored.get("owner_message_sent") is True
+    assert not quiet_finish(stored)
+    if reply == "silent":
+        assert _request_fact(trace)["status"] == "selected" and stored.get("wake_silent") is True
+        [notice] = sends(pending)
+        assert notice["terminal_origin"] == "host_notice"
+        assert notice["text"].startswith("⚠️ This run sent its message and then ended best_effort (round_limit).")
+        assert "chose to finish without a message" not in notice["text"]
+
+
+def test_a_forced_end_of_a_run_that_sent_nothing_stores_no_message_fact(at_limit):
+    turn = at_limit
+    text, usage, trace, bus = turn.run([call("chat_history", {}), native({"action": "finish", "answer": ANSWER})],
+                                       metadata=OWNER)
+    _pending, stored = emit(turn, text, usage, trace, bus=bus, metadata=OWNER)
+    assert "owner_message_sent" not in usage and "owner_message_sent" not in stored
+
+
+@pytest.mark.parametrize("form", ["native", "text"])
+def test_owner_words_after_the_live_message_hold_forced_silence(at_limit, form):
+    """The hold is unchanged on the forced rail: the human's words after the live message refuse silence."""
+    turn = at_limit
+    asked = turn.owner_writes("And the appendix?", call("send_user_message", {"text": SPOKEN}), "owner-2")
+    text, usage, trace, _bus = turn.run([asked, FORMS[form]({"action": "finish", "silent": True})], metadata=OWNER)
+    _host_fallback(text, usage, trace)
+    assert _request_fact(trace)["reason"].startswith("owner_reply_owed"), _request_fact(trace)

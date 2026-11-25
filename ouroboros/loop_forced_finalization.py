@@ -145,6 +145,8 @@ def _record_forced_finalization(
     # an ordinary replacement or the host's own fallback text is speech.
     tools = getattr(ctx, "tools", None)  # the task's facts live on its tool context, never on the round limits
     tools_ctx = getattr(tools, "_ctx", None)
+    if getattr(tools_ctx, "_owner_message_sent", False):  # as the accepting exit: a run that spoke is never quiet
+        ctx.accumulated_usage["owner_message_sent"] = True
     if getattr(candidate, "quiet", False):
         ctx.accumulated_usage.update(wake_silent=True, terminal_origin=TERMINAL_ORIGIN_MODEL_FINAL)
     elif schedule_report_ctx(tools_ctx):

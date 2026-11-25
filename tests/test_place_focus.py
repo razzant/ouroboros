@@ -1144,7 +1144,7 @@ def test_a_refused_doorless_root_can_choose_the_silence_its_refusal_offers(focus
     p.places_path(root).write_text("{not json", encoding="utf-8")  # the store cannot be read (``places_unreadable``)
     request, error = completion_request(ctx, {"action": "finish", "silent": True, "answer": "Private note."})
     if legacy:
-        assert request is None and error.startswith("silent is available only on a self-started run"), error
+        assert request is None and error.startswith("silent needs a finish that owes no one words"), error
     else:
         assert (error, request is not None) == ("", True)
 
