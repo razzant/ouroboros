@@ -394,7 +394,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "ouroboros/loop_model_call.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_RoundModelCallContext", "_append_or_merge_user_message",
-        "_call_round_model", "_fallback_chain_allowed",
+        "_fallback_chain_allowed",
         "_reconcile_transport_wait", "_run_cross_model_fallback_chain",
         "_context_overflow_retries", "_dispatch_round_model", "_emit_checkpoint_event",
         "_measure_round_main_fit", "_output_exhausted_notice", "_rebind_context_fit_plan",
