@@ -68,6 +68,11 @@ body {
     --sidebar-effective-width: min(calc(max(var(--sidebar-min-width), var(--sidebar-width)) + var(--nav-rail-extra)), var(--sidebar-max-box-width));
     --sidebar-column-start: calc(var(--app-inset-start) + var(--nav-rail-w));
     --sidebar-column-width: max(0px, calc(var(--sidebar-effective-width) - var(--nav-rail-w) - var(--space-3)));
+    --sidebar-pad-bottom: calc(var(--space-3) + var(--inset-bottom));
+    --sidebar-foot-line: var(--control-h-sm);
+    --sidebar-foot-gap: max(var(--space-2), calc((var(--touch-target-min) - var(--sidebar-foot-line)) / 2));
+    /* The Projects zone ends above the footer and its touch targets. Docked overlays use this same edge. */
+    --sidebar-foot-clearance: calc(var(--sidebar-pad-bottom) + var(--sidebar-foot-line) + var(--sidebar-foot-gap) + var(--space-1));
 }
 :root[dir="rtl"] {
     --app-inset-start: var(--app-inset-right);
@@ -151,9 +156,9 @@ html[data-layout="stack"] .shell-icon-control {
 [data-layer-landing]:focus { outline: none; }
 
 /* The sidebar's zones (docs/DESIGN.md "Shell"; owner 12.11, the fifth round; owner 24.11, «Рельс снаружи»): at the
-   start edge the rail of the places (the sections at its top; Dashboard, Settings and the version with the update at
-   its foot), and beside it the column: a pinned head (this Ouroboros's card, the Main Chat place) and the Projects list
-   as the ONE scroller, down to the bottom edge. Row heights follow the pointer: a finger gets the touch minimum, a
+   start edge the rail of the places (the sections at its top; Dashboard and Settings at its foot), and beside it the
+   column: a pinned head (this Ouroboros's card, the Main Chat place), the Projects list as the ONE scroller, and under
+   it the version's one line. Row heights follow the pointer: a finger gets the touch minimum, a
    mouse a quieter row, and a short window with a mouse compacts the rows first. A window too short even for that
    falls back to the whole column scrolling with the head sticky and the rail in view; where the head would hide every
    row, it is the column's top. The rail stands outside the column: the box is the column's width (the one the handle
@@ -165,7 +170,6 @@ html[data-layout="stack"] .shell-icon-control {
     --nav-item-h: 32px;      /* a Project row */
     --nav-control-h: 28px;   /* a row's ⋯ and the header's + */
     --nav-kebab-w: var(--nav-control-h);  /* the column a Project row's ⋯ takes (none on touch: a long press opens it) */
-    --sidebar-pad-bottom: var(--space-3);  /* the inset from the bottom edge; the drawer adds the safe area */
     --sidebar-top: var(--space-4);  /* the head's and the rail's first line: a band, a safe area or a host row adds to it */
     --sidebar-h: var(--vvh);
     --nav-rail-row: var(--touch-target-min);  /* a place in the rail: 36px for a mouse, the touch minimum for a finger */
@@ -173,7 +177,7 @@ html[data-layout="stack"] .shell-icon-control {
     height: var(--sidebar-h);
     display: grid;
     grid-template-columns: var(--nav-rail-w) minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);  /* the head, then the Projects in the free room */
+    grid-template-rows: auto minmax(0, 1fr) auto;  /* head, Projects, foot */
     row-gap: var(--space-1);
     min-width: 0;
     padding-block: 0 var(--sidebar-pad-bottom);
@@ -187,6 +191,7 @@ html[data-layout="stack"] .shell-icon-control {
     scrollbar-width: thin;
 }
 #primary-sidebar :is(.sidebar-head, .nav-projects, .nav-row-main) { grid-column: 2; }
+#primary-sidebar > .sidebar-foot-meta { grid-area: 3 / 2; margin-block-start: var(--sidebar-foot-gap); }
 /* One maximum for a drag, a restored width and a narrowing window, the rail and active app insets included; the
    adjacent room keeps its composer. */
 html[data-layout="docked"] #primary-sidebar {
@@ -200,17 +205,22 @@ html[data-layout="docked"] #primary-sidebar {
 }
 /* A window too short for the zones (the head and three list rows no longer fit): the whole column is the ONE scroller
    with the head sticky, and the list shows every row in flow, so a finger or a wheel moves one thing (the gate counts
-   the sidebar's scrollers). The rail stays in view beside it (.nav-rail). The head's measured height (layout.js
-   measurePinnedBars) is the scroll margin of the rows that pass under it, so a row reached with Tab is never left under
-   it, while the head's own control leaves the column where it is (a scroll padding on the column would count the head
-   as covered and move it). A column too short even for the card and one Project row with their clearance (layout.js
-   sets data-bars-crowd) lets the head go with the list instead: the card is its top, one scroll up. Only its pinning,
-   the rows' margin and the fade leave there, never a box, so the heights that set the attribute read the same and it
-   holds still at the edge. */
+   the sidebar's scrollers). The head's measured height (layout.js measurePinnedBars) clears focused rows and foot
+   controls that pass under it. The foot's own bottom inset also clears its focus rings and touch reach on Tab,
+   whether the rail fits or not. A scroll padding on the column would move the head's own control. When the head
+   and one Project row with their clearance no longer fit (data-bars-crowd), the head scrolls with the list: its
+   pinning, clearance and fade leave, never a box, so the heights that set the attribute stay the same. */
 @media (max-height: 499px), (pointer: coarse) and (max-height: 640px) {
-    #primary-sidebar { grid-template-rows: auto minmax(min-content, 1fr); }
+    #primary-sidebar {
+        --sidebar-head-clearance: calc(var(--sidebar-head-h, 0px) + var(--space-4));
+        grid-template-rows: auto minmax(min-content, 1fr) auto;
+    }
+    #primary-sidebar[data-bars-crowd] { --sidebar-head-clearance: 0px; }
     #primary-sidebar .nav-projects * {
-        scroll-margin-block: calc(var(--sidebar-head-h, 0px) + var(--space-4)) var(--space-4);
+        scroll-margin-block: var(--sidebar-head-clearance) var(--space-4);
+    }
+    #primary-sidebar > .sidebar-foot-meta :is(button, a) {
+        scroll-margin-block: var(--sidebar-head-clearance) var(--sidebar-pad-bottom);
     }
     #primary-sidebar[data-bars-crowd] .nav-projects * { scroll-margin-block: 0px; }
     #primary-sidebar[data-bars-crowd] .sidebar-head { position: static; }
@@ -243,7 +253,7 @@ html[data-layout="docked"] #primary-sidebar {
 }
 
 /* The rail (owner 24.11, «Рельс снаружи»; pages.js renderNavRail): the sections at its top and, at its foot,
-   Dashboard, Settings and the version row. Each place is its glyph alone in a round target, its word its name and its
+   Dashboard and Settings. Each place is its glyph alone in a round target, its word its name and its
    tooltip, as the shell's other icon controls have; the chosen one is the strong crimson disc (.nav-row.active), and
    Settings stands chosen for Extensions, which opens through its door (owner 24.11, «как задумано»). It runs the
    column's height beside it, its first line on the head's and its last on the bottom inset; in a window that scrolls
@@ -264,7 +274,7 @@ html[data-layout="docked"] #primary-sidebar {
 }
 /* Where the rail's own controls are taller than the column's content box (layout.js sets data-rail-crowd,
    independently of data-bars-crowd), unpin it so it scrolls with the column and native focus-scroll reveals its
-   lower controls (version check, update notice) cleanly in both directions without self-feedback. */
+   lower controls cleanly in both directions without self-feedback. */
 #primary-sidebar[data-rail-crowd] > .nav-rail {
     position: static;
     align-self: stretch;
@@ -304,47 +314,46 @@ html[data-layout="docked"] #primary-sidebar {
 /* The drawer's × is the stack layout's; a desk has a docked sidebar and no drawer to close. */
 .nav-rail > .nav-drawer-close { display: none; }
 
-/* The version row at the rail's foot: the version itself is the update check (owner 21.11: no Check button), its
-   glyph under its number on hover, on focus and while it checks, and always under a finger. The check's answer takes
-   that glyph's own place under the whole number, however many lines it wraps to: Up to date's tick for its few seconds
-   and Check failed's warning until a check succeeds, the failure's reason the check's tooltip; its words are the
-   version's description and the live region's, as the rail has no room for them (update_status.js). One height in
-   every state of the check, so nothing above it moves. An update on offer, an update under way and its outcome are the
-   one capsule over the version, which is then plain text. */
+/* The column's foot: one quiet version line under Projects, outside its scroller in a
+   normal window, in the meta ink. The number starts on the Project names' line; the check's glyph, its answer or the
+   Update capsule with its close stand beside it on that line, never under it. The line is a small control's height
+   in every state (plain, busy, answer, offer), so nothing above it moves and the number never shifts; a finger reaches
+   its controls through their hit areas (.ui-hit-area, .btn), which the line's margins above and the column's inset
+   below keep clear of the Projects. A version too long for the column ellipsizes on the line; the check's name still
+   reads it whole (update_status.js). In a short window the whole column is the one scroller with the head sticky and
+   the rail in view; there the foot rides with the column and its controls keep their reach (scroll margins above). */
 .sidebar-foot-meta {
     position: relative;
     display: flex;
-    flex-direction: column;
     align-items: center;
     gap: var(--space-1);
-    width: 100%;
+    min-width: 0;
+    min-height: var(--sidebar-foot-line);
+    padding-inline-start: var(--space-1);
     color: var(--text-meta);
 }
 /* The plain version (before the first status read, under a capsule, where the install offers no check) keeps the
-   check's box, its number where the check's stands and its glyph's line empty, so the number never moves. */
-.sidebar-foot-meta > #nav-version {
-    min-height: var(--nav-rail-row);
-    padding-block: var(--space-1) calc(var(--space-1) + 16px);
-}
+   check's inset, so its number stands where the check's does. */
+.sidebar-foot-meta > #nav-version { padding-inline: var(--space-2); }
 .nav-version-check {
     /* Its glyph shows on hover, on focus, while it checks and under a finger (1). */
     --nav-version-glyph-shown: 0;
     display: inline-flex;
-    flex-direction: column;
     align-items: center;
-    gap: 2px;
+    gap: var(--space-1);
+    min-width: 0;
     max-width: 100%;
-    min-height: var(--nav-rail-row);
-    padding: var(--space-1) 2px;
+    height: var(--sidebar-foot-line);
+    padding: 0 var(--space-2);
     border: 0;
-    border-radius: var(--radius-inner);
+    border-radius: var(--pill-radius);
     background: transparent;
     color: var(--text-meta);
     font: inherit;
     cursor: pointer;
 }
 .nav-version-check[hidden] { display: none; }
-/* The one place under the number: the check's glyph and its answer share it, so an answer never meets the number. */
+/* The one place after the number: the check's glyph and its answer share it, so an answer never meets the number. */
 .nav-version-slot { display: grid; flex: none; place-items: center; }
 .nav-version-slot > * { grid-area: 1 / 1; }
 .nav-version-glyph {
@@ -472,18 +481,20 @@ body.resizing-panels { -webkit-user-select: none; user-select: none; }
 }
 html[data-layout="stack"] .resize-handle { display: none; }
 
-/* The version is a readable fact in the meta ink (owner Q6=A), under the update capsule; its check's hover takes it
-   to the primary ink (the version row above). A version longer than the rail is wide breaks onto a second line,
-   never past the rail. */
+/* The version is a readable fact in the meta ink (owner Q6=A); its check's hover takes it to the primary ink (the
+   version row above). It keeps its one line: a version longer than the column is wide ellipsizes there, its text
+   whole in the DOM for the check's name. */
 #nav-version {
     display: block;
+    min-width: 0;
     max-width: 100%;
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     color: inherit;
     font-variant-numeric: tabular-nums;
-    text-align: center;
-    overflow-wrap: anywhere;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .nav-row {
@@ -4715,8 +4726,6 @@ html[data-layout="stack"] #primary-sidebar {
     opacity: 0.5;
     transition: transform var(--drawer-settle, var(--motion-close)) var(--ease-sheet),
         opacity var(--drawer-settle, var(--motion-close)) ease;
-    --sidebar-pad-bottom: calc(var(--space-3) + var(--inset-bottom));
-    padding-bottom: var(--sidebar-pad-bottom);
     touch-action: pan-y;  /* a sideways finger is the drawer's (drawer_drag.js); up and down scroll the list */
 }
 /* The same on the room: a page's vertical scroller hands a sideways finger to the drawer. touch-action starts over
@@ -7435,9 +7444,9 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     color: var(--text-secondary);
 }
 
-/* P2: main-screen Update capsule — a pointer to Dashboard -> Updates, never an apply (update_status.js). It stands in
-   the rail over the version (owner 24.11): a round neutral capsule (.btn.btn-default.btn-sm, docs/DESIGN.md "Status
-   and chips"; owner 22.11: not the crimson) holding the glyph of its state, its words its name and its title the
+/* P2: main-screen Update capsule — a pointer to Dashboard -> Updates, never an apply (update_status.js). It stands on
+   the version's line beside the number (owner 25.11): a round neutral capsule (.btn.btn-default.btn-sm, docs/DESIGN.md
+   "Status and chips"; owner 22.11: not the crimson) holding the glyph of its state, its words its name and its title the
    detail. An update on offer is the arrow up in the success ink; uncommitted local changes ARE a caveat about what an
    update would do, the owner's turn in the amber tone; a failed attempt takes the red tone; a stage and an unknown
    outcome stay neutral, in the meta ink, and a needed restart, the owner's step, is its own arrow in the primary ink; a
@@ -7456,18 +7465,17 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 .update-pill:is([data-tone="error"], [data-tone="warn"], .has-local) > .update-pill-glyph { color: inherit; }
 .update-pill-words { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 /* The notice (update_status.js): the capsule and, for a failed or unconfirmed outcome, the close that ends it, the
-   shared neutral capsule, small and round under it, its reach clear of the capsule's. It stands over the version, plain
-   beneath it. */
+   shared neutral capsule, small and round beside it, its reach clear of the capsule's. It stands on the version's
+   line after the plain number, in the check's place, at the line's height. */
 .update-notice {
-    order: -1;
     display: flex;
-    flex-direction: column;
+    flex: none;
     align-items: center;
-    gap: var(--space-1);
+    gap: var(--space-2);
 }
 .update-notice[hidden] { display: none; }
 .update-notice > .update-pill {
-    --control-h: var(--nav-rail-row);
+    --control-h: var(--sidebar-foot-line);
     --control-pad-x: 0px;
     --control-pad-y: 0px;
     width: var(--control-h);
@@ -7480,8 +7488,9 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 }
 .update-notice-close > svg { display: block; width: 12px; height: 12px; }
 .update-pill[data-tone="error"] + .update-notice-close { color: var(--status-error-fg); }
+/* Under a finger each reaches out sideways to the touch minimum (8px and 10px): the gap keeps the reaches apart. */
 @media (pointer: coarse) {
-    .update-notice { gap: var(--space-3); }
+    .update-notice { gap: var(--space-5); }
 }
 
 .settings-embedded-content {
