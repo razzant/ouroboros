@@ -251,7 +251,7 @@ def test_a_letters_root_may_finish_silently_by_finish_task_and_still_answers_my_
     staged = json.loads(_finish_task(root, action="finish", silent=True))
     assert staged["status"] == "completion_requested" and root._completion_request["wake_silent"] is True
     helper = context("helper-1", parent_task_id=root.task_id, delegation_role="subagent")
-    assert "silent is available only" in completion_request(helper, {"action": "finish", "silent": True})[1]
+    assert "silent needs a finish that owes no one words" in completion_request(helper, {"action": "finish", "silent": True})[1]
     owed = context(root.task_id)
     owed._owner_directives = [{"source": "owner_mailbox", "msg_id": "m-1", "content": "A fictional row of my human."}]
     assert forced_completion_selection({"action": "finish", "silent": True}, False, None, tool_ctx=owed)[2] == (

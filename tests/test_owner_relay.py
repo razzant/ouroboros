@@ -2086,12 +2086,11 @@ def test_a_work_reply_keeps_one_first_answer_across_continue_and_retry(tmp_path,
         held_owner_messages(later)
         assert set(later._open_relays) == {rid}, "both start holding the answered relay open"
 
-    trace, usage = {}, {}
+    trace = {}
     successor._forced_work_replies_pending = ({rid: "Backfill first, then the schema."}, [])
-    commit_forced_work_replies(registry, trace, usage)
+    commit_forced_work_replies(registry, trace)
     assert trace["forced_work_replies"] == [{"relay_id": rid, "status": "ok", "code": "OK", "delivery_id": did,
                                              "delivery_state": first, "answered_earlier": True}]
-    assert "owner_message_sent" not in usage
     said = {"owed": "owed: the outbox retries it until sent", "delivered": "delivered",
             "exhausted": "not confirmed as sent; a copy is saved"}[first]
     assert owner_reply_owed(retry)
