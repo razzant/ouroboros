@@ -679,16 +679,16 @@ def _release_booting_slot(
     })
 
 
-def kill_worker_tree(pid: int, *, keep_services: bool = False, panic_process=None):
+def kill_worker_tree(pid: int, *, keep_services: bool = False, kept: Any = None, panic_process=None):
     """The ONE worker process-tree kill, for every teardown and backstop.
 
     A worker's tree is not the worker's property: the installation's daemon roots (``daemon``-scope
     custody rows — the shared Claudexor daemon when a task worker was the first to need it) outlive
     every worker and server generation, so they and their descendants are spared. ``keep_services``
     additionally spares the deliberately kept session services a verifier still needs when ONE task
-    is cancelled or timed out; a generation change ends those services with the generation, so the
-    pool paths leave it off. The platform helper applies the same retained-subtree contract on every
-    OS.
+    is cancelled or timed out, or an idle worker retires (``kept``: the leaders its caller already
+    read); a generation change ends those services with the generation, so the pool paths leave it
+    off. The platform helper applies the same retained-subtree contract on every OS.
     """
     from ouroboros.platform_layer import kill_pid_tree, request_process_tree_kill
     if panic_process is not None:
@@ -702,7 +702,7 @@ def kill_worker_tree(pid: int, *, keep_services: bool = False, panic_process=Non
 
     spared = _q._retained_daemon_pids()
     if keep_services:
-        spared |= _q._kept_service_pids()
+        spared |= _q._kept_service_pids() if kept is None else set(kept)
     kill_pid_tree(pid, exclude_pids=spared)
 
 
@@ -1092,9 +1092,20 @@ def _idle_retirement_current(job: dict, slot: Any) -> bool:
                 and not project_fenced(slot))
 
 
+def _return_idle_worker(job: dict, slot: Any, why: str) -> None:
+    """Withdraw a retirement no signal began: the slot is assignable again and must confirm quiescence anew."""
+    with _queue_lock:
+        if _idle_retirement_current(job, slot):
+            slot.retiring = slot.reaping = False
+            slot.quiescence_token, slot.quiescence_confirmed = "", False
+    log.warning("Idle worker %s stays in the pool: %s", slot.wid, why)
+
+
 def reap_idle_worker(job: dict) -> None:
-    """Kill only the reserved acknowledged actor, then forget only confirmed death (an enabled
-    pool's last member is replaced). The first stop's bounded join sees an ordinary exit now; one row records it.
+    """Kill only the reserved acknowledged actor, sparing its kept services, then forget only confirmed
+    death (an enabled pool's last member is replaced). The first stop's bounded join sees an ordinary exit
+    now; one row records it. Retirement is discretionary: when custody cannot name every kept service
+    before the first signal, the worker returns to the pool instead; a begun stop keeps its spare.
 
     The lifecycle serializer guards membership, never a native wait: the slot is reserved under Q
     (``retiring``), so the kill and join run without it and assignment keeps its turn; the
@@ -1106,7 +1117,15 @@ def reap_idle_worker(job: dict) -> None:
     if not _idle_retirement_current(job, slot):
         return
     if slot.proc.is_alive():
-        kill_worker_tree(_slot_pid(slot), keep_services=True)
+        if "kept" not in job:  # decided once, before the first signal; a cancel/timeout kill never waits on it
+            from ouroboros.launch_custody import kept_service_spare
+
+            kept = kept_service_spare(job["drive_root"])
+            if kept.blind:
+                _return_idle_worker(job, slot, kept.blind)
+                return
+            job["kept"] = kept.pids
+        kill_worker_tree(_slot_pid(slot), keep_services=True, kept=job["kept"])
         # Each health-tick re-drive repeats one bounded tree kill, then joins without waiting.
         slot.proc.join(timeout=2 if job.pop("first_stop", False) else 0)
     if slot.proc.is_alive():

@@ -723,3 +723,197 @@ def test_the_exit_never_reports_completion_over_ledger_debt_it_could_not_count(t
     assert _owed(tmp_path, _PID)[0] == [_CHILD], "the ledger still names C"
     process_custody.reap_orphaned_processes(tmp_path, running_task_ids=set())  # the next start's sweep
     assert _CHILD not in rows, "the next start's sweep ends what the exit could not"
+
+
+# Pids above every host's pid range: a missed fake can signal nothing real.
+_LEADER, _REUSED, _UNREAD, _LEGACY, _HELD = 999_999_901, 999_999_902, 999_999_903, 999_999_904, 999_999_905
+_EXECED, _REFUTED, _GONE, _UNCONFIRMED = 999_999_906, 999_999_907, 999_999_908, 999_999_909
+_BIRTH = "Mon Nov 24 10:00:00 2026"
+
+
+def _kept(rows, *, blind="", notes=(), unknown=()):
+    from types import SimpleNamespace
+
+    from ouroboros import launch_custody
+
+    return launch_custody._KeptLaunches(
+        SimpleNamespace(blind=blind, unknown={id(row) for row in unknown}, readable=True), rows,
+        {id(row): [{"record_id": row["rid"], "host_pid": row["pid"]}] for row in rows}, {}, {}, [], [*notes])
+
+
+def _row(pid, rid, birth="", **fingerprint):
+    return {"pid": pid, "rid": rid, "scope_birth": birth, "purpose": "service:web", "scope": "session",
+            "fingerprint": fingerprint}
+
+
+def test_the_kept_spare_proves_leaders_keeps_mains_retention_rule_and_names_every_gap(monkeypatch):
+    """Every OS observation is a double. A leader with a recorded birth is judged by it in one batched read (spared
+    whatever its command became after an ``exec``; another birth is a reused pid); one without, by its strict measured
+    fingerprint, refuted only by a measured birth mismatch, ended only by a provable exit (a liveness probe that cannot
+    see it proves nothing). Every other leader is unknown and named in ``blind``; it is spared only as main's retention
+    rule (``_fingerprint_matches``) spares a recorded row, never by its live pid alone. Every store gap the selection
+    reports, a damaged copy no store attributes included, is in ``blind`` too; a selection that fails to read spares
+    nothing and says so."""
+    from ouroboros import launch_custody, platform_layer, process_census, process_containment, process_custody
+    from ouroboros.process_census import IDENTITY_ALIVE, IDENTITY_UNREADABLE, _Identity
+
+    rows = [_row(_LEADER, "a", _BIRTH, cmd_sha256="argv-before-exec"), _row(_REUSED, "b", "Mon Nov 24 10:00:01 2026"),
+            _row(_UNREAD, "c", "Mon Nov 24 10:00:02 2026", start_time="t0", cmd_sha256="h0"), _row(_LEGACY, "d"),
+            _row(_HELD, "e", start_time="t1", cmd_sha256="h1"), _row(_EXECED, "f", start_time="t2", cmd_sha256="h2"),
+            _row(_REFUTED, "g", start_time="t3", cmd_sha256="h3"), _row(_GONE, "h", start_time="t4", cmd_sha256="h4"),
+            _row(_UNCONFIRMED, "i", start_time="t5", cmd_sha256="h5")]
+    reads, strict, retained = [], [], []
+    measured = {_EXECED: ["cmd_sha256"], _REFUTED: ["start_time"]}
+    monkeypatch.setattr(process_census, "read_identities", lambda pids: reads.append(sorted(pids)) or {
+        _LEADER: _Identity(IDENTITY_ALIVE, _BIRTH), _REUSED: _Identity(IDENTITY_ALIVE, "Tue Nov 25 08:00:00 2026"),
+        _UNREAD: _Identity(IDENTITY_UNREADABLE)})
+    monkeypatch.setattr(platform_layer, "pid_provably_gone", lambda pid: pid == _GONE)
+    monkeypatch.setattr(platform_layer, "pid_is_alive", lambda pid: pid not in (_GONE, _UNCONFIRMED))
+    monkeypatch.setattr(process_containment, "pid_is_zombie", lambda pid: False)
+
+    def fingerprint(row, require_measured=False):
+        (strict if require_measured else retained).append(row["pid"])
+        return row["pid"] == _HELD or (not require_measured and row["pid"] == _UNREAD)
+
+    monkeypatch.setattr(process_custody, "_fingerprint_matches", fingerprint)
+    monkeypatch.setattr(process_custody, "measured_identity_mismatch",
+                        lambda row: {"mismatches": measured[row["pid"]]} if row["pid"] in measured else {})
+    damaged = "a pending ownership copy (launch-x) cannot be read, and no other store says whose launch it is"
+    monkeypatch.setattr(launch_custody, "_kept_launches", lambda root: _kept(rows, blind=damaged, notes=[damaged]))
+    spare = launch_custody.kept_service_spare("/nonexistent-drive")
+    assert reads == [[_LEADER, _REUSED, _UNREAD]]
+    assert strict == [_LEGACY, _HELD, _EXECED, _REFUTED, _UNCONFIRMED] and retained == [_UNREAD, _EXECED, _UNCONFIRMED]
+    assert spare.pids == {_LEADER, _UNREAD, _HELD}, "no leader is spared by its live pid alone"
+    assert spare.blind == (f"{damaged}; kept launch(es) pid-999999903, pid-999999904, pid-999999906, pid-999999909 "
+                           "may run: their leader's identity is unknown")
+    monkeypatch.setattr(launch_custody, "_kept_launches", lambda root: _kept(
+        rows[:1], blind=launch_custody._SET_UNREADABLE, notes=[launch_custody._SET_UNREADABLE]))
+    assert launch_custody.kept_service_spare("/nonexistent-drive") == ({_LEADER}, launch_custody._SET_UNREADABLE)
+
+    def unreadable(root):
+        raise OSError("the state directory cannot be listed")
+
+    monkeypatch.setattr(launch_custody, "_kept_launches", unreadable)
+    assert launch_custody.kept_service_spare("/nonexistent-drive") == (set(), "kept services could not be read: OSError")
+
+
+def test_an_unreadable_kept_executor_record_is_a_gap_and_a_forgotten_one_is_not(tmp_path, monkeypatch):
+    from ouroboros import launch_custody
+
+    (tmp_path / "torn.json").write_text("{", encoding="utf-8")
+    records = [{"record_id": rid, "kind": "service", "record_path": str(tmp_path / name)}
+               for rid, name in (("svc-torn", "torn.json"), ("svc-gone", "gone.json"))]
+    monkeypatch.setattr(launch_custody, "read_custody", lambda root, strict=True, every_drive=False:
+                        launch_custody.LaunchCustody(True, [], {}, set(), "", b"", records))
+    assert launch_custody._kept_launches(tmp_path).notes == [
+        "executor record svc-torn cannot be read: it may be a kept service"]
+
+
+def _secondary_drive(tmp_path):
+    fork = tmp_path / "state" / "headless_tasks" / "producer" / "data"
+    fork.mkdir(parents=True)
+    return fork
+
+
+def _launch(pid, nonce, purpose, scope):
+    """A ledger row as ``process_custody.record_process`` writes it for a launch with its own marker."""
+    return {"pid": pid, "pgid": pid, "purpose": purpose, "scope": scope, "owner_task": "producer", "session_id": "s",
+            "fingerprint": {}, "scope_marker": "OURO_LAUNCH_SCOPE_" + nonce * 32, "scope_birth": _BIRTH}
+
+
+@pytest.mark.parametrize("gap", ["set unreadable", "ledger line torn", "pending copy damaged"])
+def test_a_store_gap_never_empties_what_reads_and_is_named_beside_it(tmp_path, gap):
+    """Real files in a temporary store; no process is read. One store may be all that names a launch, so a gap in any
+    of them leaves every launch the others name in the selection, beside a note: an unreadable set still yields the
+    launch only its pending copy names (on a task's own drive, read there), a ledger with a line nothing parses still
+    yields the launch only its other line names, and a damaged pending copy no store attributes is named as such."""
+    from ouroboros import launch_custody, owned_shutdown
+    from ouroboros.process_custody import ledger_path
+
+    row = _launch(_LEADER, "a", "service:kept-page", "session")
+    pending = tmp_path / "state" / owned_shutdown.PENDING_DIRNAME
+    if gap == "set unreadable":
+        assert owned_shutdown.record_ledgered_process(_secondary_drive(tmp_path), row, contended=True)
+        owned_shutdown.owned_processes_path(tmp_path).write_text("{", encoding="utf-8")
+        note = launch_custody._SET_UNREADABLE
+    elif gap == "ledger line torn":  # only the ledger names it
+        ledger_path(tmp_path).parent.mkdir(parents=True)
+        ledger_path(tmp_path).write_text(json.dumps(row) + "\n{torn\n", encoding="utf-8")
+        note = "the process ledger cannot be read whole"
+    else:
+        assert owned_shutdown.record_ledgered_process(tmp_path, row)
+        note = (f"a pending ownership copy (launch-{'d' * 32}) cannot be read, and no other store says whose launch "
+                "it is")
+    if gap != "ledger line torn":
+        pending.mkdir(parents=True, exist_ok=True)
+        (pending / f"launch-{'d' * 32}.torn.json").write_text("{", encoding="utf-8")
+    custody = launch_custody.read_custody(tmp_path, every_drive=True)
+    [found] = custody.rows
+    assert found["scope_marker"] == row["scope_marker"]
+    assert custody.readable is (gap != "ledger line torn") and custody.blind == ("" if gap == "ledger line torn" else note)
+    assert (id(found) in custody.unknown) is (gap != "pending copy damaged"), "its stores were not read whole"
+    kept = launch_custody._kept_launches(tmp_path)
+    assert [launch["pid"] for launch in kept.rows] == [_LEADER] and kept.notes == [note]
+
+
+@pytest.mark.parametrize("store", ["readable", "document unreadable"])
+def test_panic_ends_the_unheld_kept_host_launch_and_its_owed_member_through_the_exit_stop(tmp_path, monkeypatch,
+                                                                                          store):
+    """The real exit stop on the inert OS model (``_controlled``: a pid table, measured signals, no OS process is read
+    or signalled). A kept host launch on a task's own drive, its leader reparented, owes a member an earlier pass
+    recorded that has left its group; neither shows a marker. Panic stamps every owned stop first (an earlier stamp
+    stays) and hands the exit's own record stop exactly that launch, which signals its leader and that member by their
+    recorded births, judges what the launch owes and retires its record: ``completed``. The launch ``tools.services``
+    holds here (its launch id decides, not its pid), a local-executor launch (its executor's durable settle owns it)
+    and a task process stay untouched. With the document unreadable, the launch only a pending copy names still ends,
+    but its custody cannot be reconciled: the answer is ``unknown`` and its stamped record stays for the next start.
+    It proves the POSIX measured route only: no Windows native stop and no executor alias owner runs here."""
+    from types import SimpleNamespace
+
+    from ouroboros import launch_custody, owned_shutdown, process_census, process_custody
+    from ouroboros.tools import services
+    from ouroboros.utils import append_jsonl
+    from tests._launch_stop_shared import _CARRIER
+
+    task_pid, member = _PID + 3, {"pid": _CHILD, "birth": _BIRTH}
+    rows = {pid: process_census._Row(pid, 1, pid, _BIRTH, 123.0, "alive", set())
+            for pid in (_PID, _CHILD, _CARRIER, _OTHER, task_pid)}  # reparented, each its own group, no marker shown
+    world = _controlled(tmp_path, monkeypatch, rows)
+    monkeypatch.setattr(launch_custody, "_PANIC_ACCOUNTING_SEC", _PATIENCE)  # a bound for a loaded host, not a pace
+    fork, unreadable = _secondary_drive(tmp_path), store == "document unreadable"
+
+    def spawned(drive, row):  # what record_process writes: the drive's ledger row, then its ownership record
+        assert append_jsonl(process_custody.ledger_path(drive), row)
+        assert owned_shutdown.record_ledgered_process(drive, row)
+
+    kept, held = _launch(_PID, "a", "service:kept-page", "session"), _launch(_CARRIER, "b", "service:held-page", "session")
+    executor, task = _launch(_OTHER, "c", "workspace_service:api", "session"), _launch(task_pid, "e", "service:x", "task")
+    for row in (held, executor, task):
+        spawned(tmp_path, row)
+    spawned(fork, kept)
+    assert process_custody.note_owed(fork, kept, [member]) is not None  # an earlier pass recorded what it owes
+    task_id, kept_id = "launch-" + "e" * 32, "launch-" + "a" * 32
+    [earlier] = owned_shutdown._stamp(tmp_path, "stop_requested_at", lambda entry: entry["record_id"] == task_id)
+    if unreadable:  # its copy waits as a pending file; then the document turns unreadable
+        assert owned_shutdown.record_ledgered_process(fork, process_custody.latest_launch_row(fork, kept), contended=True)
+        owned_shutdown.owned_processes_path(tmp_path).write_text("{", encoding="utf-8")
+    assert _owed(fork, _PID) == ([_CHILD], [_CHILD]) and world.signals == []
+    monkeypatch.setattr(services, "_SERVICES", {"producer:held-page": SimpleNamespace(
+        scope_marker=held["scope_marker"], proc=SimpleNamespace(pid=_GONE))})
+
+    outcome = launch_custody.panic_stop_kept(tmp_path)
+
+    assert sorted(world.signals) == [(_PID, _BIRTH), (_CHILD, _BIRTH)], "the launch and its owed member, by birth"
+    assert set(rows) == {_CARRIER, _OTHER, task_pid} and (world.kills, world.native) == ([], [])
+    assert _owed(fork, _PID)[0] == [], "its ledger owes nothing once the stop judged that member"
+    records = {record["record_id"]: record for record in owned_shutdown.owned_records(tmp_path)}
+    if unreadable:
+        assert outcome["state"] == "unknown" and outcome["unconfirmed"] == [kept_id], outcome
+        assert outcome["note"].startswith(launch_custody._SET_UNREADABLE), outcome
+        assert list(records) == [kept_id] and records[kept_id]["stop_requested_at"], "kept for the next start"
+    else:
+        assert outcome == {"state": "completed", "targets": 1, "unconfirmed": []}
+        assert set(records) == {"launch-" + "b" * 32, "launch-" + "c" * 32, task_id}, "its record retired"
+        assert all(record["stop_requested_at"] for record in records.values()), "every owned stop stamped"
+        assert records[task_id]["stop_requested_at"] == earlier["stop_requested_at"], "an earlier stamp stays"
+        assert _owed(fork, _PID) == ([], [])

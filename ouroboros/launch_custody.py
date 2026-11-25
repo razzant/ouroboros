@@ -31,6 +31,9 @@ from ouroboros.utils import file_identity
 log = logging.getLogger(__name__)
 
 
+_SET_UNREADABLE = "the ownership set cannot be read: it may name more launches"
+
+
 class LaunchCustody(NamedTuple):
     readable: bool  # the ledger of the drive asked about
     rows: List[Dict[str, Any]]  # its latest row per key, then every launch only another store or drive names
@@ -41,20 +44,28 @@ class LaunchCustody(NamedTuple):
     records: List[Dict[str, Any]]  # the ownership set as read
 
 
+def _ledger_rows(drive: Any, strict: bool) -> tuple:
+    """``(read whole, rows, bytes)``: a ledger a strict read refuses still yields every line a lenient read parses."""
+    readable, rows, previous = pc._read_ledger_records(pathlib.Path(drive), strict=strict)
+    return readable, rows if readable else pc._read_ledger_records(pathlib.Path(drive), strict=False)[1], previous
+
+
 def read_custody(drive_root: Any, *, strict: bool = True, every_drive: bool = False) -> LaunchCustody:
     """A launch's row is its own drive's latest (one read per drive) or, once that is gone, its ownership copy's; what
     the copy names beside it comes with it (``process_custody._launch_target``). Rows are as stored, so a sweep's
     survivors still match its ledger. Without ``every_drive`` a launch of another drive stays out: a sweep compacts
-    only this drive's ledger. What cannot be read makes its launch ``unknown``; what no row can attribute (a damaged
-    copy of a launch nothing else names, an unreadable set) makes the selection ``blind`` for every owner."""
+    only this drive's ledger. A gap never empties what does read: a ledger with a line no reader parses still yields
+    its other lines (``readable`` False), an unreadable set its pending copies. What cannot be read makes its launch
+    ``unknown``; what no row can attribute (a damaged copy of a launch nothing else names, an unreadable set) makes
+    the selection ``blind`` for every owner, every launch then ``unknown``."""
     from ouroboros.owned_shutdown import _ledgered_launch, owned_records
 
     here = pathlib.Path(drive_root).resolve(strict=False)
-    readable, stored, previous = pc._read_ledger_records(pathlib.Path(drive_root), strict=strict)
+    readable, stored, previous = _ledger_rows(drive_root, strict)
     rows = list(stored)
     ledgers = {here: (readable, {pc.custody_key(row): row for row in rows})}
     copies: Dict[int, List[Dict[str, Any]]] = {}
-    unknown: set = set()
+    unknown: set = set() if readable else {id(row) for row in rows if pc.custody_key(row)[0] == "launch"}
     blind = ""
     records: List[Dict[str, Any]] = []
     damaged: set = set()
@@ -62,8 +73,11 @@ def read_custody(drive_root: Any, *, strict: bool = True, every_drive: bool = Fa
         records = owned_records(drive_root, strict=True, only=set(), damaged=damaged)
     except Exception as exc:
         log.warning("ownership set of %s could not be read: %s", drive_root, exc)
-        blind = "the ownership set cannot be read: it may name more launches"
-        unknown.update(id(row) for row in rows if pc.custody_key(row)[0] == "launch")
+        blind = _SET_UNREADABLE
+        try:
+            records = owned_records(drive_root, damaged=damaged)
+        except Exception:
+            records = []
     for record in records:
         if not _ledgered_launch(record):
             continue
@@ -74,7 +88,7 @@ def read_custody(drive_root: Any, *, strict: bool = True, every_drive: bool = Fa
         if home != here and not every_drive:
             continue
         if home not in ledgers:
-            found, other, _bytes = pc._read_ledger_records(home, strict=strict)
+            found, other, _bytes = _ledger_rows(home, strict)
             ledgers[home] = (found, {pc.custody_key(row): row for row in other})
         found, by_key = ledgers[home]
         row = by_key.get(key, copy)
@@ -84,10 +98,12 @@ def read_custody(drive_root: Any, *, strict: bool = True, every_drive: bool = Fa
         if not found:
             unknown.add(id(row))
     launches = {pc.custody_record_id(row): row for row in rows if pc.custody_key(row)[0] == "launch"}
+    if blind:  # the set's unread part may owe more for any launch
+        unknown.update(id(row) for row in launches.values())
     for record_id in damaged:
         if record_id in launches:
             unknown.add(id(launches[record_id]))
-        elif record_id.startswith("launch-"):
+        elif record_id.startswith("launch-") and not blind:
             blind = f"a pending ownership copy ({record_id}) cannot be read, and no other store says whose launch it is"
     return LaunchCustody(readable, rows, copies, unknown, blind, previous, records)
 
@@ -329,29 +345,41 @@ def _durable_launch(stored: Dict[str, Any]) -> bool:
     return stored.get("executor_type") == "local" and is_launch_marker(str(stored.get("scope_marker") or ""))
 
 
-def _kept_selection(drive_root: Any) -> tuple:
-    """``([(item, stop entries)], complete, note)``: every kept launch whose processes may still run, each with the
-    ownership-set records a stop of it acts on (a ledger row's record, a local executor's record of the same launch,
-    a Docker executor record). One custody read, one census for every launch row; a Docker backend is probed."""
+class _KeptLaunches(NamedTuple):
+    custody: LaunchCustody
+    rows: List[Dict[str, Any]]  # kept launch rows of both local backends; a lost ledger row's own record copy stands in
+    entries: Dict[int, List[Dict[str, Any]]]  # {id(row): the ownership records a stop of that launch acts on}
+    drives: Dict[tuple, pathlib.Path]  # {custody key: the drive whose ledger and logs the launch uses}
+    attached: Dict[tuple, Dict[str, Any]]  # {custody key: its local executor record, the stored record as ``_stored``}
+    others: List[tuple]  # (record, stored): kept executor records naming no durable launch (Docker, an older local)
+    notes: List[str]  # why the selection may miss a launch
+
+
+def _kept_launches(root: pathlib.Path) -> _KeptLaunches:
+    """The one definition of what kept launches exist, read once (no census, no signal): every session-scope
+    ``service:``/``workspace_service:`` row (``_kept_row``) across the installation's indexed drives, and each kept
+    local executor record's launch, its own copy standing in when the ledger lost its row. What reads comes back
+    beside every gap (``read_custody``); ``notes`` names each gap, since one store may be all that names a launch."""
     from ouroboros import workspace_executor as executor
-    from ouroboros.owned_shutdown import installation_root
     from ouroboros.process_custody import custody_key, custody_record_id, ledger_path
 
-    root = installation_root(drive_root)
     custody = read_custody(root, every_drive=True)
-    notes = [note for note in (custody.blind, "" if custody.readable else "the process ledger cannot be read") if note]
+    notes = [note for note in (custody.blind, "" if custody.readable else "the process ledger cannot be read whole")
+             if note]
     drives = {custody_key(record["ledger_entry"]): pathlib.Path(record.get("drive_root") or root)
               for record in custody.records if isinstance(record.get("ledger_entry"), dict)}
     by_id = {str(record.get("record_id") or ""): record for record in custody.records}
     rows = [row for row in custody.rows if _kept_row(row)]
     row_keys = {custody_key(row) for row in rows}
     attached: Dict[tuple, Dict[str, Any]] = {}
-    docker: List[tuple] = []
+    others: List[tuple] = []
     for record in custody.records:
         if record.get("kind") != "service":
             continue
         path = pathlib.Path(str(record.get("record_path") or ""))
         stored = executor._load_process_record(path)
+        if stored is None and (path.exists() or path.is_symlink()):  # gone is forgotten; present but unread is not
+            notes.append(f"executor record {record.get('record_id')} cannot be read: it may be a kept service")
         if stored is None or not stored.get("keep_alive"):
             continue
         if _durable_launch(stored):  # its ledger row and this record are one launch, on every platform
@@ -362,35 +390,53 @@ def _kept_selection(drive_root: Any) -> tuple:
                 drives[custody_key(launch)] = path.parents[2]
             attached[custody_key(launch)] = {**record, "_stored": stored}
         else:
-            docker.append((record, stored))
-    states = dict((id(row), state) for row, state in unsettled_selection(root, rows, custody)) if rows else {}
+            others.append((record, stored))
+    entries: Dict[int, List[Dict[str, Any]]] = {}
+    for row in rows:
+        key, rid, purpose = custody_key(row), custody_record_id(row), str(row.get("purpose") or "")
+        drive = drives.get(key, root)
+        entries[id(row)] = [by_id.get(rid) or {"record_id": rid, "kind": "supervised", "drive_root": str(drive),
+                                              "record_path": str(ledger_path(drive)), "ledger_entry": row,
+                                              "owner_task": str(row.get("owner_task") or ""), "scope": "session",
+                                              "purpose": purpose}]
+        if key in attached:
+            entries[id(row)].append({key_: value for key_, value in attached[key].items() if key_ != "_stored"})
+    return _KeptLaunches(custody, rows, entries, drives, attached, others, notes)
+
+
+def _kept_selection(drive_root: Any) -> tuple:
+    """``([(item, stop entries)], complete, note)``: every kept launch whose processes may still run, each with the
+    ownership-set records a stop of it acts on (a ledger row's record, a local executor's record of the same launch,
+    a Docker executor record). One custody read, one census for every launch row; a Docker backend is probed."""
+    from ouroboros import workspace_executor as executor
+    from ouroboros.owned_shutdown import installation_root
+    from ouroboros.process_custody import custody_key, custody_record_id
+
+    root = installation_root(drive_root)
+    kept = _kept_launches(root)
+    rows = kept.rows
+    states = dict((id(row), state) for row, state in unsettled_selection(root, rows, kept.custody)) if rows else {}
     found: List[tuple] = []
     for row in rows:
         if id(row) not in states:
             continue  # settled: nothing it reaches is alive
         key = custody_key(row)
-        drive = drives.get(key, root)
-        rid = custody_record_id(row)
+        entries = kept.entries[id(row)]
+        local = kept.attached.get(key)
         purpose = str(row.get("purpose") or "")
         name = purpose.split(":", 1)[1]
         task_id = str(row.get("owner_task") or "")
-        record = by_id.get(rid) or {"record_id": rid, "kind": "supervised", "drive_root": str(drive),
-                                    "record_path": str(ledger_path(drive)), "ledger_entry": row,
-                                    "owner_task": task_id, "scope": "session", "purpose": purpose}
-        entries = [record]
-        local = attached.get(key)
-        if local is not None:
-            entries.append({key_: value for key_, value in local.items() if key_ != "_stored"})
+        rid = custody_record_id(row)
         is_executor = purpose.startswith("workspace_service:")
         recorded = str((local or {}).get("_stored", {}).get("backend_log_path") or "")
-        log_path = _host_log(drive, task_id, name, is_executor, rid, recorded)
+        log_path = _host_log(kept.drives.get(key, root), task_id, name, is_executor, rid, recorded)
         found.append(({"launch_id": rid, "name": name, "task_id": task_id,
                        "state": "running" if states[id(row)] == "live" else "unknown",
                        "since": str(row.get("ts") or (local or {}).get("birth") or ""),
                        "address": _log_address(log_path) if log_path else "", "log_path": log_path,
                        "backend": "local_executor" if local or is_executor else "host",
                        "pid": int(row.get("pid") or 0)}, entries))
-    for record, stored in docker:
+    for record, stored in kept.others:
         if stored.get("executor_type") == "local":
             alive = executor._host_pid_matches_record(stored)
             state = "running" if alive else ("" if _exit_proven(int(stored.get("host_pid") or 0)) else "unknown")
@@ -404,7 +450,97 @@ def _kept_selection(drive_root: Any) -> tuple:
                        "since": str(stored.get("created_at") or ""), "address": "", "log_path": "",
                        "backend": "docker" if stored.get("executor_type") == "docker_exec" else "local_executor",
                        "pid": int(stored.get("host_pid") or 0)}, [record]))
-    return found, not notes, "; ".join(notes)
+    return found, not kept.notes, "; ".join(kept.notes)
+
+
+class KeptSpare(NamedTuple):
+    pids: set  # kept leaders a worker kill spares with their descendants
+    blind: str  # why the selection may not name every kept service now: a store gap or a leader's unknown identity
+
+
+def kept_service_spare(drive_root: Any) -> KeptSpare:
+    """What a worker kill that keeps services spares (``process_custody.live_kept_service_pids``, idle retirement),
+    over the one kept selection (``_kept_launches``: what reads, beside every gap) in ONE batched identity read, no
+    census. A leader is proven by its recorded birth (``scope_birth``, POSIX: it survives a benign ``exec`` and is
+    never reused) or, without one, by its strict measured fingerprint; a measured other birth refutes it, and only a
+    provable exit ends it. Any other leader is unknown, never ended: named in ``blind``, and spared only as main's
+    retention rule spares a recorded row (``process_custody._fingerprint_matches``), never by a live pid alone.
+    ``blind`` carries every store gap too, so idle retirement, which may wait, defers on it; a cancel/timeout kill
+    never waits. Sparing grants no stop authority. Never raises: what fails to read is ``blind``."""
+    from ouroboros.owned_shutdown import installation_root
+    from ouroboros.platform_layer import IS_WINDOWS, pid_provably_gone
+    from ouroboros.process_census import IDENTITY_ALIVE, IDENTITY_UNREADABLE, canonical_birth, read_identities
+    from ouroboros.process_containment import pid_is_zombie
+
+    try:
+        kept = _kept_launches(installation_root(drive_root))
+        rows = [row for row in kept.rows if int(row.get("pid") or 0) > 0]
+        births = {id(row): canonical_birth(row.get("scope_birth")) for row in rows if not IS_WINDOWS}
+        identities = read_identities(int(row["pid"]) for row in rows if births.get(id(row)))
+        pids, unread = set(), []
+        for row in rows:
+            pid, birth = int(row["pid"]), births.get(id(row))
+            if birth:
+                identity = identities.get(pid)
+                unknown = identity is None or identity.state == IDENTITY_UNREADABLE
+                proven = not unknown and identity.state == IDENTITY_ALIVE and identity.birth == birth
+            elif pid_provably_gone(pid) or pid_is_zombie(pid):
+                unknown = proven = False
+            else:
+                proven = pc._fingerprint_matches(row, require_measured=True)
+                unknown = not proven and "start_time" not in (pc.measured_identity_mismatch(row).get("mismatches") or ())
+            if proven or (unknown and row.get("fingerprint") and pc._fingerprint_matches(row)):
+                pids.add(pid)
+            if unknown:
+                unread.append(pc.custody_record_id(row))
+        gaps = [*kept.notes, *([f"kept launch(es) {', '.join(unread)} may run: their leader's identity is unknown"]
+                               if unread else [])]
+        return KeptSpare(pids, "; ".join(gaps))
+    except Exception as exc:
+        log.warning("kept services of %s could not be read", drive_root, exc_info=True)
+        return KeptSpare(set(), f"kept services could not be read: {type(exc).__name__}")
+
+
+_PANIC_ACCOUNTING_SEC = 0.2  # the record stop's share of Panic's request window; what it leaves stays stamped
+
+
+def panic_stop_kept(drive_root: Any) -> Dict[str, Any]:
+    """Panic's stop of the kept host launches this process does not hold (ARCHITECTURE §9 "Panic path").
+
+    A kept ``start_service`` launch outlives the worker that started it (idle retirement, a task on another drive), so
+    no Popen here and no worker tree reaches it, and on macOS a platform binary hides its markers from the scope
+    census; its durable custody still names it. Panic's existing owners end it. Every stop target is first stamped
+    ``stop_requested_at`` with no lock wait (``owned_shutdown._stamp``: a contended stamp lands as a pending copy, an
+    earlier stamp stays), so what the hard exit cuts short ``finish_unconfirmed_stops`` retries before the next
+    admission. Then the exit's record stop (``owned_shutdown._stop_records``: its ownership gates, measured identity,
+    owed members written ahead of any signal, daemon roots spared) takes every ``service:`` launch of the one kept
+    selection (``_kept_launches``) that ``tools.services`` does not hold here, judged by launch id; a held one is its
+    native owner's. A local-executor launch stays with the executor's durable settle
+    (``workspace_executor.kill_all_services``), so no launch has two Panic owners. Never joined past Panic's deadline.
+    ``completed``: every target's exit confirmed; ``unconfirmed`` names what is still recorded; ``unknown`` adds
+    ``note``: why the selection or a stamp may miss a launch, whose readable rest is stopped all the same."""
+    from ouroboros.owned_shutdown import _is_stop_target, _stamp, _stop_records, installation_root
+    from ouroboros.process_census import launch_id
+    from ouroboros.tools import services
+
+    root = installation_root(drive_root)
+    try:
+        stamped = {entry["record_id"] for entry in _stamp(root, "stop_requested_at", _is_stop_target, timeout_sec=0.0)}
+    except Exception:
+        log.warning("Panic could not stamp the owned stops of %s", root, exc_info=True)
+        stamped = set()
+    kept = _kept_launches(root)
+    held = {launch_id(record.scope_marker) for record in services._SERVICES.copy().values()}
+    rows = [row for row in kept.rows
+            if str(row.get("purpose") or "").startswith("service:") and pc.custody_record_id(row) not in held]
+    targets = [entry for row in rows for entry in kept.entries[id(row)]]
+    remaining = _stop_records(root, targets, time.monotonic() + _PANIC_ACCOUNTING_SEC) if targets else []
+    unread = sorted(pc.custody_record_id(row) for row in rows if id(row) in kept.custody.unknown)
+    unstamped = sorted({entry["record_id"] for entry in targets} - stamped)
+    gaps = [*kept.notes, *([f"the stores of kept launch(es) {', '.join(unread)} cannot be read whole"] if unread else []),
+            *([f"not stamped: {', '.join(unstamped)}"] if unstamped else [])]
+    return {"state": "unknown" if gaps else "unconfirmed" if remaining else "completed", "targets": len(targets),
+            "unconfirmed": remaining, **({"note": "; ".join(gaps)} if gaps else {})}
 
 
 def _exit_proven(pid: int) -> bool:
