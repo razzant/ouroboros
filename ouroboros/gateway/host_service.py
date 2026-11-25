@@ -781,12 +781,13 @@ def _skill_state_path(ctx: HostServiceContext, skill_name: str, raw: Any, field:
 
 
 def _confined_inject_sources(
-    ctx: HostServiceContext, skill_name: str, payload: dict,
+    ctx: HostServiceContext, skill_name: str, payload: dict, *, owner_answer: bool = False,
 ) -> list[tuple[Optional[pathlib.Path], str, Any]]:
     """``(source, name, mime)`` per ``{path, name?, mime?}``; each a regular file under the
     calling skill's OWN state root (the ``staged_files`` confinement, ``_skill_state_path``).
     A pathless ``{name, unavailable, ...}`` is media the skill never received: ``(None, name, its
-    row ref)`` (``chat_uploads.delivery_ref``); nothing is read for it."""
+    row ref)`` (``chat_uploads.delivery_ref``); nothing is read for it. ``owner_answer``: the
+    caller already proved the bundled bridge's own decision relay, which carries no message fields."""
     value = payload.get("attachments")
     if value in (None, []):
         return []
@@ -802,7 +803,7 @@ def _confined_inject_sources(
             from ouroboros.chat_references import exact_reply_ingress
 
             chat_id, user_id = int(payload.get("chat_id") or 0), int(payload.get("user_id") or 0)
-            if (chat_id <= 0 or user_id != chat_id or payload.get("ui_control") or not exact_reply_ingress(
+            if not owner_answer and (chat_id <= 0 or user_id != chat_id or payload.get("ui_control") or not exact_reply_ingress(
                     ctx.data_dir, f"skill:{skill_name}", chat_id, payload.get("client_message_id"), payload.get("transport"))):
                 raise ValueError("pathless attachment facts require the bundled Telegram owner's message")
             try:
@@ -836,7 +837,7 @@ def _inject_identity(
 
 
 def _inject_attachment_uploads(
-    ctx: HostServiceContext, skill_name: str, payload: Dict[str, Any], cleanup: ExitStack,
+    ctx: HostServiceContext, skill_name: str, payload: Dict[str, Any], cleanup: ExitStack, *, owner_answer: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
     """Copy a skill's inbound files (#668) and its inline photo into the shared upload store.
 
@@ -856,7 +857,7 @@ def _inject_attachment_uploads(
     """
     refs: list[dict[str, Any]] = []
     specs: list[dict[str, Any]] = []
-    sources = _confined_inject_sources(ctx, skill_name, payload)
+    sources = _confined_inject_sources(ctx, skill_name, payload, owner_answer=owner_answer)
 
     def park(source: Any, name: str, mime: str = "") -> None:
         stored, ref = store_upload(source, name, data_dir=ctx.data_dir)
@@ -913,6 +914,11 @@ async def _api_chat_decision(request: Request) -> JSONResponse:
     idempotent per ``request_id``, first answer wins, typed 404/409 refusals.
     ``inject_chat`` is the owner grant that already lets this skill speak as the
     owner's chat input; answering the owner's own quiz needs nothing more (#472).
+    Only the bundled bridge's Reply may carry ``attachments`` (its one ``/chat/inject`` item: a parked
+    file or the fact of media it never received): stored as any owner upload, recorded with that
+    request's winner alone. A new copy is removed only once the record is read and names it not;
+    unknown keeps it. The bridge's ``rejoin`` reads whether its own request is the recorded answer
+    (``task_decision.rejoin_decision``) before it receives a Reply's file again.
     """
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
@@ -925,15 +931,57 @@ async def _api_chat_decision(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         return _json_error("invalid json", 400)
-    from ouroboros.gateway.task_decision import answer_decision
+    from ouroboros.chat_references import TELEGRAM_SOURCE, bundled_bridge
+    from ouroboros.gateway.task_decision import answer_decision, rejoin_decision
 
+    source, copies, refs, decided = f"skill:{skill_name}", ExitStack(), None, False
+    # Any other skill keeps these fields, which the ingress refuses as before.
+    bridge = (isinstance(body, dict) and ("attachments" in body or body.get("rejoin") is True)
+              and source == TELEGRAM_SOURCE and bundled_bridge(ctx.data_dir))
     try:
-        status, payload = await answer_decision(ctx.data_dir, body, source=f"skill:{skill_name}", request=request)
+        if bridge and body.get("rejoin") is True:
+            status, payload = await run_sync_to_completion(rejoin_decision, ctx.data_dir, body)
+        else:
+            if bridge:
+                body = dict(body)
+                try:
+                    _specs, refs, _image = await run_sync_to_completion(
+                        _inject_attachment_uploads, ctx, skill_name, {"attachments": body.pop("attachments")}, copies,
+                        owner_answer=True)
+                except ValueError as exc:
+                    return _json_error(str(exc), 400)
+            try:  # an ordinary answer's call stays as it was
+                status, payload = await answer_decision(ctx.data_dir, body, source=source, request=request,
+                                                        **({"attachments": refs} if refs is not None else {}))
+            finally:  # even after a raise or cancellation here, the record alone decides the copies' fate
+                if refs:
+                    decided = True
+                    await run_sync_to_completion(_settle_answer_copies, ctx.data_dir, body, refs, copies)
     except Exception as exc:
         log.debug("Host service decision relay failed", exc_info=True)
         return _json_error(str(exc), 500)
+    finally:
+        if not decided:  # no answer was attempted with them: nothing can name these copies
+            try:
+                copies.close()
+            except OSError:
+                log.warning("Could not remove an unrecorded answer file", exc_info=True)
     payload.setdefault("ok", status < 400)
     return JSONResponse(payload, status_code=status)
+
+
+def _settle_answer_copies(root: pathlib.Path, body: Dict[str, Any], refs: list, copies: ExitStack) -> None:
+    """Keep the copies the recorded winner names, or an unreadable record may name; remove them only after the
+    record was read and names none (``task_decision.answer_holds_uploads``). Readback and removal run as one unit."""
+    from ouroboros.gateway.task_decision import answer_holds_uploads
+
+    if answer_holds_uploads(root, body, refs):
+        copies.pop_all()
+        return
+    try:
+        copies.close()
+    except OSError:
+        log.warning("Could not remove an unrecorded answer file", exc_info=True)
 
 
 async def _api_ui_language(request: Request) -> JSONResponse:

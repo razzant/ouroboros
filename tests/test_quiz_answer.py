@@ -972,3 +972,617 @@ def test_two_recommended_options_are_refused_and_one_survives_live_and_replay_al
     live = [index for index, option in enumerate(event["options"]) if option.get("recommended")]
     [block] = quiz_states(tmp_path, "root-1").values()
     assert live == [1] and block["recommended_index"] == 1  # live and replay agree on the one option
+
+
+def test_task_detail_and_task_events_project_every_quiz_answer_file_copy(tmp_path):
+    """GET /api/tasks/{id} and both GET/POST /api/tasks/{id}/events
+    share one public_task_result projection over all named quiz-attachment carriers — owner_quiz
+    (and delivery.answer_row), top-level held_owner_messages, metadata.late_answer.answer_snapshot.quiz
+    (plus sibling metadata.chat_attachments and omitted transport-only metadata.chat_attachment_uploads
+    when a typed late ordinary quiz file snapshot is established) and
+    metadata.continuation.owner_sources.held_owner_messages — preserving file-only answers (no
+    answered_index), option/comment/delivery semantics, non-quiz held rows and persisted raw evidence."""
+    import json
+
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros.chat_uploads import staging_specs
+    from ouroboros.gateway.tasks import api_task_events, api_task_get
+    from ouroboros.task_results import write_task_result
+
+    shot_upload = f"{'1' * 32}_shot.png"
+    raw_refs = [
+        {"upload": shot_upload, "name": "shot.png", "kind": "image", "mime": "image/png",
+         "size": 128, "sha256": "a" * 64, "mtime_ns": 123456789},
+        {"name": "clip.mp4", "kind": "file", "mime": "video/mp4",
+         "unavailable": "too_large", "limit_bytes": 10 * 1024 * 1024},
+        {"name": "voice.ogg", "kind": "file", "mime": "audio/ogg", "unavailable": "download_failed"},
+        {"name": "gone.pdf", "kind": "file", "unavailable": "missing"},
+    ]
+    raw_uploads = staging_specs(raw_refs, tmp_path)
+    expected_files = [
+        {"name": "shot.png", "kind": "image", "mime": "image/png", "size": 128, "sha256": "a" * 64},
+        {"name": "clip.mp4", "kind": "file", "mime": "video/mp4",
+         "unavailable": "too_large", "limit_bytes": 10 * 1024 * 1024},
+        {"name": "voice.ogg", "kind": "file", "mime": "audio/ogg", "unavailable": "download_failed"},
+        {"name": "gone.pdf", "kind": "file", "unavailable": "missing"},
+    ]
+    file_only_quiz = {"quiz_id": "q-files", "state": "answered", "comment": "", "attachments": raw_refs}
+    file_only_block = {
+        "quiz_id": "q-files", "question": "Send the screenshot", "options": ["Skip"],
+        "state": "answered", "comment": "", "attachments": raw_refs,
+        "delivery": {
+            "kind": "answer", "state": "delivered",
+            "answer_row": {
+                "type": "quiz_answer", "task_id": "task-quiz-files", "chat_id": 1,
+                "ts": "2026-11-18T12:01:00+00:00", "attachments": raw_refs,
+                "quiz": dict(file_only_quiz),
+            },
+        },
+    }
+    button_block = {
+        "quiz_id": "q-btn", "question": "Which option?", "options": ["Skip", "Keep"],
+        "state": "answered", "answered_index": 1, "comment": "use this one", "attachments": [raw_refs[0]],
+    }
+    quiz_addr = "row:1@2026-11-18T12:01:00+00:00#deadbeef"
+    plain_addr = "row:1@2026-11-18T12:00:30+00:00#cafebabe"
+    quiz_row = {
+        "ts": "2026-11-18T12:01:00+00:00", "direction": "in", "chat_id": 1, "type": "quiz_answer",
+        "task_id": "asker-1", "text": "", "attachments": raw_refs, "quiz": dict(file_only_quiz),
+    }
+    plain_row = {
+        "ts": "2026-11-18T12:00:30+00:00", "direction": "in", "chat_id": 1, "text": "ordinary note",
+        "attachments": [{"upload": "u-plain_note.pdf", "name": "note.pdf", "kind": "file",
+                         "mime": "application/pdf", "size": 42, "sha256": "e" * 64, "mtime_ns": 777}],
+    }
+    held_rows = {quiz_addr: dict(quiz_row), plain_addr: dict(plain_row)}
+    late_delivery = {"kind": "answer", "state": "delivered", "route": "fresh_head"}
+    write_task_result(
+        tmp_path, "task-quiz-files", "completed", ts="2026-11-18T12:02:00+00:00", result="done",
+        owner_quiz={"q-files": file_only_block, "q-btn": button_block},
+        held_owner_messages=held_rows,
+        metadata={
+            "late_answer": {
+                "task_id": "asker-1", "quiz_id": "q-btn",
+                "answer_snapshot": {
+                    "task_id": "asker-1",
+                    "quiz": {"quiz_id": "q-btn", "state": "answered", "answered_index": 1,
+                             "answered_after_terminal": True, "comment": "use this one",
+                             "delivery": dict(late_delivery), "attachments": raw_refs},
+                },
+            },
+            "chat_attachments": raw_refs,
+            "chat_attachment_uploads": raw_uploads,
+            "continuation": {
+                "predecessor_task_id": "pred-1",
+                "owner_sources": {"held_owner_messages": dict(held_rows)},
+            },
+        },
+    )
+
+    app = Starlette(routes=[
+        Route("/api/tasks/{task_id}", api_task_get, methods=["GET"]),
+        Route("/api/tasks/{task_id}/events", api_task_events, methods=["GET", "POST"]),
+    ])
+    app.state.drive_root = tmp_path
+
+    def _sse_task_result(resp):
+        assert resp.status_code == 200, resp.text
+        events = [json.loads(line[6:]) for line in resp.text.splitlines() if line.startswith("data: ")]
+        [result_event] = [event for event in events if event.get("type") == "task_result"]
+        return result_event["data"]
+
+    with TestClient(app) as client:
+        detail_resp = client.get("/api/tasks/task-quiz-files")
+        assert detail_resp.status_code == 200, detail_resp.text
+        detail_payload = detail_resp.json()
+        get_event_payload = _sse_task_result(client.get("/api/tasks/task-quiz-files/events?wait=0"))
+        post_event_payload = _sse_task_result(
+            client.post("/api/tasks/task-quiz-files/events", json={"v": 2, "wait": 0}),
+        )
+
+    for surface in (detail_payload, get_event_payload, post_event_payload):
+        pub_files = surface["owner_quiz"]["q-files"]
+        assert "answered_index" not in pub_files, "file-only answer must not synthesize answered_index"
+        assert pub_files["comment"] == ""
+        assert pub_files["attachments"] == expected_files
+        assert pub_files["delivery"]["answer_row"]["attachments"] == expected_files
+        assert pub_files["delivery"]["answer_row"]["quiz"]["attachments"] == expected_files
+        assert "answered_index" not in pub_files["delivery"]["answer_row"]["quiz"]
+
+        pub_btn = surface["owner_quiz"]["q-btn"]
+        assert pub_btn["answered_index"] == 1 and pub_btn["comment"] == "use this one"
+        assert pub_btn["attachments"] == [expected_files[0]]
+
+        top_quiz = surface["held_owner_messages"][quiz_addr]
+        assert top_quiz["attachments"] == expected_files and top_quiz["quiz"]["attachments"] == expected_files
+        assert "answered_index" not in top_quiz["quiz"]
+        assert surface["held_owner_messages"][plain_addr] == plain_row
+
+        late_quiz = surface["metadata"]["late_answer"]["answer_snapshot"]["quiz"]
+        assert late_quiz["attachments"] == expected_files
+        assert late_quiz["answered_index"] == 1 and late_quiz["comment"] == "use this one"
+        assert late_quiz["answered_after_terminal"] is True
+        assert late_quiz["delivery"] == late_delivery
+        assert surface["metadata"]["chat_attachments"] == expected_files
+        assert "chat_attachment_uploads" not in surface["metadata"]
+
+        cont_held = surface["metadata"]["continuation"]["owner_sources"]["held_owner_messages"]
+        inherited_quiz = cont_held[quiz_addr]
+        assert inherited_quiz["attachments"] == expected_files
+        assert inherited_quiz["quiz"]["attachments"] == expected_files
+        assert "answered_index" not in inherited_quiz["quiz"]
+        assert cont_held[plain_addr] == plain_row
+
+    # Persisted canonical record stays untouched for internal readers across every carrier.
+    stored = read_result(tmp_path, "task-quiz-files")
+    assert stored["owner_quiz"]["q-files"]["attachments"][0]["upload"] == shot_upload
+    assert stored["owner_quiz"]["q-files"]["attachments"][0]["mtime_ns"] == 123456789
+    assert stored["owner_quiz"]["q-files"]["delivery"]["answer_row"]["quiz"]["attachments"][0]["upload"] == shot_upload
+    assert stored["held_owner_messages"][quiz_addr]["quiz"]["attachments"][0]["upload"] == shot_upload
+    assert stored["metadata"]["late_answer"]["answer_snapshot"]["quiz"]["attachments"][0]["upload"] == shot_upload
+    assert stored["metadata"]["chat_attachments"][0]["upload"] == shot_upload
+    assert stored["metadata"]["chat_attachments"][0]["mtime_ns"] == 123456789
+    assert stored["metadata"]["chat_attachment_uploads"] == raw_uploads
+    assert stored["metadata"]["chat_attachment_uploads"][0]["path"] == str(tmp_path / "uploads" / shot_upload)
+    stored_inherited = stored["metadata"]["continuation"]["owner_sources"]["held_owner_messages"][quiz_addr]
+    assert stored_inherited["quiz"]["attachments"][0]["upload"] == shot_upload
+    assert stored_inherited["attachments"][0]["mtime_ns"] == 123456789
+
+
+def test_public_task_result_keeps_in_memory_input_and_unrelated_fields_intact():
+    """Single-owner projection clones without mutating caller dicts, supports all canonical late
+    markers, and preserves metadata.chat_attachments / metadata.chat_attachment_uploads verbatim
+    for ordinary, event, invalid or text-only late provenance."""
+    from ouroboros.outcomes import public_task_result
+
+    raw = {"upload": f"{'9' * 32}_shot.png", "name": "shot.png", "kind": "image", "mime": "image/png",
+           "size": 12, "sha256": "c" * 64, "mtime_ns": 4242}
+    raw_uploads = [{"label": "shot.png", "mime": "image/png", "size": 12, "sha256": "c" * 64,
+                    "path": f"/tmp/uploads/{raw['upload']}"}]
+    shown = {"name": "shot.png", "kind": "image", "mime": "image/png", "size": 12, "sha256": "c" * 64}
+    block = {"quiz_id": "q1", "state": "answered", "answered_after_terminal": True,
+             "comment": "this one", "attachments": [raw]}
+    quiz_addr = "row:1@2026-11-18T12:01:00+00:00#deadbeef"
+    plain_addr = "row:1@2026-11-18T12:00:30+00:00#cafebabe"
+    quiz_row = {"ts": "2026-11-18T12:01:00+00:00", "direction": "in", "chat_id": 1, "type": "quiz_answer",
+                "task_id": "asker-1", "text": "", "attachments": [raw], "quiz": dict(block)}
+    plain_row = {"ts": "2026-11-18T12:00:30+00:00", "direction": "in", "chat_id": 1, "text": "plain",
+                 "attachments": [{"upload": "u-0_doc.pdf", "name": "doc.pdf", "mtime_ns": 55}]}
+    custom_meta = {"attachments": [{"upload": "u-custom.bin", "name": "custom.bin", "mtime_ns": 88}]}
+    carriers = {"chat_attachments": [dict(raw)], "chat_attachment_uploads": list(raw_uploads)}
+    stored = {
+        "task_id": "task-immut", "status": "running",
+        "owner_quiz": {"q1": dict(block)},
+        "held_owner_messages": {quiz_addr: dict(quiz_row), plain_addr: dict(plain_row)},
+        "metadata": {
+            "custom": dict(custom_meta),
+            "late_answer": {"task_id": "asker-1", "quiz_id": "q1",
+                            "answer_snapshot": {"task_id": "asker-1", "quiz": dict(block)}},
+            **carriers,
+            "continuation": {"predecessor_task_id": "pred-1",
+                             "owner_sources": {"held_owner_messages": {quiz_addr: dict(quiz_row),
+                                                                       plain_addr: dict(plain_row)}}},
+        },
+    }
+
+    projected = public_task_result(stored)
+
+    assert projected["held_owner_messages"][plain_addr] == plain_row
+    assert projected["metadata"]["continuation"]["owner_sources"]["held_owner_messages"][plain_addr] == plain_row
+    assert projected["metadata"]["custom"] == custom_meta
+    assert projected["metadata"]["chat_attachments"] == [shown]
+    assert "chat_attachment_uploads" not in projected["metadata"]
+    # Original in-memory input dict is completely unmutated across all carriers.
+    assert stored["owner_quiz"]["q1"]["attachments"][0]["upload"] == raw["upload"]
+    assert stored["owner_quiz"]["q1"]["attachments"][0]["mtime_ns"] == 4242
+    assert stored["held_owner_messages"][quiz_addr]["quiz"]["attachments"][0]["upload"] == raw["upload"]
+    assert stored["metadata"]["late_answer"]["answer_snapshot"]["quiz"]["attachments"][0]["upload"] == raw["upload"]
+    assert stored["metadata"]["chat_attachments"][0]["upload"] == raw["upload"]
+    assert stored["metadata"]["chat_attachment_uploads"] == raw_uploads
+    assert stored["metadata"]["continuation"]["owner_sources"]["held_owner_messages"][quiz_addr]["quiz"]["attachments"][0]["mtime_ns"] == 4242
+
+    # All three canonical late-block markers establish typed late quiz file provenance.
+    for marker in (
+        {"answered_after_terminal": True},
+        {"delivery_after_terminal": True},
+        {"delivery": {"route": "fresh_head"}},
+    ):
+        late_out = public_task_result({
+            "task_id": "task-late", "status": "completed",
+            "metadata": {
+                "late_answer": {"task_id": "asker-1", "quiz_id": "q1",
+                                "answer_snapshot": {"task_id": "asker-1",
+                                                    "quiz": {"quiz_id": "q1", "state": "answered",
+                                                             "attachments": [dict(raw)], **marker}}},
+                **carriers,
+            },
+        })
+        assert late_out["metadata"]["chat_attachments"] == [shown]
+        assert "chat_attachment_uploads" not in late_out["metadata"]
+
+    # Ordinary task, event row, invalid late provenance, secret request, and text-only late
+    # provenance all preserve metadata.chat_attachments and metadata.chat_attachment_uploads.
+    event_row = {"type": "message", "task_id": "task-ev", "ts": "2026-11-18T12:00:00+00:00",
+                 "metadata": dict(carriers)}
+    assert public_task_result(event_row, include_outcome_axes=False) == event_row
+
+    missing_flag_out = public_task_result({
+        "task_id": "task-permissive", "status": "completed",
+        "metadata": {
+            "late_answer": {"task_id": "asker-1", "quiz_id": "q1",
+                            "answer_snapshot": {"task_id": "asker-1",
+                                                "quiz": {"quiz_id": "q1", "state": "answered",
+                                                         "attachments": [dict(raw)]}}},
+            **carriers,
+        },
+    })
+    assert missing_flag_out["metadata"]["late_answer"]["answer_snapshot"]["quiz"]["attachments"] == [shown]
+    assert missing_flag_out["metadata"]["chat_attachments"] == [raw]
+    assert missing_flag_out["metadata"]["chat_attachment_uploads"] == raw_uploads
+
+    for meta in (
+        dict(carriers),  # ordinary non-late task
+        {**carriers, "late_answer": {"task_id": "asker-1", "quiz_id": "q1",
+                                     "answer_snapshot": {"task_id": "other-asker",
+                                                         "quiz": dict(block)}}},  # mismatched task_id
+        {**carriers, "late_answer": {"task_id": "asker-1", "quiz_id": "q1",
+                                     "answer_snapshot": {"task_id": "asker-1",
+                                                         "quiz": {"quiz_id": "q1", "state": "answered",
+                                                                  "delivery": "bad",
+                                                                  "attachments": [dict(raw)]}}}},  # invalid delivery
+        {**carriers, "late_answer": {"task_id": "asker-1", "quiz_id": "q1",
+                                     "answer_snapshot": {"task_id": "asker-1",
+                                                         "quiz": {**block, "secret_request": {"pluginName": "p"}}}}},
+        {**carriers, "late_answer": {"task_id": "asker-1", "quiz_id": "q1",
+                                     "answer_snapshot": {"task_id": "asker-1",
+                                                         "quiz": {"quiz_id": "q1", "state": "answered",
+                                                                  "answered_after_terminal": True,
+                                                                  "comment": "text only"}}}},
+    ):
+        neg = public_task_result({"task_id": "task-neg", "status": "completed", "metadata": meta})
+        assert neg["metadata"]["chat_attachments"] == [raw]
+        assert neg["metadata"]["chat_attachment_uploads"] == raw_uploads
+
+
+def _quiz_projection_fixture():
+    """Shared synthetic fixtures for ordinary late-row, chat-stream and mailbox quiz-file projections."""
+    import copy
+
+    note_upload = f"{'2' * 32}_note.png"
+    raw_refs = [
+        {"upload": note_upload, "name": "note.png", "kind": "image", "mime": "image/png",
+         "size": 64, "sha256": "b" * 64, "mtime_ns": 987654321},
+        {"name": "clip.mp4", "kind": "file", "mime": "video/mp4",
+         "unavailable": "too_large", "limit_bytes": 10 * 1024 * 1024},
+    ]
+    expected_files = [
+        {"name": "note.png", "kind": "image", "mime": "image/png", "size": 64, "sha256": "b" * 64},
+        {"name": "clip.mp4", "kind": "file", "mime": "video/mp4",
+         "unavailable": "too_large", "limit_bytes": 10 * 1024 * 1024},
+    ]
+    answer_row = {
+        "type": "quiz_answer", "task_id": "asker-1", "chat_id": 1, "attachments": copy.deepcopy(raw_refs),
+        "quiz": {"quiz_id": "q-files", "state": "answered", "attachments": copy.deepcopy(raw_refs)},
+    }
+    delivery = {"kind": "answer", "state": "delivered", "route": "fresh_head",
+                "answer_row": copy.deepcopy(answer_row)}
+    file_only_block = {
+        "quiz_id": "q-files", "question": "Send the screenshot", "options": ["Skip"], "state": "answered",
+        "comment": "", "attachments": copy.deepcopy(raw_refs), "delivery": copy.deepcopy(delivery),
+    }
+    button_block = {
+        "quiz_id": "q-btn", "question": "Which option?", "options": ["Skip", "Keep"], "state": "answered",
+        "answered_index": 1, "comment": "use this one", "answered_after_terminal": True,
+        "attachments": [copy.deepcopy(raw_refs[0])],
+    }
+    secret_block = {
+        "quiz_id": "q-secret", "state": "answered", "secret_request": {"pluginName": "p"},
+        "secret_outcome": {"event": "saved", "pluginName": "p", "fields": ["token"]},
+    }
+    late_row = {
+        "ts": "2026-11-18T12:01:30+00:00", "direction": "in", "chat_id": 1, "source": "web",
+        "client_message_id": "quiz_late_answer:asker-1:q-late", "text": "use this one",
+        "attachments": copy.deepcopy(raw_refs),
+        "late_answer": {
+            "task_id": "asker-1", "quiz_id": "q-late",
+            "answer_snapshot": {"task_id": "asker-1",
+                                "quiz": {**copy.deepcopy(button_block), "quiz_id": "q-late",
+                                         "attachments": copy.deepcopy(raw_refs),
+                                         "delivery": copy.deepcopy(delivery)}},
+        },
+    }
+    file_only_late_row = {
+        "ts": "2026-11-18T12:01:45+00:00", "direction": "in", "chat_id": 1, "source": "web",
+        "client_message_id": "quiz_late_answer:asker-1:q-file-only",
+        "text": "[Attached file: note.png]", "text_placeholder": True, "attachments": copy.deepcopy(raw_refs),
+        "late_answer": {
+            "task_id": "asker-1", "quiz_id": "q-file-only",
+            "answer_snapshot": {"task_id": "asker-1",
+                                "quiz": {**copy.deepcopy(file_only_block), "quiz_id": "q-file-only"}},
+        },
+    }
+    plain_row = {
+        "ts": "2026-11-18T12:00:30+00:00", "direction": "in", "chat_id": 1, "text": "ordinary note",
+        "attachments": [{"upload": f"{'3' * 32}_note.pdf", "name": "note.pdf", "kind": "file",
+                         "mime": "application/pdf", "size": 42, "sha256": "e" * 64, "mtime_ns": 777}],
+    }
+    return {
+        "note_upload": note_upload, "raw_refs": raw_refs, "expected_files": expected_files,
+        "file_only_block": file_only_block, "button_block": button_block, "secret_block": secret_block,
+        "late_row": late_row, "file_only_late_row": file_only_late_row, "plain_row": plain_row,
+    }
+
+
+def _read_public_task_surfaces(tmp_path, task_id):
+    """Read GET /api/tasks/{id} plus GET and POST /api/tasks/{id}/events SSE streams."""
+    import json
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+    from ouroboros.gateway.tasks import api_task_events, api_task_get
+
+    app = Starlette(routes=[
+        Route("/api/tasks/{task_id}", api_task_get, methods=["GET"]),
+        Route("/api/tasks/{task_id}/events", api_task_events, methods=["GET", "POST"]),
+    ])
+    app.state.drive_root = tmp_path
+
+    def _sse_events(resp):
+        assert resp.status_code == 200, resp.text
+        return [json.loads(line[6:]) for line in resp.text.splitlines() if line.startswith("data: ")]
+
+    with TestClient(app) as client:
+        detail = client.get(f"/api/tasks/{task_id}")
+        assert detail.status_code == 200, detail.text
+        return (
+            detail.json(),
+            _sse_events(client.get(f"/api/tasks/{task_id}/events?wait=0")),
+            _sse_events(client.post(f"/api/tasks/{task_id}/events", json={"v": 2, "wait": 0})),
+        )
+
+
+def test_held_late_chat_event_and_mailbox_quiz_copies_project_in_public_readers(tmp_path):
+    """Real detail and GET/POST SSE readers project ordinary quiz-answer files across held inbound
+    late-answer rows (top-level and continuation ``held_owner_messages``), task-scoped ``chat``
+    ``quiz_answer`` events and serialized ``owner_mailbox.rows`` / ``unread_mailbox.rows`` while
+    keeping persisted rows, string wire types, ordinary chat/mail entries and protected forms intact."""
+    import copy
+    import json
+    from ouroboros import dialogue_store as ds
+    from ouroboros.owner_mailbox import (
+        KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, acknowledge_task_messages, write_owner_message,
+    )
+    from ouroboros.task_results import write_task_result
+    from supervisor.message_ingress import log_chat
+
+    fx, task_id = _quiz_projection_fixture(), "task-held-late"
+    late_addr = "row:1@2026-11-18T12:01:30+00:00#1111aaaa"
+    file_only_addr = "row:1@2026-11-18T12:01:45+00:00#2222bbbb"
+    plain_addr = "row:1@2026-11-18T12:00:30+00:00#cafebabe"
+    held_rows = {late_addr: copy.deepcopy(fx["late_row"]),
+                 file_only_addr: copy.deepcopy(fx["file_only_late_row"]),
+                 plain_addr: copy.deepcopy(fx["plain_row"])}
+    # Form 1: real chat-stream quiz_answer, secret quiz_answer and ordinary chat rows for this task.
+    quiz_cid, secret_cid, plain_cid = f"quiz_answer:{task_id}:q-files", f"quiz_answer:{task_id}:q-secret", "m-ordinary-chat"
+    assert log_chat("system", 1, 0, "[Owner quiz answer] file-only", ts="2026-11-18T12:01:05+00:00",
+                    source="owner_quiz_answer", task_id=task_id, client_message_id=quiz_cid,
+                    record_type="quiz_answer", quiz=copy.deepcopy(fx["file_only_block"]),
+                    drive_root=tmp_path, require_write=True) is not None
+    assert log_chat("system", 1, 0, "[Secret request outcome]", ts="2026-11-18T12:01:10+00:00",
+                    source="owner_quiz_answer", task_id=task_id, client_message_id=secret_cid,
+                    record_type="quiz_answer", quiz=copy.deepcopy(fx["secret_block"]),
+                    drive_root=tmp_path, require_write=True) is not None
+    assert log_chat("in", 1, 1, "ordinary task msg", ts="2026-11-18T12:00:40+00:00", source="web",
+                    task_id=task_id, client_message_id=plain_cid,
+                    message_meta={"attachments": copy.deepcopy(fx["plain_row"]["attachments"])},
+                    drive_root=tmp_path, require_write=True) is not None
+    # Form 2: real mailbox rows captured on terminal transition into owner_mailbox and unread_mailbox.
+    mail_files_id, mail_btn_id = f"quiz_answer:{task_id}:q-files", f"quiz_answer:{task_id}:q-btn"
+    mail_plain_id, mail_secret_id = "m-plain-letter", f"quiz_answer:{task_id}:q-secret"
+    for mid, text, qid, block in (
+        (mail_files_id, "[Owner quiz answer] file-only", "q-files", fx["file_only_block"]),
+        (mail_btn_id, "[Owner quiz answer] button", "q-btn", fx["button_block"]),
+        (mail_secret_id, "[Secret request outcome]", "q-secret", fx["secret_block"]),
+    ):
+        assert write_owner_message(
+            tmp_path, text, task_id, msg_id=mid, kind=KIND_QUIZ_ANSWER,
+            quiz_delivery={"task_id": task_id, "quiz_id": qid, "canonical_root": str(tmp_path),
+                           "answer_snapshot": copy.deepcopy(block)},
+        )
+    assert write_owner_message(tmp_path, "ordinary owner letter", task_id, msg_id=mail_plain_id, kind=KIND_OWNER_TEXT)
+    assert acknowledge_task_messages(tmp_path, task_id, [mail_btn_id], wake_id="test")
+    write_task_result(
+        tmp_path, task_id, "completed", ts="2026-11-18T12:02:00+00:00", result="done",
+        held_owner_messages=copy.deepcopy(held_rows),
+        metadata={"continuation": {"predecessor_task_id": "pred-late",
+                                   "owner_sources": {"held_owner_messages": copy.deepcopy(held_rows)}}},
+    )
+    detail_payload, get_events, post_events = _read_public_task_surfaces(tmp_path, task_id)
+    [get_result] = [e["data"] for e in get_events if e.get("type") == "task_result"]
+    [post_result] = [e["data"] for e in post_events if e.get("type") == "task_result"]
+    stored, expected_files = read_result(tmp_path, task_id), fx["expected_files"]
+    stored_owner = {json.loads(line)["msg_id"]: line for line in stored["owner_mailbox"]["rows"]}
+    stored_unread = {json.loads(line)["msg_id"]: line for line in stored["unread_mailbox"]["rows"]}
+
+    for surface in (detail_payload, get_result, post_result):
+        for held_map in (surface["held_owner_messages"],
+                         surface["metadata"]["continuation"]["owner_sources"]["held_owner_messages"]):
+            pub_late, pub_file_only = held_map[late_addr], held_map[file_only_addr]
+            assert "quiz" not in pub_late and pub_late["text"] == "use this one"
+            assert pub_late["attachments"] == expected_files
+            assert "upload" not in pub_late["attachments"][0] and "mtime_ns" not in pub_late["attachments"][0]
+            late_quiz = pub_late["late_answer"]["answer_snapshot"]["quiz"]
+            assert late_quiz["attachments"] == expected_files
+            assert late_quiz["delivery"]["answer_row"]["attachments"] == expected_files
+            assert late_quiz["delivery"]["answer_row"]["quiz"]["attachments"] == expected_files
+            assert pub_file_only["text_placeholder"] is True and pub_file_only["attachments"] == expected_files
+            file_only_quiz = pub_file_only["late_answer"]["answer_snapshot"]["quiz"]
+            assert file_only_quiz["attachments"] == expected_files and "answered_index" not in file_only_quiz
+            assert held_map[plain_addr] == fx["plain_row"]
+        for cap_key, raw_by_id, expected_ids in (
+            ("owner_mailbox", stored_owner, (mail_files_id, mail_btn_id)),
+            ("unread_mailbox", stored_unread, (mail_files_id,)),
+        ):
+            pub_rows = surface[cap_key]["rows"]
+            assert all(isinstance(line, str) for line in pub_rows)
+            pub_by_id = {json.loads(line)["msg_id"]: line for line in pub_rows}
+            assert pub_by_id[mail_plain_id] == raw_by_id[mail_plain_id]
+            assert pub_by_id[mail_secret_id] == raw_by_id[mail_secret_id]
+            for mid in expected_ids:
+                snap = json.loads(pub_by_id[mid])["quiz_delivery"]["answer_snapshot"]
+                assert snap["attachments"] == (expected_files if mid == mail_files_id else [expected_files[0]])
+                assert "upload" not in snap["attachments"][0] and "mtime_ns" not in snap["attachments"][0]
+                if mid == mail_files_id:
+                    assert "answered_index" not in snap
+                    assert snap["delivery"]["answer_row"]["attachments"] == expected_files
+                    assert snap["delivery"]["answer_row"]["quiz"]["attachments"] == expected_files
+    for stream_events in (get_events, post_events):
+        chat_by_cid = {e["data"].get("client_message_id"): e for e in stream_events if e.get("source") == "chat"}
+        pub_quiz_ev = chat_by_cid[quiz_cid]["data"]
+        assert pub_quiz_ev["type"] == "quiz_answer" and pub_quiz_ev["text"] == "[Owner quiz answer] file-only"
+        assert pub_quiz_ev["quiz"]["attachments"] == expected_files and "upload" not in pub_quiz_ev["quiz"]["attachments"][0]
+        assert pub_quiz_ev["quiz"]["delivery"]["answer_row"]["attachments"] == expected_files
+        assert pub_quiz_ev["quiz"]["delivery"]["answer_row"]["quiz"]["attachments"] == expected_files
+        assert chat_by_cid[secret_cid]["data"]["quiz"] == fx["secret_block"]
+        assert chat_by_cid[plain_cid]["data"]["attachments"] == fx["plain_row"]["attachments"]
+    # Persisted canonical storage stays untouched across held rows, chat rows and mailbox captures.
+    for stored_map in (stored["held_owner_messages"],
+                       stored["metadata"]["continuation"]["owner_sources"]["held_owner_messages"]):
+        assert stored_map[late_addr]["attachments"][0]["upload"] == fx["note_upload"]
+        assert stored_map[late_addr]["attachments"][0]["mtime_ns"] == 987654321
+        assert stored_map[plain_addr] == fx["plain_row"]
+    for raw_line in (stored_owner[mail_files_id], stored_owner[mail_btn_id], stored_unread[mail_files_id]):
+        raw_snap = json.loads(raw_line)["quiz_delivery"]["answer_snapshot"]
+        assert raw_snap["attachments"][0]["upload"] == fx["note_upload"] and raw_snap["attachments"][0]["mtime_ns"] == 987654321
+    stored_chat = {row.row.get("client_message_id"): row.row for row in ds.iter_rows(tmp_path, "chat")}
+    assert stored_chat[quiz_cid]["quiz"]["attachments"][0]["upload"] == fx["note_upload"]
+    assert stored_chat[quiz_cid]["quiz"]["attachments"][0]["mtime_ns"] == 987654321
+
+
+def test_public_quiz_projection_keeps_inputs_immutable_and_boundaries_exact():
+    """``public_owner_row`` and ``public_task_result`` clone without mutating inputs, support all
+    three canonical late markers, and keep ordinary, legacy, invalid, protected-form, text-only
+    and malformed chat/mailbox records untouched."""
+    import copy
+    import json
+    from ouroboros.chat_uploads import public_owner_row
+    from ouroboros.outcomes import public_task_result
+
+    fx = _quiz_projection_fixture()
+    raw_refs, expected_files, late_row, plain_row = fx["raw_refs"], fx["expected_files"], fx["late_row"], fx["plain_row"]
+
+    def _late(quiz, snap_task="asker-1"):
+        return {"task_id": "asker-1", "quiz_id": "q-late", "answer_snapshot": {"task_id": snap_task, "quiz": quiz}}
+
+    def _mail_line(mid, kind, text, **extra):
+        return json.dumps({"msg_id": mid, "kind": kind, "text": text, **extra}, ensure_ascii=False)
+
+    row_before = copy.deepcopy(late_row)
+    pub_direct = public_owner_row(late_row)
+    assert pub_direct["attachments"] == expected_files
+    assert pub_direct["late_answer"]["answer_snapshot"]["quiz"]["attachments"] == expected_files
+    assert late_row == row_before
+
+    plain_line = _mail_line("m1", "owner_text", "hello", attachments=raw_refs)
+    text_only_quiz_line = _mail_line("m2", "quiz_answer", "ok", quiz_delivery={
+        "task_id": "t1", "quiz_id": "q-txt", "answer_snapshot": {"quiz_id": "q-txt", "state": "answered", "comment": "yes"}})
+    secret_quiz_line = _mail_line("m3", "quiz_answer", "secret", quiz_delivery={
+        "task_id": "t1", "quiz_id": "q-sec", "answer_snapshot": {**fx["secret_block"], "attachments": raw_refs}})
+    file_quiz_line = _mail_line("m4", "quiz_answer", "with file", quiz_delivery={
+        "task_id": "t1", "quiz_id": "q-files", "answer_snapshot": copy.deepcopy(fx["file_only_block"])})
+    in_mem = {
+        "task_id": "task-mem", "status": "completed",
+        "held_owner_messages": {"r1": copy.deepcopy(late_row), "r2": copy.deepcopy(plain_row)},
+        "owner_mailbox": {"schema": 1, "rows": [plain_line, text_only_quiz_line, secret_quiz_line,
+                                                file_quiz_line, "not-json", "[]", 42]},
+        "unread_mailbox": {"schema": 1, "rows": [file_quiz_line]},
+        "metadata": {"continuation": {"predecessor_task_id": "pred-late",
+                                      "owner_sources": {"held_owner_messages": {"r1": copy.deepcopy(late_row)}}}},
+    }
+    in_mem_before = copy.deepcopy(in_mem)
+    projected = public_task_result(in_mem)
+    assert projected["held_owner_messages"]["r1"]["attachments"] == expected_files
+    assert projected["held_owner_messages"]["r2"] == plain_row
+    assert projected["metadata"]["continuation"]["owner_sources"]["held_owner_messages"]["r1"]["attachments"] == expected_files
+    out_rows = projected["owner_mailbox"]["rows"]
+    assert out_rows[:3] == [plain_line, text_only_quiz_line, secret_quiz_line] and out_rows[4:] == ["not-json", "[]", 42]
+    assert isinstance(out_rows[3], str)
+    assert json.loads(out_rows[3])["quiz_delivery"]["answer_snapshot"]["attachments"] == expected_files
+    assert json.loads(projected["unread_mailbox"]["rows"][0])["quiz_delivery"]["answer_snapshot"]["attachments"] == expected_files
+    assert in_mem == in_mem_before
+
+    chat_ev = {"type": "quiz_answer", "task_id": "t1", "source": "owner_quiz_answer",
+               "quiz": copy.deepcopy(fx["file_only_block"])}
+    chat_ev_before = copy.deepcopy(chat_ev)
+    assert public_task_result(chat_ev, include_outcome_axes=False)["quiz"]["attachments"] == expected_files
+    assert chat_ev == chat_ev_before
+    secret_ev = {"type": "quiz_answer", "task_id": "t1",
+                 "quiz": {**fx["secret_block"], "attachments": copy.deepcopy(raw_refs)}}
+    assert public_task_result(secret_ev, include_outcome_axes=False) == secret_ev
+    ordinary_ev = {"type": "message", "task_id": "t1", "attachments": copy.deepcopy(raw_refs)}
+    assert public_task_result(ordinary_ev, include_outcome_axes=False) == ordinary_ev
+
+    for marker in ({"answered_after_terminal": True}, {"delivery_after_terminal": True},
+                   {"delivery": {"route": "fresh_head"}}):
+        marked_out = public_owner_row({
+            **plain_row, "attachments": copy.deepcopy(raw_refs),
+            "late_answer": _late({"quiz_id": "q-late", "state": "answered",
+                                  "attachments": copy.deepcopy(raw_refs), **marker}),
+        })
+        assert marked_out["attachments"] == expected_files
+        assert marked_out["late_answer"]["answer_snapshot"]["quiz"]["attachments"] == expected_files
+
+    assert public_owner_row(plain_row) == plain_row
+    legacy_late = {**plain_row, "attachments": copy.deepcopy(raw_refs),
+                   "late_answer": {"task_id": "asker-1", "quiz_id": "q-late"}}
+    assert public_owner_row(legacy_late) == legacy_late
+    missing_out = public_owner_row({
+        **plain_row, "attachments": copy.deepcopy(raw_refs),
+        "late_answer": _late({"quiz_id": "q-late", "state": "answered", "attachments": copy.deepcopy(raw_refs)}),
+    })
+    assert missing_out["late_answer"]["answer_snapshot"]["quiz"]["attachments"] == expected_files
+    assert missing_out["attachments"] == raw_refs
+
+    for bad_late in (
+        _late({"quiz_id": "q-late", "state": "answered", "answered_after_terminal": True,
+               "attachments": copy.deepcopy(raw_refs)}, "other-asker"),
+        _late({"quiz_id": "q-late", "state": "answered", "delivery": "bad",
+               "attachments": copy.deepcopy(raw_refs)}),
+        _late({"quiz_id": "q-late", "state": "answered", "answered_after_terminal": True,
+               "secret_request": {"pluginName": "p"}, "attachments": copy.deepcopy(raw_refs)}),
+        _late({"quiz_id": "q-late", "state": "answered", "answered_after_terminal": True, "comment": "text only"}),
+    ):
+        neg_out = public_owner_row({**plain_row, "attachments": copy.deepcopy(raw_refs), "late_answer": bad_late})
+        assert neg_out["attachments"] == raw_refs
+        if "secret_request" in bad_late["answer_snapshot"]["quiz"]:
+            assert neg_out["late_answer"] == bad_late
+
+
+def test_a_rejoin_reports_an_unreadable_coverage_as_unconfirmed(tmp_path, monkeypatch):
+    """The coverage read behind an indexed miss (``dialogue_import.coverage``) needs the store as well: an
+    unavailable or still-importing store is the SAME typed 503 ``quiz_answer_unconfirmed`` the bridge already reads
+    as unknown — never an uncaught store failure, and never "this is not the answer". A readable coverage still
+    decides the miss the same way it did."""
+    from ouroboros import dialogue_import
+    from ouroboros.gateway import task_decision as td
+    from ouroboros.store import StoreError
+
+    body = {"request_id": "tg:9:m:42:7", "decision_id": "quiz:task-1:q1", "rejoin": True}
+    read_streams = []
+
+    def _unreadable(root, stream, seq=None):
+        read_streams.append(stream)
+        raise StoreError("the canonical store is unavailable")
+
+    monkeypatch.setattr(dialogue_import, "coverage", _unreadable)
+    status, payload = td.rejoin_decision(tmp_path, body)
+    assert read_streams == ["chat"], "the miss read the canonical chat stream's coverage"
+    assert status == 503 and payload["reason_code"] == "quiz_answer_unconfirmed"
+
+    monkeypatch.setattr(dialogue_import, "coverage",
+                        lambda root, stream, seq=None: {"imported": True, "pending": 0, "mismatch": 0, "gaps": 0})
+    status, payload = td.rejoin_decision(tmp_path, body)
+    assert status == 404 and payload["reason_code"] == "request_not_recorded"

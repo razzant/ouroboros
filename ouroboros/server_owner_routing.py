@@ -67,24 +67,33 @@ def _stage_mailbox_attachments(
         if not uploads:
             return "", [], ""
         from ouroboros.artifacts import attachment_manifest_projection, stage_task_attachments
-        from ouroboros.chat_uploads import delivery_manifest_rows
         from ouroboros.gateway.tasks import _render_attachment_lines
 
         manifest = stage_task_attachments(task_drive, task_id, uploads)
         authority = attachment_manifest_projection(task_drive, task_id, manifest)
-        rendered = _render_attachment_lines(authority)
-        rows = authority["attachment_manifest"]
-        if failures := delivery_manifest_rows(rows):
-            authority = {**authority, "attachment_manifest": [row for row in rows if row not in failures]}
-        staged = _render_attachment_lines(authority) if failures else rendered
-        note = f"\n\n[ATTACHMENTS]\n{staged}\n[END_ATTACHMENTS]" if staged else ""
-        return note, manifest, rendered
+        return mailbox_attachment_note(authority), manifest, _render_attachment_lines(authority)
     finally:
         if temp_source is not None:
             try:
                 temp_source.unlink(missing_ok=True)
             except OSError:
                 log.debug("Unable to remove routed attachment staging source", exc_info=True)
+
+
+def mailbox_attachment_note(authority: Any) -> str:
+    """The note an owner letter carries for its staged files, from its typed manifest projection (``authority``:
+    ``attachment_manifest`` and any ``attachment_manifest_ref``, as the mailbox entry keeps them) through the one
+    renderer; a file never received is the host's delivery fact instead (``chat_uploads.attachment_delivery_block``)."""
+    from ouroboros.chat_uploads import delivery_manifest_rows
+    from ouroboros.gateway.tasks import _render_attachment_lines
+
+    authority = {key: authority[key] for key in ("attachment_manifest", "attachment_manifest_ref")
+                 if isinstance(authority, dict) and key in authority}
+    rows = authority.get("attachment_manifest") or []
+    if failures := delivery_manifest_rows(rows):
+        authority = {**authority, "attachment_manifest": [row for row in rows if row not in failures]}
+    staged = _render_attachment_lines(authority) if authority else ""
+    return f"\n\n[ATTACHMENTS]\n{staged}\n[END_ATTACHMENTS]" if staged else ""
 
 
 def _start_order(row: Dict[str, Any]) -> tuple:

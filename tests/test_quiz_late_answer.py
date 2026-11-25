@@ -127,6 +127,40 @@ def test_ingress_late_answer_is_accepted_and_delivered_as_an_owner_message(tmp_p
     assert len([f for f in frames if f.get("type") == "chat"]) == 1
 
 
+def test_a_late_file_alone_is_the_owners_message_with_its_file_and_no_invented_words(tmp_path, monkeypatch):
+    """A Telegram Reply's file answering a finished task's card: the named ingress records the owner's row with that
+    file and the host placeholder (no words of theirs), and the late consumer reads it as their input with its file,
+    never as an answer that is unavailable."""
+    import asyncio
+
+    from ouroboros import chat_uploads
+    from ouroboros.answer_facts import card_input
+    from ouroboros.gateway import task_decision as td
+
+    record_asked(tmp_path, "task-1", quiz_id="q1", question="Which screen?", options=["A", "B"],
+                 assumption="A meanwhile", chat_id=1)
+    reconcile_terminal(tmp_path, "task-1")
+    bridge, frames = _late_bridge(tmp_path, monkeypatch)
+    monkeypatch.setattr(td, "_live_root_task", lambda task_id, **_: (None, "task_not_live"))
+    _path, ref = chat_uploads.store_upload(b"\x89PNG\r\n\x1a\nshot", "shot.png", data_dir=tmp_path)
+
+    status, body = asyncio.run(td.answer_decision(tmp_path, {"request_id": "tg:9:m:1:5", "decision_id": "quiz:task-1:q1"},
+                                                  source="skill:telegram", attachments=[ref]))
+
+    assert status == 200 and body["forwarded"] is True and body["attachments"][0]["name"] == "shot.png"
+    [queued] = _inbox(bridge)
+    # The queue carries the host's placeholder for a wordless message; the turn's model text is the rebuilt card.
+    assert queued["text"] == "(image attached)" and queued["task_metadata"]["chat_attachments"] == [ref]
+    _assert_host_snapshot(queued["task_metadata"]["late_answer"], "task-1", "q1")
+    [row] = _accepted_rows(tmp_path, "quiz_late_answer:task-1:q1")
+    assert row["text"] == "(image attached)" and row["text_placeholder"] is True
+    assert [item["upload"] for item in row["attachments"]] == [ref["upload"]]
+    [echo] = [f for f in frames if f.get("type") == "chat" and f.get("role") == "user"]
+    assert echo["text_placeholder"] is True and [item["name"] for item in echo["attachments"]] == ["shot.png"]
+    fact = card_input(queued["task_metadata"], tmp_path)
+    assert (fact["source"], fact["content"], fact["attachments"]) == ("owner_mailbox", "", [ref])
+
+
 def test_an_answer_the_live_task_received_is_not_forwarded_when_retried_after_it_ended(tmp_path, monkeypatch):
     """A lost HTTP response and the UI's retry of the SAME request after the task ended
     must not turn an answer the task already received into a second owner turn: delivery

@@ -168,6 +168,16 @@ def _refused(message: str, status: int, **extra: Any) -> Tuple[int, Dict[str, An
     return status, payload
 
 
+def _answer_fields(block: Dict[str, Any]) -> Dict[str, Any]:
+    """The recorded winner as every receipt and card frame names it: option, words, and the files a Telegram
+    Reply carried (``chat_uploads.answer_files``: no stored id), each only when recorded."""
+    from ouroboros.chat_uploads import answer_files
+
+    return {**({"answered_index": block["answered_index"]} if isinstance(block.get("answered_index"), int) else {}),
+            **({"comment": str(block["comment"])} if str(block.get("comment") or "") else {}),
+            **({"attachments": answer_files(block["attachments"])} if block.get("attachments") else {})}
+
+
 def _answer_pending(root: pathlib.Path, task_id: str, quiz_id: str, reason: str,
                     message: str) -> Tuple[int, Dict[str, Any]]:
     """A failed effect must leave the accepted answer visible as owed."""
@@ -178,10 +188,7 @@ def _answer_pending(root: pathlib.Path, task_id: str, quiz_id: str, reason: str,
         return _refused("The answer could not be confirmed. Retry the same answer when storage is available.",
                         503, task_id=task_id, reason_code="quiz_answer_unconfirmed",
                         **({"state": block["state"]} if block.get("state") else {}))
-    delivery = question_delivery_projection(block)
-    fields = {"question_delivery": delivery,
-              **({"answered_index": block["answered_index"]} if "answered_index" in block else {}),
-              **({"comment": block["comment"]} if block.get("comment") else {})}
+    fields = {"question_delivery": question_delivery_projection(block), **_answer_fields(block)}
     _send_quiz_state(quiz_id, task_id, "answered", **fields)
     return _refused(message, 503, task_id=task_id, state="answered", reason_code=reason, **fields)
 
@@ -291,20 +298,25 @@ def _forward_late_quiz_answer(
     chat_id, reason = _late_answer_destination(drive_root, task_id, block)
     if chat_id is None:
         return False, reason
+    from ouroboros.chat_uploads import staging_specs, stored_refs
     from ouroboros.owner_quiz import late_answer_owner_text
 
-    text = late_answer_owner_text(block)
-    if not text:
-        # An answered block always has a comment or a valid index; a block
-        # that has neither cannot be spoken as the owner's words.
+    text, files = late_answer_owner_text(block), stored_refs(block.get("attachments"))
+    if not text and not files:
+        # An answered block always has a comment, a valid index or a file; a block
+        # that has none cannot be spoken as the owner's message.
         return False, "answer_unreadable"
     # Snapshot current related work at delivery, not at ask time: a child may
     # have been promoted after the question. The owner's Main turn stays unrestricted.
     from ouroboros.presence_owner_contact import private_main_contact
     from ouroboros.task_results import load_task_result
     snapshot = dict(block)
+    # A Reply's file rides the owner's message as its own: the row keeps the recorded refs (a file alone takes the
+    # host placeholder, never words), and the turn stages those exact bytes from the store.
     metadata = {"late_answer": {"task_id": task_id, "quiz_id": quiz_id,
-                                "answer_snapshot": {"task_id": task_id, "quiz": snapshot}}}
+                                "answer_snapshot": {"task_id": task_id, "quiz": snapshot}},
+                **({"chat_attachments": files, "chat_attachment_uploads": staging_specs(files, drive_root)}
+                   if files else {})}
     if private_main_contact(block, task_id):
         current = load_task_result(drive_root, task_id, strict=True) or {}
         child = ((current.get("metadata") or {}).get("presence_work_ref")
@@ -358,7 +370,9 @@ def deliver_as_owner_message(
         # already echoed when it was first accepted).
         from ouroboros.projects_registry import stamp_project_thread
         from ouroboros.chat_references import owner_frame_fields
+        from ouroboros.chat_uploads import attachment_views
 
+        views = attachment_views(row.get("attachments"))
         echo = {
             # The accepted canonical row is the echo's text authority, exactly
             # as the owner's own typing echoes what the ingress recorded; its
@@ -366,6 +380,8 @@ def deliver_as_owner_message(
             "type": "chat", "role": "user", "content": str(row.get("text") or text),
             "ts": str(row.get("ts") or ""), "source": str(source or "web"), "chat_id": chat_id,
             "sender_session_id": "", "client_message_id": client_message_id,
+            **({"attachments": views} if views else {}),  # its files, as history replays the row
+            **({"text_placeholder": True} if views and row.get("text_placeholder") is True else {}),
             **owner_frame_fields(drive_root, chat_id, row),
         }
         if row.get("ingress_accepted") is True:
@@ -390,7 +406,7 @@ def _quiz_decision_receipt(decision_id: str, outcome: dict, block: dict) -> Dict
     payload = {"ok": bool(outcome.get("ok")), "decision_id": decision_id,
                "state": str(block.get("state") or outcome.get("state") or ""),
                "duplicate": bool(outcome.get("duplicate")),
-               **{key: block[key] for key in (*CLOSURE_FIELDS, "answered_index", "comment") if key in block}}
+               **{key: block[key] for key in CLOSURE_FIELDS if key in block}, **_answer_fields(block)}
     if delivery := question_delivery_projection(block):
         payload["question_delivery"] = delivery
     return payload
@@ -472,14 +488,14 @@ async def _dismiss_quiz_decision(root: pathlib.Path, family: str, task_id: str, 
     if not outcome.get("ok"):
         error = str(outcome.get("error") or "quiz_dismiss_refused")
         return (404 if error == "quiz_not_found" else 409), {**payload, "error": error}
-    _send_quiz_state(quiz_id, task_id, str(block.get("state") or "answered"),
-                     **{key: block[key] for key in ("answered_index", "comment") if key in block},
+    _send_quiz_state(quiz_id, task_id, str(block.get("state") or "answered"), **_answer_fields(block),
                      question_delivery=question_delivery_projection(block))
     return 200, payload
 
 
 async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = "web", _recovery: bool = False,
-                          request: Optional[Request] = None) -> Tuple[int, Dict[str, Any]]:
+                          request: Optional[Request] = None,
+                          attachments: Optional[list] = None) -> Tuple[int, Dict[str, Any]]:
     """The ONE decision-answer ingress, transport-neutral: ``(status, payload)``.
 
     ``POST /api/decisions`` (the browser card) and the loopback Host Service
@@ -490,6 +506,8 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
     ``answered_after_terminal``, and forwarded into the card's chat as the
     owner's own message (``forwarded`` says whether that happened). 404 stays
     for a card the projection no longer knows, 409 for one already answered.
+    ``attachments``: measured refs the Host Service stored for the bundled bridge's Reply file (never a body field);
+    they answer only a quiz, with or without words, and are recorded only with this request's own winner.
     """
     if not isinstance(body, dict):
         return _refused("request body must be a JSON object", 400)
@@ -550,6 +568,8 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
             f"the {family} decision family is not served yet",
             501, reason_code="decision_family_not_served",
         )
+    if attachments and (family != "quiz" or action != "answer"):
+        return _refused("a file answers a quiz only", 400, reason_code="attachments_invalid")
     if action == "close":
         if family != "quiz":
             return _refused("closure addresses a quiz", 400, reason_code="close_payload_invalid")
@@ -571,7 +591,7 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
         # rejected every offered option and wrote their own answer, which the
         # comment carries verbatim. The routing family has no such verb — its
         # option IS the destination — so it keeps the integer requirement.
-        if family != "quiz" or not comment.strip():
+        if family != "quiz" or not (comment.strip() or attachments):
             return _refused(
                 "option_index is required (a quiz answer may instead carry a "
                 "non-empty comment as the owner's own answer)",
@@ -628,7 +648,7 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
         outcome = record_answered(
             drive_root, task_id,
             quiz_id=quiz_id, option_index=raw_index,
-            request_id=request_id, comment=comment,
+            request_id=request_id, comment=comment, attachments=attachments,
             # The late answer is accepted (В17a=A); with the task alive the
             # expired state would be a contradiction, so the flag is not set.
             allow_expired=task is None,
@@ -662,17 +682,29 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
             forwarded, forward_reason = await run_sync_to_completion(
                 deliver_answer, drive_root, task_id, quiz_id, block, _mail_holder, _forward_late_quiz_answer)
             late_delivery = late_delivery or bool(forwarded)
-            forward_reason = pending_reason or forward_reason
+            if forward_reason in {"awaiting_recipient_read", "quiz_history_write_pending"} and pending_reason:
+                forward_reason = pending_reason
             if forward_reason:
                 record_quiz_delivery_failure(drive_root, task_id, quiz_id, forward_reason)
             if forward_reason == "mailbox_write_failed":
                 return _answer_pending(drive_root, task_id, quiz_id, forward_reason,
                                        "The answer was recorded. Delivery remains pending.")
-        elif late_delivery and question_delivery_settled(block):
-            forwarded = True
         settled_block = quiz_states(drive_root, task_id).get(quiz_id)
         if settled_block:
             block = settled_block
+        delivery_block = block.get("delivery") if isinstance(block.get("delivery"), dict) else {}
+        late_delivery = late_delivery or bool(
+            block.get("answered_after_terminal") or block.get("delivery_after_terminal")
+        )
+        if (delivery_block.get("kind") == "answer" and delivery_block.get("state") == "delivered"
+                and delivery_block.get("route") == "fresh_head" and not delivery_block.get("read_at")):
+            late_delivery = True
+            forwarded = True
+            forward_reason = ""
+        elif (not forwarded and delivery_block.get("state") == "owed"
+              and delivery_block.get("reason_code") == "late_answer_delivery_unknown"):
+            late_delivery = late_delivery or delivery_block.get("route") == "fresh_head"
+            forward_reason = "late_answer_delivery_unknown"
         delivery_view = question_delivery_projection(block)
         if not outcome.get("ok"):
             error = str(outcome.get("error") or "quiz_answer_refused")
@@ -690,22 +722,15 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
             # means the card was ALREADY answered — never a fabricated expiry.
             payload["state"] = state
             refused_block = outcome.get("block") if isinstance(outcome.get("block"), dict) else {}
-            if isinstance(refused_block.get("answered_index"), int):
-                # The loser of a first-wins race settles honestly: the card
-                # learns the WINNING option, never a false expiry.
-                payload["answered_index"] = refused_block["answered_index"]
-            if str(refused_block.get("comment") or ""):
-                payload["comment"] = str(refused_block["comment"])
+            # The loser of a first-wins race settles honestly: the card learns the
+            # WHOLE winner (option, words, files), never a false expiry.
+            payload.update(_answer_fields(refused_block))
             payload.update({key: refused_block[key] for key in CLOSURE_FIELDS if key in refused_block})
             if error in {"option_out_of_range", "answer_empty"}:
                 status = 400
             return status, payload
-        _send_quiz_state(
-            quiz_id, task_id, str(outcome.get("state") or "answered"),
-            answered_index=block.get("answered_index"),
-            comment=str(block.get("comment") or ""),
-            question_delivery=delivery_view,
-        )
+        _send_quiz_state(quiz_id, task_id, str(outcome.get("state") or "answered"), **_answer_fields(block),
+                         question_delivery=delivery_view)
     except Exception:
         try:
             from ouroboros.owner_quiz import record_quiz_delivery_failure
@@ -728,6 +753,103 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
     return 200, payload_ok
 
 
+# The canonical history row that keeps a settled question's final record once its bounded projection let it go:
+# row type → (its writers' sources, the state it keeps). Answers: ``_record_quiz_answer_history``; closures:
+# ``events_chat_delivery._handle_send_quiz_state``. Each is found by its exact indexed ``<type>:<task>:<quiz>`` id.
+_FINAL_ROWS = {"quiz_answer": ({"owner_quiz_answer"}, "answered"),
+               "quiz_closed": ({"owner_question_close", "model_question_close"}, "closed")}
+
+
+def _recorded_quiz(drive_root: pathlib.Path, decision_id: str) -> Optional[Dict[str, Any]]:
+    """The question's record as stored now: its projection block, else, once that bounded projection let a settled
+    answer or closure go (``owner_quiz._QUIZ_CAP``), the one its canonical history row keeps (``_FINAL_ROWS``), less
+    the delivery that row froze when written (today's is not known there); ``{}`` when none holds it. A read that
+    fails raises (unknown, never absent)."""
+    from ouroboros import dialogue_store as ds
+    from ouroboros.task_store import read_document
+
+    _family, task_id, quiz_id = _parse_quiz_decision_id(decision_id)
+    document = read_document(drive_root, task_id) if task_id else None
+    quiz = (document.get("owner_quiz") or {}).get(quiz_id) if isinstance(document, dict) else None
+    if isinstance(quiz, dict):
+        return dict(quiz)
+    if not task_id or not ds.present(drive_root):
+        return {}
+    ids = [("client_message_id", f"{kind}:{task_id}:{quiz_id}") for kind in _FINAL_ROWS]
+    for entry in ds.probe_rows(drive_root, "chat", ids, limit=8):
+        row, kept = entry.row, entry.row.get("quiz")
+        sources, state = _FINAL_ROWS.get(row.get("type"), ((), ""))
+        if (row.get("source") in sources and row.get("direction") == "system" and row.get("task_id") == task_id
+                and isinstance(kept, dict) and kept.get("quiz_id") == quiz_id and kept.get("state") == state):
+            return {key: value for key, value in kept.items() if key != "delivery"}
+    return {}
+
+
+def _absence_unproven(drive_root: pathlib.Path) -> bool:
+    """Whether this indexed miss is NOT a definite absence: the canonical chat store's import coverage of the whole
+    stream says the history it would hold is still coming (``dialogue_import.coverage``: a reader that found no rows
+    there must say "still importing", never "no rows"). One indexed probe per state, read-only and bounded: it never
+    starts the archive import, scans the store or forces a migration, so a planned-but-unimported cutover, a pending
+    segment or a segment that never imported leaves the miss unproven. A root with no store and no chain files has
+    nothing to import, and its absence IS proven."""
+    from ouroboros import dialogue_import
+
+    return not bool(dialogue_import.coverage(drive_root, "chat").get("imported"))
+
+
+def answer_holds_uploads(drive_root: pathlib.Path, body: Dict[str, Any], refs: list) -> bool:
+    """Whether this decision's recorded winner names the upload copies just stored for it (``answer_decision``
+    records them with this request only), or its record cannot be read: an unknown outcome keeps them. Readable and
+    naming none (another request won, this one replayed an earlier winner, or it was refused) is definite
+    non-acceptance, so the caller removes them."""
+    new = {ref["upload"] for ref in refs if isinstance(ref, dict) and ref.get("upload")}
+    if not new:
+        return False
+    try:
+        quiz = _recorded_quiz(drive_root, str(body.get("decision_id") or ""))
+    except Exception:
+        return True
+    return any(isinstance(ref, dict) and ref.get("upload") in new for ref in quiz.get("attachments") or ())
+
+
+def rejoin_decision(drive_root: pathlib.Path, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+    """The bundled bridge's read of one Reply's answer (``rejoin``), before it receives the Reply's file again or
+    after an unknown outcome: 200 with the receipt a replay of this request returns (``duplicate``) when this
+    ``request_id`` is the question's recorded winner, also after its bounded projection let it go; 404
+    ``request_not_recorded`` when it is not, its ``state`` saying which (``answered``: another request's definite
+    winner, whatever its words or bytes; ``closed``: its closure; an open state: none yet; absent: no record holds
+    the question), a final one with the fields a losing answer learns (the winner's option, words and files, the
+    closure's reason); 503 when the record cannot be read, and also when no record holds the question while the
+    canonical chat store's import is not yet complete — the miss then proves no absence (``_absence_unproven``), and
+    the bridge reads it as unknown, downloading nothing. When that coverage says the import IS complete the miss is
+    read once more, so a row that arrived between the two reads is the record and a miss re-read after complete
+    coverage is the 404's absence; a hit pays for no extra read. The coverage read behind that miss needs the store
+    too, so its own failure is the SAME typed 503, never an uncaught store failure. It writes nothing and
+    delivers nothing: an owed delivery stays with recovery."""
+    request_id, decision_id = str(body.get("request_id") or "").strip(), str(body.get("decision_id") or "").strip()
+    if set(body) - {"request_id", "decision_id", "rejoin"} or not request_id or not _parse_quiz_decision_id(decision_id)[1]:
+        return _refused("a rejoin names only its request and question", 400, reason_code="rejoin_invalid")
+    try:
+        quiz = _recorded_quiz(drive_root, decision_id)
+        # An indexed miss is not an absence until the canonical history's coverage says it is: an unavailable
+        # or still-importing store leaves the miss unproven (the same typed 503). With complete coverage the
+        # miss is read once more, so a segment committing between the two reads is a hit; a miss re-read after
+        # that coverage read is the absence the 404 claims. A hit pays for no extra read.
+        if not quiz:
+            if _absence_unproven(drive_root):
+                return _refused("The answer record could not be read.", 503, reason_code="quiz_answer_unconfirmed")
+            quiz = _recorded_quiz(drive_root, decision_id)
+    except Exception:
+        return _refused("The answer record could not be read.", 503, reason_code="quiz_answer_unconfirmed")
+    if quiz.get("state") != "answered" or str(quiz.get("request_id") or "") != request_id:
+        final = _quiz_decision_receipt(decision_id, {}, quiz) if quiz.get("state") in {"answered", "closed"} else {}
+        return _refused("this request is not the recorded answer", 404, reason_code="request_not_recorded",
+                        **({"state": quiz["state"]} if quiz.get("state") else {}),
+                        **{key: value for key, value in final.items()
+                           if key not in {"ok", "decision_id", "state", "duplicate"}})
+    payload = _quiz_decision_receipt(decision_id, {"ok": True, "duplicate": True}, quiz)
+    payload.update({key: True for key in ("answered_after_terminal", "delivery_after_terminal") if quiz.get(key) is True})
+    return 200, payload
 
 
 async def api_decision_answer(request: Request) -> JSONResponse:
@@ -792,7 +914,8 @@ async def recover_question_deliveries(drive_root: pathlib.Path, *, limit: int = 
                             "decision_id": f"quiz:{task_id}:{quiz_id}", "request_id": block["request_id"],
                             **({"option_index": block["answered_index"]} if "answered_index" in block else {}),
                             "comment": str(block.get("comment") or ""),
-                        }, source=str(block.get("answer_source") or "web"), _recovery=True)
+                        }, source=str(block.get("answer_source") or "web"), _recovery=True,
+                            attachments=block.get("attachments"))  # its own recorded files: a replay, never a new set
                 elif block.get("state") == "closed":
                     await run_sync_to_completion(_handle_send_quiz_state,
                         {"type": "send_quiz_state", "task_id": task_id, "quiz_id": quiz_id}, ctx)
@@ -817,4 +940,5 @@ async def recover_question_deliveries(drive_root: pathlib.Path, *, limit: int = 
     return report
 
 
-__all__ = ["answer_decision", "api_decision_answer", "deliver_as_owner_message", "recover_question_deliveries"]
+__all__ = ["answer_decision", "answer_holds_uploads", "api_decision_answer", "deliver_as_owner_message",
+           "recover_question_deliveries", "rejoin_decision"]

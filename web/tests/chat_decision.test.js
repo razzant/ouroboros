@@ -425,6 +425,35 @@ test('an answer whose delivery is unknown is amber on a Project question\'s card
     } finally { mirror.restore(); }
 });
 
+test('a Telegram Reply\'s files ride the answered pointer into the Main copy of a Project question as host facts distinct from owner words, and narrower deliveries never blank them', () => {
+    const files = [{ name: 'shot.png', kind: 'image', size: 12, sha256: 'a'.repeat(64) },
+        { name: 'clip.mp4', kind: 'file', unavailable: 'download_failed' }];
+    const column = new NodeStub();
+    const mirror = fixture({ isMain: true, frameNode: frameBubble, insertMessageNode: (node) => { column.append(node); return true; } });
+    try {
+        const row = { role: 'system', system_type: 'project_question_pointer', task_id: 't-1', quiz_id: 'qz-1', project_id: 'p1',
+            project_chat_id: 23, project_name: 'Storage', ts: '2026-09-18T22:00:00+00:00', quiz_state: 'answered',
+            question: 'Merge now?', options: ['Yes', 'No'], comment: 'this one', attachments: files,
+            question_delivery: { kind: 'answer', state: 'owed', reason_code: 'late_answer_delivery_unknown' } };  // owed: the copy stays
+        mirror.decision.appendQuestionPointer(row);
+        const answer = () => column.querySelector('.chat-quiz-answer')?.textContent;
+        const fileLines = () => column.querySelector('.chat-quiz-answer-files')?.textContent;
+        const expectedWords = "Owner's answer: this one";
+        const expectedFiles = '\u{1F4CE} shot.png\n\u{1F4CE} clip.mp4: not received, the download failed';
+        assert.equal(answer(), expectedWords, 'owner words stay separate from host file facts');
+        assert.equal(fileLines(), expectedFiles);
+        // The census or a lifecycle frame names the same winner without its files: the copy keeps what it shows.
+        const narrower = { ...row };
+        delete narrower.attachments;
+        mirror.decision.appendQuestionPointer(narrower);
+        assert.equal(answer(), expectedWords);
+        assert.equal(fileLines(), expectedFiles);
+        mirror.decision.applyQuizStateFrame({}, { quiz_id: 'qz-1', task_id: 't-1', state: 'answered' });
+        assert.equal(answer(), expectedWords);
+        assert.equal(fileLines(), expectedFiles);
+    } finally { mirror.restore(); }
+});
+
 test('a full read without a delivery fact drops an owed observation older than its start; a live one stated since survives', async () => {
     const delivery = { kind: 'answer', state: 'owed', reason_code: 'late_answer_delivery_unknown' };
     const address = 'row:23@2024-04-09T10:14:00+00:00#0123456789ab';
@@ -1564,6 +1593,38 @@ test('the owner\'s own press still hands focus to the question; a landing on the
         first.focus();  // a Reply's landing (chat_reply.markTarget)
         fx.decision.applyQuizStateFrame({}, { quiz_id: 'qz-focus', task_id: 't-1', state: 'answered', answered_index: 0 });
         assert.equal(globalThis.document.activeElement, first, 'a repeated settlement does not move a landing');
+    } finally { fx.restore(); }
+});
+
+test('a file-only settled answer keeps host file facts out of Owner\'s answer and carries the Reply landing address', async () => {
+    const files = [
+        { name: 'shot.png', kind: 'image', size: 12, sha256: 'a'.repeat(64) },
+        { name: 'clip.mp4', kind: 'file', unavailable: 'too_large', limit_bytes: 10485760 },
+        { name: 'gone.pdf', kind: 'file', unavailable: 'missing' },
+    ];
+    const fx = fixture({
+        isMain: true,
+        fetchDetail: async () => ({
+            task_id: 't-1', chat_id: 1,
+            owner_quiz: { 'qz-detail': { ...WS_MSG, quiz_id: 'qz-detail', state: 'answered', asked_at: WS_MSG.ts, attachments: files } },
+        }),
+    });
+    try {
+        // History row with file-only answer: no Owner's answer: label wrapping host facts; Reply lands on file block.
+        const card = fx.decision.buildQuizCard(answeredRow({ quiz_id: 'qz-files', attachments: files, answer_row_address: ANSWER_ROW }));
+        assert.equal(card.querySelector('.chat-quiz-answer'), null, 'no Owner\'s answer block when there is no caption');
+        const fileBlock = card.querySelector('.chat-quiz-answer-files');
+        assert.equal(fileBlock?.textContent,
+            '📎 shot.png\n📎 clip.mp4: not received, too large\n📎 gone.pdf: not received, unavailable');
+        assert.deepEqual([fileBlock.dataset.rowAddress, fileBlock.tabIndex], [ANSWER_ROW, -1]);
+        assert.equal(card.querySelectorAll('a').length, 0, 'answer files never open a download link');
+
+        // Task-detail re-read (GET /api/tasks/{id}) also settles a card with projected answer files.
+        const detailCard = fx.decision.buildQuizCard({ ...WS_MSG, quiz_id: 'qz-detail' });
+        await fx.decision.readQuestion('t-1', 'qz-detail', '');
+        assert.equal(detailCard.dataset.state, 'answered');
+        assert.equal(detailCard.querySelector('.chat-quiz-answer'), null);
+        assert.equal(detailCard.querySelector('.chat-quiz-answer-files')?.textContent, fileBlock.textContent);
     } finally { fx.restore(); }
 });
 

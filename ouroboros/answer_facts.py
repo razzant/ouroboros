@@ -159,16 +159,19 @@ def living_card_input(row: Any, root: Any = None) -> dict:
 
 
 def late_quiz_input(ref: Mapping, block: dict, words_source: str = "owner_mailbox") -> dict:
-    """The corpus fact for one reading of a late answer, including an unavailable answer."""
+    """The corpus fact for one reading of a late answer, including an unavailable answer. A Reply's recorded files
+    (``attachments``: stored refs, or why one never arrived) ride beside the words; a file alone has no words."""
+    from ouroboros.chat_uploads import answer_evidence, stored_refs
     from ouroboros.owner_quiz import late_answer_owner_text
 
-    content = late_answer_owner_text(block)
-    if not content:
+    content, files = late_answer_owner_text(block), stored_refs(block.get("attachments"))
+    if not content and (block.get("answered_index") is not None or block.get("secret_request")
+                        or block.get("secret_outcome") or not answer_evidence(files)):
         return {"source": OWNER_CARD_INPUT, "content": "Quiz answer received. Its accepted answer is unavailable."}
     pressed = late_answer_owner_text({**block, "comment": ""})
     return {"source": answer_source(block, words_source), "content": content, "source_task_id": ref["task_id"],
             "quiz_id": ref["quiz_id"], **({"pressed": pressed} if pressed else {}),
-            "reply_to": answered_card_reply(block, ref["task_id"])}
+            "reply_to": answered_card_reply(block, ref["task_id"]), **({"attachments": files} if files else {})}
 
 
 def card_input(row: Any, root: Any, words_source: str = "owner_mailbox") -> dict:
@@ -220,7 +223,9 @@ def last_own_words(ctx: Any) -> str:
 
     last = ("", "")
     for item, ts, reference, _door in _dated_directives(ctx):
-        if not item.get("carried") and item.get("source") in OWNER_WORD_SOURCES:
+        # A file sent without a caption stays an arrival in the corpus; it is not words of theirs.
+        if (not item.get("carried") and item.get("source") in OWNER_WORD_SOURCES
+                and str(item.get("content") or "").strip()):
             last = (ts or _item_time(item), reference or row_ref(item))
     return f"[Host fact: their last own words in this work: {last[0]} ({last[1]})]" if all(last) else ""
 
@@ -254,19 +259,24 @@ def answered_card(block: Any, words: str) -> dict[str, Any] | None:
 
     from ouroboros.owner_quiz import STATE_ANSWERED, late_answer_owner_text
 
-    if not (isinstance(block, dict) and not block.get("secret_request") and block.get("state") == STATE_ANSWERED
-            and late_answer_owner_text(block) == words):
+    if not (isinstance(block, dict) and not block.get("secret_request") and not block.get("secret_outcome")
+            and block.get("state") == STATE_ANSWERED and late_answer_owner_text(block) == words):
         return None
     return {key: copy.deepcopy(block[key]) for key in CARD_FIELDS if key in block}
 
 
 def carded(row: dict[str, Any], source: Any, root: Any = None) -> dict[str, Any]:
     """``row`` with the card its words answer beside them (``answered_card_source(source)``) when that card records
-    exactly these words: the asking task, the card's id and the card a Continue successor reads."""
+    exactly these words: the asking task, the card's id, the card a Continue successor reads and the files a Telegram
+    Reply answered it with (the row's own, when it holds some)."""
+    from ouroboros.chat_uploads import stored_refs
+
     block, asker = answered_card_source(source, root)
     card = answered_card(block, row["content"])
     if card and all(isinstance(value, str) and value for value in (asker, card.get("quiz_id"))):
         row.update(source_task_id=asker, quiz_id=card["quiz_id"], card=card)
+        if files := stored_refs(block.get("attachments")):
+            row.setdefault("attachments", files)
     return row
 
 
@@ -389,6 +399,7 @@ def retained_card_input(row: Mapping, root: Any) -> dict:
     """An accepted physical card row as an input. Only its own record can interpret the display text."""
     if item := card_input(row, root):
         return item
+    from ouroboros.chat_uploads import answer_evidence
     from ouroboros.owner_quiz import late_answer_owner_text
     from ouroboros.owner_relay import owner_text
 
@@ -398,7 +409,9 @@ def retained_card_input(row: Mapping, root: Any) -> dict:
                  and row.get("source") in (None, "", "owner_quiz_answer")
                  and row.get("direction") == "system" else owner_text(row))
         if (card := answered_card(block, words)) and card.get("quiz_id"):
-            return late_quiz_input({"task_id": asker, "quiz_id": card["quiz_id"]}, card, "owner_quiz_answer")
+            files = answer_evidence(block.get("attachments"))
+            return late_quiz_input({"task_id": asker, "quiz_id": card["quiz_id"]},
+                                   {**card, **({"attachments": files} if files else {})}, "owner_quiz_answer")
     if isinstance(block, Mapping) or row.get("type") == "quiz_answer":
         return {"source": OWNER_CARD_INPUT, "content": "Quiz answer received. Its accepted answer is unavailable."}
     return {}

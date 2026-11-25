@@ -292,9 +292,10 @@ def _delegated_receipt_counts(value: Any) -> tuple[int, int] | None:
     return counts
 
 
-# A replica carries results, not canonical drive placement, copy-back provenance or local custody.
+# A replica carries results, not canonical drive placement, copy-back provenance or local custody
+# (including root-relative ``owner_mailbox`` terminal captures; ``unread_mailbox`` stays a union below).
 CANONICAL_CUSTODY_FIELDS = ("launch_handoffs", "retired_tool_invocations", "retired_model_consumers",
-                            "native_capture_pending", "received_file_outputs", *TASK_ROOT_FIELDS)
+                            "native_capture_pending", "received_file_outputs", "owner_mailbox", *TASK_ROOT_FIELDS)
 # A rejected ending lends none of its answer, execution or delivery fields, even where canonical has no value.
 # The ending facts a card reads beside the words (``project_completion_facts``) belong to that ending too:
 # whether an answer exists (``_result_text_present``), the stop it names (``cancel_origin``), the schedule it

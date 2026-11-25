@@ -169,10 +169,15 @@ def _first_user_content(task: Dict[str, Any], env: Any, *, attachment_facts=None
     record no ``drive_root`` (promotion's and Continue's do not: assignment and terminal files read that field as a
     fork), so the actor's own ``env.drive_root`` names the store its inputs were staged in."""
     from ouroboros.chat_uploads import attachment_delivery_block
+    from ouroboros.owner_quiz import late_answer_ref, resolved_late_quiz
 
     content = build_user_content(task if task.get("drive_root") else {**task, "drive_root": env.drive_root},
                                  attachment_facts=attachment_facts)
-    fact = attachment_delivery_block(task.get("attachment_manifest"))
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    late = late_answer_ref(metadata.get("late_answer"))
+    # A late answer's card frame already names each file never received (``quiz_answer_frame``): one renderer.
+    framed = bool(late) and resolved_late_quiz(task.get("drive_root") or env.drive_root, late).get("state") == "answered"
+    fact = "" if framed else attachment_delivery_block(task.get("attachment_manifest"))
     if not fact:
         return content
     if isinstance(content, list):

@@ -13,7 +13,7 @@ import pathlib
 import queue
 
 from dataclasses import asdict, dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from ouroboros import task_pacing
 from ouroboros.context import build_incoming_user_content
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND, WHOLE_CATEGORY
@@ -27,8 +27,6 @@ from ouroboros.tools.registry import ToolRegistry
 from ouroboros.transcript_prefix import SIZE_PASS_ROWS_ATTR, departure, rewrite_view, sanction_rewrite, size_pass_host_rows
 from ouroboros.usage_accounting import invalidate_task_cache_splits
 from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN, _narrow_round_deadline, _owner_stop_control_is_current, _owner_stop_window_elapsed, handle_finalize_now_entry  # noqa: F401 -- _owner_stop_control_is_current stays a facade surface
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # annotation-only names; lazy under future annotations, never imported at runtime
     from ouroboros.loop_delivery import DeliveryCandidate
@@ -233,7 +231,7 @@ def _drain_incoming_messages(
     def ack_saved(entry: Dict[str, Any]) -> None:
         if not acknowledge_transcript_entry(drive_root, task_id, entry) or event_queue is None:
             return
-        if ((entry.get("relay") and not (entry.get("host_carried") or entry.get("work_reply")))
+        if ((entry.get("relay") and not (entry.get("host_carried") or entry.get("work_reply")))  # a carried row posts no receipt to the room
                 or entry.get("quiz_delivery") or entry.get("card_delivery")):
             from ouroboros.owner_relay import retained_relay
             event_queue.put_nowait({"type": "owner_message_injected", "task_id": task_id,
@@ -374,24 +372,44 @@ def _drain_incoming_messages(
                 ack_content(entry)
                 continue
             if kind == KIND_QUIZ_ANSWER:
-                source = _record_quiz_delivery(owner_ctx, entry, dmsg)
+                source, source_address = _record_quiz_delivery(owner_ctx, entry, dmsg)
+                attachment_facts: Dict[str, Any] = {}
+                # A Reply's staged image reaches the asker as owner mail's does (this delivery's manifest only).
+                content = (
+                    _owner_content(entry, drive_root, task_id, attachment_facts=attachment_facts)
+                    if (entry.get("attachment_manifest") or entry.get("attachment_manifest_ref"))
+                    else None
+                )
                 deliver_quiz_answer(
                     entry, task_id, event_queue,
-                    lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx,
-                                                                       kind=OWNER_WORDS_KIND),
+                    lambda text: _loop()._append_or_merge_user_content(messages, content, slot=owner_ctx,
+                                                                       kind=OWNER_WORDS_KIND)
+                    if isinstance(content, list) else
+                    _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx, kind=OWNER_WORDS_KIND),
                 )
                 arrivals.append(len(messages) - 1)
+                if attachment_facts:
+                    _note_owner_contribution(
+                        owner_ctx, messages[-1], "mailbox_input", attachment_facts,
+                        owner_words=False, source_address=source_address,
+                    )
                 if source == OWNER_PRESS:
                     mark_press_arrival(owner_ctx, messages[-1])
                 ack_content(entry)
                 continue
             # A late answer keeps the owner's act or words separately from the full stored card frame.
             chats = str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root  # the room's rows
-            model_msg = dmsg
+            model_msg, card_files = dmsg, False
             if entry.get("late_answer") is not None:
-                from ouroboros.owner_quiz import late_answer_model_text
+                from ouroboros.owner_quiz import late_answer_model_text, late_answer_ref, resolved_late_quiz
+                from ouroboros.server_owner_routing import mailbox_attachment_note
 
                 model_msg = late_answer_model_text(chats, entry.get("late_answer"), dmsg)
+                # A readable card's frame names a Reply's files and why any never arrived; where this work reads the
+                # staged ones is the letter's typed manifest, through the owner-mail renderer.
+                late = late_answer_ref(entry.get("late_answer"))
+                if card_files := bool(late) and resolved_late_quiz(chats, late).get("state") == "answered":
+                    model_msg += mailbox_attachment_note(entry)
             elif entry.get("card_press") is not None:  # a press on a finished author's card: its card frame
                 from ouroboros.gateway.card_decision import card_press_model_text
 
@@ -414,7 +432,7 @@ def _drain_incoming_messages(
                 append_fallback_context(messages, fallback, reply_target=target, reply_reference=entry.get("reply_reference"))
             from ouroboros.chat_uploads import attachment_delivery_block, delivery_manifest_refs
 
-            fact = attachment_delivery_block(entry.get("attachment_manifest"))
+            fact = "" if card_files else attachment_delivery_block(entry.get("attachment_manifest"))  # its frame names them
             _loop()._record_owner_directive(
                 owner_ctx,
                 source=source,
@@ -426,10 +444,11 @@ def _drain_incoming_messages(
                         "source_task_id": living.get("source_task_id"), "quiz_id": living.get("quiz_id"),
                         "mail_kind": mailbox_mail_kind(entry, living, source=source)},
                 reply_to=target or None,
-                attachments=((held or {}).get("attachments") or delivery_manifest_refs(entry.get("attachment_manifest"))) if fact else None,
+                attachments=living.get("attachments") or (((held or {}).get("attachments")
+                            or delivery_manifest_refs(entry.get("attachment_manifest"))) if fact else None),
             )
-            arrivals.append(_append_owner_mail_input(messages, owner_ctx, entry, owner_content, fact, wordless=bool(fact and not dmsg)))
-            _note_owner_contribution(owner_ctx, messages[arrivals[-1]], "mailbox_input", attachment_facts, owner_words=not bool(fact and not dmsg))
+            arrivals.append(_append_owner_mail_input(messages, owner_ctx, entry, owner_content, fact, wordless=bool(fact and not model_msg)))
+            _note_owner_contribution(owner_ctx, messages[arrivals[-1]], "mailbox_input", attachment_facts, owner_words=not bool(fact and not model_msg))
             if source == OWNER_PRESS:
                 mark_press_arrival(owner_ctx, messages[arrivals[-1]])
             ack_content(entry)
@@ -456,15 +475,17 @@ def _drain_incoming_messages(
     return controls
 
 
-def _note_owner_contribution(ctx, row, form, attachment_facts=None, *, owner_words=True):
+def _note_owner_contribution(ctx, row, form, attachment_facts=None, *, owner_words=True, source_address=None):
     from ouroboros.context_assembly_trace import note_contribution
 
-    delivery = getattr(ctx, 'last_owner_delivery', None) or {}
+    source = (
+        ((getattr(ctx, 'last_owner_delivery', None) or {}).get('source_row_address', ''))
+        if source_address is None else source_address
+    )
     if owner_words:
-        note_contribution(ctx, row, 'owner_input', form=form, source=delivery.get('source_row_address', ''))
+        note_contribution(ctx, row, 'owner_input', form=form, source=source)
     if attachment_facts:
-        note_contribution(ctx, row, 'attachment_manifest', observation=attachment_facts,
-                          source=delivery.get('source_row_address', ''))
+        note_contribution(ctx, row, 'attachment_manifest', observation=attachment_facts, source=source)
 
 
 def _show_held_quote_handles(owner_ctx: Any, messages: List[Dict[str, Any]]) -> None:
@@ -478,11 +499,11 @@ def _show_held_quote_handles(owner_ctx: Any, messages: List[Dict[str, Any]]) -> 
             owner_ctx._quote_handles_shown = handles
 
 
-def _record_quiz_delivery(ctx, entry: dict, text: str) -> str:
-    """Record the live answer and its card before delivery. Return its input type for the new arrival row."""
+def _record_quiz_delivery(ctx, entry: dict, text: str) -> Tuple[str, str]:
+    """Record the live answer and its card before delivery. Return its input type and verified row address."""
     from ouroboros.answer_facts import answer_source
     from ouroboros.owner_quiz import late_answer_owner_text
-    from ouroboros.owner_relay import retain_owner_message
+    from ouroboros.owner_relay import owner_row_address, retain_owner_message
     from ouroboros.owner_words import answered_card_reply
 
     delivery = entry.get("quiz_delivery") or {}
@@ -497,8 +518,9 @@ def _record_quiz_delivery(ctx, entry: dict, text: str) -> str:
         origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id"),
                 **_arrival(held, entry.get("ts"), held=True)},
         reply_to=answered_card_reply(answer, delivery.get("task_id")),
+        attachments=answer.get("attachments") if isinstance(answer, dict) else None,  # a Reply's file, words or none
     )
-    return source
+    return source, owner_row_address(held) if isinstance(held, dict) else ""
 
 
 def _context_overflow_retries(tool_ctx: Any, record: str = "_context_overflow_retries") -> set:
@@ -865,13 +887,14 @@ class _RoundLimitContext:
     resume_candidate: bool = False
 
 
+def _best_effort_tail(*, urgent: bool = False) -> str:
+    tail = _loop()._FORCED_BEST_EFFORT_TAIL
+    return tail.replace(" now ", " NOW ", 1) if urgent else tail
+
+
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({ctx.max_rounds})."
-    prompt = (
-        f"[ROUND_LIMIT] {finish_reason} Produce your best final answer now from the "
-        "verified work so far; clearly mark anything unverified or incomplete. An honest "
-        "best-effort result is the expected outcome here, not a failure."
-    )
+    prompt = f"[ROUND_LIMIT] {finish_reason} {_best_effort_tail()}"
     return _loop()._forced_final_answer(ctx, prompt=prompt, fallback_text=finish_reason, reason_code="round_limit")
 
 
@@ -888,12 +911,8 @@ def _handle_forced_finalization(ctx: _RoundLimitContext, reason: str) -> Tuple[s
     rail = (reason_lines[0].strip() if reason_lines else "") or "deadline"
     cause = TASK_CAUSE_PHRASES.get(rail, f"Task reached {rail}")
     fallback = f"⚠️ {cause}; finalization grace produced no answer."
-    prompt = (
-        f"[FINALIZE_NOW] The supervisor opened a finalization grace window (reason: {reason or 'deadline'}). "
-        "The task will be stopped shortly. Produce your best final answer NOW from the verified "
-        "work so far; clearly mark anything unverified or incomplete. An honest best-effort "
-        "result is the expected outcome here, not a failure."
-    )
+    prompt = (f"[FINALIZE_NOW] The supervisor opened a finalization grace window (reason: {reason or 'deadline'}). "
+              f"The task will be stopped shortly. {_best_effort_tail(urgent=True)}")
     return _loop()._forced_final_answer(ctx, prompt=prompt, fallback_text=fallback, reason_code="finalization_grace")
 
 
@@ -940,32 +959,19 @@ def _handle_owner_stop_finalization(
     """Owner-requested finalization: zero or one tool-less model turn."""
     live_trace = getattr(ctx, "llm_trace", None)
     llm_trace = live_trace if isinstance(live_trace, dict) else {}
-    candidate = _loop()._current_delivery_candidate(ctx, llm_trace)
-    if candidate is not None:
-        _loop()._finalize_forced_services(ctx, llm_trace)
-        ctx.accumulated_usage["execution_status"] = "failed"
-        ctx.accumulated_usage["reason_code"] = REASON_OWNER_REQUESTED_FINALIZATION
-        return _loop()._forced_fallback_result(
-            ctx, llm_trace, candidate.full_text, REASON_OWNER_REQUESTED_FINALIZATION,
-            retained_source="owner_stop_retained_candidate",
-        )
     fallback = "⚠️ The owner requested finalize-then-stop; no final answer could be produced inside the grace window."
-    if _owner_stop_window_elapsed(ctx):
+    candidate = _loop()._current_delivery_candidate(ctx, llm_trace)
+    if candidate is not None or _owner_stop_window_elapsed(ctx):
         _loop()._finalize_forced_services(ctx, llm_trace)
-        ctx.accumulated_usage["execution_status"] = "failed"
-        ctx.accumulated_usage["reason_code"] = REASON_OWNER_REQUESTED_FINALIZATION
+        ctx.accumulated_usage.update(execution_status="failed", reason_code=REASON_OWNER_REQUESTED_FINALIZATION)
         return _loop()._forced_fallback_result(
-            ctx, llm_trace, fallback, REASON_OWNER_REQUESTED_FINALIZATION,
-            source="owner_stop_window_elapsed",
+            ctx, llm_trace, candidate.full_text if candidate is not None else fallback, REASON_OWNER_REQUESTED_FINALIZATION,
+            **({"retained_source": "owner_stop_retained_candidate"} if candidate is not None
+               else {"source": "owner_stop_window_elapsed"}),
         )
     child_block = "\n".join(str(control_text or "").splitlines()[1:]).strip()
-    prompt = (
-        "[OWNER_STOP] The owner asked this task to summarize and stop now. "
-        "Produce your best final answer NOW from the verified work so far; "
-        "clearly mark anything unverified or incomplete. An honest best-effort "
-        "result is the expected outcome here, not a failure. Do not start new work."
-        + (f"\n\n{child_block}" if child_block else "")
-    )
+    prompt = (f"[OWNER_STOP] The owner asked this task to summarize and stop now. {_best_effort_tail(urgent=True)} "
+              f"Do not start new work." + (f"\n\n{child_block}" if child_block else ""))
     return _loop()._forced_final_answer(
         ctx, prompt=prompt, fallback_text=fallback,
         reason_code="owner_requested_finalization", single_semantic_turn=True,
@@ -1230,12 +1236,8 @@ def _maybe_deadline_local_finalize(
     remaining = local_deadline_remaining(tools._ctx, ctx)
     if remaining is None or remaining > task_pacing.effective_finalization_reserve_sec(tools._ctx):
         return None
-    prompt = (
-        f"[DEADLINE] The task's remaining time is ~{max(0.0, remaining)/60:.1f} min "
-        "and the run will stop at it. Produce your best final answer NOW from the verified work so far; "
-        "clearly mark anything unverified or incomplete. An honest best-effort result is the expected "
-        "outcome here, not a failure."
-    )
+    prompt = (f"[DEADLINE] The task's remaining time is ~{max(0.0, remaining)/60:.1f} min "
+              f"and the run will stop at it. {_best_effort_tail(urgent=True)}")
     fallback = "⚠️ Task reached its deadline; local finalization produced no answer."
     return _loop()._forced_final_answer(ctx, prompt=prompt, fallback_text=fallback, reason_code="deadline_local")
 

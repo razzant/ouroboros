@@ -10,21 +10,55 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+def _valid_answered_quiz_block(row: Any) -> dict[str, Any]:
+    """One answered card record if it carries an accepted answer and its asking request id, else ``{}``."""
+    from ouroboros.chat_uploads import answer_evidence
+    from ouroboros.owner_quiz import STATE_ANSWERED
+
+    if not isinstance(row, dict) or row.get("state") != STATE_ANSWERED or not row.get("request_id"):
+        return {}
+    index = row.get("answered_index")
+    options = row.get("options") or []
+    label = options[index] if type(index) is int and 0 <= index < len(options) else ""
+    # A Reply's file alone answers too (its stored upload or why none arrived); an empty entry does not.
+    return row if label or str(row.get("comment") or "").strip() or answer_evidence(row.get("attachments")) else {}
+
+
 def answered_quiz_block(drive_root: Any, task_id: str, quiz_id: Any) -> dict[str, Any]:
     """The answered card ``quiz_id`` of ``task_id`` exactly as its projection recorded it, else ``{}``.
 
     Scope is the caller's: ``resolve_owner_source`` admits only the calling task's own
     card; Continue reads only the card identity the producer carried into a start.
     """
-    from ouroboros.owner_quiz import STATE_ANSWERED, quiz_states
+    from ouroboros.owner_quiz import quiz_states
 
-    row = quiz_states(drive_root, task_id).get(str(quiz_id or ""), {})
-    if row.get("state") != STATE_ANSWERED or not row.get("request_id"):
-        return {}
-    index = row.get("answered_index")
-    options = row.get("options") or []
-    label = options[index] if type(index) is int and 0 <= index < len(options) else ""
-    return row if label or str(row.get("comment") or "").strip() else {}
+    return _valid_answered_quiz_block(quiz_states(drive_root, task_id).get(str(quiz_id or ""), {}))
+
+
+def _recorded_answered_quiz(drive_root: pathlib.Path, task_id: str, quiz_id: str) -> tuple[dict[str, Any], Optional[dict]]:
+    """The canonical ``quiz_answer`` history row of an evicted ordinary card, without borrowing ``delivery``."""
+    from ouroboros import dialogue_store as ds
+    from ouroboros.owner_quiz import STATE_ANSWERED
+    from ouroboros.question_answers import answer_message_id
+
+    source_id = answer_message_id(task_id, quiz_id)
+    candidates = [
+        entry.row for entry in ds.probe_rows(drive_root, "chat", [("client_message_id", source_id)], limit=8)
+        if isinstance(entry.row, dict) and entry.row.get("client_message_id") == source_id
+    ]
+    if len(candidates) != 1:
+        return {}, None
+    row = candidates[0]
+    kept = row.get("quiz")
+    if (row.get("type") == "quiz_answer" and row.get("source") == "owner_quiz_answer"
+            and row.get("direction") == "system" and row.get("task_id") == task_id
+            and isinstance(kept, dict) and kept.get("quiz_id") == quiz_id
+            and kept.get("state") == STATE_ANSWERED
+            and not (kept.get("secret_request") or kept.get("secret_outcome"))):
+        cleaned = _valid_answered_quiz_block({key: value for key, value in kept.items() if key != "delivery"})
+        if cleaned:
+            return cleaned, row
+    return {}, None
 
 
 def _recorded_row(drive: Any, row: Any, recorded: dict[str, Any]) -> bool:
@@ -149,6 +183,7 @@ def start_answer(root: pathlib.Path, task_id: str, row: dict, drafter: str) -> O
     """Read a relay by its exact chat address, or a direct answer by its asker's delivery."""
     from ouroboros.answer_facts import answer_source, answered_card, answered_card_reply, row_source
     from ouroboros.chat_chain import resolve_row
+    from ouroboros.chat_uploads import answer_evidence
     from ouroboros.owner_relay import owner_row_identity, quotable_owner_row
     from ouroboros.owner_words import answered_card_source
     from ouroboros.question_answers import answer_message_id
@@ -180,25 +215,48 @@ def start_answer(root: pathlib.Path, task_id: str, row: dict, drafter: str) -> O
     else:
         if not all(isinstance(x, str) and x.strip() for x in (asker, quiz_id, msg_id)) or asker == task_id:
             return None
-        block = answered_quiz_block(root, asker, quiz_id)
-        delivery = block.get("delivery") or {}
-        if msg_id not in (answer_message_id(asker, quiz_id), delivery.get("msg_id")):
+        from ouroboros.task_store import read_document
+
+        try:
+            document = read_document(root, asker)
+        except (StoreError, OSError, ValueError, TypeError):
             return None
-        if physical and (answer_row := delivery.get("answer_row")):
-            if not isinstance(answer_row, dict) or physical != owner_row_identity(answer_row)["row_sha256"]:
+        if not isinstance(document, dict) or not isinstance(quizzes := document.get("owner_quiz"), dict):
+            return None
+        if quiz_id in quizzes:
+            block = _valid_answered_quiz_block(quizzes.get(quiz_id))
+            if not block:
+                return None
+            delivery = block.get("delivery") if isinstance(block.get("delivery"), dict) else {}
+            if msg_id not in (answer_message_id(asker, quiz_id), delivery.get("msg_id")):
+                return None
+            if physical not in (None, ""):
+                answer_row = delivery.get("answer_row")
+                if (not isinstance(answer_row, dict) or not answer_row
+                        or physical != owner_row_identity(answer_row)["row_sha256"]):
+                    return None
+        else:
+            try:
+                block, history_row = _recorded_answered_quiz(root, asker, quiz_id)
+            except (StoreError, OSError, ValueError, TypeError):
+                return None
+            if not block or msg_id != answer_message_id(asker, quiz_id):
+                return None
+            if physical not in (None, "") and (not isinstance(history_row, dict)
+                                                or physical != owner_row_identity(history_row)["row_sha256"]):
                 return None
     card = answered_card(block, words)
     if (not card or not asker or not quiz_id or row.get("source_task_id", asker) != asker
             or row.get("quiz_id", quiz_id) != quiz_id
             or "reply_to" in row and row["reply_to"] != answered_card_reply(block, asker)):
         return None
-    source = start_answer_source(card, row)
-    if source is None:
+    if (source := start_answer_source(card, row)) is None:
         return None
+    files = answer_evidence(block.get("attachments"))  # the winner's own record, never the carried row's refs
     return {"source": source, "content": words, "msg_id": msg_id, "source_task_id": asker,
-            **{key: row[key] for key in ("basis", "cited", "row_sha256") if row.get(key)},
-            "quiz_id": quiz_id, "card": card, **({"request_id": block["request_id"]} if block.get("request_id") else {}),
-            **({"relay_source_root": row["relay_source_root"]} if row.get("relay_source_root") else {})}
+            **({"attachments": files} if files else {}),
+            **{key: row[key] for key in ("basis", "cited", "row_sha256", "relay_source_root") if row.get(key)},
+            "quiz_id": quiz_id, "card": card, **({"request_id": block["request_id"]} if block.get("request_id") else {})}
 
 
 def start_citations(rows: list) -> tuple[list, dict]:
