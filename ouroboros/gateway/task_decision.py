@@ -357,15 +357,16 @@ def deliver_as_owner_message(
         # owner the SAME user bubble their own typing produces (a rejoin
         # already echoed when it was first accepted).
         from ouroboros.projects_registry import stamp_project_thread
-        from ouroboros.chat_references import projection_fields
+        from ouroboros.chat_references import owner_frame_fields
 
         echo = {
             # The accepted canonical row is the echo's text authority, exactly
-            # as the owner's own typing echoes what the ingress recorded.
+            # as the owner's own typing echoes what the ingress recorded; its
+            # rooms and quote are the ones a named source's frame carries.
             "type": "chat", "role": "user", "content": str(row.get("text") or text),
             "ts": str(row.get("ts") or ""), "source": str(source or "web"), "chat_id": chat_id,
             "sender_session_id": "", "client_message_id": client_message_id,
-            **projection_fields(row, drive_root),
+            **owner_frame_fields(drive_root, chat_id, row),
         }
         if row.get("ingress_accepted") is True:
             echo["ingress_accepted"] = True  # the row's own fact: live matches history replay

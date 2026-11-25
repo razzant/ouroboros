@@ -774,8 +774,7 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
             chat_id=chat_id, client_message_id=client_message_id, ts=ts, text=text)
         if not row:
             message["_origin_unkept"] = True
-    from ouroboros.chat_references import projection_fields
-    from ouroboros.room_appearances import frame_rooms
+    from ouroboros.chat_references import owner_frame_fields
     author = declared_author(row)
     if author or source != "web":
         # A parked inline photo is one of the views: one bubble, never a second photo frame;
@@ -790,8 +789,7 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
             "sender_label": str(row.get("sender_label") if author else message.get("sender_label") or ""),
             "sender_session_id": str(message.get("sender_session_id") or ""),
             "client_message_id": client_message_id, "transport": message.get("transport") or {},
-            "chat_id": chat_id, **(projection_fields(row, message_bus.DATA_DIR) if row else {}),
-            **frame_rooms(message_bus.DATA_DIR, row),
+            "chat_id": chat_id, **(owner_frame_fields(message_bus.DATA_DIR, chat_id, row) if row else {}),
             **({"declared_author": author, "system_type": str(row.get("system_type") or row.get("type") or ""), "ingress_accepted": True,
                 **delivery_facts(row, chat_id)} if author else {}),
             **({"kind": "room_echo"} if author and row.get("kind") == "room_echo" else {}),

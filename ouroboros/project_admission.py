@@ -165,12 +165,19 @@ def _strict_admission_snapshot(drive_root: Any, *, allow_missing: bool = False,
     return validated_registry(data, identity_only=identity_only, preserve_raw=preserve_raw), present
 
 
-def reserved_project_for_chat(drive_root: Any, chat_id: int) -> dict:
-    """Strict execution chat routing: every row's identity, then the matched room's routing.
+def reserved_rooms(drive_root: Any) -> list:
+    """Every reservation with its identity checked, read once: what one read lends its strict room checks
+    (``reserved_project_for_chat``'s ``rows``, ``RoomResolver``'s ``reserved``) instead of a parse each."""
+    return _strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)[0]["projects"]
+
+
+def reserved_project_for_chat(drive_root: Any, chat_id: int, *, rows: Optional[list] = None) -> dict:
+    """Strict execution chat routing: every row's identity, then the matched room's routing; ``rows`` is a
+    ``reserved_rooms`` read the caller already holds.
 
     Only a root with no surviving registry or Project store can attest to absence.
     """
-    rows = _strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)[0]["projects"]
+    rows = reserved_rooms(drive_root) if rows is None else rows
     return next((_routing_row(row) for row in rows if row["chat_id"] == chat_id), {})
 
 

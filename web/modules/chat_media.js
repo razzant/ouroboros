@@ -1133,13 +1133,14 @@ export function createChatMedia({
             rememberBubble(bubble, keys);
             return insertMessageNode(bubble) !== false;
         }
-        function appendQuizMessage(msg) {
+        // `requestedAt`: a history row's read start (a full read of the question's record); a live frame names none.
+        function appendQuizMessage(msg, requestedAt) {
             const quizId = String((msg.quiz && msg.quiz.quiz_id) || msg.quiz_id || '');
             const keys = keysFor(msg, `quiz:${msg.task_id || ''}:${quizId}`);
             // The decision controller updates the existing keyed card, keeping
             // drafts/focus when targeted detail and ordinary history overlap. A
             // card first shown live gains the row history names, as media does.
-            const bubble = buildQuizCard ? buildQuizCard(msg) : null;
+            const bubble = buildQuizCard ? buildQuizCard(msg, null, requestedAt) : null;
             if (!bubble) { alreadyRendered(msg, keys); return false; }
             rememberBubble(bubble, keys);
             return insertMessageNode(bubble) !== false;
@@ -1156,9 +1157,9 @@ export function createChatMedia({
         // handling: a mid-task delivery cannot finish its task card. False for any other row.
         const replayed = { document: appendDocumentBubble, links: appendLinksMessage, quiz: appendQuizMessage,
             card: appendCardMessage, photo: appendMediaBubble, video: appendMediaBubble };
-        function appendDelivery(msg) {
+        function appendDelivery(msg, requestedAt) {
             const append = Object.hasOwn(replayed, msg?.msg_type || '') ? replayed[msg.msg_type] : null;
-            if (append) append(msg);
+            if (append) append(msg, requestedAt);
             return Boolean(append);
         }
         // Media frames carry no activity identity: hide the dots row but keep

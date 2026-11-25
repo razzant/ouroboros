@@ -581,6 +581,29 @@ def visible_source_reply(root, ref, chat_id, *, reply=None, row=None, display_ro
     return {}
 
 
+def shown_reply_fields(root, chat_id, row, fields, *, visibility=None):
+    """The quote room ``chat_id`` shows on ``row``, a stored row or its live frame: the row's own Reply, rechecked
+    where the host generated it (``projected_reply_fields``), else, on my human's answer, the question it answered
+    (``question_quote``). Display only: room evidence, recall and a model's context keep the stored relations. A
+    live frame other rooms also show (``also_rooms``) has one preview for all of them, so it takes no room's
+    question; each room's read draws its own. ``visibility`` is the read's cache."""
+    reply = fields.get("reply_to")
+    if (row.get("direction") == "in" and not (isinstance(reply, dict) and reply.get("address"))
+            and not fields.get("also_rooms") and (quote := question_quote(root, chat_id, row, visibility))):
+        fields["reply_to"] = quote
+        return fields
+    return projected_reply_fields(root, chat_id, row, fields, visibility=visibility)
+
+
+def owner_frame_fields(root, chat_id, row) -> dict:
+    """What a live frame of one accepted owner row carries beside its words, alike from both local producers (a late
+    delivery's echo, ``task_decision.deliver_as_owner_message``; a named source's frame, ``message_ingress``): its
+    identity, the other rooms it reaches (``frame_rooms``) and the quote the history of room ``chat_id`` shows."""
+    from ouroboros.room_appearances import frame_rooms
+
+    return shown_reply_fields(root, chat_id, row, {**projection_fields(row, root), **frame_rooms(root, row)})
+
+
 def projected_reply_fields(root, chat_id, row, fields, *, visibility=None):
     """Recheck a generated quote at its history or pointer destination. Explicit relay replies keep their source."""
     reply = fields.get("reply_to")
@@ -1013,6 +1036,68 @@ def resolve_history_row(root, address):
     return None, {"state": "absent"}
 
 
+def question_key(row) -> tuple | None:
+    """``(asker, quiz id)`` of a published question card row, else None."""
+    quiz = row.get("quiz") if row.get("type") == "quiz" else None
+    key = (str(row.get("task_id") or ""), str(quiz.get("quiz_id") or "")) if isinstance(quiz, dict) else ("", "")
+    return key if all(key) else None
+
+
+def published_question(root, task: str, quiz_id: str, cache=None):
+    """The card ``quiz_id`` of ``task`` as published (``message_bus.send_quiz``): one exact lookup of its name, else,
+    for a card published before cards were named, the asker's cards — read once per ``cache`` (a read's) for every
+    question of that asker, a legacy question published in more than one room quoting nowhere, as the publication
+    migration knows; None when neither holds it. That read needs the whole chat history readable (no archive still
+    importing, no skipped line: ``range_coverage``, checked once per ``cache`` before any scan, since an import that
+    ends mid-scan proves nothing); otherwise it finds no card. Without ``cache`` the fallback stops at its first exact
+    hit: an ordinary single lookup reads no more of the asker's history than before."""
+    from ouroboros import dialogue_store as ds
+
+    for entry in ds.iter_probes(root, "chat", [("client_message_id", f"quiz_publication:{task}:{quiz_id}")]):
+        if question_key(entry.row) == (task, quiz_id):
+            return entry
+    if cache is None:  # the ordinary single lookup: first exact hit, never the asker's whole history
+        for entry in ds.iter_probes(root, "chat", [("task_id", task)]):
+            if question_key(entry.row) == (task, quiz_id):
+                return entry
+        return None
+    if ("chat_whole",) not in cache:  # a legacy card not read yet may be the same question in another room
+        coverage = ds.range_coverage(root, "chat")
+        cache[("chat_whole",)] = coverage["imported"] and not coverage["gaps"]
+    if ("asker_cards", task) not in cache:
+        cards = cache[("asker_cards", task)] = {}
+        card_rooms: dict = {}
+        for entry in ds.iter_probes(root, "chat", [("task_id", task)]) if cache[("chat_whole",)] else ():
+            if (key := question_key(entry.row)) and key[0] == task:
+                card = entry.row.get("chat_id")
+                if isinstance(card, int) and not isinstance(card, bool):
+                    card_rooms.setdefault(key[1], set()).add(card)
+                cards.setdefault(key[1], entry)
+        for quiz, rooms in card_rooms.items():
+            if len(rooms) > 1:  # one legacy question, two rooms: ambiguous, never a guess by insertion order
+                cards.pop(quiz)
+    return cache[("asker_cards", task)].get(quiz_id)
+
+
+def saved_decisions(root, keys) -> dict:
+    """``(asker, quiz id) -> row``: each question's saved answer or closure, by the name its writer gives it
+    (``quiz_answer:<asker>:<quiz>``, ``quiz_closed:<asker>:<quiz>``), all in one lookup: what settles a card whose
+    question block has gone while no page read holds its answer. Unreadable is no record: the card stays as stored."""
+    from ouroboros import dialogue_store as ds
+
+    names = {f"{kind}:{asker}:{quiz}": (asker, quiz) for asker, quiz in keys for kind in ("quiz_answer", "quiz_closed")}
+    found: dict = {}
+    try:
+        for entry in ds.iter_probes(root, "chat", [("client_message_id", name) for name in sorted(names)]):
+            key, quiz = names.get(str(entry.row.get("client_message_id") or "")), entry.row.get("quiz")
+            if (key and entry.row.get("type") in {"quiz_answer", "quiz_closed"} and entry.row.get("task_id") == key[0]
+                    and isinstance(quiz, dict) and quiz.get("quiz_id") == key[1]):
+                found.setdefault(key, entry.row)
+    except (OSError, StoreError):
+        return {}
+    return found
+
+
 def quiz_question_row(root, answer, *, answer_seq):
     """The stored question displaying this exact answer, by asker and quiz id, never a source-ref copy."""
     from ouroboros import dialogue_positions as dp, dialogue_store as ds
@@ -1020,10 +1105,8 @@ def quiz_question_row(root, answer, *, answer_seq):
     task, quiz = str(answer.get("task_id") or ""), answer.get("quiz")
     if answer.get("type") != "quiz_answer" or not task or not isinstance(quiz, dict) or not quiz.get("quiz_id"):
         return None
-    for entry in ds.iter_probes(root, "chat", [("task_id", task)]):
-        if (entry.row.get("type") == "quiz" and isinstance(entry.row.get("quiz"), dict)
-                and entry.row["quiz"].get("quiz_id") == quiz["quiz_id"]):
-            return entry
+    if (entry := published_question(root, task, str(quiz["quiz_id"]))) is not None:
+        return entry
     # On a miss, the question could still be in the unread history preceding its answer.
     ds.require_imported(root, "chat", upper=answer_seq)
     if dp.skipped_between(root, "chat", upper=answer_seq):
@@ -1075,18 +1158,123 @@ def history_row_destination(root, row, thread_id, project_ids, source_refs, room
         if len(homes) != 1:
             return {"state": "ambiguous" if homes else "unavailable"}
         home = homes[0]
-    # Every room's identity, then only the home's routing: a malformed unrelated room blocks nothing.
-    if home != 1 and reserved_project_for_chat(root, home).get("lifecycle") != "active":
+    # Every room's identity, then only the home's routing: a malformed unrelated room blocks nothing. A strict
+    # resolver lent one read's registry (``reserved``) checks the home in it.
+    lent = getattr(rooms, "reserved", None)
+    if home != 1 and reserved_project_for_chat(root, home, rows=None if lent is None else list(lent.values())).get(
+            "lifecycle") != "active":
         return {"state": "unavailable"}
     return {"state": "found" if home == thread_id else "moved", "chat_id": home}
 
 
-def origin_projection(root, ref):
-    """A projected origin keeps its real source address, never hashes view fields."""
+def answered_question(row, typed=None) -> tuple | None:
+    """``(asker, quiz id)`` of the question an answer of my human's answered, as the host recorded it, never read from
+    words: a late answer's ``late_answer``, a recorded answer row's own card, else, for an opening whose row is gone,
+    its binding's retained card fact (``typed``: ``source_input``). None for any other row."""
+    from ouroboros.owner_quiz import late_answer_ref
+    from ouroboros.owner_relay import quotable_owner_row
+
+    row = row or {}
+    late = late_answer_ref(row.get("late_answer")) if row.get("direction") == "in" else None
+    if late:
+        return late["task_id"], late["quiz_id"]
+    typed = typed if isinstance(typed, dict) and not row else {}
+    key = ((str(row.get("task_id") or ""), str(row["quiz"].get("quiz_id") or ""))
+           if row.get("type") == "quiz_answer" and quotable_owner_row(row) else
+           (str(typed.get("source_task_id") or ""), str(typed.get("quiz_id") or "")))
+    return key if all(key) else None
+
+
+def question_quote(root, chat_id, row, cache=None, *, typed=None) -> dict:
+    """The quote of the question an answer of my human's answered (``answered_question``), for room ``chat_id``
+    showing that answer as its own bubble; ``{}`` when anything it rests on is unknown, the answer staying readable.
+
+    Built when shown, never stored, so rows saved before it get it and no reader of stored rows (room evidence,
+    recall, a model's context) sees it: an owner Reply's reference to the card (``reference_from_row``), its preview
+    the question's first line alone, never its files, marked ``derived_question``. Showing and placing are separate
+    facts, each decided by the authority the quote's press reads (``_strict_room``, once per ``cache``, a read's):
+    this room must be the owner's (Main, a Project) and show the answer (``room_membership``; an opening whose row
+    is gone, by the binding that projects it here), and the question's home must be an available room of his
+    (``history_row_destination``): here, the ordinary quote; elsewhere ``room_label`` names it."""
+    from ouroboros.chat_chain import _row_chat_id
+    from ouroboros.room_membership import room_membership
+
+    cache = {} if cache is None else cache
+    asked = answered_question(row, typed)
+    facts = _strict_room(root, chat_id, cache) if asked and root else None
+    if facts is None or not (chat_id == 1 or chat_id in facts[0]):
+        return {}
+    key = ("question", *asked, chat_id)
+    try:
+        if row and not room_membership(chat_id, *facts)(_row_chat_id(row), row):
+            return {}
+        if key not in cache:
+            cache[key] = _question_quote(root, chat_id, *asked, facts, cache)
+    except (OSError, ValueError, TypeError, KeyError, StoreError):
+        cache[key] = {}
+    return dict(cache[key])
+
+
+def _strict_room(root, chat_id, cache):
+    """``(project ids, source refs, rooms)`` of room ``chat_id`` as the quote's press reads them (the exact read's
+    strict authority, ``gateway.history._project_history_context``), read once per ``cache``: the registry once, lent
+    to the room rule and to the homes it checks; None while that authority cannot be read."""
+    if ("strict_room", chat_id) not in cache:
+        from ouroboros.project_admission import reserved_rooms
+        from ouroboros.project_dialogue import source_refs_for_project
+        from ouroboros.projects_registry import RoomResolver
+
+        try:
+            rows = reserved_rooms(root)
+            rooms = RoomResolver(root, strict=True, reserved={row["id"]: row for row in rows})
+            projects = {row["chat_id"] for row in rows}
+            refs = source_refs_for_project(root, chat_id, bindings=rooms.bindings) if chat_id in projects else []
+            cache[("strict_room", chat_id)] = projects, refs, rooms
+        except (OSError, ValueError, TypeError, KeyError, StoreError):
+            cache[("strict_room", chat_id)] = None
+    return cache[("strict_room", chat_id)]
+
+
+def _question_quote(root, chat_id, asker: str, quiz_id: str, facts, cache) -> dict:
+    from ouroboros.project_facts import project_display_name
+    from ouroboros.utils import strip_markdown
+
+    entry = published_question(root, asker, quiz_id, cache)
+    where = history_row_destination(root, entry.row, chat_id, *facts) if entry is not None else {"state": "absent"}
+    lines = strip_markdown(str(entry.row.get("text") or "")).splitlines() if entry is not None else []
+    title = next((" ".join(line.split()) for line in lines if line.strip()), "")
+    if where["state"] not in {"found", "moved"} or not title:
+        return {}  # nowhere to open it, or no words to show: no "Attachment" stands in for a question's title
+    project = next((row for row in facts[2].reserved.values() if row["chat_id"] == where["chat_id"]), {})
+    if where["state"] == "found":
+        room = {}
+    elif where["chat_id"] == 1:
+        room = {"room_label": "Main", "room_label_kind": "main"}
+    elif display := project_display_name(project.get("name"), project.get("id")):
+        room = {"room_label": display}
+    else:
+        room = {"room_label": "Project", "room_label_kind": "project"}
+    reference = reference_from_row(entry.row, root)
+    for key in ("chars", "attachment_failures"):  # the title alone: the whole card's length and files are not its
+        reference.pop(key, None)
+    return {**reference, **_preview(title), "derived_question": True, **room}
+
+
+def origin_projection(root, ref, chat_id=None, cache=None, *, typed=None):
+    """A projected origin keeps its real source address, never hashes view fields. Shown in Project ``chat_id``, an
+    opening that answered a question quotes it (``question_quote``, with the read's ``cache``): by its own row's
+    record, or, that row gone, by its binding's retained card fact (``typed``: ``source_input``)."""
     from ouroboros.project_dialogue import resolve_owner_message_source
+    from ouroboros.room_membership import binding_origin_allowed
+
     try:
         row = resolve_owner_message_source(root, ref)
     except StoreError:
         return {}
-    from ouroboros.room_membership import binding_origin_allowed
-    return projection_fields(row, root) if row and binding_origin_allowed(ref["chat_id"], row) else {}
+    if row and not binding_origin_allowed(ref["chat_id"], row):
+        return {}
+    fields = projection_fields(row, root) if row else {}
+    if chat_id is not None and not fields.get("reply_to") and (
+            quote := question_quote(root, chat_id, row, cache, typed=typed)):
+        fields["reply_to"] = quote
+    return fields

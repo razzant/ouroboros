@@ -71,6 +71,9 @@ class ChatReplyReference(TypedDict, total=False):
     work_task_id: str  # addressed work, not the quoted author; empty means the work could not be resolved
     ordinary: Literal[True]  # the host proved the quoted row addresses no work; with neither key it could not tell
     target_home: Literal["work", "room", "none"]  # what decides the quoted row's room; an older reference lacks it
+    derived_question: Literal[True]  # host-derived question quote on an owner answer bubble without its own Reply, built per room on read or single-room live frame; never stored, no owner Reply
+    room_label: str  # only with derived_question: Main, the Project's display name, or Project when unnamed, when the question's home is another room
+    room_label_kind: Literal["main", "project"]  # only with derived_question + room_label: built-in chrome (Main or unnamed Project); absent for a user-named Project
     telegram_room_chat_id: int | None  # the owner bot's Reply only: its Project's turn, 0 its chat's own, null refused
     unresolved: bool
 
