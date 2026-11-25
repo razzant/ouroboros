@@ -46,7 +46,7 @@ def test_folded_line_reads_all_related_rows_and_no_unrelated_room_words(tmp_path
     captured = mv.capture_memory_view(tmp_path, task, replace(mv.ROLE_DEFAULTS['integrator'], room_id=str(rooms['beta'])))
     group = next(g for g in captured.conversations if any(r['room_id'] == str(room_id) for r in g['rooms']))
     room = next(r for r in group['rooms'] if r['room_id'] == str(room_id))
-    fold = room['folded']
+    [fold] = room['folds']
     assert fold['count'] == 3
     shown = _fold_line(room)
     assert shown.count(' → ') == (0 if inherited else 1)
@@ -95,6 +95,10 @@ def test_map_separates_display_order_stored_bounds_and_the_finish_that_supplied_
         snapshot = mv.capture_memory_view(tmp_path, task, replace(mv.ROLE_DEFAULTS['integrator'], room_id=str(focus)))
         if focus == rooms['beta']:
             assert f'[{last_reply} → {first_reply}] «Both replies settled.»: 2 words read and folded' in mv.render_room(snapshot)
+            from ouroboros import memory_form_facts as held_facts
+            held = held_facts.holding_room(replace(snapshot, story=[], room=None), mv.FULL_VIEW)
+            unit = next(text for _tokens, text in held['largest'] if text.startswith('read and folded,'))
+            assert f"from='{first_reply}', to='{last_reply}'" in unit  # the reader reads stored order, the label displays
         return memory_composition(mv.snapshot_from_json(mv.snapshot_json(snapshot)), mv.FULL_VIEW)['blocks']['room']['parts']
 
     parts = capture(rooms['beta'])

@@ -1,22 +1,23 @@
-"""A room's considered point and its running work, from captured rows and indexed task facts; no history scan,
-no sealing authority. What considers a room is an act of mine there (``memory_view_conversations``): my own
+"""A room's considering quiet finishes and its running work, from captured rows and indexed task facts; no history
+scan, no sealing authority. What considers a room is an act of mine there (``memory_view_conversations``): my own
 words, a quiet finish, a finish that folded what it read (``fold_read``), a note; never a time and never a wake's
-bare boundary."""
+bare boundary. What each act counts as read is what its work was shown (``memory_reading``)."""
 from ouroboros.dialogue_provenance import row_class
 
 
-def considered_through(entries, lineage):
-    """Last mind-authored quiet finish in stored order, also when its own row is already sealed."""
-    positions = []
-    for _address, row, pos in entries:
+def quiet_finishes(entries, lineage):
+    """The mind-authored quiet finishes in stored order, also those whose own row is already sealed."""
+    found = []
+    for entry in entries:
+        _address, row, pos = entry
         own = row_class(row, pos=pos, **lineage)["author"]["kind"] == "ouroboros"
         canonical = (row.get("summary_kind") == "terminal_root_projection"
                      and row.get("outcome_authority") == "canonical_task_result_after_finalization"
                      and row.get("terminal_origin") == "model_final"
                      and not row.get("subagent_task_id") and row.get("delegation_role") != "subagent")
         if row.get("quiet_finish") is True and (own or canonical):
-            positions.append(pos)
-    return max(positions, default=-1)
+            found.append(entry)
+    return found
 
 
 def running_by_room(root, by_room, notes, bindings, projects):

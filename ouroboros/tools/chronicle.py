@@ -72,6 +72,8 @@ from ouroboros.dialogue_provenance import (memory_row_header, quote_parts, quote
 from ouroboros.knowledge import focus_signature
 from ouroboros.mark_anchors import anchor_problem, describe as describe_anchor
 from ouroboros import memory_fold_receipt as receipts
+from ouroboros.memory_coverage import NotShown, bound_delegated, foldable
+from ouroboros.memory_reading import note_node, note_read, record_of
 from ouroboros.memory_view_account import (quote_line, selection_facts, source_change_lines, told_by, told_map,
                                          told_records)
 from ouroboros.store import StoreError
@@ -276,8 +278,8 @@ def _page_covers_hint(room: str) -> str:
                 "exact note IDs; if available, memory_read(room_id='legacy') lists the room's records.")
     return (f"If available, memory_read(room_id={room!r}, rows=true) prints row addresses; narrow by period or "
             "task_id if needed. Use covers={from, to} only if your page retells the entire inclusive room range. "
-            "Use {task_ids} for selected tasks or {note_ids} for notes. {to} covers all open room rows up to "
-            "that address; {to, conversation: true} covers the conversation's open rows up to it.")
+            "Use {task_ids} for selected tasks or {note_ids} for notes. {to} covers the open room rows up to "
+            "that address; {to, conversation: true} the conversation's; a helper's, those it was shown or read.")
 
 
 def _expand(root: Path, room: str, lineage: Dict[str, Any], *, from_addr: Any = None, to_addr: Any = None,
@@ -426,15 +428,23 @@ def check_quotes(root: Any, quotes: Any) -> Tuple[bool, Optional[int]]:
 def publish_covered_page(root: Path, store: ChronicleStore, author: Dict[str, Any], room: str, text: str,
                          covers_arg: Dict[str, Any], *, quotes: Iterable[Any] = (), expected_sequence: Optional[int] = None,
                          closes_project: str = "", closure_delivery: str = "", lead_rule: Optional[int] = None,
+                         reader: Any = None,
                          ) -> Tuple[PublishResult, Dict[str, Any], Dict[str, Any], Dict[str, Any], List[Any]]:
     """Expand a page's covers (``_expand``) and publish it: ``(result, covers, coverage facts, host stamp, the rows read)``, as
     ``chronicle_write(kind='page')`` and ``close_project`` (its closing note, ``closes_project``: the notice it posts
     after the page, ``closure_delivery``, is linked below it) write one. An unresolved bound raises
-    ``chat_chain.RowAddressError``; covers that name nothing open raise ``ValueError``."""
+    ``chat_chain.RowAddressError``; covers that name nothing open raise ``ValueError``. A delegated writer's covers
+    (``reader``: its tool context) keep only the rows and notes it was shown whole or read and no running work
+    (``memory_coverage.bound_delegated``): ``coverage_facts.left_open`` names the rest, and none left is ``NotShown``."""
     lineage = row_lineage(root)
     covers, facts, rows = _expand(root, room, lineage, from_addr=covers_arg.get("from"), to_addr=covers_arg.get("to"),
                                   task_ids=covers_arg.get("task_ids"), note_ids=covers_arg.get("note_ids"),
                                   conversation=covers_arg.get("conversation") is True)
+    if reader is not None:
+        covers, rows, left = bound_delegated(root, record_of(reader), room, covers, rows, lineage)
+        facts = {**facts, "rows": len(rows), "notes": len(covers["note_ids"]), "left_open": left,
+                 **({"rooms": len(covers["rooms"])} if covers.get("rooms") else {}),
+                 "by_author": dict(sorted(Counter(row_author(r, pos=p, **lineage)["kind"] for _a, r, p in rows).items()))}
     stamp = host_stamp(root, covers["task_ids"], rows=rows)
     resolver = _quote_resolver(root, lineage, {address["row_sha256"]: pos for address, _r, pos in rows})
     label = page_room_label(root, room, rows)
@@ -465,7 +475,12 @@ def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
         result, covers, facts, stamp, rows = publish_covered_page(root, store, author, room, a["text"],
                                                             covers_arg, quotes=a["quotes"] or (),
                                                             expected_sequence=a["expected_sequence"],
+                                                            reader=ctx if author["kind"] == "helper" else None,
                                                             **chronicle_lead_metadata())
+    except NotShown as exc:
+        return _refused(ctx, "not_read", "No page was written: a delegated writer seals only the rows and notes it "
+                        "was shown whole or read; read rows with memory_read(rows=true) and notes with "
+                        "memory_read(node_id=…) first", left_open=exc.left)
     except chat_chain.RowAddressError as exc:
         return _refused(ctx, "target_missing", f"a covers bound does not resolve: {exc.resolution.get('status')}. "
                         + _page_covers_hint(room))
@@ -480,28 +495,20 @@ def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
                           result.record, lambda: receipts.page_lines(result.record, rows)))
 
 
-def _own_or_legacy(record: Optional[Dict[str, Any]], author: Dict[str, Any]) -> bool:
-    """Whether a delegated focus may fold this member: a legacy section or its own draft, never the mind's records.
-
-    A missing id is left to the store's own ``target_missing`` refusal.
-    """
-    if record is None or record.get("kind") == "legacy":
-        return True
-    signer = record.get("author") if isinstance(record.get("author"), dict) else {}
-    return signer.get("kind") == "helper" and isinstance(signer.get("focus"), dict) and (
-        str(signer.get("task_id") or "") == str(author.get("task_id") or ""))
-
-
 def _write_part(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
     members = a["member_ids"]
     if not isinstance(members, list) or not members:
         return _arg_error(ctx, "a part needs member_ids: adjacent records of one lower level of one room")
-    foreign = [str(m) for m in members if author["kind"] == "helper" and not _own_or_legacy(store.get(str(m)), author)]
+    foreign, unshown = foldable(store, author, members, record_of(ctx)) if author["kind"] == "helper" else ([], [])
     if foreign:  # the mind's pages and other writers' records are folded by the integrating mind
         return _refused(ctx, "not_integrator",
                         f"a delegated {author['focus']['role']} folds into its draft part only legacy sections and "
                         "its own drafts; folding other records is the integrating mind's to do, so put it in your "
                         "report. Nothing was written", conflict_ids=foreign)
+    if unshown:  # a legacy section it was never shown whole nor read
+        return _refused(ctx, "not_read", "No part was written: a delegated writer folds only its own drafts and "
+                        "sections it was shown whole or read; read them with memory_read(node_id=…) first",
+                        conflict_ids=unshown)
     room = a["room_id"]
     if room is None or str(room).strip() == "":
         first = store.get(str(members[0]))  # the members' own room unless one is named
@@ -844,7 +851,7 @@ def _read_records(root: Path, room: str, after_seq: int, limit: int) -> str:
     return f"{head}\n{continuation(1, exhausted and len(kept) == 1)}\n{stub}"
 
 
-def _read_rows(root: Path, room: str, bounds: Dict[str, Any], start: int, limit: int) -> str:
+def _read_rows(root: Path, room: str, bounds: Dict[str, Any], start: int, limit: int, ctx: Any = None) -> str:
     """One room's chat rows by address in stored order: from/to and ``next: from=`` bound stored positions
     (``chat_chain.iter_room_rows``). A room holding imported earlier messages reads by send time in its
     view and ``chat_history``; here they stand where they were stored, and every page names the order.
@@ -890,6 +897,9 @@ def _read_rows(root: Path, room: str, bounds: Dict[str, Any], start: int, limit:
         return f"next: from={chat_chain.format_address(kept[k][0])} (same room and filters; {_ROW_ORDER})"
 
     text, shown = _fit(head, texts, exhausted, continuation, limit)
+    total = len(render_row_text(kept[0][1])) if kept else 0  # a first row resumed at ``start`` is one window of it
+    note_read(ctx, room, [(*kept[i], texts[i]) for i in range(bool(offset), shown)], contiguous=not (
+        task_id or bounds.get("period")), window=(kept[0], offset, total, total, texts[0]) if offset and shown else None)
     if shown or not kept:
         return text
     address, row, _pos = kept[0]  # one row larger than a page: its words by character window
@@ -902,7 +912,9 @@ def _read_rows(root: Path, room: str, bounds: Dict[str, Any], start: int, limit:
     end = min(begin + room_left, len(words))
     cont = (f"next: from={chat_chain.format_address(address)} start={end} (same room and filters; {_ROW_ORDER})"
             if end < len(words) else after)
-    return f"{head}\n{cont}\n{header} (chars {begin}–{end} of {len(words)}) {words[begin:end]}"
+    piece = f"{header} (chars {begin}–{end} of {len(words)}) {words[begin:end]}"
+    note_read(ctx, room, [], contiguous=False, window=(kept[0], begin, end, len(words), piece))
+    return f"{head}\n{cont}\n{piece}"
 
 
 def _source_section(src: Dict[str, Any]) -> str:
@@ -1076,23 +1088,10 @@ def _groups(root: Path, store: ChronicleStore) -> List[Dict[str, Any]]:
 
 
 def _read_owed(root: Path, store: ChronicleStore, start: int, limit: int) -> str:
-    """The conversations whose words no page holds (``memory_waiting``'s class), oldest first, each with the rooms
-    with a recorded word of my human or reply of mine; rooms of other people alone carry no page debt."""
-    from ouroboros import memory_view as mv, memory_view_conversations as conversations
+    """The conversations whose words no page holds (``memory_waiting.owed_listing``), oldest first."""
+    from ouroboros.memory_waiting import owed_listing
 
-    owed = conversations.owed(_groups(root, store))
-
-    def whole(item):  # one page over every room of the conversation, held by the room of its newest row
-        room, newest = item["newest"]
-        return (f"  seal it whole: chronicle_write(kind='page', room_id='{room}', covers={{'to': '{newest}', "
-                "'conversation': true})") if len(item["group"]["rooms"]) > 1 else ""
-
-    lines = [line for item in owed for line in (conversations.identity_line(item["group"]), whole(item), *(
-        f"  - {room['label']}; open since {mv._minute(room['facts']['earliest'])}; ~{room['facts']['chars']} chars; "
-        f"memory_read(room_id='{room['room_id']}', rows=true); seal: chronicle_write(kind='page', "
-        f"room_id='{room['room_id']}', covers={{'to': '{room['newest']}'}})" for room in item["rooms"])) if line]
-    return _window(f"Conversations whose words no page holds: {len(owed)}", "\n".join(lines), start, limit,
-                   lambda n: f"memory_read(room_id='conversations', start={n})")
+    return _window(*owed_listing(_groups(root, store)), start, limit, lambda n: f"memory_read(room_id='conversations', start={n})")
 
 
 def _read_rooms(root: Path, store: ChronicleStore, start: int, limit: int) -> str:
@@ -1333,9 +1332,10 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
             text = _window(head, body, start, limit, lambda n: f"memory_read(room_id='{room_id}', start={n})")
         elif node_id:
             text = _read_node(root, str(node_id), start, limit, str(revision or ""))
+            note_node(ctx, node_id, text, start)
         elif rows:
             text = _read_rows(root, _room(ctx, root, room_id), {**bounds, "task_id": task_id, "period": period},
-                              start, limit)
+                              start, limit, ctx)
         else:
             text = _read_records(root, _room(ctx, root, room_id), after_seq, limit)
     except _NotActivated as exc:
@@ -1497,7 +1497,7 @@ def chronicle_tools() -> List[ToolEntry]:
         "room_id": room,
         "text": {"type": "string", "description": "The record in my own words. No length limit; it is read back through memory_read pages."},
         "covers": {"type": "object", "additionalProperties": False,
-                   "description": "page: {from, to} row addresses (inclusive), {to} alone (this room's still-open rows up to it), {to, conversation: true} (the still-open rows up to it of every room of that row's conversation — a repository, a channel, a group — each sealed in its own room), {task_ids} (those tasks' rows and bound owner words), or {note_ids} (selected notes of this room, even without open rows). The host expands the exact coverage; it proves no reading, so a page names what it did not re-read. Already sealed members are refused. Pages never release marks.",
+                   "description": "page: {from, to} row addresses (inclusive), {to} alone (this room's still-open rows up to it), {to, conversation: true} (the still-open rows up to it of every room of that row's conversation — a repository, a channel, a group — each sealed in its own room), {task_ids} (those tasks' rows and bound owner words), or {note_ids} (selected notes of this room, even without open rows). The host expands the exact coverage (a helper's: only rows and notes it was shown whole or read); a page names what it did not re-read. Already sealed members are refused. Pages never release marks.",
                    "properties": {"from": address, "to": address, "conversation": {"type": "boolean"},
                                   "task_ids": {"type": "array", "items": string},
                                   "note_ids": {"type": "array", "items": string, "minItems": 1, "uniqueItems": True}}},
