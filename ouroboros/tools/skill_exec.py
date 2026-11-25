@@ -638,8 +638,7 @@ def _skill_review_refusal(ctx: ToolContext, code: str, text: str) -> str:
     return _publish_tool_result(ctx, ToolResult(status=TOOL_CODE_SPECS[code].status, code=code, text=text))
 
 
-def _record_open(drive_root: pathlib.Path, record_id: str) -> bool:
-    """Whether the ledger record a reference names is still pending (open seats); an unknown id is not open."""
+def _record_rules_out_unavailability(drive_root: pathlib.Path, record_id: str) -> bool:
     from ouroboros import review_ledger as ledger
 
     if not record_id:
@@ -647,53 +646,53 @@ def _record_open(drive_root: pathlib.Path, record_id: str) -> bool:
     try:
         record = ledger.load_record(drive_root, record_id)
     except ValueError:
-        return False
-    return bool(record) and str(record.get("state") or "") != "settled"
+        return True
+    return bool(record) and (record.get("state") != "settled"
+                             or (record.get("verdict") or {}).get("aggregate") in ("PASS", "FAIL"))
 
 
 def _earlier_feedback(drive_root: pathlib.Path, skill_name: str, review_state: Any, content_hash: str,
                       review_reference: Any) -> tuple[bool, Dict[str, Any], str]:
-    """``(has feedback, basis, refusal)`` of an author finish. Earlier reviewer feedback is a substantive
-    verdict in ``review.json`` (legacy or projected) or a settled skill record of this skill with findings.
-    Without it the author needs the exact ``review_reference`` a terminal review returned: the lifecycle
-    job that finished without a verdict (its projected record carries the partial feedback, if any; a seat
-    still open there keeps the review running), or a settled ledger record of these bytes that formed no
-    verdict (quorum failed, nothing dispatched, not performed), named by ``record_id`` or ``job_id``."""
+    """Prefer a validated terminal result for these files; keep the earlier-feedback fallback."""
     from ouroboros import review_ledger as ledger
     from ouroboros.review_custody import _row_is_pending
     from ouroboros.skill_review_runner import _read_review_job, review_job_state_path
     from ouroboros.tools.review_skill import settled_skill_records, skill_record_rows
 
     basis = {"surface": "skill", "basis": "reviewed", "content_hash": review_state.reviewed_content_hash or review_state.content_hash}
-    prior = (review_state.status != "pending" and review_state.review_profile != "owner_attested"
-             and bool(review_state.findings or review_state.raw_actor_records or review_state.raw_result))
-    if prior or settled_skill_records(drive_root, skill_name, limit=1):
-        return True, basis, ""
     refusal = ("SKILL_REVIEW_ERROR: author finish needs prior reviewer feedback or the exact review_reference "
                "returned by a terminal review that formed no verdict (quorum failed, nothing dispatched) or gave "
                "partial feedback. A review still running is not unavailable.")
+
+    def earlier() -> tuple[bool, Dict[str, Any], str]:
+        prior = (review_state.status != "pending" and review_state.review_profile != "owner_attested"
+                 and bool(review_state.findings or review_state.raw_actor_records or review_state.raw_result))
+        return (True, basis, "") if prior or settled_skill_records(drive_root, skill_name, limit=1) else (False, basis, refusal)
+
     supplied = review_reference if isinstance(review_reference, dict) else {}
     reference = str(supplied.get("record_id") or supplied.get("job_id") or "")
     supplied_hash = str(supplied.get("content_hash") or "")
-    if not reference or not supplied_hash:
-        return False, basis, refusal
+    previous = earlier() if not reference or supplied_hash != content_hash else None
+    if not reference or not supplied_hash or (previous and previous[0]):
+        return previous or earlier()
     job = _read_review_job(review_job_state_path(drive_root, skill_name))
     if (reference in (str(job.get("job_id") or ""), str(job.get("record_id") or "")) and job.get("finished_at")
             and job.get("skill") == skill_name and str(job.get("content_hash") or "") == supplied_hash
             and job.get("status") in {"completed", "succeeded", "failed", "interrupted", "cancelled", "timeout"}
             and job.get("review_status") in {"pending", "failed", "interrupted", "cancelled", "timeout"}):
-        # The job ended, the wave may not have: a record still open (its author left; a seat still answers)
-        # is a review running, which the ledger knows and which is never "unavailable" (opus R1-2).
-        if _record_open(drive_root, str(supplied.get("record_id") or job.get("record_id") or "")):
-            return False, basis, refusal
+        record_id = str(job.get("record_id") or "")
+        if _record_rules_out_unavailability(drive_root, record_id):
+            return previous or earlier()
         actors = ([actor for actor in (review_state.raw_actor_records or []) if isinstance(actor, dict)]
-                  if review_state.content_hash == supplied_hash else [])
+                  if review_state.status == "pending" and review_state.content_hash == supplied_hash
+                  and (not record_id or review_state.record_id == record_id) else [])
         feedback = [item for actor in actors for item in (actor.get("parsed_items") or [])
                     if isinstance(item, dict) and item.get("verdict") in {"PASS", "FAIL"}]
         if not feedback and any(_row_is_pending(actor) for actor in actors):
-            return False, basis, refusal
+            return previous or earlier()
         found = {"surface": "skill", "basis": "partial_feedback" if feedback else "unavailable",
-                 **{key: job[key] for key in ("job_id", "content_hash", "status", "review_status", "finished_at")}}
+                 **{key: job[key] for key in ("job_id", "content_hash", "status", "review_status", "finished_at")},
+                 **({"record_id": record_id} if record_id else {})}
         if feedback:
             found["feedback"] = feedback
         return True, found, ""
@@ -707,12 +706,13 @@ def _earlier_feedback(drive_root: pathlib.Path, skill_name: str, review_state: A
             continue
         aggregate = str((record.get("verdict") or {}).get("aggregate") or "")
         if (record.get("state") != "settled" or aggregate in ("PASS", "FAIL")
+                or record.get("surface") != "skill" or (record.get("subject") or {}).get("skill") != skill_name
                 or str((record.get("subject") or {}).get("tree_sha") or "") != supplied_hash):
             continue
         return True, {"surface": "skill", "basis": "unavailable", "record_id": str(record.get("record_id") or ""),
                       "job_id": job_id, "content_hash": supplied_hash, "status": "completed",
                       "review_status": "pending", "finished_at": str(record.get("ts") or "")}, ""
-    return False, basis, refusal
+    return previous or earlier()
 
 
 def _author_finish_existing_skill_review(
@@ -777,16 +777,18 @@ def _author_finish_existing_skill_review(
     save_review_state(drive_root, skill_name, review_state)
     from ouroboros.review_overrides import note_skill_over_review
     from ouroboros.skill_dependencies import ensure_skill_dependencies
+    from ouroboros.skill_lifecycle_actions import grant_consent_on_admission  # the secret form's waiting allow
     from ouroboros.skill_loader import auto_grant_if_enabled
     from ouroboros.skill_review_runner import _reconcile_extension_payload
 
     loaded.review = review_state
     auto_grant_if_enabled(drive_root, loaded)
     deps_status, deps_error = ensure_skill_dependencies(drive_root, loaded)
-    extension = (_reconcile_extension_payload(ctx, skill_name, drive_root=drive_root,
-                                             repo_path=None, binding=binding)
-                 if loaded.manifest.is_extension() else {})
-    if loaded.enabled:  # on, and accepted by its author without a passed review: named on the work's card
+    def setup():  # the ordinary reload, unless the waiting allow just turned it on (one setup)
+        return _reconcile_extension_payload(ctx, skill_name, drive_root=drive_root, repo_path=None, binding=binding) if loaded.manifest.is_extension() else {}
+    extension = grant_consent_on_admission(drive_root, skill_name, expected_skill=loaded, deps_result=(deps_status, deps_error), normal_setup=setup)
+    extension = setup() if extension is None else extension
+    if (load_bound_skill(binding) or loaded).enabled:  # on now, and accepted by its author without a passed review: named on the work's card
         note_skill_over_review(ctx, skill_name, review_state.gate_for(current_hash), "author_finish")
     return {
         "skill_name": skill_name,

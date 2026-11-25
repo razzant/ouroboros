@@ -185,6 +185,57 @@ def test_quiz_disposition_is_hidden_replay_evidence_across_pages(tmp_path, kind)
     assert ask["quiz"]["options"][1]["recommended"] is True
 
 
+def test_a_project_secret_result_catches_up_main_as_card_evidence(tmp_path):
+    from ouroboros.gateway.chat_search import make_chat_search_endpoint
+    from ouroboros.projects_registry import create_project
+
+    chat = create_project(tmp_path, "secret-room", name="Secret room")["chat_id"]
+    other = create_project(tmp_path, "other-room", name="Other room")["chat_id"]
+    common = {"chat_id": chat, "task_id": "asker"}
+    fields = {"plugin_name": "fakeplug", "fields": [{"id": "token", "setting_key": "FAKEPLUG_TOKEN"}]}
+    quiz = {"quiz_id": "q", "question": "Secret needed for fakeplug: token.", "options": [],
+            "state": "open", "secret_request": fields}
+    ds.append(tmp_path, "chat", row(0, **common, direction="out", type="quiz", quiz=quiz, text=quiz["question"],
+                                   client_message_id="quiz_publication:asker:q"))
+    answer_at, result_at = "2026-09-12T00:00:01Z", "2026-09-12T00:00:02Z"
+    binding = {"content_hash": "a" * 64, "installation": "b" * 16, "enable": False}
+    keys = ["FAKEPLUG_TOKEN"]
+    outcome = {"event": "secret_filled", "pluginName": "fakeplug", "fields": ["token"], "settings_keys": keys,
+               "at": answer_at, "consumers": [], "allow": {**binding, "state": "deferred", "skill": "fakeplug",
+                   "fields": ["token"], "keys": keys, "at": answer_at, "settled_at": answer_at}}
+    answer = {**quiz, "state": "answered", "publication_chat_id": chat, "request_id": "save-1", "secret_outcome": outcome}
+    ds.append(tmp_path, "chat", {**row(1, **common, direction="system", type="quiz_answer", text="",
+                                      ts=answer_at, quiz=answer, client_message_id="quiz_answer:asker:q"),
+                                 "source": "owner_quiz_answer"})
+    status, prior = request(tmp_path, chat_id="1")
+    assert status == 200
+    [pointer] = [msg for msg in prior["messages"] if msg.get("system_type") == "project_question_pointer"]
+    assert pointer["secret_outcome"]["allow"]["state"] == "deferred"
+
+    readers = [{"name": "fakeplug", "enabled": False, "reads": keys, "granted": keys}]
+    ds.append(tmp_path, "chat", row(2, **common, direction="system", type="secret_allow_result", text="",
+                                   ts=result_at, quiz_id="q", quiz={"quiz_id": "q", "secret_request": fields},
+                                   client_message_id="secret_allow_result:asker:q", result={
+                                       "request_id": "save-1", "binding": binding, "at": result_at,
+                                       "facts": {"state": "granted", "granted_keys": keys}, "consumers": readers}))
+    status, delta = request(tmp_path, chat_id="1", cursor=prior["after_cursor"])
+    assert status == 200
+    [frame] = [msg for msg in delta["messages"] if msg.get("task_id") == "asker"]
+    assert (frame["system_type"], frame["role"], frame["text"], frame["ts"]) == ("quiz_answer", "system", "", result_at)
+    assert frame["quiz"]["quiz_id"] == pointer["quiz_id"] and frame["quiz"]["state"] == "answered"
+    result = frame["quiz"]["secret_outcome"]
+    assert result["allow"]["state"] == "granted" and result["allow"]["granted_keys"] == keys
+    assert result["allow"]["resolved_at"] == result_at and result["consumers"] == readers
+    assert "result" not in frame  # only the question projection is on the wire
+    status, unrelated = request(tmp_path, chat_id=str(other))
+    assert status == 200 and not any(msg.get("task_id") == "asker" for msg in unrelated["messages"])
+    response = asyncio.run(make_chat_search_endpoint(tmp_path)(SimpleNamespace(
+        query_params={"chat_id": str(chat), "q": "fakeplug"})))
+    assert response.status_code == 200
+    assert all(msg.get("system_type") != "secret_allow_result" for
+               msg in json.loads(response.body)["candidates"])
+
+
 @pytest.mark.parametrize("current", ["running", "finalizing", "missing", "future"])
 def test_historical_terminal_never_overrides_current_result_authority(tmp_path, current):
     write(tmp_path / "logs" / "progress.jsonl", [row(0, "progress", task_id="old-task")])

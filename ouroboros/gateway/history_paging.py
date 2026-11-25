@@ -82,6 +82,8 @@ _GAP_NAMES = {"invalid": "malformed_jsonl", "non_object": "invalid_jsonl_row"}
 # renders them before a child's words are routed to its card, and their
 # producers (message_bus ``send_photo`` ...) count every one.
 _STANDALONE_KINDS = DELIVERY_KINDS
+QUESTION_EVIDENCE_KINDS = ("quiz_answer", "quiz_closed", "secret_allow_result")
+QUESTION_HISTORY_KINDS = ("quiz", *QUESTION_EVIDENCE_KINDS)
 # A read around one task (``around=task:<id>``, DESIGN "Room work status") holds a quarter of
 # each stream's quota before the task's earliest row in the room and the rest from it on.
 _AROUND_OLDER_SHARE = 4
@@ -353,7 +355,7 @@ def room_lens(data_dir: pathlib.Path, thread_id: int, project_chat_ids: set, sou
     # inbound candidates still pass the canonical row/room check, including for old rows.
     telegram = tuple(("telegram_inbound_chat", chat) for chat in sorted(project_chat_ids))
     return {"chat": RoomLens((*spoken, *telegram, ("appearance", "room:1"),
-                              ("kind", "quiz"), ("kind", "quiz_answer"), ("kind", "quiz_closed"))),
+                              *(("kind", kind) for kind in QUESTION_HISTORY_KINDS))),
             "progress": RoomLens(tuple(keys))}
 
 
@@ -882,7 +884,7 @@ def _stored_message(row_matches_thread, stored_chat_id, child):
     def message(entry):
         kind = str(entry.get("type") or "")
         return (str(entry.get("direction") or "").lower() in ("out", "system")
-                and kind not in ("routing_options", "quiz_answer", "quiz_closed", "task_summary", "skill_review")
+                and kind not in ("routing_options", *QUESTION_EVIDENCE_KINDS, "task_summary", "skill_review")
                 and not is_a2a_chat_id(entry.get("chat_id", 1))
                 and (str(entry.get("text") or "").strip() not in ("", "\u200b") or kind in _STANDALONE_KINDS)
                 and row_matches_thread(stored_chat_id(entry.get("chat_id"), 1), entry)

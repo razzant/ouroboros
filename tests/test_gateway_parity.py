@@ -82,8 +82,8 @@ from ouroboros.gateway.contracts import (
 )
 from ouroboros.gateway.contracts import ClaudexorPassiveReadError, ClaudexorQuotaResponse
 from ouroboros.gateway.contracts import (
-    SecretConsumer, SecretDecisionRequest, SecretDecisionResponse, SecretEvent, SecretKeyState, SecretOutcome,
-    SecretRequestField, SecretRequestMeta,
+    SecretAllow, SecretAllowRequest, SecretConsumer, SecretDecisionRequest, SecretDecisionResponse, SecretEvent,
+    SecretKeyState, SecretOutcome, SecretRequestField, SecretRequestMeta, SecretSkillFacts,
 )
 from ouroboros.gateway.router import collect_routes
 from ouroboros.gateway.widgets import WidgetFaultRequest, WidgetFaultResponse, WidgetTab, WidgetsResponse
@@ -374,8 +374,8 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
                 UploadResponse, TaskCreateRequest, TaskCreateResponse, AttachmentManifestEntry,
                 DecisionRequest, DecisionResponse, LinkAction, LinksOutbound, QuizOption, QuizOutbound, QuizStateOutbound,
                 # The integration-secret form (showSecretHitl / saveSecretToken) and its metadata.
-                SecretConsumer, SecretDecisionRequest, SecretDecisionResponse, SecretEvent, SecretKeyState,
-                SecretOutcome, SecretRequestField, SecretRequestMeta,
+                SecretAllow, SecretAllowRequest, SecretConsumer, SecretDecisionRequest, SecretDecisionResponse,
+                SecretEvent, SecretKeyState, SecretOutcome, SecretRequestField, SecretRequestMeta, SecretSkillFacts,
                 # widgets-lifecycle W1b: the owner's per-card start-mode override is checked field by field.
                 UiPreferencesResponse, DesktopAutostartResponse,
                 ActiveDirectTurn, ActiveChatActivity, TypingOutbound,

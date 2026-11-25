@@ -300,7 +300,8 @@ def test_save_writes_settings_only_and_delivers_metadata_only_secret_filled(env)
     assert 'secret_filled: {"pluginName": "fakeplug", "fields": ["botToken"]}' in mail["text"]
     assert "saved it to Settings (FAKEPLUG_TOKEN)" in mail["text"] and "do not ask for it here" in mail["text"]
     assert "Saving is not a connection" in mail["text"]
-    assert "its grant does not cover FAKEPLUG_TOKEN" in mail["text"]
+    assert ("fakeplug (disabled; requests FAKEPLUG_TOKEN; is not allowed to read FAKEPLUG_TOKEN; "
+            "use Grant access in Skills)") in mail["text"]
     assert "Verbatim" not in mail["text"]
     block = _block(env, quiz_id)
     assert block["secret_outcome"]["event"] == "secret_filled" and "comment" not in block
@@ -374,7 +375,7 @@ def test_replace_while_readers_are_enabled_reports_them_and_grants_nothing(env):
     assert response.status_code == 200 and response.json()["secret_outcome"]["event"] == "secret_replaced"
     assert response.json()["secret_outcome"]["consumers"][0]["enabled"] is True
     [mail] = [entry for entry in _mail(env) if entry.get("kind") == "quiz_answer"]
-    assert "fakeplug (enabled; its grant covers the listed keys)" in mail["text"]
+    assert "fakeplug (enabled; requests FAKEPLUG_TOKEN; is allowed to read FAKEPLUG_TOKEN)" in mail["text"]
     after = grant_status_for_skill(env.root, find_skill(env.root, "fakeplug"))
     assert after["granted_keys"] == before["granted_keys"] and after["missing_keys"] == before["missing_keys"]
     _assert_absent(env, CANARY, texts=[response.text])
@@ -1089,3 +1090,515 @@ createInterface({input: process.stdin}).on('line', line => {
             assert len(starts.read_text().splitlines()) == 2
     finally:
         assert manager.discovery.wait(10)
+
+
+# ------------------------------------------------------------------ Save and allow (the form's explicit allow)
+
+def _admit(env, name="fakeplug"):
+    """These exact files pass an ordinary review (a clean verdict for the current digest)."""
+    from ouroboros.skill_loader import SkillReviewState, find_skill, save_review_state
+
+    skill = find_skill(env.root, name)
+    save_review_state(env.root, name, SkillReviewState(status="clean", content_hash=skill.content_hash))
+    return find_skill(env.root, name)
+
+
+def _review_clean(env, name="fakeplug"):
+    """An ordinary review of the current files, through the lifecycle the Skills page and tasks use."""
+    from ouroboros.skill_loader import SkillReviewState, find_skill, save_review_state
+    from ouroboros.skill_review import SkillReviewOutcome
+    from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
+
+    def review(_ctx, skill_name):
+        skill = find_skill(env.root, skill_name)
+        save_review_state(env.root, skill_name, SkillReviewState(status="clean", content_hash=skill.content_hash))
+        return SkillReviewOutcome(skill_name=skill_name, status="clean", content_hash=skill.content_hash)
+
+    return run_skill_review_lifecycle_blocking(SimpleNamespace(drive_root=env.root, repo_dir=env.root.parent, messages=[]),
+                                               name, review_impl=review, repo_path="")
+
+
+def _allow(env, quiz_id, *, enable=True, content_hash=None, installation=None, fields=("botToken",)):
+    facts = _status(env, quiz_id).json()["skill"]
+    return {"content_hash": facts["content_hash"] if content_hash is None else content_hash,
+            "installation": facts["installation"] if installation is None else installation,
+            "fields": list(fields), "enable": enable}
+
+
+def _allow_body(env, skill, *, enable=True):
+    from ouroboros.skill_grant_follow import allow_installation
+
+    return {"content_hash": skill.content_hash, "installation": allow_installation(env.root, skill),
+            "fields": ["botToken"], "enable": enable}
+
+
+def _save_allow(env, quiz_id, values, *, request_id="r1", allow=None, observed=None):
+    return env.client.post("/api/decisions/secret", json={
+        "request_id": request_id, "decision_id": f"quiz:{TASK}:{quiz_id}", "values": values,
+        "observed": _observed(env, quiz_id) if observed is None else observed,
+        "allow": _allow(env, quiz_id) if allow is None else allow})
+
+
+def _grants(env, name="fakeplug"):
+    from ouroboros.skill_loader import find_skill, grant_status_for_skill
+
+    return grant_status_for_skill(env.root, find_skill(env.root, name))
+
+
+def _switch(env, name="fakeplug"):
+    from ouroboros.skill_loader import skill_state_dir_path
+
+    path = skill_state_dir_path(env.root, name) / "enabled.json"
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def _secret_form_grants(env):
+    path = env.root / "logs" / "events.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    return [row for row in rows if row.get("action") == "skill_grant" and row.get("via") == "secret_form"]
+
+
+def _answers(env):
+    return [entry["text"] for entry in _mail(env) if entry.get("kind") == "quiz_answer"]
+
+
+def _reinstall(env, name="fakeplug"):
+    """A new landing of the same release: a reinstall of exactly these files."""
+    from ouroboros.skill_install_record import write_install_record
+    from ouroboros.skill_loader import find_skill
+
+    write_install_record(env.root, name, {"basis": "review", "source": {"kind": "local", "id": "local"},
+                                          "release": {"digest": find_skill(env.root, name).content_hash}})
+
+
+def test_status_names_the_requests_own_skill_and_its_installation_for_its_allow(env):
+    from ouroboros.skill_grant_follow import allow_installation
+    from ouroboros.skill_loader import find_skill, save_enabled
+
+    quiz_id = _ask(env)
+    skill = find_skill(env.root, "fakeplug")
+    facts = _status(env, quiz_id).json()["skill"]
+    assert facts == {"name": "fakeplug", "available": True, "content_hash": skill.content_hash,
+                     "installation": allow_installation(env.root, skill), "supported": True, "admitted": False,
+                     "granted": [], "waiting": [], "switch": "unset"}
+    assert len(facts["installation"]) == 16
+    _admit(env)
+    save_enabled(env.root, "fakeplug", False, actor="owner_ui")
+    facts = _status(env, quiz_id).json()["skill"]
+    assert facts["admitted"] is True and facts["switch"] == "off"
+    _reinstall(env)  # the same release landed again: another installation
+    assert _status(env, quiz_id).json()["skill"]["installation"] not in ("", facts["installation"])
+
+
+def test_runtime_authority_alone_never_admits_the_shown_files(env, monkeypatch):
+    """Cyber Pro lets reviewed-or-not bytes run by Ouroboros's judgment (``executable_review``); that is no check of
+    the files the owner allows: the press keeps the consent, grants nothing and turns nothing on."""
+    from ouroboros import skill_review_status
+    from ouroboros.skill_loader import find_skill
+
+    monkeypatch.setattr(skill_review_status, "cyber_authority", lambda: True)
+    skill = find_skill(env.root, "fakeplug")
+    assert skill.review.gate_for(skill.content_hash)["executable_review"] is True  # the runtime would run them
+    quiz_id = _ask(env)
+    assert _status(env, quiz_id).json()["skill"]["admitted"] is False
+    allow = _save_allow(env, quiz_id, {"botToken": CANARY}).json()["secret_outcome"]["allow"]
+    assert allow["state"] == "deferred" and allow["reason"] == "not_admitted" and allow["enable_reason"] == "deferred"
+    assert _grants(env)["granted_keys"] == [] and _switch(env) is None
+
+
+def test_save_and_allow_grants_only_the_shown_skill_its_keys_and_turns_it_on(env):
+    from ouroboros.skill_grant_follow import load_receipt
+
+    _write_skill(env.root, "mailer", env="FAKEPLUG_TOKEN", fields="  token: FAKEPLUG_TOKEN")
+    skill = _admit(env)
+    _admit(env, "mailer")
+    quiz_id = _ask(env)
+    response = _save_allow(env, quiz_id, {"botToken": CANARY})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["saved"] is True and body["state"] == "answered" and "allow_job" not in body
+    allow = body["secret_outcome"]["allow"]
+    assert {key: allow[key] for key in ("skill", "fields", "keys", "content_hash", "installation", "enable", "state",
+                                        "enabled")} == {
+        "skill": "fakeplug", "fields": ["botToken"], "keys": ["FAKEPLUG_TOKEN"], "content_hash": skill.content_hash,
+        "installation": _allow_body(env, skill)["installation"], "enable": True, "state": "granted", "enabled": True}
+    assert allow["granted_keys"] == ["FAKEPLUG_TOKEN"] and allow["started_at"] and allow["settled_at"]
+    assert "reason" not in allow
+    assert _settings(env)["FAKEPLUG_TOKEN"] == CANARY
+    assert _grants(env)["granted_keys"] == ["FAKEPLUG_TOKEN"]
+    assert _grants(env, "mailer")["granted_keys"] == []  # no other skill requesting the key gains anything
+    assert _switch(env)["enabled"] is True and _switch(env)["actor"] == "owner_ui" and _switch(env, "mailer") is None
+    assert load_receipt(env.root, "fakeplug")["via"] == "secret_form"
+    readers = {row["name"]: row for row in body["secret_outcome"]["consumers"]}
+    assert readers["fakeplug"]["granted"] == ["FAKEPLUG_TOKEN"] and readers["mailer"]["granted"] == []
+    [mail] = _answers(env)
+    assert ("With the same press the owner allowed fakeplug to read FAKEPLUG_TOKEN and asked to turn it on: granted"
+            in mail)
+    assert "fakeplug was on at the time." in mail and "No other skill was granted anything." in mail
+    assert "Saving is not a connection" not in mail and "Skills that requested them at the time:" in mail
+    assert "fakeplug (was enabled; requested FAKEPLUG_TOKEN; was allowed to read FAKEPLUG_TOKEN)" in mail
+    assert ("mailer (was disabled; requested FAKEPLUG_TOKEN; was not allowed to read FAKEPLUG_TOKEN; "
+            "use Grant access in Skills)") in mail
+    assert any((frame.get("secret_outcome") or {}).get("allow", {}).get("state") == "granted" for frame in env.frames)
+    audit = [json.loads(line) for line in (env.root / "logs" / "events.jsonl").read_text().splitlines()]
+    assert [row["allow"] for row in audit if row.get("action") == "secret_request_save"] == ["granted"]
+    assert [row["state"] for row in _secret_form_grants(env)] == ["granted"]
+
+    replay = _save_allow(env, quiz_id, {"botToken": CANARY}, allow=_allow_body(env, skill), observed={"botToken": False})
+    assert replay.status_code == 200 and replay.json()["duplicate"] is True
+    assert replay.json()["secret_outcome"]["allow"]["state"] == "granted"
+    assert len(_secret_form_grants(env)) == 1  # a repeat neither writes the value again nor grants again
+    assert len(_answers(env)) == 1  # delivered once
+    _assert_absent(env, CANARY, texts=[response.text, replay.text, json.dumps(env.frames, ensure_ascii=False)])
+
+
+def test_an_older_client_save_without_an_allow_only_saves_on_this_server(env):
+    _admit(env)
+    quiz_id = _ask(env)
+    response = _save(env, quiz_id, {"botToken": CANARY})  # the body an older form sends: no allow
+    assert response.status_code == 200 and "allow" not in response.json()["secret_outcome"]
+    assert _grants(env)["granted_keys"] == [] and _switch(env) is None and not _secret_form_grants(env)
+    assert "Saving is not a connection: nothing was granted, enabled" in _answers(env)[0]
+
+
+@pytest.mark.parametrize("enable", [True, False])
+def test_an_off_the_owner_chose_stays_off_and_the_allow_only_grants(env, enable):
+    from ouroboros.skill_loader import save_enabled
+
+    _admit(env)
+    save_enabled(env.root, "fakeplug", False, actor="owner_ui")
+    quiz_id = _ask(env)
+    allow = _save_allow(env, quiz_id, {"botToken": CANARY}, allow=_allow(env, quiz_id, enable=enable)).json()[
+        "secret_outcome"]["allow"]
+    assert allow["state"] == "granted" and _grants(env)["granted_keys"] == ["FAKEPLUG_TOKEN"]
+    assert _switch(env)["enabled"] is False and _switch(env)["actor"] == "owner_ui"
+    if enable:  # a stale form that still offered turning on: the earlier Off stands, said so
+        assert allow["enabled"] is False and allow["enable_reason"] == "owner_off"
+        assert "fakeplug was not turned on: it was turned off, and that choice stands." in _answers(env)[0]
+    else:
+        assert "enabled" not in allow and "enable_reason" not in allow
+
+
+@pytest.mark.parametrize("change", ["files", "installation"])
+def test_an_allow_for_files_or_an_installation_changed_since_the_form_read_them_saves_nothing(env, change):
+    skill = _admit(env)
+    quiz_id = _ask(env)
+    shown = _allow_body(env, skill)
+    if change == "files":
+        (env.root / "skills" / "external" / "fakeplug" / "scripts" / "run.py").write_text("print('changed')\n")
+    else:
+        _reinstall(env)
+    response = _save_allow(env, quiz_id, {"botToken": CANARY}, allow=shown)
+    assert response.status_code == 409 and response.json()["saved"] is False
+    assert response.json()["reason_code"] == "secret_allow_stale"
+    fresh = response.json()["skill"]  # the form re-reads what it would bind to now
+    assert (fresh["content_hash"], fresh["installation"]) != (shown["content_hash"], shown["installation"])
+    assert "FAKEPLUG_TOKEN" not in _settings(env) and _block(env, quiz_id)["state"] == "open"
+    assert _grants(env)["granted_keys"] == [] and not _secret_form_grants(env)
+    _assert_absent(env, CANARY, texts=[response.text])
+
+
+def test_an_unknown_installation_is_never_bound(env, monkeypatch):
+    from ouroboros import skill_grant_follow
+
+    monkeypatch.setattr(skill_grant_follow, "installation_of", lambda *_args: None)  # no folder identity, no record
+    quiz_id = _ask(env)
+    assert _status(env, quiz_id).json()["skill"]["installation"] == ""  # the form offers Save alone
+    response = _save_allow(env, quiz_id, {"botToken": CANARY}, allow=_allow(env, quiz_id, installation="guessed"))
+    assert response.status_code == 409 and response.json()["reason_code"] == "secret_allow_stale"
+    assert "FAKEPLUG_TOKEN" not in _settings(env) and skill_grant_follow.consent_of(env.root, "fakeplug") == {}
+
+
+def test_a_reinstall_while_the_grant_waits_in_the_queue_gets_nothing(env, monkeypatch):
+    from ouroboros import skill_lifecycle_actions
+
+    _admit(env)
+    queued = skill_lifecycle_actions.run_lifecycle_job_blocking
+
+    def reinstall_first(**kwargs):  # the same release lands again while this job waits for the lane
+        _reinstall(env)
+        _admit(env)
+        return queued(**kwargs)
+
+    monkeypatch.setattr(skill_lifecycle_actions, "run_lifecycle_job_blocking", reinstall_first)
+    quiz_id = _ask(env)
+    response = _save_allow(env, quiz_id, {"botToken": CANARY})
+    assert response.status_code == 200 and response.json()["saved"] is True
+    allow = response.json()["secret_outcome"]["allow"]
+    assert allow["state"] == "refused" and allow["reason"] == "installation_changed"
+    assert allow["enabled"] is False and allow["enable_reason"] == "not_allowed"
+    assert _grants(env)["granted_keys"] == [] and _switch(env) is None
+    assert "nothing was granted: it was not the installation the form showed" in _answers(env)[0]
+
+
+@pytest.mark.parametrize("allow", [
+    {"content_hash": "x", "installation": "i", "fields": [], "enable": True},
+    {"content_hash": "x", "installation": "i", "fields": ["botToken", "botToken"], "enable": True},
+    {"content_hash": "x", "installation": "i", "fields": ["botToken"], "enable": "yes"},
+    {"content_hash": "", "installation": "i", "fields": ["botToken"], "enable": True},
+    {"content_hash": "x", "installation": "", "fields": ["botToken"], "enable": True},
+    {"content_hash": "x", "fields": ["botToken"], "enable": True},
+    {"content_hash": "x", "installation": "i", "fields": ["botToken"], "enable": True, "skill": "mailer"},
+    ["botToken"],
+])
+def test_an_allow_names_exactly_the_requested_fields_or_nothing_is_saved(env, allow):
+    quiz_id = _ask(env)
+    response = _save_allow(env, quiz_id, {"botToken": CANARY}, allow=allow)
+    assert response.status_code == 400 and response.json()["reason_code"] == "allow_invalid"
+    assert response.json()["saved"] is False and "FAKEPLUG_TOKEN" not in _settings(env)
+    for action in ("status", "cancel"):
+        refused = env.client.post("/api/decisions/secret", json={
+            "request_id": "s1", "decision_id": f"quiz:{TASK}:{quiz_id}", "action": action, "allow": allow})
+        assert refused.status_code == 400 and refused.json()["reason_code"] == f"{action}_payload_invalid"
+
+
+def test_files_not_admitted_keep_the_consent_until_their_admission_then_grant_once(env):
+    from ouroboros.skill_grant_follow import consent_of
+
+    quiz_id = _ask(env)
+    shown = _allow(env, quiz_id)
+    response = _save_allow(env, quiz_id, {"botToken": CANARY}, allow=shown)
+    assert response.status_code == 200, response.text
+    allow = response.json()["secret_outcome"]["allow"]
+    assert allow["state"] == "deferred" and allow["reason"] == "not_admitted"
+    assert allow["enabled"] is False and allow["enable_reason"] == "deferred"
+    assert _grants(env)["granted_keys"] == [] and _switch(env) is None  # pressing is not a Skip
+    consent = consent_of(env.root, "fakeplug")
+    assert (consent["digest"], consent["installation"]) == (shown["content_hash"], shown["installation"])
+    assert consent["keys"] == ["FAKEPLUG_TOKEN"] and consent["enable"] and "claimed_at" not in consent
+    assert consent["decisions"] == [{"decision_id": f"quiz:{TASK}:{quiz_id}", "request_id": "r1"}]
+    assert CANARY not in json.dumps(consent)
+    assert _status(env, quiz_id).json()["state"] == "answered"
+    [mail] = _answers(env)
+    assert "Those files were not admitted yet, so nothing was granted at the time" in mail
+    assert "consent was recorded to grant it once exactly those files passed a review or were explicitly accepted" in mail
+    assert ("fakeplug was not turned on at the time; it was recorded to turn on with that grant "
+            "unless it was turned off first.") in mail
+    assert "the owner's allow was recorded to wait for those files' admission" in mail
+    assert "Skills that requested them at the time:" in mail
+
+    _review_clean(env)
+    assert _grants(env)["granted_keys"] == ["FAKEPLUG_TOKEN"]
+    assert _switch(env)["enabled"] is True and _switch(env)["actor"] == "owner_ui"
+    outcome = _block(env, quiz_id)["secret_outcome"]
+    fulfilled = outcome["allow"]
+    assert fulfilled["state"] == "granted" and fulfilled["enabled"] is True and fulfilled["resolved_at"]
+    assert fulfilled["settled_at"] and "reason" not in fulfilled and consent_of(env.root, "fakeplug") == {}
+    # The readers are read again with the grant: the card never says granted beside "not allowed yet".
+    assert [row["granted"] for row in outcome["consumers"] if row["name"] == "fakeplug"] == [["FAKEPLUG_TOKEN"]]
+    assert any((frame.get("secret_outcome") or {}).get("allow", {}).get("resolved_at") for frame in env.frames)
+    assert [bool(row.get("fulfilled")) for row in _secret_form_grants(env)] == [False, True]
+    _review_clean(env)  # once: a later review of the same files finds nothing waiting
+    assert len(_secret_form_grants(env)) == 2
+    _assert_absent(env, CANARY, texts=[response.text])
+
+
+@pytest.mark.parametrize("next_read", ["status", "landing", "replacement"])
+def test_a_deferred_grant_survives_a_failed_card_write(env, monkeypatch, next_read):
+    from ouroboros.skill_grant_follow import consent_of, read_consent_outcomes
+    from ouroboros.store import StoreBusy
+
+    quiz_id = _ask(env)
+    decision_id = f"quiz:{TASK}:{quiz_id}"
+    shown = _allow(env, quiz_id)
+    response = _save_allow(env, quiz_id, {"botToken": CANARY}, allow=shown)
+    assert response.json()["secret_outcome"]["allow"]["state"] == "deferred"
+
+    record = sr.record_allow
+    failures = []
+
+    def fail_once(drive, decision, facts, **kwargs):
+        if decision["decision_id"] == decision_id and facts["state"] == "granted" and not failures:
+            failures.append(decision["decision_id"])
+            raise StoreBusy("synthetic temporary card write failure")
+        return record(drive, decision, facts, **kwargs)
+
+    monkeypatch.setattr(sr, "record_allow", fail_once)
+    _review_clean(env)
+    assert failures == [decision_id]
+    assert _block(env, quiz_id)["secret_outcome"]["allow"]["state"] == "deferred"
+    assert _grants(env)["granted_keys"] == ["FAKEPLUG_TOKEN"] and consent_of(env.root, "fakeplug") == {}
+    pending = read_consent_outcomes(env.root)["fakeplug"][decision_id]
+    assert pending["facts"]["state"] == "granted"
+
+    if next_read == "landing":
+        _reinstall(env)
+    elif next_read == "replacement":
+        (env.root / "skills" / "external" / "fakeplug" / "scripts" / "run.py").write_text(
+            "print('next edition')\n", encoding="utf-8")
+        another = _ask(env)
+        receipt = _save_allow(env, another, {"botToken": CANARY_B}).json()
+        assert receipt["secret_outcome"]["allow"]["state"] == "deferred"
+        assert consent_of(env.root, "fakeplug")["digest"] != shown["content_hash"]
+
+    reply = _status(env, quiz_id)
+    allow = reply.json()["secret_outcome"]["allow"]
+    assert reply.status_code == 200 and allow["state"] == "granted"
+    assert allow["installation"] == shown["installation"] and allow["content_hash"] == shown["content_hash"]
+    assert allow["granted_keys"] == ["FAKEPLUG_TOKEN"] and allow["resolved_at"] == pending["at"]
+    assert decision_id not in read_consent_outcomes(env.root).get("fakeplug", {})
+    assert [bool(row.get("fulfilled")) for row in _secret_form_grants(env)].count(True) == 1
+    _assert_absent(env, CANARY, CANARY_B, texts=[reply.text])
+
+
+def test_two_waiting_allows_report_only_the_fields_and_switch_each_press_named(env):
+    _write_skill(env.root, fields="  botToken: FAKEPLUG_TOKEN\n  region: FAKEPLUG_REGION")
+    token, region = _ask(env), _ask(env, fields=("region",))
+    a = _save_allow(env, token, {"botToken": CANARY}, allow=_allow(env, token, enable=False))
+    b = _save_allow(env, region, {"region": CANARY_B}, allow=_allow(env, region, fields=("region",)))
+    assert [response.json()["secret_outcome"]["allow"]["state"] for response in (a, b)] == ["deferred", "deferred"]
+
+    _review_clean(env)
+    first, second = (_status(env, quiz).json()["secret_outcome"]["allow"] for quiz in (token, region))
+    assert set(_grants(env)["granted_keys"]) == {"FAKEPLUG_TOKEN", "FAKEPLUG_REGION"}
+    assert first["skill"] == second["skill"] == "fakeplug" and first["state"] == second["state"] == "granted"
+    assert first["fields"] == ["botToken"] and first["granted_keys"] == ["FAKEPLUG_TOKEN"]
+    assert "enabled" not in first and "enable_reason" not in first
+    assert second["fields"] == ["region"] and second["granted_keys"] == ["FAKEPLUG_REGION"]
+    assert second["enabled"] is True
+    assert [bool(row.get("fulfilled")) for row in _secret_form_grants(env)].count(True) == 1
+
+
+def test_an_off_after_the_consent_cancels_its_turn_on_but_not_its_grant(env):
+    from ouroboros.skill_loader import save_enabled
+
+    quiz_id = _ask(env)
+    assert _save_allow(env, quiz_id, {"botToken": CANARY}).json()["secret_outcome"]["allow"]["state"] == "deferred"
+    save_enabled(env.root, "fakeplug", False, actor="owner_ui")
+    _review_clean(env)
+    fulfilled = _block(env, quiz_id)["secret_outcome"]["allow"]
+    assert fulfilled["state"] == "granted" and fulfilled["enabled"] is False and fulfilled["enable_reason"] == "owner_off"
+    assert _grants(env)["granted_keys"] == ["FAKEPLUG_TOKEN"] and _switch(env)["enabled"] is False
+
+
+@pytest.mark.parametrize("change", ["edit", "landing"])
+def test_other_files_or_a_new_landing_end_the_waiting_consent_and_say_so(env, change):
+    from ouroboros.skill_grant_follow import consent_of
+
+    quiz_id = _ask(env)
+    assert _save_allow(env, quiz_id, {"botToken": CANARY}).json()["secret_outcome"]["allow"]["state"] == "deferred"
+    if change == "edit":  # the admission of other files ends it
+        (env.root / "skills" / "external" / "fakeplug" / "scripts" / "run.py").write_text("print('edited')\n")
+        _review_clean(env)
+    else:  # a reinstall of the same files is a new landing: it ends it at once
+        _reinstall(env)
+        _admit(env)
+        _review_clean(env)
+    ended = _block(env, quiz_id)["secret_outcome"]["allow"]
+    assert ended["state"] == "refused" and ended["reason"] == ("skill_changed" if change == "edit" else "installation_ended")
+    assert ended["enabled"] is False and ended["enable_reason"] == "not_allowed" and ended["resolved_at"]
+    assert consent_of(env.root, "fakeplug") == {} and _grants(env)["granted_keys"] == [] and _switch(env) is None
+    assert [row.get("fulfilled") for row in _secret_form_grants(env)] == [None]  # the press only, never a grant
+
+
+def test_earlier_waiting_allows_survive_later_presses_and_keep_their_results(env):
+    from ouroboros.skill_grant_follow import consent_of
+
+    env.live["task"] = None  # the asker is gone: the ordinary answer delivery settles into history at once
+    quizzes, first_ask = [], None
+    for index in range(17):  # sequential answers, not more than the supported number of open questions
+        quiz_id = _ask(env)
+        if index == 0:  # the ordinary ask row, as the publication flow writes it
+            from supervisor.message_bus import log_chat
+
+            asked = owner_quiz.quiz_states(env.root, TASK)[quiz_id]
+            first_ask = log_chat("out", 1, 0, asked["question"], ts=asked["asked_at"], task_id=TASK,
+                                 record_type="quiz", feed=True, require_write=True,
+                                 client_message_id=f"quiz_publication:{TASK}:{quiz_id}",
+                                 quiz={"quiz_id": quiz_id, "question": asked["question"], "options": [],
+                                       "stake": "", "assumption": "", "wait_for_answer": True, "state": "open",
+                                       "secret_request": dict(asked["secret_request"])})
+        receipt = _save_allow(env, quiz_id, {"botToken": f"{CANARY}-{index}"}, request_id=f"r{index}").json()
+        assert receipt["secret_outcome"]["allow"]["state"] == "deferred"
+        quizzes.append(quiz_id)
+    assert len(consent_of(env.root, "fakeplug")["decisions"]) == len(quizzes)
+    assert [owner_quiz.quiz_states(env.root, TASK)[quiz_id]["secret_outcome"]["allow"]["state"]
+            for quiz_id in quizzes] == ["deferred"] * len(quizzes)  # every wait itself stays current
+    _review_clean(env)
+    assert quizzes[0] not in owner_quiz.quiz_states(env.root, TASK)  # its result outlives the card
+    for quiz_id in quizzes:
+        reply = _status(env, quiz_id)
+        assert reply.status_code == 200
+        assert reply.json()["secret_outcome"]["allow"]["state"] == "granted"
+    assert [bool(row.get("fulfilled")) for row in _secret_form_grants(env)].count(True) == 1
+    from ouroboros.gateway.history import _collect_chat_rows
+
+    rows, _quota = _collect_chat_rows(env.root / "logs" / "chat.jsonl", env.root / "archive", 30,
+                                       lambda *_: True, {}, selected_entries=[first_ask])
+    asked = next(row["quiz"] for row in rows if isinstance(row.get("quiz"), dict)
+                 and row["quiz"].get("quiz_id") == quizzes[0])
+    assert asked["state"] == "answered"
+    assert asked["secret_outcome"]["allow"]["state"] == "granted"
+    assert asked["answer_row_address"]
+
+
+def test_a_consent_an_admission_claimed_and_never_settled_is_unknown_never_granted(env):
+    from ouroboros.skill_grant_follow import allow_installation, claim_consent, consent_of
+    from ouroboros.skill_loader import find_skill
+
+    quiz_id = _ask(env)
+    assert _save_allow(env, quiz_id, {"botToken": CANARY}).json()["secret_outcome"]["allow"]["state"] == "deferred"
+    skill = find_skill(env.root, "fakeplug")
+    assert claim_consent(env.root, skill, allow_installation(env.root, skill))[0] == "claimed"  # then the process ended
+    assert consent_of(env.root, "fakeplug")["claimed_at"]  # its questions stay reachable
+    _review_clean(env)
+    cut = _block(env, quiz_id)["secret_outcome"]["allow"]
+    assert cut["state"] == "unknown" and cut["reason"] == "grant_unconfirmed" and cut["enabled"] is None
+    assert _grants(env)["granted_keys"] == [] and consent_of(env.root, "fakeplug") == {}
+
+
+def test_a_step_that_never_began_resumes_on_its_repeat_and_reads_not_started_after_a_restart(env, monkeypatch):
+    from ouroboros.gateway import secret_decision as sd
+
+    skill = _admit(env)
+    cut = {"on": True}
+    real = sr.run_allow
+
+    def cut_step(drive_root, task_id, quiz_id, **kwargs):  # the process ends before the step begins
+        if cut["on"]:
+            if kwargs.get("reserved"):
+                sr.release_allow(task_id, quiz_id)
+            return _block(env, quiz_id)
+        return real(drive_root, task_id, quiz_id, **kwargs)
+
+    monkeypatch.setattr(sd.sr, "run_allow", cut_step)
+    first, second = _ask(env), _ask(env)
+    for quiz_id in (first, second):
+        response = _save_allow(env, quiz_id, {"botToken": CANARY}, request_id=f"r-{quiz_id}",
+                               allow=_allow_body(env, skill), observed={"botToken": quiz_id == second})
+        assert response.json()["secret_outcome"]["allow"]["state"] == "requested"
+    assert not _answers(env)  # the asker waits for the step
+    cut["on"] = False
+    again = _save_allow(env, first, {"botToken": CANARY}, request_id=f"r-{first}", allow=_allow_body(env, skill),
+                        observed={"botToken": True})
+    assert again.json()["duplicate"] is True and again.json()["secret_outcome"]["allow"]["state"] == "granted"
+    assert len(_secret_form_grants(env)) == 1 and _grants(env)["granted_keys"] == ["FAKEPLUG_TOKEN"]
+    sd.deliver_secret_outcome(env.root, TASK, second, recovery=True)  # after a restart nothing holds it
+    never = _block(env, second)["secret_outcome"]["allow"]
+    assert never["state"] == "refused" and never["reason"] == "not_started" and never["enabled"] is False
+    assert any("nothing was granted: the grant step did not start." in text for text in _answers(env))
+    assert len(_secret_form_grants(env)) == 1
+
+
+def test_a_step_that_started_and_was_cut_is_unknown_and_never_run_again(env, monkeypatch):
+    from ouroboros.gateway import secret_decision as sd
+
+    skill = _admit(env)
+
+    def started_then_cut(drive_root, task_id, quiz_id, **kwargs):  # it claimed the step, then the process ended
+        sr.claim_allow(drive_root, {"decision_id": f"quiz:{task_id}:{quiz_id}"})
+        if kwargs.get("reserved"):
+            sr.release_allow(task_id, quiz_id)
+        return _block(env, quiz_id)
+
+    real = sr.run_allow
+    monkeypatch.setattr(sd.sr, "run_allow", started_then_cut)
+    quiz_id = _ask(env)
+    assert _save_allow(env, quiz_id, {"botToken": CANARY}, allow=_allow_body(env, skill)).json()[
+        "secret_outcome"]["allow"]["state"] == "running"
+    monkeypatch.setattr(sd.sr, "run_allow", real)  # the next process: the owner repeats the same press
+    repeat = _save_allow(env, quiz_id, {"botToken": CANARY}, allow=_allow_body(env, skill), observed={"botToken": False})
+    cut = repeat.json()["secret_outcome"]["allow"]
+    assert repeat.json()["duplicate"] is True and cut["state"] == "unknown" and cut["reason"] == "grant_unconfirmed"
+    assert not _secret_form_grants(env) and _grants(env)["granted_keys"] == [] and _switch(env) is None
+    assert any("whether it was granted is unknown" in text for text in _answers(env))

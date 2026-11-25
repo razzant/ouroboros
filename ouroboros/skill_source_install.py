@@ -485,13 +485,23 @@ def start_review(drive_root: pathlib.Path, name: str, *, repo_dir: Optional[path
 
 
 def settle_pending_updates_at_startup(drive_root: pathlib.Path) -> None:
+    """At startup, in the lane: settle each kept update, then what a restart left of the secret form's allows (a
+    claimed grant step is recorded unknown and never runs again; an unclaimed consent whose exact files are already
+    admitted finishes once; a known result is published to its card)."""
+    from ouroboros.skill_grant_follow import consents_to_recover, recover_consent
+
     root = pathlib.Path(drive_root) / "state" / "skills"
     for path in sorted(root.glob("*/update_backup.json")):
         name = path.parent.name
         try:
-            run_in_lane(drive_root, "update_settle", name, lambda: settle_pending_update(drive_root, name))
+            run_in_lane(drive_root, "update_settle", name, lambda name=name: settle_pending_update(drive_root, name))
         except Exception:
             log.warning("Pending update settlement failed for %s; kept evidence at %s", name, path, exc_info=True)
+    for name in consents_to_recover(drive_root):
+        try:
+            run_in_lane(drive_root, "grant", name, lambda name=name: recover_consent(drive_root, name))
+        except Exception:
+            log.warning("The allow a restart left for %s was not settled", name, exc_info=True)
 
 
 def settle_before_replacement(drive_root: pathlib.Path, name: str) -> None:
