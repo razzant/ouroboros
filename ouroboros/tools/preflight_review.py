@@ -3,8 +3,8 @@
 The tool is ``review_change(subject=worktree, surface=preflight, reviewers=[reviewer])``
 on the system repository, the same action ``commit_reviewed(preflight_reviewer=…)``
 takes, so a preflight has no pipeline of its own: one ledger record, the record's
-reuse, its budget and the code-review allowance it spends with every other
-``review_change`` wave and the commit panel. A ``surface=preflight`` record never answers the
+reuse, its budget and the code-review allowance it spends with ``review_change``'s
+code waves and the commit panel. A ``surface=preflight`` record never answers the
 commit panel (the reuse key carries the surface). ``deterministic_only`` keeps the
 free release metadata and labelled worktree book balance (``commit_gate.release_diagnostics``);
 ``advisory_review`` stays callable under the old name. ``review_status`` is the

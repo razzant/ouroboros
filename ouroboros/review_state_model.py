@@ -73,6 +73,10 @@ class AdvisoryReviewState:
     # history only, never open work; written back unchanged, so an earlier body reading the file after a rollback
     # finds them where it left them.
     retired_review_rows: Dict[str, Any] = field(default_factory=dict)
+    # On the canonical root only: one row per paid code-review wave whose attempt row lives on a task's own drive
+    # (``review_cycles.note_paid_code_wave``), so the wave stays counted after that drive is retired. Accounting
+    # alone: never an attempt of this root, never shown, expired, collected or continued; kept like paid rows.
+    paid_code_waves: List[Dict[str, Any]] = field(default_factory=list)
 
     def latest_attempt(self) -> Optional[CommitAttemptRecord]:
         return self.attempts[-1] if self.attempts else None

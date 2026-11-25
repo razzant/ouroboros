@@ -254,10 +254,10 @@ Ouroboros binds Ouroboros as the author, never the subject repository.
 When the previous blocker was *only* `tests_affected` and the new diff changes
 *only* test files plus the subject's release/version touchpoints (the
 `Ouroboros Body Layer` names the body's), reviewers must focus on verifying
-whether the newly staged tests address the named gap — not search for fresh
-gaps in unchanged code. A new critical finding on this retry round requires a
-new concrete artifact, consistent with the Critical threshold rule below: a
-reformulation of an earlier concern is not a new finding.
+whether the newly staged tests address the named gap, not on hunting fresh
+test gaps in unchanged code. A defect evidenced in the current subject may
+still be raised (Critical threshold rule below); a reformulation of an
+earlier concern is not a new finding.
 
 ### Critical threshold rule (applies to ALL items)
 

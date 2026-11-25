@@ -349,8 +349,8 @@ def format_prompt_code_block(content: str, language: str = "") -> str:
 
 def round_material() -> list:
     """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): the later-round sections
-    rendered over fixed placeholder records in these branches (rebuttal, author questions, earlier rounds with and
-    without the convergence rule). The records are data; their frames and rules count."""
+    rendered over fixed placeholder records in these branches (rebuttal, author questions, one and two earlier
+    rounds). The records are data; their frames and rules count."""
     finding = {"severity": "critical", "tag": "⟨tag⟩", "model": "⟨model⟩", "obligation_id": "⟨id⟩",
                "item": "⟨item⟩", "reason": "⟨reason⟩", "detail": "⟨detail⟩"}
     rounds = [{"attempt": 1, "commit_message": "⟨message⟩", "critical": [finding], "advisory": [finding],

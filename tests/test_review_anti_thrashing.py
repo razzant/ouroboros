@@ -99,7 +99,7 @@ def test_a_later_round_keeps_both_rules_and_restricts_no_new_finding():
     coupling = [{"summary": f"round {number}", "status": "responded"} for number in (1, 2, 3)]
     for out in (triad_hist(rounds), scope_hist(rounds), _build_scope_history_section(coupling)):
         assert _ANTI_THRASHING_RULE_VERDICT in out and _HISTORY_VERIFICATION_ONLY_RULE in out
-        for gone in ("CONVERGENCE RULE", "attempt 3", "new critical findings", "unchanged code"):
+        for gone in ("CONVERGENCE RULE", "attempt 3", "not changed between this attempt", "unchanged code"):
             assert gone not in out, gone
 
 

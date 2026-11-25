@@ -259,28 +259,32 @@ def _durable_admission(parent: Dict[str, Any], child: Dict[str, Any], predecesso
 def continuation_ancestry(drive_root: Any, task_id: str) -> tuple[str, ...]:
     """``task_id`` and the roots it continues, nearest first: what an account that follows a Continue chain reads.
 
-    Backward only, two stored results a hop, never a look at any other root. An episode's own admission, else its
-    metadata, only says where to look; the predecessor's hash-bound ``continued_by`` claim naming that episode
-    decides, and an admission the episode did record must match it (``_durable_admission``, the proof
-    ``verified_work_episodes`` rests on). A hop that cannot be proved (an unreadable result, a claim naming another
-    task, a mismatched admission, the integrity bound) ends the walk at the last proved episode.
+    Backward only, to the origin: one stored result an episode, never a look at any other root, no family bound
+    (a cycle ends it). An episode's admission receipt (its own, else the one kept under its ``metadata``) names the
+    predecessor and must match that predecessor's hash-bound ``continued_by`` claim (``_durable_admission``, the
+    proof ``verified_work_episodes`` rests on); an older episode with no receipt is joined only by a claim that
+    names it and is marked admitted, never by one merely prepared. A hop that cannot be proved (an unreadable
+    result, a claim naming another task, a mismatched receipt) ends the walk at the last proved episode.
     """
     from ouroboros.owner_continue import continued_by_binding
 
     chain = [str(task_id or "")]
     try:
         row = _root_result(drive_root, chain[0])
-        while len(chain) < _WORK_CHAIN_MAX_HOPS:
-            admitted = "continuation_admission" in row
-            holder = row["continuation_admission"] if admitted else row.get("metadata")
-            named = holder.get("binding" if admitted else "continuation") if isinstance(holder, dict) else None
+        while True:
+            hint = (row.get("metadata") or {}).get("continuation") if isinstance(row.get("metadata"), dict) else None
+            hint = hint if isinstance(hint, dict) else {}
+            receipt = row.get("continuation_admission") or hint.get("admission")
+            named = receipt.get("binding") if isinstance(receipt, dict) else hint
             predecessor = named.get("predecessor_task_id") if isinstance(named, dict) else None
             if not isinstance(predecessor, str) or not predecessor or predecessor in chain:
                 break
             parent = _root_result(drive_root, predecessor)
             claim = continued_by_binding(parent)
-            if (claim.get("successor_task_id") != chain[-1] or claim.get("predecessor_task_id", predecessor) != predecessor
-                    or (admitted and _durable_admission(parent, row, predecessor) is None)):
+            if claim.get("successor_task_id") != chain[-1] or claim.get("predecessor_task_id", predecessor) != predecessor:
+                break
+            if (_durable_admission(parent, {"continuation_admission": receipt}, predecessor) is None if receipt
+                    else (parent.get("continued_by") or {}).get("state") != "admitted"):
                 break
             chain.append(predecessor)
             row = parent

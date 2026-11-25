@@ -258,13 +258,13 @@ def test_resolve_root_task_id_ignores_the_followup_chain():
     assert resolve_root_task_id(subtask) == "tree-root"
 
 
-def _paid_row(drive, tool, root, attempt, *, repo, task=None):
+def _paid_row(drive, tool, root, attempt, *, repo, task=None, record="", started=""):
     from ouroboros.review_state import CommitAttemptRecord, make_repo_key, update_state, _utc_now
 
     update_state(pathlib.Path(drive), lambda state: state.attempts.append(CommitAttemptRecord(
         ts=_utc_now(), commit_message="wave", status="reviewed", repo_key=make_repo_key(pathlib.Path(repo)),
         tool_name=tool, task_id=task or root, root_task_id=root, attempt=attempt, phase="review_only", paid=True,
-        review_retry_key=f"{tool}-{root}-{attempt}")))
+        review_retry_key=f"{tool}-{root}-{attempt}", review_record_id=record, started_ts=started)))
 
 
 def test_code_review_spends_one_pool_and_result_and_skill_waves_keep_their_own(tmp_path):
@@ -290,6 +290,92 @@ def test_code_review_spends_one_pool_and_result_and_skill_waves_keep_their_own(t
     assert paid("review_change", root="root-2") == 1 and paid("commit_reviewed", root="root-3") == 0
     assert (paid("review_result"), paid("review_skill")) == (2, 1)
     assert paid("review_result", checkout=other) == 2  # a root's result allowance, wherever the material lives
+
+
+def test_one_wave_is_counted_once_however_many_drives_hold_its_row(tmp_path):
+    """A task's fork can hold a copy of a numbered attempt beside the drive that owns it: the wave's record is its
+    identity, so the copy adds nothing, while a second paid send that reuses the local number stays a second wave."""
+    from ouroboros.tools.commit_gate import count_paid_review_cycles
+
+    repo, canonical = tmp_path / "repo", tmp_path / "data"
+    (repo / ".git").mkdir(parents=True)
+    fork = canonical / "state" / "headless_tasks" / "root-1" / "data"
+    fork.mkdir(parents=True)
+    ctx = types.SimpleNamespace(repo_dir=repo, drive_root=fork, task_id="root-1", _current_review_tool_name="commit_reviewed",
+                                task_metadata={"budget_drive_root": str(canonical)})
+
+    def paid():
+        return count_paid_review_cycles(ctx, root_task_id="root-1")
+
+    _paid_row(canonical, "commit_reviewed", "root-1", 1, repo=repo, record="rl-one", started="2026-11-20T10:00:00+00:00")
+    assert paid() == 1
+    _paid_row(fork, "commit_reviewed", "root-1", 1, repo=repo, record="rl-one", started="2026-11-20T12:00:00+00:00")
+    assert paid() == 1, "the same recorded wave, copied with another start time"
+    _paid_row(fork, "commit_reviewed", "root-1", 1, repo=repo, record="rl-two", started="2026-11-21T10:00:00+00:00")
+    assert paid() == 2, "another paid send under the same local number"
+    for drive in (canonical, fork):  # rows older than their record id: an exact copy is one wave
+        _paid_row(drive, "review_change", "root-1", 7, repo=repo, started="2026-11-19T10:00:00+00:00")
+    assert paid() == 3
+
+
+def test_a_paid_commit_wave_on_a_tasks_own_drive_stays_counted_after_that_drive_is_retired(tmp_path):
+    """The paid stamp of a commit wave on a task's own drive leaves one canonical fact: a Continue successor still
+    counts the wave once its predecessor's drive is retired, a parent counts its child's, and the fact is no attempt
+    of the canonical drive."""
+    from ouroboros.headless import prepare_task_drive
+    from ouroboros.owner_continue import binding_sha
+    from ouroboros.review_dispatch import invoke_review_paid_stamp
+    from ouroboros.review_cycles import note_paid_code_wave
+    from ouroboros.review_state import load_state, make_repo_key, update_state
+    from ouroboros.task_custody import settle_child_drive
+    from ouroboros.task_results import write_task_result
+    from ouroboros.task_store import patch_document
+    from ouroboros.tools import git
+    from ouroboros.tools.commit_gate import count_paid_review_cycles
+
+    repo, canonical = tmp_path / "repo", tmp_path / "data"
+    (repo / ".git").mkdir(parents=True)
+
+    def ctx(task, drive, root=None):
+        return types.SimpleNamespace(repo_dir=repo, drive_root=drive, task_id=task, _current_review_tool_name="commit_reviewed",
+                                     task_metadata={"budget_drive_root": str(canonical), "root_task_id": root or task})
+
+    def buy(author, retry_key):
+        author._current_review_retry_key = retry_key
+        git._install_paid_dispatch_stamp(author, "candidate", 0.0, {"fingerprint": "fp-" + retry_key})
+        invoke_review_paid_stamp(author._review_paid_stamp)
+        for _again in range(2):  # noting the same stamped wave again adds nothing
+            note_paid_code_wave(author, author.drive_root, repo_key=make_repo_key(repo), tool_name="commit_reviewed",
+                                task_id=author.task_id, attempt=1)
+
+    def paid(reader):
+        return count_paid_review_cycles(reader, root_task_id=reader.task_metadata["root_task_id"])
+
+    drive = prepare_task_drive(canonical, "first", "empty")
+    first = ctx("first", drive)
+    buy(first, "wave-1")
+    update_state(drive, lambda state: setattr(state.attempts[0], "review_record_id", "rl-wave-1"))  # as its settlement binds it
+    assert paid(first) == 1, "its own row and the canonical fact are one wave"
+    [fact] = load_state(canonical).paid_code_waves
+    assert (fact["task_id"], fact["root_task_id"], fact["tool_name"]) == ("first", "first", "commit_reviewed")
+    assert load_state(canonical).attempts == [], "the fact is no attempt of the canonical drive"
+
+    write_task_result(canonical, "first", "failed", root_task_id="first", reason_code="llm_api_error", memory_mode="empty",
+                      headless_child_drive_root=str(drive), budget_drive_root=str(canonical))
+    write_task_result(canonical, "second", "running")
+    binding = {"successor_task_id": "second"}
+    patch_document(canonical, "second", lambda row: {**row, "metadata": {"continuation": {"predecessor_task_id": "first"}}})
+    patch_document(canonical, "first", lambda row: {**row, "continued_by": {
+        "successor_task_id": "second", "binding": binding, "binding_sha256": binding_sha(binding), "state": "admitted"}})
+    second = ctx("second", prepare_task_drive(canonical, "second", "empty"))
+    assert paid(second) == 1
+    assert settle_child_drive(canonical, "first", drive, live=lambda _task: False)["status"] == "removed"
+    assert not drive.exists() and paid(second) == 1, "the wave outlives the drive it was bought on"
+
+    child = ctx("child", prepare_task_drive(canonical, "child", "empty"), root="second")
+    buy(child, "wave-2")
+    assert paid(second) == paid(child) == 2, "a child's wave on its own drive is its tree's"
+    assert paid(ctx("stranger", canonical)) == 0
 
 
 @pytest.mark.parametrize("link", ["valid", "tampered", "missing"])

@@ -574,7 +574,7 @@ def test_ancestry_walks_back_over_proved_hops_only_and_reads_no_other_root(tmp_p
     monkeypatch.setattr(task_results, "load_task_result",
                         lambda root, task_id, **kw: reads.append(task_id) or real(root, task_id, **kw))
     assert continuation_ancestry(tmp_path, successor) == (successor, "first")
-    assert reads == [successor, "first"], "two stored results a hop, whatever else the store holds"
+    assert reads == [successor, "first"], "one stored result an episode, whatever else the store holds"
     assert continuation_ancestry(tmp_path, "first") == ("first",)  # an origin continues nothing
     assert continuation_ancestry(tmp_path, "unrelated-3") == ("unrelated-3",)  # an independent task is fresh
     # The admission the successor recorded must match its predecessor's claim: another nonce proves nothing.
@@ -588,5 +588,20 @@ def test_ancestry_walks_back_over_proved_hops_only_and_reads_no_other_root(tmp_p
            metadata={"continuation": {"predecessor_task_id": "first"}})
     assert continuation_ancestry(tmp_path, successor) == (successor, "first")
     claim = real(tmp_path, "first")["continued_by"]
+    # The placement bound on a family is not this walk's: it follows every proved hop and ends on a cycle.
+    monkeypatch.setattr("supervisor.continuation_admission._WORK_CHAIN_MAX_HOPS", 1)
+    _patch(tmp_path, "first", metadata={"continuation": {"predecessor_task_id": successor}})
+    assert continuation_ancestry(tmp_path, successor) == (successor, "first")
+    # A claim that was only prepared (its admission never recorded anywhere) is no link.
+    _patch(tmp_path, "first", continued_by={**claim, "state": "bound"})
+    assert continuation_ancestry(tmp_path, successor) == (successor,)
+    # A receipt kept under the episode's metadata takes part in the proof: matching joins, another nonce does not.
+    _patch(tmp_path, successor, metadata={"continuation": {"predecessor_task_id": "first", "admission": admission}})
+    assert continuation_ancestry(tmp_path, successor) == (successor, "first")
+    _patch(tmp_path, successor, metadata={"continuation": {"predecessor_task_id": "first", "admission": {
+        **admission, "binding": {**admission["binding"], "action_nonce": "another-press"}}}})
+    _patch(tmp_path, "first", continued_by=claim)
+    assert continuation_ancestry(tmp_path, successor) == (successor,)
+    _patch(tmp_path, successor, metadata={"continuation": {"predecessor_task_id": "first"}})
     _patch(tmp_path, "first", continued_by={**claim, "binding_sha256": "tampered"})
     assert continuation_ancestry(tmp_path, successor) == (successor,)

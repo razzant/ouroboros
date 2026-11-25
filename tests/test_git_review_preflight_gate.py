@@ -770,7 +770,8 @@ def _cycle_with_a_look(candidate, monkeypatch, cap):
         # The panel's one wave: the first seat retrieves and answers both parts, the
         # others read the packet (contract A); the ledger's facts the gate records.
         panel.append(message)
-        invoke_review_paid_stamp(ctx._review_paid_stamp)
+        if not getattr(ctx, "_review_reconcile_only", False):  # a collected round sends nothing
+            invoke_review_paid_stamp(ctx._review_paid_stamp)
         rows = _panel_rows()
         texts = {hashlib.sha256(b"BRIEF").hexdigest(): "BRIEF", hashlib.sha256(b"PACKET").hexdigest(): "PACKET"}
         plan = []
@@ -791,10 +792,10 @@ def _cycle_with_a_look(candidate, monkeypatch, cap):
 
     monkeypatch.setattr(git, "_run_parallel_review", reviewer)
 
-    def run(**kwargs):
+    def run(preflight_reviewer="api-scout", **kwargs):
         git._reset_commit_review_state(candidate)
         return git._run_reviewed_stage_cycle(candidate, "candidate", 0, require_release_tag=False,
-                                             preflight_reviewer="api-scout", **kwargs)
+                                             preflight_reviewer=preflight_reviewer, **kwargs)
 
     return look, panel, run
 
@@ -827,11 +828,20 @@ def test_a_performed_preflight_of_the_same_tree_never_answers_the_commit_panel(c
 def test_the_last_wave_of_the_allowance_goes_to_the_panel_and_the_look_is_said_not_performed(candidate, monkeypatch):
     """The look and the panel spend one allowance. With one wave left a new look is not bought: the panel
     reviews, and the commit's preflight fact, its record and the author's notes say the look was not performed
-    for lack of review capacity. With two left both run; a look already paid is reused free beside the last wave."""
+    for lack of review capacity, and the refusal never becomes the checkout's look. With two left both run; a look
+    already paid is reused free beside the last wave; a panel that is only collected leaves the look its wave."""
+    import json
+
     from ouroboros import review_ledger as rl
+    from ouroboros.review_state import make_repo_key, stale_marker_status
+    from ouroboros.tools.preflight_review import _handle_review_status
 
     def paid():
         return commit_gate.count_paid_review_cycles(candidate, root_task_id=candidate.task_id)
+
+    def status():
+        shown = json.loads(_handle_review_status(candidate))
+        return shown["latest_advisory_status"], (shown["preflight"] or {}).get("record_id")
 
     look, panel, run = _cycle_with_a_look(candidate, monkeypatch, 1)
     result = run()
@@ -842,6 +852,7 @@ def test_the_last_wave_of_the_allowance_goes_to_the_panel_and_the_look_is_said_n
     assert rl.load_record(rl.ledger_root(candidate), result["review_reference"]["review_record_id"])["preflight"] == fact
     [note] = [line for line in candidate._review_advisory if "was not performed" in str(line)]
     assert "api-scout" in note and "kept for the commit panel" in note
+    assert status() == ("none", None), "a look that was not sent is no look of this checkout"
 
     # A new intent with room for both buys both, never more than the ceiling.
     monkeypatch.setattr(commit_gate, "review_max_cycles", lambda: 3)
@@ -856,3 +867,22 @@ def test_the_last_wave_of_the_allowance_goes_to_the_panel_and_the_look_is_said_n
     run(goal="a third intent")
     assert len(look.calls) == 2 and len(panel) == 3 and paid() == 5
     assert candidate._commit_preflight == bought
+    # A panel whose completed round this call only collects buys nothing, so the named look takes the last wave.
+    monkeypatch.setattr(commit_gate, "review_max_cycles", lambda: 7)
+    run(preflight_reviewer="", goal="a fourth intent")
+    assert len(panel) == 4 and paid() == 6
+    run(goal="a fourth intent")
+    seen = candidate._commit_preflight
+    assert seen["status"] == "performed" and len(look.calls) == 3 and paid() == 7
+    assert status() == ("fresh", seen["record_id"])
+    # An edit stales that look; a later look the allowance cannot cover leaves it the checkout's look, still stale.
+    (candidate.repo_dir / "change.py").write_text("value = 3\n", encoding="utf-8")
+    subprocess.run(["git", "add", "change.py"], cwd=candidate.repo_dir, check=True)
+    commit_gate._invalidate_advisory(candidate, changed_paths=["change.py"], source_tool="edit_text")
+    assert status() == ("stale", seen["record_id"])
+    monkeypatch.setattr(commit_gate, "review_max_cycles", lambda: 8)
+    run(goal="a fifth intent")
+    assert candidate._commit_preflight["status"] == "not_performed" and len(look.calls) == 3 and paid() == 8
+    assert status() == ("stale", seen["record_id"])
+    assert stale_marker_status(load_state(candidate.drive_root), candidate.drive_root,
+                               make_repo_key(candidate.repo_dir))[0], "the edit's marker still speaks"

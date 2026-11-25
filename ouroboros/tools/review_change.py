@@ -129,7 +129,7 @@ _TEXT_ARGS = ("root", "workspace_root", "subject", "base", "head", "surface", "g
 
 def wave_tool_name(request: Any) -> str:
     """The attempt rows' tool name: result and skill waves count apart; a code wave joins the commit gate's rows
-    in one pool (``commit_gate.paid_review_pool``)."""
+    in one pool (``review_cycles.paid_review_pool``)."""
     surface = str(getattr(request, "surface", "") or "")
     return RESULT_TOOL_NAME if surface == RESULT else SKILL_TOOL_NAME if surface == SKILL else TOOL_NAME
 
@@ -863,7 +863,7 @@ def _words_since_reuse(ctx: ToolContext, record: Dict[str, Any]) -> Dict[str, An
 
 
 def _cycles_exhausted(ctx: ToolContext, wave: _Wave, held: int = 0) -> Optional[Dict[str, Any]]:
-    """The ceiling of this wave's pool (``commit_gate.paid_review_pool``: code review of the root's repository,
+    """The ceiling of this wave's pool (``review_cycles.paid_review_pool``: code review of the root's repository,
     or this root's result or skill waves), ``held`` waves left to a caller about to buy one; a skill wave
     outside any task (the manual lane) meets the same number per content version (owner Q23)."""
     from ouroboros.tools.commit_gate import check_review_cycles_ceiling
@@ -1060,7 +1060,7 @@ def run_review_change(ctx: ToolContext, **args: Any) -> Dict[str, Any]:
     # passes ``host`` and every model call keeps the default.
     chosen_by = str(args.pop("_chosen_by", "") or "ouroboros")
     # The commit gate's look leaves this many of the pool's waves to the panel it runs before (0 for every tool call).
-    cycles_held = int(args.pop("_cycles_held", 0) or 0)
+    cycles_held = int(bool(args.pop("_cycles_held", 0)))  # one panel wave, or none
     request = parse_request(args)
     if request.subject == SKILL and frozen_skill is None:
         raise ReviewChangeArgumentError("subject=skill is skill_review's own: call skill_review for a skill payload")
