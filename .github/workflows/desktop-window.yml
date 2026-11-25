@@ -9,8 +9,10 @@
 # and it runs only the fit's resize: a minimum larger than the screen (WinForms
 # itself limits it on a one-screen runner), the move of a form that hangs over an
 # edge and a form Windows opened maximized are covered by the stand-in test alone.
-# A separate job opens Beautiful Context in a real EdgeChromium window with an
-# invented local archive. It checks the selected project's requests, comparison,
+# A separate job shows the shipped page in a real EdgeChromium window, served by a
+# fixture server with no optional skill installed, and presses Dashboard > Logs
+# "Open recent requests". In the separate Beautiful Context window that opens over
+# an invented local archive it checks the selected project's requests, comparison,
 # token receipt wording and clearing of the comparison on a room switch. Its
 # screenshots and JUnit describe that run, not the installed app or a live provider.
 #

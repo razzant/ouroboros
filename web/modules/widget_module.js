@@ -35,9 +35,11 @@ const faultText = (value, max) => (typeof value === 'string'
 export const WIDGET_FRAME_SANDBOX = 'allow-scripts allow-pointer-lock allow-downloads';
 export const WIDGET_FRAME_ALLOW = 'autoplay; fullscreen; clipboard-write';
 
-function createWidgetFrame() {
+// A frame is named by its card's title, the words the card's head shows (widgets.js, widget_card.js).
+function createWidgetFrame(tab) {
     const iframe = document.createElement('iframe');
     iframe.className = 'widgets-frame';
+    iframe.setAttribute('title', String(tab.title || tab.tab_id || tab.skill));
     iframe.setAttribute('sandbox', WIDGET_FRAME_SANDBOX);
     iframe.setAttribute('allow', WIDGET_FRAME_ALLOW);
     iframe.setAttribute('allowfullscreen', '');
@@ -171,7 +173,7 @@ export async function mountRouteIframeWidget(mount, tab, render, mountSignal = n
     // property, never an attribute string.
     const lease = await openRouteLease(tab, mountSignal);
     if (mountSignal?.aborted) { revokeWidgetAssetLease(lease); return; }
-    const iframe = createWidgetFrame();
+    const iframe = createWidgetFrame(tab);
     iframe.referrerPolicy = 'no-referrer';
     mount.replaceChildren(iframe);
     setFrameHeight(iframe, board ? board.geometry().height : frameHeight(render));
@@ -269,7 +271,7 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
     // The document goes in through the `srcdoc` property (no attribute
     // escaping round-trip of a module-sized payload); the frame carries the
     // shared sandbox / permissions set — nothing that re-exposes the SPA origin.
-    const iframe = createWidgetFrame();
+    const iframe = createWidgetFrame(tab);
     if (assetBase) iframe.referrerPolicy = 'no-referrer';
     board?.starting();
     iframe.srcdoc = srcdoc;

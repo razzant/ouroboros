@@ -17,7 +17,7 @@ A widget written for Ouroboros only works in your interface if your host keeps e
 - **Classic sources:** `GET /api/extensions/{skill}/module/{entry}` answers captured JavaScript text, without caching and with any-origin CORS; network authentication still applies. `409` means no live bundle, `404` no captured file. ESM uses the lease below.
 - **Change signals:**
   - `revision` is the skill's live content hash. A card whose `revision` changed while it runs is stopped (§6) and starts again only as a new card would (§7, §9). `generation` names the live publication: an `entry_type: "module"` card's file lease is bound to it, so in board, Costs and chat mounts its change stops such a card the same way, even with unchanged bytes. Classic cards ignore it.
-  - An `extension_lifecycle` WebSocket frame means "read `GET /api/widgets` again". A card that left the list is stopped.
+  - An `extension_lifecycle` WebSocket frame, or the end of a skill lifecycle job (its `chat` row with `system_type: "skill_lifecycle"` and `lifecycle.phase` `completed`, `failed` or `cancelled`; a catalog install that turns a skill on sends no `extension_lifecycle`), means "read `GET /api/widgets` again". A card that left the list is stopped.
 - **The owner's launch choice:** `GET /api/ui/preferences` returns `widget_start_mode`, keyed `"<skill>:<tab_id>"`. It overrides the card's own `start`, except beside `unreadable: true` (saved preferences the core could not read). `POST /api/ui/preferences` with `{widget_start_mode}` saves it.
 
 For a classic entry, fetch the script with the owner's session, from the page. The builtin host gives up after 25 seconds and shows a retryable error.

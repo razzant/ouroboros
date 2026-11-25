@@ -46,6 +46,7 @@ test('a module frame is heard only on the channel its own hello handed over, and
     const server = serve();
     try {
         const { frame, handlers, dispose, windowPosts } = await moduleFrame();
+        assert.equal(frame.getAttribute('title'), 'face', 'an untitled tab\'s frame is named as its card\'s head: the tab id');
         const emit = (event) => window.emit('message', event);
         // Another window, or the right window with another nonce, offers a port: neither is adopted.
         const foreign = new FakeMessageChannel();
@@ -162,13 +163,13 @@ test('a board frame takes no report from before its latest fresh fit, and every 
     }
 });
 
-async function routeFrame() {
+async function routeFrame(tab = TAB) {
     const card = document.createElement('div');
-    card.setAttribute('data-widget-key', TAB.key);
+    card.setAttribute('data-widget-key', tab.key);
     card.innerHTML = '<div data-widget-status hidden></div><div data-widget-mount></div>';
     const mount = card.querySelector('[data-widget-mount]');
     const handlers = new Set();
-    const dispose = await mountRouteIframeWidget(mount, TAB, { kind: 'iframe', route: 'page' }, null, null, handlers);
+    const dispose = await mountRouteIframeWidget(mount, tab, { kind: 'iframe', route: 'page' }, null, null, handlers);
     const frame = mount.querySelector('iframe');
     frame.contentWindow = { postMessage() { throw new Error('nothing is posted to a route frame window'); } };
     const hello = (lease) => {
@@ -185,9 +186,10 @@ test('a route page proves itself with the lease in its own URL and gets its skil
     const dom = installCardDom();
     const server = serve();
     try {
-        const { frame, handlers, dispose, hello } = await routeFrame();
+        const { frame, handlers, dispose, hello } = await routeFrame({ ...TAB, title: 'Clock face' });
         assert.equal(frame.src, `http://local${LEASE.base_url}page`);
         assert.equal(frame.referrerPolicy, 'no-referrer');
+        assert.equal(frame.getAttribute('title'), 'Clock face', 'a frame is named by its card\'s title');
         const guess = hello('G'.repeat(43));
         guess.send({ type: 'ouro-widget-events', op: 'subscribe' });
         assert.equal(handlers.size, 0, 'a document without the lease is not heard');
