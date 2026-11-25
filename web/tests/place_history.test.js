@@ -519,7 +519,7 @@ test('a changed view rereads the newest page and replaces the shown ranges only 
     assert.equal(f.doc.activeElement, f.q('[data-history-older]'), 'focus stays in the reader');
     f.q('[data-history-older]').click(); await tick();
     assert.equal(requests.at(-1), 'time-order');
-    // Each read says why, for the server's record: the same vocabulary as a room's reads.
+    // Each read says why, which the server counts: the same vocabulary as a room's reads.
     assert.deepEqual(told, [{ reason: 'open', mode: 'newest' }, { reason: 'navigate', mode: 'older' },
         { reason: 'navigate', mode: 'newest', decision: 'view_changed' }, { reason: 'retry', mode: 'newest' },
         { reason: 'navigate', mode: 'older' }]);

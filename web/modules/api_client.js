@@ -589,7 +589,7 @@ export const apiClient = {
      * Independently of socket readiness, a scoped document consumes only a match from the serving generation.
      * `requestedAt` (Date.now() as it was asked for) dates the rows: a question's delivery a live frame stated since
      * is newer than they are (chat_decision observe). `tags` say why the read is made (`reason`, `mode`, `decision`,
-     * `detail`): the server records them, nothing more. */
+     * `detail`): the server counts them, nothing more. */
     chatHistory: async ({ chatId = 1, cursor = null, around = null, signal, tags = null } = {}) => {
         const requestedAt = Date.now();
         const scope = documentScope(globalThis.document);

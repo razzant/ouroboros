@@ -852,9 +852,10 @@ async function landInProject(project, inst, { taskId, quizId, latest, sourceReve
     await acknowledgeProjectAfterPaint(project, inst, { forcePaint, why });
 }
 
-// The data profile a registry answer speaks for (CLIENT_CONTRACT §6): the one it names, else this document's while
-// its socket proves it (ws.js canShowSavedProfile), else none. Its word that a Project is gone takes only that
-// profile's saved text of it (chat_preview.js): the same Project id under another profile keeps its own.
+// The data profile a registry answer speaks for (CLIENT_CONTRACT §6): the one it names, else this document's while it
+// may paint its saved text (ws.js canShowSavedProfile: a fresh document until a socket says otherwise, after a
+// disconnect only a socket that proved it), else none. Its word that a Project is gone takes only that profile's saved
+// text of it (chat_preview.js): the same Project id under another profile keeps its own.
 function registryScope(answer) {
     return answer?.profile_scope ? provenScope(answer.profile_scope)
         : ws.canShowSavedProfile?.() === true ? documentScope(document) : '';

@@ -204,7 +204,7 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
         find('[data-history-status]').textContent = find('[data-history-messages]').childElementCount ? '' : 'No stored messages in these returned ranges.';
     };
     // `replacing`: a loaded range's index, or a newest page that replaces every range once it arrives:
-    // 'chain' (Refresh history) or 'changed' (the shown chain's view changed). `reason`: why, for the server's record.
+    // 'chain' (Refresh history) or 'changed' (the shown chain's view changed). `reason`: why, which the server counts.
     async function loadPage(askedCursor = null, replacing = null, reason = 'navigate') {
         if (closed || busy) return;
         controller?.abort(); controller = new AbortController(); const version = ++generation;

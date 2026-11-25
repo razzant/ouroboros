@@ -74,7 +74,7 @@ export function historyCoverage(recent, pages = []) {
 const navigates = direction => direction === 'around' || direction === 'revisit';
 
 // Why a physical read is made (CLIENT_CONTRACT "Reading history"): `reason`, the selector it sends (`mode`), the gate
-// or fallback leg that chose it (`decision`) and what that leg met (`detail`). The server records them; nothing here
+// or fallback leg that chose it (`decision`) and what that leg met (`detail`). The server counts them; nothing here
 // or there selects by them. A navigation's reason is `navigate` unless its caller names another; empty names go.
 const MODES = { older: 'older', newer: 'page', revisit: 'page', around: 'around', latest: 'newest', recent: 'newest' };
 const why = tags => Object.fromEntries(Object.entries(tags).filter(([, value]) => value));
