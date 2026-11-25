@@ -442,23 +442,28 @@ def test_a_letter_card_keeps_two_same_word_replies_and_reads_the_long_one_whole(
         browser = bundled_browser(pw, engine)
         context = browser.new_context(viewport={"width": 1440, "height": 900},
                                       extra_http_headers={"X-Gallery-Scene": "share.letter"})
-        page = context.new_page()
-        errors = []
-        page.on("pageerror", lambda exc: errors.append(str(exc)))
-        page.goto(f"{server.url}/?scene=share.card")
+        # This probe mounts its own cards; a gallery scene would start an unrelated UI and sign reads with its own scene.
+        page = open_scene(context, f"{server.url}/?bare=1")
         answers = page.evaluate(mount)
         assert [a["words"] for a in answers] == ["Done.", "Done.",
                                                  "These words are too long for this card; this work has them whole."], answers
         assert len({a["letter"] for a in answers}) == 3, "same words, three letters, three notes"
         assert page.evaluate("() => document.querySelector('[data-letter-part=\"question:q1\"] .peer-letter-text').textContent") \
             .find("has not released") >= 0
-        page.click('[data-letter-read="answer"]')
-        page.wait_for_function("""() => {
-            const n = document.querySelector('.peer-letter-card[data-letter-id="L3"][data-letter-part="answer"] .peer-letter-text');
-            return n && n.textContent.startsWith('whole words') && n.textContent.length === 9600;
-        }""")
+        path = "/api/tasks/gallery-share-letter/artifacts/L3.answer.txt"
+        answer = page.locator('#letter-probe [data-letter-id="L3"][data-letter-part="answer"]')
+        with page.expect_response(lambda r: r.request.method == "GET" and r.url == f"{server.url}{path}?letter=L3") as read:
+            answer.locator('[data-letter-read="answer"]').click()
+        response = read.value
+        whole = server.corpus.cards["share"]["letter"]["letter_words"]["L3"]
+        assert response.status == 200, server.requests
+        assert response.headers["content-type"].startswith("text/plain")
+        assert len(whole) == 9600 and response.body() == whole.encode("utf-8")
+        page.wait_for_function("""words => document.querySelector(
+            '#letter-probe [data-letter-id="L3"][data-letter-part="answer"] .peer-letter-text')?.textContent === words
+        """, arg=whole)
         assert page.evaluate("() => document.scrollingElement.scrollWidth - document.scrollingElement.clientWidth") == 0
-        assert not errors, errors
+        assert page.gallery_errors == [], page.gallery_errors
         browser.close()
 
 
