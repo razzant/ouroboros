@@ -124,6 +124,18 @@ def test_web_answer_in_the_owners_own_words_settles_the_card_verbatim(card):
     assert edit[2].endswith("\nAnswered: 1. sqlite — " + "x" * 200 + "…")
 
 
+def test_a_plain_preview_keeps_its_whole_budget_and_says_the_cut():
+    """#4255: in a plain preview the ellipsis is extra, so a cut never costs a unit of text."""
+    telegram_quiz = _load_plugin().telegram_quiz
+    assert telegram_quiz._echo("x" * 200) == "x" * 200  # the budget itself is shown whole
+    assert telegram_quiz._echo("x" * 201) == "x" * 200 + "…"  # one unit over is still a cut
+    smileys = "🙂" * 100  # two UTF-16 units each
+    assert telegram_quiz._echo(smileys) == smileys
+    assert telegram_quiz._echo(smileys + "🙂") == smileys + "…"  # a cut never splits a pair
+    # A total-width caller keeps paying for its marker out of the units it was given.
+    assert telegram_quiz._clip_u16("x" * 300, 10) == "x" * 9 + "…"
+
+
 def test_closed_wait_drops_the_waiting_line_and_keeps_the_card_answerable(card):
     card.send(wait_for_answer=True)
     assert _WAITING_LINE in Client.instances[0].panels[0][1]

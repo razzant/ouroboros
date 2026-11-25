@@ -56,7 +56,6 @@ from ouroboros.owner_source import (_retained_start_quote as _retained_start_quo
 from ouroboros.owner_words import (OWNER_CARD_INPUT, OWNER_PRESS, OWNER_SOURCES, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT,
                                    answered_card, answered_card_reply, attachments_line, carded,
                                    reply_target, scheduled_text_items)
-from ouroboros.question_answers import answer_message_id
 from ouroboros.review_evidence_sections import renders_exactly
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
@@ -652,7 +651,7 @@ def _quiz_answer_consumed_by_predecessor(root: pathlib.Path, task_id: str, resul
     if secret_outcome_block(entry) is not None:
         return False
     from ouroboros.owner_mailbox import mail_read_state
-    from ouroboros.question_answers import custody_proves_read
+    from ouroboros.question_answers import answer_message_id, custody_proves_read
     from ouroboros.task_store import read_document
 
     msg_id = str(entry.get("msg_id") or "")

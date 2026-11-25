@@ -457,7 +457,13 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "review_drive_root", "slot_id_for_row",
     })),
     "ouroboros/loop_round_limits.py": ("ouroboros/loop.py", "_loop", frozenset({
-        "DeliveryCandidate", "_append_or_merge_user_content",
+        "DeliveryCandidate",
+        # The #4247 lane (97ca81c0) re-homed this leaf's four inline finalization
+        # prompts onto the wrap-up rail's one shared tail, so its read moved into
+        # the declared set; it stays late-bound on the loop facade exactly as the
+        # budget leaf's reads of the same name do.
+        "_FORCED_BEST_EFFORT_TAIL",
+        "_append_or_merge_user_content",
         "_append_or_merge_user_message", "_current_delivery_candidate",
         "_emit_checkpoint_event", "_finalize_forced_services",
         "_forced_fallback_result", "_forced_final_answer",
