@@ -145,7 +145,7 @@ One row per key (`settings_defaults.py`). `unset`-default rows (plus `Env-only` 
 | OUROBOROS_ONBOARDING_SNAPSHOT_TIMEOUT_SEC | 45 | Onboarding Claudexor snapshot bound (wedged daemon refuses, never hangs) |
 | OUROBOROS_SETTINGS_DOCUMENT_LOCK_TIMEOUT_SEC | 30 | Owner-write lock bound; contention refuses before transform runs (`owner_settings.py`) |
 | OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC | 2700 | LLM read timeout |
-| OUROBOROS_REVIEW_MAX_CYCLES | "2" | Shared result/commit/skill review cap (`unlimited` = no count cap; `review_cycles.py`, §6) |
+| OUROBOROS_REVIEW_MAX_CYCLES | "2" | Shared result/code/skill review cap (`unlimited` = no count cap; `review_cycles.py`, §6) |
 | OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES | (none) | Alias → `OUROBOROS_REVIEW_MAX_CYCLES` (passes + 1) |
 | OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC | unset | Logical review window (late results stay in custody) |
 | OUROBOROS_REVIEW_MAX_TOKENS | 65536 | Env-only: reviewer output budget (floor 8192) |

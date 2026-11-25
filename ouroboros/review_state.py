@@ -193,6 +193,8 @@ def _load_state_unlocked(
         last_stale_repo_key=str(data.get("last_stale_repo_key", "")),
         last_stale_task_id=str(data.get("last_stale_task_id", "")),
         earlier_stale_markers=_earlier_stale_markers_from(data.get("earlier_stale_markers")),
+        paid_code_waves=[row for row in (data.get("paid_code_waves") if isinstance(data.get("paid_code_waves"), list)
+                                         else []) if isinstance(row, dict)],
         # Empty lists and default counters carry nothing; an earlier body reads their absence as empty. A counter
         # past its default is kept with the lists, so a rollback does not number a new obligation like an old one.
         retired_review_rows=({key: data[key] for key in RETIRED_REVIEW_KEYS if key in data}
@@ -283,6 +285,8 @@ def _save_state_unlocked(
         "last_stale_task_id": state.last_stale_task_id,
         # Only once a marker of another scope was displaced: one scope keeps the legacy shape.
         **({"earlier_stale_markers": earlier_markers} if earlier_markers else {}),
+        # Only once a wave was noted: every other state file keeps its shape.
+        **({"paid_code_waves": waves} if (waves := getattr(state, "paid_code_waves", None)) else {}),
         "saved_at": unchanged_from[1] if unchanged_from is not None else _utc_now(),
     }
     _project_saved_evidence(data.get("attempts"))

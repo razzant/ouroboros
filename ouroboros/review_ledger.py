@@ -586,10 +586,9 @@ def _preflight_heads(drive_root: Any) -> Dict[str, Any]:
         return data
     rows = recent_records(drive_root, limit=50, hot_only=True, surface="preflight")
     data = {"heads": {}, "complete": len(rows) < 50 and not archived_segments_exist(drive_root)}
-    for row in rows:
+    for row in (row for row in rows if (row.get("verdict") or {}).get("aggregate") != VERDICT_NOT_DISPATCHED):
         record_id = str(row.get("record_id") or "")
-        record = load_record(drive_root, record_id)
-        root = str(((record or {}).get("subject") or {}).get("root") or "")
+        root = str(((load_record(drive_root, record_id) or {}).get("subject") or {}).get("root") or "")
         if not root:
             data["complete"] = False
             continue
@@ -599,9 +598,10 @@ def _preflight_heads(drive_root: Any) -> Dict[str, Any]:
 
 
 def _keep_preflight_head(drive_root: Any, payload: Dict[str, Any]) -> None:
-    """Publish under the ledger lock; pruning retains incomplete coverage."""
+    """Publish under the ledger lock; pruning retains incomplete coverage. A look that was not dispatched is no look."""
     path = ledger_dir(drive_root) / PREFLIGHT_HEADS_NAME
-    root = str((payload.get("subject") or {}).get("root") or "") if payload.get("surface") == "preflight" else ""
+    looked = payload.get("surface") == "preflight" and (payload.get("verdict") or {}).get("aggregate") != VERDICT_NOT_DISPATCHED
+    root = str((payload.get("subject") or {}).get("root") or "") if looked else ""
     if path.exists() and not root:
         return
     try:

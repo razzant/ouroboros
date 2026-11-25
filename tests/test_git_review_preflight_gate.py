@@ -748,18 +748,19 @@ def _panel_rows():
              "cost_usd": 0.01} for i, model in enumerate(models, 1)]
 
 
-def test_a_performed_preflight_of_the_same_tree_never_answers_the_commit_panel(candidate, monkeypatch):
-    """The real cycle: the named row's ``surface=preflight`` wave reads the worktree, then the
-    panel still runs over the same tree and writes its own record, which names the look."""
+def _cycle_with_a_look(candidate, monkeypatch, cap):
+    """The real stage cycle under a cycle ceiling: the named row's wave is ``review_change``'s paid stub, the
+    panel's one wave stamps its paid fact and answers. Returns ``(look, panel, run)``; ``run()`` is one call."""
     import hashlib
 
     from ouroboros import review_ledger as rl
+    from ouroboros.review_dispatch import invoke_review_paid_stamp
     from ouroboros.review_ledger import CouplingOutcome
     from ouroboros.tools import review_change as rc
     from tests.test_review_change_tool import Wave
 
     _roster(monkeypatch)
-    monkeypatch.setattr(commit_gate, "review_max_cycles", lambda: None)
+    monkeypatch.setattr(commit_gate, "review_max_cycles", lambda: cap)
     look = Wave()
     monkeypatch.setattr(rc, "run_parallel_review", look)
     monkeypatch.setattr(git, "_run_review_preflight_tests", lambda *a, **kw: None)
@@ -769,6 +770,8 @@ def test_a_performed_preflight_of_the_same_tree_never_answers_the_commit_panel(c
         # The panel's one wave: the first seat retrieves and answers both parts, the
         # others read the packet (contract A); the ledger's facts the gate records.
         panel.append(message)
+        if not getattr(ctx, "_review_reconcile_only", False):  # a collected round sends nothing
+            invoke_review_paid_stamp(ctx._review_paid_stamp)
         rows = _panel_rows()
         texts = {hashlib.sha256(b"BRIEF").hexdigest(): "BRIEF", hashlib.sha256(b"PACKET").hexdigest(): "PACKET"}
         plan = []
@@ -788,9 +791,24 @@ def test_a_performed_preflight_of_the_same_tree_never_answers_the_commit_panel(c
         return None, CouplingOutcome(verdict="PASS", blocked=False, status="responded"), "", []
 
     monkeypatch.setattr(git, "_run_parallel_review", reviewer)
-    git._reset_commit_review_state(candidate)
-    result = git._run_reviewed_stage_cycle(candidate, "candidate", 0, require_release_tag=False,
-                                           preflight_reviewer="api-scout")
+
+    def run(preflight_reviewer="api-scout", **kwargs):
+        git._reset_commit_review_state(candidate)
+        return git._run_reviewed_stage_cycle(candidate, "candidate", 0, require_release_tag=False,
+                                             preflight_reviewer=preflight_reviewer, **kwargs)
+
+    return look, panel, run
+
+
+def test_a_performed_preflight_of_the_same_tree_never_answers_the_commit_panel(candidate, monkeypatch):
+    """The real cycle: the named row's ``surface=preflight`` wave reads the worktree, then the
+    panel still runs over the same tree and writes its own record, which names the look."""
+    import json
+
+    from ouroboros import review_ledger as rl
+
+    look, panel, run = _cycle_with_a_look(candidate, monkeypatch, None)
+    result = run()
     assert [(call.triad, call.coupling) for call in look.calls] == [(["api-scout"], [])]
     assert panel == ["candidate"], "the panel runs after the look, over the same tree"
     fact = candidate._commit_preflight
@@ -801,3 +819,70 @@ def test_a_performed_preflight_of_the_same_tree_never_answers_the_commit_panel(c
     assert [seat["seat_id"] for seat in preflight["rows"]] == ["api-scout"]
     assert preflight["fingerprints"]["reuse_key"] != gate["fingerprints"]["reuse_key"]
     assert gate["preflight"] == fact and result["status"] == "reviewed"  # the panel's PASS returns before Git
+    # The handback says who answered what, in the record's own per-seat words.
+    seats = json.loads(result["message"].split("\n", 1)[1])["seat_verdicts"]
+    assert {seat["seat_id"]: seat["verdict"] for seat in seats} == gate["verdict"]["per_row"]
+    assert set(gate["verdict"]["per_row"].values()) == {"PASS"} and len(seats) == len(_panel_rows())
+
+
+def test_the_last_wave_of_the_allowance_goes_to_the_panel_and_the_look_is_said_not_performed(candidate, monkeypatch):
+    """The look and the panel spend one allowance. With one wave left a new look is not bought: the panel
+    reviews, and the commit's preflight fact, its record and the author's notes say the look was not performed
+    for lack of review capacity, and the refusal never becomes the checkout's look. With two left both run; a look
+    already paid is reused free beside the last wave; a panel that is only collected leaves the look its wave."""
+    import json
+
+    from ouroboros import review_ledger as rl
+    from ouroboros.review_state import make_repo_key, stale_marker_status
+    from ouroboros.tools.preflight_review import _handle_review_status
+
+    def paid():
+        return commit_gate.count_paid_review_cycles(candidate, root_task_id=candidate.task_id)
+
+    def status():
+        shown = json.loads(_handle_review_status(candidate))
+        return shown["latest_advisory_status"], (shown["preflight"] or {}).get("record_id")
+
+    look, panel, run = _cycle_with_a_look(candidate, monkeypatch, 1)
+    result = run()
+    assert look.calls == [] and panel == ["candidate"] and paid() == 1, "one wave, and it is the panel's"
+    fact = candidate._commit_preflight
+    assert (fact["status"], fact["reviewer"], fact["reason"]) == ("not_performed", "api-scout", "review_cycles_exhausted")
+    assert rl.load_record(rl.ledger_root(candidate), fact["record_id"])["verdict"]["aggregate"] == "NOT_DISPATCHED"
+    assert rl.load_record(rl.ledger_root(candidate), result["review_reference"]["review_record_id"])["preflight"] == fact
+    [note] = [line for line in candidate._review_advisory if "was not performed" in str(line)]
+    assert "api-scout" in note and "kept for the commit panel" in note
+    assert status() == ("none", None), "a look that was not sent is no look of this checkout"
+
+    # A new intent with room for both buys both, never more than the ceiling.
+    monkeypatch.setattr(commit_gate, "review_max_cycles", lambda: 3)
+    run(goal="another intent")
+    assert len(look.calls) == 1 and len(panel) == 2 and paid() == 3
+    assert candidate._commit_preflight["status"] == "performed"
+    # A look already paid for is collected free beside the allowance's last wave, which the panel takes.
+    monkeypatch.setattr(commit_gate, "review_max_cycles", lambda: 5)
+    bought = commit_gate.run_commit_preflight(candidate, "api-scout", commit_message="candidate", goal="a third intent",
+                                              scope="", review_rebuttal="")
+    assert bought["status"] == "performed" and len(look.calls) == 2 and paid() == 4
+    run(goal="a third intent")
+    assert len(look.calls) == 2 and len(panel) == 3 and paid() == 5
+    assert candidate._commit_preflight == bought
+    # A panel whose completed round this call only collects buys nothing, so the named look takes the last wave.
+    monkeypatch.setattr(commit_gate, "review_max_cycles", lambda: 7)
+    run(preflight_reviewer="", goal="a fourth intent")
+    assert len(panel) == 4 and paid() == 6
+    run(goal="a fourth intent")
+    seen = candidate._commit_preflight
+    assert seen["status"] == "performed" and len(look.calls) == 3 and paid() == 7
+    assert status() == ("fresh", seen["record_id"])
+    # An edit stales that look; a later look the allowance cannot cover leaves it the checkout's look, still stale.
+    (candidate.repo_dir / "change.py").write_text("value = 3\n", encoding="utf-8")
+    subprocess.run(["git", "add", "change.py"], cwd=candidate.repo_dir, check=True)
+    commit_gate._invalidate_advisory(candidate, changed_paths=["change.py"], source_tool="edit_text")
+    assert status() == ("stale", seen["record_id"])
+    monkeypatch.setattr(commit_gate, "review_max_cycles", lambda: 8)
+    run(goal="a fifth intent")
+    assert candidate._commit_preflight["status"] == "not_performed" and len(look.calls) == 3 and paid() == 8
+    assert status() == ("stale", seen["record_id"])
+    assert stale_marker_status(load_state(candidate.drive_root), candidate.drive_root,
+                               make_repo_key(candidate.repo_dir))[0], "the edit's marker still speaks"

@@ -3,8 +3,8 @@
 Covers the verdict-authoritative and verification-only instructions in the ONE
 shared `build_review_history_section` — as the packet seat (`review.py`) and the
 two-part brief (`review_brief_coupling.py`) both render it — plus the Part-2
-coupling-history block, and that earlier rounds reach the next wave as written,
-with no obligation layer on top.
+coupling-history block, that no round restricts a newly evidenced finding, and
+that earlier rounds reach the next wave as written, with no obligation layer on top.
 """
 import json
 import pathlib
@@ -89,6 +89,18 @@ def test_coupling_history_section_verdict_authoritative():
     # The shared constant is interpolated into the Part-2 history block.
     assert _ANTI_THRASHING_RULE_VERDICT in out
     assert _HISTORY_VERIFICATION_ONLY_RULE in out
+
+
+def test_a_later_round_keeps_both_rules_and_restricts_no_new_finding():
+    """On a third round the packet history, the two-part brief's history and the Part-2 coupling history carry
+    the verdict and verification-only rules and nothing that ties a new critical finding to the round number or
+    to code changed since the previous attempt: a defect evidenced in the current subject may be raised on any round."""
+    rounds = [entry for attempt in (1, 2, 3) for entry in _mk_history(attempt)]
+    coupling = [{"summary": f"round {number}", "status": "responded"} for number in (1, 2, 3)]
+    for out in (triad_hist(rounds), scope_hist(rounds), _build_scope_history_section(coupling)):
+        assert _ANTI_THRASHING_RULE_VERDICT in out and _HISTORY_VERIFICATION_ONLY_RULE in out
+        for gone in ("CONVERGENCE RULE", "attempt 3", "not changed between this attempt", "unchanged code"):
+            assert gone not in out, gone
 
 
 # ---------------------------------------------------------------------------

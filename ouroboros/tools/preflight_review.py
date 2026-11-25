@@ -3,7 +3,8 @@
 The tool is ``review_change(subject=worktree, surface=preflight, reviewers=[reviewer])``
 on the system repository, the same action ``commit_reviewed(preflight_reviewer=…)``
 takes, so a preflight has no pipeline of its own: one ledger record, the record's
-reuse, its budget and its ceiling. A ``surface=preflight`` record never answers the
+reuse, its budget and the code-review allowance it spends with ``review_change``'s
+code waves and the commit panel. A ``surface=preflight`` record never answers the
 commit panel (the reuse key carries the surface). ``deterministic_only`` keeps the
 free release metadata and labelled worktree book balance (``commit_gate.release_diagnostics``);
 ``advisory_review`` stays callable under the old name. ``review_status`` is the
@@ -50,7 +51,8 @@ def _next_step() -> str:
                 "operations stay recorded, and this is not a PASS.")
     return ("When the edits are complete, run commit_reviewed(commit_message='...'): the deterministic checks, "
             "the tests and the review panel run (the outcome returns before any commit); "
-            "preflight_reviewer='<enabled row>' optionally buys one early look first.")
+            "preflight_reviewer='<enabled row>' optionally buys one early look first, from the same paid "
+            "allowance as the panel (a new panel wave keeps the last one; a matching earlier look is reused free).")
 
 
 def _predecessor_commit_rows(ctx, canonical, repo_key, task_filter, tool_name=""):
@@ -211,7 +213,8 @@ _PREFLIGHT_DESCRIPTION = (
     "not; deterministic_only is the free diagnostic form. Reads the system "
     "worktree via review_change(subject=worktree, surface=preflight, reviewers=[reviewer]), also used by "
     "commit_reviewed(preflight_reviewer=...). Informational, never a gate or an answer for the commit panel; "
-    "unchanged worktree reuses its settled record free. No tests here; commit_reviewed runs them. "
+    "unchanged worktree reuses its settled record free; a new look spends the paid code-review allowance "
+    "review_change and the commit panel share. No tests here; commit_reviewed runs them. "
     "deterministic_only=True requires source=worktree|index and returns free release diagnostics plus a separately "
     "labelled worktree book balance instead. Returns a review record or the free diagnostic JSON."
 )

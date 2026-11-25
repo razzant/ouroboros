@@ -382,6 +382,25 @@ def _ledger_seat_actor(seat: Dict[str, Any], record: Dict[str, Any]) -> Dict[str
 _POOL_FACT_KEYS = ("pool", "strictness", "widened_from", "not_reached")
 
 
+def seat_verdicts(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """One compact row per recorded seat for an author's handback: who answered, with which model, and what.
+
+    ``verdict`` is the record's own word for the seat (``verdict.per_row``: PASS, FAIL, ``pending``,
+    ``unanswered``, ``NOT_DISPATCHED``), never reduced again here; ``critical`` counts the criticals of the parts
+    the seat was asked; ``model`` is the observed one, "" while execution is unknown, beside the requested one
+    (``_ledger_seat_actor``, the card's own adapter). An added adviser is marked: heard, never counted."""
+    per_row = (record.get("verdict") or {}).get("per_row") or {}
+    rows = []
+    for seat in record.get("rows") or []:
+        actor = _ledger_seat_actor(seat, record)
+        rows.append({"seat_id": actor["slot_id"], "model": actor["observed_model"],
+                     "requested_model": actor["requested_model"],
+                     "verdict": str(per_row.get(actor["slot_id"]) or actor["semantic_verdict"]),
+                     "critical": sum(answer["critical"] for answer in actor["answers"].values()),
+                     **({"additional": True} if seat.get("additional") else {})})
+    return rows
+
+
 def _seat_name(item: Any) -> str:
     return item if isinstance(item, str) else str(item.get("seat_id") or "") if isinstance(item, dict) else ""
 

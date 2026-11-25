@@ -48,6 +48,9 @@ def _legacy_payload(state):
     # Displaced stale markers are stored only when present: one scope keeps the legacy shape.
     if not data["earlier_stale_markers"]:
         del data["earlier_stale_markers"]
+    # A canonical root's noted paid waves, likewise: a state that holds none keeps its shape.
+    if not data["paid_code_waves"]:
+        del data["paid_code_waves"]
     data["state_version"] = data["schema_version"] = store._STATE_SCHEMA_VERSION
     return json.loads(json.dumps(data, ensure_ascii=False, indent=2))
 
@@ -119,6 +122,11 @@ def test_compact_encoding_preserves_full_legacy_payload_and_nested_evidence(tmp_
     loaded = store._load_state_unlocked(tmp_path, strict_attempt_authority=True)
     assert loaded.attempts[0].triad_raw_results == expected["attempts"][0]["triad_raw_results"]
     assert loaded.retired_review_rows == RETIRED
+    # A noted paid wave is accounting beside the attempts: stored as given, read back whole, never an attempt.
+    wave = {"root_task_id": "root", "repo_key": "/repo", "tool_name": "commit_reviewed", "task_id": "t", "attempt": 1}
+    store.update_state(tmp_path, lambda current: current.paid_code_waves.append(wave))
+    reread = store._load_state_unlocked(tmp_path, strict_attempt_authority=True)
+    assert _payload(tmp_path)["paid_code_waves"] == reread.paid_code_waves == [wave] and len(reread.attempts) == 1
     # Machine JSON is compact; owner-authored settings retain their indentation.
     other = tmp_path / "other.json"
     atomic_write_json(other, {"unchanged": [1, 2]})

@@ -73,6 +73,10 @@ class AdvisoryReviewState:
     # history only, never open work; written back unchanged, so an earlier body reading the file after a rollback
     # finds them where it left them.
     retired_review_rows: Dict[str, Any] = field(default_factory=dict)
+    # On the canonical root only: one row per paid code-review wave whose attempt row lives on a task's own drive
+    # (``review_cycles.note_paid_code_wave``), so the wave stays counted after that drive is retired. Accounting
+    # alone: never an attempt of this root, never shown, expired, collected or continued; kept like paid rows.
+    paid_code_waves: List[Dict[str, Any]] = field(default_factory=list)
 
     def latest_attempt(self) -> Optional[CommitAttemptRecord]:
         return self.attempts[-1] if self.attempts else None
@@ -259,8 +263,8 @@ class AdvisoryReviewState:
     def _trim_attempt_history(self) -> None:
         """Authority-preserving eviction (Q16 fix round, F1): trimming to the
         historical cap may only evict NON-authoritative rows, oldest first.
-        Paid rows are the money ledger ``count_paid_review_cycles`` derives the
-        per-root-task ceiling from — evicting them would let a capped root task
+        Paid rows are the money ledger ``count_paid_review_cycles`` derives each
+        review pool's ceiling from — evicting them would let a capped root task
         loop until the ceiling forgets itself — and verdict-block rows are kept
         with them. Both preserved classes are bounded
         by the money ceiling itself, so only the noise portion (free refusals,

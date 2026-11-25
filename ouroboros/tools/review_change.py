@@ -128,7 +128,8 @@ _TEXT_ARGS = ("root", "workspace_root", "subject", "base", "head", "surface", "g
 
 
 def wave_tool_name(request: Any) -> str:
-    """The attempt rows' tool name: one paid-cycle count per kind of review."""
+    """The attempt rows' tool name: result and skill waves count apart; a code wave joins the commit gate's rows
+    in one pool (``review_cycles.paid_review_pool``)."""
     surface = str(getattr(request, "surface", "") or "")
     return RESULT_TOOL_NAME if surface == RESULT else SKILL_TOOL_NAME if surface == SKILL else TOOL_NAME
 
@@ -817,6 +818,7 @@ def review_result(record: Dict[str, Any], *, reused: bool) -> Dict[str, Any]:
                              "task_id": str(record.get("task_id") or ""),
                              "surface": record.get("surface") if record.get("surface") in SINGLE_QUESTION else "change"},
         "aggregate": str(verdict.get("aggregate") or ""), "per_question": dict(verdict.get("per_question") or {}),
+        "per_row": dict(verdict.get("per_row") or {}),  # each seat's own verdict word, as the record reduced it
         "quorum": dict(verdict.get("quorum") or {}), "panel": dict(record.get("panel") or {}),
         "rows": list(record.get("rows") or []), "subject": dict(record.get("subject") or {}),
         "checklist": {"layer": str(checklist.get("layer") or "core"),
@@ -860,9 +862,10 @@ def _words_since_reuse(ctx: ToolContext, record: Dict[str, Any]) -> Dict[str, An
         "rows": [f"{words_stamp(row)}\n{row['text']}" for row in unseen]}} if unseen else {}
 
 
-def _cycles_exhausted(ctx: ToolContext, wave: _Wave) -> Optional[Dict[str, Any]]:
-    """The shared per-task-tree ceiling of (this root, this kind of review: ``wave_tool_name``); a skill
-    wave outside any task (the manual lane) meets the same number per content version (owner Q23)."""
+def _cycles_exhausted(ctx: ToolContext, wave: _Wave, held: int = 0) -> Optional[Dict[str, Any]]:
+    """The ceiling of this wave's pool (``review_cycles.paid_review_pool``: code review of the root's repository,
+    or this root's result or skill waves), ``held`` waves left to a caller about to buy one; a skill wave
+    outside any task (the manual lane) meets the same number per content version (owner Q23)."""
     from ouroboros.tools.commit_gate import check_review_cycles_ceiling
 
     if wave.request.surface == SKILL and not wave.root_task_id:
@@ -871,20 +874,21 @@ def _cycles_exhausted(ctx: ToolContext, wave: _Wave) -> Optional[Dict[str, Any]]
         return manual_lane_ceiling(ctx, wave)
     probe = SimpleNamespace(**{**vars(ctx), "repo_dir": wave.root,
                                "_current_review_tool_name": wave_tool_name(wave.request)})
-    return check_review_cycles_ceiling(probe, root_task_id=wave.root_task_id)
+    return check_review_cycles_ceiling(probe, root_task_id=wave.root_task_id, held=held)
 
 
 def _refuse_exhausted(ctx: ToolContext, wave: _Wave, exhausted: Dict[str, Any]) -> Dict[str, Any]:
     from ouroboros.review_cycles import emit_review_cycles_exhausted
 
+    held = {"held": int(exhausted["held"])} if exhausted.get("held") else {}  # waves left to the caller's own panel
     emit_review_cycles_exhausted(
         getattr(ctx, "event_queue", None), ctx.drive_root, surface=wave_tool_name(wave.request),
         task_id=str(getattr(ctx, "task_id", "") or ""), cycles_paid=int(exhausted["cycles_paid"]),
         cap=int(exhausted["cap"]), enforcement=wave.enforcement, root_task_id=wave.root_task_id,
-        fingerprint=str(wave.frozen.diff_sha), root=str(wave.root))
+        fingerprint=str(wave.frozen.diff_sha), root=str(wave.root), **held)
     outcome = {"blocked": True, "block_reason": "review_cycles_exhausted",  # ``cap``: the ceiling it met, a raise lifts it
                "dispatch_refusal": {"kind": "review_cycles_exhausted", "message": str(exhausted["message"]),
-                                    "cap": int(exhausted["cap"])}}
+                                    "cap": int(exhausted["cap"]), **held}}
     result = _settle(ctx, wave, wave_facts(ctx, wave, outcome=outcome, forensic={}), outcome)
     result["message"] = str(exhausted["message"])
     return result
@@ -1055,6 +1059,8 @@ def run_review_change(ctx: ToolContext, **args: Any) -> Dict[str, Any]:
     # Who seated this panel. The tool schema has no such argument; the host floor
     # passes ``host`` and every model call keeps the default.
     chosen_by = str(args.pop("_chosen_by", "") or "ouroboros")
+    # The commit gate's look leaves this many of the pool's waves to the panel it runs before (0 for every tool call).
+    cycles_held = int(bool(args.pop("_cycles_held", 0)))  # one panel wave, or none
     request = parse_request(args)
     if request.subject == SKILL and frozen_skill is None:
         raise ReviewChangeArgumentError("subject=skill is skill_review's own: call skill_review for a skill payload")
@@ -1192,7 +1198,7 @@ def run_review_change(ctx: ToolContext, **args: Any) -> Dict[str, Any]:
                 prior = reuse_or_none(ledger_root(ctx), wave.reuse_key, questions=request.author_questions)
                 if prior is not None:
                     return {**review_result(prior["record"], reused=True), **_words_since_reuse(ctx, prior["record"])}
-                exhausted = _cycles_exhausted(ctx, wave)
+                exhausted = _cycles_exhausted(ctx, wave, cycles_held)
                 if exhausted is not None:
                     return _refuse_exhausted(ctx, wave, exhausted)
             with _wave_context(ctx, wave):

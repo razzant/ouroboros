@@ -49,7 +49,6 @@ _MOVED_OWNERS = {
     "load_checklist_layers": review_checklist,
     "load_checklist_section": review_checklist,
     "_ANTI_THRASHING_RULE_VERDICT": review_prompt_text,
-    "_CONVERGENCE_RULE_TEXT": review_prompt_text,
     "_HISTORY_VERIFICATION_ONLY_RULE": review_prompt_text,
     "_OBLIGATION_SUFFIX_RE": review_prompt_text,
     "_make_fence": review_prompt_text,

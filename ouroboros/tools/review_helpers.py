@@ -732,7 +732,6 @@ from ouroboros.tools.review_prompt_text import (  # noqa: E402, F401 -- intentio
     REVIEW_SEVERITY_THRESHOLDS,
     REVIEW_THOROUGHNESS_BLOCK,
     _ANTI_THRASHING_RULE_VERDICT,
-    _CONVERGENCE_RULE_TEXT,
     _HISTORY_VERIFICATION_ONLY_RULE,
     _OBLIGATION_SUFFIX_RE,
     _make_fence,

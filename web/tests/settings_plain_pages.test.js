@@ -265,7 +265,7 @@ test('Permissions and checks: three questions and what it is trusted with, doors
     // The cap is changed where it stands: one press writes its one key, and the pressed option is the chosen one.
     const CAP = 'OUROBOROS_REVIEW_MAX_CYCLES';
     const offered = (shown) => shown.row(CAP).querySelectorAll('[data-setting-value]').map((button) => button.dataset.settingValue);
-    assert.deepEqual([page.row(CAP).querySelector('.ui-row-title').textContent, page.meta(CAP)], ['Max review cycles', 'Paid cycles per task, for each kind of review.']);
+    assert.deepEqual([page.row(CAP).querySelector('.ui-row-title').textContent, page.meta(CAP)], ['Max review cycles', 'Paid cycles per task and kind of review; code review per repository, across Continue.']);
     assert.deepEqual(offered(page), ['1', '2', '3', '5', 'unlimited']);
     assert.equal(page.option(CAP, '2').getAttribute('aria-pressed'), 'true');
     await page.press(page.option(CAP, 'unlimited'));

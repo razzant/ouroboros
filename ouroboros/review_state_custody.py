@@ -353,7 +353,7 @@ def _left_before_launch_still_sends(operation_id: str) -> bool:
 
 def _attempt_history_evictable(item: "CommitAttemptRecord") -> bool:
     """True only for rows the Max-Review-Cycles machinery derives NO authority
-    from. Never evictable: paid rows (the per-root-task money count), rows of
+    from. Never evictable: paid rows (the review pools' money count), rows of
     an attempt still in flight (their upcoming terminal/paid merge must find
     them), and review-VERDICT blocks (legacy rows classify by recorded reason
     via the commit gate's ``attempt_block_class``). Unclassifiable rows are kept — fail toward

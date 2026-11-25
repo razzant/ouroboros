@@ -48,7 +48,8 @@ explicit work-order review obligations.
   counts), then the named row's look, then ONE review wave in which every seat on the panel (the pool
   seats Ouroboros named, with a reason when narrowed), shown the same test execution fact, answers both parts of the brief. The commit
   records its preflight fact: `performed` with the record id, `skipped` for an
-  explicit `skip_advisory_review=True`, `not_performed` when no row was named.
+  explicit `skip_advisory_review=True`, `not_performed` when no row was named or
+  the review allowance left the named row no wave (its `reason`).
   `preflight_reviewer` and `skip_advisory_review=True` are opposite choices
   (`TOOL_ARG_ERROR`); an author continuation dispatches no critic and names no row.
 - Finish all edits first: a worktree mutation after the look marks the recorded
@@ -94,8 +95,9 @@ explicit work-order review obligations.
   earlier review records as written — each seat's answer, the author's
   decisions and rebuttal — under the shared rules of
   `review_prompt_text.build_anti_thrashing_rules_section`: the JSON `"verdict"`
-  field is authoritative; history verifies and never alone grounds a new FAIL;
-  from the third attempt, no new critical finding on unchanged code. One
+  field is authoritative; history verifies and never alone grounds a new FAIL.
+  The round number restricts nothing: a defect evidenced in the current subject
+  may be raised on any round. One
   renderer serves both deliveries (packet prompts via
   `review.py::_review_history_brief`, retrieving briefs via
   `review_brief_coupling.build_retrieving_brief`).
@@ -213,7 +215,7 @@ Ouroboros binds Ouroboros as the author, never the subject repository.
 | 1 | secrets_check | Are secrets, API keys, .env files, credentials present in the diff? | critical |
 | 2 | code_quality | Careful code review: bugs, logic errors, crashes, regressions, race conditions, resource leaks? | critical |
 | 3 | security_issues | Security vulnerabilities an outside input can reach: injection from model, tool, web or skill input; path traversal out of a confinement the code promises; secret leakage to a third party? Defenses against the owner or the subject's own process are not security findings. | critical |
-| 4 | tests_affected | Does the changed behavior lack adequate test coverage? (PASS if only docs/config/memory changed, or if tests already cover the new behavior.) **Critical FAIL requires all three:** (a) name a specific behavior, code path, symbol, or failure scenario that THIS diff introduces or changes; (b) explain why existing or newly staged tests do NOT catch that specific scenario; (c) the gap is concrete, not speculative. Existing tests in any module or layer count when they exercise the changed behavior and would catch the identified failure; module or feature proximity alone is not coverage. Requiring an additional overlapping selector/unit/e2e test is only justified when a second distinct failure mode is named explicitly. Wanting one more test is not a finding. **Surplus is the same finding under the same rules:** a newly staged test whose invariant already has a home, a test that pins wording, source text or shape, a parametrize row that adds no failure mode, a new real-process test for an entry point that already has its witness, a new world, stand or git repository for a scenario an existing seam reaches, or a new test module for an owner that already has one. Name the module to extend; it is critical under the same three-part concreteness (the behaviour, its existing home test, the concrete overlap), advisory otherwise. Retiring such a test is not a weakening. Public contracts, machine-read book shape and architecture boundaries stay pinned. | critical |
+| 4 | tests_affected | Does the changed behavior lack adequate test coverage? (PASS if only docs/config/memory changed, or if tests already cover the new behavior.) **Critical FAIL requires all three:** (a) name a specific behavior, code path, symbol, or failure scenario that THIS diff introduces or changes; (b) explain why existing or newly staged tests do NOT catch that specific scenario; (c) the gap is concrete, not speculative. Existing tests in any module or layer count when they exercise the changed behavior and would catch the identified failure; module or feature proximity alone is not coverage. Requiring an additional overlapping selector/unit/e2e test is only justified when a second distinct failure mode is named explicitly. Wanting one more test is not a finding. **Surplus is an advisory finding:** a newly staged test whose invariant already has a home, a test that pins wording, source text or shape, a parametrize row that adds no failure mode, a new real-process test for an entry point that already has its witness, a new world, stand or git repository for a scenario an existing seam reaches, or a new test module for an owner that already has one. Name the module to extend. A test that passes with the changed behaviour broken, and an existing test weakened, deleted or skipped without the diff covering what it pinned, are coverage gaps under the rule above, not surplus. Retiring a surplus test is not a weakening. Public contracts, machine-read book shape and architecture boundaries stay pinned. | critical |
 | 5 | architecture_doc | Did the change REPLACE the current description of every node it touched in the subject's architecture / engineering documents (map rows, flows, invariants)? PASS when a new module, endpoint or data flow gains its one-line row and touched descriptions read as current truth; PASS with "Not applicable" when nothing architectural changed or the subject keeps no such document. A removed or relocated claim names its surviving owner or evidence of retirement; registry tests prove membership, not preservation of meaning. FAIL when the edit only appended a version stamp, a decision codename, a "used to / previously" narrative, or a second statement of a fact already owned elsewhere in the docs (a present-tense map, one home per fact). | critical |
 | 6 | cross_platform | Does the diff use platform-specific APIs (`os.kill`, `os.setsid`, `os.killpg`, `os.getpgid`, `fcntl`, `msvcrt`, `signal.SIGKILL`, `signal.SIGTERM`, `subprocess` with `start_new_session`/`creationflags`, hardcoded `/` or `\\` in filesystem paths) outside the subject's platform abstraction layer, when it has one? Does it import Unix-only or Windows-only modules (`fcntl`, `msvcrt`, `winreg`, `resource`) at any level without a platform guard (a `sys.platform` check or the subject's equivalent)? | critical |
 | 7 | capability_regression | Does the diff REMOVE or NARROW a previously-supported user-facing behavior or capability — a tool/flag/mode/path that worked before now errors or is gated tighter (e.g. a new `is_dir`/existence guard that blocks a legitimate create, a tightened allowlist that drops a real path, a removed fallback)? If so, is it INTENTIONAL and disclosed as a breaking/capability change in the commit message + changelog? Accidental capability removal is the failure class this item names. Ask whether a golden "from zero" test would have caught it. **Guard-change trigger (executable requirements, not an essay):** ADDING or TIGHTENING a guard, filter, allowlist, or deny rule IS a capability change and fires this item. For such a diff the reviewer must verify two things: (a) the diff names and runs a positive test in the invariant's home that drives the guard's own seam with a legitimate input and proves it still succeeds — a negative "it blocks X" test alone is insufficient (a gate can pass its own probe while breaking every real run); a caller-level walk or a real process is required only when the caller's wiring or a process boundary changed; (b) the diff or its disclosure NAMES THE SURVIVING POSITIVE PATH — the concrete actor and flow that still work after the change. A guard change without passing surviving-path evidence is a capability-regression finding, not a safety improvement; a missing *new* test is not. A guard keyed on model or provider identity (id, prefix, family, provider name) always fires this item; its positive test uses an identity that the diff's own literals do not contain, and a test that proves only refusal is insufficient. **Owner acceptance:** a narrowing counts as OWNER-ACCEPTED only when the subject's owner actually decided it (the owner's words or answer for this work, or a standing disclosure the subject keeps for this purpose) or it lies within authority the owner had already delegated for this work; the plan council's answers are the reviewers' view, not the owner's consent. Owner acceptance makes the finding advisory (disclosed, non-blocking). Intent wording, a commit-message disclosure, or a changelog row alone is disclosure, NOT acceptance. This names who accepts a narrowing; it adds no approval step. Severity follows the `Critical surface whitelist` below — silently removing a documented user-facing capability or a release contract is critical; removing or loosening an internal guard, proof or re-check is advisory and needs one line naming the residual and its cost measured on a real install at today's history size; an owner-accepted narrowing or an internal-only refactor is advisory. | advisory |
@@ -226,14 +228,14 @@ Ouroboros binds Ouroboros as the author, never the subject repository.
 - Items 4-6 are conditionally critical: FAIL only when the condition applies.
   If the condition does not apply, write verdict PASS with a short reason
   (e.g. "Not applicable — no code logic change").
-- Items 7-9 are advisory: FAIL produces a warning but does not block. Item 9
+- Items 7-9 are advisory: FAIL produces a warning. Item 9
   (`perf_lifecycle`) passes with "Not applicable" when the diff changes no data
   reader, startup/shutdown or other batch operation, endpoint, poller,
   subscription or timer.
 - Item 8 (`changelog_accuracy`) is advisory by design: prose-level wording
   drift, off-by-one test counts, and minor descriptive inaccuracies in a
   changelog entry MUST NOT be raised as critical under a release-metadata or
-  consistency item. They surface here and do not block.
+  consistency item. They surface here as advisory findings.
 - Item 7 (`capability_regression`) is advisory by default but escalates to
   critical under the `Critical surface whitelist` below: a SILENT removal/narrowing
   of a documented user-facing capability or a release contract is critical;
@@ -252,12 +254,10 @@ Ouroboros binds Ouroboros as the author, never the subject repository.
 When the previous blocker was *only* `tests_affected` and the new diff changes
 *only* test files plus the subject's release/version touchpoints (the
 `Ouroboros Body Layer` names the body's), reviewers must focus on verifying
-whether the newly staged tests address the named gap — not search for fresh
-gaps in unchanged code. A new critical finding on this retry round requires a
-new concrete artifact, consistent with the Critical threshold rule below: a
-reformulation of an earlier concern is not a new finding. The convergence applies
-when the retry extends an existing test in the invariant's home; a brand-new test
-module staged on a retry round re-opens item 4's surplus question.
+whether the newly staged tests address the named gap, not on hunting fresh
+test gaps in unchanged code. A defect evidenced in the current subject may
+still be raised (Critical threshold rule below); a reformulation of an
+earlier concern is not a new finding.
 
 ### Critical threshold rule (applies to ALL items)
 

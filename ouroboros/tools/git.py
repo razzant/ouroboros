@@ -54,7 +54,7 @@ from ouroboros.tools.commit_gate import (
     commit_preflight_choice_error as _commit_preflight_choice_error,
     resolve_root_task_id,
 )
-from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED, emit_review_cycles_exhausted
+from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED, emit_review_cycles_exhausted, note_paid_code_wave
 from ouroboros.review_overrides import note_override_landing
 from ouroboros.tools.release_sync import is_development_marker
 from ouroboros.tools.review_revalidation import handle_revalidation_failure  # noqa: F401
@@ -285,6 +285,8 @@ def _install_paid_dispatch_stamp(
                                      review_retry_key=reserved_retry_key)
         else:  # a rejoin's own send: the attempt it collects
             _record(paid=True)
+        note_paid_code_wave(ctx, drive, repo_key=reserved_repo_key, tool_name=reserved_tool_name,
+                            task_id=reserved_task_id, attempt=reserved_attempt_number)
 
     ctx._review_paid_stamp = ReviewPaidStamp(_write, fail_closed=True, reserve=lambda: _record(paid=False))
 
@@ -1389,7 +1391,7 @@ def get_tools() -> List[ToolEntry]:
         "free deterministic checks, the tests preflight, then the review panel (both questions). Every outcome, PASS and "
         "pending included, returns before commit/tag/push and the commit is your explicit "
         "continuation (review_reference + author_disposition). preflight_reviewer optionally buys ONE named row's early look at the worktree first (review_change surface=preflight): it informs, never "
-        "gates, and its record never answers the panel. Without it the commit records preflight not_performed, "
+        "gates, and its record never answers the panel; it spends the same paid allowance as the panel, so a new look is not bought when only the new panel's wave is left (recorded not_performed with its reason). Without it the commit records preflight not_performed, "
         "a fact rather than a bypass. Omitted reviewers mean the whole pool; outside Cyber Pro name at least one ticked reviewer "
         "and give a reason when you name fewer than all; Cyber Pro composes freely. Unticked advisers never count."
     )
@@ -1403,7 +1405,7 @@ def get_tools() -> List[ToolEntry]:
         "paths": {"type": "array", "items": {"type": "string"}, "description": "Optional subset of task-attributed paths. Omitted computes candidates (with author_disposition: the reviewed paths); empty never stages the whole tree."},
         "skip_tests": {"type": "boolean", "default": False, "description": "Skip pre-commit tests."},
         "review_rebuttal": {"type": "string", "default": "", "description": "A NEW content-hashed counter-argument buys one paid re-review within capacity."},
-        "preflight_reviewer": {"type": "string", "default": "", "description": "One ENABLED catalog row (id or handle; a review-pool member or not) for an early informational look at the worktree before the panel; unknown or disabled, or named beside skip_advisory_review=True or an author continuation, is TOOL_ARG_ERROR before anything is staged."},
+        "preflight_reviewer": {"type": "string", "default": "", "description": "One ENABLED catalog row (id or handle; a review-pool member or not) for an early informational look at the worktree before the panel, a new look is bought only when the paid review allowance covers it beside a new panel wave; unknown or disabled, or named beside skip_advisory_review=True or an author continuation, is TOOL_ARG_ERROR before anything is staged."},
         "reviewers": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Enabled catalog ids/handles. Omitted means the whole pool; outside Cyber Pro name at least one ticked reviewer. Cyber Pro composes freely. Unticked advisers are heard, not counted; unknown or disabled is TOOL_ARG_ERROR."},
         "reason": {"type": "string", "default": "", "description": "Why these reviewers; required outside Cyber Pro when you name fewer than all. Missing reason refuses at $0 before staging."},
         "skip_advisory_review": {"type": "boolean", "default": False, "description": "Record that this commit deliberately goes without a preflight (preflight: skipped). The deterministic checks, the tests (see skip_tests) and the panel still run; the opposite of preflight_reviewer."},
