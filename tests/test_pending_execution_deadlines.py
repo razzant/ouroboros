@@ -665,3 +665,55 @@ def test_pending_deadline_salvage_reads_history_outside_the_supervisor_queue_loc
     assert responsive, "the deadline salvage read holds Q and blocks supervisor admission and control"
     stored = load_task_result(host.root, "pending")
     assert stored["status"] == "failed"  # the settlement itself still completes
+
+
+@pytest.mark.parametrize("shape", ["global_budget", "root_budget", "root_selection", "restored_app_stop"])
+def test_never_started_auto_expiry_hides_close_before_tick_and_reaps_at_deadline(
+    host, clock, monkeypatch, shape,  # noqa: F811
+):
+    """#4123/#939: never-started holds the reaper expires (money, a settled spending fence, a lead's selection,
+    an ordinary app_stop) show deadline_expired without Resume or Close before the timeout tick, and still
+    auto-expire through the queued reaper without worker dispatch: one decision, the reaper's."""
+    from ouroboros.gateway.state import _chat_activities_snapshot
+    from ouroboros.parked_deadline import deadline_offer, parked_binding
+    from ouroboros.work_stop import queue_control
+    from supervisor import expired_park_close as epc
+    from supervisor.events_budget import budget_hold_fact
+    from supervisor.queue_snapshot import saved_queue_unowned
+
+    if shape != "restored_app_stop":
+        task = _resource_hold(host, clock, monkeypatch, shape, deadline=True)
+    else:
+        add_task(host, clock, deadline=True)
+        assert queue.persist_queue_snapshot()
+        host.pending.clear()
+        assert queue.restore_pending_from_snapshot() == 1
+        [task] = host.pending
+        assert (budget_hold_fact(task) or {}).get("reason") == "saved_work_hold"
+
+    clock.now[0] += 100
+    assert not saved_queue_unowned()
+    control = queue_control(host.root, task, dict(queue.BUDGET_ROOT_FENCES))
+    binding = parked_binding(host.root, task, control["view"])
+    assert binding  # parked_binding itself stays unchanged; Close declines auto-expiring never-started rows
+    raw_token = deadline_offer(task, binding, clock.now[0])[1]["close_expired"]
+
+    facts = {}
+    activities = _chat_activities_snapshot(
+        host.root, {}, [], list(host.pending), dict(queue.BUDGET_ROOT_FENCES),
+        [], [], {}, [], False, work_facts=facts, park_clock=(clock.now[0], []),
+    )
+    if not shape.startswith("root_"):  # a helper is no row of the root census; its door is the same observe
+        [activity] = [row for row in activities if row["activity_id"] == "pending"]
+        assert activity["can_resume"] is False and "close_expired" not in activity
+        assert facts["pending"].get("deadline_expired") is True
+    assert epc.observe(queue, "pending", now=clock.now[0]) == {}
+    assert epc.request_close(queue, "pending", raw_token) == {"ok": False, "error": epc.CHANGED}
+
+    queue.enforce_task_timeouts()
+    clock.reap()
+    result = load_task_result(host.root, "pending")
+    assert [row["id"] for row in host.pending] == (["root"] if shape.startswith("root_") else [])
+    assert not host.running and not host.attempts
+    assert (result["status"], result["reason_code"]) == ("failed", "deadline")
+    assert _done(clock) == ["failed"]

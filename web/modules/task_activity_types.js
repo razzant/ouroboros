@@ -65,6 +65,7 @@
  * @property {Object=} owner_wait  // the waited quiz_id, its wait state, quiz_state and optional wait_ended_at, independent of Project detail
  * @property {Object=} project_admission_hold  // accepted unstarted work waiting for original Project authority
  * @property {boolean=} can_resume Positive current queue/grant authority, never derived from a label.
+ * @property {Object=} close_expired The exact parked Close offer, never a Resume grant.
  * @property {boolean=} cancelable
  * @property {boolean=} presence_pause  // a live Presence turn moved to a Project as text (never a live call): Pause saves it, Restart returns it
  * @property {string=} pause_cause  // budget | owner | authority | restart | sleep | unknown; display only

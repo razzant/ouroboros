@@ -91,6 +91,167 @@ def test_every_ordinary_end_of_the_root_closes_its_exact_paused_helper(env, stat
     assert load_task_result(env.root, ROOT)["status"] == status and load_task_result(env.root, ROOT)["result"] == "the answer"
 
 
+@pytest.mark.parametrize("shape", ["helper", "tree"])
+def test_owner_close_expired_uses_parked_capture_and_never_closes_another_park(env, shape):
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.gateway.tasks import api_task_cancel
+    from supervisor.expired_park_close import observe
+
+    deadline = "2026-01-01T00:00:00Z"
+    extra = {"deadline_at": deadline, "chat_id": 7}
+    if shape == "tree":
+        target, _ = _parked(env.root, env.monkeypatch, task_id=ROOT, extra=extra)
+        write_task_result(env.root, ROOT, "scheduled", root_task_id=ROOT, **extra)
+        _paused_helper(env.root, env.monkeypatch)
+    else:
+        write_task_result(env.root, ROOT, "running", root_task_id=ROOT)
+        target = _paused_helper(env.root, env.monkeypatch, extra=extra)
+    _paused_helper(env.root, env.monkeypatch, task_id="untouched", work="other-tree")
+    saved_ref = budget_pause_row(env.root, CHILD)["source_ref"]
+    before = read_actor_source_bytes(env.root, CHILD, saved_ref)
+    tid = target["id"]
+    offer = observe(env.q, tid)["offer"]  # what /api/state publishes for it
+    request = {"stop_policy": "close_expired", "close_expired": offer["close_expired"]}
+    app = Starlette(routes=[Route("/api/tasks/{task_id}/cancel", api_task_cancel, methods=["POST"])])
+    app.state.drive_root = env.root
+
+    with TestClient(app) as client:
+        assert client.post("/api/tasks/untouched/cancel", json=request).status_code == 409
+        assert client.post(f"/api/tasks/{tid}/cancel", json={"close_expired": request["close_expired"]}).status_code == 400
+        response = client.post(f"/api/tasks/{tid}/cancel", json=request)
+        assert response.status_code == 200, response.text
+        again = client.post(f"/api/tasks/{tid}/cancel", json=request)  # an exact retry reports the finished Close
+        assert again.status_code == 200 and again.json()["request_id"] == response.json()["request_id"]
+        assert "cancel_state" not in again.json()
+
+    assert read_actor_source_bytes(env.root, CHILD, saved_ref) == before
+    assert load_task_result(env.root, CHILD)["cancel_origin"]["source"] == "deadline_close"
+    assert load_task_result(env.root, ROOT)["status"] == ("cancelled" if shape == "tree" else "running")
+    _retained(env, "untouched")
+
+
+def test_expired_reminder_and_the_direct_parent_tool_share_one_exact_park(env, monkeypatch):
+    from ouroboros import model_sleep
+    from ouroboros.owner_mailbox import acknowledge_task_messages, drain_owner_entries
+    from ouroboros.tools import control, join_ledger
+    from supervisor import expired_park_close, queue_timeouts, workspace_preparation
+    from supervisor.events_runtime_controls import _drive_cancel_task_event
+    from tests.test_model_sleep import _ctx
+
+    write_task_result(env.root, ROOT, "running", root_task_id=ROOT)
+    env.workers.RUNNING[ROOT] = {"task": {"id": ROOT, "root_task_id": ROOT}, "attempt": 1}
+    task = _paused_helper(env.root, monkeypatch, extra={"deadline_at": "2026-01-01T00:00:00Z"})
+    captures = []
+    generation = SimpleNamespace(launches_closed=lambda: False, submit=lambda job, lane: captures.append((job, lane)) or True)
+    monkeypatch.setattr(workspace_preparation, "current_generation", lambda: generation)
+
+    def pass_and_deliver():
+        with env.q._queue_lock:
+            queue_timeouts._expire_pending_deadlines_locked(env.workers, time.time())
+            ((job, lane),) = captures
+        captures.clear()
+        assert lane == workspace_preparation.ADMISSION_LANE and not env.q._queue_lock._is_owned()
+        job()
+
+    pass_and_deliver()
+    ctx = _ctx(env.root, ROOT, root=ROOT)
+    write_task_result(env.root, "unrelated", "running", parent_task_id=ROOT, root_task_id=ROOT)
+    assert model_sleep.wake_reason(ctx, model_sleep.selectors(ctx, tasks=[CHILD])) == f"work_attention:{CHILD}"
+    assert model_sleep.wake_reason(ctx, model_sleep.selectors(ctx, tasks=["unrelated"])) == ""
+    [reminder] = drain_owner_entries(env.root, ROOT)
+    assert not drain_owner_entries(env.root, CHILD)
+    token = reminder["work_attention"]["episode_id"]
+    assert token in reminder["text"] and reminder["provenance"] == "system"
+    assert (f"cancel_task(task_id={CHILD!r}, close_expired={token!r})" in reminder["text"]
+            and "you can start a new separate task" in reminder["text"])
+    assert acknowledge_task_messages(env.root, ROOT, [reminder["msg_id"]], wake_id="fixture-read")
+    task.pop("_expired_park_notice")  # handoff to another supervisor, no in-memory delivery knowledge
+    pass_and_deliver()
+    assert not drain_owner_entries(env.root, ROOT)
+    assert not ci.active_intent(env.root, CHILD)  # the reminder is not a Close
+
+    events = []
+    monkeypatch.setattr(control, "_emit_control_event", lambda _ctx, event: events.append(event) or "live")
+    unrelated = _ctx(env.root, "unrelated", root="unrelated")
+    assert "refused" in join_ledger._cancel_task(unrelated, CHILD, close_expired=token) and not events
+    assert not ci.active_intent(env.root, CHILD)
+    assert "recorded" in join_ledger._cancel_task(ctx, CHILD, close_expired=token)
+    assert ci.active_intent(env.root, CHILD, include_close=True)["parked_close"] == {"requested_by": ROOT, "token": token}  # before the ack
+    [event] = events
+    assert event["type"] == "cancel_task"
+    _drive_cancel_task_event(event, env)
+    assert load_task_result(env.root, CHILD)["status"] == "cancelled" and not ci.active_intent(env.root, CHILD)
+    [outcome] = drain_owner_entries(env.root, ROOT)
+    assert outcome["text"] == f"Close of {CHILD}: closed; its materials are kept."
+    retried = expired_park_close.request_close(env.q, CHILD, token, parent_id=ROOT)
+    assert retried["ok"] and retried["settled"] == "cancelled"  # the exact offer's finished Close, never another
+
+
+def test_an_open_expired_close_is_not_an_old_stop_or_a_running_worker_signal(env, monkeypatch):
+    from supervisor.expired_park_close import CHANGED, observe, request_close
+
+    write_task_result(env.root, ROOT, "running", root_task_id=ROOT)
+    task = _paused_helper(env.root, monkeypatch, extra={"deadline_at": "2026-01-01T00:00:00Z"})
+    offer = observe(env.q, CHILD)["offer"]
+    asked = request_close(env.q, CHILD, offer["close_expired"])
+    assert asked["ok"]
+    from json import loads
+    cancel_file = env.root / "state/cancel_intents.json"
+    [persisted] = loads(cancel_file.read_text())["intents"]
+    from ouroboros.task_results import validate_task_id
+    with pytest.raises(ValueError):
+        validate_task_id(persisted)  # the unchanged older watchdog's task lookup refuses this key
+    assert not ci.cancel_pending(env.root, CHILD)
+    env.workers.PENDING.remove(task)
+    env.workers.RUNNING[CHILD] = {"task": task, "attempt": 2}
+    assert env.q.drive_cancel_intent_scope(CHILD) == CHANGED
+    assert env.workers.RUNNING[CHILD]["attempt"] == 2
+    assert not ci.active_intent(env.root, CHILD)
+
+
+def test_expired_answered_root_closes_parked_tree_without_replacing_the_answer(env):
+    from ouroboros.owner_pause import FENCE_PAUSED, FENCE_REQUESTED, install_fence, read_fence, set_fence_state
+    from supervisor.expired_park_close import CHANGED, observe, request_close
+
+    _work_root(env.root, deadline_at="2026-01-01T00:00:00Z")
+    fence, _ = install_fence(env.root, ROOT, request_id="expired-late-fixture", late_work=True)
+    set_fence_state(env.root, ROOT, fence_id=fence["fence_id"], expected_state=FENCE_REQUESTED, state=FENCE_PAUSED)
+    _paused_helper(env.root, env.monkeypatch)
+    before = load_task_result(env.root, ROOT)
+    offer = observe(env.q, ROOT, late=True)["offer"]  # the answered root's own record carries its deadline
+    live_id = "still-running"
+    env.workers.RUNNING[live_id] = {"task": {"id": live_id, "root_task_id": ROOT, "parent_task_id": ROOT}, "attempt": 1}
+    assert request_close(env.q, ROOT, offer["close_expired"])["error"] == CHANGED
+    assert not ci.active_intent(env.root, ROOT) and _pending(env) is not None
+    env.workers.RUNNING.pop(live_id)
+    assert request_close(env.q, ROOT, offer["close_expired"])["ok"]
+    assert env.q.drive_cancel_intent_scope(ROOT) == "already_settled"  # its answer is kept; nothing pends
+    after = load_task_result(env.root, ROOT)
+    assert (after["status"], after["result"]) == (before["status"], before["result"])
+    assert read_fence(env.root, ROOT)["state"] == "released"
+    assert load_task_result(env.root, CHILD)["status"] == "cancelled"
+
+
+def test_expired_close_revalidates_after_prepare_before_its_final_write(env, monkeypatch):
+    from ouroboros.budget_pause import set_budget_pause
+    from supervisor.expired_park_close import CHANGED, observe, request_close
+
+    write_task_result(env.root, ROOT, "running", root_task_id=ROOT)
+    task = _paused_helper(env.root, monkeypatch, extra={"deadline_at": "2026-01-01T00:00:00Z"})
+    offer = observe(env.q, CHILD)["offer"]
+    assert request_close(env.q, CHILD, offer["close_expired"])["ok"]
+    point = budget_pause_row(env.root, CHILD)
+    fired = _fire_before_write(env, monkeypatch, "inside_write", lambda: set_budget_pause(
+        env.root, CHILD, {**point, "pause_generation": point["pause_generation"] + 1}))
+    assert env.q.drive_cancel_intent_scope(CHILD) == CHANGED
+    assert fired and _pending(env) is task
+    assert load_task_result(env.root, CHILD)["status"] == "scheduled" and not ci.active_intent(env.root, CHILD)
+
+
 @pytest.mark.parametrize("hold", [
     "saved_work_hold", "owner_restart_hold", "saved_sleep_recovery", "root_fence_member_pending_selection", "authority",
 ])

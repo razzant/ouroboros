@@ -137,9 +137,10 @@
  */
 /**
  * @typedef {Object} WorkControl
- * @property {string} action  // stop | stop_earlier | pause | resume | hurry | wrap_up | model
+ * @property {string} action  // stop | stop_earlier | pause | resume | hurry | wrap_up | model | close
  * @property {string} target  // the exact task id the door acts on
  * @property {string=} scope  // single | cascade | work
+ * @property {string=} close_expired  // exact park offer, only for close
  */
 /**
  * @typedef {Object} WorkEpisode
@@ -160,6 +161,7 @@
  * @property {string} mark  // the member's own mark, independent of its tails
  * @property {number=} queue_attempt  // observed queue ordinal of this member's state, not an executor ordinal
  * @property {LastResume=} last_resume
+ * @property {WorkControl=} close_expired
  */
 /**
  * @typedef {Object} WorkMembers
@@ -208,6 +210,7 @@
  */
 /**
  * @typedef {Object} RoomStatus
+ * @property {boolean=} deadline_expired
  * @property {string} activity  // working | queued | waiting | paused | idle | unknown
  * @property {string} transition
  * @property {string} call

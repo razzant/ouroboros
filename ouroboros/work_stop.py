@@ -15,6 +15,8 @@ import pathlib
 from datetime import datetime, timezone
 from typing import Any
 
+from ouroboros.deadline_utils import task_deadline
+
 log = logging.getLogger(__name__)
 
 SELECTION_KEY = "_resume_selection"
@@ -395,13 +397,16 @@ def queue_control(drive_root: Any, row: dict, fences: dict, *, running: bool = F
 def restored_row_class(drive_root: Any, row: dict, fences: dict) -> str:
     """What a restored queue row needs, read as the work projection reads it (``queue_control``): ``paused`` (an
     owner, money or authority pause stands), ``resume`` (another stop or a refusal holds it until a Resume),
-    ``continues`` (only admission or a wait stands before it) or ``unknown`` (a fact it needs is unreadable)."""
+    ``continues`` (only admission or a wait stands before it), ``expired`` (stopped past its hard deadline: Resume
+    refuses, Close or the deadline reaper ends it) or ``unknown`` (a fact it needs is unreadable)."""
     control = queue_control(drive_root, row, fences)
     if control["phase"] == "unknown":
         return "unknown"
     if control["phase"] == "queued" or control["view"].get("waiting"):
         return "continues"
     cause = (control["view"].get("stop") or {}).get("cause")
+    if (deadline := task_deadline(row)) is not None and deadline <= datetime.now(timezone.utc):
+        return "expired"
     return "paused" if cause in {"pause", "money", "authority"} else "resume"
 
 
@@ -424,7 +429,8 @@ def restored_rows_text(drive_root: Any, pending: Any, fences: dict) -> str:
     except Exception:
         log.warning("Restored queue rows were not classified; the startup notice keeps its count alone", exc_info=True)
         return ""
-    words = {"continues": "continuing by themselves", "resume": "waiting for Resume", "paused": "still paused"}
+    words = {"continues": "continuing by themselves", "resume": "waiting for Resume", "paused": "still paused",
+             "expired": "deadline expired"}
     parts = "; ".join(f"{text}: {classes.count(key)}" for key, text in words.items() if key in classes)
     return f"{parts[0].upper()}{parts[1:]}." if parts and "unknown" not in classes else ""
 
@@ -523,10 +529,13 @@ def task_current_stop(drive_root: Any, snapshot: dict, task_id: str) -> dict:
     stop, reason = view.get("stop") or {}, view.get("reason") or {}
     live = running and control["phase"] == "budget_pausing" and not warm_paused_member(outer)
     tree = _tree_basis(drive_root, task)
+    from ouroboros.parked_deadline import expired_park
+    expired = not live and expired_park(task)  # warm or queued, bound or held: Resume refuses past it
     return {"state": "pausing" if live else "held",
             "cause": stop.get("cause") or ("refusal" if view.get("refusal") else "unknown"),
             "scope": stop.get("scope") or "member", "code": reason.get("code"), "text": reason.get("text"),
             "release": "owner" if view.get("release") == "owner" else "mind" if view.get("resumable") else "none",
+            **({"deadline_expired": True, "release": "none"} if expired else {}),
             **{key: reason[key] for key in ("since", "by") if reason.get(key)},
             **({} if queue_snapshot_observation(snapshot)["fresh"] else {"queue_freshness": "stale"}),
             **({} if tree is not None else {"resume_basis": "unreadable"}),

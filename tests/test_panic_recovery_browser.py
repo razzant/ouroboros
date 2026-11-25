@@ -59,7 +59,8 @@ _ROWS = """selector => [...document.querySelectorAll(`${selector} .panic-recover
     outcome: row.querySelector('.panic-recovery-outcome').textContent,
     tone: row.querySelector('.panic-recovery-outcome').dataset.tone || '',
     box: (box => box && !box.hidden ? {checked: box.checked, disabled: box.disabled} : null)(row.querySelector('input')),
-    stop: (stop => stop && !stop.hidden ? {disabled: stop.disabled} : null)(row.querySelector(':scope > button')),
+    stop: (stop => stop && !stop.hidden ? {disabled: stop.disabled} : null)(
+        row.querySelector(':scope .panic-recovery-acts > button:not([data-close-expired-run])')),
 }))"""
 _PARTS = """selector => {
     const root = document.querySelector(selector);
@@ -248,6 +249,40 @@ def wait_settled(page):
                            ".hasAttribute('aria-busy')", arg=MESSAGE, timeout=30_000)
 
 
+def test_expired_panic_row_crosses_to_close_without_joining_the_resume_selection(spa):
+    core = FakeCore(works=WORKS[:3])
+    target = "task-digest"
+    page, errors = spa(core, viewport=DESKTOP, theme="dark")
+    expired = page.locator(f'{MESSAGE} [data-task-id="{target}"]')
+    expired.locator('input').check()
+    capture(page, "expired-park-before", crop=False)
+    token = "a" * 64
+    core.works[0]["close_expired"] = {"action": "close", "target": target, "scope": "cascade", "close_expired": token}
+    page.wait_for_function("selector => !document.querySelector(selector).getClientRects().length",
+                           arg=f'{MESSAGE} [data-task-id="{target}"] input', timeout=15_000)
+    close = expired.get_by_role("button", name="Close", exact=True)
+    assert close.is_visible() and "Deadline expired" in expired.inner_text()
+    # The card still grants its own Stop: a deadline takes the Resume away, never the owner's right to stop.
+    assert expired.get_by_role("button", name="Stop…", exact=True).is_visible()
+    assert not core.posts and not core.stops
+    assert parts(page)["all"] == "Choose all 2"
+    capture(page, "expired-park-after", crop=True)
+    close.click()
+    expired.wait_for(state="detached", timeout=15_000)
+    assert core.stops == [(target, {"stop_policy": "close_expired", "close_expired": token})]
+    # When every remaining Panic row is expired too, the Resume button and its empty actions footer both hide.
+    for index, work in enumerate(core.works):
+        work["close_expired"] = {
+            "action": "close", "target": work["task_id"], "scope": "cascade",
+            "close_expired": ("b" if index == 0 else "c") * 64,
+        }
+    page.evaluate("() => window.dispatchEvent(new Event('focus'))")
+    page.locator(f"{MESSAGE} [data-panic-resume]").wait_for(state="hidden", timeout=15_000)
+    assert page.locator(f"{MESSAGE} .system-message-actions").is_hidden()
+    capture(page, "expired-park-all-expired", crop=True)
+    assert not core.posts and not errors
+
+
 @pytest.mark.parametrize("theme", ["dark", "light"])
 def test_the_owner_chooses_a_subset_and_reads_what_came_back(spa, theme):
     core = FakeCore()
@@ -321,7 +356,7 @@ def test_one_card_per_panic_work_beside_the_actions_it_does_not_name(spa):
     wait_settled(page)
     assert core.posts == [("task-outline", {"expected_panic_hold_id": "hold-outline-1"})]
     # Its Stop… opens that work's stop alone (its box is its Resume) and stops only that work.
-    page.locator(f"{MESSAGE} .panic-recovery-row[data-task-id='task-tidy'] > button").click()
+    page.locator(f"{MESSAGE} .panic-recovery-row[data-task-id='task-tidy'] .panic-recovery-acts > button").click()
     menu = page.locator(".task-control-menu [data-task-control]")
     assert menu.evaluate_all("items => items.map(item => item.dataset.taskControl)") == ["stop_now"]
     menu.first.click()

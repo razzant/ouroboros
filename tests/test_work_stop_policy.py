@@ -316,6 +316,10 @@ def test_restored_row_class_names_what_a_restored_row_needs(tmp_path, monkeypatc
     held = {**row, "_budget_pause_hold": {"reason": "saved_work_hold"}}
     assert restored_rows_text(tmp_path, [held, row, held], {}) == "Continuing by themselves: 1; waiting for Resume: 2."
     assert restored_rows_text(tmp_path, [held], owner) == "Still paused: 1."  # the first label is capitalised
+    # #4123: past its hard deadline a held or paused row's Resume refuses, so it is not counted as waiting for one.
+    due = {"deadline_at": "2026-01-01T00:00:00Z"}
+    assert needs({**held, **due}) == needs(due, owner) == "expired" and needs(due) == "continues"
+    assert restored_rows_text(tmp_path, [held, {**held, **due}], {}) == "Waiting for Resume: 1; deadline expired: 1."
     assert restored_rows_text(tmp_path, [], owner) == ""
     reads = work_stop.row_pausing  # one row whose durable pause cannot be read, among rows that read
     monkeypatch.setattr(work_stop, "row_pausing", lambda root, r, tid: None if tid == "dark" else reads(root, r, tid))

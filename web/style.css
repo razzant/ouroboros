@@ -1030,6 +1030,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
     padding-block: var(--space-2);
 }
 .panic-recovery-row + .panic-recovery-row { border-top: 1px solid var(--divider); }
+.panic-recovery-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: var(--space-1) var(--space-2); }
+.panic-recovery-acts:empty { display: none; }
 .panic-recovery-pick {
     display: grid;
     grid-template-columns: 14px minmax(0, 1fr);
