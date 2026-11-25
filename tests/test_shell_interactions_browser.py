@@ -667,26 +667,33 @@ MOVING = "n => document.querySelectorAll('#nav-projects-list .status-mark[data-s
 SIDEBAR_FACTS = """() => {
     const side = document.getElementById('primary-sidebar');
     const rows = [...side.querySelectorAll('#nav-projects-list > .nav-project-item')].filter((e) => !e.hidden);
-    const box = (sel) => side.querySelector(sel).getBoundingClientRect();
-    // The column's content edge: the Projects zone reaches it, and the rail's version row ends on it.
+    const box = (sel) => side.querySelector(sel)?.getBoundingClientRect();
+    const foot = box('.sidebar-foot-meta'), projects = box('#nav-projects');
+    const top = sel => { const r = box(sel); return r ? Math.round(r.top) : null; };
     const edge = side.getBoundingClientRect().bottom - parseFloat(getComputedStyle(side).paddingBottom);
     return {rows: rows.map((e) => e.querySelector('[data-project-id]').dataset.projectId),
-            zoneGap: Math.round(edge - box('#nav-projects').bottom),
-            railTop: Math.round(box('.nav-rail').top), sectionsTop: Math.round(box('.nav-rail [data-nav-page="circles"]').top),
-            settingsTop: Math.round(box('.nav-rail [data-nav-page="settings"]').top),
-            versionGap: Math.round(edge - box('.sidebar-foot-meta').bottom),
-            versionBelowSettings: box('.sidebar-foot-meta').top >= box('.nav-rail [data-nav-page="settings"]').bottom - 0.5,
+            railTop: top('.nav-rail'), sectionsTop: top('.nav-rail [data-nav-page="circles"]'),
+            settingsTop: top('.nav-rail [data-nav-page="settings"]'),
+            versionTop: foot.top, versionHeight: foot.height, versionGap: edge - foot.bottom,
+            projectsHidden: side.querySelector('#nav-projects').hidden,
+            projectGap: projects.height ? foot.top - projects.bottom : null,
+            versionOutsideRail: !document.querySelector('.nav-rail').contains(document.querySelector('.sidebar-foot-meta')),
             columnScrolls: side.scrollHeight > side.clientHeight + 1,
             retired: side.querySelectorAll('#nav-projects-toggle, #nav-projects-count, .nav-projects-facts, .sidebar-foot, .nav-card').length,
             moving: rows.filter(e => e.querySelector('.status-mark')?.dataset.shape === 'moving')
                 .map(e => e.dataset.navProjectId)};
 }"""
 
+# style.css: the column's row gap (--space-1, 4 px) plus the foot line's own margin above it (--sidebar-foot-gap =
+# max(--space-2, (--touch-target-min - --sidebar-foot-line) / 2) = max(8, (44 - 28) / 2) = 8 px). The version row
+# stands this far off the Projects list in every phase and at both documented sizes.
+SIDEBAR_FOOT_GAP = 12
 
-@pytest.mark.parametrize('width,height', [(1108, 680), (390, 844)])
-def test_collapsed_projects_keep_only_the_pinned_ones_and_the_rail_holds_still(shell_ui, tmp_path, width, height):
-    """Navigation has no collapse: Find narrows the list; its pins lead, the Projects keep the column down to its bottom
-    edge, and the rail beside them holds its places and its version still (owner 24.11)."""
+
+@pytest.mark.parametrize('width,height,short_width,short_height', [(1108, 680, 1108, 480), (390, 844, 320, 568)])
+def test_filtering_projects_keeps_the_pins_rail_and_version_in_place(shell_ui, tmp_path, width, height,
+                                                                    short_width, short_height):
+    """The version has its own compact row before Projects arrive and with either a full or a sparse list."""
     page = seed_page(shell_ui, width, height)
     live = [PROJECTS[3]['id'], PROJECTS[7]['id']]
     pins = [PROJECTS[1]['id'], PROJECTS[7]['id']]
@@ -695,40 +702,60 @@ def test_collapsed_projects_keep_only_the_pinned_ones_and_the_rail_holds_still(s
     for project in state['projects']:
         if project['id'] in pins:
             project['name'] = 'Matched pin: ' + project['name']
+    def defer_app(route):
+        route.fulfill(content_type='text/javascript', body='')
+
     try:
         page.route('**/api/state', lambda route: route.fulfill(json=state))
         page.route('**/api/projects*', lambda route: answer_projects(route, state['projects']))
+        # Load the shipped document but defer app.js for the measurement of its pre-Projects layout.
+        page.route('**/static/app.js', defer_app)
+        page.goto(shell_ui['url'] + '/')
+        facts['before_projects'] = page.evaluate(SIDEBAR_FACTS)
+        page.unroute('**/static/app.js', defer_app)
         boot(page, shell_ui)
-        page.wait_for_function(MOVING, arg=2, timeout=20_000)
         if width < 720:
             open_drawer(page)
-        facts['open'] = page.evaluate(SIDEBAR_FACTS)
+        facts['open'] = page.wait_for_function('() => { const s = (' + SIDEBAR_FACTS + ')();'
+                                              ' return s.moving.length === 2 && s; }', timeout=20_000).json_value()
         page.locator('.nav-find-input').fill('matched pin')
         page.wait_for_function('wanted => JSON.stringify((' + ROWS + ')()) === JSON.stringify(wanted)', arg=pins)
         settle(page)
         facts['filtered'] = page.evaluate(SIDEBAR_FACTS)
         setup_browser.capture(page, f'shell-sidebar-filtered-{width}-{shell_ui["engine"]}')
+        page.set_viewport_size({'width': short_width, 'height': short_height})
+        settle(page)
+        facts['short_filtered'] = page.evaluate(SIDEBAR_FACTS)
+        setup_browser.capture(page, f'shell-sidebar-sparse-{short_width}x{short_height}-{shell_ui["engine"]}')
+        page.set_viewport_size({'width': width, 'height': height})
         page.locator('.nav-find-clear').click()
         page.wait_for_function('n => (' + ROWS + ')().length === n', arg=len(PROJECTS))
         settle(page)
         facts['cleared'] = page.evaluate(SIDEBAR_FACTS)
     finally:
-        evidence(tmp_path, f'shell-sidebar-collapse-{width}-{shell_ui["engine"]}', facts)
+        evidence(tmp_path, f'shell-sidebar-filter-{width}-{shell_ui["engine"]}', facts)
         page.close()
     expected = pins + [p['id'] for p in PROJECTS if p['id'] not in pins]
     assert facts['open']['rows'] == facts['cleared']['rows'] == expected, facts
-    assert facts['filtered']['rows'] == pins, facts
+    assert facts['filtered']['rows'] == facts['short_filtered']['rows'] == pins, facts
     assert set(facts['open']['moving']) == set(facts['cleared']['moving']) == set(live), facts
     assert facts['filtered']['moving'] == [pins[1]], facts
-    # DESIGN Navigation: the Projects take the column down to its bottom edge; the rail's places and version hold still.
-    for phase in ('open', 'filtered', 'cleared'):
+    before = facts['before_projects']
+    assert before['projectsHidden'] and before['rows'] == [], facts
+    assert before['versionTop'] == pytest.approx(facts['open']['versionTop'], abs=1), ('no first-paint jump', facts)
+    for phase in ('before_projects', 'open', 'filtered', 'short_filtered', 'cleared'):
         side = facts[phase]
-        assert side['retired'] == 0 and abs(side['zoneGap']) <= 1, (phase, facts)
-        for key in ('railTop', 'sectionsTop', 'settingsTop'):
-            assert abs(side[key] - facts['open'][key]) <= 1, (phase, key, facts)
-        assert side['versionBelowSettings'], (phase, facts)
-        if not side['columnScrolls']:
-            assert abs(side['versionGap']) <= 1, ('the version row ends on the bottom inset', phase, facts)
+        assert side['retired'] == 0, (phase, facts)
+        if phase not in ('before_projects', 'short_filtered'):
+            for key in ('railTop', 'sectionsTop', 'settingsTop'):
+                assert abs(side[key] - facts['open'][key]) <= 1, (phase, key, facts)
+        assert side['versionOutsideRail'] and not side['columnScrolls'], (phase, facts)
+        assert side['versionHeight'] == pytest.approx(28, abs=0.5), (phase, 'one small row', facts)
+        assert abs(side['versionGap']) <= 1, (phase, 'row ends at the content edge', facts)
+        if phase != 'before_projects':
+            # The row meets the list on the design's own spacing, from both sides: a foot adrift at the column's
+            # bottom (the 112 px gap R2 let pass) fails the upper bound, a row crowding the last project the lower.
+            assert side['projectGap'] == pytest.approx(SIDEBAR_FOOT_GAP, abs=1), (phase, 'meets the list', facts)
 
 
 DOT_FACTS = """() => {
@@ -1249,6 +1276,21 @@ def test_off_room_call_mark_keeps_last_project_row_and_menu_reachable_without_pe
         const cssVar = Number.parseFloat(document.documentElement.style.getPropertyValue('--call-mark-height'));
         return actual > 0 && Math.abs(cssVar - actual) <= 1;
     }"""
+    foot_hits = """() => {
+        const foot = document.querySelector('.sidebar-foot-meta');
+        const mark = document.querySelector('.call-mark').getBoundingClientRect();
+        const side = foot.closest('#primary-sidebar');
+        return [...foot.querySelectorAll('button')].filter(el => el.getClientRects().length).map(el => {
+            const r = el.getBoundingClientRect(), pseudo = getComputedStyle(el, '::after');
+            const reach = parseFloat(pseudo.height) || r.height;
+            const edge = r.top - Math.max(0, reach - r.height) / 2;
+            const x = (r.left + r.right) / 2;
+            const at = y => Boolean(el.contains(document.elementFromPoint(x, y)));
+            return {id: el.id || 'close', reach, clear: edge - mark.bottom, x, y: edge + 1,
+                    hitTop: at(edge + 1), hitBody: at(r.top + 1), hitCenter: at((r.top + r.bottom) / 2),
+                    footBottom: side.getBoundingClientRect().bottom - foot.getBoundingClientRect().bottom};
+        });
+    }"""
     probe_js = """() => {
         const box = el => { const b = el.getBoundingClientRect();
             return {top: b.top, bottom: b.bottom, left: b.left, right: b.right, width: b.width, height: b.height}; };
@@ -1365,17 +1407,50 @@ def test_off_room_call_mark_keeps_last_project_row_and_menu_reachable_without_pe
         settle(page)
         facts['after_destroy'] = page.evaluate(probe_js)
     finally:
-        evidence(tmp_path, f'shell-call-mark-clearance-{shell_ui["engine"]}', facts)
         try:
             page.evaluate('() => window.__testCallMark?.entry?.destroy?.()')
         except Exception:  # noqa: BLE001 - best-effort cleanup before closing
             pass
         page.close()
 
+    # On a docked touch surface, hit the top of the expanded 44px area, not just its always-visible centre.
+    page = seed_page(shell_ui, 1100, 646, touch=True)
+    status = {'managed': True, 'available': False, 'checked_at': '2026-11-25T10:00:00Z', 'local_changes': 'absent'}
+    page.route('**/api/update/status*', lambda route: route.fulfill(json=status))
+    try:
+        _route_call_mark_assets(page)
+        boot(page, shell_ui)
+        page.locator('#nav-version-check').wait_for(state='visible')
+        page.evaluate(mount_js)
+        page.wait_for_function(synced_height_js, timeout=5_000)
+        settle(page)
+        facts['touch_check'] = page.evaluate(foot_hits)
+        setup_browser.capture(page, f'shell-call-mark-version-{shell_ui["engine"]}')
+
+        page.evaluate("document.documentElement.style.setProperty('--tg-safe-area-inset-bottom', '21px')")
+        status['update_progress'] = {'operation_id': 'footer-failed', 'generation': 'g', 'active': False,
+                                     'outcome': 'failed', 'error': 'Synthetic failure',
+                                     'started_at': '2026-11-25T10:01:00Z', 'outcome_at': '2026-11-25T10:02:00Z'}
+        page.evaluate("window.__ouroWs.emit('update_progress_changed', {})")
+        page.locator('.update-notice-close').wait_for(state='visible')
+        settle(page)
+        facts['inset_notice'] = page.evaluate(foot_hits)
+        setup_browser.capture(page, f'shell-call-mark-update-inset-{shell_ui["engine"]}')
+    finally:
+        evidence(tmp_path, f'shell-call-mark-clearance-{shell_ui["engine"]}', facts)
+        page.close()
+
+    assert [c['id'] for c in facts['touch_check']] == ['nav-version-check'], facts
+    assert [c['id'] for c in facts['inset_notice']] == ['update-pill', 'close'], facts
+    for target in facts['touch_check'] + facts['inset_notice']:
+        assert target['reach'] >= 44 and target['clear'] >= 0, target
+        assert target['hitTop'] and target['hitBody'] and target['hitCenter'], target
+    assert all(c['footBottom'] >= 21 for c in facts['inset_notice']), facts
+
     before, docked, short, stack = facts['before_call'], facts['docked_scrolled'], facts['short_scrolled'], facts['stack_390']
     assert before['rows'] == 10 and before['heightVar'] == '' and before['paddingBottom'] == 0, facts
     assert facts['docked_scrollers'] == ['nav-projects-list'], facts
-    assert docked['mark'] and docked['paddingBottom'] >= docked['mark']['height'] + 43, facts
+    assert docked['mark'] and docked['paddingBottom'] >= docked['mark']['height'] + 6, facts
     assert docked['listScrollTop'] > 0 and docked['sideScrollTop'] == 0, facts
     assert docked['lastItem']['bottom'] <= docked['mark']['top'] - 6, facts
     assert docked['lastKebab']['bottom'] <= docked['mark']['top'] - 6, facts
@@ -1387,7 +1462,7 @@ def test_off_room_call_mark_keeps_last_project_row_and_menu_reachable_without_pe
     assert facts['docked_menu']['ended'] == 0 and facts['docked_menu']['revealed'] == 0, facts
 
     assert facts['short_scrollers'] == ['primary-sidebar'], facts
-    assert short['mark'] and short['paddingBottom'] >= short['mark']['height'] + 43, facts
+    assert short['mark'] and short['paddingBottom'] >= short['mark']['height'] + 6, facts
     assert short['scrollPaddingBottom'] >= short['mark']['height'] + 43 and short['sideScrollTop'] > 0, facts
     assert short['lastItem']['bottom'] <= short['mark']['top'] - 6, facts
     assert short['lastKebab']['bottom'] <= short['mark']['top'] - 6, facts
@@ -1398,7 +1473,8 @@ def test_off_room_call_mark_keeps_last_project_row_and_menu_reachable_without_pe
     assert stack['layout'] == 'stack' and stack['mark'] and stack['mark']['top'] < 100, facts
     assert stack['paddingBottom'] == 0 and stack['scrollPaddingBottom'] == 0, facts
 
-    assert facts['restored_docked']['mark'] and facts['restored_docked']['paddingBottom'] >= facts['restored_docked']['mark']['height'] + 43, facts
+    restored = facts['restored_docked']
+    assert restored['mark'] and restored['paddingBottom'] >= restored['mark']['height'] + 6, facts
     for cleared in (facts['after_hide'], facts['after_destroy']):
         assert cleared['mark'] is None and cleared['heightVar'] == '', facts
         assert cleared['paddingBottom'] == 0 and cleared['scrollPaddingBottom'] == 0, facts

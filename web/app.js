@@ -123,11 +123,12 @@ const primarySidebar = document.getElementById('primary-sidebar');
 const shellMotion = createShellMotion({ content: document.getElementById('content'),
     isStack: () => isStackLayout() });
 // The places come from the one registry (pages.js): Main into the pinned head, the tools into the rail beside the
-// Projects (owner 24.11), with the version. Nothing below looks a row up before this.
+// Projects (owner 24.11), and the version row into the column's own one-line foot after the Projects list (owner
+// 25.11): the version never wraps the rail's glyphs. Nothing below looks a row up before this.
 primarySidebar?.querySelector('.sidebar-head')?.insertAdjacentHTML('beforeend', renderNavRows('head'));
-// The rail holds the sections at its top and the system rows with the version at its foot; a document that holds a
-// rail, a retained foot or a version row gets it composed by mountNavRail (pages.js) — the retained version and the
-// drawer's × move into it, v7.7.0's replaced Utilities group leaves: one set stands.
+// The rail holds the sections at its top and the system rows at its foot; a document that holds a rail, a retained
+// foot or a version row gets it composed by mountNavRail (pages.js) — the retained version row moves into the
+// column's foot after the Projects, v7.7.0's replaced Utilities group leaves: one set stands.
 if (primarySidebar?.querySelector('.nav-rail, .sidebar-foot, #nav-version')) mountNavRail(primarySidebar);
 measurePinnedBars(primarySidebar);  // a short window's row scroll margin under its pinned head
 // A short window scrolls the whole column: rows that wait past a pinned bar fade under it (style.css), as the list's do.

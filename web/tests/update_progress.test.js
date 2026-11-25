@@ -20,23 +20,24 @@ import { apiClient } from '../modules/api_client.js';
 const VERSION = 'v7.11.1-alpha.0';
 
 // The sidebar in the document order the page gives it (web/index.html, app.js, pages.js mountNavRail; owner 24.11,
-// «Рельс снаружи»): the rail leads, the drawer's × first, then its sections and at its foot the system rows over the
-// version row; Main's pinned head and the Projects follow it. The rows are the registry's own markup, so the last
-// destination in document order is Main and the one beside the version row is Settings.
+// «Рельс снаружи», 25.11): the rail leads, the drawer's × first, then its sections and at its foot the system rows;
+// Main's pinned head and the Projects follow it, and the version row is the column's own one-line foot after the
+// Projects list. The rows are the registry's own markup: Main comes after the rail's Settings in document order.
 function mountSidebar(env) {
     const sidebar = env.el('nav', { attrs: { id: 'primary-sidebar' } });
     env.doc.body.append(sidebar);
     appendHtml(sidebar, '<div class="nav-rail"><button id="nav-drawer-close" class="shell-icon-control nav-drawer-close" '
         + `type="button" aria-label="Close navigation"></button>${renderNavRail()}</div>`
         + `<div class="sidebar-head">${renderNavRows('head')}</div>`
-        + '<section id="nav-projects" class="nav-section nav-projects"><div id="nav-projects-list" class="nav-projects-list"></div></section>');
+        + '<section id="nav-projects" class="nav-section nav-projects"><div id="nav-projects-list" class="nav-projects-list"></div></section>'
+        + '<div class="sidebar-foot-meta"><span id="nav-version"></span></div>');
     env.doc.getElementById('nav-version').textContent = VERSION;
-    const row = sidebar.querySelector('.nav-rail-system > .sidebar-foot-meta');
+    const row = sidebar.querySelector('.sidebar-foot-meta');
     const settings = sidebar.querySelector('.nav-rail [data-nav-page="settings"]');
     const main = sidebar.querySelector('.sidebar-head [data-nav-page="chat"]');
     // The world the four fallbacks used to read: the last destination in document order is Main's row, not Settings.
     assert.equal([...sidebar.querySelectorAll('[data-nav-page]')].pop(), main);
-    assert.equal(row.previousElementSibling, settings, 'the version row stands under Settings, the rail\'s last row');
+    assert.equal(row.previousElementSibling.id, 'nav-projects', 'the version row stands after the Projects list, the rail its sibling above');
     return { sidebar, row, settings, main };
 }
 
@@ -280,8 +281,9 @@ test('a restart need belongs to the server that had it', () => {
 });
 
 // One indicator on the DOM double: its listeners, storage and a window whose events reach their listeners, in the
-// sidebar as the page orders it (mountSidebar: the rail with the version row at its foot, then Main), so the version's
-// own check, its answer and every focus landing are exercised by the same world the capsule is.
+// sidebar as the page orders it (mountSidebar: the rail, then Main's head and the Projects, the version row as the
+// column's own foot after them), so the version's own check, its answer and every focus landing are exercised by the
+// same world the capsule is.
 async function withIndicator(run) {
     const env = installDomDouble();
     const stored = new Map();
@@ -378,7 +380,7 @@ test('a failed or unconfirmed outcome stays with its own close; closing hides th
 
 test('restart messages are untouched: a needed restart is a stage without a close, a failed one keeps its words', async () => {
     await withIndicator(async ({ show, pill, close, opened }) => {
-        // A stage first: the rail shows the capsule's glyph alone, so the needed restart that follows must not look
+        // A stage first: the foot shows the capsule's glyph alone, so the needed restart that follows must not look
         // like the work still going on.
         await show({ managed: true, available: false, update_progress: { ...refusal, active: true, outcome: '', result: '',
             stage: 'stopping_services', work_stop: 'invoked' } });
@@ -600,7 +602,7 @@ test('a reviewed merge whose own check has not passed is that check at work, nev
 });
 
 // R2 (Astra, rl-20261125T043832-dc397aa48cfb): when assisted resolution changed to gate_blocked, work had stopped and
-// Dashboard → Updates named the owner's quit and reopen, yet the rail, which shows the capsule's glyph alone, still drew
+// Dashboard → Updates named the owner's quit and reopen, yet the foot, which shows the capsule's glyph alone, still drew
 // the stage's sync arrows.
 test('a reviewed resolution stopped short of a conclusion is not the work going on: its own glyph, no close', async () => {
     await withIndicator(async ({ row, show, pill, close, opened, parts }) => {
@@ -668,7 +670,7 @@ test('a reviewed merge that committed is a needed restart like any update; local
     });
 });
 
-test('no two capsule states look alike in the rail: each pairs its own glyph with its own tone', async () => {
+test('no two capsule states look alike in the foot: each pairs its own glyph with its own tone', async () => {
     await withIndicator(async ({ show, pill }) => {
         const states = {
             offer: { managed: true, available: true, local_changes: 'absent' },
@@ -1772,7 +1774,7 @@ test('the disappearing close hands focus to the capsule, the row\'s check or the
         close().focus();
         close().click();
         assert.equal(env.doc.activeElement, parts().check, 'the row\'s visible check, the retry the failure left');
-        // An install that offers no check has only the rail's row beside the version to land on: Settings, never Main.
+        // An install that offers no check has only the rail's own last row to land on: Settings, never Main.
         await show({ managed: false, available: false, update_progress: { ...refusal, operation_id: 'attempt-u' } });
         close().focus();
         close().click();
@@ -1784,7 +1786,7 @@ test('the disappearing close hands focus to the capsule, the row\'s check or the
         await show({ managed: false, available: false, update_progress: { ...refusal, operation_id: 'attempt-v',
             outcome: 'applied', result: 'applied', concluded_by: 'boot', blockers: [], work_stop: '', reason: '' } });
         assert.deepEqual([parts().pill.hidden, close().hidden], [true, true]);
-        assert.equal(env.doc.activeElement, settings, 'the × that went with its notice hands focus beside the version');
+        assert.equal(env.doc.activeElement, settings, 'the × that went with its notice hands the focus to the rail\'s last row');
     });
 });
 
