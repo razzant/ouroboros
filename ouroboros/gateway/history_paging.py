@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import contextvars
 import hashlib
+import itertools
 import json
 import logging
 import pathlib
@@ -35,9 +36,8 @@ from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, is_a2a_chat_id
 from ouroboros.dialogue_positions import skipped_between
 from ouroboros.subagent_messages import DELIVERY_KINDS, is_conversation_card_content as _card_content
 from ouroboros.chat_annotations import _ANNOTATIONS_NAME
-from ouroboros.project_dialogue import (
-    MAIN_PINNED_ROW_TYPES, ORIGIN_ADDRESSED_NOTICE_TYPES, WORK_SPEECH_ELSEWHERE_TYPES, owner_message_entries,
-)
+from ouroboros.gateway.completion_gist import short_gist
+from ouroboros.project_dialogue import ROOM_FIXED_ROW_TYPES, owner_message_entries
 from ouroboros.room_archive import ordinary_room
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.subagent_messages import subagent_message_meta
@@ -149,9 +149,13 @@ DELTA_RESET_DETAILS = frozenset({
     "delta_byte_limit", "replay_gap", "historical_import", "lifecycle_ended", "cursor_size"})
 
 
-# The kind of the cursor a request's selection decoded, for the route's read count (``history_attribution``): a
-# per-request mapping the route sets around the read; nothing selects, authorizes or answers by it.
+# The kind of the cursor a request's selection decoded, and whether an ``after`` read answered with ``repairs``, for
+# the route's read count (``history_attribution``): a per-request mapping the route sets around the read; nothing
+# selects, authorizes or answers by it.
 DECODED_CURSOR: contextvars.ContextVar = contextvars.ContextVar("history_decoded_cursor", default=None)
+# What a client that applies ``repairs`` asks for (``?repair=settled``, CLIENT_CONTRACT "Reading history"): its window's
+# ``after`` reads answer a shown task that settled with that task's rows the window holds, projected anew.
+REPAIR_SETTLED = "settled"
 
 
 class HistoryCursorError(ValueError):
@@ -254,6 +258,11 @@ def decode_cursor(value, thread_id, view):
         tasks = cursor.setdefault("tasks", {})  # see ``history_page_tokens``
         if not isinstance(tasks, dict) or any(type(seq) is not int or seq < 0 for seq in tasks.values()):
             raise ValueError
+        held = cursor.setdefault("held", None)  # see ``_held_rows``: shown tasks' rows, per stream, below ``upper``
+        if held is not None:
+            if cursor["kind"] != "after" or not isinstance(held, dict) or set(held) - set(tasks):
+                raise ValueError
+            cursor["held"] = {task: _held_seqs(rows, cursor["upper"]) for task, rows in held.items()}
         if type(cursor.setdefault("newest", "")) is not str or len(cursor["newest"]) > 64:  # see ``latest_arrival``
             raise ValueError
         if type(cursor.setdefault("lifecycle", False)) is not bool:
@@ -558,12 +567,15 @@ def history_source(root, source, lens, upper=None, *, physical=False):
 
 
 def select_history_page(data_dir, thread_id, view, cursor, quotas, predicates, caps, lens, notes="", warm=None,
-                        around=None, thread_filter=None, row_target=None):
+                        around=None, thread_filter=None, row_target=None, repair=""):
     """``lens``: the room's ``RoomLens`` per stream (``history._room_lens``); ``notes``:
     ``notes_stamp``; ``warm``: the room rule's lineage batch read, given rows before they are counted;
     ``around``: a task or exact row (``row_target`` is its resolved source/seq); ``thread_filter``: the
-    room rule and stored-chat coercion it decides membership with (``room_member_predicate``).
+    room rule and stored-chat coercion it decides membership with (``room_member_predicate``); ``repair``:
+    the client's ``?repair=`` (``REPAIR_SETTLED``: it applies ``repairs``, so the window's rows of a settled
+    task it shows are selected again with the arrivals, ``repair_ids``, instead of a refusal).
     A chronological room has its own view: its cursors never continue a stored-order chain."""
+    repair = repair == REPAIR_SETTLED
     if lens["chat"].chrono:
         view = f"{view}{_CHRONOLOGICAL}"
     if around is not None:
@@ -574,8 +586,10 @@ def select_history_page(data_dir, thread_id, view, cursor, quotas, predicates, c
     continuation = decode_cursor(cursor, thread_id, view) if cursor else None
     if continuation and (decoded := DECODED_CURSOR.get()) is not None:
         decoded["kind"] = continuation["kind"]
+    settled, repair_ids = set(), set()
     if continuation and continuation["kind"] == "after":
-        changed = "notes_changed" if continuation["notes"] != notes else _settled_since(data_dir, continuation["tasks"])
+        changed, settled = ("notes_changed", set()) if continuation["notes"] != notes else _settled_since(
+            data_dir, continuation["tasks"], continuation["held"] if repair else None)
         if changed:
             raise HistoryCursorError("history_delta_reset", detail=changed)
     if continuation:
@@ -609,6 +623,11 @@ def select_history_page(data_dir, thread_id, view, cursor, quotas, predicates, c
                                            for entry in selections[source][0]):
                 # Earlier messages imported since land inside the window's past, not after it.
                 raise HistoryCursorError("history_delta_reset", detail="historical_import", stream=source)
+            if settled:  # the window's rows of the tasks that settled, projected with what arrived
+                entries, lower, gaps = selections[source]
+                again = _held_entries(reader, continuation["held"], settled, source)
+                repair_ids.update(entry["history_id"] for entry in again)
+                selections[source] = (entries + again, lower, gaps)
         elif continuation and continuation["kind"] == "page":
             selections[source] = reader.replay(continuation["lower"][source], page_ends[source])
         elif continuation:
@@ -622,6 +641,8 @@ def select_history_page(data_dir, thread_id, view, cursor, quotas, predicates, c
             importing.append(source)
     if importing and not any(selections[source][0] for source in _SOURCES):
         raise StoreMigrating("Dialogue history is still importing")  # nothing on this page is readable yet
+    if settled and (decoded := DECODED_CURSOR.get()) is not None:
+        decoded["repairs"] = REPAIR_SETTLED
     evidence = []
     answer_seq = continuation.get("answer_seq") if continuation and continuation["kind"] == "page" else None
     if answer_seq is not None:
@@ -635,7 +656,8 @@ def select_history_page(data_dir, thread_id, view, cursor, quotas, predicates, c
             "quiet": bool(continuation and continuation["quiet"]), "lens": lens, "notes": notes,
             "selections": selections, "before": before, "page_ends": page_ends, "importing": importing,
             "horizon": horizon, "chains": chains, "chrono": chrono,
-            **({key: continuation[key] for key in ("tasks", "newest", "lifecycle")} if after else {})}
+            "repair": repair, "repaired": settled, "repair_ids": repair_ids,
+            **({key: continuation[key] for key in ("tasks", "newest", "lifecycle", "held")} if after else {})}
 
 
 def _select_around(data_dir, thread_id, view, task_id, quotas, predicates, lens, notes, warm, member, row_target=None):
@@ -705,27 +727,63 @@ def _select_around(data_dir, thread_id, view, task_id, quotas, predicates, lens,
     return page
 
 
-def _settled_since(data_dir, tasks):
-    """Which change of a task the window shows sends it to its newest page again, "" for none: one
-    that changed since its read while it no longer runs (``task_settled``: a question that closed,
-    a late phase that settled). Its own rows cannot say so; a running task's rows carry its facts.
+def _settled_since(data_dir, tasks, held=None):
+    """Which change of a task the window shows sends it to its newest page again, "" for none, and the
+    settled tasks this read answers instead: one that changed since its read while it no longer runs
+    (a question that closed, a late phase that settled). Its new rows cannot say so for the rows the window
+    already holds; a running task's rows carry its facts. A task whose rows the cursor ``held`` (a client
+    that applies ``repairs``) is answered by those rows projected anew; any other is ``task_settled``.
     Unknown is a change: a task gone (``task_missing``) or versions unread (``task_versions_unavailable``)."""
     if not tasks:
-        return ""
+        return "", set()
     from ouroboros import task_store
     from ouroboros.task_status import FINAL_STATUSES
 
     try:
         now = task_store.task_versions(data_dir, tasks)
     except Exception:
-        return "task_versions_unavailable"
+        return "task_versions_unavailable", set()
+    settled = set()
     for task_id, seen in tasks.items():
         if task_id not in now:
-            return "task_missing"
+            return "task_missing", set()
         seq, status, owes = now[task_id]
         if seq != seen and status in FINAL_STATUSES and not (owes and status in ("completed", "failed")):
-            return "task_settled"  # settled since (a cancelled record is terminal even while it owes its late phase)
-    return ""
+            # settled since (a cancelled record is terminal even while it owes its late phase)
+            if held is None or task_id not in held:
+                return "task_settled", set()
+            settled.add(task_id)
+    return "", settled
+
+
+def _held_seqs(rows, upper):
+    """A held task's rows as an ``after`` cursor carries them (``_held_steps``): per stream (``_SOURCES``) the
+    first coordinate, then each next one's step from the one before (at least 1), all below the stream's ``upper``."""
+    if not isinstance(rows, list) or len(rows) != len(_SOURCES):
+        raise ValueError
+    decoded = []
+    for source, steps in zip(_SOURCES, rows):
+        if not isinstance(steps, list) or any(type(step) is not int or step < bool(index) for index, step in enumerate(steps)):
+            raise ValueError
+        seqs = list(itertools.accumulate(steps))
+        if seqs and seqs[-1] >= upper[source]:
+            raise ValueError
+        decoded.append(seqs)
+    return decoded
+
+
+def _held_steps(seqs):
+    return [seq - prior for prior, seq in zip([0, *seqs], seqs)]
+
+
+def _held_entries(reader, held, settled, source):
+    """The rows of the ``settled`` tasks the window holds in ``source``, read by their coordinates: the read sends
+    them again, projected with the page (``repairs``). A row it cannot read leaves the window unaccounted for."""
+    seqs = sorted({seq for task in settled for seq in held[task][_SOURCES.index(source)]})
+    rows = ds.rows_at(reader.root, source, seqs) if seqs else {}
+    if len(rows) != len(seqs):
+        raise HistoryCursorError("history_delta_reset", detail="replay_gap", stream=source)
+    return reader._entries([rows[seq] for seq in seqs])
 
 
 def history_page_coverage(page, stream_gaps):
@@ -793,21 +851,31 @@ def history_page_tokens(page, messages=(), reads=None):
     versions, overlaid = getattr(reads, "versions", {}), getattr(reads, "overlaid", set)
     # Tasks whose facts the rows show: not an owner's row, a notice naming another room's task or a pointer.
     shown = {str(row.get("task_id")) for row in messages if row.get("task_id") and row.get("role") != "user"
-             and row.get("system_type") not in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES,
-                                                *MAIN_PINNED_ROW_TYPES, *WORK_SPEECH_ELSEWHERE_TYPES)}
+             and row.get("system_type") not in ROOM_FIXED_ROW_TYPES}
     lifecycle = any(row.get("lifecycle_virtual") for row in messages)
     if page.get("after") and page.get("lifecycle") and not lifecycle:  # the shown operation ended: nothing here says so
         raise HistoryCursorError("history_delta_reset", detail="lifecycle_ended")
+    tasks = {**page.get("tasks", {}), **{tid: versions[tid] for tid in sorted(overlaid(shown)) if tid in versions}}
+    issues = page.get("after") or (page["recent"] and not page["replayed"])  # the reads that name new arrivals
+    held = _held_rows(page, messages, shown, reads) if page.get("repair") and issues else None
+    if held is not None:
+        # A task's held rows keep the version they were projected at until a read sends them again (``repairs``).
+        tasks.update((task, seq) for task, seq in page.get("tasks", {}).items() if task not in page["repaired"])
+        held = {task: [_held_steps(seqs) for seqs in rows] for task, rows in held.items() if task in tasks}
     arrivals = {**state, "kind": "after", "before": dict(page["upper"]), "quiet": False, "notes": page["notes"],
-                "tasks": {**page.get("tasks", {}),
-                          **{tid: versions[tid] for tid in sorted(overlaid(shown)) if tid in versions}},
-                "newest": page.get("newest", ""), "lifecycle": lifecycle}
-    after_cursor = encode_cursor(arrivals)
+                "tasks": tasks, "newest": page.get("newest", ""), "lifecycle": lifecycle}
+    after_cursor = encode_cursor({**arrivals, "held": held} if held is not None else arrivals)
+    if held is not None and len(after_cursor) > _CURSOR_CHARS:  # rows too many to name: no repairs in this window
+        after_cursor = encode_cursor(arrivals)
     after_cursor = after_cursor if len(after_cursor) <= _CURSOR_CHARS else None
     if page.get("after"):  # a read of what arrived after the window's last read: it never pages older
         if after_cursor is None:
             raise HistoryCursorError("history_delta_reset", detail="cursor_size")
-        return {"has_more": False, "next_cursor": None, "page_cursor": None, "after_cursor": after_cursor}
+        # The rows sent again for the tasks that settled leave ``messages`` (what arrived) for ``repairs``.
+        repairs = [short_gist(row) for row in messages if row.get("history_id") in page["repair_ids"]]
+        messages[:] = [row for row in messages if row.get("history_id") not in page["repair_ids"]]
+        return {"has_more": False, "next_cursor": None, "page_cursor": None, "after_cursor": after_cursor,
+                **({"repairs": repairs} if repairs else {})}
     keys = (page.get("chrono") or {}).get("chat")  # a time-ordered room continues from row keys
     origin = {"origin": keys["origin"]} if keys and keys.get("origin") is not None else {}  # a pivot's own chain
     older_keys = {"chrono": {"before": _chrono_bound(page, "chat", before["chat"]), **origin}} if keys else {}
@@ -824,6 +892,44 @@ def history_page_tokens(page, messages=(), reads=None):
         **({"after_cursor": after_cursor} if after_cursor and page["recent"] and not page["replayed"] else {}),
         **({"anchor": anchor} if anchor is not None else {}),
     }
+
+
+def _held_rows(page, messages, shown, reads):
+    """The rows the window holds of each task it shows whose settling a later ``after`` read answers by sending them
+    again (``repairs``): every stored row of the task this page shows (an owner's aside), by coordinate per stream,
+    carried from read to read. None: this window shows what such a read could not bring up to date, so a task that
+    settles takes the newest page again (``task_settled``) until the next one: a room other than Main or a Project
+    (a place's rows also project its accounts and decisions), or an owner's send shown pending (its dispatch can
+    enter with no row to say so). A task is not held when the page projects it with another task's document or rows,
+    or shows it without a stored row of its own: an overlaid successor or a child drive's replica, a folded review
+    group or a review presented for another task, a historical receipt, a child's row shown without its lineage, a
+    row its room fixes elsewhere (``ROOM_FIXED_ROW_TYPES``), only a current-work carrier; one not held in a window is
+    never held again in it."""
+    if not any(column == "appearance" for column, _key in page["lens"]["chat"].keys):  # Main and Projects only
+        return None
+    carried = page.get("held") if page.get("after") else {}
+    if carried is None or any(row.get("ingress_pending") for row in messages):
+        return None
+    overlays = {task: reads.overlaid({task}) - {task} for task in shown} if reads is not None else {}
+    blocked = {*getattr(reads, "replica_results", ()), *(task for task, after in overlays.items() if after),
+               *(task for after in overlays.values() for task in after)}
+    if page.get("after"):
+        blocked |= set(page.get("tasks", {})) - set(carried)  # shown earlier in this window, not held then
+    held = {task: [list(seqs) for seqs in rows] for task, rows in carried.items()}
+    for row in messages:
+        task, owner, group = str(row.get("task_id") or ""), str(row.get("presentation_owner_task_id") or ""), row.get(
+            "review_group")
+        if (owner and owner != task) or isinstance(group, dict):
+            blocked |= {task, owner, *(str(attempt.get("task_id") or "") for attempt in (group or {}).get("attempts", ()))}
+        if not task or row.get("role") == "user":
+            continue  # an owner's row: its receipts and its delivery are the notes stamp's and the pending send's
+        if (row.get("historical_terminal") or row.get("system_type") in ROOM_FIXED_ROW_TYPES
+                or row.get("history_id") in page.get("stripped", ())):
+            blocked.add(task)
+        elif isinstance(position := row.get("history_position"), dict):  # else a carrier projected anew each read
+            held.setdefault(task, [[], []])[_SOURCES.index(position["source"])].append(position["offset"])
+    return {task: [sorted(set(seqs)) for seqs in rows] for task, rows in held.items()
+            if task not in blocked and (task in shown or task in carried)}
 
 
 def _chrono_bound(page, source, boundary):
@@ -984,7 +1090,9 @@ def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, pro
     offset = lambda row: row["history_position"]["offset"]  # noqa: E731
     words = lambda row: _card_content(row, str(row.get("system_type") or ""), child)  # noqa: E731
     arrived = _arrived_unread(data_dir, page["chat_id"])
-    feed = [row for row in rows if _feed_message(row) and not message_elsewhere(row, row_matches_thread)]
+    repaired = page.get("repair_ids", ())  # rows sent again for a task that settled arrived before: never the newest
+    feed = [row for row in rows if _feed_message(row) and not message_elsewhere(row, row_matches_thread)
+            and row.get("history_id") not in repaired]
     spoken = sorted((row for row in feed if row.get("role") != "user" and arrived(row) and (
         str(row.get("text") or "").strip() not in ("", "\u200b") or row.get("msg_type"))), key=offset)
     latest = next((row for row in reversed(spoken) if not words(row)), None)

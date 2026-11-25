@@ -1379,7 +1379,7 @@ def _assemble_history_response(
     thread_id: int,
     n_human: int,
     n_progress: int,
-    cursor: Optional[str] = None, around: Optional[str] = None, profile_scope: str = "",
+    cursor: Optional[str] = None, around: Optional[str] = None, profile_scope: str = "", repair: str = "",
 ) -> bytes:
     """Select and project recent/archive history in the endpoint's one worker.
 
@@ -1419,7 +1419,7 @@ def _assemble_history_response(
                                 "progress": progress_quota_predicate(row_matches_thread, _stored_chat_id)},
                                {"human": _MAX_N_HUMAN, "progress": _MAX_N_PROGRESS},
                                room_lens(data_dir, thread_id, project_chat_ids, project_source_refs, bindings_by_task),
-                               notes, rooms.warm, around, (row_matches_thread, _stored_chat_id), row_target)
+                               notes, rooms.warm, around, (row_matches_thread, _stored_chat_id), row_target, repair)
     selections, before, recent = page["selections"], page["before"], page["recent"]
     order = _reading_order(selections["chat"][0])
     n_human, n_progress = page["quotas"]["human"], page["quotas"]["progress"]
@@ -1477,7 +1477,7 @@ def _assemble_history_response(
         human_rows_dropped = lineage_truncated = review_overlays_truncated = False
 
     # Annotate only emitted rows; an absent summary must not strand a card.
-    deferred_lineage: set = set()
+    deferred_lineage: set = page.setdefault("stripped", set())  # a child row shown without its lineage
     evidence_anchors = {}
     if recent or page["after"]:  # current work has no history position: its evidence lands at the page end
         from ouroboros.gateway.state import current_work_in_room
@@ -1577,11 +1577,11 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         thread_id = _int_param("chat_id", 1, 2**53 - 1) or 1
         # ONE thread hop for the whole assembly (perf2 P3): reads, transforms,
         # slicing, annotation, and the JSON encode all run off the event loop.
-        cursor, around = (request.query_params.get(name) for name in ("cursor", "around"))
+        cursor, around, repair = (request.query_params.get(name) for name in ("cursor", "around", "repair"))
         profile_scope = request_profile_scope(request)  # frozen at apply (#3294)
         try:
             body = await asyncio.to_thread(_assemble_history_response, data_dir, thread_id, n_human, n_progress,
-                                           cursor, around, profile_scope)
+                                           cursor, around, profile_scope, repair or "")
         except (HistoryCursorError, OSError, StoreError) as exc:
             reason = (exc.reason if isinstance(exc, HistoryCursorError) else
                       "migrating" if isinstance(exc, StoreMigrating) else "history_source_unavailable")
