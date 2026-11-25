@@ -620,6 +620,44 @@ test('a word naming no profile takes saved text only where the real socket prove
     }
 });
 
+// The row menu's Delete marks its row `deleting` before the core answers (project_create.js), so the list stops
+// offering the Project at once. That mark is this page's, not the registry's word: a repaint from the list's own rows
+// meanwhile (a pin confirmed, the preferences read, a state read without rows) takes no saved text, so a refused delete
+// keeps it. The core's answer that it fenced the Project, or a state read's own `deleting` row, takes it (astra w3, the
+// delete path).
+for (const [says, answer, kept] of [
+    ['refused: the next state read shows it active', (h) => { h.changed({ authoritative: true }); h.read('active'); },
+        [PREVIEW_SCOPE, OTHER_PROFILE]],
+    ['answered: the core fenced it', (h) => h.changed({ authoritative: true, projectId: 'p1', lifecycle: 'deleting' }),
+        [OTHER_PROFILE]],
+    ['shown deleting by a state read before the answer', (h) => h.read('deleting'), [OTHER_PROFILE]]]) {
+    test(`a delete marked before the core answers takes no saved text until its word: ${says}`, () => {
+        const saved = savedProfiles(), menus = [];
+        const context = vm.createContext({
+            ...readAhead, ...pageProfile(true), forgetProjectPreviews: saved.forget, state: { projectSeenRevision: {} },
+            navState: { activeProjectId: null }, projectActivityIndex: { byChat: new Map() }, knownProjectsJson: '',
+            lastProjectRows: [], rooms: { forget() {} }, IDLE_SUMMARY: {}, pendingProjectPins: new Set(), apiClient: {},
+            markView: () => ({}), markWords: () => '', openProjectRowMenu: (_project, options) => menus.push(options) > 0,
+            projectsNav: { unreadRows: () => [], row: id => context.lastProjectRows.find(row => row.id === id) || null,
+                noteChange() {}, refresh() {}, keyboardHome: () => null },
+            closeProjectPanel() {}, paintProjectsNav() {}, syncNavigationState() {}, patchProjectActivityMarkers() {},
+            refreshProjectsNav() {}, refreshSharedProjectSeen() {},
+        });
+        vm.runInContext(`${unreadRule}${['renderProjectsNav', 'registryScope', 'openProjectMenu'].map(lift).join('\n')}`,
+            context);
+        const h = { read: lifecycle => context.renderProjectsNav([{ id: 'p1', name: 'P', chat_id: 9, lifecycle,
+            visible_revision: 5 }], [9]), changed: change => menus[0].onChanged(change) };
+        h.read('active');
+        assert.equal(context.openProjectMenu({ dataset: { navProjectId: 'p1' }, querySelector: () => null }), true);
+        h.changed({ projectId: 'p1', lifecycle: 'deleting', optimistic: true });  // the menu's Delete, confirmed
+        assert.equal(context.lastProjectRows[0].lifecycle, 'deleting', 'the list shows it going at once');
+        context.renderProjectsNav(context.lastProjectRows, [9]);  // a repaint from the list's own rows
+        assert.deepEqual(saved.kept(), [PREVIEW_SCOPE, OTHER_PROFILE], 'before the core answered: nothing taken');
+        answer(h);
+        assert.deepEqual(saved.kept(), kept, says);
+    });
+}
+
 // The read a Project's paint makes names its action (history_attribution.py): the room built now asks it as its
 // opening, its Retry as a retry; a kept room's return, as an unread receipt's own.
 test('a Project room built now asks its paint as its opening, its Retry as a retry, a return as the receipt\'s', async () => {

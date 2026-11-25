@@ -1042,10 +1042,11 @@ function renderProjectsNav(projects, projectChatIds, activityIndex = projectActi
         closeProjectPanel();
     }
     // The registry's own word retires a room kept away (also one leaving now, or holding work until it ends: every read
-    // asks again) and its saved text (chat_preview.js); absence from this bounded list never does.
-    const going = rows.filter(p => p.lifecycle === 'deleting').map(p => p.id);
-    rooms.forget(...going);
-    forgetProjectPreviews(going, registryScope());
+    // asks again) and its saved text (chat_preview.js); absence from this bounded list never does. This page's own mark
+    // of a delete the core has not answered (`_optimistic`, openProjectMenu) retires the room but takes no saved text.
+    const going = rows.filter(p => p.lifecycle === 'deleting');
+    rooms.forget(...going.map(p => p.id));
+    forgetProjectPreviews(going.filter(p => !p._optimistic).map(p => p.id), registryScope());
     const json = JSON.stringify([state.projectMessagesRevision, ...rows.map(p => [p.id, p.name, p.chat_id, p.lifecycle,
         p.visible_revision, p._unread, p.delete_error, p.pinned === true, p.last_message_at])]);  // a moved time repaints
     if (readOrder) projectsFeedOrder = readOrder;  // with its rows: nothing reads the one under the other's order
@@ -1215,7 +1216,8 @@ function openProjectMenu(item, { anchor = null, point = null } = {}) {
         onChanged: (change = {}) => {
             if (change.optimistic && change.projectId) {
                 const row = lastProjectRows.find(p => p.id === change.projectId);
-                if (row) { row.lifecycle = 'deleting'; row._unread = false; }
+                // Shown going at once; a mark of this page's own, which takes no saved text (renderProjectsNav).
+                if (row) Object.assign(row, { lifecycle: 'deleting', _unread: false, _optimistic: true });
                 projectsNav.noteChange(change.projectId, { lifecycle: 'deleting' });
                 if (navState.activeProjectId === change.projectId) closeProjectPanel();
                 paintProjectsNav();
