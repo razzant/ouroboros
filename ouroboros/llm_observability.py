@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterator, Optional, Tuple
 from ouroboros.context_timing import STEPS as _STEPS, carry_spans, host_step, measured_sections, section_spans, timed
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.anthropic_native_custody import public_custody_projection
-from ouroboros.utils import emit_cognitive_operation_event, sanitize_tool_result_for_log
+from ouroboros.utils import emit_cognitive_operation_event, sanitize_tool_result_for_log, utc_now_iso
 from ouroboros.physical_attempt_context import attempt_fact
 
 
@@ -358,3 +358,111 @@ def chat_observed(
     except Exception:
         pass
     return msg, usage
+
+
+def _remember_llm_call(
+    usage: Dict[str, Any], *, call_ids: Dict[str, Any], model: str, display_model: str, provider: str,
+    request_ref: Dict[str, Any], response_ref: Dict[str, Any],
+    reported_model: Any = None, use_local: Optional[bool] = None,
+    requested_profile: Optional[str] = None, observed_route: Optional[Dict[str, Any]] = None,
+    now: Any = utc_now_iso,
+) -> None:
+    call_meta = {
+        "ts": now(), **call_ids,
+        "model": model, "resolved_model": display_model, "provider": provider,
+        "reported_model": reported_model.strip() if isinstance(reported_model, str) and reported_model.strip() else None,
+        "use_local": use_local,
+        "request_ref": request_ref.get("manifest_ref") if request_ref else None,
+        "response_ref": response_ref.get("manifest_ref") if response_ref else None,
+        "requested_profile": requested_profile, "observed_route": dict(observed_route or {}),
+    }
+    usage["_last_llm_call_meta"] = call_meta
+    usage.setdefault("llm_call_refs", []).append(call_meta)
+
+
+def record_main_request(
+    drive_root: pathlib.Path, *, task_id: str, llm_call_id: str,
+    messages: Any, send_messages: Any, tools: Any, model: str, effort: str,
+    max_tokens: int, use_local: bool, allow_server_web_search: bool,
+    response_cache_bypass_requested: bool, accumulated_usage: Dict[str, Any],
+    call_ids: Dict[str, Any], context_fit_event_fields: Dict[str, Any],
+    persist: Any = persist_observed_call, writer: Any = persist_call, now: Any = utc_now_iso,
+) -> Dict[str, Any]:
+    """Persist the Main call's request projection and return its manifest reference."""
+    return persist(
+        drive_root, task_id=task_id, call_id=f"{llm_call_id}_request", call_type="llm_request",
+        payload={
+            "messages": messages,
+            "send_messages": send_messages,  # shares its equal elements with ``messages`` (stored once)
+            "tools": tools or [],
+            "model": model,
+            "reasoning_effort": effort,
+            "max_tokens": max_tokens,  # the logical caller ceiling; the sent allowance is the physical candidate's
+            "use_local": bool(use_local),
+            "allow_server_web_search": bool(allow_server_web_search),
+            "response_cache_bypass_requested": response_cache_bypass_requested,
+        },
+        manifest={
+            "first_request_at": accumulated_usage.setdefault("first_request_at", now()),
+            **call_ids,
+            "model": model,
+            "reasoning_effort": effort,
+            "response_cache_bypass_requested": response_cache_bypass_requested,
+            **context_fit_event_fields,
+        },
+        writer=writer,
+    )
+
+
+def record_main_response(
+    drive_root: pathlib.Path, *, task_id: str, llm_call_id: str,
+    msg: Dict[str, Any], usage: Dict[str, Any], accumulated_usage: Dict[str, Any],
+    call_ids: Dict[str, Any], model: str, display_model: str, provider: str,
+    use_local: bool, request_ref: Dict[str, Any], physical: Any,
+    host_route: Dict[str, Any], model_account_override: Optional[str],
+    persist: Any = persist_observed_call, writer: Any = persist_call, now: Any = utc_now_iso,
+) -> Dict[str, Any]:
+    """Persist the Main call's response projection and append its call metadata to ``accumulated_usage``."""
+    response_ref = persist(
+        drive_root,
+        task_id=task_id,
+        call_id=f"{llm_call_id}_response",
+        call_type="llm_response",
+        payload={
+            "message": msg,
+            "usage": usage,
+        },
+        manifest={
+            "first_answer_at": accumulated_usage.setdefault("first_answer_at", now()),
+            **call_ids,
+            "model": model,
+            "resolved_model": display_model,
+            "provider": provider,
+        },
+        writer=writer,
+    )
+    attempt_id = (usage.get("ledger_attempt_ids") or [None])[-1]
+    _remember_llm_call(
+        accumulated_usage,
+        call_ids={
+            **call_ids,
+            "physical_attempt_id": attempt_id,
+            **({
+                "physical_model": physical.model,
+                "physical_provider": physical.provider,
+                "dispatch_account": getattr(physical.physical_context, "dispatch_account", ""),
+                **({"processing_preference": physical.processing_preference}
+                   if hasattr(physical, "processing_preference") else {}),
+            } if physical is not None and physical.state == "settled" and physical.attempt_id == attempt_id else {}),
+            **({"provider_body_error": True} if usage.get("provider_error") else {}),
+        },
+        model=model, display_model=display_model, provider=provider,
+        request_ref=request_ref, response_ref=response_ref,
+        reported_model=usage.get("resolved_model"), use_local=bool(use_local),
+        requested_profile=(usage.get("claudexor") or {}).get(
+            "requested_profile", host_route.get("credential_profile_id", model_account_override)
+        ),
+        observed_route=(usage.get("claudexor") or {}).get("route"),
+        now=now,
+    )
+    return response_ref

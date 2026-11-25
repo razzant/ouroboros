@@ -21,7 +21,8 @@ export function excerptBody(row) {
         || bubble.querySelector('.chat-quiz-card, .chat-routing-card, .chat-relay-deck')) return null;
     if (row.matches('[data-reply-caption]')) return row;
     const kind = row.dataset.systemType || '';
-    if (TEXT_TYPES.has(kind) || (row.classList.contains('assistant') && PROJECT_ROW_TYPES.has(kind))) {
+    const note = kind === 'agent_note_received' && row.classList.contains('user') && Boolean(row.dataset.replyAuthor);
+    if (TEXT_TYPES.has(kind) || note || (row.classList.contains('assistant') && PROJECT_ROW_TYPES.has(kind))) {
         const body = row.querySelector(':scope > .message[data-reply-body]:not([hidden])');
         if (body) return body;
     }

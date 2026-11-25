@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any
 
 OBSERVATION_INTERVAL_SEC = 120.0
 OBSERVATION_TIMEOUT_SEC = 3.0
@@ -628,3 +629,70 @@ def hold_selection(owner, addresses, *, owner_note: bool) -> None:
         owner._primary_view = (held[0], select_view(held[1], held[1].initial_mode, addresses, owner_note=owner_note))
     except ValueError:
         owner._primary_view = None
+
+
+def _record_authoring_handover(
+    tool_ctx: Any,
+    *,
+    from_model: str,
+    to_model: str,
+    reason: str,
+    tool_calls_at_handover: int,
+) -> None:
+    """Open the successor’s handover after the predecessor used tools. Trace and usage share its row."""
+    source = str(from_model or "").strip()
+    target = str(to_model or "").strip()
+    if not source or not target or source == target or tool_calls_at_handover < 1:
+        return
+    row = {
+        "from_model": source,
+        "to_model": target,
+        "reason": str(reason or "host_route_change"),
+        "tool_calls_at_handover": int(tool_calls_at_handover),
+        "reply_observed": True,
+        "recovery_prompted": False,
+        "status": "pending",
+    }
+    tool_ctx._authoring_handover = row
+    usage = getattr(tool_ctx, "_accumulated_usage", None)
+    if isinstance(usage, dict):
+        handovers = usage.setdefault("authoring_handovers", [])
+        if isinstance(handovers, list):
+            handovers.append(row)
+    trace = getattr(tool_ctx, "_execution_trace", None)
+    if isinstance(trace, dict):
+        trace.setdefault("route_handovers", []).append(row)
+
+
+def observe_authoring_response(tool_ctx: Any, model: str, *, forced: bool = False) -> None:
+    """Only a reply transfers authorship. Failed attempts leave the host's reason for the next reply."""
+    reason = getattr(tool_ctx, "_pending_handover_reason", None)
+    tool_ctx._pending_handover_reason = None
+    handover = getattr(tool_ctx, "_authoring_handover", None) or {}
+    trace = getattr(tool_ctx, "_execution_trace", None) or {}
+    usage = getattr(tool_ctx, "_accumulated_usage", None) or {}
+    source = (getattr(tool_ctx, "_completion_observation", None) or {}).get("model")
+    if not handover and model and reason != "mind_switch":
+        # Restore reunites this execution's two copies, but an old route pair proves no reply. Only its target's
+        # actual reply attaches the row, and not after an author the pair does not name or a switch the mind made.
+        routes, rows = trace.get("route_handovers"), usage.get("authoring_handovers")
+        if (isinstance(routes, list) and routes and isinstance(rows, list) and rows
+                and (row := routes[-1]) is rows[-1] and isinstance(row, dict) and row.get("to_model") == model
+                and source in (None, row.get("from_model")) and row.get("reply_observed") is not True
+                and (row.get("status") == "pending" or (row.get("status") == "incomplete"
+                    and trace.get("authoring_handover_incomplete") is row))):
+            row["reply_observed"] = True
+            tool_ctx._authoring_handover = row
+            return
+    if not (reason or handover or forced):
+        return
+    if not source:  # A retry under a new ID retains the predecessor's accepted routes in the trace.
+        routes = usage.get("accepted_routes") or trace.get("accepted_routes") or []
+        previous = routes[-1].get("to_binding") if routes else None
+        source = previous[0] if previous else None
+    if reason == "mind_switch":
+        if handover and model != handover.get("to_model"):
+            tool_ctx._authoring_handover = None  # its previous author made no selection
+        return
+    _record_authoring_handover(tool_ctx, from_model=source, to_model=model, reason=reason or "route_change",
+                               tool_calls_at_handover=len(trace.get("tool_calls") or []))

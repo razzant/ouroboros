@@ -448,6 +448,7 @@
  * @property {'user'=} quote_role  // the owner's ink on a recorded card answer
  * @property {string=} author_label
  * @property {string=} kind
+ * @property {'agent_note'|'late_result'|'place_machine'=} program_source  // recorded source kind, not permission
  * @property {string=} snippet
  * @property {number=} chars  // the quoted text's whole length, present when snippet cuts it
  * @property {string=} ts
@@ -490,6 +491,14 @@
  * @property {{v: 1, occurred_at: ?string, source: 'executor_terminal'|'supervisor_cancel'|'unknown', attempt: Object}=} terminal_time
  */
 
+/** An agent's note's author as the host recorded it, never an owner stamp.
+ * @typedef {Object} DeclaredAuthor
+ * @property {'agent'} kind
+ * @property {string} label
+ * @property {'self_declared'|'link_key'} basis
+ * @property {string=} key_id
+ */
+
 /**
  * One `GET /api/chat/history` row (live frames call `text` `content`). A row may also carry the
  * task-progress and outcome fields of a live `chat` frame (`ChatOutbound`). Replay-evidence rows
@@ -498,6 +507,7 @@
  * @property {PlaceHistoryFacts=} place_history
  * @property {PresenceContact=} presence_contact
  * @property {string=} wait_ended_at
+ * @property {string=} kind  // room_echo for a program's message saved in its recipient's room
  * @property {string=} row_address
  * @property {boolean=} reply_excerpt_disabled  // a mixed or wordless card display, not one authored passage
  * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
@@ -517,8 +527,10 @@
  * @property {ChatHistoryPosition=} history_position
  * @property {boolean=} markdown
  * @property {string=} source
- * @property {string=} sender_label
+ * @property {string=} sender_label  // an agent's note: its rendered identity, shown as is
  * @property {string=} sender_session_id
+ * @property {DeclaredAuthor=} declared_author  // an agent's note in Main: never the owner's words
+ * @property {string=} late_report_id  // the displayed letter id, not a return capability
  * @property {string=} client_message_id  // correlation id, not proof of owner authorship; use role
  * @property {"swarm"=} subagents_mode  // effective mode at acceptance; preserved on replay
  * @property {boolean=} ingress_accepted
@@ -747,6 +759,8 @@
  * @property {string=} source
  * @property {string=} sender_label
  * @property {string=} task_id
+ * @property {DeclaredAuthor=} declared_author  // an agent's note: its literal body is `text`, never the owner's words
+ * @property {string=} late_report_id  // the displayed letter id, not a return capability
  * @property {ChatSearchAttachment[]=} attachments
  * @property {boolean=} text_placeholder
  * @property {'photo'|'video'|'document'|'links'|'quiz'=} msg_type

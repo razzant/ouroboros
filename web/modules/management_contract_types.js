@@ -1037,6 +1037,33 @@
  */
 
 /**
+ * The author an agent's note declares: exactly these two keys.
+ * @typedef {Object} AgentNoteAuthor
+ * @property {'agent'} kind
+ * @property {string} label
+ */
+
+/**
+ * `POST /api/command` without `cmd`: an agent's note for Main, literal text and never the owner's words.
+ * @typedef {Object} AgentNoteRequest
+ * @property {string} text
+ * @property {AgentNoteAuthor} author
+ * @property {string=} reply_to  // a citation, never steering
+ * @property {import('./client_contract_types.js').ReplyExcerpt=} reply_excerpt
+ * @property {string=} if_boot
+ */
+
+/**
+ * A note's receipt: the recorded author, the saved row and `delivery: 'queued'`; an older host answers without them.
+ * @typedef {Object} AgentNoteResponse
+ * @property {'ok'} status
+ * @property {true} accepted
+ * @property {Object} author  // history's declared_author
+ * @property {string} row_address
+ * @property {'queued'} delivery
+ */
+
+/**
  * @typedef {Object} CommandResponse
  * @property {string=} status
  * @property {boolean=} ok

@@ -1038,7 +1038,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 491 -> 496: #4196 adds ``state/sign_in``, its ``clients.json``, ``grants`` and
 # ``grants/*/*/*.json``, plus ``state/skills/*/sign_in_withdrawn.json``
 # (``service_sign_in.py``). PERSISTENCE.md already covers both file families.
-EXPECTED_SCAN_PATHS = 496
+# 496 -> 498: call bindings in ``state/extension_late_results/*.json`` and saved API revisions
+# in ``state/connection_revisions.json`` (both documented in PERSISTENCE.md).
+EXPECTED_SCAN_PATHS = 498
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

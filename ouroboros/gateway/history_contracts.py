@@ -117,6 +117,7 @@ class PlaceHistoryFacts(TypedDict, total=False):
     kind: Required[Literal['message', 'notice', 'delivery']]
     delivery_state: Literal['authored', 'accepted', 'delivered', 'failed', 'uncertain']
     attention: PlaceHistoryAttention
+    actor_origin: Literal['machine']  # an incoming program, as recorded by the connector; absent carries no origin claim
     owner_confirmed: bool  # current stored account confirmation, never inferred from role=user
     facts: List[str]  # a heard row's declared event facts ([] when none were declared)
     identity: Dict[str, Any]  # captured incoming rows: the connector's declared identity at that moment
@@ -151,7 +152,24 @@ class HistoricalTerminal(TypedDict, total=False):
     schedule_report_only: bool
 
 
-class ChatHistoryMessage(HostNoticeField, total=False):
+class DeclaredAuthor(TypedDict, total=False):
+    """An agent's note's author as the host recorded it (``dialogue_provenance.recorded_author``): the label it declared,
+    never verified (``basis: "self_declared"``); ``link_key`` with ``key_id`` is reserved for a host-attested key."""
+
+    kind: Required[Literal["agent"]]
+    label: Required[str]
+    basis: Required[Literal["self_declared", "link_key"]]
+    key_id: str
+
+
+class AgentNoteFields(TypedDict, total=False):
+    """The program's author and optional letter id, on both the live echo and its history row."""
+
+    declared_author: DeclaredAuthor  # an agent's note in Main: never the owner's words
+    late_report_id: str  # the letter's display id, not the host return reference
+
+
+class ChatHistoryMessage(HostNoticeField, AgentNoteFields, total=False):
     """One ``GET /api/chat/history`` row. Every row has the six required keys; a stored row also
     has ``history_id`` and ``history_position``. Live frames call ``text`` ``content``.
 
@@ -171,6 +189,7 @@ class ChatHistoryMessage(HostNoticeField, total=False):
     presence_contact: PresenceContact
     place_history: PlaceHistoryFacts
     wait_ended_at: str
+    kind: str  # room_echo for a program's message saved in its recipient's room
     row_address: str
     reply_excerpt_disabled: bool
     reply_author_label: str  # whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
@@ -183,7 +202,7 @@ class ChatHistoryMessage(HostNoticeField, total=False):
     history_position: ChatHistoryPosition
     markdown: bool
     source: str
-    sender_label: str
+    sender_label: str  # an agent's note: its rendered identity (``agent "<label>" (declared, not verified)``)
     sender_session_id: str
     subagents_mode: Literal["swarm"]  # Effective room mode at owner-message acceptance.
     client_message_id: str  # correlation id; owner rows have role=user, quiz publications also use it
@@ -379,14 +398,15 @@ class ChatSearchQuestion(TypedDict, total=False):
     comment: str
 
 
-class ChatSearchCandidate(HostNoticeField, total=False):
+class ChatSearchCandidate(HostNoticeField, AgentNoteFields, total=False):
     """One saved message of the room as the fields the room's renderer draws its words from: the text history
     gives it (``system_type``, ``markdown``, ``narration``, ``source`` and the owner's ``attachments`` names choose
     how) or a host notice's line (``notice``; its details, template and values are not searched), a photo, video or file's ``caption`` and a file's ``filename``, a links row's ``title`` and ``actions``, a
     question's ``quiz``, a Project lifecycle row's answer and ending (``completion_answer``, ``project_id``,
-    ``project_name``, ``task_name``, ``completion_notice``). Whether its words contain the query is the client's
-    reading of those words. ``history_id`` and ``row_address`` are the row's identity in ``GET /api/chat/history``, whose
-    ``around=<row_address>`` reads the page around it; ``role`` is its author as history names it."""
+    ``project_name``, ``task_name``, ``completion_notice``). An agent's note carries its literal body as ``text`` under
+    its ``declared_author`` (``role`` ``user``), as history shows it, never the neutral receipt fact. Whether its words
+    contain the query is the client's reading of those words. ``history_id`` and ``row_address`` are the row's identity in
+    ``GET /api/chat/history``, whose ``around=<row_address>`` reads the page around it; ``role`` is its author as history names it."""
 
     history_id: Required[str]
     row_address: Required[str]

@@ -30,8 +30,9 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from ouroboros import places, conversation_lease
-from ouroboros.tool_effects import (EFFECT_MESSAGE, EFFECT_READ, ToolEffect, argument_value, bound_declaration,
-                                    connector_of, effect_of, target_values, thread_pairs, touched_addresses)
+from ouroboros.tool_effects import (EFFECT_GESTURE, EFFECT_MESSAGE, EFFECT_READ, ToolEffect, argument_value,
+                                    bound_declaration, connector_of, effect_of, target_values, thread_pairs,
+                                    touched_addresses)
 
 _PREFIX = "⚠️ RESOURCE_CONSTRAINT_BLOCKED: "
 PLACE_BINDING_VERSION = 1
@@ -322,12 +323,16 @@ def dispatch_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
         return (_PREFIX + f"The destination of {name!r} cannot be attributed while {labels} is Silent or Paused. "
                 "Use a tool with declared, attributable targets or change the state in Circles "
                 "or with configure_presence.")
-    return _author_refusal(ctx, name, args, call) if effect.effect == EFFECT_MESSAGE else ""
+    if effect.effect == EFFECT_MESSAGE:
+        return _author_refusal(ctx, name, args, call)
+    if effect.effect == EFFECT_GESTURE:
+        _note_own_gesture(ctx, name, args, call, connector_of(name, ext_tool))
+    return ""
 
 
 def _author_refusal(ctx: Any, name: str, args: Mapping[str, Any], call: _CallReach) -> str:
     """One author per conversation for words: another live turn's conversation names its author; this run's own
-    sends there are noted (``_note_message_call``). Only where the words land holds an author: a group's write or
+    sends there are noted (``_note_response_call``). Only where the words land holds an author: a group's write or
     read beside them takes none."""
     keys = []
     for reach in call.reaches.values():
@@ -338,8 +343,24 @@ def _author_refusal(ctx: Any, name: str, args: Mapping[str, Any], call: _CallRea
                 return (_PREFIX + f"Task {author} is authoring this conversation in {place.label or place.place_id}. "
                         f"Hand the intent to it with tell_task(task_id={author!r}, note=...).")
             keys.append(key)
-    _note_message_call(ctx, name, args, keys, call.effect)
+    _note_response_call(ctx, name, args, keys, call.effect)
     return ""
+
+
+def _note_own_gesture(ctx: Any, name: str, args: Mapping[str, Any], call: _CallReach, connector: str) -> None:
+    """Remember possible response in this conversation without changing gesture admission."""
+    from ouroboros.place_reply import _gesture_on_waking_message
+
+    metadata = _metadata(ctx)
+    presence = metadata.get("presence")
+    event = presence.get("event") if isinstance(presence, Mapping) else None
+    if not isinstance(event, Mapping) or not connector or connector != presence.get("transport_skill"):
+        return
+    key = event.get("conversation_key")
+    effect = call.effect
+    if isinstance(key, str) and key and (any(key in reach.keys for reach in call.reaches.values())
+            or (not call.targets.get(effect.thread) and _gesture_on_waking_message(metadata, effect, args))):
+        _note_response_call(ctx, name, args, [key], effect)
 
 
 def authored_notes(records: Any, place: Any) -> list[dict[str, Any]]:
@@ -418,11 +439,11 @@ def with_destination_facts(ctx: Any, name: str, args: Mapping[str, Any], result:
                    producer_text=(result.producer_text if result.host_annotations or result.producer_text is not None else result.text))
 
 
-def _note_message_call(ctx: Any, name: str, args: Mapping[str, Any], keys: list[str], effect: ToolEffect) -> None:
-    """Keep on the context that this run dispatched a ``message`` call into these conversations (``_place_message_calls``):
-    the words proposed (its declared ``text`` argument, default ``text``, when it has one) and when. A dispatched call is not a delivery:
-    Safety may still refuse it and the handler may fail; the connector's receipt, when it comes, says what landed.
-    ``this_turn_sends`` reads it beside the receipts, so a finish seconds after a send is judged with the send in view."""
+def _note_response_call(ctx: Any, name: str, args: Mapping[str, Any], keys: list[str], effect: ToolEffect) -> None:
+    """Record a possible response in the existing resumable call list, not proof of delivery.
+
+    A gesture contributes to completion evidence, never to the message-call presentation.
+    """
     from ouroboros.utils import utc_now_iso
 
     if not keys:
@@ -434,8 +455,10 @@ def _note_message_call(ctx: Any, name: str, args: Mapping[str, Any], keys: list[
             ctx._place_message_calls = calls
         except AttributeError:  # a context that takes no attributes keeps no record
             return
-    words = argument_value(args, effect.text or "text")
+    gesture = effect.effect == EFFECT_GESTURE
+    words = None if gesture else argument_value(args, effect.text or "text")
     calls.append({"tool": name, "at": utc_now_iso(), "conversation_keys": list(dict.fromkeys(keys)),
+                  **({"gesture": True} if gesture else {}),
                   **({"text": words} if isinstance(words, str) else {})})
 
 
@@ -457,7 +480,8 @@ def this_turn_sends(ctx: Any, conversation_key: str) -> dict[str, Any]:
         record, confirmed = None, "unknown (receipts unreadable)"
     delivered = set(record["sent"]) if record else set()
     calls = [row for row in getattr(ctx, "_place_message_calls", None) or []
-             if isinstance(row, Mapping) and conversation_key in (row.get("conversation_keys") or ())]
+             if isinstance(row, Mapping) and not row.get("gesture")
+             and conversation_key in (row.get("conversation_keys") or ())]
     pending = [{key: row[key] for key in ("tool", "at", "text") if key in row}
                for row in calls if row.get("text") is None or row["text"] not in delivered]
     return {"confirmed": confirmed, "calls_without_receipt": pending}

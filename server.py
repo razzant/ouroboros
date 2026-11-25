@@ -171,8 +171,7 @@ from ouroboros.config import (
     SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     SETTINGS_DEFAULTS,
     SettingsIntegrityError,
-    load_settings, save_settings, verify_settings_integrity,
-    apply_settings_to_env as _apply_settings_to_env,
+    load_settings, save_settings, verify_settings_integrity, apply_settings_to_env as _apply_settings_to_env,
 )
 from ouroboros.server_runtime import (
     apply_runtime_provider_defaults,
@@ -285,6 +284,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any, *, timeout: float = 1
 def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: list) -> int:
     from supervisor.message_bus import coerce_chat_identity, record_inbound_message
     from ouroboros.chat_uploads import attachment_placeholder, local_message_words
+    from ouroboros.dialogue_provenance import declared_author
 
     for upd in updates:
         cursor[0] += 1
@@ -310,7 +310,8 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         image_caption = str(msg.get("image_caption") or "")
         task_constraint = msg.get("task_constraint") if isinstance(msg.get("task_constraint"), dict) else None
         image_data = (image_base64, image_mime, image_caption) if image_base64 else None
-        log_text = local_message_words(source, text, image_caption) or attachment_placeholder(image_base64, msg.get("task_metadata"))
+        declared = declared_author(msg.get("accepted_source_row"))
+        log_text = text if declared else local_message_words(source, text, image_caption) or attachment_placeholder(image_base64, msg.get("task_metadata"))
         now_iso = utc_now_iso()
         if not client_message_id:
             # Some owner transports have no client-generated id.  Give the
@@ -334,7 +335,8 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             )
             client_message_id = f"host-{uuid.uuid5(uuid.NAMESPACE_URL, identity).hex}"
 
-        lowered = text.strip().lower()
+        # An agent's note (its accepted row's recorded author) is literal text: no command, Panic, stamp or binding.
+        lowered = "" if declared else text.strip().lower()
         is_slash_command = lowered.startswith("/")
         is_external_transport = source != "web"
         external_identity_present = (not is_external_transport) or (chat_id > 0 and user_id > 0)
@@ -383,7 +385,8 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             consciousness_clock.note_owner_zone(live, task_metadata, own=not is_external_transport or bound_external_owner, message=origin_message_ref, at=now_iso, accepted=msg.get("accepted_source_row"))
 
         try:
-            ctx.update_state(_stamp_owner_activity)
+            if not declared:
+                ctx.update_state(_stamp_owner_activity)
         except StateUnavailable as exc:
             log.warning("Owner activity not stamped: %s", exc)  # the message itself still proceeds
 
@@ -487,7 +490,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                     "accepted_source_row": msg.get("accepted_source_row") if reply_source else None,
                     "origin_message_snapshot": msg.get("_origin_snapshot"), "origin_unkept": msg.get("_origin_unkept") is True,
                     "source": source, "received_at": str(msg.get("received_at") or ""),
-                    "bound_external_owner": bound_external_owner,
+                    "bound_external_owner": bound_external_owner, "declared_author": declared,
                 },
             )
     return offset

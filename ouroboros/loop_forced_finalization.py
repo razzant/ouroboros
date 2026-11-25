@@ -886,8 +886,8 @@ def _call_forced_model_once(
     if admitted_request is None and initial_messages is None:
         append_refused_sends(ctx.accumulated_usage, ctx.messages)
     owner_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
-    # The admitted send reuses the lookahead's one measurement (``task_pacing.prepared_wrapup_candidate``);
-    # a direct, drift or owner-refresh send measures its own final input afresh.
+    if getattr(owner_ctx, "_late_report_ref", ""):  # machine consideration grants no alternate forced send
+        return ""
     physical = getattr(owner_ctx, "_forced_physical_context", None) if admitted_request is not None else None
     if owner_ctx is not None:
         owner_ctx._forced_physical_context = None
@@ -895,7 +895,6 @@ def _call_forced_model_once(
         physical = _forced_physical_context(ctx, initial_messages if initial_messages is not None else ctx.messages)
     response_meta: Dict[str, Any] = {}
     from ouroboros.send_clock import main_clock_policy
-
     from ouroboros import task_pacing
 
     content = lambda request: (getattr(request, "candidate_clock_free_sha256", None)  # noqa: E731

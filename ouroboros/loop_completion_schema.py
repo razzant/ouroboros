@@ -43,9 +43,16 @@ _SCHEMA = {"name": SCHEDULE_DOOR, "description": (
 
 def completion_schema(tools: Any, schemas: list | None = None) -> str:
     """Materialize the current permitted front door, including cold/Nano holds."""
-    from ouroboros.usage_accounting import invalidate_task_cache_splits
     ctx = tools._ctx
     name = "finish_task"
+    if getattr(ctx, "_late_report_ref", ""):
+        from ouroboros.tool_policy import initial_tool_schemas
+
+        projected = initial_tool_schemas(tools)
+        if schemas is not None and schemas != projected:
+            schemas[:] = projected
+            _completion_schema_changed(ctx, name if projected else "")
+        return name if projected else "no currently permitted completion tool"
     getter = getattr(tools, "get_schema_by_name", None)
     if not callable(getter):
         return name
@@ -62,10 +69,17 @@ def completion_schema(tools: Any, schemas: list | None = None) -> str:
         return "no currently permitted completion tool"
     if schemas is not None and not any(row.get("function", {}).get("name") == name for row in schemas):
         schemas.append(schema)
-        invalidate_task_cache_splits(getattr(ctx, "task_id", ""))
-        getattr(ctx, "messages", []).append({"role": "user", "content":
-            "[SYSTEM NOTICE] Current permitted completion schema loaded: " + name + ". The schema prefix changed."})
+        _completion_schema_changed(ctx, name)
     return name
+
+
+def _completion_schema_changed(ctx: Any, name: str) -> None:
+    from ouroboros.usage_accounting import invalidate_task_cache_splits
+
+    invalidate_task_cache_splits(getattr(ctx, "task_id", ""))
+    notice = f"Current permitted completion schema loaded: {name}." if name else "No completion tool is permitted here."
+    getattr(ctx, "messages", []).append({"role": "user", "content":
+        f"[SYSTEM NOTICE] {notice} The schema prefix changed."})
 
 
 def _occurrence(ctx: Any) -> dict | None:
@@ -267,8 +281,10 @@ def schedule_finish(ctx: Any, outcome: str = "", message: str = "", action: str 
     """Stage the ordinary completion request of the bound run: the selected report, as its quiet record.
 
     The author's own literal or offered hash is the selection: an argument the frozen ceiling fixes refuses instead
-    of choosing or changing it. Outcome words are the older call's and change no audience. Without a reply carrier
-    the quiet Presence completion is staged here too, so no ending makes the record speech."""
+    of choosing or changing it. Outcome words are the older call's and change no audience. The staged ``wake_silent``
+    is this door's own host-set quiet (a planned report is a record), never the model's explicit silence, so the
+    explicit-silence fact does not follow from it. Without a reply carrier the quiet Presence completion is staged
+    here too, so no ending makes the record speech."""
     from ouroboros.place_reply import reply_carrier
     from ouroboros.tools.control_runtime import stage_completion_request
     from ouroboros.tools.presence import PRESENCE_OUTCOMES

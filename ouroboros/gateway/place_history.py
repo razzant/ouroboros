@@ -7,7 +7,9 @@ A row whose arrival recorded its provider send time shows it (``sent_at``); ``ts
 """
 from __future__ import annotations
 
-from ouroboros.dialogue_provenance import reaction_action_words, reaction_fact, reaction_words
+from ouroboros.dialogue_provenance import (
+    MACHINE_ORIGIN, place_machine_actor, reaction_action_words, reaction_fact, reaction_words, recorded_speaker_name,
+)
 from ouroboros.place_arrivals import heard_attention
 from ouroboros.places import PlaceError, owner_confirmed_row, place_owner_accounts, row_place_id
 from ouroboros.presence_call import call_utterance
@@ -28,6 +30,8 @@ def record_facts(entry):
         facts = {'kind': 'message'}
     else:
         return None  # Progress, task evidence and private Main contact are not room speech.
+    if facts['kind'] == 'message' and place_machine_actor(entry):
+        facts['actor_origin'] = MACHINE_ORIGIN
     delivery = transport.get('delivery') or {}
     if isinstance(delivery, dict) and delivery.get('state') in {'authored', 'accepted', 'delivered', 'failed', 'uncertain'}:
         facts['delivery_state'] = delivery['state']
@@ -65,6 +69,8 @@ def annotate_place_history(messages, entries, root, reads):
     accounts = None  # the places' current owner accounts, read once for the page when a person's row needs them
     for message, entry in candidates:
         facts = record_facts(entry)
+        if facts.get('actor_origin') == MACHINE_ORIGIN and not message.get('sender_label'):
+            message['sender_label'] = recorded_speaker_name(entry)
         # The provider send time the arrival recorded (``source_order``); a row without one has none, nor has a call's
         # utterance. One stored before heard rows stopped carrying the opening's message holds the opening's time and,
         # never rewritten, still reads there in a room ordered by time (``place_arrivals.READING_TIME``).

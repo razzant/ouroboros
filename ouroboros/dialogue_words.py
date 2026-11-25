@@ -252,6 +252,10 @@ def fields_of(row: Mapping[str, Any]) -> List[Field]:
     else:
         carried = row.get("corpus_answer") if isinstance(row.get("corpus_answer"), Mapping) else {}
         text = str(row.get("text") or "")
+        if "declared_author" in row:  # an agent's note: its literal body as program data, the one shared projection
+            from ouroboros.dialogue_provenance import agent_note_text  # pure; only a note reaches it, never a store
+
+            text = agent_note_text(row)
         fields = [Field("press", text, "owner", words=False) if carried.get("source") == "owner_press"
                   else Field("text", text, "author")]
     return [field for field in fields if field.text.strip()]

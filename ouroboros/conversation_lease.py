@@ -544,17 +544,18 @@ def root_conversation_key(task: Any) -> str:
 
 
 OWNER_CONVERSATION = "owner:"  # an owner turn's intake key: this prefix and its chat id
+LOCAL_RESULT_INTAKE = "local-result"  # non-owner mail only; its address is rechecked by the return door
 
 
 def owner_conversation_key(task: Any) -> str:
-    """``owner:<chat>`` for my human's own foreground turn: the conversation whose ordinary messages it reads; else "".
+    """``owner:<chat>`` for an owner or agent-note foreground turn reading this ordinary conversation, else "".
 
-    Facts the host already stamps, never a mark of its own: the direct origin with the owner door's ingress
-    (``dialogue_provenance.run_origin``: a wake or an auto-resume has none), on the conversation lane or not yet
+    Facts the host already stamps: a direct owner ingress or its own admitted note (neither a wake nor auto-resume),
+    on the conversation lane or not yet
     carried, any executor but a live call's (``inline_call``), in a chat of the owner's and bound to no Project.
     Presence, detached, Project and pooled work read none. Its fact is the host's from admission, then its carrier's
     (``worker_chat_lane.CarrierTurn``); the final drain closes it (``follow_loop_admission``)."""
-    from ouroboros.dialogue_provenance import is_presence_task, run_origin
+    from ouroboros.dialogue_provenance import admission_note, is_presence_task, run_origin
     from ouroboros.task_carrier import (
         EXECUTOR_INLINE_CALL,
         LANE_CONVERSATION,
@@ -572,7 +573,8 @@ def owner_conversation_key(task: Any) -> str:
         return ""
     if (chat_id <= 0 or execution_kind(task) != "direct"
             or execution_owner(task).get("lane") not in (None, LANE_CONVERSATION)
-            or carrier_executor(task) == EXECUTOR_INLINE_CALL or not run_origin(task)["owner_ingress"]
+            or carrier_executor(task) == EXECUTOR_INLINE_CALL
+            or not (run_origin(task)["owner_ingress"] or admission_note(task))
             or is_presence_task(task) or task.get("detached_at") or metadata.get("detached_at")
             or str(task.get("project_id") or "").strip()):
         return ""
@@ -590,6 +592,12 @@ def task_attempt(task: Any) -> int:
 def open_root_intake(drive_root: Any, task: Any) -> bool:
     """A root's loop reads its conversation from here on, on its own drive beside its mailbox; never fails the loop."""
     key = root_conversation_key(task)
+    if (not key and not owner_conversation_key(task) and not task.get("parent_task_id")
+            and type(task.get("chat_id")) is int and task["chat_id"] > 0):
+        from ouroboros.dialogue_provenance import is_presence_task
+
+        if not is_presence_task(task):
+            key = LOCAL_RESULT_INTAKE
     try:
         return bool(key) and open_author_intake(drive_root, str(task.get("id") or ""), key, attempt=task_attempt(task))
     except Exception:
@@ -636,7 +644,8 @@ def follow_loop_admission(ctx: Any, accepting: bool) -> None:
         with task_mail_lock(root, task_id) as locked:
             row = json.loads(path.read_text(encoding="utf-8"))
             if not (isinstance(metadata.get("presence"), dict)
-                    or str(row.get("conversation_key") or "").startswith(OWNER_CONVERSATION)):
+                    or str(row.get("conversation_key") or "").startswith(OWNER_CONVERSATION)
+                    or row.get("conversation_key") == LOCAL_RESULT_INTAKE):
                 return
             attempt = task_attempt({"_attempt": getattr(ctx, "task_attempt", None)}) if "attempt" in row else None
             if not _own_row(row, attempt) or bool(row.get("accepting")) is bool(accepting):

@@ -24,7 +24,7 @@ import queue
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from ouroboros import working_checkpoint
+from ouroboros import extension_late_result, working_checkpoint
 from ouroboros.config import get_context_mode
 from ouroboros.conversation_lease import follow_loop_admission
 from ouroboros.delivery_facts import FACTS_NOTED_CONTROL, note_delivery_facts as _note_delivery_facts
@@ -1457,6 +1457,9 @@ def _no_tool_final_answer(
             text, usage, forced_trace = _handle_direct_turn_hard_stop(limit_ctx)
             _loop()._merge_finalization_trace(llm_trace, forced_trace)
             return text, usage, llm_trace
+        if not stopping and (post_controls.get("agent_note") or extension_late_result.owed_letter(tools._ctx)):
+            solving_again()  # context only; never release an owner seal or change the owner corpus
+            return held("agent_note")
         from ouroboros.place_intake import reopen_for_place_mail
         if not stopping and reopen_for_place_mail(tools._ctx, post_controls):
             return held("place_mail")  # keep the answer; the accepted place context gets a model round
@@ -1485,7 +1488,7 @@ def _no_tool_final_answer(
     if isinstance(candidate, _loop().DeliveryCandidate):
         _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
         content = candidate.full_text
-    from ouroboros.place_reply import prepare_focus_reply, refusal_facts
+    from ouroboros.place_reply import accept_focus_completion, prepare_focus_reply, refusal_facts
     if stopping:
         request = tools._ctx._completion_selected
         record_stopped_completion(llm_trace, request, candidate)
@@ -1512,10 +1515,7 @@ def _no_tool_final_answer(
             _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
         solving_again()
         return held("focus_reply_refused")
-    if isinstance(getattr(tools._ctx, "_presence_completion", None), dict):  # Accept only at this common exit.
-        tools._ctx._presence_completion_accepted = True
-        limit_ctx.accumulated_usage["presence_completion_outcome"] = tools._ctx._presence_completion["outcome"]
-        limit_ctx.accumulated_usage["terminal_origin"] = _loop().TERMINAL_ORIGIN_MODEL_FINAL
+    accept_focus_completion(tools._ctx, limit_ctx.accumulated_usage, _loop().TERMINAL_ORIGIN_MODEL_FINAL)
     if getattr(candidate, "quiet", False) or getattr(tools._ctx, "_focus_record_only", False):  # a wake's silent or a focus's records-only finish
         limit_ctx.accumulated_usage.update(wake_silent=True, terminal_origin=_loop().TERMINAL_ORIGIN_MODEL_FINAL)
     if summary := (getattr(tools._ctx, "_completion_selected", None) or {}).get("wake_summary"): limit_ctx.accumulated_usage["wake_summary"] = summary

@@ -46,47 +46,45 @@ def _same_selection(prior: Mapping[str, Any], citation: Mapping[str, Any]) -> bo
 
 
 def reply_target(drive_root: Any, reference: Any) -> Dict[str, Any]:
-    """The whole message my human's words reply to, under its author, by the address the door resolved: one
-    sha-checked read. Unreadable: the address alone (a selected passage that carried its source keeps it); a reply
-    to a work card names work, not anyone's words. Its
-    author is signed without the places' owner snapshot on purpose: a target is context, never my human's words."""
+    """One exact read of a Reply target as context, never my human's words. Late results keep a locator;
+    an ordinary selected passage keeps its captured source if the original is now unreadable."""
     reference = reference if isinstance(reference, Mapping) else {}
     address = str(reference.get("address") or "")
     if not address or address.startswith("task:"):
         return {}
     citation = {"excerpt": reference["excerpt"]} if reference.get("excerpt") else {}
-    if reference.get("unresolved"):
-        return {"address": address, "author": "", "text": "", **citation}
-    recorded_author = str((reference.get("author") if citation else "") or reference.get("author_label") or "")
-    from ouroboros.dialogue_provenance import quote_words, render_row_text, row_author
+    from ouroboros.dialogue_provenance import program_source, quote_words, render_row_text, row_author
 
-    # The host's role for the replied row rides with a selection: the actor its carriers agree on (``_same_selection``).
-    recorded_role = {"role": reference["role"]} if citation and reference.get("role") in REPLY_ROLES else {}
+    base = {"address": address, "author": "", "text": ""}
+    if reference.get("unresolved"):
+        return {**base, **citation}
     try:
         from ouroboros import chat_chain
 
         row = chat_chain.resolve_row(drive_root, address)[0] if drive_root is not None else None
     except (StoreError, OSError, ValueError, TypeError):
         row = None
+    kind = program_source(row) if row else reference.get("program_source")
+    if kind == "late_result":
+        return {**base, "program_source": kind}
+    if kind:
+        base.update(program_source=kind, snippet=_snippet(quote_words(row)) if row else reference.get("snippet", ""))
     if not row:
-        # A selected passage that arrived with its source by value (a relay's quote) keeps it when history cannot be read.
         held = reference.get("text")
         by_value = ({"text": held, **({"attachments": reference["attachments"]} if reference.get("attachments") else {})}
                     if citation and isinstance(held, str) and held else {})
-        return {"address": address, "author": recorded_author, "text": "", **by_value, **citation, **recorded_role}
+        role = {"role": reference["role"]} if citation and reference.get("role") in REPLY_ROLES else {}
+        return {**base, "author": str(reference.get("author") or reference.get("author_label") or ""), **by_value, **citation, **role}
     if display := card_reply_display(drive_root, row):
-        return {"address": address, "author": "System", "text": display, **citation}
-    if citation:
+        return {**base, "author": "System", "text": display, **citation}
+    base["author"] = "Ouroboros" if citation and project_answer_text(row) else row_author(row)["label"]
+    if citation or delivery_failures(row.get("attachments")):
         files = excerpt_source_attachments(row)
-        return {"address": address, "author": "Ouroboros" if project_answer_text(row) else row_author(row)["label"],
-                "text": excerpt_source_text(row), **citation, "role": reply_role(row),
-                **({"attachments": files} if files else {})}
-    if delivery_failures(row.get("attachments")):
-        return {"address": address, "author": row_author(row)["label"],
-                "text": "" if row.get("text_placeholder") else excerpt_source_text(row),
-                "attachments": excerpt_source_attachments(row)}
-    return {"address": address, "author": row_author(row)["label"],
-            "text": quote_words(row) if (row.get("reply_to") if isinstance(row.get("reply_to"), Mapping) else {}).get("excerpt") else render_row_text(row)}
+        return {**base, "text": "" if row.get("text_placeholder") else excerpt_source_text(row), **citation,
+                **({"role": reply_role(row)} if citation else {}), **({"attachments": files} if files else {})}
+    own_reply = row.get("reply_to")
+    return {**base, "text": quote_words(row) if isinstance(own_reply, Mapping) and own_reply.get("excerpt")
+            else render_row_text(row, model_reply=True)}
 
 
 def selected_reply_target(root, source, matching_deliveries):
@@ -185,18 +183,19 @@ REPLY_ROLES = ("user", "assistant", "system")
 
 
 def _reply_author_label(row: dict) -> str:
-    from ouroboros.dialogue_provenance import recorded_speaker_name, row_provenance
+    from ouroboros.dialogue_provenance import author_words, declared_author, dialogue_speaker, place_machine_actor, recorded_speaker_name, row_provenance
 
+    if author := declared_author(row):
+        return author_words(author)
+    if place_machine_actor(row):
+        return dialogue_speaker(row)
     if reply_role(row) == "user":
         return recorded_speaker_name(row) or ("author not recorded" if row_provenance(row) == "place" else "You")
     return "Ouroboros" if reply_role(row) == "assistant" else "System"
 
 
 def reply_role(row: dict) -> str:
-    """Whose words a replied row holds, from the stored row alone: the one actor identity every reader of it
-    shares, whatever label each shows for that person. A lifecycle row carrying an authored answer is that answer
-    in Ouroboros's voice wherever Main shows it (project_answer.js::appendProjectRow). A row stored as ``role: system``
-    is the host's even when it entered by the owner's door (a call's opening: ``direction: in``), as history shows it."""
+    """A Reply's display role, distinct from its author: lifecycle answers are assistant speech; stored receipts stay System."""
     if project_answer_text(row):
         return "assistant"
     return "system" if row.get("role") == "system" else {"in": "user", "out": "assistant"}.get(
@@ -209,6 +208,7 @@ def reference_from_row(row: dict, root=None) -> dict:
     answer = project_answer_text(row)
     # My human's recorded answer to a card reads as their choice, never the host frame the System row stores;
     # its role and address stay the row's, which room membership and saved stamps read.
+    from ouroboros.dialogue_provenance import agent_note_text, declared_author, program_source
     from ouroboros.owner_relay import owner_text, quotable_owner_row
     chose = owner_text(row) if kind == "quiz_answer" and quotable_owner_row(row) else ""
     kind = ("question" if kind == "quiz" else "completion" if kind in
@@ -219,10 +219,12 @@ def reference_from_row(row: dict, root=None) -> dict:
     from ouroboros.room_membership import reply_target_home
     address = row_address(row)
     failures = delivery_failures(row.get("attachments"))
+    preview = agent_note_text(row) if declared_author(row) else body or answer or chose or row.get("text") or row.get("caption")
     return {"address": format_address(address), "row_sha256": address["row_sha256"], "chat_id": address["chat_id"],
+            **({"program_source": program} if (program := program_source(row)) else {}),
             **({"quote_role": "user"} if chose else {}),
             "role": role, "author_label": str(row.get("sender_label") or "You") if chose else _reply_author_label(row),
-            "kind": kind, **_preview("" if row.get("text_placeholder") else body or answer or chose or row.get("text") or row.get("caption")),
+            "kind": kind, **_preview("" if row.get("text_placeholder") else preview),
             "ts": str(row.get("ts") or ""), "task_id": str(row.get("task_id") or ""),
             **({"attachment_failures": failures} if failures else {}),
             "target_home": reply_target_home(row)}
@@ -334,6 +336,10 @@ def media_caption(row: dict) -> str:
 
 def excerpt_source_text(row: dict) -> str:
     """The authored source of a selected reply, not the generated preview for a whole-row reply."""
+    from ouroboros.dialogue_provenance import agent_note_text, declared_author
+
+    if declared_author(row):
+        return agent_note_text(row)
     body = web_attachment_caption(row) if row.get("direction") == "in" else str(row.get("text") or "")
     return project_answer_text(row) or media_caption(row) or body
 
@@ -349,6 +355,8 @@ def excerpt_source_attachments(row: dict) -> list:
 
 def ingress_reply(root, metadata: dict, *, accepted: dict | None = None, strict_transient: bool = False) -> dict:
     """Fresh selections require a real authored row. A duplicate compares with its original acceptance."""
+    from ouroboros.dialogue_provenance import agent_note_text
+
     ref = reply_identity(metadata)
     if accepted is not None:
         return ref  # rejoin_or_refuse compares it before using the saved resolution
@@ -361,13 +369,15 @@ def ingress_reply(root, metadata: dict, *, accepted: dict | None = None, strict_
         raise ReplyExcerptUnavailable("The quoted message is unavailable. Retry or clear the quote.") from exc
     if row is None:  # resolve_row checks the room, timestamp and every supplied digest digit
         raise ReplyExcerptUnavailable("The quoted message is unavailable. Retry or clear the quote.")
-    authored = (row.get("direction") in {"in", "out"} and row.get("role") != "system"
-                and not any(row.get(key) for key in ("relay", "quiz", "host_fact", "text_placeholder", "is_progress")))
-    plain = (row.get("system_type") or row.get("type")) in {
+    direction, kind = row.get("direction"), row.get("system_type")
+    plain = (kind or row.get("type")) in {
         None, "", "message", "text", "main_notice", "relay_reply", "proactive_message"}
-    body = plain and (web_attachment_caption(row) if row.get("direction") == "in" else row.get("text"))
-    if not project_answer_text(row) and not (authored and (body or media_caption(row).strip())
-                                             and not _card_display_only(row, _card_display(root, row))):
+    body = plain and (web_attachment_caption(row) if direction == "in" else row.get("text"))
+    note = kind == "agent_note_received" and agent_note_text(row).strip()
+    authored = note or (direction in {"in", "out"} and row.get("role") != "system" and (body or media_caption(row).strip()))
+    if not project_answer_text(row) and not (
+        authored and not any(row.get(key) for key in ("relay", "quiz", "host_fact", "text_placeholder", "is_progress"))
+        and not _card_display_only(row, _card_display(root, row))):
         raise ReplyExcerptNotAuthored("Only a passage of an authored chat message can be quoted")
     reference = reference_from_row(row, root)
     reference.pop("chars", None)
@@ -633,15 +643,15 @@ def exact_reply_ingress(root, source, chat_id, client_message_id, transport) -> 
 
 
 def keeps_binding(msg: dict) -> bool:
-    """Whether an owner message leaves its room's binding as it was: the host's delivery of the owner's Telegram act (a
-    late answer to a question, a press on a living card) into the room that act belongs to is no word written
-    there, so it neither binds that room to Telegram nor clears another connector's binding (its turn's own address:
-    ``turn_reply_transport``)."""
+    """Whether an inbound row leaves its room's binding as it was: the host's delivery of the owner's Telegram act (a
+    late answer, a card press, an exact room reply) or an accepted ``/late_result`` report into its owning room neither
+    binds that room nor clears another connector's binding (a Telegram act's own address: ``turn_reply_transport``)."""
     meta = msg.get("task_metadata") if isinstance(msg.get("task_metadata"), dict) else {}
-    reply = (msg.get("accepted_source_row") or {}).get("reply_to")
-    return msg.get("source") == TELEGRAM_SOURCE and bool(
+    accepted = msg.get("accepted_source_row") if isinstance(msg.get("accepted_source_row"), dict) else {}
+    reply = accepted.get("reply_to")
+    return bool(accepted.get("late_report_sha256")) or (msg.get("source") == TELEGRAM_SOURCE and bool(
         meta.get("late_answer") or meta.get("card_press") or
-        (isinstance(reply, dict) and type(reply.get("telegram_room_chat_id")) is int and reply["telegram_room_chat_id"] > 0))
+        (isinstance(reply, dict) and type(reply.get("telegram_room_chat_id")) is int and reply["telegram_room_chat_id"] > 0)))
 
 
 def proven_address(row: dict) -> dict:

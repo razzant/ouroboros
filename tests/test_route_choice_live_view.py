@@ -6,7 +6,9 @@ from that mirror if the live view fell back to the environment. It never does: t
 effective document over ``skill_environ`` (this tree's own mirrored values dropped by digest, an
 operator's own variable kept), memoised behind the document's stat; an unreadable document makes
 credential keys unavailable rather than stale. Every other setting keeps the task's entry snapshot, and
-so do the route keys of a process with no saved document at all (an env-configured one).
+so do the route keys of a process with no saved document at all (an env-configured one). A live read of a
+document the owner's settings writer recorded also names the saved API connection it dispatches on, never by its key
+(``provider_connections``); any other read names none.
 """
 
 from __future__ import annotations
@@ -191,3 +193,81 @@ def test_the_web_search_source_moves_with_its_model_within_a_task(monkeypatch):
         assert second["source"] == "openai" and "error" not in second and "ignored_legacy_model" not in second
         assert [(leg["source"], leg["model"]) for leg in second["legs"]] == [("openai", "gpt-new")]
         assert task.environ["OUROBOROS_WEBSEARCH_BACKEND"] == "anthropic"  # the entry snapshot itself is untouched
+
+
+_ROUTER, _CREDITS = "anthropic/claude-opus-5.5", "openrouter@credits::anthropic/claude-opus-5.5"
+
+
+def _account(route=_ROUTER):
+    from ouroboros.llm import LLMClient
+
+    return LLMClient()._resolve_remote_target(route).get("dispatch_account", "")
+
+
+def test_a_live_route_names_the_saved_connection_it_dispatches_on(monkeypatch):
+    """A later answer may wake its room only on the connection its call ran on (``extension_late_result``): a live
+    read names that saved connection by the random revision the owner's settings writer recorded, never by its
+    credential, the same through an unrelated save, a restart or another process, and anew only where that
+    connection's own saved fields change."""
+    from types import SimpleNamespace
+
+    from ouroboros import provider_connections, route_choice
+    from ouroboros.extension_late_result import _captured_route
+
+    row = {"kind": "openrouter", "name": "credits", "api_key": "row-old"}
+    unchanged = {**_document("old"), "OUROBOROS_CONNECTIONS": [row]}
+    save_owner(unchanged)
+    built_in, named = _account(), _account(_CREDITS)
+    assert built_in.startswith("api:openrouter#") and named.startswith("api:openrouter@credits#")
+    record = (config.DATA_DIR / "state" / "connection_revisions.json").read_text(encoding="utf-8")
+    assert not any(secret in text for secret in ("router-old", "row-old", "key-old", "compat-old")
+                   for text in (built_in, named, record))
+    call = {"model": _ROUTER, "physical_provider": "openrouter", "physical_model": _ROUTER,
+            "dispatch_account": built_in, "use_local": False}
+    assert _captured_route(SimpleNamespace(_current_llm_call_meta=call))["dispatch_account"] == built_in
+
+    save_owner({**unchanged, "OUROBOROS_TOOL_TIMEOUT_SEC": 601})  # an unrelated save
+    assert (_account(), _account(_CREDITS)) == (built_in, named)
+    monkeypatch.setattr(provider_connections, "_RECORD", ())  # a restart, or another process, reads the same files
+    monkeypatch.setattr(route_choice, "_VIEW", None)
+    assert (_account(), _account(_CREDITS)) == (built_in, named)
+
+    save_owner({**unchanged, "OUROBOROS_TOOL_TIMEOUT_SEC": 601, "OPENROUTER_API_KEY": "router-replaced"})
+    assert _account() not in ("", built_in) and _account(_CREDITS) == named  # only the replaced key's connection moves
+    save_owner({**unchanged, "OUROBOROS_CONNECTIONS": [{**row, "api_key": "row-new"}]})
+    assert _account(_CREDITS) not in ("", named)
+
+
+def test_a_document_the_owner_writer_did_not_record_names_no_connection(monkeypatch):
+    """A document the settings writer's record does not name (one saved before the first recorded save, an edit by
+    hand, a writer that keeps no record) names no connection, so no earlier call's connection can match it; the next
+    owner save gives a new random revision instead of carrying one from that document."""
+    config.SETTINGS_PATH.write_text(json.dumps(_document("old"), indent=2), encoding="utf-8")  # an older install's
+    assert _account() == ""
+    save_owner(_document("old"))
+    before = _account()
+    assert before.startswith("api:openrouter#")
+    on_disk = json.loads(config.SETTINGS_PATH.read_text(encoding="utf-8"))
+    config.SETTINGS_PATH.write_text(json.dumps({**on_disk, "OUROBOROS_TOOL_TIMEOUT_SEC": 601}, indent=2),
+                                    encoding="utf-8")  # an edit by hand, even one that leaves the connection alone
+    assert _account() == ""
+    save_owner({**_document("old"), "OUROBOROS_TOOL_TIMEOUT_SEC": 601})
+    after = _account()
+    assert after.startswith("api:openrouter#") and after != before
+
+
+def test_no_connection_is_named_beside_an_operator_variable_override_or_unsaved_document(monkeypatch):
+    """Where the call's credential may not be the saved one (an operator's variable, a one-off key or mapping, no
+    saved document at all), nothing names a connection: such a call's later answer stays readable by its letter id."""
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_routing import resolve_target
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "operator-key")
+    assert _account() == ""  # no saved document: the environment is the configuration
+    save_owner(_document("old"))
+    target = LLMClient()._resolve_remote_target(_ROUTER)
+    assert target["api_key"] == "router-old" and "dispatch_account" not in target  # the variable could stand in
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    assert _account().startswith("api:openrouter#")
+    assert "dispatch_account" not in resolve_target(_ROUTER, {"OPENROUTER_API_KEY": "mapping-key"})
+    assert "dispatch_account" not in LLMClient(api_key="one-off")._resolve_remote_target(_ROUTER)

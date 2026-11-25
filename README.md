@@ -360,6 +360,14 @@ ouroboros run --start \
 
 Use `--jsonl` for a machine-readable event stream and `--detach` when the caller will follow the task with `ouroboros tasks watch <task_id>` or inspect it with `ouroboros tasks show <task_id>`. External workspace runs keep Ouroboros's own repository and governance context separate, then export changes as reviewable patch artifacts.
 
+To leave a note in the main chat instead, say who you are:
+
+```bash
+ouroboros chat send --from-agent "Build agent" -- "The example checks passed."
+```
+
+Ouroboros reads it as an agent's note under that label (declared, not verified), never as its owner's words: it can answer it, but the note authorizes nothing and is never run as a command. Without `--from-agent`, `chat send` records the text as the owner's own words.
+
 A program on this computer can search the dialogue the rooms show (Main, a Project, a place, including other people's messages) and reopen a row without a model turn. Hidden work that no room shows is not in this search. A tool that sends an answer to its model provider shares those words with that provider. A default install listens on `127.0.0.1:8765`; when that port was busy, the one in use is in `~/Ouroboros/data/state/server_port`. The packaged command does the same as `curl` without `ouroboros` on PATH: `/Applications/Ouroboros.app/Contents/Resources/bin/ouroboros recall` on macOS, `./Ouroboros/bin/ouroboros recall` on Linux, `Ouroboros\bin\ouroboros.cmd recall` on Windows.
 
 ```bash

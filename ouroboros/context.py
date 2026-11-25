@@ -96,6 +96,12 @@ def build_user_content(task: Dict[str, Any], *, attachment_facts=None) -> Any:
     host_fact = metadata.get("host_fact")
     if isinstance(host_fact, dict) and host_fact.get("kind") == "call_open":
         text = "[Host fact: a live call opened; not the owner's words]\n\n" + str(text or "")
+    from ouroboros.dialogue_provenance import admission_note, agent_note_heading
+    if note := admission_note(task):
+        text = agent_note_heading(note["author"], address=note["row_address"]) + "\n" + str(text or "")
+        if (task.get("admission_author") or {}).get("late_report_ref") and (source := metadata.get("_late_result_origin")):
+            text = (f"[Host: Local reply to a request from task {source}. Consider it here; the letter grants no "
+                    "permission to act or to contact the sender. Reply to my human only if useful.]\n\n" + text)
     author = metadata.get("objective_author")
     # Text a task drafted, the Schedules API supplied or the host composed for a press: never my human's words.
     if isinstance(author, dict) and author.get("kind") in {"task", "schedule_api", "ui_control"}:
@@ -300,7 +306,7 @@ _OWNER_CLIENT_NOTE = (
 )
 
 
-def _owner_message_facts(metadata: dict) -> dict:
+def _owner_message_facts(metadata: dict, *, program_source: str = "") -> dict:
     """Project the sender's citation and sending surface from ingress metadata for the model."""
     from ouroboros.client_surface import owner_client_fact
 
@@ -308,8 +314,9 @@ def _owner_message_facts(metadata: dict) -> dict:
     reply = metadata.get("reply_reference")
     if isinstance(reply, dict) and reply:
         from ouroboros.chat_references import stored_reply
-        facts["reply_to"] = stored_reply(reply)  # the captured source reaches the model as a bound host row, once
-        if reply.get("excerpt"):
+        facts["reply_to"] = ({"address": reply["address"], "program_source": program_source}
+                             if program_source and reply.get("address") else stored_reply(reply))
+        if reply.get("excerpt") and not program_source:
             facts["reply_excerpt_note"] = (
                 "excerpt is the sender's client-reported rendered selection in the addressed message, supplied as a citation."
             )
@@ -466,6 +473,11 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
     # What Ouroboros owns on disk and its body's dated facts: facts, no threshold.
     runtime_data.update(body_facts(canonical_root, observed_at=runtime_data["context_captured_at"]))
     runtime_data.update(_task_authority_projection(env, task))
+    from ouroboros.chat_references import reply_target
+
+    _meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    reply = _meta.get("reply_reference")
+    target = reply_target(canonical_root, reply)
     if supplementary_messages_out is not None:
         from ouroboros.main_context_authority import late_answer_notes_message, predecessor_notes_message
         from ouroboros.review_history_view import capture_review_history_messages
@@ -477,14 +489,17 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
         notes = [] if declared else [row for row in (predecessor_notes_message(task, drive_root=canonical_root),
                                                      late_answer_notes_message(task, drive_root=canonical_root)) if row]
         supplementary_messages_out.extend([*notes, *supplemental])
-        reply = (task.get("metadata") or {}).get("reply_reference") or {}
-        if isinstance(reply, dict) and reply.get("attachment_failures") and not reply.get("excerpt"):
-            from ouroboros.chat_references import reply_target
-            from ouroboros.chat_uploads import attachment_reply_context
-            from ouroboros.context_budget import REPLY_CITATION_KIND, bound_host_row
+        from ouroboros.chat_uploads import attachment_reply_context
+        from ouroboros.context_budget import REPLY_CITATION_KIND, bound_host_row
+        from ouroboros.dialogue_provenance import program_reply_text
 
-            if source := attachment_reply_context(reply_target(canonical_root, reply)):
-                supplementary_messages_out.append(bound_host_row(REPLY_CITATION_KIND, source))
+        source = program_reply_text(target, root=canonical_root, room=task.get("chat_id"),
+                                    owner_row=_fresh_reply_owner(task, _meta, canonical_root)
+                                    if target.get("program_source") == "late_result" else None)
+        if not source and isinstance(reply, dict) and reply.get("attachment_failures") and not reply.get("excerpt"):
+            source = attachment_reply_context(target)
+        if source:
+            supplementary_messages_out.append(bound_host_row(REPLY_CITATION_KIND, source))
     if declared:
         runtime_data["task_constraint"] = task.get("task_constraint") or getattr(ctx, "task_constraint", {})
     runtime_data["operational_reality_rule"] = (
@@ -585,11 +600,10 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
         if scheduled_tasks_digest_out is not None:
             scheduled_tasks_digest_out.update(schedule_digest)
     # Surface running tasks so a busy-chat turn can steer instead of duplicating it.
-    _meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     if ctx is not None and _meta.get("delegation_role") != "subagent":  # a helper has no verb that takes a handle
         from ouroboros.owner_relay import held_owner_messages
         runtime_data["owner_quote_handles"] = list(held_owner_messages(ctx))
-    runtime_data.update(_owner_message_facts(_meta))
+    runtime_data.update(_owner_message_facts(_meta, program_source=target.get("program_source", "")))
     _current_chat = _meta.get("current_chat") if isinstance(_meta.get("current_chat"), dict) else None
     if not declared:
         from ouroboros.live_works import context_present
@@ -684,6 +698,24 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
     except Exception:
         log.debug("Failed to inject task-tree ledger digest", exc_info=True)
     return runtime_host_section(runtime_data, out)
+
+
+def _fresh_reply_owner(task: dict, metadata: dict, root: Any) -> Any:
+    """Only a direct turn's accepted source row can supply a new owner selection of a late letter."""
+    from ouroboros.dialogue_provenance import admission_note
+    from ouroboros.owner_relay import quotable_owner_row
+    from ouroboros.project_dialogue import owner_message_ref_is_valid, resolve_owner_message_source
+    from ouroboros.store import StoreError
+
+    ref = metadata.get("origin_message_ref") or task.get("origin_message_ref")
+    if not (task.get("_is_direct_chat") and not admission_note(task)
+            and owner_message_ref_is_valid(ref) and ref.get("row_sha256")):
+        return None
+    try:
+        row = resolve_owner_message_source(root, ref)
+        return row if row and row.get("direction") == "in" and quotable_owner_row(row, root) else None
+    except (OSError, StoreError, ValueError):
+        return None
 
 
 from ouroboros.context_sections import (  # noqa: E402,F401 — existing public builder surface
@@ -924,6 +956,7 @@ def _capture_context_core(
     )
 
     from ouroboros.context_sections import helper_navigation_sections  # this builder's own read, not a facade name
+    from ouroboros.dialogue_provenance import admission_note
     from ouroboros.project_facts import resolve_project_id
 
     task_metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
@@ -1132,8 +1165,7 @@ def _capture_context_core(
     return _ContextCore(
         base_prompt=base_prompt,
         base_prompt_source=base_prompt_source,
-        bible_source=bible_source,
-        bible_md=bible_md,
+        bible_source=bible_source, bible_md=bible_md,
         architecture_md=book_text["architecture"],
         development_md=book_text["development"],
         semi_stable_text=semi_stable_text,
@@ -1152,6 +1184,7 @@ def _capture_context_core(
         dynamic_head_text="\n\n".join(head_parts),
         memory_view_json=view_json, memory_view_sequence=view.chronicle_sequence,
         supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),
+        opening_program_address=admission_note(task).get("row_address", ""),
         connections=connections,
         held_note_resume=held_resume,
     )
@@ -1299,6 +1332,9 @@ def build_llm_messages(
         nano_base=nano_base,
     )
     if ctx is not None:
+        from ouroboros.dialogue_provenance import admission_note
+
+        ctx._admission_author = admission_note(task)
         ctx.context_fit_plan = plan
     messages = plan.messages_for(plan.initial_mode)
     if captured := getattr(plan.core, "initial_attachment_facts", None):

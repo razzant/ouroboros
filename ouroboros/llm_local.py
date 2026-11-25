@@ -252,6 +252,10 @@ class _LocalLaneMixin:
         if not (isinstance(evidence, dict) and evidence.get("supported")):
             return candidate
         target["local_input_measurement"] = evidence
+        pid = str(evidence.get("process_id") or "")
+        if (target.get("local_dispatch_base_url") and target.get("context_window_confirmed")
+                and pid and pid == target.get("window_instance_id")):
+            target["dispatch_account"] = f"local-instance:{pid}"
         # Rebuild from the original prepared source so the exact measured
         # input and output cap are sealed together.
         return _finalized_physical_candidate(target, payload, "chat.completions")

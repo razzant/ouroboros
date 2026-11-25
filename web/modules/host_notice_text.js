@@ -130,6 +130,27 @@ export function hostSentenceText(text) {
  *  task, so its row says who wrote it instead of «Message from task unknown». */
 export const hostTaskMessage = (evt) => evt?.provenance === 'system' && (!evt.source_task_id || evt.source_task_id === 'unknown');
 
+// owner_mailbox stamps agent_note={author,row_address}. The program's signature is data, never the owner's words.
+export function agentNoteSignature(evt) {
+    if (evt?.provenance !== 'agent_note') return '';
+    const author = evt.agent_note?.author || {};
+    const label = String(author.label || '').trim() || 'not recorded';
+    const who = author.basis === 'link_key' ? `holder of key «${label}» (agent)` : `agent "${label}" (declared, not verified)`;
+    return fmt('Agent note from {author}', { author: who });
+}
+
+/** The receiver's mailbox delivery names its program, host or task source by value on both surfaces.
+ * The Logs tab keeps its ordinary labels in English; the live block localizes them. */
+export function taskMessagePresentation(evt, { localized = false } = {}) {
+    const source = evt.source_task_id ? String(evt.source_task_id)
+        : localized ? tr('task.progress.another_task', 'another task') : 'another task';
+    const note = agentNoteSignature(evt);
+    const headline = note || (hostTaskMessage(evt)
+        ? (localized ? tr('task.progress.system_message', 'System message') : 'System message')
+        : (localized ? fmt('Message from task {source}', { source }) : `Message from task ${source}`));
+    return { headline, senderKey: note || source };
+}
+
 /** A host notice's line, the one its server assembled for every reader (`notice.line`); '' for any other row. */
 export const noticeLine = (row) => (row?.role === 'system' && row.narration !== true
     && typeof row.notice?.line === 'string' ? row.notice.line : '');
