@@ -896,14 +896,15 @@ def history_page_tokens(page, messages=(), reads=None):
 
 def _held_rows(page, messages, shown, reads):
     """The rows the window holds of each task it shows whose settling a later ``after`` read answers by sending them
-    again (``repairs``): every stored row of the task this page shows (an owner's aside), by coordinate per stream,
-    carried from read to read. None: this window shows what such a read could not bring up to date, so a task that
-    settles takes the newest page again (``task_settled``) until the next one: a room other than Main or a Project
-    (a place's rows also project its accounts and decisions), or an owner's send shown pending (its dispatch can
-    enter with no row to say so). A task is not held when the page projects it with another task's document or rows,
-    or shows it without a stored row of its own: an overlaid successor or a child drive's replica, a folded review
-    group or a review presented for another task, a historical receipt, a child's row shown without its lineage, a
-    row its room fixes elsewhere (``ROOM_FIXED_ROW_TYPES``), only a current-work carrier; one not held in a window is
+    again (``repairs``), by coordinate per stream, carried from read to read: every stored row of the task the page
+    drew (an owner's aside), and the evidence its rows were projected with though the page drew none of it (an answer
+    to its question, a receipt of its ending), read again with them so they project as the newest page projects
+    them. None: this window shows what such a read could not bring up to date, so a task that settles takes the
+    newest page again (``task_settled``) until the next one: a room other than Main or a Project (a place's rows also
+    project its accounts and decisions), or an owner's send shown pending (its dispatch can enter with no row to say
+    so). A task is not held when the page projects it with another task's document or rows: an overlaid successor
+    or a child drive's replica, a folded review group or a review presented for another task, a child's row shown
+    without its lineage; nor when it shows no stored row of it (only its current work); one not held in a window is
     never held again in it."""
     if not any(column == "appearance" for column, _key in page["lens"]["chat"].keys):  # Main and Projects only
         return None
@@ -923,11 +924,15 @@ def _held_rows(page, messages, shown, reads):
             blocked |= {task, owner, *(str(attempt.get("task_id") or "") for attempt in (group or {}).get("attempts", ()))}
         if not task or row.get("role") == "user":
             continue  # an owner's row: its receipts and its delivery are the notes stamp's and the pending send's
-        if (row.get("historical_terminal") or row.get("system_type") in ROOM_FIXED_ROW_TYPES
-                or row.get("history_id") in page.get("stripped", ())):
+        if row.get("history_id") in page.get("stripped", ()):
             blocked.add(task)
         elif isinstance(position := row.get("history_position"), dict):  # else a carrier projected anew each read
             held.setdefault(task, [[], []])[_SOURCES.index(position["source"])].append(position["offset"])
+    for source, (entries, _lower, _gaps) in page["selections"].items():
+        for entry in entries:
+            if (entry.get("type") in QUESTION_EVIDENCE_KINDS or entry.get("type") == "task_summary" and entry.get(
+                    "summary_kind")) and (rows := held.get(str(entry.get("task_id") or ""))) is not None:
+                rows[_SOURCES.index(source)].append(entry["history_position"]["offset"])
     return {task: [sorted(set(seqs)) for seqs in rows] for task, rows in held.items()
             if task not in blocked and (task in shown or task in carried)}
 

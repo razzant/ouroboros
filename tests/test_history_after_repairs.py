@@ -220,8 +220,9 @@ def _row(task, seq, **extra):
 
 
 def test_held_rows_leave_out_tasks_the_page_shows_through_another_or_without_a_row():
+    answer = {"type": "quiz_answer", "task_id": "plain", "history_position": {"source": "chat", "offset": 12}}
     page = {"lens": {"chat": history_paging.RoomLens((("appearance", "room:1"),))}, "after": False,
-            "stripped": {"h4"}}
+            "stripped": {"h4"}, "selections": {"chat": ([answer], 0, set()), "progress": ([], 0, set())}}
     messages = [_row("plain", 1), _row("plain", 2, is_progress=True, history_position={"source": "progress", "offset": 7}),
                 _row("plain", 3, role="user"),  # an owner's row: never held
                 _row("stripped", 4),  # a child's row shown without its lineage
@@ -230,7 +231,31 @@ def test_held_rows_leave_out_tasks_the_page_shows_through_another_or_without_a_r
                 _row("reviewer", 8, presentation_owner_task_id="owner"), _row("owner", 9),
                 _row("grouped", 10, review_group={"attempts": [{"task_id": "attempt"}]}), _row("attempt", 11),
                 {"task_id": "carried_only", "role": "system", "system_type": "task_evidence"}]
-    shown = {"plain", "stripped", "receipt", "reviewer", "owner", "grouped", "attempt", "carried_only"}
-    assert history_paging._held_rows(page, messages, shown, _Reads()) == {"plain": [[1], [7]]}
+    shown = {"plain", "stripped", "receipt", "pinned", "reviewer", "owner", "grouped", "attempt", "carried_only"}
+    # The answer the page drew no row of is still evidence its question's row was projected with.
+    assert history_paging._held_rows(page, messages, shown, _Reads()) == {
+        "plain": [[1, 12], [7]], "receipt": [[5], []], "pinned": [[6], []]}
     place = {**page, "lens": {"chat": history_paging.RoomLens((("chat_id", 9),))}}
     assert history_paging._held_rows(place, messages, shown, _Reads()) is None  # a place room holds none
+
+
+def test_a_question_answered_on_the_page_keeps_its_answer_when_its_task_settles(tmp_path):
+    """The page draws the answered question, not its answer row; that row is still what the question's row was
+    projected with, so a repair reads it again and shows the question as the newest page does."""
+    answered = {**QUESTION, "state": "answered", "answered_index": 1}
+    _task(tmp_path, "asker", "running", 0, owner_quiz={"q1": answered})
+    ds.append(tmp_path, "chat", {"ts": TS.format(0), "chat_id": 1, "task_id": "asker", "type": "quiz", "direction": "out",
+                                 "text": "Which?", "quiz": {**QUESTION, "state": "open"}})
+    ds.append(tmp_path, "chat", {"ts": TS.format(1), "chat_id": 1, "task_id": "asker", "direction": "system",
+                                 "type": "quiz_answer", "source": "owner_quiz_answer", "text": "b", "quiz": answered})
+    ds.append(tmp_path, "progress", {"ts": TS.format(2), "chat_id": 1, "task_id": "asker", "content": "go on with b"})
+    _, page = _read(tmp_path)
+    question = next(row for row in page["messages"] if row.get("msg_type") == "quiz")
+    assert question["quiz"].get("answer_row_address"), question["quiz"]
+    _task(tmp_path, "asker", "completed", 0, owner_quiz={"q1": answered})
+    status, repaired = _read(tmp_path, page["after_cursor"])
+    assert status == 200 and repaired["messages"] == []
+    status, newest = _read(tmp_path)
+    again = {row["history_id"] for row in repaired["repairs"]}
+    assert [row for row in newest["messages"] if row.get("history_id") in again] == repaired["repairs"]
+    assert next(row for row in repaired["repairs"] if row.get("msg_type") == "quiz")["quiz"] == question["quiz"]
