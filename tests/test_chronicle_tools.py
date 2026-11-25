@@ -1321,7 +1321,7 @@ def test_a_notes_only_page_prints_no_rows_figure_and_no_receipt_promises_a_figur
     assert effect.split("\n")[:2] == ["this page covers rows by room: none; 1 note; 0 works among its rows",
                                        "the page's own words: 2 tokens"]
     # A roomy Max, Low, Nano or an unknown window prices no telling: the closing clause names its condition.
-    assert "a start whose gate prices a shortest telling shows it in its facts" in CLOSE
+    assert "an integrating start whose gate prices a shortest telling shows it in its facts" in CLOSE
     assert "the next integrating start's facts show" not in CLOSE and "this task's view is unchanged by it" in CLOSE
 
 
@@ -1375,6 +1375,34 @@ def test_a_member_whose_lookup_fails_prints_size_not_read_never_zero(tmp_path, m
     monkeypatch.setattr(ChronicleStore, "get", lambda self, ident: None if ident in pages else real(self, ident))
     effect = write(ctx, kind="account", text="Again.", sources=pages)["effect"]
     assert effect.split("\n")[1].endswith("its 2 sources' own words: size not read")
+
+
+def test_a_pages_rows_are_measured_as_their_reader_shows_them_a_programs_note_by_its_body(tmp_path):
+    from ouroboros.dialogue_provenance import recorded_author, render_row_text
+    from ouroboros.memory_floor import view_tokens
+
+    body = "The comparison of the two builds is ready: " + "the second one is faster on every bench. " * 12
+    row = {"chat_id": 1, "ts": ts(3), "direction": "in", "role": "system", "system_type": "agent_note_received",
+           "text": "Program message received.", "agent_note_text": body, "declared_author": recorded_author("Bench")}
+    chat(tmp_path, [row])
+    effect = write(ctx_for(tmp_path), kind="page", text="Read.", covers={"from": addr(row), "to": addr(row)})["effect"]
+    size = view_tokens(render_row_text(row))
+    assert size > 3 * view_tokens(row["text"]) and f"its 1 row's own words: {size:,} tokens\n" in effect
+
+
+def test_a_source_that_is_a_decision_or_a_selection_is_measured_by_its_reason(tmp_path):
+    from ouroboros.memory_floor import view_tokens
+
+    ctx = ctx_for(tmp_path)
+    page, other = (write(ctx, kind="page", text="Told.", covers={"from": addr(r), "to": addr(r)})["node_id"]
+                   for r in _room_rows(tmp_path))
+    reason = "I tell this matter again in a later page with the owner's correction beside it."
+    decision = write(ctx, kind="decision", target_id=page, accepted=False, reason=reason)["node_id"]
+    account = write(ctx, kind="account", text="About it.", sources=[other])["node_id"]
+    selection = write(ctx, kind="selection", target_id=account, replaces=[other], reason=reason)["node_id"]
+    for source in (decision, selection):
+        effect = write(ctx, kind="account", text="Why.", sources=[source])["effect"]
+        assert f"its 1 source's own words: {view_tokens(reason):,} tokens\n" in effect, effect
 
 
 def test_member_reads_look_records_up_by_id_and_never_capture_the_whole_index(tmp_path, monkeypatch):

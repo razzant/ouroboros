@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 from ouroboros import memory_floor as floor, memory_view as mv
 
 CLOSE = ("Originals remain readable by address; this task's view is unchanged by it; memory_read(story=true) shows my "
-         "story as it stands now; a start whose gate prices a shortest telling shows it in its facts.")
+         "story as it stands now; an integrating start whose gate prices a shortest telling shows it in its facts.")
 
 
 def fold_receipt(saved: Optional[Mapping[str, Any]], build: Callable[[], List[str]]) -> str:
@@ -38,12 +38,15 @@ def by_room(counts: Mapping[str, int]) -> str:
 
 def _read(store: Any, refs: Iterable[Tuple[str, Optional[str]]]) -> Dict[str, Tuple[Optional[str], Optional[int]]]:
     """Each record's room and own words in tokens (at the cited revision where one is named), read by id, one lookup
-    each (never a capture of the whole index); ``(None, None)`` for a record the lookup does not find."""
+    each (never a capture of the whole index), its words as the record reader takes them (``memory_reader._words``:
+    the text as corrected, else a decision's or selection's reason); ``(None, None)`` for a record not found."""
+    from ouroboros.memory_reader import _words
+
     out: Dict[str, Tuple[Optional[str], Optional[int]]] = {}
     for ident, revision in refs:
         record = store.get(ident)
-        out[ident] = ((str(record.get("room_id")), floor.view_tokens(
-            store.interpret([record], revision=revision, sources=False)[0]["current_text"])) if record else (None, None))
+        out[ident] = ((str(record.get("room_id")), floor.view_tokens(_words(
+            store.interpret([record], revision=revision, sources=False)[0]))) if record else (None, None))
     return out
 
 
@@ -67,9 +70,12 @@ def _own_size(record: Mapping[str, Any], noun: str = "", read: Optional[Mapping[
 
 
 def _row_words(row: Mapping[str, Any]) -> Optional[int]:
-    """A read row's own words in tokens: its text, else its recorded size; None where the row holds neither."""
-    if isinstance(row.get("text"), str):
-        return floor.view_tokens(row["text"])
+    """A read row's own words in tokens as its reader shows them (``dialogue_provenance.render_row_text``, the one
+    home of a row's text: a program's note is its body); a row that holds no body at all: its recorded size, else None."""
+    from ouroboros.dialogue_provenance import render_row_text
+
+    if text := render_row_text(row):
+        return floor.view_tokens(text)
     return floor.tokens_of(int(row["text_chars"])) if isinstance(row.get("text_chars"), int) else None
 
 
