@@ -553,3 +553,211 @@ def test_post_multipart_pre_dup_emfile_keeps_outbox_retryable_not_uncertain(tmp_
     finally:
         monkeypatch.setattr(transport.os, "dup", real_dup)
         store.close()
+
+
+def test_reply_quote_pairing_custody_bound_panic_under_bad_pairing_file_and_transient_eio_redeem(tmp_path, monkeypatch):
+    plugin = _load_plugin("tg_lc_r20")
+    from tg_lc_r20.lib import telegram_owner_auth as oa, telegram_poll_binding as pb, telegram_presence_bridge as bridge
+    from tg_lc_r20.lib.presence import custody, events as pres_events, runtime as rt_mod
+    from tg_lc_r20.scripts import telegram_settings as ts
+
+    # 1) Unbound private DM bare paste + reply/quote referencing it NEVER enters SQLite custody AND keeps /pair working
+    s1 = tmp_path / "reply_custody"
+    api1 = _StubApi(s1)
+    code1 = oa.issue_owner_pairing_code(s1)["code"]
+    store1 = custody.CustodyStore(s1 / "presence.sqlite3")
+    rt1 = rt_mod.PresenceRuntime(api=api1, state_dir=s1, submitter=types.SimpleNamespace(submit=lambda *a, **k: asyncio.sleep(0)))
+    rt1.store = store1
+    rt1._bot_id = "123456"
+    cursor1 = pb.PollCursor(s1 / "cursor.json", "https://api.telegram.org", "123456")
+    binding1 = types.SimpleNamespace(current=lambda _g: True)
+    sent1: list[tuple[int, str]] = []
+    cl1 = types.SimpleNamespace(
+        bot_id="123456",
+        api_base_origin="https://api.telegram.org",
+        send_message=lambda cid, txt, **k: asyncio.sleep(0, result=sent1.append((cid, txt)) or 1),
+    )
+    u_bare = {"update_id": 1, "message": {"chat": {"id": 18, "type": "private"}, "from": {"id": 18}, "message_id": 10, "date": 1700000000, "text": code1}}
+    u_reply = {
+        "update_id": 2,
+        "message": {
+            "chat": {"id": 18, "type": "private"}, "from": {"id": 18}, "message_id": 11, "date": 1700000001,
+            "text": "did you get it?",
+            "reply_to_message": {"message_id": 10, "text": code1},
+        },
+    }
+    try:
+        asyncio.run(
+            pb.handle_poll_batch(
+                api1, cl1, [u_bare, u_reply], cursor1, binding1, 1, "", 10, "strict", "en",
+                is_panic=lambda _u: False, authorize=plugin._authorized_owner,
+                on_callback=lambda *a, **k: asyncio.sleep(0, result="en"),
+                on_message=plugin._handle_owner_message_inner,
+                on_non_owner=lambda a, c, u, p: bridge.handle_non_owner_update(a, c, u, p, runtime_getter=lambda _a: rt1),
+            )
+        )
+        with store1._connect() as conn:
+            rows = conn.execute("SELECT payload_json FROM inbox").fetchall()
+        assert rows == []
+        assert (s1 / "owner_pairing.json").exists()
+        assert oa.redeem_owner_pairing_code(s1, 18, f"/pair {code1}") is True
+    finally:
+        store1.close()
+
+    # 2) Bound owner /panic succeeds even when owner_pairing.json has corrupt UTF-8, chmod 000, or is a directory
+    for mode in ("bad_utf8", "chmod_000", "directory"):
+        s2 = tmp_path / f"panic_{mode}"
+        api2 = _StubApi(s2)
+        ts.merge_settings(s2, {"TELEGRAM_CHAT_ID": "18"})
+        pfile = s2 / "owner_pairing.json"
+        if mode == "bad_utf8":
+            pfile.write_bytes(b"\xff\xfe\x00garbage")
+        elif mode == "chmod_000":
+            pfile.write_text('{"code":"abc"}', encoding="utf-8")
+            pfile.chmod(0)
+        else:
+            pfile.mkdir()
+        injected: list[dict] = []
+        monkeypatch.setattr(plugin, "_inject", lambda _a, payload: asyncio.sleep(0, result=injected.append(payload)))
+        monkeypatch.setattr(plugin, "_POLL_GENERATION_STARTED", 1)
+        cursor2 = pb.PollCursor(s2 / "cursor.json", "https://api.telegram.org", "123456")
+        cl2 = types.SimpleNamespace(
+            bot_id="123456",
+            api_base_origin="https://api.telegram.org",
+            send_message=lambda cid, txt, **k: asyncio.sleep(0, result=1),
+        )
+        u_panic = {"update_id": 10, "message": {"chat": {"id": 18, "type": "private"}, "from": {"id": 18}, "message_id": 20, "date": 1700000000, "text": "/panic"}}
+        try:
+            asyncio.run(
+                pb.handle_poll_batch(
+                    api2, cl2, [u_panic], cursor2, types.SimpleNamespace(current=lambda _g: True), 1, "18", 10, "strict", "en",
+                    is_panic=plugin._panic_update, authorize=plugin._authorized_owner,
+                    on_callback=lambda *a, **k: asyncio.sleep(0, result="en"),
+                    on_message=plugin._handle_owner_message_inner,
+                    on_non_owner=lambda *a, **k: asyncio.sleep(0),
+                )
+            )
+            assert len(injected) == 1 and injected[0]["text"] == "/panic", mode
+            if mode == "bad_utf8":
+                # Non-panic messages also do not crash with UnicodeDecodeError
+                assert oa.is_pairing_command(s2, {"chat": {"id": 18, "type": "private"}, "text": "hello"}) is False
+        finally:
+            if mode == "chmod_000":
+                pfile.chmod(0o600)
+
+    # 3) Single transient EIO on first read during legitimate private /pair leaves update unconfirmed & preserves challenge for retry
+    s3 = tmp_path / "eio_redeem"
+    api3 = _StubApi(s3)
+    code3 = oa.issue_owner_pairing_code(s3)["code"]
+    cursor3 = pb.PollCursor(s3 / "cursor.json", "https://api.telegram.org", "123456")
+    sent3: list[tuple[int, str]] = []
+    cl3 = types.SimpleNamespace(
+        bot_id="123456",
+        api_base_origin="https://api.telegram.org",
+        send_message=lambda cid, txt, **k: asyncio.sleep(0, result=sent3.append((cid, txt)) or 1),
+    )
+    u_pair = {"update_id": 4, "message": {"chat": {"id": 18, "type": "private"}, "from": {"id": 18}, "message_id": 40, "date": 1700000000, "text": f"/pair {code3}"}}
+    real_read_text = pathlib.Path.read_text
+    failed_once = {"done": False}
+
+    def eio_once(self, *a, **k):
+        if self.name == "owner_pairing.json" and not failed_once["done"]:
+            failed_once["done"] = True
+            raise OSError(errno.EIO, "transient read error")
+        return real_read_text(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", eio_once)
+    with pytest.raises(ts.TelegramSettingsError):
+        asyncio.run(
+            pb.handle_poll_batch(
+                api3, cl3, [u_pair], cursor3, types.SimpleNamespace(current=lambda _g: True), 1, "", 10, "strict", "en",
+                is_panic=lambda _u: False, authorize=plugin._authorized_owner,
+                on_callback=lambda *a, **k: asyncio.sleep(0, result="en"),
+                on_message=plugin._handle_owner_message_inner,
+                on_non_owner=lambda a, c, u, p: bridge.handle_non_owner_update(a, c, u, p, runtime_getter=lambda _a: None),
+            )
+        )
+    assert cursor3.offset == 0 and (s3 / "owner_pairing.json").exists()
+    assert ts.load_settings(s3).get("TELEGRAM_CHAT_ID", "") == ""
+    # Retry succeeds and binds owner 18 cleanly
+    asyncio.run(
+        pb.handle_poll_batch(
+            api3, cl3, [u_pair], cursor3, types.SimpleNamespace(current=lambda _g: True), 1, "", 10, "strict", "en",
+            is_panic=lambda _u: False, authorize=plugin._authorized_owner,
+            on_callback=lambda *a, **k: asyncio.sleep(0, result="en"),
+            on_message=plugin._handle_owner_message_inner,
+            on_non_owner=lambda a, c, u, p: bridge.handle_non_owner_update(a, c, u, p, runtime_getter=lambda _a: None),
+        )
+    )
+    assert ts.load_settings(s3).get("TELEGRAM_CHAT_ID") == "18" and cursor3.offset == 5
+
+    # 4) Custody SQLite accepts lone-surrogate text cleanly without UnicodeEncodeError
+    s4 = tmp_path / "sur_custody"
+    store4 = custody.CustodyStore(s4 / "presence.sqlite3")
+    try:
+        ev = pres_events.parse_telegram_update(
+            {"update_id": 7, "message": {"chat": {"id": -1001, "type": "supergroup", "title": "grp"}, "from": {"id": 5, "first_name": "A\ud800"}, "message_id": 7, "date": 1700000000, "text": "hi \ud800 there"}},
+            bot_account_id="123456", bot_username="mybot", download_limit=1024,
+        )
+        assert ev is not None
+        assert store4.commit_update(7, ev, []) is True
+    finally:
+        store4.close()
+
+
+def test_async_client_emfile_and_html_fallback_before_send_oserror_stay_retryable(tmp_path, monkeypatch):
+    _load_plugin("tg_lc_cli")
+    from tg_lc_cli.lib.presence import custody, outbox_files, runtime as rt_mod, transport
+    from tg_lc_cli.scripts.telegram_settings import merge_settings
+
+    # 1) Text message send where httpx.AsyncClient() hits EMFILE stays retryable (pending, NOT uncertain)
+    state = tmp_path / "state"
+    api = _StubApi(state)
+    merge_settings(state, {"TELEGRAM_CHAT_ID": "18"})
+    store = custody.CustodyStore(state / "presence_msg_emfile.sqlite3")
+    store.enqueue_outbox(
+        "d-msg-emfile",
+        {"kind": "message", "account_id": "123456", "chat_id": "-1001", "topic_id": "", "text": "hello"},
+    )
+    monkeypatch.setattr(transport.httpx, "AsyncClient", lambda *a, **k: (_ for _ in ()).throw(OSError(errno.EMFILE, "Too many open files")))
+    client = transport.PresenceBotClient("123456:TOK_A")
+    fake_submitter = types.SimpleNamespace(submit=lambda *a, **k: asyncio.sleep(0), poll=lambda *a, **k: asyncio.sleep(0))
+    rt = rt_mod.PresenceRuntime(api=api, state_dir=state, submitter=fake_submitter, client_factory=lambda: client)
+    rt.store = store
+    rt._bot_id = "123456"
+    rt._validation_gen = 1
+    monkeypatch.setattr(rt, "_ready_client", lambda: asyncio.sleep(0, result=client))
+    monkeypatch.setattr(rt, "_client_is_current", lambda _c, _g: True)
+    monkeypatch.setattr(rt, "_resolved_reporting", lambda _p: asyncio.sleep(0, result={}))
+    monkeypatch.setattr(rt, "_check_place", lambda *a, **k: asyncio.sleep(0))
+
+    try:
+        assert asyncio.run(rt.process_one_outbox()) is True
+        receipt = store.delivery_receipt("d-msg-emfile")
+        assert receipt["state"] == "pending" and receipt["attempts"] == 1
+        assert "uncertain" not in str(receipt.get("error") or "").lower()
+    finally:
+        store.close()
+
+    # 2) HTML-400 fallback before_send() ValueError/OSError maps to TelegramRequestNotSent (retryable, not uncertain)
+    src = tmp_path / "doc.bin"
+    src.write_bytes(b"HTML_400_FALLBACK")
+    frozen = outbox_files.keep(src, state, 1024)
+    cl2 = transport.PresenceBotClient("123456:TOK_A")
+    monkeypatch.setattr(
+        cl2,
+        "_post_multipart",
+        lambda *a, **k: (_ for _ in ()).throw(transport.TelegramApiError("sendDocument", "Bad Request: can't parse entities", 400)),
+    )
+
+    async def fail_before():
+        raise ValueError("the copy of doc.bin kept when it was queued cannot be read (OSError); not sent")
+
+    with pytest.raises(transport.TelegramRequestNotSent):
+        asyncio.run(
+            cl2.send_media(
+                "document", "-1001", pathlib.Path(frozen["path"]),
+                prepared_caption={"text": "<b>hi</b>", "parse_mode": "HTML"},
+                before_send=fail_before,
+            )
+        )

@@ -993,11 +993,6 @@ async def _handle_owner_message_inner(
         await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["help_text"])
         return
 
-    # Never forward /pair <code...> or /start <pairing_code> into chat history or Presence custody.
-    if update.get("_owner_paired") or is_pairing_command(api, message):
-        await client.send_message(chat_id, _LOCALIZED_TEXTS[lang].get("paired_ok", "Owner chat confirmed."))
-        return
-
     if _panic_update(update):
         # If someone sent /panic as a reply to a secret card, quarantine its message_id too.
         api_base = str(getattr(client, "api_base_origin", "") or "")
@@ -1019,6 +1014,11 @@ async def _handle_owner_message_inner(
                 await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["panic_unconfirmed"])
             except TelegramBindingChanged:
                 pass  # the notice lost its client; the unknown Panic is still not retried
+        return
+
+    # Never forward /pair <code...> or /start <pairing_code> into chat history or Presence custody.
+    if update.get("_owner_paired") or is_pairing_command(api, message):
+        await client.send_message(chat_id, _LOCALIZED_TEXTS[lang].get("paired_ok", "Owner chat confirmed."))
         return
 
     # Fail-closed secret exposure check BEFORE any download, command routing, Presence ingest, or inject:

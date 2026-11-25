@@ -178,12 +178,7 @@ class PresenceBotClient:
         clean_path = file_path.lstrip("/")
         url = f"{self._api_server}/file/bot{self._token}/{clean_path}"
         try:
-            async with httpx.AsyncClient(
-                timeout=35.0,
-                trust_env=self._trust_env,
-                proxy=self._proxy,
-                follow_redirects=False,
-            ) as client:
+            async with self._new_async_client("download", 35.0) as client:
                 self._check_binding("download")
                 async with client.stream("GET", url) as response:
                     if response.status_code != 200:
@@ -330,7 +325,10 @@ class PresenceBotClient:
             if not caption or parse_mode != "HTML" or exc.error_code != 400:
                 raise
             if before_send is not None:
-                await before_send()
+                try:
+                    await before_send()
+                except (OSError, ValueError) as before_exc:
+                    raise TelegramRequestNotSent(endpoint, str(before_exc)) from None
             fields.pop("parse_mode", None)
             fields["caption"] = _telegram_html_to_plain(caption)
             result = await self._post_multipart(
@@ -377,7 +375,10 @@ class PresenceBotClient:
             if exc.error_code != 400 or not any(entry.get("parse_mode") == "HTML" for entry in media):
                 raise
             if before_send is not None:
-                await before_send()
+                try:
+                    await before_send()
+                except (OSError, ValueError) as before_exc:
+                    raise TelegramRequestNotSent("sendMediaGroup", str(before_exc)) from None
             media = [
                 {
                     **{key: value for key, value in entry.items() if key != "parse_mode"},
@@ -447,16 +448,22 @@ class PresenceBotClient:
             payload["message_thread_id"] = int(topic_id)
         return bool(await self._post_json("sendChatAction", payload, timeout=10.0))
 
-    async def _post_json(self, endpoint: str, payload: Dict[str, Any], *, timeout: float = 35.0) -> Any:
-        self._check_binding(endpoint)
-        url = f"{self._api_server}/bot{self._token}/{endpoint}"
+    def _new_async_client(self, endpoint: str, timeout: float) -> httpx.AsyncClient:
         try:
-            async with httpx.AsyncClient(
+            return httpx.AsyncClient(
                 timeout=timeout,
                 trust_env=self._trust_env,
                 proxy=self._proxy,
                 follow_redirects=False,
-            ) as client:
+            )
+        except OSError as exc:
+            raise TelegramRequestNotSent(endpoint, type(exc).__name__) from None
+
+    async def _post_json(self, endpoint: str, payload: Dict[str, Any], *, timeout: float = 35.0) -> Any:
+        self._check_binding(endpoint)
+        url = f"{self._api_server}/bot{self._token}/{endpoint}"
+        try:
+            async with self._new_async_client(endpoint, timeout) as client:
                 self._check_binding(endpoint)
                 response = await client.post(url, json=payload)
         except TelegramRequestNotSent:
@@ -521,12 +528,7 @@ class PresenceBotClient:
             "Content-Length": str(stream.content_length),
         }
         try:
-            async with httpx.AsyncClient(
-                timeout=timeout,
-                trust_env=self._trust_env,
-                proxy=self._proxy,
-                follow_redirects=False,
-            ) as client:
+            async with self._new_async_client(endpoint, timeout) as client:
                 self._check_binding(endpoint)
                 response = await client.post(url, content=stream, headers=headers)
         except TelegramRequestNotSent:

@@ -98,17 +98,20 @@ def _write_private_json(path: pathlib.Path, payload: Dict[str, Any]) -> None:
 
 
 def _read_pairing_record(path: pathlib.Path) -> Optional[Dict[str, Any]]:
+    """Read ``owner_pairing.json``: ``None`` if absent, ``{}`` if corrupt UTF-8/JSON, raise on OS I/O errors."""
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
+    except UnicodeDecodeError:
+        return {}
     except OSError as exc:
         raise TelegramSettingsError("Could not read owner pairing challenge.") from exc
     try:
         record = json.loads(raw)
     except ValueError:
-        return None
-    return record if isinstance(record, dict) else None
+        return {}
+    return record if isinstance(record, dict) else {}
 
 
 def _clear_pairing_unlocked(path: pathlib.Path) -> None:
@@ -116,6 +119,13 @@ def _clear_pairing_unlocked(path: pathlib.Path) -> None:
         path.unlink(missing_ok=True)
     except OSError as exc:
         raise TelegramSettingsError("Could not remove owner pairing challenge.") from exc
+
+
+def _best_effort_clear_pairing_unlocked(path: pathlib.Path) -> None:
+    try:
+        _clear_pairing_unlocked(path)
+    except TelegramSettingsError:
+        pass
 
 
 def clear_owner_pairing(state_dir: Any) -> None:
@@ -188,54 +198,95 @@ def redeem_owner_pairing_code(
     cmd, candidate = match.group(1).lower(), match.group(2)
     root = _resolve_state_dir(state_dir)
     path = _pairing_path(root)
-    try:
-        with settings_lock(root):
-            try:
-                existing_owner = int(str(load_settings(root).get("TELEGRAM_CHAT_ID") or "").strip() or "0")
-            except (TelegramSettingsError, TypeError, ValueError):
-                existing_owner = 0
-            if existing_owner > 0:
-                return False
-            if not path.is_file():
-                return False
-            record = _read_pairing_record(path)
-            if record is None:
-                _clear_pairing_unlocked(path)
-                return False
-            expected = str(record.get("code") or "")
-            if not expected or _is_burned_in_memory(expected):
-                _clear_pairing_unlocked(path)
-                return False
-            bounds = _parse_pairing_bounds(record)
-            if bounds is None:
-                _clear_pairing_unlocked(path)
-                return False
-            expires_at, failed = bounds
-            ts = time.time() if now is None else float(now)
-            if not math.isfinite(ts) or ts > expires_at or failed >= _PAIRING_MAX_ATTEMPTS:
-                _clear_pairing_unlocked(path)
-                return False
-            if not _const_eq(expected, candidate):
-                if cmd == "pair" or len(candidate) >= _MIN_START_PAIR_LEN:
-                    failed += 1
-                    if failed >= _PAIRING_MAX_ATTEMPTS:
-                        _clear_pairing_unlocked(path)
-                    else:
-                        record["failed_attempts"] = failed
-                        try:
-                            _write_private_json(path, record)
-                        except OSError:
-                            _clear_pairing_unlocked(path)
-                return False
-            sentinel = {"redeemed_sha256": _sha256_text(expected), "redeemed_at": ts}
-            try:
-                _write_private_json(path, sentinel)
-            except OSError:
-                return False
-            merge_settings_unlocked(root, {"TELEGRAM_CHAT_ID": str(int(chat_id))})
-            return True
-    except (TelegramSettingsError, OSError):
-        return False
+    with settings_lock(root):
+        raw_owner = str(load_settings(root).get("TELEGRAM_CHAT_ID") or "").strip()
+        try:
+            existing_owner = int(raw_owner or "0")
+        except (TypeError, ValueError):
+            existing_owner = 0
+        if existing_owner > 0:
+            return False
+        record = _read_pairing_record(path)
+        if record is None:
+            return False
+        expected = str(record.get("code") or "")
+        if not expected or _is_burned_in_memory(expected):
+            _best_effort_clear_pairing_unlocked(path)
+            return False
+        bounds = _parse_pairing_bounds(record)
+        if bounds is None:
+            _best_effort_clear_pairing_unlocked(path)
+            return False
+        expires_at, failed = bounds
+        ts = time.time() if now is None else float(now)
+        if not math.isfinite(ts) or ts > expires_at or failed >= _PAIRING_MAX_ATTEMPTS:
+            _best_effort_clear_pairing_unlocked(path)
+            return False
+        if not _const_eq(expected, candidate):
+            if cmd == "pair" or len(candidate) >= _MIN_START_PAIR_LEN:
+                failed += 1
+                if failed >= _PAIRING_MAX_ATTEMPTS:
+                    _best_effort_clear_pairing_unlocked(path)
+                else:
+                    record["failed_attempts"] = failed
+                    try:
+                        _write_private_json(path, record)
+                    except OSError:
+                        _best_effort_clear_pairing_unlocked(path)
+            return False
+        sentinel = {"redeemed_sha256": _sha256_text(expected), "redeemed_at": ts}
+        try:
+            _write_private_json(path, sentinel)
+        except OSError as exc:
+            raise TelegramSettingsError("Could not persist owner pairing redemption.") from exc
+        merge_settings_unlocked(root, {"TELEGRAM_CHAT_ID": str(int(chat_id))})
+        return True
+
+
+def _collect_pairing_strings(obj: Any, out: list[str]) -> None:
+    if not isinstance(obj, dict):
+        return
+    for key in ("text", "caption"):
+        val = str(obj.get(key) or "").strip()
+        if val:
+            out.append(val)
+    for ent_key in ("entities", "caption_entities"):
+        ents = obj.get(ent_key)
+        if not isinstance(ents, list):
+            continue
+        for ent in ents:
+            if not isinstance(ent, dict):
+                continue
+            raw_url = str(ent.get("url") or "").strip()
+            if not raw_url:
+                continue
+            out.append(raw_url)
+            u1 = urllib.parse.unquote(raw_url)
+            if u1 != raw_url:
+                out.append(u1)
+                u2 = urllib.parse.unquote(u1)
+                if u2 != u1:
+                    out.append(u2)
+    lpo = obj.get("link_preview_options")
+    if isinstance(lpo, dict):
+        lp_url = str(lpo.get("url") or "").strip()
+        if lp_url:
+            out.append(lp_url)
+            u1 = urllib.parse.unquote(lp_url)
+            if u1 != lp_url:
+                out.append(u1)
+
+
+def _pairing_haystacks(message: Dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    _collect_pairing_strings(message, out)
+    _collect_pairing_strings(message.get("quote"), out)
+    for nested_key in ("reply_to_message", "external_reply"):
+        nested = message.get(nested_key)
+        if isinstance(nested, dict):
+            _collect_pairing_strings(nested, out)
+            _collect_pairing_strings(nested.get("quote"), out)
+    return out
 
 
 def is_pairing_command(state_dir: Any, message: Any) -> bool:
@@ -248,16 +299,7 @@ def is_pairing_command(state_dir: Any, message: Any) -> bool:
         return False
     raw, _entities = _message_text_and_entities(message)
     cleaned = raw.strip()
-    entity_urls = []
-    for ent in list(message.get("entities") or []) + list(message.get("caption_entities") or []):
-        if isinstance(ent, dict):
-            raw_url = str(ent.get("url") or "").strip()
-            if raw_url:
-                entity_urls.append(raw_url)
-                unquoted = urllib.parse.unquote(raw_url)
-                if unquoted != raw_url:
-                    entity_urls.append(unquoted)
-    haystacks = ([cleaned] if cleaned else []) + entity_urls
+    haystacks = _pairing_haystacks(message)
     if not haystacks:
         return False
     root = _resolve_state_dir(state_dir)
@@ -270,15 +312,14 @@ def is_pairing_command(state_dir: Any, message: Any) -> bool:
     active_code = str((record or {}).get("code") or "")
     if active_code:
         matched = any(
-            any(_const_eq(active_code, tok) for tok in _CODE_TOKEN_RE.findall(h))
-            or (not is_private and active_code in h)
+            any(_const_eq(active_code, tok) for tok in _CODE_TOKEN_RE.findall(h)) or (active_code in h)
             for h in haystacks
         )
         if matched:
             # Burn exposed active code atomically under settings_lock (propagates TelegramSettingsError
             # on lock/read/unlink failure so the poller rewinds offset and halts the batch before redemption).
-            # In an unbound private DM with a bare paste (no /pair or /start), suppress without burning
-            # so the code never enters Presence custody while the user can still send `/pair <code>`.
+            # In an unbound private DM without /pair or /start (bare paste or reply/quote to it), suppress
+            # without burning so the code never enters Presence custody while `/pair <code>` still works.
             if not is_private or pair_any or start_match or live_owner_chat_id(root) > 0:
                 _burn_active_code_if_matches(root, active_code)
             return True

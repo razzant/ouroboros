@@ -498,9 +498,9 @@ def remember_event(conn: sqlite3.Connection, event: TelegramEvent) -> None:
             event.thread_id,
             chat_forum(event.conversation.get("chat_type"), event.conversation.get("is_forum"), event.thread_id),
             str(actor.get("platform_actor_id") or ""),
-            name or str((actor.get("sender_chat") or {}).get("title") or ""),
+            _utf8_safe(name or str((actor.get("sender_chat") or {}).get("title") or "")),
             0,
-            event.text,
+            _utf8_safe(event.text),
             mg,
             origin_known,
         ),
@@ -626,8 +626,21 @@ def reply_payload(event: Dict[str, Any], text: str, reply_to: Any = None) -> Dic
     return payload
 
 
+def _utf8_safe(text: str) -> str:
+    try:
+        text.encode("utf-8")
+        return text
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def compact_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    try:
+        raw.encode("utf-8")
+        return raw
+    except UnicodeEncodeError:
+        return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
 def iso_timestamp(value: Any) -> str:
