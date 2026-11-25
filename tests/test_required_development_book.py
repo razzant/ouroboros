@@ -19,7 +19,7 @@ import pytest
 
 from ouroboros import context, loop, memory_view
 from ouroboros import context_fit as fit
-from ouroboros.context_input_selection import development_required, development_resident
+from ouroboros.context_input_selection import development_required
 from ouroboros.context_measurement import measure_main_fit, required_book_addition
 from ouroboros.contracts.task_contract import attach_task_contract, build_task_contract
 from ouroboros.loop_model_call import _measure_main_context_view
@@ -122,13 +122,10 @@ def test_an_older_top_level_answer_keeps_its_max_meaning_and_gains_no_requiremen
     legacy = attach_task_contract({"id": "old", "type": "task", KEY: True, "workspace_root": workspace,
                                    "workspace_mode": "external", "metadata": {}})
     assert KEY not in legacy["task_contract"] and development_required(legacy) is False
-    ctx = SimpleNamespace(repo_dir=tmp_path, system_repo_dir=tmp_path, drive_root=tmp_path)
-    assert development_resident(legacy, ctx) is True  # Max, as it was described when it was written
     env, core, task = _capture(tmp_path / "capture", legacy)
     assert core.development_required is False
-    for mode in ("low", "nano"):
+    for mode in ("max", "low", "nano"):
         assert not _book_blocks(_capture_plan(env, core, task, mode), mode)
-    assert _book_blocks(_capture_plan(env, core, task, "max"), "max")
     # Its restart loses the row's copy as before; it never promotes itself through the contract.
     from supervisor.queue_snapshot import _PENDING_FIELDS
 
@@ -138,6 +135,7 @@ def test_an_older_top_level_answer_keeps_its_max_meaning_and_gains_no_requiremen
 
 
 @pytest.mark.parametrize(("mode", "answer"), [
+    pytest.param("max", {"context_requires_self_body_docs": True}, id='max-answer0'),
     pytest.param("low", {"context_requires_self_body_docs": True}, id='low-answer0'),
     pytest.param("low", {"task_contract": {KEY: False}}, id='low-answer2'),
     pytest.param("low", {}, id='low-answer4'),
@@ -149,7 +147,7 @@ def test_a_subject_marker_an_explicit_no_or_absence_keeps_the_compact_map(tmp_pa
     plan = _capture_plan(env, core, task, mode)
     assert not core.development_required and not _book_blocks(plan, mode)
     assert "Full engineering discipline." not in _text(plan, mode)
-    assert "DEVELOPMENT.md (navigation map)" in _text(plan, mode) or "docs/development/change.md" in _text(plan, mode)
+    assert "The whole body map." in _text(plan, mode)
 
 
 def test_an_explicit_no_survives_restore_on_its_contract_in_max(tmp_path):
@@ -251,8 +249,6 @@ def test_a_restart_restores_the_answer_from_the_contract_alone(tmp_path, monkeyp
     restored = next(row for row in workers.PENDING if row["id"] == task["id"])
     assert KEY not in restored  # the row's copy never survived a restart; the carrier does
     assert restored["task_contract"][KEY] is flag and development_required(restored) is flag
-    ctx = SimpleNamespace(repo_dir=tmp_path, system_repo_dir=tmp_path, drive_root=tmp_path)
-    assert development_resident(restored, ctx) is flag
 
 
 @pytest.mark.parametrize("stored,carried", [(True, True), (False, False), ("absent", "absent")])
@@ -286,7 +282,7 @@ def test_continue_leaves_an_older_top_level_answer_where_it_was(tmp_path, monkey
 
 # --- The view -----------------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("mode", ["low", "nano"])
+@pytest.mark.parametrize("mode", ["max", "low", "nano"])
 def test_compact_modes_add_the_whole_composed_book_as_a_block_beside_the_shared_prefix(tmp_path, mode):
     env, core, task = _capture(tmp_path / "with", {"task_contract": {KEY: True}})
     plan = _capture_plan(env, core, task, mode)
@@ -297,8 +293,8 @@ def test_compact_modes_add_the_whole_composed_book_as_a_block_beside_the_shared_
     env2, ordinary, task2 = _capture(tmp_path / "without")
     without = _blocks(_capture_plan(env2, ordinary, task2, mode), mode)
     with_book = _blocks(plan, mode)
-    # One shared cache prefix: the first block is byte-identical and keeps the map; the book is the next stable one.
-    assert with_book[0] == without[0] and "docs/development/change.md" in with_book[0]["text"]
+    # One shared cache prefix: the first block is byte-identical and keeps the Body Map; the book is the next stable one.
+    assert with_book[0] == without[0] and "The whole body map." in with_book[0]["text"]
     assert with_book[1]["text"].startswith("## DEVELOPMENT.md\n") and "cache_control" in with_book[1]
     assert _text(plan, mode).count("Full engineering discipline.") == 1
     assert plan.core_sha256 != _capture_plan(env2, ordinary, task2, mode).core_sha256
@@ -306,14 +302,18 @@ def test_compact_modes_add_the_whole_composed_book_as_a_block_beside_the_shared_
 
 
 def test_a_book_the_ordinary_max_view_holds_is_neither_repeated_nor_charged(tmp_path):
+    """Under the unified Body Map layout, ordinary Max holds no whole handbook; explicit development_required adds
+    Block D beside the byte-identical Block A' prefix and accounts for its tokens cleanly."""
     env, core, task = _capture(tmp_path / "with", {"task_contract": {KEY: True}})
     plan = _capture_plan(env, core, task, "max")
-    assert core.docs_need_development and core.required_book_tokens("max") == 0
-    assert len(_book_blocks(plan, "max")) == 1 and core.required_book_tokens("low") > 0
+    assert not core.docs_need_development and core.required_book_tokens("max") == core.required_book_tokens("low") > 0
+    assert len(_book_blocks(plan, "max")) == 1
     env2, ordinary, task2 = _capture(tmp_path / "without")
-    assert _blocks(plan, "max")[:2] == _blocks(_capture_plan(env2, ordinary, task2, "max"), "max")[:2]
+    ordinary_plan = _capture_plan(env2, ordinary, task2, "max")
+    assert not _book_blocks(ordinary_plan, "max")
+    assert _blocks(plan, "max")[0] == _blocks(ordinary_plan, "max")[0]
     assert measure_main_fit(plan, plan.messages_for("max"), [], profile="owner_max", rendered_mode="max",
-                            round_id="r").measurement.required_book_tokens == 0
+                            round_id="r").measurement.required_book_tokens > 0
 
 
 def test_a_foreign_subjects_max_view_gets_the_book_without_paying_for_it(tmp_path, fixed_density):
@@ -321,8 +321,7 @@ def test_a_foreign_subjects_max_view_gets_the_book_without_paying_for_it(tmp_pat
     required = _plan(tmp_path, _core(tmp_path, required=True), "max", 1_000_000)
     assert _choices(required) == _choices(ordinary) and required.initial_mode == "max"
     assert not _book_blocks(ordinary, "max") and len(_book_blocks(required, "max")) == 1
-    stable = "\n".join(block["text"] for block in _blocks(required, "max"))
-    assert "DEVELOPMENT.md (navigation map)" not in stable  # its own block replaces the map it stood in for
+    assert _blocks(required, "max")[0] == _blocks(ordinary, "max")[0]
     held, plain = (plan.projection("max").memory_facts["max_room"] for plan in (required, ordinary))
     book = math.ceil(required.core.required_book_tokens("max") * RATIO)
     # The settled facts state the real room: choices were made without the book, the numbers carry it.
@@ -352,7 +351,7 @@ def test_a_declared_capture_reads_the_same_signal(tmp_path, monkeypatch):
             "configured_subagent": {"id": "helper", "route": {"kind": "api_model"}},
             "task_contract": {"input_sources": "declared", KEY: True}}
     core = context._capture_context_core(env, Memory(drive_root=env.drive_root, repo_dir=env.repo_dir), task, None, None)
-    assert core.development_required and core.compact_reference_docs and core.docs_need_development is False
+    assert core.development_required and core.docs_need_development is False
     plan = _capture_plan(env, core, task, "max")
     book = next(b for b in core.reference_books if b.book_id == "development")
     assert _book_blocks(plan, "max") == ["## DEVELOPMENT.md\n\n" + compose_book(book)]
@@ -435,15 +434,17 @@ def test_a_soft_work_room_shortfall_starts_with_the_real_room_in_its_notice(tmp_
 def test_a_low_start_line_does_not_call_the_required_book_a_map(tmp_path, fixed_density):
     from ouroboros.context_view_facts import low_start_line
 
-    shape = dict(arch_words=80_000, page_chars=40_000)
-    plan = _plan(tmp_path, _core(tmp_path, required=True, **shape), "max", 330_000)
-    assert plan.initial_mode == "low" and len(_book_blocks(plan, "low")) == 1
-    assert plan.low_projection.memory_facts["max_room"]["cause"] == "crowded"
-    assert "This task's directly required handbook stays whole beside these chapter maps." in _blocks(plan, "low")[-1]["text"]
-    assert "(this task's directly required handbook stays whole)" in low_start_line(plan, "low", "t")
-    plain = _plan(tmp_path, _core(tmp_path, **shape), "max", 330_000)
+    # A window that physically overflows Max into Nano (shedding full reply reserve and tool schemas):
+    # the required handbook stays whole and is named so in the owner notice without affecting ordinary choices.
+    shape = dict(arch_words=10_000, page_chars=2_000, book_tokens=10_000, assignment="Keep this work. " * 12_000)
+    plain = _plan(tmp_path, _core(tmp_path, **shape), "max", 120_000)
+    plan = _plan(tmp_path, _core(tmp_path, required=True, **shape), "max", 120_000)
+    assert plain.initial_mode == plan.initial_mode == "nano" and len(_book_blocks(plan, "nano")) == 1
+    assert plan.nano_projection.memory_facts["max_room"]["cause"] in ("crowded", "route")
+    assert "(this task's directly required handbook stays whole)" in low_start_line(plan, "nano", "t")
     assert _choices(plan) == _choices(plain)  # its words follow the choices, never enter them
-    assert "stays whole" not in low_start_line(plain, "low", "t") and "runs in Low for now, not in your Max:" in low_start_line(plain, "low", "t")
+    assert "stays whole" not in low_start_line(plain, "nano", "t")
+    assert "runs in Nano for now, not in your Max:" in low_start_line(plain, "nano", "t")
 
 
 def test_reprojection_keeps_the_book_and_asks_nothing_of_memory_for_it(tmp_path, fixed_density):
@@ -469,24 +470,24 @@ def test_reprojection_keeps_the_book_and_asks_nothing_of_memory_for_it(tmp_path,
 
 
 def test_running_max_rebind_credits_only_books_that_can_yield(tmp_path, fixed_density, monkeypatch):
-    from ouroboros.context_budget import RECLAIM_LOW_WATER_DIVISOR
     from tests._context_fit_fixtures import _rebind
 
-    # In a body task Max already carries the handbook. It may not be priced as a map when Low keeps it whole.
-    core = _core(tmp_path, required=True, subject=True, book_tokens=65_000, arch_words=96_000, page_chars=30_000)
+    # Under the unified Body Map layout, Max has no whole books to shed into Low; a running Max rebind
+    # keeps Max and the required handbook whole without making memory pay for the handbook.
+    core = _core(tmp_path, required=True, subject=True, book_tokens=65_000, arch_words=10_000, page_chars=20_000)
     plan = _plan(tmp_path, core, "max", 1_000_000)
-    messages = plan.messages_for("max") + [{"role": "user", "content": "Exact owner follow-up."}]
+    plain = _plan(tmp_path, replace(core, development_required=False), "max", 1_000_000)
+    followup = [{"role": "user", "content": "Exact owner follow-up."}]
+    messages = plan.messages_for("max") + followup
     tail = messages[1:]
-    start = math.ceil(fit.estimate_context_prompt_tokens(messages, []) * RATIO)
-    window = start + 8_192 - 174_000
+    plain_messages = plain.messages_for("max") + followup
+    plain_size = math.ceil(fit.estimate_context_prompt_tokens(plain_messages, []) * RATIO)
+    window = plain_size + 8_192 + 20_000  # ordinary view fits; with required handbook it overflows
     kept, mode, _ = _rebind(monkeypatch, tmp_path / 'route', plan, messages, window=window, ratio=RATIO, start_mode='max')
-    assert mode == 'low' and messages[1:] == tail
+    assert mode == 'max' and messages[1:] == tail
     assert _book_blocks(kept, mode) == _book_blocks(plan, 'max')
-    final = measure_main_fit(kept, messages, [], profile='task_local_low', rendered_mode=mode, round_id='r').measurement
-    physical_free = final.capacity_total_tokens - final.response_reserve_tokens - final.estimated_input_tokens
-    print(f'measured Max-to-Low required handbook: {window=} {physical_free=} book={final.required_book_tokens}')
+    final = measure_main_fit(kept, messages, [], profile='owner_max', rendered_mode=mode, round_id='r').measurement
     assert final.required_book_tokens > 0
-    assert physical_free < 0 and physical_free + final.required_book_tokens >= math.ceil(window / RECLAIM_LOW_WATER_DIVISOR)
     assert kept.projection(mode).memory_facts['floor']['steps'] == plan.max_projection.memory_facts['floor']['steps']
 
 
@@ -500,16 +501,15 @@ def test_max_to_low_can_spend_architecture_but_not_low_handbook_addition(tmp_pat
     held = _plan(tmp_path, core, 'max', 1_000_000)
     plain = _plan(tmp_path, replace(core, development_required=False), 'max', 1_000_000)
     tail = {'role': 'user', 'content': 'Keep this precise owner follow-up.'}
-    low_size = math.ceil(fit.estimate_context_prompt_tokens([*plain.messages_for('low'), tail], []) * RATIO)
-    window = low_size + 8_192 + (14_000 if ordinary_fits else -4_000)
+    base_size = math.ceil(fit.estimate_context_prompt_tokens([*plain.messages_for('max'), tail], []) * RATIO)
+    window = base_size + 8_192 + (14_000 if ordinary_fits else -4_000)
     outputs = []
     for plan in (plain, held):
         messages = [*plan.messages_for('max'), tail]
-        assert math.ceil(fit.estimate_context_prompt_tokens(messages, []) * RATIO) + 8_192 > window
         kept, mode, _ = _rebind(monkeypatch, tmp_path / ('held' if plan.core.development_required else 'plain'),
                                 plan, messages, window=window, ratio=RATIO, start_mode='max')
-        assert mode == 'low' and messages[-1] == tail
-        disposition = measure_main_fit(kept, messages, [], profile='task_local_low', rendered_mode=mode, round_id='r')
+        assert mode == 'max' and messages[-1] == tail
+        disposition = measure_main_fit(kept, messages, [], profile='owner_max', rendered_mode=mode, round_id='r')
         measured = disposition.measurement
         refusal = main_context_fit_refusal(AttemptRequest(model='fixture', provider='fixture',
             prompt_tokens_bounded_estimate=measured.raw_input_tokens, physical_context=fit._physical_context_for_fit(disposition)))
@@ -517,7 +517,7 @@ def test_max_to_low_can_spend_architecture_but_not_low_handbook_addition(tmp_pat
         assert bool(refusal) is plan.core.development_required
         if refusal:
             assert 0 < -refusal['free_tokens'] <= measured.required_book_tokens
-        outputs.append(kept.low_projection.memory_facts['floor']['runs'])
+        outputs.append(kept.max_projection.memory_facts['floor']['runs'])
     assert outputs[0] == outputs[1]
     if not ordinary_fits:
         assert outputs[0]
@@ -526,11 +526,9 @@ def test_max_to_low_can_spend_architecture_but_not_low_handbook_addition(tmp_pat
 def test_running_books_do_not_retry_when_only_the_required_development_map_could_save(tmp_path, fixed_density):
     core = replace(_core(tmp_path, required=True, subject=True, memory=False, book_tokens=60_000), architecture_md='')
     held = _plan(tmp_path, core, 'max', 1_000_000)
-    plain = _plan(tmp_path, replace(core, development_required=False), 'max', 1_000_000)
     assert _book_blocks(held, 'max') == _book_blocks(held, 'low') and _book_blocks(held, 'max')
     def count(plan, mode):
         return fit.estimate_context_prompt_tokens(plan.messages_for(mode), [])
-    assert count(plain, 'low') < count(plain, 'max')  # only dropping Development would help
     assert count(held, 'low') >= count(held, 'max')
     chosen = held.reproject_for_route(window_tokens=80_000, known_window=True, ratio=RATIO, output_reserve=RESERVE,
         start_mode='max', select_mode='low', tool_schemas=[], current_messages=held.messages_for('max'),
@@ -635,89 +633,78 @@ def test_the_required_nano_book_and_full_reply_fit_an_input_only_limit(tmp_path,
 BOOK_BODY = "Its practice and why. " * 70  # a handbook of about 60,000 tokens behind maps of about 1,200 each
 
 
-def _rows(plan):
-    return [row["section_id"] for row in plan.low_projection.memory_facts.get("host_sections_addressed", ())]
+def _rows(plan, mode: str = "low"):
+    return [row["section_id"] for row in plan.projection(mode).memory_facts.get("host_sections_addressed", ())]
 
 
 def test_a_required_book_that_fits_only_beside_shorter_maps_shortens_its_own_map_first(tmp_path, fixed_density):
-    """Owner 23.11.2026 (1). The twin without the requirement decides every form; where the start's first request with
-    the whole book would not go out, the book's own detailed map steps to its chapter list beside its retained full
-    text, ARCHITECTURE's only if that is not enough. Memory, mode, schemas, the reply and the book stay; past both
-    maps, the named refusal. A route that holds both maps changes nothing but the book (the equality test above)."""
+    """Unified Body Map: where the start's first request with the whole book would not go out, the resident
+    ``body_map`` steps to its parts-and-addresses form beside its retained full text. Memory, mode, schemas,
+    the reply and the book stay; past ``body_map``, the named refusal."""
     from ouroboros.tool_policy import select_tool_schemas
 
     ordinary, required = (booked(_core(tmp_path, required=flag, page_chars=2_000), tmp_path, body=BOOK_BODY)
                           for flag in (False, True))
     roomy = _plan(tmp_path, required, "low", 1_000_000)
     tools = fit.tool_schema_tokens(list(select_tool_schemas(SCHEMAS, context_mode="low").schemas))
-    whole = math.ceil((roomy.low_projection.estimated_tokens + tools) * RATIO) + RESERVE  # the start beside both maps
-    dev, arch = (math.ceil(map_saving(book, name) * RATIO) for book, name in zip(
-        required.reference_books[::-1], ("development_map", "architecture_map")))
-    one, twin = (_plan(tmp_path, core, "low", whole - dev // 2) for core in (required, ordinary))
-    assert not _rows(roomy) and _rows(one) == [*_rows(twin), "development_map"]
+    whole = math.ceil((roomy.low_projection.estimated_tokens + tools) * RATIO) + RESERVE
+    bm = math.ceil(map_saving(required.reference_books[0], "body_map") * RATIO)
+    assert bm > 500
+    one, twin = (_plan(tmp_path, core, "low", whole - bm // 2) for core in (required, ordinary))
+    assert not _rows(roomy) and _rows(one) == [*_rows(twin), "body_map"]
     assert [part for i, part in enumerate(_choices(one)) if i != 4] == [part for i, part in enumerate(_choices(twin)) if i != 4]
     text = "\n".join(block["text"] for block in _blocks(one, "low"))
-    assert len(_book_blocks(one, "low")) == 1 and "## Engineering (chapters)" in text and "Mechanism 149 — lines" in text
+    assert len(_book_blocks(one, "low")) == 1 and "## Body (parts & addresses)" in text
     assert "omitted for the physical window; retained full text: read_file(root='artifact_store'" in text
     assert one.low_projection.memory_facts["host_sections_addressed"][-1].get("start_room") is None
-    both = _plan(tmp_path, required, "low", whole - dev - arch // 2)
-    assert _rows(both)[-2:] == ["development_map", "architecture_map"] and len(_book_blocks(both, "low")) == 1
     with pytest.raises(fit.MinimumViewUnfit, match="directly required handbook"):
-        _plan(tmp_path, required, "low", whole - dev - arch - 2_000)
+        _plan(tmp_path, required, "low", whole - bm - 2_000)
 
 
 def test_a_local_route_leaves_the_required_book_to_the_senders_exact_count(tmp_path, fixed_density):
     """Where the sender counts the sealed request exactly (a local route), the planner's estimate neither shortens a
-    map nor refuses for the required handbook: the detailed request goes to that count, which alone can refuse it
-    (``llm_attempt.main_context_fit_refusal``; then one yield per refusal). An estimate-only route at the same window
-    shortens the book's own map (its terminal refusal is covered in the map-order test above)."""
+    map nor refuses for the required handbook: the detailed request goes to that count, which alone can refuse it."""
     from ouroboros.tool_policy import select_tool_schemas
 
     core = booked(_core(tmp_path, required=True, page_chars=2_000), tmp_path, body=BOOK_BODY)
     roomy = _plan(tmp_path, core, "low", 1_000_000)
     tools = fit.tool_schema_tokens(list(select_tool_schemas(SCHEMAS, context_mode="low").schemas))
     whole = math.ceil((roomy.low_projection.estimated_tokens + tools) * RATIO) + RESERVE
-    dev, arch = (math.ceil(map_saving(book, name) * RATIO) for book, name in zip(
-        core.reference_books[::-1], ("development_map", "architecture_map")))
+    bm = math.ceil(map_saving(core.reference_books[0], "body_map") * RATIO)
 
-    for window in (whole - dev // 2, whole - dev - arch - 2_000):
+    for window in (whole - bm // 2, whole - bm - 2_000):
         deferred = _plan(tmp_path, core, "low", window, provider="local")
         text = "\n".join(block["text"] for block in _blocks(deferred, "low"))
         assert deferred.initial_mode == "low" and not _rows(deferred) and len(_book_blocks(deferred, "low")) == 1
-        assert "Rule 149 — lines" in text and "Mechanism 149 — lines" in text  # both maps detailed beside the book
-    assert _rows(_plan(tmp_path, core, "low", whole - dev // 2)) == ["development_map"]
+        assert "How part 00 works for Change" in text
+    assert _rows(_plan(tmp_path, core, "low", whole - bm // 2)) == ["body_map"]
 
 
 def test_counterfactual_start_marks_deferred_local_required_book_without_claiming_a_definite_start(tmp_path, fixed_density):
     """A local route defers required-handbook admission and map shortening to its exact count: the pairwise start
     forecast shows the projected mode and states that actual admission and final navigation are unknown until a
-    matching exact local count (Astra's 165,496 window / 65,536 reply reserve frame), while definite cases keep
-    ``starts ...``."""
+    matching exact local count, while definite cases keep ``starts ...``."""
     from ouroboros import memory_floor
 
     core = booked(_core(tmp_path, required=True, page_chars=2_000), tmp_path, body=BOOK_BODY)
     snapshot = memory_view.snapshot_from_json(core.memory_view_json)
-    window = 165_496  # Astra's frame: 65,536 reply reserve leaves 99,960, below even shortened-map input
+    window = 165_496
     with pytest.raises(fit.MinimumViewUnfit, match="directly required handbook"):
         _plan(tmp_path, core, "low", window)  # non-local proves this frame cannot admit the required book
 
-    for preferred, mode_label in (("low", "Low"), ("max", memory_floor.TEMPORARY_LOW)):
+    for preferred, mode_label in (("low", "Low"), ("max", "Max")):
         deferred = memory_floor.counterfactual_starts(_plan(tmp_path, core, preferred, window, provider="local"),
                                                       {"same": snapshot})
-        assert deferred["measured"] and deferred["arms"]["same"]["mode"] == "low"
+        assert deferred["measured"] and deferred["arms"]["same"]["mode"] == preferred
         assert deferred["arms"]["same"]["local_admission_deferred"] is True
         lines = "\n".join(memory_floor.counterfactual_lines(deferred))
         assert f"- same: projected {mode_label} (local required-handbook admission deferred: actual admission and final navigation" in lines
         assert "- same: starts " not in lines
 
-    # Definite cases keep ``starts ...``: non-local route, local route without a required handbook, and a local
-    # self-body Max arm whose whole handbook is already part of Max's ordinary view.
     for plan, expected_mode in (
         (_plan(tmp_path, core, "low", 1_000_000), "Low"),
         (_plan(tmp_path, booked(_core(tmp_path, required=False, page_chars=2_000), tmp_path, body=BOOK_BODY),
                "low", window, provider="local"), "Low"),
-        (_plan(tmp_path, booked(_core(tmp_path, required=True, subject=True, page_chars=2_000), tmp_path, body=BOOK_BODY),
-               "max", 1_000_000, provider="local"), "Max"),
     ):
         definite = memory_floor.counterfactual_starts(plan, {"same": snapshot})
         assert "local_admission_deferred" not in definite["arms"]["same"]
@@ -725,35 +712,31 @@ def test_counterfactual_start_marks_deferred_local_required_book_without_claimin
 
 
 def test_step_book_map_keeps_the_at_planning_book_notice_without_a_stale_remaining_count(main_call, tmp_path, fixed_density):
-    """After ``step_book_map`` shortens a map on an unread Low start, the outgoing request keeps the handbook's
+    """After ``step_book_map`` shortens ``body_map`` on an unread Low start, the outgoing request keeps the handbook's
     at-planning notice and cost without a stale remaining-room count or present-tense shortfall."""
     from ouroboros.context_budget import bound_host_row
     from ouroboros.context_measurement import BOOK_NOTE_KEY
 
-    def rows(dev, arch, book, size):
-        return [bound_host_row("ouroboros_context_facts", "[CONTEXT_FACTS] " + _filler(dev // 4 + 2_000))]
+    def rows(bm, book, size):
+        return [bound_host_row("ouroboros_context_facts", "[CONTEXT_FACTS] " + _filler(bm // 4 + 2_000))]
 
-    ctx, gateway, *_ = _map_start(main_call, tmp_path / "round", rows, lambda dev, arch: dev // 4, memory=True)
+    ctx, gateway, *_ = _map_start(main_call, tmp_path / "round", rows, lambda bm: bm // 4, memory=True)
     before_note = ctx.context_fit_plan.low_projection.memory_facts[BOOK_NOTE_KEY]
     answer, _cost, mode = loop._call_round_model(ctx)
-    assert answer and mode == "low" and len(gateway.creates) == 1 and _rows(ctx.context_fit_plan) == ["development_map"]
+    assert answer and mode == "low" and len(gateway.creates) == 1 and _rows(ctx.context_fit_plan) == ["body_map"]
     assert ctx.context_fit_plan.low_projection.memory_facts[BOOK_NOTE_KEY] == before_note > 0
     outgoing = "\n".join(fit.extract_plain_text_from_content(row.get("content", ""))
                          for row in gateway.uploads[0][0]["messages"])
-    assert "## Engineering (chapters)" in outgoing
+    assert "## Body (parts & addresses)" in outgoing
     assert "Start room at planning was smaller than the" in outgoing and "this task's directly required handbook takes" in outgoing
     assert "requested remain." not in outgoing and "Start room is smaller than requested" not in outgoing
 
 
-# The sealed first request's excess beyond what the planner admitted, in calibrated map savings, the maps it shortens and
-# whether it goes out. A new start's own rows may hold an applied actor capsule (``review_history_view``), a role the
-# step never reads; a prefix an answered send carried (``loop._record_transcript_prefix``) keeps its view.
 FIRST_REQUESTS = {
-    "own_map": (lambda dev, arch: dev // 2, ["development_map"], 1),
-    "own_then_architecture": (lambda dev, arch: dev + arch // 2, ["development_map", "architecture_map"], 1),
-    "past_both_maps": (lambda dev, arch: dev + arch + 2_000, ["development_map", "architecture_map"], 0),
-    "new_start_with_a_capsule": (lambda dev, arch: dev // 2, ["development_map"], 1),
-    "answered_prefix": (lambda dev, arch: dev // 2, [], 0),
+    "own_map": (lambda bm: bm // 2, ["body_map"], 1),
+    "past_map": (lambda bm: bm + 2_000, ["body_map"], 0),
+    "new_start_with_a_capsule": (lambda bm: bm // 2, ["body_map"], 1),
+    "answered_prefix": (lambda bm: bm // 2, [], 0),
 }
 
 
@@ -761,21 +744,18 @@ FIRST_REQUESTS = {
 def test_a_first_request_the_book_cannot_send_shortens_maps_by_the_final_senders_measure(main_call, tmp_path,
                                                                                          fixed_density, case):
     """The planner admitted the start; its sealed first request carries more than the planner priced (here a facts row
-    a round writes) and the final sender's own check refuses it by the book's excess alone. The refusal passes shorten
-    the book's own map, then ARCHITECTURE's, each only while the request still cannot go out; memory, mode, schemas,
-    the reply and the whole book stay. Past both maps, nothing is sent and the refusal is named. A prefix an answered
-    send already carried is shown as it was."""
+    a round writes) and the final sender's own check refuses it by the book's excess alone. The refusal pass shortens
+    ``body_map`` only while the request still cannot go out; past it, nothing is sent and the refusal is named."""
     from ouroboros.context_budget import bound_host_row
     from ouroboros.context_view_facts import SIZE_REFUSAL_KEY
     from ouroboros.transcript_prefix import observe_send
 
-    ctx, gateway, *_ = main_call  # maps of 600 headings: half the book's own map is above what a round adds itself
+    ctx, gateway, *_ = main_call
     fixture_plan = ctx.context_fit_plan
     core = booked(_core(tmp_path, required=True, memory=False), tmp_path, headings=600, body="Its practice. " * 10)
-    dev, arch = (math.ceil(map_saving(book, name) * RATIO) for book, name in zip(
-        core.reference_books[::-1], ("development_map", "architecture_map")))
+    bm = math.ceil(map_saving(core.reference_books[0], "body_map") * RATIO)
     excess, expected, sends = FIRST_REQUESTS[case]
-    over = excess(dev, arch)
+    over = excess(bm)
 
     def build(window, **route):
         return replace(_plan(tmp_path, core, "low", window, **route), model=fixture_plan.model,
@@ -783,28 +763,28 @@ def test_a_first_request_the_book_cannot_send_shortens_maps_by_the_final_senders
 
     roomy = build(1_000_000)
     facts = bound_host_row("ouroboros_context_facts", "[CONTEXT_FACTS] " + "a measured fact of this round "
-                           * math.ceil((over / RATIO + 1_500) * 4 / 30))  # larger than the excess: the planner admits
+                           * math.ceil((over / RATIO + 1_500) * 4 / 30))
     capsule = ([{"role": "assistant", "content": [{"type": "text", "text": "An applied capsule of my earlier review."}]}]
                if case == "new_start_with_a_capsule" else [])
     first = measure_main_fit(roomy, [*roomy.messages_for("low"), *capsule, facts], SCHEMAS, profile="owner_low",
                              rendered_mode="low", round_id="r").measurement
-    plan = build(first.estimated_input_tokens + RESERVE - over, source="local_health")  # one buffer holds the reply
-    assert plan.low_projection.system_content_json == roomy.low_projection.system_content_json  # admitted whole
+    plan = build(first.estimated_input_tokens + RESERVE - over, source="local_health")
+    assert plan.low_projection.system_content_json == roomy.low_projection.system_content_json
     ctx.messages[:] = [*plan.messages_for("low"), *capsule, facts]
     ctx.tool_schemas = SCHEMAS
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
     ctx.active_context_mode = ctx.tools._ctx.active_context_mode = "low"
-    if case == "answered_prefix":  # what Main records of a usable send
+    if case == "answered_prefix":
         observe_send(ctx.tools._ctx, plan.messages_for("low"), round_idx=0, tools=SCHEMAS)
     shown = json.loads(json.dumps(ctx.messages[0]))
     answer, _cost, mode = loop._call_round_model(ctx)
     assert _rows(ctx.context_fit_plan) == expected and mode == "low"
     assert len(gateway.creates) == sends and bool(answer) is bool(sends)
     view = [block["text"] for block in ctx.messages[0]["content"]]
-    assert view[1:] == [block["text"] for block in shown["content"][1:]]  # the book and everything after it, as admitted
-    assert ("## Engineering (chapters)" in view[0]) is bool(expected) and ("Rule 599 — lines" in view[0]) is not bool(expected)
-    assert ("## Body (chapters)" in view[0]) is ("architecture_map" in expected)
-    if not sends:  # the final sender's own prediction refused it by name; no request went out
+    assert view[1:] == [block["text"] for block in shown["content"][1:]]
+    assert ("## Body (parts & addresses)" in view[0]) is bool(expected)
+    assert ("How part 00 works for Change" in view[0]) is not bool(expected)
+    if not sends:
         rows = [json.loads(line) for line in (ctx.drive_logs / "events.jsonl").read_text().splitlines()]
         assert any(row.get("checkpoint_kind") == "context_fit_refused" for row in rows)
         slot = ctx.accumulated_usage[SIZE_REFUSAL_KEY]
@@ -812,15 +792,10 @@ def test_a_first_request_the_book_cannot_send_shortens_maps_by_the_final_senders
 
 
 def _map_start(main_call, tmp_path, rows, over, *, memory=False):
-    """The test above's start with the round's own rows the planner never priced, ``rows(dev, arch, book, size)``
-    (``size`` prices one row beside the start); ``over(dev, arch)`` is the sealed first request's excess beyond what
-    the planner admitted, in calibrated tokens. Returns the round, the gateway, the map savings and the builder of a
-    plan on the same route."""
     ctx, gateway, *_ = main_call
     fixture_plan = ctx.context_fit_plan
     core = booked(_core(tmp_path, required=True, memory=memory), tmp_path, headings=600, body="Its practice. " * 10)
-    dev, arch = (math.ceil(map_saving(book, name) * RATIO) for book, name in zip(
-        core.reference_books[::-1], ("development_map", "architecture_map")))
+    bm = math.ceil(map_saving(core.reference_books[0], "body_map") * RATIO)
 
     def build(window, *, held_note_resume=None, **route):
         captured = replace(core, held_note_resume=held_note_resume)
@@ -834,16 +809,16 @@ def _map_start(main_call, tmp_path, rows, over, *, memory=False):
                                 rendered_mode="low", round_id="r").measurement
 
     alone = measured([])
-    rows = rows(dev, arch, alone.required_book_tokens,
+    rows = rows(bm, alone.required_book_tokens,
                 lambda row: measured([row]).estimated_input_tokens - alone.estimated_input_tokens)
-    plan = build(measured(rows).estimated_input_tokens + RESERVE - over(dev, arch), source="local_health")
-    assert not _rows(plan)  # admitted with both maps whole; memory's start note names its own room
+    plan = build(measured(rows).estimated_input_tokens + RESERVE - over(bm), source="local_health")
+    assert not _rows(plan)
     assert memory or plan.low_projection.system_content_json == roomy.low_projection.system_content_json
     ctx.messages[:] = [*plan.messages_for("low"), *rows]
     ctx.tool_schemas = SCHEMAS
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
     ctx.active_context_mode = ctx.tools._ctx.active_context_mode = "low"
-    return ctx, gateway, dev, arch, build
+    return ctx, gateway, bm, build
 
 
 def _filler(tokens, phrase="a measured fact of this round "):
@@ -856,9 +831,6 @@ def _events(ctx):
 
 def test_a_facts_row_no_send_carried_is_rewritten_in_place_so_one_map_pays(main_call, tmp_path, fixed_density,
                                                                             monkeypatch):
-    """The first request's facts row went out with no candidate (the final sender refused it before dispatch): the
-    retry rewrites it instead of keeping it as a second, superseded row the next map would pay for. Here the book's own
-    map pays the excess with one current facts row and could not beside two."""
     from ouroboros import loop_messages
     from ouroboros.context_budget import bound_host_row
 
@@ -866,56 +838,49 @@ def test_a_facts_row_no_send_carried_is_rewritten_in_place_so_one_map_pays(main_
     monkeypatch.setattr(loop_messages, "context_facts_line", lambda *a, **kw: real(*a, **kw).ljust(8_000, "~"))
     width = {}
 
-    def rows(dev, arch, book, size):
+    def rows(bm, book, size):
         width["facts"] = size(bound_host_row("ouroboros_context_facts", "[CONTEXT_FACTS] ".ljust(8_000, "~")))
-        excess = dev - width["facts"] * 3 // 2  # one facts row of this width beside the shorter map fits, two do not
+        excess = bm - width["facts"] * 3 // 2
         return [bound_host_row("ouroboros_context_facts", "[CONTEXT_FACTS] " + _filler(excess + 2_000))]
 
-    ctx, gateway, dev, arch, _build = _map_start(main_call, tmp_path, rows, lambda dev, arch: dev - width["facts"] * 3 // 2)
-    assert width["facts"] * 2 < dev  # the case is the facts row's, not the map's
+    ctx, gateway, bm, _build = _map_start(main_call, tmp_path, rows, lambda bm: bm - width["facts"] * 3 // 2)
+    assert width["facts"] * 2 < bm
     answer, _cost, mode = loop._call_round_model(ctx)
     assert answer and len(gateway.creates) == 1 and mode == "low"
-    assert _rows(ctx.context_fit_plan) == ["development_map"]
+    assert _rows(ctx.context_fit_plan) == ["body_map"]
     padded = [row for row in ctx.messages if str(row.get("content")).endswith("~~~")]
     assert len(padded) == 1 and padded[0]["content"] == ctx.accumulated_usage["_context_facts_line"]
 
 
 def test_an_ordinary_pass_before_the_book_leaves_both_maps_their_turn(main_call, tmp_path, fixed_density):
-    """A late host row the view without the book could not hold either takes the round's first pass (superseded state
-    at its address); what is left is the book's own excess, larger than its map alone saves. The second pass still
-    shortens both maps, each priced on the prepared send, and the one retry goes out."""
     from ouroboros.context_budget import bound_host_row
 
     sizes = {}
 
-    def rows(dev, arch, book, size):
+    def rows(bm, book, size):
         stale = bound_host_row("ouroboros_context_facts", "[CONTEXT_FACTS] " + _filler(book + 3_000, "an earlier fact "))
         sizes["stale"] = size(stale)
-        return [stale, {"role": "user", "content": _filler(dev + arch + 2_000, "A late word of my human. ")}]
+        return [stale, {"role": "user", "content": _filler(bm + 2_000, "A late word of my human. ")}]
 
-    # Past the book with the stale row; past the book's own map, not both maps, once it leaves.
-    ctx, gateway, dev, arch, _build = _map_start(main_call, tmp_path, rows,
-                                                 lambda dev, arch: sizes["stale"] + dev + arch // 2)
+    ctx, gateway, bm, _build = _map_start(main_call, tmp_path, rows,
+                                          lambda bm: sizes["stale"] + bm // 2)
     answer, _cost, mode = loop._call_round_model(ctx)
     passes = [(row["rung"], row["status"]) for row in _events(ctx) if row.get("checkpoint_kind") == "context_reclaim_emergency"]
     assert ("host_copies", "applied") in passes
-    assert _rows(ctx.context_fit_plan) == ["development_map", "architecture_map"]
+    assert _rows(ctx.context_fit_plan) == ["body_map"]
     assert answer and len(gateway.creates) == 1 and mode == "low"
-    assert [row.get("book_map") for row in _events(ctx) if row.get("checkpoint_kind") == "context_fit_low_retry"] == [
-        "development_map", "architecture_map"]  # one owner-visible fact per map, each naming its own
+    assert [row.get("book_map") for row in _events(ctx) if row.get("checkpoint_kind") == "context_fit_low_retry"] == ["body_map"]
     assert any("A late word of my human." in str(row.get("content")) for row in ctx.messages)
 
 
 def test_an_answer_that_read_the_start_keeps_its_detailed_maps(main_call, tmp_path, fixed_density):
-    """A metered reply cut at its output limit read the start though no usable prefix was recorded (``departure`` has
-    no baseline): its view keeps both maps, and the book's own excess is the named refusal."""
     from ouroboros.context_budget import bound_host_row
     from ouroboros.transcript_prefix import note_prefix_answer
 
-    def rows(dev, arch, book, size):
-        return [bound_host_row("ouroboros_context_facts", "[CONTEXT_FACTS] " + _filler(dev // 2 + 2_000))]
+    def rows(bm, book, size):
+        return [bound_host_row("ouroboros_context_facts", "[CONTEXT_FACTS] " + _filler(bm // 2 + 2_000))]
 
-    ctx, gateway, dev, arch, _build = _map_start(main_call, tmp_path, rows, lambda dev, arch: dev // 2)
+    ctx, gateway, bm, _build = _map_start(main_call, tmp_path, rows, lambda bm: bm // 2)
     note_prefix_answer(ctx.accumulated_usage, {"prompt_tokens": 90_000, "completion_tokens": 4_096}, ctx.active_model, False)
     shown = json.loads(json.dumps(ctx.messages[0]))
     answer, _cost, _mode = loop._call_round_model(ctx)
@@ -1025,13 +990,11 @@ def _numberless(main_call, tmp_path, results):
 
 @pytest.mark.parametrize(("results", "maps"), [
     pytest.param(["sent"], [], id="unknown_window_no_refusal"),
-    pytest.param(["too_large", "sent"], ["development_map"], id="the_books_own_map_suffices"),
-    pytest.param(["too_large", "too_large", "sent"], ["development_map", "architecture_map"], id="then_architecture"),
+    pytest.param(["too_large", "sent"], ["body_map"], id="body_map_suffices"),
 ])
 def test_a_size_refusal_no_number_measures_shortens_one_map_per_retry(main_call, tmp_path, fixed_density, results, maps):
-    """Through the fake transport: a route of unknown window sends both maps while nothing refuses. A provider's size
-    refusal that states no number prices nothing, so its retry carries the book's own map at its chapter list alone;
-    ARCHITECTURE's steps only when that shorter request is refused for size too. One provider call per verdict."""
+    """Through the fake transport: a route of unknown window sends the full Body Map while nothing refuses. A
+    provider's size refusal that states no number shortens ``body_map`` on the retry."""
     ctx, gateway = _numberless(main_call, tmp_path, results)
     answer, _cost, mode = loop._call_round_model(ctx)
     assert answer and mode == "low" and len(gateway.creates) == len(results)
@@ -1042,9 +1005,10 @@ def test_a_size_refusal_no_number_measures_shortens_one_map_per_retry(main_call,
 @pytest.mark.parametrize("turn", ["first", "later"])
 def test_foreign_max_with_required_book_lowers_to_low_before_map_yield_on_first_and_later_turns(
         main_call, tmp_path, fixed_density, turn):
-    """Foreign Max with forced DEVELOPMENT has required_book_tokens('max') > 0: its books rung must still lower
-    Max to Low (putting ARCHITECTURE behind its detailed map while keeping DEVELOPMENT whole) on both the first turn
-    and a later turn, instead of refusing before books runs."""
+    """Under the unified Body Map layout, Max has no whole books to shed into Low; on a first unread turn with a
+    required handbook whose excess fits within ``body_map``'s saving, Max yields ``body_map`` directly without a
+    spurious Max->Low switch; on a later turn after an answered send, maps are never mutated and the refusal is named."""
+    from ouroboros.context_budget import bound_host_row
     from ouroboros.transcript_prefix import note_prefix_answer, observe_send
 
     ctx, gateway, *_ = main_call
@@ -1052,29 +1016,20 @@ def test_foreign_max_with_required_book_lowers_to_low_before_map_yield_on_first_
     core = booked(_core(tmp_path, required=True, subject=False, memory=False), tmp_path, headings=600,
                   body="Its practice and why. " * 20)
     assert not core.docs_need_development and core.required_book_tokens("max") > 0
+    bm = math.ceil(map_saving(core.reference_books[0], "body_map") * RATIO)
+    over = bm // 2
 
     def build(window, **route):
         return replace(_plan(tmp_path, core, "max", window, **route), model=fixture_plan.model,
                        provider="claudexor", model_role="main", model_route=fixture_plan.model_route)
 
     roomy = build(1_000_000)
-    assert roomy.initial_mode == "max"
-    base_max = measure_main_fit(roomy, roomy.messages_for("max"), SCHEMAS, profile="owner_max",
-                                rendered_mode="max", round_id="r").measurement
-    base_low = measure_main_fit(roomy, roomy.messages_for("low"), SCHEMAS, profile="task_local_low",
-                                rendered_mode="low", round_id="r").measurement
-    arch_save = base_max.estimated_input_tokens - base_low.estimated_input_tokens
-    over = min(base_max.required_book_tokens, arch_save) // 3
-    assert over > 2_000
-    ordinary_max = base_max.estimated_input_tokens - base_max.required_book_tokens
-    extra_tokens = (ordinary_max + RESERVE) // 3 + over + 4_000
-    extra = {"role": "user", "content": _filler(extra_tokens, "An owner follow-up note. ")}
-    grown_max = measure_main_fit(roomy, [*roomy.messages_for("max"), extra], SCHEMAS, profile="owner_max",
-                                 rendered_mode="max", round_id="r").measurement
-    window = grown_max.estimated_input_tokens + RESERVE - over
-    plan = build(window, source="local_health")
+    facts = bound_host_row("ouroboros_context_facts", "[CONTEXT_FACTS] " + _filler(over + 2_000))
+    first = measure_main_fit(roomy, [*roomy.messages_for("max"), facts], SCHEMAS, profile="owner_max",
+                             rendered_mode="max", round_id="r").measurement
+    plan = build(first.estimated_input_tokens + RESERVE - over, source="local_health")
     assert plan.initial_mode == "max" and len(_book_blocks(plan, "max")) == 1
-    ctx.messages[:] = [*plan.messages_for("max"), extra]
+    ctx.messages[:] = [*plan.messages_for("max"), facts]
     ctx.tool_schemas = SCHEMAS
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
     ctx.active_context_mode = ctx.tools._ctx.active_context_mode = "max"
@@ -1084,50 +1039,41 @@ def test_foreign_max_with_required_book_lowers_to_low_before_map_yield_on_first_
         note_prefix_answer(ctx.accumulated_usage, {"prompt_tokens": 90_000, "completion_tokens": 2_000},
                            ctx.active_model, False)
     answer, _cost, mode = loop._call_round_model(ctx)
-    assert answer and len(gateway.creates) == 1 and mode == "low"
-    assert _rows(ctx.context_fit_plan) == [] and len(_book_blocks(ctx.context_fit_plan, "low")) == 1
-    common = ctx.messages[0]["content"][0]["text"]
-    assert "Mechanism 599 — lines" in common and "Rule 599 — lines" in common
-    assert [row.get("book_map") for row in _events(ctx) if row.get("checkpoint_kind") == "context_fit_low_retry"] == [None]
-    assert not any(row.get("checkpoint_kind") == "context_reclaim_emergency" for row in _events(ctx))
+    assert mode == "max"
+    if turn == "first":
+        assert answer and len(gateway.creates) == 1
+        assert _rows(ctx.context_fit_plan, "max") == ["body_map"] and len(_book_blocks(ctx.context_fit_plan, "max")) == 1
+        assert "## Body (parts & addresses)" in ctx.messages[0]["content"][0]["text"]
+    else:
+        assert answer is None and len(gateway.creates) == 0 and _rows(ctx.context_fit_plan, "max") == []
 
 
-@pytest.mark.parametrize("full_low_fits", [True, False], ids=["full-low-accepted", "full-low-refused-then-dev-map"])
 def test_body_max_numberless_refusal_with_known_window_tries_full_low_before_shortening_maps(
-        main_call, tmp_path, fixed_density, full_low_fits):
-    """Body Max on a known window with a numberless provider refusal: Pass 2 lowers Max to Low and must try full Low
-    on the wire first, never shortening a detailed book map in the same pass."""
+        main_call, tmp_path, fixed_density):
+    """Body Max on a known window with a numberless provider refusal yields ``body_map`` directly in Max without a
+    spurious Max->Low hop (since Max and Low carry the identical Body Map)."""
     ctx, gateway, *_ = main_call
     fixture_plan = ctx.context_fit_plan
     core = booked(_core(tmp_path, required=True, subject=True, memory=False), tmp_path, headings=600,
                   body="Its practice and why. " * 20)
-    assert core.docs_need_development and core.required_book_tokens("max") == 0 < core.required_book_tokens("low")
+    assert core.required_book_tokens("max") == core.required_book_tokens("low") > 0
     plan = replace(_plan(tmp_path, core, "max", 1_000_000), model=fixture_plan.model,
                    provider="claudexor", model_role="main", model_route=fixture_plan.model_route)
     assert plan.initial_mode == "max" and plan.window_record.usable is not None
     refused = result(outcome="failed", problem={"code": "provider_failed", "message": "Controlled model refusal",
                                                 "retryable": True, "context": {"httpStatus": 400,
                                                 "vendorCode": "context_length_exceeded", "parameter": "input"}})
-    gateway.results = [refused, result()] if full_low_fits else [refused, refused, result()]
-    gateway.dispatch = ["response_received"] * len(gateway.results)
+    gateway.results = [refused, result()]
+    gateway.dispatch = ["response_received", "response_received"]
     ctx.messages[:], ctx.tool_schemas = plan.messages_for("max"), SCHEMAS
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
     ctx.active_context_mode = ctx.tools._ctx.active_context_mode = "max"
     ctx.tools._ctx._accumulated_usage = ctx.accumulated_usage
     answer, _cost, mode = loop._call_round_model(ctx)
-    assert answer and mode == "low" and len(gateway.creates) == len(gateway.results)
-    low_attempt = json.dumps(gateway.uploads[1][0]["messages"], ensure_ascii=False)
-    assert "Mechanism 599 — lines" in low_attempt and "Rule 599 — lines" in low_attempt
-    assert "## Engineering (chapters)" not in low_attempt
-    if full_low_fits:
-        assert _rows(ctx.context_fit_plan) == []
-        assert [row.get("book_map") for row in _events(ctx) if row.get("checkpoint_kind") == "context_fit_low_retry"] == [None]
-    else:
-        assert _rows(ctx.context_fit_plan) == ["development_map"]
-        assert [row.get("book_map") for row in _events(ctx) if row.get("checkpoint_kind") == "context_fit_low_retry"] == [
-            None, "development_map"]
-        third_attempt = json.dumps(gateway.uploads[2][0]["messages"], ensure_ascii=False)
-        assert "## Engineering (chapters)" in third_attempt and "Mechanism 599 — lines" in third_attempt
+    assert answer and mode == "max" and len(gateway.creates) == 2
+    assert _rows(ctx.context_fit_plan, "max") == ["body_map"]
+    second_attempt = json.dumps(gateway.uploads[1][0]["messages"], ensure_ascii=False)
+    assert "## Body (parts & addresses)" in second_attempt
 
 
 @pytest.mark.parametrize("map_tokens", [84_302, 85_000], ids=["design-map-fits", "still-unfit-no-arch-dev-concession"])
@@ -1339,36 +1285,36 @@ def test_a_cold_return_shows_again_the_chapter_list_its_accepted_view_held(main_
     from ouroboros.tools.compact_context import record_context_view
     from ouroboros.transcript_prefix import observe_send
 
-    def rows(dev, arch, book, size):
-        return [bound_host_row("ouroboros_context_facts", "[CONTEXT_FACTS] " + _filler(dev // 4 + 2_000))]
+    def rows(bm, book, size):
+        return [bound_host_row("ouroboros_context_facts", "[CONTEXT_FACTS] " + _filler(bm // 4 + 2_000))]
 
-    ctx, gateway, dev, arch, build = _map_start(main_call, tmp_path, rows, lambda dev, arch: dev // 4, memory=True)
+    ctx, gateway, bm, build = _map_start(main_call, tmp_path, rows, lambda bm: bm // 4, memory=True)
     detailed_plan = ctx.context_fit_plan
     gateway.results, gateway.dispatch = [result(), result()], ["response_received"] * 2
     window = ctx.context_fit_plan.window_tokens
     answer, _cost, _mode = loop._call_round_model(ctx)
     accepted = ctx.context_fit_plan
-    assert answer and _rows(accepted) == ["development_map"]
+    assert answer and _rows(accepted) == ["body_map"]
     if observed:
         observe_send(ctx.tools._ctx, ctx.messages, round_idx=ctx.round_idx, tools=SCHEMAS)  # what Main records of it
         record_context_view(ctx.tools._ctx, ctx.messages, SCHEMAS)
     if case == "unrecorded_detailed":
         ctx.tools._ctx.context_fit_plan = detailed_plan
     ctx.messages.append({"role": "assistant", "content": "Read the handbook; continuing."})
-    if case == "transcript_grown":  # beside the list the view without the book still fits, beside the detailed map not
+    if case == "transcript_grown":
         shown = measure_main_fit(accepted, ctx.messages, SCHEMAS, profile="owner_low", rendered_mode="low",
                                  round_id="r").measurement
         spare = window - RESERVE - (shown.estimated_input_tokens - shown.required_book_tokens)
         ctx.messages += [{"role": "assistant", "content": "", "tool_calls": [{"id": "grown", "type": "function", "function": {
                               "name": "read_file", "arguments": "{}"}}]},
-                         {"role": "tool", "tool_call_id": "grown", "content": _filler(spare - dev // 2, "A long read. ")}]
+                         {"role": "tool", "tool_call_id": "grown", "content": _filler(spare - bm // 2, "A long read. ")}]
     state = owner_wait.continuation_state(ctx.tools._ctx, ctx.messages, {}, {}, ctx.round_idx, SCHEMAS, set())
     if case == "legacy_observation_only":
         state.pop(held_notes.CAPTURE_KEY, None)
     fresh = build(window, source="local_health", held_note_resume=held_notes.restored_capture(state))
-    assert _rows(fresh) == (["development_map"] if has_saved_list else []) and fresh.core.required_book_tokens("low")
+    assert _rows(fresh) == (["body_map"] if has_saved_list else []) and fresh.core.required_book_tokens("low")
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = fresh
-    served = fresh.model_route  # the same account, window and route identity the work ran on
+    served = fresh.model_route
     evidence = SimpleNamespace(route_fp="route", status="confirmed", stale=False, window_tokens=window,
                                source="local_health", ts=utc_now_iso(), source_id=served["source"],
                                credential_profile_id=served["credentialProfileId"],
@@ -1379,7 +1325,7 @@ def test_a_cold_return_shows_again_the_chapter_list_its_accepted_view_held(main_
         "credential_profile_id": None}, "medium"))
     from ouroboros.window_learning import RouteSchemas
 
-    monkeypatch.setattr(continuation_tools, "reconcile_restored_tools",  # the saved list priced as one catalog, no notice
+    monkeypatch.setattr(continuation_tools, "reconcile_restored_tools",
                         lambda _tools, state, *_a, **_kw: continuation_tools.RestoredTools(RouteSchemas(state["tool_schemas"], [])))
     plan, mode = owner_wait.rebind_restored_route(ctx.tools, {"tool_schemas": SCHEMAS, "context_start": list(fresh.start)},
                                                   ctx.messages)
@@ -1387,16 +1333,16 @@ def test_a_cold_return_shows_again_the_chapter_list_its_accepted_view_held(main_
     ctx.context_fit_plan, ctx.active_context_mode, ctx.round_idx = plan, mode, ctx.round_idx + 1
     view = ctx.messages[0]["content"][0]["text"]
     answer, _cost, mode = loop._call_round_model(ctx)
-    if not has_saved_list:  # nothing to show again, and no unread start to shorten a map on a guess
-        assert _rows(plan) == [] and "Rule 599 — lines" in view and answer is None and len(gateway.creates) == 1
+    if not has_saved_list:
+        assert _rows(plan) == [] and "How part 00 works for Change" in view and answer is None and len(gateway.creates) == 1
         assert _rows(ctx.context_fit_plan) == []
         return
-    assert _rows(plan) == ["development_map"] and "## Engineering (chapters)" in view
-    assert "Mechanism 599 — lines" in view and "Rule 599 — lines" not in view
+    assert _rows(plan) == ["body_map"] and "## Body (parts & addresses)" in view
+    assert "How part 00 works for Change" not in view
     floor = lambda shown: (shown.low_projection.memory_facts.get("floor") or {}).get("steps")  # noqa: E731
-    assert floor(plan) == floor(accepted)  # no early refit paid for the detailed map with memory
-    assert _rows(ctx.context_fit_plan) == ["development_map"] and mode == "low"
-    if case == "transcript_grown":  # with the book it is over by the growth: no map steps for a read view, a refusal
+    assert floor(plan) == floor(accepted)
+    assert _rows(ctx.context_fit_plan) == ["body_map"] and mode == "low"
+    if case == "transcript_grown":
         assert answer is None and len(gateway.creates) == 1
         return
     assert answer and len(gateway.creates) == 2
@@ -1404,9 +1350,6 @@ def test_a_cold_return_shows_again_the_chapter_list_its_accepted_view_held(main_
 
 def test_cold_return_without_held_heads_never_newly_shortens_a_formerly_detailed_map(main_call, tmp_path,
                                                                                      fixed_density, monkeypatch):
-    """A task without held heads whose maps were shown detailed returns cold onto a tighter known window. Neither the
-    cold planner (``build_context_fit_plan``), ``rebind_restored_route`` nor the round sender may newly shorten a map
-    to pay for the mandatory book, nor prematurely raise ``MinimumViewUnfit`` before rebind."""
     from ouroboros import context, continuation_tools, held_notes, owner_wait
     from ouroboros.capability_evidence import utc_now_iso
     from ouroboros.loop_round_limits import start_unread
@@ -1428,19 +1371,17 @@ def test_cold_return_without_held_heads_never_newly_shortens_a_formerly_detailed
     roomy = build(1_000_000)
     tools = fit.tool_schema_tokens(list(select_tool_schemas(SCHEMAS, context_mode="low").schemas))
     whole = math.ceil((roomy.low_projection.estimated_tokens + tools) * RATIO) + RESERVE
-    dev, arch = (math.ceil(map_saving(book, name) * RATIO) for book, name in zip(
-        core.reference_books[::-1], ("development_map", "architecture_map")))
-    # Sanity: a fresh start at these tighter windows DOES shorten development_map or raise MinimumViewUnfit.
-    assert _rows(build(whole - dev // 2)) == ["development_map"]
+    bm = math.ceil(map_saving(core.reference_books[0], "body_map") * RATIO)
+    assert _rows(build(whole - bm // 2)) == ["body_map"]
     with pytest.raises(fit.MinimumViewUnfit, match="directly required handbook"):
-        build(whole - dev - arch - 2_000)
+        build(whole - bm - 2_000)
 
     ctx.messages[:], ctx.tool_schemas = roomy.messages_for("low"), SCHEMAS
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = roomy
     ctx.active_context_mode = ctx.tools._ctx.active_context_mode = "low"
     observe_send(ctx.tools._ctx, ctx.messages, round_idx=0, tools=SCHEMAS)
     record_context_view(ctx.tools._ctx, ctx.messages, SCHEMAS)
-    ctx.messages.append({"role": "assistant", "content": "Read both detailed maps; continuing."})
+    ctx.messages.append({"role": "assistant", "content": "Read full body map; continuing."})
     state = owner_wait.continuation_state(ctx.tools._ctx, ctx.messages, {}, {}, 1, SCHEMAS, set())
     capture = held_notes.restored_capture(state)
     assert capture["entries"] == [] and capture.get("book_maps") == []
@@ -1453,9 +1394,9 @@ def test_cold_return_without_held_heads_never_newly_shortens_a_formerly_detailed
         "model": ctx.active_model, "use_local_model": False, "model_role": "main", "model_route": served,
         "credential_profile_id": None}, "medium"))
 
-    for tight in (whole - dev // 2, whole - dev - arch - 2_000):
+    for tight in (whole - bm // 2, whole - bm - 2_000):
         cold = build(tight, held_note_resume=capture)
-        assert _rows(cold) == []  # neither newly shortened nor prematurely refused before rebind
+        assert _rows(cold) == []
         evidence = SimpleNamespace(route_fp="route", status="confirmed", stale=False, window_tokens=tight,
                                    source="local_health", ts=utc_now_iso(), source_id=served["source"],
                                    credential_profile_id=served["credentialProfileId"],
@@ -1469,7 +1410,7 @@ def test_cold_return_without_held_heads_never_newly_shortens_a_formerly_detailed
             ctx.tools, {**state, "tool_schemas": SCHEMAS, "context_start": list(roomy.start)}, restored_messages)
         assert mode == "low" and _rows(plan) == [] and not start_unread(ctx.tools._ctx, ctx.accumulated_usage)
         view = restored_messages[0]["content"][0]["text"]
-        assert "Rule 149 — lines" in view and "Mechanism 149 — lines" in view
+        assert "How part 00 works for Change" in view
     ctx.messages[:] = restored_messages
     ctx.context_fit_plan, ctx.active_context_mode = plan, mode
     answer, _cost, _mode = loop._call_round_model(ctx)
@@ -1535,62 +1476,44 @@ def test_cold_return_required_book_fits_unknown_reply_total_between_start_and_un
 
 def test_owner_max_effective_low_keeps_its_compact_development_map_on_a_wider_cold_route(tmp_path, fixed_density,
                                                                                          monkeypatch):
-    """An owner-Max task that ran in effective Low with a compact Development map returns cold on a wider route where
-    Max fits. Both ``cold.low_projection`` (the alternate Low frame when ``cold`` starts in Max), ``rebind_restored_route``
-    into effective Low, and a Max reprojection keep the saved compact Development map."""
+    """An owner-Max task that ran with a compact ``body_map`` keeps that saved compact ``body_map`` across cold
+    return on a wider route, across Max/Low reprojections, and through ``rebind_restored_route``."""
     from ouroboros import context, continuation_tools, held_notes, memory_floor, owner_wait
     from ouroboros.capability_evidence import utc_now_iso
-    from ouroboros.tool_policy import select_tool_schemas
     from ouroboros.window_learning import RouteSchemas
 
     core = booked(_core(tmp_path, required=True, page_chars=2_000), tmp_path, body=BOOK_BODY)
     roomy = _plan(tmp_path, core, "max", 1_000_000)
-    assert roomy.initial_mode == "max"  # at a roomy window both whole books fit Max's start room
-    tools = fit.tool_schema_tokens(list(select_tool_schemas(SCHEMAS, context_mode="low").schemas))
-    low_whole = math.ceil((roomy.low_projection.estimated_tokens + tools) * RATIO) + RESERVE
-    max_whole = math.ceil((roomy.max_projection.estimated_tokens + tools) * RATIO) + RESERVE
-    # A window above the whole-map Low boundary and below Max's whole start: there the walk starts the owner-Max
-    # task in effective Low with the book's maps whole (it takes Max only once that view fits the window).
-    assert low_whole + 2_000 < max_whole
-    narrow = low_whole + 2_000  # Max whole books miss start room here -> effective Low
-    low_roomy = _plan(tmp_path, core, "max", narrow)
-    assert low_roomy.preferred_mode == "max" and low_roomy.initial_mode == "low" and _rows(low_roomy) == []
-    accepted = memory_floor.step_book_map(low_roomy, "low")
-    assert accepted is not None and _rows(accepted) == ["development_map"]
+    assert roomy.initial_mode == "max" and _rows(roomy, "max") == []
+    accepted = memory_floor.step_book_map(roomy, "max")
+    assert accepted is not None and _rows(accepted, "max") == ["body_map"]
 
     ctx = SimpleNamespace(
         task_id="t", task_attempt=1, drive_root=tmp_path, budget_drive_root=tmp_path, repo_dir=tmp_path,
-        context_fit_plan=accepted, active_context_mode="low", active_model="fixture", active_use_local=False,
+        context_fit_plan=accepted, active_context_mode="max", active_model="fixture", active_use_local=False,
         active_effort="medium", model_wait_context=None, _actor_loaded_tool_names=set(), task_metadata={},
-        # Even if _last_context_observation later recorded Max (or was absent), low_projection's map survives:
-        _last_context_observation={"memory_mode": "max", "memory_facts": {"host_sections_addressed": []}},
     )
-    messages = accepted.messages_for("low")
+    messages = accepted.messages_for("max")
     state = json.loads(json.dumps(owner_wait.continuation_state(ctx, messages, {}, {}, 1, SCHEMAS, set())))
     capture = held_notes.restored_capture(state)
-    assert [row["section_id"] for row in capture["book_maps"]] == ["development_map"]
+    assert [row["section_id"] for row in capture["book_maps"]] == ["body_map"]
 
     wide = 1_000_000
     cold = _plan(tmp_path, replace(core, held_note_resume=capture), "max", wide)
     assert cold.preferred_mode == "max" and cold.initial_mode == "max"
-    assert not cold.max_projection.memory_facts.get("host_sections_addressed")
-    assert _rows(cold) == ["development_map"]  # alternate Low frame retained its saved compact Development map
+    assert _rows(cold, "max") == ["body_map"] and _rows(cold, "low") == ["body_map"]
     low_text = "\n".join(block["text"] for block in _blocks(cold, "low"))
-    assert "## Engineering (chapters)" in low_text and "Rule 149 — lines" not in low_text
+    assert "## Body (parts & addresses)" in low_text and "How part 00 works for Change" not in low_text
 
-    # Reprojecting in Max (where low_projection stays the alternate frame) and then back to Low keeps it too.
     in_max = cold.reproject_for_route(window_tokens=wide, known_window=True, ratio=RATIO, output_reserve=RESERVE,
                                       tool_schemas=SCHEMAS, start_mode="max", select_mode="max",
                                       current_messages=cold.messages_for("max"), admitted=True)
-    assert in_max.initial_mode == "max" and _rows(in_max) == ["development_map"]
-    # Back on the narrow route the task ran on: reprojection from the mode the task itself ran in keeps effective
-    # Low and the saved compact map (the Max reprojection is the step above).
-    back_to_low = in_max.reproject_for_route(window_tokens=narrow, known_window=True, ratio=RATIO,
-                                             output_reserve=RESERVE, tool_schemas=SCHEMAS, start_mode="low",
-                                             current_messages=in_max.messages_for("max"), admitted=True)
-    assert back_to_low.initial_mode == "low" and _rows(back_to_low) == ["development_map"]
+    assert in_max.initial_mode == "max" and _rows(in_max, "max") == ["body_map"]
+    in_low = in_max.reproject_for_route(window_tokens=wide, known_window=True, ratio=RATIO,
+                                        output_reserve=RESERVE, tool_schemas=SCHEMAS, start_mode="low",
+                                        current_messages=in_max.messages_for("max"), admitted=True)
+    assert in_low.initial_mode == "low" and _rows(in_low, "low") == ["body_map"]
 
-    # And rebind_restored_route with owner="max" and active_context_mode="low" on the wider route keeps compact Low.
     monkeypatch.setattr("ouroboros.loop.get_context_mode", lambda: "max")
     evidence = SimpleNamespace(route_fp="route", status="confirmed", stale=False, window_tokens=wide,
                                source="metadata", ts=utc_now_iso())
@@ -1602,20 +1525,19 @@ def test_owner_max_effective_low_keeps_its_compact_development_map_on_a_wider_co
                         lambda _tools, saved_state, *_a, **_kw: continuation_tools.RestoredTools(
                             RouteSchemas(saved_state["tool_schemas"], [])))
     ctx.context_fit_plan = cold
-    ctx.active_context_mode = "low"
+    ctx.active_context_mode = "max"
     tools = SimpleNamespace(_ctx=ctx, schemas=lambda: SCHEMAS, get_schema_by_name=lambda _n: SCHEMAS[0])
     rebound_messages = [json.loads(json.dumps(row)) for row in messages]
     plan, mode = owner_wait.rebind_restored_route(tools, {**state, "context_start": list(accepted.start)}, rebound_messages)
-    assert mode == "low" and _rows(plan) == ["development_map"]
-    assert "## Engineering (chapters)" in rebound_messages[0]["content"][0]["text"]
-    assert "Rule 149 — lines" not in rebound_messages[0]["content"][0]["text"]
+    assert mode == "max" and _rows(plan, "max") == ["body_map"]
+    assert "## Body (parts & addresses)" in rebound_messages[0]["content"][0]["text"]
+    assert "How part 00 works for Change" not in rebound_messages[0]["content"][0]["text"]
 
 
 def test_cold_return_without_held_heads_retains_updated_chapter_map_behind_fresh_reader(tmp_path, fixed_density,
                                                                                         monkeypatch):
-    """After chapter text changes across a cold return without held heads, the previously short Development map stays
-    short and points via a fresh ``artifact_store`` reader to the CURRENT full map rather than silently expanding to
-    the detailed map or serving stale bytes."""
+    """After Body Map content changes across a cold return without held heads, the previously short ``body_map``
+    stays short and points via a fresh ``artifact_store`` reader to the CURRENT full Body Map."""
     from ouroboros import context, continuation_tools, held_notes, memory_floor, owner_wait
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.capability_evidence import utc_now_iso
@@ -1624,11 +1546,11 @@ def test_cold_return_without_held_heads_retains_updated_chapter_map_behind_fresh
 
     core = booked(_core(tmp_path, required=True, page_chars=2_000), tmp_path, headings=150, body=BOOK_BODY)
     accepted = memory_floor.step_book_map(_plan(tmp_path, core, "low", 1_000_000), "low")
-    assert accepted is not None and _rows(accepted) == ["development_map"]
+    assert accepted is not None and _rows(accepted) == ["body_map"]
     original = next(row for row in accepted.low_projection.memory_facts["host_sections_addressed"]
-                    if row["section_id"] == "development_map")
+                    if row["section_id"] == "body_map")
     old_bytes = read_actor_source_bytes(core.section_root, core.section_task_id, original["source_ref"]).decode()
-    assert "Change (navigation map)" in old_bytes and "Rule 149 — lines" in old_bytes
+    assert "How part 00 works for Change (150 rules)" in old_bytes
 
     ctx = SimpleNamespace(
         task_id="t", task_attempt=1, drive_root=tmp_path, budget_drive_root=tmp_path, repo_dir=tmp_path,
@@ -1640,7 +1562,7 @@ def test_cold_return_without_held_heads_retains_updated_chapter_map_behind_fresh
     updated_core = booked(replace(core, held_note_resume=held_notes.restored_capture(state)), tmp_path,
                           headings=165, body="Revised chapter guidance. " * 75, development_title="Rework")
     cold = _plan(tmp_path, updated_core, "low", 1_000_000)
-    assert _rows(cold) == ["development_map"]
+    assert _rows(cold) == ["body_map"]
 
     monkeypatch.setattr("ouroboros.loop.get_context_mode", lambda: "low")
     evidence = SimpleNamespace(route_fp="route", status="confirmed", stale=False, window_tokens=1_000_000,
@@ -1656,43 +1578,34 @@ def test_cold_return_without_held_heads_retains_updated_chapter_map_behind_fresh
     tools = SimpleNamespace(_ctx=ctx, schemas=lambda: SCHEMAS, get_schema_by_name=lambda _n: SCHEMAS[0])
     rebound = [json.loads(json.dumps(row)) for row in messages]
     plan, mode = owner_wait.rebind_restored_route(tools, {**state, "context_start": list(accepted.start)}, rebound)
-    assert mode == "low" and _rows(plan) == ["development_map"]
+    assert mode == "low" and _rows(plan) == ["body_map"]
     current = next(row for row in plan.low_projection.memory_facts["host_sections_addressed"]
-                   if row["section_id"] == "development_map")
+                   if row["section_id"] == "body_map")
     assert current["reader"] != original["reader"] and current["source_ref"] != original["source_ref"]
     view = rebound[0]["content"][0]["text"]
-    assert "## Engineering (chapters)" in view and current["reader"] in view
-    assert original["reader"] not in view and "Rework (navigation map)" not in view and "Rule 164 — lines" not in view
+    assert "## Body (parts & addresses)" in view and current["reader"] in view
+    assert original["reader"] not in view and "How part 00 works for Rework (165 rules)" not in view
     current_bytes = read_actor_source_bytes(core.section_root, core.section_task_id, current["source_ref"]).decode()
-    assert "Rework (navigation map)" in current_bytes and "Rule 164 — lines" in current_bytes
+    assert "How part 00 works for Rework (165 rules)" in current_bytes
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.task_id = "t"
     read_out = registry.execute("read_file", {"root": "artifact_store", "path": current["source_ref"]["path"]})
-    assert "Rework (navigation map)" in read_out and "Rule 164 — lines" in read_out
+    assert "How part 00 works for Rework (165 rules)" in read_out
     assert read_actor_source_bytes(core.section_root, core.section_task_id, original["source_ref"]).decode() == old_bytes
 
 
 def test_pre_first_reply_saves_preserve_prepared_maps_and_distinguish_never_sent_from_unknown_and_preview(
         main_call, tmp_path, fixed_density, monkeypatch):
-    """Cold restores of saves and pauses made before the first reply:
-    1) ``working_checkpoint.save_round(..., 'ready')`` / ``save_model_call`` before the first reply preserves a
-       reducer-selected compact map without ``_last_context_observation``.
-    2) Missing answer is never proof of no dispatch: ``working_checkpoint``, ``recovered_from_working`` pauses,
-       ``physical_calls=None`` pauses, abandoned-attempt pauses and ``physical_calls>=1`` pauses restore as NOT unread
-       (preserving unknown-attempt fences and never newly shortening detailed maps); ONLY an exact live pause proven
-       ``never sent`` (``physical_calls == 0``) keeps ``start_unread`` True so its first real send may still yield a map.
-    3) ``memory_floor.counterfactual_starts`` clears ``held_note_resume`` even without held heads so fresh selection
-       preview stays distinct from real cold restore."""
     from ouroboros import context, continuation_tools, held_notes, memory_floor, owner_wait, working_checkpoint
     from ouroboros.capability_evidence import utc_now_iso
     from ouroboros.context_budget import bound_host_row
     from ouroboros.loop_round_limits import start_unread
     from ouroboros.window_learning import RouteSchemas
 
-    def rows(dev, arch, book, size):
-        return [bound_host_row("ouroboros_context_facts", "[CONTEXT_FACTS] " + _filler(dev // 4 + 2_000))]
+    def rows(bm, book, size):
+        return [bound_host_row("ouroboros_context_facts", "[CONTEXT_FACTS] " + _filler(bm // 4 + 2_000))]
 
-    ctx, gateway, dev, arch, build = _map_start(main_call, tmp_path, rows, lambda dev, arch: dev // 4, memory=True)
+    ctx, gateway, bm, build = _map_start(main_call, tmp_path, rows, lambda bm: bm // 4, memory=True)
     detailed = ctx.context_fit_plan
     window = detailed.window_tokens
     served = detailed.model_route
@@ -1708,9 +1621,8 @@ def test_pre_first_reply_saves_preserve_prepared_maps_and_distinguish_never_sent
                         lambda _tools, saved_state, *_a, **_kw: continuation_tools.RestoredTools(
                             RouteSchemas(saved_state["tool_schemas"], [])))
 
-    # 1) Reducer selected compact map BEFORE first reply; save_round("ready") writes working checkpoint with no observation.
     prepared = memory_floor.step_book_map(detailed, "low")
-    assert prepared is not None and _rows(prepared) == ["development_map"]
+    assert prepared is not None and _rows(prepared) == ["body_map"]
     ctx.tools._ctx.task_attempt = 1
     ctx.tools._ctx.budget_drive_root = ctx.drive_root
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = prepared
@@ -1721,37 +1633,35 @@ def test_pre_first_reply_saves_preserve_prepared_maps_and_distinguish_never_sent
     _raw, saved_ready = working_checkpoint.read_working(ctx.drive_root, ctx.task_id, 1)
     assert not (saved_ready.get("context_observations") or {}).get("_last_context_observation")
     cold_prepared = build(window, source="local_health", held_note_resume=held_notes.restored_capture(saved_ready))
-    assert _rows(cold_prepared) == ["development_map"]
+    assert _rows(cold_prepared) == ["body_map"]
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = cold_prepared
     restored_msgs, restored_trace, restored_usage, restored_seen = [], {}, {}, set()
     owner_wait.restore_continuation_state(ctx.tools, saved_ready, restored_msgs, restored_trace, restored_usage, restored_seen)
     rebound_prepared, mode = owner_wait.rebind_restored_route(ctx.tools, saved_ready, restored_msgs)
-    assert mode == "low" and _rows(rebound_prepared) == ["development_map"]
-    assert not start_unread(ctx.tools._ctx, restored_usage)  # working checkpoint is unknown, never proven unsent
+    assert mode == "low" and _rows(rebound_prepared) == ["body_map"]
+    assert not start_unread(ctx.tools._ctx, restored_usage)
 
-    # 3) Fresh selection preview (counterfactual_starts) on a cold-restored plan without held heads stays fresh.
     from ouroboros.tool_policy import select_tool_schemas
 
     roomy_cold = build(1_000_000, source="local_health", held_note_resume=held_notes.restored_capture(saved_ready))
-    assert _rows(roomy_cold) == ["development_map"]
+    assert _rows(roomy_cold) == ["body_map"]
     snapshot = memory_view.snapshot_from_json(roomy_cold.core.memory_view_json)
     before_resume = dict(roomy_cold.core.held_note_resume)
     preview = memory_floor.counterfactual_starts(roomy_cold, {"now": snapshot})
     assert roomy_cold.core.held_note_resume == before_resume
-    assert "development_map" not in [name for name, _saved in preview["arms"]["now"]["host"]]
+    assert "body_map" not in [name for name, _saved in preview["arms"]["now"]["host"]]
     roomy_fresh = build(1_000_000, source="local_health")
     low_tools = fit.tool_schema_tokens(list(select_tool_schemas(SCHEMAS, context_mode="low").schemas))
-    tight_start = math.ceil((roomy_fresh.low_projection.estimated_tokens + low_tools) * RATIO) + RESERVE - dev // 2
-    assert _rows(build(tight_start, source="local_health")) == ["development_map"]
+    tight_start = math.ceil((roomy_fresh.low_projection.estimated_tokens + low_tools) * RATIO) + RESERVE - bm // 2
+    assert _rows(build(tight_start, source="local_health")) == ["body_map"]
     for empty_resume in ({"entries": []}, {}):
         tight_cold = replace(build(tight_start, source="local_health", held_note_resume=empty_resume),
                              core=replace(roomy_fresh.core, held_note_resume=empty_resume))
         assert _rows(tight_cold) == []
         tight_preview = memory_floor.counterfactual_starts(tight_cold, {"now": snapshot})
         assert tight_cold.core.held_note_resume == empty_resume
-        assert "development_map" in [name for name, _saved in tight_preview["arms"]["now"]["host"]]
+        assert "body_map" in [name for name, _saved in tight_preview["arms"]["now"]["host"]]
 
-    # 2) Detailed maps saved before first reply: unknown vs already-shown vs proven never-sent pause.
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = detailed
     limit_detailed = SimpleNamespace(
         tools=ctx.tools, messages=[json.loads(json.dumps(r)) for r in ctx.messages], llm_trace={},
@@ -1763,11 +1673,11 @@ def test_pre_first_reply_saves_preserve_prepared_maps_and_distinguish_never_sent
 
     base_state = owner_wait.continuation_state(ctx.tools._ctx, ctx.messages, {}, {}, 0, SCHEMAS, set())
     unknown_carriers = [
-        saved_unknown,  # working checkpoint with pending transport outcome and no _pause_row
+        saved_unknown,
         {**base_state, "_pause_row": {"physical_calls": None, "resume_point": {"recovered_from_working": "ready"}}},
-        {**base_state, "_pause_row": {"physical_calls": None, "resume_point": {}}},  # degraded ledger
+        {**base_state, "_pause_row": {"physical_calls": None, "resume_point": {}}},
         {**base_state, "_pause_row": {"physical_calls": 0, "resume_point": {"abandoned_model_attempts": ["a1"]}}},
-        {**base_state, "_pause_row": {"physical_calls": 1, "resume_point": {}}},  # already dispatched
+        {**base_state, "_pause_row": {"physical_calls": 1, "resume_point": {}}},
     ]
     for carrier in unknown_carriers:
         cold_det = build(window, source="local_health", held_note_resume=held_notes.restored_capture(carrier))
@@ -1780,14 +1690,12 @@ def test_pre_first_reply_saves_preserve_prepared_maps_and_distinguish_never_sent
         if carrier is saved_unknown:
             assert usg.get("_pending_transport_outcome") == {"attempt_id": "unknown-1"}
 
-    # Unknown working recovery with detailed maps refuses rather than newly shortening a map on a guess.
     ctx.messages[:], ctx.accumulated_usage = msgs, {}
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan_det
     ctx.active_context_mode = ctx.tools._ctx.active_context_mode = "low"
     answer_unknown, _cost, _ = loop._call_round_model(ctx)
     assert answer_unknown is None and not gateway.creates and _rows(ctx.context_fit_plan) == []
 
-    # Exact live pause positively proven never sent (physical_calls == 0): start_unread stays True, first send yields map.
     proven_unsent = {**base_state, "_pause_row": {"physical_calls": 0, "resume_point": {}}}
     cold_unsent = build(window, source="local_health", held_note_resume=held_notes.restored_capture(proven_unsent))
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = cold_unsent
@@ -1800,7 +1708,7 @@ def test_pre_first_reply_saves_preserve_prepared_maps_and_distinguish_never_sent
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan_unsent
     ctx.active_context_mode = ctx.tools._ctx.active_context_mode = "low"
     answer_unsent, _cost, _ = loop._call_round_model(ctx)
-    assert answer_unsent and len(gateway.creates) == 1 and _rows(ctx.context_fit_plan) == ["development_map"]
+    assert answer_unsent and len(gateway.creates) == 1 and _rows(ctx.context_fit_plan) == ["body_map"]
 
 
 # --- Growth, refusal and the end of that path ---------------------------------------------------------------------

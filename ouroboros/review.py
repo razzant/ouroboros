@@ -1485,7 +1485,19 @@ def diff_pulse(
     fact = (f"Diff pulse since {since}: files {len(changed)}, lines +{added}/-{deleted} (net {added - deleted:+d}); "
             f"new files: {listed(new)}; module lines (target {TARGET_MODULE_LINES}, cap {MAX_MODULE_LINES}): "
             f"{listed(sizes)}{suite}.")
-    return "\n".join(part for part in (fact, shape, book_balance_note(root, shown), DIFF_PULSE_QUESTION) if part)
+    return "\n".join(part for part in (fact, shape, *_diff_pulse_tail_parts(root, base, staged, shown)) if part)
+
+
+def _diff_pulse_tail_parts(root: pathlib.Path, base: str, staged: bool, shown: list[str]) -> tuple[str, ...]:
+    from ouroboros.code_shape_facts import body_ownership_pulse, removed_governance_prose_pulse
+    from ouroboros.reference_books import book_balance_note
+
+    return (
+        body_ownership_pulse(root, shown, staged),
+        removed_governance_prose_pulse(root, base, staged, shown, _change_texts),
+        book_balance_note(root, shown, source="index" if staged else "worktree"),
+        DIFF_PULSE_QUESTION,
+    )
 
 
 def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any]:

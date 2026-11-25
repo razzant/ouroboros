@@ -169,7 +169,8 @@ export function taskCheckpointLabel(evt = {}) {
         return 'Source-address recovery after empty length-limited replies (no model)';
     }
     if (kind === 'context_fit_low_retry' && evt.book_map) {  // written while the retry is prepared, before any send
-        const shortened = { development_map: 'Development map shortened to its chapter list',
+        const shortened = { body_map: 'Body map shortened to its parts list',
+            development_map: 'Development map shortened to its chapter list',
             architecture_map: 'Architecture map shortened to its chapter list',
             design_bible: 'Design bible shortened to its map' }[evt.book_map] || 'A map shortened';
         return `Preparing a smaller request: ${shortened}`;

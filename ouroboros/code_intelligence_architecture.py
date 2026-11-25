@@ -45,6 +45,7 @@ ARCHITECTURE_FACTS = (
     "facade_consumers",
     "persistence_entities_written_by",
     "protected_contracts_affected",
+    "module_map",
 )
 
 # A top-level ``from <module> import name`` carrying the F401-noqa marker is a re-export.
@@ -64,12 +65,13 @@ _DIFF_RENAME = re.compile(r"^rename (?:from|to) (\S+)$", re.MULTILINE)
 
 @dataclass(frozen=True)
 class DomainManifest:
-    """The parsed domain manifest: vocabulary, assignment, baseline edges."""
+    """The parsed domain manifest: vocabulary, assignment, references, baseline edges."""
 
     domains: Dict[str, str]        # "D02" -> title
     modules: Dict[str, str]        # repo-relative path -> domain id
     graph_allowed: Tuple[str, ...]  # strict baseline "D01->D02" pairs
     lazy_only: Tuple[str, ...]      # lazy-only baseline pairs
+    references: Dict[str, Tuple[str, ...]] = ()  # type: ignore[assignment]
 
 
 def _read_carrier(repo_root: pathlib.Path, relpath: str) -> str:
@@ -102,11 +104,17 @@ def load_domain_manifest(repo_root: pathlib.Path) -> DomainManifest:
         pure = pathlib.PurePosixPath(path)
         if pure.is_absolute() or ".." in pure.parts or "\\" in path:
             raise ValueError("domain module paths must stay relative to their repository")
+    refs = {
+        str(k): tuple(str(v) for v in vals)
+        for k, vals in (data.get("references") or {}).items()
+        if isinstance(vals, list)
+    }
     return DomainManifest(
         domains={str(k): str(v) for k, v in (data.get("domains") or {}).items()},
         modules={str(k): str(v) for k, v in (data.get("modules") or {}).items()},
         graph_allowed=tuple(str(p) for p in graph.get("allowed") or ()),
         lazy_only=tuple(str(p) for p in graph.get("lazy_only") or ()),
+        references=refs,
     )
 
 
@@ -632,6 +640,111 @@ def protected_contracts_affected(
 
 
 # ---------------------------------------------------------------------------
+# module_map (live docstring / header projection over domains.toml & web/)
+# ---------------------------------------------------------------------------
+
+def _module_lead(repo_root: pathlib.Path, relpath: str) -> str:
+    """First-line summary of a Python module docstring or JS header comment; "" when absent."""
+    full = pathlib.Path(repo_root) / relpath
+    if not work_domain.is_file(full):
+        return ""
+    try:
+        text = work_domain.read_text(full)
+    except work_domain.WorkDomainUnsettled:
+        raise
+    except OSError:
+        return ""
+    if relpath.endswith(".py"):
+        try:
+            doc = ast.get_docstring(ast.parse(text, filename=relpath)) or ""
+        except SyntaxError:
+            return ""
+        first = next((line.strip() for line in doc.splitlines() if line.strip()), "")
+        return first[:160]
+    if relpath.endswith((".js", ".mjs", ".ts")):
+        lines = text.splitlines()
+        comment_lines: List[str] = []
+        for raw in lines[:12]:
+            stripped = raw.strip()
+            if not stripped:
+                if comment_lines:
+                    break
+                continue
+            if stripped.startswith("//"):
+                comment_lines.append(stripped[2:].strip())
+            elif stripped.startswith("/*"):
+                body = stripped[2:].removeprefix("*").removesuffix("*/").strip()
+                if body:
+                    comment_lines.append(body)
+                if "*/" in stripped:
+                    break
+            elif comment_lines:
+                break
+            else:
+                break
+        return " ".join(c for c in comment_lines if c)[:160]
+    return ""
+
+
+def module_map_rows(repo_root: pathlib.Path, target: str) -> List[str]:
+    """Live module map projected from ``domains.toml``, Python docstrings, and ``web/`` headers."""
+    root = pathlib.Path(repo_root)
+    manifest = load_domain_manifest(root)
+    arg = str(target or "").strip().replace("\\", "/")
+    if not arg:
+        raise ValueError("module_map requires 'domains', a domain id (e.g. D06), or a path prefix (e.g. web/modules/)")
+    if arg.lower() in {"domains", "all"}:
+        counts: Dict[str, int] = {}
+        for dom in manifest.modules.values():
+            counts[dom] = counts.get(dom, 0) + 1
+        rows = [
+            f"{dom} — {manifest.domains[dom]} ({counts.get(dom, 0)} modules)"
+            + (f" | manuals: {', '.join(manifest.references[dom])}" if manifest.references.get(dom) else "")
+            for dom in sorted(manifest.domains)
+        ]
+        for key in sorted(k for k in manifest.references if k not in manifest.domains):
+            rows.append(f"{key} | manuals: {', '.join(manifest.references[key])}")
+        return rows
+    upper = arg.upper()
+    if upper in manifest.domains:
+        mods = sorted(path for path, dom in manifest.modules.items() if dom == upper)
+        manuals = ", ".join(manifest.references.get(upper, ())) or "—"
+        rows = [f"{upper} — {manifest.domains[upper]} ({len(mods)} modules) | manuals: {manuals}"]
+        for path in mods:
+            lead = _module_lead(root, path)
+            rows.append(f"{path} — {lead}" if lead else path)
+        return rows
+    prefix = arg.lstrip("./")
+    if prefix.startswith("web/") or prefix == "web":
+        base_dir = root / prefix.rstrip("/")
+        if not base_dir.exists():
+            return [f"{prefix}: no matching files under {root}"]
+        files = sorted(
+            p.relative_to(root).as_posix()
+            for p in (base_dir.rglob("*") if base_dir.is_dir() else [base_dir])
+            if p.is_file() and p.suffix in {".js", ".mjs", ".ts"}
+        )
+        manuals = ", ".join(manifest.references.get("web/", ())) or "—"
+        rows = [f"{prefix} ({len(files)} JS/TS modules) | manuals: {manuals}"]
+        for rel in files:
+            lead = _module_lead(root, rel)
+            rows.append(f"{rel} — {lead}" if lead else rel)
+        return rows
+    matched = sorted(path for path in manifest.modules if path == prefix or path.startswith(prefix))
+    if not matched:
+        return [f"{prefix}: no modules matched in {DOMAIN_MANIFEST_RELPATH} or web/"]
+    rows = []
+    for path in matched:
+        dom = manifest.modules[path]
+        manuals = ", ".join(manifest.references.get(dom, ()))
+        lead = _module_lead(root, path)
+        suffix = f" — {lead}" if lead else ""
+        ref_tag = f" [manuals: {manuals}]" if manuals else ""
+        rows.append(f"{path} ({dom}){suffix}{ref_tag}")
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # The query_code op=architecture renderer
 # ---------------------------------------------------------------------------
 
@@ -703,6 +816,8 @@ def architecture_fact_rows(
             f"{row.entity} [{row.section}] writer: {row.writer_cell}"
             for row in writes
         ]
+    if fact == "module_map":
+        return module_map_rows(root, arg)
     impact = protected_contracts_affected(root, arg, read_book_bytes=read_book_bytes)
     rows = [
         f"{len(impact.paths)} changed path(s): {len(impact.protected)} protected, "

@@ -1,6 +1,6 @@
 # 3. Web UI Pages & Buttons
 
-One build-free SPA serves desktop, browser, Docker, Telegram, phone and Linux fallback. The browser paints host-stamped placement, outcome, receipts and liveness; text, timing and client lists grant no authority.
+My single build-free ES-module SPA (`web/`) serving desktop, browser, Docker, Telegram mini-app, phone, and Linux fallback surfaces: Chat & Project rooms, composer capsules, dictation/TTS/Live Conversation, living cards, Widgets, Dashboard, Logs, Costs, Files, Extensions/Skills, and Settings. UI visuals and interaction rules live in `docs/DESIGN.md` and `docs/CLIENT_CONTRACT.md`. The browser paints host-stamped placement, outcome, receipts, and liveness; client text, timing, and lists grant no authority.
 
 ### SPA shape and host bridges
 

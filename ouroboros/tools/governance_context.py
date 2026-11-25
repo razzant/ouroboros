@@ -86,6 +86,8 @@ DEVELOPMENT_BOOK_ID = "development"
 ARCHITECTURE_BOOK_ID = "architecture"
 # Always relevant: it is the protocol the reviewer is executing right now.
 REVIEW_PROTOCOL_CHAPTER = "docs/development/05-review-and-commit-protocol.md"
+# Always relevant for body changes: all 32 invariants + Closed roads (matching SKILL_LAYER).
+BODY_INVARIANTS_CHAPTER = "docs/architecture/10-key-invariants.md"
 
 PACKET_DELIVERY = "packet"
 RETRIEVING_DELIVERY = "retrieving"
@@ -284,6 +286,41 @@ def _top_sections(source) -> tuple:
         return ()
     top = min(levels)
     return tuple(heading for heading in source.headings if heading.level == top)
+
+
+def _selectable_blocks(source) -> list[tuple[str, int, str]]:
+    """Individually selectable units of a chapter: pre-subheading blocks PLUS top subsections.
+
+    Pre-subheading paragraphs, lists, and code blocks (between the chapter's H1 and its first
+    subsection, or the entire body of a heading-less chapter) are each selectable on their own
+    so content placed before the first ``##``/``###`` heading (such as numbered invariants or
+    tables) is never invisible to packet reviewers (Bug #2).
+    """
+    blocks: list[tuple[str, int, str]] = []
+    first_h1 = source.headings[0] if source.headings and source.headings[0].level == 1 else None
+    pre_start = first_h1.span.end_byte if first_h1 is not None else 0
+    sub_headings = [h for h in source.headings if h.level > 1]
+    pre_end = sub_headings[0].span.start_byte if sub_headings else len(source.raw)
+    pre_spans = sorted(
+        (span for span in (*source.paragraphs, *source.lists, *source.code_blocks)
+         if pre_start <= span.start_byte and span.end_byte <= pre_end),
+        key=lambda s: s.start_byte,
+    )
+    # Skip nested spans (e.g. paragraphs inside list blocks already covered by the list span).
+    outer_pre: list[Any] = []
+    for span in pre_spans:
+        if outer_pre and span.start_byte < outer_pre[-1].end_byte:
+            continue
+        outer_pre.append(span)
+    for idx, span in enumerate(outer_pre, 1):
+        body = source.text_at(span).strip()
+        if body:
+            blocks.append((f"opening block {idx} (lines {span.start_line}-{span.end_line})", span.start_byte, body))
+    for heading in _top_sections(source):
+        body = source.text_at(heading.section)
+        if body.strip():
+            blocks.append((heading.title, heading.span.start_byte, body))
+    return blocks
 
 
 def _book_navigation(repo_dir: Path, book_id: str, book, load_doc, *, instructions: bool = True) -> str:
@@ -632,6 +669,12 @@ def governance_context(
         return True
 
     # --- tier 2: rules by change class ------------------------------------
+    from ouroboros.reference_books import resolve_body_references
+
+    body_refs = resolve_body_references(root, touched_paths or (), include_mentions=False)
+    ref_manuals = set(body_refs.get("manuals") or ())
+    touched_domains = tuple(body_refs.get("domains") or ())
+
     dev_book, dev_problem = _load_book(root, DEVELOPMENT_BOOK_ID)
     dev_chapters = _book_sources(dev_book)
     rows.append(_row("docs/DEVELOPMENT.md", 2, "navigation", 0,
@@ -644,9 +687,10 @@ def governance_context(
         files, mentions = _mentions(chapter.text, names)
         if path == REVIEW_PROTOCOL_CHAPTER:
             candidates.append(((0, 0, path), path, path, "the review protocol this reviewer executes"))
-        elif files:
-            candidates.append(((2, -files * 1000 - mentions, path), path, path,
-                               f"mentions {files} touched file(s), {mentions} time(s)"))
+        elif files or path in ref_manuals:
+            reason = (f"mentions {files} touched file(s), {mentions} time(s)" if files
+                      else "owning manual via domains.toml [references]")
+            candidates.append(((2, -(files or 1) * 1000 - mentions, path), path, path, reason))
         else:
             rows.append(_row(path, 2, "navigation", len(chapter.text),
                              "no touched file mentioned"))
@@ -711,32 +755,63 @@ def governance_context(
             else:
                 rows.append(_row(bible_path, 2, "navigation", 0, bible_absent))
 
-    # --- tier 3: the map, never whole -------------------------------------
+    # --- tier 3: the map, never whole (plus whole Key Invariants + Closed roads) ---
     arch_book, arch_problem = _load_book(root, ARCHITECTURE_BOOK_ID)
     arch_chapters = _book_sources(arch_book)
     packet = str(delivery or PACKET_DELIVERY) == PACKET_DELIVERY
     arch_reason = "the map is delivered as navigation, never whole; " + (
-        "the sections that name a touched file are selected below" if packet
-        else "this reviewer reads sections on demand with its own tools")
+        "key invariants (with Closed roads) and relevant sections are selected below" if packet
+        else "reads sections on demand; key invariants (with Closed roads) are required")
     rows.append(_row("docs/ARCHITECTURE.md", 3, "navigation", 0, arch_reason if arch_chapters
                      else arch_problem or "no chaptered membership: navigation only"))
     sections: list[tuple[tuple, str, str, str]] = []
+    invariants_chapter = next((c for c in arch_chapters if c.source_path == BODY_INVARIANTS_CHAPTER), None)
+    if invariants_chapter is not None:
+        if packet:
+            _admit(BODY_INVARIANTS_CHAPTER, BODY_INVARIANTS_CHAPTER, invariants_chapter.text, 2,
+                   "all 32 cross-cutting invariants and Closed roads for body review")
+        else:
+            rows.append(_row(BODY_INVARIANTS_CHAPTER, 2, "required", len(invariants_chapter.text),
+                             "all 32 cross-cutting invariants and Closed roads; read in full"))
     for chapter in arch_chapters:
+        if chapter.source_path == BODY_INVARIANTS_CHAPTER:
+            continue
         rows.append(_row(chapter.source_path, 3, "navigation", len(chapter.text),
                          "the map is never inlined whole; chapter navigation above"))
-        if not packet or not names:
+        if not packet:
             continue
-        for heading in _top_sections(chapter):
-            body = chapter.text_at(heading.section)
-            files, mentions = _mentions(body, names)
-            if not files:
-                continue
-            path = f"{chapter.source_path}#{heading.title}"
-            sections.append(((-files * 1000 - mentions, chapter.source_path, heading.span.start_byte),
-                             path, path, f"mentions {files} touched file(s), {mentions} time(s)"))
-            chapter_text[path] = body
+        matched_any = False
+        if names:
+            for block_title, start_byte, body in _selectable_blocks(chapter):
+                files, mentions = _mentions(body, names)
+                if not files:
+                    continue
+                matched_any = True
+                path = f"{chapter.source_path}#{block_title}"
+                sections.append(((-files * 1000 - mentions, chapter.source_path, start_byte),
+                                 path, path, f"mentions {files} touched file(s), {mentions} time(s)"))
+                chapter_text[path] = body
+        if not matched_any and chapter.source_path in ref_manuals:
+            sections.append(((0, chapter.source_path, 0),
+                             chapter.source_path, chapter.source_path,
+                             "owning manual via domains.toml [references]"))
+            chapter_text[chapter.source_path] = chapter.text
     for order, path, title, reason in sorted(sections):
         _admit(path, title, chapter_text.get(path, ""), 3, reason)
+    if packet and touched_domains:
+        try:
+            from ouroboros.code_intelligence_architecture import module_map_rows
+
+            dom_lines: list[str] = []
+            for dom in touched_domains[:4]:
+                dom_lines.extend(module_map_rows(root, dom)[:45])
+            if dom_lines:
+                _admit("ouroboros/domains.toml#affected_domains",
+                       "Affected domain module map (projected from domains.toml & docstrings)",
+                       "\n".join(dom_lines), 3,
+                       f"live module leads for touched domain(s): {', '.join(touched_domains[:4])}")
+        except Exception:
+            pass
 
     # --- navigation -------------------------------------------------------
     pointers = [_checklist_pointer(bool(checklist_text.strip()), shared_inline)]

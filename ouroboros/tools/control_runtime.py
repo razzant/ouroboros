@@ -76,11 +76,26 @@ def _prepare_self_change(ctx: ToolContext, resume: str = "", in_place: bool = Fa
                 status="blocked", code="ACCESS_BLOCKED",
                 text="⚠️ CANDIDATE_ALREADY_BOUND: this task already authors a candidate; in_place applies before it."))
         body_candidate.choose_in_place(ctx)
+        roads = body_candidate.closed_roads_note(ctx)
         return ("OK: by your explicit Cyber Pro decision this task writes the serving checkout directly. "
-                "Unfinished edits are live for every reader of that tree.")
+                "Unfinished edits are live for every reader of that tree."
+                + (f"\n\n{roads}" if roads else ""))
     try:
         bound = body_candidate.prepare(ctx, resume=str(resume or "").strip())
     except body_candidate.CandidateRefused as exc:
+        if exc.code == "CANDIDATE_NOT_APPLICABLE" and not str(resume or "").strip():
+            from ouroboros.contracts.task_constraint import normalize_task_constraint
+            constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+            if constraint is not None and getattr(constraint, "mode", "") in {"acting_subagent", "local_readonly_subagent"}:
+                from ouroboros.tools.tool_resolution import active_repo_dir_for
+                try:
+                    where = str(active_repo_dir_for(ctx))
+                except Exception:
+                    where = str(getattr(ctx, "repo_dir", ""))
+                return _publish_tool_result(ctx, ToolResult(
+                    status="ok", code="OK",
+                    text=("OK: no separate body candidate prepared — a subagent works in the workspace/copy its parent "
+                          f"selected ({where}); the parent owns candidate preparation and integration.")))
         return _publish_tool_result(ctx, ToolResult(
             status="blocked", code=exc.code, text=f"⚠️ {exc.code}: {exc.text}"))
     from ouroboros.tools.plan_ask import planning_roots
@@ -113,6 +128,7 @@ def _prepare_self_change(ctx: ToolContext, resume: str = "", in_place: bool = Fa
         + (f" The earlier checkout of this task was gone; its commits remain on branch {bound['previous_branch']}."
            if bound.get("previous_branch") else "") + body_candidate.attribution_note(bound.get("attribution"))
         + (f"\n{neighbours}" if (neighbours := body_candidate.neighbour_note(ctx, with_ended=True)) else "")
+        + (f"\n\n{roads}" if (roads := body_candidate.closed_roads_note(ctx)) else "")
     )
 
 
@@ -235,7 +251,8 @@ def self_change_tool_entries() -> list:
                 "Idempotent. resume deliberately continues ONE exact retained candidate (its id, owner task or "
                 "branch) whose previous owner has ended. The receipt, like the first automatic bind, names other open "
                 "candidates with the paths they have changed, read at that moment. in_place is Cyber Pro's explicit "
-                "decision to edit the serving checkout directly instead."),
+                "decision to edit the serving checkout directly instead. The parent prepares or resumes the candidate; "
+                "a child works in the workspace/copy its parent selected."),
             "parameters": {"type": "object", "properties": {
                 "resume": {"type": "string", "description": "Exact retained candidate to continue; omit for this task's own."},
                 "in_place": {"type": "boolean", "description": "Cyber Pro only: author the serving checkout directly."},

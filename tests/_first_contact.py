@@ -22,6 +22,8 @@ def _episode(tmp_path, monkeypatch, server):
             shutil.copyfile(REPO / name, repo / name)
     if (REPO / "docs/architecture").is_dir():
         shutil.copytree(REPO / "docs/architecture", repo / "docs/architecture")
+    if (REPO / "docs/development").is_dir():
+        shutil.copytree(REPO / "docs/development", repo / "docs/development")
     cfg = keyless_settings(server, OUROBOROS_CONTEXT_MODE="max", OUROBOROS_REASONING_SUMMARY="off",
                            OUROBOROS_CONSCIOUSNESS_SAFETY_MODE="off")
     for key, value in cfg.items():

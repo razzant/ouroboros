@@ -1543,7 +1543,7 @@ def _apply_refusal_step(ctx: _RoundModelCallContext, step: str, fit: Any, target
         return max(0, before - after.measurement.estimated_input_tokens) if after is not None else 0
 
     if step == "books":
-        _reproject_actual_overflow_low(ctx, books_must_save=target is not None)
+        _reproject_actual_overflow_low(ctx, books_must_save=True)
         return shed_since_before() if ctx.active_context_mode != "max" else None
     # The rest of the measured excess with the slack (a slack-only ask outlines nothing), else a known window's
     # deficit with it, else its slack alone (a probe, not a measured density), else memory detail alone, or after

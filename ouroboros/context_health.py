@@ -494,7 +494,6 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
         from ouroboros.tools.release_sync import (
             _normalize_pep440,
             _shields_escape,
-            extract_architecture_header_version,
             extract_readme_badge_version,
             is_release_version,
         )
@@ -528,13 +527,6 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
                 desync_parts.append(f"README={readme_ver}")
             elif readme_ver and not badge_token_ok:
                 desync_parts.append("README badge URL token")
-        except Exception:
-            pass
-        try:
-            arch = read_text(env.repo_path("docs/ARCHITECTURE.md"))
-            arch_ver = extract_architecture_header_version(arch)
-            if arch_ver and arch_ver != ver_file:
-                desync_parts.append(f"ARCHITECTURE.md={arch_ver}")
         except Exception:
             pass
         if desync_parts:

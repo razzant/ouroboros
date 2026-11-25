@@ -1,5 +1,7 @@
 # 12. Host Service, Companion Processes, and Chat IDs
 
+My Host Service, companion processes, external chat connectors, Presence identity, and typed chat-id partitioning (Main, Projects, hidden `0`, negative A2A ids). Connectors supply observed facts and event-snapshot identity while my mind judges whether to reply or wake; `kind: user` alone matches owner confirmation, identity never enters `places.json`, and chat ids are typed values (never tested for truthiness).
+
 Connectors supply facts and identity; the mind judges. Focus voice, owner match, Safety and delivery use the
 event snapshot; other Safety/own wakes use the first valid identity among 50 newest arrivals. Browser status is
 account-scoped (§3); the server invokes connector routes only for one approved built-in setup-card POST with its code and options (`onboarding_connections`). Only `kind: user` can match account-scoped owner confirmation.

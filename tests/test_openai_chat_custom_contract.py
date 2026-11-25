@@ -153,7 +153,7 @@ def test_a_tool_that_fits_whole_keeps_its_field_prose_and_a_larger_one_sends_str
     field = function["parameters"]["properties"]["marker"]
     field.update({"default": "ok", "x-note": "kept", "description": ""})
     structure = copy.deepcopy(function["parameters"])
-    for annotation in ("default", "x-note", "description"):
+    for annotation in ("default", "x-note", "description", "type"):
         del structure["properties"]["marker"][annotation]
     room = MAX_CUSTOM_DESCRIPTION_CHARS - len(lead + "\n" + _SCHEMA_CLAUSE + _schema_text(function["parameters"]))
 

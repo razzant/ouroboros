@@ -17,18 +17,20 @@ def test_honest_max_selects_low_before_folding_story_and_keeps_window_budget(tmp
     core, build = _built(tmp_path, monkeypatch, books=600_000, ratio=1)
     roomy = build(1_000_000)
     tight = build(200_000)
-    assert roomy.initial_mode == "max" and core.architecture_md in roomy.max_projection.system_content_json.replace("\\n", "\n")
-    assert tight.initial_mode == "low" and tight.preferred_mode == "max"
-    floor = tight.projection("low").memory_facts["floor"]
-    assert floor["target_tokens"] is None and floor["budget_allowance_tokens"] is None
-    assert floor["mode_switch"] == {"from": "max", "to": "low"}
-    assert ("Low, temporarily, for the window; my human's mode is Max. With no memory and no tool schemas, whole books "
-            "beside the rest of this start (my core, the host's sections and the assignment) and the work's room need ") in (
-        tight.low_projection.system_content_json)
-    assert tight.projection("low").memory_facts["max_room"]["cause"] == "route"  # the books alone overflow 200k
+    # Unified Body Map (BIBLE P1): Max carries the compact Body Map, never whole architecture_md,
+    # so 200K holds Max cleanly without a spurious Low hop; only a physically tiny window steps to Nano.
+    assert roomy.initial_mode == "max" and core.architecture_md not in roomy.max_projection.system_content_json.replace("\\n", "\n")
+    assert tight.initial_mode == "max" and tight.preferred_mode == "max"
     assert roomy.projection("max").memory_facts["max_room"]["cause"] == "held"
-    assert "word word word word" not in tight.low_projection.system_content_json
+    assert tight.projection("max").memory_facts["max_room"]["cause"] == "held"
+    assert "word word word word" not in tight.max_projection.system_content_json
     assert tight.core_sha256 == roomy.core_sha256
+    tiny = build(65_537)
+    assert tiny.initial_mode == "nano" and tiny.preferred_mode == "max"
+    floor = tiny.projection("nano").memory_facts["floor"]
+    assert floor["target_tokens"] is None and floor["budget_allowance_tokens"] is None
+    assert floor["mode_switch"] == {"from": "max", "to": "nano"}
+    assert tiny.projection("nano").memory_facts["max_room"]["cause"] == "route"
 
 
 @pytest.mark.parametrize("mode,target", [("low", cb.OWNER_LOW_TARGET_TOKENS), ("nano", cb.OWNER_NANO_TARGET_TOKENS)])
@@ -108,14 +110,23 @@ def test_smaller_route_addresses_memory_only_when_the_compact_request_exceeds_it
 
 
 def test_start_uses_one_floor_walk_and_calibrates_before_book_choice(tmp_path, monkeypatch):
-    _, build = _built(tmp_path, monkeypatch, books=600_000, ratio=1)
+    core, build = _built(tmp_path, monkeypatch, books=600_000, ratio=1)
+    big = dataclasses.replace(core, semi_stable_sections=(),
+                              semi_stable_text=core.semi_stable_text + "\n" + "steady " * 5_000)
+    def build_big(window):
+        from ouroboros import capability_evidence as ce, context_fit as cf
+        return cf.build_context_fit_plan(None, big, {"id": "cal-mode"}, preferred_mode="max",
+            route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "fixture"},
+                ce.CapabilityEvidence(window, "asserted", "metadata", "fixture")), tool_schemas=[])
+    est = build_big(1_000_000).max_projection.estimated_tokens
+    window = est + 65_536 + 500  # fits Max at ratio=1; calibrated ratio=4/2.7 overflows Max before any Max floor walk
     render, walks = mf.render_view_for_mode, []
     def measured(*args, **kwargs):
         walks.append(bool(kwargs.get("shortest") or kwargs.get("level")))  # True: a host step's price, never a chosen view
         return render(*args, **kwargs)
     monkeypatch.setattr(mf, "render_view_for_mode", measured)
-    assert build(330_000).initial_mode == "max"
-    assert walks == [True, False]  # price the ordinary Max view, then walk the selected view once
+    assert build_big(window).initial_mode == "max"
+    assert walks.count(False) == 1 and walks[-1] is False  # price candidates, then walk the selected view once
     monkeypatch.setattr("ouroboros.context_fit._route_calibration_ratio", lambda *_a, **_kw: 4 / 2.7)
-    assert build(330_000).initial_mode == "low"
-    assert walks.count(False) == 2  # calibrated before the book choice: Low's one walk, never a Max walk first
+    assert build_big(window).initial_mode == "nano"
+    assert walks.count(False) == 2  # calibrated before mode selection: Nano's one walk, never a Max walk first

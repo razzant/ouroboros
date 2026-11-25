@@ -743,26 +743,20 @@ def _ordered_world(world):
 
 def test_window_takes_maps_then_the_index_outline_then_heads_one_at_a_time_and_a_head_without_a_summary_stays(world, monkeypatch):
     captured = _ordered_world(world)
-    # At 170k, summarizing two heads in the whole-book frame could keep Max. Map the books first.
-    roomy, maps, band, outlined, one, two = (
-        _plan(world, window, core=captured) for window in (200_000, 170_000, 90_000, 60_000, 44_000, 30_000))
-    assert roomy.initial_mode == "max" and "Book text. Book text." in _blocks(roomy)[0]["text"]
-    assert all(plan.initial_mode == "low" for plan in (maps, band, outlined, one, two))
-    assert "Book text. Book text." not in _blocks(maps)[0]["text"] and "Full mechanism" in _blocks(maps)[0]["text"]
-    assert _index(roomy) == _index(maps) == "whole" and _cuts(roomy) == _cuts(maps) == []
-    # The band. At 90k this start misses its own bound (the window less the reply reserve and the two eighths a root
-    # keeps for work) while the physical window still holds the request with the whole index. Neither yields: only
-    # the physical window outlines an index, and a head waits for the outlines. The start has less work room.
-    request = band.projected_tokens_with_tools("low", [])
+    # Unified Body Map keeps Max across the whole range down to Nano: whole index -> outline -> heads one by one.
+    roomy, band, outlined, one, two = (
+        _plan(world, window, core=captured) for window in (200_000, 90_000, 60_000, 44_000, 30_000))
+    assert all(plan.initial_mode == "max" for plan in (roomy, band, outlined, one, two))
+    assert "Book text. Book text." not in _blocks(roomy)[0]["text"]
+    assert _index(roomy) == "whole" and _cuts(roomy) == []
+    request = band.projected_tokens_with_tools("max", [])
     assert request + RESERVE <= 90_000 < request + RESERVE + 2 * (90_000 // 8)
     assert _index(band) == "whole" and _cuts(band) == []
     assert all(f"Head {topic}. " * 5_000 in _held(band) for topic in "abc")
-    # Where the physical window no longer holds the whole index, the outline comes first, as the window's step and
-    # never the start room's, and it is enough: every head stands whole.
     assert request + RESERVE > 60_000
     assert _index(outlined) == "outline" and _cuts(outlined) == []
     assert all(f"Head {topic}. " * 5_000 in _held(outlined) for topic in "abc")
-    [index_row] = [row for row in outlined.low_projection.memory_facts["host_sections_addressed"]
+    [index_row] = [row for row in outlined.max_projection.memory_facts["host_sections_addressed"]
                    if row["section_id"] == "knowledge_index"]
     assert "start_room" not in index_row
     assert [_index(plan) for plan in (one, two)] == ["outline", "outline"]
@@ -770,18 +764,16 @@ def test_window_takes_maps_then_the_index_outline_then_heads_one_at_a_time_and_a
     assert _cuts(two) == [("a", "summary"), ("c", "summary")]
     assert "Head b. " * 5_000 in _held(two)
     assert ("Head c. " * 5_000 in _held(one)) and ("Head c. " * 5_000 not in _held(two))
-    assert ("Head a. " * 5_000 in _held(one, "max")) and not _cuts(one, "max")
     assert "Head shortened to its authored summary for the physical window." in _held(one)
     assert _blocks(one)[-1]["text"].count("Authored telling of a.") == 1
     assert "Authored telling of a." in _held(one)  # the outline no longer shows it
 
-    # A frame that holds no head is the target's: the same notes, never adopted, outline for the physical window.
     with monkeypatch.context() as patch:
         patch.setattr(held_notes, "turn_sections", lambda *_a, **_kw: [])
         unheld = _core(world)
-    held_window = _plan(world, 120_000, core=unheld).projected_tokens_with_tools("low", []) + RESERVE  # as it stands
+    held_window = _plan(world, 120_000, core=unheld).projected_tokens_with_tools("max", []) + RESERVE
     short_room, physical = (_plan(world, held_window + spare, core=unheld) for spare in (2_000, -3_000))
-    assert any(row.get("start_room") for row in short_room.low_projection.memory_facts["host_sections_addressed"])
+    assert any(row.get("start_room") for row in short_room.max_projection.memory_facts["host_sections_addressed"])
     assert [_index(short_room), _index(physical)] == ["whole", "outline"] and not _held(short_room)
 
     messages = [*roomy.messages_for("max"), {"role": "user", "content": "Owner's words during work."}]
@@ -791,13 +783,11 @@ def test_window_takes_maps_then_the_index_outline_then_heads_one_at_a_time_and_a
 
     still_max = rebind(roomy, 150_000)
     assert still_max.initial_mode == "max" and not _cuts(still_max) and _index(still_max) == "whole"
-    # A view already sent keeps no new work room: the outline first, then one head pays what the window still lacks.
     sent_outline, rebound = rebind(roomy, 60_000), rebind(roomy, 31_000)
-    assert sent_outline.initial_mode == "low" and _index(sent_outline) == "outline" and not _cuts(sent_outline)
-    assert rebound.initial_mode == "low" and _index(rebound) == "outline" and _cuts(rebound) == [("a", "summary")]
-    assert rebound.messages_for("low")[1:] == messages[1:]
-    # The form a head was sent in stays on its receipt: a narrower frame of the same work never shows it whole again.
-    narrower = rebind(rebound, 25_000, "low")
+    assert sent_outline.initial_mode == "max" and _index(sent_outline) == "outline" and not _cuts(sent_outline)
+    assert rebound.initial_mode == "max" and _index(rebound) == "outline" and _cuts(rebound) == [("a", "summary")]
+    assert rebound.messages_for("max")[1:] == messages[1:]
+    narrower = rebind(rebound, 25_000, "max")
     assert _cuts(narrower) == [("a", "summary"), ("c", "summary")] and "Head a. " * 5_000 not in _held(narrower)
 
     emergency = _plan(world, 12_000, core=captured)
@@ -809,10 +799,8 @@ def test_window_takes_maps_then_the_index_outline_then_heads_one_at_a_time_and_a
 
 
 def test_a_smaller_window_never_shows_more_of_a_head_and_no_head_yields_beside_a_whole_index(world):
-    """Down one descending sweep of windows, from whole books through the map frame to the emergency floor: the set
-    of whole heads never grows, a whole-book frame shortens none, wherever a head has yielded the index stands as
-    its outline, and in the map frames the index never comes back once outlined. (A whole-book frame's own index step
-    is the target's and is not judged here; this frame sends no tool schemas, so Nano prices like the map frame.)"""
+    """Down one descending sweep of windows, from roomy Max to the Nano emergency floor: the set of whole heads
+    never grows, wherever a head has yielded the index stands as its outline, and once outlined the index never returns."""
     captured = _ordered_world(world)
     whole, forms, outlined = {"a", "b", "c"}, [], False
     for window in range(196_000, 8_000, -4_000):
@@ -820,17 +808,15 @@ def test_a_smaller_window_never_shows_more_of_a_head_and_no_head_yields_beside_a
         shown = {topic for topic in "abc" if f"Head {topic}. " * 5_000 in _held(plan)}
         assert shown <= whole, (window, sorted(shown), sorted(whole))
         assert shown == {"a", "b", "c"} - {topic for topic, _form in _cuts(plan)}
-        assert not _cuts(plan) or (plan.initial_mode != "max" and _index(plan) == "outline"), window
+        assert not _cuts(plan) or _index(plan) == "outline", window
         whole = shown
         form = (plan.initial_mode, _index(plan), tuple(_cuts(plan)))
-        if plan.initial_mode != "max":
-            assert not (outlined and _index(plan) == "whole"), window
-            outlined = outlined or _index(plan) == "outline"
-            if form not in forms:
-                forms.append(form)
-    # The map frames crossed every step in order: the whole index, its outline, each head by address, the emergency.
-    assert forms == [("low", "whole", ()), ("low", "outline", ()), ("low", "outline", (("a", "summary"),)),
-                     ("low", "outline", (("a", "summary"), ("c", "summary"))),
+        assert not (outlined and _index(plan) == "whole"), window
+        outlined = outlined or _index(plan) == "outline"
+        if form not in forms:
+            forms.append(form)
+    assert forms == [("max", "whole", ()), ("max", "outline", ()), ("max", "outline", (("a", "summary"),)),
+                     ("max", "outline", (("a", "summary"), ("c", "summary"))),
                      ("nano", "outline", (("a", "reader"), ("c", "summary"), ("b", "reader")))]
 
 
@@ -854,9 +840,9 @@ def test_no_head_yields_while_an_index_or_the_registry_can_still_take_its_outlin
     steps = set(memory_floor.WHOLE_OR_OUTLINE_STEPS)
     assert _untaken_outlines(_plan(world, 250_000, core=captured, task=task)) == steps  # all three can be taken here
     band = _plan(world, 120_000, core=captured, task=task)
-    request = band.projected_tokens_with_tools("low", [])
+    request = band.projected_tokens_with_tools("max", [])
     assert request + RESERVE <= 120_000 < request + RESERVE + 2 * (120_000 // 8)  # its own bound missed, the window holds
-    assert band.initial_mode == "low" and _untaken_outlines(band) == steps and not _cuts(band)
+    assert band.initial_mode == "max" and _untaken_outlines(band) == steps and not _cuts(band)
     crossed = []
     for window in range(224_000, 8_000, -2_000):
         plan = _plan(world, window, core=captured, task=task)
@@ -871,13 +857,13 @@ def test_no_head_yields_while_an_index_or_the_registry_can_still_take_its_outlin
 
 
 def test_nano_prices_its_own_frame_and_carries_no_cut_from_the_map_frame_before_it(world):
-    """Across the map frame and Nano a smaller window can buy room back: Nano unloads the tool schemas, so it prices
+    """Across Max and Nano a smaller window can buy room back: Nano unloads the tool schemas, so it prices
     its own request and shortens only what that request still lacks. Within one frame the order holds as ever."""
     captured = _ordered_world(world)
     tools = [{"type": "function", "function": {"name": f"fixture_tool_{number}", "description": "schema detail " * 2_000,
                                                 "parameters": {"type": "object", "properties": {}}}} for number in range(4)]
     maps, nano, tighter = (_plan(world, window, core=captured, tool_schemas=tools) for window in (60_000, 42_000, 30_000))
-    assert maps.initial_mode == "low" and _cuts(maps) == [("a", "summary"), ("c", "summary")]
+    assert maps.initial_mode == "max" and _cuts(maps) == [("a", "summary"), ("c", "summary")]
     assert [nano.initial_mode, tighter.initial_mode] == ["nano", "nano"]
     assert _cuts(nano) == [("a", "summary")] and "Head c. " * 5_000 in _held(nano)  # it fits whole there: no stale cut
     assert _cuts(tighter) == [("a", "summary"), ("c", "summary")] and "Head b. " * 5_000 in _held(tighter)
@@ -974,31 +960,25 @@ def test_admitted_rebind_compares_both_full_prices(world, deciding_cost):
 
 
 @pytest.mark.parametrize("preferred,connections,schemas,kept", [
-    # A Max work lowered to its maps, two small tool schemas: Nano admits no more input and its fixed part is no
-    # smaller, so the mode is not paid for a note four characters shorter (the full prices would choose Nano).
-    ("max", ("", ""), 2, "low"),
+    # A Max work with two small tool schemas: Nano admits no more input and its fixed part is no smaller, so it stays Max.
+    ("max", ("", ""), 2, "max"),
     # Low carries a connections map Nano does not: Nano's fixed part is smaller (the full prices would keep Low).
     ("low", ("Low connections. " * 4, ""), 0, "nano"),
 ])
 def test_a_running_work_that_holds_no_head_takes_low_or_nano_by_the_two_frames_alone(world, preferred, connections, schemas, kept):
-    """A work already running in Low whose request no longer fits: without held heads the choice is the frames' own
-    (Nano only where it admits more input or has a smaller fixed part), never the fully priced views that decide for
-    a capture with heads (``test_admitted_rebind_compares_both_full_prices``). In both cases here the two rules
-    disagree."""
     tools = [{"type": "function", "function": {"name": name, "parameters": {"type": "object"}}}
              for name in ("read_fixture", "memory_read")][:schemas]
     memory = synthetic.snapshot(mark_count=1)
     core = replace(_core(world), section_root="", memory_view_json=memory_view.snapshot_json(memory), connections=connections)
     assert not any(isinstance(part, held_notes.HeldNoteSection) for part in core.dynamic_sections)
     initial = _plan(world, 30_000, mode=preferred, core=core)
-    assert initial.initial_mode == "low"
-    messages = initial.messages_for("low")
-    # Three hundred tokens short of the request as it stands: Low cannot hold its own view, so the choice is real.
-    window = initial.projected_tokens_with_tools("low", tools) + RESERVE - 300
-    fit = dict(window_tokens=window, known_window=True, ratio=1.0, output_reserve=RESERVE, start_mode="low",
+    assert initial.initial_mode == preferred
+    messages = initial.messages_for(preferred)
+    window = initial.projected_tokens_with_tools(preferred, tools) + RESERVE - 300
+    fit = dict(window_tokens=window, known_window=True, ratio=1.0, output_reserve=RESERVE, start_mode=preferred,
                tool_schemas=tools, current_messages=messages, admitted=True)
-    plan, low = initial.reproject_for_route(**fit), initial.reproject_for_route(**fit, select_mode="low")
-    assert low.projected_tokens_with_tools("low", tools) + RESERVE > window
+    plan, same = initial.reproject_for_route(**fit), initial.reproject_for_route(**fit, select_mode=preferred)
+    assert same.projected_tokens_with_tools(preferred, tools) + RESERVE > window
     assert plan.initial_mode == kept and plan.messages_for(kept)[1:] == messages[1:]
 
 
@@ -1154,22 +1134,21 @@ def test_a_cold_return_replays_the_book_map_it_sent_beside_whole_heads_and_memor
     first = _plan(world, 65_000 if mismatch == "outlined_index" else window, mode="low", ctx=sent, core=core,
                   tool_schemas=saved)
     accepted = first
-    while mismatch != "outlined_index" and not any(row["section_id"] == "development_map" for row in map_rows(accepted)):
-        accepted = memory_floor.step_book_map(accepted, "low")  # its required handbook's yields, its own map included
+    while mismatch != "outlined_index" and not any(row["section_id"] == "body_map" for row in map_rows(accepted)):
+        accepted = memory_floor.step_book_map(accepted, "low")  # its required handbook's yields, body_map included
     assert _index(accepted) == ("outline" if mismatch == "outlined_index" else "whole")
-    assert not _cuts(accepted) and "Rule 599 — lines" not in _blocks(accepted)[0]["text"]
+    assert not _cuts(accepted) and "How part 00 works for Change" not in _blocks(accepted)[0]["text"]
     sent.context_fit_plan, sent.active_context_mode = accepted, "low"
     messages = accepted.messages_for("low")
     observe_send(sent, messages, round_idx=1, tools=saved)
     record_context_view(sent, messages, saved)
     state = json.loads(json.dumps(continuation_state(sent, messages, {}, {}, 1, saved, set())))
     originals = map_rows(accepted)
-    original = next(row for row in originals if row["section_id"] == "development_map")
+    original = next(row for row in originals if row["section_id"] == "body_map")
     reader = original["reader"]
     source = read_actor_source_bytes(core.section_root, core.section_task_id, original["source_ref"]).decode()
     old_block = state["context_observations"]["_last_context_observation"]["messages"][0]["content"][0]["text"]
-    assert reader in old_block and "- Change:" in old_block and "Rule 599 — lines" in source
-    assert "Change (navigation map)" in source
+    assert reader in old_block and "## Body (parts & addresses)" in old_block and "How part 00 works for Change" in source
 
     restored = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
     captured = replace(core, held_note_resume=held_notes.restored_capture(state))
@@ -1210,23 +1189,23 @@ def test_a_cold_return_replays_the_book_map_it_sent_beside_whole_heads_and_memor
     assert (priced[0] != priced[1]) is (mismatch in {"late_row", "changed_schema", "outlined_index"})
     assert mode == "low" and _held(plan) == _held(accepted) and not _cuts(plan) and floor(plan) == floor(accepted)
     block = resumed[0]["content"][0]["text"]
-    assert ("Mechanism 599 — lines" in block) is (mismatch != "outlined_index")
+    assert "## Body (parts & addresses)" in block
     assert _index(plan) == "whole"
     if mismatch in {"changed_title", "changed_chapter"}:
         assert [row["section_id"] for row in map_rows(plan)] == [row["section_id"] for row in originals]
-        updated = next(row for row in map_rows(plan) if row["section_id"] == "development_map")
+        updated = next(row for row in map_rows(plan) if row["section_id"] == "body_map")
         assert updated["reader"] != reader and updated["source_ref"] != original["source_ref"]
         assert reader not in block and updated["reader"] in block
-        assert "## Engineering (chapters)" in block and "Rework (navigation map)" not in block
+        assert "## Body (parts & addresses)" in block and "How part 00 works for Rework" not in block
         current_map = read_actor_source_bytes(core.section_root, core.section_task_id, updated["source_ref"]).decode()
-        assert "Rework (navigation map)" in current_map and ("Rule 611 — lines" in current_map) is (mismatch == "changed_chapter")
+        assert "How part 00 works for Rework" in current_map and ("612 rules" in current_map) is (mismatch == "changed_chapter")
         tool_registry = ToolRegistry(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root)
         tool_registry._ctx.task_id = TASK["id"]
-        assert "Rework (navigation map)" in tool_registry.execute(
+        assert "How part 00 works for Rework" in tool_registry.execute(
             "read_file", {"root": "artifact_store", "path": updated["source_ref"]["path"]})
         assert read_actor_source_bytes(core.section_root, core.section_task_id, original["source_ref"]).decode() == source
     else:
-        assert map_rows(plan) == originals and reader in block and "## Engineering (chapters)" in block
+        assert map_rows(plan) == originals and reader in block and "## Body (parts & addresses)" in block
     payload = "\n".join(part["text"] for part in resumed[0]["content"])  # the restored request's whole system row
     assert "A held note. " * 1_500 in payload and "Another held note. " * 1_500 in payload  # both heads, whole
     notices = [row["content"] for row in resumed if "The tool set changed since this task's last request" in str(
@@ -1274,17 +1253,17 @@ def test_a_start_shaped_like_the_owners_keeps_all_six_heads_whole_while_memory_g
     captured = replace(_core(world), memory_view_json=memory_view.snapshot_json(memory))
     telling = memory_floor.tokens_of(memory_view.story_chars(memory, memory_floor.telling_level(memory)))
 
-    def facts(plan):  # the owner's Max, rendered at chapter maps
-        assert plan.preferred_mode == "max" and plan.initial_mode == "low"
+    def facts(plan):  # the owner's Max, rendered with the unified Body Map
+        assert plan.preferred_mode == "max" and plan.initial_mode == "max"
         assert "Book text. Book text." not in _blocks(plan)[0]["text"]
-        return plan.low_projection.memory_facts
+        return plan.max_projection.memory_facts
 
     def whole(plan):
         return [topic for topic, words in heads.items() if words * 400 in _held(plan)]
 
     roomy, shaped, tight = (_plan(world, window, core=captured) for window in (150_000, 100_000, 24_000))
     assert not facts(roomy)["floor"]["steps"] and not _cuts(roomy)
-    request, story = shaped.projected_tokens_with_tools("low", []), facts(shaped)["blocks"]["story_tokens"]
+    request, story = shaped.projected_tokens_with_tools("max", []), facts(shaped)["blocks"]["story_tokens"]
     work_room = 100_000 // 8 * 2
     assert request - story + telling + RESERVE + work_room > 100_000 + 20_000  # my telling misses by tens of thousands
     assert request + RESERVE + work_room <= 100_000 and story < telling  # memory below a telling fits
@@ -1297,20 +1276,19 @@ def test_a_start_shaped_like_the_owners_keeps_all_six_heads_whole_while_memory_g
     held = sum(memory_floor.view_tokens(part.full_text) for part in captured.dynamic_sections
                if isinstance(part, held_notes.HeldNoteSection))
     cut = memory_floor.addressed_text(facts(shaped)["floor"]["steps"])
-    line = context_view_facts.memory_facts(shaped, "low")
+    line = context_view_facts.memory_facts(shaped, "max")
     assert f"; shown only by address: {cut}; held note heads: {held:,} tokens stand whole; marks in view 0" in line
     # Where the window took nothing from memory, or without held heads, the line is what it was.
-    assert "held note heads:" not in context_view_facts.memory_facts(roomy, "low")  # the fact, not the measure's part
+    assert "held note heads:" not in context_view_facts.memory_facts(roomy, "max")  # the fact, not the measure's part
     with monkeypatch.context() as patch:
         patch.setattr(held_notes, "turn_sections", lambda *_a, **_kw: [])
         unheld = replace(_core(world), memory_view_json=captured.memory_view_json)
     plain = _plan(world, 60_000, core=unheld)
     assert facts(plain)["floor"]["steps"] and not _held(plain)
-    assert context_view_facts.memory_facts(plain, "low").endswith(
+    assert context_view_facts.memory_facts(plain, "max").endswith(
         f"; shown only by address: {memory_floor.addressed_text(facts(plain)['floor']['steps'])}; marks in view 0")
 
-    # A work already running in whole books: where my telling no longer fits beside them the books go to their maps,
-    # and that drop shortens nothing; memory then folds and the index outlines before the window takes a head.
+    # A work already running in Max: memory folds and the index outlines before the window takes a head.
     running = _plan(world, 400_000, core=captured)
     assert running.initial_mode == "max"
     messages = [*running.messages_for("max"), {"role": "user", "content": "Owner's words during work."}]
@@ -1319,11 +1297,11 @@ def test_a_start_shaped_like_the_owners_keeps_all_six_heads_whole_while_memory_g
             tool_schemas=[], start_mode="max", current_messages=messages, admitted=True)
 
     mapped, folded, taken = rebind(130_000), rebind(30_000), rebind(22_750)
-    assert mapped.initial_mode == "low" and not mapped.low_projection.memory_facts["floor"]["steps"]
+    assert mapped.initial_mode == "max" and not mapped.max_projection.memory_facts["floor"]["steps"]
     assert not _cuts(mapped) and whole(mapped) == list(heads) and _index(mapped) == "whole"
-    assert folded.initial_mode == "low" and not _cuts(folded) and whole(folded) == list(heads)
-    assert _index(folded) == "outline" and "F5l" in folded.low_projection.memory_facts["floor"]["steps"]
-    assert _cuts(taken) == [("joi", "summary")] and taken.messages_for("low")[1:] == messages[1:]
+    assert folded.initial_mode == "max" and not _cuts(folded) and whole(folded) == list(heads)
+    assert _index(folded) == "outline" and "F5l" in folded.max_projection.memory_facts["floor"]["steps"]
+    assert _cuts(taken) == [("joi", "summary")] and taken.messages_for("max")[1:] == messages[1:]
 
 
 def test_only_an_admitted_call_for_the_complete_bound_revision_can_shorten_a_head(world, monkeypatch):
@@ -1700,26 +1678,24 @@ def test_a_saved_form_replays_only_at_the_same_density_and_request_cost(world, m
     assert not _cuts(recalibrated) and _held(recalibrated) == _held(recomputed)
 
 
-@pytest.mark.parametrize("preferred,window", [("low", 48_000), ("max", 200_000)], ids=["summary", "lower_mode"])
+@pytest.mark.parametrize("preferred,window", [("low", 48_000), ("max", 48_000)], ids=["summary_low", "summary_max"])
 def test_the_next_start_preview_of_a_cold_return_is_a_fresh_start_while_the_return_keeps_its_frame(
         world, monkeypatch, preferred, window):
     """#3649: ``memory_read``'s pairwise start (``memory_floor.counterfactual_starts``) of a cold return fits a fresh
-    start of the same material. The return replays what its saved frame sent: the head's summary, and Low in the
-    owner's Max. A fresh start at that window holds the head whole and keeps the owner's mode, and so does the arm
-    whose request prices like that frame (saved before any reply); an arm with a changed story is fresh either way.
-    The preview writes nothing and leaves the return's capture as it was."""
+    start of the same material. The return replays what its saved frame sent (the head's summary), while a fresh start
+    at that wider window holds the head whole and writes nothing."""
     head = "The held head before the frame changed. " * 1_200
     _write(world, "saved", head, summary="An authored summary.")
     ctx = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.6)
-    whole = _plan(world, 60_000, mode="low", ctx=ctx)
-    tight = _plan(world, whole.projected_tokens_with_tools("low", []) // 2 + RESERVE, mode=preferred, ctx=ctx)
-    carried = _rebind(monkeypatch, ctx, tight, tight.messages_for("low"), window)  # a new route before any reply
-    assert carried.initial_mode == "low" and _cuts(carried) == [("saved", "summary")]
-    capture = json.loads(json.dumps(held_notes.continuation_capture(carried, "low")))[held_notes.CAPTURE_KEY]
+    whole = _plan(world, 60_000, mode=preferred, ctx=ctx)
+    tight = _plan(world, whole.projected_tokens_with_tools(preferred, []) // 2 + RESERVE, mode=preferred, ctx=ctx)
+    carried = _rebind(monkeypatch, ctx, tight, tight.messages_for(preferred), window)  # a new route before any reply
+    assert carried.initial_mode == preferred and _cuts(carried) == [("saved", "summary")]
+    capture = json.loads(json.dumps(held_notes.continuation_capture(carried, preferred)))[held_notes.CAPTURE_KEY]
     returned = _plan(world, window, mode=preferred, core=replace(tight.core, held_note_resume=capture))
     cold = context_fit.restored_start(returned, list(tight.start))
-    assert cold.initial_mode == "low" and _cuts(cold) == _cuts(carried) and _held(cold) == _held(carried)
+    assert cold.initial_mode == preferred and _cuts(cold) == _cuts(carried) and _held(cold) == _held(carried)
 
     now = memory_view.snapshot_from_json(tight.core.memory_view_json)
     arms = {"now": now, "with this selection": replace(now, story=synthetic.pages(2, 3_000))}

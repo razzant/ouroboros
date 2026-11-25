@@ -149,10 +149,10 @@ def test_exact_fit_reaches_ordinary_round_dispatch(lane, monkeypatch):
     assert (anchor.input_tokens, anchor.estimate_tokens, floor) == (10_050, admitted[-1], 10_050)
 
 
-@pytest.mark.parametrize("needs_arch,ordinary_first", [(False, False), (True, False), (True, True)])
-def test_book_map_retry_submits_each_step_to_exact_local_admission(tmp_path, monkeypatch, needs_arch, ordinary_first):
-    import re
-    from ouroboros import context_fit as fit, loop_model_call, loop_round_limits
+@pytest.mark.parametrize("ordinary_first", [False, True])
+def test_book_map_retry_submits_each_step_to_exact_local_admission(tmp_path, monkeypatch, ordinary_first):
+    import math, re
+    from ouroboros import context_fit as fit, loop_model_call, memory_floor
     from ouroboros.context_measurement import _physical_context_for_fit
     from ouroboros.local_model_server import input_fingerprint
     from ouroboros.llm_attempt import _physical_candidate, main_context_fit_refusal
@@ -165,23 +165,44 @@ def test_book_map_retry_submits_each_step_to_exact_local_admission(tmp_path, mon
     monkeypatch.setattr("ouroboros.capability_evidence.resolve_main_token_density", lambda *a, **kw: (1.0, "fresh_route_usage"))
     core = books.booked(books._core(tmp_path, required=True, memory=False), tmp_path,
                         headings=600, body="Its practice. " * 10)
-    window = 109_177
-    plan = books._plan(tmp_path, core, "low", window, source="local_health")
+    roomy = books._plan(tmp_path, core, "low", 1_000_000, source="local_health")
     ctx = facts_ctx(tmp_path)
-    ctx.active_model, ctx.active_context_mode = plan.model, "low"
-    ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
-    ctx.tool_schemas, ctx.messages[:] = books.SCHEMAS, plan.messages_for("low")
+    ctx.active_model, ctx.active_context_mode = roomy.model, "low"
+    ctx.tool_schemas, ctx.messages[:] = books.SCHEMAS, roomy.messages_for("low")
     superseded = {"role": "assistant", "content": "A superseded host observation. " * 30}
     if ordinary_first:
         ctx.messages.append(superseded)
-    assert append_context_facts(ctx, money={}) and books._rows(plan) == []
+    ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = roomy
+    assert append_context_facts(ctx, money={}) and books._rows(roomy) == []
+
+    def exact_count(messages, tools, *, offset=0):
+        payload = _physical_candidate(dict(messages=messages, tools=tools,
+                                           model=roomy.model, max_tokens=books.RESERVE))
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return payload, len(re.findall(r"[a-zA-Z]+|[0-9]|[^a-zA-Z0-9\s]", text)) + offset
+
+    _, initial_exact = exact_count(ctx.messages, ctx.tool_schemas)
+    stepped_probe = memory_floor.step_book_map(roomy, "low")
+    assert stepped_probe is not None
+    stepped_msgs = stepped_probe.reproject_transcript(
+        [m for m in ctx.messages if m is not superseded], "low"
+    )
+    _, stepped_exact = exact_count(stepped_msgs, ctx.tool_schemas)
+    exact_saving = initial_exact - stepped_exact
+    assert exact_saving > 500
+    # Window holds the chars/4 estimate with start room (so build keeps body_map whole), while
+    # the local tokenizer's exact count overflows by less than exact_saving.
+    est_with_tools = roomy.projected_tokens_with_tools("low", books.SCHEMAS)
+    min_unstepped_window = math.ceil((est_with_tools + books.RESERVE) * 8 / 7) + 2_000
+    window = max(min_unstepped_window, stepped_exact + books.RESERVE + exact_saving // 2)
+    density_offset = max(0, window - books.RESERVE - stepped_exact - exact_saving // 2)
+    plan = books._plan(tmp_path, core, "low", window, source="local_health")
+    assert books._rows(plan) == []
+    ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
     measured = loop._measure_round_main_fit(ctx, automatic_pass_used=False)
 
     def request(candidate):
-        payload = _physical_candidate(dict(messages=candidate.messages, tools=candidate.tool_schemas,
-                                           model=plan.model, max_tokens=books.RESERVE))
-        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        count = len(re.findall(r"[a-zA-Z]+|[0-9]|[^a-zA-Z0-9\s]", text)) + (4_000 if needs_arch else 0)
+        payload, count = exact_count(candidate.messages, candidate.tool_schemas, offset=density_offset)
         native = dict(supported=True, input_is_exact=True, native_input_sha256=input_fingerprint(payload),
                       input_tokens=count, context_window=window)
         with ua.bind_physical_attempt_context(_physical_context_for_fit(measured, plan)):
@@ -221,12 +242,7 @@ def test_book_map_retry_submits_each_step_to_exact_local_admission(tmp_path, mon
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
     answer, cost, mode = loop_model_call._recover_context_overflow(ctx, refusal, 0.0)
     assert answer and mode == "low" and cost == 0
-    expected = ([[]] if ordinary_first else []) + [["development_map"]]
-    if needs_arch:
-        expected += [["development_map", "architecture_map"]]
+    expected = ([[]] if ordinary_first else []) + [["body_map"]]
     assert sends == expected  # a distinct exact refusal precedes each further map step
     assert books._rows(ctx.context_fit_plan) == expected[-1]
-    if not needs_arch:
-        assert "Mechanism 599 — lines" in ctx.messages[0]["content"][0]["text"]
-        after = loop_round_limits._measure_trial_candidate(ctx, ctx.messages)
-        assert measured.measurement.estimated_input_tokens - after.measurement.estimated_input_tokens < target - slack
+    assert "## Body (parts & addresses)" in ctx.messages[0]["content"][0]["text"]

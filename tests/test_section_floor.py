@@ -25,7 +25,7 @@ def test_host_ladder_lists_live_producers_and_keeps_only_the_actual_protected_co
     from ouroboros.context_layout import TIER0_ALWAYS_FULL
 
     assert memory_floor.HOST_STEPS == ("runtime", "review_pool", "review_continuity", "installed_skills",
-        "drive_state", "world", "subagents", "architecture_map", "development_map", "return_facts_words")
+        "drive_state", "world", "subagents", "body_map", "return_facts_words")
     assert memory_floor.OPTIONAL_STEPS == ("design_bible",)
     assert section_floor.PROTECTED == TIER0_ALWAYS_FULL
     # The overview joins the protected core by the owner's choice (20.10.2026): never an address.
@@ -241,19 +241,22 @@ def test_physical_mode_lowering_carries_host_addresses_from_the_shown_view(tmp_p
 
 
 def test_a_shown_view_keeps_its_books_while_its_own_completed_view_fits(tmp_path):
-    """A Max view already shown, on a smaller known window (no tools): its own folded view, receipt included, needs
-    8,719 tokens with the reply reserve. Before, a generic Nano-note price of its shortest view (465 vs its real 360
-    tokens) lowered it from 8,724 to 8,814 tokens, to a Nano view that itself needed 8,960."""
+    """A Max view already shown, on a smaller known window (no tools): its own folded view, receipt included, stays
+    in Max while it fits, and steps down below that completed view's boundary."""
     snapshot = syn.snapshot(story=syn.pages(4, 8_000), room_facts=syn.room("1", lane1=[
         syn.spoken(1, "human", 2_000), syn.spoken(2, "ouroboros", 2_000)]))
     roomy = _plan(_core(tmp_path, snapshot=snapshot), 2_000_000)
+    # Find the exact folded Max window where memory actually folds past F5l into F5, and 64 tokens below it.
+    probe = roomy.reproject_for_route(window_tokens=RESERVE + 1_000, known_window=True, ratio=1.0,
+                                      output_reserve=RESERVE, tool_schemas=[], start_mode="max")
+    fit_window = probe.max_projection.estimated_tokens + RESERVE + 20
     held = {window: roomy.reproject_for_route(window_tokens=window, known_window=True, ratio=1.0,
                                               output_reserve=RESERVE, tool_schemas=[], start_mode="max")
-            for window in (8_764, 8_700)}
-    kept = held[8_764].projection(held[8_764].initial_mode)
-    assert held[8_764].initial_mode == "max" and kept.estimated_tokens + RESERVE <= 8_764
-    assert "F5" in kept.memory_facts["floor"]["steps"]  # memory folded; the books stayed
-    assert held[8_700].initial_mode != "max"  # below its own completed view, the books step down
+            for window in (fit_window, fit_window - 64)}
+    kept = held[fit_window].projection(held[fit_window].initial_mode)
+    assert held[fit_window].initial_mode == "max" and kept.estimated_tokens + RESERVE <= fit_window
+    assert "F5" in kept.memory_facts["floor"]["steps"]  # memory folded; Max stayed
+    assert held[fit_window - 64].initial_mode != "max"  # below its own completed view, steps down
 
 
 def test_tool_schema_cost_and_route_density_both_count_toward_physical_pressure(tmp_path, monkeypatch):
@@ -541,39 +544,38 @@ def test_authored_memory_selection_keeps_host_addresses(tmp_path):
 
 
 def test_an_integrating_low_start_keeps_both_book_maps_while_the_window_holds_them_beside_my_telling(tmp_path):
-    """#3649 (owner 17.11.2026: keep both maps whole). A new Low start of a focus that integrates keeps both books'
-    detailed maps while the window's start bound holds the request with them beside my shortest telling: neither the
-    owner's Low target nor the start's own room shortens them, while other host forms still pay the target, in the
-    owner's Low and in a Max lowered for the window alike. A delegated child's compact maps keep their old steps."""
+    """#3649 (owner 17.11.2026) under unified Body Map: a new Low start of an integrating focus keeps the
+    full Body Map + Reference Atlas whole while the window's start bound holds it beside my shortest telling:
+    neither the owner's Low target nor the start's own room shortens it, while other host forms still pay the target.
+    A delegated child's Body Map keeps its ordinary start-room step."""
     talk = [syn.conversation(i, words=20, word_chars=1_000) for i in range(150)]  # whole far above Low's target
     core = booked(_core(tmp_path, [_service(size=20_000)], snapshot=syn.snapshot(conversations=talk)), tmp_path,
-                   body="Its whole mechanism and why. " * 60)  # whole books Max cannot hold in 150,000
+                   body="Its whole mechanism and why. " * 60)
     for window, preferred in ((1_000_000, "low"), (150_000, "max")):
         plan = _plan(core, window, preferred)
-        stepped = [row["section_id"] for row in _host_facts(plan, "low")]
-        assert plan.initial_mode == "low" and "runtime" in stepped, (window, preferred, stepped)
-        assert not {"architecture_map", "development_map"} & set(stepped), (window, preferred, stepped)
-        assert "Mechanism 149 — lines" in _text(plan, "low") and "Rule 149 — lines" in _text(plan, "low")
-    child = dataclasses.replace(core, compact_reference_docs=True, memory_view_json=memory_view.snapshot_json(
+        stepped = [row["section_id"] for row in _host_facts(plan, preferred)]
+        assert plan.initial_mode == preferred and "runtime" in stepped, (window, preferred, stepped)
+        assert "body_map" not in stepped, (window, preferred, stepped)
+        assert "How part 00 works for Change" in _text(plan, preferred)
+    child = dataclasses.replace(core, memory_view_json=memory_view.snapshot_json(
         syn.snapshot(role="child", story=syn.pages(40, 30_000))))  # its own whole story above Low's target
     rows = {row["section_id"]: row for row in _host_facts(_plan(child, 1_000_000, "low"), "low")}
-    assert rows["architecture_map"]["start_room"] == rows["development_map"]["start_room"] == "low"
+    assert rows["body_map"]["start_room"] == "low"
 
 
 def test_a_low_start_the_window_cannot_hold_shortens_only_the_book_map_it_needs(tmp_path):
-    """Past the physical window beside reply reserve and my shortest telling the maps step in ``HOST_STEPS`` order, only as many
-    as that bound needs, each to its chapter list beside its retained full text, named a step for the window."""
+    """Past the physical window beside reply reserve and my shortest telling the Body Map steps in ``HOST_STEPS``
+    order to its parts & addresses list beside its retained full text, named a step for the window."""
     core = booked(_core(tmp_path, snapshot=syn.snapshot()), tmp_path)
-    request = _plan(core, 2_000_000, "low").low_projection.estimated_tokens  # both maps whole beside all of memory
-    saving = map_saving(core.reference_books[0], "architecture_map")
+    request = _plan(core, 2_000_000, "low").low_projection.estimated_tokens  # Body Map whole beside all of memory
+    saving = map_saving(core.reference_books[0], "body_map")
     plan = _plan(core, request - saving // 2 + RESERVE, "low")  # physical shortfall, not the desired work margin
     rows, text = _host_facts(plan, "low"), _text(plan, "low")
-    assert plan.initial_mode == "low" and [row["section_id"] for row in rows] == ["architecture_map"], rows
-    assert "start_room" not in rows[0] and "## Body (chapters)" in text and "Mechanism 149 — lines" not in text
+    assert plan.initial_mode == "low" and [row["section_id"] for row in rows] == ["body_map"], rows
+    assert "start_room" not in rows[0] and "## Body (parts & addresses)" in text and "How part 00 works for Change" not in text
     assert "omitted for the physical window; retained full text: read_file(root='artifact_store'" in text
-    assert "Rule 149 — lines" in text
 
-    # Without held heads, the cold fit prices the previously shown ARCH list without shortening DEV first.
+    # Without held heads, the cold fit replays the previously shown Body Map parts list.
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.held_notes import restored_capture
     from ouroboros.owner_wait import continuation_state
@@ -585,32 +587,27 @@ def test_a_low_start_the_window_cannot_hold_shortens_only_the_book_map_it_needs(
     captured = dataclasses.replace(core, held_note_resume=restored_capture(continuation_state(ctx, messages, {}, {}, 1, [], set())))
     cold = _plan(captured, 2_000_000, "low")
     assert _host_facts(cold, "low") == rows
-    [arch] = rows
-    source = read_actor_source_bytes(core.section_root, core.section_task_id, arch["source_ref"]).decode()
-    assert arch["reader"] in _text(cold) and "Mechanism 149 — lines" in source and "Rule 149 — lines" in _text(cold)
-    # The held handle is absent in this actor's store: the cold replay retains the CURRENT map's full text for this
-    # reader at the same digest-named address, so the chapter list stays — confirmed by reading it back, not by the
-    # path's existence; without it the map would show whole ("Mechanism 149 — lines" in the request itself).
+    [bm] = rows
+    source = read_actor_source_bytes(core.section_root, core.section_task_id, bm["source_ref"]).decode()
+    assert bm["reader"] in _text(cold) and "How part 00 works for Change" in source
     unavailable = _plan(dataclasses.replace(captured, section_task_id="different-task"), 2_000_000, "low")
     [fresh] = _host_facts(unavailable, "low")
-    assert fresh["section_id"] == arch["section_id"] and not fresh.get("predicted")
-    assert fresh["source_ref"] == arch["source_ref"] and fresh["reader"] in _text(unavailable)
+    assert fresh["section_id"] == bm["section_id"] and not fresh.get("predicted")
+    assert fresh["source_ref"] == bm["source_ref"] and fresh["reader"] in _text(unavailable)
     retained = read_actor_source_bytes(core.section_root, "different-task", fresh["source_ref"]).decode()
-    assert "Mechanism 149 — lines" in retained and "Mechanism 149 — lines" not in _text(unavailable)
-    assert "## Body (chapters)" in _text(unavailable) and "Rule 149 — lines" in _text(unavailable)
+    assert "How part 00 works for Change" in retained and "How part 00 works for Change" not in _text(unavailable)
+    assert "## Body (parts & addresses)" in _text(unavailable)
 
-    # A store this actor can neither read the held handle from nor write to keeps the map whole: the request shows
-    # the map's own text and no chapter-list pointer, while the other book keeps its whole form as before.
+    # A store this actor can neither read the held handle from nor write to keeps the Body Map whole.
     blocked = tmp_path / "blocked"
     blocked.mkdir()
     (blocked / "task_results").write_text("not a directory", encoding="utf-8")
     unretainable = _plan(dataclasses.replace(captured, section_task_id="different-task", section_root=str(blocked)),
                          2_000_000, "low")
-    assert not _host_facts(unretainable, "low") and "## Body (chapters)" not in _text(unretainable)
-    assert "Mechanism 149 — lines" in _text(unretainable) and "Rule 149 — lines" in _text(unretainable)
+    assert not _host_facts(unretainable, "low") and "## Body (parts & addresses)" not in _text(unretainable)
+    assert "How part 00 works for Change" in _text(unretainable)
 
-    # ``memory_read``'s counterfactual start models a fresh start of the same material: it never takes this
-    # continuation's list (``counterfactual_starts``), and it writes nothing.
+    # ``memory_read``'s counterfactual start models a fresh start of the same material: never takes the continuation's list.
     fresh = _plan(core, 2_000_000, "low")
     files = sorted(path for path in Path(core.section_root).rglob("*") if path.is_file())
     pairwise = memory_floor.counterfactual_starts(cold, {"same": syn.snapshot()})
@@ -622,13 +619,13 @@ def test_a_low_start_the_window_cannot_hold_shortens_only_the_book_map_it_needs(
 
 
 def test_a_required_book_yields_optional_maps_then_its_own_map_and_never_one_that_saves_nothing(monkeypatch):
-    """A directly required handbook's first request takes every optional attachment's map first, then its own book's
-    map, then ARCHITECTURE's, one at a time (``memory_floor.yield_for_book``; owner 23.11.2026, 1); a map whose chapter
-    list with its receipt saves nothing, or one with nowhere to retain its full text, stays whole."""
+    """A directly required handbook's first request takes every optional attachment's map first, then the unified
+    ``body_map`` at its parts-and-addresses list beside its retained full text; a map whose compact form with its
+    receipt saves nothing, or one with nowhere to retain its full text, stays whole."""
     monkeypatch.setattr(memory_floor, "retain_section", lambda part, **_kw: {
         "section_id": part.section_id, "reader": "read_file(root='artifact_store', path='host.md')"})
-    arch = HostSection("architecture_map", "## Body\n\n" + "- Mechanism — lines 1-2\n" * 200, "## Body (chapters)\n\n- Core")
-    dev = HostSection("development_map", "## Engineering\n\n" + "- Rule — lines 1-2\n" * 200, "## Engineering (chapters)")
+    body_map = HostSection("body_map", "## Body\n\n" + "- Part mechanism and contract lead.\n" * 200,
+                           "## Body (parts & addresses)\n\n- Core")
     design = HostSection("design_bible", "## Design bible\n\n" + "A rule of the room. " * 200, "## Design bible (map)")
 
     held, readerless = (SimpleNamespace(section_root=root, section_task_id="t") for root in ("r", ""))
@@ -636,29 +633,26 @@ def test_a_required_book_yields_optional_maps_then_its_own_map_and_never_one_tha
     def ids(rows):
         return None if rows is None else [row["section_id"] for row in rows]
 
-    first = memory_floor.yield_for_book([design, arch, dev], [], held, maps=True)
+    first = memory_floor.yield_for_book([design, body_map], [], held, maps=True)
     assert ids(first) == ["design_bible"]
-    second = memory_floor.yield_for_book([design, arch, dev], first, held, maps=True)
-    assert ids(second) == ["design_bible", "development_map"] and second[-1]["tokens_saved"] > 0
-    third = memory_floor.yield_for_book([design, arch, dev], second, held, maps=True)
-    assert ids(third) == ["design_bible", "development_map", "architecture_map"]
-    assert memory_floor.yield_for_book([design, arch, dev], third, held, maps=True) is None
-    assert memory_floor.yield_for_book([arch, dev], [], held) is None  # not an unread Low start
-    small = HostSection("development_map", "## Engineering (chapters)\n\n- Change: `docs/development/change.md`",
-                        "## Engineering (chapters)\n\n- Change")  # shorter than its own, but not beside its receipt
+    second = memory_floor.yield_for_book([design, body_map], first, held, maps=True)
+    assert ids(second) == ["design_bible", "body_map"] and second[-1]["tokens_saved"] > 0
+    assert memory_floor.yield_for_book([design, body_map], second, held, maps=True) is None
+    assert memory_floor.yield_for_book([body_map], [], held) is None  # not an unread start
+    small = HostSection("body_map", "## Body (parts & addresses)\n\n- Core: `docs/architecture/core.md`",
+                        "## Body (parts & addresses)\n\n- Core")  # shorter than its own, but not beside its receipt
     assert memory_floor.yield_for_book([small], [], held, maps=True) is None
-    assert memory_floor.yield_for_book([arch, dev], [], readerless, maps=True) is None
+    assert memory_floor.yield_for_book([body_map], [], readerless, maps=True) is None
 
 
 def test_unsent_start_reprojection_keeps_detailed_book_maps_distinct_from_sent_views(tmp_path):
-    """Unsent start reprojection (e.g. first text rebind before any send) keeps both detailed book maps of a new
-    integrating Low start while tellings fit the physical frame, independent of assistant/user message roles;
-    an already-sent or cold-restored view (unsent_start=False) keeps host forms before memory."""
+    """Unsent start reprojection keeps the full Body Map of a new integrating Low start while tellings fit the
+    physical frame; an already-sent or cold-restored view (unsent_start=False) keeps host forms before memory."""
     talk = [syn.conversation(i, words=8, word_chars=400) for i in range(40)]
     core = booked(_core(tmp_path, snapshot=syn.snapshot(conversations=talk)), tmp_path, body="Its practice. " * 20)
     roomy = _plan(core, 2_000_000, "low")
     assert not _host_facts(roomy, "low") and not any(roomy.low_projection.memory_facts["floor"]["steps"].values())
-    assert "Mechanism 149 — lines" in _text(roomy, "low") and "Rule 149 — lines" in _text(roomy, "low")
+    assert "How part 00 works for Change" in _text(roomy, "low")
 
     tight = roomy.low_projection.estimated_tokens + RESERVE - 4_000
     # Applied review capsule carries role='assistant': unsent_start must not rely on message roles.
@@ -668,20 +662,20 @@ def test_unsent_start_reprojection_keeps_detailed_book_maps_distinct_from_sent_v
                 admitted=True, room_if_narrowed=True)
     unsent = roomy.reproject_for_route(**args, unsent_start=True)
     assert unsent.initial_mode == "low"
-    assert not {"architecture_map", "development_map"} & {row["section_id"] for row in _host_facts(unsent, "low")}
-    assert "Mechanism 149 — lines" in _text(unsent, "low") and "Rule 149 — lines" in _text(unsent, "low")
+    assert "body_map" not in {row["section_id"] for row in _host_facts(unsent, "low")}
+    assert "How part 00 works for Change" in _text(unsent, "low")
     assert any(unsent.low_projection.memory_facts["floor"]["steps"].values())
 
     sent = roomy.reproject_for_route(**args, unsent_start=False)
-    assert {"architecture_map", "development_map"} & {row["section_id"] for row in _host_facts(sent, "low")}
+    assert "body_map" in {row["section_id"] for row in _host_facts(sent, "low")}
 
     bare_core = booked(_core(tmp_path / "bare", snapshot=syn.snapshot()), tmp_path / "bare")
     bare = _plan(bare_core, 2_000_000, "low")
-    saving = map_saving(bare_core.reference_books[0], "architecture_map")
+    saving = map_saving(bare_core.reference_books[0], "body_map")
     too_tight = bare.low_projection.estimated_tokens - saving // 2 + RESERVE
     narrow = bare.reproject_for_route(window_tokens=too_tight, known_window=True, ratio=1.0, output_reserve=RESERVE,
                                       tool_schemas=[], start_mode="low", start_work=True, unsent_start=True)
-    assert "architecture_map" in [row["section_id"] for row in _host_facts(narrow, "low")]
+    assert "body_map" in [row["section_id"] for row in _host_facts(narrow, "low")]
 
 
 def test_narrowed_by_window_reports_physical_book_map_cut_under_low_budget_without_false_positives(tmp_path, monkeypatch):
@@ -708,11 +702,11 @@ def test_narrowed_by_window_reports_physical_book_map_cut_under_low_budget_witho
         booked(_core(tmp_path / "req", snapshot=syn.snapshot()), tmp_path / "req", body="Its practice and why. " * 320),
         development_required=True)
     roomy = _plan(req_core, 1_000_000, "low")
-    dev_saving = map_saving(req_core.reference_books[1], "development_map")
-    tight_over_target = roomy.low_projection.estimated_tokens + RESERVE - dev_saving // 2
+    bm_saving = map_saving(req_core.reference_books[0], "body_map")
+    tight_over_target = roomy.low_projection.estimated_tokens + RESERVE - bm_saving // 2
     assert tight_over_target > 250_000
     tight_plan = _plan(req_core, tight_over_target, "low")
-    assert [row["section_id"] for row in _host_facts(tight_plan, "low")] == ["development_map"]
+    assert [row["section_id"] for row in _host_facts(tight_plan, "low")] == ["body_map"]
     assert "start_room" not in _host_facts(tight_plan, "low")[0]
 
     req_windows = iter((tight_over_target, 1_000_000))
@@ -727,33 +721,30 @@ def test_narrowed_by_window_reports_physical_book_map_cut_under_low_budget_witho
                                            route_resolver=fit.RouteQuestion({"id": "task-req"}, req_resolver))
     assert req_calls == [tight_over_target, 1_000_000]
     assert not _host_facts(recovered, "low")
-    assert "Rule 149 — lines" in _text(recovered, "low") and "Mechanism 149 — lines" in _text(recovered, "low")
+    assert "How part 00 works for Change" in _text(recovered, "low")
 
 
 def test_fresh_low_keeps_maps_below_desired_work_room_and_reports_the_remaining_room(tmp_path):
-    """Both maps survive while tellings, tools and the reply reserve fit physically; a required book's separate
-    smaller-room notice survives too. Its unsendable map ladder is covered in test_required_development_book."""
+    """The Body Map survives while tellings, tools and the reply reserve fit physically; a required book's separate
+    smaller-room notice survives too."""
     base = booked(_core(tmp_path, snapshot=syn.snapshot()), tmp_path, body="Its practice and why. " * 100)
     roomy = _plan(base, 2_000_000, "low")
     req = roomy.low_projection.estimated_tokens
-    # The physically sendable ordinary view keeps both maps even below its desired work room.
     ordinary_window = req + RESERVE + 862
     assert 862 < math.ceil(ordinary_window / 8)
     ordinary = _plan(base, ordinary_window, "low")
     assert ordinary.initial_mode == "low"
     assert not _host_facts(ordinary, "low")
-    assert "Mechanism 149 — lines" in _text(ordinary, "low") and "Rule 149 — lines" in _text(ordinary, "low")
+    assert "How part 00 works for Change" in _text(ordinary, "low")
     assert "Start room is smaller than requested" in _text(ordinary, "low")
 
-    # 2) Required book joined onto an ordinary view that fits its physical frame with room to spare:
-    #    desired work-room shortfall (free ~862 < work_room) keeps BOTH detailed maps whole and emits the notice.
     required = dataclasses.replace(base, development_required=True)
     book = required.required_book_tokens("low")
     shortfall_window = req + book + RESERVE + 862
     assert 862 < math.ceil(shortfall_window / 8) < book + 862
     held = _plan(required, shortfall_window, "low")
     assert held.initial_mode == "low" and not _host_facts(held, "low")
-    assert "Mechanism 149 — lines" in _text(held, "low") and "Rule 149 — lines" in _text(held, "low")
+    assert "How part 00 works for Change" in _text(held, "low")
     assert "Start room at planning was smaller than the" in _text(held, "low")
     assert "this task's directly required handbook takes" in _text(held, "low")
     assert "requested remain." not in _text(held, "low")
@@ -766,12 +757,12 @@ def test_fresh_low_without_memory_keeps_maps_below_the_desired_work_margin(tmp_p
     assert 862 < math.ceil(window / 8)
     held = _plan(core, window, "low")
     assert held.initial_mode == "low" and not _host_facts(held, "low")
-    assert "Mechanism 149 — lines" in _text(held) and "Rule 149 — lines" in _text(held)
+    assert "How part 00 works for Change" in _text(held)
 
 
 @pytest.mark.parametrize("memory", [False, True], ids=["no-snapshot", "with-tellings"])
 def test_low_map_work_margin_exception_never_spares_unrelated_return_facts(tmp_path, memory):
-    """The same request fits physically but misses desired work room: only its two book maps get the exception.
+    """The same request fits physically but misses desired work room: only the Body Map gets the exception.
     Return facts retain their existing start-room rule, also without a memory snapshot."""
     returned = HostSection("return_facts_words", "A carried return fact. " * 500, "Return facts at their source.")
     core = dataclasses.replace(booked(_core(tmp_path, snapshot=syn.snapshot() if memory else None), tmp_path),
@@ -782,7 +773,7 @@ def test_low_map_work_margin_exception_never_spares_unrelated_return_facts(tmp_p
     assert shown.initial_mode == "low"
     assert {row["section_id"] for row in _host_facts(shown, "low")} == {"return_facts_words"}
     assert returned.full_text not in _text(shown, "low")
-    assert "Mechanism 149 — lines" in _text(shown, "low") and "Rule 149 — lines" in _text(shown, "low")
+    assert "How part 00 works for Change" in _text(shown, "low")
 
 
 def test_a_cold_return_fits_as_its_fresh_start_did_with_the_maps_it_showed_whole(tmp_path):

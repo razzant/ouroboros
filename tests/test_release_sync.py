@@ -232,12 +232,12 @@ class TestSyncReleaseMetadata:
 
         assert desync == ["web/modules/api_types.js (expected GATEWAY_CONTRACT_VERSION = '1.2.3')"]
 
-    def test_syncs_architecture_header(self, tmp_path):
+    def test_does_not_rewrite_architecture_header(self, tmp_path):
         repo = _make_repo(tmp_path, "1.2.3")
+        before = (repo / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
         changed = sync_release_metadata(str(repo))
-        assert "docs/ARCHITECTURE.md" in changed
-        text = (repo / "docs" / "ARCHITECTURE.md").read_text()
-        assert "v1.2.3" in text
+        assert "docs/ARCHITECTURE.md" not in changed
+        assert (repo / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8") == before
 
     def test_syncs_direct_download_urls_from_version(self, tmp_path):
         repo = _make_repo(tmp_path, "1.2.3")
@@ -714,14 +714,12 @@ class TestSyncReleaseMetadataRc:
         # URL path doubles the literal hyphen per shields.io escape.
         assert "badge/version-4.50.0--rc.1-green" in text
 
-    def test_syncs_architecture_header(self, tmp_path):
+    def test_does_not_rewrite_architecture_header(self, tmp_path):
         repo = _make_rc_repo(tmp_path, "4.50.0-rc.1")
+        before = (repo / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
         changed = sync_release_metadata(str(repo))
-        assert "docs/ARCHITECTURE.md" in changed
-        text = (repo / "docs" / "ARCHITECTURE.md").read_text()
-        assert "v4.50.0-rc.1" in text
-        # Must not leave the old stable spelling around.
-        assert "v4.50.0 —" not in text
+        assert "docs/ARCHITECTURE.md" not in changed
+        assert (repo / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8") == before
 
     def test_idempotent_on_rc_version(self, tmp_path):
         repo = _make_rc_repo(tmp_path, "4.50.0-rc.1")

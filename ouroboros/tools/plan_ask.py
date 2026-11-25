@@ -283,7 +283,6 @@ def _task_objective(ctx: Any) -> str:
 
 
 def stable_prompt(ctx: Any, *, body: bool, system_root: pathlib.Path, by_retrieval: bool) -> str:
-    from ouroboros.context_layout import design_navigation
     from ouroboros.tools.review_checklist import load_checklist_section
 
     try:
@@ -291,16 +290,9 @@ def stable_prompt(ctx: Any, *, body: bool, system_root: pathlib.Path, by_retriev
     except Exception as exc:
         log.warning("Could not load the Plan Review Checklist section: %s", exc)
         checklist = ""
-    bible = _governance_text(system_root, "BIBLE.md") if body else ""
-    architecture = _governance_text(system_root, "docs/ARCHITECTURE.md") if body else ""
-    design_map = (design_navigation(_governance_text(system_root, "docs/DESIGN.md") or None,
-                                    source=str(pathlib.Path(system_root) / "docs/DESIGN.md")) if body else None)
-    return plan_packet.build_stable_prompt(
-        checklist_section=checklist, body=body,
-        bible_text=bible or None, architecture_text=architecture or None,
-        bible_locator=str(pathlib.Path(system_root) / "BIBLE.md"),
-        architecture_locator=str(pathlib.Path(system_root) / "docs" / "ARCHITECTURE.md"),
-        governance_by_retrieval=by_retrieval, design_nav_map=design_map)
+    return plan_packet.build_stable_prompt_for_root(
+        checklist_section=checklist, body=body, system_root=system_root,
+        governance_by_retrieval=by_retrieval, read_governance_text=_governance_text)
 
 
 def _prior_transcript(state_root: pathlib.Path, task_id: str, participant_row: Mapping[str, Any]) -> Optional[List[Dict[str, Any]]]:

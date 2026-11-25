@@ -1,6 +1,6 @@
 # 4. Server API Endpoints
 
-Browser/CLI routes: `gateway/router.py`; Host Service: §12. Tests check this table in both directions. Shapes: `GET /api/contract`.
+Every HTTP and WebSocket route my server exposes (`ouroboros/gateway/router.py`) for the SPA, CLI, extensions, and live streaming, with machine-readable shapes published at `GET /api/contract` and `docs/CLIENT_CONTRACT.md` (Host Service routes: §12). Route table tests check this chapter in both directions, so adding or changing an endpoint updates this manual in the same commit.
 
 `NetworkAuthGate` runs `browser_boundary.py` first on every request/handshake, loopback included: foreign/opaque pages get 403 (WS 4403), passive files pass (DEPLOYMENT). `OUROBOROS_NETWORK_PASSWORD` gates non-loopback via an expiring HMAC session cookie (refused WS closes pre-accept with 4401); unset leaves remote access open by operator choice (CLIENT_CONTRACT §3, DEPLOYMENT). A valid `X-Ouroboros-Link` is my linked Ouroboros, on letter routes only (§12). Widget lease reads take only their lease (§3) and authenticate nothing else.
 
@@ -123,6 +123,7 @@ Files routes (`/api/files/*`, `gateway/files.py::file_browser_routes()`; parity:
 | POST | `/api/peer-links/invite` | a link's introduction at the owner doors below; `introduce` under the invitation token (§12) |
 | POST | `/api/peer-links/accept` | |
 | POST | `/api/peer-links/introduce` | |
+| GET | `/api/peer-links/{link_id}` | |
 | POST | `/api/peer-links/{link_id}/confirm` | |
 | POST | `/api/peer-links/{link_id}/revoke` | |
 | POST | `/api/circles` | |

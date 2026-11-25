@@ -15,7 +15,8 @@ def test_assembled_sources_survive_split_and_unverified_placement_is_named(tmp_p
     monkeypatch.setattr(usage_accounting, 'estimate_cost_optional', lambda *args, **kwargs: 0.01)
     core = ContextCore(base_prompt='Guide', bible_md='Constitution', architecture_md='Map text',
                        development_md='Handbook', semi_stable_text='', dynamic_text='', user_content_json='null',
-                       docs_need_development=True, semi_stable_sections=(HostSection('identity', 'Identity text'),),
+                       docs_need_development=False, development_required=True,
+                       semi_stable_sections=(HostSection('identity', 'Identity text'),),
                        dynamic_head_sections=(HostSection('knowledge_index', 'Knowledge'),),
                        dynamic_sections=(HostSection('recent_tools', 'Tools ran'),))
     governance = _governance_blocks(None, core, mode='max')
@@ -67,7 +68,8 @@ def test_assembled_sources_survive_split_and_unverified_placement_is_named(tmp_p
 def test_projection_witness_is_bound_to_the_selected_blocks_and_declared_append():
     core = ContextCore(base_prompt='Guide', bible_md='Constitution', architecture_md='Map text',
                        development_md='Handbook', semi_stable_text='', dynamic_text='', user_content_json='null',
-                       docs_need_development=True, dynamic_sections=(HostSection('recent_tools', 'Tools ran'),))
+                       docs_need_development=False, development_required=True,
+                       dynamic_sections=(HostSection('recent_tools', 'Tools ran'),))
     governance = _governance_blocks(None, core, mode='max')
     facts = {'floor': {'steps': {}}}
     system, captured = capture_system_projection(core, governance, 'Story', 'Room', 'max', {}, (), True,
@@ -95,7 +97,8 @@ def test_an_optional_section_this_actor_cannot_read_keeps_the_map_and_names_no_s
 
     design = HostSection('design_bible', '## Design bible\n\n' + 'Airy rule. ' * 400, operative_view='## Design bible\n\nAiry.')
     core = ContextCore(base_prompt='Guide', bible_md='Constitution', architecture_md='Map text', development_md='Handbook',
-                       semi_stable_text='', dynamic_text='', user_content_json='null', docs_need_development=True,
+                       semi_stable_text='', dynamic_text='', user_content_json='null', docs_need_development=False,
+                       development_required=True,
                        dynamic_sections=(HostSection('recent_tools', 'Tools ran'), design))
     receipts, addressed = [], {}
     assert _address_optional(design, receipts, addressed, root='', task_id='') > 0
@@ -135,8 +138,8 @@ def test_a_cold_restore_keeping_low_sends_the_witness_of_its_low_view(tmp_path, 
     def forms(rows):
         return {(group['family'], group['form']) for row in rows for group in row['groups']}
 
-    assert ('architecture', 'whole_book') in forms(fresh.projection('max').assembly_witnesses)
-    assert ('architecture', 'whole_book') not in forms(layout)  # Low's own render, not the fresh start's Max
+    assert layout == verified_layout({'messages': messages}, fresh.projection('low').assembly_witnesses)
+    assert ('architecture', 'whole_book') not in forms(layout)
 
 
 def test_late_contributions_bind_exact_prepared_forms_without_storing_body(tmp_path, monkeypatch):
@@ -407,7 +410,8 @@ def test_a_book_map_step_keeps_old_witnesses_off_the_changed_blocks():
     design = HostSection('design_bible', '## Design bible\n\n' + 'Airy rule. ' * 400,
                           operative_view='## Design bible\n\nAiry.')
     core = ContextCore(base_prompt='Guide', bible_md='Constitution', architecture_md='Map text', development_md='Handbook',
-                       semi_stable_text='', dynamic_text='', user_content_json='null', docs_need_development=True,
+                       semi_stable_text='', dynamic_text='', user_content_json='null', docs_need_development=False,
+                       development_required=True,
                        dynamic_sections=(HostSection('recent_tools', 'Tools ran'), design))
     governance = _governance_blocks(None, core, mode='low')
     system, captured = capture_system_projection(core, governance, 'Story', 'Room', 'low', {}, (), True,

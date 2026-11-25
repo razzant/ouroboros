@@ -137,9 +137,10 @@ _START_TASK_DESCRIPTION = (
 
 
 _MESSAGE_DESTINATION_DESCRIPTION = (
-    "'current' (default): this work's room. 'main': also the "
+    "'current' (default): this work's room (in Main, 'current' is Main; on an unbound wake or schedule already "
+    "in Main, omit destination or use 'current'). 'main': also the "
     "owner's main chat while this work lives in an owner-visible Project "
-    "room, for an expected result, a decision or a substantial change to "
+    "room (an owner-started root in Main may also send a typed 'main' notice there), for an expected result, a decision or a substantial change to "
     "what the owner relies on (such as lost promised verification or "
     "unique data, risk to shared work, a correction of a reported "
     "result), even when a workaround means they need not act. One "
@@ -177,7 +178,8 @@ _SCHEDULE_SUBAGENT_DESCRIPTION = (
     # The default child reads; only a write_surface value below makes it acting. Both words stay in this lead,
     # which is all a custom projection without parameter prose shows of that choice.
     "Default native READ-ONLY: repo/data/history, web/browser; no other writes or shell/review/runtime/skills. "
-    "workspace_root: start folder, else yours. Read-only input_files: file/git_range. "
+    "workspace_root: existing start folder (default: yours; omit for genesis; with external_workspace must match "
+    "write_root if both set; self_worktree copies it). Read-only input_files: file/git_range. "
     "ACTING write_surface: self_worktree isolates eligible Git files, uncommitted too (integrate_subagent_patch); "
     "external_workspace writes shared files (write_root, else workspace_root, else new Git tree); "
     "genesis: own empty durable Git repo. Private harness snapshots: integrate_delegated_patch. "
@@ -355,8 +357,8 @@ def get_tools() -> List[ToolEntry]:
                     "project_id": {"type": "string", "description": "Optional EXISTING project scope (filesystem-clean id).", "default": ""},
                     "workspace_root": {"type": "string", "description": "Absolute ordinary folder or Git worktree root outside Ouroboros repo/data, validated at admission. File/process work supports ordinary folders; Git operations need a worktree. Omit for the Project's registered working_dir or, in Main, Ouroboros's own repo.", "default": ""},
                     "workspace": {"type": "string", "description": "'none' opts out of the Project's default folder; empty otherwise.", "default": ""},
-                    "context_requires_self_body_docs": {"type": "boolean", "description": "True for work on Ouroboros code, including copies elsewhere: this task gets the full development handbook in Max and the design bible of docs/DESIGN.md from any folder, in every mode while it fits. Low/Nano and helpers keep their usual book maps.", "default": False},
-                    "context_requires_development": {"type": "boolean", "description": "true: all of docs/DEVELOPMENT.md in every mode; false: its chapter map."},
+                    "context_requires_self_body_docs": {"type": "boolean", "description": "True for work on Ouroboros code, including copies elsewhere: this task gets the design bible of docs/DESIGN.md from any folder, in every mode while it fits (all modes and helpers keep the resident Body Map + Reference Atlas and draw manuals on demand).", "default": False},
+                    "context_requires_development": {"type": "boolean", "description": "true: all of docs/DEVELOPMENT.md in every mode; false or omit: resident Body Map + Reference Atlas only (draw manuals on demand)."},
                     "review_answer": {"type": "boolean", "default": False, "description": "true when your human asks that this work's answer itself be checked: under task review Required the host reviews its whole final answer before delivery even when no file was made."},
                     "source": {"type": "string", "description": "Attach an existing folder or clone a git URL (https://... or git@host:path) server-side into the projects root; private auth failures are typed auth_required. Registers the folder with provenance + trusted_at as the Project/task workspace. Use for work on a supplied repo/folder.", "default": ""},
                     **_START_CHOICE_PARAMS,

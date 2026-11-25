@@ -1,6 +1,6 @@
 # DEVELOPMENT.md — Development Principles & Module Guide
 
-Rules by change class name their enforcement (or its absence). The first chapter fixes authority beside BIBLE, ARCHITECTURE, DESIGN and CHECKLISTS. Update the affected node, not a changelog. On the official line, leave each reference book no larger ("Documentation contract").
+Rules by change class name their enforcement (or its absence). The first chapter fixes authority beside BIBLE, ARCHITECTURE, DESIGN and CHECKLISTS. Update the affected node, not a changelog. On the official line, keep always-resident texts (`BIBLE.md`, `prompts/*.md`, Body Map + Atlas) within base size and pulled chapters within one default read ("Documentation contract").
 
 ## Chapters
 

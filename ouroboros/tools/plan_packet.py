@@ -92,6 +92,51 @@ _ROLE = (
 _PLAN_MARKER = "## THE PLAN"
 
 
+def load_architecture_book_for_plan(system_root: Any, fallback_text: str = "") -> tuple[str, tuple[str, ...]]:
+    """Load the full composed architecture book + ordered chapter locators from one capture."""
+    import pathlib
+    from ouroboros.reference_books import compose_book, load_reference_book
+
+    root = pathlib.Path(system_root)
+    try:
+        arch_book = load_reference_book(root, "architecture")
+        return compose_book(arch_book), tuple(str(root / ch.source_path) for ch in arch_book.chapters)
+    except (OSError, ValueError, KeyError):
+        return fallback_text, ()
+
+
+def build_stable_prompt_for_root(
+    *,
+    checklist_section: str,
+    body: bool,
+    system_root: Any,
+    governance_by_retrieval: bool,
+    read_governance_text: Any,
+) -> str:
+    """Load body governance texts/chapter locators for ``system_root`` and render ``build_stable_prompt``."""
+    import pathlib
+    from ouroboros.context_layout import design_navigation
+
+    root = pathlib.Path(system_root)
+    bible = read_governance_text(root, "BIBLE.md") if body else ""
+    architecture, architecture_chapters = (
+        load_architecture_book_for_plan(root, read_governance_text(root, "docs/ARCHITECTURE.md"))
+        if body else ("", ())
+    )
+    design_map = (
+        design_navigation(read_governance_text(root, "docs/DESIGN.md") or None, source=str(root / "docs/DESIGN.md"))
+        if body else None
+    )
+    return build_stable_prompt(
+        checklist_section=checklist_section, body=body,
+        bible_text=bible or None, architecture_text=architecture or None,
+        bible_locator=str(root / "BIBLE.md"),
+        architecture_locator=str(root / "docs" / "ARCHITECTURE.md"),
+        architecture_chapter_locators=architecture_chapters,
+        governance_by_retrieval=governance_by_retrieval, design_nav_map=design_map,
+    )
+
+
 def build_stable_prompt(
     *,
     checklist_section: str,
@@ -100,6 +145,7 @@ def build_stable_prompt(
     architecture_text: Optional[str] = None,
     bible_locator: str = "BIBLE.md",
     architecture_locator: str = "docs/ARCHITECTURE.md",
+    architecture_chapter_locators: Sequence[str] = (),
     governance_by_retrieval: bool = False,
     design_nav_map: Optional[str] = None,
 ) -> str:
@@ -120,12 +166,23 @@ def build_stable_prompt(
         if not architecture_text:
             raise PlanPacketError("a body plan's pack requires ARCHITECTURE.md; none supplied")
         if governance_by_retrieval:
+            chapters = [str(p).strip() for p in architecture_chapter_locators if str(p or "").strip()]
+            chapter_block = (
+                "\nArchitecture chapters (read every listed file beside the entrypoint — the entrypoint is only "
+                "the Body Map & Reference Atlas):\n"
+                + "\n".join(f"- `{p}`" for p in chapters)
+                + "\n"
+            ) if chapters else ""
             parts.append(
                 "## Governance pack (this plan touches Ouroboros's own body) — MANDATORY FULL READS\n\n"
                 "You are a retrieving participant: before judging, read BOTH documents in full with your own "
                 f"tools — the constitution `{str(bible_locator or 'BIBLE.md').strip()}` and the architecture "
-                f"reference `{str(architecture_locator or 'docs/ARCHITECTURE.md').strip()}`. A packet participant "
-                "receives them inline; you receive them by retrieval (same pack, same authority).\n\n---\n"
+                f"reference `{str(architecture_locator or 'docs/ARCHITECTURE.md').strip()}`"
+                + (" plus every chapter listed below" if chapters else "")
+                + ". A packet participant "
+                "receives them inline; you receive them by retrieval (same pack, same authority).\n"
+                + chapter_block
+                + "\n---\n"
             )
         else:
             parts.append(f"## BIBLE.md (constitution — this plan touches Ouroboros's own body)\n\n{bible_text}\n\n---\n")

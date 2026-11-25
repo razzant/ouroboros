@@ -41,7 +41,6 @@ CARRIER_FILES = (
     "web/package.json",
     "web/modules/api_types.js",
     "README.md",
-    "docs/ARCHITECTURE.md",
     "uv.lock",
 )
 
@@ -102,11 +101,9 @@ def _write_carriers(repo, version, *, history=("7.0.0", "6.104.0"), intro="Intro
         + _download_refs(version), newline="\n"
     )
     (repo / "docs").mkdir(exist_ok=True)
-    # encoding pinned: the header carries an em dash, and Windows' locale codec
-    # (cp1252) would otherwise commit non-utf-8 bytes that the carrier-span
-    # resolver cannot decode — the file then stays a conflict instead of clean.
+    # docs/ARCHITECTURE.md is no longer a version carrier (cache-invariant Body Map).
     (repo / "docs" / "ARCHITECTURE.md").write_text(
-        f"# Ouroboros v{version} — Architecture & Reference\n\nArchitecture body.\n",
+        "# Ouroboros — Body Map & Reference Atlas\n\nArchitecture body.\n",
         encoding="utf-8", newline="\n"
     )
     (repo / "uv.lock").write_text(
@@ -205,7 +202,6 @@ def test_planner_resolves_carrier_span_conflict_to_the_official_side(tmp_path, m
     readme = (repo / "README.md").read_text()
     assert "version-7.0.1-green" in readme
     assert "| 7.0.1 |" in readme and "| 7.1.0 |" not in readme
-    assert "# Ouroboros v7.0.1" in (repo / "docs" / "ARCHITECTURE.md").read_text()
     # Never whole-file theirs: the local NON-span edit survived the update.
     assert "Locally rewritten intro." in readme
     # A real 2-parent merge commit landed (reviewed base first, official second).
@@ -436,12 +432,14 @@ def test_every_descriptor_matches_the_live_repo_exactly_once():
         "readme_badge", "readme_history", "readme_download_refs",
     }
     # The span set is cut from THIS tree's carrier inventory (everything
-    # sync_release_metadata writes / version_carrier_desyncs checks): the 7
-    # ratified carriers + README-history, the README direct-download reference
+    # sync_release_metadata writes / version_carrier_desyncs checks): the 6
+    # ratified carriers (docs/ARCHITECTURE.md is cache-invariant and carries no
+    # release version) + README-history, the README direct-download reference
     # block, the uv.lock root-package mirror, the web/package-lock.json header
     # (both root version entries in one span), and 8 release-download anchors on
     # each of the two public install pages (macos-arm64 appears twice there).
-    assert len(VERSION_CARRIER_SPANS) == 26
+    assert len(VERSION_CARRIER_SPANS) == 25
+    assert "docs/ARCHITECTURE.md" not in {s.path for s in VERSION_CARRIER_SPANS}
     assert {s.carrier_id for s in VERSION_CARRIER_SPANS} >= {
         "uv_lock_root_package", "web_package_lock_version", "readme_download_refs",
         "site_install_download_macos-arm64_button",

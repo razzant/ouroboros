@@ -397,24 +397,17 @@ class ContextCore:
     held_note_resume: Optional[Mapping[str, Any]] = None
 
     def required_book_tokens(self, mode: str) -> int:
-        """What the directly required handbook adds to the ordinary view of ``mode``, 0 when that view holds it.
+        """What the directly required handbook adds to the ordinary view of ``mode``, 0 when absent.
 
-        Compact views keep their chapter map beside it; Max for another subject carries the map in the book's
-        place. The window charges it; owner targets, memory or transcript narrowing and rescues are sized without it.
-        Only a first request that cannot go out with it yields maps for it (``memory_floor.yield_for_book``). A missing
-        source adds nothing: the capture discloses the gap instead of a partial book.
+        Under the unified Body Map layout (BIBLE P1), ordinary views carry no whole handbook,
+        so a task's explicit ``development_required`` adds the whole handbook in every mode.
         """
-        full = mode == "max" and not self.compact_reference_docs
-        if not self.development_required or not self.development_md.strip() or (full and self.docs_need_development):
+        del mode
+        if not self.development_required or not self.development_md.strip():
             return 0
-        chapter_map = reference_doc_sections(None, context_mode="max", include_development=False, architecture_text="",
-                                             development_text=self.development_md, books=self.reference_books)[1] if full else ""
-        # Characters as the request estimate counts them: its own system item (comma included), less the map and its
-        # separator inside B; the estimate is chars/4 over the whole request.
         item = len(json.dumps({"text": whole_development_book(self.development_md), "type": "text"}, ensure_ascii=False,
                               sort_keys=True, separators=(",", ":"))) + 1
-        replaced = len(json.dumps(chapter_map, ensure_ascii=False)) + 2 if chapter_map else 0
-        return max(0, (item - replaced + 3) // 4)
+        return max(0, (item + 3) // 4)
 
 
 def _governance_blocks(env: Any, core: ContextCore, *, mode: str) -> Tuple[Any, ...]:
@@ -899,16 +892,18 @@ def _wire_room(raw, complete, *, mode, preferred, reserve, window, record, admit
 
 
 def _integrating(core: ContextCore, role: Any) -> bool:
-    """A view of a focus that integrates (BIBLE P1): no compact books, no delegated child's or nanny's ``role``."""
-    return not core.compact_reference_docs and role not in DELEGATED_FOCUS_ROLES
+    """A view of a focus that integrates (BIBLE P1): no delegated child's or nanny's ``role``."""
+    del core
+    return role not in DELEGATED_FOCUS_ROLES
 
 
 def _mode_host_receipts(selected: str, form_mode: str, rows: Iterable[Mapping[str, Any]],
                         low_maps: Iterable[Mapping[str, Any]], book_maps: Iterable[str]) -> list:
-    if form_mode != "low":
-        return [row for row in rows if not row.get("held_note_form") and row.get("section_id") not in book_maps]
-    seen = {row.get("section_id") for row in rows} if selected == "low" else None
-    return [*rows, *(row for row in low_maps if row.get("section_id") not in seen)] if seen is not None else list(rows)
+    del form_mode, book_maps
+    if selected not in ("max", "low"):
+        return list(rows)
+    seen = {row.get("section_id") for row in rows}
+    return [*rows, *(row for row in low_maps if row.get("section_id") not in seen)]
 
 
 def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...]], user_content_json: str, *, preferred: str,
@@ -958,7 +953,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     spares = (kept is None or start_work or unsent_start) and integrating
     can_yield_maps = ((kept is None and not cold_resume) or start_work or unsent_start) and integrating
     book_maps = floor.replay_book_maps(sections["low"], saved if kept is None else {}, core, retain=retain)
-    low_maps = book_maps if kept is None else [r for r in (kept_sections or {}).get("low", ()) if r.get("section_id") in floor.BOOK_MAPS]
+    low_maps = book_maps if kept is None else [
+        r for r in ((kept_sections or {}).get(shown_mode, ()) or (kept_sections or {}).get("low", ()))
+        if r.get("section_id") in floor.BOOK_MAPS
+    ]
     saved_frame = saved.get("frame") if len(book_maps) == len(saved.get("book_maps", ())) else None  # a list now detailed: refit
     previous = tuple((kept_sections or {}).get(shown_mode, ()))
     receipts, room_fact = list(previous), None  # room_fact: the start's Max room, named by a view lowered from Max
@@ -1077,7 +1075,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             shortest=shortest if snapshot and kept is None else None,  # a held view was sent: it keeps its steps
             told=told if snapshot and known_window else None,
             # Held heads yield last, to the window alone (voice setup is a start even with a prepared view).
-            held_least=shortest if held_heads and snapshot and known_window and form[selected] == "low" and not replay else None,
+            held_least=shortest if held_heads and snapshot and known_window and not replay else None,
             held_bound=host_allowances["window" if kept is None or start_work else "physical"],
             window=window if known_window else None, reserve=reserve, ratio=ratio, saving=host_saving,
             slack=max(slack, slack + host_saving - asked) if running else slack,  # a trial's growth buys no host outline
@@ -1086,7 +1084,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             budget_mode=selected if kept is None and target and target < window else None,
             window_bound=host_allowances["window"], retain=retain,  # the window's own start bound, whatever target frames the start
             optional_walk=(lambda forms: view(selected, sent, forms, window, boundary)) if snapshot else None,
-            maps_told=(lambda forms: told(forms, False)) if spares and selected == "low" else None)
+            maps_told=(lambda forms: told(forms, False)) if spares and selected in ("max", "low") else None)
         fixed = measure(selected, sent, section_views(sections[selected], receipts))
         allowances = floor.floor_allowances(window_tokens=window if known_window else None,
             output_reserve_tokens=reserve, non_memory_tokens=fixed, target_tokens=target if kept is None else None,
@@ -1108,13 +1106,6 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             fixed=fixed, ratio=ratio, forms=forms, window=window, reserve=reserve, work=work(), allowances=allowances,
             schemas=tool_schema_tokens(list(sent.schemas), provider=provider, reasoning_effort=reasoning_effort),
             memory_price=memory_price)
-    running_max_needs_maps = (not running and mode == "max" and form[mode] == "max" and known_window and snapshot
-                              and kept is not None and not start_work and held_heads
-                              and not telling_fits(mode, sent, section_views(sections[mode], receipts),
-                                                   window, boundary, reserve, start_room=False))
-    if (room_fact and floor.max_room_lost(room_fact)) or running_max_needs_maps:
-        mode = "low"
-        sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
 
     running_shown = None
     def render(forms=None, *, level=None, telling_floor=False):
@@ -1167,10 +1158,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         if mode == "nano" or not overflows(shown):
             break
         # A live trial still has to reselect tools and measure its chosen wire reserve.
-        if (running or mode == "low") and kept is not None and admitted:
+        if (running or mode in ("max", "low")) and kept is not None and admitted:
             prior_view = (running_shown or render()) if shown is floor.NO_VIEW else shown
             last = (sent, fixed, reserve, window, boundary, allowances, receipts, prior_view, wire_room(prior_view), mode)
-        mode, running_shown = ("low" if mode == "max" and not running else "nano"), None
+        mode, running_shown = "nano", None
         sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
     if held_heads and mode == "nano" and overflows(shown):
         emergency_level = shown.level
@@ -1190,9 +1181,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                                fixed_tokens=fixed, memory_tokens=floor.tokens_of(shown.story_chars) + floor.tokens_of(shown.room_chars),
                                reserve_tokens=reserve, window_tokens=window, ratio=ratio,
                                work_room_tokens=work() if core_alone else 0)
-    def optional_map():  # the required handbook's next yield: optional maps, then an unread Low start's book maps
+    def optional_map():  # the required handbook's next yield: optional maps, then an unread start's book maps
         nonlocal receipts
-        receipts = floor.yield_for_book(sections[mode], receipts, core, retain=retain, maps=can_yield_maps and mode == "low") or receipts
+        receipts = floor.yield_for_book(sections[mode], receipts, core, retain=retain, maps=can_yield_maps and mode in ("max", "low")) or receipts
         return measure(mode, sent, section_views(sections[mode], receipts))
     story, room, room_data, receipt = _final_view(shown, snapshot, whole_core, mode, room_fact, fixed=fixed, ratio=ratio,
         window=window, reserve=reserve, output_reserve=output_reserve, work=work, window_record=limits(mode)[3], optional_map=optional_map,

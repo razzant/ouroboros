@@ -1563,11 +1563,11 @@ def book_yield_due(ctx: Any) -> bool:
     mode = str(getattr(ctx, "active_context_mode", "") or "")
     plan = ctx.context_fit_plan
     core = getattr(plan, "core", None)
-    if (mode not in ("low", "nano") or core is None or getattr(plan, f"{mode}_projection", None) is None
+    if (mode not in ("max", "low", "nano") or core is None or getattr(plan, f"{mode}_projection", None) is None
             or not core.required_book_tokens(mode) or not start_unread(ctx.tools._ctx, ctx.accumulated_usage)):
         return False
     facts = plan.projection(mode).memory_facts or {}
-    if mode == "low":
+    if mode in ("max", "low"):
         return _integrating(core, facts.get("role"))
     rows = {row.get("section_id") for row in facts.get("host_sections_addressed", ())}
     return any(part.section_id in memory_floor.OPTIONAL_STEPS and part.section_id not in rows

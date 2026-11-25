@@ -7,7 +7,7 @@
  * @property {string} round_id
  * @property {''|'max'|'low'|'nano'} preferred_at_send  // the task plan's owner mode when it sent
  * @property {'max'|'low'|'nano'} applied  // the mode the send is named in: Low for Low under the owner's Max (shown_mode)
- * @property {'whole'|'maps'} books  // the books' form in this send
+ * @property {'body_map'|'whole'|'maps'} books  // the books' form in this send
  * @property {string} profile  // owner_max | owner_low | owner_nano | task_local_low | task_local_nano
  * @property {''|'memory'|'request'|'route'|'window'|'after_start'} cause  // why applied is lower than preferred_at_send
  * @property {boolean} target_missed  // this send exceeded the owner's mode target

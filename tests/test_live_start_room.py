@@ -146,9 +146,9 @@ def test_native_resume_prices_nano_schemas_and_keeps_loaded_and_feature_tools(ho
 
 @pytest.mark.parametrize('host_world', [('max', 1_000_000, 'estimator')], indirect=True)
 @pytest.mark.parametrize('route,resume,excess,mode,deeper', [
-    ('fixture', '', 4_000, 'max', False), ('fixture', '', 87_000, 'low', False),
-    ('fixture', '', 285_000, 'low', True), ('fixture', 'fixture-resume', 4_000, 'max', False),
-    ('grok', '', 87_000, 'low', False),
+    ('fixture', '', 4_000, 'max', False), ('fixture', '', 87_000, 'max', True),
+    ('fixture', '', 160_000, 'max', True), ('fixture', 'fixture-resume', 4_000, 'max', False),
+    ('grok', '', 87_000, 'max', True),
 ])
 def test_running_voice_wall_prices_whole_books_before_going_below_tellings(host_world, route, resume, excess, mode, deeper):
     from time import perf_counter

@@ -59,11 +59,10 @@ def test_main_max_and_nano_use_the_same_captured_book_bytes(tmp_path):
         assert "My whole earlier biography." in text
         assert "The complete constitution." in text
         assert text.count("How I keep work alive.") == 1
-    assert "Full mechanism and WHY." in full and "Full engineering discipline." in full
+        assert "Full mechanism and WHY." not in text and "Full engineering discipline." not in text
+        assert "docs/architecture/runtime.md" in text and "docs/DEVELOPMENT.md" in text
     assert "Parent's unselected current working note." in full
     assert "Unselected raw parent conversation." in full
-    assert "Full mechanism and WHY." not in nano and "Full engineering discipline." not in nano
-    assert "docs/architecture/runtime.md" in nano and "docs/development/change.md" in nano
     assert str(env.repo_dir) not in plan.projection("max").system_message()["content"][0]["text"]
     # Reading a newer file cannot mutate an already captured source or cached prefix.
     before = json.dumps(plan.messages_for("max"), sort_keys=True)
@@ -76,7 +75,7 @@ def test_child_keeps_biography_and_book_orientation_in_max(tmp_path):
     env, core, task = _capture(tmp_path, {"delegation_role": "subagent"})
     text = _text(_plan(env, core, task, "max"), "max")
     assert "My whole earlier biography." in text and "My complete identity." in text
-    assert "How I keep work alive." in text and "How changes remain coherent." in text
+    assert "How I keep work alive." in text and "docs/DEVELOPMENT.md" in text
     assert "Full mechanism and WHY." not in text
     assert "Parent's unselected current working note." not in text
     assert "Unselected raw parent conversation." not in text

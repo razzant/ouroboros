@@ -35,7 +35,7 @@ from ouroboros.tool_access import (
 )
 from ouroboros.tools.registry import ToolContext, active_repo_dir_for
 from ouroboros.tools.arg_feedback import ABSENT, read_end_spelling, with_argument_notes
-from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, append_published_text, completed_local_read
 from ouroboros.utils import safe_relpath
 
 log = logging.getLogger(__name__)
@@ -824,6 +824,7 @@ def _stamp_read_view(ctx: ToolContext, target: Any, opened: str, opened_root: st
             extent["body_start"] += len(revision_line)
         view = {"target": str(target), "opened_path": str(opened), "opened_root": str(opened_root), **extent}
         ctx.last_read_view = view
+        from ouroboros.body_candidate import own_body_reference_note
         from ouroboros.delegate_output import acknowledge_staged_output_read
         from ouroboros.tools.tool_result import _published_tool_result, _replace_tool_result
 
@@ -839,9 +840,9 @@ def _stamp_read_view(ctx: ToolContext, target: Any, opened: str, opened_root: st
                   ToolResult(status="ok", code="OK", text=rendered, meta={"read_view": compact}))
         rendered = _publish_tool_result(ctx, result)
         acknowledge_staged_output_read(ctx, compact, rendered)
+        if body_note := own_body_reference_note(ctx, target, opened_root, active_repo=active_repo_dir_for(ctx)):
+            rendered = append_published_text(ctx, rendered, "\n" + body_note)
     elif identity_note:
-        from ouroboros.tools.tool_result import append_published_text
-
         rendered = append_published_text(ctx, rendered, "\n" + identity_note)
     return rendered
 

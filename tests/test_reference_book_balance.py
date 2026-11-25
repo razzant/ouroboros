@@ -64,7 +64,7 @@ def test_published_feature_keeps_contribution_growth(tmp_path, remote, url):
     _git(clone, "branch", f"--set-upstream-to={fork}/feature")
     assert _git(clone, "rev-parse", "@{upstream}") == _git(clone, "rev-parse", "HEAD")
     (published,) = book_balances(clone, [CHAPTER])
-    assert published.vs_head == 0 and published.vs_upstream == published.owed == len("Committed growth.\n")
+    assert published.vs_head == 0 and published.vs_upstream == len("Committed growth.\n") and published.owed == 0
     # Advance the official target independently: the measured base must be the
     # common ancestor, not this tip and not the feature-tracking upstream.
     tree = _git(clone, "rev-parse", f"{base}^{{tree}}")
@@ -73,7 +73,7 @@ def test_published_feature_keeps_contribution_growth(tmp_path, remote, url):
     (clone / CHAPTER).write_text(BODY + "Committed growth.\nMore.\n", encoding="utf-8", newline="\n")
     (balance,) = book_balances(clone, [CHAPTER])
     assert balance.vs_head == len("More.\n")
-    assert balance.vs_upstream == len("Committed growth.\nMore.\n") == balance.owed
+    assert balance.vs_upstream == len("Committed growth.\nMore.\n") and balance.owed == 0
     assert balance.upstream == target and balance.merge_base == base
     assert target in render_book_balance(balance) and base in render_book_balance(balance)
     assert balance.changed == ((CHAPTER, len("More.\n")),)
@@ -296,11 +296,21 @@ def test_balance_helper_does_not_import_runtime_state(tmp_path):
 
 def test_note_states_the_rule_when_owed_and_one_quiet_line_when_paid(tmp_path):
     repo = _book_repo(tmp_path)
+    (repo / "BIBLE.md").write_text("# BIBLE\n\nP0.\n", encoding="utf-8", newline="\n")
+    _git(repo, "add", "BIBLE.md")
+    _git(repo, "commit", "-qm", "add bible")
+    _git(repo, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
+    # Tier B pulled chapter growth inside the one-read band reports factual delta with nothing owed.
     (repo / CHAPTER).write_text(BODY + "Added.\n", encoding="utf-8", newline="\n")
-    grown = book_balance_note(repo, [CHAPTER])
-    assert "Architecture book" in grown and "+7 B vs HEAD" in grown and BOOK_GROWTH_RULE in grown
-    (repo / CHAPTER).write_text(BODY.replace(" and long enough to shorten", ""), encoding="utf-8", newline="\n")
-    paid = book_balance_note(repo, [CHAPTER])
+    tier_b = book_balance_note(repo, [CHAPTER])
+    assert "Architecture book" in tier_b and "+7 B vs HEAD" in tier_b and "nothing owed" in tier_b
+    assert BOOK_GROWTH_RULE not in tier_b and "\n" not in tier_b
+    # Tier A resident text (BIBLE.md) growth states the shrink-only rule.
+    (repo / "BIBLE.md").write_text("# BIBLE\n\nP0. Added.\n", encoding="utf-8", newline="\n")
+    grown = book_balance_note(repo, ["BIBLE.md"])
+    assert "BIBLE.md" in grown and "+7 B vs HEAD" in grown and BOOK_GROWTH_RULE in grown
+    (repo / "BIBLE.md").write_text("# BIBLE\n\nP0.\n", encoding="utf-8", newline="\n")
+    paid = book_balance_note(repo, ["BIBLE.md"])
     assert paid.startswith("ℹ️ Text growth:") and "nothing owed" in paid
     assert BOOK_GROWTH_RULE not in paid and "\n" not in paid
     assert book_balance_note(repo, ["notes.md"]) == ""
@@ -344,15 +354,15 @@ def test_note_discloses_an_unavailable_book_beside_a_measured_book(tmp_path, mis
     complete = book_balance_note(repo, paths)
     readable_only = book_balance_note(repo, [readable])
     assert "unavailable" not in complete
-    assert ("nothing owed" in complete) is (not growth)
-    assert (BOOK_GROWTH_RULE in complete) is bool(growth)
+    assert "nothing owed" in complete
+    assert BOOK_GROWTH_RULE not in complete
 
     (repo / missing).unlink()
     partial = book_balance_note(repo, paths)
     assert f"{missing_book.title()} book balance unavailable" in partial
     assert render_book_balance(book_balances(repo, [readable])[0]) in partial
     assert "nothing owed" not in partial
-    assert (BOOK_GROWTH_RULE in partial) is bool(growth)
+    assert BOOK_GROWTH_RULE not in partial
     assert book_balance_note(repo, [readable]) == readable_only
     assert book_balance_note(repo, ["notes.md"]) == ""
 
@@ -379,7 +389,7 @@ def test_a_body_book_edit_carries_the_balance(subtests, tmp_path, monkeypatch):
             monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
             result = str(_registry(tmp_path, external=False).execute(tool, GROW[tool]))
             assert result.startswith("✅"), result[:300]
-            assert "ℹ️ Text growth:\n" in result and BOOK_GROWTH_RULE in result
+            assert "ℹ️ Text growth:" in result and "Architecture book" in result
 
 
 def test_a_foreign_project_or_a_non_book_path_gets_no_balance(subtests, tmp_path, monkeypatch):
@@ -409,16 +419,25 @@ def test_the_commit_gate_states_the_staged_books_balance_in_its_diff_pulse(tmp_p
     from ouroboros.tools.review_helpers import check_worktree_readiness
 
     repo = _book_repo(tmp_path / "body")
-    for text, owed in ((BODY + "Added.\n", True), (BODY.replace(" and long enough to shorten", ""), False)):
-        (repo / CHAPTER).write_text(text, encoding="utf-8", newline="\n")
-        _git(repo, "add", CHAPTER)
+    (repo / "BIBLE.md").write_text("# BIBLE\n\nP0 honest and long enough to shorten.\n", encoding="utf-8", newline="\n")
+    _git(repo, "add", "BIBLE.md")
+    _git(repo, "commit", "-qm", "add bible")
+    _git(repo, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
+    # Tier B chapter reports factual delta with nothing owed; Tier A BIBLE.md states the rule when grown.
+    for path, text, owed, label in (
+        (CHAPTER, BODY + "Added.\n", False, "Architecture book"),
+        ("BIBLE.md", "# BIBLE\n\nP0 honest and long enough to shorten.\nAdded.\n", True, "BIBLE.md"),
+        ("BIBLE.md", "# BIBLE\n\nP0 honest.\n", False, "BIBLE.md"),
+    ):
+        (repo / path).write_text(text, encoding="utf-8", newline="\n")
+        _git(repo, "add", path)
         progress: list = []
         ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "data", task_id="t-books", emit_progress_fn=progress.append)
-        commit_gate.deterministic_preflight(ctx, "docs: one chapter", [CHAPTER])
+        commit_gate.deterministic_preflight(ctx, "docs: update", [path])
         [size] = [line for line in progress if line.startswith("Size (information):")]
-        assert "Diff pulse since canonical/ouroboros merge-base" in size and "Architecture book" in size
+        assert "Diff pulse since canonical/ouroboros merge-base" in size and label in size
         assert (BOOK_GROWTH_RULE in size) is owed and ("nothing owed" in size) is not owed
-        assert not [w for w in check_worktree_readiness(repo, paths=[CHAPTER]) if "book" in w]
+        assert not [w for w in check_worktree_readiness(repo, paths=[path]) if "book" in w]
 
 
 def test_bible_and_the_prompts_follow_the_book_rule(tmp_path):

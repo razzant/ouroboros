@@ -118,17 +118,15 @@ def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, fore
     for index, request in enumerate(inputs):
         system = json.dumps([m for m in request["messages"] if m["role"] == "system"])
         assert "PREDECESSOR-CONTRACT-SENTINEL" not in system and "predecessor_authority" in system
-        # Low projects books as navigation. A Max overflow without numbers narrows memory first and keeps the books
-        # (owner order 7A: memory before books, which wait for a further refusal; 06.11), so the stored inclusion
-        # choice keeps the whole handbook in every Max request here. User content may be blocks.
+        # Unified resident Body Map + Reference Atlas: neither Max nor Low preloads whole DEVELOPMENT.md
+        # unless the task explicitly sets context_requires_development=True.
         assert sum(block.get("text", "").startswith("## DEVELOPMENT.md\n")
                    for m in request["messages"] if m["role"] == "system"
-                   for block in m["content"]) == int(flag is True and mode == "max")
-        if mode == "low" or (index == 2 and flag is not True):
-            assert "## DEVELOPMENT.md (navigation map)" in system
+                   for block in m["content"]) == 0
+        assert "ARCHITECTURE.md" in system
         users = json.dumps([m for m in request["messages"] if m["role"] == "user"], ensure_ascii=False)
         assert json.dumps(task["text"], ensure_ascii=False)[1:-1] in users
-    assert registry._ctx.context_fit_plan.core.docs_need_development is bool(flag)
+    assert registry._ctx.context_fit_plan.core.docs_need_development is False
     assert task["task_contract"][FIELD] is bool(flag)
     assert "owner pressed" not in task["text"].lower() and "already in your context" in task["text"]
     assert len({request["model"] for request in inputs}) == 1

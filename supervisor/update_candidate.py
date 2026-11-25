@@ -820,7 +820,6 @@ def project_version_carriers(target_sha: str, *, cwd: Optional[str] = None) -> T
             web_package_text=_read("web/package.json"),
             web_package_lock_text=_read("web/package-lock.json"),
             readme_text=readme_text,
-            arch_text=_read("docs/ARCHITECTURE.md"),
             api_types_text=_read("web/modules/api_types.js"),
             download_readme_text=readme_text,
             site_install_text=_read("site/install/index.html"),

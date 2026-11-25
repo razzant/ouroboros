@@ -5,8 +5,8 @@ rebases of the v7 branch (owner-ratified: spec §1.9-10, batch №8 answer 6=A).
 Standalone operator tooling — NOT runtime. When a `git rebase` (or merge) of
 the v7 branch stops on the release carriers (VERSION, pyproject.toml, uv.lock,
 web/package.json, web/modules/api_types.js GATEWAY_CONTRACT_VERSION, the
-README badge / Version History block / direct-download reference block, the
-docs/ARCHITECTURE.md header, the release-download anchors of the two public
+README badge / Version History block / direct-download reference block, and the
+release-download anchors of the two public
 install pages), this helper resolves each conflicted carrier file by span
 substitution: the preferred side — 'ours' by default, which during a rebase is
 the side being rebased ONTO (index stage 2) — wins INSIDE the declared carrier

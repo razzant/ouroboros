@@ -938,7 +938,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     reports_miss = binds or (report_nano_miss and kept is None and mode == owner_mode == "nano"
                              and target is not None and (window is None or target < window))
     floor, keeps = ((TARGET_FLOOR, TARGET_KEEPS) if binds else (TELLING_STAGES, frozenset())  # the one order (4A)
-                    if telling_floor or mode == "max" and (kept is None or start_work) else (None, frozenset()))
+                    if telling_floor else (None, frozenset()))
     size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))
     room_bound = allowances["window"] if binds else allowances["margin"]  # a target's miss is its own fact, below
     uncovered = uncovered_owner_rows(snapshot)
@@ -1021,7 +1021,7 @@ def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: 
 # Host producers before the whole-or-outline sections, then the memory walk, all under the same
 # start budget. Running views narrow only under physical pressure or a refusal.
 HOST_STEPS = ("runtime", "review_pool", "review_continuity", "installed_skills", "drive_state",
-              "world", "subagents", "architecture_map", "development_map", "return_facts_words")
+              "world", "subagents", "body_map", "return_facts_words")
 # Optional reference sections keep their whole excerpt beside my shortest tellings until physical pressure.
 OPTIONAL_STEPS = ("design_bible",)
 
@@ -1061,7 +1061,7 @@ TELLING_SPARED = ("return_facts", "return_facts_words")
 # target or desired work room shortens them; a cold return keeps the chapter lists it held, retaining the current
 # full map when a chapter changed (``replay_book_maps``). A directly required handbook's first request that cannot go out takes them in this
 # order, its own map first, after the optional maps (owner 23.11.2026, 1; ``yield_for_book``).
-BOOK_MAPS = ("development_map", "architecture_map")
+BOOK_MAPS = ("body_map",)
 
 
 def _held_note_steps(sections, receipts, fits, *, form="summary"):
@@ -1352,14 +1352,14 @@ def step_book_map(plan: Any, mode: str, *, maps: Optional[bool] = None) -> Optio
     from ouroboros.section_floor import render_sections
 
     core = getattr(plan, "core", None)
-    if (core is None or mode not in ("low", "nano") or getattr(plan, f"{mode}_projection", None) is None
+    if (core is None or mode not in ("max", "low", "nano") or getattr(plan, f"{mode}_projection", None) is None
             or not core.required_book_tokens(mode)):
         return None
     shown = plan.projection(mode)
-    governance = _governance_blocks(None, core, mode="low")
+    governance = _governance_blocks(None, core, mode="low" if mode == "nano" else mode)
     common = governance[0] if not isinstance(governance[0], str) else ()
     rows = list(shown.memory_facts.get("host_sections_addressed", ()))
-    allow_maps = (mode == "low") if maps is None else bool(maps and mode == "low")
+    allow_maps = (mode in ("max", "low")) if maps is None else bool(maps and mode in ("max", "low"))
     stepped = yield_for_book((*core.dynamic_head_sections, *common), rows, core, maps=allow_maps)
     system = json.loads(shown.system_content_json)
 

@@ -149,7 +149,8 @@ def _host_section_fixture(tmp_path, monkeypatch):
     books = []
     for name, entry in BOOK_ENTRYPOINTS.items():
         chapter = f'{name}/fixture.md'
-        docs = {entry: f'# {name.title()}\n\nFixture book.\n\n## Chapters\n\n- [Fixture]({chapter})\n',
+        atlas = '\n## Reference Atlas\n\n- `docs/DEVELOPMENT.md` — fixture\n' if name == 'architecture' else ''
+        docs = {entry: f'# {name.title()}\n\nFixture book.\n\n## Chapters\n\n- [Fixture]({chapter})\n{atlas}',
                 f'docs/{chapter}': f'# Fixture\n\nIntroduction to {name}.\n\n## Detail\n\nThe full {name} example.\n'}
         books.append(load_reference_book(tmp_path, name, lambda path: docs[path].encode('utf-8')))
     inputs = {book.book_id + '_md': compose_book(book) for book in books}
@@ -202,22 +203,21 @@ def test_compact_context_inspect_keeps_base_governance_addresses(mode, folded, t
     seen = json.loads(inspect)
     assert seen['memory_view_status'] == 'observed_snapshot' and 'next_offset' not in seen
     host = [row for row in seen['units'] if row['kind'] == 'host']
-    books = ['governance_2'] if mode == 'max' else ['architecture_map', 'development_map']
     expected_ids = [
         'subagents', 'review_pool', 'identity', 'world', 'always_on_skills', 'stable_5',
         'shared_understanding', 'knowledge_index', 'project_knowledge_index', 'head_3', 'head_4',
         'dynamic_0', 'dynamic_1', 'dynamic_2', 'scratchpad', 'registry', 'installed_skills', 'drive_state',
         'runtime', 'dynamic_8', 'review_continuity', 'dynamic_10', 'dynamic_11', 'dynamic_12',
-        'governance_0', 'governance_1', *books, 'governance_3' if mode == 'max' else 'governance_4',
+        'governance_0', 'governance_1', 'body_map',
     ]
     protected = {'identity', 'scratchpad', 'shared_understanding'}
     assert [(row['view_address'], row['section_id'], row['protected']) for row in host] == [
         ('host:' + key, key, key in protected) for key in expected_ids]
 
     local_families = {group['family'] for row in p.projection(mode).assembly_witnesses for group in row['groups']}
-    assert {'system', 'bible', 'architecture', 'development', 'project_journal', 'project_workpad', 'connections',
+    assert {'system', 'bible', 'body_map', 'project_journal', 'project_workpad', 'connections',
             'recent_progress', 'recent_tools', 'recent_events', 'story'} <= local_families
-    assert (b'The full development example.' in wire) is (mode == 'max')
+    assert b'The full development example.' not in wire
     assert (b'Page 0.' in wire) is (not folded)
 
     # No report labels in the pre-observer representation. If a producer introduces a public ID

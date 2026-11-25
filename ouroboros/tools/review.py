@@ -187,31 +187,78 @@ def _preflight_check(commit_message: str, staged_files: str,
     # comment-only .py diff refused for missing tests). See docstring —
     # CHECKLISTS.md items 4/12 own these duties semantically.
 
-    # New logic modules require active ARCHITECTURE.md update.
+    # New logic modules require manifest membership, a module docstring lead, and
+    # owning-manual documentation (BIBLE P6).
     new_logic_files = [
         f for f in new_files
         if f.startswith(("ouroboros/", "supervisor/")) and f.endswith(".py")
     ]
-    # The Architecture book is the obligation, not one file: a new module is
-    # documented in the CHAPTER that owns its subsystem, and demanding an
-    # entrypoint edit would only buy a membership-list touch that documents
-    # nothing. Any staged source of the book satisfies it.
-    from ouroboros.reference_books import BOOK_ENTRYPOINTS, book_entrypoint_for
+    if new_logic_files:
+        import ast as _ast
+        from ouroboros.reference_books import BOOK_ENTRYPOINTS, book_entrypoint_for, load_domain_references
 
-    architecture_entrypoint = BOOK_ENTRYPOINTS["architecture"]
-    documented = any(
-        book_entrypoint_for(staged) == architecture_entrypoint for staged in active_staged
-    )
-    if new_logic_files and not documented:
-        return (
-            "⚠️ PREFLIGHT_BLOCKED: New files added in ouroboros/ or supervisor/ "
-            "but no source of the Architecture book is staged.\n"
-            "  New structural additions must be documented in the Architecture book "
-            f"(`{architecture_entrypoint}` or a `docs/architecture/` chapter) "
-            "(Bible P6: authenticity / architectural mirror).\n"
-            f"  New files: {new_logic_files[:5]}\n"
-            f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
+        def _staged_or_disk_bytes(rel: str) -> bytes:
+            txt = _git_show_staged(repo_dir, rel)
+            if txt is not None:
+                return txt.encode("utf-8")
+            return (repo_dir / rel).read_bytes()
+
+        has_manifest = (
+            _git_show_staged(repo_dir, "ouroboros/domains.toml") is not None
+            or (repo_dir / "ouroboros/domains.toml").is_file()
         )
+        domains, modules, references = (
+            load_domain_references(repo_dir, _staged_or_disk_bytes) if has_manifest else ({}, {}, {})
+        )
+        problems: list[str] = []
+        if has_manifest and modules:
+            unlisted = [f for f in new_logic_files if f not in modules]
+            if unlisted:
+                problems.append(
+                    "New runtime module(s) missing from staged `ouroboros/domains.toml` [modules]: "
+                    f"{unlisted[:5]} (add and stage each row per CPL-1 / BIBLE P6)."
+                )
+        missing_docstrings: list[str] = []
+        for nf in new_logic_files:
+            if pathlib.PurePosixPath(nf).name == "__init__.py":
+                continue
+            src_text = _git_show_staged(repo_dir, nf)
+            if src_text is None:
+                continue
+            try:
+                doc = _ast.get_docstring(_ast.parse(src_text, filename=nf)) or ""
+            except SyntaxError:
+                doc = ""
+            if not doc.strip():
+                missing_docstrings.append(nf)
+        if missing_docstrings:
+            problems.append(
+                "New runtime module(s) lack a module docstring lead for live module_map projections: "
+                f"{missing_docstrings[:5]}."
+            )
+        architecture_entrypoint = BOOK_ENTRYPOINTS["architecture"]
+        missing_manual_for: list[str] = []
+        for nf in new_logic_files:
+            dom = modules.get(nf, "")
+            owning = references.get(dom, ()) if dom else ()
+            if owning:
+                if not any(m in active_staged for m in owning) and architecture_entrypoint not in active_staged:
+                    missing_manual_for.append(f"{nf} ({dom} -> {', '.join(owning)})")
+            else:
+                if not any(book_entrypoint_for(staged) == architecture_entrypoint for staged in active_staged):
+                    missing_manual_for.append(nf)
+        if missing_manual_for:
+            problems.append(
+                "New files added in ouroboros/ or supervisor/ without staging their owning Architecture book manual "
+                f"(or `{architecture_entrypoint}` / a `docs/architecture/` chapter, Bible P6): "
+                f"{missing_manual_for[:5]}."
+            )
+        if problems:
+            return (
+                "⚠️ PREFLIGHT_BLOCKED: New module documentation check failed:\n"
+                + "\n".join(f"  - {item}" for item in problems)
+                + f"\n  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
+            )
 
     # conftest.py must not contain collectable module-level tests.
     conftest_files = [f for f in active_staged if pathlib.Path(f).name == "conftest.py"]

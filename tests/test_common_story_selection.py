@@ -717,11 +717,15 @@ def test_the_proposal_fits_the_next_start_now_and_with_it_in_this_tasks_frame_an
     found = high
     plan = scale.build(tmp_path, monkeypatch, window=found, snap=captured)
     _pages, read = _proposal_with(tmp_path, plan, target_id=g, replaces=[long])
+    # Under unified Body Map, both arms keep Max: "now" needs floor steps to fit the long page,
+    # whereas "with this selection" fits with headroom and zero floor steps.
     assert [re.search(rf"- {name}: starts ([^;]+);", read)[1] for name in ("now", "with this selection")] == [
-        "Low, temporarily, for the window", "Max"]
-    assert "- now: starts Low, temporarily, for the window; Max room lost, cause memory: window " in read
-    assert plan.initial_mode == "low"  # the production start of the captured view is the "now" arm: chapter maps
-    assert "This task started in Low, temporarily, for the window (its start projection, a separate fact" in read
+        "Max", "Max"]
+    now_line = next(line for line in read.splitlines() if line.startswith("- now: "))
+    sel_line = next(line for line in read.splitlines() if line.startswith("- with this selection: "))
+    assert "floor steps F5" in now_line and "floor steps none" in sel_line
+    assert plan.initial_mode == "max" and plan.projection("max").memory_facts["floor"]["steps"]
+    assert "This task started in max (its start projection, a separate fact" in read
     files, views, capture = tree(tmp_path), [], mv.capture_memory_view
     monkeypatch.setattr(artifacts, "store_actor_source_bytes", lambda *a, **kw: pytest.fail("the read wrote"))
     monkeypatch.setattr(mv, "capture_memory_view", lambda *a, **kw: (views.append(a[2]), capture(*a, **kw))[1])
@@ -731,7 +735,8 @@ def test_the_proposal_fits_the_next_start_now_and_with_it_in_this_tasks_frame_an
     monkeypatch.undo()
     _write(tmp_path, kind="selection", target_id=g, replaces=[long], reason="one sentence holds it")
     after = mv.capture_memory_view(tmp_path, {"id": "scale-fit", "chat_id": 1, "_is_direct_chat": True}, captured.spec)
-    assert scale.build(tmp_path, monkeypatch, window=found, snap=after).initial_mode == "max"
+    after_plan = scale.build(tmp_path, monkeypatch, window=found, snap=after)
+    assert after_plan.initial_mode == "max" and not after_plan.projection("max").memory_facts["floor"]["steps"]
 
 
 def test_a_proposal_with_an_unreadable_memory_capture_never_reports_that_its_empty_story_starts_max(tmp_path, monkeypatch):

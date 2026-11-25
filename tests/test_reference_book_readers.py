@@ -38,7 +38,7 @@ def _chaptered_corpus(root: pathlib.Path, *, body: str = "The exact chapter body
 
 @pytest.mark.parametrize("path,role", [
     ("docs/ARCHITECTURE.md", "entrypoint"),
-    ("docs/architecture/06-agent-core.md", "chapter"),
+    ("docs/architecture/06-1-loop-tools-and-safety.md", "chapter"),
     ("docs/reference-books-migration.md", ""),
     ("docs/CHECKLISTS.md", ""),
     ("docs/architecture/notes.txt", ""),
@@ -99,7 +99,7 @@ def test_a_chapter_is_canonical_exactly_as_its_entrypoint_was(tmp_path):
         is_canonical_governance_path,
     )
 
-    assert is_canonical_governance_path("docs/architecture/06-agent-core.md")
+    assert is_canonical_governance_path("docs/architecture/06-1-loop-tools-and-safety.md")
     assert is_canonical_governance_path("docs/DEVELOPMENT.md")
     assert not is_canonical_governance_path("docs/reference-books-migration.md")
 
@@ -191,7 +191,7 @@ def test_a_chapter_read_is_an_ordinary_result_under_the_measured_frame():
     from ouroboros.tool_result_delivery import RECOVER_PAGEABLE, RESULT_VIEW_MARKER
 
     oversized = "x" * 85_000 + "\nLAST LINE"
-    for rel in ("docs/architecture/06-agent-core.md", "docs/development/06-rules-by-change-class.md",
+    for rel in ("docs/architecture/06-1-loop-tools-and-safety.md", "docs/development/06-rules-by-change-class.md",
                 "docs/reference-books-migration.md"):
         args = {"path": rel}
         assert requested_result_view(args) is None  # a plain read asks for no particular form
@@ -204,19 +204,22 @@ def test_a_chapter_read_is_an_ordinary_result_under_the_measured_frame():
 
 
 def test_chapters_exceed_a_single_turn_so_range_delivery_is_load_bearing():
-    """Measured rather than assumed: some chapters are longer than the retired
-    80,000-char read page, so a chapter read can only ever be whole under a frame
-    that actually holds it."""
-    from ouroboros.reference_books import load_reference_book
+    """Every architecture & development chapter now fits inside the physical one-read band
+    (<= 80,000 chars / <= 2,000 lines), while standalone governance specs (DESIGN, PERSISTENCE,
+    CLIENT_CONTRACT) remain larger than TOOL_RESULT_LIMITS['read_file'] so range delivery
+    remains load-bearing."""
+    from ouroboros.reference_books import STANDALONE_REFERENCE_DOCS, load_reference_book
     from ouroboros.tool_capabilities import TOOL_RESULT_LIMITS, UNTRUNCATED_REPO_READ_PREFIXES
 
-    oversized = []
     for book_id in BOOK_ENTRYPOINTS:
         for chapter in load_reference_book(REPO, book_id).chapters:
             assert chapter.source_path.startswith(UNTRUNCATED_REPO_READ_PREFIXES)
-            if len(chapter.raw) > TOOL_RESULT_LIMITS["read_file"]:
-                oversized.append(chapter.source_path)
-    assert oversized, "if no chapter exceeds the page, range delivery needs a different proof"
+            assert len(chapter.raw) <= TOOL_RESULT_LIMITS["read_file"], chapter.source_path
+    oversized_specs = [
+        rel for rel in STANDALONE_REFERENCE_DOCS
+        if (REPO / rel).is_file() and len((REPO / rel).read_bytes()) > TOOL_RESULT_LIMITS["read_file"]
+    ]
+    assert oversized_specs, "standalone reference specs still exceed a single read page"
 
 
 # --- the mandatory-read corpus --------------------------------------------
@@ -258,7 +261,7 @@ def test_the_triad_session_task_addresses_chapters_never_the_membership_page():
         architecture_text=load_governance_doc(REPO, "docs/ARCHITECTURE.md"),
     )
     with_book = build_triad_session_task(governance_repo_dir=REPO, **sections)
-    assert "Source: `docs/architecture/06-agent-core.md`" in with_book
+    assert "Source: `docs/architecture/06-1-loop-tools-and-safety.md`" in with_book
     assert "Source: `docs/development/14-build-and-ci.md`" in with_book
     assert "## ARCHITECTURE.md (navigation map)" not in with_book
 

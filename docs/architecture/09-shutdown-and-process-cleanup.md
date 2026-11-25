@@ -1,6 +1,6 @@
 # 9. Shutdown & Process Cleanup
 
-Signals, timeouts and engine terminal facts prove no OS exit; jobs stay until return. Cold receipts grant custody, not Resume or survival (§6). Switching restores stopped handles; boot retries unconfirmed custody.
+How I handle Close, Restart, Quit, Panic, Fault, and child/service process custody (`process_custody.py`, `owned_shutdown.py`, `restart_retention.py`) across POSIX and Windows. Signals, timeouts, and engine terminal facts prove no OS exit: processes stay owned until return, Panic holds all saved work for Resume, and acknowledged owner Restart returns named active work while holding warm sleeps and paused grants for Resume.
 
 Server startup raises descriptor capacity for per-run transports (`server_process.raise_open_file_limit`; platform rules and failures: its docstring).
 
@@ -11,7 +11,7 @@ Server startup raises descriptor capacity for per-run transports (`server_proces
 | Desktop close, keep-running on, live indicator | none: window hides, on macOS only after full screen's DidExit | all tasks, schedules, companions and daemon | none |
 | Close, quit, SIGTERM, launcher gone (pipe EOF, POSIX too) | this generation's workers, maintenance child, services, owned executor/task processes and unfinished reviews | shared daemon/clients unless Quit; saved pauses; saved work held for Resume | `shutdown_entry.json`, then `server_shutdown.cause`: `external_signal`, `launcher_quit` or `launcher_gone` |
 | Planned restart (self-restart, update) | same; off-pin daemon unless newer | saved pauses; saved work/cut owner turns/runnable queue, returned; same-pin or newer daemon | restart handoff, then `shutdown_entry.json` |
-| Manual Restart (owner) | same; its own delegated runs end | as Planned restart (§3) | restart transaction `door=owner_restart`, `shutdown_entry.json` |
+| Manual Restart (owner) | same; its own delegated runs end | same-pin/newer daemon; acknowledged exit-42 returns named active work, `owner_wait`s and runnable queue; warm sleeps, technical/authority pauses, late arrivals and unacknowledged restarts hold for Resume (Retention below; §3, §10 inv. 31) | restart transaction `door=owner_restart`, `shutdown_entry.json` |
 | Panic | all owned work | saved work awaits owner Resume after launch; pauses unchanged | `panic_stop.flag` (`panic`), then `panic_ingress_receipt` |
 | Fault (`bus_lost`, `loop_failed`; §5) | as Close; kept work's delegated runs end | as Close; unsaved rows `cancelled` | as Close, cause named; a `supervisor_failure` row, then the startup notice and one recovery turn per died generation (facts `recovery_turn_facts.py`); exit 1 under a launcher, else census and re-exec (`server_process.fault_exit`); Panic owns exit; never 42/99 |
 

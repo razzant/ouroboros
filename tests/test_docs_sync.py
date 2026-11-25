@@ -106,32 +106,32 @@ def test_architecture_component_map_covers_every_live_runtime_module():
     ``delegate_supervision.py``, while those three modules had no row of any
     kind.
     """
+    """Every tracked runtime module has a domain in ouroboros/domains.toml and an owning manual in [references]."""
+    from ouroboros.code_intelligence_architecture import load_domain_manifest
     from scripts.domain_graph import tracked_population
 
-    arch = _read("docs/ARCHITECTURE.md")
+    manifest = load_domain_manifest(REPO)
     missing = sorted(
         path for path in tracked_population(REPO)
-        if not path.endswith("__init__.py")
-        and path not in arch
-        and not _names_basename(arch, pathlib.PurePosixPath(path).name)
+        if path not in manifest.modules
+        or not manifest.references.get(manifest.modules[path])
     )
     assert not missing, (
-        "docs/ARCHITECTURE.md names no owner for these live modules: "
+        "ouroboros/domains.toml names no owning manual for these live modules: "
         f"{missing}"
     )
 
 
 def test_architecture_subject_map_row_resolves_its_owner_section():
-    """The map preserves the module and a resolvable owner section, not a fixed
-    inventory of private helpers inside the registry row."""
+    """The domain manifest maps review_subject.py to its owning manual and Subject operation resolves there."""
+    from ouroboros.code_intelligence_architecture import load_domain_manifest
     from ouroboros.reference_books import load_reference_book, read_book_section
 
-    arch = _read("docs/ARCHITECTURE.md")
-    rows = [line for line in arch.splitlines() if line.strip().startswith("review_subject.py ")]
-    assert len(rows) == 1, rows
-    assert "§6 Subject operation" in rows[0]
+    manifest = load_domain_manifest(REPO)
+    dom = manifest.modules["ouroboros/tools/review_subject.py"]
+    assert "docs/architecture/06-4-self-change-and-review.md" in manifest.references[dom]
     section = read_book_section(load_reference_book(REPO, "architecture"), "Subject operation")
-    assert section.sources[0].path == "docs/architecture/06-agent-core.md"
+    assert section.sources[0].path == "docs/architecture/06-4-self-change-and-review.md"
 
 
 def _change_review_items() -> dict:

@@ -202,6 +202,9 @@ def render_domain_map(manifest: Manifest) -> str:
     for d in sorted(manifest.domains):
         L.append("")
         L.append(f"### {d} — {manifest.domains[d]}")
+        if refs := manifest.references.get(d):
+            L.append("")
+            L.append("Owning manuals: " + ", ".join(f"`{r}`" for r in refs))
         L.append("")
         for path in mods_by_domain[d]:
             mark = " *" if path in manifest.proposed else ""
@@ -220,6 +223,15 @@ def run_checks(root: pathlib.Path = REPO_ROOT) -> tuple[list[str], list[str]]:
     if bad_domains:
         findings.append(f"manifest names unknown domains: {bad_domains}")
         return findings, notes
+
+    if manifest.references:
+        missing_ref_domains = sorted(d for d in manifest.domains if not manifest.references.get(d))
+        if missing_ref_domains:
+            findings.append(f"references: domains missing [references] manual entries: {missing_ref_domains}")
+        for key, paths in sorted(manifest.references.items()):
+            for ref_path in paths:
+                if not (root / ref_path).is_file():
+                    findings.append(f"references: [references][{key!r}] points to missing file: {ref_path}")
 
     tracked = tracked_population(root)
     for path in sorted(tracked - set(manifest.modules)):

@@ -42,7 +42,6 @@ from ouroboros.context_input_selection import (
     _validate_declared_input_task,
     declared_receipt_section,
     development_required,
-    development_resident,
     required_book_unavailable,
     wake_start_checkpoint,
 )
@@ -983,13 +982,10 @@ def _capture_context_core(
         seen = reach(canonical_root)
     view_spec, view, view_json = _capture_memory_view(task, canonical_root, ctx, declared=declared)
 
-    # Max keeps the full capability/WHY map even for external work: binding a
-    # folder changes tools' default target, not the mind's knowledge of its body.
-    # Its handbook follows the subject of the work (BIBLE P1); Low/Nano and children
-    # receive both books' authored orientation through the same captured-source projection.
-    # A direct requirement is not a subject: fitting reads the subject's default, then adds the book (section_floor).
+    # Unified Body Map + Reference Atlas rides across all modes and foci (BIBLE P1);
+    # engineering manuals are drawn on demand unless this task explicitly requires DEVELOPMENT whole.
     required = development_required(task)
-    docs_need_development = development_resident(task, design_ctx, subject_only=required)
+    docs_need_development = False
 
     semi_stable_parts, subagent_catalog = [], None
     try:
@@ -1191,7 +1187,7 @@ def _capture_context_core(
         docs_need_development=docs_need_development, development_required=required,
         reference_books=tuple(books),
         reference_book_errors=tuple(book_errors),
-        compact_reference_docs=is_child,
+        compact_reference_docs=False,
         dynamic_head_text="\n\n".join(head_parts),
         memory_view_json=view_json, memory_view_sequence=view.chronicle_sequence,
         supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),

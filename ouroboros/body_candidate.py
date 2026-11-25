@@ -760,9 +760,28 @@ def _targets_body(ctx: Any, root: str) -> bool:
         return False
 
 
+def closed_roads_note(ctx: Any) -> str:
+    """Body-gate contact fact: whole ``10.2 Closed roads`` + address of ``10-key-invariants.md``."""
+    from ouroboros.reference_books import closed_roads_section
+
+    try:
+        roads = closed_roads_section(serving_repo_dir_for(ctx))
+    except Exception:
+        return ""
+    if not roads:
+        return ""
+    return (
+        "[Body gate — invariants & Closed roads]\n"
+        "Before editing Ouroboros's body, read `docs/architecture/10-key-invariants.md` and the "
+        "owning manuals for the files you touch.\n\n"
+        + roads
+    )
+
+
 def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> CandidateRefused | str | None:
     """Bind the candidate BEFORE an ordinary body write, a PR-integration verb or an acting
-    body child resolves a target; the bind that prepared or resumed it returns the neighbour note.
+    body child resolves a target; the bind that prepared or resumed it returns the neighbour note
+    and Closed roads contact fact.
 
     Process tools are deliberately absent: no command text is classified. The
     mind prepares explicitly before process-first work. A refusal that the
@@ -795,7 +814,10 @@ def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> CandidateRefuse
         return exc
     except Exception as exc:
         return CandidateRefused("CANDIDATE_UNAVAILABLE", f"the candidate could not be prepared: {type(exc).__name__}: {exc}")
-    return None if bound.get("state") == "bound" else neighbour_note(ctx) or None
+    if bound.get("state") == "bound":
+        return None
+    parts = [p for p in (neighbour_note(ctx), closed_roads_note(ctx)) if p]
+    return "\n\n".join(parts) or None
 
 
 def process_environment(ctx: Any, work_dir: Any, *, source=None) -> Optional[Dict[str, str]]:
@@ -1260,3 +1282,54 @@ def discard_scratch(row: Dict[str, Any]) -> None:
     if path.name and _wt._deletable(env_root, _wt._resolve_root()) and env_root.exists() and not _retained_scratch(
             row, classify=row.get("kind") != KIND):
         _wt._force_rmtree(env_root)
+
+
+def own_body_reference_note(ctx: Any, target: Any, opened_root: str, *, active_repo: Any = None) -> str:
+    """Stateless 1-line owning-manual address for own-body code reads ONLY (BIBLE P1, P6).
+
+    Strictly guarded to proven own-body roots (system_repo, bound body candidate, or system
+    copy) and code/prompt/skill paths listed in ``ouroboros/domains.toml`` ``[references]``.
+    Never fires for docs/, tests/, data/, runtime_data, user_files, or foreign repositories.
+    """
+    if opened_root not in ("system_repo", "active_workspace"):
+        return ""
+    try:
+        from ouroboros.reference_books import resolve_body_references
+        from ouroboros.workspace_copies import copy_binding, same_directory
+
+        system = serving_repo_dir_for(ctx).resolve(strict=False)
+        physical = pathlib.Path(target).resolve(strict=False)
+        body_root: Optional[pathlib.Path] = None
+        if opened_root == "system_repo":
+            body_root = system
+        else:
+            bound = descriptor(ctx) if is_bound(ctx) else None
+            if bound and bound.get("path"):
+                cand = pathlib.Path(str(bound["path"])).resolve(strict=False)
+                if physical == cand or cand in physical.parents:
+                    body_root = cand
+            if body_root is None:
+                binding = copy_binding(ctx)
+                if binding and binding.get("source_is_system_repo") is not False and binding.get("execution_root"):
+                    exec_root = pathlib.Path(str(binding["execution_root"])).resolve(strict=False)
+                    if physical == exec_root or exec_root in physical.parents:
+                        body_root = exec_root
+            if body_root is None and active_repo is not None:
+                active = pathlib.Path(active_repo).resolve(strict=False)
+                if same_directory(active, system) and (physical == system or system in physical.parents):
+                    body_root = system
+        if body_root is None:
+            return ""
+        rel = physical.relative_to(body_root).as_posix()
+        if rel.startswith(("docs/", "tests/")):
+            return ""
+        refs = resolve_body_references(body_root, [rel], include_mentions=False)
+        manuals = refs.get("manuals") or ()
+        if not manuals:
+            return ""
+        listed = ", ".join(str(m) for m in manuals)
+        inv = "docs/architecture/10-key-invariants.md"
+        tail = "" if inv in manuals else f" | invariants & Closed roads: {inv}"
+        return f"[Body manual: {listed}{tail}]"
+    except Exception:
+        return ""

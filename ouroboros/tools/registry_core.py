@@ -622,7 +622,8 @@ class ToolRegistry:
                 # acting (mutative) fields so it cannot spawn an acting grandchild.
                 schema = copy.deepcopy(schema)
                 props = schema.get("parameters", {}).get("properties", {})
-                for field in ("write_surface", "write_root", "protected_paths_grant", "external_tool_grants"):
+                for field in ("write_surface", "write_root", "workspace", "directory_strategy",
+                              "scope_paths", "protected_paths_grant", "external_tool_grants"):
                     props.pop(field, None)
             elif entry.name == "delegate_start":
                 # Same selector trap the acting branch hides: a readonly child

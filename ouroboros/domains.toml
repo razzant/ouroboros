@@ -67,6 +67,35 @@ D18 = "Launcher, packaging, platform & shared substrate"
 D19 = "Frozen contracts (ABI)"
 D20 = "Presence"
 
+[references]
+# Owning architecture/specification manuals per domain and non-Python surface.
+# HUMAN section: preserved by `python scripts/check_domains.py --write`.
+D01 = ["docs/architecture/06-1-loop-tools-and-safety.md"]
+D02 = ["docs/architecture/06-2-model-calls-and-budget.md", "docs/MODEL_SEND_OBSERVABILITY.md"]
+D03 = ["docs/architecture/06-5-planning-memory-and-skills.md", "docs/architecture/06-1-loop-tools-and-safety.md"]
+D04 = ["docs/architecture/06-1-loop-tools-and-safety.md"]
+D05 = ["docs/architecture/06-1-loop-tools-and-safety.md", "docs/architecture/06-5-planning-memory-and-skills.md", "docs/code-navigation.md"]
+D06 = ["docs/architecture/06-4-self-change-and-review.md", "docs/CHECKLISTS.md"]
+D07 = ["docs/architecture/06-3-delegation-and-subagents.md", "docs/DELEGATED_ADMISSION.md"]
+D08 = ["docs/architecture/05-supervisor-loop.md"]
+D09 = ["docs/architecture/09-shutdown-and-process-cleanup.md", "docs/architecture/05-supervisor-loop.md"]
+D10 = ["docs/architecture/06-4-self-change-and-review.md", "docs/architecture/08-git-branching-ci-and-build.md"]
+D11 = ["docs/architecture/04-server-api-endpoints.md", "docs/architecture/03-web-ui-pages-and-buttons.md", "docs/CLIENT_CONTRACT.md"]
+D12 = ["docs/architecture/07-configuration.md"]
+D13 = ["docs/architecture/06-1-loop-tools-and-safety.md", "docs/architecture/10-key-invariants.md"]
+D14 = ["docs/architecture/13-external-skills-layer.md", "docs/CREATING_SKILLS.md"]
+D15 = ["docs/architecture/06-5-planning-memory-and-skills.md", "docs/PERSISTENCE.md"]
+D16 = ["docs/architecture/06-2-model-calls-and-budget.md", "docs/USAGE_STORE.md", "docs/PASSIVE_QUOTA_READ.md"]
+D17 = ["docs/architecture/06-1-loop-tools-and-safety.md", "docs/architecture/01-high-level-architecture.md", "docs/PERSISTENCE.md"]
+D18 = ["docs/architecture/01-high-level-architecture.md", "docs/architecture/02-startup-onboarding-flow.md", "docs/architecture/08-git-branching-ci-and-build.md"]
+D19 = ["docs/architecture/11-frozen-contracts-v1.md", "docs/CLIENT_CONTRACT.md"]
+D20 = ["docs/architecture/12-host-service-companions-and-chat-ids.md"]
+"web/" = ["docs/architecture/03-web-ui-pages-and-buttons.md", "docs/DESIGN.md", "docs/CLIENT_CONTRACT.md"]
+"prompts/" = ["docs/development/04-core-governance-artifacts.md", "docs/architecture/06-5-planning-memory-and-skills.md"]
+"skills/" = ["docs/architecture/13-external-skills-layer.md", "docs/CREATING_SKILLS.md"]
+"android/" = ["docs/architecture/01-high-level-architecture.md", "docs/ANDROID_INSTALL.md", "docs/ANDROID_RECOVERY.md"]
+"scripts/" = ["docs/architecture/08-git-branching-ci-and-build.md", "docs/development/02-naming-and-boundaries.md"]
+
 [modules]
 "ouroboros/_usage_settlement.py" = "D16"
 "ouroboros/call_peers.py" = "D11"

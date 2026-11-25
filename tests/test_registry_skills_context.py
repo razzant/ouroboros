@@ -181,46 +181,46 @@ def test_a_calls_real_send_outlines_registry_and_index_only_for_its_physical_ove
 
 
 def _shown_max_beside_books(tmp_path):
-    """``(plan, registry section, a floor of its outline's saving)``: a Max view already sent beside large books
-    and the whole registry, then rebound (a fallback or an account switch) to a smaller known window."""
+    """``(plan, registry section, a floor of its outline's saving)``: a Max view already sent beside a full
+    reply reserve (65,536 vs Nano's 8,192) and the whole registry, then rebound to a smaller known window."""
     from ouroboros.memory_floor import view_tokens
 
     _sources(tmp_path, _registry(40))
     part = _build_registry_section(SimpleNamespace(drive_path=lambda rel: tmp_path / rel))
     core = _synthetic_core(tmp_path, [part], snapshot=syn.snapshot(story=syn.pages(2, 4_000)))
-    shown = _synthetic_plan(dataclasses.replace(core, architecture_md="# Architecture\n\n" + "book word " * 40_000),
-                            2_000_000)
+    shown = _synthetic_plan(core, 2_000_000)
+    shown = dataclasses.replace(shown, output_reserve_tokens=65_536)
     assert shown.initial_mode == "max" and part.full_text in _text(shown) and not _host_facts(shown)
     return shown, part, view_tokens(part.full_text) - view_tokens(part.operative_view) - 100
 
 
-_REBIND = dict(known_window=True, ratio=1, output_reserve=RESERVE, tool_schemas=[], start_mode="max")
+_REBIND = dict(known_window=True, ratio=1, output_reserve=65_536, tool_schemas=[], start_mode="max")
 
 
 def test_a_shown_max_view_lowered_by_a_smaller_route_keeps_the_registry_its_low_view_holds(tmp_path):
-    """Low starts from the forms that were shown and owes only what its books left unpaid. Before, the abandoned
-    Max frame's registry outline, bought with the whole Max deficit, reached a Low view that holds it whole."""
+    """Nano starts from the forms that were shown and owes only what its lower reserve left unpaid. Before, an
+    abandoned Max frame's registry outline reached a lowered view that holds it whole."""
     shown, part, _saving = _shown_max_beside_books(tmp_path)
-    window = shown.low_projection.estimated_tokens + RESERVE + 500  # Low beside the whole registry fits; Max cannot
+    window = shown.nano_projection.estimated_tokens + RESERVE + 500  # Nano beside whole registry fits; Max (+65K reserve) cannot
     held = shown.reproject_for_route(window_tokens=window, **_REBIND)
-    assert held.initial_mode == "low" and part.full_text in _text(held) and not _host_facts(held)
-    assert held.projection("low").estimated_tokens + RESERVE <= window
+    assert held.initial_mode == "nano" and part.full_text in _text(held) and not _host_facts(held)
+    assert held.projection("nano").estimated_tokens + RESERVE <= window
 
 
 def test_a_lowered_view_still_outlines_for_its_own_overflow_and_keeps_every_shown_form(tmp_path):
-    """Controls: a Low view the window cannot hold whole still takes the registry outline, as the window's; an outline
+    """Controls: a Nano view the window cannot hold whole still takes the registry outline, as the window's; an outline
     the window chose for a shown Max view survives that view's lowering, never unfolded."""
     shown, part, saving = _shown_max_beside_books(tmp_path)
-    low = shown.low_projection.estimated_tokens
-    tight = shown.reproject_for_route(window_tokens=low + RESERVE - saving // 2, **_REBIND)
-    assert tight.initial_mode == "low" and [row["section_id"] for row in _host_facts(tight)] == ["registry"]
+    nano = shown.nano_projection.estimated_tokens
+    tight = shown.reproject_for_route(window_tokens=nano + RESERVE - saving // 2, **_REBIND)
+    assert tight.initial_mode == "nano" and [row["section_id"] for row in _host_facts(tight)] == ["registry"]
     assert "omitted for the physical window" in _text(tight) and part.full_text not in _text(tight)
-    assert tight.projection("low").estimated_tokens + RESERVE <= low + RESERVE - saving // 2
-    narrowed = shown.reproject_for_route(window_tokens=shown.max_projection.estimated_tokens + RESERVE - saving // 2,
+    assert tight.projection("nano").estimated_tokens + RESERVE <= nano + RESERVE - saving // 2
+    narrowed = shown.reproject_for_route(window_tokens=shown.max_projection.estimated_tokens + 65_536 - saving // 2,
                                          **_REBIND)
     assert narrowed.initial_mode == "max" and [row["section_id"] for row in _host_facts(narrowed)] == ["registry"]
-    lowered = narrowed.reproject_for_route(window_tokens=low + RESERVE + 500, **_REBIND)
-    assert lowered.initial_mode == "low" and _host_facts(lowered) == _host_facts(narrowed)
+    lowered = narrowed.reproject_for_route(window_tokens=nano + RESERVE + 500, **_REBIND)
+    assert lowered.initial_mode == "nano" and _host_facts(lowered) == _host_facts(narrowed)
     assert part.full_text not in _text(lowered)
 
 
@@ -244,32 +244,25 @@ def test_an_owner_scale_start_outlines_registry_and_index_only_where_its_folded_
         tmp_path, monkeypatch):
     from tests._memory_scale_fixture import tools
 
-    roomy = _owner_scale_plan(tmp_path, monkeypatch, 400_000)
+    roomy = _owner_scale_plan(tmp_path, monkeypatch, 310_000)
     rows, text = _host_facts(roomy), _text(roomy)
     index = next(part for part in roomy.core.dynamic_head_sections if part.section_id == "knowledge_index")
-    # Max keeps the whole books while my memory at its tellings fits beside them (owner 15.11.2026, 4A): its ordinary
-    # forms do not fit here, its tellings do, so this start holds Max with my memory told. The request it sends holds
-    # both sections whole beside its whole one-eighth room: any host step it takes is the start room's, and nothing
-    # calls them physical.
+    # Under unified Body Map, an owner-scale start holds Max even at 310K by folding memory while keeping
+    # both the registry and knowledge_index whole beside its one-eighth start room.
     room = roomy.projection(roomy.initial_mode).memory_facts["max_room"]
     assert roomy.initial_mode == "max" and room["cause"] == "held" and room["need"] > room["window"]
     assert _registry(40) in text and index.full_text in text and all(row.get("start_room") for row in rows)
-    # Whether this start moves host sections at all turns on its surroundings (in this test none; under the rev_fable
-    # witness three). A start 100K tighter folds its memory and does move them, only for its start room, with the
-    # registry and the index whole (rev_fable 7: the check of start-room steps must not pass on an empty list).
-    folded = _owner_scale_plan(tmp_path, monkeypatch, 300_000)
+    folded = _owner_scale_plan(tmp_path, monkeypatch, 250_000)
     folded_rows, folded_text = _host_facts(folded), _text(folded)
     folded_index = next(part for part in folded.core.dynamic_head_sections if part.section_id == "knowledge_index")
     assert folded_rows and all(row.get("start_room") for row in folded_rows)
     assert _registry(40) in folded_text and folded_index.full_text in folded_text
-    # A start whose memory folded names what holds the room (S2); one that holds Max whole has nothing to name
-    # (rev_fable F2).
     assert "Holding the room (tokens):" in text and "Holding the room (tokens):" in folded_text
     held = _owner_scale_plan(tmp_path, monkeypatch, 1_000_000)
     assert held.initial_mode == "max" and "Holding the room (tokens):" not in _text(held)
     assert "F7" not in roomy.projection(roomy.initial_mode).memory_facts["floor"]["steps"]
     sent = roomy.projection(roomy.initial_mode).estimated_tokens + fit.tool_schema_tokens(tools())
-    assert sent + 10_000 + math.ceil(400_000 / 8) <= 400_000
+    assert sent + 10_000 + math.ceil(310_000 / 8) <= 310_000
     # At 92K even memory's shortest forms leave the window short: both outlines are physical, and they cost fewer
     # owner rows than keeping both whole would.
     tight = _owner_scale_plan(tmp_path, monkeypatch, 92_000)
@@ -295,17 +288,15 @@ def _lowered_start(tmp_path, *, immune, extra=0):
 
 @pytest.mark.parametrize("immune", [True, False], ids=["protected-owner-row", "addressable-owner-row"])
 def test_a_start_lowered_from_max_pays_its_whole_receipt_with_the_registry_outline_before_owner_words(tmp_path, immune):
-    """A Max start lowered to Low sends a floor receipt naming its route and its short start room; the window must
-    hold that too. Before, a price with a generic note kept the registry whole: a protected row refused by 54
-    tokens, an open one became an address."""
+    """A tight Max start pays its whole floor receipt with the registry outline before owner words."""
     from ouroboros.artifacts import read_actor_source_bytes
 
-    core, owner, part = _lowered_start(tmp_path, immune=immune)
+    core, owner, part = _lowered_start(tmp_path, immune=immune, extra=160)
     plan = _synthetic_plan(core, 240_000, "max")
     projection = plan.projection(plan.initial_mode)
     assert owner["line"] in _text(plan) and "F7" not in projection.memory_facts["floor"]["steps"]
     [row] = _host_facts(plan)
-    assert plan.initial_mode == "low" and row["section_id"] == "registry" and "start_room" not in row
+    assert plan.initial_mode == "max" and row["section_id"] == "registry" and "start_room" not in row
     assert projection.estimated_tokens + RESERVE <= 240_000  # the outlined start fits with its reply reserve
     assert projection.estimated_tokens + row["tokens_saved"] + RESERVE > 240_000  # the whole registry did not
     assert read_actor_source_bytes(tmp_path, "task-1", row["source_ref"]) == part.full_text.encode("utf-8")
@@ -316,10 +307,10 @@ def test_a_start_lowered_from_max_pays_its_whole_receipt_with_the_registry_outli
 
 
 @pytest.mark.parametrize("extra", [6_230, 6_270])
-def test_a_start_whose_own_low_view_cannot_fit_takes_the_ordinary_nano_its_own_view_holds(tmp_path, extra):
-    """More resident bytes: the completed Low view, route receipt included, overflows by 6-46 tokens, while the
-    start's own lowered Nano view fits with the protected owner row whole. Before, Low's shortest view priced with a
-    generic Nano note seemed to fit, so the start never reached Nano and refused."""
+def test_a_start_whose_own_low_view_cannot_fit_takes_the_ordinary_nano_its_own_view_holds(tmp_path, monkeypatch, extra):
+    """When Max's reserve cannot fit even with the registry outlined, the start steps directly to Nano (8,192 reserve)
+    and keeps the protected owner row whole."""
+    monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 65_536)
     core, owner, _part = _lowered_start(tmp_path, immune=True, extra=extra)
     plan = _synthetic_plan(core, 240_000, "max")
     shown = plan.projection(plan.initial_mode)
@@ -328,10 +319,8 @@ def test_a_start_whose_own_low_view_cannot_fit_takes_the_ordinary_nano_its_own_v
 
 
 def test_a_start_whose_own_nano_view_cannot_fit_refuses_with_that_view(tmp_path):
-    """A few more tokens and even the lowered Nano view overflows: a legitimate refusal naming that last view. The
-    floor receipt that names reduced forms by kind and what holds the room (plan commit 2, point 10) is 16 tokens
-    shorter than the earlier note with its sealing invitation, so this shape's edge lies 16 tokens further."""
-    core, _owner, _part = _lowered_start(tmp_path, immune=True, extra=6_340)
+    """A few more tokens and even the lowered Nano view overflows: a legitimate refusal naming that last view."""
+    core, _owner, _part = _lowered_start(tmp_path, immune=True, extra=6_500)
     with pytest.raises(fit.MinimumViewUnfit, match="Protected owner words and the minimum view") as refused:
         _synthetic_plan(core, 240_000, "max")
     assert refused.value.physical and refused.value.deficit_tokens > 0 and refused.value.memory_view_tokens > 0

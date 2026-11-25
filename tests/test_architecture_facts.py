@@ -394,6 +394,7 @@ def test_architecture_fact_vocabulary_is_closed():
         "facade_consumers",
         "persistence_entities_written_by",
         "protected_contracts_affected",
+        "module_map",
     )
     with pytest.raises(ValueError, match="owner_of"):
         architecture_fact_rows(REPO, "unknown_fact x")

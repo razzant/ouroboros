@@ -50,7 +50,7 @@ def test_dangling_paths_headings_and_invariants_fail_while_real_ones_resolve(poi
 
 def test_relocated_release_and_map_rules_have_concrete_destinations():
     book = load_reference_book(ROOT, "architecture")
-    for layer in ("Structural", "Operational", "Rationale", "complete registry"):
+    for layer in ("Structural", "Operational", "Rationale", "domains.toml"):
         assert layer in book.entrypoint.text
     invariant = read_book_section(book, "10. Key Invariants").text.split("\n3.")[0]
     assert "VERSION_CARRIER_SPANS" in invariant

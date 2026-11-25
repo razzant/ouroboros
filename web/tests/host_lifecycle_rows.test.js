@@ -9,7 +9,7 @@ import { mergeHistoricalTimelineItem } from '../modules/chat_history_replay.js';
 import { foldWaitRow, waitEpisode } from '../modules/task_checkpoints.js';
 import { buildTimelineItemHtml } from '../modules/chat_activity.js';
 import { projectResultArtifacts } from '../modules/result_files.js';
-import { causeOf, contextShown, lowMissedOf, observeContext } from '../modules/context_observation.js';
+import { asSent, causeOf, contextShown, lowMissedOf, observeContext } from '../modules/context_observation.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 import {
@@ -225,6 +225,9 @@ test('a book map shortened for a required handbook names its own map, one row pe
     assert.equal(summarizeLogEvent({ type: 'task_checkpoint', checkpoint_kind: 'context_fit_low_retry', round: 4,
         book_map: 'architecture_map' }).headline, 'Preparing a smaller request: Architecture map shortened to its chapter list');
     assert.equal(row('design_bible').headline, 'Preparing a smaller request: Design bible shortened to its map');
+    assert.equal(row('body_map').headline, 'Preparing a smaller request: Body map shortened to its parts list');
+    assert.equal(asSent({ applied: 'max', books: 'body_map' }).applied, 'max');
+    assert.equal(asSent({ applied: 'max', books: 'maps' }).applied, 'low');
 });
 
 test('a Low size-recovery checkpoint does not claim a physical retry', () => {

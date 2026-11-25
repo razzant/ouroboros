@@ -1,6 +1,6 @@
 # 11. Frozen Contracts v1 (`ouroboros/contracts/`)
 
-§11.1 freezes `ouroboros/contracts/`. Browser ABI: `gateway/contracts.py` + `api_types.js`; schemas: `GET /api/contract` (`gateway/schema.py`).
+My backward-compatible frozen ABI layer (`ouroboros/contracts/`, browser ABI in `gateway/contracts.py` + `web/modules/api_types.js`, schemas at `GET /api/contract`, and §11.1 frozen-contract table). Before modifying any frozen payload or contract file I inspect `query_code(op="architecture", query="protected_contracts_affected <paths>")` and this chapter; frozen shapes extend explicitly or ship versioned successors without breaking existing consumers.
 
 ### 11.1 What is frozen
 

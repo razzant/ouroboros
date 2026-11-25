@@ -231,8 +231,8 @@ def _wire(monkeypatch, messages):
 
 @pytest.mark.parametrize('book_chars,excess,expected,deeper', [
     (240_000, -1_000, 'max', False), (240_000, 5_000, 'max', False),
-    (240_000, 45_000, 'low', False), (240_000, 98_000, 'low', True), (0, 98_000, 'max', True),
-], ids=['fitting', 'tellings-pay', 'maps-pay', 'remainder-after-maps', 'nothing-from-maps'])
+    (240_000, 45_000, 'max', True), (240_000, 98_000, 'max', True), (0, 98_000, 'max', True),
+], ids=['fitting', 'tellings-pay', 'deeper-memory-mid', 'deeper-memory-high', 'nothing-from-maps'])
 def test_a_max_rebind_charges_tellings_then_maps_at_the_admitted_line(tmp_path, monkeypatch, book_chars, excess, expected, deeper):
     from ouroboros import context_fit as cf, memory_floor as mf, memory_view as mv
     from ouroboros.memory_forms import stage_of
@@ -326,17 +326,17 @@ def test_nano_cannot_buy_room_by_leaving_its_required_handbook_off_the_scale(tmp
     from ouroboros.context_fit import estimate_context_prompt_tokens as price
     from tests._memory_view_synthetic import pages
 
-    # Max already holds this subject's whole DEVELOPMENT. Compact modes add it back beside both maps.
+    # Unified Body Map (BIBLE P1): both Max and Nano carry the required DEVELOPMENT handbook in Block D.
     plan = _short_book_plan(monkeypatch, pages(1, 800), required=True,
                             development_md="# Development\n\n## Review\n\n" + "Required handbook. " * 12_000)
     messages = [*plan.messages_for("max"), OWNER]
     raw = price(messages, [])
-    window = raw + HEADROOM - 4_000  # not the additive charge of a handbook (Max already carried it)
-    assert plan.core.required_book_tokens("max") == 0 < plan.core.required_book_tokens("nano")
+    window = raw + HEADROOM - 4_000
+    assert plan.core.required_book_tokens("max") == plan.core.required_book_tokens("nano") > 0
     rebound, mode, _event = _rebind(monkeypatch, tmp_path / "tight", plan, messages, window=window, start_mode="max")
     sizes = {m: price(rebound.reproject_transcript(messages, m), []) for m in ("max", "nano")}
     print({"before": raw, "candidates": sizes, "admitted": window - HEADROOM, "selected": mode})
-    assert mode == "max" and sizes["max"] < sizes["nano"]
+    assert mode == "max" and sizes["max"] <= sizes["nano"]
     assert "Required handbook." in rebound.projection(mode).system_content_json and messages[-1] == OWNER
 
 
@@ -602,13 +602,14 @@ def test_a_cold_restore_sends_the_new_capture_at_its_own_level_not_refolded_to_t
     assert active == mode == registry._ctx.active_context_mode == rebound.initial_mode
     assert messages[1:len(restored)] == restored[1:]  # the restored tail, then the restart notice
     assert messages[0] == fresh.projection(mode).system_message()  # the new capture, never the old bytes
-    assert (messages[0] == fresh.projection("max").system_message()) is (mode == "max")  # Max books only in Max
+    assert messages[0] != restored[0]
+    assert fresh.projection("max").system_message() == fresh.projection("low").system_message()  # unified Body Map
     assert rebound.projection(mode).memory_facts == fresh.projection(mode).memory_facts
 
 
 def test_a_cold_restore_keeps_the_tasks_own_start_not_the_restore_fit(tmp_path, monkeypatch):
     """A task that started in Max and was rebound to Low is parked and cold-restored where the new capture's own fit
-    starts Low (``ContextFitPlan.start`` of a fresh plan). The continuation serializer carries the task's start beside
+    starts Nano (``ContextFitPlan.start`` of a fresh plan). The continuation serializer carries the task's start beside
     its model role, an exact Resume's checkpoint keeps the source's (written before the rebind), and the restore lays
     it onto the new plan before every rebind: the restored task still started in Max, so its Low is ``after_start``.
     A source written before the start was carried (an old checkpoint right after Update) has no known start: it is
@@ -624,9 +625,8 @@ def test_a_cold_restore_keeps_the_tasks_own_start_not_the_restore_fit(tmp_path, 
 
     _core, plan = _built(tmp_path / "w", monkeypatch)
     started = plan(1_000_000, tool_schemas=[])  # the source task's own start
-    fresh = next(candidate for window in (200_000, 150_000, 120_000, 100_000, 90_000, 80_000, 70_000, 60_000)
-                 if (candidate := plan(window, tool_schemas=[])).initial_mode == "low" and candidate.start[1])
-    assert started.start == ("max", "") and fresh.start[0] == "low" and fresh.start[1]
+    fresh = plan(65_537, tool_schemas=[])  # overflows Max reply reserve, drops straight to Nano
+    assert started.start == ("max", "") and fresh.start[0] == "nano" and fresh.start[1]
     source = ToolRegistry(repo_dir=tmp_path / "s", drive_root=tmp_path / "s")
     source._ctx.context_fit_plan = dataclasses.replace(started, initial_mode="low")  # rebound to Low after its start
     saved = json.loads(json.dumps(owner_wait.continuation_state(source._ctx, [], {}, {}, 3, [], set())))
@@ -1034,7 +1034,7 @@ def test_an_owner_max_task_in_task_local_low_rebinds_a_fallback_and_its_return_f
     windows.update({"account-a": primary, "account-b": {"roomy": 900_000, "tight": 100_000}[fallback]})
     built = dataclasses.replace(plan(primary), initial_mode="low")  # the owner's Max plan, task-local Low shown
     low = built.messages_for("low")[0]
-    assert built.preferred_mode == "max" and low != built.messages_for("max")[0]
+    assert built.preferred_mode == "max" and low == built.messages_for("max")[0]  # unified Body Map in Block A'
     ctx.messages[:] = [*built.messages_for("low"), result()["message"],
                        {"role": "tool", "tool_call_id": "a", "content": "verified read A"},
                        {"role": "tool", "tool_call_id": "b", "content": "completed review B"}]
@@ -1052,7 +1052,7 @@ def test_an_owner_max_task_in_task_local_low_rebinds_a_fallback_and_its_return_f
     rebound = [row for row in _drained(events) if row.get("checkpoint_kind") == "context_fit_route_rebound"]
     mode = {"roomy": "low", "tight": "nano"}[fallback]
     assert [(row["preferred_mode"], row["effective_mode"], row["books"], row["view_kept"]) for row in rebound] == [
-        ("max", mode, "maps", fallback == "roomy"), ("max", mode, "maps", True)]  # a Low for the window is Low (21.11)
+        ("max", mode, "body_map", fallback == "roomy"), ("max", mode, "body_map", True)]  # unified Body Map
     assert tools._ctx.active_context_mode == mode and tools._ctx.context_fit_plan.preferred_mode == "max"
     assert tools._ctx.messages[0] == tools._ctx.context_fit_plan.projection(mode).system_message()
     assert ("cannot hold Max with even the shortest view of my memory; this task runs in Nano."  # kept by the return
@@ -1370,16 +1370,14 @@ def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_books(ma
     assert all(stage_of(memory, step, ident) in mf.TELLING_STAGES for step, ids in level.addressed for ident in ids)
 
 
-@pytest.mark.parametrize('maps_only', [False, True], ids=['maps-and-tellings', 'maps-alone'])
-def test_a_presend_low_fold_publishes_only_the_necessary_concessions(main_call, monkeypatch, tmp_path, maps_only):
+def test_a_presend_low_fold_publishes_only_the_necessary_concessions(main_call, monkeypatch, tmp_path):
     """The production pre-send floor sends the owner tail intact and names what it actually shortened."""
-    from ouroboros import context_fit, memory_floor as mf
+    from ouroboros import memory_floor as mf
     from ouroboros.memory_inventory import shortage_from_trace
     from ouroboros.memory_view import snapshot_from_json, snapshot_json
     from ouroboros.tool_policy import initial_tool_schemas
     from tests import _memory_view_synthetic as syn
     from ouroboros import loop_model_call
-    from ouroboros.context_window import _start_form
 
     attempts = []
     attach = loop_model_call.with_attempt_prefix
@@ -1392,8 +1390,7 @@ def test_a_presend_low_fold_publishes_only_the_necessary_concessions(main_call, 
 
     monkeypatch.setattr(loop_model_call, 'with_attempt_prefix', inspect_prefix)
     ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
-                                                         view=snapshot_json(syn.actor("main")),
-                                                         books=800_000 if maps_only else 400_000)
+                                                         view=snapshot_json(syn.actor("main")), books=400_000)
     roomy = plan(10_000_000)
     full = roomy.projected_tokens_with_tools("max", initial_tool_schemas(tools, context_mode="max"))
     # A window that holds Max with all of my memory and both working margins.
@@ -1401,72 +1398,53 @@ def test_a_presend_low_fold_publishes_only_the_necessary_concessions(main_call, 
     built = plan(window)
     assert built.initial_mode == "max" and not built.projection("max").memory_facts["floor"]["steps"]  # startup: whole
     words = "Owner, while you worked: keep the old API alive. "
-    # The owner's words pass the line this request is admitted at (the stated window less the reply floor) by
-    # 90,000: more than my memory's detail can give (06.11: memory pays in the
-    # first pass), so its floor lowers the books itself, the physical fact BIBLE P1 names; no second pass runs.
-    owner = {"role": "user", "content": words * math.ceil((window - full - 8_192 + 90_000) * 4 / len(words))}
+    # Owner words pass the admitted line by 10,000: pre-send floor folds memory cleanly in Max without a fake Low hop.
+    owner = {"role": "user", "content": words * math.ceil((window - full - 8_192 + 10_000) * 4 / len(words))}
     ctx.messages[:] = [*built.messages_for("max"), owner]
-    full_low = built.reproject_transcript(ctx.messages, "low")
-    assert context_fit.estimate_context_prompt_tokens(full_low, initial_tool_schemas(tools, context_mode="low")) + \
-        8_192 <= window  # after dropping books the original, uncut memory would be admitted
     first = copy.deepcopy(ctx.messages)
     gateway.results = [_answer(ROUTE, {"role": "assistant", "content": "Kept."})]
     gateway.dispatch = ["response_received"]
     tools._ctx.memory_view_facts = mf.trace_facts(built.projection("max").memory_facts)  # as the start records it
     text, _usage, trace = _run(ctx, tools, events, built)
 
-    [low] = [payload["messages"] for payload, _key in gateway.uploads]
+    [sent] = [payload["messages"] for payload, _key in gateway.uploads]
     rows = _drained(events)
     kinds = [row.get("checkpoint_kind") for row in rows]
-    assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "low"
-    # The Max trial did not make enough room; the same pass uses maps. Its checkpoint says what reached the wire.
-    checkpoint = 'context_fit_low_retry' if maps_only else 'context_memory_coarsened'
-    assert [(row.get("effective_mode"), row.get("books")) for row in rows  # a Low for the window is Low (21.11)
-            if row.get("checkpoint_kind") == checkpoint] == [("low", "maps")]
-    assert ('context_memory_coarsened' if maps_only else 'context_fit_low_retry') not in kinds
-    assert _start_form(attempts[-1]) == 'maps'
-    origins = attempts[-1].prefix['origins']
-    assert ('memory_coarsened' in origins) is not maps_only and origins.count('low_retry') == 1
+    assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "max"
+    assert [(row.get("effective_mode"), row.get("books")) for row in rows
+            if row.get("checkpoint_kind") == "context_memory_coarsened"] == [("max", "body_map")]
+    assert "context_fit_low_retry" not in kinds
+    origins = attempts[-1].prefix["origins"]
+    assert "memory_coarsened" in origins
     from ouroboros.transcript_prefix import message_digest
-    assert {message_digest(first[1]), message_digest(owner)} <= {message_digest(row) for row in low}
-    if maps_only:
-        assert tools._ctx.memory_view_facts['floor']['runs'] == built.max_projection.memory_facts['floor']['runs']
-        return
+    assert {message_digest(first[1]), message_digest(owner)} <= {message_digest(row) for row in sent}
 
-    def shows(sent, whole):
-        return json.dumps(whole, ensure_ascii=False)[1:-1] in json.dumps(sent, ensure_ascii=False)
+    def shows(wire, whole):
+        return json.dumps(whole, ensure_ascii=False)[1:-1] in json.dumps(wire, ensure_ascii=False)
 
     elements = mf.floor_elements(snapshot_from_json(built.core.memory_view_json))
-    # List forms reuse the source group's text for pricing. Its disappearance
-    # does not assert that this particular list form (rather than a row) was used.
     narrowed = {(step, ident) for step, ident, whole, _short in elements
-                if step not in (*mf._LIST_FORMS, "F6a") and shows(first, whole) and not shows(low, whole)}
-    # The deficit took more than one rung: beside the task lines here the room records (F4); this room's replies,
-    # folded before them, came back in the walk's give-back, which the coarser F4 cuts left room for (both pinned in
-    # test_memory_view_floor).
+                if step not in (*mf._LIST_FORMS, "F6a") and shows(first, whole) and not shows(sent, whole)}
     folded = {step for step, _ident in narrowed}
     assert "F1" in folded and folded - {"F1"}
-    # Max sends [books, handbook, story, rooms notice, turns...]; Low [book navigation, story, rooms notice, turns...].
-    assert len(json.dumps(low[0])) < len(json.dumps(first[0]))
-    note = low[2]["content"]
-    assert f"Low cuts for the window ({window} tokens)." in note  # Low, temporarily, for the window (owner 21.11)
+    assert len(json.dumps(sent[0])) < len(json.dumps(first[0]))
+    note = sent[2]["content"]
+    assert f"Max cuts for the window ({window} tokens)." in note
     assert "does not hold all of my memory" not in note and "cannot hold" not in note
-    # The task's trace keeps the fact of the Low view sent, not the whole Max view of its start: a writer reads
-    # what the request actually showed only by address.
-    sent_fact = mf.trace_facts(tools._ctx.context_fit_plan.projection("low").memory_facts)
+    sent_fact = mf.trace_facts(tools._ctx.context_fit_plan.projection("max").memory_facts)
     assert trace[VIEW_TRACE_KEY] == tools._ctx.memory_view_facts == sent_fact
-    assert sent_fact["floor"]["mode"] == "low" and sent_fact["floor"]["steps"].keys() >= folded
-    rows = sent_fact["floor"]["steps"].keys() & {"F2", "F7"}  # this room's rows by address name the shortage, else its
-    assert shortage_from_trace(trace).kind == ("open_rows" if rows else "narrative")  # old narrative; never the notes
+    assert sent_fact["floor"]["mode"] == "max" and sent_fact["floor"]["steps"].keys() >= folded
+    shortage_rows = sent_fact["floor"]["steps"].keys() & {"F2", "F7"}
+    assert shortage_from_trace(trace).kind == ("open_rows" if shortage_rows else "narrative")
     # A later fitting route keeps this historical note and every address without reasserting a new shortage.
     after = tools._ctx.context_fit_plan
     rebound = after.reproject_for_route(window_tokens=window * 2, known_window=True, ratio=1.0,
-        output_reserve=after.output_reserve_tokens, tool_schemas=initial_tool_schemas(tools, context_mode="low"),
-        start_mode="low", current_messages=ctx.messages)
-    assert rebound.initial_mode == "low" and rebound.preferred_mode == "max"
-    assert rebound.low_projection.system_content_json == after.low_projection.system_content_json
-    assert rebound.low_projection.memory_facts == after.low_projection.memory_facts
-    assert _addressed(rebound, "low") == _addressed(after, "low")
+        output_reserve=after.output_reserve_tokens, tool_schemas=initial_tool_schemas(tools, context_mode="max"),
+        start_mode="max", current_messages=ctx.messages)
+    assert rebound.initial_mode == "max" and rebound.preferred_mode == "max"
+    assert rebound.max_projection.system_content_json == after.max_projection.system_content_json
+    assert rebound.max_projection.memory_facts == after.max_projection.memory_facts
+    assert _addressed(rebound, "max") == _addressed(after, "max")
 
 
 @pytest.mark.parametrize("owner_mode", ["low", "nano"])

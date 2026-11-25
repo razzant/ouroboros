@@ -1,5 +1,7 @@
 # 2. Startup / Onboarding Flow
 
+How I boot from packaged seed or managed checkout through launcher checks, gateway onboarding, and first-run setup before my supervisor starts. I inspect boot state via `data/state/` records and `docs/DEPLOYMENT.md` for container installs. Boot normalization never creates `settings.json` (fresh-install latches require its absence), and automatic sign-in launch honors Panic by exiting 0 with the marker intact.
+
 Startup orders launcher checks, gateway onboarding and an atomic save of settings, next-boot mode and install-time presets. Boot normalization never creates `settings.json`: fresh-install latches need its absence. Sufficient provider configuration starts the optional supervisor. Automatic intent (`--launch-intent automatic`; direct server: `OUROBOROS_LAUNCH_INTENT=automatic`) passes `launcher_bootstrap.automatic_launch_allowed`: after Panic it exits 0 before startup, marker intact. Launcher intent overrides the child's inherited intent; owner/default intent starts normally. Containers: [DEPLOYMENT](../DEPLOYMENT.md#containers).
 
 ### Boot order
