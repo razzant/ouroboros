@@ -443,3 +443,17 @@ def test_a_capacity_refusal_after_the_session_opened_keeps_the_call_ended_words(
     assert (words, usage) == call_ending('context_capacity', 'infra_failed', CONTEXT_CAPACITY_DETAIL)
     assert 'host_notice_row' not in usage and 'action' not in state
 
+
+def test_end_pressed_before_the_engine_opened_is_the_ordinary_ending(host_world, monkeypatch):
+    """The owner's bye reached the hub while the call prepared: the real driver never opens the engine and the call
+    ends with the ordinary ending, the one a preparation refused after that bye also takes
+    (``tests/test_live_preparation_fit_refusal.py``)."""
+    from ouroboros.realtime_setup import call_ending
+    from skills.live_conversation.driver import run as drive
+
+    hub = host_world.host.hub
+    hub.join(cp.PeerInfo('owner', cp.PEER_OWNER, True, True), 24000)
+    hub.receive_control('owner', {'type': 'bye'})
+    words, usage, host, state = _run_call(host_world, monkeypatch, drive)
+    assert (words, usage) == call_ending('finished', 'ok') and state['reason'] == 'finished'
+    assert not host._session_opened and not host_world.sessions

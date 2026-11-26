@@ -2477,7 +2477,8 @@ the room's context cannot fit into the selected engine's window leaves one Syste
 line and nothing else: the engine, what the room needs (or at least needs, when
 memory was not measured) and what the engine takes; the stage, window, reserve
 and parts behind Details; the Calls (beta) settings as its step. Its sheet says
-so calmly with Open Calls. Failed
+so calmly with Open Calls. An End pressed while the call prepared stays the
+owner's End. Failed
 configuration reads keep the last good value; mount, focus, visible return and
 successful Settings saves refresh it. There is no call time cap or separate
 per-call reserve; the ordinary shared spending limit applies. The feature's

@@ -162,3 +162,26 @@ def test_a_refusal_carries_parts_and_says_when_memory_was_not_measured(direct_ca
     refusal, = [row for row in seen.rows if row["type"] == "call.fit_refused"]
     assert refusal["fit"]["measurement"]["memory_measured"] is False
 
+
+def test_end_pressed_during_preparation_stays_the_owners_end(direct_call, tmp_path, monkeypatch):
+    """The owner's bye reached the hub before the build refused: the hub, the finished event, the room row and the
+    task record carry the same ending as an End pressed while a fitting preparation ran (``call_ending``; the real
+    driver's ending is pinned in ``tests/test_live_fit_refused.py``), and none names the capacity refusal."""
+    from ouroboros.realtime_setup import call_ending
+    from ouroboros.task_results import load_task_result
+
+    world = direct_call
+    world.hub.receive_control("owner", {"type": "bye"})
+    words, usage = call_ending("finished", "ok")
+    seen = _prepare_call(world, tmp_path, monkeypatch, True, "memory")
+    assert world.hub.closed and world.hub._state["reason"] == usage["reason_code"] and "detail" not in world.hub._state
+    assert [event["reason"] for event in seen.finished] == [usage["reason_code"]]
+    assert seen.answers and {row["text"] for row in seen.answers} == {words}
+    stored = load_task_result(tmp_path, seen.task_id)
+    # The task record classifies that usage as any finished call's (its outcome code is the record's own).
+    assert stored["status"] not in ("failed", "infra_failed") and stored["outcome_axes"]["execution"]["status"] == "ok"
+    assert stored["result"] == words
+    named = json.dumps([world.hub._state, seen.finished, seen.answers, stored])
+    assert "context_capacity" not in named
+    refusal, = [row for row in seen.rows if row["type"] == "call.fit_refused"]  # the measurement is still logged
+    assert refusal["ended_by_owner"] is True
