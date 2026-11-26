@@ -426,10 +426,12 @@ def _index_sizes(root: Path, where: str) -> dict[str, int] | None:
     listing = _git_bytes(root, "ls-files", "-s", "-z", "--", where)
     if listing is None:
         return None
-    staged = {}  # path -> blob; stage 0 only (an unmerged path has no single staged form)
+    staged = {}  # path -> blob
     for row in listing.decode("utf-8", "replace").split("\0"):
         meta, _, path = row.partition("\t")
-        if path and len(fields := meta.split()) == 3 and fields[2] == "0":
+        if path and len(fields := meta.split()) == 3:
+            if fields[2] != "0":  # an unmerged path has no single staged form: the collection is unmeasured
+                return None
             staged[path] = fields[1]
     batch = "".join(f"{blob}\n" for blob in staged.values()).encode()
     checked = _git_bytes(root, "cat-file", "--batch-check", stdin=batch)

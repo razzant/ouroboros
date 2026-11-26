@@ -1389,6 +1389,15 @@ def _suite_facts(
     return f"tests: {items_fact}, new modules {created}, {serial_fact}, {seconds_fact}", [row[3] for row in sorted(sized)]
 
 
+def _sizable_module_path(path: str) -> bool:
+    """A gated module the pulse can size; a name the inventory rejects (a literal backslash in a POSIX file
+    name) is counted in the change but not sized, as the worktree reader treats it, never an exception."""
+    try:
+        return _is_gated_module_path(_exact_repo_relative_path(path))
+    except ValueError:
+        return False
+
+
 def diff_pulse(
     repo_dir: pathlib.Path, paths: Iterable[str] | None = None, *, staged: bool = False, limit: int = 5,
 ) -> str:
@@ -1452,7 +1461,7 @@ def diff_pulse(
             and "tests" in pathlib.PurePosixPath(path).parts[:-1]}
     python = [path for path in shown if path in changed and path.endswith(".py")]
     # Staged, a module's size is the index's (read in the same batch), never the worktree's later edits.
-    gated = [path for path in shown if _is_gated_module_path(path)] if staged else []
+    gated = [path for path in shown if _sizable_module_path(path)] if staged else []
     at_base, current = _change_texts(root, base, staged, python, list(dict.fromkeys([*rows, *python, *gated])))
     modules: list[tuple[GatedModule, int, int]] = []
     for path in shown:
