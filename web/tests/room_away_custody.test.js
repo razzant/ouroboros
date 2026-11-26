@@ -266,6 +266,7 @@ test('a delivered direct answer opens its ordinary link on return and keeps equa
     const opened = [];
     win.pywebview = { api: { async open_external_url(url) { opened.push(url); return { ok: true }; } } };
     doc.addEventListener = (...args) => doc.body.addEventListener(...args);
+    doc.removeEventListener = (...args) => doc.body.removeEventListener(...args);
     installDesktopShellLinkInterceptor({ win, doc });
 
     const feed = doc.createElement('main');
