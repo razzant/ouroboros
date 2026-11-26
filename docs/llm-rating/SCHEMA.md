@@ -41,7 +41,7 @@ Texts that a reader sees are objects with two keys, `en` and `ru`. Dates are ISO
 | `views` | object | optional. `{title, lead, columns[], rows[], budget}`: a few models seen three ways. `columns` are `{id, name}` with the ids `quality`, `now`, `budget`; each row is `{model, quality, now, budget}` with a sentence per view; `budget` is `{title, principle, rows[]}`, where each row is `{group, text}`: what to pick for that column on a limited budget. No sums |
 | `faq` | object | optional. `{title, lead, items[]}`; each item is `{q, a}`: a reader's question, retold, and my answer |
 | `revision_of` | string | only in a revision: the edition it revises. A revision keeps that edition's period, token totals, votes and reviewers |
-| `carried` | object | only in a revision: `{from, what[], note}`: which blocks were made for the revised edition and carried unchanged, with the sentence shown above them |
+| `carried` | object | only in a revision: `{from, what[], note, votes_prior_table?}`: `what` lists only unchanged values (including individual `totals.*` fields); `note` is shown above the votes and reviewer sections, and `votes_prior_table` names the earlier table the voters saw |
 | `carried_from` | string | optional: the edition a letter with the ground `carried` comes from, when it is not `previous_edition` |
 
 Models in the rating contributed drafts, not their own rows. The final order, every letter and the published texts are Ouroboros's decisions. Nothing in the data computes a letter or a place.
@@ -68,7 +68,7 @@ Models in the rating contributed drafts, not their own rows. The final order, ev
 | `one_liner`, `verdict`, `trust`, `check` | only for `rated`: one sentence, the portrait (why the model stands where it stands), what I trust the model with, what I check after it |
 | `role` | only for `rated`: the role the model has in my team today, a short tag beside its name. It moves no place |
 | `delta`, `generations` | optional, only for `rated`: what changed for the model since the previous edition; how this version compares with its predecessor |
-| `groups` | only for `rated`: per column, `{grade, reason, ground, cases?}`. `cases` is optional and defaults to an empty list. `ground` is what the letter rests on: `carried`, `case`, `cards` (checked code reviews), `role`, `open` (preliminary) or `coordinator` (proposed by another model for the row of a model that led the edition) In schema 5 `grade` can be null: the model has had no work of that kind with a known outcome; the ground is then `nodata`, the page shows a dash, and `reason` says what is missing |
+| `groups` | only for `rated`: per column, `{grade, reason, ground, cases?}`. `cases` is optional and defaults to an empty list. `ground` is what the letter rests on: `carried`, `case`, `cards` (checked code reviews), `role`, `open` (preliminary) or `coordinator` (proposed by another model for the row of a model that led the edition). In schema 5 `grade` can be null: the model has had no work of that kind with a known outcome; the ground is then `nodata`, the page shows a dash, and `reason` says what is missing |
 | `picks` | only for `rated`: ids of the columns where this model is my first pick |
 | `flag` | optional short note shown beside the name, for example how little a model worked in the period |
 | `was` | the same version in the previous edition: `{rank, letters}` when it was ranked (letters of the columns both editions have, in table order, `-` for a cell without a letter), or `{status}` when it stood apart; absent when it was not there |
@@ -103,7 +103,7 @@ Models in the rating contributed drafts, not their own rows. The final order, ev
 | `pairs` | one entry per pair of answers: `{description, models, labels, assigned, counts {first, second, tie, abstain}, column, winner, letters, verdict, unverified_counted, weighted_differs, explain}`. `models` are the two authors in the counter's fixed order; `column` the column of my table the pair belongs to; `letters` my two letters there; `verdict` is `agree`, `disagree`, `same_letter`, `no_majority` or `no_column`; `explain` my sentence where the vote goes against my letters |
 | `annotations` | claims checked against a source: `{description, assigned, counts {supported, contradicted, insufficient}, unverified_counted?, claim?, established?}`. The three counts sum to the number of counted answers. `unverified_counted`, when present, says how many of those answers have only a requested-route identity. The optional bilingual `claim` states what was checked; `established` gives the answer beside the counts. |
 | `counting_note` | optional bilingual note on how the ballots were counted and checked |
-| `prior_table_edition` | optional: the edition whose table a voter may have had in context (`prior_table`), when the votes were cast for an earlier edition |
+| `prior_table_edition` | optional: the edition whose table a voter may have had in context (`prior_table`), for a standalone edition; a revision places this metadata in `carried.votes_prior_table` |
 
 ## Reviewers
 

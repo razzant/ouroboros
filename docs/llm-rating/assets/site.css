@@ -615,12 +615,17 @@ details.roster, .rtwrap, .cmpwrap { max-width: 100%; min-width: 0; }
   .page.v5 { padding-top: 14px; gap: 12px; }
   .page.v5 h1 { font-size: clamp(28px, 3.1vw, 42px); }
   .page.v5 .lead { margin-top: 6px; }
+@media (min-width: 960px) and (max-width: 1140px) { .page.v5 .legend { column-gap: 12px; } }
   .page.v5 .board-head .note { display: none; }
   .page.v5 .board { padding-top: 9px; }
 }
 @media (max-width: 420px) { .mx.v5:not([data-group="all"]) { --cw: 24px; } }
 /* eight columns on the narrowest phones: the ranking still fits without sideways scrolling; at 320 px a long name is cut short */
-@media (max-width: 380px) { .mx.v5 { --namew: 124px; } .mx.v5:not([data-group="all"]) { --cw: 23px; } }
+@media (max-width: 380px) {
+  .mx.v5 { --namew: 124px; }
+  .mx.v5:not([data-group="all"]) { --cw: 23px; }
+  .mx.v5 .mbtn .nm { white-space: normal; overflow: visible; overflow-wrap: anywhere; line-height: 1.05; }
+}
 @media (max-width: 340px) {
   .mx.v5 { --namew: 106px; padding-right: 4px; }
   .mx.v5:not([data-group="all"]) { --cw: 22px; }

@@ -268,7 +268,7 @@
     return '<section class="head' + (vote ? ' head-with-vote' : '') + '"><div class="head-main">' +
       '<p class="eyebrow">' + t('eyebrow', { id: E.edition }) + (E.revision_of ? ' <span class="pill early">' + esc(t('revision_pill', { id: E.revision_of })) + '</span>' :
         E.early ? ' <span class="pill early">' + esc(t('early_pill')) + '</span>' : '') + '</p>' +
-      '<h1>' + esc(t('title')) + '</h1><p class="lead">' + esc(t('lead')) + '</p></div>' +
+      '<h1>' + esc(t('title')) + '</h1><p class="lead">' + esc(t(v5(E) ? 'lead_v5' : 'lead')) + '</p></div>' +
       '<div class="head-side"><div class="status' + (draft ? ' draft' : '') + '">' + t(draft ? 'status_draft' : 'status_final', { id: E.edition }) + '</div>' +
       '<div class="sub">' + nb(t('as_of', { date: dateLong(asOf(E)) })) + '</div>' +
       (draft ? '<div class="sub">' + esc(t(draftSub(E))) + '</div>' : '') +
@@ -339,7 +339,7 @@
   }
   function cellBtn(kind, key, r, k, g, who, what, compared, x) {
     // x: the cell of a method-5 column, which may have no letter or a preliminary one
-    var open = x && x.ground === 'open', words = x && !g ? t('nodata_short') : chipWords(g);
+    var open = x && (x.ground === 'open' || x.ground === 'role'), words = x && !g ? t('nodata_short') : chipWords(g);
     if (open) words += '; ' + t('legend_open');
     return '<button class="t t-' + (g || 'N') + (open ? ' g-open' : '') + '" type="button" data-' + kind + '="' + esc(key) + '" data-r="' + r + '" data-k="' + k + '" aria-expanded="false" aria-label="' +
       esc(who + ', ' + what + ': ' + words + (compared ? '; ' + t('letter_compared') : '')) + '" title="' + esc(what + ': ' + words) + '">' + (g || '–') + '</button>';
@@ -422,7 +422,7 @@
     h.push('</div>');
     RATED.forEach(function (m, r) {
       h.push('<div class="r" role="row"><div class="m" role="rowheader"><button class="mbtn" type="button" data-m="' + esc(m.id) + '" aria-expanded="false" title="' +
-        esc(m.name + (m.role ? ' · ' + L(m.role) : '')) + '" aria-label="' + esc(t('rank_label', { n: m.rank }) + ': ' + m.name) + '"><span class="rk">' + m.rank + '</span><span class="nm">' + esc(m.short) + '</span></button></div>');
+        esc(m.name + (m.role ? ' · ' + L(m.role) : '')) + '" aria-label="' + esc(t('rank_label', { n: m.rank }) + ': ' + m.name + (m.role ? ' · ' + t('role_label') + ': ' + L(m.role) : '')) + '"><span class="rk">' + m.rank + '</span><span class="nm">' + esc(m.short) + '</span></button></div>');
       cols.forEach(function (c, k) {
         if (c.gap) h.push(sp);
         var groupVotes = c.g && compared && compared[c.g.id];
@@ -860,7 +860,7 @@
     var V = E.votes;
     if (!V) return '';
     // the table a voter may have seen is the edition before the one the ballots were cast for
-    var prev = V.prior_table_edition || E.previous_edition || '', counted = 0, notCounted = 0, none = 0, seen = 0, rows = '';
+    var prev = (E.carried && E.carried.votes_prior_table) || V.prior_table_edition || E.previous_edition || '', counted = 0, notCounted = 0, none = 0, seen = 0, rows = '';
     V.voters.forEach(function (v) {
       var cls = ballotClass(v.status), m = M[v.model];
       if (cls === 'ok') counted++; else if (cls === 'warn') notCounted++; else none++;

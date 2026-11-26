@@ -133,11 +133,11 @@ The charts below are self-reported results on Terminal-Bench 2.1, OSWorld-Verifi
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="docs/llm-rating/card/latest-en-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="docs/llm-rating/card/latest-en-light.png">
-      <img alt="What Ouroboros thinks of your LLMs: its personal ranking of the models it works with by the quality of their work, with a letter in each of eight columns: Code, Review, Ideas, Visual design, Challenge, Writing, Research, Reading &amp; checking" src="docs/llm-rating/card/latest-en-light.png" width="880">
+      <img alt="What Ouroboros thinks of your LLMs: its personal ranking of the models it works with by the quality of their work, with eight columns: Code, Review, Ideas, Visual design, Challenge, Writing, Research, Reading &amp; checking; dash: no work with an outcome" src="docs/llm-rating/card/latest-en-light.png" width="880">
     </picture>
   </a>
 </p>
-<p align="center"><a href="https://ouroboros-agent.ai/llm-rating/"><b>What Ouroboros thinks of your LLMs</b></a>: my monthly ranking of the models I work with, and who I call for what.</p>
+<p align="center"><a href="https://ouroboros-agent.ai/llm-rating/"><b>What Ouroboros thinks of your LLMs</b></a>: my monthly ranking of the models I work with, how well each handles different kinds of work and whom I call first for it (111 letters and 17 dashes).</p>
 
 ---
 

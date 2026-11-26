@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 import xml.etree.ElementTree as ET
 from collections import Counter
 from html import unescape
@@ -35,7 +36,10 @@ RATING_ARCHIVES = {
     "2026.12": ("December", DECEMBER_CARD_SHA256, ("Edition 2026.12", "15 models", "6 columns")),
 }
 RATING_GRADES = {"S", "A", "B", "C"}
-RATING_MONEY = re.compile(r"[$\u20ac\u20bd\u00a3\u00a5]|\b(?:usd|eur|rub)\b|\bdollars?\b|\u0440\u0443\u0431|\u0434\u043e\u043b\u043b\u0430\u0440", re.I)
+_AMOUNT = r"[0-9]+(?:[.,   ][0-9]+)*"
+_CURRENCY = r"[$€₽£¥]|\b(?:usd|eur|rub|dollars?|euros?|roubles?|rubles?|руб(?:ль|ля|лей|лю|лём|лем|ле|ли|лям|лями|лях)?\.?|долл\.?|доллар(?:а|ов|у|ом|е|ы|ам|ами|ах)?|евро)\b"
+RATING_MONEY = re.compile(rf"(?:{_CURRENCY})\s*{_AMOUNT}|{_AMOUNT}\s*(?:{_CURRENCY})", re.I)
+RATING_REVISION = re.compile(r"([0-9]{4}\.[0-9]{2})\.[1-9][0-9]*")
 INDEXABLE = {
     "/": SITE / "index.html",
     "/about/": SITE / "about" / "index.html",
@@ -201,7 +205,8 @@ def test_rating_publication_is_complete_and_source_bound():
     if data["method_version"] >= 4:
         _assert_rating_column_reasons(data)
         _assert_rating_reviewers(data)
-        _assert_rating_votes(data)
+        _assert_rating_public_text_has_no_amounts(data)
+        _assert_rating_vote_source(data, source)
         _assert_rating_static_publication(source, data)
         if data["method_version"] >= 5:
             _assert_rating_views_and_questions(data)
@@ -222,6 +227,33 @@ def test_rating_publication_is_complete_and_source_bound():
         assert re.search(r"\bcolumns?\b", alts[0], re.I) and not re.search(r"\bkinds?\s+of\s+work\b", alts[0], re.I), (
             "README rating card alt must describe columns, not kinds of work"
         )
+
+
+def _assert_rating_assets_are_javascript(source, node):
+    for path in sorted((source / "assets").glob("*.js")):
+        result = subprocess.run([node, "--check", str(path)], capture_output=True, text=True, timeout=30, check=False)
+        assert result.returncode == 0, f"Invalid published JavaScript: {path.name}\n{result.stderr}"
+
+
+def test_rating_published_javascript_parses():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed; browser execution is checked by the rating build")
+    _assert_rating_assets_are_javascript(SITE / "public" / "llm-rating", node)
+
+
+def test_rating_javascript_check_detects_invalid_asset(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed; cannot check the syntax control")
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    script = assets / "control.js"
+    script.write_text("const ok = true;\n", encoding="utf-8")
+    _assert_rating_assets_are_javascript(tmp_path, node)
+    script.write_text("const broken = ;\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="Invalid published JavaScript: control.js"):
+        _assert_rating_assets_are_javascript(tmp_path, node)
 
 
 def test_rating_november_archive_is_frozen_and_graded():
@@ -294,6 +326,8 @@ def _assert_rating_column_reasons(data):
     assert {model["id"] for model in rated} == {model["id"] for model in data["models"] if model["status"] == "rated"}
     assert len(rated) == data["totals"]["models"]["rated"] > 0
     cells = [model["groups"].get(gid, {}) for model in rated for gid in main]
+    assert all("grade" in cell for cell in cells), "every main cell needs an explicit grade (null for a dash)"
+    case_ids = {case["id"] for case in data["cases"]}
     letters = data["totals"]["letters"]
     assert letters["main"] == sum(1 for cell in cells if cell.get("grade") is not None) and letters.get("empty", 0) == sum(
         1 for cell in cells if cell.get("grade") is None
@@ -311,6 +345,11 @@ def _assert_rating_column_reasons(data):
             assert entry.get("grade") in RATING_GRADES or (dash_allowed and entry.get("grade") is None), ("not a letter of the scale", *where)
             assert entry.get("ground") in grounds, ("unknown ground", *where)
             assert (entry.get("grade") is None) == (entry.get("ground") == "nodata"), ("a dash and the ground nodata go together", *where)
+            if entry["ground"] == "case":
+                links = entry.get("cases")
+                assert isinstance(links, list) and links and all(cid in case_ids for cid in links), (
+                    "ground=case requires existing case IDs", *where
+                )
             for language in ("en", "ru"):
                 reason = entry.get("reason", {}).get(language)
                 assert isinstance(reason, str) and reason.strip(), (*where, language)
@@ -380,36 +419,58 @@ def _assert_rating_vote_verdict(item, models, columns, scale):
     assert item.get("verdict") == expected, ("votes pair verdict disagrees with winner and ranking", item["models"], expected)
 
 
+def _assert_rating_vote_source(data, source=None):
+    revision = RATING_REVISION.fullmatch(data["edition"])
+    if revision:
+        assert data.get("revision_of") == revision[1], "a revision must have revision_of naming the edition it revises"
+        _assert_rating_carried_blocks(data, source)
+    else:
+        _assert_rating_votes(data, source)
+
+
 def _assert_rating_carried_blocks(data, source=None):
     """A revision casts no votes of its own: it carries the votes and the reviewers of the edition it revises,
     unchanged, and says above them which edition they were made for."""
     source = source or SITE / "public" / "llm-rating"
     revised = json.loads((source / "data/editions" / data["revision_of"] / "edition.json").read_text(encoding="utf-8"))
     assert revised["edition"] == data["revision_of"] == data["previous_edition"], "a revision revises the edition right before it"
-    carried = {key: value for key, value in data["votes"].items() if key != "prior_table_edition"}
-    assert carried == revised["votes"], "a revision must carry the votes unchanged"
+    assert data["votes"] == revised["votes"], "a revision must carry the votes unchanged"
     assert data["reviewers"] == revised["reviewers"], "a revision must carry the reviewers unchanged"
     note = data.get("carried", {})
     assert note.get("from") == data["revision_of"], "the carried blocks must name the edition they were made for"
+    for field in note["what"]:
+        fields = field.split(".")
+        left, right = data, revised
+        for key in fields:
+            left, right = left[key], right[key]
+        assert left == right, ("named carried field differs from the source edition", field)
+    assert {"votes", "reviewers"} <= set(note["what"]), "what must include the votes and reviewers"
     text = note.get("note")
     assert isinstance(text, dict) and all(isinstance(text.get(lang), str) and text[lang].strip() for lang in ("en", "ru")), (
         "the carried blocks need their note in both languages"
     )
 
 
-def _assert_rating_views_and_questions(data):
-    """Method 5: a few ranked models seen three ways, what to pick for each column on a limited budget, and readers'
-    questions. Every text is in both languages and none names a sum of money."""
-    def texts(node):
+def _assert_rating_public_text_has_no_amounts(data):
+    def texts(node, path=()):
         if isinstance(node, dict):
-            if node.keys() == {"en", "ru"}:
-                yield node
-            else:
-                for value in node.values():
-                    yield from texts(value)
+            for key, value in node.items():
+                yield from texts(value, (*path, key))
         elif isinstance(node, list):
-            for value in node:
-                yield from texts(value)
+            for i, value in enumerate(node):
+                yield from texts(value, (*path, str(i)))
+        elif isinstance(node, str):
+            yield path, node
+
+    for path, text in texts(data):
+        assert not RATING_MONEY.search(text), ("public rating text must name no sum of money", path, text[:160])
+
+
+def _assert_rating_views_and_questions(data):
+    def bilingual(text):
+        return isinstance(text, dict) and text.keys() == {"en", "ru"} and all(
+            isinstance(text[lang], str) and text[lang].strip() for lang in ("en", "ru")
+        )
 
     rated = {model["id"] for model in data["models"] if model["status"] == "rated"}
     main = [group["id"] for group in data["groups"] if group["main"]]
@@ -419,16 +480,13 @@ def _assert_rating_views_and_questions(data):
     assert view_ids == ["quality", "now", "budget"], "the three views are quality, now and budget"
     for row in views["rows"]:
         assert row["model"] in rated and row.keys() == {"model", *view_ids}, ("a view row is one ranked model seen three ways", row.get("model"))
+        assert all(bilingual(row[field]) for field in view_ids), "view rows are bilingual"
     assert [row["group"] for row in views["budget"]["rows"]] == main, "the budget block has one line per column of the main table"
+    assert all(bilingual(row.get("text")) for row in views["budget"]["rows"]), "budget rows are bilingual"
     questions = data.get("faq")
     assert isinstance(questions, dict) and questions.get("items"), "method >= 5 requires readers' questions"
     assert all(item.keys() == {"q", "a"} for item in questions["items"]), "a reader's question is a question and an answer"
-    found = list(texts(views)) + list(texts(questions))
-    assert len(found) >= 3 * len(views["rows"]) + len(main) + 2 * len(questions["items"])
-    for text in found:
-        for lang in ("en", "ru"):
-            assert isinstance(text[lang], str) and text[lang].strip(), ("views and questions are bilingual", text)
-            assert not RATING_MONEY.search(text[lang]), ("the views and the answers name no sum of money", text[lang][:80])
+    assert all(bilingual(item[field]) for item in questions["items"] for field in ("q", "a")), "FAQ questions and answers are bilingual"
 
 
 def _assert_rating_votes(data, source=None):
@@ -826,6 +884,19 @@ def _a_dash_dressed_as_nodata(data):
     _a_dash(data)
 
 
+def _hide_fields_and_add_sum(data):
+    for key in ("views", "faq", "carried"):
+        del data[key]
+    data["cases"][0]["text"]["ru"] = "Запуск обошёлся в 1 200,50 руб."
+
+
+@pytest.mark.parametrize("amount", ["$15", "15$", "€ 20", "20 €", "14₽", "15 USD", "EUR 18.5", "5 руб.", "20 долл.", "15 долларов", "долларов 15", "40 евро"])
+def test_rating_money_check_recognises_amounts_in_either_order(amount):
+    _assert_rating_public_text_has_no_amounts({"en": "rough time estimate", "ru": "грубая оценка времени, модель 6.2"})
+    with pytest.raises(AssertionError, match="name no sum of money"):
+        _assert_rating_public_text_has_no_amounts({"nested": [{"text": amount}]})
+
+
 RATING_DATA_CONTROLS = {
     # method 5: dashes, the count of letters, the role tag
     "dash-with-the-ground-of-a-letter": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, False).update(ground="role"),
@@ -846,8 +917,6 @@ RATING_DATA_CONTROLS = {
     # a revision carries the votes and the reviewers unchanged
     "carried-votes-edited": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d["votes"]["counting_note"].update(en=d["votes"]["counting_note"]["en"] + " "),
                              "must carry the votes unchanged"),
-    "carried-vote-count-edited": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d["votes"]["pairs"][0]["counts"].update(tie=d["votes"]["pairs"][0]["counts"]["tie"] + 1),
-                                  "must carry the votes unchanged"),
     "carried-reviewers-edited": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d["reviewers"]["rows"][0].update(open=d["reviewers"]["rows"][0]["open"] + 1),
                                  "must carry the reviewers unchanged"),
     "carried-from-another-edition": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d["carried"].update({"from": "2026.11"}),
@@ -860,12 +929,14 @@ RATING_DATA_CONTROLS = {
                                   "one ranked model seen three ways"),
     "budget-line-missing": ("2026.12.1", _assert_rating_views_and_questions, lambda d: d["views"]["budget"]["rows"].pop(), "one line per column"),
     "answer-in-one-language": ("2026.12.1", _assert_rating_views_and_questions, lambda d: d["faq"]["items"][0]["a"].update(ru=""), "are bilingual"),
-    "sum-with-a-currency-sign": ("2026.12.1", _assert_rating_views_and_questions,
-                                 lambda d: d["views"]["budget"]["rows"][0]["text"].update(en=d["views"]["budget"]["rows"][0]["text"]["en"] + " About $15 a turn."),
-                                 "name no sum of money"),
-    "sum-in-words": ("2026.12.1", _assert_rating_views_and_questions,
-                     lambda d: d["faq"]["items"][1]["a"].update(ru=d["faq"]["items"][1]["a"]["ru"] + " \u041e\u043a\u043e\u043b\u043e 15 \u0434\u043e\u043b\u043b\u0430\u0440\u043e\u0432."),
-                     "name no sum of money"),
+    "answer-deleted-in-one-language": ("2026.12.1", _assert_rating_views_and_questions, lambda d: d["faq"]["items"][0]["a"].pop("en"), "are bilingual"),
+    "revision-of-missing": ("2026.12.1", _assert_rating_vote_source, lambda d: d.pop("revision_of"), "must have revision_of"),
+    "explicit-dash-grade-missing": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, False).pop("grade"), "needs an explicit grade"),
+    "case-id-unknown": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, True).update(ground="case", cases=[-1]), "requires existing case IDs"),
+    "case-id-missing": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, True).update(ground="case", cases=[]), "requires existing case IDs"),
+    "sum-in-case-outside-views": ("2026.12.1", _assert_rating_public_text_has_no_amounts, lambda d: d["cases"][0]["text"].update(en="About $15 a turn."), "name no sum of money"),
+    "sum-in-words": ("2026.12.1", _assert_rating_public_text_has_no_amounts, lambda d: d["faq"]["items"][1]["a"].update(ru="Около 15 долларов."), "name no sum of money"),
+    "sum-with-three-fields-deleted": ("2026.12.1", _assert_rating_public_text_has_no_amounts, _hide_fields_and_add_sum, "name no sum of money"),
 }
 
 
