@@ -10,8 +10,7 @@ awkward names and actions the product really shows. Four oracles; the geometry a
 * material: its own opaque sheet, float shadow and sheet radius, the same whatever its ARIA role, and no pixel of what
   lies under it shows through (a differential screenshot over deliberately loud content), nor through a row's menu;
 * containment: names clamp, targets stay inside the sheet and reachable, nothing overflows sideways;
-* behaviour: Escape, an outside press and leaving close it and return focus; reduced motion draws no entrance or fold;
-  Main's history note waits behind the open list.
+* behaviour: Escape, an outside press and leaving close it and return focus; reduced motion draws no entrance or fold.
 
 Screenshots and the facts read in the page go to ``OUROBOROS_UI_EVIDENCE_DIR`` when it is set.
 """
@@ -442,17 +441,3 @@ def test_escape_outside_press_and_reduced_motion(room_ui, room, reduced):
     page.mouse.click(700 if room == "main" else 900, 520)
     wait_facts(page, room, lambda f: f["surfaceHidden"], "an outside press closed it")
     assert transport.posts == [], "closing a list posts nothing: no decision, no task control"
-
-
-def test_main_history_note_waits_behind_the_open_list(room_ui):
-    page, _transport = _open(room_ui, width=1100, height=722, theme="dark", room="main")
-    note = page.locator("#page-chat .chat-page-note > *").first
-    note.wait_for(state="visible")
-    assert note.is_visible()
-    _open_list(page, "main")
-    visibility = page.locator("#page-chat .chat-page-note").evaluate("el => getComputedStyle(el).visibility")
-    assert visibility == "hidden", "the note hangs where the open list lies, so it waits behind it"
-    page.keyboard.press("Escape")
-    wait_facts(page, "main", lambda f: f["surfaceHidden"], "closed")
-    assert note.is_visible(), "and comes back when the list closes"
-    evidence(f"note-{room_ui['engine']}", {"visibility": visibility})

@@ -98,6 +98,7 @@ class ElementStub {
     setAttribute(name, value) { this.attributes.set(name, String(value)); }
     getAttribute(name) { return this.attributes.get(name) || ''; }
     removeAttribute(name) { this.attributes.delete(name); }
+    hasAttribute(name) { return this.attributes.has(name); }
     appendChild(node) { return this.insertBefore(node, null); }
     append(...nodes) { nodes.forEach((node) => this.appendChild(node)); }
     prepend(...nodes) { const before = this.children[0] || null; nodes.forEach((node) => this.insertBefore(node, before)); }
@@ -207,6 +208,8 @@ function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ ac
     };
     const mount = new ElementStub('div', document);
     document.byId.set('content', mount);
+    // The page's notices (toast.js) land in the body, as a failed history read's does.
+    document.body = new ElementStub('body', document);
     const storage = new Map();
     globalThis.getComputedStyle = () => ({ lineHeight: '24px', height: '168px', getPropertyValue: () => '7' });
     globalThis.document = document;
@@ -222,7 +225,7 @@ function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ ac
     };
     globalThis.fetch = fetchImpl;
     globalThis.WebSocket = { OPEN: 1 };
-    globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+    globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
     globalThis.requestAnimationFrame = (fn) => { fn(); return 1; };
     return { prior, mount };
 }

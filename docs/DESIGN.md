@@ -48,7 +48,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    over moving content wears its own material, whatever its ARIA role or parent bar. The work list (owner 2A, 25.10),
    menus, popovers and the shared modal dialogs (confirmations, an import, a skill's details) have an opaque neutral
    backing so underlying words cannot bleed through. The rest keep their own paint: the composer field, a note over
-   the transcript (Main's history note, the voice offer), toasts and float capsules stay glass, and the document
+   the transcript (the voice offer), toasts and float capsules stay glass, and the document
    reader and file dialogs keep their near-opaque modal sheet over a scrim.
 3. **Colour says who and what.** Each voice colours its own objects: the owner blue,
    Ouroboros rose (its answers, its work cards and its card in the sidebar alike), System amber (gold on dark), a
@@ -745,10 +745,13 @@ Status, owner action, and urgent notification are separate product concepts:
   product's explicit incident/notification seam, not a red status or a failed
   task as a proxy.
 
-A status names who or what ends it; needed facts stay in their owning view. A toast announces news once:
-its timer pauses on hover or focus, and a non-expiring toast has a visible keyboard-reachable close, whatever its tone.
-It wears the shared float material without a rim; its tone is its words' ink; its close is a small plain × in its
-top-right corner, one line of words centred on it, a finger's reach the touch minimum (owner decision 27.11.2026).
+A status names who or what ends it; needed facts stay in their owning view. Events speak through the toast; a
+state of a place is shown by the place (owner decision 27.11.2026): what happened (a read failed, a restore landed
+inexactly, a module did not start) is the one top-right toast, never a chip or row of its own, while what a place is
+(a gap in its history, its beginning, an upgrade in progress, a list that cannot be read) stays in that place. A toast
+announces news once: its timer pauses on hover or focus, and a non-expiring toast has a visible keyboard-reachable
+close, whatever its tone. It wears the shared float material without a rim; its tone is its words' ink; its close is a
+small plain × in its top-right corner, one line of words centred on it, a finger's reach the touch minimum.
 The problem, needed restart or unconfirmed outcome stays in its authoritative view (a card, Updates record or
 in-feed history edge) until it changes or the owner resolves it. Dismissing a notice hides it per browser,
 never its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
@@ -1477,8 +1480,8 @@ before or after; a refused session or sign-out erases only these copies, and a d
 Project's copy in its data profile goes once this browser learns of the deletion (a `deleting`
 row a state read brings once the socket proved that profile, a lookup of that Project, or the
 complete list Find a project and Show more read), staying within the total until then. Task activity remains separate.
-Failure and approximate-restoration notices are wrapping text in the room's header
-chrome: the Project status bar, or Main's floating note on its float-sheet backing (§5).
+A failed read and an inexact restoration are events: each is told once by the page's toast (a failure with the
+edge's Retry), while the room shows, and withdrawn when it ends (owner decision 27.11.2026, §4).
 
 A room first opens at its newest message, whatever its age or others' traffic. A return within the page
 session finds it as left: following, it follows the fresh end; reading older history, it
@@ -1532,16 +1535,15 @@ out of view; one the reader is on grows down.
 Reading far back releases newest pages, bounding retention as replies arrive.
 Disconnected fragments or uncertain coverage show
 `Some saved history is not loaded. Shown messages may have gaps.` at the
-in-feed `Load more history` edge heading the window, beside any failure or
-approximation (owner 21.10), never over newest rows (U021).
+in-feed `Load more history` edge heading the window, as do a store being upgraded and Main's unreadable project
+list (owner 21.10), never over newest rows (U021).
 Bytes added after an empty-source read remain missing until read from its
 start. Mixed cards keep one node and this note; dates, shared row IDs and exhausted
 cursors prove neither a separator nor full coverage.
 `Beginning of saved history` requires complete conversation delivery.
 Retained origins say `Saved project context` until a matching canonical row
 adopts the node and removes the label; context proves no archive coverage.
-On return, a lost place falls back to its card, then the clamped prior position,
-with this note until explicit navigation clears it.
+On return, a lost place falls back to its card, then the clamped prior position, and the toast says so once.
 Reconciliation keeps visible rows, card lines, selection, focus and expanded
 Reviews in their actual nodes.
 
@@ -1567,7 +1569,7 @@ no card speaks for it. The title
 ellipsizes first, and a new word never moves a neighbour or resizes the bar.
 Pressing the status, or ↓/↑ on it, opens that
 room's work and only that room's as one floating list under the bar's capsules, the same in every
-room (an opaque sheet of its own from the status capsule to the bar's last control, Main's history note waiting behind it): one row per work, the owner's unconfirmed sends, and unfinished cards an
+room (an opaque sheet of its own from the status capsule to the bar's last control): one row per work, the owner's unconfirmed sends, and unfinished cards an
 incomplete read has not confirmed (shown unknown, without controls). A Project
 with nothing else keeps its latest represented root card. Main's list opens when there is work or a start to show; a
 Project's starts with the room's whole name, wrapped (its title in the bar keeps one line, §10), so its title
@@ -3756,7 +3758,7 @@ and, during a campaign, `Evolution ›`
 the title and status share one floating capsule (`--chip-float`, non-shrinking
 mark and caret with inline inset), and each command is its own floating capsule
 (owner 21.10). No band, mask or clip is drawn under or between them, so the capsules float over the transcript
-(owner 2026-11-01); at the edge the transcript under them is darkened and blurred ("A room's edges"). A failure or approximation note hangs under the bar; a page
+(owner 2026-11-01); at the edge the transcript under them is darkened and blurred ("A room's edges"). Nothing hangs under the bar but its lists and search; a page
 has no caption line, its sidebar row and its tabs name it.
 
 ### Doors and containers

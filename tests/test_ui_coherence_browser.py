@@ -93,20 +93,14 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
     clear_end = ", rgba(0, 0, 0, 0) 100%)"
     assert paint["fade"].startswith(("linear-gradient(rgb(", "linear-gradient(180deg,")) and paint["fade"].endswith(clear_end), paint
     assert "0.5" in paint["fade"] and "0.14" in paint["fade"], paint
-    # The edge reaches one compact length below the bar on every layout, the desk included. This history read left
-    # Main's note under the bar: a later sibling at the bar's own level, it paints over the edge as the capsules do,
-    # so its words stay sharp.
+    # The edge reaches one compact length below the bar on every layout, the desk included. Nothing hangs under the
+    # bar: a failed history read is the page's notice (owner decision 27.11.2026).
     reach = 32
     assert paint["reach"] == pytest.approx(paint["bar"] + reach, abs=1), paint
     # The transcript's first row clears the bar and its edge (style.css --chat-top-reserve), not only the bar and note.
     feed_top = page.locator("#chat-messages").evaluate("el => parseFloat(getComputedStyle(el).paddingTop)")
     assert feed_top >= paint["bar"] + reach - 1, (feed_top, paint)
-    assert page.locator("#page-chat > .chat-page-note > *").count() and page.locator("#page-chat > .chat-page-note").is_visible()
-    order = page.evaluate("""() => { const bar = document.querySelector('#page-chat > .chat-page-header');
-        const note = document.querySelector('#page-chat > .chat-page-note');
-        return {after: Boolean(bar.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING),
-            bar: Number(getComputedStyle(bar).zIndex), note: Number(getComputedStyle(note).zIndex)}; }""")
-    assert order["after"] and order["note"] >= order["bar"], order
+    assert page.locator("#page-chat > .chat-page-note").count() == 0
     # The desktop window's title-band strip keeps the bar's ::after (style.css :root[data-window-chrome]): the edge
     # never takes its box, and the strip still takes presses for the title bar.
     page.evaluate("document.documentElement.dataset.windowChrome = 'integrated'")

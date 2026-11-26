@@ -269,14 +269,14 @@ def test_work_navigation_clears_persistent_history_error(shell_ui, chat_id, keyb
     if keyboard:
         page.evaluate("document.body.classList.add('keyboard-open')")
     page.locator(f"{host} .chat-load-older-btn").click()
-    page.locator(f"{host} .chat-history-status").wait_for(state="visible")
+    page.locator("#toast-stack .toast").wait_for(state="visible")  # the failed read is the page's notice
     page.locator(f"{host} .rw-trigger").click()
     page.locator(f'{host} .rw-row[data-id="gap-work"] .rw-main').click()
     page.wait_for_function("host => document.querySelector(host + ' .rw-shade:not(.cx-shade)').hidden", arg=host)
     facts = page.evaluate("""host => {
         const root = document.querySelector(host);
         return {card: root.querySelector('.chat-live-card[data-task-id="gap-work"]').getBoundingClientRect().top,
-                error: root.querySelector('.chat-history-status').getBoundingClientRect().bottom};
+                error: root.querySelector('.chat-page-header, .project-panel-bar').getBoundingClientRect().bottom};
     }""", host)
     record(f"work-navigation-error-{chat_id}-{keyboard}-{shell_ui['engine']}", facts)
     capture(page, f"work-navigation-error-{chat_id}-{keyboard}-{shell_ui['engine']}")
@@ -482,7 +482,8 @@ def test_separate_ui_history_oracle_sees_in_feed_gaps(shell_ui):
     from tests.test_separate_ui_browser import _history_notice
 
     page = shell_ui["page"]
-    page.set_content('''<div id="page-chat"><span class="chat-history-status" hidden>Read failed</span>
+    page.set_content('''<div id="toast-stack"><div class="toast" hidden><span class="toast-words">Read failed</span></div></div>
+        <div id="page-chat">
         <div class="chat-load-older has-gaps"><span class="chat-load-older-note">History has gaps</span>
         <span class="chat-history-gap" hidden>Separate gap</span></div></div>''')
     assert _history_notice(page) == "History has gaps"
@@ -491,5 +492,5 @@ def test_separate_ui_history_oracle_sees_in_feed_gaps(shell_ui):
     assert _history_notice(page) == "Separate gap"
     page.locator('.chat-load-older').evaluate("el => { el.classList.remove('has-gaps'); }")
     assert _history_notice(page) == ""
-    page.locator('.chat-history-status').evaluate("el => { el.hidden = false; }")
+    page.locator('#toast-stack .toast').evaluate("el => { el.hidden = false; }")
     assert _history_notice(page) == "Read failed"

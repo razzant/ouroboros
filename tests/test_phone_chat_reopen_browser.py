@@ -60,7 +60,7 @@ def select_preview_text(page, index=0):
     }""", index)
 
 
-LOADING_STATEMENTS = """() => [...document.querySelectorAll('#chat-messages *, .chat-page-note *')]
+LOADING_STATEMENTS = """() => [...document.querySelectorAll('#chat-messages *')]
     .filter(e => e.children.length === 0 && /Loading saved history|Saved text preview · updating/.test(e.textContent)
         && e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden')
     .map(e => e.textContent.trim())"""

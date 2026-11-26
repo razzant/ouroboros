@@ -478,6 +478,10 @@ test('a selected reply queued offline frees the field, says so on its own bubble
     const f = deferredSaveRoom({ savedReply: reply, status: 'queued' });
     try {
         document.body = new ElementStub('body', document);  // the toast stack's host
+        await f.settle();
+        // The fixture's room has no saved history to read: its own notice says so before any Send.
+        const toasts = () => document.body.children.flatMap((stack) => stack.children);
+        const before = toasts();
         f.type('First note.');
         f.press();
         await f.settle();
@@ -494,8 +498,7 @@ test('a selected reply queued offline frees the field, says so on its own bubble
         assert.equal(f.frames.length, 1, 'nothing is queued twice');
         f.fire('close');
         assert.deepEqual(f.actions(bubble), [], 'the queue will write it: nothing is offered twice');
-        assert.deepEqual(document.body.children.flatMap((stack) => stack.children.map((toast) => toast.textContent)), [],
-            'no toast stands in for the bubble');
+        assert.deepEqual(toasts().filter((toast) => !before.includes(toast)), [], 'no toast stands in for the bubble');
         assert.deepEqual(f.kept().at(-1).frame.reply_excerpt, reply.excerpt, 'a reload still finds it kept');
         f.fire('outbound_sent', { clientMessageId: 'cm-1', queued: true });
         assert.equal(bubble.classList.contains('pending'), false, 'written: the queued note leaves');

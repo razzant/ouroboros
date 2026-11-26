@@ -62,7 +62,7 @@ FACTS = """(pid) => {
     const rows = [...feed.querySelectorAll('.chat-bubble')].map((b) => b.getBoundingClientRect())
         .filter((b) => b.width && b.bottom > r.top && b.top < r.bottom);
     return {...facts, focusVisible: feed.matches(':focus-visible'), outline: s.outlineStyle,
-        note: Boolean(feed.parentElement.querySelector('.chat-panel-statusbar .chat-history-status:not([hidden])')),
+        note: Boolean(document.querySelector('#toast-stack .toast')),
         feed: {x: r.x, y: r.y, width: r.width, height: r.height, clientWidth: feed.clientWidth,
                offsetWidth: feed.offsetWidth, padTop: parseFloat(s.paddingTop), padLeft: parseFloat(s.paddingLeft),
                padRight: parseFloat(s.paddingRight),

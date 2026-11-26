@@ -263,12 +263,11 @@ export function openRoomArchive({ doc = globalThis.document, read = apiClient.ch
 }
 
 /** The history edge owns when this door is offered; navigation owns its lifetime. */
-export function archiveDoor({ open = openRoomArchive, notes = null, returnFocus = null,
+export function archiveDoor({ open = openRoomArchive, notify = null, returnFocus = null,
     readReceipt, syncHistory, isVisible } = {}) {
-    let door = null, hint = null, timer = null, reader = null, disposed = false, restored = false;
+    let door = null, hint = null, reader = null, disposed = false, restored = false;
     function clearHint() {
-        clearTimeout(timer);
-        hint?.remove();
+        hint?.dispose?.();
         hint = null;
     }
     function close() {
@@ -314,12 +313,10 @@ export function archiveDoor({ open = openRoomArchive, notes = null, returnFocus 
         recent(error, page) {
             if (disposed) return;
             if (error) { restored = false; clearHint(); return; }
-            if (restored || page?.project_registry !== 'restored' || !notes) return;
+            // The restore happened: told once by the page's notice, which ends by itself (owner decision 27.11.2026).
+            if (restored || page?.project_registry !== 'restored' || typeof notify !== 'function') return;
             restored = true;
-            hint = element(notes.ownerDocument, 'p', 'chat-registry-restored', RESTORED);
-            hint.setAttribute('role', 'status');
-            notes.append(hint);
-            timer = setTimeout(clearHint, 8000);
+            hint = notify(RESTORED);
         },
         close,
         dispose() { disposed = true; close(); clearHint(); door?.remove(); },

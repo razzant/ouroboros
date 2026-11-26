@@ -1782,31 +1782,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     pointer-events: auto;
 }
 
-/* The history note (a reading-window fact: a failed read, an approximate position) is its own floating chip under
-   the bar, never a full-width strip: it floats at the bar's measured height (chat.js writes --chat-header-bar)
-   with its own float-sheet backing, and the transcript's reserve counts both. Empty, it takes no room. */
-.chat-page-note {
-    position: absolute;
-    top: var(--chat-header-bar, 56px);
-    left: var(--page-header-padding-x);
-    right: auto;
-    max-width: min(560px, calc(100% - 2 * var(--page-header-padding-x)));
-    z-index: var(--z-page-header);
-    padding: 2px 0 var(--space-2);
-    pointer-events: none;
-}
-.chat-page-note > * {
-    display: block;
-    padding: 6px 12px;
-    border-radius: var(--radius-inner);
-    background: var(--surface-float);
-    box-shadow: var(--elev-rest);
-    -webkit-backdrop-filter: var(--glass);
-    backdrop-filter: var(--glass);
-    pointer-events: auto;
-}
-.chat-page-note:not(:has(> :not([hidden]))) { display: none; }
-
 /* Search in a chat (DESIGN "Search in a chat", chat_search.js): one sheet floating under the room's bar at its
    trailing edge, over moving content, so it wears the menus' material (--popup-float, the float shadow). Its corner is
    the composer field's: the sheet radius, half the height of the field alone in it, so the field alone is a capsule
@@ -2157,14 +2132,6 @@ html[data-layout="stack"] .chat-find {
     gap: inherit;
 }
 .chat-saved-preview > .chat-load-older-note { align-self: center; }
-.chat-history-status {
-    grid-column: 1 / -1;
-    flex: 0 0 100%;
-    order: 1;
-    max-width: none;
-    text-align: left;
-    overflow-wrap: anywhere;
-}
 /* The transcript's typing bubble: the shared moving mark (status_mark.js) in the bubble's secondary ink, on a line of
    its own height. */
 .typing-bubble { opacity: 0.7; color: var(--text-secondary); }
@@ -4907,11 +4874,6 @@ html[data-layout="stack"] .chat-page-header > .app-page-title-block {
 /* The actions keep their own width; the title block takes the rest (the status after the title ellipsizes last). */
 html[data-layout="stack"] .chat-page-header > .app-page-actions {
     flex: 0 0 auto;
-}
-html[data-layout="stack"] .chat-page-note {
-    left: var(--space-3);
-    max-width: calc(100% - 2 * var(--space-3));
-    padding: 2px 0 var(--space-2);
 }
 #chat-input-area,
 .chat-input-area {
@@ -9246,7 +9208,7 @@ body.keyboard-open #page-chat.active {
 }
 
 /* Outside Telegram, keyboard chrome takes its place in the column and the feed scrolls between it. */
-html:not([data-telegram-fullscreen]) body.keyboard-open #page-chat.active :is(.chat-page-header, .chat-page-note),
+html:not([data-telegram-fullscreen]) body.keyboard-open #page-chat.active .chat-page-header,
 html:not([data-telegram-fullscreen]) body.keyboard-open .project-panel .project-panel-bar {
     flex-shrink: 0;
     position: relative;
@@ -9273,9 +9235,9 @@ html:not([data-telegram-fullscreen]) body.keyboard-open :is(#chat-input-area, .c
     bottom: auto;
     padding-block: var(--composer-typing-pad, var(--space-2));
 }
-/* Capsule hints pass below Panic. The note and search sheet still float over the bar's material. */
+/* Capsule hints pass below Panic. The search sheet still floats over the bar's material. */
 body.keyboard-open :is(.chat-page-header, .project-panel-bar),
-html[data-telegram-fullscreen] body.keyboard-open :is(.chat-page-note, .chat-find) {
+html[data-telegram-fullscreen] body.keyboard-open .chat-find {
     z-index: calc(var(--z-page-header) + 1);
 }
 /* A short room's composer keeps --space-1 between its rows (a folded row takes it along) and inside the field (one

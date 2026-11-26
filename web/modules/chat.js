@@ -204,9 +204,8 @@ export function createChatInstance({
     const page = document.createElement('div');
     page.id = asPanel ? `panel-${idPrefix}` : 'page-chat';
     page.className = asPanel ? 'chat-instance-panel' : 'page active';
-    // Main: a failed read or approximate restoration floats under the bar (chat_header.js); Project keeps its status bar.
     page.innerHTML = `
-        ${roomBarHtml({ asPanel, title })}${asPanel ? '' : '<div class="chat-page-note"></div>'}
+        ${roomBarHtml({ asPanel, title })}
         <div id="chat-messages"></div>
         <div id="chat-input-area">
             <div class="chat-input-wrap">
@@ -237,7 +236,6 @@ export function createChatInstance({
     const inputArea = byId('input-area');
     const statusBadge = byId('status');
     const pageHeader = page.querySelector('.chat-page-header') || (asPanel ? container?.closest?.('.project-panel')?.querySelector?.('.project-panel-bar') : null);
-    const pageNote = page.querySelector('.chat-page-note');
     const scrollBottomBtn = byId('scroll-bottom');
     const scrollActivityDot = scrollBottomBtn?.querySelector('.chat-scroll-activity-dot');
     let nestedSubagentsExpanded = false;
@@ -2603,19 +2601,17 @@ export function createChatInstance({
         const shortMoved = syncShortRoom(page);
         let chromeMoved = false;
         if (pageHeader && messagesDiv) {
-            // The bar's own height places the note under it; the transcript clears both.
+            // The bar's own height: what floats under it hangs there, and the transcript clears it.
             const bar = Math.ceil(pageHeader.offsetHeight || 0);
-            const note = pageNote?.offsetParent ? Math.ceil(pageNote.offsetHeight || 0) : 0;
             setProperty('--chat-header-bar', `${bar}px`);
-            setProperty('--chat-header-reserve', `${Math.max(56, bar + note)}px`);
+            setProperty('--chat-header-reserve', `${Math.max(56, bar)}px`);
         }
         if (inputArea && messagesDiv) {
             setProperty('--chat-composer-height', `${composerHeightAtRest(inputArea)}px`);
             // Keyboard up: all but feed and field text is chrome (style.css), read at rest.
             const box = el => el.getBoundingClientRect();
             if (document.body.classList.contains('keyboard-open') && !inputArea.querySelector('[data-motion]')) {
-                const top = Math.max(readBand(messagesDiv, pageHeader, null).top,
-                    pageNote?.offsetHeight ? box(pageNote).bottom : 0);
+                const top = readBand(messagesDiv, pageHeader, null).top;
                 chromeMoved = setProperty('--chat-keyboard-chrome', `${Math.round(top - box(pageHeader || page).top
                     + box(inputArea).height - box(input).height)}px`);
             }
@@ -2657,7 +2653,6 @@ export function createChatInstance({
         chatResizeObserver = new ResizeObserver(schedule);
         chatResizeObserver.observe(messagesDiv);
         if (pageHeader) chatResizeObserver.observe(pageHeader);
-        if (pageNote) chatResizeObserver.observe(pageNote);
         if (inputArea) chatResizeObserver.observe(inputArea);
     }
 
@@ -2804,12 +2799,17 @@ export function createChatInstance({
     }
 
     const historyVisible = () => isInstanceVisible() && !messagesDiv.closest('[inert]')
-        && !document.body.classList.contains('nav-drawer-open') && (asPanel || (!isProjectOpening?.()
-        && !document.body.classList.contains('project-panel-open')));
-    const archive = isMain && !asPanel ? archiveDoor({ notes: pageNote, returnFocus: messagesDiv,
+        && !document.body?.classList.contains('nav-drawer-open') && (asPanel || (!isProjectOpening?.()
+        && !document.body?.classList.contains('project-panel-open')));
+    // What happened to this room's history (a failed read, an inexact return) is the page's one notice: a failure in
+    // the error's ink with the edge's Retry, standing until it ends or is closed; the rest in plain words, ending by
+    // themselves (chat_render_batch.js, room_archive.js).
+    const historyNotice = (text, action = null) => showToast(text, action ? 'danger' : 'info',
+        { action, ttl: action ? 0 : 6000, haptic: false, dismissLabel: tr('toast.dismiss', 'Dismiss notice') });
+    const archive = isMain && !asPanel ? archiveDoor({ notify: historyNotice, returnFocus: messagesDiv,
         readReceipt, syncHistory, isVisible: historyVisible }) : null;
-    const historyControls = createHistoryControls(messagesDiv, pageNote || page.querySelector('.chat-panel-statusbar'), {
-        archive, isVisible: historyVisible,
+    const historyControls = createHistoryControls(messagesDiv, {
+        notify: historyNotice, archive, isVisible: historyVisible,
     });
     const { olderButton: loadOlderBtn } = historyControls;
 
