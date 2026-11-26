@@ -1014,6 +1014,7 @@ D20 = ["docs/architecture/12-host-service-companions-and-chat-ids.md"]
 "ouroboros/tools/review_collection.py" = "D06"
 "ouroboros/tools/review_checklist.py" = "D06"
 "ouroboros/tools/governance_context.py" = "D06"
+"ouroboros/tools/governance_module_rows.py" = "D06"
 "ouroboros/tools/review_context_atlas.py" = "D06"
 "ouroboros/tools/review_helpers.py" = "D06"
 "ouroboros/tools/review_file_pack.py" = "D06"

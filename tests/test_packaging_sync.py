@@ -311,14 +311,20 @@ def test_server_workers_init_reads_manifest_branches_not_hardcoded_strings():
 
 
 def test_architecture_module_tree_lists_all_live_extension_http_endpoints():
-    """The module map keeps an entry for ``ouroboros/gateway/extensions.py``,
-    and the §4 endpoint registry (the map entry points there) lists the
-    skill routes the module registers, including the Phase 5 review surface
+    """The module map keeps an entry for ``ouroboros/gateway/extensions.py``
+    (the ``module_map`` lookup, with its own lead, under a domain whose manuals
+    include the §4 endpoint registry), and that registry lists the skill routes
+    the module registers, including the Phase 5 review surface
     ``POST /api/skills/{skill}/review``."""
-    architecture = architecture_text(REPO)
+    from ouroboros.code_intelligence_architecture import load_domain_manifest
+    from ouroboros.code_intelligence_module_map import module_map_rows
 
-    # Module map entry for ``gateway/extensions.py``.
-    assert re.search(r"^\s*extensions\.py — ", architecture, re.MULTILINE)
+    architecture = architecture_text(REPO)
+    manifest = load_domain_manifest(REPO)
+    rows = module_map_rows(REPO, "ouroboros/gateway/extensions.py", manifest)
+    assert re.search(r"^ouroboros/gateway/extensions\.py \(D\d+\) — \S", "\n".join(rows), re.MULTILINE), rows
+    owner = manifest.modules["ouroboros/gateway/extensions.py"]
+    assert "docs/architecture/04-server-api-endpoints.md" in manifest.references[owner]
     for route in ("toggle", "delete", "review"):
         assert f"| POST | `/api/skills/{{skill}}/{route}` |" in architecture
 

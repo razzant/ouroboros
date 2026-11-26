@@ -735,6 +735,15 @@ def governance_context(
             sections.append(((-files * 1000 - mentions, chapter.source_path, heading.span.start_byte),
                              path, path, f"mentions {files} touched file(s), {mentions} time(s)"))
             chapter_text[path] = body
+    if packet and touched:  # no module tree in the book: the touched domains' rows, neighbours yield first
+        from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH, blocks
+        whole, reduced, left_out, problem = blocks(root, touched)
+        if problem:
+            rows.append(_row(MODULE_ROWS_PATH, 3, "navigation", 0, problem))
+        elif whole and not _admit(MODULE_ROWS_PATH, MODULE_ROWS_PATH, whole, 3, "module rows of the touched domains") \
+                and left_out:
+            _admit(MODULE_ROWS_PATH, MODULE_ROWS_PATH, reduced, 3,
+                   f"touched module rows only; {left_out} neighbour row(s) left out, said in the block")
     for order, path, title, reason in sorted(sections):
         _admit(path, title, chapter_text.get(path, ""), 3, reason)
 

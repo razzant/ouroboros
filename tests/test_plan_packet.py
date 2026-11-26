@@ -224,3 +224,18 @@ def test_the_seat_line_follows_the_cache_stable_prefix_on_every_packet_seat(monk
     blocks = delivery["slot_messages"]["a"][-1]["content"]
     assert isinstance(blocks, list) and blocks[0]["text"] == packet[:boundary] and blocks[-1]["text"].endswith("`a`\n")
     assert delivery["request_policy"]["output_contract"] == plan_packet.PLAN_REPLY_CONTRACT
+
+
+def test_a_plan_seat_without_tools_gets_the_domain_index_and_a_retrieving_seat_does_not():
+    import pathlib
+
+    from ouroboros.tools import plan_ask
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    inline = plan_ask.stable_prompt(None, body=True, system_root=repo, by_retrieval=False)
+    assert "## Domains (`ouroboros/domains.toml`" in inline
+    assert "D06 — Review stack" in inline and "docs/architecture/06-4-self-change-and-review.md" in inline
+    assert inline.index("## ARCHITECTURE.md") < inline.index("## Domains")
+    retrieving = plan_ask.stable_prompt(None, body=True, system_root=repo, by_retrieval=True)
+    assert "## Domains" not in retrieving
+    assert "## Domains" not in plan_ask.stable_prompt(None, body=False, system_root=repo, by_retrieval=False)

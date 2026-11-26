@@ -102,6 +102,7 @@ def build_stable_prompt(
     architecture_locator: str = "docs/ARCHITECTURE.md",
     governance_by_retrieval: bool = False,
     design_nav_map: Optional[str] = None,
+    domains_table: Optional[str] = None,
 ) -> str:
     """The byte-stable part of every delivery of one plan (role, checklist, reply
     contract, the body pack). A body plan without BIBLE.md or ARCHITECTURE.md text is a
@@ -131,6 +132,9 @@ def build_stable_prompt(
             parts.append(f"## BIBLE.md (constitution — this plan touches Ouroboros's own body)\n\n{bible_text}\n\n---\n")
             parts.append("## ARCHITECTURE.md (architecture and data flow — inline, in full, for a plan that changes "
                          f"Ouroboros's own body)\n\n{architecture_text}\n\n---\n")
+            if domains_table:  # the book keeps no module tree; a seat without tools gets the domain index
+                parts.append("## Domains (`ouroboros/domains.toml`: domain, what it is, module count, owning manuals)"
+                             f"\n\n{domains_table}\n\n---\n")
         if design_nav_map:
             parts.append("\n" + design_nav_map + "\n")
             parts.append(

@@ -454,3 +454,56 @@ def test_retrieving_triad_receives_shared_tiers_in_its_actual_task(repo, monkeyp
     assert "docs/architecture/02-web.md" in task
     assert "The chat page is web/modules/chat.js" not in task
     assert 'read_file(root="system_repo"' in task
+
+
+# --- module rows of the touched domains (the book keeps no module tree) ----------
+
+def _with_manifest(repo: pathlib.Path, neighbours: int = 30) -> pathlib.Path:
+    (repo / "ouroboros").mkdir()
+    rows = {"ouroboros/project_dialogue.py": "The touched module's own lead."}
+    rows.update({f"ouroboros/n{i:02d}.py": f"Neighbour {i:02d} " + "words " * 25 for i in range(neighbours)})
+    for path, lead in rows.items():
+        (repo / path).write_text(f'"""{lead}"""\n', encoding="utf-8", newline="\n")
+    (repo / "ouroboros" / "domains.toml").write_text(
+        '[domains]\nD01 = "Agent core"\n\n[references]\nD01 = ["docs/architecture/01-core.md"]\n\n[modules]\n'
+        + "".join(f'"{path}" = "D01"\n' for path in rows), encoding="utf-8", newline="\n")
+    return repo
+
+
+def test_a_packet_reviewer_gets_the_touched_domains_module_rows_touched_first(repo):
+    from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH
+
+    context = _context(_with_manifest(repo))
+    assert MODULE_ROWS_PATH in _paths(context, "inline", tier=3)
+    text = context.selected_inline
+    touched = text.index("ouroboros/project_dialogue.py — The touched module's own lead.")
+    assert touched < text.index("ouroboros/n00.py — Neighbour 00") and "docs/architecture/01-core.md" in text
+    # A reviewer with tools calls the lookup itself.
+    assert MODULE_ROWS_PATH not in _paths(_context(repo, delivery="retrieving"))
+
+
+def test_module_rows_that_do_not_fit_keep_the_touched_rows_and_say_what_left(repo):
+    from ouroboros.tools.governance_context import _render
+    from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH, blocks
+
+    _with_manifest(repo)
+    whole, reduced, left_out, problem = blocks(repo, ["ouroboros/project_dialogue.py"])
+    assert left_out == 30 and not problem
+    roomy = _context(repo)
+    before = sum(estimate_tokens(_render(title, text)) for title, text in roomy.inline_sections
+                 if title in {row["path"] for row in _rows(roomy, "inline", tier=2)})
+    between = (estimate_tokens(_render(MODULE_ROWS_PATH, whole)) + estimate_tokens(_render(MODULE_ROWS_PATH, reduced))) // 2
+    tight = _context(repo, usable_window_tokens=int((before + between) / REVIEW_GOVERNANCE_INLINE_SHARE) + 1)
+    module_rows = [row for row in tight.manifest if row["path"] == MODULE_ROWS_PATH]
+    assert [row["disposition"] for row in module_rows] == ["navigation", "inline"], module_rows
+    assert "30 neighbour row(s) left out" in tight.selected_inline and "module_map D01" in tight.selected_inline
+    assert "ouroboros/project_dialogue.py — The touched module's own lead." in tight.selected_inline
+    assert "ouroboros/n00.py" not in tight.selected_inline
+
+
+def test_an_unreadable_manifest_is_a_named_navigation_row_not_an_empty_block(repo):
+    from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH
+
+    rows = [row for row in _context(repo).manifest if row["path"] == MODULE_ROWS_PATH]
+    assert [row["disposition"] for row in rows] == ["navigation"]
+    assert "module rows unavailable" in rows[0]["reason"]

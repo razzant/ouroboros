@@ -1,3 +1,5 @@
+"""Skill tools: ``list_skills``, ``skill_review``, ``skill_exec`` (runtime allowlist; gated by enablement, review and content hash), ``toggle_skill`` and ``skill_owner_action`` (§13)."""
+
 from __future__ import annotations
 
 import json

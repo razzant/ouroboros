@@ -88,50 +88,54 @@ def test_architecture_does_not_claim_usage_response_is_the_only_usage_reader():
     assert 'resp_dict.get("usage")' in _read("ouroboros/llm_openai_compatible.py")
 
 
-def test_architecture_component_map_covers_every_live_runtime_module():
-    """README calls ARCHITECTURE.md the full component map — so prove it.
+def test_every_live_runtime_module_is_findable_with_its_own_lead():
+    """README calls ARCHITECTURE.md the full component map, and the book's module
+    addresses now come from the code: the ``module_map`` lookup lists each domain's
+    manifest modules with the first line of their own docstring. So prove it.
 
-    Every non-``__init__`` module of the tracked runtime population must be
-    named in the component map (by path or by basename). A module nobody wrote
-    a row for is invisible to the one document a contributor is told to read
-    before editing, and the omission is silent: no other gate reads this
-    document against the tree. Population comes from the domain manifest's own
-    SSOT helper (``scripts/domain_graph.tracked_population``) so this pin and
-    the domain gates can never disagree about what "live module" means.
-
-    The basename must appear as its OWN token, not as a substring. A plain
-    ``name in arch`` accepted a basename buried inside a longer name — so
-    ``browser.py`` was "documented" by ``test_s3_task_control_browser.py``,
-    ``health.py`` by ``extension_health.py`` and ``vision.py`` by
-    ``delegate_supervision.py``, while those three modules had no row of any
-    kind.
-    """
+    Every non-``__init__`` module of the tracked runtime population appears in its
+    domain's ``module_map`` rows with a lead of its own, or, when the module states
+    none, is named in §1's hand-written relationships. A module with neither would be
+    invisible to a contributor told to look there before editing, and the omission
+    would be silent. Population comes from the domain manifest's own SSOT helper
+    (``scripts/domain_graph.tracked_population``) so this pin and the domain gates
+    never disagree about what "live module" means. The basename must appear in §1 as
+    its OWN token, not as a substring (``browser.py`` inside a test file's name)."""
+    from ouroboros.code_intelligence_architecture import load_domain_manifest
+    from ouroboros.code_intelligence_module_map import module_map_rows
     from scripts.domain_graph import tracked_population
 
-    arch = _read("docs/ARCHITECTURE.md")
-    missing = sorted(
-        path for path in tracked_population(REPO)
-        if not path.endswith("__init__.py")
-        and path not in arch
-        and not _names_basename(arch, pathlib.PurePosixPath(path).name)
-    )
-    assert not missing, (
-        "docs/ARCHITECTURE.md names no owner for these live modules: "
-        f"{missing}"
-    )
+    manifest = load_domain_manifest(REPO)
+    led, listed = set(), set()
+    for domain in manifest.domains:
+        for row in module_map_rows(REPO, domain, manifest)[1:]:
+            path, _, lead = row.partition(" — ")
+            listed.add(path)
+            if lead.strip():
+                led.add(path)
+    chapter_one = (REPO / "docs/architecture/01-high-level-architecture.md").read_text(encoding="utf-8")
+    population = [path for path in tracked_population(REPO) if not path.endswith("__init__.py")]
+    assert not sorted(set(population) - listed), "module_map does not list these live modules"
+    missing = sorted(path for path in population if path not in led and path not in chapter_one
+                     and not _names_basename(chapter_one, pathlib.PurePosixPath(path).name))
+    assert not missing, f"no docstring lead and no §1 relationship names these live modules: {missing}"
 
 
-def test_architecture_subject_map_row_resolves_its_owner_section():
-    """The map preserves the module and a resolvable owner section, not a fixed
-    inventory of private helpers inside the registry row."""
+def test_a_module_resolves_to_its_owner_section_through_its_domain_manuals():
+    """The module keeps a resolvable owner section without a hand-kept registry row:
+    its domain's ``[references]`` manuals hold the section that owns it, and every
+    architecture manual named there is a member of the book."""
+    from ouroboros.code_intelligence_architecture import load_domain_manifest
     from ouroboros.reference_books import load_reference_book, read_book_section
 
-    arch = _read("docs/ARCHITECTURE.md")
-    rows = [line for line in arch.splitlines() if line.strip().startswith("review_subject.py ")]
-    assert len(rows) == 1, rows
-    assert "§6 Subject operation" in rows[0]
-    section = read_book_section(load_reference_book(REPO, "architecture"), "Subject operation")
-    assert section.sources[0].path == "docs/architecture/06-4-self-change-and-review.md"
+    manifest = load_domain_manifest(REPO)
+    book = load_reference_book(REPO, "architecture")
+    members = {chapter.source_path for chapter in book.chapters}
+    named = {ref for refs in manifest.references.values() for ref in refs if ref.startswith("docs/architecture/")}
+    assert named and named <= members, named - members
+    section = read_book_section(book, "Subject operation")
+    owner = manifest.modules["ouroboros/tools/review_subject.py"]
+    assert section.sources[0].path in manifest.references[owner]
 
 
 def _change_review_items() -> dict:
@@ -291,7 +295,7 @@ def test_prompt_tool_names_resolve_to_registered_tools(tmp_path):
 #   3. the settings table mirrors `config.SETTINGS_DEFAULTS` (env-only and retired
 #      rows are declared, not guessed).
 # Language-tagged code fences (```yaml, ```python …) are examples and are not
-# scanned; the plain ``` fence holding the §1 module tree IS scanned. The first
+# scanned; plain ``` fences ARE scanned. The first
 # ARCHITECTURE line carries the release version by contract and is skipped, as
 # are DEVELOPMENT's "External facts: unknown is not no" (dated provenance is the
 # rule there) and the "Documentation contract" section that quotes the markers.
@@ -485,3 +489,4 @@ def test_architecture_settings_table_mirrors_config_defaults():
         if key in expected and _normalize_default_cell(cell) != str(config.SETTINGS_DEFAULTS[key]).lower()
     ]
     assert not mismatched, f"documented default differs from config.SETTINGS_DEFAULTS: {mismatched}"
+

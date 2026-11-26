@@ -1,3 +1,5 @@
+"""The running VERSION string: the bundled or checkout ``VERSION`` file, else package metadata."""
+
 from __future__ import annotations
 
 import sys

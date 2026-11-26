@@ -11,7 +11,6 @@ import shlex
 import pytest
 
 from ouroboros import claudexor_daemon as owned
-from tests._governance_docs_shared import architecture_text
 
 
 def _write_descriptor(config_dir: pathlib.Path, *, port: int = 45678) -> None:
@@ -3562,8 +3561,15 @@ def test_the_proxy_count_in_the_docs_matches_the_handlers_that_exist(tmp_path):
         f"does not say \"{expected} THIN proxies\""
     )
 
-    arch = architecture_text()
-    assert "claudexor_accounts.py" in arch and "claudexor_quota.py" in arch
+    # The module map names the gateway owners (the ``module_map`` lookup over the code);
+    # the endpoint registry names every registered route.
+    from ouroboros.code_intelligence_architecture import load_domain_manifest
+    from ouroboros.code_intelligence_module_map import module_map_rows
+
+    gateway = "\n".join(module_map_rows(pathlib.Path(__file__).resolve().parents[1], "ouroboros/gateway/",
+                                         load_domain_manifest(pathlib.Path(__file__).resolve().parents[1])))
+    for owner in ("claudexor_accounts.py", "claudexor_quota.py"):
+        assert re.search(rf"^ouroboros/gateway/{owner} \(D\d+\) — \S", gateway, re.M), owner
     from ouroboros.reference_books import load_reference_book, read_book_section
 
     book = load_reference_book(pathlib.Path(__file__).resolve().parents[1], "architecture")
