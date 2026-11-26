@@ -19,7 +19,8 @@
 # reverts nothing, runs on no schedule and uses no secret: only this workflow's own GITHUB_TOKEN
 # with the permissions below. scripts/post_merge_check.py documents each step.
 # A window that touches the interface also starts .github/workflows/post-merge-browser.yml (owner choice 1,
-# 2026-11-25, a pilot): a run of its own, which nothing here waits for or reads.
+# 2026-11-25, a pilot): a run of its own, which nothing here waits for or reads. Only the `browser-dispatch` job,
+# which checks out and runs no repository code, holds `actions: write`, and its failure changes no verdict.
 
 name: Post-merge check
 run-name: Post-merge range check
@@ -51,9 +52,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: write  # reads the earlier runs; starts the browser check (post-merge-browser.yml)
+      actions: read
     outputs:
       window: ${{ steps.base.outputs.window }}
+      browser: ${{ steps.browser_scope.outputs.applicable }}
+      browser_base: ${{ steps.base.outputs.base }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -75,26 +78,18 @@ jobs:
           if-no-files-found: error
       - name: Post-merge replay input ${{ steps.base.outputs.replay }}
         run: echo "Recorded outstanding hand-overs for a run interrupted before its legs finish."
-      # The browser check (post-merge-browser.yml) runs as its own workflow over this frozen window, only when the
-      # window touches the interface (scripts/post_merge_browser_select.py `scope`). Neither step can fail a leg.
+      # Whether the window touches the interface (scripts/post_merge_browser_select.py `scope`); the
+      # `browser-dispatch` job starts post-merge-browser.yml over this frozen window. A selector that fails fails
+      # this step visibly and starts nothing; it never stops a leg.
       - name: Decide whether the browser check applies
         id: browser_scope
         continue-on-error: true
         timeout-minutes: 3
         env:
           BASE: ${{ steps.base.outputs.base }}
-        run: python3 -I -S scripts/post_merge_browser_select.py scope --base "$BASE" --head "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
-      - name: Start the browser check of this window
-        id: browser_dispatch
-        if: github.ref == 'refs/heads/ouroboros' && steps.browser_scope.outputs.applicable == 'true'
-        continue-on-error: true
-        timeout-minutes: 3
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BASE: ${{ steps.base.outputs.base }}
-        run: >-
-          gh workflow run post-merge-browser.yml --repo "$GITHUB_REPOSITORY" --ref ouroboros
-          -f base="$BASE" -f head="$GITHUB_SHA"
+        run: |
+          set -o pipefail
+          python3 -I -S scripts/post_merge_browser_select.py scope --base "$BASE" --head "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
       - name: Post-merge ${{ fromJSON(steps.base.outputs.window).continuous && 'confirmed' || 'provisional' }} base ${{ steps.base.outputs.base }}
         run: echo "Recorded the shared starting point before either leg runs."
 
@@ -276,3 +271,24 @@ jobs:
       - name: Post-merge continuous range measured
         if: ${{ !cancelled() && steps.publish.outputs.window_scope == 'chain' }}
         run: echo "Measured $BASE..$GITHUB_SHA on $RUNNER_OS from the confirmed base."
+
+  # The only job with `actions: write`: no checkout, no repository code, one `gh workflow run` with the window's frozen
+  # base and head. Its failure fails neither the legs nor this run (continue-on-error).
+  browser-dispatch:
+    needs: window
+    if: github.repository == 'razzant/ouroboros' && github.ref == 'refs/heads/ouroboros' && needs.window.outputs.browser == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      actions: write
+    steps:
+      - name: Start the browser check of this window
+        id: browser_dispatch
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ needs.window.outputs.browser_base }}
+        run: >-
+          gh workflow run post-merge-browser.yml --repo "$GITHUB_REPOSITORY" --ref ouroboros
+          -f base="$BASE" -f head="$GITHUB_SHA"

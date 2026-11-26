@@ -43,13 +43,14 @@ _AUTHOR = re.compile(r" by `([^`\n]+)` landed\. First bad commit")  # a culprit 
 _OBSERVED = re.compile(r"^(?:Found failing|Still not passing) at `([0-9a-f]{40})`: ", re.M)
 _FORWARD = "This check blocks nothing and reverts nothing; the fix goes forward in a new pull request."
 _COMMENT_LIMIT = 60_000  # GitHub refuses a comment longer than 65,536 characters
-# Per-test notes of the browser check's base comparison (scripts/post_merge_browser.py), each {test id: value}: what the
-# window's base showed, and the window's merges that may have caused the red. No leg writes them.
-PER_ID = ("at_base", "candidates")
-_AT_BASE = {"passed": "passed at the window's base", "absent": "absent from the window's base",
-            "unknown": "not settled at the window's base",
-            "dependencies": "not compared: uv.lock differs between the window's base and head",
-            "error": "not comparable at the window's base"}
+# Per-test notes of the browser check's base comparison (scripts/post_merge_browser.py), each {test id: value}: what its
+# window's base showed, that base, and the window's merges that touched the files that selected the test. A test keeps
+# its own when it joins an issue from a later window. No leg writes them.
+PER_ID = ("at_base", "window", "candidates")
+_AT_BASE = {"passed": "passed at its window's base", "absent": "not present at its window's base",
+            "failed": "failed at its window's base", "unknown": "not settled at its window's base",
+            "dependencies": "not compared: uv.lock differs between its window's base and head",
+            "error": "not comparable at its window's base"}
 
 
 class GitHub:
@@ -233,12 +234,10 @@ def issue_body(block: dict, *, head: str, run_url: str, author: str = "", seen: 
                    "of its window is blamed.")
     else:
         opening = f"These tests fail on `ouroboros` on {system}, but the post-merge check could not find the merge that broke them."
-        at_base = block.get("at_base") if isinstance(block.get("at_base"), dict) else {}
-        if at_base and all(at_base.get(nodeid) in ("passed", "absent") for nodeid in block["ids"]):
-            opening += (" They passed at, or were absent from, the window's base, and that window held more than one "
-                        "merge: each row lists its candidate merges, none confirmed.")
-        elif at_base:
-            opening += " Each row says what the window's base showed and lists its candidate merges, none confirmed."
+        if isinstance(block.get("at_base"), dict) and block["at_base"]:
+            opening += (" Each row says what its own window's base showed and lists that window's candidate merges, "
+                        "none confirmed: the merges that touched the files that selected the test. The cause may lie "
+                        "elsewhere.")
     rows = "\n".join(f"- {_named(nodeid)}{_note(block, nodeid)}" for nodeid in block["ids"])
     sized = sum(nodeid.startswith(SIZE_PREFIX) for nodeid in block["ids"])  # a size test is never found gone: `_size_hint`
     gone = ("" if sized == len(block["ids"]) else ", or finds one outside the size check gone" if sized
@@ -250,8 +249,10 @@ def issue_body(block: dict, *, head: str, run_url: str, author: str = "", seen: 
 
 def _note(block: dict, nodeid: str) -> str:
     """A browser red's own comparison with the window's base, if its block keeps one."""
-    at_base, candidates = (block.get(key) if isinstance(block.get(key), dict) else {} for key in PER_ID)
-    parts = ([_AT_BASE.get(at_base[nodeid], f"{at_base[nodeid]} at the window's base")] if nodeid in at_base else []) + (
+    at_base, window, candidates = (block.get(key) if isinstance(block.get(key), dict) else {} for key in PER_ID)
+    shown = f" `{window[nodeid][:12]}`" if isinstance(window.get(nodeid), str) and window[nodeid] else ""
+    parts = ([_AT_BASE.get(at_base[nodeid], f"{at_base[nodeid]} at its window's base") + shown]
+             if nodeid in at_base else []) + (
         ["candidate merges " + ", ".join(f"`{sha}`" for sha in candidates[nodeid])] if candidates.get(nodeid) else [])
     return ": " + "; ".join(parts) if parts else ""
 
@@ -592,6 +593,10 @@ def _close_green(call, github, issues, failed, node_green, head, run_url, rechec
         block, number = issue["block"], issue["number"]
         gone = [nodeid for nodeid in block["ids"] if green(block, nodeid)]
         system = NAMES[system_of(block)]
+        if gone and system_of(block) == "browser" and _reread(call, github, number) != block:
+            record["warnings"].append(f"issue #{number} changed since it was read (or did not read again): "
+                                      "the next run settles it")
+            continue
         if gone and len(gone) == len(block["ids"]):
             text = (f"Green at `{head}` on {system}: every test this issue tracks passes on `ouroboros` or no longer "
                     f"exists ({run_url}). Closing.")
@@ -650,6 +655,14 @@ def _upsert_issue(call, github, issues, block, pr, head, run_url, record, curren
             record["warnings"].append(f"issue #{issue['number']} did not confirm the open {LABEL} hand-over")
         return issue["number"]
     number, known = existing["number"], set(existing["block"]["ids"])
+    if system_of(block) == "browser" and set(block["ids"]) - known:
+        # The browser check's writers are serialized, yet another may have written since this run listed the
+        # issues: merge against the issue as it is now, never an earlier read.
+        fresh = _reread(call, github, number)
+        if fresh is None or issue_key(fresh) != issue_key(block):
+            record["warnings"].append(f"issue #{number} did not read again before its update; its record was kept")
+            return None
+        existing["block"], known = fresh, set(fresh["ids"])
     if added := sorted(set(block["ids"]) - known):
         if not current(existing):
             record["warnings"].append(f"issue #{number} has no observation at or before this head; its record was kept")
@@ -674,6 +687,14 @@ def _upsert_issue(call, github, issues, block, pr, head, run_url, record, curren
             issues.remove(existing)
             record["warnings"].append(f"issue #{number} did not confirm the updated {LABEL} hand-over")
     return number
+
+
+def _reread(call, github, number: int) -> dict | None:
+    """The machine block of open issue `number` as GitHub holds it now, or None."""
+    ok, item = call(f"read #{number} again", github.get, f"issues/{number}")
+    if not ok or not isinstance(item, dict) or item.get("state") != "open":
+        return None
+    return parse_machine_block(item.get("body") or "")
 
 
 def _file_prior_reds(call, github, issues, record, *, system, ancestor, latest, keys) -> None:

@@ -16,27 +16,31 @@ window job runs `scope` to decide whether to start that workflow; its own `scope
   error surfaces). A string or a comment that mentions the marker declares nothing.
 - The check APPLIES when a commit of the window touches `web/**`, a `ui_browser` module (at the head, or at the base
   where the window deleted it or took its marker away), a file under `tests/` that such a module names (a helper or a
-  fixture), or the shared browser infrastructure (SHARED: what every browser session loads), which runs the
-  sentinels. Otherwise the window is NOT APPLICABLE: nothing runs, and nothing is green.
+  fixture), or the browser lane every browser test loads (SHARED: tests/browser_lane.py and the conftests), which
+  runs the sentinels. That is the owner's scope; dependencies (uv.lock, pyproject.toml), the CI runners and the
+  setup action stay with the release and manual lanes. Otherwise the window is NOT APPLICABLE: nothing runs, and
+  nothing is green.
 - Candidates are the `ui_browser` modules at the head: (1) a changed module; (2) a module whose name holds the stem of a
   changed `web/` file (`web/room_work.css` → `test_room_work_browser.py`); (3) a module that names a changed `web/`
   file (`chat_cards.js`), test helper or fixture, or imports from a changed module whose change reaches beyond its
   tests. A module runs whole, unless every reason that chose it is a change confined to some of its tests: then it
-  runs those tests. A file or stem more than WIDE modules name (`chat.js`, `style.css`, the stem `chat`) is a hub: it
+  runs those tests (a hunk that only deletes lines is confined to none: the module runs whole). A changed test that
+  the lane's `-m ui_browser` deselects (a Docker-only test) is EXCLUDED by the lane, named, never passed. A file or stem more than WIDE modules name (`chat.js`, `style.css`, the stem `chat`) is a hub: it
   selects nothing apart from the module named exactly after it, and stays with the release lane. Within a tier the
   window's commits take turns (each commit's cheapest candidate first), so one large merge cannot crowd out the
   others of a burst; then the cheaper candidate first.
 - The SENTINELS, the WebKit scenarios whose product regressions reached the 7.12.0 release lane, always run as their
-  tests (every engine and parameter the test declares), and run first: an argument that covers one moves to the front
-  (pytest runs each test once, in the order of the first argument naming it). A sentinel whose test the head no longer
-  defines is named, never passed to pytest; scripts/post_merge_browser.py names a scenario the session did not
-  collect or complete. A plan with nothing to run is NOT APPLICABLE.
+  tests (every engine and parameter the test declares), and run first: pytest runs each test once, in its module's
+  order wherever an argument overlaps a wider one, so scripts/post_merge_browser.py (a plugin of the head session)
+  moves the two exact cases to the front of the collected items. A sentinel whose test the head no longer defines is
+  named, never passed to pytest; scripts/post_merge_browser.py names a scenario the session did not collect or
+  complete. A plan with nothing to run is NOT APPLICABLE.
 - The plan takes candidates in that order while the estimate fits BUDGET_SECONDS and at most MAX_MODULES of them; the
   rest are DROPPED and named with their reasons. The estimate counts each node once: the run's frozen weight table
   (scripts/ci_shard_plan.py `ci-durations.json`, `ui_nodes`, milliseconds) times a node; a candidate the table does
   not time weighs the table's median module and is counted as unknown; a sentinel's nodes count under the sentinel.
-- `browser`-marked modules without `ui_browser` run in no lane and are not candidates; neither is
-  test_separate_ui_browser.py, which needs the Caddy the full lane installs.
+- `browser`-marked modules without `ui_browser` run in no lane and are not candidates; neither are the modules that
+  need the Caddy only the full lane installs (EXCLUDED, named as excluded by the lane).
 
 Stdlib only: the window job runs `scope` on the runner's bare interpreter.
 """
@@ -59,7 +63,9 @@ MAX_MODULES = 24
 BUDGET_SECONDS = 2100
 SESSION_FACTOR = 1.3
 MIN_STEM = 4  # shorter stems (`app`, `ws`) match by accident
-EXCLUDED = {"tests/test_separate_ui_browser.py": "needs the Caddy only the full lane installs"}
+CADDY = "needs the Caddy only the full lane installs"
+EXCLUDED = {"tests/test_separate_ui_browser.py": CADDY, "tests/test_client_views_browser.py": CADDY}
+DESELECTED = "`-m ui_browser` deselects it (a Docker-only or unmarked test)"
 # (scenario, the web/ files it guards): the 7.12.0 release lane found these WebKit-only product regressions
 # (web/modules/chat_cards.js: job 137377977467; web/room_work.css: job 138790711236).
 SENTINELS = (
@@ -68,12 +74,14 @@ SENTINELS = (
     ("tests/test_room_work_browser.py::"
      "test_a_queued_row_says_behind_which_work_it_stands_and_never_overflows[webkit-282]", ("web/room_work.css",)),
 )
-# What every browser session loads, whatever it selects: its pytest plugins and configuration, its launcher and retry
-# wrapper, the browser installer and the locked dependencies (Playwright among them). A change here can break any
-# browser test, so the window runs the sentinels.
-SHARED = ("tests/conftest.py", "tests/browser_lane.py", "tests/ci_evidence.py", "tests/default_lane.py",
-          "tests/ci_verdicts.py", "tests/_shared.py", "tests/_test_folders.py", "scripts/safe_test.py",
-          "scripts/ci_retry.py", "scripts/ci_browser_install.py", "pyproject.toml", "uv.lock")
+# The browser lane every browser test loads, whatever it selects (owner choice 1: web/, browser tests, their helpers and
+# the lane's own infrastructure): a change here can break any browser test, so the window runs the sentinels.
+# Browser modules live in tests/ itself, so the conftests they load are these two.
+SHARED = ("tests/browser_lane.py", "tests/conftest.py", "conftest.py")
+
+
+def shared(path: str) -> bool:
+    return path in SHARED
 _MODULE = re.compile(r"tests/test_[^/]+\.py")
 _UI_TEXT = re.compile(r"\bmark\.ui_browser\b(?!_)")  # a module that does not parse: its text decides
 
@@ -173,15 +181,16 @@ def applicability(changed: list[str], head_modules: dict[str, str], base_modules
     helpers = [path for path in changed if path.startswith("tests/") and _named_by(path, index)]
     if helpers:
         return True, f"{len(helpers)} changed browser test helper(s) or fixture(s), e.g. {helpers[0]}"
-    shared = [path for path in changed if path in SHARED]
-    if shared:
-        return True, f"the shared browser infrastructure changed ({', '.join(shared)}): the sentinels run"
+    shared_ = [path for path in changed if shared(path)]
+    if shared_:
+        return True, f"the shared browser infrastructure changed ({', '.join(shared_)}): the sentinels run"
     return False, ("no commit of the window touches web/, a browser test module, a file such a module names or the "
                    "shared browser infrastructure")
 
 
 def changed_lines(base: str, head: str, paths, cwd: Path = REPO) -> dict[str, set[int]]:
-    """{module: head line numbers the window changed} from one `git diff -U0 BASE HEAD`."""
+    """{module: head line numbers the window changed} from one `git diff -U0 BASE HEAD`; a hunk that only deletes
+    lines adds line 0, which no test holds, so its module runs whole (`changed_tests`)."""
     paths = sorted(paths)
     if not paths:
         return {}
@@ -192,26 +201,37 @@ def changed_lines(base: str, head: str, paths, cwd: Path = REPO) -> dict[str, se
             current = line[6:] if line.startswith("+++ b/") else None
         elif line.startswith("@@") and current:
             start, _, count = line.split("+", 1)[1].split(" ", 1)[0].partition(",")
-            first, many = int(start), int(count or 1)
-            lines.setdefault(current, set()).update(range(first, first + max(many, 1)))
+            first, many = int(start), int(count) if count else 1
+            lines.setdefault(current, set()).update(range(first, first + many) if many else (0,))
     return lines
 
 
 def collectable_spans(module: str, text: str) -> list[tuple[int, int, str]] | None:
     """(first line, last line, node id without parameters) of each test pytest collects from `text` (`test_*`
     functions, `test_*` methods of `Test*` classes; decorators included), or None when it does not parse."""
+    marked = lane_tests(module, text)
+    return None if marked is None else [(first, last, name) for first, last, name, _ in marked]
+
+
+def lane_tests(module: str, text: str) -> list[tuple[int, int, str, bool]] | None:
+    """`collectable_spans` with whether `-m ui_browser` keeps each test: its module's `pytestmark`, its class's
+    decorator or `pytestmark`, or its own decorators (a parameter's `marks=` included) name the marker."""
     try:
         tree = ast.parse(text)
     except SyntaxError:
         return None
-    spans = []
+    spans, everywhere = [], any(_pytestmark(node) for node in tree.body)
     for node in tree.body:
-        members = ([(f"{node.name}::", item) for item in node.body] if isinstance(node, ast.ClassDef)
-                   and node.name.startswith("Test") else [("", node)])
+        if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            members = [(f"{node.name}::", item) for item in node.body]
+            outer = everywhere or any(_marks(d) for d in node.decorator_list) or any(map(_pytestmark, node.body))
+        else:
+            members, outer = [("", node)], everywhere
         for prefix, item in members:
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("test_"):
                 first = min([item.lineno] + [decorator.lineno for decorator in item.decorator_list])
-                spans.append((first, item.end_lineno or item.lineno, f"{module}::{prefix}{item.name}"))
+                spans.append((first, item.end_lineno or item.lineno, f"{module}::{prefix}{item.name}",
+                              outer or any(_marks(decorator) for decorator in item.decorator_list)))
     return spans
 
 
@@ -278,7 +298,7 @@ def select(commits: list[dict], head_modules: dict[str, str], *, base_modules=()
     applies, why = applicability(changed, head_modules, base_modules, index)
     plan = {"format": 2, "applicable": applies, "reason": why, "changed": changed,
             "commits": [{"sha": c["sha"], "files": c["files"]} for c in commits],
-            "shared": [path for path in changed if path in SHARED],
+            "shared": [path for path in changed if shared(path)],
             "budget_ms": budget_seconds * 1000, "max_modules": max_modules, "selected": [], "dropped": [],
             "excluded": [], "wide": [], "sentinels": [], "args": [], "estimate_ms": 0, "unknown_modules": 0}
     if not applies:
@@ -335,10 +355,18 @@ def select(commits: list[dict], head_modules: dict[str, str], *, base_modules=()
                                   "estimate_ms": _timed(table, [test])[0] if present else 0})
     pinned = [row["test"] for row in plan["sentinels"] if row["present"]]
     fallback = _fallback(table)
-    for row in candidates.values():
-        tests = None if row["whole"] else changed_tests(row["module"], head_modules[row["module"]],
-                                                        lines.get(row["module"]))
-        estimate, engines, timed = _timed(table, tests or [row["module"]], minus=pinned)
+    for module, row in list(candidates.items()):
+        tests = None if row["whole"] else changed_tests(module, head_modules[module], lines.get(module))
+        if tests is not None:  # a changed test the lane deselects is excluded by the lane, never passed
+            kept = {name for _, _, name, marked in lane_tests(module, head_modules[module]) or () if marked}
+            plan["excluded"] += [{"module": test, "why": DESELECTED} for test in tests if test not in kept]
+            tests = [test for test in tests if test in kept]
+            if not tests:
+                del candidates[module]
+                for own in offered.values():
+                    own.discard(module)
+                continue
+        estimate, engines, timed = _timed(table, tests or [module], minus=pinned)
         row.update(tests=tests, estimate_ms=estimate if timed else fallback, timed=timed, nodes=engines)
     # Each commit's own candidates take turns, so one large merge cannot crowd out the others of its window.
     rank = {}
@@ -357,11 +385,11 @@ def select(commits: list[dict], head_modules: dict[str, str], *, base_modules=()
         else:
             plan["selected"].append(row)
             used += row["estimate_ms"]
-    # pytest runs each test once, in the order of the first argument that names it, and a session stopped early keeps
-    # the head of the plan: the sentinels (or the arguments that cover them) first, then the plan's priority order.
+    # A session stopped early keeps the head of the plan: the sentinels first (the head session's plugin moves their
+    # exact cases to the front, whichever argument covers them), then the plan's priority order. pytest runs each
+    # test once however many arguments overlap it.
     chosen = [arg for row in plan["selected"] for arg in row["tests"] or [row["module"]]]
-    front = [next((arg for arg in chosen if _covers(arg, test)), test) for test in pinned]
-    for arg in front + chosen:
+    for arg in [test for test in pinned if not any(_covers(other, test) for other in chosen)] + chosen:
         if not any(_covers(other, arg) for other in plan["args"]):
             plan["args"].append(arg)
     plan["estimate_ms"] = used

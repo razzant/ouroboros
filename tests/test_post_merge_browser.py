@@ -107,14 +107,23 @@ def test_only_interface_changes_apply_and_nothing_else_is_green():
 
 
 def test_a_change_to_the_shared_browser_infrastructure_runs_the_sentinels_and_says_why():
-    for path in ("tests/conftest.py", "tests/browser_lane.py", "tests/ci_evidence.py", "scripts/ci_retry.py", "uv.lock"):
+    for path in ("tests/conftest.py", "tests/browser_lane.py", "conftest.py"):
         plan = sel.select(commits([path]), MODULES, table=TABLE)
         assert plan["applicable"] is True and plan["shared"] == [path], path
         assert plan["selected"] == [] and plan["args"] == [LIVING_TEST, ROOM_TEST], path
         assert "shared browser infrastructure" in plan["reason"]
     judged = {**pmb.judge(Path("/nonexistent"), {}), "outcome": "green", "partial": [], "planned": 2, "passed": 2}
-    text = "\n".join(pmb.summary_lines(sel.select(commits(["uv.lock"]), MODULES), judged, [], {}, {}))
-    assert "Shared browser infrastructure changed (`uv.lock`)" in text
+    text = "\n".join(pmb.summary_lines(sel.select(commits(["tests/browser_lane.py"]), MODULES), judged, [], {}, {}))
+    assert "Shared browser infrastructure changed (`tests/browser_lane.py`)" in text
+
+
+def test_only_the_owners_scope_starts_the_check_automatically():
+    """Owner choice 1: web/, browser tests, their helpers and the browser lane. Dependencies, CI runners and the setup
+    action stay with the release and manual lanes (findings 4 and 14): a window of them alone is not applicable."""
+    for path in ("uv.lock", "pyproject.toml", "scripts/ci_retry.py", "scripts/run_tests.py", "tests/ci_evidence.py",
+                 "tests/ci_verdicts.py", "tests/ci_accepted.py", ".github/actions/setup-python-env/action.yml",
+                 "tests/system_e2e/conftest.py", "scripts/post_merge_browser.py"):
+        assert sel.select(commits([path]), MODULES)["applicable"] is False, path
 
 
 def test_tiers_order_changed_tests_then_name_stems_then_narrow_mentions_and_hubs_select_nothing():
@@ -226,16 +235,27 @@ def test_the_sentinels_run_first_and_every_node_counts_once():
     whole = sel.select(commits(["web/room_work.css"]), MODULES, table=TABLE)
     [room] = whole["selected"]
     assert room["estimate_ms"] == 60_000 and whole["estimate_ms"] == 33_000 + 60_000
-    assert whole["args"] == [LIVING_TEST, "tests/test_room_work_browser.py"]
+    assert whole["args"] == [LIVING_TEST, "tests/test_room_work_browser.py"]  # the room sentinel: inside its module
     # A budget that holds both sentinels and the module's other nodes keeps the module (it was dropped when the
     # sentinel's time was charged twice).
     fits = sel.select(commits(["web/room_work.css"]), MODULES, table=TABLE, budget_seconds=93)
     assert [row["module"] for row in fits["selected"]] == ["tests/test_room_work_browser.py"]
-    # A selected module that holds a sentinel comes before every other candidate.
+    # The arguments keep the plan's priority; the head session's plugin puts the two exact cases first (below).
     living = sel.select(commits(["tests/test_composer_capsules_browser.py"], ["web/modules/chat_cards.js"]),
                         MODULES, table=TABLE)
-    assert living["args"] == ["tests/test_living_cards_browser.py", ROOM_TEST,
-                              "tests/test_composer_capsules_browser.py"]
+    assert living["args"] == [ROOM_TEST, "tests/test_composer_capsules_browser.py", "tests/test_living_cards_browser.py"]
+
+
+def test_the_head_session_runs_the_two_sentinel_cases_first_whatever_argument_collected_them():
+    """pytest keeps a module's own order where arguments overlap (a test and its whole module), so the plugin, not the
+    argument order, puts the exact WebKit cases first (advisory 7), each once."""
+    items = [SimpleNamespace(nodeid=node) for node in (
+        "tests/test_living_cards_browser.py::test_a[chromium]", ROOM.replace("webkit", "chromium"),
+        "tests/test_composer_capsules_browser.py::test_c", ROOM, "tests/test_living_cards_browser.py::test_z", LIVING)]
+    pmb.pytest_collection_modifyitems(None, items)
+    assert [item.nodeid for item in items] == [
+        LIVING, ROOM, "tests/test_living_cards_browser.py::test_a[chromium]", ROOM.replace("webkit", "chromium"),
+        "tests/test_composer_capsules_browser.py::test_c", "tests/test_living_cards_browser.py::test_z"]
 
 
 def test_a_sentinel_the_head_no_longer_defines_is_named_and_never_passed():
@@ -264,9 +284,49 @@ def test_a_plan_with_nothing_to_run_is_not_applicable_and_caddy_stays_with_the_f
     plan = sel.select(commits(["web/tests/x.test.js"]), {"tests/test_other_browser.py": UI})
     assert plan["args"] == [] and plan["applicable"] is False
     assert plan["reason"].endswith("no browser test matches it and no sentinel is present")
-    modules = {**MODULES, "tests/test_separate_ui_browser.py": UI}
-    caddy = sel.select(commits(["tests/test_separate_ui_browser.py"]), modules)
-    assert caddy["selected"] == [] and caddy["excluded"][0]["module"] == "tests/test_separate_ui_browser.py"
+    for module in ("tests/test_separate_ui_browser.py", "tests/test_client_views_browser.py"):  # advisory 3
+        caddy = sel.select(commits([module]), {**MODULES, module: UI})
+        assert caddy["selected"] == [] and caddy["excluded"] == [{"module": module, "why": sel.CADDY}]
+
+
+DOCKER = ("import pytest\n\n\n@pytest.mark.ui_browser\ndef test_page():\n    pass\n\n\n"
+          "@pytest.mark.ui_browser_docker\ndef test_docker():\n    pass\n")
+D = "tests/test_smoke_browser.py"
+
+
+def test_a_changed_test_the_lane_deselects_is_excluded_by_the_lane_and_never_passed():
+    """Finding 9: a Docker-only test of a browser module (tests/test_ui_smoke_playwright.py) is named as excluded by
+    the lane; it is neither run (`-m ui_browser` deselects it) nor counted green."""
+    assert [(name, marked) for _, _, name, marked in sel.lane_tests(D, DOCKER)] == [
+        (f"{D}::test_page", True), (f"{D}::test_docker", False)]
+    only = sel.select(commits([D]), {**MODULES, D: DOCKER}, lines={D: {10}})
+    assert only["selected"] == [] and only["excluded"] == [{"module": f"{D}::test_docker", "why": sel.DESELECTED}]
+    assert only["args"] == [LIVING_TEST, ROOM_TEST]
+    both = sel.select(commits([D]), {**MODULES, D: DOCKER}, lines={D: {6, 10}})
+    assert both["selected"][0]["tests"] == [f"{D}::test_page"] and f"{D}::test_page" in both["args"]
+
+
+def test_a_hunk_that_only_deletes_lines_runs_its_module_whole(tmp_path):
+    """Findings 5 and 19: a deleted helper or fixture after a test leaves `@@ -a,n +b,0 @@`, whose line b is the last
+    line of the test before it; that test alone would leave the deletion's other readers unrun."""
+    repo = repository(tmp_path)
+    text = UI + "\n\ndef test_a():\n    pass\n\n\ndef test_b():\n    assert helper()\n"
+    (repo / K).write_text(text + "\n\ndef helper():\n    return True\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / K).write_text(text)
+    git(repo, "commit", "-qam", "head")
+    lines = sel.changed_lines(base, "HEAD", {K}, cwd=repo)
+    assert lines == {K: {0}} and sel.changed_tests(K, text, lines[K]) is None
+    plan = sel.select(commits([K]), {**MODULES, K: text}, lines=lines)
+    [row] = plan["selected"]
+    assert row["module"] == K and row["tests"] is None and K in plan["args"]
+    # An ordinary edit inside one test keeps the narrow path.
+    (repo / K).write_text(text.replace("assert helper()", "assert helper() is True"))
+    git(repo, "commit", "-qam", "edit")
+    edited = sel.changed_lines("HEAD~1", "HEAD", {K}, cwd=repo)
+    assert sel.changed_tests(K, text, edited[K]) == [f"{K}::test_b"]
 
 
 def test_the_scope_command_runs_on_a_bare_interpreter():
@@ -277,7 +337,7 @@ def test_the_scope_command_runs_on_a_bare_interpreter():
 
 # --- the outcome ------------------------------------------------------------------------------------------------
 
-PLAN = {"applicable": True, "base": "b" * 40, "head": "h" * 40, "args": ["tests/test_a_browser.py"],
+PLAN = {"applicable": True, "base": "b" * 40, "head": "h" * 40, "args": [],
         "selected": [{"module": "tests/test_a_browser.py", "files": ["web/a.js"], "reasons": ["x"]}],
         "sentinels": [], "commits": [{"sha": "1" * 40, "files": ["web/a.js"]}, {"sha": "2" * 40, "files": ["x.py"]}]}
 
@@ -311,6 +371,82 @@ def test_green_only_when_every_selected_node_ran_and_passed(tmp_path, monkeypatc
     found = pmb.judge(evidence(tmp_path, monkeypatch, selected=["a", "b"], rows=whole("a") + whole("b"),
                                verdict={"verdict": "green", "failed": [], "flaky": []}), PLAN)
     assert found["outcome"] == "green" and found["passed"] == 2 and found["partial"] == [] and found["not_run"] == []
+
+
+def test_a_dropped_changed_or_same_named_module_is_checked_partially(tmp_path, monkeypatch):
+    """Findings 8 and 20: a tier-1 or tier-2 module the budget or the cap dropped is not checked: CHECKED PARTIALLY,
+    named. A dropped tier-3 module or a hub is only named, and a plan within its budget stays green."""
+    green = {"verdict": "green", "failed": [], "flaky": []}
+    plan = sel.select(commits(["web/room_work.css"], ["tests/test_composer_capsules_browser.py"]), MODULES,
+                      table=TABLE, budget_seconds=70)
+    assert {(row["module"], row["tier"]) for row in plan["dropped"]} == {
+        ("tests/test_room_work_browser.py", 2)} and plan["args"] == [LIVING_TEST, ROOM_TEST,
+                                                                     "tests/test_composer_capsules_browser.py"]
+    plan = {**plan, "base": "b" * 40, "head": "h" * 40}
+    nodes = [LIVING, ROOM, "tests/test_composer_capsules_browser.py::test_c"]
+    found = pmb.judge(evidence(tmp_path / "d", monkeypatch, selected=nodes,
+                               rows=[r for node in nodes for r in whole(node)], verdict=green), plan)
+    assert found["outcome"] == "partial" and found["dropped"] == [
+        "tests/test_room_work_browser.py: over the time budget"]
+    assert "a changed or same-named browser module was not checked (budget or cap)" in found["partial"]
+    text = "\n".join(pmb.summary_lines(plan, found, [], {}, {}))
+    assert "CHECKED PARTIALLY" in text and "- tests/test_room_work_browser.py: over the time budget" in text
+    third = {**plan, "dropped": [{"module": "tests/test_x_browser.py", "tier": 3, "why": "over the time budget"}]}
+    named = pmb.judge(evidence(tmp_path / "t", monkeypatch, selected=nodes,
+                               rows=[r for node in nodes for r in whole(node)], verdict=green), third)
+    assert named["outcome"] == "green" and named["dropped"] == []
+
+
+def test_a_requested_collector_skipped_or_never_collected_is_partial_beside_a_passing_sibling(tmp_path, monkeypatch):
+    """Findings 1 and 9: ci_retry can say green when one selected module is skipped at collection and its sibling
+    passes; the session's selection then omits it. What was requested and never collected is CHECKED PARTIALLY;
+    what the plan excludes by the lane is not."""
+    green = {"verdict": "green", "failed": [], "flaky": []}
+    plan = {**PLAN, "args": ["tests/test_a_browser.py", "tests/test_b_browser.py", "tests/test_c_browser.py::test_y"],
+            "excluded": [{"module": "tests/test_c_browser.py::test_docker", "why": sel.DESELECTED}]}
+    node = "tests/test_a_browser.py::test_x"
+    path = evidence(tmp_path / "s", monkeypatch, selected=[node], rows=whole(node), verdict=green)
+    sessions = {path / "head": {"rows": whole(node), "selected": [node], "collection_skips": ["tests/test_b_browser.py"],
+                                "collection": []}}
+    monkeypatch.setattr(pmb.pmc, "read_session", lambda d: sessions.get(Path(d), {"rows": [], "selected": None}))
+    found = pmb.judge(path, plan)
+    assert found["outcome"] == "partial" and found["collection_skipped"] == ["tests/test_b_browser.py"]
+    assert found["not_collected"] == {"tests/test_c_browser.py::test_y": "the session collected no test it names"}
+    assert {"a requested collector was skipped at collection", "a requested test was never collected"} <= set(
+        found["partial"])
+    text = "\n".join(pmb.summary_lines(plan, found, [], {}, {}))
+    assert "Not checked: skipped at collection:\n- `tests/test_b_browser.py`" in text
+    assert "Excluded by the lane (neither checked nor partial):\n- `tests/test_c_browser.py::test_docker`" in text
+    # Every requested argument collected and passed: green, the lane's exclusion named only.
+    sessions[path / "head"] = {"rows": whole(node), "selected": [node], "collection_skips": [], "collection": []}
+    assert pmb.judge(path, {**plan, "args": ["tests/test_a_browser.py"]})["outcome"] == "green"
+    # A class skipped at collection inside a module whose other tests ran is named too.
+    sessions[path / "head"] = {"rows": whole(node), "selected": [node], "collection": [],
+                               "collection_skips": ["tests/test_a_browser.py::TestSkipped"]}
+    assert pmb.judge(path, {**plan, "args": ["tests/test_a_browser.py"]})["collection_skipped"] == [
+        "tests/test_a_browser.py::TestSkipped"]
+
+
+def test_an_unfinished_retry_is_partial_with_its_first_failure_and_never_routed(tmp_path, monkeypatch):
+    """Findings 2 and 10: a real failure whose retry was killed (InFlight, a start-only journal) has one completed
+    observation: CHECKED PARTIALLY, the first failure shown, nothing handed over. Two completed failures stay RED."""
+    verdict = {"verdict": "red", "flaky": [], "failed": [
+        {"nodeid": "cut", "attempts": [{"phase": "call", "error_type": "AssertionError"},
+                                       {"phase": "crash", "error_type": "InFlight"}]},
+        {"nodeid": "red", "attempts": [{"phase": "call", "error_type": "AssertionError"},
+                                       {"phase": "setup", "error_type": "TimeoutError"}]}]}
+    found = pmb.judge(evidence(tmp_path, monkeypatch, selected=["cut", "red"],
+                               rows=[row("cut", "failed"), row("red", "failed")], rounds=[[row("red", "failed")]],
+                               verdict=verdict), PLAN)
+    assert found["red"] == ["red"] and found["outcome"] == "red"
+    assert found["once"] == {"cut": "failed (call: AssertionError); its retry did not finish (crash: InFlight)"}
+    assert "a failure got no second completed observation" in found["partial"]
+    alone = {**verdict, "failed": verdict["failed"][:1]}
+    cut = pmb.judge(evidence(tmp_path / "c", monkeypatch, selected=["cut"], rows=[row("cut", "failed")],
+                             verdict=alone), PLAN)
+    assert cut["outcome"] == "partial" and cut["red"] == []
+    text = "\n".join(pmb.summary_lines(PLAN, cut, [], {}, {}))
+    assert "- `cut`: failed (call: AssertionError); its retry did not finish" in text
 
 
 def test_red_needs_two_observed_failures(tmp_path, monkeypatch):
@@ -443,6 +579,21 @@ def test_an_id_a_tree_does_not_hold_is_absent_and_stops_no_sibling_in_a_real_ses
     assert sorted(exported["selected_nodeids"]) == sorted(node for node, answer in found.items() if answer != "absent")
 
 
+def test_a_real_session_collects_the_sentinel_cases_first_and_each_case_once(tmp_path):
+    """pytest 9 keeps a module's order where a test and its module are both arguments; the plugin moves the exact
+    WebKit case to the front of the collected items, and no case is collected twice."""
+    tree, launcher = suite(tmp_path)
+    module = LIVING.split("::", 1)[0]
+    name = LIVING_TEST.split("::")[-1]
+    (tree / module).write_text(UI + "\n\ndef test_first():\n    pass\n\n\n"
+                               f"@pytest.mark.parametrize('engine', ['chromium', 'webkit'])\ndef {name}(engine):\n"
+                               "    pass\n", encoding="utf-8")
+    done = subprocess.run([*launcher, "-p", "scripts.post_merge_browser", "--co", "-q", "-m", "ui_browser",
+                           LIVING_TEST, module], cwd=tree, capture_output=True, text=True, timeout=120)
+    collected = [line for line in done.stdout.splitlines() if line.startswith("tests/") and "::" in line]
+    assert collected == [LIVING, f"{module}::test_first", LIVING.replace("webkit", "chromium")], done.stdout + done.stderr
+
+
 def test_compare_runs_nothing_where_the_lock_differs_and_never_trusts_a_worktree_it_did_not_verify(
         tmp_path, monkeypatch):
     red = ["tests/test_x_browser.py::test_red"]
@@ -479,26 +630,58 @@ def test_the_recheck_settles_the_open_issues_by_whole_passes_first_and_skips_wha
 
 # --- attribution ------------------------------------------------------------------------------------------------
 
-def test_a_merge_is_named_only_for_a_window_of_one_merge_that_the_base_confirms():
+def test_a_merge_is_named_only_for_a_window_of_one_merge_whose_base_ran_the_red_green():
     node = "tests/test_a_browser.py::test_x"
     one = {**PLAN, "commits": PLAN["commits"][:1]}
-    for at_base in ("passed", "absent"):  # absent: introduced with that merge
-        [named] = pmb.attribute(one, [node], {"results": {node: at_base}})
-        assert named == {"id": node, "verdict": "culprit", "culprit": "1" * 40, "last_good": "b" * 40,
-                         "at_base": at_base}
+    [named] = pmb.attribute(one, [node], {"results": {node: "passed"}})
+    assert named == {"id": node, "verdict": "culprit", "culprit": "1" * 40, "last_good": "b" * 40,
+                     "at_base": "passed", "window": "b" * 40}
+    # Finding 6: absent at the base proves no merge (a renamed test that already failed): not attributed.
+    [absent] = pmb.attribute(one, [node], {"results": {node: "absent"}})
+    assert absent["verdict"] == "unattributed" and absent["why"] == "not present at the base"
+    assert absent["candidates"] == ["1" * 40] and absent["at_base"] == "absent"
     [pre] = pmb.attribute(PLAN, [node], {"results": {node: "failed"}})
-    assert pre == {"id": node, "verdict": "pre-existing"}
+    assert pre == {"id": node, "verdict": "pre-existing", "at_base": "failed", "window": "b" * 40}
+    # Finding 11: a failure the base did not observe for this test is inconclusive, never pre-existing.
+    [unsure] = pmb.attribute(one, [node], {"results": {node: "unknown"},
+                                           "inconclusive": {node: "did not collect at the base"}})
+    assert unsure["verdict"] == "unattributed" and unsure["at_base"] == "unknown"
+    assert unsure["why"] == "its answer at the base was inconclusive: did not collect at the base"
     # Two merges: the base proves only that the window introduced it. The one that touched its files comes first.
     [many] = pmb.attribute(PLAN, [node], {"results": {node: "passed"}})
     assert many["verdict"] == "unattributed" and many["candidates"] == ["1" * 40] and many["at_base"] == "passed"
     untouched = {**PLAN, "commits": [{"sha": "1" * 40, "files": ["x.py"]}, {"sha": "2" * 40, "files": ["y.py"]}]}
     [anyone] = pmb.attribute(untouched, [node], {"results": {node: "absent"}})
-    assert anyone["candidates"] == ["1" * 40, "2" * 40]
+    assert anyone["candidates"] == ["1" * 40, "2" * 40] and anyone["why"] == "not present at the base"
     for answer in ("flaky", "unknown", "skipped", None):
         [unsure] = pmb.attribute(one, [node], {"results": {node: answer} if answer else {}})
         assert unsure["verdict"] == "unattributed" and unsure["at_base"] == "unknown", answer
     [locked] = pmb.attribute(one, [node], {"results": {node: "passed"}, "dependencies_differ": True})
     assert locked["verdict"] == "unattributed" and locked["at_base"] == "dependencies" and "uv.lock" in locked["why"]
+
+
+def test_a_base_failure_needs_a_failed_report_of_that_test(tmp_path, monkeypatch):
+    """Finding 11: `recheck_ids` answers `failed` for every id of a module that did not collect, or of a test still
+    running; the browser check keeps those inconclusive (unknown) and a real failure pre-existing. The shared
+    recheck semantics the legs use stay as they are."""
+    reds = ["tests/test_x_browser.py::test_red", "tests/test_x_browser.py::test_new", "tests/test_y_browser.py::t",
+            "tests/test_z_browser.py::test_hang"]
+    session = {"rows": [row(reds[0], "failed"), row(reds[3], "failed", "crash")],
+               "collection": ["tests/test_y_browser.py"], "selected": None}
+    monkeypatch.setattr(pmb.pmc, "read_session", lambda directory: session)
+    found = pmb.observed_failures(tmp_path, dict.fromkeys(reds, "failed") | {reds[1]: "absent"})
+    assert found == {reds[2]: "did not collect at the base", reds[3]: "did not finish at the base"}
+    monkeypatch.setattr(pmb.pmc, "_blob", lambda sha, path: "1")
+    monkeypatch.setattr(pmb, "protected_projection", lambda head, base, git: ("same", ""))
+    monkeypatch.setattr(pmb, "comparable", lambda files, **options: ([reds[0], reds[2], reds[3]], {}, None))
+    monkeypatch.setattr(pmb.pmc, "add_worktree", lambda tree, sha, omit_protected: tree.mkdir())
+    monkeypatch.setattr(pmb.pmc, "remove_worktree", lambda tree: None)
+    monkeypatch.setattr(pmb.pmc, "_git", lambda *args, cwd=None: "b" * 40)
+    monkeypatch.setattr(pmb.pmc, "recheck_ids", lambda ids, directory, **options: dict.fromkeys(ids, "failed"))
+    compared = pmb.compare(tmp_path, PLAN, [reds[0], reds[2], reds[3]])
+    assert compared["results"] == {reds[0]: "failed", reds[2]: "unknown", reds[3]: "unknown"}
+    verdicts = {row["id"]: row for row in pmb.attribute(PLAN, [reds[0], reds[2]], compared)}
+    assert verdicts[reds[0]]["verdict"] == "pre-existing" and verdicts[reds[2]]["verdict"] == "unattributed"
 
 
 def test_a_sentinel_is_compared_through_the_files_it_guards():
@@ -514,9 +697,9 @@ def test_a_sentinel_is_compared_through_the_files_it_guards():
 DATA = {"base": "b" * 40, "head": "f" * 40, "red": ["tests/test_a_browser.py::test_x", "tests/test_b_browser.py::t"],
         "flaky": [], "same_run": {}, "rechecked": {}, "recheck_listed": True,
         "verdicts": [{"id": "tests/test_a_browser.py::test_x", "verdict": "unattributed", "at_base": "passed",
-                      "candidates": ["1" * 40]},
+                      "window": "b" * 40, "candidates": ["1" * 40]},
                      {"id": "tests/test_b_browser.py::t", "verdict": "unattributed", "at_base": "unknown",
-                      "candidates": ["1" * 40, "2" * 40]}]}
+                      "window": "b" * 40, "candidates": ["1" * 40, "2" * 40]}]}
 
 
 def test_browser_reds_are_their_own_system_with_each_tests_base_answer_and_candidates():
@@ -530,16 +713,13 @@ def test_browser_reds_are_their_own_system_with_each_tests_base_answer_and_candi
     assert block["os"] == "browser" and block["candidates"] == {"tests/test_a_browser.py::test_x": ["1" * 40],
                                                                  "tests/test_b_browser.py::t": ["1" * 40, "2" * 40]}
     assert block["at_base"] == {"tests/test_a_browser.py::test_x": "passed", "tests/test_b_browser.py::t": "unknown"}
-    assert ("- `tests/test_a_browser.py::test_x`: passed at the window's base; candidate merges `" + "1" * 40 + "`"
-            in issue["body"])
-    assert "- `tests/test_b_browser.py::t`: not settled at the window's base; candidate merges" in issue["body"]
-    assert "passed at, or were absent from," not in issue["body"]  # one of them did not
+    assert block["window"] == dict.fromkeys(block["ids"], "b" * 40)
+    assert ("- `tests/test_a_browser.py::test_x`: passed at its window's base `bbbbbbbbbbbb`; candidate merges `"
+            + "1" * 40 + "`" in issue["body"])
+    assert "- `tests/test_b_browser.py::t`: not settled at its window's base `bbbbbbbbbbbb`; candidate" in issue["body"]
+    # Advisories 5 and 16: the candidates are the merges that touched the files that selected the test, no more.
+    assert "the merges that touched the files that selected the test. The cause may lie elsewhere." in issue["body"]
     assert github.issues[7]["state"] == "open" and 7 not in record["updated"] and record["untracked"] == []
-    one = {**DATA, "red": DATA["red"][:1], "verdicts": DATA["verdicts"][:1]}
-    alone = FakeGitHub(label=True)
-    pmb.hand_over(one, alone, run_url="run", retire=True)
-    [body] = [issue["body"] for issue in alone.issues.values()]
-    assert "They passed at, or were absent from, the window's base" in body
     # A Linux leg that sees the same test pass leaves the browser issue alone.
     later = routing.route(github, classification={"failed": []}, attribution={"verdicts": []}, head="f" * 40,
                           run_url="run", recheck=lambda ids: dict.fromkeys(ids, "passed"), system="linux")
@@ -547,22 +727,66 @@ def test_browser_reds_are_their_own_system_with_each_tests_base_answer_and_candi
 
 
 def test_an_issue_keeps_each_tests_own_notes_as_tests_join_and_leave_it():
+    """Finding 18 and advisory 11: a test that joins an issue from a later window keeps its own base and comparison;
+    the rows render each against its own commit."""
     first = {"format": 1, "os": "browser", "kind": "unattributed", "ids": ["a", "b"], "at_base": {"a": "passed", "b": "x"},
-             "candidates": {"a": ["1" * 40], "b": ["2" * 40]}}
+             "window": {"a": "1" * 40, "b": "1" * 40}, "candidates": {"a": ["1" * 40], "b": ["2" * 40]},
+             "base": "1" * 40}
     github = FakeGitHub(issues=[tracking_issue(9, first)], label=True)
-    joined = {**DATA, "red": ["c"], "verdicts": [{"id": "c", "verdict": "unattributed", "at_base": "absent",
-                                                  "candidates": ["3" * 40]}]}
+    joined = {**DATA, "base": "9" * 40, "red": ["c"], "verdicts": [{
+        "id": "c", "verdict": "unattributed", "at_base": "absent", "window": "9" * 40, "candidates": ["3" * 40]}]}
     record = pmb.hand_over(joined, github, run_url="run", retire=True, ancestor=lambda older, newer: True)
     assert record["updated"] == [9]
     block = routing.parse_machine_block(github.issues[9]["body"])
     assert block["ids"] == ["a", "b", "c"] and block["candidates"] == {"a": ["1" * 40], "b": ["2" * 40],
                                                                        "c": ["3" * 40]}
+    assert block["window"] == {"a": "1" * 40, "b": "1" * 40, "c": "9" * 40}
+    body = github.issues[9]["body"]
+    assert "- `a`: passed at its window's base `111111111111`" in body
+    assert "- `c`: not present at its window's base `999999999999`" in body
     narrowed = routing.route(github, classification={"failed": []}, attribution={"verdicts": []}, head="f" * 40,
                              run_url="run", recheck=lambda ids: {"a": "passed"}, system="browser",
                              ancestor=lambda older, newer: True)
     assert narrowed["narrowed"] == [{"issue": 9, "ids": ["a"]}]
     rest = routing.parse_machine_block(github.issues[9]["body"])
     assert rest["ids"] == ["b", "c"] and set(rest["candidates"]) == set(rest["at_base"]) == {"b", "c"}
+
+
+def test_a_browser_issue_is_read_again_right_before_each_write():
+    """Finding 16: route writers take turns (one concurrency group), and each reads the issue again right before it
+    writes: an update merges against the issue as it is now, a narrowing of an issue changed since its read waits."""
+    first = {"format": 1, "os": "browser", "kind": "unattributed", "ids": ["a"]}
+    github = FakeGitHub(issues=[tracking_issue(9, first)], label=True)
+    listed = routing.open_issues(github)
+    github.issues[9]["body"] = tracking_issue(9, {**first, "ids": ["a", "z"]})["body"]  # another window wrote
+    github.pages = lambda path, listed=listed: [dict(github.issues[9], body=tracking_issue(9, first)["body"])]
+    joined = {**DATA, "red": ["c"], "verdicts": [{"id": "c", "verdict": "unattributed", "at_base": "absent",
+                                                  "window": "b" * 40, "candidates": ["3" * 40]}]}
+    pmb.hand_over(joined, github, run_url="run", retire=False, ancestor=lambda older, newer: True)
+    assert routing.parse_machine_block(github.issues[9]["body"])["ids"] == ["a", "c", "z"]  # z kept
+    stale = FakeGitHub(issues=[tracking_issue(5, {**first, "ids": ["a", "b"]})], label=True)
+    stale.pages = lambda path: [dict(stale.issues[5], body=tracking_issue(5, {**first, "ids": ["a"]})["body"])]
+    record = routing.route(stale, classification={"failed": []}, attribution={"verdicts": []}, head="f" * 40,
+                           run_url="run", recheck=lambda ids: dict.fromkeys(ids, "passed"), system="browser",
+                           ancestor=lambda older, newer: True)
+    assert record["closed"] == [] and stale.issues[5]["state"] == "open"
+    assert any("changed since it was read" in warning for warning in record["warnings"])
+
+
+def test_browser_reds_reach_ouroboros_through_the_post_merge_red_issues_it_reads():
+    """Decision 7 (finding 15 declined by the owner's choice): the consumer of a red whose author's task ended is
+    Ouroboros, which reads the open post-merge-red issues from the update facts; a browser issue is one of them."""
+    from ouroboros import update_qualification
+
+    github = FakeGitHub(label=True)
+    pmb.hand_over(DATA, github, run_url="run", retire=True)
+    [issue] = github.issues.values()
+    assert {"name": routing.LABEL} in issue["labels"] and routing.LABEL == update_qualification.RED_LABEL
+    asked = []
+    read = update_qualification.post_merge_reds("https://github.com/razzant/ouroboros", get_json=lambda url: asked.append(
+        url) or [dict(issue, created_at="2026-11-26T00:00:00Z")])
+    assert f"labels={routing.LABEL}" in asked[0] and read["issues"][0]["number"] == issue["number"]
+    assert read["issues"][0]["title"].startswith("Post-merge red on the browser check (Ubuntu)")
 
 
 def test_a_legs_issue_never_gains_notes():
@@ -668,19 +892,22 @@ STEPS = {name: {step.get("id") or step.get("uses") or step["name"]: step for ste
 
 
 def test_the_window_job_starts_the_check_only_on_ouroboros_and_only_when_it_applies():
-    window = POST_MERGE["jobs"]["window"]
+    window, dispatch = POST_MERGE["jobs"]["window"], POST_MERGE["jobs"]["browser-dispatch"]
     steps = {step.get("id"): step for step in window["steps"]}
-    assert set(POST_MERGE["jobs"]) == {"window", "post-merge"}  # no browser job holds the post-merge group
-    assert window["permissions"] == {"contents": "read", "actions": "write"}  # write: the dispatch alone
-    scope, start = steps["browser_scope"], steps["browser_dispatch"]
-    assert scope["run"].startswith("python3 -I -S scripts/post_merge_browser_select.py scope")
-    assert scope["continue-on-error"] is True and start["continue-on-error"] is True  # neither can stop a leg
-    assert start["if"] == "github.ref == 'refs/heads/ouroboros' && steps.browser_scope.outputs.applicable == 'true'"
+    assert set(POST_MERGE["jobs"]) == {"window", "post-merge", "browser-dispatch"}  # none holds the post-merge group
+    assert window["permissions"] == {"contents": "read", "actions": "read"}  # as before the pilot (advisories 6, 14)
+    scope = steps["browser_scope"]
+    assert scope["run"].startswith("set -o pipefail\npython3 -I -S scripts/post_merge_browser_select.py scope")
+    assert scope["continue-on-error"] is True and dispatch["continue-on-error"] is True  # neither can stop a leg
+    assert dispatch["needs"] == "window" and dispatch["permissions"] == {"actions": "write"}
+    assert dispatch["if"] == ("github.repository == 'razzant/ouroboros' && github.ref == 'refs/heads/ouroboros' "
+                              "&& needs.window.outputs.browser == 'true'")
+    [start] = dispatch["steps"]
     assert re.fullmatch(r'gh workflow run post-merge-browser\.yml --repo "\$GITHUB_REPOSITORY" --ref ouroboros '
                         r'-f base="\$BASE" -f head="\$GITHUB_SHA"', start["run"]), start["run"]
-    assert start["env"] == {"GH_TOKEN": "${{ github.token }}", "BASE": "${{ steps.base.outputs.base }}"}
+    assert start["env"] == {"GH_TOKEN": "${{ github.token }}", "BASE": "${{ needs.window.outputs.browser_base }}"}
     order = [step.get("id") for step in window["steps"]]
-    assert order.index("base") < order.index("browser_scope") < order.index("browser_dispatch")
+    assert order.index("base") < order.index("browser_scope")
     for step in window["steps"]:  # what the window readers take from its step names
         name = step.get("name") or ""
         if "browser" in name:
@@ -703,6 +930,70 @@ def test_the_route_jobs_run_no_test_and_only_the_trial_routes_dry():
     run = STEPS["check"]["run"]["run"]
     assert "-p scripts.post_merge_browser" in run and "--session-timeout=\"$SESSION\"" in run
     assert "scripts/ci_retry.py" in run and "--require-ui-browser" not in run  # a subset proves no lane
+
+
+def _scope_step(steps):
+    return next(step for step in steps if step.get("id") in ("scope", "browser_scope") and "run" in step)
+
+
+def test_a_selector_that_crashes_fails_its_scope_step_in_both_workflows(tmp_path):
+    """Finding 12: under the default `bash -e`, `selector | tee` exits with tee's status; pipefail makes a crash fail
+    the step instead of an empty "not applicable"."""
+    for steps in (POST_MERGE["jobs"]["window"]["steps"], JOBS["scope"]["steps"]):
+        script = _scope_step(steps)["run"].replace("python3 -I -S scripts/post_merge_browser_select.py scope",
+                                                    "python3 -c 'raise SystemExit(1)'")
+        done = subprocess.run(["bash", "-e", "-c", script], env={"GITHUB_OUTPUT": str(tmp_path / "out"),
+                                                                "PATH": "/usr/bin:/bin"}, capture_output=True)
+        assert done.returncode != 0, script
+
+
+def test_the_writer_hands_over_only_a_first_parent_window_of_ouroboros(tmp_path):
+    """Finding 7: the route job checks out its own revision and runs the head's routing code only when the head is in
+    origin/ouroboros and the base is a first-parent ancestor of it; otherwise it hands nothing over and says why."""
+    (tmp_path / "r").mkdir()
+    repo = repository(tmp_path / "r")
+    (repo / "f").write_text("0")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-qb", "topic")
+    (repo / "g").write_text("1")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "topic")
+    topic = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-q", "-")
+    git(repo, "merge", "-q", "--no-ff", "-m", "merge", "topic")
+    head = git(repo, "rev-parse", "HEAD")
+    git(repo, "update-ref", "refs/remotes/origin/ouroboros", head)
+    script = STEPS["route"]["trusted"]["run"]
+
+    def trusted(base_sha, head_sha):
+        out, summary = tmp_path / "out", tmp_path / "summary"
+        out.write_text("")
+        summary.write_text("")
+        subprocess.run(["bash", "-e", "-c", script], cwd=repo, check=True, env={
+            "BASE": base_sha, "HEAD_SHA": head_sha, "GITHUB_OUTPUT": str(out), "GITHUB_STEP_SUMMARY": str(summary),
+            "PATH": "/usr/bin:/bin:/opt/homebrew/bin"})
+        return out.read_text().strip(), summary.read_text()
+
+    assert trusted(base, head) == ("trusted=true", "") and git(repo, "rev-parse", "HEAD") == head
+    git(repo, "checkout", "-q", "topic")
+    assert trusted(base, topic)[0] == "trusted=true"  # merged code, though off the first parent of the tip
+    off, text = trusted(topic, head)  # the topic commit is no first-parent ancestor of the head
+    assert off == "trusted=false" and "not a first-parent window of ouroboros" in text
+    git(repo, "checkout", "-qb", "elsewhere", base)
+    (repo / "h").write_text("2")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "unmerged")
+    assert trusted(base, git(repo, "rev-parse", "HEAD"))[0] == "trusted=false"  # not in ouroboros
+
+
+def test_the_run_step_ends_just_above_the_session_so_the_outcome_is_still_judged():
+    """Advisory 1: ci_retry's retry runs without `--session-timeout`; the run step's ceiling cuts it a few minutes after
+    the session's own limit, and the judge reads that retry as unfinished (CHECKED PARTIALLY)."""
+    session = sel.session_seconds(sel.BUDGET_SECONDS)
+    ceiling = STEPS["check"]["run"]["timeout-minutes"] * 60
+    assert session < ceiling <= session + 300
 
 
 def test_the_check_writes_its_outcome_before_the_upload_and_fails_only_after_it():

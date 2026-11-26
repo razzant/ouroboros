@@ -25,6 +25,8 @@ class FakeGitHub:
         self._check("GET", path)
         if path == f"labels/{routing.LABEL}" and not self.label:
             raise urllib.error.HTTPError(path, 404, "Not Found", None, None)
+        if path.startswith("issues/") and path[len("issues/"):].isdigit():
+            return dict(self.issues[int(path[len("issues/"):])])
         return {}
 
     def pages(self, path):

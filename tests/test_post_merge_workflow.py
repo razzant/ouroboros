@@ -29,8 +29,9 @@ def test_it_runs_after_pushes_to_ouroboros_only_and_in_the_official_repository_o
     triggers = WORKFLOW.get("on", WORKFLOW.get(True))  # PyYAML's YAML 1.1 spelling of "on"
     assert set(triggers) == {"push", "workflow_dispatch"} and triggers["push"] == {"branches": ["ouroboros"]}
     assert triggers["workflow_dispatch"]["inputs"]["base"]["required"] is True
-    # The browser check is a workflow of its own (post-merge-browser.yml; tests/test_post_merge_browser.py).
-    assert set(WORKFLOW["jobs"]) == {"window", "post-merge"}
+    # The browser check is a workflow of its own (post-merge-browser.yml; tests/test_post_merge_browser.py), which
+    # the `browser-dispatch` job only starts.
+    assert set(WORKFLOW["jobs"]) == {"window", "post-merge", "browser-dispatch"}
     assert WINDOW["if"] == JOB["if"] == "github.repository == 'razzant/ouroboros' && github.ref == 'refs/heads/ouroboros'"
     assert JOB["runs-on"] == "${{ matrix.os }}" and JOB["timeout-minutes"] == 165
 
@@ -87,7 +88,9 @@ def test_the_matrix_uses_one_shared_base_and_keeps_the_same_receipt_on_both_syst
     assert WINDOW["steps"][-1]["name"] == (
         "Post-merge ${{ fromJSON(steps.base.outputs.window).continuous && 'confirmed' || 'provisional' }} "
         "base ${{ steps.base.outputs.base }}")
-    assert WINDOW["outputs"] == {"window": "${{ steps.base.outputs.window }}"}
+    assert WINDOW["outputs"] == {"window": "${{ steps.base.outputs.window }}",
+                                 "browser": "${{ steps.browser_scope.outputs.applicable }}",
+                                 "browser_base": "${{ steps.base.outputs.base }}"}
     assert JOB["env"]["BASE"] == "${{ fromJSON(needs.window.outputs.window).base }}"
     assert STEPS["base"]["env"] == {"WINDOW": "${{ needs.window.outputs.window }}"}
     assert '"$WINDOW" > "$RUNNER_TEMP/$EVIDENCE_NAME/base.json"' in STEPS["base"]["run"]
@@ -140,17 +143,20 @@ def test_it_holds_exactly_the_permissions_of_its_hand_over_and_no_secret():
     assert WORKFLOW["permissions"] == {"contents": "read", "actions": "read", "issues": "write",
                                        "pull-requests": "write"}
     assert "permissions" not in JOB
-    # actions: write starts the browser check (post-merge-browser.yml) and nothing else needs it.
-    assert WINDOW["permissions"] == {"contents": "read", "actions": "write"}
+    assert WINDOW["permissions"] == {"contents": "read", "actions": "read"}
+    # actions: write starts the browser check (post-merge-browser.yml), in a job that checks out and runs no code.
+    dispatch_job = WORKFLOW["jobs"]["browser-dispatch"]
+    assert dispatch_job["permissions"] == {"actions": "write"} and dispatch_job["continue-on-error"] is True
+    assert not any("uses" in step for step in dispatch_job["steps"])
     assert "secrets." not in TEXT and "secrets:" not in TEXT
-    steps = WINDOW["steps"] + JOB["steps"]
+    steps = WINDOW["steps"] + JOB["steps"] + dispatch_job["steps"]
     tokens = {name: value for step in steps for name, value in (step.get("env") or {}).items()
               if "TOKEN" in name}
     assert tokens == {"GH_TOKEN": "${{ github.token }}"}  # base, growth and route read GitHub, nothing else does
     assert [step["id"] for step in steps if "GH_TOKEN" in (step.get("env") or {})] == [
-        "base", "browser_dispatch", "growth", "route"]
-    dispatch = next(step for step in WINDOW["steps"] if step.get("id") == "browser_dispatch")
-    assert dispatch["run"].startswith("gh workflow run post-merge-browser.yml ") and dispatch["continue-on-error"]
+        "base", "growth", "route", "browser_dispatch"]
+    [dispatch] = dispatch_job["steps"]
+    assert dispatch["run"].startswith("gh workflow run post-merge-browser.yml ")
 
 
 def test_every_action_is_pinned_by_commit_or_local():
@@ -164,6 +170,7 @@ def test_every_action_is_pinned_by_commit_or_local():
     # No checkout of the browser check keeps the token on disk for the tests it runs.
     checkouts = [step for step in browser if step.get("uses", "").startswith("actions/checkout@")]
     assert len(checkouts) == 4 and all(step["with"]["persist-credentials"] is False for step in checkouts)
+    assert not any("uses" in step for step in WORKFLOW["jobs"]["browser-dispatch"]["steps"])
 
 
 def test_the_browser_check_is_a_workflow_of_its_own_that_the_post_merge_readers_never_see():
@@ -186,7 +193,9 @@ def test_the_browser_check_is_a_workflow_of_its_own_that_the_post_merge_readers_
     # One run per window head at a time: no group spans two windows, so no window's pending run is ever dropped.
     assert BROWSER["concurrency"] == {"group": "post-merge-browser-${{ inputs.head || github.sha }}",
                                       "cancel-in-progress": False}
-    assert not any("concurrency" in job for job in BROWSER["jobs"].values())
+    # The issue writers take turns across every window (finding 16); nothing else waits for another window.
+    assert {name for name, job in BROWSER["jobs"].items() if "concurrency" in job} == {"route"}
+    assert BROWSER["jobs"]["route"]["concurrency"] == {"group": "post-merge-browser-route", "cancel-in-progress": False}
 
 
 def test_the_browser_check_writes_issues_only_from_its_route_job_on_ouroboros():
@@ -203,6 +212,14 @@ def test_the_browser_check_writes_issues_only_from_its_route_job_on_ouroboros():
               if "GH_TOKEN" in (step.get("env") or {})}
     assert tokens == {("check", "weights"), ("check", "run"), ("check", "recheck"), ("route", "route"),
                       ("route-trial", "route")}
+    # A push only registers the workflow: no window is checked over it (finding 17).
+    assert jobs["register"] == {**jobs["register"], "if": "github.event_name == 'push'", "permissions": {}}
+    assert not any("uses" in step for step in jobs["register"]["steps"])
+    assert "github.event_name == 'workflow_dispatch'" in jobs["scope"]["if"]
+    # The writer checks out this workflow's own revision, verifies the window, and only then the head (finding 7).
+    route = jobs["route"]["steps"]
+    assert "ref" not in route[0]["with"] and [step.get("id") for step in route[1:3]] == ["trusted", "route"]
+    assert route[2]["if"] == "steps.trusted.outputs.trusted == 'true'"
 
 
 def test_probes_import_their_own_tree_because_no_project_is_installed():

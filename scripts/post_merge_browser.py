@@ -17,22 +17,30 @@ more), and then:
 - COMPARE: the confirmed reds run once at the window's BASE in a worktree that keeps the historical fixture off disk
   where its blob differs from the head's (post_merge_check `add_worktree`, `comparable`), through post_merge_check
   `recheck_ids`: their modules are collected whole and only the listed tests run (`--ci-listed`), so an id the base
-  lacks (a new test, a renamed one or a changed parameter) is absent and stops no other. Where uv.lock differs
-  between base and head the base would run in the head's environment: nothing is compared.
+  lacks (a new test, a renamed one or a changed parameter) is absent and stops no other. `recheck_ids` counts a
+  module that did not collect, or a test still running, as failed for each id inside it; here a base failure needs a
+  failed setup, call or teardown report of that test, and anything else is inconclusive (unknown). Where uv.lock
+  differs between base and head the base would run in the head's environment: nothing is compared.
 - RECHECK: the tests of the open browser issues that this run neither saw fail nor passed whole run once at the head,
   the same way, within RECHECK_SECONDS.
-- OUTCOME (`judge`): GREEN when every selected node ran and passed (FLAKY: passed on its retry, listed, never handed
-  over); RED for a test that failed twice; CHECKED PARTIALLY when anything did not run or is not explained: no plan
-  or no verdict of scripts/ci_retry.py, a session that selected nothing of a non-empty plan, a selected test that
-  never ran, a skip that tests/browser_lane.py `permitted_skip` does not allow (this module, loaded as a plugin by
-  the head session, records which skips it allowed), a failure that got no second observation (its cause named), a
-  failure whose retry skipped, a sentinel scenario the head no longer collects or completes, or a red verdict of
-  ci_retry that no test explains (its reason named). Red and partial can hold together.
+- OUTCOME (`judge`): GREEN when every requested node was collected, completed setup, call and teardown and passed,
+  both sentinel cases included (FLAKY: passed on its retry, listed, never handed over); RED for a test with two
+  completed failure observations; CHECKED PARTIALLY, each item named with its cause, when anything requested did not
+  run or is not explained: no plan or no verdict of scripts/ci_retry.py, a changed or same-named module (tier 1 or 2)
+  the budget or the cap dropped, a requested argument or collector skipped or broken at collection or never
+  collected, a selected test that never ran, a skip that tests/browser_lane.py `permitted_skip` does not allow (this
+  module, loaded as a plugin by the head session, records which skips it allowed and moves the sentinel cases to the
+  front), a failure without a second completed observation (a retry that skipped or did not finish: the first
+  failure is shown, nothing is handed over), a sentinel case the head no longer collects or completes, or a red
+  verdict of ci_retry that no test explains. Red and partial can hold together. What the lane excludes (the plan's
+  `excluded`: Caddy modules, tests `-m ui_browser` deselects) is named, neither green evidence nor partial; dropped
+  tier-3 modules and hub files are named only.
 - ATTRIBUTION, the owner's rule (2026-11-25: name the author only when the comparison with the base confirms it, else
   "not attributed"): a merge is named only when the window holds exactly one first-parent commit and the red passed
-  whole at the base (setup, call and teardown) or its test was absent there (introduced with that merge). Failing at
-  the base too it is pre-existing. Otherwise it is not attributed: its candidates are the window's commits that touched
-  its files (its module, the changed files that selected it, a sentinel's guarded files), else all of them.
+  whole at the base (setup, call and teardown). A test absent at the base is not attributed ("not present at the
+  base"); one that failed there is pre-existing; an inconclusive base answer is unknown. Unattributed reds list their
+  candidate merges: the window's commits that touched the files that selected the test (its module, the changed
+  files that chose it, a sentinel's guarded files), else all of them; the cause may lie elsewhere.
 
 The `route` job runs no test: scripts/post_merge_routing.py `route` with the system `browser`, so its issues are
 `post-merge-red` issues of their own system, each red with its own base answer and candidates, and a culprit's pull
@@ -59,6 +67,7 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from scripts import post_merge_browser_select as selection  # noqa: E402
 from scripts import post_merge_check as pmc  # noqa: E402
 from scripts import post_merge_routing as routing  # noqa: E402
 from scripts.post_merge_bisect import comparable, probe_files, protected_projection  # noqa: E402
@@ -91,6 +100,21 @@ def pytest_runtest_logreport(report):
                                          if report.nodeid.startswith(prefix) and re.search(pattern, reason))
 
 
+try:  # the head session loads this module as a plugin; the route job runs it on a bare interpreter
+    from pytest import hookimpl as _hookimpl
+except ImportError:  # pragma: no cover - no pytest, no session to order
+    def _hookimpl(**_options):
+        return lambda function: function
+
+
+@_hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):  # noqa: ARG001
+    """The two sentinel cases first, whichever argument collected them: pytest keeps a module's own order where
+    arguments overlap, and a session stopped at its budget keeps the head of the plan."""
+    first = [scenario for scenario, _ in selection.SENTINELS]
+    items.sort(key=lambda item: first.index(item.nodeid) if item.nodeid in first else len(first))
+
+
 def pytest_sessionfinish(session):
     config = session.config
     directory = getattr(config.option, "ci_evidence_dir", None)
@@ -113,6 +137,16 @@ def _write(path: Path, value) -> None:
     path.write_text(json.dumps(value, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _completed(attempt: dict) -> bool:
+    """Whether a failed attempt of verdict.json is a completed failure observation: not a skip on the retry, not a
+    test still running when its session was killed, not a collection error."""
+    return attempt.get("error_type") not in ("Skipped", "InFlight") and attempt.get("phase") != "collect"
+
+
+def _first(attempt: dict) -> str:
+    return f"{attempt.get('phase', '?')}: {attempt.get('error_type', '?')}"
+
+
 def _rounds(directory: Path) -> list[Path]:
     """scripts/ci_retry.py's retry rounds of a pass, in order."""
     rounds = [path for path in Path(directory).glob("retry-*") if path.name[len("retry-"):].isdigit()]
@@ -131,8 +165,9 @@ def _once(attempt: dict, reason: str) -> str:
 def judge(evidence: Path, plan: dict) -> dict:
     """The outcome of DIR/head: its first session, ci_retry's rounds and verdict.json, against the plan."""
     result = {"outcome": "partial", "partial": [], "red": [], "once": {}, "failed_then_skipped": [], "flaky": [],
-              "accepted": [], "not_run": [], "skipped": [], "missing_sentinels": [], "passed": 0, "planned": None,
-              "verdict": None, "reason": ""}
+              "accepted": [], "not_run": [], "skipped": [], "missing_sentinels": [], "dropped": [],
+              "collection_skipped": [], "not_collected": {}, "passed": 0, "planned": None, "verdict": None,
+              "reason": ""}
     if not plan:
         result["partial"].append("the job stopped before it chose the tests: nothing ran")
         return result
@@ -168,10 +203,13 @@ def judge(evidence: Path, plan: dict) -> dict:
             continue
         if len(attempts) < 2:
             result["once"][node] = _once(attempts[0], result["reason"])
-        elif all(attempt.get("error_type") != "Skipped" for attempt in attempts[:2]):
-            result["red"].append(node)  # two observed failures
-        else:
+        elif all(_completed(attempt) for attempt in attempts[:2]):
+            result["red"].append(node)  # two completed failure observations
+        elif attempts[1].get("error_type") == "Skipped" and _completed(attempts[0]):
             result["failed_then_skipped"].append(node)
+        else:  # a retry, or a first attempt, that never finished: the first failure stays visible, nothing is routed
+            result["once"][node] = (f"failed ({_first(attempts[0])}); its retry did not finish ({_first(attempts[1])})"
+                                    if _completed(attempts[0]) else _once(attempts[0], result["reason"]))
     if not verdict:  # no verdict: a failure the session saw is reported, never handed over
         result["once"] = {node: "failed; its retry never ran" for node, observed in ran.items()
                           if observed["outcome"] == "failed"}
@@ -180,6 +218,20 @@ def judge(evidence: Path, plan: dict) -> dict:
                                and node not in permitted and node not in seen)
     if planned is not None:
         result["not_run"] = sorted((set(planned) - set(ran)) | set(verdict.get("not_run") or []))
+    # What was requested and never became a selected test: a collector skipped or broken at collection, or an
+    # argument that collected nothing (a module the plan asked for whole, one changed test).
+    skips, broken = first.get("collection_skips") or [], first.get("collection") or []
+    result["collection_skipped"] = sorted(skips)
+    for node in broken:
+        result["once"].setdefault(node, "did not collect")
+    explained = set(skips) | set(broken)
+    for arg in plan.get("args") or [] if planned is not None else []:
+        if any(pmc._inside(node, arg) for node in planned):
+            continue
+        if not any(pmc._inside(node, arg) or pmc._inside(arg, node) for node in explained):
+            result["not_collected"][arg] = "the session collected no test it names"
+    result["dropped"] = [f"{row['module']}: {row.get('why', 'dropped')}" for row in plan.get("dropped") or []
+                         if row.get("tier", 3) <= 2]
     for row in plan.get("sentinels") or []:
         scenario = row["scenario"]
         if not row.get("present"):
@@ -190,13 +242,17 @@ def judge(evidence: Path, plan: dict) -> dict:
             result["missing_sentinels"].append(f"{scenario}: it did not complete")
     result["passed"] = sum(observed["outcome"] == "passed" for node, observed in ran.items()
                            if node not in seen and node not in result["flaky"])
-    for key, label in (("once", "a failure got no second observation"), ("failed_then_skipped",
-                                                                         "a failure skipped on its retry"),
+    for key, label in (("dropped", "a changed or same-named browser module was not checked (budget or cap)"),
+                       ("collection_skipped", "a requested collector was skipped at collection"),
+                       ("not_collected", "a requested test was never collected"),
+                       ("once", "a failure got no second completed observation"),
+                       ("failed_then_skipped", "a failure skipped on its retry"),
                        ("skipped", "a test skipped outside the lane's permitted skips"),
                        ("not_run", "a selected test never ran"), ("missing_sentinels", "a sentinel was not checked")):
         if result[key]:
             result["partial"].append(label)
-    explained = result["red"] or result["once"] or result["failed_then_skipped"] or result["not_run"] or result["skipped"]
+    explained = (result["red"] or result["once"] or result["failed_then_skipped"] or result["not_run"]
+                 or result["skipped"] or result["collection_skipped"] or result["not_collected"])
     if verdict and verdict.get("verdict") not in ("green", "flaky", "accepted") and not explained:
         result["partial"].append("scripts/ci_retry.py says " + str(verdict.get("verdict")) + " and no test explains it"
                                  + (f": {result['reason']}" if result["reason"] else ""))
@@ -228,10 +284,11 @@ def run_session(tree: Path, args, directory: Path, *, pytest=None) -> int:
 
 
 def compare(evidence: Path, plan: dict, red: list[str], *, run=None) -> dict:
-    """compare.json: each confirmed red at the window's base, {id: passed|failed|absent|skipped|xfailed|unknown|error}."""
+    """compare.json: each confirmed red at the window's base, {id: passed|failed|absent|skipped|xfailed|unknown|error};
+    `inconclusive` names why a `recheck_ids` failure became unknown (no failed report of that test at the base)."""
     base, head = plan.get("base") or "", plan.get("head") or ""
     record = {"format": 1, "base": base, "head": head, "ids": sorted(red), "results": {},
-              "dependencies_differ": False, "excluded": {}}
+              "dependencies_differ": False, "excluded": {}, "inconclusive": {}}
     if not red:
         return record
     if pmc._blob(base, "uv.lock") != pmc._blob(head, "uv.lock"):  # as post_merge_check's Prober records it
@@ -253,6 +310,8 @@ def compare(evidence: Path, plan: dict, red: list[str], *, run=None) -> dict:
         record["results"].update(pmc.recheck_ids(
             kept, Path(evidence) / "base", head=base, read_source=pmc.tree_source(base), budget=COMPARE_SECONDS,
             run=run or (lambda args, directory: run_session(tree, args, directory))))
+        record["inconclusive"] = observed_failures(Path(evidence) / "base", record["results"])
+        record["results"].update(dict.fromkeys(record["inconclusive"], "unknown"))
     except (OSError, subprocess.SubprocessError) as error:
         record["error"] = f"the base did not run: {error}"
         record["results"].update({node: "unknown" for node in kept if node not in record["results"]})
@@ -261,6 +320,22 @@ def compare(evidence: Path, plan: dict, red: list[str], *, run=None) -> dict:
             pmc.remove_worktree(tree)
         shutil.rmtree(work, ignore_errors=True)
     return record
+
+
+def observed_failures(directory: Path, results: dict) -> dict[str, str]:
+    """{id: why} for each `failed` answer of the base session that no failed setup, call or teardown report of that
+    test shows: its module or collector did not collect, or it was still running when the session ended. Such an
+    answer says nothing about the test, so it is no proof that the red was there before the window."""
+    session = pmc.read_session(directory)
+    failed = {row["nodeid"] for row in session["rows"]
+              if row["outcome"] == "failed" and row["phase"] in ("setup", "call", "teardown")}
+    found = {}
+    for node, answer in results.items():
+        if answer != "failed" or any(pmc._inside(other, node) for other in failed):
+            continue
+        broken = any(pmc._inside(node, other) or pmc._inside(other, node) for other in session["collection"])
+        found[node] = "did not collect at the base" if broken else "did not finish at the base"
+    return found
 
 
 def same_run_passes(directory: Path, ids) -> dict[str, str]:
@@ -310,8 +385,11 @@ def relevant_files(plan: dict, node: str) -> set[str]:
 
 
 def attribute(plan: dict, red: list[str], compared: dict) -> list[dict]:
-    """route()'s verdicts by the owner's rule: culprit, pre-existing or unattributed with candidates."""
+    """route()'s verdicts by the owner's rule: a culprit only for a one-merge window whose base ran the red whole and
+    green; pre-existing only where the base showed that test fail; else unattributed with its candidate merges. Each
+    verdict keeps its own window base (`window`), so an issue that gains tests from a later window keeps both."""
     commits, results = plan.get("commits") or [], compared.get("results") or {}
+    inconclusive, base = compared.get("inconclusive") or {}, plan.get("base") or ""
     verdicts = []
     for node in red:
         files = relevant_files(plan, node)
@@ -319,18 +397,21 @@ def attribute(plan: dict, red: list[str], compared: dict) -> list[dict]:
         answer = results.get(node, "unknown")
         if compared.get("dependencies_differ"):
             verdicts.append({"id": node, "verdict": "unattributed", "at_base": "dependencies", "candidates": candidates,
-                             "why": "uv.lock differs between the window's base and head: the base was not run"})
+                             "window": base, "why": "uv.lock differs between the window's base and head: the base "
+                                                    "was not run"})
         elif answer == "failed":
-            verdicts.append({"id": node, "verdict": "pre-existing"})
-        elif answer in ("passed", "absent") and len(commits) == 1:
-            verdicts.append({"id": node, "verdict": "culprit", "culprit": commits[0]["sha"],
-                             "last_good": plan.get("base"), "at_base": answer})
+            verdicts.append({"id": node, "verdict": "pre-existing", "at_base": "failed", "window": base})
+        elif answer == "passed" and len(commits) == 1:
+            verdicts.append({"id": node, "verdict": "culprit", "culprit": commits[0]["sha"], "last_good": base,
+                             "at_base": answer, "window": base})
         else:
             at_base = answer if answer in ("passed", "absent", "error") else "unknown"
-            why = (f"the window holds {len(commits)} merges and the base does not tell them apart"
-                   if at_base in ("passed", "absent") else f"its answer at the base was {answer}")
+            why = (f"the window holds {len(commits)} merges and the base does not tell them apart" if at_base == "passed"
+                   else "not present at the base" if at_base == "absent"
+                   else f"its answer at the base was inconclusive: {inconclusive[node]}" if node in inconclusive
+                   else f"its answer at the base was {answer}")
             verdicts.append({"id": node, "verdict": "unattributed", "at_base": at_base, "candidates": candidates,
-                             "why": why})
+                             "window": base, "why": why})
     return verdicts
 
 
@@ -461,13 +542,20 @@ def summary_lines(plan: dict, judged: dict, verdicts: list[dict], compared: dict
         lines += ["", "Shared browser infrastructure changed (" + ", ".join(f"`{path}`" for path in plan["shared"])
                   + "): the sentinels run whatever else is selected."]
     for key, label in (("dropped", "Not selected (budget or cap)"), ("wide", "Hub files left to the release lane"),
-                       ("excluded", "Excluded")):
+                       ("excluded", "Excluded by the lane (neither checked nor partial)")):
         if plan.get(key):
             lines += ["", f"{label}:"] + [f"- `{row.get('module') or row.get('file')}`: "
                                           f"{row.get('why') or str(row.get('modules')) + ' modules name it'}"
                                           for row in plan[key]]
     if judged["partial"]:
         lines += ["", "Checked partially because:"] + [f"- {reason}" for reason in judged["partial"]]
+    for key, label in (("dropped", "Not checked: changed or same-named modules over the budget or cap"),
+                       ("collection_skipped", "Not checked: skipped at collection")):
+        if judged.get(key):
+            lines += ["", f"{label}:"] + [f"- `{node}`" if key != "dropped" else f"- {node}" for node in judged[key]]
+    if judged.get("not_collected"):
+        lines += ["", "Not checked: requested, never collected:"] + [
+            f"- `{arg}`: {cause}" for arg, cause in sorted(judged["not_collected"].items())]
     unfinished = {step: outcome for step, outcome in (steps or {}).items() if outcome not in ("success", "skipped", "")}
     if unfinished:
         lines += ["", "Steps that did not finish: " + ", ".join(f"{step} ({outcome})" for step, outcome in
@@ -478,11 +566,12 @@ def summary_lines(plan: dict, judged: dict, verdicts: list[dict], compared: dict
         for node in judged["red"]:
             verdict = notes.get(node, {})
             if verdict.get("verdict") == "culprit":
-                note = f" — introduced by `{verdict['culprit'][:12]}` ({verdict.get('at_base')} at the base)"
+                note = f" — introduced by `{verdict['culprit'][:12]}` (passed whole at the base)"
             elif verdict.get("verdict") == "pre-existing":
                 note = " — already red at the base: not attributed"
             else:
-                note = (f" — not attributed ({verdict.get('why', 'no base comparison')}); candidate merges: "
+                note = (f" — not attributed ({verdict.get('why', 'no base comparison')}); candidate merges (they "
+                        "touched the files that selected it; the cause may lie elsewhere): "
                         + ", ".join(f"`{sha[:12]}`" for sha in verdict.get("candidates") or []))
             lines.append(f"- `{node}`{note}")
     if judged["once"]:
