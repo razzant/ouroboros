@@ -526,3 +526,18 @@ def test_the_reference_atlas_lists_every_standalone_spec_and_resolves():
     for path in re.findall(r"`([\w./-]+\.(?:toml|md))`", atlas):
         assert (REPO / path).is_file(), path
 
+
+def test_closed_roads_state_the_road_and_its_reason_without_ciphers():
+    """§10.2 keeps rejected approaches that have no file of their own: each line is
+    "Not X, because Y" in the present tense. Where it was decided stays in Git (the
+    residue rule keeps decision labels out of the book), so no line carries a private
+    operator cipher such as "3A" or "Q7=A"."""
+    from ouroboros.reference_books import load_reference_book, read_book_section
+
+    section = read_book_section(load_reference_book(REPO, "architecture"), "10.2 Closed roads")
+    assert section.sources[0].path == "docs/architecture/10-key-invariants.md"
+    roads = [line for line in section.text.splitlines() if line.startswith("- ")]
+    assert roads
+    for road in roads:
+        assert road.startswith("- **Not ") and ", because " in road, road
+        assert not re.search(r"\b\d+[A-Z]\b|\bQ\d+\s*=|\bD-[A-Z]{2,}", road), road

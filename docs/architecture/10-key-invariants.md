@@ -53,3 +53,14 @@ Bounded views are projections, never new authority: deciding actors resolve the 
 
 Subject identity fixes before seat budgeting so changed sources invalidate it, and `tool_trajectory:<corpus-sha>[<source-index>]` addresses original records, never moving tails. Review records and checkpoints commit write-once (`state/review_ledger`, `source_handles/context_checkpoints`) before `write_task_result` projections; a task-acceptance checkpoint stored before result review keeps `applied_source_status`. `review_projection.late_notice_receipts` queues late-notice custody on the outbox; `terminal_delivery.register_delivery` keeps the first receipt (`basis="send_handler_returned"` proves send return, not human reading), and late evidence is judged on an admissible turn (§6 Review stack).
 
+### 10.2 Closed roads
+
+Approaches rejected or retired that have no file of their own to carry the reason. Each states the road and why it stays closed; a line leaves when its fork ceases to exist.
+
+- **Not the architecture book only for work on my own body in owner-Max**, because it is the map through which I understand my capabilities, tools and accesses and so work effectively on any task (BIBLE P1 keeps it resident while it fits).
+- **Not a hand-kept module tree in §1**, because its rows restated module docstrings and drifted from the code; addresses and leads come from `module_map` and the manifest, and §1 keeps only what code cannot state.
+- **Not tracked generated maps of the code**, such as the domain map and the facade, data-layout and frozen-contract inventories, because their sources answer on demand (`query_code` architecture facts, `scripts/check_domains.py --map`) and a tracked copy must be regenerated in every change touching its source.
+- **Not grant files or per-chapter byte budgets for the books**, because one pairwise rule per book, paid in the same book in the same change, needs no stored number or reserve (`tests/test_reference_book_budgets.py`).
+- **Not a resident Pattern Register or host-written execution reflections as a privileged learning organ**, because a lesson is a change in what I understand, keep in view or can do, put where it acts; such notes are ordinary knowledge.
+- **Not connectors that filter events themselves**, because filtering by the connector replaces my judgment; connectors report observed provider facts (`event.facts`, CREATING_SKILLS) and the mind decides (§12).
+- **Not a separate directory of decision records**, because a reason kept beside its rule ("not X, because Y") is read where the rule is changed, on every fork; only roads without such a home are listed here.
