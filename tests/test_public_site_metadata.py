@@ -3,12 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
+import subprocess
 import xml.etree.ElementTree as ET
 from collections import Counter
 from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
 import yaml
 
 from ouroboros.tools.release_sync import (
@@ -24,9 +28,34 @@ SITE = REPO / "site"
 DOCS = REPO / "docs"
 ORIGIN = "https://ouroboros-agent.ai"
 NOVEMBER_SHA256 = "9976660610a53f0352a8df529943653de20d17f605741fe47a8ffc3fa8345709"
-NOVEMBER_CARD = "card/editions/2026.11-en.png"
 NOVEMBER_CARD_SHA256 = "15d6fbada68b212adcd9e483b99a29a1bf0811e104617a5f898030f21b2db779"
+DECEMBER_SHA256 = "97f25397c30f6f3bf4ccbf9efdcef4c4495cee94d18f94c947e1141d4acaf253"
+DECEMBER_CARD_SHA256 = "7f995bf3edb9ca3879ce5677d20ac452bb3d7ed6ee0bf459bc7ba92516670ca2"
+# A published edition is frozen: its data and its card, and the words its archive page must carry in its head.
+RATING_ARCHIVES = {
+    "2026.11": ("November", NOVEMBER_CARD_SHA256, ("Edition 2026.11", "11 models", "32 kinds of work")),
+    "2026.12": ("December", DECEMBER_CARD_SHA256, ("Edition 2026.12", "15 models", "6 columns")),
+}
 RATING_GRADES = {"S", "A", "B", "C"}
+# Separate digits from word boundaries: a unit touching a number is still a unit (15руб., GBP25).
+_RATING_UNITS = (
+    r"usd|eur|rub|gbp|dollars?|euros?|cents?|roubles?|rubles?|рубл\w*|руб\.?|долл\.?|доллар\w*|евро|"
+    r"цент(?:а|ов|у|ом|е|ы|ам|ами|ах)?|коп(?:\.|ей(?:ка|ки|ку|кой|кою|ками|ках|кам|ке)|еек)?|бакс\w*"
+)
+_RATING_AMOUNT = r"\d+(?:[.,]\d+)*(?:[\u00a0\u202f ]\d{3}(?:[.,]\d+)?)? *(?:[kmb](?![^\W\d_])|тыс\.?|млн|млрд)?"
+RATING_MONEY = re.compile(
+    rf"[$€₽£¥]|(?<![^\W\d_])(?:{_RATING_UNITS})\s*{_RATING_AMOUNT}"
+    rf"|{_RATING_AMOUNT}\s*(?:{_RATING_UNITS})(?![^\W\d_])"
+    # Preserve the existing policy against naming a currency or its sign even without a numeric amount.
+    rf"|\b(?:{_RATING_UNITS})(?!\w)", re.I,
+)
+RATING_CARRIED_FIELDS = ("votes", "reviewers", "period", "volume", "totals.tokens")
+RATING_COUNT = re.compile(r"\b([0-9]+)\s+(letters?|dashes?|cells? without a letter|букв[аы]?|прочерк(?:а|ов)?)\b", re.I)
+
+FROZEN_RATING_JSON = {Path(f"data/editions/{name}/edition.json"): digest for name, digest in (
+    ("2026.11", NOVEMBER_SHA256), ("2026.12", DECEMBER_SHA256),
+)}
+RATING_REVISION = re.compile(r"([0-9]{4}\.[0-9]{2})\.[1-9][0-9]*")
 INDEXABLE = {
     "/": SITE / "index.html",
     "/about/": SITE / "about" / "index.html",
@@ -192,15 +221,24 @@ def test_rating_publication_is_complete_and_source_bound():
     if data["method_version"] >= 4:
         _assert_rating_column_reasons(data)
         _assert_rating_reviewers(data)
-        _assert_rating_votes(data)
+        # Keep the latest-payload safety check first, including when revision fields are missing.
+        _assert_rating_public_text_has_no_amounts(data)
+        _assert_rating_vote_source(data, source)
         _assert_rating_static_publication(source, data)
+        if data["method_version"] >= 5:
+            _assert_rating_views_and_questions(data)
     else:
         assert data["method_version"] == 3
         _assert_rating_per_kind_reasons(data)
-    _assert_rating_wrappers_and_asset_versions(source)
     for path in (SITE / "index.html", DOCS / "index.html"):
         assert 'href="/llm-rating/"' in path.read_text(encoding="utf-8")
     readme = (REPO / "README.md").read_text(encoding="utf-8")
+    if data["method_version"] >= 5:
+        for mirror in (source, generated):
+            _assert_rating_public_files_have_no_money(mirror, readme)
+    _assert_rating_wrappers_and_asset_versions(source)
+    if data["method_version"] >= 5:
+        _assert_rating_published_counts(source, data, readme)
     for theme in ("light", "dark"):
         image = f"docs/llm-rating/card/latest-en-{theme}.png"
         assert image in readme and (REPO / image).is_file()
@@ -211,6 +249,40 @@ def test_rating_publication_is_complete_and_source_bound():
         assert re.search(r"\bcolumns?\b", alts[0], re.I) and not re.search(r"\bkinds?\s+of\s+work\b", alts[0], re.I), (
             "README rating card alt must describe columns, not kinds of work"
         )
+
+
+def _assert_rating_assets_are_javascript(source, node):
+    def check(label, *args, script=None):
+        result = subprocess.run([node, "--check", *args], input=script, capture_output=True, text=True, timeout=30, check=False)
+        assert result.returncode == 0, f"Invalid published JavaScript: {label}\n{result.stderr}"
+
+    for path in sorted((source / "assets").glob("*.js")):
+        check(path.name, str(path))
+    for path in sorted(source.rglob("*.html")):
+        for i, script in enumerate(_rating_html(path.read_text(encoding="utf-8")).scripts, 1):
+            check(f"{path.relative_to(source)} inline script {i}", "-", script=script)
+
+
+def test_rating_published_javascript_parses():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed; browser execution is checked by the rating build")
+    for mirror in (SITE / "public" / "llm-rating", DOCS / "llm-rating"):
+        _assert_rating_assets_are_javascript(mirror, node)
+
+
+def test_rating_javascript_check_detects_invalid_asset(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed; cannot check the syntax control")
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    script = assets / "control.js"
+    script.write_text("const ok = true;\n", encoding="utf-8")
+    _assert_rating_assets_are_javascript(tmp_path, node)
+    script.write_text("const broken = ;\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="Invalid published JavaScript: control.js"):
+        _assert_rating_assets_are_javascript(tmp_path, node)
 
 
 def test_rating_november_archive_is_frozen_and_graded():
@@ -224,6 +296,24 @@ def test_rating_november_archive_is_frozen_and_graded():
         latest = json.loads((mirror / "data/latest.json").read_text(encoding="utf-8"))
         if latest["edition"] != "2026.11" and latest["method_version"] >= 4:
             _assert_rating_archive_share_head(mirror)
+
+
+def test_rating_december_archive_is_frozen():
+    for mirror in (SITE / "public" / "llm-rating", DOCS / "llm-rating"):
+        _assert_rating_december_archive(mirror)
+
+
+def _assert_rating_december_archive(mirror):
+    """Edition 2026.12 is published: its data and its card stay byte for byte whichever edition is the latest, and once
+    a later edition exists it has an archive page of its own."""
+    raw = (mirror / "data/editions/2026.12/edition.json").read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == DECEMBER_SHA256, f"2026.12 archive SHA-256 changed: {mirror}"
+    december = json.loads(raw)
+    assert december["edition"] == "2026.12" and december["method_version"] == 4 and december["status"] == "final"
+    _assert_rating_column_reasons(december)
+    latest = json.loads((mirror / "data/latest.json").read_text(encoding="utf-8"))
+    if latest["edition"] != "2026.12":
+        _assert_rating_archive_share_head(mirror, "2026.12")
 
 
 def _assert_rating_per_kind_reasons(data):
@@ -256,19 +346,65 @@ def _assert_rating_column_reasons(data):
     main = {group["id"] for group in data["groups"] if group["main"]}
     assert len(main) == data["totals"]["columns"] > 0
     grounds = {"carried", "case", "cards", "role", "open", "coordinator"}
+    # Method 5: a cell may carry a dash instead of a letter (no work of that kind with a known outcome). It has the
+    # ground "nodata", only such a cell has it, and it still says in both languages what is missing.
+    dash_allowed = data["method_version"] >= 5
+    if dash_allowed:
+        grounds = grounds | {"nodata"}
     rated = [model for model in data["models"] if model.get("rank") is not None]
     assert {model["id"] for model in rated} == {model["id"] for model in data["models"] if model["status"] == "rated"}
     assert len(rated) == data["totals"]["models"]["rated"] > 0
+    cells = [model["groups"].get(gid, {}) for model in rated for gid in main]
+    assert all("grade" in cell for cell in cells), "every main cell needs an explicit grade (null for a dash)"
+    case_ids = {case["id"] for case in data["cases"]}
+    letters = data["totals"]["letters"]
+    assert letters["main"] == sum(1 for cell in cells if cell.get("grade") is not None) and letters.get("empty", 0) == sum(
+        1 for cell in cells if cell.get("grade") is None
+    ), "totals.letters disagrees with the letters and dashes of the table"
     for model in rated:
         assert main <= model["groups"].keys(), model["id"]
+        if data["method_version"] >= 5:
+            role = model.get("role")
+            assert isinstance(role, dict) and all(isinstance(role.get(lang), str) and role[lang].strip() for lang in ("en", "ru")), (
+                "method >= 5 requires a role tag", model["id"]
+            )
         for gid in main:
             entry = model["groups"][gid]
             where = (model["id"], gid)
-            assert entry.get("grade") in RATING_GRADES, where
-            assert entry.get("ground") in grounds, where
+            assert entry.get("grade") in RATING_GRADES or (dash_allowed and entry.get("grade") is None), ("not a letter of the scale", *where)
+            assert entry.get("ground") in grounds, ("unknown ground", *where)
+            assert (entry.get("grade") is None) == (entry.get("ground") == "nodata"), ("a dash and the ground nodata go together", *where)
+            if entry["ground"] == "case":
+                links = entry.get("cases")
+                assert isinstance(links, list) and links and all(cid in case_ids for cid in links), (
+                    "ground=case requires existing case IDs", *where
+                )
             for language in ("en", "ru"):
                 reason = entry.get("reason", {}).get(language)
                 assert isinstance(reason, str) and reason.strip(), (*where, language)
+    if dash_allowed:
+        _assert_rating_case_links(data, case_ids)
+        compare = data.get("compare")
+        if compare and compare.get("new_columns"):
+            assert compare["comparable"] == compare["columns"] and not set(compare["comparable"]) & set(compare["new_columns"])
+
+
+def _assert_rating_case_links(data, ids):
+    def visit(node, path=()):
+        if isinstance(node, dict):
+            for key, val in node.items():
+                where = (*path, key)
+                if key == "cases" and where not in {("cases",), ("totals", "cases")}:
+                    assert isinstance(val, list) and all(type(cid) is int and cid in ids for cid in val), (
+                        "unknown public case reference", where, val
+                    )
+                else:
+                    visit(val, where)
+        elif isinstance(node, list):
+            for i, val in enumerate(node):
+                visit(val, (*path, i))
+
+    visit(data)
 
 
 def _assert_rating_reviewers(data):
@@ -335,7 +471,266 @@ def _assert_rating_vote_verdict(item, models, columns, scale):
     assert item.get("verdict") == expected, ("votes pair verdict disagrees with winner and ranking", item["models"], expected)
 
 
-def _assert_rating_votes(data):
+def _assert_rating_vote_source(data, source=None):
+    revision = RATING_REVISION.fullmatch(data["edition"])
+    if revision:
+        assert data.get("revision_of") == revision[1], "a revision must have revision_of naming the edition it revises"
+        _assert_rating_carried_blocks(data, source)
+    else:
+        _assert_rating_votes(data, source)
+
+
+def _assert_rating_carried_blocks(data, source=None):
+    """A revision casts no votes of its own: it carries the votes and the reviewers of the edition it revises,
+    unchanged, and says above them which edition they were made for."""
+    source = source or SITE / "public" / "llm-rating"
+    revised = json.loads((source / "data/editions" / data["revision_of"] / "edition.json").read_text(encoding="utf-8"))
+    assert revised["edition"] == data["revision_of"] == data["previous_edition"], "a revision revises the edition right before it"
+    assert data["votes"] == revised["votes"], "a revision must carry the votes unchanged"
+    assert data["reviewers"] == revised["reviewers"], "a revision must carry the reviewers unchanged"
+    note = data.get("carried", {})
+    assert note.get("from") == data["revision_of"], "the carried blocks must name the edition they were made for"
+    _assert_rating_carried_fields(data, revised, note)
+    if data.get("compare"):
+        _assert_rating_comparable_columns(data, revised)
+    text = note.get("note")
+    assert isinstance(text, dict) and all(isinstance(text.get(lang), str) and text[lang].strip() for lang in ("en", "ru")), (
+        "the carried blocks need their note in both languages"
+    )
+    _assert_carried_vote_letters(data, text)
+
+
+def _assert_rating_carried_fields(data, revised, note):
+    actual = note.get("what")
+    assert isinstance(actual, list) and Counter(actual) == Counter(RATING_CARRIED_FIELDS), (
+        "carried.what must list exactly the publication carry fields", actual, RATING_CARRIED_FIELDS
+    )
+    for field in RATING_CARRIED_FIELDS:
+        fields = field.split(".")
+        left, right = data, revised
+        for key in fields:
+            left, right = left[key], right[key]
+        assert left == right, ("named carried field differs from the source edition", field)
+
+
+def _assert_rating_comparable_columns(data, previous):
+    current_cols = {g["id"] for g in data["groups"] if g["main"]}
+    previous_cols = {g["id"] for g in previous["groups"] if g["main"]}
+    common = current_cols & previous_cols
+    unknown = set(data["compare"]["comparable"]) - common
+    assert not unknown, ("compare.comparable names a column absent from one of its editions", sorted(unknown))
+
+
+def _assert_carried_vote_letters(data, text):
+    models = {model["id"]: model for model in data["models"]}
+    groups = {group["id"]: group for group in data["groups"]}
+    for pair in data["votes"]["pairs"]:
+        column = pair["column"]
+        if pair["letters"] is None:  # A carried no-column verdict has no letters to compare.
+            continue
+        for model_id, before in zip(pair["models"], pair["letters"], strict=True):
+            model = models[model_id]
+            after = model["groups"][column]["grade"]
+            if before == after:
+                continue
+            # Accept only a disclosure of this particular model, column and transition in both languages.
+            move = f"{before or '–'} → {after or '–'}"
+            for lang in ("en", "ru"):
+                fragments = re.split(r"[.!?;](?:\s+|$)", text[lang])
+                assert any(all(part.casefold() in fragment.casefold() for part in (
+                    model["short"], groups[column]["name"][lang], move,
+                )) for fragment in fragments), ("carried vote letter differs from the current table", model_id, column, move, lang)
+
+
+class _RatingHTML(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.hidden = []
+        self.text = []
+        self.metadata = []
+        self.scripts = []
+        self.inline = None
+        self.title = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"head", "script", "style"}:
+            self.hidden.append(tag)
+        attrs = dict(attrs)
+        if tag == "title" and "head" in self.hidden:
+            self.title = []
+        if tag == "meta" and "head" in self.hidden and attrs.get("content"):
+            self.metadata.append(attrs["content"])
+        if tag == "script" and "src" not in attrs:
+            self.inline = []
+        if not self.hidden and tag == "img" and "alt" in attrs:
+            self.text.append(attrs["alt"])
+
+    def handle_endtag(self, tag):
+        if self.hidden and self.hidden[-1] == tag:
+            self.hidden.pop()
+        if tag == "title" and self.title is not None:
+            self.metadata.append("".join(self.title))
+            self.title = None
+        if tag == "script" and self.inline is not None:
+            self.scripts.append("".join(self.inline))
+            self.inline = None
+
+    def handle_data(self, data):
+        if self.inline is not None:
+            self.inline.append(data)
+        if self.title is not None:
+            self.title.append(data)
+        if not self.hidden:
+            self.text.append(data)
+
+
+def _rating_html(html):
+    parser = _RatingHTML()
+    parser.feed(html)
+    parser.close()
+    return parser
+
+
+def _assert_no_money(text, where):
+    match = RATING_MONEY.search(unescape(text))
+    assert not match, ("public rating text must name no sum of money or currency", where, match.group() if match else "")
+
+
+def test_rating_head_keeps_only_title_and_meta_contents_for_money_scan():
+    page = _rating_html('<head><title>25 GBP</title><meta name="description" content="15руб.">'
+                        '<meta property="og:title" content="GBP 25"><meta name="twitter:title" content="25EUR">'
+                        '<link href="x/25GBP"><script>"75 USD"</script></head><body>body</body>')
+    assert page.text == ["body"]
+    assert page.metadata == ["25 GBP", "15руб.", "GBP 25", "25EUR"]
+    for text in page.metadata:
+        with pytest.raises(AssertionError, match="public rating text must name no sum of money"):
+            _assert_no_money(text, "head control")
+
+
+def test_rating_no_column_vote_has_no_letters_to_compare():
+    _assert_carried_vote_letters({"models": [], "groups": [], "votes": {"pairs": [
+        {"column": None, "letters": None}, {"column": "review", "letters": None},
+    ]}}, {})
+
+
+def _assert_rating_public_text_has_no_amounts(data, where=()):
+    if isinstance(data, dict):
+        for key, value in data.items():
+            _assert_rating_public_text_has_no_amounts(value, (*where, key))
+    elif isinstance(data, list):
+        for i, value in enumerate(data):
+            _assert_rating_public_text_has_no_amounts(value, (*where, i))
+    elif isinstance(data, str):
+        _assert_no_money(data, where)
+
+
+def _assert_rating_public_files_have_no_money(source, readme):
+    for path in sorted(source.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(source)
+        label = str(path)
+        if path.suffix == ".json":
+            raw = path.read_bytes()
+            if FROZEN_RATING_JSON.get(rel) == hashlib.sha256(raw).hexdigest():
+                continue
+            _assert_rating_public_text_has_no_amounts(json.loads(raw), (label,))
+        elif path.name == "strings.js":
+            prefix = "window.OUROBOROS_STRINGS="
+            script = path.read_text(encoding="utf-8").strip()
+            assert script.startswith(prefix) and script.endswith(";"), f"invalid rating strings wrapper: {label}"
+            _assert_rating_public_text_has_no_amounts(json.loads(script[len(prefix):-1]), (label,))
+        elif path.suffix == ".html":
+            page = _rating_html(path.read_text(encoding="utf-8"))
+            for text in (*page.text, *page.metadata):
+                _assert_no_money(text, label)
+        elif path.suffix == ".md":
+            _assert_no_money(path.read_text(encoding="utf-8"), label)
+    # Match the rating card by its exact target, not other pictures or unrelated prices in the root README.
+    blocks = re.findall(r"<picture>.*?</picture>(?:\s*</a>\s*</p>\s*<p[^>]*>.*?</p>)?", readme, re.S)
+    cards = [part for part in blocks if "docs/llm-rating/card/latest-en-light.png" in part]
+    assert len(cards) == 1, "README must have one rating picture block"
+    for text in _rating_html(cards[0]).text:
+        _assert_no_money(text, "root README rating card")
+
+
+def _rating_counts(data, columns):
+    grades = [model["groups"][column]["grade"] for model in data["models"] if model.get("rank") is not None for column in columns]
+    return sum(grade is not None for grade in grades), grades.count(None)
+
+
+def _assert_rating_count_text(text, expected, where, *, required=True):
+    matches = [("letters" if noun.startswith(("letter", "букв")) else "dashes", int(n))
+               for n, noun in RATING_COUNT.findall(unescape(text).casefold())]
+    assert not required or {kind for kind, _ in matches} == {"letters", "dashes"}, (
+        "published rating counts missing", where, matches
+    )
+    wanted = dict(zip(("letters", "dashes"), expected))
+    assert all(n == wanted[kind] for kind, n in matches), ("published rating counts disagree with table", where, matches, wanted)
+    return bool(matches)
+
+
+def _assert_rating_published_counts(source, data, readme):
+    main = [g["id"] for g in data["groups"] if g["main"]]
+    expected = _rating_counts(data, main)
+    for filename in ("README.md", "METHOD.md", "CHANGELOG.md"):
+        text = (source / filename).read_text(encoding="utf-8")
+        if filename == "CHANGELOG.md":
+            sections = re.split(r"(?m)^## (\S+)\s*$", text)
+            text = dict(zip(sections[1::2], sections[2::2]))[data["edition"]]
+        _assert_rating_count_text(text, expected, filename)
+    for label, text in (("root README alt", re.findall(r'<img alt="([^"]*)" src="docs/llm-rating/card/latest-en-light\.png"', readme)),
+                        ("root README caption", re.findall(r'(?m)^<p[^>]*><a [^>]*href="https://ouroboros-agent\.ai/llm-rating/"[^>]*><b>[^\n]*</p>$', readme))):
+        assert len(text) == 1, ("published rating counts missing", label)
+        _assert_rating_count_text(text[0], expected, label)
+    archive_index = json.loads((source / "data/editions/index.json").read_text(encoding="utf-8"))
+    latest_entry = next(e for e in archive_index["editions"] if e["edition"] == data["edition"])
+    for lang in ("en", "ru"):
+        _assert_rating_count_text(data["notes"]["changelog"][lang], expected, f"edition changelog {lang}")
+        _assert_rating_count_text(latest_entry["changelog"][lang], expected, f"edition index {lang}")
+    if new_columns := data.get("compare", {}).get("new_columns"):
+        new_expected = _rating_counts(data, new_columns)
+        previous = json.loads((source / "data/editions" / data["previous_edition"] / "edition.json").read_text(encoding="utf-8"))
+        previous_expected = _rating_counts(previous, [g["id"] for g in previous["groups"] if g["main"]])
+        for lang, previous_label in (("en", "earlier columns"), ("ru", "прежних колонок")):
+            checked_new = False
+            for i, item in enumerate(data["compare"]["bullets"]):
+                text = item[lang]
+                refers_to_previous = previous_label in text.casefold()
+                matched = _assert_rating_count_text(text, previous_expected if refers_to_previous else new_expected,
+                                                    f"compare bullet {i} {lang}", required=False)
+                checked_new |= matched and not refers_to_previous
+            assert checked_new, ("published rating counts missing", f"new columns {lang}")
+    wrapped = (source / "assets/strings.js").read_text(encoding="utf-8").strip()
+    counts = json.loads(wrapped.removeprefix("window.OUROBOROS_STRINGS=").removesuffix(";"))["card_table_count"]
+    for lang, template in (("en", "{letters} letters · {dashes} dashes"), ("ru", "Буквы: {letters} · прочерки: {dashes}")):
+        assert counts[lang] == template, ("published card count labels must read the letter and dash totals", lang, counts[lang])
+
+
+def _assert_rating_views_and_questions(data):
+    def bilingual(text):
+        return isinstance(text, dict) and text.keys() == {"en", "ru"} and all(
+            isinstance(text[lang], str) and text[lang].strip() for lang in ("en", "ru")
+        )
+
+    rated = {model["id"] for model in data["models"] if model["status"] == "rated"}
+    main = [group["id"] for group in data["groups"] if group["main"]]
+    views = data.get("views")
+    assert isinstance(views, dict) and views.get("rows"), "method >= 5 requires the three views"
+    view_ids = [column["id"] for column in views["columns"]]
+    assert view_ids == ["quality", "now", "budget"], "the three views are quality, now and budget"
+    for row in views["rows"]:
+        assert row["model"] in rated and row.keys() == {"model", *view_ids}, ("a view row is one ranked model seen three ways", row.get("model"))
+        assert all(bilingual(row[field]) for field in view_ids), "view rows are bilingual"
+    assert [row["group"] for row in views["budget"]["rows"]] == main, "the budget block has one line per column of the main table"
+    assert all(bilingual(row.get("text")) for row in views["budget"]["rows"]), "budget rows are bilingual"
+    questions = data.get("faq")
+    assert isinstance(questions, dict) and questions.get("items"), "method >= 5 requires readers' questions"
+    assert all(item.keys() == {"q", "a"} for item in questions["items"]), "a reader's question is a question and an answer"
+    assert all(bilingual(item[field]) for item in questions["items"] for field in ("q", "a")), "FAQ questions and answers are bilingual"
+
+
+def _assert_rating_votes(data, source=None):
     votes = data.get("votes")
     assert isinstance(votes, dict), "method >= 4 requires the votes object"
     assert votes.get("source") == "final" and votes.get("complete") is True, "votes must be final and complete"
@@ -412,8 +807,10 @@ def _assert_rating_votes(data):
     rated = {m["id"] for m in data["models"] if m["status"] == "rated"}
     assert rated <= seen_models, ("votes roster must include every rated version", sorted(rated - seen_models))
     # Fable 5.1 is catalogued as historical context, but was not a voter in this edition.
-    if data["edition"] == "2026.12":
+    if data.get("revision_of", data["edition"]) == "2026.12":
         assert "claude-fable-5.1" not in seen_models, "Fable 5.1 is not a voter in 2026.12"
+    if data.get("revision_of"):
+        _assert_rating_carried_blocks(data, source)
 
     for key, pair in item_totals.items():
         assert pair == (roster_tallies[(key, "assigned")], roster_tallies[(key, "counted")]), (
@@ -431,44 +828,46 @@ def _assert_rating_votes(data):
         assert {key: count(value, key) for key in value} == dict(expected), ("votes participation disagrees with voter list", field, expected)
 
 
-def _assert_rating_archive_share_head(mirror):
-    page = mirror / "2026.11.html"
-    assert page.is_file(), "missing November archive share page"
+def _assert_rating_archive_share_head(mirror, edition="2026.11"):
+    month, card_sha256, words = RATING_ARCHIVES[edition]
+    page = mirror / f"{edition}.html"
+    assert page.is_file(), f"missing {month} archive share page"
     html = page.read_text(encoding="utf-8")
     head = html.split("</head>", 1)[0]
     tags = _tags(head)
     metas = _tags(head, "meta")
-    url = f"{ORIGIN}/llm-rating/2026.11.html"
-    card = NOVEMBER_CARD
+    url = f"{ORIGIN}/llm-rating/{edition}.html"
+    card = f"card/editions/{edition}-en.png"
     digest = hashlib.sha256((mirror / card).read_bytes()).hexdigest()
-    assert digest == NOVEMBER_CARD_SHA256, f"2026.11 archive PNG SHA-256 changed: {mirror}"
+    assert digest == card_sha256, f"{edition} archive PNG SHA-256 changed: {mirror}"
     digest = digest[:10]
-    for file in ("index.html", "editions.html", "2026.11.html"):
+    for file in ("index.html", "editions.html", f"{edition}.html"):
         bodies = _tags((mirror / file).read_text(encoding="utf-8"), "body")
         assert len(bodies) == 1
         cards = json.loads(bodies[0].get("data-archive-cards", "{}"))
-        assert cards.get("2026.11") == digest, ("November data-archive-cards must point to the frozen PNG", file)
-    assert [tag.get("href") for tag in tags if tag.get("rel") == "canonical"] == [url], "November archive canonical URL"
+        assert cards.get(edition) == digest, (f"{month} data-archive-cards must point to the frozen PNG", file)
+    assert bodies[0].get("data-edition") == edition, f"{month} archive page must name its edition"
+    assert [tag.get("href") for tag in tags if tag.get("rel") == "canonical"] == [url], f"{month} archive canonical URL"
     fields = [
         ("property", "og:url", url),
         ("property", "og:image", f"{ORIGIN}/llm-rating/{card}?v={digest}"),
         ("name", "twitter:image", f"{ORIGIN}/llm-rating/{card}?v={digest}"),
     ]
     for attr, key, expected in fields:
-        assert [tag.get("content") for tag in metas if tag.get(attr) == key] == [expected], ("November archive", key)
+        assert [tag.get("content") for tag in metas if tag.get(attr) == key] == [expected], (f"{month} archive", key)
     for attr, key in (("name", "description"), ("property", "og:image:alt"), ("name", "twitter:image:alt")):
         values = [tag.get("content", "") for tag in metas if tag.get(attr) == key]
-        assert len(values) == 1 and all(s in values[0] for s in ("Edition 2026.11", "11 models", "32 kinds of work")), ("November archive", key)
-    assert re.search(r"<title>[^<]*Edition 2026\.11</title>", head), "November archive title"
+        assert len(values) == 1 and all(s in values[0] for s in words), (f"{month} archive", key)
+    assert re.search(rf"<title>[^<]*Edition {re.escape(edition)}</title>", head), f"{month} archive title"
     fallback = re.findall(r"<noscript\b[^>]*>(.*?)</noscript>", html, flags=re.I | re.S)
-    assert len(fallback) == 1, "missing November no-JavaScript fallback"
+    assert len(fallback) == 1, f"missing {month} no-JavaScript fallback"
     body = html.split("</head>", 1)[1]
     assert not re.search(r"data/latest\.(?:json|js)|card/(?:latest-|full-|og-)", body), (
-        "November no-JavaScript fallback must not link to latest files"
+        f"{month} no-JavaScript fallback must not link to latest files"
     )
     assert {tag.get("href") for tag in _tags(fallback[0], "a")} == {
-        "data/editions/2026.11/edition.json", card
-    }, "November no-JavaScript fallback must link frozen data and card"
+        f"data/editions/{edition}/edition.json", card
+    }, f"{month} no-JavaScript fallback must link frozen data and card"
     _assert_rating_relative_asset_versions(mirror, page.name, _tags(html))
 
 
@@ -696,3 +1095,132 @@ def test_claudexor_dependency_snapshot_is_pin_derived_and_least_privilege():
     assert '"scanned"' in text
     assert 'X-GitHub-Api-Version: 2026-03-10' in text
     assert "dependency-graph/snapshots" in text
+
+
+# ---- Negative controls of the rating checks. Each new check must fail on the defect it guards, for its own reason:
+# a check that passes whatever it is given proves nothing. The controls take the frozen files of the repository, break
+# one thing in a private copy and require the named assertion; the unbroken copy must pass first.
+def _rating_edition(edition, mirror=None):
+    mirror = mirror or SITE / "public" / "llm-rating"
+    return json.loads((mirror / "data/editions" / edition / "edition.json").read_text(encoding="utf-8"))
+
+
+def _rating_cell(data, with_letter):
+    """The first cell of the main table that has a letter, or the first that has a dash."""
+    main = [group["id"] for group in data["groups"] if group["main"]]
+    for model in data["models"]:
+        for gid in main if model.get("rank") is not None else ():
+            if (model["groups"][gid]["grade"] is not None) == with_letter:
+                return model["groups"][gid]
+    raise AssertionError("the edition has no such cell")
+
+
+def _a_dash(data):
+    _rating_cell(data, True)["grade"] = None
+    data["totals"]["letters"] = {"main": data["totals"]["letters"]["main"] - 1, "empty": data["totals"]["letters"].get("empty", 0) + 1}
+
+
+def _a_dash_dressed_as_nodata(data):
+    _rating_cell(data, True)["ground"] = "nodata"
+    _a_dash(data)
+
+
+def _hide_fields_and_add_sum(data):
+    for key in ("views", "faq", "carried"):
+        del data[key]
+    data["cases"][0]["text"]["ru"] = "Запуск обошёлся в 1 200,50 руб."
+
+
+@pytest.mark.parametrize("amount", ["$15", "15$", "€ 20", "20 €", "14₽", "15 USD", "EUR 18.5", "5 руб.", "20 долл.", "15 долларов", "долларов 15", "40 евро", "15руб.", "GBP 25", "25 GBP", "GBP25", "коп. 30", "30 копеек"])
+def test_rating_money_check_recognises_amounts_in_either_order(amount):
+    _assert_rating_public_text_has_no_amounts({"en": "GPT-6.2, Qwen 3.8, 2026.12.1 and 2026-11-26", "ru": "396,9 млрд токенов"})
+    with pytest.raises(AssertionError, match="name no sum of money"):
+        _assert_rating_public_text_has_no_amounts({"nested": [{"text": amount}]})
+
+
+RATING_DATA_CONTROLS = {
+    # method 5: dashes, the count of letters, the role tag
+    "dash-with-the-ground-of-a-letter": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, False).update(ground="role"),
+                                          "a dash and the ground nodata go together"),
+    "letter-with-the-ground-of-a-dash": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, True).update(ground="nodata"),
+                                          "a dash and the ground nodata go together"),
+    "dash-without-its-sentence": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, False)["reason"].update(ru=" "), "'ru'"),
+    "letter-outside-the-scale": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, True).update(grade="D"), "not a letter of the scale"),
+    "letters-miscounted": ("2026.12.1", _assert_rating_column_reasons, lambda d: d["totals"]["letters"].update(main=d["totals"]["letters"]["main"] + 1),
+                           "totals.letters disagrees"),
+    "dashes-uncounted": ("2026.12.1", _assert_rating_column_reasons, lambda d: d["totals"]["letters"].pop("empty"), "totals.letters disagrees"),
+    "role-tag-missing": ("2026.12.1", _assert_rating_column_reasons, lambda d: next(m for m in d["models"] if m.get("rank") == 1).pop("role"),
+                         "method >= 5 requires a role tag"),
+    "role-tag-in-one-language": ("2026.12.1", _assert_rating_column_reasons, lambda d: next(m for m in d["models"] if m.get("rank") == 2)["role"].update(ru=""),
+                                 "method >= 5 requires a role tag"),
+    "dash-in-method-4": ("2026.12", _assert_rating_column_reasons, _a_dash, "not a letter of the scale"),
+    "nodata-in-method-4": ("2026.12", _assert_rating_column_reasons, _a_dash_dressed_as_nodata, "not a letter of the scale"),
+    # a revision carries the votes and the reviewers unchanged
+    "carried-votes-edited": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d["votes"]["counting_note"].update(en=d["votes"]["counting_note"]["en"] + " "),
+                             "must carry the votes unchanged"),
+    "carried-reviewers-edited": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d["reviewers"]["rows"][0].update(open=d["reviewers"]["rows"][0]["open"] + 1),
+                                 "must carry the reviewers unchanged"),
+    "carried-from-another-edition": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d["carried"].update({"from": "2026.11"}),
+                                     "must name the edition they were made for"),
+    "carried-note-in-one-language": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d["carried"]["note"].update(ru=""), "need their note in both languages"),
+    "revision-of-an-older-edition": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d.update(revision_of="2026.11"), "revises the edition right before it"),
+    # the three views, the budget block, readers' questions
+    "views-removed": ("2026.12.1", _assert_rating_views_and_questions, lambda d: d.pop("views"), "requires the three views"),
+    "view-of-an-unranked-model": ("2026.12.1", _assert_rating_views_and_questions, lambda d: d["views"]["rows"][0].update(model="gemini-4-hydrogen"),
+                                  "one ranked model seen three ways"),
+    "budget-line-missing": ("2026.12.1", _assert_rating_views_and_questions, lambda d: d["views"]["budget"]["rows"].pop(), "one line per column"),
+    "answer-in-one-language": ("2026.12.1", _assert_rating_views_and_questions, lambda d: d["faq"]["items"][0]["a"].update(ru=""), "are bilingual"),
+    "answer-deleted-in-one-language": ("2026.12.1", _assert_rating_views_and_questions, lambda d: d["faq"]["items"][0]["a"].pop("en"), "are bilingual"),
+    "revision-of-missing": ("2026.12.1", _assert_rating_vote_source, lambda d: d.pop("revision_of"), "must have revision_of"),
+    "explicit-dash-grade-missing": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, False).pop("grade"), "needs an explicit grade"),
+    "case-id-unknown": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, True).update(ground="case", cases=[-1]), "requires existing case IDs"),
+    "case-id-missing": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, True).update(ground="case", cases=[]), "requires existing case IDs"),
+    "sum-in-case-outside-views": ("2026.12.1", _assert_rating_public_text_has_no_amounts, lambda d: d["cases"][0]["text"].update(en="About $15 a turn."), "name no sum of money"),
+    "sum-in-words": ("2026.12.1", _assert_rating_public_text_has_no_amounts, lambda d: d["faq"]["items"][1]["a"].update(ru="Около 15 долларов."), "name no sum of money"),
+    "sum-with-three-fields-deleted": ("2026.12.1", _assert_rating_public_text_has_no_amounts, _hide_fields_and_add_sum, "name no sum of money"),
+}
+
+
+@pytest.mark.parametrize("control", sorted(RATING_DATA_CONTROLS))
+def test_rating_data_checks_fail_on_the_defect_they_guard(control):
+    edition, check, break_it, message = RATING_DATA_CONTROLS[control]
+    check(_rating_edition(edition))            # the published edition itself passes
+    broken = _rating_edition(edition)
+    break_it(broken)
+    with pytest.raises(AssertionError, match=re.escape(message)):
+        check(broken)
+
+
+def _replace_once(path, old, new):
+    text = path.read_text(encoding="utf-8")
+    assert text.count(old) == 1, (path.name, old, text.count(old))
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+RATING_ARCHIVE_CONTROLS = {
+    "data-edited": (lambda m: (m / "data/editions/2026.12/edition.json").write_bytes((m / "data/editions/2026.12/edition.json").read_bytes() + b" "),
+                    "2026.12 archive SHA-256 changed"),
+    "card-swapped": (lambda m: shutil.copyfile(m / "card/editions/2026.11-en.png", m / "card/editions/2026.12-en.png"), "2026.12 archive PNG SHA-256 changed"),
+    "page-removed": (lambda m: (m / "2026.12.html").unlink(), "missing December archive share page"),
+    "page-of-another-edition": (lambda m: _replace_once(m / "2026.12.html", 'data-edition="2026.12"', 'data-edition="2026.12.1"'),
+                                "December archive page must name its edition"),
+    "card-digest-on-the-rating-page": (lambda m: _replace_once(m / "index.html", f"&quot;2026.12&quot;:&quot;{DECEMBER_CARD_SHA256[:10]}", "&quot;2026.12&quot;:&quot;0000000000"),
+                                       "December data-archive-cards must point to the frozen PNG"),
+    "title-of-the-latest-edition": (lambda m: _replace_once(m / "2026.12.html", "Edition 2026.12</title>", "Edition 2026.12.1</title>"), "December archive title"),
+    "canonical-of-the-latest-page": (lambda m: _replace_once(m / "2026.12.html", f'<link rel="canonical" href="{ORIGIN}/llm-rating/2026.12.html">',
+                                                           f'<link rel="canonical" href="{ORIGIN}/llm-rating/">'), "December archive canonical URL"),
+    "fallback-links-the-latest-data": (lambda m: (m / "2026.12.html").write_text(
+        (m / "2026.12.html").read_text(encoding="utf-8").replace("data/editions/2026.12/edition.json", "data/latest.json"), encoding="utf-8"),
+        "December no-JavaScript fallback must not link to latest files"),
+}
+
+
+@pytest.mark.parametrize("control", sorted(RATING_ARCHIVE_CONTROLS))
+def test_rating_december_archive_check_fails_on_the_defect_it_guards(control, tmp_path):
+    break_it, message = RATING_ARCHIVE_CONTROLS[control]
+    mirror = tmp_path / "llm-rating"
+    shutil.copytree(SITE / "public" / "llm-rating", mirror)
+    _assert_rating_december_archive(mirror)    # the published copy itself passes
+    break_it(mirror)
+    with pytest.raises(AssertionError, match=re.escape(message)):
+        _assert_rating_december_archive(mirror)
