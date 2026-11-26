@@ -22,7 +22,8 @@ const at = (fact) => {
 const identity = (fact) => `${fact.work}:${fact.task_attempt}:${fact.attempt_id}`;
 // A work the window took from the owner's Max runs in Low, temporarily, for the window, and is named Low; the owner's
 // choice stays Max beside it (`preferred_at_send`, owner 21.11.2026). Rows of 17-22 Nov 2026 named that state Max with
-// chapter maps (`applied` max, `books` maps; a room's own work reads whole books in Max otherwise): they read as Low.
+// chapter maps (`applied` max, `books` maps): they read as Low. A row written since the books left every request
+// says `books` body_map; `whole`, `maps` and unmarked rows are from before, read in the words of their time (`causeOf`).
 export const asSent = (fact) => (fact?.applied === 'max' && fact.books === 'maps' ? { ...fact, applied: 'low' } : fact);
 const newest = (facts) => facts.filter(Boolean).reduce((a, b) => (!a || at(b) > at(a) ? b : a), null);
 const sourceIdentity = (fact) => fact?._source_identity || identity(fact);
@@ -141,11 +142,18 @@ const LOWERING = ['memory', 'request', 'route', 'window', 'after_start'];
 export function causeOf(fact, preferred) {
     const asked = said(fact.preferred_at_send);
     const ran = said(fact.applied);
+    const books = fact.books !== 'body_map';  // a row from when whole books rode Max (or older, unmarked): they took its room
     switch (asked && fact.cause) {
-    case 'memory': return fmt('{mode} for now, not {chosen}: the whole books do not fit beside the history.', { mode: ran, chosen: asked });
-    case 'request': return fmt('{mode} for now, not {chosen}: even without the history, the request leaves the whole books no room.', { mode: ran, chosen: asked });
-    case 'route': return fmt('{mode} for now, not {chosen}: this model’s window cannot hold the whole books.', { mode: ran, chosen: asked });
-    case 'window': return fact.applied === 'low' && fact.preferred_at_send === 'max'  // rows of 17-22 Nov: schemas tipped it
+    case 'memory': return books
+        ? fmt('{mode} for now, not {chosen}: the whole books do not fit beside the history.', { mode: ran, chosen: asked })
+        : fmt('{mode} for now, not {chosen}: the history does not fit this model’s window even in its shortest tellings.', { mode: ran, chosen: asked });
+    case 'request': return books
+        ? fmt('{mode} for now, not {chosen}: even without the history, the request leaves the whole books no room.', { mode: ran, chosen: asked })
+        : fmt('{mode} for now, not {chosen}: even without the history, the request leaves the work no room in this model’s window.', { mode: ran, chosen: asked });
+    case 'route': return books
+        ? fmt('{mode} for now, not {chosen}: this model’s window cannot hold the whole books.', { mode: ran, chosen: asked })
+        : fmt('{mode} for now, not {chosen}: this model’s window cannot hold the start even without the history and the tools.', { mode: ran, chosen: asked });
+    case 'window': return books && fact.applied === 'low' && fact.preferred_at_send === 'max'  // rows of 17-22 Nov: schemas tipped it
         ? fmt('{mode} for now, not {chosen}: the whole books did not fit beside the rest of the start.', { mode: ran, chosen: asked })
         : fmt('{mode} did not fit at the start.', { mode: asked });
     case 'after_start': return fmt('The work moved to {mode} after it started.', { mode: ran });

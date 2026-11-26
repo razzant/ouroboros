@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-K/7+nvBgvNxCfhzlmSQPo5SQcStdf71u5BbegBVqa3k='; style-src 'sha256-XVBibiwh/cdPsZWEXePYhggsKZiXopwU4yV78/48+fc='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-oRsJszf+exuUysORs+XzShC2IjVcxyqzHA1z0O5yLvU='; style-src 'sha256-XVBibiwh/cdPsZWEXePYhggsKZiXopwU4yV78/48+fc='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -612,7 +612,7 @@ function show(facts, name, example = false) {
   result.hidden = false;
 }
 const SOURCE_NAMES = new Map(Object.entries({
-  system: 'Base instructions', bible: 'Constitution', architecture: 'Architecture reference',
+  system: 'Base instructions', bible: 'Constitution', body_map: 'Body map', architecture: 'Architecture reference',
   development: 'Development handbook', design_bible: 'Design reference', identity: 'Identity', world: 'World map',
   scratchpad: 'Working notes', story: 'Story and settled retellings', memory_fit_notes: 'Memory fitting notes',
   registry: 'Source register', shared_understanding: 'Shared understanding', knowledge_index: 'Knowledge index',
@@ -625,7 +625,7 @@ const SOURCE_NAMES = new Map(Object.entries({
   recent_progress: 'Recent progress', recent_tools: 'Recent tool activity', recent_events: 'Recent events',
 }));
 const SOURCE_FORMS = new Map(Object.entries({
-  chapter_map: 'chapter overview', chapter_links: 'chapter links', whole_book: 'whole book',
+  body_map: 'whole map', map_parts: 'parts and addresses', chapter_map: 'chapter overview', chapter_links: 'chapter links', whole_book: 'whole book',
   whole_view: 'whole captured view', shorter: 'shorter form', summary: 'summary', count: 'count and reader',
   framing: 'section framing', rendered: 'as assembled',
 }));
