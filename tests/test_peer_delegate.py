@@ -2124,11 +2124,11 @@ def test_recovered_peer_binding_rejects_spoofed_mismatched_and_paused_observatio
 
 
 def test_recovered_peer_run_observed_through_body_wait_hold_and_recovery_then_settles(tmp_path, monkeypatch):
-    """Real in-process consumer test: recovered peer run stays observable across BodyRuntime, delegate_wait,
-    delegate_hold and delegate_recovery, refuses withheld stubs as ordinary observation, and settles cleanly."""
-    import time
+    """The body can read a recovered peer while its local start observation is still owed, then settle it."""
+    import contextlib
+    import threading
     import supervisor.queue as queue
-    from ouroboros import delegate_collection as collection, delegate_hold, delegate_recovery
+    from ouroboros import delegate_collection as collection, delegate_hold, delegate_recovery, delegate_resume, store
     from ouroboros.install_identity import acting_as
     from ouroboros.task_results import write_task_result
     from ouroboros.tools import delegate as delegate_tools
@@ -2143,17 +2143,56 @@ def test_recovered_peer_run_observed_through_body_wait_hold_and_recovery_then_se
             write_task_result(pair.root_b, b_task_id, "running")
 
         _bind_pair_sender_to_receiver(pair, client, monkeypatch)
+        request = client.request
+
+        def read_only_request(method, *args, **kwargs):
+            assert method == "GET", "recovering observations must never resend the letter"
+            return request(method, *args, **kwargs)
+
+        monkeypatch.setattr(client, "request", read_only_request)
         entry = _seed_recovered_peer_run(pair, body_req["letter_id"], resume_start_state="unknown")
         assert entry.resume_start_state == "unknown" and entry.daemon_store_id == ""
         sender = _pair_sender_ctx(pair)
 
+        # Drive the real scheduler one pass at a time; a second driver of the same
+        # run competes with its no-wait custody write (on Windows too).
+        release_driver = threading.Event()
+        tick = collection.BodyRuntime.tick
+        monkeypatch.setattr(collection.BodyRuntime, "tick", lambda _: release_driver.wait())
+        publication_lock = delegate_resume.publication_lock
+        busy_observations = []
+        busy = True
+
+        @contextlib.contextmanager
+        def publication_with_busy_store(root, event):
+            with publication_lock(root, event) as holders:
+                if (busy and root == pair.root_a and event["type"] == custody.START_STATE_OBSERVED
+                        and event["run_id"] == entry.run_id):
+                    busy_observations.append(event["resume_start_state"])
+                    raise store.StoreBusy("test: temporary custody contention", reason="contention")
+                yield holders
+
+        monkeypatch.setattr(delegate_resume, "publication_lock", publication_with_busy_store)
         body = collection.BodyRuntime(pair.root_a, gateway_factory=lambda: pytest.fail("owned engine built"))
+
+        def step():
+            tick(body)
+            with body.lock:
+                jobs = list(body.reads.values()) + list(body.collections.values())
+            for job in jobs:
+                job.result(timeout=10)
+
         try:
-            with acting_as(pair.root_a):
-                body._observe(current.run(pair.root_a, body_req["letter_id"]))
-            obs = body.observation(body_req["letter_id"])
-            assert obs["answered"] is True and obs["run_state"] == "running", obs
-            updated = current.run(pair.root_a, body_req["letter_id"])
+            for expected_attempts in (1, 2):
+                step()
+                obs = body.observation(entry.run_id)
+                assert obs["answered"] is True and obs["run_state"] == "running", obs
+                assert busy_observations == ["running"] * expected_attempts
+                assert current.run(pair.root_a, entry.run_id).resume_start_state == "unknown"
+
+            busy = False
+            step()
+            updated = current.run(pair.root_a, entry.run_id)
             assert updated.resume_start_state == "running" and updated.containment_fault == {}
 
             with acting_as(pair.root_a):
@@ -2179,21 +2218,16 @@ def test_recovered_peer_run_observed_through_body_wait_hold_and_recovery_then_se
                 write_task_result(pair.root_b, b_task_id, "completed", result="4 widgets.",
                                   peer_reply=admitted(pair, "4 widgets."),
                                   finished_at="2026-11-24T12:00:00+00:00")
-            with acting_as(pair.root_a):
-                body._observe(current.run(pair.root_a, body_req["letter_id"]))
-                body.tick()
-                deadline = time.monotonic() + 10.0
-                while time.monotonic() < deadline:
-                    done = current.run(pair.root_a, body_req["letter_id"])
-                    if done is not None and done.settled and not current.collection_pending(done):
-                        break
-                    body.tick()
-                    time.sleep(0.05)
+            step()  # Observe the same run's terminal reply.
+            step()  # Collect the recorded terminal reply.
         finally:
+            body.close()
+            release_driver.set()
             body.close(wait=True)
 
         final_entry = current.run(pair.root_a, body_req["letter_id"])
         assert final_entry.terminal_state == "succeeded" and final_entry.settled is True
+        assert not current.collection_pending(final_entry)
         retained = collection.retained_payload(pair.root_a, final_entry)
         assert retained["primary_output"]["text"] == "4 widgets." and retained["final_summary"]["result_available"] is True
 
