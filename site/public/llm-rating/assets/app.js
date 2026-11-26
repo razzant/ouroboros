@@ -266,7 +266,7 @@
     var draft = E.status !== 'final';
     var vote = v4(E) ? openingVote(E) : '';
     return '<section class="head' + (vote ? ' head-with-vote' : '') + '"><div class="head-main">' +
-      '<p class="eyebrow">' + t('eyebrow', { id: E.edition }) + (E.revision_of ? ' <span class="pill early">' + esc(t('revision_pill', { id: E.revision_of })) + '</span>' :
+      '<p class="eyebrow' + (E.revision_of ? ' revision' : '') + '"><span>' + t('eyebrow', { id: E.edition }) + '</span>' + (E.revision_of ? ' <span class="pill early">' + esc(t('revision_pill', { id: E.revision_of })) + '</span>' :
         E.early ? ' <span class="pill early">' + esc(t('early_pill')) + '</span>' : '') + '</p>' +
       '<h1>' + esc(t('title')) + '</h1><p class="lead">' + esc(t(v5(E) ? 'lead_v5' : 'lead')) + '</p></div>' +
       '<div class="head-side"><div class="status' + (draft ? ' draft' : '') + '">' + t(draft ? 'status_draft' : 'status_final', { id: E.edition }) + '</div>' +
@@ -337,12 +337,15 @@
     });
     return items.length ? '<div class="picks"><h3>' + chip(top) + esc(t('picks_title')) + '</h3><ul>' + items.join('') + '</ul></div>' : '';
   }
+  function gradeDisplay(g, x) {
+    var open = x && (x.ground === 'open' || x.ground === 'role');
+    var words = x && !g ? t('nodata_short') : chipWords(g);
+    return { cls: 't t-' + (g || 'N') + (open ? ' g-open' : ''), glyph: g || '–', words: words + (open ? '; ' + t('legend_open') : '') };
+  }
   function cellBtn(kind, key, r, k, g, who, what, compared, x) {
-    // x: the cell of a method-5 column, which may have no letter or a preliminary one
-    var open = x && (x.ground === 'open' || x.ground === 'role'), words = x && !g ? t('nodata_short') : chipWords(g);
-    if (open) words += '; ' + t('legend_open');
-    return '<button class="t t-' + (g || 'N') + (open ? ' g-open' : '') + '" type="button" data-' + kind + '="' + esc(key) + '" data-r="' + r + '" data-k="' + k + '" aria-expanded="false" aria-label="' +
-      esc(who + ', ' + what + ': ' + words + (compared ? '; ' + t('letter_compared') : '')) + '" title="' + esc(what + ': ' + words) + '">' + (g || '–') + '</button>';
+    var d = gradeDisplay(g, x);
+    return '<button class="' + d.cls + '" type="button" data-' + kind + '="' + esc(key) + '" data-r="' + r + '" data-k="' + k + '" aria-expanded="false" aria-label="' +
+      esc(who + ', ' + what + ': ' + d.words + (compared ? '; ' + t('letter_compared') : '')) + '" title="' + esc(what + ': ' + d.words) + '">' + d.glyph + '</button>';
   }
   function comparedColumns(E) {
     var columns = {};
@@ -626,10 +629,14 @@
       '<div class="dcol"><h4>' + esc(t('letters_title')) + '</h4>' + groupLetters(g.id) +
       (x.cases ? '<h4 class="in">' + esc(t('cases_title')) + '</h4>' + casesList(x.cases) : '') + '</div></div>';
   }
-  function groupPills(m) {
+  function groupPills(E, m) {
     var out = '';
-    MAIN.forEach(function (g) { out += '<span class="gp">' + chip(m.groups[g.id].grade) + esc(L(g.name)) + '</span>'; });
-    return out ? '<div class="gps">' + out + '</div>' : '';
+    MAIN.forEach(function (g) {
+      var x = m.groups[g.id], name = L(g.name), d = gradeDisplay(x.grade, v5(E) ? x : null);
+      out += '<span class="gp" data-grade-group="' + esc(g.id) + '" title="' + esc(name + ': ' + d.words) + '"><span class="' + d.cls +
+        '" role="img" aria-label="' + esc(d.words) + '">' + d.glyph + '</span>' + esc(name) + '</span>';
+    });
+    return out ? '<div class="gps" data-grade-model="' + esc(m.id) + '">' + out + '</div>' : '';
   }
   function trustCheck(m) {
     return '<p class="tc"><b>' + esc(t('trust_label')) + '</b> ' + esc(L(m.trust)) + '</p><p class="tc"><b>' + esc(t('check_label')) + '</b> ' + esc(L(m.check)) + '</p>';
@@ -659,7 +666,7 @@
     var m = M[id];
     var since = sinceText(E, m);
     return dhead(rankBadge(m), esc(m.name) + flagPill(m), esc(m.maker) + '. ' + esc(L(m.one_liner))) +
-      '<div class="dg"><div class="dcol">' + (m.role ? '<p class="rolerow">' + roleTag(m) + '</p>' : '') + '<p class="dlong">' + esc(L(m.verdict)) + '</p>' + deltaBox(m) + groupPills(m) + trustCheck(m) + pickLine(m) + noteBox(m) +
+      '<div class="dg"><div class="dcol">' + (m.role ? '<p class="rolerow">' + roleTag(m) + '</p>' : '') + '<p class="dlong">' + esc(L(m.verdict)) + '</p>' + deltaBox(m) + groupPills(E, m) + trustCheck(m) + pickLine(m) + noteBox(m) +
       (since ? '<p class="tc since">' + esc(since) + '</p>' : '') + factsList(modelFacts(E, m)) + '</div>' +
       '<div class="dcol"><h4>' + esc(t('cases_title')) + '</h4>' + casesList(m.cases) + '</div></div>';
   }
@@ -676,7 +683,7 @@
       var since = sinceText(E, m);
       return '<li class="vrow"><div class="who"><h3><span class="rk">' + m.rank + '</span>' + esc(m.name) + '</h3><div class="mk">' + esc(m.maker) + '</div>' +
         (m.role ? '<div class="mk rolerow">' + roleTag(m) + '</div>' : '') +
-        (since || m.flag ? '<div class="mk since">' + esc(since) + (m.flag ? (since ? ' ' : '') + flagPill(m) : '') + '</div>' : '') + groupPills(m) + '</div>' +
+        (since || m.flag ? '<div class="mk since">' + esc(since) + (m.flag ? (since ? ' ' : '') + flagPill(m) : '') + '</div>' : '') + groupPills(E, m) + '</div>' +
         '<div class="say"><p class="liner">' + esc(L(m.one_liner)) + '</p><p class="long">' + esc(L(m.verdict)) + '</p>' + deltaBox(m) + trustCheck(m) +
         '<details><summary>' + esc(t('numbers_and_cases')) + '</summary>' + noteBox(m) + factsList(modelFacts(E, m)) + '<h4>' + esc(t('cases_title')) + '</h4>' + casesList(m.cases) + '</details></div></li>';
     });

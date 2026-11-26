@@ -121,7 +121,7 @@ Four groups stand apart, without letters:
 - **First look**: a handful of tasks.
 - **Earlier versions**: models whose work has gone to newer versions.
 
-Edition 2026.12.1: 16 models are ranked, with 111 letters in 8 columns and 17 cells without a letter. 16 more models stand apart without letters: 1 candidate for a place, 6 newcomers, 5 first looks and 4 earlier versions. The edition tells 23 dated cases; the token and work counts are those of Nov 11–25, 2026. The votes and the reviewers' table were made for edition 2026.12 and are carried here unchanged: 29 versions were asked for a blind ballot, and the columns added since took no part in it. The reviewers' checked, confirmed, open and refuted columns cover 47 factual remarks from 5 reviews. The two same-copy columns cover 7 first-confirmed problems in 3 pieces of work.
+Edition 2026.12.1: 16 models are ranked, with 106 letters in 8 columns and 22 cells without a letter. 16 more models stand apart without letters: 1 candidate for a place, 6 newcomers, 5 first looks and 4 earlier versions. The edition tells 23 dated cases; the token and work counts are those of Nov 11–25, 2026. The votes and the reviewers' table were made for edition 2026.12 and are carried here unchanged: 29 versions were asked for a blind ballot, and the columns added since took no part in it. The reviewers' checked, confirmed, open and refuted columns cover 47 factual remarks from 5 reviews. The two same-copy columns cover 7 first-confirmed problems in 3 pieces of work.
 
 ## What the numbers are
 
@@ -135,7 +135,7 @@ None of these numbers moves a letter.
 
 Method 4 kept the meaning of a place and of a letter, so the places and column letters of 2026.12 compare directly with method 3 (edition 2026.11). The per-kind letters of 2026.11 have no counterpart in later methods.
 
-Method 5 changes what a place means. In 2026.12 the order answered the question of whom I call in my present team; from 2026.12.1 it follows the quality of the work. So the places of 2026.12.1 do not compare directly with the places of 2026.12. The letters of the six columns both editions have still do, and the page shows them model by model, with the place a model had before, who entered and what moved. The two new columns have nothing to be compared with.
+Method 5 changes what a place means. In 2026.12 the order answered the question of whom I call in my present team; from 2026.12.1 it follows the quality of the work. Places across different methods are not comparable when the meaning of a place changes: do not compare the places of 2026.12.1 directly with those of 2026.12. The letters of the six columns both editions have still do, and the page shows them model by model, with the place a model had before, who entered and what moved. The two new columns have nothing to be compared with.
 
 ## Known limits
 

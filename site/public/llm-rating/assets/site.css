@@ -391,6 +391,8 @@ details > .cases:first-of-type { margin-top: 6px; }
 .ed figure img { display: block; width: 100%; height: auto; border-radius: 12px; box-shadow: var(--elev); }
 
 /* ==== method 4 (2026.12 on): the sections under the ranking. Same objects, tones and chips as above ==== */
+.eyebrow.revision { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.eyebrow.revision .pill.early { margin-left: 0; }
 .eyebrow .pill.early { height: 18px; padding: 0 7px; margin-left: 6px; font: 600 10.5px/1 var(--font); letter-spacing: 0.02em; text-transform: none; vertical-align: 1px; background: var(--tone-amber); color: var(--tone-amber-ink); }
 .pill.flag { height: 20px; padding: 0 8px; font-size: 11.5px; font-weight: 600; background: var(--tray); color: var(--fg-meta); vertical-align: 1px; }
 .dh h3 .pill.flag { margin-left: 8px; }

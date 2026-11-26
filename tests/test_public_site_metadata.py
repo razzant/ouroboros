@@ -8,6 +8,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 from collections import Counter
 from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -36,9 +37,13 @@ RATING_ARCHIVES = {
     "2026.12": ("December", DECEMBER_CARD_SHA256, ("Edition 2026.12", "15 models", "6 columns")),
 }
 RATING_GRADES = {"S", "A", "B", "C"}
-_AMOUNT = r"[0-9]+(?:[.,   ][0-9]+)*"
-_CURRENCY = r"[$€₽£¥]|\b(?:usd|eur|rub|dollars?|euros?|roubles?|rubles?|руб(?:ль|ля|лей|лю|лём|лем|ле|ли|лям|лями|лях)?\.?|долл\.?|доллар(?:а|ов|у|ом|е|ы|ам|ами|ах)?|евро)\b"
-RATING_MONEY = re.compile(rf"(?:{_CURRENCY})\s*{_AMOUNT}|{_AMOUNT}\s*(?:{_CURRENCY})", re.I)
+RATING_MONEY = re.compile(
+    r"[$€₽£¥]|\b(?:usd|eur|rub|dollars?|euros?|cents?|roubles?|rubles?|руб|рубл(?:ь|я|ю|ём|ем|е|и|ей|ям|ями|ях)|"
+    r"долл|доллар\w*|евро|цент(?:а|ов|у|ом|е|ы|ам|ами|ах)?|бакс\w*)\b", re.I,
+)
+FROZEN_RATING_JSON = {Path(f"data/editions/{name}/edition.json"): digest for name, digest in (
+    ("2026.11", NOVEMBER_SHA256), ("2026.12", DECEMBER_SHA256),
+)}
 RATING_REVISION = re.compile(r"([0-9]{4}\.[0-9]{2})\.[1-9][0-9]*")
 INDEXABLE = {
     "/": SITE / "index.html",
@@ -205,6 +210,7 @@ def test_rating_publication_is_complete_and_source_bound():
     if data["method_version"] >= 4:
         _assert_rating_column_reasons(data)
         _assert_rating_reviewers(data)
+        # Keep the latest-payload safety check first, including when revision fields are missing.
         _assert_rating_public_text_has_no_amounts(data)
         _assert_rating_vote_source(data, source)
         _assert_rating_static_publication(source, data)
@@ -213,10 +219,13 @@ def test_rating_publication_is_complete_and_source_bound():
     else:
         assert data["method_version"] == 3
         _assert_rating_per_kind_reasons(data)
-    _assert_rating_wrappers_and_asset_versions(source)
     for path in (SITE / "index.html", DOCS / "index.html"):
         assert 'href="/llm-rating/"' in path.read_text(encoding="utf-8")
     readme = (REPO / "README.md").read_text(encoding="utf-8")
+    if data["method_version"] >= 5:
+        for mirror in (source, generated):
+            _assert_rating_public_files_have_no_money(mirror, readme)
+    _assert_rating_wrappers_and_asset_versions(source)
     for theme in ("light", "dark"):
         image = f"docs/llm-rating/card/latest-en-{theme}.png"
         assert image in readme and (REPO / image).is_file()
@@ -230,16 +239,23 @@ def test_rating_publication_is_complete_and_source_bound():
 
 
 def _assert_rating_assets_are_javascript(source, node):
+    def check(label, *args, script=None):
+        result = subprocess.run([node, "--check", *args], input=script, capture_output=True, text=True, timeout=30, check=False)
+        assert result.returncode == 0, f"Invalid published JavaScript: {label}\n{result.stderr}"
+
     for path in sorted((source / "assets").glob("*.js")):
-        result = subprocess.run([node, "--check", str(path)], capture_output=True, text=True, timeout=30, check=False)
-        assert result.returncode == 0, f"Invalid published JavaScript: {path.name}\n{result.stderr}"
+        check(path.name, str(path))
+    for path in sorted(source.rglob("*.html")):
+        for i, script in enumerate(_rating_html(path.read_text(encoding="utf-8")).scripts, 1):
+            check(f"{path.relative_to(source)} inline script {i}", "-", script=script)
 
 
 def test_rating_published_javascript_parses():
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is not installed; browser execution is checked by the rating build")
-    _assert_rating_assets_are_javascript(SITE / "public" / "llm-rating", node)
+    for mirror in (SITE / "public" / "llm-rating", DOCS / "llm-rating"):
+        _assert_rating_assets_are_javascript(mirror, node)
 
 
 def test_rating_javascript_check_detects_invalid_asset(tmp_path):
@@ -353,6 +369,29 @@ def _assert_rating_column_reasons(data):
             for language in ("en", "ru"):
                 reason = entry.get("reason", {}).get(language)
                 assert isinstance(reason, str) and reason.strip(), (*where, language)
+    if dash_allowed:
+        _assert_rating_case_links(data, case_ids)
+        compare = data.get("compare")
+        if compare and compare.get("new_columns"):
+            assert compare["comparable"] == compare["columns"] and not set(compare["comparable"]) & set(compare["new_columns"])
+
+
+def _assert_rating_case_links(data, ids):
+    def visit(node, path=()):
+        if isinstance(node, dict):
+            for key, val in node.items():
+                where = (*path, key)
+                if key == "cases" and where not in {("cases",), ("totals", "cases")}:
+                    assert isinstance(val, list) and all(type(cid) is int and cid in ids for cid in val), (
+                        "unknown public case reference", where, val
+                    )
+                else:
+                    visit(val, where)
+        elif isinstance(node, list):
+            for i, val in enumerate(node):
+                visit(val, (*path, i))
+
+    visit(data)
 
 
 def _assert_rating_reviewers(data):
@@ -449,21 +488,109 @@ def _assert_rating_carried_blocks(data, source=None):
     assert isinstance(text, dict) and all(isinstance(text.get(lang), str) and text[lang].strip() for lang in ("en", "ru")), (
         "the carried blocks need their note in both languages"
     )
+    _assert_carried_vote_letters(data, text)
 
 
-def _assert_rating_public_text_has_no_amounts(data):
-    def texts(node, path=()):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                yield from texts(value, (*path, key))
-        elif isinstance(node, list):
-            for i, value in enumerate(node):
-                yield from texts(value, (*path, str(i)))
-        elif isinstance(node, str):
-            yield path, node
+def _assert_carried_vote_letters(data, text):
+    models = {model["id"]: model for model in data["models"]}
+    groups = {group["id"]: group for group in data["groups"]}
+    for pair in data["votes"]["pairs"]:
+        column = pair["column"]
+        for model_id, before in zip(pair["models"], pair["letters"], strict=True):
+            model = models[model_id]
+            after = model["groups"][column]["grade"]
+            if before == after:
+                continue
+            # Accept only a disclosure of this particular model, column and transition in both languages.
+            move = f"{before or '–'} → {after or '–'}"
+            for lang in ("en", "ru"):
+                fragments = re.split(r"[.!?;](?:\s+|$)", text[lang])
+                assert any(all(part.casefold() in fragment.casefold() for part in (
+                    model["short"], groups[column]["name"][lang], move,
+                )) for fragment in fragments), ("carried vote letter differs from the current table", model_id, column, move, lang)
 
-    for path, text in texts(data):
-        assert not RATING_MONEY.search(text), ("public rating text must name no sum of money", path, text[:160])
+
+class _RatingHTML(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.hidden = []
+        self.text = []
+        self.scripts = []
+        self.inline = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"head", "script", "style"}:
+            self.hidden.append(tag)
+        attrs = dict(attrs)
+        if tag == "script" and "src" not in attrs:
+            self.inline = []
+        if not self.hidden and tag == "img" and "alt" in attrs:
+            self.text.append(attrs["alt"])
+
+    def handle_endtag(self, tag):
+        if self.hidden and self.hidden[-1] == tag:
+            self.hidden.pop()
+        if tag == "script" and self.inline is not None:
+            self.scripts.append("".join(self.inline))
+            self.inline = None
+
+    def handle_data(self, data):
+        if self.inline is not None:
+            self.inline.append(data)
+        if not self.hidden:
+            self.text.append(data)
+
+
+def _rating_html(html):
+    parser = _RatingHTML()
+    parser.feed(html)
+    parser.close()
+    return parser
+
+
+def _assert_no_money(text, where):
+    match = RATING_MONEY.search(unescape(text))
+    assert not match, ("public rating text must name no sum of money or currency", where, match.group() if match else "")
+
+
+def _assert_rating_public_text_has_no_amounts(data, where=()):
+    if isinstance(data, dict):
+        for key, value in data.items():
+            _assert_rating_public_text_has_no_amounts(value, (*where, key))
+    elif isinstance(data, list):
+        for i, value in enumerate(data):
+            _assert_rating_public_text_has_no_amounts(value, (*where, i))
+    elif isinstance(data, str):
+        _assert_no_money(data, where)
+
+
+def _assert_rating_public_files_have_no_money(source, readme):
+    for path in sorted(source.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(source)
+        label = str(path)
+        if path.suffix == ".json":
+            raw = path.read_bytes()
+            if FROZEN_RATING_JSON.get(rel) == hashlib.sha256(raw).hexdigest():
+                continue
+            _assert_rating_public_text_has_no_amounts(json.loads(raw), (label,))
+        elif path.name == "strings.js":
+            prefix = "window.OUROBOROS_STRINGS="
+            script = path.read_text(encoding="utf-8").strip()
+            assert script.startswith(prefix) and script.endswith(";"), f"invalid rating strings wrapper: {label}"
+            _assert_rating_public_text_has_no_amounts(json.loads(script[len(prefix):-1]), (label,))
+        elif path.suffix == ".html":
+            for text in _rating_html(path.read_text(encoding="utf-8")).text:
+                _assert_no_money(text, label)
+        elif path.suffix == ".md":
+            _assert_no_money(path.read_text(encoding="utf-8"), label)
+    # Match the rating card by its exact target, not other pictures or unrelated prices in the root README.
+    blocks = re.findall(r"<picture>.*?</picture>(?:\s*</a>\s*</p>\s*<p[^>]*>.*?</p>)?", readme, re.S)
+    cards = [part for part in blocks if "docs/llm-rating/card/latest-en-light.png" in part]
+    assert len(cards) == 1, "README must have one rating picture block"
+    for text in _rating_html(cards[0]).text:
+        _assert_no_money(text, "root README rating card")
 
 
 def _assert_rating_views_and_questions(data):

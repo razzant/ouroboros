@@ -38,8 +38,8 @@ Texts that a reader sees are objects with two keys, `en` and `ru`. Dates are ISO
 | `votes` | object | see Votes |
 | `reviewers` | object | see Reviewers |
 | `notes` | object | `author`, `review_from`, `changes`, `changelog`, `lead_note`, optional `postscript` and `place_rule` (what gives a model a place); in a draft with cases not yet verified by a second reader, `unverified` counts them |
-| `views` | object | optional. `{title, lead, columns[], rows[], budget}`: a few models seen three ways. `columns` are `{id, name}` with the ids `quality`, `now`, `budget`; each row is `{model, quality, now, budget}` with a sentence per view; `budget` is `{title, principle, rows[]}`, where each row is `{group, text}`: what to pick for that column on a limited budget. No sums |
-| `faq` | object | optional. `{title, lead, items[]}`; each item is `{q, a}`: a reader's question, retold, and my answer |
+| `views` | object | required for method 5; optional in earlier methods. `{title, lead, columns[], rows[], budget}`: a few models seen three ways. `columns` are `{id, name}` with the ids `quality`, `now`, `budget`; each row is `{model, quality, now, budget}` with a sentence per view; `budget` is `{title, principle, rows[]}`, where each row is `{group, text}`: what to pick for that column on a limited budget. No sums |
+| `faq` | object | required for method 5; optional in earlier methods. `{title, lead, items[]}`; each item is `{q, a}`: a reader's question, retold, and my answer |
 | `revision_of` | string | only in a revision: the edition it revises. A revision keeps that edition's period, token totals, votes and reviewers |
 | `carried` | object | only in a revision: `{from, what[], note, votes_prior_table?}`: `what` lists only unchanged values (including individual `totals.*` fields); `note` is shown above the votes and reviewer sections, and `votes_prior_table` names the earlier table the voters saw |
 | `carried_from` | string | optional: the edition a letter with the ground `carried` comes from, when it is not `previous_edition` |
@@ -90,7 +90,7 @@ Models in the rating contributed drafts, not their own rows. The final order, ev
 
 ## Compare
 
-`{with, comparable, rows[], left[], bullets[], columns?, new_columns?, title?, note?}`. When the edition added columns, `columns` names the columns both editions have (the letters of `rows` and of `was` cover exactly those) and `new_columns` the added ones; `title` and `note` are optional texts of the section.  `rows`: for each ranked model `{model, rank, letters, was}`, where `was` is as in Model. `left`: models ranked in the previous edition and not now, `{model, name, was, now, successor}`. `bullets`: what changed, in words. `notes.changes` lists the same moves one by one: `{model, rank_from, rank}`, `{model, group, from, to}`, `{model, new, rank}`, `{model, left}`.
+`{with, comparable, rows[], left[], bullets[], columns?, new_columns?, title?, note?}`. When the edition added columns, `comparable` lists only the shared columns (earlier fixed-column comparisons use a boolean). `columns` names the columns both editions have (the letters of `rows` and of `was` cover exactly those) and `new_columns` the added ones; `title` and `note` are optional texts of the section.  `rows`: for each ranked model `{model, rank, letters, was}`, where `was` is as in Model. `left`: models ranked in the previous edition and not now, `{model, name, was, now, successor}`. `bullets`: what changed, in words. `notes.changes` lists the same moves one by one: `{model, rank_from, rank}`, `{model, group, from, to}`, `{model, new, rank}`, `{model, left}`.
 
 ## Votes
 
