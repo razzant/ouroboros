@@ -691,14 +691,19 @@ def test_an_engine_wire_counts_its_images_as_images_not_as_base64_text():
         {"inlineData": {"mimeType": "image/png", "data": data}}]}]}}]}
     openai = {"events": [{"type": "conversation.item.create", "item": {"type": "message", "role": "user", "content": [
         {"type": "input_image", "image_url": "data:image/png;base64," + data}]}}]}
+    chat = {"messages": [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + data}}]}]}
     text = {"events": [{"clientContent": {"turns": [{"role": "user", "parts": [{"text": data}]}]}}]}
     arguments = {"nested": {"type": "image", "content": [{"inlineData": {"mimeType": "image/png", "data": data}}]}}
     tool = {"role": "assistant", "tool_calls": [{"function": {"name": "describe", "arguments": arguments}}]}
     function_call = {"clientContent": {"turns": [{"parts": [{"functionCall": {"name": "describe", "args": arguments}}]}]}}
     assert estimate_context_prompt_tokens([tool]) > 50_000
     assert estimate_context_prompt_tokens([function_call]) > 50_000
+    disguised = {"messages": [{"role": "assistant", "tool_calls": [
+        {"function": {"name": "describe", "arguments": chat}}]}]}
+    assert estimate_context_prompt_tokens([disguised]) > 50_000
     response_output = {"type": "function_call_output", "call_id": "c1",
                        "output": [{"type": "input_image", "image_url": "data:image/png;base64," + data}]}
-    for wire in (gemini, openai, response_output):
-        assert estimate_context_prompt_tokens([wire]) < 5_000
+    for wire in (gemini, openai, response_output, chat):
+        assert estimate_context_prompt_tokens([wire]) < 5_000, tuple(wire)
     assert estimate_context_prompt_tokens([text]) > 50_000  # control: text of that size still counts in full
