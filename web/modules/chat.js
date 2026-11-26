@@ -2503,7 +2503,8 @@ export function createChatInstance({
 
     // The composer (composer.js): its field, the room's capsules, attachments and the send path.
     composer = createComposer({ page, byId, ws, replies, chatSessionId, isMain, chatId, projectId, storeKey,
-        refreshState: refreshHeaderControlState, openSettings, onLayout: () => updateMessagesPadding(),
+        durableDraft: Boolean(roomProfile.profileScope), refreshState: refreshHeaderControlState,
+        openSettings, onLayout: () => updateMessagesPadding(),
         onSent: showSent, readingBack: () => !reading.stick && reading.ownMove });
 
     // A send the composer made, shown in the feed: the bubble, its doubt until the host's saved echo, `Sending...`.
