@@ -1,6 +1,7 @@
 """Owner-shaped counts and measured text lengths; no private owner content."""
 from dataclasses import replace
 import json
+import random
 from types import SimpleNamespace
 
 from ouroboros import context_fit as cf, memory_view as mv
@@ -13,8 +14,30 @@ HOST = {'knowledge_index': 20000, 'runtime': 15200, 'subagents': 10400,
         'review_continuity': 7200, 'installed_skills': 3200, 'review_ledger': 3200}
 
 
+_SENTENCES = (
+    'The owner asked to keep the whole history in view and to fold only what I retold myself.',
+    'Сегодня мы разобрали, почему звонок не помещается в окно и что остаётся целым.',
+    'A finished work leaves its result, its review and the question it still holds open.',
+    'Мы договорились проверять каждое изменение на свежей и на зрелой установке.',
+    'The connections map names every server, its tools and what each one is for.',
+    'Заметка о человеке хранит его собственные слова и мою краткую сводку рядом.',
+    'I keep the marks that guide my judgment and release them when they no longer hold.',
+    'Отчёт о ревью лежит в источнике, а в окне остаётся только его адрес и итог.',
+)
+
+
+def prose(label, size):
+    """Deterministic multilingual prose (Russian and English sentences, seeded by ``label``): no network, no private
+    text; no quotes, backslashes or newlines, so its characters are its JSON characters."""
+    rng, out, length = random.Random(label), [], 0
+    while length < size:
+        out.append(rng.choice(_SENTENCES))
+        length += len(out[-1]) + 1
+    return ' '.join(out)
+
+
 def text(label, size):
-    return (label + ' ' + 'x' * size)[:size]
+    return (label + ' ' + prose(label, size))[:size]
 
 
 def snapshot(rows=158, pages=113):
@@ -131,3 +154,52 @@ def write_root(root):
     assert store.mark({'node_id': pages[-1]['id']}, text('Protected marks', PROTECTED['memory_marks']),
                       MIND, room_id='1', scope='global').ok
     return root
+
+
+MIND = {'kind': 'mind', 'task_id': 'install', 'focus': {'role': 'root', 'task_id': 'install'}}
+FRESH = {'identity': 1800, 'scratchpad': 900, 'overview': 1500, 'marks': (40, 90, 150, 220, 300)}
+
+
+def _page(store, room, i, size):
+    return store.publish_page(room_id=room, text=text(f'Page {room}-{i}', size), author=MIND,
+                              covers={'mode': 'range', 'rows': [f'row-{room}-{i}'], 'stream_span': [i, i]}).record
+
+
+def install(drive, shape='fresh'):
+    """A synthetic drive the ordinary build reads over the real checkout: authored identity, scratchpad and overview,
+    an activated chronicle whose marks the views keep, Main and a project room with their rows. ``fresh``: a new
+    install after a few days of use."""
+    from ouroboros import dialogue_store as ds
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.projects_registry import create_project
+
+    sizes = FRESH
+    memory = drive / 'memory'
+    (memory / 'knowledge').mkdir(parents=True, exist_ok=True)
+    (drive / 'logs').mkdir(exist_ok=True)
+    (memory / 'identity.md').write_text(text('Identity', sizes['identity']), encoding='utf-8')
+    (memory / 'scratchpad.md').write_text(text('Scratchpad', sizes['scratchpad']), encoding='utf-8')
+    (memory / 'knowledge' / 'overview.md').write_text('# Overview\n' + text('Overview', sizes['overview']), encoding='utf-8')
+    store = ChronicleStore(drive)
+    store.ensure_activated()
+    project = create_project(drive, 'fresh-project', name='Fresh project')
+    for i in range(6):
+        ds.append(drive, 'chat', {'chat_id': 1, 'direction': 'in' if i % 2 == 0 else 'out', 'task_id': f'turn-{i}',
+                                  'ts': f'2026-11-2{i}T10:00:00+00:00', 'text': text(f'Main row {i}', 300)}, emit_live=False)
+    ds.append(drive, 'chat', {'chat_id': project['chat_id'], 'direction': 'in', 'ts': '2026-11-21T09:00:00+00:00',
+                              'text': text('Project words', 200)}, emit_live=False)
+    target = _page(store, '1', 0, 900)
+    for i, size in enumerate(sizes['marks']):
+        assert store.mark({'node_id': target['id']}, text(f'Mark {i}', size * 4), MIND, room_id='1',
+                          scope='global' if i % 2 else 'room', quote=text(f'Quote {i}', 80) if i < 3 else None).ok
+    return drive
+
+
+def env_on(drive):
+    """``(env, memory)`` of the real checkout over ``drive``: the governance a start reads is the shipped text."""
+    import pathlib
+    from ouroboros.agent import Env
+    from ouroboros.memory import Memory
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    return Env(repo_dir=repo, drive_root=drive), Memory(drive_root=drive, repo_dir=repo)

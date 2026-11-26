@@ -45,6 +45,7 @@ log = logging.getLogger(__name__)
 
 _Schemas = Optional[List[Dict[str, Any]] | Callable[[], List[Dict[str, Any]]]]
 _ToolFrames = Optional[Callable[[str], Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]]]
+DENSITY_VIEW_KINDS = {"consciousness": "own_wake", "presence": "focus", "integrator": "owner_turn"}  # role -> witness view
 
 
 def extract_plain_text_from_content(content: Any) -> str:
@@ -662,6 +663,10 @@ class RouteQuestion:
                 return self.answer
         return timed("fit.route", self.resolver, {**task, "route_start_read": True}, allow_fetch=allow_fetch)
 
+    def peek(self) -> Optional[Tuple[Dict[str, Any], Any]]:
+        """The answer already arrived for the asked route, else None: never waits, consumes the key or adopts work."""
+        return self.answer if self.key is not None and self.asked.is_set() and self.error is None and self.asked_key == self.key else None
+
     def again(self, task: Dict[str, Any], *, failed: bool = False) -> Tuple[Dict[str, Any], Any]:
         """The same question at the fit's usual point (the horizon guard, or a start whose route named no window). When
         the early answer came from a read that failed, or the fit names its first answer failed (``failed``), the
@@ -726,6 +731,20 @@ def main_output_reserve_tokens(*, use_local: bool, evidence=None) -> int:
     return ResponseLimit(**(getattr(evidence, "response_limit", {}) or {})).ceiling(requested)
 
 
+def route_window(route: Dict[str, Any], evidence: Any, preferred: str) -> Tuple[int, Any, str, bool, WindowRecord]:
+    """One route answer's ``(output reserve, working reserve, window basis, bound, window record)`` for every frame."""
+    # Keep the fit projection tied to the physical dispatch contract instead of duplicating its output reservation.
+    output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local")), evidence=evidence)
+    route_facts = getattr(evidence, "route_facts", {}) or {}
+    working_reserve = route_facts.get("working_reserve_tokens")
+    reserve = context_budget.context_mode_limits(preferred, preferred, output_reserve,
+                                                working_reserve_tokens=working_reserve)[1]
+    scope = route.get("window_observation_fp", evidence.route_fp)
+    bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
+    return output_reserve, working_reserve, str(route_facts.get("basis") or ""), bound, resolve_window(
+        evidence, reserve, bound=bound, observation_fp=scope, load=(route.get("_resolved_target") or {}).get("requested_load_window"))
+
+
 def _request_tail(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return messages[1:] if messages and messages[0].get("role") == "system" else messages
 
@@ -753,7 +772,8 @@ class MinimumViewUnfit(ValueError):
 
     def __init__(self, message: str, *, fixed_tokens: int, memory_tokens: int,
                  reserve_tokens: int, window_tokens: int, ratio: float, work_room_tokens: int = 0,
-                 required_book_tokens: int = 0):
+                 required_book_tokens: int = 0, memory_measured: bool = True, parts: Iterable[Tuple[str, int]] = ()):
+        self.memory_measured, self.parts = memory_measured, tuple(parts)  # False: no memory priced (never a measured 0)
         # Retain the fitter's exact rounding: fixed + memory is calibrated once.
         self.raw_input_tokens = fixed_tokens + memory_tokens
         self.measurement_density = ratio
@@ -1363,7 +1383,7 @@ def build_context_fit_plan(
 
     view_task = {**task, "metadata": task.get("metadata") or meta}
     role = view_role(view_task)
-    view_kind = {"consciousness": "own_wake", "presence": "focus", "integrator": "owner_turn"}.get(role, role)
+    view_kind = DENSITY_VIEW_KINDS.get(role, role)
     # Select density before the single start walk, comparing the whole captured request at the size that can be sent.
     restored = core.held_note_resume or {}
     current_messages = restored.get("messages")
@@ -1393,16 +1413,7 @@ def build_context_fit_plan(
     def frame(route: Dict[str, Any], evidence: Any) -> SimpleNamespace:
         """What the start walk reads of one route answer: reserves, the window record, the density and the request's
         shape (``context_measurement._request_shapes``: its provider matters only where it opens the custom ladder)."""
-        # Keep the fit projection tied to the physical dispatch contract instead of duplicating its output reservation.
-        output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local")), evidence=evidence)
-        route_facts = getattr(evidence, "route_facts", {}) or {}
-        working_reserve = route_facts.get("working_reserve_tokens")
-        window_basis = str(route_facts.get("basis") or "")
-        reserve = context_budget.context_mode_limits(preferred, preferred, output_reserve,
-                                                    working_reserve_tokens=working_reserve)[1]
-        scope = route.get("window_observation_fp", evidence.route_fp)
-        bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
-        window_record = resolve_window(evidence, reserve, bound=bound, observation_fp=scope, load=(route.get("_resolved_target") or {}).get("requested_load_window"))
+        output_reserve, working_reserve, window_basis, bound, window_record = route_window(route, evidence, preferred)
         provider = str(route.get("provider") or "")
         if provider not in sized:  # the whole request measured once per provider, however many answers are framed
             sized[provider] = estimate_context_prompt_tokens(rows, schemas, provider=provider,
