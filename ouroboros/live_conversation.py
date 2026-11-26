@@ -252,7 +252,7 @@ class LiveConversationTurn(RealtimeTurn):
                         host.wire.close()  # the call's last records are on disk before it reports finished
                     self.publish({"type": "conversation_finished", "chat_id": self.spec.chat_id,
                                   "call_id": self.spec.call_id, "task_id": ctx.task_id, "reason": reason})
-        words, usage = call_ending(reason, status, detail, notice)
+        words, usage = call_ending(reason, status, detail, notice, opened=host is not None and host._session_opened)
         return words, {**usage, **({"failure": failure} if failure is not None else {})}, (
             host.trace if host is not None else {"reasoning_notes": [], "tool_calls": []})
 

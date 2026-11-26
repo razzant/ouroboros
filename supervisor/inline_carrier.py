@@ -455,7 +455,7 @@ def _close_failed_call(admitted: Dict[str, Any], e: BaseException):
                     already_closed, turn._closed = turn._closed, True
                 if hub is not None and hub.ended_by_owner:  # the owner's End came first: it stays the owner's
                     reason, notice, words = "finished", None, {}
-                    ending = call_ending(reason, "ok")
+                    ending = call_ending(reason, "ok", opened=False)
                 else:
                     reason, notice = "context_capacity", preparation_refusal_notice(turn, e)
                     words = {"detail": notice["text"], "action": "settings"}

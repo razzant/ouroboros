@@ -172,7 +172,8 @@ def test_end_pressed_during_preparation_stays_the_owners_end(direct_call, tmp_pa
 
     world = direct_call
     world.hub.receive_control("owner", {"type": "bye"})
-    words, usage = call_ending("finished", "ok")
+    words, usage = call_ending("finished", "ok", opened=False)
+    assert words == "Call ended before it started."  # owner 26.11: no transcript for a call that never opened
     seen = _prepare_call(world, tmp_path, monkeypatch, True, "memory")
     assert world.hub.closed and world.hub._state["reason"] == usage["reason_code"] and "detail" not in world.hub._state
     assert [event["reason"] for event in seen.finished] == [usage["reason_code"]]

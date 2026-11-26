@@ -124,6 +124,7 @@ def text_input_estimate(messages, tools):
 # The refusal's internal message; the person and the mind read ``capacity_notice``.
 CONTEXT_CAPACITY_DETAIL = "This room's context and working reserve do not fit this engine's window."
 CALL_ENDED = "Call ended. Its transcript is in this room."
+CALL_ENDED_UNSTARTED = "Call ended before it started."  # the owner's End during preparation: there is no transcript
 _NEEDS = {True: "The call could not start on {engine}: this room needs {need} tokens of input, and {engine} takes {takes} "
                 "on this route today.",
           False: "The call could not start on {engine}: this room needs at least {need} tokens of input, and {engine} "
@@ -186,12 +187,16 @@ def session_refusal_notice(host):
         window=measurement["capacity_total_tokens"], extra=str(refusal.get("detail") or ""))
 
 
-def call_ending(reason, status, detail="", notice=None):
-    """A call's terminal words and usage: one home for the ending every refusal and End share."""
+def call_ending(reason, status, detail="", notice=None, *, opened=True):
+    """A call's terminal words and usage: one home for the ending every refusal and End share.
+
+    ``opened`` is false when no session ever opened (the End came during preparation)."""
     if notice is not None:
         words = notice["record"]
     elif reason == "not_connected":  # nobody joined: one short notice, no transcript to point at
         words = f"The call did not start: {detail.rstrip('.')}."
+    elif reason == "finished" and not opened:
+        words = CALL_ENDED_UNSTARTED
     else:
         words = (CALL_ENDED if status in ("ok", "cancelled") or not detail
                  else f"Call ended: {detail.rstrip('.')}. Its transcript is in this room.")

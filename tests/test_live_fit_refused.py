@@ -378,6 +378,8 @@ def test_stale_prepared_successor_then_replacement_open(host_world, monkeypatch,
             assert not any(native_output(wire, 'finishes-after-fit') for wire in live.provider.connections)
             assert slow.effects == ['list_available_tools']
         assert live.result[1]['reason_code'] == ('finished' if failure == 'none' else 'reconnect_failed')
+        if failure == 'none':  # the owner ended a call that opened: its transcript is in the room
+            assert live.result[0] == 'Call ended. Its transcript is in this room.'
 
     asyncio.run(scenario())
 
@@ -444,10 +446,21 @@ def test_a_capacity_refusal_after_the_session_opened_keeps_the_call_ended_words(
     assert 'host_notice_row' not in usage and 'action' not in state
 
 
+@pytest.mark.parametrize('opened', [False, True])
+def test_the_owners_end_says_whether_the_call_ever_opened(opened):
+    """The one home of a call's ending words (owner 26.11): an End before the call opened has no transcript to point
+    at; an End of a call that opened keeps today's words. Both are the owner's ordinary End (``finished``, ``ok``)."""
+    from ouroboros.realtime_setup import call_ending
+
+    words, usage = call_ending('finished', 'ok', opened=opened)
+    assert words == ('Call ended. Its transcript is in this room.' if opened else 'Call ended before it started.')
+    assert usage == {'terminal_origin': 'host_notice', 'execution_status': 'ok', 'reason_code': 'finished'}
+
+
 def test_end_pressed_before_the_engine_opened_is_the_ordinary_ending(host_world, monkeypatch):
     """The owner's bye reached the hub while the call prepared: the real driver never opens the engine and the call
-    ends with the ordinary ending, the one a preparation refused after that bye also takes
-    (``tests/test_live_preparation_fit_refusal.py``)."""
+    ends with the owner's ordinary End, worded for a call that never started, the one a preparation refused after
+    that bye also takes (``tests/test_live_preparation_fit_refusal.py``)."""
     from ouroboros.realtime_setup import call_ending
     from skills.live_conversation.driver import run as drive
 
@@ -455,5 +468,6 @@ def test_end_pressed_before_the_engine_opened_is_the_ordinary_ending(host_world,
     hub.join(cp.PeerInfo('owner', cp.PEER_OWNER, True, True), 24000)
     hub.receive_control('owner', {'type': 'bye'})
     words, usage, host, state = _run_call(host_world, monkeypatch, drive)
-    assert (words, usage) == call_ending('finished', 'ok') and state['reason'] == 'finished'
+    assert (words, usage) == call_ending('finished', 'ok', opened=False) and state['reason'] == 'finished'
+    assert words == 'Call ended before it started.'
     assert not host._session_opened and not host_world.sessions
