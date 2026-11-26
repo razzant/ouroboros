@@ -44,9 +44,10 @@ negative control and stage R included.
 THREE FIXED LINES, each placed from what this stand measures on the wire under the unified resident Body Map +
 Reference Atlas (replacing the retired 600 KB whole-books-to-maps rung):
 
-* ``enough`` (E) = 240,000, between the measured refused full-Max first send (~310k) and the folded-memory Max form
-  (~172k): ~67k+ mock tokens of room on both sides. The memory carrier's own legal smaller form brings the request
-  under the line while keeping the Body Map and full toolset intact; A2 starts folded and passes in one POST.
+* ``enough`` (E) = 294,000, between the measured refused full-Max first send (~310.7k / ~325.3k) and the hinted
+  folded-memory Max first send (~276.8k, 14 bodies + 20/20 leads; cold walk ~172.8k): ~16.7k+ mock tokens of room on
+  both sides. The memory carrier's own legal smaller form brings the request under the line while keeping the Body Map
+  and full toolset intact; A2 starts folded and passes in one POST.
 * ``standing`` (S) = 120,000, between the refused folded-memory Max form (~172k) and Nano's standing toolset (~73k):
   both full Max and folded Max are refused; Nano's standing toolset rescues the turn over HTTP while keeping the
   resident Body Map, BIBLE and owner words intact. A2 starts folded (skipping full Max) and steps to standing tools.
@@ -186,8 +187,8 @@ LEAD_UNIT = "Room {room} closed its arc: the work it shipped is told here, one f
 BODY_FILLER = "What this room settled, and why it matters to the rest of the work. "  # as tests/_stand.lay_rooms
 STORY_ROOMS, STORY_TOKENS = 20, 100_000  # synthetic story: its weight is what the memory carrier can give back
 #: Fixed lines, priced from the measured forms under the unified resident Body Map + Reference Atlas:
-#: full Max ~310k, folded Max ~172k, Nano standing toolset ~73k.
-THRESHOLD = {"enough": 240_000, "standing": 120_000, "none": 40_000}
+#: full Max ~310.7k, hinted folded Max ~276.8k (cold walk ~172.8k), Nano standing toolset ~74.5k..83.0k.
+THRESHOLD = {"enough": 294_000, "standing": 120_000, "none": 40_000}
 CLEARANCE = 10_000  # no turn's request may sit inside this of its scenario's line; asserted from this run's sizes
 #: Stage R's line: the size this account's own route last put on the wire, plus the spread the same stand measured
 #: between two new chats' first sends in ONE run (558,651 against 574,354: 15,703 mock tokens) taken twice over, so
