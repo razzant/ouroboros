@@ -567,11 +567,17 @@ def test_collect_repo_sync_state_prefers_managed_remote(monkeypatch):
     assert state["unpushed_lines"] == ["abc123 local commit"]
 
 def test_checkout_and_reset_keeps_bundled_sha_on_first_managed_bootstrap(monkeypatch, tmp_path):
+    """The first boot of a bundled managed checkout keeps the bundle's SHA, fetches nothing and clears its pin.
+    Its own clean tree keeps the room history reader serving; a dirty or unreadable tree is not that tree, so
+    the same bootstrap retires the reader before any tree step."""
+    from ouroboros.gateway import history_reader
+
     git_dir = tmp_path / ".git"
     git_dir.mkdir()
-    (git_dir / git_ops.BOOTSTRAP_PIN_MARKER_NAME).write_text("pending\n", encoding="utf-8")
+    marker = git_dir / git_ops.BOOTSTRAP_PIN_MARKER_NAME
 
     monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path / "data")
     monkeypatch.setattr(git_ops, "_has_remote", lambda name=None: name in (None, "managed"))
     monkeypatch.setattr(
         git_ops,
@@ -588,14 +594,20 @@ def test_checkout_and_reset_keeps_bundled_sha_on_first_managed_bootstrap(monkeyp
     monkeypatch.setattr(git_ops, "save_state", lambda state: saved_state.update(state))
     monkeypatch.setattr(git_ops, "update_state", lambda mutator, **_kw: mutator(saved_state) or saved_state)
 
+    status = {}
+
     def fake_git_capture(cmd):
-        if cmd == ["git", "rev-parse", "HEAD"]:
-            return 0, "bundle123", ""
+        if cmd in (["git", "rev-parse", "HEAD"], ["git", "rev-parse", "--verify", "ouroboros"]):
+            return 0, "bundle123", ""  # the branch names the bundled tree this process was started from
+        if cmd == ["git", "status", "--porcelain"]:
+            return status["rc"], status["out"], ""
         raise AssertionError(cmd)
 
     monkeypatch.setattr(git_ops, "git_capture", fake_git_capture)
 
     calls = []
+    monkeypatch.setattr(history_reader, "reader",
+                        SimpleNamespace(retire_for_checkout=lambda root: calls.append(("retire_reader", root)) or ""))
 
     def fake_run(cmd, cwd=None, capture_output=False, text=False, check=False, env=None):
         calls.append(cmd)
@@ -611,13 +623,23 @@ def test_checkout_and_reset_keeps_bundled_sha_on_first_managed_bootstrap(monkeyp
 
     monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
 
-    ok, message = git_ops.checkout_and_reset("ouroboros", reason="bootstrap", unsynced_policy="ignore")
+    clean, dirty, unreadable = (0, ""), (0, " M server.py"), (128, "")
+    retired = [("retire_reader", tmp_path / "data")]
+    for (rc, porcelain), reader_steps in ((clean, []), (dirty, retired), (unreadable, retired)):
+        marker.write_text("pending\n", encoding="utf-8")
+        status.update(rc=rc, out=porcelain)
+        saved_state.clear()
+        calls.clear()
 
-    assert ok
-    assert message == "ok"
-    assert ["git", "fetch", "managed"] not in calls
-    assert saved_state["current_sha"] == "bundle123"
-    assert not (git_dir / git_ops.BOOTSTRAP_PIN_MARKER_NAME).exists()
+        ok, message = git_ops.checkout_and_reset("ouroboros", reason="bootstrap", unsynced_policy="ignore")
+
+        assert ok
+        assert message == "ok"
+        assert ["git", "fetch", "managed"] not in calls
+        assert saved_state["current_sha"] == "bundle123"
+        assert not marker.exists()
+        assert [step for step in calls if step[0] == "retire_reader"] == reader_steps, status
+        assert calls[:len(reader_steps)] == reader_steps, status  # before any Git subprocess, tree steps included
 
 def test_ensure_official_update_remote_uses_manifest_remote_name(monkeypatch):
     captured = []

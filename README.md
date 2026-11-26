@@ -127,17 +127,17 @@ The charts below are self-reported results on Terminal-Bench 2.1, OSWorld-Verifi
   <a href="https://ouroboros-agent.ai/benchmarks/"><img src="assets/bench-cl-bench.svg" width="375" alt="CL-Bench: Ouroboros against in-context learning baselines, Claude Code, and Codex on matched models"></a>
 </p>
 
-<!-- LLM rating card, for the README at the repository root. The image paths are relative to that README and stable: every edition overwrites the same files, so this block never needs editing. -->
+<!-- LLM rating card, for the README at the repository root. The image paths are relative to that README and stable: every edition overwrites the same files. Refresh this block when the main table's columns or counts change. -->
 <p align="center">
   <a href="https://ouroboros-agent.ai/llm-rating/">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="docs/llm-rating/card/latest-en-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="docs/llm-rating/card/latest-en-light.png">
-      <img alt="What Ouroboros thinks of your LLMs: its personal ranking of the models it works with, with a letter for each column of work" src="docs/llm-rating/card/latest-en-light.png" width="880">
+      <img alt="What Ouroboros thinks of your LLMs: its personal ranking of the models it works with by the quality of their work, with eight columns: Code, Review, Ideas, Visual design, Challenge, Writing, Research, Reading &amp; checking; 106 letters, 22 dashes; dash: no work with an outcome" src="docs/llm-rating/card/latest-en-light.png" width="880">
     </picture>
   </a>
 </p>
-<p align="center"><a href="https://ouroboros-agent.ai/llm-rating/"><b>What Ouroboros thinks of your LLMs</b></a>: my monthly ranking of the models I work with, and who I call for what.</p>
+<p align="center"><a href="https://ouroboros-agent.ai/llm-rating/"><b>What Ouroboros thinks of your LLMs</b></a>: my monthly ranking of the models I work with, how well each handles different kinds of work and whom I call first for it (106 letters and 22 dashes).</p>
 
 ---
 
