@@ -290,17 +290,21 @@ def test_a_failing_claim_never_skips_the_custody_retry(data, monkeypatch):
     assert owned_shutdown.finish_unconfirmed_stops(data)["retried"] == 1 and len(retried) == 1
 
 
-def test_a_planned_restart_keeps_its_own_record_before_its_teardown_entry():
+def test_a_planned_restart_keeps_its_own_record_before_its_teardown_entry(data, monkeypatch):
     """The reader contract's other half: a planned restart stops its workers before its teardown door,
     so its restart transaction, not the entry, records that window (behaviour: test_delegate_recovery's
     door test reads the prepared transaction before any process teardown). Its teardown door then writes
     ``restart_requested``; no earlier grace or entry is started for a diagnostic."""
     import server
-    from ouroboros import server_restart
+    from ouroboros import owned_shutdown
+    from tests.test_restart_retention import _planned_restart_door
 
-    planned = inspect.getsource(server_restart._perform_supervisor_restart)
-    assert planned.index("prepare_restart_returns(") < planned.index("ctx.kill_workers(")
-    assert "begin_owned_stop" not in planned and "shutdown_entry" not in planned
+    _generation(monkeypatch, "gen-planned")
+    steps = [step[0] for step in _planned_restart_door(data, monkeypatch)]
+    assert steps.index("name_returns") < steps.index("kill_workers") and steps[-1] == "exit"
+    stop = owned_shutdown._GENERATION_STOP  # it asks for its exit with no grace begun and no entry written
+    assert stop.deadline is None and not stop.started and stop.entry == {}
+    assert not owned_shutdown.shutdown_entry_path(data).exists()
     assert "begin_owned_stop(lifespan_drive_root, cause=server_stop_cause())" in inspect.getsource(server.lifespan)
 
 
