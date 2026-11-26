@@ -617,6 +617,8 @@ def test_commit_gate_review_refuses_unverified_root_cap_authority_without_dispat
     assert not [e for e in ctx_pre.pending_events if e.get("type") == "review_wave_budget_insufficient"]
     adv_pre = "\n".join(map(str, ctx_pre._review_advisory))
     assert "root_cap_backfill_pending" in adv_pre and "Known spend has reached" not in adv_pre
+    assert "migrate_from_journal" in adv_pre and "retry this review" in adv_pre
+    assert "no budget exhaustion was claimed" in adv_pre
 
     _, llm_auth, (err_a, coup_a, _, _) = run_gate("pre-capped", root_limit=5.0, root_source="authored_root_ceiling")
     _, llm_nb, (err_n, coup_n, _, _) = run_gate("pre-neighbor", root_limit=10.0, group_limit=10.0)

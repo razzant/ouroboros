@@ -483,6 +483,7 @@ def test_an_advisory_finish_over_findings_is_the_authors_own_decision(tmp_path, 
 def test_money_refusal_keeps_its_recovery_not_the_review_cycle_ceiling(tmp_path, monkeypatch):
     from ouroboros import usage_accounting as ua
     from ouroboros.tools.review_result import result_review_at_delivery
+    from ouroboros.usage_admission import work_cap_target
 
     ctx = _floor_ctx(tmp_path, monkeypatch)
     _produced_answer_protocol(monkeypatch)
@@ -498,9 +499,21 @@ def test_money_refusal_keeps_its_recovery_not_the_review_cycle_ceiling(tmp_path,
         assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True
     assert not sends
     assert trace["review_runs"][0]["dispatch_refusal"] == "review_wave_budget_insufficient"
-    assert "raises the review ceiling" not in shown[-1]
-    assert "per-task budget" in shown[-1]
-    assert "was reviewed before delivery" not in shown[-1]
+    said = shown[-1]
+    assert "raises the review ceiling" not in said
+    # The scope's first attempt bound this root as its own ordinary $1 group (here the ledger's first row, as no task
+    # record exists; a started task pins it at admission). A conversational raise amends that cap; the per-task
+    # setting applies only to later work (#4267).
+    bound = work_cap_target(ctx.drive_root, {}, ctx.task_id)
+    assert [bound.get(key) for key in ("error", "billing_group_id", "billing_group_limit_usd")] == [
+        None, ctx.task_id, 1.], bound
+    assert f"$1.000000 for group {ctx.task_id}" in said
+    assert "this work's cap" in said and "set_task_cost_cap" in said
+    assert "per-task setting does not amend" in said
+    assert "raise the per-task budget" not in said and "raise TOTAL_BUDGET" not in said
+    assert "retry this review" in said and 'review_change(subject="result")' in said
+    assert "commit-gate" not in said and "same commit" not in said
+    assert "was reviewed before delivery" not in said
 
 
 def test_an_advisory_delivery_after_a_shown_refusal_is_the_authors_own_decision(tmp_path, monkeypatch):

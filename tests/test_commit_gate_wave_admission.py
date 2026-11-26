@@ -214,7 +214,8 @@ def test_known_spend_at_the_fence_declines_the_wave_at_zero_dollars(gate, tmp_pa
 
     assert llm.calls == [] and _ledger(gate) == before
     said = _returned(ctx, review_err)
-    assert "commit-gate review wave declined before dispatch ($0 spent)" in said
+    assert "declined before dispatch ($0 spent)" in said
+    assert "retry this review" in said
     assert f"Known spend has reached the whole-work billing-group budget fence $4.000000 for group {ROOT}" in said
     assert "known spend=$4.000000, remaining=" in said, "nothing uncounted: no blended or zero hold"
     assert "remaining=$0.000000" in said
@@ -257,7 +258,8 @@ def test_global_known_spend_at_the_limit_declines_the_wave_before_any_seat_reser
 
     assert llm.calls == [] and len(_ledger(gate)) == 1  # the other root's attempt only (one current row)
     said = _returned(ctx, review_err)
-    assert "commit-gate review wave declined before dispatch ($0 spent)" in said
+    assert "declined before dispatch ($0 spent)" in said
+    assert "retry this review" in said
     assert "Known spend has reached the global budget TOTAL_BUDGET $100.000000: known spend=$100.000000 across every task" in said
     assert "across every task, remaining=" in said
     assert "remaining=$0.000000" in said
