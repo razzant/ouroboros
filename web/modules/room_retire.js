@@ -220,13 +220,16 @@ const cutWindow = ({ reason_code: refused, window } = {}) => Boolean(refused)
 const degradedWindow = (data = {}) => cutWindow(data)
     || Boolean(data.window?.truncated_by?.some?.(cause => String(cause).endsWith('_source_unavailable')));
 
-/** Local owner rows in a drawn history window that carry explicit host dispatch confirmation for a pending send. */
-export function dispatchedOwnerIds(rows, pending, { chatId, sessionId, localOwnerRow }) {
+/** Local owner rows in a drawn history window by which the host answers for a pending send: its dispatch entered
+ * (`ingress_dispatched`), or, its process having ended, no dispatch fact at all, an outcome unknown that the bubble says
+ * as its delivery doubt (chat_attachments.js `settle`). `ingress_pending` is no answer: the running host still owes the
+ * start, and its live frame ends the wait. */
+export function answeredOwnerIds(rows, pending, { chatId, sessionId, localOwnerRow }) {
     if (!pending?.size || !Array.isArray(rows)) return [];
     const matched = [];
     for (const row of rows) {
         if (row?.role !== 'user' || row.is_progress || row.declared_author) continue;
-        if (row.ingress_accepted !== true || row.ingress_dispatched !== true || row.ingress_pending === true) continue;
+        if (row.ingress_accepted !== true || row.ingress_pending === true) continue;
         const id = String(row.client_message_id || '');
         const entry = id && pending.get(id);
         if (!entry || !localOwnerRow(row)) continue;

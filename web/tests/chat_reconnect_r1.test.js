@@ -1,7 +1,9 @@
 // W2 R1: disconnected send reconciliation through the real chat instance.
-// Only a matching local owner row with positive dispatch evidence (or an existing
-// authoritative receipt) in a successfully DRAWN, qualifying post-disconnect source
-// response may settle Sending into Starting….
+// Only a matching local owner row in a successfully DRAWN, qualifying source response begun after a disconnect
+// may end the wait for a send, and only by the host's own answer: its dispatch
+// entered (Sending settles into Starting…), or its process ended and it knows nothing (the wait ends in the bubble's
+// delivery doubt, no success claimed, nothing resent). A still-pending row, a foreign or old row, and an ordinary read
+// in a window that missed nothing settle nothing; an existing authoritative receipt still does.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
@@ -69,6 +71,7 @@ function makeRoom(t, { chatId = 2, asPanel = true, initialOnline = true, afterCu
 
     let connected = true, opened = true, seq = 0;
     const listeners = new Map();
+    const sent = [];  // every frame the room wrote: a doubt never resends one
     const rawWs = {
         ws: { readyState: 1 },
         on(type, fn) {
@@ -83,7 +86,7 @@ function makeRoom(t, { chatId = 2, asPanel = true, initialOnline = true, afterCu
         foreignProfile: () => false,
         servingProfileScope: () => PREVIEW_SCOPE,
         canShowSavedProfile: () => true,
-        send: () => ({ status: connected ? 'sent' : 'queued', clientMessageId: `cm-${++seq}` }),
+        send: (frame) => { sent.push(frame); return { status: connected ? 'sent' : 'queued', clientMessageId: `cm-${++seq}` }; },
     };
     const ws = roomSocket(rawWs);
     const instance = createChatInstance({
@@ -169,8 +172,10 @@ function makeRoom(t, { chatId = 2, asPanel = true, initialOnline = true, afterCu
         return () => hits;
     };
     return {
-        instance, ws, rawWs, reads, messages, status, send, bubble, sessionIdOf, userRow, assistantRow, page, armDrawFault,
+        instance, ws, rawWs, reads, sent, messages, status, send, bubble, sessionIdOf, userRow, assistantRow, page, armDrawFault,
         shown: () => messages.querySelectorAll('[data-history-id]').map((n) => n.dataset.historyId),
+        // What a bubble offers on its delivery note, in order (`send_as_new`: the one action of a delivery doubt).
+        actions: (cmid) => (bubble(cmid)?.querySelectorAll('[data-unconfirmed-action]') || []).map((b) => b.dataset.unconfirmedAction),
         push: (...items) => queue.push(...items),
         setDefault: (body) => { defaultBody = body; },
         disconnect() { connected = false; rawWs.ws.readyState = 3; rawWs.emit('close'); },
@@ -221,7 +226,7 @@ test('R1 reproducer: pending saved echo pushed out of bounded 150-row newest nev
     assert.equal(r.status(), 'Starting…');
 });
 
-test('R1: still-pending and old-server rows without positive dispatch evidence do not guess; authoritative receipt settles', async (t) => {
+test('R1: a still-pending row and an old server\'s row without ingress facts keep Sending; a durable routing receipt settles', async (t) => {
     const r = makeRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
@@ -232,16 +237,12 @@ test('R1: still-pending and old-server rows without positive dispatch evidence d
     assert.equal(r.status(), 'Sending');
 
     r.disconnect();
-    // 1. Matching row still pending dispatch -> stays Sending.
-    // 2. Matching row with ingress_accepted only (ended process / old server lacking ingress_dispatched) -> stays Sending.
-    // 3. Matching row lacking all ingress fields (older server) -> stays Sending.
-    // 4. Same old-server row with durable chat_annotation (existing authoritative receipt) -> settles.
+    // 1. Matching row still pending dispatch (the running host owes the start) -> stays Sending.
+    // 2. Matching row lacking all ingress fields (older server: nothing says the host saved it) -> stays Sending.
+    // 3. Same old-server row with durable chat_annotation (existing authoritative receipt) -> settles.
     r.push(
         r.page([r.userRow(cmid, 'Need positive dispatch', {
             sender_session_id: sessionId, ingress_accepted: true, ingress_dispatched: undefined, ingress_pending: true,
-        })]),
-        r.page([r.userRow(cmid, 'Need positive dispatch', {
-            sender_session_id: sessionId, ingress_accepted: true, ingress_dispatched: undefined,
         })]),
         r.page([r.userRow(cmid, 'Need positive dispatch', {
             sender_session_id: sessionId, ingress_accepted: undefined, ingress_dispatched: undefined,
@@ -259,56 +260,123 @@ test('R1: still-pending and old-server rows without positive dispatch evidence d
 
     await r.instance.refreshHistory({ revision: 2 });
     await quiet();
-    assert.equal(r.status(), 'Sending', 'ingress_accepted alone without ingress_dispatched must not guess dispatch');
-
-    await r.instance.refreshHistory({ revision: 3 });
-    await quiet();
     assert.equal(r.status(), 'Sending', 'old-server row lacking ingress fields must not guess dispatch');
 
-    await r.instance.refreshHistory({ revision: 4 });
+    await r.instance.refreshHistory({ revision: 3 });
     await quiet();
     assert.equal(r.status(), 'Starting…', 'existing durable routing receipt still settles old-server row');
 });
 
-test('R1: same-id-but-not-ours rows never settle Sending; next qualifying read with our dispatched row does', async (t) => {
+// A host process that ended took the row's dispatch with it, and the new one can say nothing about it: the saved row
+// carries neither `ingress_dispatched` nor `ingress_pending`. A window that outlived the restart then stands where a
+// reload stands: nothing it waits for, the kept copy in doubt ("Saved; delivery not confirmed", Send as new).
+test('R1: an ended host\'s saved row ends the wait in an explicit delivery doubt, never in success or a resend', async (t) => {
     const r = makeRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
 
-    const cmid = r.send('Mine only');
+    const cmid = r.send('Saved before the restart');
     const sessionId = r.sessionIdOf(cmid);
-    const ownAddress = 'row:2@2026-11-26T10:00:01Z#aaaaaaaaaaaa';
-    r.rawWs.emit('chat', {
-        role: 'user', chat_id: 2, source: 'web', content: 'Mine only', text: 'Mine only',
-        client_message_id: cmid, sender_session_id: sessionId, row_address: ownAddress,
-        ingress_accepted: true, ingress_pending: true, ts: isoAt(1),
-    });
     await quiet();
+    assert.equal(r.status(), 'Sending');
+    const writes = r.sent.length;
 
     r.disconnect();
-    const impostors = [
-        r.userRow(cmid, 'Projected copy', { history_id: 'chat:imp-1', origin_projected: true, sender_session_id: sessionId, row_address: ownAddress }),
-        r.userRow(cmid, 'Other room', { history_id: 'chat:imp-2', chat_id: 99, sender_session_id: sessionId, row_address: 'row:99@2026-11-26T10:00:01Z#aaaaaaaaaaaa' }),
-        r.userRow(cmid, 'Agent note', { history_id: 'chat:imp-3', declared_author: 'agent', sender_session_id: sessionId, row_address: ownAddress }),
-        r.userRow(cmid, 'Telegram row', { history_id: 'chat:imp-4', source: 'telegram', sender_session_id: sessionId, row_address: ownAddress }),
-        r.userRow(cmid, 'Other tab', { history_id: 'chat:imp-5', sender_session_id: 'other-tab-session', row_address: ownAddress }),
-        r.userRow(cmid, 'Other physical row', { history_id: 'chat:imp-6', sender_session_id: sessionId, row_address: 'row:2@2026-11-26T10:00:02Z#bbbbbbbbbbbb' }),
-        { ...r.assistantRow('chat:imp-7', 'Assistant with same id', 2), client_message_id: cmid, ingress_accepted: true, ingress_dispatched: true },
-        r.userRow(cmid, 'Progress echo', { history_id: 'chat:imp-8', is_progress: true, sender_session_id: sessionId, row_address: ownAddress }),
-        r.userRow(cmid, 'Pending despite dispatch flag', { history_id: 'chat:imp-9', ingress_accepted: true, ingress_dispatched: true, ingress_pending: true, sender_session_id: sessionId, row_address: ownAddress }),
-    ];
-    const ours = r.userRow(cmid, 'Mine only', { sender_session_id: sessionId, row_address: ownAddress });
-    r.push(r.page(impostors), r.page([ours]));
-
+    r.push(r.page([r.userRow(cmid, 'Saved before the restart', { sender_session_id: sessionId, ingress_dispatched: undefined })]));
     r.reconnect();
     await until(() => r.reads.length === 2);
     await quiet();
-    assert.equal(r.status(), 'Sending', 'same-client_message_id rows that are not ours must not settle Sending');
 
+    assert.equal(r.instance.hasPaintedHistory(), true);
+    const note = r.bubble(cmid).querySelector('[data-ingress-saved]');
+    assert.equal(note?.dataset.ingressSaved, 'unconfirmed', 'the bubble wears the delivery doubt');
+    assert.equal(note?.textContent, 'Saved; delivery not confirmed.');
+    assert.deepEqual(r.actions(cmid), ['send_as_new'], 'a new message is the one honest next step');
+    assert.equal(r.status(), 'Starting…', 'the room no longer waits for this send, and claims nothing it was not told');
+    assert.equal(r.sent.length, writes, 'nothing is sent again');
+
+    // No later read or silence turns the doubt into a started send.
     await r.instance.refreshHistory({ revision: 2 });
     await quiet();
-    assert.equal(r.status(), 'Starting…', 'subsequent qualifying read carrying our matching dispatched row settles Sending');
+    assert.equal(r.status(), 'Starting…');
+    assert.equal(r.bubble(cmid).querySelector('[data-ingress-saved]')?.dataset.ingressSaved, 'unconfirmed');
+    assert.equal(r.sent.length, writes);
 });
+
+// An old echo is a read begun before the disconnect: it answers for the host that ended, not for this window's wait.
+test('R1: a pre-disconnect read answering late cannot end the wait with an ended host\'s row; a read after the reconnect does', async (t) => {
+    const r = makeRoom(t);
+    await until(() => r.reads.length === 1);
+    await quiet();
+
+    const cmid = r.send('Before the close');
+    const sessionId = r.sessionIdOf(cmid);
+    let releaseLate;
+    r.push(new Promise((resolve) => { releaseLate = resolve; }));
+    const lateRefresh = r.instance.refreshHistory({ revision: 2 });
+    await until(() => r.reads.length === 2);
+
+    r.disconnect();
+    let releasePost;
+    r.push(new Promise((resolve) => { releasePost = resolve; }));
+    r.reconnect();
+    const row = r.userRow(cmid, 'Before the close', { sender_session_id: sessionId, ingress_dispatched: undefined });
+
+    releaseLate(r.page([row]));
+    await lateRefresh;
+    await until(() => r.reads.length === 3);
+    await quiet();
+    assert.equal(r.status(), 'Sending', 'a read begun before the close cannot end the wait');
+
+    releasePost(r.page([row]));
+    await quiet();
+    assert.equal(r.status(), 'Starting…', 'the read after the reconnect does');
+    assert.deepEqual(r.actions(cmid), ['send_as_new']);
+});
+
+// Our row says what the host knows of the dispatch: it entered (`ingress_dispatched`), or its process ended and it knows
+// nothing. Either way only OUR row, in a read begun after the disconnect, is the host's word on this wait.
+for (const [kind, facts] of [['dispatched', {}], ['ended-host', { ingress_dispatched: undefined }]]) {
+    test(`R1: same-id-but-not-ours rows never settle Sending; next qualifying read with our ${kind} row does`, async (t) => {
+        const r = makeRoom(t);
+        await until(() => r.reads.length === 1);
+        await quiet();
+
+        const cmid = r.send('Mine only');
+        const sessionId = r.sessionIdOf(cmid);
+        const ownAddress = 'row:2@2026-11-26T10:00:01Z#aaaaaaaaaaaa';
+        r.rawWs.emit('chat', {
+            role: 'user', chat_id: 2, source: 'web', content: 'Mine only', text: 'Mine only',
+            client_message_id: cmid, sender_session_id: sessionId, row_address: ownAddress,
+            ingress_accepted: true, ingress_pending: true, ts: isoAt(1),
+        });
+        await quiet();
+
+        r.disconnect();
+        const impostors = [
+            r.userRow(cmid, 'Projected copy', { ...facts, history_id: 'chat:imp-1', origin_projected: true, sender_session_id: sessionId, row_address: ownAddress }),
+            r.userRow(cmid, 'Other room', { ...facts, history_id: 'chat:imp-2', chat_id: 99, sender_session_id: sessionId, row_address: 'row:99@2026-11-26T10:00:01Z#aaaaaaaaaaaa' }),
+            r.userRow(cmid, 'Agent note', { ...facts, history_id: 'chat:imp-3', declared_author: 'agent', sender_session_id: sessionId, row_address: ownAddress }),
+            r.userRow(cmid, 'Telegram row', { ...facts, history_id: 'chat:imp-4', source: 'telegram', sender_session_id: sessionId, row_address: ownAddress }),
+            r.userRow(cmid, 'Other tab', { ...facts, history_id: 'chat:imp-5', sender_session_id: 'other-tab-session', row_address: ownAddress }),
+            r.userRow(cmid, 'Other physical row', { ...facts, history_id: 'chat:imp-6', sender_session_id: sessionId, row_address: 'row:2@2026-11-26T10:00:02Z#bbbbbbbbbbbb' }),
+            { ...r.assistantRow('chat:imp-7', 'Assistant with same id', 2), client_message_id: cmid, ingress_accepted: true, ingress_dispatched: true },
+            r.userRow(cmid, 'Progress echo', { ...facts, history_id: 'chat:imp-8', is_progress: true, sender_session_id: sessionId, row_address: ownAddress }),
+            r.userRow(cmid, 'Pending despite dispatch flag', { history_id: 'chat:imp-9', ingress_accepted: true, ingress_dispatched: true, ingress_pending: true, sender_session_id: sessionId, row_address: ownAddress }),
+        ];
+        const ours = r.userRow(cmid, 'Mine only', { ...facts, sender_session_id: sessionId, row_address: ownAddress });
+        r.push(r.page(impostors), r.page([ours]));
+
+        r.reconnect();
+        await until(() => r.reads.length === 2);
+        await quiet();
+        assert.equal(r.status(), 'Sending', 'same-client_message_id rows that are not ours must not settle Sending');
+
+        await r.instance.refreshHistory({ revision: 2 });
+        await quiet();
+        assert.equal(r.status(), 'Starting…', `subsequent qualifying read carrying our matching ${kind} row settles Sending`);
+    });
+}
 
 test('R1: failed, cut, and source_unavailable reads never settle; unrelated receipt Retry settles on clean newest', async (t) => {
     const r = makeRoom(t);

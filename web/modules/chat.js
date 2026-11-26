@@ -17,7 +17,7 @@ import { createChatMedia, showTaskIncidentToast } from './chat_media.js';
 import { createEarlyTextBubbles, createTextBubbles } from './chat_text_bubble.js';
 import { endLetters, letterRow } from './peer_letter_card.js';
 import { noticeLine } from './host_notice_text.js';
-import { createCatchUp, createWindowReturn, dispatchedOwnerIds } from './room_retire.js';
+import { createCatchUp, createWindowReturn, answeredOwnerIds } from './room_retire.js';
 import { createChatPreview, createRoomProfileLifecycle } from './chat_preview.js';
 import { createUnconfirmedSends } from './chat_attachments.js';
 import { createChatDecision } from './chat_decision.js';
@@ -2714,7 +2714,7 @@ export function createChatInstance({
     function acceptRecentWindow(data, messages) {
         if (data.recentVersion <= recentApplied) return false;
         recentApplied = data.recentVersion;
-        const whole = catchUp.confirmWindow(data, dispatchedOwnerIds(messages, pendingSubmissions, { chatId, sessionId: chatSessionId, localOwnerRow }));
+        const whole = catchUp.confirmWindow(data, answeredOwnerIds(messages, pendingSubmissions, { chatId, sessionId: chatSessionId, localOwnerRow }));
         if (!catchUp.owed) withStableViewport(() => { const c = earlyRows.clear(messages,
             data.window?.complete === true && (data.has_more ?? data.hasMore) === false ? 'complete' : 'bounded'); windowReturn.settle(earlyRows.get); return c; });
         preview.save(messages, data);
