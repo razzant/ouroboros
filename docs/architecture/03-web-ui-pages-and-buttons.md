@@ -1,6 +1,6 @@
 # 3. Web UI Pages & Buttons
 
-One build-free SPA serves desktop, browser, Docker, Telegram, phone and Linux fallback. The browser paints host-stamped placement, outcome, receipts and liveness; text, timing and client lists grant no authority.
+This part gives me the face my owner sees: one build-free SPA serves desktop, browser, Docker, Telegram, phone and Linux fallback, with rooms, the composer, cards, widgets, the dashboard, logs, costs, files, extensions and settings; visual and interaction rules live in [DESIGN](../DESIGN.md) and client meaning in [CLIENT_CONTRACT](../CLIENT_CONTRACT.md). The browser paints host-stamped placement, outcome, receipts and liveness; text, timing and client lists grant no authority.
 
 ### SPA shape and host bridges
 

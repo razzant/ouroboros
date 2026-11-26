@@ -1,6 +1,6 @@
 # 4. Server API Endpoints
 
-Browser/CLI routes: `gateway/router.py`; Host Service: §12. Tests check this table in both directions. Shapes: `GET /api/contract`.
+This part gives me every route my server answers. Browser/CLI routes: `gateway/router.py` collects them and `server.py` adds `/` and the static mounts; Host Service: §12. Tests check this table in both directions, so a new or changed route updates it in the same commit; an unchanged path's new behaviour still needs review. Shapes: `GET /api/contract`.
 
 `NetworkAuthGate` runs `browser_boundary.py` first on every request/handshake, loopback included: foreign/opaque pages get 403 (WS 4403), passive files pass (DEPLOYMENT). `OUROBOROS_NETWORK_PASSWORD` gates non-loopback via an expiring HMAC session cookie (refused WS closes pre-accept with 4401); unset leaves remote access open by operator choice (CLIENT_CONTRACT §3, DEPLOYMENT). A valid `X-Ouroboros-Link` is my linked Ouroboros, on letter routes only (§12). Widget lease reads take only their lease (§3) and authenticate nothing else.
 

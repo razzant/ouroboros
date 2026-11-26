@@ -1,6 +1,6 @@
 # 10. Key Invariants
 
-Cross-cutting owners and the continuity map: exact sources, working views and authority.
+This part gives me the rules every other part keeps: cross-cutting owners and the continuity map (exact sources, working views and authority), and the closed roads (§10.2), approaches already rejected and why. Before I design or edit a part of my body, I read it whole.
 
 1. **Constitution and identity persist.** Outside Cyber Pro neither `BIBLE.md` nor `identity.md` is deleted; content evolves.
 2. **Release metadata has one projection.** `VERSION` is canonical; `ouroboros/tools/release_sync.py::VERSION_CARRIER_SPANS` names carriers, `sync_release_metadata()` writes them, `version_carrier_desyncs()` checks them, and BIBLE P9 governs neutral commits.
@@ -52,3 +52,4 @@ Bounded views are projections, never new authority: deciding actors resolve the 
 | Canonical versus execution roots | canonical: identity, authority, biography, results, promoted observability; execution drives: tools, workspace, trajectory, call manifests | project/fork/task lenses | `install_identity`, task pointers, source handles | paths never authorize foreign installs; copies mint an identity, foreign tasks await move, forks stay execution lenses; adoption precedes retention verifying `task_source` without rewrite; GC cannot prove untracked late futures quiescent; missing bytes stay gaps |
 
 Subject identity fixes before seat budgeting so changed sources invalidate it, and `tool_trajectory:<corpus-sha>[<source-index>]` addresses original records, never moving tails. Review records and checkpoints commit write-once (`state/review_ledger`, `source_handles/context_checkpoints`) before `write_task_result` projections; a task-acceptance checkpoint stored before result review keeps `applied_source_status`. `review_projection.late_notice_receipts` queues late-notice custody on the outbox; `terminal_delivery.register_delivery` keeps the first receipt (`basis="send_handler_returned"` proves send return, not human reading), and late evidence is judged on an admissible turn (§6 Review stack).
+

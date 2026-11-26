@@ -490,3 +490,39 @@ def test_architecture_settings_table_mirrors_config_defaults():
     ]
     assert not mismatched, f"documented default differs from config.SETTINGS_DEFAULTS: {mismatched}"
 
+
+def _architecture_openings() -> dict:
+    from ouroboros.reference_books import _preamble, load_reference_book
+
+    book = load_reference_book(REPO, "architecture")
+    return {chapter.source_path: chapter.text_at(_preamble(chapter)) for chapter in book.chapters}
+
+
+def test_every_architecture_chapter_opens_with_what_it_gives_me_and_no_volatile_numbers():
+    """The openings are what Low and Nano read of a chapter (owner's choice of first-person
+    openings): each says what the part gives me, and carries no line number, count or
+    version stamp that would move with every edit. Section signs, file names and
+    backticked identifiers are addresses, not counts."""
+    openings = _architecture_openings()
+    assert len(openings) >= 17
+    for path, text in openings.items():
+        assert text.startswith("This part gives me"), path
+        stripped = re.sub(r"`[^`]*`|\]\([^)]*\)|§[\d.]+|BIBLE P\d+|exits? \d+|E2E", "", text)
+        assert not re.search(r"\d", stripped), (path, re.findall(r"[^ ]*\d[^ ]*", stripped))
+
+
+def test_the_reference_atlas_lists_every_standalone_spec_and_resolves():
+    from ouroboros.reference_books import load_reference_book
+
+    entry = load_reference_book(REPO, "architecture").entrypoint
+    assert [h.title for h in entry.headings][1:] == ["Chapters", "Reference Atlas"]
+    atlas = entry.text.split("## Reference Atlas", 1)[1]
+    linked = set(re.findall(r"\]\(([^)]+)\)", atlas))
+    for target in linked:
+        assert (REPO / "docs" / target).is_file(), target
+    specs = {p.relative_to(REPO / "docs").as_posix() for p in (REPO / "docs").glob("*.md")} - {"ARCHITECTURE.md"}
+    specs |= {f"inventories/{p.name}" for p in (REPO / "docs" / "inventories").glob("*.md")}
+    assert specs <= linked, specs - linked
+    for path in re.findall(r"`([\w./-]+\.(?:toml|md))`", atlas):
+        assert (REPO / path).is_file(), path
+

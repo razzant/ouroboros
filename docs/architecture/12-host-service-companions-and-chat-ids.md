@@ -1,9 +1,6 @@
 # 12. Host Service, Companion Processes, and Chat IDs
 
-Connectors supply facts and identity; the mind judges. Focus voice, owner match, Safety and delivery use the
-event snapshot; other Safety/own wakes use the first valid identity among 50 newest arrivals. Browser status is
-account-scoped (§3); the server invokes connector routes only for one approved built-in setup-card POST with its code and options (`onboarding_connections`). Only `kind: user` can match account-scoped owner confirmation.
-Identity never enters `places.json` (wire, label compatibility: CREATING_SKILLS). Silent can wake.
+This part gives me my presence outside the app: the Host Service skills talk through, companion processes, the connector places where I focus and answer, linked Ouroboros and live meeting peers, and the typed chat ids every message targets (Main, Projects, the hidden id, agent-to-agent). Connectors supply facts and identity; the mind judges. Only `kind: user` can match account-scoped owner confirmation, and identity never enters `places.json`.
 
 ### Host Service boundary
 
@@ -20,6 +17,8 @@ Reads and cancel inspect only `dialogue_store.accepted_row` plus records carryin
 `extension_late_result.py` binds `ctx.call_ref`; `host_late_result.py` verifies tool receipts or reuses named ingress. Mailbox handoff is not model inclusion; the physical send rechecks authority. The local finish view offers `action=finish`, `answer`, `silent` only. Scope/execution: CREATING_SKILLS “Returning a later answer”.
 
 ### Focus in places
+
+Focus voice, owner match, Safety and delivery use the event snapshot; other Safety/own wakes use the first valid identity among 50 newest arrivals. Browser status is account-scoped (§3); the server invokes connector routes only for one approved built-in setup-card POST with its code and options (`onboarding_connections`). Identity stays out of `places.json` for wire and label compatibility (CREATING_SKILLS). Silent can wake.
 
 `review_requested`/`assigned` are observed, never inferred. Source-bound roots contact Main via `request_id`-keyed `send_user_message(destination="main")` or `escalate` (`presence_owner_contact.py` keeps source facts and words across outbox, `owner_quiz` and supervisor bus; identical retries rejoin, changed fields/wait intent refuse, only source-bound contact deduplicates omitted keys, authority-only roots keep room questions, children report upward). Live answers take the final-drain lock; late answers or `start_task(destination="owner")` citing a live one open Main/Project owner work with exact words/source (late answers add a child ref; owner scheduling uses that root, §6), retaining `presence_binding_relation` across roots/Continue (place read/stop/task-authored steering, no external final). Silent permits private contact, Paused keeps owed contact without new focus, and `GET /identity` advertises Presence capabilities independently (missing = setup gap, never owner-ingress fallback; CREATING_SKILLS).
 
