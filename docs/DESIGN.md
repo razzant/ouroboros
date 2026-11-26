@@ -193,8 +193,11 @@ On Windows the desktop window keeps its ordinary system caption, buttons, Snap a
 resizing; only their light or dark tint follows the painted palette — the system
 tint, not the page's colour — and a High Contrast theme keeps its own colours.
 On macOS the main window is one surface: the page reaches the top edge under a
-transparent title bar, the real traffic lights sit level with the header row, empty
-parts of that band drag the window, and a double-click follows the Mac's setting:
+transparent title bar and every header stands on the real traffic lights' line: the page's band is the lights'
+row, as much air under their line as above it and never shorter than a control (owner decision 27.11.2026,
+«синхронизовать позиции»). Empty parts of that row drag the window, a press on the page under it stays the
+page's (the lights keep the window's physical left in a right-to-left page, and the header there clears them), and
+a double-click follows the Mac's setting:
 Zoom, Minimize, Do Nothing or Fill. Fill relies on an available undocumented native
 action, not an imitation by Zoom. Its appearance follows Light or Dark and inherits
 under System. In full screen the bar hides until the pointer reveals it; the setup
@@ -3490,13 +3493,16 @@ and Add"); a destination is a room or a section.
 
 Destinations come from one registry (`web/modules/pages.js`): it renders the navigation rows, names the titles and
 feeds the shell gate, so a new page is a registry row and its module, checked at phone widths with no further work.
-The column reads from the top: Ouroboros's card, which is Main (its picture, with one 7 px amber dot on its rim
+The column reads from the top: Find a project, with + (New project) at the end of its row, the column's first row
+(owner decision 27.11.2026, «Вариант B»): on a Mac the traffic lights' row, past the lights; in the drawer beside its
+×. Then Ouroboros's card, which is Main (its picture, with one 7 px amber dot on its rim
 while Main or a Project in the list waits for the owner, the card's words for readers saying so, its name with a quiet `Main Chat`,
 Main's count and its room's mark in the Project rows' mark column, and under them what Main is doing now, nothing
-while it rests), in the Ouroboros voice and in the strong crimson while Main is where you are; then Find a project,
-with + (New project) at the end of its row; then the Projects, the column's only scroller, down to the version
+while it rests), in the Ouroboros voice and in the strong crimson while Main is where you are; then the Projects,
+the column's only scroller, down to the version
 (no heading, collapse or unread total). Outside the column, at its start, the rail (the room or the drawer's column
-gives its width): Circles, Files and Widgets at its top, Dashboard and Settings at its foot, each a glyph whose word
+gives its width), its first place on the first row's line, or on the card's under the traffic lights: Circles, Files
+and Widgets at its top, Dashboard and Settings at its foot, each a glyph whose word
 is its accessible name, chosen in the strong crimson. The version is the column's one-line foot under the Projects
 in the meta ink: the number on the Project names' line, the check's glyph, its answer or the Update
 indicator (§4) beside it; a version too long for the column ellipsizes, the check's name whole. Where the rail's
@@ -3668,8 +3674,8 @@ Tabs or Files' location lead its band, actions end it, at one height and shape. 
 18px below a browser's top. Rails use the shared fade;
 location reveals its folder without widening the rail. Section headings follow
 “A section with pages”; a Project shows its name.
-An empty band draws nothing. Its scroller reaches the window's top; its first row starts below the macOS band,
-which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10), while a room's
+An empty band draws nothing. Its scroller reaches the window's top; its first row starts under the traffic lights'
+row, which stays the window's (owner decision 27.11.2026). Widgets cards pass under it with crisp edges (owner 20.10), while a room's
 feed passes under its bar's frosted edge ("A room's edges"); other moving content fades by principle 9. Empty band space still drags the window. In stack layout the header is one row of 44px controls,
 a page's 18px below a browser's top: one leading control (the picture on a room or section list, the round Back when
 owed), destination name, status, then a room's consciousness chip and Panic. Tabs or filters occupy one line below;
