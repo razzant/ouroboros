@@ -39,6 +39,18 @@ def _project(tmp_path):
     return int(project["chat_id"])
 
 
+def test_the_destination_description_tells_a_root_already_in_main_to_keep_current():
+    """A wake or scheduled root in Main that sends 'main' is refused (its room already is Main); the schema keeps
+    one static enum for cache stability, so the field's own words say what to send on the first call."""
+    from ouroboros.tools.control import get_tools
+
+    schema = next(entry.schema for entry in get_tools() if entry.name == "send_user_message")
+    destination = schema["parameters"]["properties"]["destination"]
+    assert destination["enum"] == ["current", "main"]
+    assert ("a wake or scheduled root already in Main omits destination or uses 'current', which reaches the "
+            "owner there") in destination["description"]
+
+
 class TestProducer:
     def test_main_destination_addresses_main_with_its_own_type(self, tmp_path):
         q = queue.Queue()
