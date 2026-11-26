@@ -101,6 +101,9 @@ def load_domain_manifest(repo_root: pathlib.Path) -> DomainManifest:
         data = tomllib.loads(raw)
     except Exception as exc:
         raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} does not parse as TOML: {exc}") from exc
+    for section in ("domains", "modules", "references", "graph"):  # a wrong shape is the carrier's error, named
+        if not isinstance(data.get(section) or {}, dict):
+            raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} section [{section}] must be a table")
     graph = data.get("graph") or {}
     for path in data.get("modules") or {}:
         pure = pathlib.PurePosixPath(path)
@@ -111,8 +114,8 @@ def load_domain_manifest(repo_root: pathlib.Path) -> DomainManifest:
         modules={str(k): str(v) for k, v in (data.get("modules") or {}).items()},
         graph_allowed=tuple(str(p) for p in graph.get("allowed") or ()),
         lazy_only=tuple(str(p) for p in graph.get("lazy_only") or ()),
-        references={str(k): tuple(str(v) for v in vals)
-                    for k, vals in (data.get("references") or {}).items() if isinstance(vals, list)},
+        references={str(k): tuple(str(v) for v in vals) if isinstance(vals, list) else ()
+                    for k, vals in (data.get("references") or {}).items()},
     )
 
 

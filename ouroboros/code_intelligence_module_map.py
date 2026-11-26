@@ -155,6 +155,9 @@ def module_map(root: pathlib.Path, arg: str, manifest, *, list_prefix: ListPrefi
     else:
         prefix = _prefix(arg)
         listed, limits = (list_prefix or _default_list_prefix(root))(prefix)
+        from ouroboros.code_intelligence import _SKIP_DIRS
+        if set(prefix.split("/")) & _SKIP_DIRS:  # the inventory never walks it: not an empty folder
+            limits = [*limits, "module_map_excluded_from_inventory: the code inventory does not walk this prefix"]
         wants_tests = "tests" in prefix.split("/")
         tests = [p for p in listed if not wants_tests and "tests" in p[len(prefix):].split("/")]
         paths = sorted(p for p in listed if _under(p, prefix) and p not in tests)

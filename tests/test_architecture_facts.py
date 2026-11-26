@@ -495,3 +495,30 @@ def test_module_leads_are_the_files_own_first_words():
     assert header_comment_lead("// One\n// two\nexport const x = 1;\n") == "One two"
     assert header_comment_lead("/**\n * Block\n * header\n */\nlet y;\n") == "Block header"
     assert header_comment_lead("export const z = 1; // trailing\n") == ""
+
+
+def test_a_wrong_shaped_manifest_is_a_named_error_and_a_refused_prefix_is_incomplete(tmp_path, monkeypatch):
+    from ouroboros.code_intelligence_architecture import load_domain_manifest
+    from ouroboros.tools import query_code
+    from ouroboros.tools.registry import ToolRegistry
+
+    (tmp_path / "ouroboros").mkdir()
+    (tmp_path / "ouroboros" / "domains.toml").write_text("modules = [1, 2]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"section \[modules\] must be a table"):
+        load_domain_manifest(tmp_path)
+
+    real_visible = query_code._visible_file
+    monkeypatch.setattr(query_code, "_visible_file", lambda ctx, root, rel, *rest: (
+        not str(rel).replace("\\", "/").startswith("web/modules") and real_visible(ctx, root, rel, *rest)))
+    registry = ToolRegistry(repo_dir=REPO, drive_root=tmp_path / "data")
+
+    def module_map(arg):
+        return registry.execute("query_code", {"op": "architecture", "query": f"module_map {arg}", "root": "system_repo"})
+
+    refused = module_map("web/modules/")
+    assert "module_map_scope_not_admitted" in refused and "QUERY_CODE_TRUNCATED" in refused
+    assert "enumeration complete" not in refused
+    skipped = module_map("web/node_modules/")  # present or not, the inventory never walks it
+    assert "module_map_excluded_from_inventory" in skipped and "enumeration complete" not in skipped
+    missing = module_map("web/no_such_dir/")
+    assert "enumeration complete" in missing and "module_map_scope_not_admitted" not in missing
