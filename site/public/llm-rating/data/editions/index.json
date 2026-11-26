@@ -1,6 +1,31 @@
 {
- "latest": "2026.12",
+ "latest": "2026.12.1",
  "editions": [
+  {
+   "edition": "2026.12.1",
+   "status": "final",
+   "method_version": 5,
+   "period": {
+    "from": "2026-11-11",
+    "to": "2026-11-25"
+   },
+   "published": "2026-11-26",
+   "models_rated": 16,
+   "work_types": 34,
+   "columns": 8,
+   "cases": 23,
+   "top": [
+    "Opus 5.5",
+    "Fable 5.2",
+    "Astra 6.2"
+   ],
+   "data": "data/editions/2026.12.1/edition.json",
+   "card": "card/editions/2026.12.1-en.png",
+   "changelog": {
+    "en": "The second December edition. The order now follows the quality of the work, and a model’s role in my team is written beside its name. Two columns are new, Visual design and Research; a cell with no work that has an outcome carries a dash. Gemini 4 Neon entered the ranking. Beside the table there are three views of a model, the block \"On a limited budget\" and answers to readers’ questions. The votes and the reviewers’ table are carried over unchanged from the first December edition. If you read data/latest.json: it is schema 5, models[].groups now has eight columns, and grade can be null (ground \"nodata\").",
+    "ru": "Вторая декабрьская редакция. Порядок теперь по качеству работы, а роль модели в моей команде подписана рядом с названием. Добавлены колонки «Визуальный дизайн» и «Исследование»; в клетке без работы с исходом стоит прочерк. В рейтинг вошла Gemini 4 Neon. Рядом с таблицей три взгляда на модель, блок «Если бюджет ограничен» и ответы на вопросы читателей. Голоса и таблица ревьюеров перенесены из первой декабрьской редакции без изменений. Если вы читаете data/latest.json: схема 5, в models[].groups теперь восемь колонок, а grade может быть null (ground \"nodata\")."
+   }
+  },
   {
    "edition": "2026.12",
    "status": "final",

@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import xml.etree.ElementTree as ET
 from collections import Counter
 from html import unescape
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
 import yaml
 
 from ouroboros.tools.release_sync import (
@@ -24,9 +26,16 @@ SITE = REPO / "site"
 DOCS = REPO / "docs"
 ORIGIN = "https://ouroboros-agent.ai"
 NOVEMBER_SHA256 = "9976660610a53f0352a8df529943653de20d17f605741fe47a8ffc3fa8345709"
-NOVEMBER_CARD = "card/editions/2026.11-en.png"
 NOVEMBER_CARD_SHA256 = "15d6fbada68b212adcd9e483b99a29a1bf0811e104617a5f898030f21b2db779"
+DECEMBER_SHA256 = "97f25397c30f6f3bf4ccbf9efdcef4c4495cee94d18f94c947e1141d4acaf253"
+DECEMBER_CARD_SHA256 = "7f995bf3edb9ca3879ce5677d20ac452bb3d7ed6ee0bf459bc7ba92516670ca2"
+# A published edition is frozen: its data and its card, and the words its archive page must carry in its head.
+RATING_ARCHIVES = {
+    "2026.11": ("November", NOVEMBER_CARD_SHA256, ("Edition 2026.11", "11 models", "32 kinds of work")),
+    "2026.12": ("December", DECEMBER_CARD_SHA256, ("Edition 2026.12", "15 models", "6 columns")),
+}
 RATING_GRADES = {"S", "A", "B", "C"}
+RATING_MONEY = re.compile(r"[$\u20ac\u20bd\u00a3\u00a5]|\b(?:usd|eur|rub)\b|\bdollars?\b|\u0440\u0443\u0431|\u0434\u043e\u043b\u043b\u0430\u0440", re.I)
 INDEXABLE = {
     "/": SITE / "index.html",
     "/about/": SITE / "about" / "index.html",
@@ -194,6 +203,8 @@ def test_rating_publication_is_complete_and_source_bound():
         _assert_rating_reviewers(data)
         _assert_rating_votes(data)
         _assert_rating_static_publication(source, data)
+        if data["method_version"] >= 5:
+            _assert_rating_views_and_questions(data)
     else:
         assert data["method_version"] == 3
         _assert_rating_per_kind_reasons(data)
@@ -226,6 +237,24 @@ def test_rating_november_archive_is_frozen_and_graded():
             _assert_rating_archive_share_head(mirror)
 
 
+def test_rating_december_archive_is_frozen():
+    for mirror in (SITE / "public" / "llm-rating", DOCS / "llm-rating"):
+        _assert_rating_december_archive(mirror)
+
+
+def _assert_rating_december_archive(mirror):
+    """Edition 2026.12 is published: its data and its card stay byte for byte whichever edition is the latest, and once
+    a later edition exists it has an archive page of its own."""
+    raw = (mirror / "data/editions/2026.12/edition.json").read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == DECEMBER_SHA256, f"2026.12 archive SHA-256 changed: {mirror}"
+    december = json.loads(raw)
+    assert december["edition"] == "2026.12" and december["method_version"] == 4 and december["status"] == "final"
+    _assert_rating_column_reasons(december)
+    latest = json.loads((mirror / "data/latest.json").read_text(encoding="utf-8"))
+    if latest["edition"] != "2026.12":
+        _assert_rating_archive_share_head(mirror, "2026.12")
+
+
 def _assert_rating_per_kind_reasons(data):
     assert any(cell["grade"] is not None for cell in data["cells"]), "a per-kind edition must carry graded cells"
     groups = {group["id"]: group for group in data["groups"]}
@@ -256,16 +285,32 @@ def _assert_rating_column_reasons(data):
     main = {group["id"] for group in data["groups"] if group["main"]}
     assert len(main) == data["totals"]["columns"] > 0
     grounds = {"carried", "case", "cards", "role", "open", "coordinator"}
+    # Method 5: a cell may carry a dash instead of a letter (no work of that kind with a known outcome). It has the
+    # ground "nodata", only such a cell has it, and it still says in both languages what is missing.
+    dash_allowed = data["method_version"] >= 5
+    if dash_allowed:
+        grounds = grounds | {"nodata"}
     rated = [model for model in data["models"] if model.get("rank") is not None]
     assert {model["id"] for model in rated} == {model["id"] for model in data["models"] if model["status"] == "rated"}
     assert len(rated) == data["totals"]["models"]["rated"] > 0
+    cells = [model["groups"].get(gid, {}) for model in rated for gid in main]
+    letters = data["totals"]["letters"]
+    assert letters["main"] == sum(1 for cell in cells if cell.get("grade") is not None) and letters.get("empty", 0) == sum(
+        1 for cell in cells if cell.get("grade") is None
+    ), "totals.letters disagrees with the letters and dashes of the table"
     for model in rated:
         assert main <= model["groups"].keys(), model["id"]
+        if data["method_version"] >= 5:
+            role = model.get("role")
+            assert isinstance(role, dict) and all(isinstance(role.get(lang), str) and role[lang].strip() for lang in ("en", "ru")), (
+                "method >= 5 requires a role tag", model["id"]
+            )
         for gid in main:
             entry = model["groups"][gid]
             where = (model["id"], gid)
-            assert entry.get("grade") in RATING_GRADES, where
-            assert entry.get("ground") in grounds, where
+            assert entry.get("grade") in RATING_GRADES or (dash_allowed and entry.get("grade") is None), ("not a letter of the scale", *where)
+            assert entry.get("ground") in grounds, ("unknown ground", *where)
+            assert (entry.get("grade") is None) == (entry.get("ground") == "nodata"), ("a dash and the ground nodata go together", *where)
             for language in ("en", "ru"):
                 reason = entry.get("reason", {}).get(language)
                 assert isinstance(reason, str) and reason.strip(), (*where, language)
@@ -335,7 +380,58 @@ def _assert_rating_vote_verdict(item, models, columns, scale):
     assert item.get("verdict") == expected, ("votes pair verdict disagrees with winner and ranking", item["models"], expected)
 
 
-def _assert_rating_votes(data):
+def _assert_rating_carried_blocks(data, source=None):
+    """A revision casts no votes of its own: it carries the votes and the reviewers of the edition it revises,
+    unchanged, and says above them which edition they were made for."""
+    source = source or SITE / "public" / "llm-rating"
+    revised = json.loads((source / "data/editions" / data["revision_of"] / "edition.json").read_text(encoding="utf-8"))
+    assert revised["edition"] == data["revision_of"] == data["previous_edition"], "a revision revises the edition right before it"
+    carried = {key: value for key, value in data["votes"].items() if key != "prior_table_edition"}
+    assert carried == revised["votes"], "a revision must carry the votes unchanged"
+    assert data["reviewers"] == revised["reviewers"], "a revision must carry the reviewers unchanged"
+    note = data.get("carried", {})
+    assert note.get("from") == data["revision_of"], "the carried blocks must name the edition they were made for"
+    text = note.get("note")
+    assert isinstance(text, dict) and all(isinstance(text.get(lang), str) and text[lang].strip() for lang in ("en", "ru")), (
+        "the carried blocks need their note in both languages"
+    )
+
+
+def _assert_rating_views_and_questions(data):
+    """Method 5: a few ranked models seen three ways, what to pick for each column on a limited budget, and readers'
+    questions. Every text is in both languages and none names a sum of money."""
+    def texts(node):
+        if isinstance(node, dict):
+            if node.keys() == {"en", "ru"}:
+                yield node
+            else:
+                for value in node.values():
+                    yield from texts(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from texts(value)
+
+    rated = {model["id"] for model in data["models"] if model["status"] == "rated"}
+    main = [group["id"] for group in data["groups"] if group["main"]]
+    views = data.get("views")
+    assert isinstance(views, dict) and views.get("rows"), "method >= 5 requires the three views"
+    view_ids = [column["id"] for column in views["columns"]]
+    assert view_ids == ["quality", "now", "budget"], "the three views are quality, now and budget"
+    for row in views["rows"]:
+        assert row["model"] in rated and row.keys() == {"model", *view_ids}, ("a view row is one ranked model seen three ways", row.get("model"))
+    assert [row["group"] for row in views["budget"]["rows"]] == main, "the budget block has one line per column of the main table"
+    questions = data.get("faq")
+    assert isinstance(questions, dict) and questions.get("items"), "method >= 5 requires readers' questions"
+    assert all(item.keys() == {"q", "a"} for item in questions["items"]), "a reader's question is a question and an answer"
+    found = list(texts(views)) + list(texts(questions))
+    assert len(found) >= 3 * len(views["rows"]) + len(main) + 2 * len(questions["items"])
+    for text in found:
+        for lang in ("en", "ru"):
+            assert isinstance(text[lang], str) and text[lang].strip(), ("views and questions are bilingual", text)
+            assert not RATING_MONEY.search(text[lang]), ("the views and the answers name no sum of money", text[lang][:80])
+
+
+def _assert_rating_votes(data, source=None):
     votes = data.get("votes")
     assert isinstance(votes, dict), "method >= 4 requires the votes object"
     assert votes.get("source") == "final" and votes.get("complete") is True, "votes must be final and complete"
@@ -412,8 +508,10 @@ def _assert_rating_votes(data):
     rated = {m["id"] for m in data["models"] if m["status"] == "rated"}
     assert rated <= seen_models, ("votes roster must include every rated version", sorted(rated - seen_models))
     # Fable 5.1 is catalogued as historical context, but was not a voter in this edition.
-    if data["edition"] == "2026.12":
+    if data.get("revision_of", data["edition"]) == "2026.12":
         assert "claude-fable-5.1" not in seen_models, "Fable 5.1 is not a voter in 2026.12"
+    if data.get("revision_of"):
+        _assert_rating_carried_blocks(data, source)
 
     for key, pair in item_totals.items():
         assert pair == (roster_tallies[(key, "assigned")], roster_tallies[(key, "counted")]), (
@@ -431,44 +529,46 @@ def _assert_rating_votes(data):
         assert {key: count(value, key) for key in value} == dict(expected), ("votes participation disagrees with voter list", field, expected)
 
 
-def _assert_rating_archive_share_head(mirror):
-    page = mirror / "2026.11.html"
-    assert page.is_file(), "missing November archive share page"
+def _assert_rating_archive_share_head(mirror, edition="2026.11"):
+    month, card_sha256, words = RATING_ARCHIVES[edition]
+    page = mirror / f"{edition}.html"
+    assert page.is_file(), f"missing {month} archive share page"
     html = page.read_text(encoding="utf-8")
     head = html.split("</head>", 1)[0]
     tags = _tags(head)
     metas = _tags(head, "meta")
-    url = f"{ORIGIN}/llm-rating/2026.11.html"
-    card = NOVEMBER_CARD
+    url = f"{ORIGIN}/llm-rating/{edition}.html"
+    card = f"card/editions/{edition}-en.png"
     digest = hashlib.sha256((mirror / card).read_bytes()).hexdigest()
-    assert digest == NOVEMBER_CARD_SHA256, f"2026.11 archive PNG SHA-256 changed: {mirror}"
+    assert digest == card_sha256, f"{edition} archive PNG SHA-256 changed: {mirror}"
     digest = digest[:10]
-    for file in ("index.html", "editions.html", "2026.11.html"):
+    for file in ("index.html", "editions.html", f"{edition}.html"):
         bodies = _tags((mirror / file).read_text(encoding="utf-8"), "body")
         assert len(bodies) == 1
         cards = json.loads(bodies[0].get("data-archive-cards", "{}"))
-        assert cards.get("2026.11") == digest, ("November data-archive-cards must point to the frozen PNG", file)
-    assert [tag.get("href") for tag in tags if tag.get("rel") == "canonical"] == [url], "November archive canonical URL"
+        assert cards.get(edition) == digest, (f"{month} data-archive-cards must point to the frozen PNG", file)
+    assert bodies[0].get("data-edition") == edition, f"{month} archive page must name its edition"
+    assert [tag.get("href") for tag in tags if tag.get("rel") == "canonical"] == [url], f"{month} archive canonical URL"
     fields = [
         ("property", "og:url", url),
         ("property", "og:image", f"{ORIGIN}/llm-rating/{card}?v={digest}"),
         ("name", "twitter:image", f"{ORIGIN}/llm-rating/{card}?v={digest}"),
     ]
     for attr, key, expected in fields:
-        assert [tag.get("content") for tag in metas if tag.get(attr) == key] == [expected], ("November archive", key)
+        assert [tag.get("content") for tag in metas if tag.get(attr) == key] == [expected], (f"{month} archive", key)
     for attr, key in (("name", "description"), ("property", "og:image:alt"), ("name", "twitter:image:alt")):
         values = [tag.get("content", "") for tag in metas if tag.get(attr) == key]
-        assert len(values) == 1 and all(s in values[0] for s in ("Edition 2026.11", "11 models", "32 kinds of work")), ("November archive", key)
-    assert re.search(r"<title>[^<]*Edition 2026\.11</title>", head), "November archive title"
+        assert len(values) == 1 and all(s in values[0] for s in words), (f"{month} archive", key)
+    assert re.search(rf"<title>[^<]*Edition {re.escape(edition)}</title>", head), f"{month} archive title"
     fallback = re.findall(r"<noscript\b[^>]*>(.*?)</noscript>", html, flags=re.I | re.S)
-    assert len(fallback) == 1, "missing November no-JavaScript fallback"
+    assert len(fallback) == 1, f"missing {month} no-JavaScript fallback"
     body = html.split("</head>", 1)[1]
     assert not re.search(r"data/latest\.(?:json|js)|card/(?:latest-|full-|og-)", body), (
-        "November no-JavaScript fallback must not link to latest files"
+        f"{month} no-JavaScript fallback must not link to latest files"
     )
     assert {tag.get("href") for tag in _tags(fallback[0], "a")} == {
-        "data/editions/2026.11/edition.json", card
-    }, "November no-JavaScript fallback must link frozen data and card"
+        f"data/editions/{edition}/edition.json", card
+    }, f"{month} no-JavaScript fallback must link frozen data and card"
     _assert_rating_relative_asset_versions(mirror, page.name, _tags(html))
 
 
@@ -696,3 +796,119 @@ def test_claudexor_dependency_snapshot_is_pin_derived_and_least_privilege():
     assert '"scanned"' in text
     assert 'X-GitHub-Api-Version: 2026-03-10' in text
     assert "dependency-graph/snapshots" in text
+
+
+# ---- Negative controls of the rating checks. Each new check must fail on the defect it guards, for its own reason:
+# a check that passes whatever it is given proves nothing. The controls take the frozen files of the repository, break
+# one thing in a private copy and require the named assertion; the unbroken copy must pass first.
+def _rating_edition(edition, mirror=None):
+    mirror = mirror or SITE / "public" / "llm-rating"
+    return json.loads((mirror / "data/editions" / edition / "edition.json").read_text(encoding="utf-8"))
+
+
+def _rating_cell(data, with_letter):
+    """The first cell of the main table that has a letter, or the first that has a dash."""
+    main = [group["id"] for group in data["groups"] if group["main"]]
+    for model in data["models"]:
+        for gid in main if model.get("rank") is not None else ():
+            if (model["groups"][gid]["grade"] is not None) == with_letter:
+                return model["groups"][gid]
+    raise AssertionError("the edition has no such cell")
+
+
+def _a_dash(data):
+    _rating_cell(data, True)["grade"] = None
+    data["totals"]["letters"] = {"main": data["totals"]["letters"]["main"] - 1, "empty": data["totals"]["letters"].get("empty", 0) + 1}
+
+
+def _a_dash_dressed_as_nodata(data):
+    _rating_cell(data, True)["ground"] = "nodata"
+    _a_dash(data)
+
+
+RATING_DATA_CONTROLS = {
+    # method 5: dashes, the count of letters, the role tag
+    "dash-with-the-ground-of-a-letter": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, False).update(ground="role"),
+                                          "a dash and the ground nodata go together"),
+    "letter-with-the-ground-of-a-dash": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, True).update(ground="nodata"),
+                                          "a dash and the ground nodata go together"),
+    "dash-without-its-sentence": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, False)["reason"].update(ru=" "), "'ru'"),
+    "letter-outside-the-scale": ("2026.12.1", _assert_rating_column_reasons, lambda d: _rating_cell(d, True).update(grade="D"), "not a letter of the scale"),
+    "letters-miscounted": ("2026.12.1", _assert_rating_column_reasons, lambda d: d["totals"]["letters"].update(main=d["totals"]["letters"]["main"] + 1),
+                           "totals.letters disagrees"),
+    "dashes-uncounted": ("2026.12.1", _assert_rating_column_reasons, lambda d: d["totals"]["letters"].pop("empty"), "totals.letters disagrees"),
+    "role-tag-missing": ("2026.12.1", _assert_rating_column_reasons, lambda d: next(m for m in d["models"] if m.get("rank") == 1).pop("role"),
+                         "method >= 5 requires a role tag"),
+    "role-tag-in-one-language": ("2026.12.1", _assert_rating_column_reasons, lambda d: next(m for m in d["models"] if m.get("rank") == 2)["role"].update(ru=""),
+                                 "method >= 5 requires a role tag"),
+    "dash-in-method-4": ("2026.12", _assert_rating_column_reasons, _a_dash, "not a letter of the scale"),
+    "nodata-in-method-4": ("2026.12", _assert_rating_column_reasons, _a_dash_dressed_as_nodata, "not a letter of the scale"),
+    # a revision carries the votes and the reviewers unchanged
+    "carried-votes-edited": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d["votes"]["counting_note"].update(en=d["votes"]["counting_note"]["en"] + " "),
+                             "must carry the votes unchanged"),
+    "carried-vote-count-edited": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d["votes"]["pairs"][0]["counts"].update(tie=d["votes"]["pairs"][0]["counts"]["tie"] + 1),
+                                  "must carry the votes unchanged"),
+    "carried-reviewers-edited": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d["reviewers"]["rows"][0].update(open=d["reviewers"]["rows"][0]["open"] + 1),
+                                 "must carry the reviewers unchanged"),
+    "carried-from-another-edition": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d["carried"].update({"from": "2026.11"}),
+                                     "must name the edition they were made for"),
+    "carried-note-in-one-language": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d["carried"]["note"].update(ru=""), "need their note in both languages"),
+    "revision-of-an-older-edition": ("2026.12.1", _assert_rating_carried_blocks, lambda d: d.update(revision_of="2026.11"), "revises the edition right before it"),
+    # the three views, the budget block, readers' questions
+    "views-removed": ("2026.12.1", _assert_rating_views_and_questions, lambda d: d.pop("views"), "requires the three views"),
+    "view-of-an-unranked-model": ("2026.12.1", _assert_rating_views_and_questions, lambda d: d["views"]["rows"][0].update(model="gemini-4-hydrogen"),
+                                  "one ranked model seen three ways"),
+    "budget-line-missing": ("2026.12.1", _assert_rating_views_and_questions, lambda d: d["views"]["budget"]["rows"].pop(), "one line per column"),
+    "answer-in-one-language": ("2026.12.1", _assert_rating_views_and_questions, lambda d: d["faq"]["items"][0]["a"].update(ru=""), "are bilingual"),
+    "sum-with-a-currency-sign": ("2026.12.1", _assert_rating_views_and_questions,
+                                 lambda d: d["views"]["budget"]["rows"][0]["text"].update(en=d["views"]["budget"]["rows"][0]["text"]["en"] + " About $15 a turn."),
+                                 "name no sum of money"),
+    "sum-in-words": ("2026.12.1", _assert_rating_views_and_questions,
+                     lambda d: d["faq"]["items"][1]["a"].update(ru=d["faq"]["items"][1]["a"]["ru"] + " \u041e\u043a\u043e\u043b\u043e 15 \u0434\u043e\u043b\u043b\u0430\u0440\u043e\u0432."),
+                     "name no sum of money"),
+}
+
+
+@pytest.mark.parametrize("control", sorted(RATING_DATA_CONTROLS))
+def test_rating_data_checks_fail_on_the_defect_they_guard(control):
+    edition, check, break_it, message = RATING_DATA_CONTROLS[control]
+    check(_rating_edition(edition))            # the published edition itself passes
+    broken = _rating_edition(edition)
+    break_it(broken)
+    with pytest.raises(AssertionError, match=re.escape(message)):
+        check(broken)
+
+
+def _replace_once(path, old, new):
+    text = path.read_text(encoding="utf-8")
+    assert text.count(old) == 1, (path.name, old, text.count(old))
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+RATING_ARCHIVE_CONTROLS = {
+    "data-edited": (lambda m: (m / "data/editions/2026.12/edition.json").write_bytes((m / "data/editions/2026.12/edition.json").read_bytes() + b" "),
+                    "2026.12 archive SHA-256 changed"),
+    "card-swapped": (lambda m: shutil.copyfile(m / "card/editions/2026.11-en.png", m / "card/editions/2026.12-en.png"), "2026.12 archive PNG SHA-256 changed"),
+    "page-removed": (lambda m: (m / "2026.12.html").unlink(), "missing December archive share page"),
+    "page-of-another-edition": (lambda m: _replace_once(m / "2026.12.html", 'data-edition="2026.12"', 'data-edition="2026.12.1"'),
+                                "December archive page must name its edition"),
+    "card-digest-on-the-rating-page": (lambda m: _replace_once(m / "index.html", f"&quot;2026.12&quot;:&quot;{DECEMBER_CARD_SHA256[:10]}", "&quot;2026.12&quot;:&quot;0000000000"),
+                                       "December data-archive-cards must point to the frozen PNG"),
+    "title-of-the-latest-edition": (lambda m: _replace_once(m / "2026.12.html", "Edition 2026.12</title>", "Edition 2026.12.1</title>"), "December archive title"),
+    "canonical-of-the-latest-page": (lambda m: _replace_once(m / "2026.12.html", f'<link rel="canonical" href="{ORIGIN}/llm-rating/2026.12.html">',
+                                                           f'<link rel="canonical" href="{ORIGIN}/llm-rating/">'), "December archive canonical URL"),
+    "fallback-links-the-latest-data": (lambda m: (m / "2026.12.html").write_text(
+        (m / "2026.12.html").read_text(encoding="utf-8").replace("data/editions/2026.12/edition.json", "data/latest.json"), encoding="utf-8"),
+        "December no-JavaScript fallback must not link to latest files"),
+}
+
+
+@pytest.mark.parametrize("control", sorted(RATING_ARCHIVE_CONTROLS))
+def test_rating_december_archive_check_fails_on_the_defect_it_guards(control, tmp_path):
+    break_it, message = RATING_ARCHIVE_CONTROLS[control]
+    mirror = tmp_path / "llm-rating"
+    shutil.copytree(SITE / "public" / "llm-rating", mirror)
+    _assert_rating_december_archive(mirror)    # the published copy itself passes
+    break_it(mirror)
+    with pytest.raises(AssertionError, match=re.escape(message)):
+        _assert_rating_december_archive(mirror)

@@ -127,13 +127,13 @@ The charts below are self-reported results on Terminal-Bench 2.1, OSWorld-Verifi
   <a href="https://ouroboros-agent.ai/benchmarks/"><img src="assets/bench-cl-bench.svg" width="375" alt="CL-Bench: Ouroboros against in-context learning baselines, Claude Code, and Codex on matched models"></a>
 </p>
 
-<!-- LLM rating card, for the README at the repository root. The image paths are relative to that README and stable: every edition overwrites the same files, so this block never needs editing. -->
+<!-- LLM rating card, for the README at the repository root. The image paths are relative to that README and stable: every edition overwrites the same files. The alt text names the columns of the main table, so this block changes only when the columns do. -->
 <p align="center">
   <a href="https://ouroboros-agent.ai/llm-rating/">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="docs/llm-rating/card/latest-en-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="docs/llm-rating/card/latest-en-light.png">
-      <img alt="What Ouroboros thinks of your LLMs: its personal ranking of the models it works with, with a letter for each column of work" src="docs/llm-rating/card/latest-en-light.png" width="880">
+      <img alt="What Ouroboros thinks of your LLMs: its personal ranking of the models it works with by the quality of their work, with a letter in each of eight columns: Code, Review, Ideas, Visual design, Challenge, Writing, Research, Reading &amp; checking" src="docs/llm-rating/card/latest-en-light.png" width="880">
     </picture>
   </a>
 </p>
