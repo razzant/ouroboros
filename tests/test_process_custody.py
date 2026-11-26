@@ -175,6 +175,7 @@ _LAUNCH_FUNCTIONS = {"ouroboros/process_custody.py::spawn_supervised",  # the sh
 _PROCESS_KINDS = {
     "ouroboros/claudexor_daemon.py::OwnedClaudexorDaemon._spawn": "engine",
     "ouroboros/extension_companion.py::CompanionSupervisor.start": "companion",
+    "ouroboros/gateway/history_reader.py::HistoryReader._run": "room history reader",
     "ouroboros/local_model.py::LocalModelManager.start_server": "local model",
     "ouroboros/local_model.py::LocalModelManager._run_install": "local model",  # no ledger row: no next-start reap
     "ouroboros/maintenance.py::MaintenanceChild._recover_dialogue": "maintenance child",
@@ -249,6 +250,12 @@ _STOPPERS = {
         "restart": ("teardown: maintenance_child.stop", "cleanup: stop_background_children"),
         "panic": ("panic: maintenance_child.stop",),
         "fault": ("teardown: maintenance_child.stop", "cleanup: stop_background_children"),
+    },
+    "room history reader": {
+        "quit": ("teardown: history_reader.stop",),
+        "restart": ("teardown: history_reader.stop", "cleanup: stop_background_children"),
+        "panic": ("panic: history_reader.stop",),
+        "fault": ("teardown: history_reader.stop", "cleanup: stop_background_children"),
     },
     "storage count": {
         "quit": ("lifeline: not asked; on POSIX its parent lifeline, under a Windows launcher the launcher's Job",

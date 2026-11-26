@@ -76,8 +76,7 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
     if requested_enabled is None:
         status, detail = "unknown", "The stored consciousness control is unknown: runtime state is unavailable or recovering."
     elif not requested_enabled:  # the places it already read (a Paused one does not hear either); unread, as Stop says
-        unread = "places_brief" in snapshot and snapshot["places_brief"] is None
-        heard = heard_sentence(None if unread else snapshot.get("places_brief") or [])
+        heard = heard_sentence(snapshot.get("places_brief"))
         status, detail = "disabled", (f"Panic turned it off. {heard}" if snapshot.get("stop_source") == "panic" else heard)
     elif not snapshot and supervisor_failed:
         status, detail = "stopped", "Cannot wake: Ouroboros did not finish starting. Restart Ouroboros."
@@ -236,7 +235,7 @@ def heard_sentence(places) -> str:
     """What Off leaves in the places, said beside the position: ``places`` is one read of the place store (stored places
     or view rows), ``None`` when it could not be read. A Paused place does not hear either, so it is not counted."""
     if places is None:
-        return "Its places are heard, not answered."
+        return f"{UNKNOWN_ASSIGNMENTS} Its places are heard, not answered."
     hearing = [fact for fact in map(_place_fact, places) if fact["state"] != "paused"]
     said = f"{_count(len(hearing), 'place')} {'is' if len(hearing) == 1 else 'are'} heard, not answered." if hearing else ""
     letters = letters_start_work(places)
@@ -538,7 +537,9 @@ def _resume_room(drive_root, task_id: str, metadata: dict, own: dict) -> dict:
         log.debug("The room a Resume would add to wake %s could not be read", task_id, exc_info=True)
         quote = {}
     error = quote.get("error")
-    if error in {"consciousness_allowance_exhausted", "root_hard_cap_exhausted"}:
+    if error in {"consciousness_allowance_exhausted", "root_hard_cap_exhausted",
+                 "independent_cap_exhausted", "work_cap_export_unverified",
+                 "work_cap_reconcile_pending"}:
         return {"resume_additional_usd": 0.0}
     if error == "budget_still_exhausted":
         return {"resume_additional_usd": None, "resume_available_usd": 0.0}

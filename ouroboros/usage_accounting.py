@@ -246,7 +246,7 @@ class AttemptRequest:
     parent_task_id: str = ""
     category: str = ""
     source: str = ""
-    root_limit_usd: Optional[float] = None
+    root_limit_usd: Optional[float] = None  # the request's independent root-spend maximum
     force_unknown_reservation: bool = False
     # Applied payload TTL; empty construction sites fall back to the owner SSOT.
     prompt_cache_ttl: str = ""
@@ -258,16 +258,14 @@ class AttemptRequest:
     physical_context: Optional[PhysicalAttemptContext] = None
     # Route-locality fact (additive): base_url host is localhost/127.0.0.1/::1 (loopback OpenAI-compatible installs — Ollama / LM Studio / vLLM).
     route_is_loopback: bool = False
-    # Density uses the fit estimator's count (0 = old producer), while budget
-    # reservation retains the conservative raw-base64 estimate above.
+    # Density uses a bounded image proxy. Reservation uses the raw-base64 estimate above.
     prompt_tokens_bounded_estimate: int = 0
     global_limit_source: str = ""
     global_limit_revision: Optional[str] = None
     processing_preference: str = ""
     submitted_processing_mode: str = ""
     processing_basis: Optional[Dict[str, Any]] = None
-    # The same canonical candidate without its Main clock line (``send_clock``);
-    # None when the candidate carries none. An identity, never a row field.
+    # Digest without the Main clock line, when present. Never a row field.
     candidate_clock_free_sha256: Optional[str] = None
     effort: Optional[Dict[str, Any]] = None
     allow_live_fetch: bool = True
@@ -283,6 +281,8 @@ class AttemptRequest:
     provider_routing_pinned: Optional[bool] = None
     unpriced_add_on: bool = False  # Token rates alone cannot price this sealed request.
     opencode_go: bool = False  # the exact dispatched route, not a response-supplied billing claim
+    candidate_image_digests: Optional[tuple[str, ...]] = None
+    prompt_count_basis: str = "prompt"  # evaluated includes backend padding; empty skips calibration
 
     def settlement_policy(self) -> dict:
         return {key: True for key in ("provider_reported_cost_only", "unpriced_add_on") if getattr(self, key)}
@@ -330,7 +330,7 @@ class PhysicalAttemptCapture:
     prompt_tokens_exact: Optional[int] = None  # same candidate's serving-tokenizer count; 0 is a count
     context_window_tokens_exact: Optional[int] = None
     provider_reported_cost_only: bool = False
-
+    candidate_image_digests: Optional[tuple[str, ...]] = None
 
 @contextlib.contextmanager
 def usage_scope(scope: UsageScope) -> Iterator[UsageScope]:
@@ -452,8 +452,7 @@ def _merge_scope(request: AttemptRequest) -> Tuple[AttemptRequest, UsageScope]:
         global_limit_usd=(
             request.global_limit_usd if request.global_limit_usd is not None else bound.global_limit_usd
         ),
-        root_limit_usd=(request.root_limit_usd if request.root_limit_usd is not None
-                        else bound.root_limit_usd if same_root else None),
+        root_limit_usd=bound.root_limit_usd if same_root else None,
         root_limit_source=bound.root_limit_source if same_root else "",
         root_limit_revision=bound.root_limit_revision if same_root else None,
         root_cost_ceiling_usd=bound.root_cost_ceiling_usd if same_root else None,
@@ -474,7 +473,9 @@ def _merge_scope(request: AttemptRequest) -> Tuple[AttemptRequest, UsageScope]:
 
         scope = replace(scope, **task_billing_fields({"id": scope.task_id}, scope.root_task_id,
                                                     scope.root_limit_usd, scope.drive_root))
-    if request.root_limit_usd is not None and (scope.root_limit_usd is None or request.root_limit_usd < scope.root_limit_usd):
+    # Bare ledger callers historically used the request's cap as the whole root binding.
+    if (request.root_limit_usd is not None and not bound.task_id
+            and scope.root_limit_usd is None and not scope.root_limit_source):
         scope = replace(scope, root_limit_usd=request.root_limit_usd, root_limit_source="attempt_request", root_limit_revision=None)
     if request.global_limit_usd is None and scope.global_limit_usd is not None:
         request = replace(request, global_limit_usd=scope.global_limit_usd,
@@ -698,23 +699,11 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
                     limit_scope="global",
                     root_task_id=scope.root_task_id,
                 )
-            root_limit: Optional[float] = None
-            if scope.root_task_id:  # every rooted attempt refreshes the subtree telemetry, cap or not
-                root_summary = view.summary(scope.root_task_id)
-                root_limit = None if scope.root_limit_usd is None else max(0.0, float(scope.root_limit_usd))
-                _stash_root_accounting(scope.root_task_id, root_summary, root_limit)  # pre-append subtree sum
-            if root_limit is not None:
-                if view.exceeds_limit(root_limit, root_task_id=scope.root_task_id):
-                    raise BudgetExceeded(
-                        f"root model budget exhausted for {scope.root_task_id}: "
-                        f"{_known_spend_text(root_summary)}, limit=${root_limit:.6f}",
-                        limit_scope="root",
-                        root_task_id=scope.root_task_id,
-                    )
-            from ouroboros.usage_admission import raise_group_refusal, scope_group
+            from ouroboros.usage_admission import raise_work_refusal, scope_group
 
-            raise_group_refusal(view, scope)
-            group_id, group_limit = scope_group(scope)
+            # Every rooted attempt refreshes the subtree telemetry, cap or not; the row keeps the original binding.
+            root_limit, group_limit = raise_work_refusal(view, scope, request_root_limit=request.root_limit_usd)
+            group_id, bound_group_limit = scope_group(scope)
             view.write(
                     {
                         "kind": "attempt",
@@ -734,7 +723,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
                         "task_id": scope.task_id,
                         "root_task_id": scope.root_task_id,
                         "parent_task_id": scope.parent_task_id,
-                        "billing_group_id": group_id, "billing_group_limit_usd": group_limit,
+                        "billing_group_id": group_id, "billing_group_limit_usd": bound_group_limit,
                         "billing_group_limit_source": scope.billing_group_limit_source,
                         "billing_group_limit_revision": scope.billing_group_limit_revision,
                         "category": scope.category,
@@ -750,6 +739,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
                         "global_limit_revision": scope.global_limit_revision,
                         "root_limit_usd": scope.root_limit_usd,
                         "root_limit_source": scope.root_limit_source, "root_limit_revision": scope.root_limit_revision,
+                        "request_root_limit_usd": request.root_limit_usd,
                         "candidate_raw_sha256": request.candidate_raw_sha256,
                         "candidate_raw_size_bytes": request.candidate_raw_size_bytes,
                         "candidate_context_sha256": request.candidate_context_sha256,
@@ -1021,23 +1011,21 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
             fields.update({key: getattr(scope, key) for key in ("root_limit_usd", "root_limit_source", "root_limit_revision",
                 "billing_group_id", "billing_group_limit_usd", "billing_group_limit_source", "billing_group_limit_revision")})
             _check_dispatch_fences(scope, reservation.drive_root)
-            limit_request = AttemptRequest(model=reservation.model, provider=reservation.provider,
+            global_limit = _global_limit(AttemptRequest(model=reservation.model, provider=reservation.provider,
                 global_limit_usd=(current.get("global_limit_usd") if current.get("global_limit_source")
-                                  not in {"", "settings_budget_resolver"} else None))
-            for axis, limit, identity in (
-                ("global", _global_limit(limit_request), None),
-                ("root", scope.root_limit_usd, scope.root_task_id),
-            ):
-                # The reservation's own predicate: known spend reached the limit
-                # since this attempt was reserved, so nothing is sent (global: paid admission only).
-                if limit is not None and view.exceeds_limit(limit, root_task_id=identity) and (axis == "root"
-                        or _paid_at_limit(view, current.get("provider"), current.get("reservation_upper_bound_usd"),
-                                          current.get("model"))):
-                    raise BudgetExceeded(f"{axis} model budget changed before dispatch", limit_scope=axis,
-                                         root_task_id=scope.root_task_id)
-            from ouroboros.usage_admission import raise_group_refusal
+                                  not in {"", "settings_budget_resolver"} else None)))
+            # The reservation's own predicate: known spend reached a limit since this attempt was reserved, so
+            # nothing is sent (global: paid admission only; the root and the whole work: usage_admission).
+            if view.exceeds_limit(global_limit) and _paid_at_limit(
+                    view, current.get("provider"), current.get("reservation_upper_bound_usd"), current.get("model")):
+                raise BudgetExceeded("global model budget changed before dispatch", limit_scope="global",
+                                     root_task_id=scope.root_task_id)
+            from ouroboros.usage_admission import raise_work_refusal
 
-            raise_group_refusal(view, scope)
+            # Explicit null is a current reservation with no separate request cap. For a legacy row
+            # the stored root cap might itself be the request maximum; keep that bound at dispatch.
+            raise_work_refusal(view, scope, dispatch=True, request_root_limit=current.get(
+                "request_root_limit_usd", scope.root_limit_usd))
         replaced = {"seq", "ts", "revision", "pre_compaction_seq", "settle_reason", "reason"}
         if state == "settled":
             replaced.update(("effort", "effort_resolution", "processing", "speed", "service_tier", "cost_basis",
@@ -1061,17 +1049,9 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
                 raise _PhysicalSendNotStarted(str(exc) or "owner_pause") from exc
         else:
             appended = view.write(row, current)
-        from ouroboros._usage_money import billing_group_key
+        from ouroboros.usage_admission import stash_row_accounting
 
-        group_id = billing_group_key(current)
-        if group_id:
-            _stash_root_accounting(f"group:{group_id}",
-                view.summary(billing_group_id=group_id),
-                _number(current.get("billing_group_limit_usd", current.get("root_limit_usd"))))
-        root_task_id = str(current.get("root_task_id") or "")
-        if root_task_id:
-            _stash_root_accounting(root_task_id, view.summary(root_task_id),
-                                   _number(current.get("root_limit_usd")))
+        stash_row_accounting(view, current)
         return copy.deepcopy(appended)
 
 
@@ -1167,7 +1147,7 @@ def settle_attempt(
     if not reservation.provider_reported_cost_only:
         stash_task_cache_split(
             (_CURRENT_SCOPE.get() or UsageScope()).task_id, reservation.model,
-            int(fields.get("cached_tokens") or 0), provider=reservation.provider,
+            fields.get("cached_tokens"), provider=reservation.provider,
             ttl_seconds=3600.0 if fields["prompt_cache_ttl"] == "1h" else 300.0,
             processing_mode=observed_processing_mode(reservation.provider, fields),
         )
@@ -1184,7 +1164,7 @@ def apply_provider_price_receipt(drive_root, attempt_id: str, receipt: dict, *, 
     Stale nonfinal revisions never report an applied effect. No network runs here.
     """
     from ouroboros.usage_ledger import provider_price_refinable
-    from ouroboros._usage_money import amount, billing_group_key
+    from ouroboros._usage_money import amount
 
     root = _drive_root(drive_root)
     cost = provider_cost_value(receipt.get("cost_usd")) if isinstance(receipt, dict) else None
@@ -1208,13 +1188,9 @@ def apply_provider_price_receipt(drive_root, attempt_id: str, receipt: dict, *, 
         row.update(state="settled", cost_usd=cost, cost_final=True, settle_reason="late_receipt",
                    provider_price_receipt=copy.deepcopy(receipt))
         stored = view.write(row, current)
-        for key, summary, limit in (
-            (current.get("root_task_id"), view.summary(current.get("root_task_id")), current.get("root_limit_usd")),
-            (f"group:{billing_group_key(current)}" if billing_group_key(current) else "",
-             view.summary(billing_group_id=billing_group_key(current)), current.get("billing_group_limit_usd")),
-        ):
-            if key:
-                _stash_root_accounting(key, summary, _number(limit))
+        from ouroboros.usage_admission import stash_row_accounting
+
+        stash_row_accounting(view, current)
         return {"status": "applied", "row": stored}
 
 
@@ -1292,8 +1268,7 @@ def record_received_attempt(request: AttemptRequest, usage: Dict[str, Any], *, c
 
 
 def _observe_token_density(request: AttemptRequest, usage: Optional[Dict[str, Any]]) -> None:
-    # Lives beside the density store (capability_evidence) since this module's
-    # size ceiling; the settlement paths keep this historical seam name.
+    # Both settlement paths use the density store's measurement basis.
     from ouroboros.capability_evidence import observe_token_density
 
     observe_token_density(request, usage, drive_root_resolver=_drive_root)
@@ -1333,10 +1308,22 @@ def _return_physical_claim(attempt_id: str) -> None:
 
 
 def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseException,
-                                request: Optional[AttemptRequest] = None) -> str:
+                                request: Optional[AttemptRequest] = None, *, dispatch_seq: Optional[int] = None) -> str:
     """Route a raised provider send to its honest terminal ledger state."""
     if getattr(exc, "receiver_abandoned", False):  # owner Pause: the sender settles it late; still dispatched
         return "dispatched"
+    from ouroboros._usage_wait import PresendReadCancelled, bounded_cleanup
+
+    if (isinstance(exc, PresendReadCancelled) and dispatch_seq is not None
+            and exc.attempt_id == reservation.attempt_id):
+        # The joined preparatory read never entered the wire sender. Do not apply its proof
+        # to a row already changed by another settlement, even if that row accepts late receipts.
+        with bounded_cleanup():
+            row = _transition(reservation, "released", _allow_dispatched_release=True, _expected_seq=dispatch_seq,
+                              reason="before_dispatch_failed:PresendReadCancelled")
+        if row["state"] == "released":
+            _return_physical_claim(reservation.attempt_id)
+        return row["state"]
     if isinstance(exc, ProcessingNotStarted) and refusal_conflicts(exc):
         exc.processing_refusal_conflict = True
     payload = _retain_physical_failure(reservation, exc=exc)
@@ -1401,6 +1388,7 @@ def _record_attempt_capture(
         candidate_measurement_kind=request.candidate_measurement_kind,
         max_completion_tokens=max(0, int(request.max_completion_tokens or 0)),
         candidate_raw_sha256=request.candidate_raw_sha256,
+        candidate_image_digests=request.candidate_image_digests,
         candidate_raw_size_bytes=request.candidate_raw_size_bytes,
         candidate_context_sha256=request.candidate_context_sha256,
         candidate_context_size_bytes=request.candidate_context_size_bytes,
@@ -1554,8 +1542,10 @@ async def execute_physical_attempt_async(
         if manifest_ref is not None and not isinstance(manifest_ref, dict):
             raise TypeError("before_dispatch must return a manifest ref object or None")
         prepared_capture = _record_attempt_capture(reservation, request, "reserved", candidate_manifest_ref=manifest_ref)
-        request = with_dispatch_stamp(request, await presend_off_loop(mark_dispatched, reservation,
-                               candidate_manifest_ref=manifest_ref, local_answer_owner_pid=os.getpid()))
+        dispatch_stamp = await presend_off_loop(
+            mark_dispatched, reservation, candidate_manifest_ref=manifest_ref, local_answer_owner_pid=os.getpid(),
+        )
+        request = with_dispatch_stamp(request, dispatch_stamp)
         dispatch_capture = replace(prepared_capture, state="dispatched", physical_context=request.physical_context)
         _LAST_PHYSICAL_ATTEMPT.set(dispatch_capture)
     except BaseException as exc:
@@ -1571,7 +1561,8 @@ async def execute_physical_attempt_async(
         except BaseException as exc:
             terminal_state = "dispatched"
             try:
-                terminal_state = await presend_off_loop(_terminalize_failed_attempt, reservation, exc, request)
+                terminal_state = await presend_off_loop(_terminalize_failed_attempt, reservation, exc, request,
+                                                        dispatch_seq=dispatch_stamp[0])
             except Exception:
                 log.exception("Failed to mark provider attempt unresolved: %s", reservation.attempt_id)
             _record_attempt_capture(

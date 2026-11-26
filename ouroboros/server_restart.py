@@ -1,11 +1,9 @@
 """Restart-adjacent helpers the composition root calls at shutdown time.
 
-The live-task census the restart drain consults, the teardown arguments that
-finalize interrupted tasks with an honest reason, the managed-update guard on
-preserving queued work, the checkout/update serialization gate, the owner's manual
-Restart operation, the planned restart's engine-pin daemon stop,
-and the event bus shutdown live here. The planned restart also uses this lifecycle; its composition-root bindings
-join the deferred drain record to the performer that raises the exit signal.
+Manual and planned restarts share the live-task census, honest teardown reasons,
+managed-update queue preservation, checkout serialization and event-bus shutdown.
+The composition root binds the planned drain record to the performer that stops
+its engine-pin daemon and requests exit.
 """
 
 from __future__ import annotations
@@ -20,6 +18,7 @@ from ouroboros.server_process import (
     DATA_DIR, _owner_restart_requested, _request_restart_exit, _restart_requested, end_task_runs, log,
     restart_gate_line,
 )
+from ouroboros.store_switch import capture_history_handoff
 
 _RESTARTABLE_UPDATE_PHASES = frozenset({"pending_boot_smoke", "applying_replace"})
 _LAST_RETURNING: set = set()  # this process's Restart: the ids its transaction returns
@@ -216,19 +215,18 @@ def _started_restart_work() -> dict:
 
 def _perform_owner_restart(ctx: Any, reply=None) -> tuple[bool, str]:
     """Run the owner restart operation with an optional transport notice."""
-    ok, restart_msg = _safe_restart_serialized(
-        ctx.safe_restart,
-        reason="owner_restart",
-        unsynced_policy="rescue_and_reset",
-    )
+    with capture_history_handoff() as handoff:
+        ok, restart_msg = _safe_restart_serialized(ctx.safe_restart, reason="owner_restart",
+                                                   unsynced_policy="rescue_and_reset")
     if not ok:
+        handoff.resume_inline()
         return False, restart_msg
     from supervisor.workspace_preparation import pause_admission, resume_admission
 
     # Before this Restart's own restrictions exist: a launch or Resume already writing its marks hands over
     # to the still-running pool, which the follow-up restriction below would refuse at its put.
-    pause_admission()
     try:
+        pause_admission()
         from ouroboros.delegate_recovery import prepare_owner_restart
         from supervisor.queue_schedules import schedule_transaction
         with schedule_transaction(DATA_DIR):
@@ -242,8 +240,12 @@ def _perform_owner_restart(ctx: Any, reply=None) -> tuple[bool, str]:
                 log.exception("Restart episode awaits boot persistence")
     except Exception:
         resume_admission()
+        handoff.resume_inline()
         log.warning("Failed to write owner restart transaction", exc_info=True)
         return False, "could not write restart state."
+    except BaseException:
+        handoff.resume_inline()
+        raise
     # Everything reversible is behind us (checkout landed, restart
     # door durable): from here the restart always follows, and every
     # unconfirmed stop is a critical diagnostic, never a deferral.
@@ -261,6 +263,7 @@ def _perform_owner_restart(ctx: Any, reply=None) -> tuple[bool, str]:
 
         _OWNER_STOP_BEGAN.clear()
         reopen_queue_returns("owner_restart")  # no exit follows here: this generation keeps admitting
+        handoff.resume_inline()
         raise
     try:
         if reply is not None:
@@ -923,12 +926,12 @@ def _perform_supervisor_restart(server,
                     "the exact reviewed evolution commit.",
                     role="system", system_type="restart_notice")
             return
-    ok, msg = server._safe_restart_serialized(
-        server.body_adoption.bind_restart(ctx.safe_restart, ctx.DRIVE_ROOT, restart_reason),
-        reason="agent_restart_request",
-        unsynced_policy="rescue_and_block",
-    )
+    restart = server.body_adoption.bind_restart(ctx.safe_restart, ctx.DRIVE_ROOT, restart_reason)
+    with capture_history_handoff() as handoff:
+        ok, msg = server._safe_restart_serialized(restart, reason="agent_restart_request",
+                                                  unsynced_policy="rescue_and_block")
     if not ok:
+        handoff.resume_inline()
         release_agent_restart(str(_AGENT_RESTART.get("request_id") or ""), "restart_refused")
         try:
             from supervisor.evolution_lifecycle import disable_evolution_projection, pause_evolution_campaign
@@ -940,6 +943,18 @@ def _perform_supervisor_restart(server,
         if st.get("owner_chat_id"):
             ctx.send_with_budget(int(st["owner_chat_id"]), f"⚠️ Restart skipped: {msg}", role="system", system_type="restart_notice")
         return
+    try:
+        _finish_supervisor_restart(server, ctx)
+    except BaseException:
+        from supervisor.queue import reopen_queue_returns
+
+        reopen_queue_returns("planned_restart")  # no exit follows: this generation keeps admitting
+        handoff.resume_inline()
+        raise
+    server._request_restart_exit()
+
+
+def _finish_supervisor_restart(server, ctx):
     cleanup_status, cleanup_reason = server._begin_task_teardown(restart_requested=True)
     server._planned_delegate_restart_transaction_id = ""
     planned_handoffs: set[str] = set()
@@ -953,11 +968,8 @@ def _perform_supervisor_restart(server,
         from supervisor.workers import direct_chat_turns
 
         owner_waits = prepare_owner_wait_handoffs(ctx.DRIVE_ROOT, ctx.RUNNING, restart_transaction_id)
-        planned_handoffs = prepare_planned_restart_handoffs(
-            ctx.DRIVE_ROOT, ctx.RUNNING,
-            restart_transaction_id=restart_transaction_id,
-            additional_task_ids=owner_waits,
-        )
+        planned_handoffs = prepare_planned_restart_handoffs(ctx.DRIVE_ROOT, ctx.RUNNING,
+            restart_transaction_id=restart_transaction_id, additional_task_ids=owner_waits)
         # The planned restart also returns active work and the runnable queue (#1563);
         # the off-loop schedule duty admits nothing after this copy.
         prepare_restart_returns(ctx.DRIVE_ROOT, ctx.RUNNING, name_queue_returns(ctx.PENDING, "planned_restart"),
@@ -966,34 +978,22 @@ def _perform_supervisor_restart(server,
         server._planned_delegate_restart_transaction_id = named = restart_transaction_id
     except Exception:
         server.log.debug("Planned self-restart delegate handoff preparation failed", exc_info=True)
-    try:
-        restart_kill_kwargs = {"preserve_pending": True, **server._managed_update_pending_kwargs()}
-        if planned_handoffs:
-            server._planned_delegate_restart_transaction_id = restart_transaction_id
-            restart_kill_kwargs["preserve_pending"] = True
-        ctx.kill_workers(
-            force=True,
-            terminal_status=cleanup_status,
-            result_reason=cleanup_reason,
-            stop_source="server_shutdown",
-            preserve_running_task_ids=planned_handoffs,
-            retain_saved_work=True,
-            **restart_kill_kwargs,
-        )
-        from supervisor.restart_retention import name_late_returns  # a helper started after the returns were named
+    restart_kill_kwargs = {"preserve_pending": True, **server._managed_update_pending_kwargs()}
+    if planned_handoffs:
+        server._planned_delegate_restart_transaction_id = restart_transaction_id
+        restart_kill_kwargs["preserve_pending"] = True
+    ctx.kill_workers(
+        force=True, terminal_status=cleanup_status, result_reason=cleanup_reason, stop_source="server_shutdown",
+        preserve_running_task_ids=planned_handoffs, retain_saved_work=True, **restart_kill_kwargs,
+    )
+    from supervisor.restart_retention import name_late_returns  # a helper started after the returns were named
 
-        name_late_returns(ctx.DRIVE_ROOT, named)  # returns with them (#3192)
-        try:  # a field update: a stale snapshot never erases a control written meanwhile (#1307)
-            ctx.update_state(lambda live: live.__setitem__("session_id", server.uuid.uuid4().hex))
-        except Exception:
-            server.log.warning("Restart session id not rotated: runtime state unavailable", exc_info=True)
-        from supervisor.queue import publish_queue_snapshot
+    name_late_returns(ctx.DRIVE_ROOT, named)  # returns with them (#3192)
+    try:  # a field update: a stale snapshot never erases a control written meanwhile (#1307)
+        ctx.update_state(lambda live: live.__setitem__("session_id", server.uuid.uuid4().hex))
+    except Exception:
+        server.log.warning("Restart session id not rotated: runtime state unavailable", exc_info=True)
+    from supervisor.queue import publish_queue_snapshot
 
-        if publish_queue_snapshot(reason="pre_restart_exit") is False:
-            raise OSError("The final rollback-readable queue snapshot could not be saved")
-    except BaseException:
-        from supervisor.queue import reopen_queue_returns
-
-        reopen_queue_returns("planned_restart")  # no exit follows: this generation keeps admitting
-        raise
-    server._request_restart_exit()
+    if publish_queue_snapshot(reason="pre_restart_exit") is False:
+        raise OSError("The final rollback-readable queue snapshot could not be saved")

@@ -1,4 +1,4 @@
-"""Replaceable-client envelopes beside ``contracts.py``, mirrored in ``web/modules/client_contract_types.js``.
+"""Replaceable-client envelopes beside ``contracts.py``.
 
 These TypedDicts describe the generation's interface (``StateResponse.served_ui``), read-only setup
 (``GET /api/onboarding/bootstrap`` mirrors ``settings_setup_contract``), the settings writers' durable-outcome refusal, the
@@ -43,7 +43,7 @@ class SetupStep(TypedDict):
 
 
 class SetupProviderField(TypedDict):
-    """One credential or endpoint input; ``settingKey`` is the settings key it saves into."""
+    """One credential, endpoint or consent input; ``settingKey`` is the settings key it saves into."""
 
     id: str
     stateKey: str
@@ -155,7 +155,7 @@ class SetupInitialState(TypedDict):
     modelAccounts: Dict[str, Any]
     modelContextWindows: Dict[str, Any]
     processingPreference: str
-    modelProcessingPreferences: Dict[str, Any]
+    modelProcessingPreferences: Dict[str, Any]  # Role tiers; only `.main` may also be `ultrafast`.
     automaticModels: List[str]  # model-slot stateKeys neither the document nor an operator's variable sets
 
 
@@ -381,7 +381,7 @@ class OwnerRuntimeModeRequest(TypedDict):
     mode: Literal["light", "advanced", "pro", "cyber_pro"]
 
 
-class OwnerContextModeRequest(TypedDict):
+class OwnerContextModeRequest(TypedDict):  # `POST /api/owner/context-mode`.
     """Save the room's context for future actors; existing actors retain theirs."""
 
     mode: Literal["nano", "low", "max"]
@@ -559,6 +559,8 @@ class PlaceReadiness(TypedDict):
     tone: str
 
 
+# A stored alias (`main`, `light`) reads as the model it resolves to now; `local` follows the slot's rule for an
+# inherited or alias route, and a model of the place's own is never local here.
 class PlaceModelRoute(TypedDict):
     """The model a place thinks with now, the scope that chose it, and whether that route is the local runtime."""
 
@@ -620,13 +622,14 @@ class PlaceSummary(TypedDict):
     peer_effective: NotRequired[Dict[str, Any]]
     peer_facts: NotRequired[str]
     link: NotRequired[Optional[Dict[str, Any]]]
-    # The owner's GET /api/places only (places_view owner_reading): this link's work whose record changed last among
-    # those its letters started here, from its acceptance record ({task_id, title, status, from: the link's recorded
-    # label, room_chat_id: the room it lives in}); null when none was accepted, {unknown: true} when the task store
-    # cannot be read now. No other reader of the place views gets the field.
+    # The owner's GET /api/places only (place_projection.peer_works): the work this link's letters started here whose
+    # record changed last, not the latest acceptance. {task_id, title, status, phase, from, room_chat_id}: phase
+    # is the stored outcome projection (or paused; empty means unknown), from is the label recorded at acceptance,
+    # and room_chat_id is null without a recorded room. Null when none was accepted, {unknown: true} on an unread store.
     peer_work: NotRequired[Optional[Dict[str, Any]]]
-    # Likewise only there: while its arrival index lists no room, the room this side wrote to it in ({room_chat_id,
-    # wrote_at: its newest receipt there}); null when none, {unknown: true} when history cannot be read now.
+    # Likewise only there (place_projection.peer_rooms): while its arrival index lists no room, {room_chat_id,
+    # wrote_at} names the room this side wrote to and its newest message receipt there. Null if a room is listed or
+    # this side has no receipt there; {unknown: true} when history cannot be read now.
     peer_room: NotRequired[Optional[Dict[str, Any]]]
 
 
@@ -634,7 +637,7 @@ class PlaceDisconnectRequest(TypedDict, total=False):
     expected_revision: int
 
 
-class PlaceRoomSummary(TypedDict):
+class PlaceRoomSummary(TypedDict):  # not a complete remote-provider history
     """One captured local conversation; an unknown open-focus count stays null."""
 
     room_chat_id: int
@@ -915,6 +918,10 @@ class ScheduleActionRequest(TypedDict):
     relation: NotRequired[str]
 
 
+# `accept_unknown` returns the opaque IDs of the refusal's `acceptable_unknown`, never reconstructed ones;
+# accepting a delegated start (it needs `reason`) means its external work and costs may continue.
+# `expected_panic_hold_id` comes from `panic_recovery[].panic_hold_id`; a changed or used stop answers 409
+# `panic_selection_changed`.
 class TaskResumeRequest(TypedDict, total=False):
     """Resume one saved task. A Panic group selection sends only the observed hold ID."""
 
@@ -941,7 +948,7 @@ class TaskResumeResponse(TypedDict, total=False):
     grant_id: str
     grant_generation: int
     paused_duration_sec: float
-    consciousness_resume: Dict[str, float]  # additional_usd (decided at the wake's own allowance grant), available_now_usd (what the total budget leaves of it)
+    consciousness_resume: Dict[str, float]  # additional_usd (decided at the wake's own allowance grant), available_now_usd (what the total budget leaves of it); observations, not a reservation
     eligible_descendants: List[str]
     held_siblings: List[str]
     rebound_held_siblings: List[str]

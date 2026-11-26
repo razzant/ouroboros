@@ -22,7 +22,6 @@ import pathlib
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ouroboros.runtime_mode_policy import (
-    FROZEN_CONTRACT_PATH_PREFIXES,
     GIT_OPS_FAMILY_PATHS,
     SAFETY_CRITICAL_PATHS,
     normalize_repo_path,
@@ -32,7 +31,7 @@ from ouroboros.runtime_mode_policy import (
 # Manifest policy identity. It rides the commit gate's review-contract
 # fingerprint, so a change to what a scope reviewer is owed lapses recorded
 # free-replay authority instead of surviving it.
-SCOPE_REQUIRED_SOURCES_POLICY = "v2"
+SCOPE_REQUIRED_SOURCES_POLICY = "v4"
 
 # The logical root every row addresses — ``read_file``'s own default root, so a
 # reviewer that opens a required source without naming a root already matches.
@@ -56,13 +55,17 @@ _DERIVED_FAMILIES: Tuple[frozenset, ...] = (
     frozenset(path for path in SAFETY_CRITICAL_PATHS if path.startswith("ouroboros/tools/")),
 )
 
-# Declared cross-language twins: one contract, two languages. Extend the table
-# when another pair of files states the same contract on both sides.
-_WEB_CONTRACT_TWIN = "web/modules/api_types.js"
-_HOST_CONTRACT_TWIN = "ouroboros/gateway/contracts.py"
+# Wire fields are declared once, in Python. The browser still carries the
+# release version (not the ABI version) and three live limits: comment length
+# in task_decision, and quiz options and link actions in core_artifacts.
+# These values, not every frozen shape, are declared on both sides.
+_BROWSER_VALUES = "web/modules/api_types.js"
+_BROWSER_VALUE_OWNERS = (
+    "VERSION", "ouroboros/gateway/task_decision.py", "ouroboros/tools/core_artifacts.py",
+)
 _DECLARED_TWINS: Dict[str, Tuple[str, ...]] = {
-    _HOST_CONTRACT_TWIN: (_WEB_CONTRACT_TWIN,),
-    _WEB_CONTRACT_TWIN: (_HOST_CONTRACT_TWIN,),
+    _BROWSER_VALUES: _BROWSER_VALUE_OWNERS,
+    **{path: (_BROWSER_VALUES,) for path in _BROWSER_VALUE_OWNERS},
 }
 
 # Git name-status letters as the manifest's own dispositions.
@@ -172,8 +175,7 @@ def scope_required_sources(
     the declared twins all name files of the Ouroboros body; for the ``core``
     layer (``repo_dir`` is another repository) none of them applies, so no
     source is owed categorically and the manifest is empty — the reviewer reads
-    what its own judgment needs. The policy version is unchanged: the body
-    manifest is byte-identical to before.
+    what its own judgment needs.
     """
     if layer != "body":
         return []
@@ -203,13 +205,14 @@ def scope_required_sources(
             required.setdefault(member, "family")
     for path in touched:
         twins = _DECLARED_TWINS.get(path, ())
-        if any(path.startswith(prefix) for prefix in FROZEN_CONTRACT_PATH_PREFIXES):
-            twins = twins + (_WEB_CONTRACT_TWIN,)
         if not twins:
             continue
-        # One contract, two languages: a change on either side owes the reviewer
-        # BOTH sides in full, or it could check only the half it can see.
-        required.setdefault(path, touched[path])
+        # A shared value can drift on either side; the reviewer is owed both.
+        # The touched path's OWN status outranks the ``twin`` label another
+        # declaration would give it: a joint edit whose second row is listed
+        # first must not downgrade the first row to ``twin`` (and the reverse),
+        # so a deleted twin keeps its preimage obligation in either order.
+        required[path] = touched[path]
         for twin in twins:
             required.setdefault(twin, "twin")
 
@@ -254,7 +257,7 @@ def render_required_sources(rows: Sequence[Dict[str, Any]], *, layer: str = "bod
     if not rows and layer != "body":
         return (
             "REQUIRED SOURCES: none is owed categorically. This subject is not the "
-            "Ouroboros body, so no protected-path inventory, frozen-contract twin or "
+            "Ouroboros body, so no protected-path inventory, declared twin or "
             "prompt rule applies to it; the staged diff is the complete change "
             "evidence. Read any file of the subject your judgment needs with your "
             "own tools."

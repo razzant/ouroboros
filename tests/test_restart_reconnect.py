@@ -471,13 +471,69 @@ def test_a_raised_owner_stop_still_restarts_so_its_durable_flags_stay_true(tmp_p
 def test_an_interrupted_owner_stop_reopens_admission_without_an_exit(tmp_path, monkeypatch):
     """A BaseException (an interrupt) propagates; if this generation survives it, it keeps admitting."""
     import pytest
+
+    from ouroboros import server_restart, store_switch
+    from ouroboros.gateway import history_reader
     from supervisor import queue
+    from tests.test_store import publish
 
     def interrupted(_ctx):
         queue.name_queue_returns([], "owner_restart")
         raise KeyboardInterrupt
 
     world = _owner_restart_world(tmp_path, monkeypatch, interrupted)
+    publish(tmp_path)
+    reader = history_reader.HistoryReader()
+    reader.bind(tmp_path)
+    monkeypatch.setattr(history_reader, "reader", reader)
+
+    def checkout(*args, **kwargs):
+        handoff = store_switch.current_history_handoff()
+        assert handoff.prepare(tmp_path) == ""
+        handoff.checkout_confirmed = True
+        return True, "recovered"
+
+    monkeypatch.setattr(server_restart, "_safe_restart_serialized", checkout)
     with pytest.raises(KeyboardInterrupt):
         world.run()
     assert world.queue.RETURNS_NAMED == {} and world.exits == []
+    assert reader._server_read(tmp_path.resolve(), lambda: "reads") == "reads"
+
+
+def test_a_planned_restart_interrupted_before_naming_returns_reopens_inline_history(tmp_path, monkeypatch):
+    import pathlib
+    from types import SimpleNamespace
+
+    import pytest
+
+    from ouroboros import server_restart, store_switch
+    from ouroboros.gateway import history_reader
+    from supervisor import queue
+    from tests.test_store import publish
+
+    publish(tmp_path)
+    reader = history_reader.HistoryReader()
+    reader.bind(tmp_path)
+    monkeypatch.setattr(history_reader, "reader", reader)
+    reopened = []
+    monkeypatch.setattr(queue, "reopen_queue_returns", reopened.append)
+
+    def interrupted(**_kw):
+        raise KeyboardInterrupt
+
+    def checkout(*args, **kwargs):
+        handoff = store_switch.current_history_handoff()
+        assert handoff.prepare(tmp_path) == ""
+        handoff.checkout_confirmed = True
+        return True, "recovered"
+
+    server = SimpleNamespace(read_json_dict=lambda _path: None, pathlib=pathlib,
+                             _safe_restart_serialized=checkout,
+                             body_adoption=SimpleNamespace(bind_restart=lambda fn, *_: fn),
+                             _begin_task_teardown=interrupted,
+                             _request_restart_exit=lambda: pytest.fail("no restart"))
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, load_state=dict, safe_restart=None)
+    with pytest.raises(KeyboardInterrupt):
+        server_restart._perform_supervisor_restart(server, ctx)
+    assert reopened == ["planned_restart"]
+    assert reader._server_read(tmp_path.resolve(), lambda: "reads") == "reads"

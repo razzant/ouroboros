@@ -439,6 +439,8 @@ _VERIFY_RUN_KINDS = frozenset({
 def _target_binding_operation(name: str, args: dict[str, Any]) -> str | None:
     if name == "review_change" and str(args.get("subject") or "").strip() == "result":
         return None  # a result review reads this task's own result, never a workspace target
+    if name == "set_task_cost_cap":
+        return "work_cap"  # one work and the decision the call stands on, not a path
     operation = _TARGET_BINDING_OPERATIONS.get(name)
     if operation is not None:
         return operation
@@ -552,6 +554,10 @@ def _build_builtin_target_binding(ctx: Any, name: str, args: dict[str, Any]) -> 
     operation = _target_binding_operation(name, args)
     if operation is None:
         return None
+    if operation == "work_cap":
+        from ouroboros.tools.control_mind import prepare_task_cost_cap
+
+        return prepare_task_cost_cap(ctx, args)
     if name in _SKILL_LIFECYCLE_TARGET_TOOLS:
         return _registry().build_resolved_resource_binding(
             ctx,
@@ -643,7 +649,8 @@ def _build_builtin_target_binding(ctx: Any, name: str, args: dict[str, Any]) -> 
 
 
 def _binding_items(binding: Any) -> tuple[Any, ...]:
-    if binding is None:
+    """The resource targets a binding reaches; a decision subject (a dict: ``prepare_task_cost_cap``) reaches none."""
+    if binding is None or isinstance(binding, dict):
         return ()
     return binding if isinstance(binding, tuple) else (binding,)
 
@@ -772,7 +779,17 @@ _VCS_READ_ROOTS = (" vcs_read itself takes root='active_workspace' or 'system_re
                    "result's patch_read/manifest_read, or vcs_read(action='diff', base=<baseline_id>, head=<result_commit>).")
 
 
+class BindingRefused(Exception):
+    """A binder's own typed refusal of the call (``control_mind.prepare_task_cost_cap``), answered as it is."""
+
+    def __init__(self, result: ToolResult):
+        super().__init__(result.text)
+        self.result = result
+
+
 def _binding_error_text(name: str, root: str, exc: Exception) -> str | ToolResult:
+    if isinstance(exc, BindingRefused):
+        return exc.result
     detail = str(exc)
     if detail.startswith("SKILL_REDIRECT_BLOCKED:"):
         return f"⚠️ {detail}"

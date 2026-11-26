@@ -59,9 +59,10 @@ def test_an_abandoned_restart_reopens_the_queue_and_the_admission_lane(generatio
     assert not generation.launches_closed() and not queue.RETURNS_NAMED
 
 
-def test_planned_restart_and_quit_teardown_pause_admission_first(monkeypatch):
+def test_planned_restart_and_quit_teardown_pause_admission_first(monkeypatch, tmp_path):
     import server
     from ouroboros import server_restart
+    from tests.test_restart_retention import _planned_restart_door
 
     calls = []
     monkeypatch.setattr(prep, "pause_admission", lambda timeout=None: calls.append("pause") or True)
@@ -80,7 +81,15 @@ def test_planned_restart_and_quit_teardown_pause_admission_first(monkeypatch):
     monkeypatch.setattr(server_process, "_stop_source", "launcher_quit")
     assert server_restart._begin_task_teardown(False)[1] == args(False, "launcher_quit")[1]
     # Both server doors begin their teardown through it, before they read the queue or retire the pool.
-    assert "_begin_task_teardown(restart_requested=True)" in inspect.getsource(server_restart._perform_supervisor_restart)
+    # The planned restart as it runs (inert doubles): its landed checkout, then admission paused first and a
+    # restart's teardown; a refused checkout is no stop, so it pauses, reads and retires nothing.
+    steps = _planned_restart_door(tmp_path, monkeypatch)
+    names = [step[0] for step in steps]
+    assert names[:2] == ["checkout", "pause_admission"] and {"read_queue", "kill_workers"} <= set(names)
+    [kill] = [step[1] for step in steps if step[0] == "kill_workers"]
+    assert (kill["terminal_status"], kill["result_reason"]) == args(True)
+    refused = _planned_restart_door(tmp_path, monkeypatch, checkout=(False, "Unsynced state rescued; restart blocked."))
+    assert [step[0] for step in refused] == ["checkout"]
     assert inspect.getsource(server).count("_begin_task_teardown(restart_requested)") == 1
 
 

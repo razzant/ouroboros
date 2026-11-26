@@ -380,7 +380,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     }
 
 
-def _direct_turns_snapshot_safe(*, availability=None) -> list:
+def _direct_turns_snapshot_safe(*, availability=None, lane_rows=None) -> list:
     """The inline executors' registered actors plus the conversation lane's RUNNING turns (one shape): an inline
     executor's turn is both, and is listed once, as its live actor (its own phase and model wait)."""
     try:
@@ -390,7 +390,8 @@ def _direct_turns_snapshot_safe(*, availability=None) -> list:
         registry = get_direct_activity_registry()
         rows = registry.snapshot() if availability is None else registry.snapshot(availability=availability)
         listed = {row.get("activity_id") for row in rows}
-        return rows + [row for row in lane_turn_rows() if row.get("activity_id") not in listed]
+        lane = lane_turn_rows() if lane_rows is None else lane_rows
+        return rows + [row for row in lane if row.get("activity_id") not in listed]
     except Exception:
         if availability is not None:
             availability["complete"] = False
@@ -628,7 +629,7 @@ def _ended_tail(drive_root: Any, root_id: str) -> tuple:
     return False, bool(runs) or any(row.get("resume_decisions") for row in closure["pending"])
 
 
-def _answered_root_phase(drive_root: Any, root_id: str, facts: dict, reviews: Any, members: bool) -> tuple:
+def _answered_root_phase(drive_root: Any, root_id: str, facts: dict, reviews: Any, members: bool, *, synthesis=None) -> tuple:
     """``(phase, work facts)`` of an answered root under the owner's Pause; phase ``""`` when no row shows it.
 
     The fence's own census is the truth of "Paused": reviewers already launched finish separately and never keep the
@@ -643,7 +644,7 @@ def _answered_root_phase(drive_root: Any, root_id: str, facts: dict, reviews: An
     state = owner_fence_state(drive_root, {"root_task_id": root_id}, root_id)
     if state == "paused":
         return "budget_paused", {}
-    in_flight = post_task_synthesis_in_flight(drive_root, root_id)
+    in_flight = post_task_synthesis_in_flight(drive_root, root_id) if synthesis is None else root_id in synthesis
     if facts.get("finalizing") or in_flight or reviews(sent_only=True):
         return "budget_pausing", {"running": True} if in_flight else {}
     if reviews() or members:  # an unsent review operation deferred until Resume, or its parked members
@@ -696,29 +697,51 @@ def _direct_activity_pause_projection(drive_root: Any, row: dict, availability: 
     return activity
 
 
-def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *, direct_turns=None, availability=None,
-                                  decision_owners=None, owners_only: bool = False, question_details: bool = True,
-                                  work_facts=None, park_clock=None) -> list:
-    """Copy live owners first, then read their control/phase facts in one store transaction."""
+_LINEAGE_FIELDS = ("root_task_id", "parent_task_id", "delegation_role", "original_task_id", "timeout_retry_from")
+
+
+def _owner_inputs(row):
+    """Owner census inputs, never a task's prompt, controls or model buffers."""
+    fields = (*_LINEAGE_FIELDS, "id", "chat_id", "project_id", "queued_at", "started_at", "_attempt",
+              "_is_direct_chat", "_presence_turn", "execution_owner")
+    result = {key: row[key] for key in fields if key in row}
+    if isinstance(meta := row.get("metadata"), dict):
+        result["metadata"] = {key: meta[key] for key in (*_LINEAGE_FIELDS, "execution_transport") if key in meta}
+    return result
+
+
+def copy_activity_inputs(drive_root, *, direct_turns=None, availability=None, owners_only=False, note_waits=False,
+                         queue_nowait=False):
+    """Copy process-owned census inputs before resolving their bindings or loading their stores."""
     from ouroboros.post_task_checkpoint import post_task_model_waits
-    from ouroboros.store_hot_facts import snapshot
     from supervisor import queue as queue_mod
     from supervisor.owner_pause_control import warm_paused_member
 
-    direct_rows = direct_turns if direct_turns is not None else _direct_turns_snapshot_safe(availability=availability)
-    presence_rows = _presence_turns_snapshot_safe(drive_root, availability=availability,
-                                                  listed={row.get("activity_id") for row in direct_rows})
+    direct_rows = direct_turns
+    if not queue_nowait:  # ordinary in-server census keeps its existing read order
+        direct_rows = direct_turns if direct_turns is not None else _direct_turns_snapshot_safe(availability=availability)
+        presence_rows = _presence_turns_snapshot_safe(drive_root, availability=availability,
+                                                      listed={row.get("activity_id") for row in direct_rows})
+    lane_rows = []
+    lock = queue_mod._queue_lock
+    if queue_nowait and not lock.acquire(blocking=False):
+        raise RuntimeError("live activity inputs unavailable for the history reader")
     try:
-        with queue_mod._queue_lock:
+        with nullcontext() if queue_nowait else lock:
             from supervisor.queue_publication import note_lane_waits
 
+            if queue_nowait and direct_rows is None:
+                from supervisor.conversation_lane import lane_turn_rows
+
+                lane_rows = lane_turn_rows(queue_held=True)
             # Who keeps a queued root's lane now, noted as the tick notes it (a claim between ticks moves the revision).
-            waits = note_lane_waits() if work_facts is not None and not owners_only else {}
-            pending_rows = [dict(task, lane_wait=waits.get(str(task.get("id") or ""))) for task in queue_mod.PENDING]
+            waits = note_lane_waits() if note_waits and not owners_only else {}
+            pending_rows = [_owner_inputs(task) if owners_only else dict(task, lane_wait=waits.get(str(task.get("id") or "")))
+                            for task in queue_mod.PENDING]
             fence_rows = {str(key): dict(value) for key, value in queue_mod.BUDGET_ROOT_FENCES.items()
                           if isinstance(value, dict)}
             running_rows = [
-                (str(task_id), {**(meta.get("task") or {}), "_attempt": int(meta.get("attempt")
+                (str(task_id), (_owner_inputs(meta.get("task") or {}) if owners_only else {**(meta.get("task") or {}), "_attempt": int(meta.get("attempt")
                     or (meta.get("task") or {}).get("_attempt") or 1),
                     "model_activity": (meta.get("active_llm_call") or {}).get("model_activity"),
                     "_queue_attempt": meta.get("attempt"),  # unlike _attempt above, never defaulted
@@ -729,23 +752,50 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                     "owner_wait": dict(meta.get("owner_wait") or {}),
                     # The live silence fact is the RUNNING row's, never its task's (silence_attention.observe).
                     "silence_attention": dict(meta.get("silence_attention") or {}),
-                    "_owner_pause_warm": warm_paused_member(meta)} if isinstance(meta, dict) else {},
+                    "_owner_pause_warm": warm_paused_member(meta)}) if isinstance(meta, dict) else {},
                  _epoch_or_zero(meta.get("started_at")) if isinstance(meta, dict) else 0.0)
                 for task_id, meta in queue_mod.RUNNING.items()]
     except Exception:
         if availability is not None:
             availability["complete"] = False
         pending_rows, fence_rows, running_rows = [], {}, []
+    finally:
+        if queue_nowait:
+            lock.release()
+    if queue_nowait:  # direct handles and Presence may consult their stores; Q is already released
+        if direct_rows is None:
+            direct_rows = _direct_turns_snapshot_safe(availability=availability, lane_rows=lane_rows)
+        presence_rows = _presence_turns_snapshot_safe(drive_root, availability=availability,
+                                                      listed={row.get("activity_id") for row in direct_rows})
     try:
-        late_owners = list(post_task_model_waits(drive_root))
+        late_owners = [(owner.task_id, _owner_inputs(owner.task) if owners_only else owner.task, owner.attempt,
+                        {} if owners_only else owner.snapshot()["model_waits"]) for owner in post_task_model_waits(drive_root)]
     except Exception:
         if availability is not None:
             availability["complete"] = False
         late_owners = []
+    if owners_only:
+        activity_keys = ("activity_id", "chat_id", "project_id", "project_name", "parent_task_id", "root_task_id",
+                         "kind", "phase", "executor", "cancelable", "presence_pause")
+        direct_rows = [{key: row[key] for key in activity_keys if key in row} for row in direct_rows]
+        presence_rows = [(tid, _owner_inputs(row)) for tid, row in presence_rows]
+        fence_rows = {tid: {"cause": row.get("cause")} for tid, row in fence_rows.items()}
+    return direct_rows, pending_rows, fence_rows, running_rows, late_owners, presence_rows
+
+
+def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *, direct_turns=None, availability=None,
+                                  decision_owners=None, owners_only: bool = False, question_details: bool = True,
+                                  work_facts=None, park_clock=None, copied=None, synthesis=None) -> list:
+    """Copy live owners first, then read their control/phase facts in one store transaction."""
+    from ouroboros.store_hot_facts import snapshot
+
+    direct_rows, pending_rows, fence_rows, running_rows, late_owners, presence_rows = copied if copied is not None else (
+        copy_activity_inputs(drive_root, direct_turns=direct_turns, availability=availability,
+                             owners_only=owners_only, note_waits=work_facts is not None))
     owners = [(str(row.get("activity_id") or ""), row) for row in direct_rows]
     owners += [(str(row.get("id") or ""), row) for row in pending_rows]
     owners += [(tid, row) for tid, row, _started in running_rows]
-    owners += [(owner.task_id, owner.task) for owner in late_owners]
+    owners += [(tid, row) for tid, row, _attempt, _waits in late_owners]
     owners += [(tid, {}) for tid in fence_rows]
     owners += presence_rows
     requests = []
@@ -755,7 +805,7 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
     with nullcontext() if owners_only else snapshot(requests):  # which work is current needs no per-row control facts
         return _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_rows, fence_rows,
                                          running_rows, late_owners, availability, decision_owners, owners_only,
-                                         question_details, work_facts, presence_rows, park_clock)
+                                         question_details, work_facts, presence_rows, park_clock, synthesis=synthesis)
 
 
 def _presence_turns_snapshot_safe(drive_root: Any, *, availability=None, listed=frozenset()) -> list:
@@ -875,7 +925,7 @@ def _expired_parks(drive_root, activities, parks, park_clock, work_facts) -> Non
 
 def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_rows, fence_rows,
                               running_rows, late_owners, availability, decision_owners, owners_only,
-                              question_details=True, work_facts=None, presence_rows=(), park_clock=None) -> list:
+                              question_details=True, work_facts=None, presence_rows=(), park_clock=None, *, synthesis=None) -> list:
     """Combine direct turns, managed roots and live inline Presence in one list.
 
     Leave ``active_direct_turns`` unchanged for compatibility. The client gets managed phases
@@ -1048,11 +1098,12 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
             facts = _task_hot_facts(drive_root, root_id)  # the body only for a root shown below (its row)
             reviews = tree_review_reads(drive_root, root_id)  # the tree census's review questions, one read
             if root_id in active_roots and not (
-                    facts.get("finalizing") or post_task_synthesis_in_flight(drive_root, root_id) or reviews()):
+                    facts.get("finalizing") or (post_task_synthesis_in_flight(drive_root, root_id)
+                                                if synthesis is None else root_id in synthesis) or reviews()):
                 continue  # the logical fence alone is no second actor; genuine late work stays
             members = any(str(item.get("root_task_id") or "") == root_id for item in pending_rows) or any(
                 str(item.get("root_task_id") or "") == root_id for _tid, item, _at in running_rows)
-            phase, extra = _answered_root_phase(drive_root, root_id, facts, reviews, members)
+            phase, extra = _answered_root_phase(drive_root, root_id, facts, reviews, members, synthesis=synthesis)
             if not phase:
                 continue
             row = dict(_task_activity_facts(drive_root, root_id).get("row") or {})
@@ -1062,20 +1113,19 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 work_facts[root_id] = {**_raw_work_facts(row), **extra}
             census_ids.add(root_id)
             activities.append(visible[root_id])
-        for owner in late_owners:
-            census_ids.add(owner.task_id)
+        for task_id, task, attempt, waits in late_owners:
+            census_ids.add(task_id)
             if work_facts is not None:
-                work_facts.setdefault(owner.task_id, _raw_work_facts(owner.task))
-            waits = owner.snapshot()["model_waits"]
-            if owner.task_id in visible:
+                work_facts.setdefault(task_id, _raw_work_facts(task))
+            if task_id in visible:
                 # A Pause ending the late phase stays "pausing", never back to finalizing.
-                pausing = visible[owner.task_id]["phase"] in {"budget_pausing", "budget_paused"}
-                visible[owner.task_id].update(model_waits=waits, task_attempt=owner.attempt,
+                pausing = visible[task_id]["phase"] in {"budget_pausing", "budget_paused"}
+                visible[task_id].update(model_waits=waits, task_attempt=attempt,
                                               **({} if pausing else {"phase": "finalizing"}))
             else:
-                row = {**owner.task, "model_waits": waits}
-                activities.append(_activity(owner.task_id, row, "finalizing", _epoch_or_zero(row.get("queued_at")),
-                                            root=_census_is_root(owner.task_id, owner.task, availability)))
+                row = {**task, "model_waits": waits}
+                activities.append(_activity(task_id, row, "finalizing", _epoch_or_zero(row.get("queued_at")),
+                                            root=_census_is_root(task_id, task, availability)))
         if park_clock is not None and parks:
             _expired_parks(drive_root, activities, parks, park_clock, work_facts)
     except Exception:
@@ -1173,7 +1223,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
     return [row for row in activities if row.get("activity_id") in census_ids]
 
 
-def current_work_in_room(drive_root: Any, task_bindings: Any, matches: Callable[[Any, dict], bool]) -> list:
+def current_work_in_room(drive_root: Any, task_bindings: Any, matches: Callable[[Any, dict], bool], *, copied=None) -> list:
     """Census roots a recent history page addresses as current work of its room.
 
     An answered root whose late work alone remains (the answer stays; its upkeep or a
@@ -1181,7 +1231,12 @@ def current_work_in_room(drive_root: Any, task_bindings: Any, matches: Callable[
     its delivered answer and Activity offers that work's controls, so it is never
     re-addressed at the end of a page that no longer holds its own rows. Only this room's
     owners pay for their facts: the census of every room's work stays with ``/api/state``."""
-    in_room = [str(row["activity_id"]) for row in _chat_activities_snapshot_safe(drive_root, task_bindings, owners_only=True)
+    from ouroboros.gateway.history_live import LIVE
+
+    live = LIVE.get()
+    synthesis = None if live is None else {tid for path, tid in live["synthesis"] if path == str(pathlib.Path(drive_root).resolve())}
+    in_room = [str(row["activity_id"]) for row in _chat_activities_snapshot_safe(
+                   drive_root, task_bindings, owners_only=True, copied=copied, synthesis=synthesis)
                if row.get("activity_id") and row.get("chat_id") is not None
                and matches(row["chat_id"], {**row, "task_id": row["activity_id"]})]
     return [task_id for task_id in in_room if not _answer_stored(_task_hot_facts(drive_root, task_id).get("late_phase"))]

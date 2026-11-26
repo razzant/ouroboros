@@ -78,7 +78,7 @@ export function planWidgetListPatch(previousTabs, nextTabs) {
  * Exported so the deadline is testable against a fake clock as the product
  * composes it, rather than against a copy of it.
  *
- * @returns {Promise<[import('./api_types.js').WidgetsResponse, any]>}
+ * @returns {Promise<[Object, any]>} — Python contract: `ouroboros/gateway/widgets.py::WidgetsResponse`.
  */
 /**
  * The cards list is authoritative for what may be STOPPED (a kept-running frame

@@ -478,6 +478,9 @@ def _admit_new_generation(ctx: Any, custody: Any, roster: Roster,
     admission = admit_continuation_starts(ctx, custody, task_id=roster.task_id, root_task_id=roster.root_task_id, starts=starts)
     if admission is not None:
         fence, remedy = review_wave_binding_fence(admission)
+        if admission.get("reason") == "billing_authority_unavailable":
+            raise ContinuationRefused("billing_authority_unavailable",
+                                      f"{fence}; no successor was started. To continue, {remedy}.", offers)
         raise ContinuationRefused("budget_insufficient", f"known spend has reached the {fence}; no successor was "
                                   f"started. To continue, {remedy}.", offers)
 

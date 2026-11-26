@@ -15,6 +15,7 @@ import pytest
 
 from ouroboros import delegate_collection as body, delegate_custody as custody, delegate_custody_current as current
 from ouroboros import review_checking as rc
+from ouroboros.gateway.history_reader import HistoryReader, PURPOSE as HISTORY_READER_PURPOSE
 from ouroboros.process_containment import ProcessContainer
 from ouroboros.test_environment import isolated_environment, retain_tree
 from tests._usage_store_testing import ledger_rows
@@ -62,7 +63,10 @@ def test_capture_gate_publishes_only_complete_json(tmp_path, monkeypatch, existi
 def wait_for(predicate, proc, timeout=20):
     deadline = time.monotonic() + timeout
     while not predicate():
-        assert proc.poll() is None, f"server exited early: {proc.returncode}"
+        if (code := proc.poll()) is not None:
+            # The final atomic marker may have appeared before the exit we just observed.
+            assert predicate(), f"server exited early: {code}"
+            return
         assert time.monotonic() < deadline, "subprocess observation timed out"
         time.sleep(0.02)
 
@@ -122,6 +126,117 @@ def request_stop(proc, ingress):
         proc.send_signal(signal.SIGINT if ingress == "sigint" else signal.SIGTERM)
 
 
+def reader_exit_witness(ready, began, stopped):
+    pid = ready["reader_pid"]
+    same_server = ready["pid"] == began["pid"] == stopped["pid"]
+    readers = stopped["readers"]
+    reader = readers[0] if len(readers) == 1 and readers[0]["pid"] == pid else {}
+    code, ledger = reader.get("code"), reader.get("ledger_entry")
+    reader_remains, unexpected = False, []
+    capture_pids = {row["pid"] for row in stopped["maintenance"] if row["code"] is not None}
+    for row in stopped["records"]:
+        if (row["purpose"] == HISTORY_READER_PURPOSE and row.get("kind") == "supervised" and row["host_pid"] == pid
+                and row["scope"] == "session" and not row["owner_task"]
+                and ledger is not None and row.get("ledger_entry") == ledger
+                and row["record_id"] == reader["record_id"] and not reader_remains):
+            reader_remains = True
+        elif not (row["purpose"] == "maintenance" and not row["owner_task"]
+                  and row["host_pid"] in capture_pids):
+            unexpected.append(row["record_id"])
+    return {
+        "pid": pid,
+        "started": same_server and type(pid) is int and pid > 0 and pid != ready["pid"] and ready["code"] is None,
+        "live_before_stop": began["readers"] == [{"pid": pid, "code": None, "ready": True}],
+        "exited": type(code) is int,
+        "returncode": code,
+        "ledger_remains": reader_remains,
+    }, unexpected
+
+
+def assert_reader_exit(facts, unexpected):
+    assert facts["started"], "no live READY from the captured history reader"
+    assert facts["live_before_stop"], "the captured history reader must be alive when shutdown begins"
+    assert facts["exited"], "no exit status from the exact captured history reader"
+    assert not unexpected, f"unproved or unrelated owned records: {unexpected}"
+
+
+def test_history_reader_exit_witness_rejects_unproved_processes(tmp_path):
+    from tests._server_capture_exit import observed_exit_code, reader_at_stop
+
+    def still_running(timeout):
+        assert timeout == 2
+        raise subprocess.TimeoutExpired("inert-reader", timeout)
+
+    ready = {"pid": 1, "reader_pid": 2, "code": None}
+    process = SimpleNamespace(pid=2, poll=lambda: None)
+    owner = HistoryReader()
+    owner._process = process
+    owner.ready.set()
+    began = {"pid": 1, "readers": [reader_at_stop(process, owner)]}
+    ledger = {"pid": 2, "purpose": HISTORY_READER_PURPOSE, "scope": "session", "owner_task": "",
+              "session_id": "generation-a", "fingerprint": {"start_time": "exact-birth"}}
+    reader = {"pid": 2, "code": observed_exit_code(SimpleNamespace(wait=lambda timeout: 0)),
+              "record_id": "pid-2", "ledger_entry": ledger}
+    row = {"kind": "supervised", "host_pid": 2, "purpose": HISTORY_READER_PURPOSE, "scope": "session", "owner_task": "",
+           "record_id": "pid-2", "ledger_entry": ledger}
+    capture = {"host_pid": 3, "purpose": "maintenance", "owner_task": "", "record_id": "pid-3"}
+    stopped = {"pid": 1, "readers": [reader], "maintenance": [{"pid": 3, "code": -9}],
+               "records": [row, capture]}
+    facts, unexpected = reader_exit_witness(ready, began, stopped)
+    assert_reader_exit(facts, unexpected)
+    assert facts["ledger_remains"] and facts["returncode"] == 0
+    facts, unexpected = reader_exit_witness(ready, began, {**stopped, "records": [capture]})
+    assert_reader_exit(facts, unexpected)
+    assert not facts["ledger_remains"]
+
+    with pytest.raises(AssertionError, match="no live READY"):
+        assert_reader_exit(*reader_exit_witness({**ready, "pid": 9}, began, stopped))
+    unknown = observed_exit_code(SimpleNamespace(wait=still_running))
+    for wrong in ([], [{**reader, "code": unknown}], [{**reader, "pid": 5}], [reader, reader]):
+        with pytest.raises(AssertionError, match="no exit status"):
+            assert_reader_exit(*reader_exit_witness(ready, began, {**stopped, "readers": wrong}))
+    with pytest.raises(AssertionError, match="alive when shutdown begins"):
+        assert_reader_exit(*reader_exit_witness(
+            ready, {**began, "readers": [{**began["readers"][0], "code": 1}]}, stopped))
+
+    def poll_during_reap():
+        owner.ready.clear()
+        return None
+
+    process.poll = poll_during_reap
+    with pytest.raises(AssertionError, match="alive when shutdown begins"):
+        assert_reader_exit(*reader_exit_witness(
+            ready, {**began, "readers": [reader_at_stop(process, owner)]}, stopped))
+    owner._process = SimpleNamespace(pid=process.pid)
+    owner.ready.set()
+    process.poll = lambda: None
+    with pytest.raises(AssertionError, match="alive when shutdown begins"):
+        assert_reader_exit(*reader_exit_witness(
+            ready, {**began, "readers": [reader_at_stop(process, owner)]}, stopped))
+
+    marker = tmp_path / "lifespan-finished.json"
+
+    def exit_after_marker():
+        marker.touch()
+        return 0
+
+    wait_for(marker.exists, SimpleNamespace(poll=exit_after_marker))
+    with pytest.raises(AssertionError, match="server exited early: 0"):
+        wait_for((tmp_path / "missing.json").exists, SimpleNamespace(poll=lambda: 0))
+
+    for wrong in ([{**row, "host_pid": 5}], [{**row, "owner_task": "foreign"}], [{**row, "kind": "companion"}],
+                  [{**row, "ledger_entry": {**ledger, "session_id": "generation-b"}}],
+                  [{**row, "purpose": "unrelated"}], [row, row], [{**capture, "host_pid": 5}]):
+        with pytest.raises(AssertionError, match="unproved or unrelated owned records"):
+            assert_reader_exit(*reader_exit_witness(ready, began, {**stopped, "records": wrong}))
+    with pytest.raises(AssertionError, match="unproved or unrelated owned records"):
+        assert_reader_exit(*reader_exit_witness(
+            ready, began, {**stopped, "maintenance": [{"pid": 3, "code": unknown}]}))
+
+
+CAPTURE_ENTERED = ("ready.json", "ordinary-entered.json", "review-entered.json")
+
+
 def stop_before_release(proc, gates, ingress, *, imported=False, expected_code=None):
     assert not (gates / "release").exists()
     started = time.monotonic()
@@ -131,33 +246,33 @@ def stop_before_release(proc, gates, ingress, *, imported=False, expected_code=N
         code = proc.wait(timeout=3)
     except subprocess.TimeoutExpired:
         code = None
+    began = json.loads((gates / "stop-began.json").read_text())
+    stopped = json.loads((gates / "owned-stop.json").read_text())
+    ready = json.loads((gates / "reader-ready.json").read_text())
+    reader, unexpected = reader_exit_witness(ready, began, stopped)
     observation = {"ingress": ingress, "imported": imported,
                    "exited_before_release": code is not None, "returncode": code,
-                   "elapsed_seconds": time.monotonic() - started}
+                   "elapsed_seconds": time.monotonic() - started, "reader": reader}
     (gates / "exit.json").write_text(json.dumps(observation))
     print("EXECUTABLE_STOP", json.dumps(observation), flush=True)
     assert not (gates / "release").exists()
     assert (gates / "lifespan-finished.json").is_file()
     assert (gates / "server-finished.json").is_file()
     assert json.loads((gates / "main-socket-closed.json").read_text())["closed"]
-    began = json.loads((gates / "stop-began.json").read_text())
     assert any(row.get("stop_requested_at") for row in began["records"])
-    stopped = json.loads((gates / "owned-stop.json").read_text())
     assert stopped["outcome"]["state"] == "completed"
     assert stopped["outcome"]["confirmed"] >= 1
     assert stopped["children"] and all(row["code"] is not None for row in stopped["children"])
     assert stopped["maintenance"] and all(row["code"] is not None for row in stopped["maintenance"])
-    # Server machinery has its own lifecycle, outside the task-owned stop set.
-    # Any ledger remnants must name exactly these proven-exited maintenance children.
-    capture_pids = {row["pid"] for row in stopped["maintenance"]}
-    assert all(row["purpose"] == "maintenance" and not row["owner_task"]
-               and row["host_pid"] in capture_pids for row in stopped["records"])
     expected = expected_code if expected_code is not None else (
         130 if ingress == "sigint" else 143 if ingress == "sigterm" else 0)
     if imported:
         assert code is None, "imported main must leave process exit to its caller"
     else:
         assert code == expected, "executable did not exit while capture remained blocked"
+    # Server machinery has its own lifecycle, outside the task-owned stop set.
+    # Ledger retirement is independent of the measured exits; no unrelated record is allowed.
+    assert_reader_exit(reader, unexpected)
 
 
 def prepare_capture(tmp_path):
@@ -207,8 +322,8 @@ def test_executable_quit_preserves_owed_capture_for_next_generation(tmp_path, en
     try:
         with running(tmp_path, "held", entrypoint, ingress) as (proc, gates):
             # The ordinary capture enters in the maintenance child: allow its cold start, as recovery does.
-            wait_for(lambda: all((gates / name).exists() for name in (
-                "ready.json", "ordinary-entered.json", "review-entered.json")), proc, timeout=45)
+            wait_for(lambda: all((gates / name).exists() for name in (*CAPTURE_ENTERED, "reader-ready.json")),
+                     proc, timeout=45)
             # The server names its own process: on Windows proc.pid can be a venv launcher in front of it.
             server_pid = json.loads((gates / "ready.json").read_text(encoding="utf-8"))["pid"]
             assert json.loads((gates / "ordinary-entered.json").read_text(encoding="utf-8"))["pid"] != server_pid
@@ -221,8 +336,7 @@ def test_executable_quit_preserves_owed_capture_for_next_generation(tmp_path, en
 
         with running(tmp_path, "recovery", entrypoint) as (proc, gates):
             # The new body/child generations reclaim the dead owner's lock and finish owed capture.
-            wait_for(lambda: all((gates / name).exists() for name in (
-                "ready.json", "ordinary-entered.json", "review-entered.json")), proc, timeout=45)
+            wait_for(lambda: all((gates / name).exists() for name in CAPTURE_ENTERED), proc, timeout=45)
             pending()
             (gates / "release").touch()
             wait_for(lambda: current.run(root, entries["ordinary"].run_id).patch_captured
@@ -261,8 +375,8 @@ def test_closed_output_stream_cannot_hold_executable_capture(tmp_path, stream):
     _, _, areas, _, _ = prepare_capture(tmp_path)
     try:
         with running(tmp_path, "held", "console", broken_stream=stream) as (proc, gates):
-            wait_for(lambda: all((gates / name).exists() for name in (
-                "ready.json", "ordinary-entered.json", "review-entered.json")), proc, timeout=60)
+            wait_for(lambda: all((gates / name).exists() for name in (*CAPTURE_ENTERED, "reader-ready.json")),
+                     proc, timeout=60)
             stop_before_release(proc, gates, "pipe", expected_code=120)
             assert not (gates / "ordinary-returned.json").exists()
             for area in areas.values():
@@ -279,8 +393,8 @@ def test_imported_main_leaves_exit_and_exceptions_to_caller(tmp_path, ingress):
     prepare_capture(tmp_path)
     try:
         with running(tmp_path, "held", "imported", ingress) as (proc, gates):
-            wait_for(lambda: all((gates / name).exists() for name in (
-                "ready.json", "ordinary-entered.json", "review-entered.json")), proc, timeout=60)
+            wait_for(lambda: all((gates / name).exists() for name in (*CAPTURE_ENTERED, "reader-ready.json")),
+                     proc, timeout=60)
             stop_before_release(proc, gates, ingress, imported=True)
             if ingress == "pipe":
                 assert json.loads((gates / "main-returned.json").read_text())["result"] == 0

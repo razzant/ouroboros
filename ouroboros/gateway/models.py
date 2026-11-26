@@ -873,7 +873,8 @@ async def api_local_model_test(request: Request) -> JSONResponse:
         return json_exception(e)
 
 
-_DEDICATED_KEY, _DEDICATED_URL = (PROVIDER_KINDS["openai-compatible"].flat_key(field) for field in ("api_key", "base_url"))
+_DEDICATED_KEY, _DEDICATED_URL, _COMPATIBLE_CONSENT = (
+    PROVIDER_KINDS["openai-compatible"].flat_key(field) for field in ("api_key", "base_url", "continue_unconfirmed"))
 # The built-in compatible connection's two pairs, key setting → address setting (``compatible_endpoint``).
 # Discovery and Test name the pair a draft reaches, since both may be saved, even for one address: a kept
 # key is read from the named pair and never guessed from an address.
@@ -966,6 +967,11 @@ def _discover_provider_test_model(source_id: str, settings: dict) -> str:
     if parse_model_route(f"{source_id}::").kind != "openai-compatible":
         return ""
 
+    from ouroboros.llm_probe import _target_is_configured
+    from ouroboros.llm_routing import resolve_target
+    if not _target_is_configured(resolve_target(f"{source_id}::catalog", settings=settings)):
+        return ""
+
     async def load_first() -> str:
         loader = next((loader for source, loader in _provider_specs(settings) if source["id"] == source_id), None)
         if loader is None:
@@ -994,6 +1000,8 @@ def _provider_test_log(provider_id: str, model: str, result: dict, duration_ms: 
 
 def _run_provider_test_with_settings(provider_id: str, settings: dict, connection: str = "") -> dict:
     """Run selection, optional discovery, client construction and one send."""
+    from typing import get_args, get_type_hints
+    from ouroboros.gateway.contracts import ProviderTestResponse
     from ouroboros.llm import LLMClient
     from ouroboros.llm_probe import controlled_probe_error
 
@@ -1019,6 +1027,11 @@ def _run_provider_test_with_settings(provider_id: str, settings: dict, connectio
     public = {"ok": bool(result.get("ok"))}
     if not public["ok"]:
         public["error"] = str(result.get("error") or "Model request failed")
+    if result.get("caution"):  # the request went to a server that named no program: said whatever the outcome
+        public["caution"] = str(result["caution"])
+    withheld = get_args(get_args(get_type_hints(ProviderTestResponse, include_extras=True)["code"])[0])
+    if not public["ok"] and result.get("code") in withheld:  # what kept a compatible send back
+        public["code"] = result["code"]
     return public
 
 
@@ -1081,8 +1094,9 @@ def _endpoint_identity(base_url: object) -> tuple:
     """Where requests built on a base URL go. The OpenAI SDK and httpx (the GigaChat library)
     append each path after one enforced trailing slash and catalog reads strip it, so one
     trailing slash, case, a default port and dot segments change nothing. They append after
-    a query too, and a catalog path lands inside a fragment, so a URL with either is the
-    same endpoint only when spelled the same."""
+    a query too (the private compatible client composes before it, ``net_transport.openai_client_class``),
+    and a catalog path lands inside a fragment, so a URL with either is the same endpoint only when
+    spelled the same."""
     text = str(base_url or "").strip()
     try:
         url = httpx.URL(text)
@@ -1142,7 +1156,8 @@ def _pair_test_settings(settings: dict, overrides: dict[str, str], key_setting: 
     draft reaches (``compatible_endpoint``), with no historical fallback and no key from the other pair."""
     pair = (key_setting, _COMPATIBLE_PAIRS[key_setting])
     other = [key for item in _COMPATIBLE_PAIRS.items() if item != pair for key in item]
-    return {**settings, **{key: value for key, value in overrides.items() if key in pair}, **dict.fromkeys(other, "")}
+    carried = (*pair, _COMPATIBLE_CONSENT)  # the key's consent belongs to either pair
+    return {**settings, **{key: value for key, value in overrides.items() if key in carried}, **dict.fromkeys(other, "")}
 
 
 def _builtin_test_settings(provider_id: str, settings: dict, overrides: dict[str, str]) -> dict:
@@ -1153,7 +1168,8 @@ def _builtin_test_settings(provider_id: str, settings: dict, overrides: dict[str
         # Clear on the dedicated card must not silently restore the corresponding
         # legacy value for this request-local probe.
         legacy_fallbacks = COMPATIBLE_LEGACY_PAIR
-        if not any(str(settings.get(key, "") or "").strip() for key in legacy_fallbacks):
+        if legacy_fallbacks.keys() & overrides.keys() and not any(
+                str(settings.get(key, "") or "").strip() for key in legacy_fallbacks):
             # A legacy install has no dedicated compatible pair yet. Preserve the
             # saved half the owner did not edit while the other half is a draft.
             for dedicated_key, legacy_key in legacy_fallbacks.items():

@@ -116,7 +116,7 @@ class MailboxWriteUnconfirmed(OSError):
 
 
 def _append_mail(drive_root: pathlib.Path, task_id: str, path: pathlib.Path, entry: Dict[str, Any],
-                 admit: Optional[Any] = None, *, raise_on_unconfirmed: bool = False) -> bool:
+                 admit: Optional[Any] = None, *, raise_on_unconfirmed: bool = False, once: bool = False) -> bool:
     """Append one mailbox row under the task's mail lock (``task_custody.task_mail_lock``,
     on the canonical side), so a row can never land between a settlement's custody read and
     the unlink or drive move it permits (a sender after that recreates the mailbox, which
@@ -124,12 +124,15 @@ def _append_mail(drive_root: pathlib.Path, task_id: str, path: pathlib.Path, ent
     different lock, so a long copy-back never blocks a sender. ``admit`` is a check run
     INSIDE the lock before the write (a remote author's intake fact): False writes nothing.
     A False from the append itself is NOT write-free: bytes of a torn row may have landed. They stay
-    as they are, and the record boundary keeps the next row from being glued onto them."""
+    as they are, and the record boundary keeps the next row from being glued onto them. ``once`` (a reminder
+    always): a whole row of this id already in this store's mailbox, or its acknowledgement in the ledger beside
+    it, settles a repeat of the same letter (True, nothing appended), decided here under the lock before ``admit``."""
     from ouroboros.task_custody import task_mail_lock
     reminder = (entry.get("work_attention") or {}).get("kind") == "deadline_expired"  # stays once after its drain too
+    once = once or reminder
     with task_mail_lock(drive_root, task_id) as locked:
-        if locked and (entry.get("provenance") == "place_event" or reminder) and (_holds(path, entry["msg_id"]) or (
-                reminder and _holds(_ack_path(drive_root, task_id), entry["msg_id"]))):
+        if locked and (entry.get("provenance") == "place_event" or once) and (_holds(path, entry["msg_id"]) or (
+                once and _holds(_ack_path(drive_root, task_id), entry["msg_id"]))):
             return True
         if not locked or (admit is not None and not admit()):
             return False
@@ -413,6 +416,7 @@ def write_owner_message(
     origin_suppressed: bool = False,
     work_reply_fallback: Optional[Dict[str, Any]] = None,
     raise_on_unconfirmed: bool = False,
+    once: bool = False,
 ) -> bool:
     """Write an owner message or typed control entry to a task's mailbox.
 
@@ -428,6 +432,8 @@ def write_owner_message(
     finished author's card. ``card_delivery`` names the living-card press
     ``{card_id, request_id, canonical_root}`` its read settles. ``admit``: a check run under the
     mail lock before the append (a carried Presence author's intake), False writes nothing.
+    ``once``: a letter whose id this store already holds (row or acknowledgement) is not written again, and its
+    directory comes only with an admitted append, so a refused letter recreates no folder custody already removed.
     ``reply_reference``: the door's typed reference to the message these words reply to.
     ``origin_message_ref`` / ``origin_suppressed``: the door's source or known absence, separate from Reply and ``msg_id``.
     """
@@ -435,7 +441,8 @@ def write_owner_message(
 
     require_owned_root(drive_root)
     path = _mailbox_path(drive_root, task_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if not once:  # a ``once`` letter's directory is made by its admitted append (``append_jsonl``), never before
+        path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "msg_id": msg_id or uuid.uuid4().hex,
         "ts": utc_now_iso(),
@@ -474,7 +481,7 @@ def write_owner_message(
             from ouroboros.artifacts import attachment_manifest_projection
             entry.update(attachment_manifest_projection(drive_root, task_id, attachment_manifest))
         if not _append_mail(drive_root, task_id, path, entry, admit=admit,
-                            raise_on_unconfirmed=raise_on_unconfirmed):
+                            raise_on_unconfirmed=raise_on_unconfirmed, once=once):
             log.warning("Owner message for task %s not appended (refused by its admission or not durable)", task_id)
             return False
         return True
@@ -782,6 +789,13 @@ def reset_attempt_controls_for_retry(
         return 0
 
 
+def normalize_mailbox_kind(entry: dict) -> dict:
+    """Use the ordinary routing kind without inventing the writer's kind for legacy mail."""
+    if kind := entry.get("kind"):
+        return entry if isinstance(kind, str) else {**entry, "kind": str(kind)}
+    return {**entry, "kind": KIND_OWNER_TEXT, "recorded_kind": ""}
+
+
 def drain_owner_entries(
     drive_root: pathlib.Path,
     task_id: str,
@@ -841,12 +855,13 @@ def drain_owner_entries(
             if not isinstance(entry, dict):
                 complete = False
                 continue
-            if str(entry.get("kind") or KIND_OWNER_TEXT) == KIND_CONTROL_REVOKED:
+            entry = normalize_mailbox_kind(entry)
+            if entry["kind"] == KIND_CONTROL_REVOKED:
                 revoked.add(str(entry.get("text") or ""))
             parsed.append(entry)
         entries = []
         for entry in parsed:
-            kind = str(entry.get("kind") or KIND_OWNER_TEXT)
+            kind = entry["kind"]
             if (kinds is not None and kind not in kinds) or (kinds is None and kind == KIND_MODEL_WAIT):
                 continue
             mid = entry.get("msg_id", "")
@@ -862,7 +877,7 @@ def drain_owner_entries(
                 drained = {
                     "msg_id": mid, "text": text, "kind": kind,
                     "ts": str(entry.get("ts") or ""),
-                    **({} if entry.get("kind") else {"recorded_kind": ""}),  # routing's default is no writer's kind
+                    **({"recorded_kind": entry["recorded_kind"]} if "recorded_kind" in entry else {}),
                 }
                 if isinstance(entry.get("client_surface"), dict) and entry.get("client_surface"):
                     drained["client_surface"] = dict(entry["client_surface"])
@@ -1000,6 +1015,30 @@ def mailbox_drain_ended(task_drive: pathlib.Path, task_id: str) -> bool:
     from ouroboros.task_store import task_drive_status
 
     return task_drive_status(task_drive, [task_id]).get(str(task_id), ("", ""))[0] in SETTLED_STATUSES
+
+
+def mailbox_reader_live(root: pathlib.Path, task_drive: pathlib.Path, task_id: str) -> Optional[bool]:
+    """Whether TASK_ID still reads its mailbox in TASK_DRIVE, for a writer asking under that mail lock (typed columns,
+    no body, no queue lock): False once its canonical row in ROOT or its own row in TASK_DRIVE is final, since
+    ``task_custody.settle_task_mailbox`` retires a mailbox by the canonical row whatever a drive of its own still says,
+    and a drive's own end stops its drain (``mailbox_drain_ended``); True only while each reads not final; else None:
+    a row a store does not hold, or cannot read, proves neither."""
+    from ouroboros.task_status import NONTERMINAL_STATUSES, SETTLED_STATUSES
+    from ouroboros.task_store import task_drive_status
+
+    stores = [pathlib.Path(root)]
+    if pathlib.Path(task_drive).resolve(strict=False) != stores[0].resolve(strict=False):
+        stores.append(pathlib.Path(task_drive))
+    live = True
+    for store in stores:
+        try:
+            status = task_drive_status(store, [task_id]).get(str(task_id), ("", ""))[0]
+        except Exception:
+            status = ""
+        if status in SETTLED_STATUSES:
+            return False
+        live = live and status in NONTERMINAL_STATUSES
+    return True if live else None
 
 
 # Receipt vocabulary for a message written into a task's mailbox. A write proves only

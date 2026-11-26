@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover
     from typing_extensions import NotRequired, Required
 
 
+# Manifest contribution, projected from one live revision. Optional provider fields stay absent.
 class UiContribution(TypedDict, total=False):
     key: Required[str]
     skill: Required[str]
@@ -53,6 +54,7 @@ class UiContribution(TypedDict, total=False):
     revision: Required[str]
 
 
+# GET /api/ui/contributions (no-store). A missing chosen engine remains selected.
 class UiContributionsResponse(TypedDict):
     contributions: List[UiContribution]
     offers: Dict[str, List[Dict[str, Any]]]
@@ -168,10 +170,10 @@ async def api_extension_host_asset(request: Request) -> Response:
 class UiPreferencesResponse(TypedDict):
     ok: NotRequired[bool]
     unreadable: NotRequired[bool]  # GET: true when a saved file exists but cannot be read; every value is then the default, none the owner's choice
-    voice: dict[str, str]
-    contributions: dict[str, list[str]]
+    voice: dict[str, str]  # stt, tts and tts_voice come from the stored preference.
+    contributions: dict[str, list[str]]  # The hidden and order lists contain contribution ids.
     widget_order: list[str]
-    widget_start_mode: dict[str, Literal["auto", "manual", "retain"]]  # owner per-card launch-policy override
+    widget_start_mode: dict[str, Literal["auto", "manual", "retain"]]  # owner per-card launch-policy override, keyed "<skill>:<tab_id>"
     widget_size: dict[str, dict[str, int]]  # owner Widgets card size: {w: columns spanned, 12 = full, 0 = author's; h: content px, 0 = natural}
     nested_subagents_expanded: bool
     sidebar_width: int  # px; 0 = CSS default (resizable side sections, v6.33.0)
@@ -180,6 +182,6 @@ class UiPreferencesResponse(TypedDict):
     main_seen_revision: Optional[int]  # Main's monotonic paint ACK; null until a client first sets it
     read_ahead_revisions: dict[str, list[list[int]]]  # per chat id: revisions read in full in another room (host-owned)
     welcome: dict[str, str]  # install-wide empty-Main UI copy: mode default|hidden|custom and plain text
-    model_recents: list[ChatModelRoute]  # server-written, newest first, at most four distinct routes
-    model_pins: list[ChatModelRoute]  # owner-pinned routes in pin order; POST changes them by model_pins.pin/unpin only
+    model_recents: list[ChatModelRoute]  # server-written on owner model actions, newest first, at most four distinct routes
+    model_pins: list[ChatModelRoute]  # owner-pinned routes in pin order, at most 24 distinct; POST changes them by model_pins.pin/unpin only
 

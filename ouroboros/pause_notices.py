@@ -101,14 +101,49 @@ def authority_wait_text(cause: str) -> str:
 
 # A Resume refused on money (``supervisor.budget_resume``). The answer's ``message`` is what every door shows
 # (``work_stop.resume_outcome``), so no client keeps a copy of these sentences. A per-task cap is no next step for the
-# work that used it up: the setting reaches only work that starts after it.
+# work that used it up: the setting reaches only work that starts after it; this work's
+# own conversational cap (``set_task_cost_cap``) is the next step, and raising it never
+# resumes anything by itself. An independent fence of another provenance is a different limit: the
+# conversational cap refuses it (``independent_cap_binds``), so its words must not claim that remedy.
 RESUME_REFUSAL_WORDS = {
     "consciousness_allowance_exhausted": "the consciousness limit has nothing left for it now.",
     "consciousness_allowance_unknown": "what is left of the consciousness limit cannot be read now.",
     "consciousness_disabled": "consciousness is off.",
     "budget_still_exhausted": "the total budget has nothing left; raise it, then press Resume.",
-    "root_hard_cap_exhausted": "the per-task cost cap of this work is used up.",
+    "root_hard_cap_exhausted": "this work's per-task cost cap is used up; raise this work's cap conversationally (set_task_cost_cap), then press Resume.",
+    "independent_cap_exhausted": "this work's independent cost limit is used up; set_task_cost_cap does not raise it. Resolve that limit at its source, or end this work.",
+    "work_cap_export_unverified": "this work's cap is used up, and a retained cap decision is unverified. Verify that record before trying Resume again.",
+    "work_cap_reconcile_pending": "this work's cap is used up, and exported cap reconciliation is pending. Complete startup migration before amending it or trying Resume again.",
 }
+
+
+def cap_exhausted_error(money: dict, axis: str | None = None) -> str:
+    """The typed refusal for an exhausted cap, by what a money snapshot shows binds.
+
+    ``root_hard_cap_exhausted`` is the work's own cap — the one ``set_task_cost_cap``
+    raises, amended or not. ``independent_cap_exhausted`` names a fence of another
+    provenance: that tool refuses those (``independent_cap_binds``), so their remedy must
+    not claim it. ``axis`` overrides the snapshot's binding axis (a caller that knows which
+    axis's tree was exhausted reads that axis's own source) unless the complete
+    observation identifies a separate or unverified fence. A legacy read without
+    those facts keeps the ordinary per-task refusal.
+    """
+    from ouroboros._usage_rows import ORDINARY_GROUP_CAP_SOURCES, WORK_CAP_SCOPE
+
+    if isinstance(money, dict):
+        if block := money.get("work_cap_block"):
+            return block["error"]
+        axis = axis if axis in {"root", "group"} else money.get("binding_axis")
+        cap = money.get(f"{axis}_axis") if axis in {"root", "group"} else None
+        group = money.get("group_axis")
+        unlimited_group = isinstance(group, dict) and "limit_usd" in group and group["limit_usd"] is None
+        source = str((cap or {}).get("source") or "")
+        if (source == WORK_CAP_SCOPE or (axis == "root" and not source and not unlimited_group)
+                or axis == "group" and source in ORDINARY_GROUP_CAP_SOURCES):
+            return "root_hard_cap_exhausted"
+        if axis in {"root", "group"} and isinstance(cap, dict) and cap.get("limit_usd") is not None:
+            return "independent_cap_exhausted"
+    return "root_hard_cap_exhausted"
 
 
 def notice_text(notice: dict) -> str:

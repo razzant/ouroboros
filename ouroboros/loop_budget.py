@@ -155,15 +155,27 @@ def _check_budget_limits(
     policy = None if tool_ctx is None else task_pacing.cost_stop_policy(tool_ctx)
     own_wake = bool(policy and policy.get("own_wake_allowance"))
     resumed_wake = bool(policy and policy.get("resumed_wake_allowance"))
-    # A tree-capped or own-clock wake ceiling is the ROOT's money (its fence covers the tree);
-    # a global-share ceiling is global money.
-    pause_scope = "root" if (cost_ceiling.root_cap_usd is not None or own_wake) else "global"
     if resumed_wake:
         tree_info = _loop()._loop_tree_accounting(refresh=True, max_age_sec=0.0, strict=True)
         tree_cost: Optional[float] = _strict_tree_settled_usd(tree_info, ctx, tool_ctx)
     else:
         tree_info = _loop()._loop_tree_accounting(refresh=True, max_age_sec=_loop()._TREE_ACCOUNTING_MAX_STALE_SEC)
         tree_cost = tree_info.get("settled_usd") if isinstance(tree_info, dict) else None
+    live_cap = tree_info.get("root_limit_usd") if isinstance(tree_info, dict) else None
+    if live_cap is not None and (cost_ceiling.root_cap_usd is None
+                                 or float(live_cap) != float(cost_ceiling.root_cap_usd)):
+        # A mid-run amendment raised, or a late billing correction lowered, the effective
+        # hard cap this loop started under (a correction shrinks it: sibling roots' spend
+        # is part of the group figure); the authored early-stop point (ceiling_usd) keeps
+        # its start-fixed value.
+        cost_ceiling = task_pacing.CostCeiling(
+            state=cost_ceiling.state, ceiling_usd=cost_ceiling.ceiling_usd, root_cap_usd=float(live_cap),
+            planning_margin_usd=cost_ceiling.planning_margin_usd, basis=cost_ceiling.basis)
+        if tool_ctx is not None:
+            setattr(tool_ctx, "_cost_ceiling", cost_ceiling)  # later rounds read the refreshed cap
+    # A tree-capped or own-clock wake ceiling is the ROOT's money (its fence covers the tree);
+    # a global-share ceiling is global money.
+    pause_scope = "root" if (cost_ceiling.root_cap_usd is not None or own_wake) else "global"
     deciding, spend_basis = task_pacing.resolve_deciding_spend(
         tree_cost_usd=tree_cost,
         task_cost_usd=task_cost,
@@ -985,10 +997,14 @@ def authored_completion_budget_exhausted(ctx: Any, budget_remaining: float | Non
         if ((budget_remaining is not None and budget_remaining <= 0)
                 or (global_remaining is not None and global_remaining <= 0)):
             return True
-    cap = getattr(ceiling, "root_cap_usd", None)
+    tree = _loop()._loop_tree_accounting(refresh=True, max_age_sec=0.0)
+    # The same snapshot's limit is the cap the next call is admitted against — a mid-run
+    # work-cap amendment raises it past the start-cached number. The authored early-stop
+    # ceiling is not consulted here: only the hard cap owns a no-spend stop's verdict.
+    live_cap = tree.get("root_limit_usd") if isinstance(tree, dict) else None
+    cap = float(live_cap) if live_cap is not None else getattr(ceiling, "root_cap_usd", None)
     if cap is None:
         return False
-    tree = _loop()._loop_tree_accounting(refresh=True, max_age_sec=0.0)
     deciding, basis = task_pacing.resolve_deciding_spend(tree_cost_usd=(tree or {}).get("settled_usd"),
         task_cost_usd=ctx.accumulated_usage.get("cost"), root_cap_usd=cap)
     if deciding is not None and deciding >= cap:

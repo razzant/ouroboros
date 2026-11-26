@@ -886,12 +886,12 @@ def admit_commit_gate_wave(ctx, seats) -> str | None:
     if not seats:
         return None
     from ouroboros.review_substrate import review_usage_category
-    from ouroboros.tools.review_helpers import review_wave_binding_fence, review_wave_budget_gate
+    from ouroboros.tools import review_helpers as rh
 
     # Each seat is priced under the usage scope its substrate will SEND under
     # (surface category + slot), so its bound reads the seat's own observed
     # cache split — never the caller's warm transcript split.
-    admission = review_wave_budget_gate(
+    admission = rh.review_wave_budget_gate(
         ctx, surface="commit_gate",
         models=[seat["model"] for seat in seats],
         prompt_chars=[seat["prompt_chars"] for seat in seats],
@@ -904,6 +904,11 @@ def admit_commit_gate_wave(ctx, seats) -> str | None:
     )
     if admission is None:
         return None
+    if (authority := rh.review_wave_authority_clause(admission)) is not None:
+        return ("⚠️ REVIEW_BLOCKED: Review wave declined before dispatch ($0 spent). "
+                f"Refused because {authority[0]}; no budget exhaustion was claimed. "
+                f"No reviewer seat of the wave was dispatched: {authority[1]}, then retry this review.")
+    from ouroboros._usage_money import known_room
     from ouroboros.cost_projection import uncounted_money_text, usd_text
 
     def usd(value):
@@ -913,29 +918,28 @@ def admit_commit_gate_wave(ctx, seats) -> str | None:
     bounds = list(admission.get("slot_bounds") or []) + [None] * len(seats)
     wave, remaining = admission.get("estimated_wave_usd"), admission.get("remaining_usd")
     limit, known = admission.get("limit_usd"), admission.get("known_usd")
-    root_remaining = None if limit is None or known is None else max(0.0, float(limit) - float(known))
-    if admission.get("binding_axis") == "global":
-        # The refusal names the fence that binds and the knob that moves it — never
-        # a per-task fence the wave would have fit.
-        fence = (
-            f"the global budget TOTAL_BUDGET {usd(admission.get('global_limit_usd'))}: "
-            f"known spend={usd(admission.get('global_known_usd'))} across every task{_beside(admission, 'global_')}, "
-            f"remaining={usd(remaining)}; the per-task budget fence "
-            f"{usd(limit)} alone would leave {usd(root_remaining)}"
-        )
+    root_remaining = None if limit is None or known is None else max(0.0, float(known_room(limit, known)))
+    axes = list(admission.get("binding_axes") or ([admission["binding_axis"]] if admission.get("binding_axis") else []))
+    global_rem = admission.get("global_remaining_usd")
+    global_fence = (f"the global budget TOTAL_BUDGET {usd(admission.get('global_limit_usd'))}: "
+                    f"known spend={usd(admission.get('global_known_usd'))} across every task{_beside(admission, 'global_')}, "
+                    f"remaining={usd(global_rem if 'global' in axes and len(axes) > 1 else remaining)}")
+    work_fence = (f"the {rh.review_wave_work_fence(admission, usd(limit))}: known spend={usd(known)}{_beside(admission)}, "
+                  f"remaining={usd(root_remaining if len(axes) > 1 else remaining)}")
+    if "global" in axes and any(axis in {"root", "group"} for axis in axes):
+        fence = " and ".join(global_fence if axis == "global" else work_fence for axis in axes if axis in {"global", "root", "group"})
+    elif "global" in axes:
+        fence = f"{global_fence}; the per-task budget fence {usd(limit)} alone would leave {usd(root_remaining)}"
+    elif global_rem is None or float(global_rem) > 1e-9:
+        fence = f"{work_fence}; the global budget {usd(admission.get('global_limit_usd'))} alone would leave {usd(global_rem)}"
     else:
-        label = "whole-work billing-group budget fence" if admission.get("binding_axis") == "group" else "per-task budget fence"
-        fence = (
-            f"the {label} {usd(limit)}: known spend={usd(known)}{_beside(admission)}, "
-            f"remaining={usd(remaining)}; the global budget "
-            f"{usd(admission.get('global_limit_usd'))} alone would leave {usd(admission.get('global_remaining_usd'))}"
-        )
-    remedy = review_wave_binding_fence(admission)[1]
+        fence = work_fence
+    remedy = rh.review_wave_binding_fence(admission)[1]
     return (
-        "⚠️ REVIEW_BLOCKED: commit-gate review wave declined before dispatch ($0 spent). "
+        "⚠️ REVIEW_BLOCKED: Review wave declined before dispatch ($0 spent). "
         f"Known spend has reached {fence}. The wave's reservation upper bound would have been {usd(wave)} ("
         + "; ".join(f"{s['surface']}:{s['slot_id']} {s['model']} {usd(bounds[i])}" for i, s in enumerate(seats))
-        + f"). No reviewer seat of the wave was dispatched: {remedy}, then retry the same commit."
+        + f"). No reviewer seat of the wave was dispatched: {remedy}, then retry this review."
     )
 
 

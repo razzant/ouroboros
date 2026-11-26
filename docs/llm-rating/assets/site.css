@@ -116,6 +116,14 @@ h1 { margin: 0; font-size: clamp(28px, 3.4vw, 46px); font-weight: 680; letter-sp
 .head-side .sub { font-size: 12.5px; color: var(--fg-meta); font-variant-numeric: tabular-nums; text-wrap: balance; }
 .head-side a { color: var(--accent-word); text-underline-offset: 3px; display: inline-block; padding: 3px 0; }
 @media (min-width: 900px) { .head-side { flex-direction: column; flex-wrap: nowrap; align-items: flex-end; gap: 3px; text-align: right; } }
+.opening-vote { flex: 0 0 100%; margin: 5px 0 0; font-size: 13px; }
+.opening-vote a { white-space: nowrap; }
+.head-with-vote .head-side { max-width: 420px; }
+@media (min-width: 960px) {
+  .head-with-vote .head-main { flex-basis: 460px; }
+  .head-with-vote .head-side { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 1px 12px; }
+}
+@media (min-width: 960px) and (max-width: 1140px) { .head-with-vote .head-side { max-width: 380px; } }
 .notice { margin: 0; padding: 9px 12px; border-radius: 10px; background: var(--tone-amber); font-size: 13px; }
 
 /* ---- board: the legend, the views of the table, the table, my first picks */
@@ -124,6 +132,8 @@ h1 { margin: 0; font-size: clamp(28px, 3.4vw, 46px); font-weight: 680; letter-sp
 h2 { margin: 0; font-size: 19px; line-height: 1.25; font-weight: 660; letter-spacing: -0.012em; }
 .note { margin: 3px 0 0; font-size: 13px; color: var(--fg-meta); max-width: 78ch; }
 .board-head .note { margin: 0; font-size: 12.5px; }
+.board-votes { margin: 8px 0 0; padding: 0 18px; font-size: 13px; color: var(--fg-meta); }
+.board-votes a { white-space: nowrap; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0; padding: 0; list-style: none; font-size: 12.5px; color: var(--fg-meta); }
 .legend li { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .legend .t { width: 22px; height: 22px; font-size: 12px; border-radius: 6px; }
@@ -159,7 +169,8 @@ h2 { margin: 0; font-size: 19px; line-height: 1.25; font-weight: 660; letter-spa
 :root[data-theme="dark"] .mx .gh span { border-bottom-color: rgba(244, 81, 82, 0.5); }
 .mx .wh { height: 138px; align-self: stretch; display: flex; align-items: flex-end; justify-content: center; min-width: 0; padding: 6px 0 8px; }
 .mx .wh .wl { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; color: var(--fg); }
-.mx .wbtn { border: 0; background: none; padding: 4px 2px; margin: 0; font-size: 12.5px; cursor: pointer; border-radius: 6px; display: flex; align-items: flex-end; justify-content: center; height: 100%; width: 100%; }
+.mx .wbtn, .mx .column-label { padding: 4px 2px; margin: 0; font-size: 12.5px; display: flex; align-items: flex-end; justify-content: center; height: 100%; width: 100%; }
+.mx .wbtn { border: 0; background: none; cursor: pointer; border-radius: 6px; }
 .mx .wbtn:hover .wl, .mx .wbtn.sel .wl { color: var(--accent-word); }
 .mx .hr > .sp { align-self: stretch; }
 .mx .m { grid-column: 1; position: sticky; left: 0; z-index: 1; background: var(--obj-solid); min-width: 0; height: var(--rowh); align-self: stretch; display: flex; align-items: center; padding-left: 10px; }
@@ -186,7 +197,7 @@ h2 { margin: 0; font-size: 19px; line-height: 1.25; font-weight: 660; letter-spa
 .mx:not([data-group="all"]):not(.hz) .wh .wl { white-space: normal; max-height: 72px; line-height: 1.12; text-align: left; }
 .mx.hz .wh { height: auto; min-height: 42px; }
 .mx.hz .wh .wl { writing-mode: horizontal-tb; transform: none; white-space: normal; text-align: center; line-height: 1.25; }
-.mx.hz .wbtn { padding: 4px 6px; }
+.mx.hz .wbtn, .mx.hz .column-label { padding: 4px 6px; }
 @media (prefers-reduced-motion: reduce) { .mx button.t { transition: none; } }
 @media (min-width: 900px) and (max-height: 800px) {
   /* a short laptop window: slightly lower rows, so the whole ranking stays in view under the head */
@@ -378,3 +389,187 @@ details > .cases:first-of-type { margin-top: 6px; }
 .ed .links a { color: var(--accent-word); text-underline-offset: 3px; }
 .ed figure { margin: 0; }
 .ed figure img { display: block; width: 100%; height: auto; border-radius: 12px; box-shadow: var(--elev); }
+
+/* ==== method 4 (2026.12 on): the sections under the ranking. Same objects, tones and chips as above ==== */
+.eyebrow .pill.early { height: 18px; padding: 0 7px; margin-left: 6px; font: 600 10.5px/1 var(--font); letter-spacing: 0.02em; text-transform: none; vertical-align: 1px; background: var(--tone-amber); color: var(--tone-amber-ink); }
+.pill.flag { height: 20px; padding: 0 8px; font-size: 11.5px; font-weight: 600; background: var(--tray); color: var(--fg-meta); vertical-align: 1px; }
+.dh h3 .pill.flag { margin-left: 8px; }
+.vrow .who .mk.since { padding-top: 2px; line-height: 1.5; }
+.tc.since { color: var(--fg-meta); font-size: 13px; }
+
+/* a fifteen-row ranking still fits a small laptop window under the head */
+@media (min-width: 900px) and (max-height: 800px) {
+  .mx[data-group="rating"] { --rowh: 29px; }
+  .mx[data-group="rating"] .c .t { height: 25px; font-size: 13.5px; }
+  .mx[data-group="rating"] .mbtn { height: 27px; }
+  .mx.hz .wh { min-height: 34px; padding-top: 2px; padding-bottom: 4px; }
+  .board { padding-top: 11px; padding-bottom: 8px; }
+  .picks { padding-top: 8px; }
+}
+
+/* section navigation under the tiles: chips that are links */
+.secnav { display: flex; flex-wrap: wrap; gap: 6px; }
+a.chip { display: inline-flex; align-items: center; text-decoration: none; }
+a.chip:hover { color: var(--fg); background: var(--hover); }
+
+/* what changed since the previous edition */
+.cmpgrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px 28px; margin-top: 8px; }
+@media (min-width: 1000px) { .cmpgrid { grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); align-items: start; } }
+.plain.bul li { padding-left: 14px; position: relative; }
+.plain.bul li::before { content: ""; position: absolute; left: 2px; top: 0.62em; width: 5px; height: 5px; border-radius: 50%; background: var(--fg-dis); }
+.cmpbox { min-width: 0; }
+.cmpwrap, .rtwrap { overflow-x: auto; margin-top: 10px; }
+table.cmp, table.rt { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+table.cmp th, table.cmp td, table.rt th, table.rt td { padding: 5px 8px; text-align: left; vertical-align: middle; border-top: 1px solid var(--hair); }
+table.cmp thead th, table.rt thead th { border-top: 0; font-size: 12px; font-weight: 650; color: var(--fg-meta); padding-top: 0; }
+table.cmp tbody th, table.rt tbody th { font-weight: 600; white-space: nowrap; }
+table.cmp tbody th small, table.rt tbody th small { display: block; font-size: 11.5px; font-weight: 500; color: var(--fg-meta); }
+table.cmp td { white-space: nowrap; }
+.crk { display: inline-block; min-width: 22px; margin-right: 6px; text-align: right; font-weight: 700; color: var(--fg-meta); }
+.minis { display: inline-flex; gap: 3px; vertical-align: middle; }
+.t.mini { width: 19px; height: 19px; font-size: 11px; border-radius: 5px; }
+.t.mini.moved { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--accent); }
+.cnew { display: inline-block; padding: 2px 8px; border-radius: 999px; background: var(--tone-crimson); color: var(--tone-crimson-ink); font-size: 12px; font-weight: 600; white-space: nowrap; }
+tr.isnew th { color: var(--fg); }
+
+/* the models' votes */
+.vsum { margin: 10px 0 0; font-size: 14px; max-width: 86ch; }
+.pairs { margin: 10px 0 0; padding: 0; list-style: none; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+@media (min-width: 900px) { .pairs { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.pair { background: var(--tray); border-radius: var(--r-in); padding: 12px 14px 12px; min-width: 0; display: flex; flex-direction: column; }
+.pair h3 { margin: 0; font-size: 14px; line-height: 1.35; font-weight: 650; }
+.pair .quiet { margin-top: 3px; }
+.vbar { display: flex; gap: 2px; height: 10px; margin-top: 10px; border-radius: 4px; overflow: hidden; background: var(--hair); }
+.vb { height: 100%; min-width: 3px; }
+.vb.a { background: var(--accent); }
+.vb.b { background: var(--tone-blue-ink); }
+.vb.tie { background: var(--fg-dis); opacity: 0.55; }
+.vb.ab { background: var(--fg-dis); opacity: 0.25; }
+.vkeys { margin: 7px 0 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12.5px; color: var(--fg-meta); font-variant-numeric: tabular-nums; }
+.vkeys li { display: inline-flex; align-items: center; gap: 5px; }
+.vkeys li::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: var(--fg-dis); opacity: 0.4; }
+.vkeys li.a::before { background: var(--accent); opacity: 1; }
+.vkeys li.b::before { background: var(--tone-blue-ink); opacity: 1; }
+.vkeys li.tie::before { opacity: 0.55; }
+.vkeys b { color: var(--fg); font-weight: 650; }
+.pair .mine:not(.why) { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; margin: 10px 0 0; font-size: 12.5px; }
+.pair .mine .lbl { color: var(--fg-meta); width: 100%; }
+.pair .mine .pm { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.pair .mine .t { width: 20px; height: 20px; font-size: 11.5px; border-radius: 6px; }
+.verdict { margin: 8px 0 0; padding: 5px 10px; border-radius: 8px; font-size: 12.5px; font-weight: 600; background: var(--hover); color: var(--fg-meta); width: fit-content; max-width: 100%; }
+.verdict.vd-agree { background: var(--tone-green); color: var(--tone-green-ink); }
+.verdict.vd-disagree { background: var(--tone-amber); color: var(--tone-amber-ink); }
+.pair .why { margin-top: 8px; font-size: 12.5px; }
+.anns { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; max-width: 78ch; }
+.anns small { display: block; margin-top: 1px; font-size: 12.5px; color: var(--fg-meta); font-variant-numeric: tabular-nums; }
+.anns .established { margin: 4px 0 0; }
+.vote-counting { margin-top: 16px; }
+details.roster { margin-top: 14px; }
+.vote-identity { display: block; font-size: 12px; line-height: 1.3; font-weight: 400; color: var(--fg-meta); }
+.vote-identity[data-identity="requested_route_only"] { color: var(--fg); }
+.bs { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.bs::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--fg-dis); opacity: 0.5; flex: none; }
+.bs.ok::before { background: var(--dot); opacity: 1; }
+.bs.warn::before { background: var(--draft); opacity: 1; }
+table.vt td { color: var(--fg-meta); }
+table.vt td:nth-child(2) { color: var(--fg); }
+
+/* reviewers */
+table.rv td { white-space: nowrap; }
+.frac { display: inline-block; min-width: 52px; font-weight: 650; }
+.mini-bar { display: inline-block; width: 64px; height: 6px; margin-left: 8px; border-radius: 3px; background: var(--hair); vertical-align: middle; overflow: hidden; }
+.mini-bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+/* two groups of columns: how the remarks held up on a second reading, then the seven problems confirmed first */
+table.rv thead tr.grp th { padding-bottom: 3px; }
+table.rv thead tr.grp th[colspan] { color: var(--fg); border-bottom: 1px solid var(--hair); }
+table.rv thead th[rowspan] { vertical-align: bottom; }
+table.rv thead tr + tr th { padding-top: 4px; }
+table.rv .sep { padding-left: 26px; }
+table.rv td.noseat { color: var(--fg-meta); white-space: normal; }
+.frac.n { min-width: 24px; }
+.rvkey { margin: 12px 0 0; font-size: 13px; line-height: 1.55; color: var(--fg-meta); max-width: 940px; }
+.rvkey b { color: var(--fg); font-weight: 650; }
+.revgrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px 28px; }
+@media (min-width: 1000px) { .revgrid { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); align-items: end; } }
+.advice { margin: 10px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; font-size: 14px; counter-reset: adv; }
+.advice li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; align-items: baseline; }
+.advice .who { display: inline-flex; flex-wrap: wrap; gap: 4px; max-width: 220px; }
+.advice .who b { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--tone-crimson); color: var(--tone-crimson-ink); font-size: 12px; font-weight: 650; white-space: nowrap; }
+.examples { margin: 10px 0 0; padding: 0; list-style: none; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+@media (min-width: 900px) { .examples { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.examples li { background: var(--tray); border-radius: var(--r-in); padding: 12px 14px; }
+.examples h4 { margin: 0; font-size: 14px; color: var(--fg); }
+.examples p { margin: 5px 0 0; font-size: 13.5px; line-height: 1.5; color: var(--fg-meta); }
+
+/* the detail of a column letter in method 4 */
+.covers { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 5px; }
+.covers li { padding: 2px 9px; border-radius: 999px; background: var(--tray); font-size: 12.5px; color: var(--fg-meta); }
+.facts.tight { margin-top: 0; }
+
+@media (max-width: 640px) {
+  /* phones: a table row becomes a small card with labelled values */
+  table.rv thead { display: none; }
+  table.rv, table.rv tbody, table.rv tr, table.rv th, table.rv td { display: block; width: 100%; }
+  table.rv tr { padding: 8px 0; border-top: 1px solid var(--hair); }
+  table.rv tbody th, table.rv td { border-top: 0; padding: 2px 0; white-space: normal; }
+  table.rv td { display: flex; justify-content: space-between; gap: 12px; }
+  table.rv td::before { content: attr(data-label); color: var(--fg-meta); }
+  table.rv td.sep { padding-left: 0; }
+  /* a value keeps its number and its bar together at the right of the card */
+  table.rv td { align-items: center; }
+  table.rv td .v { display: inline-flex; align-items: center; gap: 8px; }
+  table.rv td .v .mini-bar { margin-left: 0; }
+  table.rv td.noseat { display: block; }
+  table.rv td.noseat::before { display: block; }
+  table.cmp th, table.cmp td { padding: 5px 4px; }
+  .t.mini { width: 17px; height: 18px; font-size: 10.5px; }
+  .minis { gap: 2px; }
+  .crk { min-width: 16px; margin-right: 4px; }
+}
+/* the comparison: bullets in two columns on a wide screen, then one table; what moved is a column there and a line under the name on a phone */
+.plain.bul.cols { display: block; columns: 2 380px; column-gap: 32px; }
+.plain.bul.cols li { break-inside: avoid; margin-bottom: 9px; }
+table.cmp .mv-col { white-space: normal; color: var(--fg-meta); font-size: 12.5px; }
+table.cmp th .mv-inline { display: none; }
+table.rv { max-width: 940px; }
+@media (max-width: 760px) {
+  table.cmp .mv-col { display: none; }
+  table.cmp th .mv-inline { display: block; white-space: normal; max-width: 120px; }
+}
+details.roster, .rtwrap, .cmpwrap { max-width: 100%; min-width: 0; }
+@media (max-width: 560px) {
+  /* the longest short name, "Qwen 3.8 Flash", stays whole on a phone */
+  .mx { --namew: 138px; }
+  /* the roster of ballots becomes labelled rows, like the reviewers' table */
+  table.vt thead { display: none; }
+  table.vt, table.vt tbody, table.vt tr, table.vt th, table.vt td { display: block; width: 100%; }
+  table.vt tr { padding: 7px 0; border-top: 1px solid var(--hair); }
+  table.vt tbody th, table.vt td { border-top: 0; padding: 1px 0; white-space: normal; }
+  table.vt td { display: flex; justify-content: space-between; gap: 12px; }
+  table.vt td::before { content: attr(data-label); color: var(--fg-meta); }
+}
+@media (max-width: 359px) {
+  .mx { --namew: 120px; }
+  .mx:not([data-group="all"]) { --cw: 24px; }
+}
+@media (max-width: 640px) {
+  /* the advice on reviewers: the names above the sentence, so a row of four names leaves the sentence its width */
+  .advice li { grid-template-columns: minmax(0, 1fr); }
+  .advice .who { max-width: none; }
+}
+.cdash { display: none; color: var(--fg-meta); }
+@media (max-width: 760px) {
+  /* a phone keeps the place of the previous edition and every letter of now */
+  table.cmp .was-minis, table.cmp .cnew { display: none; }
+  table.cmp .cdash { display: inline; }
+  table.cmp .crk { min-width: 0; }
+}
+@media (max-width: 560px) {
+  /* the roster of ballots: name and fate on one line, the counts and the old table on a small line under it */
+  table.vt tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 10px; align-items: baseline; }
+  table.vt tbody th { grid-column: 1; }
+  table.vt td:nth-child(2) { grid-column: 2; display: block; width: auto; }
+  table.vt td:nth-child(2)::before { content: none; }
+  table.vt td:nth-child(3), table.vt td:nth-child(4) { grid-column: 1 / -1; display: block; font-size: 12px; }
+  table.vt td:nth-child(3)::before, table.vt td:nth-child(4)::before { content: attr(data-label) ": "; }
+}

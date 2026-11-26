@@ -1,13 +1,11 @@
 """The skill MCP facts exposed by management reads match their published shape."""
 
-from pathlib import Path
 from types import SimpleNamespace
 import typing
 
 from ouroboros.gateway.management_contracts import InstalledSkill, SkillMcpServerFact
 from ouroboros.gateway.schema import validate_ingress
 from ouroboros.skill_mcp import card_facts
-from tests.test_gateway_parity import _js_typedef_fields
 
 
 def test_installed_skill_mcp_facts_match_the_producer():
@@ -24,8 +22,6 @@ def test_installed_skill_mcp_facts_match_the_producer():
     assert row == {"id": "chrome", "title": "Chrome", "conflict": False,
                    "bound": True, "configured": True, "tool_count": 2, "listed": True, "error": "", "notes": ""}
     assert set(row) == set(typing.get_type_hints(SkillMcpServerFact))
-    twin = Path(__file__).resolve().parents[1] / "web/modules/management_contract_types.js"
-    assert _js_typedef_fields(twin.read_text(), "SkillMcpServerFact") == set(row)
     assert validate_ingress(row, SkillMcpServerFact) == []
     assert validate_ingress({**row, "listed": "yes"}, SkillMcpServerFact)
     assert validate_ingress({**row, "bound": "yes"}, SkillMcpServerFact)

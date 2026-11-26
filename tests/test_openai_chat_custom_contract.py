@@ -153,7 +153,7 @@ def test_a_tool_that_fits_whole_keeps_its_field_prose_and_a_larger_one_sends_str
     field = function["parameters"]["properties"]["marker"]
     field.update({"default": "ok", "x-note": "kept", "description": ""})
     structure = copy.deepcopy(function["parameters"])
-    for annotation in ("default", "x-note", "description"):
+    for annotation in ("default", "x-note", "description", "type"):  # an all-string enum already says string
         del structure["properties"]["marker"][annotation]
     room = MAX_CUSTOM_DESCRIPTION_CHARS - len(lead + "\n" + _SCHEMA_CLAUSE + _schema_text(function["parameters"]))
 
@@ -171,6 +171,28 @@ def test_a_tool_that_fits_whole_keeps_its_field_prose_and_a_larger_one_sends_str
     assert projected("я" * (room + 1)) == lead + "\n" + _SCHEMA_CLAUSE + canonical_json(structure)
     # A tool without a lead is its schema alone, under the same bound.
     assert projected("p", description=None) == _SCHEMA_CLAUSE + _schema_text(function["parameters"])
+
+
+def test_compaction_drops_only_the_string_type_an_all_string_enum_already_states():
+    """The structure-only form is what an over-bound tool spends its room on (schedule_subagent sat 2
+    characters under the bound): a non-empty all-string enum validates exactly the same without its
+    ``"type":"string"``, so the compact form leaves that out; any other enum keeps its type, and the
+    schema bound for argument validation keeps everything."""
+    from ouroboros.openai_chat_custom import _compact_schema
+
+    strings = {"type": "string", "enum": ["a", "b"], "description": "d"}
+    assert _compact_schema(strings) == {"enum": ["a", "b"]}
+    for kept in ({"type": "string", "enum": []}, {"type": "string", "enum": ["a", 1]},
+                 {"type": "integer", "enum": [1, 2]}, {"type": ["string", "null"], "enum": ["a", None]}):
+        assert _compact_schema(kept)["type"] == kept["type"], kept
+    for value, valid in (("a", True), ("c", False), (1, False), (None, False)):
+        assert Draft202012Validator(_compact_schema(strings)).is_valid(value) is valid
+        assert Draft202012Validator(strings).is_valid(value) is valid
+    tool = {"type": "function", "function": {"name": "probe", "description": "x" * 4000, "parameters": {
+        "type": "object", "properties": {"mode": strings}, "required": ["mode"]}}}
+    catalog = project_function_tools_to_openai_custom([tool])
+    assert '"mode":{"enum":["a","b"]}' in catalog.wire_tools()[0]["custom"]["description"]
+    assert catalog.schema_binding("probe").schema() == tool["function"]["parameters"]
 
 
 def test_compaction_preserves_literal_enum_and_const_objects_exactly():

@@ -23,7 +23,8 @@ PEOPLE = {"by_place": {"a": 129, "s": 84, "b": 34, "e": 3, "g": 7}, "total": 250
 
 
 def test_the_positions_are_named_by_meaning_and_unknown_is_never_off():
-    assert V.position_words(False) == "Only when you write to it"
+    assert V.position_words(False, []) == "Only when you write to it"
+    assert V.position_words(False) == "Background wakes are off"  # a known Off, without a read of places
     assert V.position_words(True) == "Also on its own and in places"
     assert V.position_words(None) == ""  # an unknown control says nothing, never Off
     # An install that holds no place is not told of places; an unread place store keeps the whole words.
@@ -31,14 +32,15 @@ def test_the_positions_are_named_by_meaning_and_unknown_is_never_off():
     assert V.position_words(True, [place("x", "X", "paused")]) == V.position_words(True)  # Paused is still a place
     assert V.describe_consciousness_state({"places_brief": []}, True)["position"] == "Also on its own"
     described = V.describe_consciousness_state({"places_brief": PLACES}, False)
-    assert described["position"] == V.position_words(False) and described["gloss"] == V.SWITCH_GLOSS
+    assert described["position"] == "Only when you write to it" and described["gloss"] == V.SWITCH_GLOSS
 
 
 def test_off_says_how_many_places_hear_and_a_paused_place_is_not_among_them():
     assert V.heard_sentence(PLACES) == "5 places are heard, not answered."
     assert V.heard_sentence([place("a", "A")]) == "1 place is heard, not answered."
     assert V.heard_sentence([place("x", "X", "paused")]) == V.heard_sentence([]) == "Nothing wakes it between your messages."
-    assert V.heard_sentence(None) == "Its places are heard, not answered."  # an unread store claims no count
+    assert V.heard_sentence(None) == (
+        "Whether your Ouroboroses can start work here could not be read. Its places are heard, not answered.")
     assert V.describe_consciousness_state({"places_brief": None}, False)["detail"] == V.heard_sentence(None)
 
 

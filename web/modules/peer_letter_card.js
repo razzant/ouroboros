@@ -11,28 +11,7 @@
 // work has ended (its card settled, `endLetters`) a letter still open says so instead of promising an answer. The card
 // derives nothing from tool text and has no button: a letter stops with its work's own Stop, and nothing here sends a
 // letter again.
-/**
- * @typedef {Object} LetterCardFact
- * @property {string} letter_id
- * @property {string} to                the receiving Ouroboros's name here (its place's label)
- * @property {string=} to_seed          its install id: the seed of its face
- * @property {string|null} text         the letter as recorded at its start (null: too long to carry)
- * @property {string=} at               when it was written (ISO), on the first fact
- * @property {'accepted_running'|'needs_input'|'waiting_owner'|'done'|'failed'|'cancelled'|'refused'|'not_sent'|'unconfirmed'|'unknown'} state
- * @property {'queued'|'running'=} phase
- * @property {string=} refusal_code     the receiver's typed refusal, or why nothing left here (not_sent)
- * @property {number|null=} spent_usd   what is known of its cost at the receiver (null: unknown, never 0)
- * @property {boolean=} spent_final     the receiver's cost is final; otherwise spent_usd is so far, never the total
- * @property {'given'|'none'|'held'|'unknown'=} reply  done: a reply for this Ouroboros by the receiver's explicit word
- *                                      (`held`: the receiver holds one now, its code in `held`)
- * @property {string=} held             a held reply's code (`rules_changed`: it does not come by itself)
- * @property {number|null=} ceiling_usd the letter's ceiling
- * @property {string=} error            a failure's short reason
- * @property {string|null=} answer      a given reply, whole (null: too long to carry; the work holds it)
- * @property {{question_id: string, text: string|null, held?: string}=} question  the receiver's question a read names
- *                                      (`held`: the code it holds its words under now, no words)
- * @property {{question_id: string, text: string|null}=} answered  this side's answer delivered to that question
- */
+// Python contract: `ouroboros/gateway/history_contracts.py::PeerLetterCardFact`.
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { fmt, tr } from './i18n.js';
 import { formatMsgTime, formatUsdKnown } from './utils.js';

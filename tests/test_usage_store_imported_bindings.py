@@ -61,7 +61,7 @@ def _billing(binding):
 
 
 def _on_the_known_spend_rule(name, result, expected):
-    """The one deliberate change since the journal era (#1487, owner Q4-A): room is
+    """On the known-spend rule (#1487, owner Q4-A), room is
     the limit minus KNOWN (settled) spend, and a snapshot also reports that spend.
 
     The fixture's bytes stay the shipped answer; this names the translation instead
@@ -86,6 +86,13 @@ def _on_the_known_spend_rule(name, result, expected):
             if isinstance(result.get(axis), dict):
                 assert result[axis]["settled_usd"] <= result[axis]["accounted_usd"] + 1e-9
                 result[axis] = {key: value for key, value in result[axis].items() if key != "settled_usd"}
+        if isinstance(expected, dict) and expected.get("binding_axis") == "root":
+            own, group = expected["root_axis"], expected["group_axis"]
+            # Keep the journal-era fixture byte-for-byte. For these equal ordinary amounts only,
+            # report the work's shared cap rather than the identical, unsourced per-root cap.
+            if (own["source"] is None and group["source"] in {"initial_task_admission", "legacy_live"}
+                    and own["limit_usd"] == group["limit_usd"] and own["accounted_usd"] == group["accounted_usd"]):
+                expected = {**expected, "binding_axis": "group"}
     return result, expected
 
 

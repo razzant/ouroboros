@@ -63,6 +63,7 @@
       "appointment_at": "2026-10-24T09:30:00+00:00",
       "live_wake_held": false,
       "position": "Also on its own and in places",
+      "position_short": "Also on its own and in places",
       "gloss": "When Ouroboros acts"
     }
   },
@@ -337,6 +338,7 @@
     "appointment_at": "2026-10-24T09:30:00+00:00",
     "live_wake_held": false,
     "position": "Also on its own and in places",
+    "position_short": "Also on its own and in places",
     "gloss": "When Ouroboros acts",
     "recent_wakes": [
       {

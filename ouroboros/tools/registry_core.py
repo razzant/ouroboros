@@ -619,10 +619,12 @@ class ToolRegistry:
                     if isinstance((value_schema := props.get("value", {})), dict): value_schema["description"] = "Value for fill/select or direction for scroll"
             elif entry.name == "schedule_subagent":
                 # A read-only subagent may delegate read-only children only — hide the
-                # acting (mutative) fields so it cannot spawn an acting grandchild.
+                # acting (mutative) fields so it cannot spawn an acting grandchild, and the
+                # write-side geometry a read-only child refuses or treats as omitted.
                 schema = copy.deepcopy(schema)
                 props = schema.get("parameters", {}).get("properties", {})
-                for field in ("write_surface", "write_root", "protected_paths_grant", "external_tool_grants"):
+                for field in ("write_surface", "write_root", "workspace", "directory_strategy", "scope_paths",
+                              "protected_paths_grant", "external_tool_grants"):
                     props.pop(field, None)
             elif entry.name == "delegate_start":
                 # Same selector trap the acting branch hides: a readonly child

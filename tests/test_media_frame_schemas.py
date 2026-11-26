@@ -1,44 +1,49 @@
-"""Photo, video and document frames publish the fields and requiredness their browser twins declare.
-
-The three outbound media frames inherit their shared fields from one private base in
-``gateway/contracts.py``. ``tests/test_gateway_parity.py`` holds their field names to the JSDoc twins in
-``web/modules/api_types.js``; this file also holds what ``GET /api/contract`` publishes as required, and each
-frame's ``type``, to the twin, so an edit of the shared base cannot silently change every media frame at once.
-"""
+"""Published WS media shapes keep their field set, required payload and discriminator."""
 
 from __future__ import annotations
 
-import pathlib
-import re
-
 import pytest
+from starlette.testclient import TestClient
 
-from ouroboros.gateway.schema import contract_document
-
-_API_TYPES = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js"
-
-
-def _twin_properties(name: str) -> dict[str, str]:
-    """``{field: JSDoc type}`` of one ``@typedef {Object}`` twin; the media twins' types carry no braces."""
-    text = _API_TYPES.read_text(encoding="utf-8")
-    match = re.search(rf"@typedef \{{Object\}} {name}\b(?P<body>.*?)\n \*/", text, re.S)
-    assert match, f"api_types.js missing {name}"
-    declared = re.findall(r"@property \{([^{}]*)\} ([A-Za-z_][A-Za-z0-9_]*)", match.group("body"))
-    assert len({field for _, field in declared}) == len(declared), f"{name} twin declares a property twice"
-    return {field: kind for kind, field in declared}
+from ouroboros.gateway.schema import contract_typed_dict, validate_ingress
+from tests.test_gateway_client_contract import _contract_app
 
 
-@pytest.mark.parametrize("name, frame_type", [
-    ("PhotoOutbound", "photo"), ("VideoOutbound", "video"), ("DocumentOutbound", "document"),
+_SHARED_REQUIRED = {"type", "role", "mime", "ts"}
+_SHARED_OPTIONAL = set("""
+    caption download_url download_url_compat content source sender_label sender_session_id
+    client_message_id transport chat_id task_id project_thread row_address row_client_message_id
+    reply_author_label reply_to relay reply_to_relay kind room_revisions
+""".split())
+
+
+@pytest.mark.parametrize(("name", "frame_type", "payload", "required_extra", "optional_extra"), [
+    ("PhotoOutbound", "photo", "image_base64", {}, {"subagents_mode"}),
+    ("VideoOutbound", "video", "video_base64", {}, set()),
+    ("DocumentOutbound", "document", "file_base64", {"filename": "note.txt"}, {"file_ref", "size_bytes"}),
 ])
-def test_published_media_frame_matches_its_twin_including_requiredness(name, frame_type):
-    schema = contract_document()["schemas"][name]
-    twin = _twin_properties(name)
-    published, declared = set(schema["required"]), {field for field, kind in twin.items() if not kind.endswith("=")}
-
-    assert set(schema["properties"]) == set(twin), f"{name}: published fields differ from its twin"
-    assert schema["required"] == sorted(declared), (
-        f"{name}: required only as published {sorted(published - declared)}, "
-        f"only in the twin {sorted(declared - published)}")
+def test_published_media_frame_fields_requiredness_and_type(tmp_path, name, frame_type, payload,
+                                                            required_extra, optional_extra):
+    with TestClient(_contract_app(tmp_path)) as client:
+        reply = client.get("/api/contract")
+    assert reply.status_code == 200
+    contract = reply.json()
+    binding = next(row for row in contract["ws"]["messages"] if row["type"] == frame_type)
+    assert binding == {"type": frame_type, "outbound": name}
+    schema = contract["schemas"][name]
+    required = _SHARED_REQUIRED | {payload} | required_extra.keys()
+    assert set(schema["required"]) == required
+    assert set(schema["properties"]) == required | _SHARED_OPTIONAL | optional_extra
     assert schema["properties"]["type"] == {"enum": [frame_type]}
-    assert twin["type"] == f'"{frame_type}"'
+    assert schema["properties"]["role"] == {"enum": ["user", "assistant"]}
+    assert schema["properties"][payload] == {"type": "string"}
+
+    media = {"type": frame_type, "role": "assistant", "mime": "application/octet-stream",
+             "ts": "2026-11-25T12:00:00Z", payload: "YWJj", **required_extra}
+    cls = contract_typed_dict(name)
+    assert not validate_ingress(media, cls)
+    assert validate_ingress({key: value for key, value in media.items() if key != payload}, cls) == [
+        f"{payload} is required",
+    ]
+    assert validate_ingress({**media, "type": "chat"}, cls) == [f"type must be one of: {frame_type}"]
+    assert validate_ingress({**media, payload: 42}, cls) == [f"{payload} must be a JSON string"]

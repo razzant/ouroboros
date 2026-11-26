@@ -78,6 +78,39 @@ def test_get_masks_row_secrets_and_describes_every_connection(settings_client):
     assert [row["id"] for row in body["_meta"]["connections"]][:2] == ["openrouter", "openrouter@byok"]
 
 
+def test_a_consent_is_saved_as_the_id_of_its_endpoint_and_read_back_as_the_admission(settings_client, monkeypatch, tmp_path):
+    """A compatible key's consent (``llm_ollama_guard``) names its base URL: the save keeps that endpoint's id, so
+    no path, query or userinfo is written a second time; the read says whether it admits the endpoint the key has."""
+    from ouroboros import capability_evidence as ce
+    from ouroboros.llm_ollama_guard import endpoint_id
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    client, on_disk, saved = settings_client
+    flat, named = "http://127.0.0.1:8080/v1", "http://user-name:pass-word@gateway.lan:8080/tenant-token-9f3/v1?api_key=query-secret"
+    lab = {"kind": "openai-compatible", "name": "lab", "base_url": named, "continue_unconfirmed": named}
+    assert client.post("/api/settings", json={
+        "OPENAI_COMPATIBLE_BASE_URL": flat, "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED": flat,
+        CONNECTIONS_KEY: [lab]}).status_code == 200
+    [row] = saved[CONNECTIONS_KEY]
+    assert (saved["OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED"], row["continue_unconfirmed"]) == (endpoint_id(flat), endpoint_id(named))
+    assert row["base_url"] == named and len(endpoint_id(named)) == 24
+    for secret in ("user-name", "pass-word", "tenant-token", "query-secret", "gateway.lan"):
+        assert secret not in row["continue_unconfirmed"]
+
+    def admissions():
+        meta = {entry["id"]: entry for entry in client.get("/api/settings").json()["_meta"]["connections"]}
+        return [meta[key]["unidentified"]["admission"] for key in ("openai-compatible", "openai-compatible@lab")]
+
+    assert admissions() == ["consent", "consent"]
+    # The saved id read back and posted again stays; another tenant behind the same address, or another address,
+    # is not what the owner consented to.
+    assert client.post("/api/settings", json={CONNECTIONS_KEY: [{**row, "base_url": named.replace("query-secret", "other-secret")}],
+                                              "OPENAI_COMPATIBLE_BASE_URL": "http://localhost:8080/v1"}).status_code == 200
+    assert saved[CONNECTIONS_KEY][0]["continue_unconfirmed"] == endpoint_id(named) and admissions() == ["", ""]
+    assert client.post("/api/settings", json={"OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED": ""}).status_code == 200
+    assert saved["OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED"] == "", "cleared, it is withdrawn"
+
+
 def test_reposting_the_masked_rows_keeps_the_saved_key(settings_client):
     client, on_disk, saved = settings_client
     rows = client.get("/api/settings").json()[CONNECTIONS_KEY]

@@ -1,9 +1,8 @@
 """Human/test-visible HTTP endpoint index for the browser gateway ABI.
 
 Routers own the executable Route objects; this tuple is the reviewable
-contract index consumed by the parity/reliability suites. It lives beside
-``gateway/contracts.py`` (which re-exports it) so the mirror file keeps its
-TypedDict envelopes within the module size gate.
+contract index consumed by the parity/reliability suites. It lives apart from
+the TypedDict envelopes in ``gateway/contracts.py``, which re-exports it.
 
 ``HTTP_SHAPES`` and ``WS_SHAPES`` bind contract TypedDicts (by name) to entries
 of the two frozen index tuples; ``GET /api/contract`` derives the published
@@ -428,6 +427,8 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/tasks/{task_id}/reviews": Shape(
         "200:TaskReviewHistoryResponse 400,503:ErrorResponse", query="offset limit",
         note="passive paged ledger history for this exact task, with per-record gaps; no-store"),
+    # Both text exports carry X-Review-Export-SHA256 (delivered redacted bytes).
+    # The exact ledger/plan source export also carries X-Review-Source-SHA256 (saved original bytes).
     "GET /api/tasks/{task_id}/reviews/skill/{job_id}": Shape(
         "200:text 400,404,503:ErrorResponse", query="skill format",
         note="task-bound saved skill detail export; complete safe normalized text, no-store; existing desktop bridge prefix"),

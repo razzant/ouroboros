@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { composerMarkup, createPlusMenu } from '../modules/composer.js';
-import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, roomKey } from './chat_dom_fixture.js';
+import { ElementStub, installDom, memoryStorage, PREVIEW_SCOPE, restoreDom, roomKey } from './chat_dom_fixture.js';
 import { installDomDouble } from './dom_double.js';
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -19,11 +19,11 @@ function fetchStub(history = []) {
         : { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true }) });
 }
 
-function mount(env, { chatId = 1, projectId = '', idPrefix = 'chat', frames = [] } = {}) {
+function mount(env, { chatId = 1, projectId = '', idPrefix = 'chat', frames = [], status = 'sent' } = {}) {
     let generation = 0;
     return createChatInstance({
         ws: { on: () => () => {}, isConnected: () => true,
-            send: (frame) => { frames.push(frame); return { status: 'sent', clientMessageId: `cm-${frames.length}` }; } },
+            send: (frame) => { if (status !== 'failed') frames.push(frame); return { status, clientMessageId: `cm-${frames.length}` }; } },
         state: { activePage: 'chat', projectChatIds: new Set(chatId === 1 ? [] : [chatId]), unreadCount: 0 },
         updateUnreadBadge() {}, chatId, projectId, idPrefix, mountEl: env.mount, asPanel: chatId !== 1,
         stateSnapshots: { begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
@@ -32,6 +32,7 @@ function mount(env, { chatId = 1, projectId = '', idPrefix = 'chat', frames = []
 }
 
 const PROJECT = { chatId: 7, projectId: 'p7', idPrefix: 'pchat-p7' };
+const ownDraft = (chatId = 1) => JSON.parse(sessionStorage.getItem(roomKey('ouro_chat_text_v1', chatId)))?.text ?? null;
 const node = (instance, id) => instance.page.querySelector(`[id="${id}"]`);
 
 test('every room mounts the composer with the chat-* ids, namespaced in a Project panel with the mirror classes', () => {
@@ -149,8 +150,8 @@ test('a room keeps its own draft: setDraft and insertAtCursor keep it, a reopene
         const { composer } = instance;
         composer.setDraft('hello world');
         assert.equal(composer.getDraft(), 'hello world');
-        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft', 7)), 'hello world', 'kept under the room\'s own key');
-        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft')), null, 'never under Main\'s');
+        assert.equal(ownDraft(7), 'hello world', 'kept under the room\'s own key');
+        assert.equal(ownDraft(), null, 'never under Main\'s');
         // A selection is replaced by the inserted words; the caret follows them in the focused field.
         const field = composer.input;
         let caret = null;
@@ -161,7 +162,7 @@ test('a room keeps its own draft: setDraft and insertAtCursor keep it, a reopene
         assert.equal(composer.getDraft(), 'hello there');
         assert.deepEqual(caret, [11, 11]);
         assert.equal(document.activeElement, field, 'the field has focus for the next word');
-        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft', 7)), 'hello there');
+        assert.equal(ownDraft(7), 'hello there');
         // A collapsed caret inserts in place, nothing replaced.
         field.selectionStart = 5;
         field.selectionEnd = 5;
@@ -170,16 +171,20 @@ test('a room keeps its own draft: setDraft and insertAtCursor keep it, a reopene
         assert.deepEqual(caret, [6, 6]);
 
         instance.destroy();
+        globalThis.sessionStorage = memoryStorage();
         instance = mount(env, { ...PROJECT, frames });
-        assert.equal(instance.composer.getDraft(), 'hello, there', 'a reopened room restores its draft');
+        assert.equal(instance.composer.getDraft(), 'hello, there', 'cold reopen restores its own draft');
+        assert.deepEqual(frames, [], 'restoring the draft sends nothing');
         node(instance, 'pchat-p7-send').click();
         await tick();
         assert.equal(frames.length, 1);
         assert.deepEqual([frames[0].content, frames[0].chat_id, frames[0].project_id], ['hello, there', 7, 'p7']);
         assert.equal(instance.composer.getDraft(), '');
-        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft', 7)), null, 'Send clears the kept draft');
-        instance.composer.setDraft('');
-        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft', 7)), null, 'an empty draft is not kept');
+        assert.equal(ownDraft(7), null, 'Send clears the kept draft');
+        instance.destroy();
+        globalThis.sessionStorage = memoryStorage();
+        instance = mount(env, { ...PROJECT, frames });
+        assert.equal(instance.composer.getDraft(), '', 'sent text does not restore');
     } finally { instance.destroy(); restoreDom(env.prior); }
 });
 
@@ -207,6 +212,39 @@ test('the input recall is seeded once from the room\'s own sent words, newest ne
         assert.deepEqual(JSON.parse(sessionStorage.getItem('ouro_chat_input_history')), ['first ask', 'second ask']);
     } finally { instance.destroy(); restoreDom(env.prior); }
 });
+
+for (const key of ['ArrowUp', 'ArrowDown']) {
+    test(`${key} at the history boundary does not replace another window's saved draft`, () => {
+        const env = installDom(fetchStub());
+        const firstTab = sessionStorage;
+        const first = mount(env, PROJECT);
+        let second, reopened;
+        try {
+            const field = first.composer.input;
+            const caret = position => { field.selectionStart = field.selectionEnd = position; };
+            field.setSelectionRange = caret;
+            const press = key => {
+                for (const listener of field.listeners.get('keydown')) listener({ key, target: field, preventDefault() {} });
+            };
+            first.composer.seedInputHistory([{ role: 'user', text: 'old message' }]);
+            first.composer.setDraft('my draft');
+            if (key === 'ArrowUp') {
+                caret(0);
+                press('ArrowUp');
+                assert.equal(field.value, 'old message');
+            }
+            globalThis.sessionStorage = memoryStorage();
+            second = mount(env, PROJECT);
+            second.composer.setDraft('the other window’s draft');
+            globalThis.sessionStorage = firstTab;
+            caret(key === 'ArrowUp' ? 0 : field.value.length);
+            press(key);
+            globalThis.sessionStorage = memoryStorage();
+            reopened = mount(env, PROJECT);
+            assert.equal(reopened.composer.getDraft(), 'the other window’s draft', key);
+        } finally { reopened?.destroy(); second?.destroy(); first.destroy(); restoreDom(env.prior); }
+    });
+}
 
 function plusFixture() {
     const env = installDomDouble();
@@ -325,4 +363,35 @@ test('later controls add labelled sections after Attach file; a disabled item is
         f.menu.destroy();
         assert.equal(f.sheet(), null, 'destroy removes an open menu');
     } finally { f.close(); }
+});
+
+test('refused Send keeps the current text and its cold copy without sending anything', async () => {
+    const env = installDom(fetchStub()), frames = [];
+    let instance = mount(env, { ...PROJECT, frames, status: 'failed' });
+    try {
+        instance.composer.setDraft('try again');
+        node(instance, 'pchat-p7-send').click();
+        await tick();
+        assert.equal(instance.composer.getDraft(), 'try again');
+        instance.destroy();
+        globalThis.sessionStorage = memoryStorage();
+        instance = mount(env, { ...PROJECT, frames });
+        assert.equal(instance.composer.getDraft(), 'try again');
+        assert.deepEqual(frames, []);
+    } finally { instance.destroy(); restoreDom(env.prior); }
+});
+
+test('storage refusal leaves the new words in the field and does not replace the saved text', () => {
+    const env = installDom(fetchStub());
+    let instance = mount(env, PROJECT);
+    try {
+        instance.composer.setDraft('kept');
+        localStorage.setItem = () => { throw new Error('storage refused'); };
+        instance.composer.setDraft('not kept');
+        assert.equal(instance.composer.getDraft(), 'not kept');
+        instance.destroy();
+        globalThis.sessionStorage = memoryStorage();
+        instance = mount(env, PROJECT);
+        assert.equal(instance.composer.getDraft(), 'kept');
+    } finally { instance.destroy(); restoreDom(env.prior); }
 });

@@ -569,15 +569,16 @@ def test_an_old_late_row_replays_its_evidence_pointer_through_history(tmp_path):
     assert "late_evidence" not in rows["Open delegated execution: run-x."], "only the stored late row carries the pointer"
 
 
-def test_the_gateway_contract_names_the_pointer_in_both_mirrors():
-    import pathlib
-    from typing import get_type_hints
-
+def test_the_published_history_schema_still_names_the_late_evidence_pointer():
+    """The late-review evidence pointer stays a declared chat-history field: history replays
+    it on the stored late row (the replay test above), and the published schema keeps naming
+    it for a client that reads the contract."""
     from ouroboros.gateway.contracts import ChatOutbound
+    from ouroboros.gateway.schema import json_schema_for
 
-    assert "late_evidence" in get_type_hints(ChatOutbound, include_extras=True)
-    text = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js").read_text(encoding="utf-8")
-    assert "@property {Object=} late_evidence" in text
+    schema = json_schema_for(ChatOutbound)
+    assert schema["properties"]["late_evidence"] == {"type": "object"}
+    assert "late_evidence" not in schema.get("required", []), "the pointer stays additive-optional"
 
 
 def test_the_record_route_serves_only_this_tasks_own_old_acceptance_record(tmp_path):

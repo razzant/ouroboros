@@ -29,7 +29,7 @@ def history_wait_row(entry: dict) -> dict | None:
             "model_waits": {str(entry["wait_id"]): row}}
 
 
-def history_wait_overlay(messages: list[dict], owner_limit: int) -> tuple[list[dict], list[dict], bool]:
+def history_wait_overlay(messages: list[dict], owner_limit: int, *, roles=None) -> tuple[list[dict], list[dict], bool]:
     """Fold latest revision per wait, bounded by the existing hydration window."""
     other, by_owner = [], {}
     for message in messages:
@@ -42,7 +42,7 @@ def history_wait_overlay(messages: list[dict], owner_limit: int) -> tuple[list[d
         for wait_id, row in message["model_waits"].items():
             previous = current["model_waits"].get(wait_id) or {}
             if int(row.get("revision") or 0) > int(previous.get("revision") or 0):
-                current["model_waits"][wait_id] = served_wait(copy.deepcopy(row))
+                current["model_waits"][wait_id] = served_wait(copy.deepcopy(row), roles)
     ordered = sorted(by_owner.values(), key=lambda row: row["ts"])
     return other, ordered[-owner_limit:] if owner_limit > 0 else [], len(ordered) > owner_limit
 

@@ -447,6 +447,36 @@ def test_subagents_and_the_update_resolver_never_get_a_candidate_of_their_own(bo
     assert body_candidate.authoring_seam(child, "write_file", {"path": "a.txt", "content": "a"}) is None
 
 
+def test_a_child_in_cyber_pro_is_told_where_it_works_and_resume_stays_refused(body, monkeypatch, tmp_path):
+    """Cyber Pro keeps the tool in an acting child's catalog; an ordinary call is an OK fact naming the very
+    folder its parent selected (not the serving tree, not another folder), and resume= stays refused. A
+    read-only child is not offered the tool and its call is refused at the registry, as before."""
+    serving, data = body
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    selected = tmp_path / "parent-selected-copy"
+    selected.mkdir()
+    child = make_ctx(serving, data, "child-cyber", task_metadata={"root_task_id": "root-c", "delegation_role": "subagent"},
+                     task_constraint={"mode": "acting_subagent", "surface": "self_worktree",
+                                      "write_root": str(selected), "base_sha": ""},
+                     workspace_root=selected, workspace_mode="self_worktree")
+    registry = _registry(serving, data, child)
+    assert "prepare_self_change" in {tool["function"]["name"] for tool in registry.schemas()}
+    ordinary = registry.execute_result("prepare_self_change", {})
+    assert (ordinary.status, ordinary.code) == ("ok", "OK"), ordinary.text
+    assert f"parent selected ({selected})" in ordinary.text and f"({serving})" not in ordinary.text
+    assert "the parent owns candidate preparation and integration" in ordinary.text
+    assert body_candidate.list_candidates() == [] and not body_candidate.is_bound(child)
+    resumed = registry.execute_result("prepare_self_change", {"resume": "cand-of-another"})
+    assert (resumed.status, resumed.code) == ("blocked", "CANDIDATE_NOT_APPLICABLE"), resumed.text
+
+    reader = make_ctx(serving, data, "child-reader", task_metadata={"root_task_id": "root-c", "delegation_role": "subagent"},
+                      task_constraint={"mode": "local_readonly_subagent"})
+    reader_registry = _registry(serving, data, reader)
+    assert "prepare_self_change" not in {tool["function"]["name"] for tool in reader_registry.schemas()}
+    assert reader_registry.execute_result("prepare_self_change", {}).status == "blocked"
+    assert body_candidate.list_candidates() == []
+
+
 # --------------------------------------------------------------------------- #
 # Durable binding: retry / new worker / continuation / explicit resume
 # --------------------------------------------------------------------------- #
@@ -896,3 +926,305 @@ def test_candidate_start_service_uses_isolated_environment(body):
     log = data / "services" / "root-service" / "candidate-env.log"
     assert str(candidate.with_name(candidate.name + ".env") / "data") in log.read_text()
     registry.execute("stop_service", {"name": "candidate-env"})
+
+
+# --------------------------------------------------------------------------- #
+# Serving Git identity: a failed probe is never "no repository" (#4277)
+# --------------------------------------------------------------------------- #
+def test_serving_worktree_reads_gits_own_answers(tmp_path):
+    """Git's own answers classify the checkout: a broken, empty or missing checkout is a
+    refusal, never a plain install (#4277). An empty `.git` draws Git's plain miss, yet
+    it is metadata where Git searched. The plain and bare/`.git`-admin answers are
+    witnessed through both doors below; every candidate prepared above witnesses a root."""
+    (tmp_path / "broken" / ".git").parent.mkdir()
+    (tmp_path / "broken" / ".git").write_text("gitdir: definitely-not-a-gitdir\n")
+    (tmp_path / "empty" / ".git").mkdir(parents=True)
+    for checkout in ("broken", "empty"):
+        with pytest.raises(body_candidate.CandidateRefused) as refused:
+            body_candidate._serving_worktree(tmp_path / checkout)
+        assert refused.value.code == "CANDIDATE_UNAVAILABLE" and "could not be confirmed" in refused.value.text
+
+    with pytest.raises(body_candidate.CandidateRefused) as refused:
+        body_candidate._serving_worktree(tmp_path / "does-not-exist")
+    assert refused.value.code == "CANDIDATE_UNAVAILABLE" and "could not be probed" in refused.value.text
+
+
+_NO_REPO = "fatal: not a git repository (or any of the parent directories): .git\n"
+
+
+def _boundary_miss(mount) -> str:
+    return (f"fatal: not a git repository (or any parent up to mount point {mount})\n"
+            "Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n")
+
+
+def _probe_answers(monkeypatch, stderr="", stdout="", returncode=128):
+    outcome = subprocess.CompletedProcess(("git", "rev-parse", "--is-inside-work-tree"), returncode, stdout=stdout, stderr=stderr)
+    monkeypatch.setattr(subagent_worktrees, "_git", lambda *_a, **_k: outcome)
+
+
+@pytest.mark.parametrize("stdout, outcome", [
+    ("true\n\n", True), ("true\n", "could not be confirmed"), ("true", "could not be confirmed"),
+    ("true\nsub/\n", "inside another repository's Git working tree"), ("false\n\n", "outside the Git working tree")])
+def test_only_gits_whole_two_line_answer_confirms_the_root(tmp_path, monkeypatch, stdout, outcome):
+    """A root needs Git's whole answer: the work-tree word and its prefix line, empty at the
+    root. A reply cut before the prefix line is unconfirmed, never a root; a nested folder is
+    explained without Git's raw prefix."""
+    _probe_answers(monkeypatch, stdout=stdout, returncode=0)
+    if outcome is True:
+        assert body_candidate._serving_worktree(tmp_path) is True
+        return
+    with pytest.raises(body_candidate.CandidateRefused) as refused:
+        body_candidate._serving_worktree(tmp_path)
+    assert refused.value.code == "CANDIDATE_UNAVAILABLE" and outcome in refused.value.text
+    assert "sub/" not in refused.value.text
+
+
+@pytest.mark.parametrize("stderr, plain", [
+    (_NO_REPO, True),
+    (_boundary_miss("/Volumes"), True),
+    ("fatal: not a git repository (or any of the parent directories)", False),
+    (_NO_REPO + "fatal: the toolchain licence was not accepted\n", False),
+    (_boundary_miss("/Volumes").split("\n", 1)[0], False),
+])
+def test_only_gits_whole_canonical_discovery_miss_is_a_plain_install(tmp_path, monkeypatch, stderr, plain):
+    """Only Git's whole canonical miss (normal or filesystem boundary) means no repository;
+    a truncated or extended diagnostic that merely starts like it is a refusal."""
+    _probe_answers(monkeypatch, stderr)
+    if plain:
+        assert body_candidate._serving_worktree(tmp_path) is False
+        return
+    with pytest.raises(body_candidate.CandidateRefused) as refused:
+        body_candidate._serving_worktree(tmp_path)
+    assert refused.value.code == "CANDIDATE_UNAVAILABLE" and "could not be confirmed" in refused.value.text
+
+
+@pytest.mark.parametrize("metadata, plain", [
+    ("above", True), ("outer", True), ("outer, respelled", True), ("volume", False), ("between", False),
+    ("install", False)])
+def test_a_reported_filesystem_boundary_bounds_the_metadata_search(tmp_path, monkeypatch, metadata, plain):
+    """A plain volume mounted below a checkout: Git searches the install up to the volume root,
+    then names the first parent it did not search (the outer checkout). `.git` there or above
+    belongs to the outer checkout, however Git spells that folder; `.git` at the volume root,
+    between it and the install, or in the install counts."""
+    above = tmp_path.resolve() / "top"
+    outer = above / "checkout"
+    volume = outer / "volume"
+    install = volume / "sub" / "app"
+    install.mkdir(parents=True)
+    places = {"above": above, "outer": outer, "outer, respelled": outer, "volume": volume,
+              "between": volume / "sub", "install": install}
+    (places[metadata] / ".git").mkdir()
+    reported = outer.with_name("CHECKOUT") if metadata == "outer, respelled" else outer
+    if not reported.exists():
+        pytest.skip("a case-sensitive volume has one spelling per folder")
+    _probe_answers(monkeypatch, _boundary_miss(reported))
+    if plain:
+        assert body_candidate._serving_worktree(install) is False
+        return
+    with pytest.raises(body_candidate.CandidateRefused, match="could not be confirmed"):
+        body_candidate._serving_worktree(install)
+
+
+def test_git_tracing_neither_hides_a_plain_install_nor_stops_for_other_commands(tmp_path, monkeypatch):
+    """Requested Git tracing (environment and config trace2) writes beside the canonical miss;
+    the identity read alone switches it off, so a genuine plain install stays plain while
+    every other Git command keeps the owner's trace."""
+    plain = tmp_path / "wheel-install"
+    plain.mkdir()
+    trace = tmp_path / "git-trace.log"
+    (tmp_path / "trace2.gitconfig").write_text("[trace2]\n\tnormalTarget = 2\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "trace2.gitconfig"))
+    monkeypatch.setenv("GIT_TRACE", str(trace))
+    monkeypatch.setenv("GIT_TRACE_SETUP", "2")
+    monkeypatch.setenv("GIT_TRACE2_PERF", "2")
+    # The fixture really traces: a plain read in the same locale is not the bare canonical miss.
+    traced = subagent_worktrees._git(plain, "rev-parse", "--is-inside-work-tree", check=False,
+                                     env=subagent_worktrees._host_env(LC_ALL="C"))
+    assert traced.returncode == 128 and not body_candidate._PROBE_NO_REPO.fullmatch(traced.stderr)
+    trace.unlink()
+
+    assert body_candidate._serving_worktree(plain) is False
+    assert not trace.exists()  # off for the identity read only
+    other = subagent_worktrees._git(plain, "version")
+    assert other.returncode == 0 and other.stderr.strip() and trace.read_text().strip()
+
+
+def _spy_write_file(registry) -> list:
+    """A no-effect stand-in for write_file: records any call that reaches the handler."""
+    invoked: list = []
+    registry.override_handler("write_file", lambda *_a, **args: invoked.append(args) or "spy: nothing written")
+    return invoked
+
+
+def test_plain_install_keeps_the_in_place_contract_and_refuses_explicit_prepare(tmp_path, monkeypatch):
+    """True non-repo compatibility: the automatic seam still edits a plain installation
+    in place, while explicit prepare keeps its typed refusal."""
+    data = isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    plain = tmp_path / "wheel-install"
+    (plain / "ouroboros").mkdir(parents=True)
+    ctx = make_ctx(plain, data, "root-wheel")
+    registry = _registry(plain, data, ctx)
+
+    written = registry.execute_result("write_file", {"path": "ouroboros/mod_a.py", "content": "GEN = 'IN_PLACE'\n"})
+    assert written.status == "ok", written
+    assert (plain / "ouroboros" / "mod_a.py").read_text() == "GEN = 'IN_PLACE'\n"
+    assert not body_candidate.is_bound(ctx)
+
+    explicit = registry.execute_result("prepare_self_change", {})
+    assert (explicit.status, explicit.code) == ("blocked", "CANDIDATE_UNAVAILABLE"), explicit
+    assert "is not a Git working tree" in explicit.text
+    assert not body_candidate.is_bound(ctx)
+
+
+@pytest.mark.parametrize("channel", ["stderr", "stdout"])
+def test_an_unreadable_serving_identity_refuses_with_gits_own_words(body, monkeypatch, channel):
+    """A serving checkout Git cannot answer about (an unaccepted toolchain licence is
+    #4277's class) refuses on both doors with Git's own diagnostic, also when it arrives on
+    stdout alone, instead of the old in-place fall-through; the write handler is never reached."""
+    serving, data = body
+    before = _tree_bytes(serving)
+    ctx = make_ctx(serving, data, "root-prereq")
+    _probe_answers(monkeypatch, **{channel: "fatal: the toolchain licence was not accepted"})
+    registry = _registry(serving, data, ctx)
+    invoked = _spy_write_file(registry)
+
+    automatic = registry.execute_result("write_file", {"path": "ouroboros/mod_a.py", "content": "GEN = 'NEVER'\n"})
+    assert (automatic.status, automatic.code) == ("blocked", "CANDIDATE_UNAVAILABLE"), automatic
+    assert automatic.text.startswith("⚠️ CANDIDATE_UNAVAILABLE: "), automatic
+    assert "the toolchain licence was not accepted" in automatic.text
+
+    explicit = registry.execute_result("prepare_self_change", {})
+    assert (explicit.status, explicit.code) == ("blocked", "CANDIDATE_UNAVAILABLE"), explicit
+    assert "the toolchain licence was not accepted" in explicit.text
+
+    assert invoked == [] and _tree_bytes(serving) == before and not body_candidate.is_bound(ctx)
+
+
+@pytest.mark.parametrize("layout, words", [
+    ("nested", "inside another repository's Git working tree"), ("admin", "outside the Git working tree")])
+def test_git_that_is_not_the_bodys_own_working_tree_refuses_rather_than_provisions(body, layout, words):
+    """A folder Git places inside another repository's working tree, or one Git answers is
+    outside the working tree (here the `.git` admin directory; the refusal names no layout),
+    refuses on both doors: it never provisions the enclosing project nor edits in place,
+    and the write handler is never reached."""
+    serving, data = body
+    target = serving / ("ouroboros" if layout == "nested" else ".git")
+    ctx = make_ctx(target, data, f"root-{layout}")
+    registry = _registry(target, data, ctx)
+    invoked = _spy_write_file(registry)
+    before = _tree_bytes(target)
+
+    automatic = registry.execute_result("write_file", {"path": "HEAD", "content": "NEVER\n"})
+    assert (automatic.status, automatic.code) == ("blocked", "CANDIDATE_UNAVAILABLE"), automatic
+    assert words in automatic.text
+
+    explicit = registry.execute_result("prepare_self_change", {})
+    assert (explicit.status, explicit.code) == ("blocked", "CANDIDATE_UNAVAILABLE"), explicit
+    assert words in explicit.text
+
+    assert invoked == [] and _tree_bytes(target) == before and not body_candidate.is_bound(ctx)
+
+
+def test_the_identity_probe_takes_its_own_capture_environment(tmp_path, monkeypatch):
+    """Git for Windows can reroute a child's whole streams per GIT_REDIRECT_STDOUT/GIT_REDIRECT_STDERR
+    (git(1) on Windows: a path, `off`, and `2>&1` on stderr), which would read the canonical
+    miss off the captured pipe. The identity read alone spawns in its normal capture environment,
+    the redirect settings absent whatever the owner's shell carries, while every other Git
+    command keeps the owner's redirection."""
+    plain = tmp_path / "wheel-install"
+    plain.mkdir()
+    captured = {}
+
+    def _spy(cwd, *args, **kwargs):
+        captured.update(kwargs.get("env") or {})
+        return subprocess.CompletedProcess(("git", "rev-parse"), 128, stdout="", stderr=_NO_REPO)
+
+    monkeypatch.setattr(subagent_worktrees, "_git", _spy)
+    monkeypatch.setenv("GIT_TRACE", "1")
+    monkeypatch.setenv("GIT_REDIRECT_STDERR", "2>&1")
+    monkeypatch.setenv("GIT_REDIRECT_STDOUT", r"C:\git-probe-out.log")
+    assert body_candidate._serving_worktree(plain) is False
+    assert "GIT_REDIRECT_STDERR" not in captured and "GIT_REDIRECT_STDOUT" not in captured
+    assert captured["LC_ALL"] == "C" and captured["GIT_TRACE"] == "0"
+    assert subagent_worktrees._host_env()["GIT_REDIRECT_STDERR"] == "2>&1"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="GIT_REDIRECT_STDOUT/STDERR are a Git for Windows feature")
+def test_an_inherited_redirect_setting_cannot_reclassify_a_plain_install(tmp_path, monkeypatch):
+    """Git for Windows honours the reroute variables, so with them inherited from the owner's
+    shell a real plain install stays plain only because the identity read spawns without them."""
+    plain = tmp_path / "wheel-install"
+    plain.mkdir()
+    monkeypatch.setenv("GIT_REDIRECT_STDERR", "2>&1")
+    monkeypatch.setenv("GIT_REDIRECT_STDOUT", "off")
+    assert body_candidate._serving_worktree(plain) is False
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Git compares a ceiling with the kept spelling on macOS")
+def test_a_case_respelled_address_honors_the_configured_ceiling_as_git_does(tmp_path, monkeypatch):
+    """Git on macOS reads its cwd as the spelling the volume keeps (getcwd) and compares a
+    GIT_CEILING_DIRECTORIES entry against that spelling literally, so the confirmation walks
+    in Git's own frame: a case-respelled address does not extend the metadata search past a
+    configured ceiling (the repository above it belongs to what the ceiling excludes, and the
+    plain install stays plain), while an entry spelled in another case keeps not matching,
+    exactly as Git treats it, and Git itself reports that outer repository's working tree."""
+    root = tmp_path.resolve()
+    keep = root / "alpha" / "app"
+    install = keep / "sub"
+    install.mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet", str(root)], check=True, capture_output=True)
+    respelled = keep.with_name("APP") / "SUB"
+    entry = keep.with_name("APP")
+    if not respelled.exists() or not entry.exists():
+        pytest.skip("a case-sensitive volume has one spelling per folder")
+
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(keep))
+    assert body_candidate._serving_worktree(respelled) is False  # .git above the ceiling is excluded
+
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(entry))
+    with pytest.raises(body_candidate.CandidateRefused, match="inside another repository's Git working tree"):
+        body_candidate._serving_worktree(install)
+
+
+@pytest.mark.parametrize("stdout, stderr", [
+    ("true\n", _NO_REPO), ("\n", _NO_REPO), ("", _NO_REPO.rstrip("\n")), ("", " " + _NO_REPO)])
+def test_a_plain_miss_is_never_read_from_mixed_or_partial_output(tmp_path, monkeypatch, stdout, stderr):
+    """Git's miss dies before rev-parse prints a word and ends with exactly one newline: an
+    answer beside it on stdout, or a cut or padded miss, is unconfirmed, never a plain install."""
+    _probe_answers(monkeypatch, stderr, stdout)
+    with pytest.raises(body_candidate.CandidateRefused, match="could not be confirmed"):
+        body_candidate._serving_worktree(tmp_path)
+
+
+def test_the_metadata_search_reads_git_ceiling_directories_as_git_does(tmp_path, monkeypatch):
+    """GIT_CEILING_DIRECTORIES as Git's setup.c reads it (canonicalize_ceiling_entry): a relative
+    entry is ignored, an entry before an empty one is resolved, one after it is compared
+    literally, and the searched directory itself is never excluded (strict ancestor)."""
+    from ouroboros.workspace_admission import has_git_metadata
+
+    real = tmp_path.resolve() / "real"
+    install = real / "app"
+    install.mkdir(parents=True)
+    (tmp_path.resolve() / ".git").mkdir()  # metadata above `real`: only a ceiling at `real` hides it
+    alias = tmp_path.resolve() / "alias"
+    try:
+        alias.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("this volume or account cannot create a symlink")
+    monkeypatch.chdir(tmp_path.resolve())
+    for value, found in [
+        ("", True),
+        (str(real), False),
+        ("real", True),  # relative: Git ignores it, whatever the current directory
+        (str(alias), False),  # resolved before any empty entry
+        (os.pathsep + str(alias), True),  # literal after an empty entry: the alias never matches
+        (os.pathsep + real.as_posix(), False),  # literal and exact
+        (os.pathsep + real.as_posix() + "/", False),  # one trailing slash is Git's own spelling too
+        (os.pathsep + real.parent.as_posix() + "/./real", True),  # otherwise literal: never normalized
+        (str(install), True),  # the searched directory itself is never a ceiling
+        *([] if os.name == "nt" else [  # a missing middle folder: Git drops the entry, never `real`
+            (str(real.parent / "missing" / ".." / "real"), True)]),
+    ]:
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", value)
+        assert has_git_metadata(install) is found, value

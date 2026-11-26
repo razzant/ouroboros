@@ -1,6 +1,6 @@
 /**
  * One work, one status in the browser (DESIGN "Room work status"): readers over the `/api/state` work projection
- * (ouroboros/gateway/work_status.py; shapes in work_types.js). The server groups every live member into works, rolls
+ * (ouroboros/gateway/work_status.py; shapes in ouroboros/gateway/work_contracts.py). The server groups live members into works, rolls
  * works into rooms, decides each work's controls with their exact targets and names each work's and room's mark
  * (`mark`: moving | still | pause | ring | none); this module says those facts in the product's short words (a work's
  * word, and beside it its line: the episode's own reason, then what still runs beside it), keeps what an incomplete

@@ -12,15 +12,11 @@ frontier (``<stream>_importing``) and older pages also leave it false.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import pathlib
 from functools import cache
 from typing import Any, Callable, Dict, Optional
-
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
 
 from ouroboros import dialogue_store as ds
 from ouroboros.checkpoint_waits import wait_episode
@@ -30,17 +26,19 @@ from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_a2a_chat_id
 from ouroboros.dialogue_provenance import agent_note_text, declared_author
 from ouroboros.project_registry_recovery import recovery_notice
 from ouroboros.room_archive import registry_reservations
-from ouroboros.gateway._helpers import coerce_int, request_profile_scope
+from ouroboros.gateway._helpers import coerce_int
 from ouroboros.gateway.cost_breakdown import make_cost_breakdown_endpoint  # noqa: F401 — historical import path (router)
 from ouroboros.gateway.history_paging import (
-    HistoryCursorError, RegistryUnavailable, deferred_before, delivered_history_gaps, failed_read_facts, history_page_coverage, history_page_tokens, progress_quota_predicate,
+    HistoryCursorError, RegistryUnavailable, deferred_before, delivered_history_gaps, history_page_coverage, history_page_tokens, progress_quota_predicate,
     replay_evidence_rows, room_lens, room_view_fingerprint, select_history_page,
     latest_arrival, notes_stamp, parse_around, QUESTION_EVIDENCE_KINDS, QUESTION_HISTORY_KINDS,
     chat_quota_predicate, IMPORTING, PROJECTION_FAILED, _PROBE_ROWS, _RECENT_WINDOW_BYTES, _RECENT_WINDOW_ROWS,
 )
 from ouroboros.gateway.history_deliveries import delivery_fields
+from ouroboros.gateway.history_live import LIVE
+from ouroboros.gateway.history_response import make_history_endpoint
 from ouroboros.cost_projection import carry_cost_meta, live_root_cost_projection
-from ouroboros.host_notice import phrase, view as notice_view
+from ouroboros.host_notice import phrase, view as _notice_view
 from ouroboros.gateway.completion_gist import short_gist
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 from ouroboros.project_completion_facts import (
@@ -55,6 +53,11 @@ from ouroboros.task_results import TASK_COST_META_FIELDS as _TASK_COST_META_FIEL
 from ouroboros.utils import json_dumps_utf8, strip_markdown, utc_now_iso
 
 log = logging.getLogger(__name__)
+
+
+def notice_view(row):
+    live = LIVE.get()
+    return _notice_view(row) if live is None else _notice_view(row, lang=live["language"])
 
 # Hard cap on binding-backed origin rows synthesized per /api/chat/history
 # response (realistically 1-3 per project; the cap keeps the endpoint's
@@ -803,7 +806,9 @@ def _collect_chat_rows(
             if rec["role"] == "user" and entry.get("ingress_accepted") is True:
                 rec["ingress_accepted"] = True
                 # Proven undispatched, entered, or this live process's and pending; an ended process's: nothing.
-                rec.update(delivery_facts(entry, entry_chat))
+                live = LIVE.get()
+                rec.update(delivery_facts(entry, entry_chat) if live is None else
+                           delivery_facts(entry, entry_chat, bus_root=live["message_bus_root"]))
             if isinstance(entry.get("presence_contact"), dict):
                 rec["presence_contact"] = dict(entry["presence_contact"])
             if role == "user" and entry.get("attachments"):  # the same views the live echo carried
@@ -1066,7 +1071,8 @@ def _active_lifecycle_row(row_matches_thread) -> Optional[Dict[str, Any]]:
     try:
         from ouroboros.skill_lifecycle_queue import queue_snapshot
 
-        active = queue_snapshot().get("active")
+        live = LIVE.get()
+        active = queue_snapshot().get("active") if live is None else live["skill"]
         if isinstance(active, dict) and active.get("status") == "running":
             label = "stale" if active.get("stale") else "running"
             said = "" if active.get("error") else str(active.get("message") or "")  # a raw error: its notice's detail
@@ -1083,7 +1089,7 @@ def _active_lifecycle_row(row_matches_thread) -> Optional[Dict[str, Any]]:
             row = {
                 "text": text,
                 "role": "system", "system_type": "skill_lifecycle",
-                "ts": utc_now_iso(),
+                "ts": utc_now_iso() if live is None else live["observed_at"],
                 "is_progress": True,
                 "markdown": False,
                 "task_id": str(active.get("chat_task_id") or ""),
@@ -1140,7 +1146,9 @@ def _apply_window_quotas(
     from ouroboros.gateway.task_model_wait import history_wait_overlay
 
     order = order or (lambda m: m.get("ts", ""))
-    combined, model_wait_rows, model_wait_truncated = history_wait_overlay(combined, n_progress)
+    live = LIVE.get()
+    combined, model_wait_rows, model_wait_truncated = history_wait_overlay(
+        combined, n_progress, roles=None if live is None else live["managed_roles"])
     # Separate quotas protect conversation from telemetry bursts; recent child
     # lineage survives on top so the client can rebuild its cards. Older lineage
     # survives only under represented/live topology (#496), preventing orphaned
@@ -1389,6 +1397,19 @@ def _assemble_history_response(
     n_human: int,
     n_progress: int,
     cursor: Optional[str] = None, around: Optional[str] = None, profile_scope: str = "",
+    *, live: dict | None = None,
+) -> bytes:
+    """Select from the stores with this request's serving facts (or local observations)."""
+    token = LIVE.set(live)
+    try:
+        return _render_history_response(data_dir, thread_id, n_human, n_progress, cursor, around, profile_scope, live)
+    finally:
+        LIVE.reset(token)
+
+
+def _render_history_response(
+    data_dir: pathlib.Path, thread_id: int, n_human: int, n_progress: int,
+    cursor: Optional[str], around: Optional[str], profile_scope: str, live: dict | None,
 ) -> bytes:
     """Select and project recent/archive history in the endpoint's one worker.
 
@@ -1437,7 +1458,7 @@ def _assemble_history_response(
     replay_evidence: list = []
     from ouroboros.task_reads import TaskReads
 
-    result_cache: Dict[Any, Any] = {_READS: TaskReads(data_dir)}  # every task result is read once, in batches
+    result_cache: Dict[Any, Any] = {_READS: TaskReads(data_dir, history_live=live)}  # each result read once, in batches
     combined, chat_quota_rows, chat_gaps = _collect_chat_rows(
         chat_path, archive_dir, n_human, row_matches_thread, receipts.rows,
         include_gaps=True, historical_terminals=historical_terminals,
@@ -1485,7 +1506,8 @@ def _assemble_history_response(
     if recent or page["after"]:  # current work has no history position: its evidence lands at the page end
         from ouroboros.gateway.state import current_work_in_room
         evidence_anchors = dict.fromkeys(current_work_in_room(
-            data_dir, bindings_by_task, row_matches_thread.evidence_matches), "")
+            data_dir, bindings_by_task, row_matches_thread.evidence_matches,
+            **({"copied": live["activities"]} if live is not None else {})), "")
     represented = {str(row.get("task_id") or "") for row in messages} | evidence_anchors.keys()
     # A notice names its target, never a speaker (no parent); a legacy child row's parent is in the facts index.
     parents = ["" if row.get("system_type") in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES) else str(
@@ -1560,40 +1582,6 @@ def _assemble_history_response(
     ).encode("utf-8")
 
 
-def make_chat_history_endpoint(data_dir: pathlib.Path):
-    async def api_chat_history(request: Request) -> Response:
-        """Return recent chat, system, and progress messages merged chronologically."""
-        def _int_param(name: str, default: int, cap: int) -> int:
-            return max(0, min(coerce_int(request.query_params.get(name), default), cap))
-
-        # Separate per-type quotas so a burst of progress/telemetry can never evict
-        # the user's real conversation from a single combined tail. Defaults are
-        # the module-level window constants — the web client's default request
-        # sends no quota params. The legacy `limit` parameter (shipped CLIs sent
-        # it while the server ignored it) is honored as the n_human default, so
-        # an old client that asks for N human rows finally gets N, within cap; a
-        # garbled or non-positive `limit` means "absent"; an explicit n_human wins.
-        n_human = _int_param("n_human", _int_param("limit", 0, _MAX_N_HUMAN) or _DEFAULT_N_HUMAN, _MAX_N_HUMAN)
-        n_progress = _int_param("n_progress", _DEFAULT_N_PROGRESS, _MAX_N_PROGRESS)
-        # Main is 1; each other room reads its own history. Place conversation
-        # ids exceed 32 bits but remain exactly representable by the web client.
-        thread_id = _int_param("chat_id", 1, 2**53 - 1) or 1
-        # ONE thread hop for the whole assembly (perf2 P3): reads, transforms,
-        # slicing, annotation, and the JSON encode all run off the event loop.
-        cursor, around = (request.query_params.get(name) for name in ("cursor", "around"))
-        profile_scope = request_profile_scope(request)  # frozen at apply (#3294)
-        try:
-            body = await asyncio.to_thread(_assemble_history_response, data_dir, thread_id, n_human, n_progress,
-                                           cursor, around, profile_scope)
-        except (HistoryCursorError, OSError, StoreError) as exc:
-            reason = (exc.reason if isinstance(exc, HistoryCursorError) else
-                      "migrating" if isinstance(exc, StoreMigrating) else "history_source_unavailable")
-            detail = {"detail": str(exc)} if type(exc) in (StoreError, RegistryUnavailable) else {}
-            detail.update(await asyncio.to_thread(failed_read_facts, exc, data_dir, thread_id, not (cursor or around), profile_scope))
-            return JSONResponse({"messages": [], "error": reason, "reason_code": reason, **detail,
-                                 "next_cursor": cursor, "has_more": True,
-                                 "window": {"complete": False, "truncated_by": [reason]}},
-                                status_code=exc.status if isinstance(exc, HistoryCursorError) else 503)
-        return Response(content=body, media_type="application/json")
-
-    return api_chat_history
+def make_chat_history_endpoint(data_dir):
+    return make_history_endpoint(data_dir, lambda *args, **kwargs: _assemble_history_response(*args, **kwargs),
+                                 (_DEFAULT_N_HUMAN, _MAX_N_HUMAN), (_DEFAULT_N_PROGRESS, _MAX_N_PROGRESS))

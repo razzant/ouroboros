@@ -47,6 +47,7 @@ One row per key (`settings_defaults.py`). `unset`-default rows (plus `Env-only` 
 | OPENAI_BASE_URL | "" | Legacy compatible URL (with `OPENAI_API_KEY`) |
 | OPENAI_COMPATIBLE_API_KEY | "" | OpenAI-compatible key |
 | OPENAI_COMPATIBLE_BASE_URL | "" | OpenAI-compatible URL (own key; blank = no auth) |
+| OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED | "" | Unnamed server's consent URL, saved as an id (§6) |
 | CLOUDRU_FOUNDATION_MODELS_API_KEY | "" | Cloud.ru key |
 | CLOUDRU_FOUNDATION_MODELS_BASE_URL | `https://foundation-models.api.cloud.ru/v1` | Cloud.ru base URL |
 | GIGACHAT_CREDENTIALS | "" | Auth key |
@@ -78,7 +79,7 @@ One row per key (`settings_defaults.py`). `unset`-default rows (plus `Env-only` 
 | OUROBOROS_MODEL_ACCOUNTS | {} | Role managed-account pins (empty = Auto) |
 | OUROBOROS_PROCESSING_PREFERENCE | "" | Global `standard`/`fast`/`economy` (empty = adapter default) |
 | OUROBOROS_MODEL_PROCESSING_PREFERENCES | {} | Role tiers (inherit global; only `main` accepts `ultrafast`) |
-| OUROBOROS_MODEL_CONTEXT_WINDOWS | {} | Role context-window assertions (0 = Auto; no reviewer authority) |
+| OUROBOROS_MODEL_CONTEXT_WINDOWS | {} | Role context-window assertions (0 = Auto; no reviewer authority). Ollama loads follow §6; a larger load needs RAM/VRAM |
 | OUROBOROS_MODEL_VISION | "" | Vision model (empty inherits) |
 | OUROBOROS_IMAGE_INPUT_MODE | auto | Send-time image routing (`vision_routing.py`) |
 | OUROBOROS_VISION_CAPTION_TIMEOUT_SEC | 90 | Caption ceiling |

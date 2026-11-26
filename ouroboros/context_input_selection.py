@@ -533,6 +533,33 @@ def wake_projection_inputs(task: Dict[str, Any]) -> List[str]:
     return [json.dumps(str(text), ensure_ascii=False, sort_keys=True) for text in _wake_forms(wake)]
 
 
+def opening_owner_turn(env: Any, core: Any, task: Dict[str, Any]) -> bool:
+    """Require a first physical row and no earlier history in its captured logical room, not the Main fallback."""
+    from ouroboros import dialogue_store
+    from ouroboros.memory_view import snapshot_from_json
+    from ouroboros.owner_relay import owner_row_source
+    from ouroboros.project_dialogue import owner_message_ref_is_valid
+
+    origin = task.get("origin_message_ref") or (task.get("metadata") or {}).get("origin_message_ref")
+    if not owner_message_ref_is_valid(origin) or origin["chat_id"] != task.get("chat_id") or origin["chat_id"] <= 0:
+        return False
+    view = snapshot_from_json(core.memory_view_json)
+    room = view.room or {}
+    facts = room.get("facts", {})
+    if not view.active or view.frontier.get("status") != "exact" or (room.get("room_id") == str(origin["chat_id"]) and (
+            not facts or facts.get("rows", 0) > 1 or any(facts.get(k) for k in ("gaps", "pages", "notes", "task_facts"))
+            or any(room.get(k) for k in ("sealed_by", "origins", "origin_gaps", "project_words", "legacy", "told", "under_parts")))):
+        return False
+    root = task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or env.drive_root
+    try:
+        first = dialogue_store.first_room_row(root, origin["chat_id"], origin["client_message_id"])
+    except (OSError, StoreError, ValueError):
+        return False
+    return bool(first and first.row.get("direction") == "in" and first.row.get("user_id") == 1
+                and not any(first.row.get(key) for key in ("historical_import", "host_fact", "ui_control", "reply_to"))
+                and owner_row_source(first.row)[0] == origin)
+
+
 def rescued_start(env: Any, task: Dict[str, Any], user_content_json: str, unfit: Any, preferred: str,
                   fit: Callable[[str], Tuple[Any, str]]) -> Tuple[Any, str, Dict[str, str]]:
     """The start a physical refusal of the whole input leaves: ``(contents, mode, {mode: delivered input JSON})``.

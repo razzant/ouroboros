@@ -536,12 +536,17 @@ test('a window shown again brings Main back as a window, which keeps its place, 
     const enter = h.context.enterMain;
     h.context.enterMain = (how) => { hows.push(how); enter(how); };
     h.context.document.hidden = true;
+    const suspensions = [];
+    const suspend = h.context.rooms.suspend;
+    h.context.rooms.suspend = (room, windowHidden) => { suspensions.push(windowHidden); suspend(room); };
     vm.runInContext(liftBlock("document.addEventListener('visibilitychange'"), Object.assign(h.context, {
         document: Object.assign(h.context.document, { addEventListener: (type, listener) => { h.context.shown = listener; } }),
         projectInstances: new Map(),
     }));
     h.context.shown();
     assert.equal(h.context.mainChat.ws.paused, true, 'hidden, Main is away');
+    h.context.syncNavigationState();  // projects-list repaint while still hidden
+    assert.deepEqual(suspensions, [true], 'a repaint does not end the existing window suspension');
     h.context.document.hidden = false;
     h.context.shown();
     assert.deepEqual([hows, h.claims], [['window'], [['resume', true]]], 'shown again: a window return, as left');

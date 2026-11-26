@@ -31,8 +31,7 @@ Legacy facts do not prove honored model/kind filters: missing or mismatched
 ## Response contract
 
 `ClaudexorQuotaResponse` / `ClaudexorPassiveReadError` live in
-`gateway/claudexor_contracts.py`, are re-exported by `contracts.py`, and have
-JSDoc twins in `web/modules/api_types.js`.
+`gateway/claudexor_contracts.py` and are re-exported by `contracts.py`.
 
 | Field | Meaning |
 | --- | --- |

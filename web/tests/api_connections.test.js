@@ -21,6 +21,7 @@ const renderSettingsPage = () => PROVIDER_CARDS.map(providerSettingsCard).join('
 import {
     cacheHintsNote, connectionNameFor, connectionRowFacts, connectionRows, connectionUsage,
 } from '../modules/settings_connections.js';
+import { serverNote } from '../modules/connection_server_check.js';
 import { renderLiveCardMeta } from '../modules/chat_activity.js';
 
 const { contract } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url)));
@@ -255,6 +256,33 @@ test('a row says what is true of its key now: status, use, and who provides it',
     assert.match(cacheHintsNote({ cache_hints: { refused: true, learned_at: '2026-10-20T10:00:00Z' } }),
         /^Cache hints: refused by this server since /);
     assert.equal(cacheHintsNote({ cache_hints: { refused: false } }), '');
+});
+
+test('a private compatible key says what was read at its address, the risk, and its admission or the consent it needs', () => {
+    const unidentifiedNote = (entry, options) => serverNote(entry, options).text;
+    assert.equal(unidentifiedNote({ id: 'openai-compatible@cloud' }), '', 'a key the check does not concern says nothing');
+    const risk = 'A server that does not show which program it runs may shorten a long conversation without saying so.';
+    const checked = { type: 'unknown', observed_at: '2026-11-19T10:00:00Z' };
+    // Never checked: the risk and what the box below is for.
+    assert.equal(unidentifiedNote({ unidentified: { admission: '' } }), `${risk} A request goes to one only with your consent.`);
+    const needs = unidentifiedNote({ unidentified: { admission: '', checked } });
+    assert.match(needs, /^Server type not confirmed at the last check on \S+ \d+\. A server that does not show/);
+    assert.ok(needs.endsWith('A request goes to one only with your consent.'));
+    assert.ok(unidentifiedNote({ unidentified: { admission: 'prior', checked } }).endsWith(`${risk} This key may send to one: its server is on record answering a request before this check existed.`));
+    assert.ok(unidentifiedNote({ unidentified: { admission: 'consent', checked } }).endsWith(risk), 'the ticked box says the rest');
+    // Identified: no risk to state and no consent to ask.
+    assert.equal(unidentifiedNote({ unidentified: { admission: '', checked: { type: 'llama.cpp' } } }), 'Identified as llama.cpp at the last check.');
+    const ollama = { type: 'ollama', version: '0.40.16', observed_at: '2026-11-18T10:00:00Z' };
+    assert.equal(unidentifiedNote({ unidentified: { admission: 'consent', ollama, checked: { type: 'ollama' } } }), 'Identified as Ollama at the last check.');
+    assert.match(unidentifiedNote({ unidentified: { admission: '', ollama, checked: { type: 'LM Studio' } } }),
+        /^Ollama 0\.40\.16 was seen at this address on \S+ \d+\. Identified as LM Studio at the last check\.$/);
+    // Held: Ollama was seen there and this key's server is not identified. A consent changes nothing, so none is asked.
+    for (const admission of ['', 'consent', 'prior']) {
+        const held = unidentifiedNote({ unidentified: { admission, ollama, checked } });
+        assert.match(held, /^Ollama 0\.40\.16 was seen at this address on \S+ \d+\. Server type not confirmed at the last check on \S+ \d+\. Nothing is sent there until this key's server identifies itself: let its metadata be read \(GET \/api\/version\) or use another key\.$/);
+        assert.doesNotMatch(held, /consent|is Ollama|Ollama server|may shorten/, 'what was seen there, never what this server is');
+    }
+    assert.match(unidentifiedNote({ unidentified: { admission: 'consent', ollama } }), /^Ollama 0\.40\.16 was seen at this address on \S+ \d+\. Nothing is sent there until/);
 });
 
 test('a new key takes a stored name from its label once; the setting reads safely', () => {

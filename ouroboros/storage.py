@@ -118,15 +118,15 @@ class StorageRest(TypedDict):
 class StoragePlace(TypedDict):
     """One counted place; ``bytes`` is None when none of its present roots could be listed."""
 
-    id: str
-    group: str
+    id: str  # an id of PLACES
+    group: str  # one of GROUPS
     roots: List[str]
     present: bool
-    same_volume: bool
+    same_volume: bool  # on the data folder's disk.
     bytes: Optional[int]
     logical_bytes: int
     files: int
-    unreadable: int
+    unreadable: int  # entries or folders that could not be read; the walk went on.
     parts: List[StoragePart]
     rest: StorageRest
     growth_bytes: NotRequired[Optional[int]]  # against the previous finished count, when both have it
@@ -148,13 +148,13 @@ class StorageCount(TypedDict):
     started_at: str
     finished_at: str
     duration_seconds: float
-    io_priority: str
-    basis: Literal["allocated", "logical"]
+    io_priority: str  # the disk priority the count child ran at.
+    basis: Literal["allocated", "logical"]  # what `bytes` counts.
     bytes: int
     logical_bytes: int
     files: int
     unreadable: int
-    volume: StorageVolume
+    volume: StorageVolume  # as observed when the count finished.
     places: List[StoragePlace]
     growth_bytes: NotRequired[Optional[int]]
     growth_since: NotRequired[str]
@@ -173,7 +173,7 @@ class StorageCounting(TypedDict):
     places_total: int
     bytes: int
     files: int
-    done: List[StoragePart]
+    done: List[StoragePart]  # `name` is the place id
 
 
 class StorageError(TypedDict):
@@ -189,13 +189,13 @@ class StorageResponse(TypedDict):
 
     count: NotRequired[Optional[StorageCount]]
     counting: Optional[StorageCounting]
-    error: Optional[StorageError]
-    volume: StorageVolume
+    error: Optional[StorageError]  # the last count's end; the saved count stays.
+    volume: StorageVolume  # fresh at this read.
     retention_days: int
     free: "StorageFree"
     removers: Dict[str, List["StorageRemover"]]  # place id -> its removers, read on every answer (``storage_removers``)
     started: NotRequired[bool]
-    reason: NotRequired[str]
+    reason: NotRequired[str]  # why a free run did not start: preview_outdated | busy | unknown_group | unknown_item | not_offered | nothing_selected | selection_conflict | loss_not_accepted.
 
 
 class StorageUnavailable(Exception):

@@ -153,7 +153,7 @@ def accepted_here(row: dict) -> bool:
     return bool(stamp) and stamp == _process()
 
 
-def delivery_facts(row: dict, chat_id: int) -> dict:
+def delivery_facts(row: dict, chat_id: int, *, bus_root=...) -> dict:
     """What the store knows of an accepted row's dispatch, as its echo and history row say it.
 
     ``ingress_pending``: the dispatch is still owed (the acceptor is between the commit and the
@@ -162,7 +162,9 @@ def delivery_facts(row: dict, chat_id: int) -> dict:
     ``ingress_dispatched``: the handoff began in THIS process. Nothing: a row that owes no bus
     dispatch, an imported one, an abandoned obligation, or a dispatch an ended process took
     (its outcome is unknown here, as before the store)."""
-    facts = dispatch_facts({**(row or {}), "chat_id": chat_id})
+    # A captured None means the serving bus was absent, not the reader's config root.
+    facts = (None if bus_root is None else dispatch_facts({**(row or {}), "chat_id": chat_id},
+                                                         None if bus_root is ... else bus_root))
     if facts is not None and (facts["state"] == "pending" or (facts["state"] == "none" and accepted_here(row))):
         return {"ingress_pending": True}
     if _entered_here(facts):

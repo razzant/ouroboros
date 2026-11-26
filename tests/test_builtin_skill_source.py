@@ -381,22 +381,30 @@ def test_version_reads_through_the_shared_parser(tmp_path, text, expected):
     assert _version(tmp_path / "missing") == ""
 
 
-def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypatch):
-    """The bundled ``SKILL.md`` version is the RESYNC KEY: a payload change shipped
-    without a bump never reaches an existing install. Re-pin this whenever
-    skills/telegram changes."""
-    monkeypatch.setenv("OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS", "true")
-    monkeypatch.setattr("ouroboros.config.SETTINGS_PATH", tmp_path / "settings.json")
-    seed_dir = pathlib.Path(__file__).resolve().parents[1] / "skills"
-    drive_root = tmp_path / "data"
-    installed = _write_skill(drive_root / "skills" / "native", "telegram", version="1.2.0")
-    (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
-    assert _reseed(seed_dir, drive_root) == 1
-    assert "version: 1.4.24\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
-    for path in ("plugin.py", "lib/telegram_api.py", "lib/telegram_connection.py", "lib/telegram_copies.py",
-                 "lib/telegram_health.py", "lib/telegram_inbound.py", "lib/telegram_outbox.py", "lib/telegram_quiz.py", "lib/telegram_share.py",
-                 "lib/telegram_state.py", "scripts/cloudflare_tunnel.py", "scripts/companion.py", "scripts/sidecar.py"):
-        assert (installed / path).read_bytes() == (seed_dir / "telegram" / path).read_bytes()
+def test_bundled_telegram_reseed_delivers_the_current_version(env):
+    """Replace the old Telegram payload while preserving the owner's recorded Off."""
+    from ouroboros.skill_loader import compute_content_hash, save_enabled, skill_state_dir_path
+
+    old_seeds, drive_root = env
+    bundled = pathlib.Path(__file__).resolve().parents[1] / "skills" / "telegram"
+    old_quiz = _write_skill(old_seeds, "telegram", version="1.4.24") / "lib" / "telegram_quiz.py"
+    old_quiz.parent.mkdir()
+    old_quiz.write_bytes(b"# Synthetic previous quiz payload.\n")
+    assert _install("telegram", old_seeds, drive_root, turn_on_when_ready=True)["ok"]
+    installed = drive_root / "skills" / "native" / "telegram"
+    save_enabled(drive_root, "telegram", False, actor="owner_ui")
+    enabled_file = skill_state_dir_path(drive_root, "telegram") / "enabled.json"
+    owner_off = enabled_file.read_bytes()
+    assert json.loads(owner_off)["enabled"] is False
+
+    assert _reseed(bundled.parent, drive_root) == 1
+    assert enabled_file.read_bytes() == owner_off
+    for path in ("SKILL.md", "plugin.py", "lib/telegram_api.py", "lib/telegram_connection.py",
+                 "lib/telegram_copies.py", "lib/telegram_health.py", "lib/telegram_inbound.py",
+                 "lib/telegram_outbox.py", "lib/telegram_quiz.py", "lib/telegram_share.py", "lib/telegram_state.py",
+                 "scripts/cloudflare_tunnel.py", "scripts/companion.py", "scripts/sidecar.py"):
+        assert (installed / path).read_bytes() == (bundled / path).read_bytes(), path
+    assert compute_content_hash(installed) == compute_content_hash(bundled)
 
 
 @pytest.mark.parametrize("name,source,old_version", [
@@ -461,6 +469,7 @@ def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, o
      ('live_conversation', '201f5b62ce35bdb388c3e238bad261b27d3739a8', '0.1.36'),
      # Docked call mark bounds and sidebar clearance ship in 0.1.38: a 0.1.37 install is reseeded too.
      ('live_conversation', '7c9cc17a497514f1180174461bab61519b05e884', '0.1.37'),
+     ('live_conversation', 'dc9de859a7b72dad6c9ca720e11e9b62a50f12eb', '0.1.38'),
      ('unix_computer_use', 'e471e380e6de1e7f728e0fffbb4457667422ebf4', '0.6.0')])
 @pytest.mark.parametrize("edited", [False, True])
 def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(env, monkeypatch, name, previous_release,
@@ -502,9 +511,10 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
         for path, payload in previous_ui.items():
             target = installed / path
             assert (target.read_bytes() if target.exists() else None) == payload
-            assert payload != (repo / "skills" / name / path).read_bytes()
+            if previous_version != '0.1.38' or path == 'ui/call.css':
+                assert payload != (repo / "skills" / name / path).read_bytes()
     else:
-        version = {'live_conversation': '0.1.38', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.22', 'openai_realtime': '0.1.10',
+        version = {'live_conversation': '0.1.39', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.22', 'openai_realtime': '0.1.10',
                    'unix_computer_use': '0.9.2'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)

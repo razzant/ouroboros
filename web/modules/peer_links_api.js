@@ -14,7 +14,8 @@ const object = (value) => (value && typeof value === 'object' && !Array.isArray(
 const bool = (value) => (value === true ? true : value === false ? false : null);
 
 /** The facts of one linked place in the browser's names; `{}` for any other place, so its shape stays as it was. Its
- *  conversation is the place's own (`rooms`, the place sheet), read like any place's. */
+ *  conversation is the place's own (`rooms`, the place sheet), read like any place's.
+ *  Python contract: `ouroboros/gateway/client_contracts.py::PlaceSummary`. */
 export function peerPlaceFacts(raw) {
     const place = object(raw) || {};
     if (place.connector !== PEER_CONNECTOR) return {};

@@ -2471,12 +2471,6 @@ def test_a_reload_of_new_bytes_deferred_by_a_live_call_keeps_the_held_companion_
         _end_fake_companions(supervisor, spawned, loaded.name)
 
 
-def _js_typedef(path: pathlib.Path, name: str) -> str:
-    text = path.read_text(encoding="utf-8")
-    start = text.index(f"@typedef {{Object}} {name}\n")
-    return text[start:text.index("*/", start)]
-
-
 def test_grant_with_enable_and_the_named_catalogue_keep_the_observed_pending_exit(tmp_path, monkeypatch) -> None:
     """Alpha exhausted its restarts and beta awaits an unconfirmed exit. A grant carrying the owner's Enable, the named
     ``list_skills`` row and the listing name both facts alike; the catalogue only reads what the server observed,
@@ -2517,10 +2511,6 @@ def test_grant_with_enable_and_the_named_catalogue_keep_the_observed_pending_exi
         _end_fake_companions(supervisor, spawned, loaded.name)
     for typed in (contracts.SkillGrantResponse, management_contracts.SkillActionRefusal):
         assert "retained_companions" in typed.__annotations__, typed.__name__
-    web = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules"
-    for path, name in ((web / "api_types.js", "SkillGrantResponse"),
-                       (web / "management_contract_types.js", "SkillActionRefusal")):
-        assert "@property {Object<string,string>=} retained_companions" in _js_typedef(path, name), name
 
 
 def _pending_exit(skill_name: str, name: str, skill_dir) -> types.SimpleNamespace:

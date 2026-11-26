@@ -1,9 +1,8 @@
 """Typed leaf: a Project's working folder as ``/api/projects/{project_id}/folder`` reads and changes it, and the
 folder browser's listing (``GET /api/fs/dirs``) that the folder dialog and the New Project picker share.
 
-Producers: ``ouroboros/project_folder.py``; the listing, ``gateway/projects.py::api_fs_dirs``. Browser twins:
-``web/modules/project_folder_types.js``; the listing's, ``web/modules/api_types.js``. ``gateway/contracts.py``
-re-exports the listing.
+Producers: ``ouroboros/project_folder.py``; the listing, ``gateway/projects.py::api_fs_dirs``, which
+``gateway/contracts.py`` re-exports.
 """
 from __future__ import annotations
 

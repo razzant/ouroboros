@@ -1379,8 +1379,10 @@ def settle_commit_review_ledger(ctx: ToolContext, commit_message: str, *, goal: 
         if advisory_replay is not None:
             refusal = {"kind": str(advisory_replay.get("replay_reason") or "free_replay"),
                        "message": str(advisory_replay.get("advisory_replay") or "")}
-        elif str(getattr(ctx, "_last_review_block_reason", "") or "") == "review_wave_budget_insufficient":
-            refusal = {"kind": "review_wave_budget_insufficient", "message": str(structured.get("wave_refusal") or "")}
+        elif (block_kind := str(getattr(ctx, "_last_review_block_reason", "") or "")) in {
+            "review_wave_budget_insufficient", "review_wave_billing_authority_unavailable",
+        }:
+            refusal = {"kind": block_kind, "message": str(structured.get("wave_refusal") or "")}
         pending = advisory_replay is None and bool(git_mod._review_custody_pending(ctx))
         facts = _review_ledger_facts(
             ctx, commit_message, goal=goal, scope=scope, pre_fingerprint=pre_fingerprint or {},

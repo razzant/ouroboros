@@ -392,3 +392,37 @@ def test_technical_repark_names_the_read_and_owes_one_notice_per_work(notices):
     activity = {"phase": "budget_paused", "can_resume": True, "live": False}
     assert owner_actions({**activity, "pause_cause": "authority"}) == ({}, False)
     assert owner_actions({**activity, "pause_cause": "owner"}) == ({}, True)
+
+
+def test_cap_exhausted_error_separates_the_works_own_cap_from_an_independent_fence():
+    """The typed refusal follows what the money snapshot shows binds: the work's own cap (amended
+    or not) keeps the conversational remedy; a fence of another provenance never claims it."""
+    from ouroboros.pause_notices import RESUME_REFUSAL_WORDS, cap_exhausted_error
+
+    def axis(source, group=False):
+        return {"binding_axis": "group" if group else "root",
+                "root_axis": (None if group else {"limit_usd": 5.0, "source": source}),
+                "group_axis": ({"limit_usd": 5.0, "source": source} if group
+                               else {"limit_usd": 5.0, "source": "initial_task_admission"})}
+    # The work's own ordinary cap on either axis, and its raised record, keep the amendable refusal.
+    for money in (axis(""), axis("", group=True), axis("initial_task_admission", group=True),
+                  axis("work_cap"), axis("work_cap", group=True)):
+        assert cap_exhausted_error(money) == "root_hard_cap_exhausted"
+    # A fence of another provenance is a different limit, on either axis.
+    assert cap_exhausted_error(axis("producer")) == "independent_cap_exhausted"
+    assert cap_exhausted_error(axis("review_envelope", group=True)) == "independent_cap_exhausted"
+    # The caller that knows which axis's tree was exhausted reads that axis's own source.
+    mixed = {"binding_axis": "root", "root_axis": {"limit_usd": 5.0, "source": "producer"},
+             "group_axis": {"limit_usd": 5.0, "source": "initial_task_admission"}}
+    assert cap_exhausted_error(mixed, axis="group") == "root_hard_cap_exhausted"
+    # Nothing readable keeps the ordinary refusal — the common per-task cap.
+    assert cap_exhausted_error({}) == "root_hard_cap_exhausted"
+    assert cap_exhausted_error(None) == "root_hard_cap_exhausted"
+    assert cap_exhausted_error({"binding_axis": None}) == "root_hard_cap_exhausted"
+    # Finite local root cap inside an originally unlimited group is independent (work_cap_unlimited).
+    assert cap_exhausted_error({"binding_axis": "root", "root_axis": {"limit_usd": 5.0, "source": ""},
+                                "group_axis": {"limit_usd": None, "source": "initial_task_admission"}}) == "independent_cap_exhausted"
+    # Refusals carry owner words; non-amendable refusals never tell the user set_task_cost_cap raises it now.
+    assert "set_task_cost_cap does not raise it" in RESUME_REFUSAL_WORDS["independent_cap_exhausted"]
+    assert "reconciliation is pending" in RESUME_REFUSAL_WORDS["work_cap_reconcile_pending"]
+    assert "set_task_cost_cap" in RESUME_REFUSAL_WORDS["root_hard_cap_exhausted"]

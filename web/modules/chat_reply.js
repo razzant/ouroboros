@@ -323,9 +323,12 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         if (!ref?.address) return;
         const door = rowOf(ref.address)?.querySelector('.chat-quiz-comment:not(:disabled):not([readonly])');
         if (door) { door.focus(); return; }
-        staged = ref;
-        paint();
-        remember();
+        // Keep the current Send's identity for the same normalized ref, including its metadata.
+        if (JSON.stringify(staged) !== JSON.stringify(ref)) {
+            staged = ref;
+            paint();
+            remember();
+        }
         input.focus({ preventScroll: true });
     }
 
