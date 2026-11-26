@@ -697,6 +697,7 @@ def select_history_page(data_dir, thread_id, view, cursor, quotas, predicates, c
             "selections": selections, "before": before, "page_ends": page_ends, "importing": importing,
             "horizon": horizon, "chains": chains, "chrono": chrono,
             "repair": repair, "repaired": settled, "repair_ids": repair_ids, "held": held,
+            "revision_now": (lambda: _text_revision(data_dir)) if settled else None,  # read again once projected
             "revised": continuation["revised"] if after else revised,
             **({key: continuation[key] for key in ("tasks", "newest", "lifecycle")} if after else {})}
 
@@ -901,8 +902,11 @@ def history_page_tokens(page, messages=(), reads=None):
     held = _held_rows(page, messages, shown, reads) if page.get("repair") and issues else None
     if page.get("repair") and page.get("after"):
         if page["repaired"] and (held is None and page.get("held") is not None or getattr(reads, "projection_failed", False)
-                                 or held is not None and page["repaired"] - set(held)):
-            # A task sent again turned out to need another's rows, or its projection failed part-way: the newest page.
+                                 or held is not None and page["repaired"] - set(held)
+                                 or page["revision_now"]() != page["revised"]):
+            # A task sent again turned out to need another's rows or its projection failed part-way, or words were
+            # revised in place since the revision this read was taken at (they reach a window only through a newest
+            # page): the newest page.
             raise HistoryCursorError("history_delta_reset", detail="task_settled")
         # A task's earlier rows keep the version they were projected at until a read sends them again (``repairs``).
         tasks.update((task, seq) for task, seq in page.get("tasks", {}).items() if task not in page["repaired"])

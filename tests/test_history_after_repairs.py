@@ -12,6 +12,8 @@ import base64
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from ouroboros import dialogue_store as ds
 from ouroboros.gateway import history_attribution, history_paging
 from ouroboros.gateway.history import make_chat_history_endpoint
@@ -444,3 +446,30 @@ def test_a_read_receipt_placed_only_by_its_client_id_holds_nothing(tmp_path):
     _task(tmp_path, "asker", "completed", 0)
     status, refused = _read(tmp_path, page["after_cursor"])
     assert (status, refused["detail"]) == (409, "task_settled")
+
+
+@pytest.mark.parametrize("meanwhile", ["settlements_read", "projected"])
+def test_words_revised_while_a_settlement_is_answered_send_the_window_to_its_newest_page(tmp_path, monkeypatch, meanwhile):
+    """The revision is taken before the settlements are read; one that moves before the answer leaves (while they are
+    read, or once the page is projected) is a change of words the repaired rows do not carry: the read refuses as the
+    settlement alone once did, and the newest page shows them."""
+    from ouroboros.gateway import place_history
+
+    _asking(tmp_path)
+    ds.append(tmp_path, "chat", {"ts": TS.format(1), "chat_id": 1, "direction": "out", "text": "draft caption"})
+    _, page = _read(tmp_path)
+    caption = next(row for row in page["messages"] if row.get("text") == "draft caption")
+    _task(tmp_path, "asker", "completed", 0)
+    owner, name = (history_paging, "_settled_since") if meanwhile == "settlements_read" else (
+        place_history, "annotate_place_history")  # the last step of the projection, before the cursor is named
+    original = getattr(owner, name)
+
+    def revised_meanwhile(*args, **kwargs):
+        ds.revise_text(tmp_path, "chat", caption["history_position"]["offset"], "corrected caption")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(owner, name, revised_meanwhile)
+    status, refused = _read(tmp_path, page["after_cursor"])
+    assert (status, refused.get("detail")) == (409, "task_settled"), refused
+    monkeypatch.setattr(owner, name, original)
+    _, newest = _read(tmp_path)
+    assert "corrected caption" in [row.get("text") for row in newest["messages"]]
