@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { bindScrollFade, replaceScrollFade, revealPastFade } from '../modules/scroll_fade.js';
+import { ROOM_EDGE_HTML } from '../modules/page_header.js';
 
 // A room's feed carries no fade (DESIGN principle 9, owner 21.10): what darkens content under its glass is the
 // bar's and the composer's own drawing. A mask on the feed would also make it one stacking context and drop the
@@ -304,4 +305,96 @@ test('a release reaches the binding live on a rebound element, not the spent dis
     assert.equal(live.every((o) => o.disconnected), true, 'the live binding is released, not the spent one');
     assert.equal(f.listeners.size, 0);
     assert.equal(f.frames.size, 0);
+});
+
+// One edge for everything that scrolls (DESIGN "One edge", owner decision 27.11.2026): one curve (--edge-curve) and
+// two blur steps (--edge-blur-soft, --edge-blur-deep) in ui.css's :root, read by the shared scroller masks, a room's
+// edge and every painted fade. A sheet may say where and how long an edge is, never draw one of its own.
+const SHEETS = readdirSync(new URL('..', import.meta.url)).filter((name) => name.endsWith('.css'));
+const SHARED_EDGE_IMAGES = new Set(['--scroll-fade-y-image', '--scroll-fade-x-image']);
+function gradientsIn(value) {
+    const found = [];
+    for (const match of value.matchAll(/(?:repeating-)?(?:linear|radial|conic)-gradient\(/g)) {
+        let depth = 1, at = match.index + match[0].length;
+        while (depth && at < value.length) depth += { '(': 1, ')': -1 }[value[at++]] || 0;
+        found.push(value.slice(match.index + match[0].length, at - 1).trim());
+    }
+    return found;
+}
+const fades = (stops) => /\btransparent\b|rgba?\([^)]*(?:,\s*0?\.\d+|\/\s*0?\.\d+)\s*\)|hsla?\([^)]*\/\s*0?\.\d+/.test(stops);
+function edgeRecipes(css, sheet) {
+    css = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    const found = [];
+    for (const [, selectors, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        const rule = selectors.trim();
+        const decls = body.split(';').map((d) => d.split(/:(.*)/s)).filter(([p, v]) => p && v !== undefined)
+            .map(([p, v]) => [p.trim(), v.trim()]);
+        const masked = decls.some(([p, v]) => /^(-webkit-)?mask(-image)?$/.test(p) && v !== 'none');
+        for (const [prop, value] of decls) {
+            if (/^--edge-(curve|blur-)/.test(prop) && !(sheet === 'ui.css' && rule === ':root')) found.push(`${rule} defines ${prop}`);
+            if (prop.startsWith('--') && !SHARED_EDGE_IMAGES.has(prop) && gradientsIn(value).some(fades)) found.push(`${rule} ${prop}`);
+            if (SHARED_EDGE_IMAGES.has(prop) && sheet !== 'ui.css') found.push(`${rule} redefines ${prop}`);
+            if (/^(-webkit-)?mask(-image)?$/.test(prop)) {
+                const own = gradientsIn(value).filter((stops) => !/^(to [a-z ]+,\s*|var\(--edge-to\),\s*)?var\(--edge-curve\)$/.test(stops)
+                    && !/^#000,\s*#000$/.test(stops));
+                if (own.length) found.push(`${rule} ${prop}`);
+            }
+            if (/^background(-image)?$/.test(prop) && gradientsIn(value).some((stops) => fades(stops)
+                && new Set(stops.split(/,(?![^(]*\))/).map((s) => s.trim())).size > 1)) found.push(`${rule} ${prop}`);
+            if (/^(-webkit-)?backdrop-filter$/.test(prop) && masked && !/^var\(--edge-blur-(soft|deep)\)$/.test(value)) {
+                found.push(`${rule} ${prop}`);
+            }
+        }
+    }
+    return found;
+}
+
+test('every edge in every sheet is the one shared edge', () => {
+    for (const sheet of SHEETS) {
+        assert.deepEqual(edgeRecipes(readFileSync(new URL(`../${sheet}`, import.meta.url), 'utf8'), sheet), [], sheet);
+    }
+    // The recipes this replaced, each its own edge: the room's bar, the folded answer, a painted list fade, a private
+    // blur radius or curve.
+    for (const broken of [
+        `.chat-page-header::before { background: linear-gradient(180deg, rgba(var(--shell-rgb), 0.72) 0, rgba(var(--shell-rgb), 0.00) 100%);
+            backdrop-filter: blur(12px); mask-image: linear-gradient(180deg, var(--edge-mask)); }`,
+        '.project-answer.is-folded > .message { mask-image: linear-gradient(180deg, black 60%, transparent 100%); }',
+        '.sidebar-head::after { background: linear-gradient(var(--surface-side), transparent); }',
+        '.toast-edge { -webkit-backdrop-filter: blur(14px); -webkit-mask-image: linear-gradient(var(--edge-curve)); }',
+        '.page { --edge-curve: #000, transparent; }',
+        '.list { --list-fade: linear-gradient(black 80%, transparent); }',
+    ]) assert.ok(edgeRecipes(broken, 'style.css').length, broken);
+    const allowed = `.room-edge { mask-image: linear-gradient(var(--edge-to), var(--edge-curve)), linear-gradient(#000, #000); }
+        .room-edge[data-edge="deep"] { backdrop-filter: var(--edge-blur-deep); mask-image: linear-gradient(to top, var(--edge-curve)); }
+        .icon { mask-image: url("data:image/svg+xml,x"); }
+        .chip { background: linear-gradient(var(--surface-capsule), var(--surface-capsule)), rgba(var(--shell-rgb), 0.98); }
+        .glass { backdrop-filter: var(--glass); }
+        .bar-meter { background: linear-gradient(to right, var(--accent) 40%, var(--neutral) 40%); }
+        .list.scroll-fade-y[data-scroll-below] { --scroll-fade-edge: 24px; }`;
+    assert.deepEqual(edgeRecipes(allowed, 'style.css'), [], 'what places an edge, or paints no fade, is not a recipe');
+});
+
+test('the shared scroller masks and the curve are one curve, and a room edge is two blur steps under its tint', () => {
+    const ui = readFileSync(new URL('../ui.css', import.meta.url), 'utf8');
+    const alphas = (text) => [...text.matchAll(/rgb\(0 0 0 \/ (\.\d+)\)/g)].map((m) => Number(m[1]));
+    const curve = alphas(ui.match(/--edge-curve:([^;]+);/)[1]);
+    assert.equal(curve.length, 9);
+    curve.forEach((alpha, i) => {
+        const t = 1 - (i + 1) / 10;
+        assert.ok(Math.abs(alpha - t * t * (3 - 2 * t)) < 0.001, 'smoothstep: flat at both ends, so neither draws a line');
+    });
+    for (const image of ['--scroll-fade-y-image', '--scroll-fade-x-image']) {
+        const stops = alphas(ui.match(new RegExp(`${image}:([^;]+);`))[1]);
+        assert.deepEqual(stops, [...[...curve].reverse(), ...curve], `${image} lays the curve over both ends`);
+    }
+    const style = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    const piece = style.match(/\n\.room-edge \{([^}]+)\}/)[1];
+    assert.match(piece, /mask-image: linear-gradient\(var\(--edge-to\), var\(--edge-curve\)\), linear-gradient\(#000, #000\);/);
+    assert.match(style, /\.room-edge\[data-edge="soft"\] \{[^}]*backdrop-filter: var\(--edge-blur-soft\);/);
+    assert.match(style, /\.room-edge\[data-edge="deep"\] \{[^}]*backdrop-filter: var\(--edge-blur-deep\);/);
+    assert.equal((style.match(/\.room-edge[^{]*\{[^}]*backdrop-filter/g) || []).length, 2, 'two blur steps, the soft and the deep');
+    assert.equal(ROOM_EDGE_HTML.match(/data-edge="(\w+)"/g).join(' '), 'data-edge="soft" data-edge="deep" data-edge="tint"',
+        'the tint is drawn last, over the blurred feed');
+    assert.doesNotMatch(style, /:is\(\.chat-page-header, \.project-panel-bar\)::before|:is\(#chat-input-area, \.chat-input-area\)::before/,
+        'the bars draw no edge of their own beside it');
 });

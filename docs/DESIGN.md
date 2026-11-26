@@ -124,7 +124,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    read from one snapshot and written one way; a new part appears only when the old one cannot do
    the job, and then replaces it everywhere.
 
-9. **A continuation fades at the edge.** Content fades past bars, strips, sheet heads and menus; long descriptions fade before disclosure (short names and excerpts keep ellipsis). One shared transparent fade, only where more waits; one float glass; the Widgets board (20.10) crisp, a room's feed (21.10) unmasked.
+9. **A continuation fades at the edge.** Content fades past bars, strips, sheet heads and menus; long descriptions fade before disclosure (short names and excerpts keep ellipsis). One shared transparent fade on the one edge curve (§10 "One edge"), only where more waits; one float glass; the Widgets board (20.10) crisp, a room's feed (21.10) unmasked.
 
 **Seed (light | dark)**
 
@@ -3706,20 +3706,31 @@ whole or not at all, as the status word does, so a narrow phone may show the sta
 becomes a row of the work list (below). The room's and the drawer's × give way to Telegram's Back, which closes them
 (both are layers). The work list and consciousness sheet hang below at page width. Typing keeps the same row.
 
+### One edge
+
+Everything that scrolls ends in the same edge (owner decision 27.11.2026): one curve, `--edge-curve` (smoothstep from
+opaque to clear, flat at both ends, so neither end of a fade reads as a line), over one length, `--edge-length`
+(48 px), both in `web/ui.css`. A new scroller takes `.scroll-fade-y` / `.scroll-fade-x` (`scroll_fade.js` marks where
+more waits), a clipped preview `[data-fold-clipped]`, and a painted fade (a colour into what passes under it) is the
+colour masked by `linear-gradient(var(--edge-curve))`; a sheet sets only where an edge is and how long, never a
+gradient, curve or blur of its own. The Widgets board (20.10) stays crisp and a room's feed (21.10) unmasked.
+
 ### A room's edges
 
 The transcript runs to the room's top under the bar and to its bottom under the composer; nothing masks it. At both
-ends it is darkened and blurred under what floats over it, one material top and bottom (owner 15.11 «прозрачную шапку…
-градиент затемнения по нашей библии… и в десктопе», his choice 17.11 1A, 3A): the composer's darkening (the room's
-colour at 72 % at the edge, 36 % at 48 %, 10 % at 78 %, none at the far end), mirrored at the top. A 12 px blur
-keeps scrolling card actions distinct from the floating controls. It is full behind the capsules and phone clock,
-then tapers to clear within 32 px below the bar on every layout. The composer has the same soft transition inside
-its top 32 px. The first row and every landing clear the header's reach; a row under it is not read yet. The top
-effect uses one layer, separate from the desktop title-band strip. A note or the search sheet floats above it as the capsules
-do (a Project's status note, in its flow, stands below it). The blur belongs to the edge, not to a chip, so it applies in
-both themes. While typing in Telegram the feed still passes under both. The newest line and time rest just above the
-measured composer. In a tight room the top extension yields to the feed. Reading history holds the passage in place,
-as it does in a shorter window, and the feed still scrolls.
+ends what floats over it stands on one material, top and bottom (owner 15.11 «прозрачную шапку… градиент затемнения
+по нашей библии… и в десктопе», his choice 17.11 1A, 3A, and 27.11 C): two blur steps, a soft one (4 px) over the
+whole taper and a deep one in its depth (12 px in all over the soft), under the room's colour, 72 % at the window's
+edge. Blur and darkening each follow the shared edge curve to clear, the deep blur dissolving into the soft and the
+soft into sharp text, so the blurred zone ends with no line. It is full behind the
+capsules and phone clock and clears one edge length below the bar on every layout; the composer's area has the same
+edge inside its top. It keeps scrolling card actions distinct from the floating controls. The first row and every
+landing clear the header's reach; a row under it is not read yet. The top edge is separate from the desktop
+title-band strip. A note or the search sheet floats above it as the capsules do (a Project's status note, in its flow,
+stands below it). The blur belongs to the edge, not to a chip, so it applies in both themes; without backdrop blur,
+or with reduced transparency, a stronger darkening alone fades the edge. While typing in Telegram the feed still passes
+under both. The newest line and time rest just above the measured composer. In a tight room the top extension yields
+to the feed. Reading history holds the passage in place, as it does in a shorter window, and the feed still scrolls.
 Other phone keyboards keep the bar and composer in flow. In a dark room the bar's capsules are the composer
 chips' glass (the capsule's veil over a blur of what passes under it), on the desk as on a phone; light keeps white
 capsules at the top as at the bottom. Panic keeps its ink above 4.5:1 on that glass over the reddest card: a lighter

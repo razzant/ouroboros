@@ -35,12 +35,12 @@ test('Files keeps location and actions in the band, with the filter first in its
     const top = ui.match(/:where\(\.scroll-fade-y\[data-scroll-above\]\)\s*\{([^}]+)\}/)[1];
     assert.match(top, /--scroll-fade-inset:\s*min\(100%,\s*var\(--scroll-fade-top-clear\)\);/,
         'only a scrolled list clears the band, at most its own height');
-    assert.match(top, /--scroll-fade-top:\s*calc\(var\(--scroll-fade-inset\)\s*\+\s*var\(--scroll-fade-y-depth\)\);/,
-        'the opaque part starts one actual fade depth below the band');
+    assert.match(top, /--scroll-fade-top:\s*var\(--scroll-fade-y-depth\);/,
+        'the top fade runs one actual fade depth below the band');
     const vertical = ui.match(/:where\(\.scroll-fade-y,\s*\[data-fold-clipped\]\)\s*\{([^}]+)\}/)[1];
     assert.match(vertical, /--scroll-fade-y-depth:\s*min\(var\(--scroll-fade-edge\),\s*max\(0px,\s*\(100%\s*-\s*var\(--scroll-fade-inset\)\)\s*\*\s*var\(--scroll-fade-limit\)\)\);/,
         'the fade cannot take more than its share of the space left below the band');
-    assert.match(vertical, /linear-gradient\(to bottom,\s*transparent var\(--scroll-fade-inset\),\s*black var\(--scroll-fade-top\),/,
+    assert.match(vertical, /linear-gradient\(to bottom,\s*transparent var\(--scroll-fade-inset\),\s*rgb\(0 0 0 \/ \.028\) calc\(var\(--scroll-fade-inset\) \+ var\(--scroll-fade-top\) \* \.1\),/,
         'the list is transparent through the band and fades in immediately below it');
     // The band's location row takes the band's inset alone (a phone showed it 28px in, the rows 12px).
     assert.match(css, /\.files-band > \.files-browser-header \{ padding-inline: 0; \}/);

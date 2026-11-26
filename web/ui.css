@@ -199,6 +199,14 @@
     --surface-tray: rgba(var(--neutral-rgb), 0.045);
     --surface-side: #0f0f11;
     --glass: blur(18px);
+    /* The one edge of everything that scrolls (DESIGN "One edge"): its length, its curve (smoothstep, from opaque to
+       clear, flat at both ends so neither end draws a line) and a room edge's two blur steps, in both themes. */
+    --edge-length: 48px;
+    --edge-curve: #000, rgb(0 0 0 / .972) 10%, rgb(0 0 0 / .896) 20%, rgb(0 0 0 / .784) 30%, rgb(0 0 0 / .648) 40%,
+        rgb(0 0 0 / .5) 50%, rgb(0 0 0 / .352) 60%, rgb(0 0 0 / .216) 70%, rgb(0 0 0 / .104) 80%, rgb(0 0 0 / .028) 90%,
+        transparent;
+    --edge-blur-soft: blur(4px);
+    --edge-blur-deep: blur(11.3px);  /* over the soft step it compounds to 12 px: sqrt(4² + 11.3²) */
     --voice-owner: #103e7f;
     --voice-ouroboros: #76162b;
     --voice-ouroboros-card: #76162b;
@@ -886,9 +894,10 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
      token on a scope (the lock above) and adds no tone or outline.
    - .app-tab .app-tab-pill .active .is-active — a view of one page, in the page's own strip: the chosen tab is the
      soft crimson, its count a neutral pill. A section's pages are never tabs.
-   - .scroll-fade-y .scroll-fade-x [data-fold-clipped] .scroll-fade-focus-frame .is-quiet-focus — transparent edges.
-     scroll_fade.js marks live edges; a preview marks its clipped body, not its door. The focus frame puts the ring
-     outside the mask; quiet focus omits the fade's ring.
+   - .scroll-fade-y .scroll-fade-x [data-fold-clipped] .scroll-fade-focus-frame .is-quiet-focus — transparent edges,
+     each end --edge-curve over its depth (the one edge: a room's edge and a painted fade read that curve too).
+     scroll_fade.js marks live edges; a preview or a folded answer marks its clipped body, not its door. The focus
+     frame puts the ring outside the mask; quiet focus omits the fade's ring.
    - .filter-chip — a quiet filter with no body; chosen (.active), the soft crimson.
    - .ui-segment-group .ui-segment .ui-segment-fill — one choice among a few short words (page_header.js
      renderSegmentedField; a lone .ui-segment stands as a capsule); the soft crimson travels to the chosen word
@@ -965,19 +974,30 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
     --scroll-fade-focus-outline: initial;
     --scroll-fade-focus-mask: none;
 }
+/* Each end is --edge-curve laid over its depth (--scroll-fade-top / -bottom, -start / -end): the same eleven stops. */
 :where(.scroll-fade-y, [data-fold-clipped]) {
-    --scroll-fade-edge: 32px;
+    --scroll-fade-edge: var(--edge-length);
     --scroll-fade-top-clear: 0px;
     --scroll-fade-inset: 0px;
     --scroll-fade-top: 0px;
     --scroll-fade-bottom: 0px;
     --scroll-fade-y-depth: min(var(--scroll-fade-edge), max(0px, (100% - var(--scroll-fade-inset)) * var(--scroll-fade-limit)));
-    --scroll-fade-y-image: linear-gradient(to bottom, transparent var(--scroll-fade-inset), black var(--scroll-fade-top),
-        black calc(100% - var(--scroll-fade-bottom)), transparent 100%);
+    --scroll-fade-y-image: linear-gradient(to bottom, transparent var(--scroll-fade-inset),
+        rgb(0 0 0 / .028) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .1), rgb(0 0 0 / .104) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .2),
+        rgb(0 0 0 / .216) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .3), rgb(0 0 0 / .352) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .4),
+        rgb(0 0 0 / .5) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .5), rgb(0 0 0 / .648) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .6),
+        rgb(0 0 0 / .784) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .7), rgb(0 0 0 / .896) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .8),
+        rgb(0 0 0 / .972) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .9), #000 calc(var(--scroll-fade-inset) + var(--scroll-fade-top)),
+        #000 calc(100% - var(--scroll-fade-bottom)),
+        rgb(0 0 0 / .972) calc(100% - var(--scroll-fade-bottom) * .9), rgb(0 0 0 / .896) calc(100% - var(--scroll-fade-bottom) * .8),
+        rgb(0 0 0 / .784) calc(100% - var(--scroll-fade-bottom) * .7), rgb(0 0 0 / .648) calc(100% - var(--scroll-fade-bottom) * .6),
+        rgb(0 0 0 / .5) calc(100% - var(--scroll-fade-bottom) * .5), rgb(0 0 0 / .352) calc(100% - var(--scroll-fade-bottom) * .4),
+        rgb(0 0 0 / .216) calc(100% - var(--scroll-fade-bottom) * .3), rgb(0 0 0 / .104) calc(100% - var(--scroll-fade-bottom) * .2),
+        rgb(0 0 0 / .028) calc(100% - var(--scroll-fade-bottom) * .1), transparent 100%);
 }
 :where(.scroll-fade-y[data-scroll-above]) {
     --scroll-fade-inset: min(100%, var(--scroll-fade-top-clear));
-    --scroll-fade-top: calc(var(--scroll-fade-inset) + var(--scroll-fade-y-depth));
+    --scroll-fade-top: var(--scroll-fade-y-depth);
 }
 :where(.scroll-fade-y[data-scroll-below], [data-fold-clipped]) { --scroll-fade-bottom: var(--scroll-fade-y-depth); }
 :where(.scroll-fade-y:is([data-scroll-above], [data-scroll-below]), [data-fold-clipped]) {
@@ -990,8 +1010,18 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
     --scroll-fade-inline-to: right;
     --scroll-fade-start: 0px;
     --scroll-fade-end: 0px;
-    --scroll-fade-x-image: linear-gradient(to var(--scroll-fade-inline-to), transparent 0, black var(--scroll-fade-start),
-        black calc(100% - var(--scroll-fade-end)), transparent 100%);
+    --scroll-fade-x-image: linear-gradient(to var(--scroll-fade-inline-to), transparent 0,
+        rgb(0 0 0 / .028) calc(var(--scroll-fade-start) * .1), rgb(0 0 0 / .104) calc(var(--scroll-fade-start) * .2),
+        rgb(0 0 0 / .216) calc(var(--scroll-fade-start) * .3), rgb(0 0 0 / .352) calc(var(--scroll-fade-start) * .4),
+        rgb(0 0 0 / .5) calc(var(--scroll-fade-start) * .5), rgb(0 0 0 / .648) calc(var(--scroll-fade-start) * .6),
+        rgb(0 0 0 / .784) calc(var(--scroll-fade-start) * .7), rgb(0 0 0 / .896) calc(var(--scroll-fade-start) * .8),
+        rgb(0 0 0 / .972) calc(var(--scroll-fade-start) * .9), #000 var(--scroll-fade-start),
+        #000 calc(100% - var(--scroll-fade-end)),
+        rgb(0 0 0 / .972) calc(100% - var(--scroll-fade-end) * .9), rgb(0 0 0 / .896) calc(100% - var(--scroll-fade-end) * .8),
+        rgb(0 0 0 / .784) calc(100% - var(--scroll-fade-end) * .7), rgb(0 0 0 / .648) calc(100% - var(--scroll-fade-end) * .6),
+        rgb(0 0 0 / .5) calc(100% - var(--scroll-fade-end) * .5), rgb(0 0 0 / .352) calc(100% - var(--scroll-fade-end) * .4),
+        rgb(0 0 0 / .216) calc(100% - var(--scroll-fade-end) * .3), rgb(0 0 0 / .104) calc(100% - var(--scroll-fade-end) * .2),
+        rgb(0 0 0 / .028) calc(100% - var(--scroll-fade-end) * .1), transparent 100%);
 }
 :where(.scroll-fade-x[data-scroll-rtl]) { --scroll-fade-inline-to: left; }
 :where(.scroll-fade-x[data-scroll-start]) { --scroll-fade-start: var(--scroll-fade-x-depth); }
