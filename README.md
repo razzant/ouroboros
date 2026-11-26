@@ -127,7 +127,7 @@ The charts below are self-reported results on Terminal-Bench 2.1, OSWorld-Verifi
   <a href="https://ouroboros-agent.ai/benchmarks/"><img src="assets/bench-cl-bench.svg" width="375" alt="CL-Bench: Ouroboros against in-context learning baselines, Claude Code, and Codex on matched models"></a>
 </p>
 
-<!-- LLM rating card, for the README at the repository root. The image paths are relative to that README and stable: every edition overwrites the same files. The alt text names the columns of the main table, so this block changes only when the columns do. -->
+<!-- LLM rating card, for the README at the repository root. The image paths are relative to that README and stable: every edition overwrites the same files. Refresh this block when the main table's columns or counts change. -->
 <p align="center">
   <a href="https://ouroboros-agent.ai/llm-rating/">
     <picture>

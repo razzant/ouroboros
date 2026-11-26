@@ -340,7 +340,7 @@
   function gradeDisplay(g, x) {
     var open = x && (x.ground === 'open' || x.ground === 'role');
     var words = x && !g ? t('nodata_short') : chipWords(g);
-    return { cls: 't t-' + (g || 'N') + (open ? ' g-open' : ''), glyph: g || '–', words: words + (open ? '; ' + t('legend_open') : '') };
+    return { cls: 't t-' + (g || 'N') + (open ? ' g-open' : ''), glyph: g || '–', words: words + (open ? '; ' + t('legend_open') : ''), preliminary: !!open };
   }
   function cellBtn(kind, key, r, k, g, who, what, compared, x) {
     var d = gradeDisplay(g, x);
@@ -606,7 +606,11 @@
   }
   function groupCellV4(E, m, g, x) {
     var covers = g.works.map(function (w) { return '<li>' + esc(L(W[w].name)) + '</li>'; }).join('');
-    return dhead(chip(x.grade), esc(m.short) + ' · ' + esc(L(g.name)), esc(x.grade ? t('tier_long_' + x.grade) : t('nodata_long')) + '.') +
+    var d = gradeDisplay(x.grade, v5(E) ? x : null);
+    var badge = '<span class="' + d.cls + '" role="img" aria-label="' + esc(d.words) + '">' + d.glyph + '</span>';
+    var description = x.grade ? t('tier_long_' + x.grade) : t('nodata_long');
+    if (d.preliminary) description += ' · ' + t('legend_open');
+    return dhead(badge, esc(m.short) + ' · ' + esc(L(g.name)), esc(description) + '.') +
       '<div class="dg"><div class="dcol">' + why(x.reason) + (x.grade ? groundLine(E, x) : '') + columnVotes(E, m, g.id) +
       '<h4 class="in">' + esc(t('covers_title')) + '</h4><ul class="covers">' + covers + '</ul></div>' +
       '<div class="dcol"><h4>' + esc(t('letters_title')) + '</h4>' + groupLetters(g.id) +
@@ -866,8 +870,9 @@
   function votesSec(E) {
     var V = E.votes;
     if (!V) return '';
-    // the table a voter may have seen is the edition before the one the ballots were cast for
-    var prev = (E.carried && E.carried.votes_prior_table) || V.prior_table_edition || E.previous_edition || '', counted = 0, notCounted = 0, none = 0, seen = 0, rows = '';
+    // Only name a prior table when the carried ballot metadata binds it to this revision.
+    var prev = E.carried && E.carried.votes_prior_table, counted = 0, notCounted = 0, none = 0, seen = 0, rows = '';
+    var priorLabel = prev ? t('votes_col_prior', { id: prev }) : t('votes_col_prior_unnamed');
     V.voters.forEach(function (v) {
       var cls = ballotClass(v.status), m = M[v.model];
       if (cls === 'ok') counted++; else if (cls === 'warn') notCounted++; else none++;
@@ -876,9 +881,9 @@
       var identity = v.identity ? '<small class="vote-identity" data-identity="' + esc(v.identity) + '">' +
         esc(v.requested_label ? t('vote_identity_requested_snapshot', { model: v.requested_label }) : t('vote_identity_' + v.identity)) + '</small>' : '';
       rows += '<tr><th scope="row">' + esc(m ? m.short : v.model) + identity + '</th><td data-label="' + esc(t('votes_col_ballot')) + '"><span class="bs ' + cls + '">' + esc(t('vs_' + v.status)) + '</span></td>' +
-        '<td data-label="' + esc(t('votes_col_counted')) + '">' + esc(items) + '</td><td data-label="' + esc(t('votes_col_prior', { id: prev })) + '">' + esc(t('prior_' + v.prior_table)) + '</td></tr>';
+        '<td data-label="' + esc(t('votes_col_counted')) + '">' + esc(items) + '</td><td data-label="' + esc(priorLabel) + '">' + esc(t('prior_' + v.prior_table)) + '</td></tr>';
     });
-    var head = '<tr><th scope="col">' + esc(t('votes_col_version')) + '</th><th scope="col">' + esc(t('votes_col_ballot')) + '</th><th scope="col">' + esc(t('votes_col_counted')) + '</th><th scope="col">' + esc(t('votes_col_prior', { id: prev })) + '</th></tr>';
+    var head = '<tr><th scope="col">' + esc(t('votes_col_version')) + '</th><th scope="col">' + esc(t('votes_col_ballot')) + '</th><th scope="col">' + esc(t('votes_col_counted')) + '</th><th scope="col">' + esc(priorLabel) + '</th></tr>';
     var anns = V.annotations.map(function (a) {
       var c = a.counts;
       return '<li><span>' + esc(L(a.description)) + '</span>' +
@@ -890,7 +895,7 @@
     }).join('');
     return '<section class="sec pad" id="votes" aria-labelledby="votes-h"><h2 id="votes-h">' + esc(t('votes_title')) + '</h2>' + carriedNote(E) +
       '<p class="note">' + esc(E.carried ? t('votes_note_rev', { id: E.carried.from }) : t('votes_note')) + '</p>' +
-      '<p class="vsum">' + esc(t('votes_summary', { asked: V.voters.length, counted: counted, not_counted: notCounted, none: none })) + (seen ? ' ' + esc(t('votes_prior', { seen: seen, id: prev })) : '') + '</p>' +
+      '<p class="vsum">' + esc(t('votes_summary', { asked: V.voters.length, counted: counted, not_counted: notCounted, none: none })) + (prev && seen ? ' ' + esc(t('votes_prior', { seen: seen, id: prev })) : '') + '</p>' +
       '<h3 class="subh">' + esc(t('votes_pairs_title')) + '</h3><ol class="pairs">' + V.pairs.map(pairCard).join('') + '</ol>' +
       '<p class="why note">' + esc(t('votes_boundary')) + '</p>' +
       (anns ? '<h3 class="subh">' + esc(t('votes_checks_title')) + '</h3><p class="note">' + esc(t('votes_checks_note')) + '</p><ul class="anns">' + anns + '</ul>' : '') +
