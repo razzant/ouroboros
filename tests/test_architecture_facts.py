@@ -503,9 +503,18 @@ def test_a_wrong_shaped_manifest_is_a_named_error_and_a_refused_prefix_is_incomp
     from ouroboros.tools.registry import ToolRegistry
 
     (tmp_path / "ouroboros").mkdir()
-    (tmp_path / "ouroboros" / "domains.toml").write_text("modules = [1, 2]\n", encoding="utf-8")
-    with pytest.raises(ValueError, match=r"section \[modules\] must be a table"):
-        load_domain_manifest(tmp_path)
+    for wrong, named in (("modules = [1, 2]", r"section \[modules\] must be a table"),
+                         ("modules = []", r"section \[modules\] must be a table"),
+                         ("[graph]\nallowed = 7", r"\[graph\] allowed must be a list")):
+        (tmp_path / "ouroboros" / "domains.toml").write_text(wrong + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=named):
+            load_domain_manifest(tmp_path)
+    (tmp_path / "ouroboros" / "domains.toml").write_text("[modules]\n", encoding="utf-8")  # a valid empty table
+    assert load_domain_manifest(tmp_path).modules == {}
+    bad = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path / "bad-data")
+    (tmp_path / "ouroboros" / "domains.toml").write_text("modules = []\n", encoding="utf-8")
+    refused = bad.execute("query_code", {"op": "architecture", "query": "module_map D01", "root": "system_repo"})
+    assert "must be a table" in refused and "0 of 0" not in refused
 
     real_visible = query_code._visible_file
     monkeypatch.setattr(query_code, "_visible_file", lambda ctx, root, rel, *rest: (
