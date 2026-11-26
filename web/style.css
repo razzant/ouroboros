@@ -9852,6 +9852,9 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 .new-project-source-choices > label { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
 
 .new-project-selected-target { overflow-wrap: anywhere; }
+/* The folder's browser and the Git choice under it are two parts of the field, parted like the dialog's fields. */
+.new-project-attach { display: flex; flex-direction: column; gap: var(--space-3); }
+.new-project-attach[hidden] { display: none; }
 
 .new-project-browser {
     border: 1px solid var(--divider);
@@ -10506,6 +10509,11 @@ html[data-layout="stack"] .project-panel {
     display: inline-block;
     user-select: all;
 }
+/* The terminal command's parts (what to do, the shell's name, the command, Copy) stand apart like the card's own
+   parts, in the settings pages and in setup alike; the command spans the card. */
+.harness-external-terminal { align-self: stretch; display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); }
+.harness-external-terminal > .harness-attach-command { align-self: stretch; margin: 0; }
+.harness-advanced > .harness-attach-command { margin: var(--space-2) 0; }
 .harness-attach-command {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     font-size: var(--type-meta);

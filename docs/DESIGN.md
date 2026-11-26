@@ -426,7 +426,9 @@ make them all square), one white mark on the accent, one focus ring, one
 disabled look; under forced colours it is the system's own box. A radio is the
 same circle with a dot. A page places the box and its words (the gap, the
 first line it sits on), never sizes, recolours or reshapes it, and no style
-sheet styles `input[type="checkbox"]` of its own.
+sheet styles `input[type="checkbox"]` of its own. What a choice will do, beyond
+its name, is a help line under it, readable before the choice on every
+surface, not a hover title.
 
 **A search field has one look across the app**: a capsule a row high in the composer field's material, the search
 glyph at its start and a placeholder that names what it searches (`Find a project`, `Search settings`, `Find an
