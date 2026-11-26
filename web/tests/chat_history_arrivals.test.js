@@ -878,7 +878,7 @@ function repairingRoom(t, s) {
     return { r, repairs };
 }
 
-test('a card only repairs settled marks no new activity; what arrived with it does', async (t) => {
+for (const arrival of ['none', 'receipt', 'card row']) test(`a card only repairs settled marks no new activity (${arrival})`, async (t) => {
     const s = historyServer();
     s.say(1);
     s.work(2, 'task-7');
@@ -893,12 +893,20 @@ test('a card only repairs settled marks no new activity; what arrived with it do
     const settled = { ...s.rows[1], task_terminal_status: 'completed', outcome_final: true, outcome_phase: 'done',
         outcome_axes: { execution: { status: 'ok' }, lifecycle: { status: 'completed' } } };
     repairs.push(settled);
+    if (arrival !== 'none') s.say(3, { role: 'system', text: '', is_progress: false, task_id: 'task-7',
+        system_type: 'task_summary', summary_kind: 'terminal_root_projection',
+        historical_terminal: { status: 'completed', phase: 'done', ts: ts(3), provenance: 'canonical_task_result_after_finalization' } });
+    if (arrival === 'card row') s.say(4, { role: 'system', text: 'Custody settled', is_progress: false, task_id: 'task-7',
+        system_type: 'custody_notice', card_row: 'timeline', card_row_id: 'final:task-7:abc:custody_notice' });
     await r.instance.refreshHistory({ revision: 2 });
     await quiet();
+    assert.deepEqual(s.reads, ['newest', 'after']);
     const card = r.messages.children.find((node) => node.classList?.contains('chat-live-card'));
-    assert.equal(card.dataset.finished, '1', 'the card settled from its repaired row');
-    assert.equal(button.getAttribute('aria-label'), 'Scroll to latest message', 'nothing arrived: no new activity');
-    s.say(3);
+    assert.equal(card.dataset.finished, '1', 'history settled the existing card');
+    assert.equal(button.getAttribute('aria-label'), arrival === 'card row'
+        ? 'New activity — scroll to latest message' : 'Scroll to latest message');
+    if (arrival === 'card row') return;
+    s.say(5);
     await r.instance.refreshHistory({ revision: 3 });
     await quiet();
     assert.equal(button.getAttribute('aria-label'), 'New activity — scroll to latest message', 'a new message is');

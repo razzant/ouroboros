@@ -376,7 +376,8 @@ export function createChatHistoryPager({
                 // `repairs`: the rows the window holds of a task it shows that settled, as the newest page shows them now.
                 const repairs = data.repairs ?? [], card = row => row.presentation_owner_task_id || row.task_id;
                 // A card only repairs changed is no arrival: it marks nothing new (one that also gained a row does).
-                const quiet = new Set(repairs.map(card).filter(id => id && !data.messages.some(row => card(row) === id)));
+                const quiet = new Set(repairs.map(card).filter(id => id
+                    && !data.messages.some(row => !isReplayEvidenceRow(row) && card(row) === id)));
                 applyArrivals(data.messages, { window: data.window ?? null, fromReconnect: ask.fromReconnect,
                     requestedAt: data.requestedAt, repairs, quiet });
                 // The arrivals go on from this answer only once it is drawn: one that failed to apply reads the newest page.
