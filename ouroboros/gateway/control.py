@@ -1451,12 +1451,13 @@ def _apply_replace_recovery_fenced(
         try:
             update_progress.advance("applying")
             # A target without the store: the switch intent, the checkout moves at the restart exit
-            # (store_switch); its smoke is the post-boot one the pending transaction already runs.
+            # (store_switch); its smoke is the post-boot one the pending transaction already runs. The intent names
+            # this attempt, so only the seam's refusal of THIS intent abandons it at the next boot (update_merge).
             checkout = switch_or_reset(
                 DRIVE_ROOT, REPO_DIR, target_sha=expected_target_sha, target_ref=str(tx["target_ref"]),
                 reason="ui_update_apply", door="update_replace",
                 reset=lambda: checkout_and_reset(BRANCH_DEV, reason="ui_update_apply", unsynced_policy="rescue_and_reset"),
-                handoff=handoff)
+                handoff=handoff, attempt_id=tx["attempt_id"])
         except Exception as exc:
             from supervisor.git_ops_reset import refusal_text
 

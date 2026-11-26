@@ -1392,9 +1392,10 @@ def abort_orphaned_assisted_tx(
 _ABANDON_INTENT_CLEANUP = "replace_abandon_intent_cleanup_failed"
 
 
-def abandon_unapplied_replace(head: str, **event: Any) -> Dict[str, Any]:
-    """Disarm a replace that never moved HEAD off ``pre_update_sha`` (intent, then tx); earlier rescue/keep refs stay.
-    A failed cleanup leaves the clear-only phase: bootstrap defers over it and boot only retries the unlinks."""
+def abandon_unapplied_replace(tx: Dict[str, Any], **event: Any) -> Dict[str, Any]:
+    """Disarm a replace that never moved HEAD off ``pre_update_sha`` (intent, then tx); earlier rescue/keep refs stay
+    and its attempt reads not_applied. A failed cleanup leaves the clear-only phase: bootstrap defers over it and boot
+    only retries the unlinks."""
     if not _g._clear_update_intent():
         mark_update_tx_gate_blocked(_ABANDON_INTENT_CLEANUP, cleanup_only=True)
         return {"finalized": False, "reason": "could not disarm replace replay"}
@@ -1404,13 +1405,14 @@ def abandon_unapplied_replace(head: str, **event: Any) -> Dict[str, Any]:
     if not cleared:
         mark_update_tx_gate_blocked("replace_abandon_tx_cleanup_failed", cleanup_only=True)
         return {"finalized": False, "reason": "could not clear replace transaction"}
-    _log_supervisor({"type": "managed_update_replace_apply_abandoned", "head": head, **event})
-    return {"finalized": False, "abandoned": True, "reason": "replace_not_applied"}
+    _log_supervisor({"type": "managed_update_replace_apply_abandoned", "head": tx["pre_update_sha"], **event})
+    return {"finalized": False, "abandoned": True, "reason": "replace_not_applied", **_observed(tx, "not_applied")}
 
 
 def settle_replace_refusal(tx: dict, *, before_tree_effects: bool, cause: str, detail: str,
                            git_failure: Optional[dict] = None) -> Optional[dict]:
-    """Under the apply lock, disarm only this replacement. None leaves rollback in charge."""
+    """Under the update lock (its door's or boot's), disarm only this replacement at its pinned base; held otherwise
+    (a reason, nothing touched). None leaves rollback in charge."""
     status, live = read_update_tx_strict()
     keys = ("attempt_id", "pre_update_sha", "pre_update_branch", "target_sha", "strategy", "phase")
     if status != "valid" or any(not tx.get(key) or live.get(key) != tx[key] for key in keys):
@@ -1425,7 +1427,7 @@ def settle_replace_refusal(tx: dict, *, before_tree_effects: bool, cause: str, d
             or _g.git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])[:2] != (0, live["pre_update_branch"])):
         return {"reason": "could not confirm the replacement's original checkout"}
     event = {"cmd": git_failure["cmd"], "stderr": detail} if git_failure else {"detail": detail}
-    return abandon_unapplied_replace(live["pre_update_sha"], cause=cause, attempt_id=live["attempt_id"], **event)
+    return abandon_unapplied_replace(live, cause=cause, attempt_id=live["attempt_id"], **event)
 
 
 def _recover_replace_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dict[str, Any]:
@@ -1444,8 +1446,7 @@ def _recover_replace_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dict
         if head == pre:
             # No target checkout is visible. Disarm replay and leave the current tree alone;
             # the rescue already exists, but a crash before reset must not erase dirty work.
-            abandoned = abandon_unapplied_replace(head)
-            return {**abandoned, **_observed(tx, "not_applied")} if abandoned.get("abandoned") else abandoned
+            return abandon_unapplied_replace(tx)
         reason = "replace_apply_interrupted"
     ok, msg = rollback_managed_update_on_boot(reason)
     return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
@@ -1512,10 +1513,7 @@ def _finalize_managed_update_locked(supervisor_ready: bool) -> Dict[str, Any]:
 
     if refusal := body_replacement_refusal():  # neither finalized nor rolled back here: the administrator's tree
         return {"finalized": False, "reason": "managed_by_deployment", "message": refusal}
-    if status == "corrupt":
-        # Quarantined aside byte-intact (evidence survives, the admission
-        # latch does not) unless MERGE_HEAD shows a live merge (#447);
-        # mechanics in update_candidate.quarantine_corrupt_update_tx_marker.
+    if status == "corrupt":  # set aside byte-intact unless a live merge holds MERGE_HEAD (its docstring: #447)
         return quarantine_corrupt_update_tx_marker()
     if status == "future":
         # Recorded by a NEWER release (this process is the rollback
@@ -1565,6 +1563,9 @@ def _finalize_managed_update_locked(supervisor_ready: bool) -> Dict[str, Any]:
             {"finalized": False, "reason": "recovered pre-apply stash crash", **_observed(tx, "not_applied")},
             {"type": "managed_update_stash_recovered_on_boot"},
         )
+    from ouroboros.store_switch import refused_switch
+    if phase == "pending_boot_smoke" and (refused := refused_switch(_g.DRIVE_ROOT, "update_replace", tx.get("attempt_id"))):
+        return settle_replace_refusal(tx, before_tree_effects=True, cause="switch_refused", detail="intent set aside unconsumed")
     if phase == "pending_boot_smoke":
         return _rollback_incomplete(tx, _finalize_pending_boot_smoke(tx, supervisor_ready))
     if phase == "applying_replace":

@@ -147,21 +147,38 @@ def report_outcomes(root: pathlib.Path, owner_chat_id: int) -> None:
 
 
 
-def record_switch_intent(root: Any, *, target_sha: str, target_ref: str, reason: str, door: str) -> Dict[str, Any]:
-    """The door's record of the switch it wants; write-once until consumed or refused."""
+def record_switch_intent(root: Any, *, target_sha: str, target_ref: str, reason: str, door: str,
+                         attempt_id: str = "") -> Dict[str, Any]:
+    """The door's record of the switch it wants; write-once until consumed or refused. A door's ``attempt_id`` (an
+    Update replace's) binds the seam's refusal record to that attempt (``refused_switch``)."""
     root = pathlib.Path(root)
     if door not in DOORS:
         raise ValueError(f"unknown switch door: {door}")
     if (root / INTENT_REL).exists():
         raise SwitchIntentPending(f"a switch intent is already recorded: {root / INTENT_REL}")
     intent = {"target_sha": str(target_sha), "target_ref": str(target_ref), "reason": str(reason), "door": door,
-              "requested_at": utc_now_iso()}
+              "requested_at": utc_now_iso(), **({"attempt_id": str(attempt_id)} if attempt_id else {})}
     atomic_write_json(root / INTENT_REL, intent, fsync=True)
     return intent
 
 
 def read_switch_intent(root: Any) -> Optional[Dict[str, Any]]:
     return read_json_dict(pathlib.Path(root) / INTENT_REL)
+
+
+def _refused_intent_path(root: pathlib.Path, attempt_id: Any) -> Optional[pathlib.Path]:
+    """The one name ``_refuse`` gives an intent naming ``attempt_id`` when it sets it aside unconsumed."""
+    attempt = str(attempt_id or "")
+    return root / INTENT_REL.with_name(f"{INTENT_REL.stem}.refused-{attempt}.json") if attempt.isalnum() else None
+
+
+def refused_switch(root: Any, door: str, attempt_id: Any) -> Optional[Dict[str, Any]]:
+    """The intent ``door`` recorded for ``attempt_id`` as ``_refuse`` set it aside, or ``None``. That atomic rename,
+    synced before any later write, happens only before an intent is consumed, so no switching owner ever received
+    it: the decisive record, whatever became of the progress row after it."""
+    path = _refused_intent_path(pathlib.Path(root), attempt_id)
+    intent = read_json_dict(path) if path is not None else None
+    return intent if isinstance(intent, dict) and (intent.get("door"), intent.get("attempt_id")) == (door, attempt_id) else None
 
 
 def _receipt(root: pathlib.Path, intent: Dict[str, Any]) -> Dict[str, Any]:
@@ -265,7 +282,8 @@ def current_history_handoff() -> HistoryHandoff:
 
 
 def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: str, reason: str, door: str,
-                    reset: Callable[[], Tuple[bool, str]], handoff: Optional[HistoryHandoff] = None) -> Tuple[bool, str, bool]:
+                    reset: Callable[[], Tuple[bool, str]], handoff: Optional[HistoryHandoff] = None,
+                    attempt_id: str = "") -> Tuple[bool, str, bool]:
     """A door's one decision after its writers are stopped: a target WITHOUT the store, or one that cannot
     read a dialogue row held by reference, records the intent and moves nothing (the seam exports and
     switches at the restart exit the door requests next); any other runs the door's own reset now, after the
@@ -275,7 +293,8 @@ def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: st
         return UnappliedSwitch(False, refusal, False)
     needs = switch_needs(repo_dir, target_sha)
     if any(needs.get(name) for name in _DEFERRING):
-        record_switch_intent(root, target_sha=target_sha, target_ref=target_ref, reason=reason, door=door)
+        record_switch_intent(root, target_sha=target_sha, target_ref=target_ref, reason=reason, door=door,
+                             attempt_id=attempt_id)
         return True, (f"authority switch to {target_sha[:12]} recorded: the facts are exported and the checkout "
                       "moves at the restart exit"), True
     if lacks_wake_chain_reader(repo_dir, target_sha):
@@ -527,8 +546,10 @@ def _refuse(root: pathlib.Path, intent: Dict[str, Any], receipt: Dict[str, Any],
     attempt moved them); progress retains the reason for the next startup owner notice."""
     restored = _abandon(root, receipt)
     store.forget_handoffs()  # this process keeps its stores
-    refused = root / INTENT_REL.with_name(f"{INTENT_REL.stem}.refused-{_stamp()}.json")
+    refused = (_refused_intent_path(root, intent.get("attempt_id"))
+               or root / INTENT_REL.with_name(f"{INTENT_REL.stem}.refused-{_stamp()}.json"))
     os.replace(root / INTENT_REL, refused)
+    store.fsync_directory(root / "state")  # an attempt's set-aside intent is its refusal record (``refused_switch``)
     _progress(root, "refused", intent=intent, reason=reason, restored=restored, intent_moved_to=refused.name, **facts)
     return {"status": "refused", "reason": reason, "restored": restored, **facts}
 

@@ -918,4 +918,5 @@ def test_update_replace_to_a_store_less_tree_defers_the_checkout_and_skips_the_p
     assert [tx["phase"] for tx in writes][-1] == "pending_boot_smoke" and "passed" not in {tx.get("pre_restart_smoke") for tx in writes}
     intent = store_switch.read_switch_intent(root)
     assert intent["door"] == "update_replace" and intent["target_sha"] == old and intent["reason"] == "ui_update_apply"
+    assert intent["attempt_id"] == writes[-1]["attempt_id"]  # the seam's refusal of it binds this attempt
     assert git(repo, "rev-parse", "HEAD") == new

@@ -1104,13 +1104,17 @@ def test_a_store_less_target_the_switch_did_not_reach_is_never_replayed_or_final
 
     assert _git(scene.repo, "rev-parse", "HEAD") == scene.base  # never the store-less target
     assert ok is (lock_at_next_boot == "released"), message
-    assert (result.get("finalized"), result.get("rolled_back")) == (False, True), result
     assert not _rows(scene.data, "managed_update_finalized") and not git_ops._read_update_intent()
-    [row] = _rows(scene.data, "managed_update_rolled_back")
-    assert row["checkout_already_restored"] is True and row["pre_update_sha"] == scene.base
-    assert update_merge.read_update_tx_strict()[1]["phase"] == update_merge.MARKER_CLEANUP_RETRY_PHASE
-    # The restored generation only clears its handoff; the owner learns the switch did not happen.
-    assert update_merge.finalize_managed_update_on_boot(supervisor_ready=True)["finalized"] is True
+    if seam == "refused":  # refused before its owner ran: abandoned, never rolled back (dirty trees: below)
+        assert result["abandoned"] is True and result["observed"]["outcome"] == "not_applied", result
+        assert not _rows(scene.data, "managed_update_rolled_back")
+    else:  # the intent was consumed, so the owner may have run: the rollback stays
+        assert (result.get("finalized"), result.get("rolled_back")) == (False, True), result
+        [row] = _rows(scene.data, "managed_update_rolled_back")
+        assert row["checkout_already_restored"] is True and row["pre_update_sha"] == scene.base
+        assert update_merge.read_update_tx_strict()[1]["phase"] == update_merge.MARKER_CLEANUP_RETRY_PHASE
+        # The restored generation only clears its handoff; the owner learns the switch did not happen.
+        assert update_merge.finalize_managed_update_on_boot(supervisor_ready=True)["finalized"] is True
     assert update_merge.read_update_tx_strict()[0] == "absent"
     store_switch.report_outcomes(scene.data, 7)
     [switch_notice] = [text for kind, text in sent if kind == "storage_switch_notice"]
@@ -1313,6 +1317,149 @@ def test_a_pre_tree_refusal_whose_first_tx_unlink_met_a_busy_bootstrap_keeps_loc
     assert update_merge.read_update_tx_strict()[0] == "absent" and not git_ops._read_update_intent()
     assert snapshot() == before and not rollbacks
     assert not _rows(scene.data, "managed_update_rolled_back")
+
+
+def _observe_boot_rollback(monkeypatch):
+    """The boot rollback door recorded, never run; the real bootstrap may reset this launcher-managed tree."""
+    from supervisor import evolution_lifecycle, update_merge
+
+    rollbacks = []
+    monkeypatch.setattr(update_merge, "rollback_managed_update_on_boot",
+                        lambda reason: rollbacks.append(reason) or (False, "observer"))
+    monkeypatch.setattr(evolution_lifecycle, "disable_evolution_projection", lambda: None)
+    monkeypatch.setattr(evolution_lifecycle, "pause_evolution_campaign", lambda *_a: {})
+    monkeypatch.setattr(git_ops, "_is_launcher_managed_repo", lambda: True)
+    return rollbacks
+
+
+@pytest.mark.parametrize("refused_at", ["restart_exit", "next_boot", "restart_exit_then_busy_cleanup",
+                                        "restart_exit_progress_unwritten"])
+def test_a_deferred_replace_whose_switch_was_refused_before_its_owner_keeps_local_work_through_the_next_start(
+        replace_scene, monkeypatch, refused_at):
+    """A store-less Replace records its switch intent, naming its attempt, and restarts. The seam refuses that intent
+    before any switching owner: an unconfirmed worker stop at the restart exit, or a preflight refusal when the next
+    boot resumes it. The next start reads this attempt's set-aside intent and abandons the Replace at its base: the
+    real bootstrap blocks over the dirty tree, the rollback is never selected, a first cleanup that met a busy
+    bootstrap transition is simply repeated by the start after it, and a progress row that was never written changes
+    nothing."""
+    from ouroboros import store_switch
+    from ouroboros.store_import import ensure_current_store
+    from supervisor import update_merge
+
+    scene, real_clear_tx = replace_scene, update_merge.clear_update_tx
+    ensure_current_store(scene.data)
+    snapshot = _local_work(scene.repo)
+    before, owners = snapshot(), []
+    monkeypatch.setattr(store_switch, "switching_owner", lambda door: lambda _intent: owners.append(door) or (False, "x"))
+
+    status, body = scene.apply(scene.storeless)
+
+    assert (status, body["status"], body["restarting"]) == (200, "ok", True), body
+    tx, intent = update_merge.read_update_tx_strict()[1], store_switch.read_switch_intent(scene.data)
+    assert (tx["phase"], intent["door"], intent["attempt_id"]) == ("pending_boot_smoke", "update_replace", tx["attempt_id"])
+    if refused_at == "next_boot":  # this generation stopped before its restart exit ran the seam
+        monkeypatch.setattr(store_switch, "_preflight", lambda *_a: "synthetic: less free space than the export needs")
+    else:  # server._check_restart's census with one worker exit unconfirmed
+        census = {"worker_exits": {"unconfirmed": ["worker:42"]}, "live_children": [],
+                  "owned_stop": {"state": "completed", "unconfirmed": []}}
+        unwritten, real_progress = refused_at == "restart_exit_progress_unwritten", store_switch._progress
+        monkeypatch.setattr(store_switch, "_progress", lambda root, phase, **facts: (_ for _ in ()).throw(
+            OSError("synthetic: progress not written")) if unwritten and phase == "refused" else real_progress(root, phase, **facts))
+        status = store_switch.switch_at_restart(scene.data, scene.repo, census, restart_drained=True)["status"]
+        assert status == ("error" if unwritten else "refused"), status
+        monkeypatch.setattr(store_switch, "_progress", real_progress)
+        outcomes = (store_switch.read_json_dict(scene.data / store_switch.PROGRESS_REL) or {}).get("outcomes", [])
+        assert [row["phase"] for row in outcomes] == ([] if unwritten else ["refused"])
+        assert store_switch.refused_switch(scene.data, "update_replace", tx["attempt_id"]) == intent  # set aside, unconsumed
+    rollbacks = _observe_boot_rollback(monkeypatch)
+    if refused_at == "restart_exit_then_busy_cleanup":
+        monkeypatch.setattr(update_merge, "clear_update_tx", lambda: None)
+        result = _next_boot(scene, monkeypatch)[1]
+        assert result == {"finalized": False, "reason": "bootstrap transition busy; replace marker retained"}, result
+        assert update_merge.read_update_tx_strict()[1]["phase"] == "pending_boot_smoke" and not git_ops._read_update_intent()
+        monkeypatch.setattr(update_merge, "clear_update_tx", real_clear_tx)
+
+    (ok, message), result = _next_boot(scene, monkeypatch)
+
+    assert not ok and "Reset blocked (" in message, message  # the transaction was still active at bootstrap
+    assert result["abandoned"] is True and result["observed"] == {
+        "outcome": "not_applied", "attempt_id": tx["attempt_id"], "commit": scene.base}, result
+    assert update_merge.boot_outcome_notice(result)["text"] == "The last update was not applied."
+    assert update_merge.read_update_tx_strict()[0] == "absent" and not git_ops._read_update_intent()
+    assert snapshot() == before and owners == [] and rollbacks == []
+    assert not _rows(scene.data, "managed_update_rolled_back")
+    [row] = _rows(scene.data, "managed_update_replace_apply_abandoned")
+    assert (row["head"], row["cause"], row["attempt_id"]) == (scene.base, "switch_refused", tx["attempt_id"])
+
+
+@pytest.mark.parametrize("head", ["read_as_the_target", "unreadable"])
+def test_a_refused_replace_off_its_confirmed_base_is_held_never_applied_or_rolled_back(replace_scene, monkeypatch, head):
+    """A positively refused switch never turns into an apply or a fresh rollback. When the next boot cannot confirm
+    the pinned base (HEAD reads as the target, or does not read at all), the finalizer holds the transaction: no smoke,
+    no rollback, nothing written, every file as it was. Git's HEAD reads are a synthetic observer here."""
+    from ouroboros import store_switch
+    from ouroboros.store_import import ensure_current_store
+    from supervisor import update_merge
+
+    scene, smokes, real_capture = replace_scene, [], git_ops.git_capture
+    ensure_current_store(scene.data)
+    snapshot = _local_work(scene.repo)
+    before = snapshot()
+    assert scene.apply(scene.storeless)[0] == 200
+    tx = update_merge.read_update_tx_strict()[1]
+    assert store_switch.run_switch_seam(scene.data, repo_dir=scene.repo, blockers=["worker:42"])["status"] == "refused"
+    rollbacks = _observe_boot_rollback(monkeypatch)
+    monkeypatch.setattr(update_merge, "update_restart_smoke", lambda: smokes.append("pre_restart") or {"ok": True})
+    monkeypatch.setattr(update_merge, "external_host_restart_smoke", lambda: smokes.append("native") or {"ok": True})
+    seen_head = (0, scene.storeless, "") if head == "read_as_the_target" else (128, "", "fatal: synthetic unreadable HEAD")
+    monkeypatch.setattr(git_ops, "git_capture", lambda cmd, *a, **kw: seen_head if cmd[:2] == ["git", "rev-parse"] and (
+        cmd[-1] == "HEAD" and "--abbrev-ref" not in cmd) else real_capture(cmd, *a, **kw))
+
+    result = update_merge.finalize_managed_update_on_boot(supervisor_ready=True)
+
+    assert result == {"reason": "could not confirm the replacement's original checkout"}, result
+    assert rollbacks == [] and smokes == [] and snapshot() == before
+    assert update_merge.read_update_tx_strict() == ("valid", tx) and git_ops._read_update_intent()["target_sha"] == scene.storeless
+    assert not _rows(scene.data, "managed_update_finalized") and not _rows(scene.data, "managed_update_replace_apply_abandoned")
+
+
+@pytest.mark.parametrize("earlier", ["competing_door", "replace_attempt"])
+def test_a_reached_switch_owner_keeps_the_rollback_beside_an_earlier_refusal_of_the_same_target(
+        replace_scene, monkeypatch, earlier):
+    """The other side of the line. A switch to the same store-less target was refused earlier: another door's intent,
+    or an earlier attempt of this Replace (abandoned at its own next start). This attempt then recorded its own switch,
+    whose owner the seam did call. That refusal is not this attempt's, and a reached owner may have changed the tree, so
+    the next start still selects the rollback (observed here, never run) over the dirty tree."""
+    from ouroboros import store_switch
+    from ouroboros.store_import import ensure_current_store
+    from supervisor import update_merge
+
+    scene, reached, earlier_attempts = replace_scene, [], []
+    ensure_current_store(scene.data)
+    snapshot = _local_work(scene.repo)
+    before = snapshot()
+    if earlier == "competing_door":
+        store_switch.record_switch_intent(scene.data, target_sha=scene.storeless, target_ref="official",
+                                          reason="owner rollback", door="ui_rollback")
+    else:
+        assert scene.apply(scene.storeless)[0] == 200
+        earlier_attempts.append(update_merge.read_update_tx_strict()[1]["attempt_id"])
+    assert store_switch.run_switch_seam(scene.data, repo_dir=scene.repo, blockers=["worker:42"])["status"] == "refused"
+    if earlier_attempts:
+        assert update_merge.finalize_managed_update_on_boot(supervisor_ready=True)["abandoned"] is True
+    assert scene.apply(scene.storeless)[0] == 200
+    attempt = update_merge.read_update_tx_strict()[1]["attempt_id"]
+    outcome = store_switch.run_switch_seam(scene.data, repo_dir=scene.repo, owner=lambda intent: reached.append(
+        intent["attempt_id"]) or (False, "synthetic: reached"))
+    assert outcome["status"] == "switch_failed" and reached == [attempt] and attempt not in earlier_attempts, outcome
+    rollbacks = _observe_boot_rollback(monkeypatch)
+
+    (ok, message), result = _next_boot(scene, monkeypatch)
+
+    assert not ok and "Reset blocked (" in message, message
+    assert rollbacks == ["post_boot_smoke_failed"] and not result.get("abandoned"), result
+    assert snapshot() == before
+    assert [row["attempt_id"] for row in _rows(scene.data, "managed_update_replace_apply_abandoned")] == earlier_attempts
 
 
 @pytest.mark.parametrize("reason", ["rollback_restart_pending", "replace_abandon_tx_cleanup_failed"])
