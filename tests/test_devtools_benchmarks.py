@@ -3330,11 +3330,16 @@ def test_run_tb_image_build_choice_is_the_same_in_preview_and_execution(
     # The whole previewed argv is the whole dispatched one, run root and generated identity aside.
     assert argvs["preview"] == argvs["execute"] == _without_generated(calls[0], tmp_path / "execute")
     assert _image_flags(calls[0]) == expected_flags
-    ledger = json.loads((tmp_path / "execute" / "disclosure_ledger.json").read_text(encoding="utf-8"))
+    exec_manifest = json.loads((tmp_path / "execute" / "run_manifest.json").read_text(encoding="utf-8"))
+    exec_ledger_path = Path(exec_manifest["extra"]["disclosure_ledger"])
+    assert exec_ledger_path == tmp_path / "execute" / f"disclosure_ledger.{_generated_identity(calls[0])}.json"
+    ledger = json.loads(exec_ledger_path.read_text(encoding="utf-8"))
+    assert ledger == json.loads((tmp_path / "execute" / "disclosure_ledger.json").read_text(encoding="utf-8"))
     assert ledger["run"]["agent_environment_force_build"] == expected_policy
     printed = capsys.readouterr()
-    for record in ("run_manifest.json", "disclosure_ledger.json", "harbor_command.txt"):
-        assert _NOT_A_BOOLEAN not in (tmp_path / "execute" / record).read_text(encoding="utf-8")
+    for record in (tmp_path / "execute" / "run_manifest.json", exec_ledger_path,
+                   tmp_path / "execute" / "disclosure_ledger.json", tmp_path / "execute" / "harbor_command.txt"):
+        assert _NOT_A_BOOLEAN not in record.read_text(encoding="utf-8")
     assert _NOT_A_BOOLEAN not in printed.out + printed.err
 
 
@@ -3435,13 +3440,20 @@ def _harbor_job_trial(job, reward, name="sample-task__1"):
         # A fresh named job, its ordinary name with a space and Unicode: scored, scoped to that job.
         pytest.param("named job ü", {"older-job": 1.0}, {_OWN_JOB: 0.0}, 0,
                      "completed", 0, "named_job", id="named-fresh-space-unicode"),
+        # Harbor 0.18 treats explicit '.' as the jobs dir itself: count direct trials, ignore siblings.
+        pytest.param(".", {}, {_OWN_JOB: 0.0, "sibling-job": 1.0}, 0,
+                     "completed", 0, "named_job", id="named-fresh-root-excludes-sibling"),
         # The named job's trials stay scoped to it after a failed Harbor run, whose exit decides.
         pytest.param("named-job", {}, {_OWN_JOB: 1.0}, 1,
                      "harness_nonzero_exit", 1, "named_job", id="named-after-failure"),
         # Harbor resumed an existing job of that name and ran no new trial: no new result.
         pytest.param("named-job", {"named-job": 1.0}, {}, 0,
                      "trials_unverified", 1, "reused", id="named-reused-without-new-trial"),
-        # Passed to Harbor unchanged, but a name leaving the jobs dir is never read.
+        # Passed to Harbor unchanged, but empty, collapsing, or escaping names are never read.
+        pytest.param("", {}, {_OWN_JOB: 1.0}, 0,
+                     "trials_unverified", 1, "unattributed", id="empty-name"),
+        pytest.param("sub/..", {}, {_OWN_JOB: 1.0}, 0,
+                     "trials_unverified", 1, "unattributed", id="collapsing-name"),
         pytest.param("../escape", {}, {_OWN_JOB: 1.0}, 0,
                      "trials_unverified", 1, "unattributed", id="name-leaving-jobs-dir"),
     ],
@@ -3451,18 +3463,18 @@ def test_run_tb_reads_only_its_own_harbor_job(
 ):
     """razzant/ouroboros#4315: launches sharing a submission root share Harbor's jobs dir, and the
     disclosure scan walked all of it, so an unscored job reported an older job's reward as its own.
-    A launch now names its job positively (the base `job_name`, else an invocation-unique one in its
-    own job config) and reads only that job's trials, scoped to this invocation or to the named job;
-    a job that existed before the dispatch, or lies outside the jobs dir, yields no ledger and the
-    outcome fails closed. While Harbor runs, the manifest already names the command and the image
-    policy."""
+    A launch now names its job positively (the base `job_name`, including explicit `.`, else an
+    invocation-unique one in its own job config) and reads only that job's direct trials, scoped to
+    this invocation or to the named job; an unattributed name or a reused job with no accepted
+    new/changed trials yields no ledger and fails closed. While Harbor runs, the manifest already
+    names the command and the image policy."""
     import re
 
     from devtools.benchmarks.terminal_bench import run_tb
 
     settings = tmp_path / "settings.json"
     settings.write_text("{}", encoding="utf-8")
-    root = tmp_path / "run"
+    root = (tmp_path / "run").resolve()
     jobs = root / "submission" / "submissions" / "terminal-bench" / "2.1" / "ouroboros__example-model" / "job"
     for job, reward in before.items():
         _harbor_job_trial(jobs / job, reward)
@@ -3478,9 +3490,14 @@ def test_run_tb_reads_only_its_own_harbor_job(
         during.update(json.loads((root / "run_manifest.json").read_text(encoding="utf-8")))
         config = json.loads(Path(argv[argv.index("--config") + 1]).read_text(encoding="utf-8"))
         own["name"] = config["job_name"]  # as Harbor does, the job is named by its config
+        jobs_arg = Path(argv[argv.index("--jobs-dir") + 1])
         for job, reward in harbor_writes.items():
             name = own["name"] if job == _OWN_JOB else job
-            _harbor_job_trial(Path(argv[argv.index("--jobs-dir") + 1]) / name, reward)
+            target = (jobs_arg / name).resolve()
+            _harbor_job_trial(target, reward)
+            if job != _OWN_JOB:
+                # Sibling job-level summary (Harbor writes <jobs>/<sibling>/result.json).
+                (target / "result.json").write_text(json.dumps({"stats": {"evals": {}}}), encoding="utf-8")
         return harbor_exit
 
     calls, unexpected = [], []
@@ -3491,8 +3508,9 @@ def test_run_tb_reads_only_its_own_harbor_job(
         "--settings-path", str(settings), *base_args, "--execute",
     ]) == exit_code
     assert unexpected == [] and len(calls) == 1
+    invocation = _generated_identity(calls[0])
     if job_name is None:  # invocation-unique, written into the job config, in Harbor's timestamp shape
-        assert own["name"] == _generated_identity(calls[0])
+        assert own["name"] == invocation
         assert re.fullmatch(r"\d{4}-\d\d-\d\d__\d\d-\d\d-\d\d__[0-9a-f]{8}", own["name"])
     else:
         assert own["name"] == job_name  # a base name passes unchanged
@@ -3506,56 +3524,98 @@ def test_run_tb_reads_only_its_own_harbor_job(
     assert extra["harbor_job"]["binding"] == binding
     # k=1 grades a fresh job debug_only; a resumed one is a partial named-job observation.
     assert extra["report_grade"] == ("partial_named_job" if binding == "reused" else "debug_only")
-    assert extra["harbor_job"]["job_dir"] == ("" if "/" in own["name"] else str((jobs / own["name"]).resolve()))
-    ledger_path = root / "disclosure_ledger.json"
-    assert extra["disclosure_ledger"] == (str(ledger_path) if ledger_path.exists() else "")
+    expected_job_dir = "" if not own["name"] or "/" in own["name"] else str((jobs / own["name"]).resolve())
+    assert extra["harbor_job"]["job_dir"] == expected_job_dir
+    if job_name == ".":
+        assert run_tb.harbor_job_dir(jobs, {"job_name": "./"}) == jobs.resolve()
+        assert run_tb.harbor_job_dir(jobs, {"job_name": ".."}) is None
+    ledger_path = root / f"disclosure_ledger.{invocation}.json"
+    latest_path = root / "disclosure_ledger.json"
     if binding not in ("invocation", "named_job"):
-        assert not ledger_path.exists()
+        assert extra["disclosure_ledger"] == ""
+        assert not ledger_path.exists() and not latest_path.exists()
         assert extra["harbor_trials"] == {"n_trials": 0, "reward_distribution": {}}
         return
+    assert extra["disclosure_ledger"] == str(ledger_path)
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
-    assert [trial["trial_name"] for trial in ledger["trials"]] == [f"{own['name']}/sample-task__1"]
+    assert ledger == json.loads(latest_path.read_text(encoding="utf-8"))
+    assert ledger["run"]["invocation"] == invocation
+    expected_prefix = jobs.name if own["name"] == "." else own["name"]
+    assert [trial["trial_name"] for trial in ledger["trials"]] == [f"{expected_prefix}/sample-task__1"]
     assert ledger["run"]["harbor_job"] == extra["harbor_job"]
     assert extra["harbor_trials"]["n_trials"] == 1
+    expected_reward = harbor_writes[_OWN_JOB]
+    expected_key = "null" if expected_reward is None else f"{float(expected_reward)}"
+    assert ledger["reward_distribution"] == {expected_key: 1}
 
 
 _INTERRUPTED = "<interrupted>"  # a trial directory Harbor left without a result.json
 _LOCKED = "<locked>"  # a scored trial whose result cannot be read at the baseline only
+_MALFORMED = "<malformed>"  # syntactically invalid JSON written as a trial result.json
+_NON_TRIAL = "<non-trial>"  # valid JSON lacking both task_name and verifier_result
+_SIBLING = "<sibling-job>"  # sibling job dir with a nested scored trial + job-level summary
 
 
 @pytest.mark.usefixtures("_clean_seed_provenance")
 @pytest.mark.parametrize(
-    "before,harbor_writes,harbor_exit,outcome,exit_code,counted",
+    "job_name,before,harbor_writes,harbor_exit,outcome,exit_code,counted",
     [
-        pytest.param({"t1": _INTERRUPTED}, {"t2": 1.0}, 0, "completed", 0, ["t2"], id="first-new-result"),
-        pytest.param({"t1": 1.0}, {}, 0, "trials_unverified", 1, [], id="old-scored-alone"),
-        pytest.param({"t1": 1.0}, {"t2": None}, 0, "no_scored_trials", 1, ["t2"], id="old-scored-new-unscored"),
+        pytest.param("named-job", {"t1": _INTERRUPTED}, {"t2": 1.0}, 0, "completed", 0, ["t2"], id="first-new-result"),
+        pytest.param("named-job", {"t1": 1.0}, {}, 0, "trials_unverified", 1, [], id="old-scored-alone"),
+        pytest.param("named-job", {"t1": 1.0}, {"t2": _MALFORMED}, 0, "trials_unverified", 1, [], id="new-malformed-only"),
+        pytest.param("named-job", {"t1": 1.0}, {"t2": _NON_TRIAL}, 0, "trials_unverified", 1, [], id="new-non-trial-only"),
+        pytest.param("named-job", {"t1": 1.0}, {"t1": _MALFORMED}, 0, "trials_unverified", 1, [], id="replaced-with-malformed"),
+        pytest.param("named-job", {"t1": 1.0}, {"t2": _MALFORMED}, 2, "harness_nonzero_exit", 2, [], id="malformed-nonzero-exit"),
+        pytest.param("named-job", {"t1": 1.0}, {"t2": None}, 0, "no_scored_trials", 1, ["t2"], id="old-scored-new-unscored"),
+        pytest.param("named-job", {"t1": 1.0}, {"t2": _MALFORMED, "t3": None}, 0, "no_scored_trials", 1, ["t3"],
+                     id="malformed-plus-unscored"),
         # A replaced result counts, and its numeric zero is a scored zero.
-        pytest.param({"t1": None, "t2": 1.0}, {"t1": 0.0}, 0, "completed", 0, ["t1"], id="changed-result"),
-        pytest.param({"t1": 1.0}, {"t2": 1.0}, 2, "harness_nonzero_exit", 2, ["t2"], id="new-result-nonzero-exit"),
+        pytest.param("named-job", {"t1": None, "t2": 1.0}, {"t1": 0.0}, 0, "completed", 0, ["t1"], id="changed-result"),
+        pytest.param("named-job", {"t1": 1.0}, {"t2": 1.0}, 2, "harness_nonzero_exit", 2, ["t2"], id="new-result-nonzero-exit"),
         # An unknown baseline never counts, even readable afterwards; its known sibling still does.
-        pytest.param({"t1": _LOCKED, "t2": 1.0}, {"t2": 0.0}, 0, "completed", 0, ["t2"], id="unreadable-baseline"),
+        pytest.param("named-job", {"t1": _LOCKED, "t2": 1.0}, {"t2": 0.0}, 0, "completed", 0, ["t2"], id="unreadable-baseline"),
+        # Reused explicit root-level job ('.'): sibling jobs never count; direct new trials do.
+        pytest.param(".", {"old-direct__1": 1.0, "older-sibling": _SIBLING}, {"new-sibling": _SIBLING},
+                     0, "trials_unverified", 1, [], id="root-reused-sibling-only"),
+        pytest.param(".", {"old-direct__1": 1.0, "older-sibling": _SIBLING},
+                     {"new-direct__1": 0.0, "new-sibling": _SIBLING},
+                     0, "completed", 0, ["new-direct__1"], id="root-reused-direct-beside-sibling"),
     ],
 )
 def test_run_tb_counts_only_new_or_changed_trials_of_a_resumed_named_job(
-    tmp_path, monkeypatch, before, harbor_writes, harbor_exit, outcome, exit_code, counted,
+    tmp_path, monkeypatch, job_name, before, harbor_writes, harbor_exit, outcome, exit_code, counted,
 ):
-    """razzant/ouroboros#4315 review: resuming an existing named job skipped its first scored trial.
-    Only trials whose result appeared or changed during this dispatch count, never an unchanged
-    earlier one. Under otherwise leaderboard-grade settings (k=5) the manifest and the ledger say it
-    is a partial named-job observation, not a leaderboard one. A reused run root's earlier ledger is
-    not named as this run's."""
+    """razzant/ouroboros#4315 review: resuming an existing named job (including explicit `.`) counts
+    only valid direct trial results observed to appear or change during this invocation (overlapping
+    writers cannot be told apart), never an unchanged earlier one, a sibling job, or a
+    malformed/non-trial delta. Under otherwise leaderboard-grade settings (k=5) the manifest and
+    ledger say it is a partial named-job observation, not a leaderboard one. Invalid-only deltas
+    write no ledger and leave any earlier ledger untouched."""
     from devtools.benchmarks.terminal_bench import run_tb
 
     settings = tmp_path / "settings.json"
     settings.write_text("{}", encoding="utf-8")
-    root = tmp_path / "run"
-    job = root / "submission" / "submissions" / "terminal-bench" / "2.1" / "ouroboros__example-model" / "job" / "named-job"
-    for trial, reward in before.items():
+    root = (tmp_path / "run").resolve()
+    jobs = root / "submission" / "submissions" / "terminal-bench" / "2.1" / "ouroboros__example-model" / "job"
+    job = jobs if job_name == "." else jobs / job_name
+
+    def write_entry(trial, reward):
         if reward == _INTERRUPTED:
-            (job / trial).mkdir(parents=True)
+            (job / trial).mkdir(parents=True, exist_ok=True)
+        elif reward == _MALFORMED:
+            (job / trial).mkdir(parents=True, exist_ok=True)
+            (job / trial / "result.json").write_text("{not-json", encoding="utf-8")
+        elif reward == _NON_TRIAL:
+            (job / trial).mkdir(parents=True, exist_ok=True)
+            (job / trial / "result.json").write_text(json.dumps({"stats": {"evals": {}}}), encoding="utf-8")
+        elif reward == _SIBLING:
+            _harbor_job_trial(job / trial, 1.0)
+            (job / trial / "result.json").write_text(json.dumps({"stats": {"evals": {}}}), encoding="utf-8")
         else:
             _harbor_job_trial(job, 1.0 if reward == _LOCKED else reward, trial)
+
+    for trial, reward in before.items():
+        write_entry(trial, reward)
     baseline = {"open": True}
     read_bytes = Path.read_bytes
 
@@ -3567,7 +3627,7 @@ def test_run_tb_counts_only_new_or_changed_trials_of_a_resumed_named_job(
     monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
     (root / "disclosure_ledger.json").write_text("{}", encoding="utf-8")  # an earlier run's
     base = tmp_path / "base.json"
-    base.write_text(json.dumps({"job_name": "named-job"}), encoding="utf-8")
+    base.write_text(json.dumps({"job_name": job_name}), encoding="utf-8")
     monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "fake-harbor 0.0.0")
 
     during = {}
@@ -3576,7 +3636,7 @@ def test_run_tb_counts_only_new_or_changed_trials_of_a_resumed_named_job(
         baseline["open"] = False
         during.update(json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))["extra"])
         for trial, reward in harbor_writes.items():
-            _harbor_job_trial(job, reward, trial)
+            write_entry(trial, reward)
         return harbor_exit
 
     calls, unexpected = [], []
@@ -3587,37 +3647,54 @@ def test_run_tb_counts_only_new_or_changed_trials_of_a_resumed_named_job(
         "--settings-path", str(settings), "--base-job-config", str(base), "--execute",
     ]) == exit_code
     assert unexpected == [] and len(calls) == 1
+    invocation = _generated_identity(calls[0])
     extra = json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))["extra"]
     assert extra["outcome"] == outcome
     partial = {"leaderboard_valid": False, "report_grade": "partial_named_job"}
     for record in (during, extra):  # already while Harbor runs
-        assert {key: record[key] for key in partial} == partial and record["report_grade_warning"]
+        assert {key: record[key] for key in partial} == partial
+        assert "observed" in record["report_grade_warning"]
+        assert "overlapping writers" in record["report_grade_warning"]
     assert extra["harbor_job"] == {"job_dir": str(job.resolve()), "binding": "reused", "trials": "new_or_changed"}
     assert extra["harbor_trials"]["n_trials"] == len(counted)
-    ledger = json.loads((root / "disclosure_ledger.json").read_text(encoding="utf-8"))
+    invocation_ledger_path = root / f"disclosure_ledger.{invocation}.json"
+    latest_ledger = json.loads((root / "disclosure_ledger.json").read_text(encoding="utf-8"))
     if not counted:
-        assert ledger == {} and extra["disclosure_ledger"] == ""
+        assert not invocation_ledger_path.exists()
+        assert latest_ledger == {} and extra["disclosure_ledger"] == ""
         return
-    assert extra["disclosure_ledger"] == str(root / "disclosure_ledger.json")
-    assert [trial["trial_name"] for trial in ledger["trials"]] == [f"named-job/{name}" for name in counted]
+    assert extra["disclosure_ledger"] == str(invocation_ledger_path)
+    ledger = json.loads(invocation_ledger_path.read_text(encoding="utf-8"))
+    assert ledger == latest_ledger
+    assert [trial["trial_name"] for trial in ledger["trials"]] == [f"{job.name}/{name}" for name in counted]
     assert ledger["run"]["harbor_job"] == extra["harbor_job"]
     assert {key: ledger["run"][key] for key in partial} == partial
-    # Without a readable baseline nothing of an existing job counts.
+    reward = harbor_writes[counted[0]]
+    assert ledger["reward_distribution"] == {("null" if reward is None else f"{float(reward)}"): 1}
+    # Without a readable baseline nothing of an existing job counts; invalid explicit results write no file.
     assert run_tb.attributed_harbor_job(job, generated=False, existed=True, before=None)[0] is None
+    unwritten = tmp_path / "invalid-explicit-ledger.json"
+    assert run_tb.write_disclosure_ledger(
+        job_dir=job, out_path=unwritten, run_meta={},
+        results=[("bad", b"{not-json"), ("meta", b'{"stats": {}}')],
+    ) is None
+    assert not unwritten.exists()
 
 
 @pytest.mark.usefixtures("_clean_seed_provenance")
 def test_run_tb_dispatches_the_job_config_its_own_command_names(tmp_path, monkeypatch):
-    """razzant/ouroboros#4315: overlapping launches wrote one shared `agent_job_config.json`, so a
-    conflicting preview started between a launch's write and its dispatch handed Harbor the
-    preview's config. Every launch now creates its own config file and never rewrites it, even when
-    both use the default run root (and so one submission root): Harbor reads the config the
-    dispatching launch wrote, and two nameless launches carry distinct job identities."""
+    """razzant/ouroboros#4315: overlapping launches in the same (default) run root each write their
+    own `agent_job_config.<invocation>.json` and, on `--execute`, their own authoritative
+    `disclosure_ledger.<invocation>.json` referenced by `run_manifest.json`. A preview started
+    before dispatch cannot overwrite the dispatching config and writes no ledger; two overlapping
+    `--execute` launches keep distinct manifest ledger pointers that never alias each other's
+    trials even after the shared latest convenience alias `disclosure_ledger.json` is overwritten."""
     from devtools.benchmarks.terminal_bench import run_tb
 
     settings = tmp_path / "settings.json"
     settings.write_text("{}", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)  # no --run-root: both launches use the default one under here
+    monkeypatch.chdir(tmp_path)  # no --run-root: all overlapping launches use the default one under here
+    run_root = (tmp_path / "tb21_ouroboros_run").resolve()
 
     def launch(force_build, *extra):
         base = tmp_path / f"base-{str(force_build).lower()}.json"
@@ -3628,39 +3705,61 @@ def test_run_tb_dispatches_the_job_config_its_own_command_names(tmp_path, monkey
             "--base-job-config", str(base), *extra,
         ])
 
-    overlapping = []
+    overlapping, peer_manifests, dispatched = [], [], []
 
     def harbor_version(_binary):
-        # Probed after this launch created its job config and before it dispatches.
+        # Probed after the outer launch created its job config and before it dispatches.
         if not overlapping:
             overlapping.append("started")
             overlapping.append(launch(False))
         return "fake-harbor 0.0.0"
 
-    dispatched = []
-
     def harbor_run(argv):
         config = json.loads(Path(argv[argv.index("--config") + 1]).read_text(encoding="utf-8"))
         dispatched.append(config)
-        _harbor_job_trial(Path(argv[argv.index("--jobs-dir") + 1]) / config["job_name"], 1.0)
+        is_outer = len(dispatched) == 1
+        if is_outer:
+            assert launch(False, "--execute") == 0
+            # Snapshot peer's finalized manifest before the outer launch writes its own ledger.
+            peer_manifests.append(json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8")))
+        _harbor_job_trial(Path(argv[argv.index("--jobs-dir") + 1]) / config["job_name"], 1.0 if is_outer else 0.0)
 
     calls, unexpected = [], []
     monkeypatch.setattr(run_tb, "harbor_version", harbor_version)
     monkeypatch.setattr(run_tb.subprocess, "run", _fake_harbor(calls, harbor_run, unexpected))
     assert launch(True, "--execute") == 0
-    assert overlapping == ["started", 0] and unexpected == [] and len(calls) == 1
-    run_root = tmp_path / "tb21_ouroboros_run"
+    assert overlapping == ["started", 0] and unexpected == [] and len(calls) == 2
+
     configs = {path.name: json.loads(path.read_text(encoding="utf-8"))
                for path in run_root.glob("agent_job_config.*.json")}
-    own_file = Path(calls[0][calls[0].index("--config") + 1]).name
-    assert len(configs) == 2 and configs.pop(own_file) == dispatched[0]  # still what Harbor read
+    outer_file = Path(calls[0][calls[0].index("--config") + 1]).name
+    peer_file = Path(calls[1][calls[1].index("--config") + 1]).name
+    assert len(configs) == 3 and configs.pop(outer_file) == dispatched[0] and configs.pop(peer_file) == dispatched[1]
     assert dispatched[0]["environment"] == {"force_build": True}
+    assert dispatched[1]["environment"] == {"force_build": False}
     (preview,) = configs.values()
     assert preview["environment"] == {"force_build": False}
-    assert preview["job_name"] != dispatched[0]["job_name"]
-    manifest = json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["official_command"] == calls[0]
-    assert (manifest["extra"]["outcome"], manifest["extra"]["harbor_job"]["binding"]) == ("completed", "invocation")
+    outer_inv, peer_inv = _generated_identity(calls[0]), _generated_identity(calls[1])
+    assert len({outer_inv, peer_inv, preview["job_name"]}) == 3
+    assert not (run_root / f"disclosure_ledger.{preview['job_name']}.json").exists()
+
+    outer_manifest = json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8"))
+    (peer_manifest,) = peer_manifests
+    for manifest, call, inv, reward in (
+        (outer_manifest, calls[0], outer_inv, "1.0"),
+        (peer_manifest, calls[1], peer_inv, "0.0"),
+    ):
+        assert manifest["official_command"] == call
+        assert (manifest["extra"]["outcome"], manifest["extra"]["harbor_job"]["binding"]) == ("completed", "invocation")
+        ledger_path = Path(manifest["extra"]["disclosure_ledger"])
+        assert ledger_path == run_root / f"disclosure_ledger.{inv}.json"
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+        assert ledger["run"]["invocation"] == inv
+        assert [trial["trial_name"] for trial in ledger["trials"]] == [f"{inv}/sample-task__1"]
+        assert ledger["reward_distribution"] == {reward: 1}
+    assert json.loads((run_root / "disclosure_ledger.json").read_text(encoding="utf-8")) == json.loads(
+        Path(outer_manifest["extra"]["disclosure_ledger"]).read_text(encoding="utf-8")
+    )
 
 
 def test_run_tb_ledger_reads_no_trial_linked_from_outside_its_job(tmp_path):

@@ -707,16 +707,22 @@ def harbor_invocation(config: HarborCommandConfig) -> tuple[list[str], dict[str,
 
 
 def harbor_job_dir(jobs_dir: pathlib.Path, job_config: Mapping[str, Any]) -> pathlib.Path | None:
-    """`<jobs-dir>/<job_name>`, where Harbor writes this job config's job, when the name is a string
-    that stays inside the jobs dir (`safe_join_under`; spaces and Unicode are ordinary names). Any
-    other name still reaches Harbor unchanged for its own validation, but is never resolved here, so
-    nothing outside this job is read."""
+    """`<jobs-dir>/<job_name>`, where Harbor writes this job config's job, when the name is a
+    non-empty string that stays inside the jobs dir (`safe_join_under`; spaces and Unicode are
+    ordinary names, and an explicit `.` names the jobs dir itself). Any other name still reaches
+    Harbor unchanged for its own validation, but is never resolved here, so nothing outside this
+    job is read."""
     name = job_config.get("job_name")
+    if not isinstance(name, str) or not name:
+        return None
     try:
-        path = safe_join_under(jobs_dir, name) if isinstance(name, str) else None
+        path = safe_join_under(jobs_dir, name)
     except ValueError:
         return None
-    return None if path is None or path == pathlib.Path(jobs_dir).resolve() else path
+    base = pathlib.Path(jobs_dir).expanduser().resolve(strict=False)
+    if path == base and pathlib.PurePath(name).parts:
+        return None
+    return path
 
 
 def direct_trial_results(job_dir: pathlib.Path) -> list[tuple[str, bytes | None]]:
@@ -761,13 +767,15 @@ def attributed_harbor_job(
     The job is identified by its name, never by what else appeared in a shared jobs dir:
     `invocation` — the invocation-unique name this launch put in its job config, so the trials are
     this invocation's (also after a non-zero exit); `named_job` — an operator's base `job_name` that
-    did not exist before the dispatch: its trials are that named job's, which does not prove which
-    launch created them when several run under the same name; `reused` — the job existed before the
-    dispatch (Harbor resumes or refuses it): only trials whose result appeared or changed during the
-    dispatch count, compared and parsed from the same post-run bytes, never an unchanged earlier one
-    nor one unreadable before or after, so this is no cumulative score of the job (Harbor's own job
-    result keeps that); `unattributed` — the directory never appeared, or its name leaves the jobs
-    dir. A binding with nothing to count yields no job."""
+    did not exist before the dispatch: its trials are those observed in that named job, and
+    overlapping writers under the same name cannot be told apart; `reused` — the job existed before
+    the dispatch (Harbor resumes or refuses it): only direct trial files whose bytes were observed
+    to appear or change during the invocation pass to the ledger (which parses them once and skips
+    malformed/non-trial payloads, writing no ledger if none remain), never an unchanged earlier one
+    nor one unreadable before or after, so this is a partial named-job observation where
+    overlapping writers cannot be told apart (Harbor's own job result keeps the cumulative score);
+    `unattributed` — the directory never appeared, or its name is empty or leaves the jobs dir. A
+    binding with nothing to count yields no job."""
     import hashlib
 
     counted: list[tuple[str, bytes]] | None = None
@@ -792,14 +800,15 @@ def attributed_harbor_job(
 def write_disclosure_ledger(
     *, job_dir: pathlib.Path, out_path: pathlib.Path, run_meta: dict,
     results: list[tuple[str, bytes]] | None = None,
-) -> dict:
+) -> dict | None:
     """Parse each trial's `<trial>/result.json` in one Harbor job (`direct_trial_results`), or only
     the already-read `results` given, and write a denominator-preserving
     disclosure ledger: reward distribution, exception_info histogram (AgentTimeoutError /
     ApiRateLimitError counts -- the latency / rate-limit failure signal Anton asked for), per-task
-    pass rate, cost and wall-time. Honest-by-construction so a write-up can disclose how many
-    trials failed by timeout vs rate-limit at a given concurrency. Best-effort: never raises into
-    the harbor result path (the caller guards it)."""
+    pass rate, cost and wall-time. Returns None without writing when explicit `results` yield no
+    valid trial rows. Honest-by-construction so a write-up can disclose how many trials failed by
+    timeout vs rate-limit at a given concurrency. Best-effort: never raises into the harbor result
+    path (the caller guards it)."""
     import collections
 
     trials: list[dict] = []
@@ -861,6 +870,8 @@ def write_disclosure_ledger(
             "started_at": data.get("started_at"),
             "finished_at": data.get("finished_at"),
         })
+    if results is not None and not trials:
+        return None
 
     def _reward_key(reward: object) -> str:
         if reward in (1, 1.0, True):
@@ -1321,10 +1332,12 @@ def main(argv: list[str] | None = None) -> int:
             })
             print(f"[run_tb] REFUSED: leaderboard metadata cannot be rendered: {exc}", file=sys.stderr)
             return 1
+        jobs_dir_existed = job_dir.exists()
         job_dir.mkdir(parents=True, exist_ok=True)
         metadata_path.write_text(metadata_text, encoding="utf-8")
         # One identity per launch, fixed before anything is written: it names this launch's own job
-        # config file and, unless the base job config names the job, the Harbor job itself.
+        # config file, its own disclosure ledger and, unless the base job config names the job, the
+        # Harbor job itself.
         invocation = f"{datetime.now():%Y-%m-%d__%H-%M-%S}__{secrets.token_hex(4)}"
         harbor_config = HarborCommandConfig(
             dataset=args.dataset,
@@ -1376,15 +1389,21 @@ def main(argv: list[str] | None = None) -> int:
         if not args.execute:
             final.update({"outcome": "command_generated", "exit_code": 0})
             return 0
-        own_job_existed = own_job is not None and own_job.exists()
+        own_job_existed = (
+            jobs_dir_existed
+            if own_job == job_dir.resolve(strict=False)
+            else (own_job is not None and own_job.exists())
+        )
         before = trial_fingerprints(own_job) if own_job_existed else None
         if own_job_existed:
-            # This run can count only the resumed job's new or changed trials: a partial observation
-            # of that named job, never a leaderboard measurement. Harbor's job itself is untouched.
+            # This run can count only valid trial results observed to appear or change in this
+            # named job during the invocation (overlapping writers cannot be told apart): a partial
+            # observation, never a leaderboard measurement. Harbor's job itself is untouched.
             leaderboard_valid, report_grade_value = False, "partial_named_job"
             report_grade_warning = (
-                "⚠️ resumes an existing Harbor job: this run's record counts only the trials this "
-                "dispatch added or changed, a partial named-job observation, NOT leaderboard-valid."
+                "⚠️ resumes an existing Harbor job: this run's record counts only trial results "
+                "observed to appear or change in this named job during the invocation (overlapping "
+                "writers cannot be told apart), a partial named-job observation, NOT leaderboard-valid."
             )
             manifest["extra"].update({"leaderboard_valid": leaderboard_valid, "report_grade": report_grade_value,
                                       "report_grade_warning": report_grade_warning})
@@ -1393,7 +1412,7 @@ def main(argv: list[str] | None = None) -> int:
         final.checkpoint("harbor_dispatch")
         completed = subprocess.run(cmd, cwd=repo, env={**os.environ, "PYTHONPATH": str(repo)})
         ledger: dict | None = None
-        # Names this run's ledger only once written, so a reused run root's earlier one is never its.
+        # Names this invocation's own ledger only once written, never an earlier or peer ledger.
         final["disclosure_ledger"] = ""
         try:
             harbor_job, counted, final["harbor_job"] = attributed_harbor_job(
@@ -1401,11 +1420,13 @@ def main(argv: list[str] | None = None) -> int:
                 before=before,
             )
             # A job this run cannot attribute is no evidence: no ledger, so the outcome fails closed.
+            ledger_path = run_root / f"disclosure_ledger.{invocation}.json"
             ledger = None if harbor_job is None else write_disclosure_ledger(
                 job_dir=harbor_job,
                 results=counted,
-                out_path=run_root / "disclosure_ledger.json",
+                out_path=ledger_path,
                 run_meta={
+                    "invocation": invocation,
                     "dataset": args.dataset,
                     "k": int(args.k),
                     "n_concurrent": int(args.n_concurrent),
@@ -1427,7 +1448,11 @@ def main(argv: list[str] | None = None) -> int:
                 },
             )
             if ledger is not None:
-                final["disclosure_ledger"] = str(run_root / "disclosure_ledger.json")
+                final["disclosure_ledger"] = str(ledger_path)
+                try:
+                    write_json(run_root / "disclosure_ledger.json", ledger)
+                except OSError as exc:
+                    print(f"[run_tb] latest disclosure ledger alias skipped: {exc!r}", file=sys.stderr)
         except Exception as exc:  # disclosure is best-effort; never mask the harbor result
             print(f"[run_tb] disclosure ledger skipped: {exc!r}", file=sys.stderr)
         code = int(completed.returncode)

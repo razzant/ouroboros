@@ -27,11 +27,12 @@ OWNER IMMEDIATELY.**
 - Harbor owns task timeouts; Ouroboros deadline milestones are inert unless the
   task carries `deadline_at`. The in-container finalization margin is
   `_DEADLINE_SAFETY_SEC=105` (measured overhead, v6.55.0).
-- k trials per task follow the leaderboard's k; `disclosure_ledger.json`
-  (schema `tb_disclosure_ledger.v1`) records the reward distribution,
-  timeout/rate-limit/provider-failure histograms, per-task pass rate,
-  concurrency, and the multiplier/gating flags actually used, so each run's
-  leaderboard validity is auditable after the fact.
+- k trials per task follow the leaderboard's k; the disclosure ledger
+  (`disclosure_ledger.<invocation>.json`, also mirrored atomically to
+  `disclosure_ledger.json`, schema `tb_disclosure_ledger.v1`) records the
+  reward distribution, timeout/rate-limit/provider-failure histograms,
+  per-task pass rate, concurrency, and the multiplier/gating flags actually
+  used, so each run's leaderboard validity is auditable after the fact.
 
 ## Task images
 
@@ -43,7 +44,7 @@ image but ships no Dockerfile still runs on the image. Both launchers pass
 `--execute` run; otherwise Harbor's job configuration decides.
 
 `agent_environment_force_build` (`run_manifest.json` `extra`; for `run_tb.py` also
-`disclosure_ledger.json` `run`) records the configured value and its `source`: `cli`,
+the disclosure ledger's `run` block) records the configured value and its `source`: `cli`,
 `base_job_config` (`force_build: null` = not a literal boolean, left for Harbor to validate) or
 `harbor_default`. It is configuration only: it does not prove which image a task used, or
 whether that image was pulled or built.
@@ -56,32 +57,49 @@ pulled or built.
 
 ## Job attribution (`run_tb.py`)
 
-Each launch creates its own job config, `agent_job_config.<invocation>.json` in its `--run-root`,
-and never rewrites it, so no other launch, even one in the same run root, changes what a dispatched
-command names. Its manifest names that command and the image policy before Harbor starts
-(`extra.recovery_checkpoint`). The manifest, `harbor_command.txt` and the ledger are per run root:
-give every launch its own.
+When a launch assembles a Harbor invocation, it creates its own
+`agent_job_config.<invocation>.json`, and when an `--execute` run produces an attributable ledger
+(dry runs, refusals, unattributed jobs, and reused named jobs with no accepted new/changed trials
+write none), it creates its own authoritative `disclosure_ledger.<invocation>.json` in its
+`--run-root`, never rewritten by another launch. Its manifest's `official_command` names
+`agent_job_config.<invocation>.json` and its `extra.disclosure_ledger` names
+`disclosure_ledger.<invocation>.json` (absent on previews/refusals, empty when an `--execute` run
+writes no ledger), so a manifest's ledger reference identifies that invocation and cannot alias a
+peer's trials even if launches overlap in the same `--run-root` (including the default
+`tb21_ouroboros_run`). The manifest names that command and the image policy before Harbor starts
+(`extra.recovery_checkpoint`). The unversioned files in `--run-root` (`run_manifest.json`,
+`harbor_command.txt`, and `disclosure_ledger.json`, which is updated atomically as a latest
+compatibility view whenever a ledger is written) are shared last-writer-wins conveniences, not a
+consistent tuple under overlap; give every launch its own `--run-root` for independent reporting.
 
-Without a base `job_name`, the config names the Harbor job after the invocation
-(`YYYY-MM-DD__HH-MM-SS__<8 hex>`, Harbor's timestamp shape plus a random suffix); a base `job_name`
-passes unchanged. Launches that share `--submission-root`, model and dataset share one jobs dir, and
-the ledger and outcome read only this launch's job, from its `<job>/<trial>/result.json` files and
-nothing that resolves outside it. `extra.harbor_job.binding` scopes those trials: `invocation` (the
-generated name: they are this invocation's, also after a non-zero exit) or `named_job` (a base
-`job_name` absent before the dispatch: they are that named job's, which does not show which launch
-created them when several run under the same name, so they are no per-command result) or `reused`
-(the named job existed before the dispatch: Harbor resumes or refuses it). For `reused`,
-`harbor_job.trials` is `new_or_changed`: only trials whose `result.json` appeared or changed in
-content during the dispatch count, so the ledger is this resume's part, not the job's cumulative
-score, which Harbor's own job result keeps; the manifest and ledger grade it `partial_named_job`
-with `leaderboard_valid: false`, whatever `k` and settings (the submission tree is unchanged). An
-unchanged earlier trial, or one unreadable before or after, never counts. Nothing counts for
-`unattributed` (the job never appeared, or its name leaves the jobs dir). A `reused` job with
-nothing counted and an `unattributed` one write no ledger: `extra.disclosure_ledger` stays empty
-(an earlier ledger in a reused run root is not this run's) and the outcome fails closed
-(`trials_unverified`, or Harbor's non-zero exit). A fresh job without scored trials still writes
-its ledger (`no_scored_trials`). Every job stays on disk. Independent measurements need distinct job
-names and distinct run roots.
+Default unnamed runs create a fresh Harbor job each call (`YYYY-MM-DD__HH-MM-SS__<8 hex>`, Harbor's
+timestamp shape plus a random suffix); a base `job_name` passes unchanged, including an explicit
+`.` (which Harbor 0.18 treats as the jobs dir itself). Launches that share `--submission-root`,
+model, and dataset share one jobs dir and one `metadata.yaml` (use separate `--submission-root`
+directories when runs need different metadata). The ledger and outcome read only this launch's job,
+from direct `<job>/<trial>/result.json` files and nothing deeper or resolving outside it — so an
+explicit `job_name: "."` counts legitimate direct trials without recursively scanning sibling jobs
+or counting sibling job-level `result.json` files. `extra.harbor_job.binding` scopes those trials:
+`invocation` (the generated name: they are this invocation's, also after a non-zero exit),
+`named_job` (a base `job_name` absent before dispatch: they are the trials observed in that named
+job, and overlapping writers under the same name cannot be told apart, so it is no per-command
+proof), or `reused` (the named job existed before dispatch: Harbor resumes or refuses it). For
+`reused`, `harbor_job.trials` is `new_or_changed`: only valid trial `result.json` files (JSON
+objects carrying `task_name` or `verifier_result`) observed to appear or change in content during
+the invocation count, and overlapping writers cannot be told apart. The ledger is this resume's
+partial observation, not the job's cumulative score (which Harbor's own job result keeps), and the
+manifest and ledger grade it `partial_named_job` with `leaderboard_valid: false`, whatever `k` and
+settings (the submission tree is unchanged). Unchanged earlier trials, trials unreadable before or
+after, and malformed or non-trial JSON files never count. Nothing counts for `unattributed` (the
+job never appeared, or its name is empty or leaves the jobs dir). A `reused` job with zero accepted
+trial rows (including malformed-only or non-trial-only deltas) and an `unattributed` one write no
+ledger and leave any existing `disclosure_ledger.json` untouched: `extra.disclosure_ledger` stays
+empty and the outcome fails closed (`trials_unverified`, or Harbor's non-zero exit). Genuine
+unscored trial rows (e.g. `reward: null`) still write a ledger (`no_scored_trials`), numeric zero
+counts as scored (`completed`), and a fresh job without scored trials still writes its ledger
+(`no_scored_trials`). Every job stays on disk. Independent measurements need distinct job names,
+distinct `--run-root` directories, and separate `--submission-root` directories when metadata
+differs.
 
 ## Dataset identity (v6.79.0 — matters for any non-TB2.1 Harbor dataset)
 

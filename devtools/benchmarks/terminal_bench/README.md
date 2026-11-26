@@ -447,10 +447,13 @@ note deleted/retried trial dirs drop their cost record, so the on-disk sum is a 
 - **`run_tb.py` flag names differ from harbor's:** `--setup-timeout-multiplier` /
   `--build-timeout-multiplier` (run_tb) map to
   `--agent-setup-timeout-multiplier` / `--environment-build-timeout-multiplier` (harbor).
-- **No-resume fragility of `run_tb.py`** (a fresh job each call) vs the
-  robust path: **`harbor job resume -p <jobdir> [-f <ErrorType>]`** continues an existing
-  job (keeps completed trials, re-runs pending + the `-f`-removed errored-artifact trials);
-  wrap it in a retry loop so a transient SSL/DNS blip just re-resumes instead of restarting.
+- **Resume semantics of `run_tb.py` vs `harbor job resume`:** default unnamed `run_tb.py`
+  calls create a fresh Harbor job each call; pointing `--base-job-config` at an existing
+  `job_name` records only a partial named-job observation (not leaderboard-valid, and
+  overlapping writers cannot be told apart). For robust campaign continuation use
+  **`harbor job resume -p <jobdir> [-f <ErrorType>]`** (keeps completed trials, re-runs
+  pending + `-f`-removed errored-artifact trials); wrap it in a retry loop so a transient
+  SSL/DNS blip just re-resumes instead of restarting.
 - **install-timeout on slow mirrors** (`RuntimeError: Command timed out after 1200s`) and
   AgentSetupTimeout are infra, not capability. Published task images do not prevent them,
   because the agent installs in every container whatever its image; the opt-in
@@ -482,10 +485,18 @@ python devtools/benchmarks/terminal_bench/run_tb.py \
 For a targeted smoke, add repeated `--task` filters before `--execute`, for
 example `--task pypi-server --task hf-model-inference --task qemu-alpine-ssh`.
 
-Give every launch its own `--run-root` for its manifest, saved command and ledger; its job
-config file is its own in any case. Launches may share `--submission-root`; each reads only
-its own Harbor job, and a base `job_name` scopes that evidence to the named job. Independent
-measurements need distinct job names and run roots (METHODOLOGY "Job attribution").
+Give every launch its own `--run-root` for independent reporting. When a launch assembles a
+Harbor invocation, it writes its own `agent_job_config.<invocation>.json`; when an `--execute`
+launch produces an attributable ledger (dry runs, refusals, unattributed jobs, and resumed
+named jobs with no accepted new/changed trials write none), it writes its own authoritative
+`disclosure_ledger.<invocation>.json` and records that path in `run_manifest.json`. The
+unversioned files in `--run-root` (`run_manifest.json`, `harbor_command.txt`, and the atomic
+latest view `disclosure_ledger.json`) are shared last-writer-wins conveniences, not a
+consistent tuple if launches overlap in the same run root (including the default
+`tb21_ouroboros_run`). Launches that share `--submission-root`, model, and dataset share one
+jobs dir and one `metadata.yaml`: use separate `--submission-root` directories when runs need
+different metadata, and distinct job names and `--run-root` directories for independent
+measurements (METHODOLOGY "Job attribution").
 
 Task images: by default neither launcher passes an image flag, so Harbor's job
 configuration decides (for `run_tb.py`, a `--base-job-config` `environment.force_build`,
