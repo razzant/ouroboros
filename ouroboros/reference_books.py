@@ -381,11 +381,18 @@ def load_domain_references(
         data = tomllib.loads(reader("ouroboros/domains.toml").decode("utf-8"))
     except Exception:
         return {}, {}, {}
-    domains = {str(k): str(v) for k, v in (data.get("domains") or {}).items()}
-    modules = {str(k): str(v) for k, v in (data.get("modules") or {}).items()}
+    raw_domains = data.get("domains")
+    raw_modules = data.get("modules")
+    raw_references = data.get("references")
+    if ((raw_domains is not None and not isinstance(raw_domains, dict))
+            or (raw_modules is not None and not isinstance(raw_modules, dict))
+            or (raw_references is not None and not isinstance(raw_references, dict))):
+        return {}, {}, {}
+    domains = {str(k): str(v) for k, v in (raw_domains or {}).items()}
+    modules = {str(k): str(v) for k, v in (raw_modules or {}).items()}
     references = {
         str(k): tuple(str(v) for v in vals)
-        for k, vals in (data.get("references") or {}).items()
+        for k, vals in (raw_references or {}).items()
         if isinstance(vals, list)
     }
     result = (domains, modules, references)

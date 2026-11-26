@@ -491,8 +491,8 @@ def _build_work(measured: Dict[Any, Any], tag: str) -> Dict[int, Dict[str, int]]
     """Each size's build work of this turn; the laws speak of the Max -> Low branch, so a turn that kept Max is a broken precondition."""
     views = {k: at_request(measured, tag, k)["view"] for k in (K_SMALL, measured["large"])}
     for k, view in views.items():
-        assert view["mode_switch"] == {"from": "max", "to": "low"}, (
-            f"{tag} k={k}: the build laws are about the live branch Max -> Low; this turn ran {view['mode']} "
+        assert view["mode_switch"] in ({"from": "max", "to": "low"}, {"from": "max", "to": "nano"}), (
+            f"{tag} k={k}: the build laws are about a live step-down from Max; this turn ran {view['mode']} "
             f"(window {view['window_tokens']}, switch {view['mode_switch']})")
     return {k: view["work"] for k, view in views.items()}
 

@@ -897,7 +897,7 @@ def _wire_room(raw, complete, *, mode, preferred, reserve, window, record, admit
 
 def _integrating(core: ContextCore, role: Any) -> bool:
     """A view of a focus that integrates (BIBLE P1): neither a delegated child/nanny core nor role."""
-    return not core.delegated_focus and role not in DELEGATED_FOCUS_ROLES
+    return not bool(getattr(core, "delegated_focus", False)) and role not in DELEGATED_FOCUS_ROLES
 
 
 def _numberless_smaller_mode(shown_mode, cands, measure, tools_for, sections, previous, story_before, room_before):
@@ -906,15 +906,16 @@ def _numberless_smaller_mode(shown_mode, cands, measure, tools_for, sections, pr
         c, tools_for(c), section_views(sections[c], previous), story_before, room_before) < base), None)
 
 
-def _try_nano_telling(floor, snapshot, frame, view, measure, sections, get_receipts, fixed, window, reserve, ratio, owed, kept, held, start_saving):
-    """BIBLE P1: prefer Nano standing schemas over dropping authored tellings on an integrating start."""
+def _try_nano_telling(floor, snapshot, frame, view, measure, sections, get_receipts, fixed, window, reserve, ratio, owed, kept, held, start_saving, max_emergency):
+    """BIBLE P1: prefer Nano standing schemas when they keep strictly more authored tellings than Max."""
     n_sent, n_fixed, n_res, n_win, n_bnd, n_allow = frame("nano")
     if not (n_fixed < fixed and n_win - n_res >= window - reserve):
         return None
     n_forms = section_views(sections["nano"], get_receipts())
     n_shown = view("nano", n_sent, n_forms, n_win, n_bnd, saving=owed(n_fixed, n_win, n_res), fixed=n_fixed,
                    kept=None if kept is None else held, start_saving=start_saving, telling_preserved=True)
-    if (n_shown is floor.NO_VIEW or n_shown.level is None or not floor.level_is_telling(snapshot, n_shown.level)
+    if (n_shown is floor.NO_VIEW or n_shown.level is None
+            or floor.emergency_item_count(snapshot, n_shown.level) >= max_emergency
             or math.ceil(measure("nano", n_sent, n_forms, n_shown.story_chars, n_shown.room_chars) * ratio) + n_res > n_win):
         return None
     return "nano", n_sent, n_fixed, n_res, n_win, n_bnd, n_allow, n_shown
@@ -1168,7 +1169,6 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         shown = floor.NO_VIEW if stays or low_no_gain or (mode != "nano" and overflows()) else running_shown or render()
         if mode == "nano" or (not low_no_gain and not overflows(shown)):
             break
-        # A live trial still has to reselect tools and measure its chosen wire reserve.
         if not low_no_gain and (running or mode in ("max", "low")) and kept is not None and admitted:
             prior_view = (running_shown or render()) if shown is floor.NO_VIEW else shown
             cand = (sent, fixed, reserve, window, boundary, allowances, receipts, prior_view, wire_room(prior_view), mode)
@@ -1179,12 +1179,13 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
     if (mode == "max" and known_window and snapshot and integrating and (kept is None or start_work)
             and shown is not floor.NO_VIEW and shown.level is not None and not overflows(shown)
-            and not floor.level_is_telling(snapshot, shown.level)):
+            and (max_emerg := floor.emergency_item_count(snapshot, shown.level)) > 0):
         saved_receipts = list(receipts)
         rescued = _try_nano_telling(floor, snapshot, lambda m: timed(f"fit.frame_{m}", frame, m), view, measure,
-                                    sections, lambda: receipts, fixed, window, reserve, ratio, owed, kept, held, start_saving)
+                                    sections, lambda: receipts, fixed, window, reserve, ratio, owed, kept, held, start_saving, max_emerg)
         if rescued is not None:
             mode, sent, fixed, reserve, window, boundary, allowances, shown = rescued
+            room_fact = {**room_fact, "telling_preserved": True} if room_fact else room_fact
         else:
             receipts = saved_receipts
     if held_heads and mode == "nano" and overflows(shown):

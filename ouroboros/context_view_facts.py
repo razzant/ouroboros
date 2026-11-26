@@ -177,7 +177,9 @@ def low_start_line(plan, mode, task_id):
     if receipt.get("role") in DELEGATED_FOCUS_ROLES or not isinstance(room, dict) or room.get("cause") not in ("crowded", "route"):
         return ""
     ran = "Nano" if mode == "nano" else "Low"
-    why = _LOW_START_WHY[floor.lowered_cause(room)].format(model=str(getattr(plan, "model", "") or "") or "this route")
+    why = ("Max's frame would drop authored tellings here; standing schemas keep more tellings whole"
+           if room.get("telling_preserved")
+           else _LOW_START_WHY[floor.lowered_cause(room)].format(model=str(getattr(plan, "model", "") or "") or "this route"))
     return (f"Task {task_id} runs in {ran} for now{floor.REQUIRED_BOOK_WHOLE if room.get('book_required') else ''}, not "
             f"in your Max: {why}. Your setting stays Max.")
 

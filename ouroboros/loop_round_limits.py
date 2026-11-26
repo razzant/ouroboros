@@ -1553,10 +1553,8 @@ def pre_admission_size_refusal(
 
 
 def book_yield_due(ctx: Any) -> bool:
-    """Whether the refused view still takes its directly required handbook's yields (``_shorten_book_map``): an unread
-    (``start_unread``) integrating Low start carrying that handbook (its optional maps, then ``BOOK_MAPS``); an
-    unread Nano start takes only an optional map such as DESIGN, never ARCH/DEV. A helper's or nanny's Low view
-    (``context_fit._integrating``) takes none, as the reviewed 23.11 gate kept it."""
+    """Whether an unread start carrying a required handbook still takes map yields (``_shorten_book_map``):
+    integrating starts take optional maps then Body Map/DEVELOPMENT; helpers take none in Max/Low and only optional maps in Nano."""
     from ouroboros import memory_floor
     from ouroboros.context_fit import _integrating
 
@@ -1567,6 +1565,8 @@ def book_yield_due(ctx: Any) -> bool:
             or not core.required_book_tokens(mode) or not start_unread(ctx.tools._ctx, ctx.accumulated_usage)):
         return False
     facts = plan.projection(mode).memory_facts or {}
+    if mode != "nano":
+        return _integrating(core, facts.get("role"))
     if _integrating(core, facts.get("role")):
         return True
     rows = {row.get("section_id") for row in facts.get("host_sections_addressed", ())}

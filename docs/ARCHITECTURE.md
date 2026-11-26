@@ -1,6 +1,6 @@
 # Ouroboros v7.12.1-alpha.0 — Body Map & Architecture Reference
 
-This resident **Body Map** and **Reference Atlas** (BIBLE P1, P6) rides with me in every mode and focus so I know what my body can do, where its limits matter, and where every deeper manual lives. Before non-trivial work on my own body, I read the owning manual chapters, `docs/architecture/10-key-invariants.md` (invariants and *Closed roads*), and relevant `docs/DEVELOPMENT.md` rules with `read_file(root="system_repo", path=...)`; for live Python/`web/` module lookup I call `query_code(op="architecture", query="module_map <domain|prefix|domains>", root="system_repo")` or inspect `ouroboros/domains.toml`. Each manual stays present-tense across **Structural** flows, **Operational** state/logs/configs/paths/env/tools (registries project from `ouroboros/domains.toml` and docstrings), and **Rationale** beside each rule. History lives in `README.md`, tags, and Git.
+This resident **Body Map** and **Reference Atlas** (BIBLE P1, P6) rides with me in every mode and focus so I know what my body can do, where its limits matter, and where every deeper manual lives. Before non-trivial work on my own body, I read the owning manual chapters, `docs/architecture/10-key-invariants.md` (invariants and *Closed roads*), and relevant `docs/DEVELOPMENT.md` rules at their paths in `system_repo`; for live Python/`web/` module lookup I call `query_code(op="architecture", query="module_map <domain|prefix|domains>", root="system_repo")` or inspect `ouroboros/domains.toml`. Each manual stays present-tense across **Structural** flows, **Operational** state/logs/configs/paths/env/tools (registries project from `ouroboros/domains.toml` and docstrings), and **Rationale** beside each rule. History lives in `README.md`, tags, and Git.
 
 ## Chapters
 
@@ -24,7 +24,7 @@ This resident **Body Map** and **Reference Atlas** (BIBLE P1, P6) rides with me 
 
 ## Reference Atlas
 
-Deep manuals and standalone specs (open via `read_file(root="system_repo", path=...)`):
+Deep manuals and standalone specs (in `system_repo`):
 
 - `docs/DEVELOPMENT.md` — engineering discipline, capability placement, module complexity, governance delivery, review/commit protocol, change-class rules, managed updates, mutation attribution, process custody, platform abstraction, design system, MCP, gateway boundary, build/CI (chapters under `docs/development/`).
 - `docs/DESIGN.md` — UI/UX design bible, layout, composer controls, cards, widgets, voice controls, replies, and interaction semantics.

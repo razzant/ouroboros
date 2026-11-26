@@ -436,8 +436,8 @@ def lowered_line(mode: str, lowered_from: str, fact: Optional[Mapping[str, Any]]
     """Why a start left the owner's mode, in measured parts: facts only, never an instruction or a possibility."""
     if mode != "low":
         if fact and fact.get("telling_preserved"):
-            return (f"{lowered_from.capitalize()}'s full tool schemas would drop authored tellings here; "
-                    f"this task runs in {mode.capitalize()} with standing schemas so tellings stay whole.")
+            return (f"{lowered_from.capitalize()}'s frame would drop authored tellings here; "
+                    f"this task runs in {mode.capitalize()} with standing schemas so more tellings stay whole.")
         return (f"The window cannot hold {lowered_from.capitalize()} with even the shortest view of my memory; "
                 f"this task runs in {mode.capitalize()}.")
     head = f"{TEMPORARY_LOW}; my human's mode is {lowered_from.capitalize()}."
@@ -630,10 +630,10 @@ def telling_level(snapshot):
     return ordinary_level(snapshot, TELLING_STAGES)
 
 
-def level_is_telling(snapshot, level) -> bool:
-    """True when no addressed element in ``level`` fell past ``TELLING_STAGES`` (authored tellings intact)."""
-    return all(stage_of(snapshot, step, ident) in TELLING_STAGES
-               for step, idents in level.addressed for ident in idents)
+def emergency_item_count(snapshot, level) -> int:
+    """Count addressed elements in ``level`` that fell past ``TELLING_STAGES`` (0 when authored tellings stay whole)."""
+    return sum(1 for step, idents in level.addressed for ident in idents
+               if stage_of(snapshot, step, ident) not in TELLING_STAGES)
 
 
 def owner_rows(snapshot: mv.MemoryViewSnapshot) -> Dict[str, Mapping[str, Any]]:
@@ -1344,10 +1344,8 @@ def replay_book_maps(sections, saved, core, *, retain=None):
 
 def step_book_map(plan: Any, mode: str, *, maps: Optional[bool] = None) -> Optional[Any]:
     """``plan`` with its required handbook's next yield (``yield_for_book``) in ``mode``'s shown view, for an unread
-    start whose first request cannot go out (Low takes optional maps then ``BOOK_MAPS`` when ``maps`` holds; Nano
-    takes only optional maps such as DESIGN, never ARCH/DEV); None where nothing is left, the frame holds no captured
-    core, or its shown view is not this capture's rendering. Only the yielded section's text changes: memory, its
-    notes, mode, schemas and reserves stay as the start chose them."""
+    start whose first request cannot go out (optional maps then ``BOOK_MAPS`` when ``maps`` holds in any mode);
+    None where nothing is left or the shown view no longer matches. Only the yielded section's text changes."""
     from ouroboros.context_fit import _governance_blocks, _request_tokens
     from ouroboros.section_floor import render_sections
 

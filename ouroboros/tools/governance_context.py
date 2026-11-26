@@ -574,10 +574,11 @@ def _affected_domain_module_map(
     touched_domains: tuple[str, ...],
     domain_by_path: Mapping[str, str],
     *,
+    read_bytes: Any = None,
     max_neighbor_domains: int = 4,
     max_rows_per_domain: int = 45,
 ) -> tuple[str, tuple[str, ...], str]:
-    """Build live module leads: all touched modules across all touched domains first, then neighbors."""
+    """Build live module leads: all touched modules across all touched domains (plus touched web/ files) first, then neighbors."""
     from ouroboros import work_domain
     from ouroboros.code_intelligence_architecture import _module_lead, module_map_rows
 
@@ -586,7 +587,7 @@ def _affected_domain_module_map(
     omitted_neighbor_doms: list[str] = []
     try:
         for idx, dom in enumerate(touched_domains):
-            full_rows = module_map_rows(map_root, dom)
+            full_rows = module_map_rows(map_root, dom, read_bytes=read_bytes)
             if not full_rows:
                 continue
             header_row, module_rows = full_rows[0], full_rows[1:]
@@ -601,9 +602,10 @@ def _affected_domain_module_map(
                 else:
                     rest.append(row_text)
             for rel in sorted(touched - seen_touched):
-                if rel.endswith((".py", ".js", ".mjs", ".ts")) and domain_by_path.get(rel) == dom and (map_root / rel).is_file():
-                    lead = _module_lead(map_root, rel)
-                    touched_first.append(f"{rel} — {lead}" if lead else rel)
+                if rel.endswith((".py", ".js", ".mjs", ".ts")) and domain_by_path.get(rel) == dom:
+                    lead = _module_lead(map_root, rel, read_bytes=read_bytes)
+                    if lead or (read_bytes is None and (map_root / rel).is_file()):
+                        touched_first.append(f"{rel} — {lead}" if lead else rel)
             if idx < max_neighbor_domains:
                 ordered_mod_rows = [*touched_first, *rest]
                 cap = max(len(touched_first), max_rows_per_domain - 1)
@@ -633,6 +635,17 @@ def _affected_domain_module_map(
             dom_lines.append(
                 f"(+{len(omitted_neighbor_doms)} more touched domain(s) omitted: {', '.join(omitted_neighbor_doms)})"
             )
+        touched_web = sorted(p for p in touched if p.startswith("web/") and p.endswith((".js", ".mjs", ".ts")))
+        if touched_web:
+            web_rows = []
+            for rel in touched_web:
+                lead = _module_lead(map_root, rel, read_bytes=read_bytes)
+                if lead or (read_bytes is None and (map_root / rel).is_file()):
+                    web_rows.append(f"{rel} — {lead}" if lead else rel)
+            if web_rows:
+                dom_lines.append(f"web/ ({len(web_rows)} touched JS/TS module(s))")
+                dom_lines.extend(web_rows)
+                shown_domains.append("web/")
     except work_domain.WorkDomainUnsettled:
         raise
     except (OSError, ValueError) as exc:
@@ -644,6 +657,8 @@ def _resolve_body_subject_domains(
     gov_root: Path,
     map_root: Path,
     touched_paths: Iterable[Any],
+    *,
+    read_bytes: Any = None,
 ) -> tuple[set[str], tuple[str, ...], dict[str, str]]:
     """Resolve owning manuals from executing ``gov_root`` and affected domains from both ``map_root`` and ``gov_root``."""
     from ouroboros.reference_books import load_domain_references, resolve_body_references
@@ -656,9 +671,9 @@ def _resolve_body_subject_domains(
         for rel, info in (body_refs.get("by_path") or {}).items()
         if info.get("domain")
     }
-    if map_root.resolve(strict=False) != gov_root.resolve(strict=False):
+    if map_root.resolve(strict=False) != gov_root.resolve(strict=False) or read_bytes is not None:
         _, gov_mods, gov_refs = load_domain_references(gov_root)
-        _, cand_mods, _ = load_domain_references(map_root)
+        _, cand_mods, _ = load_domain_references(map_root, read_bytes=read_bytes)
         for raw in touched_paths:
             rel = _normalize(raw)
             dom = cand_mods.get(rel) or gov_mods.get(rel) or ""
@@ -680,7 +695,7 @@ def _read_body_invariants_text(root: Path, arch_chapters: Iterable[Any]) -> Opti
     try:
         if direct.is_file():
             return direct.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return None
 
@@ -699,6 +714,7 @@ def governance_context(
     manifest_facts: Any = None,
     review_words: Any = None,
     module_map_root: Any = None,
+    module_map_source: str = "worktree",
 ) -> GovernanceContext:
     """Tier the governance corpus for ONE reviewer of ONE change.
 
@@ -808,7 +824,10 @@ def governance_context(
                          "required cross-cutting invariants and Closed roads unavailable at this path"))
 
     map_root = Path(module_map_root) if module_map_root else (Path(subject_root) if subject_root else root)
-    ref_manuals, touched_domains, domain_by_path = _resolve_body_subject_domains(root, map_root, touched_paths or ())
+    from ouroboros.reference_books import source_reader as _source_reader
+    map_reader = _source_reader(map_root, source="index") if module_map_source == "index" else None
+    ref_manuals, touched_domains, domain_by_path = _resolve_body_subject_domains(
+        root, map_root, touched_paths or (), read_bytes=map_reader)
 
     dev_book, dev_problem = _load_book(root, DEVELOPMENT_BOOK_ID)
     dev_chapters = _book_sources(dev_book)
@@ -925,8 +944,9 @@ def governance_context(
                              "the map is never inlined whole; chapter navigation above"))
     for order, path, title, reason in sorted(sections):
         _admit(path, title, chapter_text.get(path, ""), 3, reason)
-    if packet and touched_domains:
-        dom_text, shown_domains, dom_err = _affected_domain_module_map(map_root, touched, touched_domains, domain_by_path)
+    if packet and (touched_domains or any(p.startswith("web/") and p.endswith((".js", ".mjs", ".ts")) for p in touched)):
+        dom_text, shown_domains, dom_err = _affected_domain_module_map(
+            map_root, touched, touched_domains, domain_by_path, read_bytes=map_reader)
         if dom_text:
             _admit("ouroboros/domains.toml#affected_domains",
                    "Affected domain module map (projected from domains.toml & docstrings)",
@@ -941,8 +961,8 @@ def governance_context(
         required_nav = [row["path"] for row in rows if row["disposition"] == "required"]
         if required_nav:
             pointers.append(
-                "REQUIRED governance read(s) before judging (read each in full via "
-                "`read_file(root=\"system_repo\", path=...)`): "
+                "REQUIRED governance read(s) before judging (read each in full via `read_file` using its listed root, "
+                "e.g. `system_repo` or `session_root` for materialized copies): "
                 + ", ".join(f"`{p}`" for p in required_nav) + "."
             )
     design_map = ""

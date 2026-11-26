@@ -436,7 +436,7 @@ def body_ownership_pulse(
     extension-qualified basenames, snake_case stems, or qualified ``stem.``/``stem::`` symbols).
     Purely diagnostic, never a gate.
     """
-    from ouroboros.reference_books import resolve_body_references, source_reader
+    from ouroboros.reference_books import _git_bytes, resolve_body_references, source_reader
 
     code_paths = [p for p in shown if not str(p).startswith(("docs/", "tests/"))]
     if not code_paths:
@@ -444,17 +444,25 @@ def body_ownership_pulse(
     diff_universe = shown if all_changed is None else all_changed
     changed_set = {str(p).replace("\\", "/").removeprefix("./") for p in diff_universe}
     idx_reader = source_reader(root, source="index") if staged else None
+    dirty_wt: set[str] = set()
+    if staged:
+        wt_raw = _git_bytes(root, "--no-optional-locks", "diff", "--name-only", "-z")
+        if wt_raw is None:
+            dirty_wt.add("*")
+        else:
+            dirty_wt = {p.replace("\\", "/").removeprefix("./") for p in wt_raw.decode("utf-8", "replace").split("\0") if p}
+    index_needed = changed_set | dirty_wt
 
     def _fast_staged_reader(rel: str) -> bytes:
         norm_rel = str(rel).replace("\\", "/").removeprefix("./")
-        if idx_reader is not None and norm_rel in changed_set:
+        if idx_reader is not None and ("*" in index_needed or norm_rel in index_needed):
             return idx_reader(norm_rel)
         return (root / norm_rel).read_bytes()
 
-    reader = _fast_staged_reader if (staged and any(
+    reader = _fast_staged_reader if (staged and ("*" in index_needed or any(
         p == "ouroboros/domains.toml" or p.startswith(("docs/architecture/", "docs/development/"))
-        for p in changed_set
-    )) else None
+        for p in index_needed
+    ))) else None
     refs = resolve_body_references(root, code_paths, read_bytes=reader, include_mentions=True)
     manuals = refs.get("manuals") or ()
     if not manuals:

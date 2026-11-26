@@ -268,8 +268,8 @@ def _preflight_check(commit_message: str, staged_files: str,
             )
         if missing_fallback:
             problems.append(
-                f"New files added in ouroboros/ or supervisor/ without updating `{architecture_entrypoint}` "
-                f"or a `docs/architecture/` chapter (BIBLE P6): {missing_fallback[:5]}."
+                f"New files added in ouroboros/ or supervisor/ without updating the Architecture book "
+                f"(`{architecture_entrypoint}` or a `docs/architecture/` chapter, BIBLE P6): {missing_fallback[:5]}."
             )
         if problems:
             return (
@@ -497,7 +497,8 @@ def _triad_governance_context(ctx: ToolContext, touched_paths: list,
                               checklist_section: str, api_models: list, api_slots: list,
                               *, delivery: str = "packet", governance_root=None,
                               layer: str = "body", subject_root: Optional[pathlib.Path] = None,
-                              review_words=None, module_map_root: Optional[pathlib.Path] = None):
+                              review_words=None, module_map_root: Optional[pathlib.Path] = None,
+                              module_map_source: str = "worktree"):
     """The triad's shared governance tiers for either delivery class.
 
     ``governance_root`` is the installed body (a frozen subject names it; the
@@ -531,6 +532,7 @@ def _triad_governance_context(ctx: ToolContext, touched_paths: list,
         subject_root=subject_root,
         review_words=review_words,
         module_map_root=module_map_root,
+        module_map_source=module_map_source,
     )
 
 
@@ -730,7 +732,8 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     governance = _triad_governance_context(
         ctx, touched_paths, checklist_section, api_models, api_slots,
         governance_root=governance_root, layer=layer, subject_root=subject_root, review_words=words,
-        module_map_root=pathlib.Path(target_repo))
+        module_map_root=pathlib.Path(target_repo),
+        module_map_source="index" if (subject is None or getattr(subject, "is_system_index", False)) else "worktree")
 
     # Build touched-file pack for full current context (managed: the reviewed
     # resolution set; binary rows carry the M0 baseline identity). A plain

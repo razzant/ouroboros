@@ -874,7 +874,11 @@ def test_enough_candidate_a2_first_send_is_the_smaller_max_form(scenario):
 
 
 def test_standing_candidate_a2_folds_memory_then_steps_to_standing_tools(scenario):
-    """Candidate, S: A2 skips full Max by starting folded (20/20 leads + full tools), then rescues via standing tools."""
+    """Candidate, S: A2 skips full Max by starting folded (20/20 leads + full tools), then rescues via standing tools.
+
+    As on base, the post-refusal cold emergency walk under REFUSAL_PASSES (owner 7A, 09.10.2026) does not assert
+    authored leads on the final emergency-walked send; only A2's hinted first send carries the 20/20 leads promise.
+    """
     result = scenario("standing")
     a1, a2 = result["rooms"]["A1"]["posts"], result["rooms"]["A2"]["posts"]
     evidence = check_wire(result)

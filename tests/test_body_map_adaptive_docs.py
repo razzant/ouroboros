@@ -659,8 +659,10 @@ def test_r2_retrieving_brief_distinct_roots_broken_sibling_and_candidate_new_mod
     assert "ouroboros/brand_new_r2.py — Brand new candidate module lead." in dom_sec
 
 
-def test_r2_nano_continuation_preserves_compact_body_map_and_telling_vs_schemas(tmp_path):
-    from ouroboros import context_fit, held_notes, memory_floor
+def test_r2_nano_continuation_preserves_compact_body_map_and_telling_vs_schemas(tmp_path, monkeypatch):
+    from ouroboros import context_fit, context_view_facts, held_notes, memory_floor
+    from ouroboros.chronicle_lead import LEAD_RULE_VERSION
+    from ouroboros.loop_llm_call import MAIN_LOOP_MAX_TOKENS
     from tests import _memory_view_synthetic as syn
     from tests.test_section_floor import _core, _host_facts, _plan, booked
 
@@ -681,12 +683,13 @@ def test_r2_nano_continuation_preserves_compact_body_map_and_telling_vs_schemas(
     assert [r["section_id"] for r in _host_facts(cold, "nano")] == ["body_map"]
     assert "## Body (parts & addresses)" in cold.messages_for("nano")[0]["content"][0]["text"]
 
-    # R2-6: integrating Max start chooses Nano standing schemas to preserve 20/20 authored leads
-    # rather than erasing tellings to keep reloadable tool schemas.
-    from ouroboros.chronicle_lead import LEAD_RULE_VERSION
+    # R2-6 + R3 Astra #2 / Fable F-2: integrating Max start prices Nano standing schemas using the
+    # route's real output reserve; verify full rescue, partial rescue (more leads than Max), truthful
+    # model + owner disclosure, and ample-window non-interference (spy confirms _try_nano_telling runs).
     pages = [
-        dict(p, lead_rule=LEAD_RULE_VERSION, text=(f"Room {i} authored lead sentence " + "detail " * 25 + ". ") + syn.prose(2_500))
-        for i, p in enumerate(syn.pages(30, 2_500))
+        dict(p, lead_rule=LEAD_RULE_VERSION,
+             text=(f"Room {i} " + "recorded understanding " * 38 + f"settled point {i}. ") + syn.prose(2_400))
+        for i, p in enumerate(syn.pages(26, 2_400))
     ]
     snap = syn.snapshot(story=pages)
     core_t = booked(_core(tmp_path / "t", snapshot=snap), tmp_path / "t", body="Short. ")
@@ -695,8 +698,8 @@ def test_r2_nano_continuation_preserves_compact_body_map_and_telling_vs_schemas(
         for name in ("read_file", "enable_tools", "memory_read", "finish_task")
     ]
     extra = [
-        {"type": "function", "function": {"name": f"extra_tool_{i}", "description": "Reloadable syntax. " * 220, "parameters": {"type": "object", "properties": {}}}}
-        for i in range(40)
+        {"type": "function", "function": {"name": f"extra_tool_{i}", "description": "Reloadable syntax. " * 130, "parameters": {"type": "object", "properties": {}}}}
+        for i in range(10)
     ]
     all_tools = standing + extra
     empty_snap = syn.snapshot(story=[])
@@ -707,29 +710,64 @@ def test_r2_nano_continuation_preserves_compact_body_map_and_telling_vs_schemas(
     nano_fixed = context_fit.estimate_context_prompt_tokens(
         _plan(core_empty, 2_000_000, "nano").messages_for("nano"), standing,
     )
-    assert max_fixed > nano_fixed + 10_000
+    assert max_fixed > nano_fixed + 3_000
+
+    spy_calls: list[int] = []
+    orig_try = context_fit._try_nano_telling
+    def _spy(*args, **kwargs):
+        res = orig_try(*args, **kwargs)
+        spy_calls.append(1 if res is not None else 0)
+        return res
+    monkeypatch.setattr(context_fit, "_try_nano_telling", _spy)
+
+    def _fit_at(win: int):
+        return context_fit.build_context_fit_plan(
+            None, core_t, {"id": f"r2-6-{win}", "chat_id": 1}, preferred_mode="max",
+            route_resolver=lambda *_a, **_kw: (
+                {"provider": "test", "model": "fixture"},
+                type("Ev", (), {"route_fp": f"r2-6-{win}", "status": "asserted", "stale": False, "window_tokens": win})(),
+            ),
+            tool_schemas=all_tools,
+        )
+
+    # 1. Full rescue: Max fits only by dropping tellings; Nano fits with all 26/26 tellings intact.
+    full_win = max_fixed + MAIN_LOOP_MAX_TOKENS + 4_000
+    full_plan = _fit_at(full_win)
+    assert spy_calls and spy_calls[-1] == 1
+    assert full_plan.initial_mode == "nano"
+    full_level = memory_floor.kept_level(snap, full_plan.projection("nano").memory_facts)
+    assert memory_floor.emergency_item_count(snap, full_level) == 0
+    nano_sys = full_plan.projection("nano").system_content_json
+    assert "would drop authored tellings here" in nano_sys
+    assert full_plan.projection("nano").memory_facts["max_room"].get("telling_preserved") is True
+    owner_line = context_view_facts.low_start_line(full_plan, "nano", "r2-6-full")
+    assert "authored tellings" in owner_line and "shortest forms" not in owner_line
+
+    # 2. Partial rescue: even Nano must fold some leads, yet preserves strictly more leads than Max.
     telling_toks = memory_floor.tokens_of(memory_floor.mv.story_chars(snap, memory_floor.telling_level(snap)))
-    assert telling_toks > 1_000
-    # Window fits Max with emergency memory (no tellings), overflows Max with tellings, and fits Nano with tellings.
-    tight_win = max_fixed + 8_192 + max(400, telling_toks // 3)
-    tight_plan = context_fit.build_context_fit_plan(
-        None, core_t, {"id": "r2-6", "chat_id": 1}, preferred_mode="max",
-        route_resolver=lambda *_a, **_kw: (
-            {"provider": "test", "model": "fixture"},
-            type("Ev", (), {"route_fp": "r2-6", "status": "asserted", "stale": False, "window_tokens": tight_win})(),
-        ),
-        tool_schemas=all_tools,
-    )
-    assert tight_plan.initial_mode == "nano"
-    tight_level = memory_floor.kept_level(snap, tight_plan.projection("nano").memory_facts)
-    assert memory_floor.level_is_telling(snap, tight_level)
+    # Use a tighter output cap (8,192) to put Nano in the middle band where 0 < nano_emerg < max_emerg.
+    monkeypatch.setattr(context_fit, "main_output_reserve_tokens", lambda **_kw: 8_192)
+    partial_win = nano_fixed + 8_192 + int(telling_toks * 0.72)
+    partial_plan = _fit_at(partial_win)
+    assert partial_plan.initial_mode == "nano"
+    partial_level = memory_floor.kept_level(snap, partial_plan.projection("nano").memory_facts)
+    partial_emerg = memory_floor.emergency_item_count(snap, partial_level)
+    assert 0 < partial_emerg < 26, f"expected partial rescue band, got emerg={partial_emerg}"
+
+    # 3. Ample window: Max holds all tellings; rescue stays quiet.
+    before_calls = len(spy_calls)
+    ample_plan = _fit_at(max_fixed + 8_192 + telling_toks + 40_000)
+    assert ample_plan.initial_mode == "max" and len(spy_calls) == before_calls
 
 
 def test_r2_corrupt_domains_manifest_preflight_and_staged_module_line_count(tmp_path):
     from ouroboros.review import diff_pulse
     from ouroboros.tools import review as review_tools
+    from ouroboros.tools.governance_context import (
+        BODY_INVARIANTS_CHAPTER, BODY_LAYER, PACKET_DELIVERY, governance_context,
+    )
 
-    # R2-9: corrupt staged domains.toml fails preflight instead of silently falling back.
+    # R2-9: corrupt or non-table staged domains.toml fails preflight cleanly without AttributeError.
     repo = tmp_path / "bad_dom"
     (repo / "ouroboros").mkdir(parents=True)
     (repo / "docs/architecture").mkdir(parents=True)
@@ -744,16 +782,63 @@ def test_r2_corrupt_domains_manifest_preflight_and_staged_module_line_count(tmp_
     _git(repo, "add", "-A")
     res = review_tools._preflight_check("add mod", "A  ouroboros/new_mod.py\nM  docs/ARCHITECTURE.md", str(repo))
     assert res is not None and "could not be parsed" in res
+    (repo / "ouroboros/domains.toml").write_text('modules = "in progress"\n', encoding="utf-8")
+    _git(repo, "add", "ouroboros/domains.toml")
+    res2 = review_tools._preflight_check("add mod", "A  ouroboros/new_mod.py\nM  docs/ARCHITECTURE.md", str(repo))
+    assert res2 is not None and "could not be parsed" in res2
 
-    # Staged diff_pulse reports staged module line count, not dirty worktree line count.
+    # Staged diff_pulse ignores unstaged worktree edits to code, domains.toml, and 10-key-invariants.md.
     repo2 = tmp_path / "staged_lines"
     (repo2 / "ouroboros").mkdir(parents=True)
-    (repo2 / "ouroboros/tiny.py").write_text('"""Tiny."""\nX = 1\n', encoding="utf-8", newline="\n")
+    (repo2 / "docs/architecture").mkdir(parents=True)
+    (repo2 / "ouroboros/tiny.py").write_text('"""Staged purpose."""\nX = 1\n', encoding="utf-8", newline="\n")
+    (repo2 / "ouroboros/domains.toml").write_text(
+        '[domains]\nD01 = "Alpha"\nD02 = "Beta"\n[modules]\n"ouroboros/tiny.py" = "D01"\n'
+        '[references]\nD01 = ["docs/architecture/01-alpha.md"]\nD02 = ["docs/architecture/02-beta.md"]\n',
+        encoding="utf-8",
+    )
+    (repo2 / "docs/architecture/10-key-invariants.md").write_text("# 10\n\n1. `tiny.py` invariant.\n", encoding="utf-8")
     _git(repo2, "init", "-q")
     _git(repo2, "add", "-A")
     _git(repo2, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
-    (repo2 / "ouroboros/tiny.py").write_text('"""Tiny."""\nX = 1\nY = 2\n', encoding="utf-8", newline="\n")
+    (repo2 / "ouroboros/tiny.py").write_text('"""Staged purpose."""\nX = 1\nY = 2\n', encoding="utf-8", newline="\n")
     _git(repo2, "add", "ouroboros/tiny.py")
-    (repo2 / "ouroboros/tiny.py").write_text('"""Tiny."""\n' + "Z = 1\n" * 15, encoding="utf-8", newline="\n")
+    (repo2 / "ouroboros/tiny.py").write_text('"""Unstaged dirty purpose."""\n' + "Z = 1\n" * 15, encoding="utf-8", newline="\n")
+    (repo2 / "ouroboros/domains.toml").write_text(
+        '[domains]\nD01 = "Alpha"\nD02 = "Beta"\n[modules]\n"ouroboros/tiny.py" = "D02"\n'
+        '[references]\nD01 = ["docs/architecture/01-alpha.md"]\nD02 = ["docs/architecture/02-beta.md"]\n',
+        encoding="utf-8",
+    )
+    (repo2 / "docs/architecture/10-key-invariants.md").write_text("# 10\n\n87. `tiny.py` dirty invariant.\n", encoding="utf-8")
     pulse = diff_pulse(repo2, ["ouroboros/tiny.py"], staged=True)
     assert "ouroboros/tiny.py 3 (+1/-0)" in pulse
+    assert "01-alpha.md" in pulse and "02-beta.md" not in pulse
+    assert "§10#1" in pulse and "§10#87" not in pulse
+    # Packet module_map with module_map_source="index" reads staged docstring, not dirty worktree.
+    pkt_idx = governance_context(
+        REPO, surface="commit", touched_paths=["ouroboros/tiny.py"],
+        usable_window_tokens=200_000, delivery=PACKET_DELIVERY, layer=BODY_LAYER,
+        module_map_root=repo2, module_map_source="index",
+    )
+    dom_idx = next(t for title, t in pkt_idx.inline_sections if "Affected domain module map" in title)
+    assert "Staged purpose." in dom_idx and "Unstaged dirty purpose." not in dom_idx
+
+    # R3 Astra R2-3 (web/-only packet leads) and R2-5 (non-UTF-8 10-key-invariants.md unavailable row).
+    pkt_web = governance_context(
+        REPO, surface="commit", touched_paths=["web/modules/card_model.js"],
+        usable_window_tokens=200_000, delivery=PACKET_DELIVERY, layer=BODY_LAYER,
+    )
+    web_sec = next(t for title, t in pkt_web.inline_sections if "Affected domain module map" in title)
+    assert "web/modules/card_model.js — " in web_sec
+    bad_utf8 = tmp_path / "bad_utf8"
+    (bad_utf8 / "docs/architecture").mkdir(parents=True)
+    (bad_utf8 / "docs/ARCHITECTURE.md").write_text(
+        "# Map\n\n- [1. Missing](architecture/01-missing.md)\n- [10. Inv](architecture/10-key-invariants.md)\n",
+        encoding="utf-8",
+    )
+    (bad_utf8 / "docs/architecture/10-key-invariants.md").write_bytes(b"\xff\xfeinvalid")
+    pkt_bad = governance_context(
+        bad_utf8, surface="commit", touched_paths=["ouroboros/review.py"],
+        usable_window_tokens=128_000, delivery=PACKET_DELIVERY, layer=BODY_LAYER,
+    )
+    assert any(r["path"] == BODY_INVARIANTS_CHAPTER and r["disposition"] == "navigation" for r in pkt_bad.manifest)
