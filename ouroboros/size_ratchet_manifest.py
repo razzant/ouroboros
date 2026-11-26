@@ -85,7 +85,7 @@ BAND_PATHS = {
     "devtools/benchmarks/osworld/run_cu_bridge_agent.py": "OSWorld launcher retains admission and finalization seams; gate, budget, prompts and tool-policy helpers live in bounded owner leaves.",
     "devtools/benchmarks/swe_bench_pro/e1v2/run_pro.py": None,
     "devtools/benchmarks/terminal_bench/harbor_installed_agent.py": None,
-    "devtools/benchmarks/terminal_bench/run_tb.py": None,
+    "devtools/benchmarks/terminal_bench/run_tb.py": "Terminal-Bench launcher keeps admission, the one read of a base Harbor job config, argv assembly and run disclosure inside one finalization seam; image-build policy and other shared flags live in run_harbor_smoke.py.",
     "devtools/e2e_live/scenarios.py": "Entered the band from 992 lines (FIX5 T2b/NEW-T2): SW1's catalog composed beside the lane template's reviewers and the SM1 wave oracle that rejects reserved rows and non-answers belong with the scenarios they prove; the SM1 durable-fact oracles are the next split when the stand grows again.",
     "launcher.py": "Desktop startup owns the child environment and planned bind: it uses the first-run mirror-safe settings read and supplies launch protection evidence for confirmed Reset.",
     "ouroboros/_usage_response.py": "Typed refusal proof and cumulative counter selection belong to one physical response reader, beside the bounded answer walk and the price reconciliation that consume the same evidence. Reuse stream framing rather than extracting a second refusal decoder.",

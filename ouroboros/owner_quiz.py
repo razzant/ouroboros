@@ -542,6 +542,7 @@ def mark_discharged(drive_root: Any, task_id: str, quiz_id: str) -> Dict[str, An
 def record_closed(
     drive_root: Any, task_id: str, *, quiz_id: str, reason: str, actor_task_id: str = "",
     actor: str = "model", request_id: str = "", secret_outcome: Optional[Dict[str, Any]] = None,
+    mail_route: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """The owner closes any unanswered question; a model closes its own, a recorded Continue/retry
     predecessor's, or a question whose task already finished (``expired_terminal``), always with
@@ -552,6 +553,10 @@ def record_closed(
 
     A secret request's save claim (``secret_save.state == writing``) refuses every closure but the
     owner's cancel, which passes its typed ``secret_outcome`` from under the settings lock.
+
+    ``mail_route`` (``question_answers.closure_route``): the one admitted Continue reading now and its mail store,
+    pinned in this winning close's ``delivery`` before any letter goes there, when the owner closes a card shown in
+    chat. Only the first win pins; a repeat, a model's closure, a secret request and an older record carry none.
     """
     reason = str(reason or "")
     if actor == "owner" and not reason.strip():
@@ -566,6 +571,8 @@ def record_closed(
     if not request_id:
         return {"ok": False, "error": "request_id_required"}
     outcome: Dict[str, Any] = {}
+    route = {key: str(mail_route[key]) for key in ("recipient_task_id", "recipient_drive")
+             if isinstance(mail_route, dict) and mail_route.get(key)}
 
     def mutate(quizzes: Dict[str, Dict[str, Any]]) -> Any:
         block = quizzes.get(str(quiz_id))
@@ -597,6 +604,9 @@ def record_closed(
             block["closed_by_task_id"] = str(actor_task_id)
         if secret_outcome is not None:
             block["secret_outcome"] = dict(secret_outcome)
+        if (len(route) == 2 and actor == "owner" and secret_outcome is None and not block.get("secret_request")
+                and block.get("published_at")):
+            block["delivery"].update(route)  # pinned by this first win, before any letter goes there
         outcome.update(ok=True, state=STATE_CLOSED, duplicate=False, block=dict(block))
         return True
 

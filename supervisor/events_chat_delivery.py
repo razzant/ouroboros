@@ -862,13 +862,28 @@ def _handle_send_quiz_state(evt: Dict[str, Any], ctx: Any) -> None:
                      client_message_id=f"quiz_closed:{tid}:{qid}", drive_root=ctx.DRIVE_ROOT,
                      require_write=True)
             mark_quiz_history_written(ctx.DRIVE_ROOT, tid, qid)
-        if block.get("closed_actor") == "owner" and not (block.get("delivery") or {}).get("mailbox_at"):
+        delivery = block.get("delivery") or {}
+        if block.get("closed_actor") == "owner" and not delivery.get("mailbox_at"):
             from ouroboros.gateway.task_decision import _mail_holder
-            from ouroboros.owner_mailbox import KIND_QUIZ_CLOSED, write_owner_message
+            from ouroboros.owner_mailbox import KIND_QUIZ_CLOSED, mailbox_reader_live, write_owner_message
             from supervisor.queue import _task_drive_for_task
 
-            task, _refusal = _mail_holder(tid)  # a paused author learns it when it continues
-            if task is not None:
+            drive, ended = None, []
+            pin = [str(delivery.get(key) or "") for key in ("recipient_task_id", "recipient_drive", "logical_id")]
+            if all(pin):
+                # The winning close pinned its reader: that task and store, whatever a retry finds, and no one else.
+                # Under its mail lock a whole row or acknowledgement there settles a repeat; otherwise it is written
+                # only while its canonical and own rows both read live, and a proven end writes it nowhere.
+                reader, drive, msg_id = pin[0], pathlib.Path(pin[1]), pin[2]
+
+                def admit() -> bool:
+                    live = mailbox_reader_live(ctx.DRIVE_ROOT, drive, reader)
+                    ended.append(live is False)
+                    return live is True
+                repeat = {"once": True, "admit": admit}
+            elif (task := _mail_holder(tid)[0]) is not None:  # a paused author learns it when it continues
+                reader, drive, msg_id, repeat = tid, _task_drive_for_task(task, tid), f"quiz_closed:{qid}", {}
+            if drive is not None:
                 frame = (f"[Owner question closed without answer] quiz {qid} — "
                          f"closed {block['closed_at']}. Reason: {block['closed_reason']}\n"
                          "This closes the question; no option was chosen and no approval was given.")
@@ -880,11 +895,11 @@ def _handle_send_quiz_state(evt: Dict[str, Any], ctx: Any) -> None:
                     # The existing typed snapshot: readers keep the host frame apart from the owner's act.
                     secret = {"quiz_delivery": {"task_id": tid, "quiz_id": qid, "canonical_root": str(ctx.DRIVE_ROOT),
                                                 "answer_snapshot": dict(block)}}
-                if not write_owner_message(_task_drive_for_task(task, tid), frame, tid,
-                                           msg_id=f"quiz_closed:{qid}", kind=KIND_QUIZ_CLOSED, **secret):
+                if write_owner_message(drive, frame, reader, msg_id=msg_id, kind=KIND_QUIZ_CLOSED, **repeat, **secret):
+                    mark_quiz_history_written(ctx.DRIVE_ROOT, tid, qid, receipt="mailbox_at")
+                elif not any(ended):  # busy, unconfirmed or not known: owed, and retried only at this same address
                     record_quiz_delivery_failure(ctx.DRIVE_ROOT, tid, qid, "mailbox_write_failed")
                     return
-                mark_quiz_history_written(ctx.DRIVE_ROOT, tid, qid, receipt="mailbox_at")
         if chat_id is None:
             if reason == "publication_address_unknown":  # the import's verdict may owe its note nowhere
                 from ouroboros import obligations
