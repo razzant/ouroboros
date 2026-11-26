@@ -1024,6 +1024,13 @@ html[data-layout="stack"] .resize-handle { display: none; }
 /* An owner-required action is a System message: the task, one sentence, the task's own controls. */
 .owner-action-body { display: flex; flex-direction: column; gap: var(--space-2); }
 .owner-action-reason { font-size: var(--type-meta); color: var(--text-meta); }
+/* A System row speaks at the size of every voice (owner decision 27.11.2026): its words, its title and its status
+   sentences at 16; its name, time and metadata (a place, a count, a row's answer) stay 12. */
+.chat-bubble.system :is(.owner-action-body > .ui-status, .owner-action-reason:not([data-panic-summary]), .model-wait-heading strong) {
+    font-size: var(--type-section);
+    line-height: var(--line-body);
+}
+.chat-bubble.system .owner-action-reason:not([data-panic-summary]) { color: var(--system-text); }
 /* The works Panic stopped (panic_recovery.js): Choose all/none beside the count, then one row per work, its box on the
    name's first line, its place and its last answer under the name, the Stop… its card had at the row's end; the one
    Resume follows the list. The whole label is the box's, so a finger reaches it anywhere, and a tap answers with the
@@ -1051,10 +1058,10 @@ html[data-layout="stack"] .resize-handle { display: none; }
     -webkit-tap-highlight-color: transparent;
 }
 .panic-recovery-pick.is-locked { cursor: default; }
-.panic-recovery-pick > .ui-checkbox { grid-column: 1; grid-row: 1; margin-top: calc((var(--type-body) * var(--line-body) - 14px) / 2); }
+.panic-recovery-pick > .ui-checkbox { grid-column: 1; grid-row: 1; margin-top: calc((var(--type-section) * var(--line-body) - 14px) / 2); }
 /* The words keep their column when a row that came back has no box. */
 .panic-recovery-pick > :not(.ui-checkbox) { grid-column: 2; min-width: 0; overflow-wrap: anywhere; }
-.panic-recovery-name { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); font-weight: 500; }
+.panic-recovery-name { color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-body); font-weight: 500; }
 .panic-recovery-meta { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .panic-recovery-meta:empty { display: none; }
 @media (pointer: coarse) {

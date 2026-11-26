@@ -1194,7 +1194,9 @@ exception, not a pattern for new notices.
 
 Built-in chrome uses words and monochrome `currentColor` vectors, not decorative
 emoji. System keeps its resting body and amber/gold label without an edge; status stays explicit in
-words and the tone primitive. Functional icons keep state and accessible names.
+words and the tone primitive. A System row's words, its title and its status sentences read at the voices' 16 px,
+the title strong; its name, time and metadata (a place, a count, a row's answer) keep 12 (owner decision
+27.11.2026). Functional icons keep state and accessible names.
 A host notice writes no pictograph. For rows written before notices, known typed host prefixes
 are hidden only at display (`host_notice_text.js`) and unlisted or ambiguous records remain
 literal. History, keys and exports keep the stored bytes; Copy keeps a notice's line and, for two
