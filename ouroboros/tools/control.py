@@ -177,7 +177,8 @@ _SCHEDULE_SUBAGENT_DESCRIPTION = (
     # The default child reads; only a write_surface value below makes it acting. Both words stay in this lead,
     # which is all a custom projection without parameter prose shows of that choice.
     "Default native READ-ONLY: repo/data/history, web/browser; no other writes or shell/review/runtime/skills. "
-    "workspace_root: start folder, else yours. Read-only input_files: file/git_range. "
+    "workspace_root: existing start folder (default: yours; omit for genesis; with external_workspace must match "
+    "write_root if both set; self_worktree copies it). Read-only input_files: file/git_range. "
     "ACTING write_surface: self_worktree isolates eligible Git files, uncommitted too (integrate_subagent_patch); "
     "external_workspace writes shared files (write_root, else workspace_root, else new Git tree); "
     "genesis: own empty durable Git repo. Private harness snapshots: integrate_delegated_patch. "

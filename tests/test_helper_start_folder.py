@@ -156,6 +156,8 @@ def test_contradictory_named_start_is_refused_before_enqueue(start_registry, sur
     result = registry.execute_result("schedule_subagent", {**args, **options})
     assert result.status != "ok" and result.code == "TOOL_ARG_ERROR", result
     assert ("genesis" if surface == "genesis" else "different folders") in result.text
+    # The refusal names the one-argument fix, so the retry does not guess between the two folders.
+    assert ("omit workspace_root" if surface == "genesis" else "omit write_root or pass the same folder") in result.text
     assert not registry._ctx.pending_events
 
 
@@ -284,3 +286,25 @@ def test_admitted_external_workspace_is_one_fact_in_contract_result_and_context(
                       workspace_mode=row["workspace_mode"], task_metadata=row["metadata"],
                       task_constraint=TaskConstraint(mode="acting_subagent", surface="external_workspace"))
     assert ctx.active_repo_dir() == selected
+
+
+def test_a_read_only_child_still_selects_an_ordinary_folder_and_read_inputs(start_registry):
+    """Its schema hides the write-side geometry (workspace, directory_strategy, scope_paths), never the
+    read-side choices: a read-only parent still names the grandchild's start folder and its input files."""
+    registry, args, home, _repo, data, _outside = start_registry
+    registry._ctx.task_constraint = {"mode": "local_readonly_subagent"}
+    props = next(tool for tool in registry.schemas()
+                 if tool["function"]["name"] == "schedule_subagent")["function"]["parameters"]["properties"]
+    assert {"workspace_root", "input_files"} <= set(props)
+    assert not {"workspace", "directory_strategy", "scope_paths", "write_surface", "write_root"} & set(props)
+    folder = home / "inspect"
+    folder.mkdir()
+    drive = data / "task_drives" / "parent"
+    drive.mkdir(parents=True)
+    (drive / "brief.md").write_text("parent brief\n", encoding="utf-8")
+    result = registry.execute_result("schedule_subagent", {
+        **args, "workspace_root": str(folder), "input_files": [{"root": "task_drive", "path": "brief.md"}]})
+    assert result.status == "ok", result.text
+    event = registry._ctx.pending_events[-1]
+    assert event["workspace_root"] == str(folder)
+    assert event["task_constraint"]["mode"] == "local_readonly_subagent"
