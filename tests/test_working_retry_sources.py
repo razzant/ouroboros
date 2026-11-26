@@ -222,7 +222,7 @@ def test_own_source_wins_and_wrong_or_corrupt_predecessor_is_not_replaced(restor
     assert "READ_FILE_ERROR" in f.tools.execute("read_file", ref["read"]["arguments"])
     old_path.write_bytes(expected)
     own_path = task_artifact_dir_path(f.root, f.ctx.task_id, create=True) / ref["path"]
-    own_path.parent.mkdir(parents=True)
+    own_path.parent.mkdir(parents=True, exist_ok=True)
     own_path.write_bytes(expected)
     old_path.write_bytes(b"The current source must win over this corrupt predecessor")
     assert read_actor_source_bytes(f.root, f.ctx.task_id, ref) == expected
