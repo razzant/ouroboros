@@ -818,6 +818,10 @@ class ConversationHost:
         async with self._tools_lock:
             record_request(self, call)
 
+    async def restore_serving_catalog(self, rejected, delivered, revision):
+        from ouroboros.live_tool_lane import restore_serving_catalog
+        return await restore_serving_catalog(self, rejected, delivered, revision)
+
     async def tool_batch(self, calls):
         """Serialize ordinary and feature tools on the effect lane; history stays writable meanwhile."""
         from ouroboros.live_tool_lane import tool_batch
