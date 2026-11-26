@@ -212,12 +212,12 @@ export function createReplayKeys() {
 }
 
 export function stampHistoryNode(node, id, position) {
-    if (!node || !id) return;
+    if (!node || !id) return false;
     node.dataset.historyId = id;
-    if (position) {
-        node.dataset.historySource = position.source;
-        node.dataset.historyOffset = String(position.offset);
-    }
+    if (!position || (node.dataset.historySource === position.source && node.dataset.historyOffset === String(position.offset))) return false;
+    node.dataset.historySource = position.source;
+    node.dataset.historyOffset = String(position.offset);
+    return true;
 }
 
 // Cause facts only a frame that states them replaces: an absent key keeps the last stated value, an explicit

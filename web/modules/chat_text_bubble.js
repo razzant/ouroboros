@@ -148,7 +148,7 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
 }
 
 /** Keep only the early nodes still awaiting the saved row that can adopt them. */
-export function createEarlyTextBubbles(feed, draw, insert, release, write = fn => fn()) {
+export function createEarlyTextBubbles(feed, draw, insert, release, write = fn => fn(), shown = () => {}) {
     const nodes = new Map();
     function clear(rows = null) {
         if (!nodes.size) return false;
@@ -173,7 +173,7 @@ export function createEarlyTextBubbles(feed, draw, insert, release, write = fn =
                 for (const { address, text, markdown, ts, initiator } of pending) {
                     const { bubble } = draw(text, 'assistant', { markdown, ts, meta: { initiator }, opts: { wordsOnly: true } });
                     nodes.set(address, bubble);
-                    insert(bubble, { forceStick: true });
+                    if (insert(bubble, { forceStick: true })) shown(address);
                 }
                 return true;
             });

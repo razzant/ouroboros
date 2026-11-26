@@ -1484,8 +1484,8 @@ session finds it as left: following, it follows the fresh end; reading older his
 keeps that passage, its disclosures and selection unless an ordinary click dismissed it, ↓ marked,
 newer messages unread. It reads what it missed as on reconnect. A window shown again can first paint
 delivered words and ordinary chat links in a room it hid while the room followed the newest message,
-if the same connection stayed live. They stay across repeat hides while that proof and the bound hold.
-Saved history sets the order, controls and read credit, adopting unchanged words in place and correcting differences.
+while the same connection stays live. Shown words survive repeat hides within the bound; reading back stops collection.
+Saved history owns order, controls and read credit, adopting equal words in place or correcting them.
 A long read still says `Updating…`. Explicit navigation wins: a question from its Main mirror, an exact quoted
 message, a search match or a row of the room's work status. Its landing reads the bounded page around
 the target as the room's history: `Load more history` continues older from it and `Scroll to latest message`

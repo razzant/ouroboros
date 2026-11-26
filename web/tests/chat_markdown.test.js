@@ -285,7 +285,7 @@ test('chart success and error writes use the supplied viewport boundary', () => 
         const dispose = enhanceChatMarkdown(root, {
             onDomWrite: (mutate) => { writes += 1; return mutate(); },
         });
-        assert.equal(writes, 3); // shared sync enhancement + success + error
+        assert.equal(writes, 2); // only the two actual writes (success and error); no no-op sync enhancement
         assert.equal(valid.dataset.processed, 'true');
         assert.equal(valid.children.length, 1);
         assert.equal(invalid.dataset.processed, 'true');

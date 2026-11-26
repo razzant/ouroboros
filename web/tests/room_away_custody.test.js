@@ -446,3 +446,88 @@ test('window return leaves an older reading position alone and waits for canonic
         assert.equal(feed.scrollTop, 220, 'canonical arrival does not jump to the latest row');
     } finally { f.close(); }
 });
+
+const savedSpeech = (frame, offset) => ({ ...frame, text: frame.content, history_id: `saved-${offset}`,
+    history_position: { source: 'chat', offset } });
+
+for (const chatId of [1, 7]) test(`saved-only, early and live replies in one millisecond follow saved positions (${chatId})`, async () => {
+    const f = fixture({ chatId });
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        const deliver = f.delayHistory();
+        const frames = [0, 1, 2].map(n => speech(chatId, n, `ordered words ${n}`, { ts: `2026-11-04T09:40:00.00000${n}Z` }));
+        const bubbles = () => f.messages.children.filter(node => node.innerHTML.includes('ordered words'));
+        f.hide(); f.socket.fire('chat', frames[1]); f.show();
+        f.socket.fire('chat', frames[2]);
+        const [early, live] = bubbles();
+        assert.ok(early && live && early !== live);
+        deliver(frames.map(savedSpeech));
+        await settle();
+        const rows = bubbles();
+        assert.deepEqual(rows.map(node => node.dataset.historyOffset), ['0', '1', '2']);
+        assert.deepEqual(rows.map(node => node.dataset.rowAddress), frames.map(frame => frame.row_address));
+        assert.equal(rows[1], early);
+        assert.equal(rows[2], live);
+    } finally { f.close(); }
+});
+
+test('a redelivered early legacy row after project invalidation cannot settle a later send', async () => {
+    const f = fixture();
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        const deliver = f.delayHistory();
+        const frame = speech(7, 1, 'legacy words');
+        const rows = () => f.messages.children.filter(node => node.innerHTML.includes(frame.content));
+        f.hide(); f.socket.fire('chat', frame); f.show();
+        assert.equal(rows().length, 1);
+        f.socket.fire('projects_changed', { chat_id: 7 });
+        assert.equal(rows().length, 0);
+        const cmid = await f.send('newer pending question');
+        const status = () => document.byId.get('chat-status').textContent;
+        assert.match(status(), /Sending/);
+        f.socket.fire('chat', frame);
+        assert.match(status(), /Sending/);
+        assert.ok(f.bubbleOf(cmid));
+        assert.equal(rows().length, 1, 'the fresh ordinary visible delivery can still draw the words');
+        assert.equal(rows()[0].dataset.historyId, undefined);
+        deliver([savedSpeech(frame, 0)]);
+        await settle();
+        assert.equal(rows().length, 1);
+        assert.equal(rows()[0].dataset.historyId, 'saved-0');
+    } finally { f.close(); }
+});
+
+test('a second hide while reading back keeps the shown early words but no longer collects', async () => {
+    const f = fixture();
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        const deliver = f.delayHistory();
+        const early = speech(7, 1, 'the first return');
+        const later = speech(7, 2, 'the non-following hide');
+        const bubble = frame => f.messages.children.find(node => node.innerHTML.includes(frame.content));
+        f.hide(); f.socket.fire('chat', early); f.show();
+        const first = bubble(early);
+        assert.ok(first);
+        const feed = f.messages;
+        feed.scrollHeight = 1200;
+        feed.scrollTop = 220;
+        for (const wheel of feed.listeners.get('wheel')) wheel({ type: 'wheel', target: feed, deltaY: -100, timeStamp: 1000 });
+        for (const scroll of feed.listeners.get('scroll')) scroll({ target: feed });
+        await settle();
+        f.hide();
+        // This exceeds the batch limit only if the non-following hide kept collecting.
+        for (let n = 10; n < 23; n++) f.socket.fire('chat', speech(7, n));
+        f.socket.fire('chat', later);
+        f.show();
+        assert.equal(bubble(early), first, 'unrelated arrivals cannot evict already shown words');
+        assert.equal(bubble(later), undefined);
+        assert.equal(feed.scrollTop, 220);
+        deliver([savedSpeech(early, 0), savedSpeech(later, 1)]);
+        await settle();
+        assert.equal(bubble(early), first);
+        assert.equal(bubble(later).dataset.historyId, 'saved-1');
+    } finally { f.close(); }
+});

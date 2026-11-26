@@ -2006,7 +2006,8 @@ export function createChatInstance({
         return Boolean(changed || queued || subagentChanged);
     }
 
-    const earlyRows = createEarlyTextBubbles(messagesDiv, drawTextBubble, insertMessageNode, releaseMessageNode, withStableViewport);
+    const earlyRows = createEarlyTextBubbles(messagesDiv, drawTextBubble, insertMessageNode, releaseMessageNode,
+        withStableViewport, address => rememberMessageKey(`window|${address}`));
     function addMessage(text, role, markdown = false, timestamp = null, isProgress = false, opts = {}) {
         const { meta, ts, legacyKey, messageKey, deliveryKey } = messageIdentity(text, role, timestamp, isProgress, opts, chatId);
         const bubbles = () => [...messagesDiv.querySelectorAll('.chat-bubble')];
@@ -2028,14 +2029,14 @@ export function createChatInstance({
         const existing = opts.historyId && earlyRows.get(address);
         const matched = opts.historyId && !existing && priorHistoryBubble(bubbles, opts, replayKeys, legacyKey, chatId);
         if (matched) {
-            recordBubble(matched);
+            const placed = recordBubble(matched);
             chatDecision.renderRoutingDecision(matched, opts.chatAnnotation);
             const adopted = adoptsRetainedCopy(matched, opts) && replies.adopt(opts.reply, matched);
             const quoteChanged = replies.syncDerivedQuestion(matched, opts.reply, { authoritative: true });
             const restored = syncSavedProjectContext(matched, opts.originProjected, opts.originId);
-            return restored || adopted || quoteChanged;
+            return placed || restored || adopted || quoteChanged;
         }
-        if (existing) { earlyRows.delete(address); rememberMessageKey(`window|${address}`); }
+        if (existing) earlyRows.delete(address);
         const { bubble, rich } = drawTextBubble(text, role, { markdown, ts, isProgress, meta, legacyKey, opts, existing });
         insertMessageNode(bubble, { forceStick: !!opts.forceStick, reorderExisting: Boolean(existing) });
         if (rich) enhanceMountedMarkdown(bubble);
@@ -2047,10 +2048,10 @@ export function createChatInstance({
         return bubble;
 
         function recordBubble(node) {
-            stampHistoryNode(node, opts.historyId, opts.historyPosition);
+            const positioned = stampHistoryNode(node, opts.historyId, opts.historyPosition);
             noteBubbleKeys(node);
             rememberMessageKey(messageKey);
-            return false;
+            return positioned && insertMessageNode(node, { reorderExisting: true });
         }
     }
 
@@ -3102,8 +3103,7 @@ export function createChatInstance({
         if (foreignProfile()) return;  // live frames of another profile never render (#3294)
         if (!isMyThread(msg)) return;
         const address = msg.role === 'assistant' && !msg.is_progress && msg.row_address;
-        // A redelivered window row cannot play its live effects against a later turn's Sending.
-        if (address && (earlyRows.get(address) || seenMessageKeys.has(`window|${address}`))) return;
+        if (earlyRows.get(address)) return;  // its words are already shown, not confirmed by history
         if (msg.system_type === 'initialization_notice') {
             unconfirmed.refused(msg);  // its typed cause decides a copy's word (chat_attachments.js)
             if (leaving) return;
@@ -3171,12 +3171,11 @@ export function createChatInstance({
                 return settled(changed);
             }
 
-            // An early final (post-task still running) is NOT the turn's
-            // conclusion; task_done or the queue snapshot concludes it.
+            // Finalizing awaits task_done/census. A repeat never concludes a later legacy turn.
             const finalizing = Boolean(explicitTaskId) && msg.task_phase === 'finalizing';
             const typedTerminal = positiveTaskTerminalFact(msg);
             if (typedTerminal) reread();
-            if (!finalizing && (!explicitTaskId || typedTerminal)) {
+            if (!finalizing && (explicitTaskId ? typedTerminal : !seenMessageKeys.has(`window|${address}`))) {
                 if (explicitTaskId) {
                     // 4A (active set): a keyed final concludes ITS OWN turn (the finished activity and its linked
                     // pending), never a concurrent turn's state (2A keeps later `Sending...`).
@@ -3423,7 +3422,7 @@ export function createChatInstance({
         forgetWindowReturn,
         leave: (windowHidden = false) => {
             if (leaving) return;
-            if (windowHidden) windowReturn.hold(windowFollower() && presentHeld() && reading.nearBottom());
+            if (windowHidden) windowReturn.hold(windowFollower() && reading.nearBottom(), presentHeld());
             roomProfile.left();  // copies shown on the core's word leave the feed, kept (chat_preview.js)
             catchUp.cancel(recentRequest);  // its return reads, and says so, anew
             // Left in an outage (down after the page's socket opened), it will not hear the reconnect that forgets a

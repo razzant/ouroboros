@@ -259,16 +259,16 @@ export function createWindowReturn({ socket, doc, chatId, projectId, accepts, kn
     function invalidate() { drop(); onInvalidate(); }
     return {
         drop,
-        hold(ready = true) {
-            if (lease?.valid()) return;
+        hold(following = true, ready = following) {
+            if (lease?.valid()) { lease.collecting = following; return; }
             drop();
             const scope = documentScope(doc), connection = connected(scope);
-            if (!ready || !doc.hidden || !connection) return;
+            if (!following || !ready || !doc.hidden || !connection) return;
             const rows = new Map();
             const valid = () => connected(scope) === connection && documentScope(doc) === scope;
             let used = 0;
             function keep(msg) {
-                if (!doc.hidden || !isWindowText(msg, knownChild) || msg.chat_id !== chatId || msg.project_id && msg.project_id !== projectId
+                if (!doc.hidden || !lease?.collecting || !isWindowText(msg, knownChild) || msg.chat_id !== chatId || msg.project_id && msg.project_id !== projectId
                         || !accepts(msg)) return;
                 if (!valid()) return invalidate();
                 const address = msg.row_address;
@@ -281,7 +281,7 @@ export function createWindowReturn({ socket, doc, chatId, projectId, accepts, kn
                 rows.set(address, { address, text: msg.content, ts: msg.ts, markdown: msg.markdown === true,
                     initiator: msg.initiator === 'consciousness' ? 'consciousness' : '' });
             }
-            lease = { rows, valid, shown: 0, off: [socket.on('chat', keep), socket.on('close', invalidate),
+            lease = { rows, valid, shown: 0, collecting: true, off: [socket.on('chat', keep), socket.on('close', invalidate),
                 socket.on('projects_changed', msg => { if (projectId && (!msg?.chat_id || Number(msg.chat_id) === chatId)) invalidate(); })] };
         },
         take(following = true) {
