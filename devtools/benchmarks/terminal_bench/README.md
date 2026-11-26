@@ -448,17 +448,21 @@ note deleted/retried trial dirs drop their cost record, so the on-disk sum is a 
   `--build-timeout-multiplier` (run_tb) map to
   `--agent-setup-timeout-multiplier` / `--environment-build-timeout-multiplier` (harbor).
 - **Resume semantics of `run_tb.py` vs `harbor job resume`:** default unnamed `run_tb.py`
-  calls create a fresh Harbor job each call. An explicit base `job_name` is unreserved
-  (`leaderboard_valid: false`, overlapping writers cannot be told apart); when stored
-  `config.json` or prior direct trials exist, `run_tb.py` records only a partial named-job
-  observation (`new_or_changed` valid trials). Harbor deletes incomplete direct subdirectories
-  (without `result.json`) on resume, so root-level names (`.` or `""`) need their own dedicated
-  jobs directory (`--submission-root`). Resuming an old forced-build job through `run_tb.py` may
-  need explicit `--force-build` so the config matches `config.json`; for robust campaign
-  continuation use **`harbor job resume -p <jobdir> [-f <ErrorType>]`**, which reads the saved
-  `config.json` directly (keeps completed trials, re-runs pending + `-f`-removed errored-artifact
-  trials) — wrap it in a retry loop so a transient SSL/DNS blip just re-resumes instead of
-  restarting.
+  calls create a fresh Harbor job each call (qualifying generated-name runs remain the
+  leaderboard-submission path). An explicit base `job_name` keeps named full-run outputs and
+  image flags available, but is not `leaderboard_valid` (`leaderboard_valid: false`, because
+  overlapping writers cannot be told apart; leaderboard submission requires a qualifying
+  generated-name run). Invalid, parent-traversing (`..`, `sub/..`), or escaping `job_name` values
+  are refused before writing outputs or dispatching Harbor. When stored `config.json` or prior
+  direct trials exist, `run_tb.py` records only a partial named-job observation (`new_or_changed`
+  valid trials). Harbor deletes incomplete direct subdirectories (without `result.json`) on
+  resume, so root-level names (`.`, `""`, `./`, or the canonical jobs-dir path) need their own
+  dedicated jobs directory (`--submission-root`). Resuming an old forced-build job through
+  `run_tb.py` may need explicit `--force-build` so the config matches `config.json`; for robust
+  campaign continuation use **`harbor job resume -p <jobdir> [-f <ErrorType>]`**, which reads the
+  saved `config.json` directly (keeps completed trials, re-runs pending + `-f`-removed
+  errored-artifact trials) — wrap it in a retry loop so a transient SSL/DNS blip just re-resumes
+  instead of restarting.
 - **install-timeout on slow mirrors** (`RuntimeError: Command timed out after 1200s`) and
   AgentSetupTimeout are infra, not capability. Published task images do not prevent them,
   because the agent installs in every container whatever its image; the opt-in
@@ -500,8 +504,8 @@ latest view `disclosure_ledger.json`) are shared last-writer-wins conveniences, 
 consistent tuple if launches overlap in the same run root (including the default
 `tb21_ouroboros_run`). Launches that share `--submission-root`, model, and dataset share one
 jobs dir and one `metadata.yaml`: use separate `--submission-root` directories when runs need
-different metadata, and distinct job names and `--run-root` directories for independent
-measurements (METHODOLOGY "Job attribution").
+different metadata, and generated job names with distinct `--run-root` directories for independent
+or leaderboard-submittable measurements (METHODOLOGY "Job attribution").
 
 Task images: by default neither launcher passes an image flag, so Harbor's job
 configuration decides (for `run_tb.py`, a `--base-job-config` `environment.force_build`,
@@ -526,11 +530,14 @@ from `--dataset`. Frontier-Bench runs on the pinned 0.18.0 (measured — see MET
 
 ### Terminal-Bench 2.1 smoke
 
-Ledgered smoke runs should go through the wrapper so `run_manifest.json` and
-the denominator-preserving `result_index.jsonl` are written beside the Harbor
-official output. The wrapper passes an invocation-unique `--job-name` and reads
-only that job's `result.json` (never another job in a shared directory). Its
-manifest derives Main/Light/fallback and the one API actor from the exact
+Ledgered smoke runs should go through the wrapper so `run_manifest.<job_name>.json`
+(mirrored to `run_manifest.json` as the latest view) and the denominator-preserving
+`result_index.jsonl` are written beside the Harbor official output. The wrapper
+passes an invocation-unique `--job-name`, reads authoritative `task_name` outcomes
+from `<run_root>/<job_name>/<trial>/result.json` cross-checked against
+`<run_root>/<job_name>/result.json` (never scanning a shared directory for another
+job or splitting trial-name suffixes), and links each index row to that invocation's
+manifest. Its manifest derives Main/Light/fallback and the one API actor from the exact
 `--model` CLI value (plus an explicit Light override), never from ambient Heavy
 or a settings-template model:
 

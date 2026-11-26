@@ -59,9 +59,13 @@ either), and neither the flag nor its absence shows whether any image was pulled
 
 ## Job attribution (`run_tb.py` and `run_harbor_smoke.py`)
 
-`run_harbor_smoke.py` passes an invocation-unique `--job-name` (`YYYY-MM-DD__HH-MM-SS__<8 hex>`)
-and resolves only `<run_root>/<job_name>/result.json`, never scanning the shared jobs directory for
-a peer's result.
+`run_harbor_smoke.py` passes an invocation-unique `--job-name` (`YYYY-MM-DD__HH-MM-SS__<8 hex>`),
+reads authoritative `task_name` outcomes from this job's direct
+`<run_root>/<job_name>/<trial>/result.json` outputs cross-checked against
+`<run_root>/<job_name>/result.json` (never scanning the shared jobs directory for a peer's result
+or splitting trial-name suffixes, and keeping repeated attempts, mixed rewards, ambiguity, and
+missing evidence explicit), and links every `result_index.jsonl` row to its stable per-invocation
+`run_manifest.<job_name>.json` while mirroring the finalized manifest to `run_manifest.json`.
 
 In `run_tb.py`, when a launch assembles a Harbor invocation, it creates its own
 `agent_job_config.<invocation>.json`, and when an `--execute` run produces an attributable ledger
@@ -82,33 +86,38 @@ give every launch its own `--run-root` for independent reporting.
 
 Default unnamed runs create a fresh Harbor job each call (`YYYY-MM-DD__HH-MM-SS__<8 hex>`, Harbor's
 timestamp shape plus a random suffix) and keep their ordinary grades (`leaderboard_valid`,
-`debug_only`, `local_low_k`). An explicit base `job_name` passes unchanged — including root-level
-`.` and `""`, which Harbor 0.18 both resolve to `--jobs-dir` itself and which stay distinct from an
-omitted `job_name`. Launches that share `--submission-root`, model, and dataset share one jobs dir
+`debug_only`, `local_low_k`). An explicit base `job_name` passes unchanged when it stays inside
+`jobs_dir` — including jobs-root spellings `.`, `""`, `./`, and the canonical `jobs_dir` path,
+which Harbor 0.18 resolves to `--jobs-dir` itself and which stay distinct from an omitted
+`job_name`. Non-string, parent-traversing (`..`, `sub/..`), or escaping `job_name` values are
+refused before writing outputs or dispatching Harbor (`outcome: "refused"`, `refusal.stage:
+"job_config"`). Launches that share `--submission-root`, model, and dataset share one jobs dir
 and one `metadata.yaml` (use separate `--submission-root` directories when runs need different
 metadata). The ledger and outcome read only this launch's job, from direct
-`<job>/<trial>/result.json` files and nothing deeper or resolving outside it — so root-level `.` or
-`""` counts legitimate direct trials without recursively scanning sibling jobs or counting sibling
-job-level `result.json` files.
+`<job>/<trial>/result.json` files and nothing deeper or resolving outside it — so jobs-root
+spellings count legitimate direct trials without recursively scanning sibling jobs or counting
+sibling job-level `result.json` files.
 
 `extra.harbor_job` (`{job_dir, binding, trials}`) records this scope in both preview and execute:
 `invocation` (the generated name: trials are this invocation's, also after a non-zero exit);
 `named_job` (an explicit base `job_name` with neither stored `config.json` nor prior direct trial
 results: a pre-existing empty/parent directory — including one created by a preview with `.` or
-`""` — is not by itself a Harbor resume, but because an unreserved operator-selected name can
-overlap even on first observation, this run record never claims `leaderboard_valid: true` and
-grades `named_job` when `k >= 5` with otherwise faithful settings, without disabling running,
-submitting, or image flags); `reused` (stored `<job>/config.json` — which makes Harbor resume a
+`""` — is not by itself a Harbor resume, but because an explicit operator-selected name can be
+shared by overlapping writers even on first observation, this run record never claims
+`leaderboard_valid: true` and grades `named_job` when `k >= 5` with otherwise faithful settings;
+named full-run outputs and image flags remain available, while leaderboard submission requires a
+qualifying generated-name run); `reused` (stored `<job>/config.json` — which makes Harbor resume a
 matching config or refuse a different one — or prior direct trial results / unreadable direct
 entries existed before dispatch). For `reused`, `harbor_job.trials` is `new_or_changed`: only valid
 trial `result.json` files (JSON objects carrying `task_name` or `verifier_result`) observed to
 appear or change in content during the invocation count, and overlapping writers cannot be told
 apart. The ledger is this run's partial observation, not the job's cumulative score (which Harbor's
 own job result keeps), and both preview and execute grade it `partial_named_job` with
-`leaderboard_valid: false`, whatever `k` and settings (the submission tree is unchanged). Unchanged
+`leaderboard_valid: false`, whatever `k` and settings (named full-run outputs remain available,
+while leaderboard submission requires a qualifying generated-name run). Unchanged
 earlier trials, trials unreadable before or after, and malformed or non-trial JSON files never
-count. Nothing counts for `unattributed` (`trials: "none"`, when the job never appeared, or its
-name is non-string, collapsing like `sub/..`, or leaves the jobs dir). A `reused` job with zero
+count. Nothing counts for `unattributed` (`trials: "none"`, when the dispatched job directory never
+appeared). A `reused` job with zero
 accepted trial rows (including malformed-only or non-trial-only deltas) and an `unattributed` one
 write no ledger and leave any existing `disclosure_ledger.json` untouched: `extra.disclosure_ledger`
 stays empty and the outcome fails closed (`trials_unverified`, or Harbor's non-zero exit). Genuine
@@ -117,10 +126,11 @@ counts as scored (`completed`), and a fresh job without scored trials still writ
 (`no_scored_trials`).
 
 Harbor deletes incomplete direct subdirectories (those without `result.json`) when resuming a job,
-so root-level job names (`.` or `""`) need their own dedicated jobs directory (`--submission-root`)
-and must not share a jobs directory with other jobs. Independent measurements need generated or
-distinct reserved job names, distinct `--run-root` directories, and separate `--submission-root`
-directories when metadata differs.
+so jobs-root spellings (`.`, `""`, `./`, or canonical `jobs_dir`) need their own dedicated jobs
+directory (`--submission-root`) and must not share a jobs directory with other jobs. Independent
+or leaderboard-submittable measurements need generated job names (no explicit base `job_name`),
+distinct `--run-root` directories, and separate `--submission-root` directories when metadata
+differs.
 
 ## Dataset identity (v6.79.0 — matters for any non-TB2.1 Harbor dataset)
 
@@ -340,9 +350,9 @@ leaderboard" for the verified mechanics. Methodology-relevant consequences:
   before upload. Scrubbing only removes credential values; results, traces,
   and disclosure artifacts are uploaded unmodified.
 - Numbers submitted to the leaderboard must come from `leaderboard_valid`
-  runs (k≥5, no overrides, agent-web off) under the review-mode disclosure
-  rules above; advisory-mode rows must not be presented as the blocking
-  record.
+  generated-name runs (k≥5, no overrides, agent-web off, no explicit base
+  `job_name`) under the review-mode disclosure rules above; advisory-mode rows
+  must not be presented as the blocking record.
 
 ## Known limitations
 

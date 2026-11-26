@@ -16,7 +16,6 @@ import re
 import shlex
 import subprocess
 import sys
-from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -46,6 +45,7 @@ from devtools.benchmarks.terminal_bench.run_harbor_smoke import (
     AGENT_IMPORT,
     add_force_build_option,
     agent_environment_force_build,
+    direct_trial_results,
     force_build_flag,
     generated_job_name,
 )
@@ -315,7 +315,7 @@ def report_grade(*, k: int, leaderboard_valid: bool, low_k_floor: int = 5) -> tu
       - debug_only        : k == 1 (a single trial — noise, not a measurement).
       - local_low_k       : anything else not leaderboard-valid (1 < k < floor, or
                             k >= 5 with a non-faithful setting like web-on).
-    `main` grades an explicit unreserved `job_name` `named_job` (or `partial_named_job` when
+    `main` grades an explicit `job_name` `named_job` (or `partial_named_job` when
     reused with stored `config.json` or prior direct trials) with `leaderboard_valid=False`.
     Returns (grade, human_warning); warning is '' for a leaderboard-valid run.
     """
@@ -575,6 +575,11 @@ def _write_agent_job_config(config: HarborCommandConfig) -> tuple[pathlib.Path, 
         job_config = _deep_merge(_load_job_config(config.base_job_config), job_config)
     if config.job_name and "job_name" not in job_config:
         job_config["job_name"] = config.job_name
+    if "job_name" in job_config and harbor_job_dir(config.jobs_dir, job_config) is None:
+        raise ValueError(
+            f"job_name must be a string staying inside jobs_dir ({config.jobs_dir}), "
+            f"got: {job_config.get('job_name')!r}"
+        )
     path = config.job_config_path or config.jobs_dir / "agent_job_config.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     # A launch's own file is created once and never rewritten; the shared default stays rewritable.
@@ -724,18 +729,25 @@ def harbor_invocation(config: HarborCommandConfig) -> tuple[list[str], dict[str,
 
 def harbor_job_dir(jobs_dir: pathlib.Path, job_config: Mapping[str, Any]) -> pathlib.Path | None:
     """`<jobs-dir>/<job_name>`, where Harbor 0.18 writes this job config's job, when `job_name` is
-    a string staying inside `jobs_dir` (`safe_join_under`; spaces, Unicode, and root-level `.` /
-    `""` are supported Harbor names). Missing/non-string, collapsing (`sub/..`), or escaping names
-    still reach Harbor unchanged for its validation, but return None so nothing outside is read."""
+    a string staying inside `jobs_dir` (`safe_join_under`; spaces, Unicode, and jobs-root spellings
+    `.` / `""` / `./` / canonical `jobs_dir` path are supported Harbor names). Missing/non-string,
+    parent-traversing (`..`, `sub/..`), or escaping names return None."""
     name = job_config.get("job_name")
     if not isinstance(name, str):
         return None
-    try:
-        path = safe_join_under(jobs_dir, name)
-    except ValueError:
+    if ".." in pathlib.PurePosixPath(name).parts or ".." in pathlib.PureWindowsPath(name).parts:
         return None
     base = pathlib.Path(jobs_dir).expanduser().resolve(strict=False)
-    if path == base and pathlib.PurePath(name).parts:
+    if not isinstance(base, pathlib.PureWindowsPath) and (
+        pathlib.PureWindowsPath(name).drive or name.startswith("\\")
+    ):
+        return None
+    try:
+        path = safe_join_under(base, name)
+    except ValueError:
+        return None
+    parts = pathlib.PurePath(name).parts
+    if path == base and parts and not pathlib.Path(name).is_absolute():
         return None
     return path
 
@@ -750,42 +762,48 @@ def _parse_trial_payload(raw: bytes) -> dict[str, Any] | None:
     return data
 
 
-def direct_trial_results(job_dir: pathlib.Path) -> Iterator[tuple[str, bytes | None]]:
-    """Yield `(trial, bytes of its result.json)` one direct child at a time, in name order; None
-    when the trial or its result cannot be read or resolves outside the job. Skips children without
-    a result.json; nothing deeper is read. Raises OSError when `job_dir` cannot be listed."""
-    with os.scandir(job_dir) as entries:
-        names = sorted(entry.name for entry in entries)
-    for trial in names:
-        try:
-            raw: bytes | None = safe_join_under(job_dir, trial, "result.json").read_bytes()
-        except (FileNotFoundError, NotADirectoryError):
-            continue
-        except (OSError, ValueError):
-            raw = None
-        yield trial, raw
-
-
-def _existing_job_state(job_dir: pathlib.Path) -> tuple[bool, bool, dict[str, str | None] | None]:
+def _existing_job_state(
+    job_dir: pathlib.Path, *, need_fingerprints: bool = True,
+) -> tuple[bool, bool, dict[str, str | None] | None]:
     """Return `(has_config, has_prior_trials, fingerprints)` for an operator-named job dir before
     dispatch. Stored `config.json` means Harbor resumes or refuses; prior direct trial results (or
     an unreadable entry/dir) mean only new/changed valid rows may count. An empty/parent dir or
-    sibling job-level summaries alone trigger neither."""
+    sibling job-level summaries alone trigger neither. When `need_fingerprints` is False (preview),
+    skip hashing and stop as soon as reuse is proved."""
     import hashlib
 
     if not job_dir.is_dir():
         return False, False, {}
     has_config = (job_dir / "config.json").exists()
-    fingerprints: dict[str, str | None] = {}
+    if has_config and not need_fingerprints:
+        return True, False, None
+    fingerprints: dict[str, str | None] | None = {} if need_fingerprints else None
     has_prior_trials = False
     try:
         for trial, raw in direct_trial_results(job_dir):
-            fingerprints[trial] = None if raw is None else hashlib.sha256(raw).hexdigest()
+            if fingerprints is not None:
+                fingerprints[trial] = None if raw is None else hashlib.sha256(raw).hexdigest()
             if raw is None or _parse_trial_payload(raw) is not None:
                 has_prior_trials = True
+                if not need_fingerprints:
+                    return has_config, True, None
     except OSError:
         return has_config, True, None
     return has_config, has_prior_trials, fingerprints
+
+
+def _harbor_job_record(
+    job_dir: pathlib.Path | None, *, generated: bool, reused: bool, present: bool = True,
+) -> dict[str, Any]:
+    """Planned or post-dispatch `{job_dir, binding, trials}` attribution record."""
+    if job_dir is None or (not present and not reused):
+        binding = "unattributed"
+    elif reused:
+        binding = "reused"
+    else:
+        binding = "invocation" if generated else "named_job"
+    trials = "none" if binding == "unattributed" else ("new_or_changed" if binding == "reused" else "all")
+    return {"job_dir": str(job_dir or ""), "binding": binding, "trials": trials}
 
 
 def attributed_harbor_job(
@@ -796,16 +814,17 @@ def attributed_harbor_job(
     of the job's, streamed by the ledger) and their scope (`binding`). `before` is the pre-dispatch
     digest map for a reused job (None: unknown, so nothing counts).
 
-    `invocation` — generated name (this invocation's trials); `named_job` — unreserved base name
+    `invocation` — generated name (this invocation's trials); `named_job` — explicit base name
     without stored `config.json` or prior direct trials (overlapping writers cannot be told apart);
     `reused` — stored `config.json` or prior direct trials existed before dispatch (streams direct
     results, keeping only new/changed valid trial payloads and dropping unchanged bytes);
-    `unattributed` — directory absent or name missing/non-string/collapsing/escaping."""
+    `unattributed` — directory absent or name missing/non-string/parent-traversing/escaping."""
     import hashlib
 
+    present = bool(job_dir is not None and job_dir.is_dir())
+    record = _harbor_job_record(job_dir, generated=generated, reused=existed, present=present)
     counted: list[tuple[str, bytes]] | None = None
-    if job_dir is not None and existed:
-        binding = "reused"
+    if job_dir is not None and record["binding"] == "reused":
         counted = []
         if before is not None:
             try:
@@ -818,13 +837,7 @@ def attributed_harbor_job(
                         counted.append((trial, raw))
             except OSError:
                 counted = []
-    elif job_dir is None or not job_dir.is_dir():
-        binding = "unattributed"
-    else:
-        binding = "invocation" if generated else "named_job"
-    trials_scope = "none" if binding == "unattributed" else ("all" if counted is None else "new_or_changed")
-    record = {"job_dir": str(job_dir or ""), "binding": binding, "trials": trials_scope}
-    attributed = binding != "unattributed" and (counted is None or bool(counted))
+    attributed = record["binding"] != "unattributed" and (counted is None or bool(counted))
     return (job_dir if attributed else None), counted, record
 
 
@@ -1356,8 +1369,6 @@ def main(argv: list[str] | None = None) -> int:
             })
             print(f"[run_tb] REFUSED: leaderboard metadata cannot be rendered: {exc}", file=sys.stderr)
             return 1
-        job_dir.mkdir(parents=True, exist_ok=True)
-        metadata_path.write_text(metadata_text, encoding="utf-8")
         # One identity per launch, fixed before anything is written: it names this launch's own job
         # config file, its own disclosure ledger and, unless the base job config names the job, the
         # Harbor job itself.
@@ -1389,27 +1400,30 @@ def main(argv: list[str] | None = None) -> int:
         # adapter reads, so binding the manifest to the same object is what keeps the recorded
         # model and the executed model from ever drifting apart.
         augment_manifest(manifest, harbor_config)
-        cmd, job_config = harbor_invocation(harbor_config)
+        try:
+            cmd, job_config = harbor_invocation(harbor_config)
+        except ValueError as exc:
+            final.update({
+                "outcome": "refused", "exit_code": 1,
+                "refusal": {"stage": "job_config", "reason": str(exc), "exit_code": 1},
+            })
+            print(f"[run_tb] REFUSED: invalid Harbor job config: {exc}", file=sys.stderr)
+            return 1
+        job_dir.mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text(metadata_text, encoding="utf-8")
         own_job = harbor_job_dir(job_dir, job_config)
+        assert own_job is not None
         generated_job = job_config.get("job_name") == invocation
         has_config, has_prior_trials, before = (
-            _existing_job_state(own_job) if (own_job is not None and not generated_job) else (False, False, {})
+            _existing_job_state(own_job, need_fingerprints=bool(args.execute))
+            if not generated_job else (False, False, {})
         )
         reused_job = has_config or has_prior_trials
-        planned_binding = (
-            "unattributed" if own_job is None else
-            "invocation" if generated_job else
-            "reused" if reused_job else "named_job"
-        )
-        planned_harbor_job = {
-            "job_dir": str(own_job or ""),
-            "binding": planned_binding,
-            "trials": "none" if planned_binding == "unattributed" else ("new_or_changed" if reused_job else "all"),
-        }
+        planned_harbor_job = _harbor_job_record(own_job, generated=generated_job, reused=reused_job)
         if not generated_job:
-            # An operator-selected job_name is unreserved and can overlap even on first observation:
-            # never claim an independently leaderboard-valid measurement, while leaving running,
-            # submitting, and image flags unchanged.
+            # An explicit base job_name can be shared by overlapping writers even on first
+            # observation: never claim leaderboard_valid. Named full-run outputs stay available,
+            # while leaderboard submission requires a qualifying generated-name run.
             leaderboard_valid = False
             if reused_job:
                 report_grade_value = "partial_named_job"
@@ -1420,17 +1434,17 @@ def main(argv: list[str] | None = None) -> int:
                 named_warning = (
                     f"⚠️ {prefix}: this run's record counts only valid trial results observed to appear or "
                     "change in this named job during the invocation (overlapping writers cannot be told "
-                    "apart), a partial named-job observation, NOT leaderboard-valid."
+                    "apart), a partial named-job observation, NOT leaderboard-valid "
+                    "(named full-run outputs remain available, but leaderboard submission requires a "
+                    "qualifying generated-name run)."
                 )
                 report_grade_warning = named_warning
             else:
                 named_warning = (
-                    "⚠️ explicit job_name cannot be attributed to a directory under jobs_dir: this launcher "
-                    "records no disclosure ledger and this run is NOT independently leaderboard-valid."
-                    if own_job is None else
-                    "⚠️ explicit operator-selected job_name is unreserved: overlapping writers under the same "
-                    "name cannot be told apart, so this run's record is NOT independently leaderboard-valid "
-                    "(running, submitting, and image flags are unchanged)."
+                    "⚠️ explicit operator-selected job_name can be shared by overlapping writers, "
+                    "so this run's record is NOT leaderboard-valid (named full-run outputs and image "
+                    "flags remain available, but leaderboard submission requires a qualifying "
+                    "generated-name run)."
                 )
                 if report_grade_value == "leaderboard_valid":
                     report_grade_value, report_grade_warning = "named_job", named_warning
