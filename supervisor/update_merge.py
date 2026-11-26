@@ -1564,7 +1564,7 @@ def _finalize_managed_update_locked(supervisor_ready: bool) -> Dict[str, Any]:
             {"type": "managed_update_stash_recovered_on_boot"},
         )
     from ouroboros.store_switch import refused_switch
-    if phase == "pending_boot_smoke" and (refused := refused_switch(_g.DRIVE_ROOT, "update_replace", tx.get("attempt_id"))):
+    if phase == "pending_boot_smoke" and refused_switch(_g.DRIVE_ROOT, "update_replace", tx.get("attempt_id")):
         return settle_replace_refusal(tx, before_tree_effects=True, cause="switch_refused", detail="intent set aside unconsumed")
     if phase == "pending_boot_smoke":
         return _rollback_incomplete(tx, _finalize_pending_boot_smoke(tx, supervisor_ready))
