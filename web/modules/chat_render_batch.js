@@ -23,14 +23,11 @@ const APPROXIMATE_NOTICE = 'Saved position could not be restored exactly.';
 /**
  * History chrome only; the chat instance retains navigation and reading state.
  *
- * `Load more history` only ever loads OLDER messages and shows only while there
- * are older ones, including those a newer read revealed behind the reader's chain
- * (owner decisions 2026-09-14, 2026-10-05). Whether a newer page is
- * cached is a fact about the bounded page cache, not about what the reader can
- * see, so it never drives this button: a released newer page returns through a
- * positive gesture at an unambiguous island edge, and the floating scroll-to-latest
- * button remains the only return-to-present control.
- *
+ * `Load more history` only ever loads OLDER messages and shows only while there are older ones, including those a newer
+ * read revealed behind the reader's chain (owner decisions 2026-09-14, 2026-10-05). Whether a newer page is cached is a
+ * fact about the bounded page cache, not about what the reader can see, so it never drives this button: a released newer
+ * page returns through a positive gesture at an unambiguous island edge, and the floating scroll-to-latest button
+ * remains the only return-to-present control.
  * What the reading window IS (a gap, its beginning, a store being upgraded, a project list it cannot read) is a state
  * of the place, said at the feed's edge. What HAPPENED to it (a read failed, a return could not land exactly) is an
  * event, said once by the page's one notice (`notify`, toast.js; owner decision 27.11.2026): while the room shows,
