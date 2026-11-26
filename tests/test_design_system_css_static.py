@@ -303,3 +303,70 @@ def test_scroller_edges_do_not_gain_opaque_positioned_descendants():
         .scroll-fade-y .quiet { position: sticky; top: 0; background: transparent; }
     """
     assert not positioned_opaque_scroller_descendants(allowed), "composer, table heads and transparent edges stay allowed"
+
+
+# Every check box is the shared .ui-checkbox (DESIGN "Controls and editable choices", owner decision 27.11.2026): its
+# size, shape, fill, mark and border live only in ui.css. A page places a box; it never draws one.
+CHECKBOX_PAINT = re.compile(r"(?:^|[;{\s])(?:width|height|min-width|border[\w-]*|background[\w-]*|accent-color|appearance"
+                            r"|-webkit-appearance)\s*:", re.I)
+CHECKBOX_SUBJECT = re.compile(r"\[type=[\"']?checkbox|\.ui-checkbox|\.md-checkbox|\.message-share-check", re.I)
+
+
+def checkbox_paint_outside_the_control(css):
+    """Rules of a page sheet that target a check box and paint it, or style a checkbox input by its type."""
+    found = []
+    for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", without_comments(css)):
+        target = re.sub(r":not\((?:[^()]|\([^()]*\))*\)", "", selector)
+        if re.search(r"\[type=[\"']?checkbox", target, re.I) or (CHECKBOX_SUBJECT.search(target) and CHECKBOX_PAINT.search(body)):
+            found.append(" ".join(selector.split()))
+    return found
+
+
+def test_only_the_shared_control_draws_a_check_box():
+    sheets = {path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8") for path in first_party_sheets()}
+    found = [f"{name}: {rule}" for name, css in sheets.items() if name != "web/ui.css"
+             for rule in checkbox_paint_outside_the_control(css)]
+    assert not found, "A page places a check box, never sizes, recolours or reshapes it:\n" + "\n".join(found)
+    ui = without_comments(sheets["web/ui.css"])
+    shared = re.search(r"\n\.ui-checkbox \{([^}]*)\}", ui)[1]
+    assert "border-radius: var(--checkbox-radius);" in shared and "width: var(--checkbox-size);" in shared
+    assert len(re.findall(r"--checkbox-radius:", ui)) == 1, "one token flips every box between round and square"
+    assert "--checkbox-radius: 50%;" in ui, "the owner's shape: round"
+
+    assert checkbox_paint_outside_the_control('.local-toggle input[type="checkbox"] { cursor: pointer; }')
+    assert checkbox_paint_outside_the_control(".x .ui-checkbox { width: 18px; }")
+    assert checkbox_paint_outside_the_control(".md-checkbox { border-radius: 4px; }")
+    assert not checkbox_paint_outside_the_control(".x > .ui-checkbox { grid-column: 1; margin-top: 2px; }")
+    assert not checkbox_paint_outside_the_control("input:not(.ui-control):not(.ui-checkbox) { border: 1px solid; }")
+
+
+CHECKBOX_TYPE = re.compile(r"""type\s*=\s*\\?["']checkbox""")
+DOM_CHECKBOX_TYPE = re.compile(r"""\.type\s*=\s*['"]checkbox|setAttribute\(\s*['"]type['"]\s*,\s*['"]checkbox""")
+
+
+def checkbox_inputs_outside_the_control(js):
+    """Check box inputs a module builds without the shared class: a template's <input …> tag, or a DOM-built input
+    whose type is set within three lines of no ui-checkbox class. A switch (role="switch") is its own control."""
+    found = []
+    for tag in re.findall(r"<input\b[^>]*>", js):
+        if CHECKBOX_TYPE.search(tag) and "ui-checkbox" not in tag and 'role="switch"' not in tag:
+            found.append(" ".join(tag.split())[:120])
+    lines = js.splitlines()
+    for index, line in enumerate(lines):
+        if DOM_CHECKBOX_TYPE.search(line):
+            near = "\n".join(lines[max(0, index - 3):index + 4])
+            if "ui-checkbox" not in near and "switch" not in near:
+                found.append(f"line {index + 1}: {line.strip()[:120]}")
+    return found
+
+
+def test_every_module_check_box_is_the_shared_control():
+    found = [f"{path.relative_to(ROOT).as_posix()}: {item}" for path in sorted((WEB / "modules").rglob("*.js"))
+             for item in checkbox_inputs_outside_the_control(path.read_text(encoding="utf-8"))]
+    assert not found, "Every check box is .ui-checkbox (DESIGN 'Controls and editable choices'):\n" + "\n".join(found)
+
+    assert checkbox_inputs_outside_the_control('html = `<input type="checkbox" data-x>`;')
+    assert checkbox_inputs_outside_the_control("const box = document.createElement('input');\nbox.type = 'checkbox';")
+    assert not checkbox_inputs_outside_the_control('html = `<input class="ui-checkbox" type="checkbox" data-x>`;')
+    assert not checkbox_inputs_outside_the_control("const box = document.createElement('input');\nbox.type = 'checkbox';\nbox.className = 'ui-checkbox';")
+    assert not checkbox_inputs_outside_the_control('html = `<input type="checkbox" role="switch" data-x>`;')

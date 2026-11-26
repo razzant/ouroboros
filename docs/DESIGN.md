@@ -417,6 +417,17 @@ label, control and optional `.ui-field-help`. A placeholder is an example,
 never the field's only name. Help and validation belong to that field without
 changing the alignment of neighboring controls and their actions.
 
+**Every check box is one control, `.ui-checkbox`, and it is round** (owner
+decision 27.11.2026: «Надо определиться квадратные везде или круглые везде»).
+A form's check boxes and radios, a menu row's, the Panic list's, setup's, a
+task list's inert mark and a share part's own all wear it: one size per pointer
+(`--checkbox-size`), one shape (`--checkbox-radius`, the single value that would
+make them all square), one white mark on the accent, one focus ring, one
+disabled look; under forced colours it is the system's own box. A radio is the
+same circle with a dot. A page places the box and its words (the gap, the
+first line it sits on), never sizes, recolours or reshapes it, and no style
+sheet styles `input[type="checkbox"]` of its own.
+
 **A search field has one look across the app**: a capsule a row high in the composer field's material, the search
 glyph at its start and a placeholder that names what it searches (`Find a project`, `Search settings`, `Find an
 installed skill`), no hairline; an action that belongs beside it (the sidebar's +) stands beside it at the same

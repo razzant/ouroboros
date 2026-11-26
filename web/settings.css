@@ -895,10 +895,8 @@ html[data-layout="stack"] .settings-search { height: 44px; }
     letter-spacing: normal;
 }
 
-/* The local toggle's checkbox and gap: one pair of dimensions for the toggles and for the
-   notes that line up with their label text (Startup & background). */
+/* The local toggle's gap between its check box and its words. */
 :root {
-    --local-toggle-box: 14px;
     --local-toggle-gap: 6px;
 }
 
@@ -913,14 +911,6 @@ html[data-layout="stack"] .settings-search { height: 44px; }
     min-width: 0;
     white-space: normal;
     overflow-wrap: anywhere;
-}
-
-.local-toggle input[type="checkbox"] {
-    flex-shrink: 0;
-    accent-color: var(--accent);
-    width: var(--local-toggle-box);
-    height: var(--local-toggle-box);
-    cursor: pointer;
 }
 
 .local-toggle[data-warning="1"] {
@@ -1619,7 +1609,7 @@ textarea.ui-control.settings-rules-text {
 .accounts-key-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: var(--space-3); align-items: start; }
 /* A compatible key's consent: across the form, its sentence wrapping beside the box. */
 .accounts-key-consent { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: var(--space-2); min-width: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-.accounts-key-consent > .ui-checkbox { flex: none; margin-top: calc((var(--type-body) * var(--line-body) - 14px) / 2); }
+.accounts-key-consent > .ui-checkbox { flex: none; margin-top: calc((var(--type-body) * var(--line-body) - var(--checkbox-size)) / 2); }
 .accounts-key-consent[hidden] { display: none; }
 .accounts-key .ui-action-row > .ui-result:empty { display: none; }
 .accounts-key .settings-card-note code { overflow-wrap: anywhere; }

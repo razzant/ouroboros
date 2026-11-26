@@ -1051,7 +1051,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     -webkit-tap-highlight-color: transparent;
 }
 .panic-recovery-pick.is-locked { cursor: default; }
-.panic-recovery-pick > .ui-checkbox { grid-column: 1; grid-row: 1; margin-top: calc((var(--type-body) * var(--line-body) - 14px) / 2); }
+.panic-recovery-pick > .ui-checkbox { grid-column: 1; grid-row: 1; margin-top: calc((var(--type-body) * var(--line-body) - var(--checkbox-size)) / 2); }
 /* The words keep their column when a row that came back has no box. */
 .panic-recovery-pick > :not(.ui-checkbox) { grid-column: 2; min-width: 0; overflow-wrap: anywhere; }
 .panic-recovery-name { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); font-weight: 500; }
@@ -4294,26 +4294,8 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
 }
 .ui-rich-content .task-list,
 .chat-bubble .message .task-list { list-style: none; }
-.md-checkbox {
-    display: inline-flex;
-    width: 18px;
-    height: 18px;
-    flex: 0 0 18px;
-    align-items: center;
-    justify-content: center;
-    margin-top: 1px;
-    border: 1px solid var(--field-border);
-    border-radius: var(--radius-inner);
-    background: var(--surface-tray);
-    color: var(--status-ok-fg);
-    font-size: var(--type-body);
-    font-weight: 700;
-    line-height: 1;
-}
-.md-checkbox.is-checked {
-    border-color: var(--status-ok-border);
-    background: var(--status-ok-bg);
-}
+/* A task's mark is the shared check box (ui.css .ui-checkbox), inert: it sits on the item's first line. */
+.md-checkbox { margin-top: calc((var(--type-body) * var(--line-body) - var(--checkbox-size)) / 2); cursor: inherit; }
 .md-quote {
     display: block;
     margin: var(--space-3) 0;
@@ -6140,7 +6122,7 @@ label.chat-model-off { cursor: pointer; }
 }
 .chat-model-off-name { min-width: 0; overflow: hidden; font-size: var(--type-body); text-overflow: ellipsis; white-space: nowrap; }
 .chat-model-off-meta { grid-column: 1; min-width: 0; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
-.chat-model-off .ui-checkbox { grid-row: 1 / span 2; grid-column: 2; width: 18px; height: 18px; }
+.chat-model-off .ui-checkbox { grid-row: 1 / span 2; grid-column: 2; }
 .chat-model-off[data-result="refused"] .chat-model-off-meta { color: var(--status-error-fg); }
 
 /* A work's model on its card (card_model.js; DESIGN "A work's model on its card"): the first fact of the meta line,
@@ -6320,26 +6302,6 @@ button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-bor
     color: var(--text-secondary);
 }
 
-
-.local-toggle {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 12px;
-    color: var(--text-secondary);
-    cursor: pointer;
-    padding-bottom: 8px;
-    white-space: nowrap;
-}
-.local-toggle input[type="checkbox"] {
-    accent-color: var(--accent);
-    width: 14px;
-    height: 14px;
-    cursor: pointer;
-}
-.local-toggle[title] {
-    transition: color 0.2s;
-}
 
 .form-field input[type="range"] {
     -webkit-appearance: none;
@@ -7000,7 +6962,7 @@ html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow:
     border-top: 1px solid var(--divider);
 }
 /* The checkbox sits on the name's first line, also when the name wraps. */
-.storage-free-group > .ui-checkbox { grid-column: 1; grid-row: 1; align-self: start; margin-top: calc((var(--type-body) * var(--line-body) - 14px) / 2); }
+.storage-free-group > .ui-checkbox { grid-column: 1; grid-row: 1; align-self: start; margin-top: calc((var(--type-body) * var(--line-body) - var(--checkbox-size)) / 2); }
 .storage-free-label {
     grid-column: 2;
     min-width: 0;
@@ -11618,34 +11580,10 @@ html[data-layout="stack"] .project-panel {
     border-top: 1px solid var(--divider);
 }
 
-/* One checkbox look for every part of the list — the app's own checkbox square (.md-checkbox's recipe: 18px,
-   the field's border, the inner radius, the tray fill), whether the control is a verbatim excerpt's own button
-   or a plain row's aria-hidden mirror. A mixed list keeps one affordance language: the empty box always, the
-   mark only when the part is chosen; the row keeps its hover and its chosen wash (the faint crimson one). */
-.message-share-check {
-    grid-column: 3;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    box-sizing: border-box;
-    width: 18px;
-    height: 18px;
-    min-width: 18px;
-    margin-top: 1px;
-    padding: 0;
-    border: 1px solid var(--field-border);
-    border-radius: var(--radius-inner);
-    background: var(--surface-tray);
-    color: var(--tone-crimson-word);
-}
-/* The chosen state lives on the plain row or the verbatim button, wherever the words put it (message_share.js). */
-.message-share-part[aria-checked="true"] > .message-share-check > svg,
-button.message-share-check[aria-checked="true"] > svg { opacity: 1; }
-.message-share-part[aria-checked="false"] > .message-share-check > svg,
-button.message-share-check[aria-checked="false"] > svg { opacity: 0; }
-button.message-share-check { cursor: pointer; }
-/* The bare checkbox takes the same focus ring as the rows around it (ui.css "One control, three tones"). */
-button.message-share-check:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+/* Every part of the list wears the shared check box (ui.css .ui-checkbox), whether it is a verbatim excerpt's own
+   button or a plain row's aria-hidden mirror; the chosen state lives where the words put it (message_share.js). The
+   row keeps its hover and its chosen wash (the faint crimson one). */
+.message-share-check { grid-column: 3; margin-top: 1px; }
 
 .message-share-foot {
     display: flex;
