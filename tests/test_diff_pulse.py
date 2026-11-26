@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
 
+import pytest
 
 from ouroboros.review import DIFF_PULSE_QUESTION, diff_pulse
 from ouroboros.tools.registry import ToolContext
@@ -138,6 +140,58 @@ def test_a_staged_pulse_sizes_modules_and_books_from_the_index_not_later_worktre
     # An unstaged revert cannot hide staged growth either.
     (repo / CHAPTER).write_text(BODY, encoding="utf-8", newline="\n")
     assert f"+{len(staged_prose)} B vs HEAD" in diff_pulse(repo, [CHAPTER], staged=True)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a literal backslash cannot be part of a Windows file name")
+def test_a_staged_name_the_module_inventory_rejects_is_counted_not_sized_and_never_raises(tmp_path):
+    """The staged pulse is a fact: a valid POSIX file name the gated-module inventory rejects (a literal
+    backslash) is counted in the change and left unsized, as the worktree pulse does, and the commit's
+    preflight carries on."""
+    repo = _body(tmp_path / "body")
+    for name in ("ordinary.md", "notes\\draft.md", "odd\\module.py"):
+        (repo / name).write_text("A note\n", encoding="utf-8", newline="\n")
+        _git(repo, "add", "--", name)
+    staged = diff_pulse(repo, staged=True)
+    assert "files 3," in staged and "odd\\module.py 1" not in staged
+    worktree = diff_pulse(repo)
+    assert "files 3," in worktree
+
+
+def test_staged_constitution_and_prompts_are_sized_from_the_index_and_a_conflict_is_unmeasured(tmp_path):
+    """The ruled texts (BIBLE.md and prompts/) follow the index like the books: an unstaged edit after staging
+    neither hides nor inflates the staged balance; during an unresolved merge the prompts are unmeasured, never a
+    false deletion, and they are measured again once the conflict is staged resolved."""
+    from ouroboros.reference_books import book_balance_note, ruled_text_sizes
+
+    repo = _body(tmp_path / "body")
+    (repo / "prompts").mkdir()
+    for name, text in (("BIBLE.md", "# Bible\n"), ("prompts/base.md", "kept\n"), ("prompts/other.md", "base\n")):
+        (repo / name).write_text(text, encoding="utf-8", newline="\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "ruled texts")
+    _git(repo, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
+    (repo / "BIBLE.md").write_text("# Bible\nStaged.\n", encoding="utf-8", newline="\n")
+    _git(repo, "add", "BIBLE.md")
+    (repo / "BIBLE.md").write_text("# Bible\n", encoding="utf-8", newline="\n")  # an unstaged revert
+    assert "+8 B vs HEAD" in book_balance_note(repo, ["BIBLE.md"], staged=True)
+    assert "+8 B vs HEAD" not in book_balance_note(repo, ["BIBLE.md"])
+    _git(repo, "commit", "-qm", "bible")
+
+    branch = _git(repo, "branch", "--show-current")
+    _git(repo, "checkout", "-qb", "theirs")
+    (repo / "prompts/other.md").write_text("theirs\n", encoding="utf-8", newline="\n")
+    _git(repo, "commit", "-qam", "theirs")
+    _git(repo, "checkout", "-q", branch)
+    (repo / "prompts/other.md").write_text("ours\n", encoding="utf-8", newline="\n")
+    _git(repo, "commit", "-qam", "ours")
+    merged = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "merge", "theirs"], cwd=repo,
+                            capture_output=True)
+    assert merged.returncode == 1 and _git(repo, "ls-files", "-u", "--", "prompts/other.md")
+    assert ruled_text_sizes(repo, "prompts", staged=True) is None
+    assert "balance unavailable" in book_balance_note(repo, ["prompts/other.md"], staged=True)
+    (repo / "prompts/other.md").write_text("resolved\n", encoding="utf-8", newline="\n")
+    _git(repo, "add", "prompts/other.md")
+    assert ruled_text_sizes(repo, "prompts", staged=True) == {"prompts/base.md": 5, "prompts/other.md": 9}
 
 
 def test_one_shape_and_one_question_for_any_size(tmp_path):

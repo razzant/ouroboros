@@ -7,9 +7,12 @@ carry inline and which it reaches through a navigation map. Three tiers:
 1. **Rules, always inline.** The surface's applicable ``docs/CHECKLISTS.md``
    section (supplied by the caller, which owns its own section name), the
    shared section every reviewer of this repository's code applies
-   (:data:`SHARED_CHECKLIST_SECTION`, loaded here), ``BIBLE.md`` whole and
-   ``docs/CHECKLISTS_ARCHIVE.md`` whole. This tier is byte-stable across
-   commits, so the caller puts it in its cache-marked prefix.
+   (:data:`SHARED_CHECKLIST_SECTION`, loaded here), ``BIBLE.md`` whole,
+   ``docs/CHECKLISTS_ARCHIVE.md`` whole and the installed key-invariants chapter
+   (:data:`BODY_INVARIANTS_CHAPTER`) whole, for packet and retrieving rows alike,
+   so a proposal is judged by the installed text even where it edits that chapter.
+   This tier is byte-stable across commits, so the caller puts it in its
+   cache-marked prefix.
 2. **Rules by change class, within a budget share.** ``docs/DESIGN.md`` when the
    change touches ``web/`` (its design bible alone when the whole book does not fit
    the share), its design bible alone for changed words elsewhere, and its numbered
@@ -21,9 +24,10 @@ carry inline and which it reaches through a navigation map. Three tiers:
    inlined, every body reviewer receives its generated heading map.
 3. **Map, never whole.** ``docs/ARCHITECTURE.md`` arrives as book navigation for
    every delivery. A PACKET reviewer (a row with no tools of its own)
-   additionally receives the top-level sections whose text mentions a touched
-   file name, from the same budget; a RETRIEVING row gets the navigation and
-   reads what it needs with its own ``read_file``.
+   additionally receives, from the same budget, the top-level sections and the
+   opening blocks (text before a chapter's first subheading; of a code listing,
+   only its lines) whose text mentions a touched file name; a RETRIEVING row gets
+   the navigation and reads what it needs with its own ``read_file``.
 
 Every document that is not inlined is NAMED in the returned manifest and in the
 navigation text, never silently dropped (BIBLE P1), and the manifest is the
@@ -87,15 +91,11 @@ ARCHITECTURE_BOOK_ID = "architecture"
 # Always relevant: it is the protocol the reviewer is executing right now.
 REVIEW_PROTOCOL_CHAPTER = "docs/development/05-review-and-commit-protocol.md"
 # The body's cross-cutting invariants: one numbered list before the chapter's first subheading, so a section
-# selector never reaches it; every body reviewer gets it whole (packet) or owes its full read (retrieving).
+# selector never reaches it. Every body reviewer gets the installed chapter whole in tier 1, as it gets BIBLE.
 BODY_INVARIANTS_CHAPTER = "docs/architecture/10-key-invariants.md"
-# The body navigation's line on it, where it was not inlined (review-contract words, ``navigation_material``).
-_INVARIANTS_POINTERS = {
-    "unavailable": (f"`{BODY_INVARIANTS_CHAPTER}` (the body's cross-cutting invariants) is UNAVAILABLE at this "
-                    "governance root and was not delivered; state the uncertainty that leaves."),
-    "required": (f"REQUIRED before you judge: read `{BODY_INVARIANTS_CHAPTER}` (the body's cross-cutting invariants) "
-                 "in full with `read_file(root=\"system_repo\", path=...)`."),
-}
+# The body navigation's line when it could not be read (review-contract words, ``navigation_material``).
+_INVARIANTS_UNAVAILABLE = (f"`{BODY_INVARIANTS_CHAPTER}` (the body's cross-cutting invariants) is UNAVAILABLE at this "
+                           "governance root and was not delivered; state the uncertainty that leaves.")
 
 PACKET_DELIVERY = "packet"
 RETRIEVING_DELIVERY = "retrieving"
@@ -205,8 +205,9 @@ def _normalize(path: Any) -> str:
     return str(path or "").replace("\\", "/").lstrip("./")
 
 
-def _touched_names(touched_paths: Optional[Iterable[Any]]) -> tuple[tuple[str, ...], ...]:
-    """One name group per touched file: its repo-relative path and its basename.
+def _touched_names(touched_paths: Optional[Iterable[Any]]) -> tuple[tuple[re.Pattern, ...], ...]:
+    """One group per touched file: its repo-relative path and its basename, each compiled once as a token
+    matcher (a broad change matches hundreds of names against every candidate text).
 
     Directory prefixes are deliberately absent — ``web/`` or ``ouroboros/``
     would match nearly every chapter and so select nothing."""
@@ -218,11 +219,12 @@ def _touched_names(touched_paths: Optional[Iterable[Any]]) -> tuple[tuple[str, .
             continue
         seen.add(rel)
         base = rel.rsplit("/", 1)[-1]
-        groups.append((rel,) if base == rel else (rel, base))
+        groups.append(tuple(re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])")
+                            for name in ((rel,) if base == rel else (rel, base))))
     return tuple(groups)
 
 
-def _mentions(text: str, groups: Iterable[tuple[str, ...]]) -> tuple[int, int]:
+def _mentions(text: str, groups: Iterable[tuple[re.Pattern, ...]]) -> tuple[int, int]:
     """``(touched files mentioned, mentions)`` of those files in ``text``.
 
     A name matches only as its own token: ``git.py`` inside ``review_git.py`` is
@@ -231,9 +233,7 @@ def _mentions(text: str, groups: Iterable[tuple[str, ...]]) -> tuple[int, int]:
     beside its own basename is one mention, not two."""
     files = mentions = 0
     for group in groups:
-        found = max(
-            len(re.findall(rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])", text))
-            for name in group)
+        found = max(len(pattern.findall(text)) for pattern in group)
         if found:
             files += 1
             mentions += found
@@ -384,7 +384,7 @@ def navigation_material(layer: str, delivery: str) -> list:
         if layer == BODY_LAYER:
             pointers.extend(design_navigation("", source="⟨source⟩", disclosure=note)
                             for note in _DESIGN_REVIEW_MAP.values())
-            pointers.extend(_INVARIANTS_POINTERS.values())
+            pointers.append(_INVARIANTS_UNAVAILABLE)
         return [*(text.format(required="⟨required⟩") for text in words.get(delivery, ())), *omissions,
                 *(pointers if layer == BODY_LAYER else ())]
     heading, with_rules, without_rules, subject_words = words["every"]
@@ -656,17 +656,13 @@ def governance_context(
     if unavailable:
         rows.append(_row(BODY_INVARIANTS_CHAPTER, 1, "navigation", 0,
                          f"the body's cross-cutting invariants are unavailable here ({unavailable})"))
-        invariants_pointer = _INVARIANTS_POINTERS["unavailable"]
-    elif packet:
+        invariants_pointer = _INVARIANTS_UNAVAILABLE
+    else:  # inline for every delivery: a session may not reach the installed tree, and a proposal may edit it
         tier1.append((BODY_INVARIANTS_CHAPTER, invariants))
         inline_texts[BODY_INVARIANTS_CHAPTER] = invariants
         rows.append(_row(BODY_INVARIANTS_CHAPTER, 1, "inline", len(invariants),
-                         "tier 1: the body's cross-cutting invariants, whole for every body reviewer"))
+                         "tier 1: the installed body's cross-cutting invariants, whole for every body reviewer"))
         invariants_pointer = ""
-    else:
-        rows.append(_row(BODY_INVARIANTS_CHAPTER, 1, "required", len(invariants),
-                         "tier 1: the body's cross-cutting invariants; read it in full"))
-        invariants_pointer = _INVARIANTS_POINTERS["required"]
 
     # --- the change-class budget: ONE share for tier 2 and tier 3 together,
     # rules by change class drawing first, architecture sections from the rest.
@@ -777,23 +773,29 @@ def governance_context(
     rows.append(_row("docs/ARCHITECTURE.md", 3, "navigation", 0, arch_reason if arch_chapters
                      else arch_problem or "no chaptered membership: navigation only"))
     sections: list[tuple[tuple, str, str, str]] = []
+    any_name = re.compile("|".join(pattern.pattern for group in names for pattern in group)) if names else None
     for chapter in arch_chapters:
-        if chapter.source_path == BODY_INVARIANTS_CHAPTER:  # tier 1 above, whole or a required read
+        if chapter.source_path == BODY_INVARIANTS_CHAPTER:  # tier 1 above, whole
             continue
         rows.append(_row(chapter.source_path, 3, "navigation", len(chapter.text),
                          "the map is never inlined whole; chapter navigation above"))
         if not packet or not names:
             continue
-        units = [(start, f"opening block {number}", text)
-                 for number, (start, text, _code) in enumerate(_opening_units(chapter), 1)]
-        units += [(heading.span.start_byte, heading.title, chapter.text_at(heading.section))
+        units = [(start, f"opening block {number}", text, is_code)
+                 for number, (start, text, is_code) in enumerate(_opening_units(chapter), 1)]
+        units += [(heading.span.start_byte, heading.title, chapter.text_at(heading.section), False)
                   for heading in _top_sections(chapter)]
-        for start, title, body in units:
+        for start, title, body, is_code in units:
+            if is_code:  # a code listing gives its lines that name a touched file, not all of itself
+                body = "\n".join(line for line in body.splitlines() if any_name.search(line))
+                title += " (excerpt: its lines naming a touched file)"
             files, mentions = _mentions(body, names)
             if not files:
                 continue
             path = f"{chapter.source_path}#{title}"
-            sections.append(((-files * 1000 - mentions, chapter.source_path, start),
+            # Authored prose first: a listing's lines name many files, so by count alone they would displace
+            # the sections that explain those files; they take what share is left.
+            sections.append(((is_code, -files * 1000 - mentions, chapter.source_path, start),
                              path, path, f"mentions {files} touched file(s), {mentions} time(s)"))
             chapter_text[path] = body
     if packet and touched:  # no module tree in the book: the touched domains' rows, neighbours yield first

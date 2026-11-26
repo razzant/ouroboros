@@ -11,7 +11,7 @@ def test_schedule_and_integration_describe_the_three_write_surfaces():
     schedule = next(entry.schema for entry in control_tools() if entry.name == "schedule_subagent")
     description = schedule["description"]
     assert "workspace_root: existing start folder (default: yours; omit for genesis; with external_workspace must " \
-           "match write_root if both set; self_worktree copies it)" in description
+           "match write_root if both set; self_worktree needs a Git worktree root)" in description
     # The default child reads; a write_surface value is what makes it acting.
     assert description.index("Default native READ-ONLY") < description.index("ACTING write_surface")
     assert "Read-only input_files: file/git_range" in description
@@ -62,10 +62,14 @@ def test_every_wire_profile_carries_the_write_surfaces_and_folder_conditions(tmp
     assert len(wire) <= MAX_CUSTOM_DESCRIPTION_CHARS
     lead = wire.partition("\n")[0]
     for clause in ("default: yours", "omit for genesis", "with external_workspace must match write_root if both set",
-                   "self_worktree copies it", "self_worktree isolates eligible Git files", "external_workspace writes "
+                   "self_worktree needs a Git worktree root", "self_worktree isolates eligible Git files", "external_workspace writes "
                    "shared files", "genesis: own empty durable Git repo", "Read-only input_files"):
         assert clause in lead, (profile, clause)
-    props = schema["function"]["parameters"]["properties"]
+    import json
+
+    from ouroboros.openai_chat_custom import _SCHEMA_CLAUSE
+
+    props = json.loads(wire.partition(_SCHEMA_CLAUSE)[2])["properties"]  # what this wire actually carries
     assert {"workspace_root", "input_files"} <= set(props)
     if profile == "readonly":
         assert not set(_GEOMETRY) & set(props)

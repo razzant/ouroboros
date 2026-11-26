@@ -157,7 +157,7 @@ def test_contradictory_named_start_is_refused_before_enqueue(start_registry, sur
     assert result.status != "ok" and result.code == "TOOL_ARG_ERROR", result
     assert ("genesis" if surface == "genesis" else "different folders") in result.text
     # The refusal names the one-argument fix, so the retry does not guess between the two folders.
-    assert ("omit workspace_root" if surface == "genesis" else "omit write_root or pass the same folder") in result.text
+    assert ("omit workspace_root" if surface == "genesis" else "omit one of them or pass the same folder") in result.text
     assert not registry._ctx.pending_events
 
 
@@ -308,3 +308,6 @@ def test_a_read_only_child_still_selects_an_ordinary_folder_and_read_inputs(star
     event = registry._ctx.pending_events[-1]
     assert event["workspace_root"] == str(folder)
     assert event["task_constraint"]["mode"] == "local_readonly_subagent"
+    # The selected input reached the queued child: copied before queueing, the bytes the parent selected.
+    [row] = read_result(data, event["task_id"])["prepared_input_files"]
+    assert row["status"] == "prepared" and Path(row["local"]).read_text(encoding="utf-8") == "parent brief\n"
