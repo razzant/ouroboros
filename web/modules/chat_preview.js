@@ -9,7 +9,7 @@
  * unavailable, older, around, stale or late read writes nothing; bounded newest windows are valid. Each row goes where
  * the feed puts its bubble (chat_render_batch.js insertTimelineNode): by the time it is stamped with (a missing one is
  * the moment it is drawn, a delayed delivery keeps its earlier one), equal times by stream position
- * (chat_history_replay.js compareHistoryPosition), a row already there keeping its place; time and position are kept
+ * (chat_timeline_order.js), a row already there keeping its place; time and position are kept
  * for that alone, and the bound keeps the rows that placement puts last. Live echoes, controls, attachments and
  * session metadata never enter it; another origin, a document proving no data profile, or refused storage opens cold.
  *
@@ -25,7 +25,7 @@
  * Project deleted where this origin hears none of these keeps its entry until one comes or the total gives it way, and
  * the same Project's rooms under another profile keep theirs. Its imports are the feed's tie rule and the words a
  * bubble draws (a host notice's line), so neither the order nor the words fork. */
-import { compareHistoryPosition } from './chat_history_replay.js';
+import { compareTimelineOrder, timelineTime } from './chat_timeline_order.js';
 import { hostRowDisplayText } from './host_notice_text.js';
 
 // The record names the form, under the one key every eraser of every earlier version removes: entries are read only
@@ -59,13 +59,12 @@ export function roomStoreKey(base, scope, chatId, isMain) {
 const ROLES = ['user', 'assistant', 'system'];
 const CARD_ROWS = ['task_evidence', 'task_summary', 'quiz', 'card'];
 const refusal = error => error?.status === 401 || error?.status === 403;
-// insertTimelineNode's rule over the strings a bubble's dataset holds: a row goes before the first timed row later than
-// it, or as late with a greater stream position (compareHistoryPosition, as the feed compares two bubbles), else last;
-// an untimed row goes last.
-const position = row => (row.pos ? { source: row.pos[0], offset: row.pos[1] } : null);
+// Adapt the compact stored placement key to the same shape as a feed node's dataset.
+const placement = row => ({ ts: Number.isFinite(row.at) ? row.at : undefined, tsTail: row.tsTail,
+    historySource: row.pos?.[0], historyOffset: row.pos?.[1] });
 const place = (rows, row) => {
-    const index = Number.isFinite(row.at) ? rows.findIndex(other => Number.isFinite(other.at) && (other.at > row.at
-        || (other.at === row.at && compareHistoryPosition(position(other), position(row)) > 0))) : -1;
+    const target = placement(row);
+    const index = rows.findIndex(other => compareTimelineOrder(placement(other), target) > 0);
     rows.splice(index < 0 ? rows.length : index, 0, row);
     return rows;
 };
@@ -237,12 +236,12 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
     const fromHistory = (messages, now = new Date().toISOString()) => (Array.isArray(messages) ? messages : [])
         .filter(row => row?.history_id && typeof row.text === 'string' && row.text && ROLES.includes(row.role)
             && !row.is_progress && !CARD_ROWS.includes(row.system_type)).map(row => {
-            const raw = row.ts || now, position = row.history_position;
-            const at = typeof raw === 'number' ? raw : Date.parse(String(raw));
+            const { ts: at, tsTail } = timelineTime(row.ts || now), position = row.history_position;
             const source = position ? String(position.source) : '';
             return { id: String(row.history_id), role: row.role, text: hostRowDisplayText(row), speaker: label(row.role, false,
                 row.system_type, { source: row.source, senderLabel: row.sender_label, initiator: row.initiator }),
-            ...(Number.isFinite(at) ? { at } : {}), ...(source ? { pos: [source, String(position.offset)] } : {}) };
+            ...(Number.isFinite(at) ? { at, ...(tsTail ? { tsTail } : {}) } : {}),
+            ...(source ? { pos: [source, String(position.offset)] } : {}) };
         });
     const note = (state) => { if (root) root.firstElementChild.textContent = `Saved text preview · ${state}`; };
     const drop = () => { root?.remove(); root = null; retiring = false; };
@@ -467,7 +466,7 @@ export function createRoomProfileLifecycle({
     }
 
     const lifecycle = {
-        storeKey, foreignProfile, fetchHistory, awaitInitialHydration, waitForHydrationWindow, startOpening,
+        profileScope, storeKey, foreignProfile, fetchHistory, awaitInitialHydration, waitForHydrationWindow, startOpening,
         get initialHydration() { return initialHydrationPromise; },
         settleInitialHydration(promise) { initialHydrationPromise = promise; },
         resetInitialHydration() { initialHydrationPromise = null; },

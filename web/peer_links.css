@@ -1,0 +1,114 @@
+/* The owner's own Ouroboroses (own_ouroboroses.js, peer_intro.js, peer_letter_card.js; DESIGN "Circles and Add").
+   The block, its list, the owner's words and the rows are the app's parts (.consciousness-card, .place-rows,
+   .place-note, .ui-row), and its conversation is the place sheet's; this sheet lays out only what is new here, with the
+   shared tokens: the face, a row's head and open body, the introduction's fields, the code and the letter's card. No
+   colour, radius or shadow. */
+
+/* A face: one round crop of its square tile (ouroboros_face.js draws the snake; 20, 28 or 36 px). */
+.peer-face { display: inline-flex; flex: none; border-radius: 50%; overflow: hidden; line-height: 0; vertical-align: middle; }
+.peer-face > svg { display: block; }
+.peer-who { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; vertical-align: middle; }
+
+/* ---- Circles: a row of the block is a tray that opens in place, as a circle does ---------------------------------- */
+.own-link { border-radius: var(--radius-inner); background: var(--surface-tray); }
+/* The head: the caret in a column of the scale, the face, the name over its address and last letter, the state with
+   its direction at the end; a narrow body puts the state under the words. */
+details.ui-disclosure.own-link > summary.own-head {
+    display: grid;
+    grid-template-columns: var(--space-4) auto minmax(0, 1fr) minmax(0, max-content);
+    column-gap: var(--space-3);
+    min-height: var(--touch-target-min);
+    padding: var(--space-3) var(--space-4) var(--space-3) var(--space-3);
+    border-radius: var(--radius-inner);
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    font-weight: 400;
+}
+@media (hover: hover) { details.own-link:not([open]) > summary.own-head:hover { background: var(--menu-item-hover); } }
+.own-pic { display: inline-flex; }
+.own-name { font-weight: 600; overflow-wrap: anywhere; }
+.own-line { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
+.own-state { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; column-gap: var(--space-2); min-width: 0; font-size: var(--type-meta); line-height: var(--line-meta); }
+.own-state > .ui-status { font-weight: 500; white-space: nowrap; }
+.own-dir { color: var(--text-meta); overflow-wrap: anywhere; }
+.own-state > .ui-status { white-space: normal; overflow-wrap: anywhere; }
+.own-rows .ui-row-title, .own-rows .ui-row-meta { overflow-wrap: anywhere; }
+.own-dir::before { content: "· "; }
+.own-link:is([data-state="paused"], [data-state="removed"]) .own-name { color: var(--text-secondary); }
+@container dashboard (max-width: 560px) {
+    details.ui-disclosure.own-link > summary.own-head { grid-template-columns: var(--space-4) auto minmax(0, 1fr); row-gap: var(--space-1); }
+    .own-state { grid-column: 3; justify-content: flex-start; }
+}
+/* The open row: its words start where the name starts, past the head's inset, the caret's column, the face (36px, as
+   faceHtml draws it in the head) and the head's two gaps. */
+details.ui-disclosure.own-link > .own-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    margin: 0;
+    padding: 0 var(--space-4) var(--space-4) calc(var(--space-3) + var(--space-4) + 36px + 2 * var(--space-3));
+}
+@container dashboard (max-width: 560px) { details.ui-disclosure.own-link > .own-body { padding-inline-start: var(--space-4); } }
+.own-rule { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.own-rule-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); min-height: var(--control-h-sm); }
+.peer-field-label { margin: 0; color: var(--text-meta); font-size: var(--type-meta); font-weight: 600; line-height: var(--line-meta); }
+.own-text { margin: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
+/* The rows inside the open tray lie on it: fills never stack. */
+.own-rows { display: flex; flex-direction: column; gap: var(--space-1); }
+.own-rows > .ui-row.settings-row { margin: 0; padding: var(--space-2) 0; background: transparent; box-shadow: none; }
+.own-rows .ui-segment-group { flex: none; }
+
+/* ---- Introduce an Ouroboros: the shared dialog with its strips, fields and the owner's words ---------------------- */
+.ui-modal.peer-intro { max-width: 560px; width: min(560px, 94vw); }
+.peer-intro .ui-modal-body { gap: var(--space-4); }
+.peer-intro .ui-segment-group { align-self: flex-start; }
+.peer-rule-field.ui-control { height: var(--peer-rule-height, auto); resize: vertical; line-height: var(--line-body); }
+.peer-from { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-radius: var(--radius-inner); background: var(--surface-tray); }
+.peer-from-words { display: flex; flex-direction: column; min-width: 0; }
+.peer-from-name { overflow-wrap: anywhere; color: var(--text-primary); font-size: var(--type-body); font-weight: 600; line-height: var(--line-body); }
+.peer-from-label, .peer-from-home { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
+.peer-from-label { font-weight: 600; }
+/* An invitation in the code face. The one to paste is a field; the one shown is one read-only line beside its Copy, its
+   start ellipsized and its last characters kept, the value whole in the page (selecting it takes all of it). */
+.peer-invite-field.ui-control { font-family: 'SF Mono', 'Fira Code', Consolas, monospace; }
+.peer-invite-row { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+/* Inline parts, never boxes of their own: a box between them would be a line break in the copied text. The start takes
+   whole characters, so the ellipsis meets the kept end. */
+.ui-action-row.peer-invite-row { flex-wrap: nowrap; }
+.peer-invite-row > .peer-invite-field.ui-control { display: block; flex: 1 1 0; min-width: 0; max-height: none; overflow: hidden; white-space: nowrap; }
+.peer-invite-row > .btn { flex: none; }
+.peer-invite-head {
+    display: inline-block;
+    max-width: calc(100% - 12ch);
+    max-width: round(down, calc(100% - 12ch), 1ch);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: top;
+}
+.peer-pairline { display: flex; align-items: center; gap: var(--space-2); color: var(--text-meta); }
+.peer-pair-link { display: inline-flex; }
+.peer-code-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+.peer-code {
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+    color: var(--text-primary);
+    font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+    font-size: var(--type-page);
+    font-weight: 600;
+    line-height: var(--line-title);
+    letter-spacing: 0.06em;
+}
+
+/* ---- A letter at its sender: the relay note with one status line and one next line, no button ------------------ */
+.peer-letter-text { margin: var(--space-1) 0 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); white-space: pre-wrap; overflow-wrap: anywhere; }
+.peer-letter-status { display: flex; flex-wrap: wrap; align-items: center; column-gap: var(--space-2); row-gap: var(--space-1); margin: var(--space-2) 0 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.peer-letter-card .chat-relay-excerpt:has(.peer-letter-read) { flex-wrap: wrap; }
+.peer-letter-card .peer-letter-read { flex: none; max-inline-size: 100%; block-size: auto; white-space: normal; overflow-wrap: anywhere; }
+.peer-letter-word { color: var(--text-primary); font-weight: 500; }
+.peer-letter-word[data-tone="error"] { color: var(--status-error-word); }
+.peer-letter-word[data-tone="owner"] { color: var(--status-warn-word); }
+.peer-letter-rest::before { content: "· "; }
+.peer-letter-next { margin: var(--space-1) 0 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
+.peer-letter-kind { margin: var(--space-1) 0 0; color: var(--text-primary); font-size: var(--type-meta); font-weight: 600; line-height: var(--line-meta); }

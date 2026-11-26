@@ -12,7 +12,8 @@ when every advertised tier is higher. Negative quotes prescribe nothing, a value
 rejection never drops its carrier, and the mandatory-reasoning floor and the
 unsupported-carrier drop remain. Only a normalized success bound to the exact settled
 physical capture teaches ``state/request_wire_compatibility.json`` (entries expire after
-14 days); unsettled attempts never teach. A returned response discloses
+14 days, so a server that stopped refusing a field, such as a cache hint, regains it);
+unsettled attempts never teach. A returned response discloses
 ``usage.request_wire`` after ``validate_wire_attempt_identity`` even when monetary
 settlement failed; ``request_wire_history`` is a bounded, ordered disclosure, while
 ``usage_store.py`` / ``state/usage.sqlite`` owns money.

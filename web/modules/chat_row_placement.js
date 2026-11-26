@@ -108,6 +108,18 @@ export function childRowPlacement(row) {
     return ORIGIN_ADDRESSED_NOTICE_TYPES.has(type) ? '' : type === 'proactive_message' ? 'line' : 'result';
 }
 
+/** A hidden room can show only what the ordinary timeline would show as its own assistant text. Shared appearances,
+ * cards, connector/external attribution and attachment notices wait for the full room projection. */
+export function isWindowText(row, knownChild) {
+    return row?.role === 'assistant' && ['', 'proactive_message'].includes(row.system_type || '')
+        && !row.is_progress && !row.card_row && !row.msg_type && !row.narration && !row.relay && !row.origin_projected
+        && !row.text_placeholder && !row.attachments?.length && !row.presence_contact
+        && !row.parent_task_id && !row.subagent_task_id && row.delegation_role !== 'subagent'
+        // RoomResolver can attest a physical retry as a root of the original logical work.
+        && (!row.task_id || !knownChild(row.task_id) && !!row.root_task_id
+            && (row.task_id === row.root_task_id || row.delegation_role === 'root'));
+}
+
 /**
  * Replay conclusion: a typed terminal fact OR a plain untyped final (replay has no
  * later task_done frame, so the bare final is the task's last word; marked rows —

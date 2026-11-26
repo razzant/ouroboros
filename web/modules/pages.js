@@ -70,33 +70,34 @@ export function renderNavRows(zone, group = '') {
     return pagesInZone(zone).filter((page) => !group || page.group === group).map(renderNavRow).join('\n');
 }
 
-/** The rail's places (owner 24.11; docs/DESIGN.md "Navigation"): the sections at its top, then at its foot the system
- * rows over the version row, where `#nav-version` (utils.js writes it) and the update's controls (update_status.js)
- * stand. A row is its glyph; its word stays its name (style.css). */
+/** The rail's places (owner 24.11, 25.11; docs/DESIGN.md "Navigation"): the sections at its top, then at its foot
+ * the system rows. A row is its glyph; its word stays its name (style.css). The version row is not the rail's: it is
+ * the column's one-line foot under the Projects list (index.html, or mountNavRail for a retained document), where
+ * `#nav-version` (utils.js writes it) and the update's controls (update_status.js) stand. */
 export function renderNavRail() {
     const rows = (group) => pagesInZone('rail').filter((page) => page.group === group).map(renderNavRow).join('');
     return `<div class="nav-rail-sections">${rows('sections')}</div>`
-        + `<div class="nav-rail-system">${rows('system')}<div class="sidebar-foot-meta"><span id="nav-version"></span></div></div>`;
+        + `<div class="nav-rail-system">${rows('system')}</div>`;
 }
 
 /** Puts the rail's places into a document, once: into its `.nav-rail`, or into a rail that leads `#primary-sidebar` in
  * DOM order (explicit column 1 in style.css) in place of a retained document's foot (an index.html kept across an
- * update, v7.7.1 to v7.12) or ahead of the oldest one's wrapper (v7.7.0, whose rows and lone `#nav-version` stand with
- * `.sidebar-scroll` and no foot of their own). A retained document already holds the version anchor: in its foot's meta
- * row (v7.7.1 to v7.11) or beside the old rows (v7.7.0). The rail adopts it in place of its own, so the document keeps
- * one `.sidebar-foot-meta` with one `#nav-version`, and the status controller (update_status.js) finds its row through
- * the anchor as usual. The drawer's one close control caps the rail first in DOM order so keyboard and assistive-tech
- * navigation hit it immediately: a newer retained head's `#nav-drawer-close` node is reused and its emptied row leaves,
- * while v7.7.0 (which had none) gets the matching control synthesized before app.js binds it. v7.7.0's own Utilities
- * group (the rows the rail replaces) leaves the document too, so each destination and its focus stop stay one; Main,
- * the Projects, the version and the old wrapper keep their place. */
+ * update, v7.7.1 to v7.12) or ahead of the oldest one's wrapper (v7.7.0, whose rows stand with `.sidebar-scroll` and
+ * no foot of their own). The version row moves with the foot: a retained document's `.sidebar-foot-meta` (holding
+ * `#nav-version`) is adopted as the column's foot, v7.7.0's loose `#nav-version` gets the fresh row around it, and the
+ * foot is put after the Projects so the status controller (update_status.js) finds its row through the anchor as usual.
+ * The document keeps one `.sidebar-foot-meta` with one `#nav-version`. The drawer's one close control caps the rail
+ * first in DOM order so keyboard and assistive-tech navigation hit it immediately: a newer retained head's
+ * `#nav-drawer-close` node is reused and its emptied row leaves, while v7.7.0 (which had none) gets the matching control
+ * synthesized before app.js binds it. v7.7.0's own Utilities group (the rows the rail replaces) leaves the document too,
+ * so each destination and its focus stop stay one; Main, the Projects, the version and the old wrapper keep their
+ * place. */
 export function mountNavRail(sidebar) {
     const doc = sidebar?.ownerDocument;
     let rail = sidebar?.querySelector('.nav-rail') || null;
     const foot = rail ? null : sidebar?.querySelector('.sidebar-foot') || null;
     const version = doc?.getElementById('nav-version') || null;
     if (!doc || (!rail && !foot && !version) || rail?.querySelector('[data-nav-page]')) return;
-    const kept = version?.closest('.sidebar-foot-meta') || null;
     if (!rail) {
         rail = doc.createElement('div');
         rail.className = 'nav-rail';
@@ -106,10 +107,14 @@ export function mountNavRail(sidebar) {
         rail.parentElement.prepend(rail);
     }
     rail.insertAdjacentHTML('beforeend', renderNavRail());
-    const fresh = rail.querySelector('.nav-rail-system > .sidebar-foot-meta');
-    // The anchor keeps its id and its row; utils.js writes it, update_status.js mounts the check in the row.
-    if (kept) fresh.replaceWith(kept);
-    else if (version) fresh.children[0].replaceWith(version);
+    let row = version?.closest('.sidebar-foot-meta') || null;
+    if (!row) {
+        row = doc.createElement('div');
+        row.className = 'sidebar-foot-meta';
+        row.append(version || Object.assign(doc.createElement('span'), { id: 'nav-version' }));
+    }
+    // The column's foot: after the Projects list, under the rail's system rows (owner 25.11).
+    sidebar.append(row);
     let close = doc.getElementById('nav-drawer-close');
     if (!close) {
         close = doc.createElement('button');
@@ -120,9 +125,9 @@ export function mountNavRail(sidebar) {
         close.setAttribute('aria-controls', 'primary-sidebar');
     }
     if (close.parentElement !== rail || rail.firstElementChild !== close) {
-        const row = close.closest?.('.drawer-head');
+        const headRow = close.closest?.('.drawer-head');
         rail.prepend(close);
-        row?.remove();
+        headRow?.remove();
     }
     sidebar.querySelector('.nav-utilities')?.remove();
 }

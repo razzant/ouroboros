@@ -1072,6 +1072,14 @@ async def api_peer_link_accept(request: Request) -> JSONResponse:
     return await _owner_call(request, _accept)
 
 
+async def api_peer_link_read(request: Request) -> JSONResponse:
+    """Owner-only local read while an invitation is open; no place or letter history."""
+    from ouroboros.peer_links import introduction_view
+
+    return await _owner_call(request, lambda req, _body: {
+        "link": introduction_view(request_drive_root(req), req.path_params["link_id"])})
+
+
 async def api_peer_link_revoke(request: Request) -> JSONResponse:
     from ouroboros.peer_links import revoke
 
@@ -1119,5 +1127,6 @@ def peer_letter_routes() -> list[Route]:
             Route("/api/peer-links/invite", api_peer_link_invite, methods=["POST"]),
             Route("/api/peer-links/accept", api_peer_link_accept, methods=["POST"]),
             Route("/api/peer-links/introduce", api_peer_link_introduce, methods=["POST"]),
+            Route("/api/peer-links/{link_id}", api_peer_link_read, methods=["GET"]),
             Route("/api/peer-links/{link_id}/confirm", api_peer_link_confirm, methods=["POST"]),
             Route("/api/peer-links/{link_id}/revoke", api_peer_link_revoke, methods=["POST"])]

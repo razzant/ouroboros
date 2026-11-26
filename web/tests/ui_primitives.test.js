@@ -266,7 +266,7 @@ test('async actions expose the same busy and status semantics', () => {
     assert.match(controlsJs, /setAttribute\('aria-busy', 'true'\)/);
     assert.match(connectionsJs, /setButtonBusy\(button, true\)/);
     assert.match(connectionsJs, /setInlineStatus\(status, 'Testing…', 'muted'\)/);
-    assert.match(connectionsJs, /providerTestStatusText\(data\), data\?\.ok \? 'ok' : 'danger'/);
+    assert.match(connectionsJs, /providerTestStatusText\(data\), providerTestTone\(data\)/);
     assert.match(connectionsJs, /setInlineStatus\(row\.querySelector\('\[data-connection-test-status\]'\), '', 'muted'\)/);
     assert.match(primitivesJs, /if \(el\.textContent !== next\) el\.textContent = next/);
     // The catalog's result is the shared result line: its count ends by itself, a read gap stays.

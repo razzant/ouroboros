@@ -553,7 +553,7 @@
   },
   {
     "id": "test_chat_history_replays_task_summaries_into_live_cards",
-    "path": "web/modules/chat_activity.js",
+    "path": "web/modules/chat_history_replay.js",
     "kind": "contains",
     "value": "if (role !== 'user' && !opts.isProgress && opts.taskId) {"
   },
@@ -1040,8 +1040,8 @@
   {
     "id": "test_sync_history_merges_offline_bootstrap_user_rows",
     "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect, requestedAt: data.requestedAt });"
+    "kind": "regex",
+    "value": "if\\s*\\(\\s*result\\.status\\s*!==\\s*'applied'\\s*\\)\\s*applyHistoryMessages\\(\\s*messages\\s*,\\s*\\{\\s*fromReconnect\\s*,\\s*newest:\\s*admitted\\s*,\\s*requestedAt:\\s*data\\.requestedAt\\s*,\\s*window:\\s*data\\.window\\s*,\\s*hasMore:\\s*data\\.has_more\\s*,?\\s*\\}\\s*\\)"
   },
   {
     "id": "test_cancel_run_confirm_and_cascade",

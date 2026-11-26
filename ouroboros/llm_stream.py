@@ -827,12 +827,9 @@ class _StreamAssembly:
     def retain(self, *, complete: bool, error: BaseException | None = None) -> dict:
         if error is not None:
             self.preserve_failure_usage(error)
-        from ouroboros import config
-        from ouroboros.observability import persist_call, write_blob
-        from ouroboros.usage_accounting import current_usage_scope, last_physical_attempt_capture, current_physical_attempt_drive_root
+        from ouroboros.usage_accounting import last_physical_attempt_capture
 
         capture = last_physical_attempt_capture()
-        scope = current_usage_scope()
         attempt_id = str(getattr(capture, "attempt_id", "") or "")
         facts = {"attempt_id": attempt_id, "complete": complete,
                  "generation_id": self.generation_id or self.accumulator.body.get("id", ""),
@@ -853,27 +850,7 @@ class _StreamAssembly:
             facts["generation_bound"] = True
         if self.generation_binding_error:
             facts["generation_binding_error"] = self.generation_binding_error
-        evidence = {"wire_base64": base64.b64encode(b"".join(self.raw)).decode("ascii"),
-                    "partial_assembly": self.accumulator.partial(), **facts}
-        try:
-            if not attempt_id:
-                raise RuntimeError("stream has no physical attempt identity")
-            root = current_physical_attempt_drive_root() or (scope.drive_root if scope is not None else config.DATA_DIR)
-            # Raw frames can contain private native signatures. Only the blob
-            # reference and structural facts enter the ordinary public projection.
-            raw_ref = write_blob(root, evidence, kind="json")
-            retained = persist_call(root, task_id=str(getattr(scope, "task_id", "") or "llm"),
-                                    call_id=f"physical_{attempt_id}_stream", call_type="physical_stream",
-                                    payload={**facts, "private_wire_ref": raw_ref}, manifest=facts)
-            facts["manifest_ref"] = retained["manifest_ref"]
-        except Exception as retention_error:
-            facts["retention_error"] = type(retention_error).__name__
-            if error is not None:
-                error.stream_evidence = evidence
-        if error is not None:
-            error.stream_receipt = facts
-            error.stream_incomplete = True
-        return facts
+        return retain_stream(self.raw, self.accumulator.partial(), facts, error)
 
     def result(self) -> dict:
         for event, data in self.frames.feed(b"", final=True):
@@ -885,6 +862,38 @@ class _StreamAssembly:
         response = AssembledResponse(body)
         self.attach_token_receipt(response)
         return response
+
+
+def retain_stream(raw, partial, facts, error=None):
+    """Keep exact wire and partial assembly private under this attempt."""
+    from ouroboros import config
+    from ouroboros.observability import persist_call, write_blob
+    from ouroboros.usage_accounting import current_usage_scope, current_physical_attempt_drive_root
+
+    scope = current_usage_scope()
+    attempt_id = facts["attempt_id"]
+    wire = raw if isinstance(raw, (bytes, bytearray)) else b"".join(raw)
+    evidence = {"wire_base64": base64.b64encode(wire).decode("ascii"),
+                "partial_assembly": partial, **facts}
+    try:
+        if not attempt_id:
+            raise RuntimeError("stream has no physical attempt identity")
+        root = current_physical_attempt_drive_root() or (scope.drive_root if scope is not None else config.DATA_DIR)
+        # Raw frames can contain private native signatures. Only the blob
+        # reference and structural facts enter the ordinary public projection.
+        raw_ref = write_blob(root, evidence, kind="json")
+        retained = persist_call(root, task_id=str(getattr(scope, "task_id", "") or "llm"),
+                                call_id=f"physical_{attempt_id}_stream", call_type="physical_stream",
+                                payload={**facts, "private_wire_ref": raw_ref}, manifest=facts)
+        facts["manifest_ref"] = retained["manifest_ref"]
+    except Exception as retention_error:
+        facts["retention_error"] = type(retention_error).__name__
+        if error is not None:
+            error.stream_evidence = evidence
+    if error is not None:
+        error.stream_receipt = facts
+        error.stream_incomplete = True
+    return facts
 
 
 def consume_stream(stream: Any, *, native: bool = False, expected_choices: int = 1,

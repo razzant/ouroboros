@@ -2,12 +2,14 @@
 docs/DESIGN.md "Shell").
 
 The places stand in the rail at the column's start edge (owner 24.11, «Рельс снаружи»): the sections at its top,
-Dashboard, Settings and the version with the update at its foot, each place its glyph with its word its name. A window
-too short for the zones lets the whole column scroll with Main pinned; the rail stays in view beside it, the version
-where a tall window puts it, and where even the rail is taller than the window it scrolls with the column, its foot at
-the end. A column too short to show a Project under Main lets Main go with the list. The rail keeps its width whatever
-the column's and whatever the language, the version row keeps one height whatever the check says (an update's capsule
-stands over the version, which never moves), and a 1280 × 540 window keeps the zones. Uses the static-server/API fixture
+Dashboard and Settings at its foot, each place its glyph with its word its name; the version with the update is the
+column's one-line foot under the Projects list (owner 25.11). A window too short for the zones lets the whole column
+scroll with Main pinned; the rail stays in view beside it, the version row rides with the column (back at the tall
+window's place when the column stands at its end), and where even the rail is taller than the window it scrolls with
+the column, its foot at the end. A column too short to show a Project under Main lets Main go with the list. The rail
+keeps its width whatever the column's and whatever the language, the version row keeps one line and one height whatever
+the check says (an update's capsule stands beside the version, which never moves), and a 1280 × 540 window keeps the
+zones. Uses the static-server/API fixture
 (test_subscription_setup_browser) with the gate's 30 Projects, update status and check answered by route mocks; never
 starts the runtime or reads live data.
 """
@@ -76,8 +78,12 @@ def test_a_short_window_keeps_the_rail_and_the_version_in_view(shell_ui, tmp_pat
     for state in ('at-0', 'at-0.5', 'at-1'):
         rail = facts[state]
         assert rail['position'] == 'sticky' and abs(rail['railTop']) <= 0.5, ('the rail stays at the top', state, facts)
-        assert abs(rail['version'] - tall['version']) <= 1, ('the version sits where a tall window puts it', state, facts)
         assert rail['sectionsInView'] and rail['settingsInView'], ('every place in view however far the list scrolls', state, facts)
+    # The version row is the column's foot under the Projects list (owner 25.11), no longer the sticky rail's: in a
+    # short window the whole column scrolls and the foot rides with it, off the fold while the column stands at its
+    # top, back at the tall window's place when a real wheel brings the column to its end.
+    assert facts['at-0']['version'] < 0, ('the foot rides below the fold at the column\'s top', facts)
+    assert abs(facts['at-1']['version'] - tall['version']) <= 1, ('the foot on the bottom edge at the column\'s end', facts)
     assert facts['tall_short'] is False and not tall['scrolls'] and tall['settingsInView'], facts
     assert tall['version'] >= 12, ('the version above the bottom inset', facts)
 
@@ -91,8 +97,9 @@ AT_REST = """() => {
     return {top: side.scrollTop, find: hits(find) && f.top >= s.top - 0.5 && f.bottom <= s.bottom + 0.5,
             head: getComputedStyle(side.querySelector('.sidebar-head')).position};
 }"""
-# The rail's controls and its version: each the target a finger finds at its middle, where it is now.
-REACH = """() => [...document.querySelectorAll('#primary-sidebar .nav-rail :is([data-nav-page], #nav-version-check, #nav-version)')]
+# The rail's controls and the column's foot (its version row and check): each the target a finger finds at its middle,
+# where it is now.
+REACH = """() => [...document.querySelectorAll('#primary-sidebar :is(.nav-rail [data-nav-page], .nav-rail #nav-version-check, .sidebar-foot-meta #nav-version-check, .sidebar-foot-meta #nav-version)')]
     .filter((el) => el.getClientRects().length).map((el) => { const r = el.getBoundingClientRect();
         const s = document.getElementById('primary-sidebar').getBoundingClientRect();
         const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
@@ -372,7 +379,7 @@ FOCUS_MOVES = """async () => {
     const side = document.getElementById('primary-sidebar');
     const frames = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     const head = side.querySelector('.sidebar-head');
-    const version = document.getElementById('nav-version-check');  // the version is the rail's check (no capsule here)
+    const version = document.getElementById('nav-version-check');  // the version is the foot's check (no capsule here)
     const bars = {}, missed = [];
     const controls = [['main', side.querySelector('.sidebar-head [data-nav-page="chat"]')], ['version', version],
         ...[...side.querySelectorAll('.nav-rail [data-nav-page]')].map(el => [el.dataset.navPage, el])];
@@ -417,7 +424,8 @@ FOCUS_MOVES = """async () => {
 def test_the_heads_and_the_rails_own_controls_leave_the_column_where_it_is(shell_ui, tmp_path, width, height, touch):
     """The rows carry the head's height as their scroll margin, not the column as its scroll padding: a row brought
     into view from half under the head clears it, and focusing Main or a place in the rail (which stays in view beside
-    the list) does not scroll the column."""
+    the list) does not scroll the column. The version row is the column's own foot under the Projects list (owner
+    25.11): focusing the check scrolls the column to bring its foot into view, never past it."""
     # A managed install whose status offers the check: the version is a focusable control, not plain text.
     page, _ = rail_page(shell_ui, width, height, lang='en', touch=touch)
     facts = {'engine': shell_ui['engine'], 'size': [width, height]}
@@ -435,6 +443,11 @@ def test_the_heads_and_the_rails_own_controls_leave_the_column_where_it_is(shell
     assert facts['check'] and facts['missed'] == [], ('every control took focus', facts)
     assert set(facts['bars']) == {'main', 'version', *RAIL_IDS}, facts
     for name, move in facts['bars'].items():
+        if name == 'version':
+            # The foot rides with the column at its end: focusing the check scrolls the column toward its end to
+            # reveal the foot, never backward into the rail's rows (the rail itself stays in view, unmoved).
+            assert move['before'] > 0 and move['after'] > move['before'], ('the foot scrolled into view', name, facts)
+            continue
         assert move['before'] > 0 and abs(move['after'] - move['before']) <= 1, ('the column stayed put', name, facts)
     assert facts['parked'] > 20, ('rows were parked under the head', facts)
     assert facts['hidden'] == [], ('a row brought into view under the pinned head', facts)
@@ -528,18 +541,24 @@ def test_the_rail_keeps_its_width_and_its_names_at_every_column_width(shell_ui, 
             assert not row['labelDrawn'], ('a glyph alone', width, row)
 
 
-# The version's own line (its text, not its box: the plain version keeps the check's box, its padding included).
+# The version's own line (its text, not its box: the plain version keeps the check's inset), and where the Project
+# names start, the line the number keeps.
 ROW = """() => { const meta = document.querySelector('.sidebar-foot-meta').getBoundingClientRect();
     const range = document.createRange();
     range.selectNodeContents(document.getElementById('nav-version'));
     const v = range.getBoundingClientRect();
-    return {height: meta.height, versionTop: v.top, versionBottom: v.bottom}; }"""
+    const name = document.querySelector('#nav-projects-list .nav-project-row');
+    const pad = name ? parseFloat(getComputedStyle(name).paddingInlineStart) : 0;
+    return {height: meta.height, versionTop: v.top, versionBottom: v.bottom, versionLeft: v.left,
+            nameLeft: name ? name.getBoundingClientRect().left + pad : null,
+            lineHeight: parseFloat(getComputedStyle(document.getElementById('nav-version')).lineHeight)}; }"""
 STATE = """() => {
     const check = document.getElementById('nav-version-check'), note = document.querySelector('.nav-check-note');
     const pill = document.getElementById('update-pill');
     const glyph = check.querySelector('.nav-version-glyph');
     // What is drawn: the answer's own glyph, the version's glyph box and the number's lines (its text, not its box).
-    const rect = (el) => { const r = el.getBoundingClientRect(); return {top: r.top, bottom: r.bottom, x: (r.left + r.right) / 2, w: r.width}; };
+    const rect = (el) => { const r = el.getBoundingClientRect();
+        return {top: r.top, bottom: r.bottom, left: r.left, right: r.right, x: (r.left + r.right) / 2, w: r.width}; };
     const range = document.createRange();
     range.selectNodeContents(document.getElementById('nav-version'));
     const drawn = note.hidden ? null : rect(note.querySelector('svg'));
@@ -550,14 +569,15 @@ STATE = """() => {
             versionGlyph: getComputedStyle(glyph).visibility, lines: range.getClientRects().length,
             text: rect(range), title: check.title, said: document.getElementById('nav-check-said').textContent,
             pointed: hit ? (hit.closest('[title]')?.getAttribute('title') || '') : null,
-            pill: pill && !pill.hidden ? pill.textContent : '', version: document.getElementById('nav-version').textContent};
+            pill: pill && !pill.hidden ? pill.textContent : '', version: document.getElementById('nav-version').textContent,
+            pillBox: pill && !pill.hidden ? rect(pill) : null};
 }"""
 
 
 def test_the_version_row_keeps_one_height_and_its_number_never_moves(shell_ui, tmp_path):
     """The version is the check (owner 21.11): rest, hover, checking, Up to date and a failure stand in one row height,
-    the answer a glyph in the version's glyph's place with its words read; the Update capsule and an attempt stand over
-    the version, which keeps its place; one press is one request."""
+    the answer a glyph in the version's glyph's place with its words read; the Update capsule and an attempt stand
+    beside the version, which keeps its place on its one line (owner 25.11); one press is one request."""
     page, world = rail_page(shell_ui, 1440, 900)
     facts = {'engine': shell_ui['engine'], 'rows': {}, 'states': {}}
 
@@ -601,13 +621,15 @@ def test_the_version_row_keeps_one_height_and_its_number_never_moves(shell_ui, t
     assert facts['checks'] == 1, ('a press while it checks starts nothing', facts)
     assert states['checking']['busy'] == 'true' and states['rest']['busy'] is None, facts
     assert states['up to date']['note'] == 'Обновлений нет' and states['failed']['note'] == 'Не удалось проверить', facts
-    # The fixture's version breaks onto a second line in the rail: the answer stands in the glyph's own place under the
-    # whole number, never on its lines, wherever the number ends.
-    assert states['rest']['lines'] >= 2, ('a version long enough to wrap', facts)
+    # The column's one-line foot (owner 25.11): the whole prerelease number on one line, the answer a glyph in the
+    # version's glyph's place after the number, on its line, never over its text.
+    assert states['rest']['lines'] == 1 and states['rest']['version'] == 'v7.11.1-alpha.0', ('the whole number', facts)
     for name in ('up to date', 'failed'):
         state = states[name]
         assert state['noteGlyph'] == 'drawn' and state['versionGlyph'] == 'hidden', ('the answer in its place', facts)
-        assert state['drawn']['top'] >= state['text']['bottom'] - 0.5, ('under the whole number', name, facts)
+        assert state['drawn']['left'] >= state['text']['right'] - 0.5, ('after the whole number', name, facts)
+        middle = (state['drawn']['top'] + state['drawn']['bottom']) / 2
+        assert state['text']['top'] - 0.5 <= middle <= state['text']['bottom'] + 0.5, ('on its line', name, facts)
         assert abs(state['drawn']['top'] - state['glyphBox']['top']) <= 0.5, ('the glyph\'s own place', name, facts)
         assert abs(state['drawn']['x'] - state['glyphBox']['x']) <= 0.5, ('the glyph\'s own place', name, facts)
     # A pointer resting on the warning reaches the reason (the check's tooltip, as the readers' words say it); the
@@ -624,7 +646,16 @@ def test_the_version_row_keeps_one_height_and_its_number_never_moves(shell_ui, t
     assert max(r['height'] for r in checks) - min(r['height'] for r in checks) <= 0.5, ('one height for the check', facts)
     assert max(r['versionBottom'] for r in rows.values()) - min(r['versionBottom'] for r in rows.values()) <= 0.5, (
         'the number never moves', facts)
-    assert rows['update']['height'] > rows['rest']['height'], ('the capsule stands over the version', facts)
+    assert max(r['versionLeft'] for r in rows.values()) - min(r['versionLeft'] for r in rows.values()) <= 0.5, (
+        'the number never moves sideways', facts)
+    # One line's space: the row is a small control's height (not the old card), in every state, the capsule included,
+    # which stands after the number; the number starts on the Project names' line.
+    rest = rows['rest']
+    assert rest['height'] <= 2 * rest['lineHeight'], ('one line\'s room', facts)
+    assert abs(rows['update']['height'] - rest['height']) <= 0.5, ('the capsule keeps the line', facts)
+    for name in ('update', 'attempt'):
+        assert states[name]['pillBox']['left'] >= states[name]['text']['right'] - 0.5, ('beside the version', name, facts)
+    assert rest['nameLeft'] is None or abs(rest['versionLeft'] - rest['nameLeft']) <= 1, ('on the names\' line', facts)
 
 
 # The docked zones in a window: Main's row and the rail's places inside the column, the list's own box and offsets.
@@ -776,7 +807,6 @@ RAIL_CROWD_HOLDS = """async () => {
 
 RAIL_FOCUS_STOP = """() => {
     const side = document.getElementById('primary-sidebar');
-    const rail = side.querySelector('.nav-rail');
     const f = document.activeElement;
     if (!f || !side.contains(f) || f === side) return null;
     const s = side.getBoundingClientRect();
@@ -786,7 +816,6 @@ RAIL_FOCUS_STOP = """() => {
         || (f.classList.contains('update-notice-close') ? 'update-notice-close' : f.className);
     return {
         id,
-        inRail: Boolean(rail && rail.contains(f)),
         top: Math.round(r.top * 10) / 10,
         bottom: Math.round(r.bottom * 10) / 10,
         left: Math.round(r.left * 10) / 10,
@@ -818,7 +847,7 @@ def _choose_rail_tab_keys(page):
     raise AssertionError('neither Tab nor Alt+Tab moved keyboard focus from #nav-drawer-close to Circles')
 
 
-def _walk_rail_keyboard(page, key, start_selector, *, include_start, stop_on=None, capture_on=None, limit=16):
+def _walk_rail_keyboard(page, key, start_selector, *, include_start, stop_on=None, capture_on=None, limit=128):
     page.evaluate("""(sel) => {
         const side = document.getElementById('primary-sidebar');
         side.scrollTop = 0;
@@ -835,7 +864,7 @@ def _walk_rail_keyboard(page, key, start_selector, *, include_start, stop_on=Non
         page.keyboard.press(key)
         settle(page)
         stop = page.evaluate(RAIL_FOCUS_STOP)
-        if stop is None or not stop['inRail']:
+        if stop is None:
             break
         stops.append(stop)
         if capture_on and stop['id'] == capture_on[0]:
@@ -845,16 +874,103 @@ def _walk_rail_keyboard(page, key, start_selector, *, include_start, stop_on=Non
     return stops
 
 
+FOOT_FOCUS = """() => {
+    const side = document.getElementById('primary-sidebar'), f = document.activeElement;
+    const r = f.getBoundingClientRect(), s = side.getBoundingClientRect();
+    const outer = getComputedStyle(f), halo = getComputedStyle(f, '::after');
+    const px = value => parseFloat(value) || 0;
+    const touch = matchMedia('(pointer: coarse)').matches;
+    const ring = Math.max(0, px(outer.outlineWidth) + px(outer.outlineOffset));
+    const hitTop = r.top + (touch ? px(outer.borderTopWidth) + px(halo.top) : 0);
+    const hitBottom = r.bottom - (touch ? px(outer.borderBottomWidth) + px(halo.bottom) : 0);
+    const hitLeft = r.left + (touch ? px(outer.borderLeftWidth) + px(halo.left) : 0);
+    const hitRight = r.right - (touch ? px(outer.borderRightWidth) + px(halo.right) : 0);
+    const top = Math.max(s.top + side.clientTop, side.querySelector('.sidebar-head').getBoundingClientRect().bottom);
+    const bottom = s.top + side.clientTop + side.clientHeight;
+    const left = s.left + side.clientLeft, right = left + side.clientWidth;
+    const x = (hitLeft + hitRight) / 2, y = (hitTop + hitBottom) / 2;
+    const clearHits = [[x, hitTop + 0.5], [x, hitBottom - 0.5], [hitLeft + 0.5, y], [hitRight - 0.5, y]]
+        .map(([i, j]) => f.contains(document.elementFromPoint(i, j)));
+    return {focusRing: f.matches(':focus-visible') && outer.outlineStyle === 'solid' && px(outer.outlineWidth) > 0,
+            ringInside: r.top - ring >= top - 0.5 && r.bottom + ring <= bottom + 0.5
+                && r.left - ring >= left - 0.5 && r.right + ring <= right + 0.5,
+            hitInside: hitTop >= top - 0.5 && hitBottom <= bottom + 0.5
+                && hitLeft >= left - 0.5 && hitRight <= right + 0.5,
+            hitSize: [hitRight - hitLeft, hitBottom - hitTop], clearHits, touch,
+            remainingScroll: side.scrollHeight - side.clientHeight - side.scrollTop,
+            bottomRoom: bottom - r.bottom,
+            scrollMargins: [outer.scrollMarginBlockStart, outer.scrollMarginBlockEnd]};
+}"""
+
+
+@pytest.mark.parametrize(('width', 'height', 'touch'), [(1100, 480, False), (390, 570, True)],
+                         ids=['desk', 'phone-drawer'])
+def test_short_column_keyboard_reveals_the_whole_footer_control(shell_ui, tmp_path, width, height, touch):
+    """The whole column scrolls although the rail fits. A real keyboard step must expose the ring and touch reach,
+    not merely the bottom control's border box. No button in the footer is focused programmatically."""
+    page, world = rail_page(shell_ui, width, height, lang='en', touch=touch)
+    facts = {'engine': shell_ui['engine'], 'size': [width, height]}
+    try:
+        if touch:
+            open_drawer(page)
+            fwd, rev = _choose_rail_tab_keys(page)
+        else:
+            fwd, rev = ('Alt+Tab', 'Alt+Shift+Tab') if shell_ui['engine'] == 'webkit' else ('Tab', 'Shift+Tab')
+        facts['keys'] = [fwd, rev]
+        assert page.evaluate(SHORT)
+        assert [row['node'] for row in sidebar_metrics(page)] == ['primary-sidebar']
+        assert not page.evaluate(CROWD) and page.evaluate(RAIL)['position'] == 'sticky'
+        page.locator('#nav-version-check').wait_for(state='visible')
+        last_project = page.locator('#nav-projects-list .nav-project-row').last
+
+        def measure(name, key, sel, *, from_projects=False):
+            el = page.locator(sel)
+            if from_projects:
+                assert last_project.evaluate("el => { el.focus({preventScroll: true});"
+                                             " document.getElementById('primary-sidebar').scrollTop = 0;"
+                                             " return document.activeElement === el; }")
+                assert page.evaluate(AT_EDGE) == [False, 0]
+            for _ in range(8 if from_projects else 1):
+                page.keyboard.press(key)
+                settle(page)
+                if el.evaluate('el => document.activeElement === el'):
+                    break
+            else:
+                raise AssertionError((name, key, page.evaluate(FOCUS)))
+            facts[name] = page.evaluate(FOOT_FOCUS)
+            setup_browser.capture(page, f'sidebar-foot-{width}x{height}-{shell_ui["engine"]}-{name}')
+
+        measure('version', fwd, '#nav-version-check', from_projects=True)
+        world['status'] = dict(REST, update_progress={'operation_id': 'short-footer-failure', 'generation': 'g',
+                                                    'active': False, 'outcome': 'failed', 'error': 'Simulated failure',
+                                                    'outcome_at': '2026-11-21T10:13:00Z'})
+        page.evaluate("window.__ouroWs.emit('update_progress_changed', {})")
+        page.locator('.update-notice-close').wait_for(state='visible')
+        measure('pill', fwd, '#update-pill', from_projects=True)
+        measure('close', fwd, '.update-notice-close')
+        measure('pill_reverse', rev, '#update-pill')
+    finally:
+        evidence(tmp_path, f'short-footer-keyboard-{width}x{height}-{shell_ui["engine"]}', facts)
+        page.close()
+    for name in ('version', 'pill', 'close', 'pill_reverse'):
+        stop = facts[name]
+        assert stop['focusRing'] and stop['ringInside'] and stop['hitInside'] and all(stop['clearHits']), (name, facts)
+        assert stop['touch'] == touch and (not touch or min(stop['hitSize']) >= 43.5), (name, facts)
+
+
 def test_a_very_short_drawer_reveals_rail_version_and_update_controls_by_keyboard(shell_ui, tmp_path):
     """In a 568×320 landscape touch drawer (30+ room rows), the rail is taller than the sidebar's content box while
-    the head and one row still fit (`data-rail-crowd` true and stable over 12 frames, `data-bars-crowd` false, single
-    scroller). Unpinning the rail lets genuine forward and reverse keyboard focus walks scroll every rail control —
-    ordinary `#nav-version-check` and active `#update-pill` + `.update-notice-close` — cleanly inside sidebar bounds
-    with passing hit-tests, and resizing to 390×570 and 390×844 restores sticky/tall behavior."""
+    the head and one row still fit (rail crowd is stable, bars crowd is off, one scroller). The unpinned rail and
+    the footer controls are reached in both directions by the keyboard, inside sidebar bounds and unobstructed.
+    Resizing to 390×570 and 390×844 restores sticky/tall behavior."""
     page, world = rail_page(shell_ui, 568, 320, lang='en', touch=True)
     facts = {'engine': shell_ui['engine']}
     try:
         open_drawer(page)
+        # Give the keyboard a following stop without wrapping at the drawer trap or adding a grid item.
+        page.evaluate("""() => document.querySelector('.sidebar-foot-meta').after(Object.assign(
+            document.createElement('button'), {id: 'after-test-foot', type: 'button',
+                style: 'position:absolute; inset:0 auto auto 0; width:1px; height:1px; opacity:0; pointer-events:none;'}))""")
         page.wait_for_function(
             "() => { const c = document.getElementById('nav-version-check');"
             " return Boolean(c && !c.hidden && c.contains(document.getElementById('nav-version'))); }"
@@ -873,7 +989,10 @@ def test_a_very_short_drawer_reveals_rail_version_and_update_controls_by_keyboar
             page, rev, '#primary-sidebar .sidebar-head [data-nav-page="chat"]',
             include_start=False, stop_on='nav-drawer-close',
         )
-        # Switch to a terminal failed update attempt so both #update-pill and .update-notice-close are rendered.
+        facts['ordinary_foot_rev'] = _walk_rail_keyboard(
+            page, rev, '#after-test-foot', include_start=False, limit=1,
+        )
+        # A simulated terminal failure replaces the check with an Update capsule and its dismiss button.
         world['status'] = dict(
             REST,
             update_progress={
@@ -903,6 +1022,9 @@ def test_a_very_short_drawer_reveals_rail_version_and_update_controls_by_keyboar
             page, rev, '#primary-sidebar .sidebar-head [data-nav-page="chat"]',
             include_start=False, stop_on='nav-drawer-close',
         )
+        facts['update_foot_rev'] = _walk_rail_keyboard(
+            page, rev, '#after-test-foot', include_start=False, limit=2,
+        )
         # Recovery to normal short drawer (390×570, sticky rail) and tall drawer (390×844, list-only scroller).
         page.set_viewport_size({'width': 390, 'height': 570})
         settle(page)
@@ -931,20 +1053,32 @@ def test_a_very_short_drawer_reveals_rail_version_and_update_controls_by_keyboar
         holds = facts[label]
         assert holds['rail'] == [True] * 12 and holds['bars'] == [False] * 12, (label, facts)
         assert holds['railPosition'] == 'static' and holds['headPosition'] == 'sticky', (label, facts)
+    # The drawer's close leads the rail; Main and Projects separate it from the footer in document order.
+    def rail_foot_ids(stops):
+        return [s['id'] for s in stops if s['id'] in ordinary_order or s['id'] in update_order]
     ordinary_order = ['nav-drawer-close', 'circles', 'files', 'widgets', 'dashboard', 'settings', 'nav-version-check']
     update_order = ['nav-drawer-close', 'circles', 'files', 'widgets', 'dashboard', 'settings', 'update-pill', 'update-notice-close']
-    assert [s['id'] for s in facts['ordinary_fwd']] == ordinary_order, facts
-    assert [s['id'] for s in facts['ordinary_rev']] == list(reversed(ordinary_order)), facts
-    assert [s['id'] for s in facts['update_fwd']] == update_order, facts
-    assert [s['id'] for s in facts['update_rev']] == list(reversed(update_order)), facts
-    for walk_name in ('ordinary_fwd', 'ordinary_rev', 'update_fwd', 'update_rev'):
+    assert rail_foot_ids(facts['ordinary_fwd']) == ordinary_order, facts
+    assert rail_foot_ids(facts['ordinary_rev']) == list(reversed(ordinary_order[:-1])), facts
+    assert rail_foot_ids(facts['update_fwd']) == update_order, facts
+    assert rail_foot_ids(facts['update_rev']) == list(reversed(update_order[:-2])), facts
+    assert [s['id'] for s in facts['ordinary_foot_rev']] == ['nav-version-check'], facts
+    assert [s['id'] for s in facts['update_foot_rev']] == ['update-notice-close', 'update-pill'], facts
+    for walk_name in ('ordinary_fwd', 'ordinary_rev', 'update_fwd', 'update_rev', 'ordinary_foot_rev', 'update_foot_rev'):
         for stop in facts[walk_name]:
-            assert stop['inBounds'] and stop['hitSelf'], (walk_name, stop, facts)
-    assert facts['ordinary_fwd'][-1]['scrollTop'] > 0 and facts['ordinary_rev'][0]['scrollTop'] > 0, facts
-    assert facts['ordinary_rev'][-1]['scrollTop'] < facts['ordinary_rev'][0]['scrollTop'], facts
-    assert facts['update_fwd'][-2]['scrollTop'] > 0 and facts['update_fwd'][-1]['scrollTop'] > 0, facts
-    assert facts['update_rev'][0]['scrollTop'] > 0 and facts['update_rev'][1]['scrollTop'] > 0, facts
-    assert facts['update_rev'][-1]['scrollTop'] < facts['update_rev'][0]['scrollTop'], facts
+            # The sight test is the walk's own subject: the rail's and the foot's controls. The Projects' own
+            # inputs between them are not what this walk proves — a field the column scrolled under its head
+            # stays as it is (the crowd tests above own that).
+            if stop['id'] in ordinary_order or stop['id'] in update_order:
+                assert stop['inBounds'] and stop['hitSelf'], (walk_name, stop, facts)
+    for walk_name, targets in (('ordinary_fwd', ['nav-version-check']),
+                               ('update_fwd', ['update-pill', 'update-notice-close'])):
+        assert all(s['scrollTop'] > 0 for s in facts[walk_name] if s['id'] in targets), facts
+    for walk_name in ('ordinary_rev', 'update_rev'):
+        walk = facts[walk_name]
+        assert walk[0]['scrollTop'] > walk[-1]['scrollTop'], facts
+    for walk_name in ('ordinary_foot_rev', 'update_foot_rev'):
+        assert all(s['scrollTop'] > 0 for s in facts[walk_name]), facts
     r570, r844 = facts['recover_570'], facts['recover_844']
     assert r570['short'] is True and r570['scrollers'] == ['primary-sidebar'], r570
     assert r570['holds']['rail'] == [False] * 12 and r570['holds']['bars'] == [False] * 12, r570

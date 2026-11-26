@@ -189,6 +189,32 @@ def page_receipts(root, message_ids) -> dict:
         return {}
 
 
+def _origin_message_id(ref):
+    return str(ref.get("client_message_id") or "")
+
+
+class HistoryPageReceipts:
+    """One page's routing receipts; a newly encountered origin may extend the initial batch."""
+
+    def __init__(self, root, chat_rows, origin_refs):
+        from ouroboros.dialogue_provenance import declared_author
+
+        self.root = root
+        self.asked = {_origin_message_id(ref) for ref in origin_refs} - {""}
+        self.asked.update(
+            str(cmid) for row in chat_rows
+            if row.get("role") != "system" and str(row.get("direction", "")).lower() == "in"
+            and not declared_author(row) and (cmid := row.get("client_message_id")) not in (None, "")
+        )
+        self.rows = page_receipts(root, self.asked)
+
+    def include_origin(self, message_id, origins, index):
+        if message_id and message_id not in self.asked:
+            extra = {_origin_message_id(row.get("ref") or {}) for row in origins[index:]} - self.asked - {""}
+            self.asked = self.asked | extra  # keep the initial batch's filter intact
+            self.rows.update(page_receipts(self.root, extra))
+
+
 def placed_token_receipts(root, message_ids, token):
     """One act's saved facts per source, including a legacy fact that remains unplaced."""
     placed, _ = _placed_annotations(root, by_token=True, message_ids=message_ids)

@@ -164,6 +164,7 @@ class StorageFree(TypedDict):
     error: Optional[str]
 
 
+# There is no "select all" on the wire: the client sends each id; two forms answer `selection_conflict`.
 class StorageFreeRequest(TypedDict):
     """``POST /api/storage/free``: the plan id the preview answered with and what to free of it:
     exact ``items`` of the ordinary pool, whole ``groups``, or the exact ``manual`` discards with
@@ -171,9 +172,11 @@ class StorageFreeRequest(TypedDict):
 
     plan: str
     groups: NotRequired[List[str]]  # ids of GROUPS
-    items: NotRequired[List[str]]  # ids of ``view=pool``
-    manual: NotRequired[List[str]]  # ids of ``view=manual``
-    accept_loss: NotRequired[bool]  # exactly true: the listed unsaved paths of ``manual`` are lost
+    items: NotRequired[List[str]]  # ids of ``view=pool``; any bad id refuses the whole request
+    manual: NotRequired[List[str]]  # ids of ``view=manual``, each one the owner chose; one not offered, unknown or outdated refuses the whole request
+    # Send true only after the owner accepts losing the whole selected copy or scratch entry, including
+    # contents not listed, or the exact files of a payload offer. Otherwise: ``loss_not_accepted``.
+    accept_loss: NotRequired[bool]
 
 
 class _Stopped(Exception):

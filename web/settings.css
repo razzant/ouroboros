@@ -1617,6 +1617,10 @@ textarea.ui-control.settings-rules-text {
 
 /* A key's page: its fields side by side while they fit, then Save and Test with one result line. */
 .accounts-key-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: var(--space-3); align-items: start; }
+/* A compatible key's consent: across the form, its sentence wrapping beside the box. */
+.accounts-key-consent { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: var(--space-2); min-width: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
+.accounts-key-consent > .ui-checkbox { flex: none; margin-top: calc((var(--type-body) * var(--line-body) - 14px) / 2); }
+.accounts-key-consent[hidden] { display: none; }
 .accounts-key .ui-action-row > .ui-result:empty { display: none; }
 .accounts-key .settings-card-note code { overflow-wrap: anywhere; }
 

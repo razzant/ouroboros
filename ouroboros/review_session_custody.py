@@ -646,6 +646,11 @@ def _continuation_ended(invocation: Any, end: Optional[float], request: Dict[str
         slot_ids=[invocation.slot_id], extra={"continuation": True, "at_send": True})
     if admission is not None:
         fence, remedy = review_wave_binding_fence(admission)
+        if admission.get("reason") == "billing_authority_unavailable":
+            raise ReviewRouteUnavailable(
+                f"{fence}, so this continuation's recorded start was not POSTed: its outcome stays unknown, "
+                f"its key and bytes kept, and no collection re-posts it. To review again, {remedy} first.",
+                code="continuation_billing_authority_unavailable")
         raise ReviewRouteUnavailable(f"known spend has reached the {fence}, so this continuation's recorded start was "
                                      "not POSTed: its outcome stays unknown, its key and bytes kept, and no collection "
                                      f"re-posts it. To review again, {remedy} first.", code="continuation_budget_insufficient")

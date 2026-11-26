@@ -1,9 +1,8 @@
 """Human/test-visible HTTP endpoint index for the browser gateway ABI.
 
 Routers own the executable Route objects; this tuple is the reviewable
-contract index consumed by the parity/reliability suites. It lives beside
-``gateway/contracts.py`` (which re-exports it) so the mirror file keeps its
-TypedDict envelopes within the module size gate.
+contract index consumed by the parity/reliability suites. It lives apart from
+the TypedDict envelopes in ``gateway/contracts.py``, which re-exports it.
 
 ``HTTP_SHAPES`` and ``WS_SHAPES`` bind contract TypedDicts (by name) to entries
 of the two frozen index tuples; ``GET /api/contract`` derives the published
@@ -66,6 +65,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/peer-links/invite",
     "POST /api/peer-links/accept",
     "POST /api/peer-links/introduce",
+    "GET /api/peer-links/{link_id}",
     "POST /api/peer-links/{link_id}/confirm",
     "POST /api/peer-links/{link_id}/revoke",
     "POST /api/skills/{skill}/publish-preflight",
@@ -393,6 +393,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/peer-links/introduce": Shape("200:json 400,401,403,503:json", headers="X-Ouroboros-Invite!",
                                             note="the accepting side's call {link_id, install_id, url, key_sha256, "
                                                  "label?, may_start?, protocol?} under the one-time invitation token"),
+    "GET /api/peer-links/{link_id}": Shape("200,403,503:json", note="owner only: link null or {link_id, place_id, peer_label, peer_install_id, code, code_check, revoked_at}"),
     "POST /api/peer-links/{link_id}/confirm": Shape("200:json 400,401,503:json",
                                                     note="owner door: the six digits match here; the link's place starts"),
     "POST /api/peer-links/{link_id}/revoke": Shape("200:json 400,401,503:json",
@@ -416,14 +417,18 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/tasks": Shape("200:TaskListResponse 503:ErrorResponse", query="status limit queue_only"),
     "GET /api/tasks/{task_id}": Shape("200:TaskDetailResponse 400,404,503:ErrorResponse"),
     "GET /api/tasks/{task_id}/artifacts/{name}": Shape(
-        "200,206:file 400,404,409,410,500,503:ErrorResponse", query="relpath archive source", headers="Range",
-        note="Range supported; x-ouroboros-artifact-sha256 when the bytes are verified"),
+        "200,206:file 400,404,409,410,500,503:ErrorResponse", query="relpath archive source letter", headers="Range",
+        note="Range supported; x-ouroboros-artifact-sha256 when the bytes are verified; ?letter=<letter id> with "
+             "{letter_id}.letter.txt or .answer.txt: the whole words of that letter of this task as text, read on "
+             "demand from this side's records (409 reply_not_given: never a reply not given to this sender)"),
     "GET /api/tasks/{task_id}/events": Shape(
         "200:sse/TaskEvent 400,404:sse", query="cursor wait",
         note="resume with ?cursor=<last event id>; a 400/404 stream carries one error event"),
     "GET /api/tasks/{task_id}/reviews": Shape(
         "200:TaskReviewHistoryResponse 400,503:ErrorResponse", query="offset limit",
         note="passive paged ledger history for this exact task, with per-record gaps; no-store"),
+    # Both text exports carry X-Review-Export-SHA256 (delivered redacted bytes).
+    # The exact ledger/plan source export also carries X-Review-Source-SHA256 (saved original bytes).
     "GET /api/tasks/{task_id}/reviews/skill/{job_id}": Shape(
         "200:text 400,404,503:ErrorResponse", query="skill format",
         note="task-bound saved skill detail export; complete safe normalized text, no-store; existing desktop bridge prefix"),

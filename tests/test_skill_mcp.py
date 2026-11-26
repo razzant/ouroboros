@@ -5,7 +5,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
-import pathlib
 import queue
 import sys
 import types
@@ -1045,15 +1044,11 @@ def test_import_never_rewrites_a_bound_row():
     assert entry["action"] == "" and entry["patch"] == {} and "skill 'chrome_browser'" in entry["problems"][0]
 
 
-def test_connect_contract_twin_and_producers_agree(world):
+def test_connect_contract_and_producers_agree(world):
     from ouroboros.gateway import skill_mcp_contracts as contracts
     from ouroboros.gateway.endpoint_index import HTTP_ENDPOINTS
     from ouroboros.gateway.schema import validate_ingress
-    from tests.test_gateway_parity import _js_typedef_fields
 
-    twin = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "skill_mcp_types.js").read_text()
-    for name in contracts.__all__:
-        assert _js_typedef_fields(twin, name) == set(typing.get_type_hints(getattr(contracts, name))), name
     _write_settings(world, _settings())
     preview = skill_mcp.preview_connect(world.data, "chrome_browser")
     assert set(preview) <= set(typing.get_type_hints(contracts.SkillMcpConnectPreviewResponse))
@@ -1064,8 +1059,6 @@ def test_connect_contract_twin_and_producers_agree(world):
     assert {"GET /api/skills/{skill}/mcp-connect", "POST /api/skills/{skill}/mcp-connect"} <= set(HTTP_ENDPOINTS)
     assert validate_ingress({"expected_content_hash": "h", "settings_digest": "d"}, contracts.SkillMcpConnectRequest) == []
     assert validate_ingress({"settings_digest": "d"}, contracts.SkillMcpConnectRequest)
-    api_types = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js").read_text()
-    assert "skill_mcp_types.js" in api_types.splitlines()[0]
     assert sys.modules["ouroboros.gateway.skill_mcp_contracts"] is contracts
 
 

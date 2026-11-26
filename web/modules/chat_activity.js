@@ -17,6 +17,8 @@ import { fmt, tr } from './i18n.js';
 import { ownerMessageBubble } from './chat_history_replay.js';
 import { placeIngressNote } from './chat_attachments.js';
 import { hostRowDisplayText, hostSentenceText, noticeBody } from './host_notice_text.js';
+import { rawTimestampEpoch } from './chat_timeline_order.js';
+export { rawTimestampEpoch, stampNodeTimestamp } from './chat_timeline_order.js';
 export { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
 import {
     projectMarkdownLines, MARKDOWN_FENCED_CODE, accountedUpperBound,
@@ -63,6 +65,7 @@ export function senderLabel(role, isProgress = false, systemType = '', opts = {}
         return 'System';
     }
     if (isProgress) return 'Thought';
+    if (systemType === 'peer_letter' && opts.senderLabel) return opts.senderLabel;
     // A self-initiated turn (a consciousness wake-up) signs its final bubble
     // through the same sender line the user bubble uses for its source.
     if (opts.initiator === 'consciousness') return 'Ouroboros · Consciousness';
@@ -327,22 +330,6 @@ export function toolEvidenceView(fold = null) {
         calls,
         errors,
     };
-}
-
-// Sortable data-ts stamping for timeline nodes; anchor mode only ever moves a
-// node's effective timestamp earlier so replay cannot teleport it downward.
-export function stampNodeTimestamp(node, raw, { anchor = false } = {}) {
-    if (!node) return false;
-    const epoch = rawTimestampEpoch(raw);
-    if (!Number.isFinite(epoch)) return false;
-    if (anchor && node.dataset.ts) {
-        const current = Number(node.dataset.ts);
-        const next = Number.isFinite(current) ? Math.min(current, epoch) : epoch;
-        if (node.dataset.ts !== String(next)) node.dataset.ts = String(next);
-        return Number.isFinite(current) && next < current;
-    }
-    if (node.dataset.ts !== String(epoch)) node.dataset.ts = String(epoch);
-    return false;
 }
 
 export function durableChatMediaUrl(value) {
@@ -615,13 +602,6 @@ export function bindContentButton(el, onActivate, isActive = () => true) {
             if (!event.repeat) el.click();
         }
     });
-}
-
-/** Convert a raw source timestamp to sortable epoch milliseconds. */
-export function rawTimestampEpoch(raw) {
-    if (raw == null || raw === '') return NaN;
-    const epoch = typeof raw === 'number' ? raw : Date.parse(String(raw));
-    return Number.isFinite(epoch) ? epoch : NaN;
 }
 
 function optionalFiniteNumber(value) {
@@ -1083,36 +1063,6 @@ export function partitionLocalEchoJournal(journal, serverClientMessageIds) {
         else unconfirmed.push(entry);
     }
     return { confirmed, unconfirmed };
-}
-
-/** Legacy delivery correlation; client ids are scoped to the room the owner wrote in. */
-export function buildMessageKey(role, text, timestamp, opts = {}) {
-    if (opts.clientMessageId) {
-        const room = role === 'user' && opts.ownerChatId !== opts.chatId ? `room:${opts.ownerChatId}|` : '';
-        return `${room}client|${opts.clientMessageId}`;
-    }
-    if (role !== 'user' && !opts.isProgress && opts.taskId) {
-        return [
-            'task',
-            role,
-            opts.systemType || '',
-            opts.source || '',
-            opts.taskId,
-            text,
-        ].join('|');
-    }
-    if (!timestamp) return '';
-    return [
-        role,
-        opts.isProgress ? '1' : '0',
-        opts.systemType || '',
-        opts.source || '',
-        opts.senderLabel || '',
-        opts.senderSessionId || '',
-        opts.taskId || '',
-        timestamp,
-        text,
-    ].join('|');
 }
 
 // Only a reload onto changed code earns a feed notice; any other reload reason or reconnect is silent.

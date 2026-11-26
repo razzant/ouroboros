@@ -1,0 +1,16 @@
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.000Z","message":{"role":"assistant","content":"Л"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.001Z","message":{"role":"assistant","content":"АЗ"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.002Z","message":{"role":"assistant","content":"У"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.003Z","message":{"role":"assistant","content":"Р"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.004Z","message":{"role":"assistant","content":"НЫЙ"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.005Z","message":{"role":"assistant","content":"_"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.006Z","message":{"role":"assistant","content":"КА"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.007Z","message":{"role":"assistant","content":"П"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.008Z","message":{"role":"assistant","content":"ИБ"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.009Z","message":{"role":"assistant","content":"А"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.010Z","message":{"role":"assistant","content":"РА"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.011Z","message":{"role":"assistant","content":"_"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.012Z","message":{"role":"assistant","content":"9"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.013Z","message":{"role":"assistant","content":"1"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.014Z","message":{"role":"assistant","content":"7"},"done":false}
+{"model":"qwen-stand:latest","created_at":"2000-01-01T00:00:00.015Z","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","total_duration":10000000000,"load_duration":2000000,"prompt_eval_count":44498,"prompt_eval_cached_count":0,"prompt_eval_duration":9600000000,"eval_count":16,"eval_duration":380000000}

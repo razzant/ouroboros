@@ -71,8 +71,6 @@ def test_only_protected_contract_and_prompt_paths_are_owed_in_full(tmp_path):
         "ouroboros/safety.py": "modified",
         "prompts/SYSTEM.md": "modified",
         "ouroboros/contracts/tool_abi.py": "added",
-        # The contract package declares its cross-language twin.
-        "web/modules/api_types.js": "twin",
     }
     # A merely-touched ordinary file is a POINTER, never a required source: its
     # complete change evidence is the inlined diff.
@@ -123,19 +121,79 @@ def test_the_tool_dispatch_family_is_read_from_the_protection_constant(tmp_path)
     assert {row["path"] for row in rows} == family
 
 
-def test_api_types_touched_owes_its_host_contract_twin(tmp_path):
-    repo = _repo(tmp_path)
-    _write(repo, "web/modules/api_types.js", "export const V = 1;\n")
-    _write(repo, "ouroboros/gateway/contracts.py", "V = 1\n")
-    _commit(repo)
+def test_required_sources_keep_value_twins_but_not_retired_shape_mirrors(tmp_path):
+    web = "web/modules/api_types.js"
+    owners = ("VERSION", "ouroboros/gateway/task_decision.py", "ouroboros/tools/core_artifacts.py")
+    shape_owners = ("ouroboros/gateway/contracts.py", "ouroboros/contracts/tool_abi.py")
+    for rel in (web, *owners, *shape_owners):
+        _write(tmp_path, rel, f"{rel}\n")
 
-    rows = scope_required_sources(repo, [("M", "web/modules/api_types.js")])
-    owed = {row["path"]: row["disposition"] for row in rows}
-    # One contract, two languages: both sides are owed in full.
-    assert owed == {
-        "web/modules/api_types.js": "modified",
-        "ouroboros/gateway/contracts.py": "twin",
+    def owed(path, *, layer="body"):
+        rows = scope_required_sources(tmp_path, [("M", path)], layer=layer)
+        assert all(row["coverage_basis"] == "candidate_blob" for row in rows)
+        return {row["path"]: row["disposition"] for row in rows}
+
+    for path in shape_owners:
+        assert owed(path) == {path: "modified"}
+    assert owed(web) == {web: "modified", **dict.fromkeys(owners, "twin")}
+    for owner in owners:
+        assert owed(owner) == {owner: "modified", web: "twin"}
+    assert owed(web, layer="core") == {}
+
+
+@pytest.mark.parametrize("order", ["modified_first", "deleted_first"])
+def test_a_joint_edit_keeps_both_direct_statuses_in_either_input_order(tmp_path, order):
+    """A touched path's own status outranks the ``twin`` label in BOTH orders.
+
+    One change bumps ``VERSION`` and deletes its browser twin. Each direct
+    status must survive whichever row the caller lists first: ``VERSION`` stays
+    ``modified`` and the deleted twin keeps its preimage obligation. Before the
+    fix each order silently downgraded one of the two to ``twin``.
+    """
+    web = "web/modules/api_types.js"
+    owners = ("VERSION", "ouroboros/gateway/task_decision.py",
+              "ouroboros/tools/core_artifacts.py")
+    for path in owners:
+        _write(tmp_path, path, f"{path}\n")
+    # The browser twin is DELETED in this change: absent from the candidate tree.
+    pairs = [("M", "VERSION"), ("D", web)]
+    if order == "deleted_first":
+        pairs.reverse()
+
+    rows = scope_required_sources(tmp_path, pairs)
+    owed = {row["path"]: row for row in rows}
+    assert set(owed) == set(owners) | {web}
+    assert owed["VERSION"]["disposition"] == "modified"
+    assert owed["VERSION"]["coverage_basis"] == "candidate_blob"
+    assert owed[web]["disposition"] == "deleted"
+    assert owed[web]["coverage_basis"] == "preimage_unavailable"
+    assert owed[web]["preimage"] == f"HEAD:{web}"
+    for path in ("ouroboros/gateway/task_decision.py",
+                 "ouroboros/tools/core_artifacts.py"):
+        assert owed[path]["disposition"] == "twin"
+        assert owed[path]["coverage_basis"] == "candidate_blob"
+
+
+@pytest.mark.parametrize("order", ["modified_first", "twin_first"])
+def test_a_joint_edit_of_two_modified_twins_keeps_both_direct_statuses(tmp_path, order):
+    """The same order-independence without the deletion: both sides stay ``modified``."""
+    web = "web/modules/api_types.js"
+    owners = ("VERSION", "ouroboros/gateway/task_decision.py",
+              "ouroboros/tools/core_artifacts.py")
+    for path in (*owners, web):
+        _write(tmp_path, path, f"{path}\n")
+    pairs = [("M", "VERSION"), ("M", web)]
+    if order == "twin_first":
+        pairs.reverse()
+
+    rows = scope_required_sources(tmp_path, pairs)
+    assert {row["path"]: row["disposition"] for row in rows} == {
+        "VERSION": "modified",
+        web: "modified",
+        "ouroboros/gateway/task_decision.py": "twin",
+        "ouroboros/tools/core_artifacts.py": "twin",
     }
+    assert all(row["coverage_basis"] == "candidate_blob" for row in rows)
 
 
 def test_a_deleted_required_source_keeps_its_preimage_obligation(tmp_path):

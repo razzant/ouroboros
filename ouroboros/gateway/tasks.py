@@ -42,7 +42,7 @@ from ouroboros.gateway.task_pause import api_task_pause, owner_tree_control_rout
 from ouroboros.gateway.task_decision import api_decision_answer  # noqa: F401
 from ouroboros.gateway.task_archive import (
     chat_media_identity, directory_archives, download_refusal, plain_segments, serve_directory_archive, serve_task_file,
-    task_artifact_location, recorded_identity, serve_task_source, serve_wrap_up_document,
+    task_artifact_location, recorded_identity, serve_letter_words, serve_task_source, serve_wrap_up_document,
 )
 from ouroboros.confined_files import root_spellings
 from ouroboros.task_custody import task_artifact_stores
@@ -960,7 +960,8 @@ def api_task_artifact(request: Request):
     name selects only a top-level file (several nested matches: 409 ``artifact_name_ambiguous`` naming
     their ``relpaths``), ``?relpath=a/b/{name}`` is exact, ``?archive=<dir>`` with ``{name}`` =
     ``<basename>.zip`` streams a recorded directory, ``?wrap_up=<Stop request>`` writes the detail's
-    ``wrap_up_document`` on read; a file's bytes leave only through ``serve_task_file``."""
+    ``wrap_up_document`` on read, ``?letter=<letter id>`` a letter's whole words (``serve_letter_words``); a file's
+    bytes leave only through ``serve_task_file``."""
     try:
         task_id = validate_task_id(request.path_params.get("task_id"))
     except ValueError as exc:
@@ -975,8 +976,11 @@ def api_task_artifact(request: Request):
         return json_error("relpath must be store-relative plain segments ending in the name, without source",
                           400, reason_code="artifact_relpath_invalid", task_id=task_id, artifact=name)
     drive_root = request_drive_root(request)
-    # One selector per request: ``archive`` and ``wrap_up`` refuse each other and relpath/source.
-    archive, stop = request.query_params.get("archive"), request.query_params.get("wrap_up")
+    # One selector per request: ``archive``, ``wrap_up`` and ``letter`` refuse each other and relpath/source.
+    archive, stop, letter = (request.query_params.get(key) for key in ("archive", "wrap_up", "letter"))
+    if letter is not None:
+        return serve_letter_words(drive_root, task_id, name, letter, other_selectors=any(
+            selector is not None for selector in (source, relpath, archive, stop)))
     if archive is not None:
         return serve_directory_archive(drive_root, task_id, name, archive, other_selectors=(
             source is not None or relpath is not None or stop is not None))

@@ -17,6 +17,7 @@
     <link rel="stylesheet" href="/static/room_work.css">
     <link rel="stylesheet" href="/static/cards.css">
     <link rel="stylesheet" href="/static/consciousness.css">
+    <link rel="stylesheet" href="/static/peer_links.css">
     <link rel="icon" href="/static/favicon.png" type="image/png">
     <script src="/static/chart.umd.min.js"></script>
     <script src="/static/purify.min.js"></script>
@@ -33,7 +34,7 @@
             <div class="nav-rail">
                 <!-- The drawer's one close control (stack layout only), capping the rail. -->
                 <button id="nav-drawer-close" class="shell-icon-control nav-drawer-close" type="button" aria-label="Close navigation" aria-controls="primary-sidebar"></button>
-                <!-- The places and the version row, rendered from the page registry (pages.js) — the registry names the places -->
+                <!-- The rail's places, rendered from the page registry (pages.js) — the registry names the places -->
             </div>
             <div class="sidebar-head">
                 <!-- Main Chat: rendered from the page registry (pages.js) -->
@@ -42,6 +43,8 @@
                 <div class="nav-projects-header"><!-- rendered from pages.js --></div>
                 <div id="nav-projects-list" class="nav-projects-list"></div>
             </section>
+            <!-- The static version row is adopted by mountNavRail (pages.js). -->
+            <div class="sidebar-foot-meta"><span id="nav-version"></span></div>
         </nav>
         <main id="content">
             <!-- Pages injected by JS -->

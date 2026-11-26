@@ -1,8 +1,6 @@
 """Positive and negative controls for composed ChatOutbound metadata."""
 from __future__ import annotations
 
-import pathlib
-
 import pytest
 
 from tests import test_contracts as contracts
@@ -50,19 +48,19 @@ def test_sibling_function_cannot_certify_a_helper_call(tmp_path):
         collect(tmp_path, source)
 
 
-@pytest.mark.parametrize("carrier", ["python", "js"])
-def test_removing_the_receipt_field_from_either_contract_fails(tmp_path, monkeypatch, carrier):
-    if carrier == "python":
-        from ouroboros.gateway.contracts import ChatOutbound
+def test_removing_the_receipt_field_from_the_wire_contract_fails(tmp_path, monkeypatch):
+    from ouroboros.gateway.contracts import ChatOutbound
 
-        monkeypatch.delitem(ChatOutbound.__annotations__, "terminal_receipt")
-    else:
-        original = pathlib.Path.read_text
-
-        def without_receipt(path, *args, **kwargs):
-            text = original(path, *args, **kwargs)
-            return text.replace("terminal_receipt", "removed_receipt") if path.name == "api_types.js" else text
-
-        monkeypatch.setattr(pathlib.Path, "read_text", without_receipt)
+    monkeypatch.delitem(ChatOutbound.__annotations__, "terminal_receipt")
     with pytest.raises(AssertionError, match="terminal_receipt"):
         contracts.test_chat_outbound_declares_progress_meta_keys_used_by_runtime(tmp_path)
+
+
+def test_the_published_chat_frame_keeps_the_optional_receipt_discriminator():
+    from ouroboros.gateway.schema import contract_document
+
+    document = contract_document()
+    name = next(frame["outbound"] for frame in document["ws"]["messages"] if frame["type"] == "chat")
+    schema = document["schemas"][name]
+    assert schema["properties"]["terminal_receipt"] == {"enum": ["retained_work"]}
+    assert "terminal_receipt" not in schema.get("required", ())

@@ -12,7 +12,7 @@ function page(index, { last = 4, messages, chain = 'A' } = {}) {
     };
 }
 
-function harness({ fetch, maxPages = 3 } = {}) {
+function harness({ fetch, maxPages = 3, rebaseOlderEdge } = {}) {
     const calls = [], applied = [], released = [], states = [], protectedIds = new Set();
     let live = true;
     const pager = createChatHistoryPager({
@@ -27,6 +27,7 @@ function harness({ fetch, maxPages = 3 } = {}) {
         isAlive: () => live,
         onState: state => states.push(state),
         maxPages,
+        rebaseOlderEdge,
     });
     return { pager, calls, applied, released, states, protectedIds, setAlive: value => { live = value; } };
 }
@@ -112,19 +113,19 @@ test('edge walks past empty pages to the first rows, and reads the present first
         const [, chain, at] = cursor.split(':'), index = Number(at);
         return page(index, { chain, messages: index < 3 ? [] : undefined });
     };
-    const walk = harness({ fetch: reads });
-    walk.pager.acceptRecent(page(0));
     let asked = null;
-    const walked = await walk.pager.edge('older', { tags: { reason: 'navigate' }, rebase: state => { asked = state; return false; } });
+    const walk = harness({ fetch: reads, rebaseOlderEdge: state => { asked = state; return false; } });
+    walk.pager.acceptRecent(page(0));
+    const walked = await walk.pager.edge('older', { tags: { reason: 'navigate' } });
     assert.equal(walked.status, 'applied');
     assert.equal(walked.messageCount, 1, 'the walk stops at the first page with rows');
     assert.deepEqual(walk.calls.map(call => call.cursor), ['before:A:1', 'before:A:2', 'before:A:3'],
         'one walk crosses every empty page; no present read without a rebase');
     assert.equal(asked.canOlder, true, 'rebase weighs the state the walk began from');
 
-    const rebased = harness({ fetch: reads });
+    const rebased = harness({ fetch: reads, rebaseOlderEdge: () => true });
     rebased.pager.acceptRecent(page(0));
-    await rebased.pager.edge('older', { tags: { reason: 'read_receipt' }, rebase: () => true });
+    await rebased.pager.edge('older', { tags: { reason: 'read_receipt' } });
     assert.equal(rebased.calls[0].cursor, null, 'the present is read first');
     assert.deepEqual(rebased.calls[0].tags, { reason: 'read_receipt', mode: 'newest', decision: 'horizon_gap' });
     assert.deepEqual(rebased.calls.slice(1).map(call => call.cursor), ['before:P:1', 'before:P:2', 'before:P:3'],

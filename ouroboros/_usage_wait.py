@@ -24,6 +24,22 @@ _CANCEL = contextvars.ContextVar("usage_presend_cancel", default=None)
 _CLEANUP = contextvars.ContextVar("usage_cleanup", default=False)
 # Acquisition slicing controls responsiveness, not lifetime or quota policy.
 ACQUISITION_SLICE_SEC = 0.25
+# Process-local ordering of wait entries, including across the off-loop bridge.
+# A prepared decision can expire even when both events share a clock tick.
+_PRESEND_WAIT_GENERATION = 0
+_PRESEND_WAIT_LOCK = threading.Lock()
+
+
+def _note_presend_wait():
+    global _PRESEND_WAIT_GENERATION
+    with _PRESEND_WAIT_LOCK:
+        _PRESEND_WAIT_GENERATION += 1
+
+
+def presend_wait_generation() -> int:
+    """Snapshot the entry order; a different generation invalidates a prepared decision."""
+    with _PRESEND_WAIT_LOCK:
+        return _PRESEND_WAIT_GENERATION
 
 
 class _PresendWait:
@@ -77,6 +93,7 @@ class _PresendWait:
             raise error
         if not self.entered:
             self.entered = True
+            _note_presend_wait()
             _hold(self.owner, "entered", self.started, self.episode_id)
         return ACQUISITION_SLICE_SEC
 
@@ -202,6 +219,7 @@ def send_acquisition(check=None):
                         raise
                     if not entered:
                         entered = True
+                        _note_presend_wait()
                         _hold(owner, "entered", started, episode_id)
                     continue
                 with stack:
@@ -279,6 +297,27 @@ async def presend_off_loop(function, *args, on_cancel=None, **kwargs):
             if capture is not None:
                 ua.adopt_physical_attempt_capture(capture)
         raise
+
+
+class PresendReadCancelled(asyncio.CancelledError):
+    """Cancellation at a read-only gate, before the bound generation sender can run."""
+
+    def __init__(self, attempt_id: str, *args):
+        super().__init__(*args)
+        self.attempt_id = attempt_id
+
+
+async def presend_read_off_loop(read):
+    """Join a preparatory read; only this gate can prove its next sender was never called."""
+    from ouroboros.usage_accounting import last_physical_attempt_capture
+
+    capture = last_physical_attempt_capture()
+    try:
+        return await presend_off_loop(read)
+    except asyncio.CancelledError as exc:
+        if capture is None or capture.state != "dispatched":
+            raise
+        raise PresendReadCancelled(capture.attempt_id, *exc.args) from exc
 
 
 async def postresponse_off_loop(function, *args, retain_on_cancel):

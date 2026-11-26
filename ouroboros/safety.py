@@ -673,11 +673,9 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     """Fixed host evidence, with authorship separate from semantic authorization. ``evidence`` (a dict) receives
     the destinations and notes resolved here, so a refusal names them without resolving them again; an extension
     call's place facts come from the descriptor being dispatched (``ext_tool``), never a later publication."""
-    from dataclasses import asdict, is_dataclass
-    from ouroboros import owner_words
     from ouroboros.place_guard import call_place_facts, place_evidence
     from ouroboros.tool_effects import mcp_sends_as
-    from ouroboros.safety_evidence import focus_event_source, with_author
+    from ouroboros.safety_evidence import checked_call_evidence, focus_event_source, with_author
 
     metadata = getattr(ctx, "task_metadata", None) or {}
     kind = work_kind(metadata)
@@ -710,11 +708,8 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     elif kind == "owner":
         occasion = "owner door"
     directives = getattr(ctx, "_owner_directives", None)
-    # User messages are quoted input when the caller has no retained host source; never certify them as owner words.
-    rows = (owner_words.safety_sources(ctx) if isinstance(directives, list)
-            else [m for m in (messages or []) if m.get("role") == "user"])
+    rows, target = checked_call_evidence(ctx, messages, resolved_binding)  # quoted user input without a host source
     sources = [with_author(focus_event_source(row, metadata, notes), metadata) for row in rows]  # diet, then author
-    target = asdict(resolved_binding) if is_dataclass(resolved_binding) else resolved_binding
     # Whose credential an MCP call acts with (e.g. a server signed in as my human); connectors carry it per place.
     sends_as = {"sends_as": mcp} if tool_name.startswith("mcp_") and (mcp := mcp_sends_as(tool_name)) else {}
     with _PRIOR_LOCK:
@@ -1486,7 +1481,8 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
             return True, ""
 
     cyber = mode_has_unrestricted_agency(_runtime_mode(ctx))
-    digest = _subject_digest(tool_name, arguments)
+    from ouroboros.safety_evidence import call_subject
+    digest = _subject_digest(tool_name, call_subject(tool_name, arguments, resolved_binding))
     with _PRIOR_LOCK:
         key = _work_key(ctx)
         rows = _PRIOR_VERDICTS.get(key, {})

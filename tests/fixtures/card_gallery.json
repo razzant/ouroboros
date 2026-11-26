@@ -4022,6 +4022,745 @@
       ],
       "task_id": "gallery-share-card"
     },
+    "letter": {
+      "detail": [
+        {
+          "_is_direct_chat": false,
+          "_schema_version": 1,
+          "accounted_upper_bound_usd": 0.0,
+          "accounted_upper_bound_usd_with_children": 0.0,
+          "actor_id": null,
+          "artifact_archives": {},
+          "artifact_bundle": {
+            "artifacts": [],
+            "errors": [],
+            "schema_version": 1,
+            "status": "not_applicable"
+          },
+          "artifact_status": "not_applicable",
+          "artifacts": [],
+          "budget_drive_root": "/gallery-data",
+          "canonical_terminal_projection": {
+            "attempt": {
+              "_attempt": null,
+              "metadata_attempt": null,
+              "metadata_task_attempt": null,
+              "started_at": null,
+              "task_attempt": null
+            },
+            "chat_id": 1,
+            "main_disposition": "ineligible",
+            "summary_id": "task-terminal:gallery-share-letter",
+            "summary_kind": "terminal_root_projection",
+            "token": "0000000000000000000000000000000d",
+            "written_at": "2026-11-20T12:00:29+00:00"
+          },
+          "canonical_terminal_projection_origin": "terminal_transition",
+          "canonical_terminal_projection_ready": null,
+          "capability_delta": null,
+          "chat_id": 1,
+          "child_drive_root": null,
+          "completion_observations": {
+            "delivery_counts": {},
+            "delivery_receipt_coverage": "not_observed_by_tool_trace",
+            "delivery_results": [],
+            "delivery_results_omitted": 0,
+            "observed_at": "2026-11-20T12:00:14+00:00",
+            "skill_history_coverage": {
+              "complete": true,
+              "gap_reasons": [],
+              "gap_rows_scanned": 0,
+              "rows_scanned": 0,
+              "source_ref": {
+                "kind": "review_ledger_index",
+                "path": "state/review_ledger/index.jsonl",
+                "reader": "read_file"
+              },
+              "truncated": false
+            },
+            "skill_state": [],
+            "skill_state_omitted": 0,
+            "skill_state_scope": "current_state_of_task_related_skills; not action attribution",
+            "trace_available": true
+          },
+          "completion_tokens": null,
+          "configured_subagent": null,
+          "constraints": null,
+          "context": null,
+          "continuation_offer": {
+            "cause": "finished",
+            "eligible": false,
+            "refusal": "author_finished"
+          },
+          "cost_accounting_status": "available",
+          "cost_custody": {
+            "closed_unrecorded_run_ids": [],
+            "open_run_ids": [],
+            "pending_invocation_ids": [],
+            "status": "available",
+            "unrecorded_run_ids": []
+          },
+          "cost_final": true,
+          "cost_presentation": {
+            "accounting_open": false,
+            "has_rows": false,
+            "has_unpriced": false,
+            "scope": "root_tree",
+            "tracked_amount": null,
+            "tracked_final": false
+          },
+          "cost_with_children_partial": false,
+          "delegation_role": null,
+          "description": null,
+          "drive_root": null,
+          "effective_executor": null,
+          "effective_model_lane": null,
+          "execution_observation": {
+            "kind": "pooled",
+            "reason": "recorded_terminal",
+            "source": "task_result",
+            "state": "terminal"
+          },
+          "executor_route": null,
+          "expected_output": null,
+          "final_answer": "",
+          "last_line": "Comparing the two summaries at the working width and in a narrow room.",
+          "last_line_at": "2026-11-20T12:00:08+00:00",
+          "ledger_integrity_degraded": false,
+          "loop_outcome": {
+            "degraded": false,
+            "degraded_reason": "",
+            "failure": null,
+            "final_answer": "",
+            "final_answer_missing_sentinel": true,
+            "final_text": "Done.",
+            "finish_reason": "final_message",
+            "outcome_axes": {
+              "artifacts": {
+                "status": "not_applicable"
+              },
+              "execution": {
+                "cosmetic_tool_errors": [],
+                "failure": null,
+                "ignored_tool_errors": [],
+                "policy_denials": [],
+                "reason_code": "final_message",
+                "recoveries": [],
+                "status": "ok",
+                "unresolved_tool_errors": []
+              },
+              "lifecycle": {
+                "status": "completed"
+              },
+              "objective": {
+                "review_status": "skipped",
+                "source": "none",
+                "status": "not_evaluated"
+              },
+              "review": {
+                "eligibility": "not_eligible",
+                "run_count": 0,
+                "status": "skipped",
+                "trigger": "not_evaluated"
+              },
+              "schema_version": 1
+            },
+            "reason_code": "final_message",
+            "recoveries": [],
+            "review_eligibility": "not_eligible",
+            "review_trigger": "not_evaluated",
+            "schema_version": 3,
+            "usage": {
+              "accounted_upper_bound_usd": null,
+              "completion_tokens": 0,
+              "prompt_tokens": 0,
+              "total_rounds": 6
+            }
+          },
+          "memory_mode": null,
+          "metadata": {},
+          "model": null,
+          "model_lane": null,
+          "non_final_rows": 0,
+          "objective": null,
+          "outcome_axes": {
+            "artifacts": {
+              "status": "not_applicable"
+            },
+            "execution": {
+              "cosmetic_tool_errors": [],
+              "failure": null,
+              "ignored_tool_errors": [],
+              "policy_denials": [],
+              "reason_code": "final_message",
+              "recoveries": [],
+              "status": "ok",
+              "unresolved_tool_errors": []
+            },
+            "lifecycle": {
+              "status": "completed"
+            },
+            "objective": {
+              "review_status": "skipped",
+              "source": "none",
+              "status": "not_evaluated"
+            },
+            "review": {
+              "eligibility": "not_eligible",
+              "run_count": 0,
+              "status": "skipped",
+              "trigger": "not_evaluated"
+            },
+            "schema_version": 1
+          },
+          "owner_mailbox": {
+            "captured_at": "2026-11-20T12:00:18+00:00",
+            "read_complete": true,
+            "rows": [],
+            "schema": 1,
+            "stores": [
+              "canonical"
+            ],
+            "total": 0
+          },
+          "parent_cognitive_route": null,
+          "parent_model_lane": null,
+          "parent_task_id": null,
+          "project_id": "",
+          "prompt_tokens": null,
+          "question_rooms": {},
+          "read_spans": {
+            "events": [],
+            "messages": [],
+            "room": null,
+            "spans": []
+          },
+          "reason_code": "final_message",
+          "reasoning_effort": null,
+          "requested_executor": null,
+          "requested_model_lane": null,
+          "reserved_usd": 0.0,
+          "result": "Done.",
+          "review_evidence": {
+            "continuations": [],
+            "corrupt_continuations": [],
+            "current_repo": {
+              "stale_attribution": "",
+              "stale_reason": "",
+              "stale_repo_key": "",
+              "stale_task_id": "",
+              "stale_ts": ""
+            },
+            "has_evidence": false,
+            "historical_author_inputs": {
+              "anchors": [],
+              "coverage": "First and latest usable author inputs only; intermediate views remain in call observability. Selected logical messages and the recorded physical projection are distinct. Declared or excluded inputs are not thereby seen. Historical evidence is not current requirements or owner authority. The host attests capture, not the truth or authority of quoted model, tool or external content. A source handle is availability, not a reader receipt; packet-only readers see only the labelled preview.",
+              "reason": "no_usable_input_captured",
+              "status": "unavailable",
+              "task_id": "gallery-share-letter",
+              "version": 1
+            },
+            "omitted_attempts": 0,
+            "omitted_continuations": 0,
+            "omitted_corrupt": 0,
+            "recent_attempts": [],
+            "repo_key": "/gallery-data",
+            "task_id": "gallery-share-letter",
+            "task_inputs": {
+              "owner_requirements_and_decisions": [],
+              "run_origin": {
+                "owner_ingress": false,
+                "task_type": "task"
+              },
+              "source_ref": {
+                "kind": "task_result",
+                "reader": "get_task_result",
+                "task_id": "gallery-share-letter"
+              },
+              "task_id": "gallery-share-letter",
+              "unavailable_sections": [],
+              "verification_receipts": [],
+              "verification_summary": {
+                "count": 0
+              },
+              "version": 1
+            }
+          },
+          "review_status": {
+            "eligibility": "not_eligible",
+            "run_count": 0,
+            "status": "skipped",
+            "trigger": "not_evaluated"
+          },
+          "role": null,
+          "root_phase_checkpoint": {
+            "accounting": {
+              "accounted_upper_bound_usd": 0.0,
+              "attempt_counts": {
+                "unresolved": 0
+              },
+              "cost_accounting_status": "available",
+              "ledger_integrity_degraded": false,
+              "non_final_rows": 0,
+              "reserved_usd": 0.0,
+              "root_task_id": "gallery-share-letter",
+              "schema": "ouroboros.root_cost_snapshot.v1",
+              "scope": "root_tree",
+              "unknown_unmetered": 0,
+              "unresolved_upper_bound_usd": 0.0
+            },
+            "post_task_synthesis": "completed"
+          },
+          "root_task_id": "gallery-share-letter",
+          "session_id": null,
+          "status": "completed",
+          "subagent_availability": null,
+          "subagent_envelope": {},
+          "suggested_name": "Compare the project summary before and after moving its supporting material into the reader",
+          "swarm_receipt": {
+            "actor_intervals": [
+              {
+                "basis": "host_task_lifetime",
+                "end": "2026-11-20T12:00:19+00:00",
+                "id": "task:gallery-share-letter",
+                "kind": "supervisor",
+                "parent_task_id": null,
+                "start": null,
+                "supervisor_route": null,
+                "task_id": "gallery-share-letter",
+                "terminal": true
+              }
+            ],
+            "causal_edges": [],
+            "cost": {
+              "attempts": [],
+              "known_final_usd": 0.0,
+              "total_usd": null,
+              "unknown_attempts": 0
+            },
+            "coverage": {
+              "actors_observed": 1,
+              "causal_edges": "unknown",
+              "gaps": [],
+              "history_before_instrumentation": "unknown",
+              "intervals_observed": 0,
+              "tree": "complete",
+              "usage": "complete"
+            },
+            "longest_causal_path": {
+              "actor_ids": [],
+              "coverage": "missing_intervals_or_edges",
+              "observed_seconds": null,
+              "rejected_edges": [],
+              "seconds": null
+            },
+            "mind_comparison": {
+              "author": "mind",
+              "state": "not_recorded"
+            },
+            "parallelism": {
+              "basis": "observed_intervals_not_productivity",
+              "mean_observed_parallelism": null,
+              "observed_actor_seconds": 0.0,
+              "observed_union_sec": 0.0,
+              "overlap_sec": 0.0,
+              "peak_observed_actors": 0
+            },
+            "published_at": "2026-11-20T12:00:20+00:00",
+            "refused_starts": [],
+            "revision": 2,
+            "root_task_id": "gallery-share-letter",
+            "schema_version": 1,
+            "selected_waits": [],
+            "state": "closed",
+            "supervisor_context_pressure": []
+          },
+          "task_constraint": null,
+          "task_contract": {
+            "acceptance_claims": [],
+            "allowed_resources": {},
+            "answer_protocol": "",
+            "attachment_manifest": [],
+            "budget_profile": {
+              "cost_hard_stop_pct": null,
+              "improvement_policy": "fixed",
+              "max_improvement_passes": null,
+              "reserve_finalization_pct": null
+            },
+            "constraints": "",
+            "context": "",
+            "context_requires_self_body_docs": false,
+            "deadline_at": "",
+            "delegation_budget": {
+              "depth_remaining": null,
+              "intent_note": "",
+              "max_children": null,
+              "may_delegate": true,
+              "may_fan_out": true,
+              "may_mutate": false
+            },
+            "disabled_tools": [],
+            "expected_output": "",
+            "lineage": {
+              "delegation_role": "root",
+              "parent_task_id": "",
+              "root_task_id": "gallery-share-letter",
+              "session_id": ""
+            },
+            "objective": "Compare the project summary before and after moving its supporting material into the reader",
+            "resource_policy": {},
+            "schema_version": 1,
+            "source": "host_draft",
+            "status": "draft",
+            "success_criteria": [],
+            "task_type": "task",
+            "workspace": {
+              "mode": "",
+              "root": ""
+            }
+          },
+          "task_group": null,
+          "task_group_id": null,
+          "task_id": "gallery-share-letter",
+          "terminal_time": {
+            "attempt": {
+              "_attempt": null,
+              "metadata_attempt": null,
+              "metadata_task_attempt": null,
+              "started_at": null,
+              "task_attempt": null
+            },
+            "occurred_at": "2026-11-20T12:00:19+00:00",
+            "source": "executor_terminal",
+            "v": 1
+          },
+          "title": "Compare the project summary before and after moving its supporting material into the reader",
+          "tool_profile": null,
+          "total_rounds": 0,
+          "trace_refs": {},
+          "trace_summary": "## Tool trace (0 calls, 0 errors)\nNo tool calls.",
+          "ts": "2026-11-20T12:00:17+00:00",
+          "unknown_unmetered": 0,
+          "unresolved_upper_bound_usd": 0.0,
+          "updated_at": "2026-11-20T12:00:33+00:00",
+          "use_local_model": null,
+          "verification_ledger": {
+            "created_at": "2026-11-20T12:00:15+00:00",
+            "entries": [
+              {
+                "kind": "objective_outcome",
+                "source": "none",
+                "status": "not_evaluated"
+              },
+              {
+                "contract_status": "draft",
+                "expected_output": "",
+                "kind": "task_contract",
+                "objective": "Compare the project summary before and after moving its supporting material into the reader",
+                "status": "recorded"
+              }
+            ],
+            "outcome_axes": {
+              "artifacts": {
+                "status": "not_applicable"
+              },
+              "execution": {
+                "cosmetic_tool_errors": [],
+                "failure": null,
+                "ignored_tool_errors": [],
+                "policy_denials": [],
+                "reason_code": "final_message",
+                "recoveries": [],
+                "status": "ok",
+                "unresolved_tool_errors": []
+              },
+              "lifecycle": {
+                "status": "completed"
+              },
+              "objective": {
+                "review_status": "skipped",
+                "source": "none",
+                "status": "not_evaluated"
+              },
+              "review": {
+                "eligibility": "not_eligible",
+                "run_count": 0,
+                "status": "skipped",
+                "trigger": "not_evaluated"
+              },
+              "schema_version": 1
+            },
+            "schema_version": 2,
+            "summary": {
+              "entry_count": 2,
+              "has_failures": false
+            },
+            "task_contract": {
+              "acceptance_claims": [],
+              "allowed_resources": {},
+              "answer_protocol": "",
+              "attachment_manifest": [],
+              "budget_profile": {
+                "cost_hard_stop_pct": null,
+                "improvement_policy": "fixed",
+                "max_improvement_passes": null,
+                "reserve_finalization_pct": null
+              },
+              "constraints": "",
+              "context": "",
+              "context_requires_self_body_docs": false,
+              "deadline_at": "",
+              "delegation_budget": {
+                "depth_remaining": null,
+                "intent_note": "",
+                "max_children": null,
+                "may_delegate": true,
+                "may_fan_out": true,
+                "may_mutate": false
+              },
+              "disabled_tools": [],
+              "expected_output": "",
+              "lineage": {
+                "delegation_role": "root",
+                "parent_task_id": "",
+                "root_task_id": "gallery-share-letter",
+                "session_id": ""
+              },
+              "objective": "Compare the project summary before and after moving its supporting material into the reader",
+              "resource_policy": {},
+              "schema_version": 1,
+              "source": "host_draft",
+              "status": "draft",
+              "success_criteria": [],
+              "task_type": "task",
+              "workspace": {
+                "mode": "",
+                "root": ""
+              }
+            },
+            "task_id": "gallery-share-letter"
+          },
+          "workspace_mode": null,
+          "workspace_root": null
+        }
+      ],
+      "frames": [],
+      "history": [
+        {
+          "error": "migrating",
+          "has_more": true,
+          "messages": [
+            {
+              "history_id": "letter-h900",
+              "history_position": 900,
+              "is_progress": true,
+              "narration": false,
+              "peer_letter_card": {
+                "answer": "Done.",
+                "ceiling_usd": 2.0,
+                "letter_id": "L1",
+                "place_id": "place-b",
+                "reply": "given",
+                "spent_final": true,
+                "spent_usd": 0.4,
+                "state": "done",
+                "text": "Count the files twice.",
+                "title": "Count",
+                "to": "Velm",
+                "to_seed": "install-b"
+              },
+              "role": "system",
+              "task_id": "gallery-share-letter",
+              "text": "Letter to Velm: done",
+              "ts": "2026-11-20T12:00:00Z"
+            },
+            {
+              "history_id": "letter-h901",
+              "history_position": 901,
+              "is_progress": true,
+              "narration": false,
+              "peer_letter_card": {
+                "answer": "Done.",
+                "ceiling_usd": 2.0,
+                "letter_id": "L2",
+                "place_id": "place-b",
+                "reply": "given",
+                "spent_final": true,
+                "spent_usd": 0.4,
+                "state": "done",
+                "text": "And once more.",
+                "title": "Count",
+                "to": "Velm",
+                "to_seed": "install-b"
+              },
+              "role": "system",
+              "task_id": "gallery-share-letter",
+              "text": "Letter to Velm: done",
+              "ts": "2026-11-20T12:00:00Z"
+            },
+            {
+              "history_id": "letter-h902",
+              "history_position": 902,
+              "is_progress": true,
+              "narration": false,
+              "peer_letter_card": {
+                "answer": null,
+                "answer_chars": 9600,
+                "ceiling_usd": 2.0,
+                "letter_id": "L3",
+                "place_id": "place-b",
+                "reply": "given",
+                "spent_final": true,
+                "spent_usd": 0.4,
+                "state": "done",
+                "text": "A long count.",
+                "title": "Count",
+                "to": "Velm",
+                "to_seed": "install-b"
+              },
+              "role": "system",
+              "task_id": "gallery-share-letter",
+              "text": "Letter to Velm: done",
+              "ts": "2026-11-20T12:00:00Z"
+            },
+            {
+              "history_id": "letter-h903",
+              "history_position": 903,
+              "is_progress": true,
+              "narration": false,
+              "peer_letter_card": {
+                "ceiling_usd": 2.0,
+                "letter_id": "L4",
+                "place_id": "place-b",
+                "question": {
+                  "held": "peer_silent",
+                  "question_id": "q1",
+                  "text": null
+                },
+                "spent_final": true,
+                "spent_usd": 0.4,
+                "state": "needs_input",
+                "text": "Which folder?",
+                "title": "Count",
+                "to": "Velm",
+                "to_seed": "install-b"
+              },
+              "role": "system",
+              "task_id": "gallery-share-letter",
+              "text": "Letter to Velm: needs_input",
+              "ts": "2026-11-20T12:00:00Z"
+            },
+            {
+              "history_id": "letter-h904",
+              "history_position": 904,
+              "is_progress": true,
+              "narration": false,
+              "peer_letter_card": {
+                "ceiling_usd": 2.0,
+                "letter_id": "L5",
+                "place_id": "place-b",
+                "question": {
+                  "delivery_state": "reserved",
+                  "question_id": "q2",
+                  "text": "Which folder?"
+                },
+                "spent_final": true,
+                "spent_usd": 0.4,
+                "state": "needs_input",
+                "text": "Reserve it.",
+                "title": "Count",
+                "to": "Velm",
+                "to_seed": "install-b"
+              },
+              "role": "system",
+              "task_id": "gallery-share-letter",
+              "text": "Letter to Velm: needs_input",
+              "ts": "2026-11-20T12:00:00Z"
+            },
+            {
+              "history_id": "letter-h905",
+              "history_position": 905,
+              "is_progress": true,
+              "narration": false,
+              "peer_letter_card": {
+                "ceiling_usd": 2.0,
+                "letter_id": "L6",
+                "place_id": "place-b",
+                "spent_final": true,
+                "spent_usd": 0.4,
+                "state": "accepted_running",
+                "stop": "requested",
+                "text": "Stop it.",
+                "title": "Count",
+                "to": "Velm",
+                "to_seed": "install-b"
+              },
+              "role": "system",
+              "task_id": "gallery-share-letter",
+              "text": "Letter to Velm: accepted_running",
+              "ts": "2026-11-20T12:00:00Z"
+            },
+            {
+              "history_id": "letter-h906",
+              "history_position": 906,
+              "is_progress": true,
+              "narration": false,
+              "peer_letter_card": {
+                "ceiling_usd": 2.0,
+                "error": "reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word reason word ",
+                "error_chars": 8400,
+                "letter_id": "L7",
+                "place_id": "place-b",
+                "spent_final": true,
+                "spent_usd": 0.4,
+                "state": "failed",
+                "text": "It failed.",
+                "title": "Count",
+                "to": "Velm",
+                "to_seed": "install-b"
+              },
+              "role": "system",
+              "task_id": "gallery-share-letter",
+              "text": "Letter to Velm: failed",
+              "ts": "2026-11-20T12:00:00Z"
+            }
+          ],
+          "next_cursor": null,
+          "reason_code": "migrating",
+          "window": {
+            "complete": false,
+            "truncated_by": [
+              "migrating"
+            ]
+          }
+        }
+      ],
+      "letter_words": {
+        "L3": "whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words whole words "
+      },
+      "state": [
+        {
+          "active_chat_activities": [],
+          "rooms": {},
+          "supervisor_ready": true,
+          "work_summary": {
+            "confirmed": true,
+            "counts": {
+              "paused": 0,
+              "queued": 0,
+              "unknown": 0,
+              "waiting": 0,
+              "working": 0
+            },
+            "turn": 0
+          },
+          "works": [],
+          "works_complete": true,
+          "works_gaps": []
+        }
+      ],
+      "task_id": "gallery-share-letter"
+    },
     "table": {
       "detail": [
         {

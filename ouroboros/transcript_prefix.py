@@ -9,10 +9,10 @@ Append-only sends preserve OpenAI-family prefix caching (#906, 2026-09-14).
 Every change of sent history is counted; a seam's sanction names it and never
 exempts it (DEVELOPMENT 06 "Cache-friendliness invariant"). The next facts line
 names the change beside the cache share it preceded, and a small per-code-version
-record feeds the Health line. The same identity retires signed reasoning before preparation/pricing.
-Main records answered sends; review records every checked, dispatched attempt.
-Restored slots reuse their context observation. Helpers report only to Logs;
-Main additionally owns one updating task row and all sends carry the model fact.
+record feeds the Health line. The same identity retires signed reasoning before preparation/pricing
+(the provider binding and its evidence: ``reasoning_artifacts``). Main records answered sends; review
+records every checked, dispatched attempt. Restored slots reuse their context observation. Helpers
+report only to Logs; Main additionally owns one updating task row and all sends carry the model fact.
 """
 
 from __future__ import annotations

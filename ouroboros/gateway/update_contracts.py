@@ -1,7 +1,6 @@
 """Core update flow envelopes: ``/api/update/preflight``, ``/api/update/apply`` (and the rollback
 refusal that shares its error shape), ``/api/update/description`` and the two update WS frames;
-re-exported by ``gateway/contracts.py``.
-The JSDoc twin is ``web/modules/update_types.js``, re-exported by ``api_types.js``."""
+re-exported by ``gateway/contracts.py``."""
 
 from typing import Any, Dict, List, Optional
 

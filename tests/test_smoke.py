@@ -101,6 +101,9 @@ def test_tool_set_matches(registry):
 
 EXPECTED_TOOLS = [
     "continue_in_background", "pause_task", "resume_task", "continue_task",
+    # The conversational work-cap operation (#4267): one started work's whole cap,
+    # amended by its owner's words — first-class, so the registry contract names it.
+    "set_task_cost_cap",
     "browse_page", "browser_action", "showSecretHitl",
     "preflight_review", "review_change", "review_status",
     "compact_context", "set_tool_timeout", "request_restart", "prepare_self_change",

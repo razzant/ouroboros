@@ -186,7 +186,7 @@ class KeptService(TypedDict, total=False):
     since: str
     address: str
     log_path: str
-    backend: str
+    backend: str  # host | local_executor | docker; '' on a capture_owed row: no live launch to name
     pid: int
 
 
@@ -221,7 +221,7 @@ class KeptServiceStopResponse(TypedDict, total=False):
     attempted, or it ended by itself) has it captured then. ``ok`` is True only when the launch is confirmed ended and
     its outputs are ``captured`` or ``none_declared``."""
 
-    ok: bool
+    ok: bool  # a not_found capture-only retry counts as ended
     outcome: str
     launch_id: str
     name: str
@@ -231,7 +231,7 @@ class KeptServiceStopResponse(TypedDict, total=False):
     detail: str
     log_path: str
     stopped_at: str
-    outputs: Dict[str, Any]
+    outputs: Dict[str, Any]  # {task_id, state, detail}
 
 
 def _kept_row(row: Dict[str, Any]) -> bool:

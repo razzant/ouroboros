@@ -570,6 +570,9 @@ ROUTING_REFUSAL_CAUSES: Dict[str, str] = {
     "repair_promotion_failed": "the skill repair request could not be started",
     "task_acceptance_fence": "the task tree is closing after its author stopped it",
     "invalid_task_depth": "the task depth was invalid",
+    # Work a linked Ouroboros's letter began may not start separately billed work outside that
+    # letter's ceiling and billing group (peer_letters.separate_work_refusal); the owner starts it.
+    "letter_work_starts_no_separate_root": "a letter's work cannot start separate work",
     "promotion_persistence_failed": "the task record could not be saved",
     "routing_receipt_persist_failed": "the receipt could not be saved",
     "routing_annotation_persist_failed": "the receipt could not be saved",

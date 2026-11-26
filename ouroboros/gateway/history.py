@@ -24,7 +24,7 @@ from starlette.responses import JSONResponse, Response
 
 from ouroboros import dialogue_store as ds
 from ouroboros.checkpoint_waits import wait_episode
-from ouroboros.chat_annotations import page_receipts
+from ouroboros.chat_annotations import HistoryPageReceipts
 from ouroboros.chat_uploads import attachment_views
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_a2a_chat_id
 from ouroboros.dialogue_provenance import agent_note_text, declared_author
@@ -98,6 +98,7 @@ _PROGRESS_META_FIELDS = (
     "outcome_axes",
     "reason_code",
     "delegated_runs_unreconciled",  # the current custody debt, an explicit [] included (a stamped code is not live debt)
+    "peer_letter_card",  # a letter's card in the room of the work that wrote it (place_projection.letter_card_fact)
     "review_projection",
     "worker_saturation_warning",
     "model_execution",
@@ -212,9 +213,8 @@ def _user_annotation(
     return {key: annotation[key] for key in (*ROUTING_RECEIPT_FIELDS, "detail") if key in annotation}
 
 
-def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotations=None, quotes=None, asked=None) -> list:
-    """Render missing bound origins by source ref, with their files, receipt, question quote and any coverage gaps.
-    ``annotations`` holds the receipts of the ids ``asked``; an origin this read renders beyond them is asked here."""
+def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, receipts=None, quotes=None) -> list:
+    """Render missing bound origins by source ref, with their files, receipt, question quote and any coverage gaps."""
     from ouroboros.project_dialogue import opening_words, project_origin_rows
     from ouroboros.chat_references import origin_projection
 
@@ -237,10 +237,10 @@ def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotation
         from ouroboros.chat_chain import format_address
         projection = origin_projection(data_dir, ref, thread_id, quotes, typed=row.get("source_input"))
         address = format_address(ref) if ref.get("row_sha256") else projection.get("row_address", "")
-        if address and cmid and asked is not None and cmid not in asked:  # its binding: the refs read failed or predates it
-            unasked = {str((later.get("ref") or {}).get("client_message_id") or "") for later in origin_rows[index:]} - asked
-            asked, annotations = asked | unasked, {**(annotations or {}), **page_receipts(data_dir, unasked - {""})}
-        annotation = _user_annotation("user", cmid, annotations or {}, original_chat, address) if address else None
+        annotation = None
+        if address and receipts is not None:
+            receipts.include_origin(cmid, origin_rows, index)
+            annotation = _user_annotation("user", cmid, receipts.rows, original_chat, address)
         synthesized.append({
             **({"chat_id": original_chat} if original_chat is not None else {}),
             "text": str(row.get("text") or ""),
@@ -356,6 +356,7 @@ def _annotate_terminal_task_truth(
         # conversation. A user's row keeps its authorship and physical identity.
         represented, tool_counts = {}, {}
         latest_progress_by_task, summaries, plain_finals = {}, {}, {}
+        letter_only_tasks = set()  # tasks whose only progress rows in this page are letter cards (never carriers)
         for message in combined:
             task_id = str(message.get("task_id") or "")
             if not task_id or message.get("system_type") in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
@@ -379,6 +380,9 @@ def _annotate_terminal_task_truth(
             if summary:
                 ending_rows.setdefault(task_id, []).append(message)
                 latest = summaries
+            elif progress and message.get("peer_letter_card"):  # a letter's card: its own row, never the task's carrier
+                letter_only_tasks.add(task_id)
+                continue
             elif progress:
                 latest = latest_progress_by_task
             elif message.get("role") == "assistant" and not message.get("system_type") and not message.get("msg_type"):
@@ -408,7 +412,8 @@ def _annotate_terminal_task_truth(
             # do. A parent anchored by its child's row is always carried (zero tools included): never a bare shell (A5).
             incomplete = (coverage.get("gaps") or max(known_calls, coverage.get("matched", 0)) > coverage.get("shown", 0))
             if task_id not in carriers and (evidence.get("observations") or evidence.get("legacy", {}).get("calls")
-                                            or incomplete or (evidence_anchors or {}).get(task_id)):
+                                            or incomplete or (evidence_anchors or {}).get(task_id)
+                                            or task_id in letter_only_tasks):
                 carrier = {"task_id": task_id, "ts": represented[task_id], "role": "system",
                            "system_type": "task_evidence", "text": "", "is_progress": False, "narration": False}
                 # This new row presents the current result; it is not a stamp on a physical history row.
@@ -428,6 +433,11 @@ def _annotate_terminal_task_truth(
                         count = (known_calls or None) if current is None else result.get("tool_calls")
                         if type(count) is int and count >= 0:
                             carrier["tool_calls"] = count
+        # On letter-only pages, use the evidence carrier for the task's own replay facts (cost, review, receipt).
+        for task_id in letter_only_tasks:
+            carrier = carriers.get(task_id)
+            if carrier is not None and task_id not in latest_progress_by_task:
+                latest_progress_by_task[task_id] = carrier
         terminal_status_by_task: Dict[str, str] = {}
         terminal_truth_by_task: Dict[str, Dict[str, Any]] = {}
         terminal_receipt_by_task: Dict[str, Dict[str, Any]] = {}
@@ -522,9 +532,9 @@ def _annotate_terminal_task_truth(
                              exact_row)
         for message in combined:
             task_id = str(message.get("task_id") or "")
-            if not task_id or message.get("system_type") in (
+            if not task_id or message.get("peer_letter_card") or message.get("system_type") in (
                     "subagent_admission_notice", "project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
-                continue
+                continue  # a letter's card carries only its own facts (place_projection), no task replay stamp
             if message.get("system_type") in {"project_started", "project_handoff"} and not message.get("task_name"):
                 message["task_name"] = task_presentation_name(  # a legacy row reuses this request's result read;
                     cache.get(task_id), fallback=message.get("project_name") or "Task")  # nameless: its Project
@@ -1118,9 +1128,8 @@ def _apply_window_quotas(
     n_progress: int,
     result_cache: Optional[Dict[str, Dict[str, Any]]] = None,
     order: Optional[Callable[[dict], str]] = None,
-    chat_annotations=None,
+    receipts=None,
     quotes=None,
-    asked=None,  # the ids whose receipts ``chat_annotations`` holds; an origin beyond them is asked when rendered
 ) -> tuple[list, Dict[str, Dict[str, Any]], bool, bool, bool, str, set]:
     """Quota slicing, origin fallback, and the lineage floor/cap (perf2 P3). ``order``: the rows'
     sort key, ``ts`` unless the room reads by its reading key (``_reading_order``).
@@ -1196,7 +1205,7 @@ def _apply_window_quotas(
     # post-quota, identity-deduped, capped with disclosed omissions.
     if thread_id in project_chat_ids and n_human > 0:
         try:
-            synthesized = _origin_fallback_rows(data_dir, thread_id, human_tail, chat_annotations, quotes, asked)
+            synthesized = _origin_fallback_rows(data_dir, thread_id, human_tail, receipts, quotes)
             if synthesized:
                 human_tail = sorted(
                     human_tail + synthesized, key=order
@@ -1425,20 +1434,14 @@ def _assemble_history_response(
     selections, before, recent = page["selections"], page["before"], page["recent"]
     order = _reading_order(selections["chat"][0])
     n_human, n_progress = page["quotas"]["human"], page["quotas"]["progress"]
-    owners = (entry for entry in selections["chat"][0] if entry.get("role") != "system"  # the rows that wear receipts
-              and str(entry.get("direction", "")).lower() == "in" and not declared_author(entry))
-    # Receipts for its owner rows and, on the newest page that renders them, its origins; never the install's others.
-    asked = {str(cmid) for entry in owners if (cmid := entry.get("client_message_id")) not in (None, "")}  # 0 too
-    asked |= {str(ref.get("client_message_id") or "")  # an origin as its copy looks one up (_origin_fallback_rows)
-              for ref in (project_source_refs if recent and n_human > 0 else ())} - {""}
-    chat_annotations = page_receipts(data_dir, asked)
+    receipts = HistoryPageReceipts(data_dir, selections["chat"][0], project_source_refs if recent and n_human > 0 else ())
     historical_terminals: Dict[str, dict] = {}
     replay_evidence: list = []
     from ouroboros.task_reads import TaskReads
 
     result_cache: Dict[Any, Any] = {_READS: TaskReads(data_dir)}  # every task result is read once, in batches
     combined, chat_quota_rows, chat_gaps = _collect_chat_rows(
-        chat_path, archive_dir, n_human, row_matches_thread, chat_annotations,
+        chat_path, archive_dir, n_human, row_matches_thread, receipts.rows,
         include_gaps=True, historical_terminals=historical_terminals,
         selected_entries=selections["chat"][0], entry_gaps=selections["chat"][2],
         projection_entries=page.get("projection_entries"),
@@ -1466,8 +1469,8 @@ def _assemble_history_response(
         {} if classified else {"latest_message": None})  # an unclassified room may be a Project
     if recent:  # arrival is named above, before the tail and the annotation
         (messages, result_cache, human_rows_dropped, lineage_truncated, review_overlays_truncated, floor, anchored_children) = _apply_window_quotas(
-            data_dir, thread_id, project_chat_ids, combined, n_human, n_progress, result_cache, order, chat_annotations,
-            quotes=row_matches_thread.quotes, asked=asked)
+            data_dir, thread_id, project_chat_ids, combined, n_human, n_progress, result_cache, order, receipts,
+            quotes=row_matches_thread.quotes)
         for source in ("chat", "progress"):
             before[source] = deferred_before(source, selections[source][0], candidates, messages, before[source])
     else:

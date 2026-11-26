@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.reviewer_window import ReviewerWindow
+from ouroboros.tools.scope_required_sources import SCOPE_REQUIRED_SOURCES_POLICY
 from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS
 from ouroboros.triad_review import parse_seat_answers
 
@@ -598,7 +599,7 @@ def test_the_brief_carries_the_index_the_governance_tiers_and_both_manifests(tmp
     assert "TOUCHED PATHS" in task and "alpha.py (modified" in task
     assert "REQUIRED SOURCES" in task and "list is a MINIMUM" in task
     assert "prompts/SYSTEM.md (added" in task          # a touched prompt is owed in full
-    assert manifest["native_required_sources_ref"]["policy"] == "v2"
+    assert manifest["native_required_sources_ref"]["policy"] == SCOPE_REQUIRED_SOURCES_POLICY
     assert manifest["native_required_sources_ref"]["required_source_count"] == 1
     assert manifest["brief_chars"] == len(task)
     # The two parts are both there, and the Part 2 brief is hashed on its own.

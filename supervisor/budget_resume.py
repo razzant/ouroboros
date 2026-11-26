@@ -683,42 +683,56 @@ def _panic_money_refusal(observation, *, check_tree):
     return observation[2]
 
 
+def _cap_exhausted_refusal(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Name the limit that actually binds and its remedy. The work's own cap — amended or not —
+    carries the conversational raise (``set_task_cost_cap``); an independent fence does not:
+    that tool refuses it (``independent_cap_binds``), and one global-budget remedy never
+    covers either. ``binding_axis``/``binding_source`` say which axis and provenance bound."""
+    from ouroboros.pause_notices import cap_exhausted_error
+
+    axis = snapshot.get("binding_axis") or "root"
+    error = cap_exhausted_error(snapshot, axis)
+    if block := snapshot.get("work_cap_block"):
+        axis = block["axis"]
+    action = {"root_hard_cap_exhausted": "raise_work_cap_then_resume",
+              "work_cap_export_unverified": "verify_work_cap_export_then_resume",
+              "work_cap_reconcile_pending": "reconcile_work_caps_then_resume"}.get(error, "resolve_limit_source_or_cancel")
+    refusal = {"ok": False, "error": error, "binding_axis": axis, "action": action}
+    cap = snapshot.get(f"{axis}_axis")
+    if isinstance(cap, dict) and cap.get("source"):
+        refusal["binding_source"] = str(cap["source"])
+    return refusal
+
+
 def _root_money_refusal(result_root: Any, task: Dict[str, Any], root_task_id: str) -> Optional[Dict[str, Any]]:
-    from ouroboros.usage_accounting import refresh_root_accounting
-    from ouroboros.usage_admission import task_accounting_key, task_billing_fields
+    from decimal import Decimal
+    from ouroboros._usage_money import decimal_of, known_room
+    from ouroboros.usage_admission import task_money_snapshot
     from ouroboros.usage_ledger import BillingAuthorityUnavailable
 
     try:
-        task_billing_fields(task, root_task_id, None, result_root)
-        # A successor keeps the original group cap. Both spend readings must be fresh.
-        tree = refresh_root_accounting(result_root, task_accounting_key(result_root, task, root_task_id), strict=True)
-        trees = [tree]
-        if isinstance(tree, dict):
-            from ouroboros.usage_admission import task_money_snapshot
-            trees.append(task_money_snapshot(result_root, task, root_task_id))
+        # One fresh authoritative read of the actor's actual applicable root and group caps.
+        snapshot = task_money_snapshot(result_root, task, root_task_id, strict_authority=True)
     except BillingAuthorityUnavailable as exc:
         return {"ok": False, "error": "billing_authority_unavailable", "billing_authority": exc.kind, "cause": exc.cause,
                 "action": "fix_billing_authority_then_resume" if exc.kind == "unreadable" else "cancel_or_new_run"}
     except Exception:
         log.warning("Resume could not read accounting for %s", root_task_id, exc_info=True)
         return {"ok": False, "error": "root_accounting_unavailable", "action": "retry_or_cancel"}
-    for tree in trees:
-        if not isinstance(tree, dict):
-            # Unknown tree spend is not room: an unreadable ledger refuses typed.
-            return {"ok": False, "error": "root_accounting_unavailable",
-                    "action": "retry_or_cancel"}
-        if tree.get("integrity_degraded"):
-            return {"ok": False, "error": "root_accounting_degraded",
-                    "action": "retry_or_cancel"}
-        # Known spend decides, the reservation's own rule (#1487); holds do not.
-        limit, known = tree.get("root_limit_usd"), tree.get("settled_usd")
-        if limit is not None:
-            if known is None:
-                return {"ok": False, "error": "root_accounting_degraded",
-                        "action": "retry_or_cancel"}
-            if float(known) >= float(limit) - 1e-9:
-                return {"ok": False, "error": "root_hard_cap_exhausted",
-                        "action": "increase_budget_then_resume"}
+    if not isinstance(snapshot, dict):
+        return {"ok": False, "error": "root_accounting_unavailable", "action": "retry_or_cancel"}
+    if (snapshot.get("integrity_degraded")
+            or (snapshot.get("root_limit_usd") is not None and snapshot.get("settled_usd") is None)):
+        return {"ok": False, "error": "root_accounting_degraded", "action": "retry_or_cancel"}
+    if snapshot.get("work_cap_block"):
+        return _cap_exhausted_refusal(snapshot)
+    # Known spend decides against the actor's actual applicable root and group limits (#1487);
+    # holds and another request's narrower row minimum in the reporting projection do not.
+    room = snapshot.get("remaining_known_usd")
+    if room is None and (limit := snapshot.get("root_limit_usd")) is not None:
+        room = known_room(limit, snapshot["settled_usd"])
+    if room is not None and decimal_of(room) <= Decimal("1e-9"):
+        return _cap_exhausted_refusal(snapshot)
     return None
 
 

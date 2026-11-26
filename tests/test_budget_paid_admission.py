@@ -214,13 +214,15 @@ def test_fieldless_standard_review_prices_only_the_selected_cloudru_route(
 
 
 @pytest.mark.parametrize("root_cap, group_cap, axis, fits", [
-    (2.0, 2.0, "global", True),
+    (2.0, 2.0, "group", True),
     (0.0, 2.0, "root", False),
     (2.0, 1.0, "group", False),
 ])
 def test_session_only_wave_at_global_limit_still_checks_its_root_and_original_group(
         data_root, root_cap, group_cap, axis, fits):
     _reach_global_limit(data_root)  # the original root and its billing group have spent $1
+    # A session-only wave draws no paid admission, so the reached global wallet stays disclosed
+    # beside it but never binds it: its own root and original-group fences decide.
     before = ledger_rows(data_root)
     successor = ua.UsageScope(drive_root=data_root, task_id="review", root_task_id="review",
                               billing_group_id="root", billing_group_limit_usd=group_cap)

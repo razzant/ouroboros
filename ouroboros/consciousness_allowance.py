@@ -317,10 +317,16 @@ def allowance_resume_decision(
         if any(type(value) not in (int, float) or not math.isfinite(value)
                for value in (hard_room, saved_cap) if value is not None):
             return unknown
-        hard_room = min(x for x in (hard_room, saved_cap - spent if saved_cap is not None else None,
-                                    float("inf")) if x is not None)
-        if hard_room <= 1e-9:
-            return {"error": "root_hard_cap_exhausted"}
+        # The snapshot's room is measured under the caps in force now — a lawfully raised work cap
+        # included (``raised_cap``) and every recorded independent root fence (``_observed_root_limit``).
+        # The root cap saved in the pause is the same cap as it stood when the pause was written:
+        # after a lawful raise it is not an independent limit and must not freeze the wake below
+        # the raised cap. It still guards a pause whose live caps the snapshot could not read.
+        if hard_room is None and saved_cap is not None:
+            hard_room = saved_cap - spent
+        if hard_room is not None and hard_room <= 1e-9:
+            from ouroboros.pause_notices import cap_exhausted_error
+            return {"error": cap_exhausted_error(money)}
         global_settled = global_summary.get("settled_usd")
         if type(global_settled) not in (int, float) or not math.isfinite(global_settled) or global_settled < 0:
             return unknown
@@ -328,12 +334,13 @@ def allowance_resume_decision(
                   else round(max(0.0, max(0.0, float(global_limit)) - float(global_settled)), 6))
         if wallet <= 1e-9:
             return {"error": "budget_still_exhausted"}
-        additional = min(float(room), float(hard_room))
+        additional = float(room) if hard_room is None else min(float(room), float(hard_room))
         ceiling = round(spent + additional, 6) if additional >= 1e-6 else spent + additional
         available_now = min(additional, float(wallet))
         if not all(math.isfinite(v) for v in (additional, ceiling, available_now)) or additional <= 1e-9 or available_now <= 1e-9:
             return unknown
-        source = ("both" if math.isclose(room, hard_room, rel_tol=0.0, abs_tol=1e-9)
+        source = ("allowance" if hard_room is None
+                  else "both" if math.isclose(room, hard_room, rel_tol=0.0, abs_tol=1e-9)
                   else "allowance" if room < hard_room else "per_task_cap")
         return {"additional_usd": additional, "ceiling_usd": ceiling, "available_now_usd": available_now,
                 "source": source, "window_limit_usd": limit}

@@ -48,6 +48,7 @@ SCOPE_TASK = "task"
 _NOTE_MAX = 500
 
 
+# An additional field is refused as unexpected_fields (400).
 class OwnerKeepRequest(TypedDict, total=False):
     """``POST /api/tasks/{task_id}/owner-keep``: keep or release the materials of exactly this task."""
 
@@ -55,6 +56,7 @@ class OwnerKeepRequest(TypedDict, total=False):
     note: str
 
 
+# 200; 404 `task_not_found`; 503 `task_unreadable`. An inflight `reason` is `custody_busy`.
 class OwnerKeepResponse(TypedDict):
     task_id: str
     keep: bool  # the fact as it now stands
@@ -65,7 +67,7 @@ class OwnerKeepResponse(TypedDict):
     # ``saved_states:<folder>`` while that folder holds a saved state for exact return, and
     # ``review_thread:<id>`` for an engine reviewer thread no recorded release has let go
     retired: List[str]  # gone, accepted for deletion, or managed import ID reuse released; not proof of deleted bytes
-    unknown: List[str]  # material classes that could not be read: nothing is claimed about them
+    unknown: List[str]  # material classes that could not be read, canonical_payloads among them: nothing is claimed about them
     releases: Dict[str, str]  # each ``review_thread:<id>`` -> its release as last observed, never polled:
     # ``release_unconfirmed`` (bound; neither kept nor gone), ``accepted_pending_removal``, ``removed`` (the engine's
     # cleanup result said so), ``purged`` (by the engine's own route), ``not_found`` (the store it asked does not hold

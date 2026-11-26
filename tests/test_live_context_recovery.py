@@ -45,11 +45,18 @@ def test_wire_measurement_recomputes_all_deficits_together(host_world):
     from ouroboros.realtime_setup import measure_session_wire
     from ouroboros.context_measurement import reclaim_low_water_margin
     host = host_world.host
-    host.plan = replace(host.plan, window_tokens=100000, output_reserve_tokens=10000)
+    from ouroboros.context_window import WindowRecord
+
+    limit = replace(host.plan.window_record.total, tokens=100_000)
+    host.plan = replace(host.plan, window_tokens=100_000, output_reserve_tokens=10_000,
+                        window_record=WindowRecord(host.plan.route_fp, total=limit, reserve=10_000,
+                                                   declared=(limit,)))
     rows = [*host.messages, {'role': 'assistant', 'content': 'word ' * 70000}]
     _, _, evidence, _ = measure_session_wire(host, host.plan, rows, host.schemas,
                                             host_world.provider['session'], LiveOptions())
     fit = evidence['fit']; m = fit['measurement']
+    assert host.plan.window_record.total.tokens == 100_000
+    assert m['capacity_total_tokens'] == 100_000
     total = m['estimated_input_tokens'] + m['response_reserve_tokens']
     target = max(0, total - m['target_total_tokens'])
     capacity = max(0, total - m['capacity_total_tokens'])

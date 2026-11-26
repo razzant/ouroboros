@@ -80,15 +80,14 @@ def _segments(literal: str) -> tuple:
 
 
 def spa_addresses() -> dict:
-    """Builtin-client address -> the first-party modules that build it (comments included; the
-    ``*_types.js`` JSDoc mirrors are skipped)."""
+    """Builtin-client address -> the first-party modules that build it (excluding type carriers)."""
     from ouroboros.review import is_gated_js_module
 
     found: dict = {}
     for path in [*(REPO / "web").glob("*.js"), *(REPO / "web" / "modules").glob("*.js")]:
         relative = path.relative_to(REPO).as_posix()
         if not is_gated_js_module(relative) or path.name.endswith("_types.js"):
-            continue  # the JSDoc mirrors name routes in prose; they call nothing
+            continue  # type carriers describe shapes and values, not endpoint calls
         for literal in _literals(path.read_text(encoding="utf-8")):
             segments = _segments(literal)
             if not segments or segments[-1] == "" or any(s and "*" in s for s in segments):

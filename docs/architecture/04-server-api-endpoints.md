@@ -120,9 +120,10 @@ Files routes (`/api/files/*`, `gateway/files.py::file_browser_routes()`; parity:
 | GET | `/api/letters/{letter_id}/state` | |
 | GET | `/api/letters/{letter_id}/result` | |
 | POST | `/api/letters/{letter_id}/cancel` | |
-| POST | `/api/peer-links/invite` | a link's introduction at the owner doors below; `introduce` under the invitation token (§12) |
+| POST | `/api/peer-links/invite` | owner doors (§12) |
 | POST | `/api/peer-links/accept` | |
-| POST | `/api/peer-links/introduce` | |
+| POST | `/api/peer-links/introduce` | invite token |
+| GET | `/api/peer-links/{link_id}` | owner: pairing status |
 | POST | `/api/peer-links/{link_id}/confirm` | |
 | POST | `/api/peer-links/{link_id}/revoke` | |
 | POST | `/api/circles` | |

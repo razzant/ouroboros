@@ -1150,7 +1150,7 @@ def _listed_refs(row: Mapping[str, Any]) -> set:
     return source_refs(row)
 
 
-def safety_sources(ctx: Any, *, _private: bool = False) -> List[Dict[str, Any]]:
+def safety_sources(ctx: Any, *, _private: bool = False, cites: str = "") -> List[Dict[str, Any]]:
     """The rows the Safety check reads for this run's work, shaped as its corpus rows (``source``, ``content``, ``msg_id`` =
     the row's reference, ``reply_to`` = the card or message it answers, ``ts`` = its time where one was recorded): the
     corpus, the field it inherited (a reply target folded into its row; an answer's card by its own address, ``card_reference``),
@@ -1159,10 +1159,11 @@ def safety_sources(ctx: Any, *, _private: bool = False) -> List[Dict[str, Any]]:
     a later copy adds, the opening dated by its door (``_opening``). Never a room, context or marked row: a permission my
     human gave another work is not this one's. ``_private`` (``safety_owner_ids``) keeps each row's exact ``row_sha256``
     for the identities, never shown to the check. Reads the context's attributes and writes nothing."""
-    from ouroboros.answer_facts import card_input, card_reference, card_reference_view, merged_card_reply, row_source
+    from ouroboros.answer_facts import card_reference, card_reference_view, merged_card_reply
     from ouroboros.chat_chain import _FULL_DIGEST, format_address
     from ouroboros.dialogue_provenance import excerpt_citation
-    from ouroboros.owner_relay import owner_row_address, owner_row_identity, owner_text
+    from ouroboros.owner_relay import owner_row_address, owner_row_identity
+    from ouroboros.safety_evidence import held_owner_source
 
     rows: List[Dict[str, Any]] = []
     kept: Dict[str, Dict[str, Any]] = {}  # reference -> the listed row of that source
@@ -1182,7 +1183,7 @@ def safety_sources(ctx: Any, *, _private: bool = False) -> List[Dict[str, Any]]:
         if row["ts"] and isinstance(digest, str) and _FULL_DIGEST.fullmatch(digest) and digits.isascii() and digits.isdigit():
             known.setdefault(format_address({"chat_id": int(room), "ts": row["ts"], "row_sha256": digest}), set()).add(digest)
     for row in _mapping(getattr(ctx, "_held_owner_messages", None)).values():
-        if reaches(row):
+        if reaches(row) or cites and owner_row_identity(row)["row_sha256"] == cites:
             known.setdefault(owner_row_address(row), set()).add(owner_row_identity(row)["row_sha256"])
 
     def add(row: Mapping[str, Any]) -> Dict[str, Any]:  # the listed copy of this source, gaps filled by a later one
@@ -1196,6 +1197,9 @@ def safety_sources(ctx: Any, *, _private: bool = False) -> List[Dict[str, Any]]:
             rows.append(listed := dict(row))
             kept.update(dict.fromkeys(refs, listed))
         listed.update({key: row[key] for key in ("reply_to", "ts") if row.get(key) and not listed.get(key)})
+        if (row.get("mail_kind") and not listed.get("mail_kind") and row.get("row_sha256")
+                and all(row.get(k) == listed.get(k) for k in ("row_sha256", "source", "content"))):
+            listed["mail_kind"] = row["mail_kind"]
         if merged := merged_card_reply(listed.get("reply_to"), row.get("reply_to")):
             listed["reply_to"] = merged
         if (row.get("reply_citation") and not listed.get("reply_citation") and target.get("address")
@@ -1225,20 +1229,17 @@ def safety_sources(ctx: Any, *, _private: bool = False) -> List[Dict[str, Any]]:
                     **{key: row[key] for key in ("row_sha256", "mail_kind") if row.get(key)},
                     **({"ts": row["ts"]} if row["ts"] else {}), **({"reply_to": target} if target else {})})
     root = _data_root(ctx)
+    prior_cite = kept.get(f"row-sha256:{cites}")
     for key, row in _mapping(getattr(ctx, "_held_owner_messages", None)).items():
-        if reaches(row):
-            source_root = row.get("_owner_source_root") or root
-            item = card_input(row, source_root)
-            carried_reply = _mapping(_mapping(row.get("corpus_answer")).get("reply_to"))
-            replied = (item.get("reply_to") or card_reference_view(carried_reply)
-                       or answered_card_reply(*answered_card_source(row, source_root))
-                       or row.get("_owner_reply_target") or reply_target(source_root, row.get("reply_to")))
-            add({"source": item.get("source") or row_source(row, "owner_mailbox", source_root),
-                 "content": item["content"] if item else owner_text(row), "msg_id": str(key),
-                 "row_sha256": owner_row_identity(row)["row_sha256"], **came,
-                 **({"ts": when} if (when := _item_time(row)) else {}), **({"reply_to": replied} if replied else {})})
+        cited = bool(cites and isinstance(row, Mapping) and owner_row_identity(row)["row_sha256"] == cites and (
+            prior_cite is None or prior_cite.get("source") == "owner_mailbox" and not prior_cite.get("mail_kind")))
+        if reaches(row) or cited:
+            add(held_owner_source(key, row, row.get("_owner_source_root") or root, origin,
+                                  carried=came if reaches(row) else {}, cited=cited))
         if not _private:
             qualify_reconstructed_card_reference(row, kept)
+    if (cited := kept.get(f"row-sha256:{cites}")) is not None:  # the row a checked call stands on (held, if unlisted)
+        cited["cited_by_this_call"] = True
     return rows if _private else [{key: value for key, value in row.items() if key != "row_sha256"} for row in rows]
 
 
@@ -1486,10 +1487,10 @@ def _task_record(drive_root: Any, task_id: str) -> Dict[str, Any]:
 
 
 def task_owner_words(drive_root: Any, task_id: str, *,
-                     task: Mapping[str, Any] | None = None) -> Tuple[List[Dict[str, str]], str]:
+                     task: Mapping[str, Any] | None = None, include_mailbox: bool = True) -> Tuple[List[Dict[str, str]], str]:
     """The words for a task: its carried field, else the first carrier of its root that yields a row; a message the
     task holds (``owner_relay.held_owner_messages``) under the carriers' reference, so one message is one row, with
-    the card it answers beside it."""
+    the card it answers beside it. A caller supplying its own authoritative mailbox read omits the legacy fallback."""
     record = dict(task) if isinstance(task, Mapping) else _task_record(drive_root, task_id)
 
     accounts = owner_place_accounts(drive_root)  # one snapshot for every row this read judges
@@ -1501,7 +1502,8 @@ def task_owner_words(drive_root: Any, task_id: str, *,
     root_id = str(record.get("root_task_id") or _mapping(record.get("metadata")).get("root_task_id") or task_id)
     if root_id != task_id:
         task_id, record = root_id, (_task_record(drive_root, root_id) or record)
-    for carrier in (_corpus_carrier, _origin_carrier, _binding_carrier, _annotation_carrier, _mailbox_carrier):
+    carriers = (_corpus_carrier, _origin_carrier, _binding_carrier, _annotation_carrier)
+    for carrier in (*carriers, _mailbox_carrier) if include_mailbox else carriers:
         rows = _deduped(carrier(drive_root, task_id, record, accounts))
         if rows:
             return _deduped(rows + held), ""

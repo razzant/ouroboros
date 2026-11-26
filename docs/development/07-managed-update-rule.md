@@ -14,7 +14,7 @@ Managed updates rewrite the live tree under owner authority. Persist target, wri
 - `git_observation.host_git_env`: content reads never lock/refresh/repair the index. Writers keep mandatory locks/repair. Refusals keep stderr; no tree effect means not-applied.
 - Manual Restore fences writers, pins HEAD, never pushes, interrupts without restart handoffs. Promotion binds one development SHA for QA and push. After-update facts reach panel and mind; the host never messages the owner (`tests/test_update_generation_facts.py`).
 - Apply shows the engine transition, active work (unreadable: unknown), installed/bundled Python/SQLite, forward-only engine data; `engine_pin_policy` also drives restart.
-- `git_bootstrap.json` needs identical clean checkout/dependency fingerprints; checkout/rollback invalidates it, successful smoke recreates it (ARCHITECTURE §2). Test zero-reset/zero-smoke repeats and change/transaction invalidation.
+- `git_bootstrap.json` needs identical clean checkout/dependency fingerprints; checkout/rollback invalidates it, successful smoke recreates it. Test zero-reset/zero-smoke repeats and change/transaction invalidation.
 
 Enforcement: `tests/test_update_merge_policy.py`, `tests/test_update_stash_recovery.py` (real Git, crash/replay, Restart).
 
