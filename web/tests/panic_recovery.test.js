@@ -27,13 +27,11 @@ const census = (rows, complete = true, extra = {}) => ({ panic_recovery: rows, p
 // The same body's owner-action card of a Panic-held work (main_decisions.owner_actions): its Resume, and its Stop.
 const card = (id, patch = {}) => ({ task_id: id, activity_id: id, phase: 'budget_paused', can_resume: true,
     cancelable: true, attention_reason: 'resume', model_waits: {}, ...patch });
-// What the message says with no row read, on the host's own word that its list is not whole.
-const BARE = 'Couldn’t check whether any tasks are waiting to resume after Panic.';
 const GAP = 'Some saved work could not be read, so this list may be incomplete.';
 
 // The message alone, over the DOM stub: `answers` answers each task's Resume (a value, an error to throw, or a function
 // of its body and transport options). A real door (`realResume`) leaves the shared client and `fetch` to answer.
-function rig(t, { answers = {}, lifetimeMs, realResume = false } = {}) {
+function rig(t, { answers = {}, lifetimeMs, realResume = false, notify } = {}) {
     const env = installDom();
     document.body = env.mount;  // the shared toasts land here
     t.after(() => restoreDom(env.prior));
@@ -64,6 +62,7 @@ function rig(t, { answers = {}, lifetimeMs, realResume = false } = {}) {
         },
         now: () => state.clock,
         ...(lifetimeMs ? { lifetimeMs } : {}),
+        ...(notify ? { notify } : {}),
     });
     t.after(() => panic.destroy());
     const message = () => one(feed, node => node.classList?.contains('panic-recovery'));
@@ -477,32 +476,47 @@ test('Main\'s pill counts the Panic choice as one action and lands on its first 
     assert.deepEqual(posts, [], 'landing sends nothing');
 });
 
-test('a first list that is empty and not whole says only that; a later whole one takes it away', async (t) => {
-    const r = rig(t);
-    const heading = () => one(r.message(), node => node.classList?.contains('model-wait-heading'));
-    const group = () => one(r.message(), node => node.getAttribute?.('role') === 'group');
-    // The host's own `false`, no row read and no other fact about Panic (a core still starting looks the same).
-    r.panic.snapshot(census([], false), 1);
-    assert.ok(r.message(), 'the fact of an incomplete list stands with no row read');
-    assert.deepEqual([r.part('panicGap').textContent, r.part('panicGap').dataset.tone], [BARE, undefined],
-        'one neutral line: no Panic, no stop and no work claimed, never amber');
-    assert.equal(heading().hidden, true, 'never `Stopped by Panic` over nothing read');
-    assert.deepEqual([one(r.message(), node => node.classList?.contains('panic-recovery-list')).hidden,
-        one(r.message(), node => node.classList?.contains('system-message-actions')).hidden], [true, true],
-    'nothing read is nothing laid out');
-    assert.equal(group().getAttribute('aria-label'), BARE);
-    assert.deepEqual([r.shown(), r.part('panicResume').hidden, r.part('panicAll').hidden, r.part('panicSummary').hidden],
-        [[], true, true, true], 'no box, no action, no count');
-    assert.equal(r.message().querySelector('.owner-action-reason').hidden, true, 'it neither asks to choose nor says nothing waits');
-    assert.equal(r.panic.target(), null, 'nothing to do here: the pill does not count it');
-    // A missing read or a dropped socket proves no whole list: the line stays, never an empty message.
-    r.panic.snapshot(null, 2);
+test('a list not whole with no row read is no message: a ready host\'s word is one notice per episode, a starting one none', async (t) => {
+    // Owner decision 27.11.2026: the bare line leaves the feed. A host not ready yet is said by the room bar (Starting…);
+    // a ready host's own `false` with nothing read is told once by the page's notice until a whole read ends it.
+    const told = [];
+    const r = rig(t, { notify: (text, options) => {
+        const notice = { text, options, disposed: false, dispose() { this.disposed = true; } };
+        told.push(notice);
+        return notice;
+    } });
+    const READY = { supervisor_ready: true, boot: { tasks_ready: true } };
+    for (const starting of [{ supervisor_ready: false }, { supervisor_ready: true, boot: { tasks_ready: false } }, {}]) {
+        r.panic.snapshot(census([], false, starting), 1);
+        assert.deepEqual([r.message(), r.feed.children.length, told.length], [null, 0, 0],
+            `a host not ready, or one that does not say, is told by nothing here (${JSON.stringify(starting)})`);
+    }
+    r.panic.snapshot(census([], false, READY), 2);
+    assert.deepEqual([r.message(), r.feed.children.length], [null, 0], 'never a System message or an empty card');
+    assert.deepEqual(told.map(n => n.text), ['Saved work could not be checked for anything waiting to resume.']);
+    assert.equal(told[0].options.action.label, 'Retry');
+    told[0].options.action.run();
+    assert.equal(r.state.refreshes, 1, 'its Retry reads the state again, and resumes nothing');
+    assert.equal(r.panic.target(), null, 'the pill counts nothing');
+    r.panic.snapshot(census([], false, READY), 3);
+    r.panic.snapshot(null, 4);
     r.panic.setConnected(false);
     r.panic.setConnected(true);
-    assert.equal(r.part('panicGap').textContent, BARE);
-    // The next whole and empty list takes it away.
-    r.panic.snapshot(census([]), 3);
-    assert.equal(r.message(), null);
+    r.panic.snapshot(census([], false, READY), 5);
+    assert.equal(told.length, 1, 'once per episode: a re-read, a failed read or a reconnect adds nothing');
+    r.panic.snapshot(census([], true, READY), 6);
+    assert.deepEqual([told[0].disposed, r.message()], [true, null], 'a whole read ends the episode and its notice');
+    r.panic.snapshot(census([], false, READY), 7);
+    assert.equal(told.length, 2, 'a new episode is told again');
+    // The working case: the same partial word with a row read is the message with its amber gap, and no notice.
+    r.panic.snapshot(census([ROWS.digest], false, READY), 8);
+    assert.equal(told[1].disposed, true, 'the message now says it');
+    assert.deepEqual([r.part('panicGap').textContent, r.part('panicGap').dataset.tone], [GAP, 'warn']);
+    const heading = one(r.message(), node => node.classList?.contains('model-wait-heading'));
+    assert.deepEqual([heading.hidden, heading.firstChild?.textContent], [false, 'Stopped by Panic']);
+    r.panic.snapshot(census([], true, READY), 9);
+    assert.equal(r.message(), null, 'a whole and empty list takes it away');
+    assert.equal(told.length, 2);
     await settle();
     assert.deepEqual(r.state.posts, []);
 });

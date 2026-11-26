@@ -13,6 +13,7 @@ import { announceMembershipGap, closeExpiredOffer, createTaskCloseButton, deadli
     from './task_control_menu.js';
 import { createSystemMessageActions } from './ui_helpers.js';
 import { fmt, tx } from './i18n.js';
+import { showToast } from './toast.js';
 import { indexDeadlineExpired } from './work_status.js';
 
 // One Resume answer may take this long (its writes wait on the queue and the disk); past it the outcome is unknown.
@@ -72,7 +73,7 @@ export function panicCards(data) {
  */
 export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mutate = (fn) => fn(), refresh = () => {},
     onChange = () => {}, resume = resumeTask, now = () => Date.now(), lifetimeMs = RESUME_ANSWER_MS,
-    stopControl = null } = {}) {
+    stopControl = null, notify = (text, options) => showToast(text, 'warn', options) } = {}) {
     // Task id -> {row, rank, current, unseen, gone, listedAt, checked, answer, card, vouched, view}, shown in
     // first-seen order; `rank` is its place in the latest census. `current`: the latest read named it while the socket
     // was open; `unseen`: an incomplete read did not name it (unconfirmed); `gone`: a complete read did not (it no
@@ -88,6 +89,10 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
     let census = 'unknown', censusAt = -Infinity, listSaid = '';
     let connected = true, sending = false, showAll = false, view = null, destroyed = false, serial = 0;
     let projects = new Map();   // project id and room chat id -> the Project's name, from the same body
+    // A ready host's own word that its list is not whole, with no row read: one notice per episode, which a whole read
+    // ends (`unread`: the episode is open; `notice`: its toast while it stands).
+    let unread = false, notice = null;
+    const withdraw = () => { notice?.dispose?.(); notice = null; };
 
     const label = (record) => record.row.task_name || fmt('Task {id}', { id: record.row.task_id.slice(0, 8) });
     const answerOf = (record) => (record.answer?.hold === record.row.panic_hold_id ? record.answer : null);
@@ -338,16 +343,9 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
             view.lead.hidden = !view.lead.textContent;
             // The host's word that its list is not whole stands until a read says it is, whatever is left to choose (the
             // last one answered) and through a missing read, which adds nothing of its own here (the room says the
-            // outage). With no row read at all it is one neutral line in place of `Stopped by Panic`: it claims no
-            // Panic, no stop and no work, so it stays true on a host that says so only until it is ready.
-            const bare = !all.length;
-            // Nothing read is nothing laid out: the title, the empty list and the empty actions row take no room.
-            for (const part of [view.heading, view.list]) part.hidden = bare;
-            view.gap.textContent = listSaid !== 'partial' ? ''
-                : bare ? tx('Couldn’t check whether any tasks are waiting to resume after Panic.')
-                    : tx('Some saved work could not be read, so this list may be incomplete.');
-            if (view.gap.textContent && !bare) view.gap.dataset.tone = 'warn'; else delete view.gap.dataset.tone;
-            view.root.setAttribute('aria-label', bare ? view.gap.textContent : tx('Stopped by Panic'));
+            // outage). The message exists only while it names a row (`snapshot`).
+            view.gap.textContent = listSaid === 'partial' ? tx('Some saved work could not be read, so this list may be incomplete.') : '';
+            if (view.gap.textContent) view.gap.dataset.tone = 'warn'; else delete view.gap.dataset.tone;
             view.picks.hidden = open.length < 2;
             view.count.textContent = offered.length
                 ? fmt('{chosen} of {total} chosen', { chosen: picked.length, total: offered.length }) : '';
@@ -360,7 +358,7 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
             view.summary.hidden = !view.summary.textContent;
             view.go.hidden = !open.length && !sending;
             // With nothing left to resume the row of actions holds nothing: it takes no room.
-            view.actions.hidden = bare || view.go.hidden;
+            view.actions.hidden = view.go.hidden;
             view.go.textContent = sending ? tx('Sending…')
                 : picked.length ? fmt('Resume {n} selected', { n: picked.length }) : tx('Resume selected');
             view.go.disabled = sending || !picked.length;
@@ -496,9 +494,20 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
                 record.view?.item.remove();
                 records.delete(taskId);
             }
-            // With no row read, the message stands only on the host's own word that its list is not whole, as one
-            // neutral line (`paint`); a whole list, or a host that says nothing of it, leaves nothing to say.
-            if (!records.size && listSaid !== 'partial') { remove(); onChange(); return; }
+            // With no row read Main holds no message (owner decision 27.11.2026). A host not ready yet is said by the room
+            // bar's Starting… (host_starting_status.js), so nothing more; a ready host's own word that its list is not
+            // whole is told once by the page's notice, claiming no Panic, stop or work, until a whole read ends it.
+            if (census === 'complete' || records.size) withdraw();
+            if (census === 'complete') unread = false;
+            if (!records.size) {
+                const ready = data.supervisor_ready === true && data.boot?.tasks_ready !== false;
+                if (listSaid === 'partial' && ready && !unread) {
+                    unread = true;
+                    notice = notify(tx('Saved work could not be checked for anything waiting to resume.'), { ttl: 0,
+                        haptic: false, action: { label: tx('Retry'), run: () => { void refresh(); } } });
+                }
+                remove(); onChange(); return;
+            }
             if (!view) mutate(() => { view = build(); return true; });
             paint();
         },
@@ -519,6 +528,6 @@ export function createPanicRecovery({ insertMessageNode, stampNodeTimestamp, mut
         node: () => view?.bubble || null,
         // Where the pill's landing puts focus: the first shown box that can be chosen (choosing sends nothing).
         door: () => [...records.values()].find((record) => choosable(record) && !record.view?.item.hidden)?.view?.input || null,
-        destroy() { destroyed = true; remove(); records.clear(); },
+        destroy() { destroyed = true; withdraw(); remove(); records.clear(); },
     };
 }
