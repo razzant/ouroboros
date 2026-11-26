@@ -3344,7 +3344,8 @@ export function createChatInstance({
         forgetWindowReturn();
         closedSinceOpen = true;
         catchUp.cancel(recentRequest, true);
-        historyReadAbort?.abort(); historyPager.cancelArrivals(); historyResyncScheduler.cancel();
+        if (ws.previouslyConnected?.()) historyReadAbort?.abort();  // a first attempt failing supersedes no read
+        historyPager.cancelArrivals(); historyResyncScheduler.cancel();
         if (leaving) { outageAway = [...outageAway || [], ...unconfirmed.written()]; return; }
         showOutage();
     });
