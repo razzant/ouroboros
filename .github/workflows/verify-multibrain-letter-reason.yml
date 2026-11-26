@@ -1,0 +1,65 @@
+name: Compare the linked-letter reader's provenance decision
+on:
+  push:
+    branches: ['verify/multibrain-letter-reason-8d88b0e8e485']
+permissions:
+  contents: read
+jobs:
+  compare-reported-reasons:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BASE: 1ce184dc8bd864d847665a5dddaae142440bc9b3
+      PRODUCT: 8d88b0e8e4856a48e2a8dd8f7abdd4fc11b52515
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind both revisions
+        run: |
+          set -eu
+          test "$(git show -s --format=%P HEAD)" = "$PRODUCT"
+          test "$(git diff --name-status "$PRODUCT" HEAD)" = "$(printf 'A\t%s' '.github/workflows/verify-multibrain-letter-reason.yml')"
+          test "$(git show -s --format=%P "$PRODUCT")" = "$BASE"
+          test "$(git rev-parse "$PRODUCT^{tree}")" = 164e3c376a104975c32a3e45cb32c5c5f7cef097
+          test "$(git diff --numstat "$BASE" "$PRODUCT")" = "$(printf '1\t0\t%s' tests/test_benchmark_provenance_v6810.py)"
+          git checkout --quiet --detach "$PRODUCT"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+          profile: test
+      - name: Run the unchanged assertion on both trees and compare its actual findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          py=$(command -v python)
+          d=$(mktemp -d /tmp/mb-reasons-XXXXXX)
+          for rev in "$BASE" "$PRODUCT"; do
+            git checkout --quiet --detach "$rev"
+            mkdir -p "$d/$rev/home" "$d/$rev/t" "$d/$rev/e"
+            rc=0
+            /usr/bin/env -i PATH="$PATH" HOME="$d/$rev/home" LANG=C.UTF-8 "$py" -I -S scripts/safe_test.py --temp-parent "$d/$rev/t" --evidence-dir "$d/$rev/e" --timeout 150 -- "$py" -m pytest -o addopts= -q --junitxml="$d/$rev/tests.xml" tests/test_benchmark_provenance_v6810.py::test_every_runtime_reason_code_has_a_recorded_truncation_decision tests/test_benchmark_provenance_v6810.py::test_the_two_out_of_tree_mirrors_stay_pinned_to_the_derived_vocabulary >"$d/$rev/output" 2>&1 || rc=$?
+            echo "$rc" >"$d/$rev/exit"
+          done
+          "$py" -I -S - "$d" "$BASE" "$PRODUCT" <<'PY'
+          import re, sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+          d, base, product = sys.argv[1:]
+          remaining = {'attachments_invalid', 'rejoin_invalid', 'request_not_recorded'}
+          for label, rev, wanted in [('base', base, remaining | {'letter_words_invalid'}), ('product', product, remaining)]:
+              p = Path(d) / rev
+              cases = ET.parse(p / 'tests.xml').findall('.//testcase')
+              assert len(cases) == 2 and (p / 'exit').read_text().strip() == '1'
+              guard, mirror = cases
+              assert guard.get('name') == 'test_every_runtime_reason_code_has_a_recorded_truncation_decision'
+              assert mirror.get('name') == 'test_the_two_out_of_tree_mirrors_stay_pinned_to_the_derived_vocabulary'
+              assert not any(c.tag in ('error', 'skipped') for c in guard) and not any(c.tag in ('failure', 'error', 'skipped') for c in mirror)
+              msg = guard.find('failure').attrib['message']
+              assert 'new runtime reason code(s) with no recorded decision' in msg
+              found = set(re.findall(r'\b([a-z0-9_]+) \(ouroboros/[^)]+:\d+\)', msg))
+              print(label, rev, 'whole guard: FAIL; mirror: PASS; missing:', sorted(found), flush=True)
+              assert found == wanted, (found, wanted)
+          print('SCOPED_DELTA_ONLY: four missing decisions became three; the whole guard is still red')
+          PY
