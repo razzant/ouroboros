@@ -747,6 +747,8 @@ Status, owner action, and urgent notification are separate product concepts:
 
 A status names who or what ends it; needed facts stay in their owning view. A toast announces news once:
 its timer pauses on hover or focus, and a non-expiring toast has a visible keyboard-reachable close, whatever its tone.
+It wears the shared float material without a rim; its tone is its words' ink; its close is a small plain × in its
+top-right corner, one line of words centred on it, a finger's reach the touch minimum (owner decision 27.11.2026).
 The problem, needed restart or unconfirmed outcome stays in its authoritative view (a card, Updates record or
 in-feed history edge) until it changes or the owner resolves it. Dismissing a notice hides it per browser,
 never its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
@@ -918,9 +920,8 @@ Surfaces whose tone is a class suffix rather than `data-tone`
 (`.chat-live-phase`) keeps its phase classes as facts, its tone in the
 `data-chip-tone` its painter writes; Logs reuses it for a failure alone (owner 14.11, «переиспользуются»). A surface that
 paints only its edge (a card tinted by its state, a callout's left rule) takes
-the border and leaves its own background alone; a toast keeps its glass
-background, because a translucent status fill over live page content costs the
-text its contrast.
+the border and leaves its own background alone; a toast takes only the foreground on its neutral glass, because a
+translucent status fill over live page content costs the text its contrast.
 
 Adopting these tokens applies the semantic status contract, which already
 governs every surface; it is not a token migration of those surfaces and does

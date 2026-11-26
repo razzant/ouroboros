@@ -42,7 +42,7 @@ def _gap_history(page, transport):
 # A room tells its history gap at the head of its loaded window and raises no notice over its newest rows (#2886, U021).
 # Every notice a room's stack ever holds is kept, so "none" covers the whole flow, not one instant.
 _ROOM_NOTICES = """window.__roomNotices = [];
-new MutationObserver(() => document.querySelectorAll('.toast-stack--room .toast').forEach(toast => {
+new MutationObserver(() => document.querySelectorAll('#toast-stack .toast').forEach(toast => {
     if (!window.__roomNotices.includes(toast)) window.__roomNotices.push(toast);
 })).observe(document, {childList: true, subtree: true});"""
 
@@ -72,7 +72,7 @@ def test_hidden_main_reads_no_history_until_shown_and_tells_its_gap_at_its_head(
     # A room behind another page neither draws nor reads (5e72b85224, "a page change ... stops drawing and reading
     # there"): Main opened behind Settings has read nothing and raised nothing.
     page.wait_for_timeout(1500)
-    hidden_notices = page.locator(".toast-stack--room .toast").count()
+    hidden_notices = page.locator("#toast-stack .toast").count()
     hidden_reads = list(reads)
     page.locator('[data-nav-page="chat"]').first.click()
     page.wait_for_selector("#page-chat.active")
@@ -120,7 +120,7 @@ def test_delayed_gap_waits_for_drawer_close_without_another_history_read(shell_u
     if chat_id == 42:
         page.evaluate("p => window.dispatchEvent(new CustomEvent('ouro:open-project', {detail: {project: p}}))", PROJECT)
         page.wait_for_selector("#project-panel.open .chat-input")
-    before_drawer = page.locator('.toast-stack--room .toast').all_text_contents()
+    before_drawer = page.locator('#toast-stack .toast').all_text_contents()
     page.locator(f"{host} [data-mobile-nav-toggle]").click()
     page.wait_for_function("document.body.classList.contains('nav-drawer-open') && window.__ouroLayers.top() === 'drawer'")
     assert pending, "the response must still be held when the drawer opens"
@@ -128,12 +128,12 @@ def test_delayed_gap_waits_for_drawer_close_without_another_history_read(shell_u
         route.fulfill(json={"messages": transport.history[chat_id], "progress": [],
                             "has_more": True, "page_cursor": "recent", "next_cursor": "older"})
     page.wait_for_function("host => document.querySelector(host + ' .chat-load-older-note')?.textContent.includes('gaps')", arg=host)
-    hidden = page.locator(".toast-stack--room .toast").count()
+    hidden = page.locator("#toast-stack .toast").count()
     facts = page.evaluate("""async host => ({bodyClass: document.body.className,
         inert: Boolean(document.querySelector(host).closest('[inert]')), top: window.__ouroLayers.top(),
         guardServed: (await (await fetch('/static/modules/chat.js')).text()).includes("!messagesDiv.closest('[inert]')")})""", host)
     record(f"drawer-gap-hidden-{chat_id}-{shell_ui['engine']}", {"notices": hidden, "reads": reads, "before_drawer": before_drawer,
-        "after_text": page.locator('.toast-stack--room .toast').all_text_contents(), **facts})
+        "after_text": page.locator('#toast-stack .toast').all_text_contents(), **facts})
     assert hidden == 0, "a drawer-covered room raises no notice"
     before = len(reads)
     page.keyboard.press("Escape")
@@ -337,31 +337,18 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
         page.goto(ui["url"] + "/")
         page.wait_for_selector("#page-chat .rw-trigger")
         page.wait_for_function("document.querySelector('#page-chat .chat-load-older-note')?.textContent.includes('gaps')")
-        assert page.locator(".toast-stack--room .toast").count() == 0, "Main tells its gap at the head of its history"
-        # A room's own notice stack (toast.js `host`) floats between the bar and the composer.
-        page.evaluate("""async () => {
-            const {showToast} = await import('/static/modules/toast.js');
-            showToast('A room notice keeps to the reading area, between the bar and the composer.', 'info',
-                {ttl: 0, haptic: false, dismissLabel: 'Dismiss room notice', host: document.querySelector('#page-chat')});
-        }""")
-        page.wait_for_selector(".toast-stack--room .toast-dismiss")
-        page.wait_for_function("getComputedStyle(document.querySelector('.toast-stack--room .toast')).opacity === '1'")
+        assert page.locator(".toast").count() == 0, "Main tells its gap at the head of its history"
         facts = page.evaluate("""() => {
-            const rect = s => document.querySelector(s).getBoundingClientRect();
             const header = document.querySelector('#page-chat .chat-page-header');
-            return {header: rect('#page-chat .chat-page-header'), toast: rect('.toast-stack--room .toast'),
-                composer: rect('#page-chat #chat-input-area'), background: getComputedStyle(header).backgroundColor,
+            return {background: getComputedStyle(header).backgroundColor,
                 edge: getComputedStyle(header, '::before').backgroundImage,
                 edgeEvents: getComputedStyle(header, '::before').pointerEvents};
         }""")
         # The bar paints nothing of its own; under its capsules lies the room's edge (DESIGN "A room's edges"), no press.
         assert facts["background"] == "rgba(0, 0, 0, 0)"
         assert "linear-gradient" in facts["edge"] and facts["edgeEvents"] == "none", facts
-        assert facts["toast"]["top"] > facts["header"]["bottom"]
-        assert facts["toast"]["bottom"] <= facts["composer"]["top"]
-        assert not page.locator("#page-chat .chat-page-note").is_visible()
         assert "Shown messages may have gaps" in page.locator("#page-chat .chat-load-older-note").inner_text()
-        # The consciousness chip opens its list, hit-testable beside the toast, without activating a command.
+        # The consciousness chip opens its list without activating a command.
         page.click("#page-chat .cx-chip:not([hidden])")
         page.locator('#page-chat .cx-shade .cx-toggle').click(trial=True)
         if theme == 'dark':
@@ -382,8 +369,6 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
             no_blur.evaluate("el => el.remove()")
         page.click("#page-chat .cx-chip")
         page.wait_for_selector("#page-chat .cx-shade", state="hidden")
-        page.click(".toast-stack--room .toast-dismiss")
-        page.wait_for_selector(".toast-stack--room .toast", state="detached")
         if width < 720:
             page.click('#page-chat [data-mobile-nav-toggle]')
             page.wait_for_function("window.__ouroLayers.top() === 'drawer'")
@@ -392,7 +377,7 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
         page.wait_for_function("!document.body.classList.contains('nav-drawer-open')")
         assert page.locator(".shell-pill").count() == 0
         page.wait_for_function("document.querySelector('#project-panel .chat-load-older-note')?.textContent.includes('gaps')")
-        assert page.locator(".toast-stack--room .toast").count() == 0, "the arriving room raises no notice of its own"
+        assert page.locator(".toast").count() == 0, "the arriving room raises no notice of its own"
         page.wait_for_function("""() => [...document.getAnimations()].every(a =>
             a.effect?.getTiming().iterations === Infinity || a.playState !== 'running')""")
         geometry = page.locator("#project-panel").evaluate("""panel => {
@@ -429,13 +414,13 @@ def test_toast_focus_timeout_and_disposal(shell_ui):
     page.wait_for_selector("#chat-input")
     page.evaluate("""async () => {
         const {showToast} = await import('/static/modules/toast.js');
-        window.testNotice = showToast('Focused notice', 'info', {ttl: 100,
-            dismissLabel: 'Close test notice', host: document.querySelector('#page-chat')});
+        window.testNotice = showToast('Focused notice', 'info', {ttl: 100, dismissLabel: 'Close test notice'});
         window.testNotice.querySelector('button').focus();
     }""")
     page.wait_for_timeout(250)
     assert page.get_by_label("Close test notice").count() == 1
-    assert "shell-icon-control" in page.get_by_label("Close test notice").get_attribute("class")
+    # The close is a small plain × in the toast's corner, not the shell's round capsule (owner decision 27.11.2026).
+    assert page.get_by_label("Close test notice").get_attribute("class") == "toast-dismiss ui-hit-area"
     page.locator("#chat-input").focus()
     page.wait_for_selector("[aria-label='Close test notice']", state="detached")
     page.evaluate("""async () => {

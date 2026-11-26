@@ -1104,15 +1104,39 @@ test('a gap notice keeps all its words beside its close button; the page stack i
     assert.deepEqual(observers[0].unobserved, [toast, shortNotice, plain],
         'every observed global notice is unobserved once on dispose');
     assert.deepEqual([...observers[0].observed], [stack], 'only the page stack remains observed');
-    cut = true;  // a room's stack keeps its own place: never the page's scrolling region
-    const host = env.doc.createElement('div');
-    env.doc.body.append(host);
-    const room = showToast('A room notice.', 'warn', { ttl: 0, dismissLabel: 'Dismiss notice', host });
-    assert.ok(!host.querySelector('.toast-stack--room').hasAttribute('tabindex'));
-    assert.equal(observers.length, 1, 'room stacks create no ResizeObserver');
-    assert.ok(!observers[0].observed.has(room), 'room notices are not observed by the page stack observer');
-    room.dispose();
-    assert.deepEqual(observers[0].unobserved, [toast, shortNotice, plain]);
+    // One place for notices: the page's stack at the top right; no notice gets a stack of its own.
+    assert.equal(env.doc.body.querySelectorAll('.toast-stack').length, 1);
+});
+
+// The toast wears the shared float material and its close is a small plain × in the top-right corner (owner decision
+// 27.11.2026): no rim, no plate. Both directions: the recipe holds here, and the old round capsule or rim would fail it.
+test('a toast is the float material with a plain corner close, never a rim or a round plate', async (t) => {
+    const { showToast } = await import('../modules/toast.js');
+    const { installDomDouble } = await import('./dom_double.js');
+    const env = installDomDouble();
+    t.after(() => env.restore?.());
+    const notice = showToast('Some saved history could not be loaded.', 'danger', { ttl: 0, haptic: false,
+        action: { label: 'Retry', run() {} } });
+    const close = notice.lastElementChild || notice.children[notice.children.length - 1];
+    assert.equal(close.className, 'toast-dismiss ui-hit-area', 'the close is no shell capsule');
+    assert.deepEqual([...notice.children].map((node) => node.className.split(' ')[0]),
+        ['toast-words', 'btn', 'toast-dismiss'], 'words, then the action, then the close');
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    const rule = (selector) => css.match(new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\>]/g, '\\$&')} \\{([^}]*)\\}`))?.[1] || '';
+    const toast = rule('.toast');
+    assert.match(toast, /background: var\(--surface-float\);/);
+    assert.match(toast, /box-shadow: var\(--elev-float\);/);
+    assert.match(toast, /backdrop-filter: var\(--glass\);/);
+    assert.doesNotMatch(toast, /border:|blur\(/, 'no rim and no blur of its own');
+    assert.doesNotMatch(css, /\.toast-(?:ok|danger|warn)\s*\{[^}]*border/, 'a tone is ink, never an edge');
+    const plain = rule('.toast > .toast-dismiss');
+    assert.match(plain, /background: transparent;/);
+    assert.match(plain, /grid-row: 1;/);
+    assert.match(plain, /align-self: start;/, 'the corner, not the middle of a tall notice');
+    assert.doesNotMatch(plain, /box-shadow|backdrop-filter/);
+    assert.match(rule('.toast > .toast-words:has(~ .toast-dismiss)'), /align-self: center;/,
+        'one line of words is centred on the close');
+    assert.doesNotMatch(css, /toast-stack--room/);
 });
 
 test('two unconfirmed effects are worded in the plural, as on the server', () => {

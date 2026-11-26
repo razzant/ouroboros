@@ -7604,14 +7604,15 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 
 .toast {
     max-width: min(420px, calc(100vw - 112px));
-    padding: 11px 14px;
+    padding: var(--space-3) var(--space-4);
     border-radius: var(--radius-object);
-    border: 1px solid rgba(var(--neutral-rgb), 0.10);
-    background: rgba(var(--modal-rgb), 0.94);
+    /* The shared float material (DESIGN principle 2, owner decision 27.11.2026): no rim, the float surface, the one
+       glass, the float shadow. A tone is its words' ink on that neutral body, never an edge. */
+    background: var(--surface-float);
     color: var(--text-primary);
-    box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
-    backdrop-filter: blur(14px);
-    -webkit-backdrop-filter: blur(14px);
+    box-shadow: var(--elev-float);
+    backdrop-filter: var(--glass);
+    -webkit-backdrop-filter: var(--glass);
     font-size: var(--type-body);
     line-height: 1.45;
     /* Error text can be a long unbroken token (a path, a URL, a serialized
@@ -7626,28 +7627,43 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     animation: toast-out 160ms ease-in forwards;
 }
 
-/* A toast keeps its own glass background (a translucent status fill over the
-   page would cost the text its contrast); the tone paints edge + foreground. */
-.toast-ok { border-color: var(--status-ok-border); color: var(--status-ok-fg); }
-.toast-danger { border-color: var(--status-error-border); color: var(--status-error-fg); }
-.toast-warn { border-color: var(--status-warn-border); color: var(--status-warn-fg); }
+.toast-ok { color: var(--status-ok-fg); }
+.toast-danger { color: var(--status-error-word, var(--status-error-fg)); }
+.toast-warn { color: var(--status-warn-fg); }
 .toast-muted,
 .toast-info { color: var(--status-neutral-fg); }
-/* Room notices sit above the measured composer, away from header menus. */
-.toast-stack--room {
-    position: absolute;
-    inset: auto 14px var(--chat-input-reserve, 108px);
-    align-items: center;
-}
-.toast-stack--room .toast { max-width: min(520px, 100%); box-sizing: border-box; background: var(--surface-float); }
 /* A notice's one way back (host_modules.js recovery) follows its words on the same line when they fit. */
 .toast .toast-action { display: inline-flex; flex-shrink: 0; margin-left: var(--space-2); vertical-align: middle; }
-.toast:has(> .toast-dismiss) { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-2); }
-/* Each part asks for the close button among its own following siblings (toast.js appends words, action, close), so
-   :has() stays in the subject compound. */
-.toast > .toast-words:has(~ .toast-dismiss) { min-width: 0; grid-column: 1; }
-.toast > .toast-action:has(~ .toast-dismiss) { grid-column: 1; margin-left: 0; justify-self: start; }
-.toast > .toast-dismiss { grid-column: 2; grid-row: 1 / span 2; }
+/* With a close, the words take the first row beside it and the action the row under them. One line of words is
+   centred on the close; several start level with it, so the close keeps the top-right corner. */
+.toast:has(> .toast-dismiss) { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-2); row-gap: var(--space-2); }
+.toast > .toast-words:has(~ .toast-dismiss) { min-width: 0; grid-column: 1; grid-row: 1; align-self: center; }
+.toast > .toast-action:has(~ .toast-dismiss) { grid-column: 1; grid-row: 2; margin-left: 0; justify-self: start; }
+/* The close: a small plain × in the corner, no plate or shadow (owner 27.11.2026); its ink deepens on hover. Under a
+   finger its reach is the touch minimum (.ui-hit-area), wider than the glyph. */
+.toast > .toast-dismiss {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: start;
+    width: 20px;
+    height: 20px;
+    margin: 0 calc(-1 * var(--space-1)) 0 0;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-meta);
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+.toast > .toast-dismiss > svg { display: block; width: 14px; height: 14px; }
+@media (hover: hover) {
+    .toast > .toast-dismiss:hover { color: var(--text-primary); }
+}
+.toast > .toast-dismiss:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 /* The page's stack ends 18 px above the screen's bottom, as it keeps from its right, and the notices it keeps scroll
    there as one column: every word and close button is reached by wheel, touch or keyboard (toast.js names it a region
    once cut). A scrolling box clips what it holds, so its padding is the toasts' shadow room (0 18px 42px): left and

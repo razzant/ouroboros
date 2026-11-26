@@ -5,21 +5,22 @@ import { normalizeTone } from './ui_helpers.js';
 
 const stackObservers = new WeakMap();
 
-function getStack(host = null) {
-    let stack = host ? host.querySelector(':scope > .toast-stack--room') : document.getElementById('toast-stack');
+// One place for every notice: the page's stack at the top right (owner 27.11.2026: «Правая верхняя позиция это стандартно»).
+function getStack() {
+    let stack = document.getElementById('toast-stack');
     if (!stack) {
         stack = document.createElement('div');
-        if (!host) stack.id = 'toast-stack';
-        stack.className = host ? 'toast-stack toast-stack--room' : 'toast-stack';
+        stack.id = 'toast-stack';
+        stack.className = 'toast-stack';
         stack.setAttribute('aria-live', 'polite');
         stack.setAttribute('aria-relevant', 'additions');
-        (host || document.body).appendChild(stack);
+        document.body.appendChild(stack);
     }
     // A window that grows or shrinks cuts the column or releases it with no notice coming or going; as it
     // scrolls, its edge moves over the words. A kept notice that grows or rewraps inside a capped column
     // shifts every notice below it while the stack's own box stays fixed, so the same observer watches each
     // global notice too.
-    if (!host && !stackObservers.has(stack) && typeof ResizeObserver === 'function') {
+    if (!stackObservers.has(stack) && typeof ResizeObserver === 'function') {
         const observer = new ResizeObserver(() => markCut(stack));
         observer.observe(stack);
         stackObservers.set(stack, observer);
@@ -64,9 +65,8 @@ function fadeCutWords(stack, scrolls) {
 
 // The page's stack ends above the screen's bottom and scrolls past it (style.css); cut there, it is reached by
 // keyboard too, as a wide table is (docs/DESIGN.md). Measured when a notice comes or goes, when the column's box
-// changes size and while it scrolls; room stacks keep their place.
+// changes size and while it scrolls.
 function markCut(stack) {
-    if (stack.id !== 'toast-stack') return;
     const cut = stack.scrollHeight > stack.clientHeight;
     fadeCutWords(stack, cut);
     if (cut === stack.hasAttribute('tabindex')) return;
@@ -83,26 +83,23 @@ function markCut(stack) {
  * One toast; a press anywhere on it dismisses it, a scroll over it never does. `ttl` 0 keeps it until then. `action`
  * ({label, run}) adds one button that dismisses the toast and runs (a recovery notice's way back, host_modules.js).
  * Non-expiring toasts always have an accessible close; `dismissLabel` also adds one to timed toasts and can name it.
- * Words stay beside the close in their own box; hover or focus pauses the auto-dismiss timer. An error toast answers the owner's own action and plays Telegram's error haptic (haptics.js); a
- * notice the owner did not cause passes `{ haptic: false }`.
- * Optional `host` confines the stack above a room's composer. Its owner calls the returned node's `dispose()` on teardown.
+ * The close is a plain × in the toast's top-right corner. Words stay beside it in their own box; hover or focus pauses
+ * the auto-dismiss timer. An error toast answers the owner's own action and plays Telegram's error haptic (haptics.js);
+ * a notice the owner did not cause passes `{ haptic: false }`. Its owner may call the returned node's `dispose()`.
  */
-export function showToast(message, tone = 'info', { ttl = 6000, action = null, haptic: felt = true, dismissLabel = '', host = null } = {}) {
-    const stack = getStack(host);
-    const observer = host ? null : stackObservers.get(stack) || null;
+export function showToast(message, tone = 'info', { ttl = 6000, action = null, haptic: felt = true, dismissLabel = '' } = {}) {
+    const stack = getStack();
+    const observer = stackObservers.get(stack) || null;
     // A notice that cannot expire must always have a visible, keyboard-reachable way out.
-    // Page notices give the shared edge a text box even when they have no close. Room notices keep their layout.
     const effectiveDismissLabel = dismissLabel || (ttl <= 0 ? tr('toast.dismiss', 'Dismiss notice') : '');
     const toast = document.createElement('div');
     const cleanTone = normalizeTone(tone || 'info', 'info');
     if (felt && cleanTone === 'danger') haptic('error');
     toast.className = `toast toast-${cleanTone}`;
     toast.setAttribute('role', cleanTone === 'danger' ? 'alert' : 'status');
-    const words = !host || effectiveDismissLabel ? document.createElement('span') : toast;
-    if (words !== toast) {
-        words.className = 'toast-words scroll-fade-y';
-        toast.append(words);
-    }
+    const words = document.createElement('span');
+    words.className = 'toast-words scroll-fade-y';
+    toast.append(words);
     words.textContent = message || '';
     let timer = 0;
     let removalTimer = 0;
@@ -160,7 +157,7 @@ export function showToast(message, tone = 'info', { ttl = 6000, action = null, h
     if (effectiveDismissLabel) {
         const close = document.createElement('button');
         close.type = 'button';
-        close.className = 'shell-icon-control toast-dismiss ui-hit-area';
+        close.className = 'toast-dismiss ui-hit-area';
         close.setAttribute('aria-label', effectiveDismissLabel);
         close.innerHTML = SHELL_ICONS.close;
         close.addEventListener('click', (event) => {
