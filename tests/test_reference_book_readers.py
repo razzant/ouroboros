@@ -38,7 +38,7 @@ def _chaptered_corpus(root: pathlib.Path, *, body: str = "The exact chapter body
 
 @pytest.mark.parametrize("path,role", [
     ("docs/ARCHITECTURE.md", "entrypoint"),
-    ("docs/architecture/06-agent-core.md", "chapter"),
+    ("docs/architecture/06-1-loop-tools-and-safety.md", "chapter"),
     ("docs/reference-books-migration.md", ""),
     ("docs/CHECKLISTS.md", ""),
     ("docs/architecture/notes.txt", ""),
@@ -99,7 +99,7 @@ def test_a_chapter_is_canonical_exactly_as_its_entrypoint_was(tmp_path):
         is_canonical_governance_path,
     )
 
-    assert is_canonical_governance_path("docs/architecture/06-agent-core.md")
+    assert is_canonical_governance_path("docs/architecture/06-1-loop-tools-and-safety.md")
     assert is_canonical_governance_path("docs/DEVELOPMENT.md")
     assert not is_canonical_governance_path("docs/reference-books-migration.md")
 
@@ -191,7 +191,7 @@ def test_a_chapter_read_is_an_ordinary_result_under_the_measured_frame():
     from ouroboros.tool_result_delivery import RECOVER_PAGEABLE, RESULT_VIEW_MARKER
 
     oversized = "x" * 85_000 + "\nLAST LINE"
-    for rel in ("docs/architecture/06-agent-core.md", "docs/development/06-rules-by-change-class.md",
+    for rel in ("docs/architecture/06-1-loop-tools-and-safety.md", "docs/development/06-rules-by-change-class.md",
                 "docs/reference-books-migration.md"):
         args = {"path": rel}
         assert requested_result_view(args) is None  # a plain read asks for no particular form
@@ -258,7 +258,7 @@ def test_the_triad_session_task_addresses_chapters_never_the_membership_page():
         architecture_text=load_governance_doc(REPO, "docs/ARCHITECTURE.md"),
     )
     with_book = build_triad_session_task(governance_repo_dir=REPO, **sections)
-    assert "Source: `docs/architecture/06-agent-core.md`" in with_book
+    assert "Source: `docs/architecture/06-1-loop-tools-and-safety.md`" in with_book
     assert "Source: `docs/development/14-build-and-ci.md`" in with_book
     assert "## ARCHITECTURE.md (navigation map)" not in with_book
 

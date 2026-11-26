@@ -131,7 +131,7 @@ def test_architecture_subject_map_row_resolves_its_owner_section():
     assert len(rows) == 1, rows
     assert "§6 Subject operation" in rows[0]
     section = read_book_section(load_reference_book(REPO, "architecture"), "Subject operation")
-    assert section.sources[0].path == "docs/architecture/06-agent-core.md"
+    assert section.sources[0].path == "docs/architecture/06-4-self-change-and-review.md"
 
 
 def _change_review_items() -> dict:

@@ -116,8 +116,9 @@ def test_the_real_architecture_book_navigation_exposes_all_h4_groups():
     book = load_reference_book(repo, "architecture")
     m = cl.book_navigation(book)
 
-    assert "## 6. Agent Core (navigation map)" in m
-    assert "Source: `docs/architecture/06-agent-core.md`" in m
+    assert "## 6.1 Agent Core — Loop, Tools & Safety (navigation map)" in m
+    assert "Source: `docs/architecture/06-1-loop-tools-and-safety.md`" in m
+    assert "Source: `docs/architecture/06-5-planning-memory-and-skills.md`" in m
     # A composed-book offset is never a locator; the read instruction is stated
     # once, over the physical Source paths.
     assert 'read_file(root="system_repo", path=...)' in m
@@ -155,7 +156,7 @@ def test_the_real_architecture_book_navigation_exposes_all_h4_groups():
 
     # Those ranges address the chapter file, so they resolve there and nowhere
     # else: the entrypoint has one section and cannot answer for them.
-    chapter = next(c for c in book.chapters if c.source_path.endswith("06-agent-core.md"))
+    chapter = next(c for c in book.chapters if c.source_path.endswith("06-1-loop-tools-and-safety.md"))
     start, end = _range("  ", "Tool capability and execution")
     lines = chapter.text.split("\n")
     assert lines[start - 1].startswith("### Tool capability and execution")

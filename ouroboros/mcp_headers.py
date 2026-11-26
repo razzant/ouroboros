@@ -161,7 +161,7 @@ def validate_changed_headers(incoming: Any, current: Any) -> None:
             raise ValueError("headers are unsupported for stdio")
 
 
-# The origin guard: every saved credential stays on the configured origin (`06-agent-core.md`).
+# The origin guard: every saved credential stays on the configured origin (`06-5-planning-memory-and-skills.md`).
 class MCPRedirectRefused(RuntimeError):
     """A request that would carry saved credentials to another origin; it was never sent."""
 
