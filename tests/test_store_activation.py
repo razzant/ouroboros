@@ -415,19 +415,21 @@ def test_restart_census_refuses_a_maintenance_exit_until_confirmed(tmp_path, mon
 
 
 def _background_owners(monkeypatch, tmp_path, order, armed):
-    """Fresh doubles bound at the three owners' own exports, each by name, so a list that points elsewhere misses
+    """Fresh doubles bound at the owners' own exports, each by name, so a list that points elsewhere misses
     one (a stop latches its owner for the process). Each stop is recorded in ``order``, the restart adoption's
     census in ``armed``; the cleanup's other owners do nothing."""
     import server
     from ouroboros import maintenance, startup_historical_audit, storage, storage_free
+    from ouroboros.gateway import history_reader
 
     owners = {"maintenance": maintenance.MaintenanceChild(), "count": storage.StorageCounter(),
-              "free": storage_free.FreeSpace()}
+              "free": storage_free.FreeSpace(), "history": history_reader.HistoryReader()}
     for module, name, key in ((maintenance, "child", "maintenance"), (storage, "count", "count"),
-                              (storage_free, "free", "free")):
+                              (storage_free, "free", "free"), (history_reader, "reader", "history")):
         owners[key].stop = lambda stop=owners[key].stop, key=key: (order.append(key), stop())[1]
         monkeypatch.setattr(module, name, owners[key])
     assert len(startup_historical_audit.BACKGROUND_CHILDREN) == len(owners)
+    monkeypatch.setattr(history_reader, "_HANDOFF_SECONDS", 0)
     monkeypatch.setattr("ouroboros.local_model._manager", None)
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
     monkeypatch.setattr(server, "begin_owned_stop", lambda *_, **__: None)
@@ -443,9 +445,9 @@ def _background_owners(monkeypatch, tmp_path, order, armed):
     return owners
 
 
-@pytest.mark.parametrize("row", ["maintenance", "count", "free"])
+@pytest.mark.parametrize("row", ["maintenance", "count", "free", "history"])
 def test_the_restart_cleanup_stops_and_counts_each_background_child(tmp_path, monkeypatch, row):
-    """Each of the three is asked to stop, maintenance child, Storage count, Free in that order, and its live child
+    """Each owner is asked to stop and its live child
     holds both of the cleanup's censuses, the body adoption's and the returned one (the store switch then
     refuses); once that child and its owner thread are done both are empty. A row dropped, pointed at another
     owner or moved fails here."""
@@ -454,12 +456,13 @@ def test_the_restart_cleanup_stops_and_counts_each_background_child(tmp_path, mo
     order, armed = [], []
     owners = _background_owners(monkeypatch, tmp_path, order, armed)
     owner, signals, release = owners[row], [], threading.Event()
-    child = SimpleNamespace(poll=lambda: None, kill=lambda: signals.append("kill"))
+    child = SimpleNamespace(pid=123, poll=lambda: None, kill=lambda: signals.append("kill"))
     owner._process, owner._thread = child, threading.Thread(target=release.wait, daemon=True)
     owner._thread.start()
     try:
-        assert server._emergency_process_cleanup()["live_children"] == [child] and armed == [[child]]
-        assert order == ["maintenance", "count", "free"] and signals == ["kill"]
+        live = [child.pid if row == "history" else child]
+        assert server._emergency_process_cleanup()["live_children"] == live and armed == [live]
+        assert order == ["maintenance", "count", "free", "history"] and signals == ["kill"]
     finally:
         release.set()
         owner._thread.join(5)
@@ -468,7 +471,7 @@ def test_the_restart_cleanup_stops_and_counts_each_background_child(tmp_path, mo
 
 
 def test_a_background_child_that_cannot_be_read_stops_none_and_raises(tmp_path, monkeypatch):
-    """All three are read before the first stop: an owner whose module is gone raises before any owner is
+    """All owners are read before the first stop: an owner whose module is gone raises before any owner is
     stopped (the restart exit then refuses, never a switch on an empty census), and a readable list stops all."""
     import server
     from ouroboros import startup_historical_audit
@@ -476,13 +479,48 @@ def test_a_background_child_that_cannot_be_read_stops_none_and_raises(tmp_path, 
     order = []
     _background_owners(monkeypatch, tmp_path, order, [])
     server._emergency_process_cleanup()
-    assert order == ["maintenance", "count", "free"]
+    assert order == ["maintenance", "count", "free", "history"]
     order.clear()
     rows = (*startup_historical_audit.BACKGROUND_CHILDREN, ("ouroboros.no_such_background_owner", "child"))
     monkeypatch.setattr(startup_historical_audit, "BACKGROUND_CHILDREN", rows)  # the unreadable one comes last
     with pytest.raises(ModuleNotFoundError):
         server._emergency_process_cleanup()
     assert order == []
+
+
+def test_restart_waits_for_an_inline_history_read_before_arming_adoption(tmp_path, monkeypatch):
+    import server
+    from ouroboros.gateway import history_reader
+
+    order, armed = [], []
+    owner = _background_owners(monkeypatch, tmp_path, order, armed)["history"]
+    monkeypatch.setattr(history_reader, "_HANDOFF_SECONDS", 3)
+    owner.bind(tmp_path)
+    started, observing, release = threading.Event(), threading.Event(), threading.Event()
+    finished, outcomes = [], []
+
+    def read():
+        started.set()
+        assert release.wait(5)
+        finished.append("history")
+
+    inline = threading.Thread(target=owner._server_read, args=(tmp_path.resolve(), read))
+    wait_stopped = owner.wait_stopped
+    monkeypatch.setattr(owner, "wait_stopped", lambda: (observing.set(), wait_stopped())[1])
+    restart = threading.Thread(target=lambda: outcomes.append(server._emergency_process_cleanup()))
+    inline.start()
+    try:
+        assert started.wait(2)
+        restart.start()
+        assert observing.wait(2)
+        assert armed == [] and owner.live_children() == [history_reader.PURPOSE + ":server_reads"]
+    finally:
+        release.set()
+        inline.join(5)
+        if restart.ident is not None:
+            restart.join(5)
+    assert not inline.is_alive() and not restart.is_alive()
+    assert finished == ["history"] and armed == [[]] and outcomes[0]["live_children"] == []
 
 
 def test_maintenance_census_covers_a_spawn_before_the_child_handle_is_published():
@@ -688,6 +726,69 @@ def test_rollback_door_resets_at_once_for_a_target_with_the_store(tmp_path, monk
     assert resets == [(new, "ui_rollback")] and store_switch.read_switch_intent(root) is None
 
 
+@pytest.mark.parametrize("failure", ["prepare", "unknown_reset", "restart_refused"])
+def test_restore_keeps_inline_history_only_for_a_known_continuing_store(tmp_path, monkeypatch, target_repo, failure):
+    import asyncio
+    from types import SimpleNamespace
+
+    from ouroboros.gateway import control, history_reader
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from supervisor import git_ops
+
+    repo, _old, new = target_repo
+    root = fixture_root(tmp_path)
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+    ensure_current_store(root)
+    capture = git_ops.git_capture
+    _wire_git_ops(monkeypatch, repo, root)
+    monkeypatch.setattr(control, "_acquire_repo_mutation_lock", lambda: (None, None))
+    monkeypatch.setattr(control, "_release_repo_mutation_lock", lambda _fh: None)
+    monkeypatch.setattr(control, "_quiesce_repo_writers", lambda _reason: [])
+    reader = history_reader.HistoryReader()
+    reader.bind(root)
+    monkeypatch.setattr(history_reader, "reader", reader)
+    commands = []
+
+    def observe(cmd, **kwargs):
+        if cmd[1] == "reset":
+            commands.append(tuple(cmd))
+            if failure == "unknown_reset":
+                raise OSError("reset reply unavailable")
+        return capture(cmd, **kwargs)
+
+    def preparation_failure():
+        raise OSError("cannot read working tree status")
+
+    monkeypatch.setattr(git_ops, "git_capture", observe)
+    if failure == "prepare":
+        monkeypatch.setattr(git_ops, "_collect_repo_sync_state", preparation_failure)
+    read = make_chat_history_endpoint(root)
+
+    def get():
+        return asyncio.run(read(SimpleNamespace(query_params={})))
+
+    def rollback():
+        return control.rollback_through_door(new, door="ui_rollback", request_restart=lambda: False)
+
+    try:
+        baseline = get()
+        assert baseline.status_code == 200
+        if failure == "unknown_reset":
+            with pytest.raises(OSError, match="reset reply unavailable"):
+                rollback()
+            assert get().status_code == 503 and len(commands) == 1
+        else:
+            status, payload = rollback()
+            assert status == (500 if failure == "prepare" else 200), payload
+            assert len(commands) == (0 if failure == "prepare" else 1)
+            result = get()
+            assert (result.status_code, result.body) == (200, baseline.body)
+        assert git(repo, "rev-parse", "HEAD") == new and not reader.live_children()
+    finally:
+        store.forget_handoffs()
+        store.close_connections()
+
+
 def test_rollback_door_fence_refusal_moves_nothing(tmp_path, monkeypatch, target_repo):
     import supervisor.git_ops as git_ops
     from ouroboros.gateway import control
@@ -817,4 +918,5 @@ def test_update_replace_to_a_store_less_tree_defers_the_checkout_and_skips_the_p
     assert [tx["phase"] for tx in writes][-1] == "pending_boot_smoke" and "passed" not in {tx.get("pre_restart_smoke") for tx in writes}
     intent = store_switch.read_switch_intent(root)
     assert intent["door"] == "update_replace" and intent["target_sha"] == old and intent["reason"] == "ui_update_apply"
+    assert intent["attempt_id"] == writes[-1]["attempt_id"]  # the seam's refusal of it binds this attempt
     assert git(repo, "rev-parse", "HEAD") == new

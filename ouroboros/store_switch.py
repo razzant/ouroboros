@@ -41,9 +41,13 @@ import logging
 import os
 import pathlib
 import shutil
+import sqlite3
 import subprocess
 import threading
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import partial
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from ouroboros import evidence_packs, store, store_import, usage_store
 from ouroboros.git_selection import selected_git
@@ -59,6 +63,26 @@ PROGRESS_REL = pathlib.Path("state/switch_progress.json")
 DOORS = ("ui_rollback", "vcs_rollback", "boot_smoke_rollback", "update_replace")
 _NOTICE_PHASES = ("refused", "switch_failed", "switch_not_performed")
 Owner = Callable[[Dict[str, Any]], Tuple[bool, str]]
+
+
+class UnappliedCheckout(NamedTuple):
+    """An ordinary failed outcome with the producer's proof no checkout step took effect."""
+
+    ok: bool
+    message: str
+    before_tree_effects = True
+
+
+class SwitchIntentPending(RuntimeError):
+    """``record_switch_intent`` refused before writing: the earlier intent stays its own door's."""
+
+
+class UnappliedSwitch(NamedTuple):
+    """The same switch result shape, preserving proof of refusal before tree effects."""
+
+    ok: bool
+    message: str
+    deferred: bool
 
 
 def _progress(root: pathlib.Path, phase: str, **facts: Any) -> None:
@@ -123,21 +147,38 @@ def report_outcomes(root: pathlib.Path, owner_chat_id: int) -> None:
 
 
 
-def record_switch_intent(root: Any, *, target_sha: str, target_ref: str, reason: str, door: str) -> Dict[str, Any]:
-    """The door's record of the switch it wants; write-once until consumed or refused."""
+def record_switch_intent(root: Any, *, target_sha: str, target_ref: str, reason: str, door: str,
+                         attempt_id: str = "") -> Dict[str, Any]:
+    """The door's record of the switch it wants; write-once until consumed or refused. A door's ``attempt_id`` (an
+    Update replace's) binds the seam's refusal record to that attempt (``refused_switch``)."""
     root = pathlib.Path(root)
     if door not in DOORS:
         raise ValueError(f"unknown switch door: {door}")
     if (root / INTENT_REL).exists():
-        raise RuntimeError(f"a switch intent is already recorded: {root / INTENT_REL}")
+        raise SwitchIntentPending(f"a switch intent is already recorded: {root / INTENT_REL}")
     intent = {"target_sha": str(target_sha), "target_ref": str(target_ref), "reason": str(reason), "door": door,
-              "requested_at": utc_now_iso()}
+              "requested_at": utc_now_iso(), **({"attempt_id": str(attempt_id)} if attempt_id else {})}
     atomic_write_json(root / INTENT_REL, intent, fsync=True)
     return intent
 
 
 def read_switch_intent(root: Any) -> Optional[Dict[str, Any]]:
     return read_json_dict(pathlib.Path(root) / INTENT_REL)
+
+
+def _refused_intent_path(root: pathlib.Path, attempt_id: Any) -> Optional[pathlib.Path]:
+    """The one name ``_refuse`` gives an intent naming ``attempt_id`` when it sets it aside unconsumed."""
+    attempt = str(attempt_id or "")
+    return root / INTENT_REL.with_name(f"{INTENT_REL.stem}.refused-{attempt}.json") if attempt.isalnum() else None
+
+
+def refused_switch(root: Any, door: str, attempt_id: Any) -> Optional[Dict[str, Any]]:
+    """The intent ``door`` recorded for ``attempt_id`` as ``_refuse`` set it aside, or ``None``. That atomic rename,
+    synced before any later write, happens only before an intent is consumed, so no switching owner ever received
+    it: the decisive record, whatever became of the progress row after it."""
+    path = _refused_intent_path(pathlib.Path(root), attempt_id)
+    intent = read_json_dict(path) if path is not None else None
+    return intent if isinstance(intent, dict) and (intent.get("door"), intent.get("attempt_id")) == (door, attempt_id) else None
 
 
 def _receipt(root: pathlib.Path, intent: Dict[str, Any]) -> Dict[str, Any]:
@@ -199,35 +240,99 @@ def reset_profile_refusal(root: Any, repo_dir: Any, target_sha: str) -> str:
             else "The target version cannot preserve the unfinished Reset.")
 
 
+class HistoryHandoff:
+    """The unchanged server may resume this transfer, not a same-door neighbour."""
+
+    _continue = None
+    checkout_confirmed = False
+
+    def prepare(self, root: pathlib.Path) -> str:
+        from ouroboros.gateway.history_reader import reader
+
+        token, refusal = reader.prepare_handoff(root.resolve())
+        self._continue = (partial(reader.continue_inline, token) if token is not None else
+                          lambda: no_switch_intent(root) and store.forget_handoffs())
+        return refusal
+
+    def resume_inline(self, *, restored=False) -> None:
+        if self._continue is not None and (self.checkout_confirmed or restored):
+            self._continue()
+
+
+_HISTORY_HANDOFF = ContextVar("history_handoff", default=None)
+
+
+@contextmanager
+def capture_history_handoff():
+    """Keep the attempt across synchronous restart wrappers with a two-value result."""
+    handoff = HistoryHandoff()
+    token = _HISTORY_HANDOFF.set(handoff)
+    try:
+        yield handoff
+    except BaseException:
+        # The checkout owner may have finished before a wrapper failed to arm exit.
+        handoff.resume_inline()
+        raise
+    finally:
+        _HISTORY_HANDOFF.reset(token)
+
+
+def current_history_handoff() -> HistoryHandoff:
+    return _HISTORY_HANDOFF.get() or HistoryHandoff()
+
+
 def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: str, reason: str, door: str,
-                    reset: Callable[[], Tuple[bool, str]]) -> Tuple[bool, str, bool]:
+                    reset: Callable[[], Tuple[bool, str]], handoff: Optional[HistoryHandoff] = None,
+                    attempt_id: str = "") -> Tuple[bool, str, bool]:
     """A door's one decision after its writers are stopped: a target WITHOUT the store, or one that cannot
     read a dialogue row held by reference, records the intent and moves nothing (the seam exports and
     switches at the restart exit the door requests next); any other runs the door's own reset now, after the
     accepted wake transitions are written in the form a target without their reader reads (best effort, its
     outcome logged: ``_export_wake_transitions``). Returns ``(ok, message, deferred)``."""
     if refusal := reset_profile_refusal(root, repo_dir, target_sha):
-        return False, refusal, False
+        return UnappliedSwitch(False, refusal, False)
     needs = switch_needs(repo_dir, target_sha)
     if any(needs.get(name) for name in _DEFERRING):
-        record_switch_intent(root, target_sha=target_sha, target_ref=target_ref, reason=reason, door=door)
+        record_switch_intent(root, target_sha=target_sha, target_ref=target_ref, reason=reason, door=door,
+                             attempt_id=attempt_id)
         return True, (f"authority switch to {target_sha[:12]} recorded: the facts are exported and the checkout "
                       "moves at the restart exit"), True
     if lacks_wake_chain_reader(repo_dir, target_sha):
         exported = _export_wake_transitions(pathlib.Path(root))
         log.info("Accepted wake transitions before the %s door's reset to %s: %s", door, target_sha[:12],
                  exported.get("status"))
-    refusal = _hand_off_stores(pathlib.Path(root))
-    if refusal:
-        store.forget_handoffs()
-        return False, f"switch refused: a store could not be handed off ({refusal})", False
+    root = pathlib.Path(root)
+    handoff = handoff if handoff is not None else current_history_handoff()
+    if refusal := handoff.prepare(root) or _hand_off_stores(root):
+        handoff.resume_inline(restored=True)  # the checkout never ran
+        return UnappliedSwitch(False, f"switch refused: a store could not be handed off ({refusal})", False)
     try:
-        ok, message = reset()
+        outcome = reset()
     except BaseException as exc:
-        if getattr(exc, "before_tree_effects", False):  # the reset changed nothing: this process keeps its stores
-            store.forget_handoffs()
+        if getattr(exc, "before_tree_effects", False):
+            handoff.resume_inline(restored=True)
         raise
+    ok, message = outcome
+    handoff.checkout_confirmed = ok
+    if not ok and getattr(outcome, "before_tree_effects", False):
+        handoff.resume_inline(restored=True)
+        return UnappliedSwitch(False, message, False)
     return ok, message, False
+
+
+def no_switch_intent(root: pathlib.Path) -> bool:
+    try:
+        return not (root / INTENT_REL).exists()
+    except OSError:
+        return False
+
+
+def inline_history_ready(root: pathlib.Path) -> bool:
+    """A confirmed continuing owner may have to wait for publication or a busy store."""
+    try:
+        return no_switch_intent(root) and store.store_ready(root)
+    except (OSError, sqlite3.OperationalError, store.StoreError):
+        return False
 
 
 def _export_wake_transitions(root: pathlib.Path) -> Dict[str, Any]:
@@ -254,7 +359,7 @@ def _hand_off_stores(root: pathlib.Path) -> str:
             store.hand_off(drive)
             dialogue_store.hand_off(drive)
         usage_store.hand_off(root)
-    except (OSError, store.StoreError, UsageAccountingError) as exc:
+    except (OSError, sqlite3.OperationalError, store.StoreError, UsageAccountingError) as exc:
         return f"{type(exc).__name__}: {exc}"
     return ""
 
@@ -441,8 +546,10 @@ def _refuse(root: pathlib.Path, intent: Dict[str, Any], receipt: Dict[str, Any],
     attempt moved them); progress retains the reason for the next startup owner notice."""
     restored = _abandon(root, receipt)
     store.forget_handoffs()  # this process keeps its stores
-    refused = root / INTENT_REL.with_name(f"{INTENT_REL.stem}.refused-{_stamp()}.json")
+    refused = (_refused_intent_path(root, intent.get("attempt_id"))
+               or root / INTENT_REL.with_name(f"{INTENT_REL.stem}.refused-{_stamp()}.json"))
     os.replace(root / INTENT_REL, refused)
+    store.fsync_directory(root / "state")  # an attempt's set-aside intent is its refusal record (``refused_switch``)
     _progress(root, "refused", intent=intent, reason=reason, restored=restored, intent_moved_to=refused.name, **facts)
     return {"status": "refused", "reason": reason, "restored": restored, **facts}
 

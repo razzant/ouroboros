@@ -219,14 +219,35 @@ def _row_key(key) -> bool:
             and type(key[2]) is int and key[2] >= 0)
 
 
+def _unpack_cursor(value):
+    if not isinstance(value, str) or len(value) > _CURSOR_CHARS:
+        raise ValueError
+    decoded = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+    cursor = json.loads(decoded)
+    if not isinstance(cursor, dict) or cursor.get("v") != 1 or cursor.get("kind") not in {"older", "page", "after"}:
+        raise ValueError
+    return cursor
+
+
+def _cursor_window(cursor):
+    return (not cursor or (cursor["kind"] == "page" and cursor.get("recent") is True),
+            bool(cursor) and cursor["kind"] == "after")
+
+
+def live_overlays(cursor, around):
+    """Admission hints only; the assembly still validates selectors against the real room view."""
+    if around is not None:
+        return False, False
+    try:
+        recent, after = _cursor_window(_unpack_cursor(cursor) if cursor else None)
+    except (ValueError, TypeError, RecursionError):
+        return False, False  # the malformed cursor cannot select a page
+    return recent or after, not cursor or after
+
+
 def decode_cursor(value, thread_id, view):
     try:
-        if not isinstance(value, str) or len(value) > _CURSOR_CHARS:
-            raise ValueError
-        decoded = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
-        cursor = json.loads(decoded)
-        if not isinstance(cursor, dict) or cursor.get("v") != 1 or cursor.get("kind") not in {"older", "page", "after"}:
-            raise ValueError
+        cursor = _unpack_cursor(value)
         for field in ("upper", "before"):
             if set(cursor[field]) != set(_SOURCES):
                 raise ValueError
@@ -582,8 +603,7 @@ def select_history_page(data_dir, thread_id, view, cursor, quotas, predicates, c
         quotas = continuation["quotas"]
         if any(quotas[key] > caps[key] for key in quotas):
             raise HistoryCursorError("history_cursor_invalid", 400)
-    recent = not continuation or (continuation["kind"] == "page" and continuation["recent"])
-    after = bool(continuation) and continuation["kind"] == "after"
+    recent, after = _cursor_window(continuation)
     selections, upper, before, page_ends, importing = {}, {}, {}, {}, []
     horizon, chains, chrono = {}, {}, {}
     for source, quota in (("chat", "human"), ("progress", "progress")):

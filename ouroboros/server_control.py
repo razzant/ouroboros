@@ -422,8 +422,10 @@ def execute_panic_stop(
             if not settle:
                 request_threads.append(thread)
 
+        from ouroboros.gateway.history_reader import reader as history_reader
         from ouroboros.startup_historical_audit import audit
 
+        attempt("room-history-reader", history_reader.stop, native=True)
         attempt("startup-audit", audit.stop, native=True)
         from ouroboros.maintenance import child as maintenance_child
 

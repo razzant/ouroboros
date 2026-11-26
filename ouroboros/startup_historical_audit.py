@@ -20,10 +20,10 @@ import time
 _REPORT_BYTES = 4096
 
 
-def spawn_maintenance_job(data_root, repo_dir, purpose, *, args=(), **popen):
+def spawn_maintenance_job(data_root, repo_dir, purpose, *, args=(), extra_env=None, direct_interpreter=False, **popen):
     """The audit, the maintenance child and the storage count share session custody, a dedicated
     group and containment env. ARGS follow the child's standard arguments; POPEN overrides the
-    stream defaults (a stdin pipe for a child that reads its input)."""
+    stream defaults. DIRECT_INTERPRETER is for a pipe owner that attests its own PID."""
     from ouroboros.config import (SETTINGS_PATH, get_deliverables_root, get_subagent_projects_root,
                                   get_subagent_worktree_root, resolve_app_root)
     from ouroboros.launch_roots import BASIS_ENV, WorkRootUnavailable
@@ -55,10 +55,17 @@ def spawn_maintenance_job(data_root, repo_dir, purpose, *, args=(), **popen):
             pass
     if os.environ.get(BASIS_ENV):
         env[BASIS_ENV] = os.environ[BASIS_ENV]
+    env.update(extra_env or {})
+    argv = [sys.executable, "-m", "ouroboros." + purpose, "--data-root", str(data_root),
+            "--custody-session", current_custody_session_id(), *args]
+    if direct_interpreter:
+        from ouroboros.platform_layer import direct_python_command
+
+        argv, launcher_env = direct_python_command(argv)
+        env.update(launcher_env)
     # Never share the server group: custody-publication failure kills this group.
     return spawn_supervised(
-        [sys.executable, "-m", "ouroboros." + purpose, "--data-root", str(data_root),
-         "--custody-session", current_custody_session_id(), *args],
+        argv,
         drive_root=data_root, purpose=purpose, scope="session", cwd=str(repo_dir), env=env,
         **{"stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.DEVNULL, **popen},
     )
@@ -115,7 +122,7 @@ def finish_maintenance_job(job, process, data_root, started, parse, record):
 # (``server._emergency_process_cleanup``); Panic asks each by name, inline; Quit stops only the
 # maintenance child. Who stops each kind at each door: ``tests/test_process_custody.py``.
 BACKGROUND_CHILDREN = (("ouroboros.maintenance", "child"), ("ouroboros.storage", "count"),
-                       ("ouroboros.storage_free", "free"))
+                       ("ouroboros.storage_free", "free"), ("ouroboros.gateway.history_reader", "reader"))
 
 
 def stop_background_children() -> list:

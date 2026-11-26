@@ -876,9 +876,19 @@ def test_providerless_boot_does_not_prepare_a_transport(boot_app, monkeypatch, f
 
 @pytest.fixture
 def providerless_history_boot_app(boot_app, monkeypatch):
+    from pathlib import Path
+
+    from ouroboros.gateway import history_reader
     from ouroboros.gateway.router import _room_reading_routes
+    from supervisor import git_ops
 
     srv, root = boot_app
+    monkeypatch.setattr(history_reader, "reader", history_reader.HistoryReader())
+    monkeypatch.setattr(srv, "REPO_DIR", Path(srv.__file__).resolve().parent)
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", root)
+    git_dir = root.parent / "history-fixture.git"
+    git_dir.mkdir()
+    monkeypatch.setattr(git_ops, "_git_dir", lambda: git_dir)
     # History captures its root at route construction, unlike request-scoped project routes.
     # Replace the Route itself so its ASGI handler also uses the lifespan's test profile.
     router = srv.app.app.router
@@ -912,6 +922,60 @@ def test_a_clean_providerless_profile_reads_main_and_creates_its_first_project_w
         assert client.get("/api/projects").json()["projects"][0]["name"] == "First"
     assert not dialogue_store.path(root).exists(), "no legacy dialogue exists to cut over"
     assert not (root / "settings.json").exists(), "reading does not author a provider profile"
+
+
+@pytest.mark.parametrize("phase", ["assisted_resolution", "pending_boot_smoke", "probe_error"])
+def test_providerless_history_boot_keeps_unavailable_checkout_on_inline_path(
+        providerless_history_boot_app, monkeypatch, phase, caplog):
+    from starlette.testclient import TestClient
+
+    from ouroboros.gateway import history_reader
+    from supervisor import update_merge
+
+    srv, root = providerless_history_boot_app
+    monkeypatch.setattr(srv, "has_startup_ready_provider", lambda _settings: False)
+    if phase == "probe_error":
+        def unreadable_marker():
+            raise PermissionError("synthetic checkout metadata error")
+
+        monkeypatch.setattr(update_merge, "_update_tx_marker_path", unreadable_marker)
+    else:
+        update_merge.write_update_tx({"phase": phase, "pre_update_sha": "a" * 40, "target_sha": "b" * 40})
+
+    # Boot recovery itself is stubbed by boot_app. Only read the synthetic
+    # marker and observe the actual startup selection and HTTP read path.
+    with TestClient(srv.app) as client:
+        _wait(lambda: _health(client)["boot"]["phase"] == "ready")
+        instance = history_reader.reader
+        if phase == "pending_boot_smoke":
+            assert instance.ready.wait(8), instance._failure
+        else:
+            instance._thread.join(8)
+            expected = "checkout_changing" if phase == "assisted_resolution" else "checkout_probe_failed"
+            assert instance.pid is None and instance._failure == expected and not instance.live_children()
+        response = client.get("/api/chat/history")
+        assert response.status_code == 200, response.text
+        if phase == "probe_error":
+            assert "room_history_reader_fallback cause=checkout_probe_failed" in caplog.text
+    assert not instance.live_children()
+
+
+def test_same_app_serves_history_after_a_fresh_lifespan(providerless_history_boot_app, monkeypatch):
+    from starlette.testclient import TestClient
+    from ouroboros.gateway import history_reader
+
+    srv, _root = providerless_history_boot_app
+    monkeypatch.setattr(srv, "has_startup_ready_provider", lambda _settings: False)
+    previous = None
+    for _ in range(2):
+        with TestClient(srv.app) as client:
+            _wait(lambda: _health(client)["boot"]["phase"] == "ready")
+            current = history_reader.reader
+            assert current is not previous and current.ready.wait(8), current._failure
+            assert client.get("/api/chat/history").json()["messages"] == []
+            assert current.pid is not None
+        assert not current.live_children()
+        previous = current
 
 
 def test_a_providerless_legacy_profile_reaches_main_and_its_first_project_through_the_real_boot(

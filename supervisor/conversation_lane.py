@@ -44,6 +44,7 @@ import logging
 import pathlib
 import time
 import uuid
+from contextlib import nullcontext
 from typing import Any, Dict, List
 
 from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
@@ -616,15 +617,15 @@ def reconcile_under_project_fence() -> None:
         log.exception("Conversation lane reconcile under the project fence failed")
 
 
-def lane_turn_rows() -> List[Dict[str, Any]]:
-    """``active_direct_turns`` rows for the lane's RUNNING turns (the registry's shape), by value.
+def lane_turn_rows(*, queue_held: bool = False) -> List[Dict[str, Any]]:
+    """Copy the lane's RUNNING turns. History can use its already-admitted Q lease.
 
     ``phase`` is ``preparing`` until a carrier holds the turn, then ``working``;
     ``turn_phase`` follows the carrier's own start facts (``direct_turn_phase``
     frames) and ``model_activity`` its observed call, both frame-fed.
     """
     rows: List[Dict[str, Any]] = []
-    with _queue_lock:
+    with nullcontext() if queue_held else _queue_lock:
         snapshot = [(tid, meta) for tid, meta in _pool().RUNNING.items() if conversation_row(meta)]
         for tid, meta in snapshot:
             task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
