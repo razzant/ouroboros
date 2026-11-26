@@ -1,4 +1,6 @@
 """Isolated queue and ledger inputs for the real state and task-control handlers."""
+import os
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +52,21 @@ def read_state(gateway):
     response = gateway.client.get("/api/state")
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def make_queue_ready(gateway, monkeypatch):
+    """The fixture's own queue is published after the task-readiness latch, without booting anything. The state then
+    reads as a started host's: ``supervisor_ready``, ``boot.tasks_ready`` and a Panic census that is whole unless its
+    own rows leave a gap. ``gateway`` alone is the core still starting, whose census says it is not whole."""
+    from supervisor import queue
+
+    ready = threading.Event()
+    ready.set()
+    gateway.client.app.state.supervisor_ready_event = ready
+    monkeypatch.setattr(queue, "INITIALIZED", True)
+    monkeypatch.setattr(queue, "OWNER_PID", os.getpid())
+    monkeypatch.setattr(queue, "QUEUE_SNAPSHOT_PATH", gateway.root / "state" / "queue_snapshot.json")
+    return gateway
 
 
 def assignment_with_an_evolution_row(data_root, monkeypatch, *, settle_at):

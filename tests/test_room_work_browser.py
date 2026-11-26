@@ -24,7 +24,7 @@ import pytest
 
 from ouroboros.consciousness_view import describe_consciousness_state
 from tests import test_subscription_setup_browser as setup_browser
-from tests._queue_state import gateway, read_state  # noqa: F401
+from tests._queue_state import gateway, make_queue_ready, read_state  # noqa: F401
 from tests._shared import answer_projects
 from tests._work_projection_shared import work_fields
 
@@ -488,7 +488,7 @@ def test_first_project_web_echo_with_a_cold_main(subscription_ui, tmp_path, monk
         expect(rows).to_be_in_viewport()
         page.screenshot(path=str(out / f"web-echo-{room}-{width}.png"), animations="disabled")
 
-    serve_chat_history(main, tmp_path)
+    serve_chat_history(main, tmp_path, scope=setup_browser.PREVIEW_SCOPE)  # the profile this document proves
     viewer.projects = [project]
     main.unroute("**/api/state*", missing_state)
     viewer.refresh()
@@ -644,7 +644,9 @@ NATIVE_NAMES = {"atlas": "Index the atlas", "symbols": "Check map symbols", "cat
 
 def native_main(room_ui, gateway, monkeypatch):  # noqa: F811
     """Main with three owner actions from the real census: atlas and symbols hold an explicit Resume, catalog
-    waits on a sign-in only. The page is open and every row is a System message in the feed."""
+    waits on a sign-in only. The page is open and every row is a System message in the feed. The core is ready as a
+    started host's is, so the census says Panic's list is whole (and empty): a core still starting says it is not,
+    and Main then adds a System message of its own (DESIGN "Project question mirror")."""
     from playwright.sync_api import expect
 
     from ouroboros.model_wait import mutate_wait
@@ -667,7 +669,9 @@ def native_main(room_ui, gateway, monkeypatch):  # noqa: F811
     mutate_wait(gateway.root, "catalog", "sign-in", lambda _: wait)
     gateway.running["catalog"] = {"task": task, "attempt": 3, "started_at": 1.0}
 
+    make_queue_ready(gateway, monkeypatch)
     state = read_state(gateway)
+    assert state["supervisor_ready"] and state["panic_recovery_complete"] and not state["panic_recovery"], state["boot"]
     assert state["main_attention_complete"] and {a["task_id"] for a in state["main_attention"]} == set(names)
     assert {a["activity_id"] for a in state["active_chat_activities"]} == {"atlas", "catalog"}
     resumes = [c for work in state["works"] for c in work["controls"] if c["action"] == "resume"]
@@ -679,7 +683,7 @@ def native_main(room_ui, gateway, monkeypatch):  # noqa: F811
                for row in state["main_attention"]}
     details["maps"] = {"task_id": "maps", "chat_id": 1, "status": "completed"}
     transport = Transport(page, history={1: reading(24)}, details=details)
-    monkeypatch.setattr(transport, "body", lambda: {**state, "supervisor_ready": True})
+    monkeypatch.setattr(transport, "body", lambda: state)
     open_app(room_ui, transport)
     expect(page.locator("#chat-messages .chat-bubble.system[data-owner-action]")).to_have_count(3)
     return page, transport
