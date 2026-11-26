@@ -1535,17 +1535,19 @@ def _render_history_response(
         message.pop("summary_kind", None)
         show_requested_executor_route(message)
     messages.extend(replay_evidence_rows(messages, replay_evidence))
-    tokens = history_page_tokens(page, messages, result_cache[_READS])
+    reads = result_cache[_READS]
+    partial = reads.failed or reads.projection_failed or PROJECTION_FAILED in (chat_gaps | progress_gaps)
+    tokens = history_page_tokens(page, messages, reads, partial)
     stream_gaps = delivered_history_gaps(data_dir, page, {
         "chat": chat_gaps | selections["chat"][2], "progress": progress_gaps | selections["progress"][2]})
     if not classified and not named:  # direct-address reads can miss rows a Project would inherit
         for gaps in stream_gaps.values():
             gaps.add("room_unclassified")
-    if result_cache[_READS].projection_failed:  # a terminal projection cut short: the rows it left hold no truth
+    if reads.projection_failed:  # a terminal projection cut short: the rows it left hold no truth
         for gaps in stream_gaps.values():
             gaps.add(PROJECTION_FAILED)
-    if result_cache[_READS].failed or PROJECTION_FAILED in (stream_gaps["chat"] | stream_gaps["progress"]):
-        tokens.pop("after_cursor", None)  # a read that failed part-way is read whole again, never continued
+    if partial:  # a read that failed part-way is read whole again, never continued: no settlement is answered either
+        tokens.pop("after_cursor", None)
     window = _window_metadata(
             chat_quota_rows, progress_quota_rows, n_human, n_progress,
             {source: selections[source][1] == 0 for source in ("chat", "progress")},

@@ -878,7 +878,7 @@ def delivered_history_gaps(root, page, stream_gaps):
     return stream_gaps
 
 
-def history_page_tokens(page, messages=(), reads=None):
+def history_page_tokens(page, messages=(), reads=None, partial=False):
     """The conversation decides whether older history remains: narration (progress)
     keeps paging alongside it but never keeps a press alive on its own, so no press
     lands narration alone. A narration-only read (no human quota) pages narration.
@@ -886,7 +886,9 @@ def history_page_tokens(page, messages=(), reads=None):
     The ``after`` cursor also carries what its window shows besides rows: the version of each
     task the projection read (``reads``, the page's ``TaskReads``), the newest message's time and
     whether a running skill operation was shown. A later ``after`` read refuses when a shown task
-    settled or changed without running, or the operation is gone (``history_delta_reset``)."""
+    settled or changed without running, or the operation is gone (``history_delta_reset``). ``partial``: the read
+    failed or projected part-way, so its caller drops ``after_cursor`` and a settlement is answered by the newest
+    page, never by ``repairs`` no window can continue from."""
     anchor = page.get("anchor")
     if anchor is not None and anchor["state"] != "found":  # an around read with no place to land: no page
         return {"has_more": False, "next_cursor": None, "page_cursor": None, "anchor": anchor}
@@ -905,12 +907,13 @@ def history_page_tokens(page, messages=(), reads=None):
     issues = page.get("after") or (page["recent"] and not page["replayed"])  # the reads that name new arrivals
     held = _held_rows(page, messages, shown, reads) if page.get("repair") and issues else None
     if page.get("repair") and page.get("after"):
-        if page["repaired"] and (held is None and page.get("held") is not None or getattr(reads, "projection_failed", False)
+        if page["repaired"] and (held is None and page.get("held") is not None or partial
                                  or page["repaired"] - shown or held is not None and page["repaired"] - set(held)
                                  or page["revision_now"]() != page["revised"]):
             # A task sent again turned out to need another's rows, shows no facts of its own on them now (its version
-            # would never move) or its projection failed part-way, or words were revised in place since the revision
-            # this read was taken at (they reach a window only through a newest page): the newest page.
+            # would never move), the read failed or projected part-way (rows it left, or arrivals past a fault: no
+            # cursor follows), or words were revised in place since the revision this read was taken at (they reach
+            # a window only through a newest page): the newest page.
             raise HistoryCursorError("history_delta_reset", detail="task_settled")
         # A task's earlier rows keep the version they were projected at until a read sends them again (``repairs``).
         tasks.update((task, seq) for task, seq in page.get("tasks", {}).items() if task not in page["repaired"])

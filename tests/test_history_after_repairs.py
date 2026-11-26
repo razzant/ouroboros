@@ -404,6 +404,55 @@ def test_a_repair_whose_projection_failed_part_way_refuses(tmp_path, monkeypatch
     assert status == 200 and repaired["repairs"]
 
 
+@pytest.mark.parametrize("fault", ["held_row", "progress_row", "arrival", "store_once", "store_down"])
+def test_a_read_that_failed_part_way_sends_no_repairs_and_counts_none(tmp_path, monkeypatch, fault):
+    """No cursor follows a read that failed or projected part-way, so no window applies what it sends: the settlement
+    is answered by the newest page, and no read is counted as a repair. The repairs it would send miss a row of the
+    task in either stream (``held_row``, ``progress_row``), are whole beside an arrival that cannot be projected
+    (``arrival``) or after one batch the store could not answer (``store_once``), or are read while it cannot answer
+    at all (``store_down``): the same answer."""
+    from ouroboros import task_store
+    from ouroboros.gateway import history
+    from tests._store_shared import unreadable_result
+
+    _asking(tmp_path)
+    _, page = _read(tmp_path)
+    shown = _ids(page["messages"])
+    _task(tmp_path, "asker", "completed", 0)
+    ds.append(tmp_path, "chat", {"ts": TS.format(9), "direction": "out", "chat_id": 1, "task_id": "other", "text": "arrived"})
+    fails = {"held_row": "while you decide", "progress_row": "working on it", "arrival": "arrived"}.get(fault, "")
+    on = {"on": True}
+    copy, carry, documents = history._copy_task_summary_metadata, history.carry_cost_meta, task_store.display_documents
+
+    def projected(rec, entry):  # a chat row that cannot be projected: every row after it is missing
+        if on["on"] and fails and entry.get("text") == fails:
+            raise RuntimeError("injected projection fault")
+        return copy(rec, entry)
+
+    def costed(entry):  # the same for a row of the narration
+        if on["on"] and fails and entry.get("content") == fails:
+            raise RuntimeError("injected projection fault")
+        return carry(entry)
+
+    def stored(*args, **kwargs):  # one batch the store cannot answer: its retry can
+        if on["on"] and fault == "store_once":
+            on["on"] = False
+            raise OSError("store busy")
+        return documents(*args, **kwargs)
+    for owner, name, replacement in ((history, "_copy_task_summary_metadata", projected),
+                                     (history, "carry_cost_meta", costed), (task_store, "display_documents", stored)):
+        monkeypatch.setattr(owner, name, replacement)
+    down = unreadable_result(monkeypatch, "asker") if fault == "store_down" else {}
+    history_attribution.drain()
+    status, refused = _read(tmp_path, page["after_cursor"], recorded=True)
+    assert (status, refused.get("detail")) == (409, "task_settled"), refused
+    assert [(group["status"], group.get("repairs")) for group in history_attribution.drain()["groups"]] == [("409", None)]
+    on["on"] = down["on"] = False  # the fault is gone: the same cursor is answered whole
+    status, repaired = _read(tmp_path, page["after_cursor"], recorded=True)
+    assert status == 200 and _ids(repaired["repairs"]) == shown and repaired["after_cursor"]
+    assert [group.get("repairs") for group in history_attribution.drain()["groups"]] == ["settled"]
+
+
 def test_a_task_that_turns_into_a_retry_while_it_settles_refuses(tmp_path):
     _asking(tmp_path)
     _, page = _read(tmp_path)
