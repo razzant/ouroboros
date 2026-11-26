@@ -47,7 +47,7 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
                     <fieldset class="new-project-sources new-project-field">
                         <legend>Working folder</legend>
                         <div class="new-project-source-choices">${SOURCES.map(([value, label], index) => `
-                            <label><input class="ui-checkbox" type="radio" name="np-source" value="${value}"${index ? '' : ' checked'}> ${label}</label>`).join('')}
+                            <label><input class="ui-radio" type="radio" name="np-source" value="${value}"${index ? '' : ' checked'}> ${label}</label>`).join('')}
                         </div>
                         <p class="ui-field-help" data-np-help>${SOURCES[0][2]}</p>
                     </fieldset>

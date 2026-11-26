@@ -1254,19 +1254,6 @@ textarea::placeholder {
   font-size: var(--type-meta);
 }
 
-.harness-attach-command {
-  margin: 0;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: rgba(var(--neutral-rgb), 0.05);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: var(--type-meta);
-  overflow-x: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
-  user-select: all;
-}
-
 .settings-inline-note {
   font-size: var(--type-meta);
   line-height: var(--line-body);
@@ -1460,9 +1447,9 @@ textarea::placeholder {
 /* track-migration:begin — Removed with the shared wizard role adapters. */
 
 
-input:not(.ui-control):not(.ui-checkbox),
-select:not(.ui-control):not(.ui-checkbox),
-textarea:not(.ui-control):not(.ui-checkbox) {
+input:not(.ui-control):not(.ui-checkbox):not(.ui-radio),
+select:not(.ui-control):not(.ui-checkbox):not(.ui-radio),
+textarea:not(.ui-control):not(.ui-checkbox):not(.ui-radio) {
   width: 100%;
   min-width: 0;
   padding: 10px 12px;
@@ -1475,9 +1462,9 @@ textarea:not(.ui-control):not(.ui-checkbox) {
 }
 
 
-input:not(.ui-control):not(.ui-checkbox):focus,
-select:not(.ui-control):not(.ui-checkbox):focus,
-textarea:not(.ui-control):not(.ui-checkbox):focus {
+input:not(.ui-control):not(.ui-checkbox):not(.ui-radio):focus,
+select:not(.ui-control):not(.ui-checkbox):not(.ui-radio):focus,
+textarea:not(.ui-control):not(.ui-checkbox):not(.ui-radio):focus {
   border-color: var(--focus-accent-border);
   box-shadow: 0 0 0 3px var(--focus-accent-ring);
 }

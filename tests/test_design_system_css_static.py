@@ -305,11 +305,12 @@ def test_scroller_edges_do_not_gain_opaque_positioned_descendants():
     assert not positioned_opaque_scroller_descendants(allowed), "composer, table heads and transparent edges stay allowed"
 
 
-# Every check box is the shared .ui-checkbox (DESIGN "Controls and editable choices", owner decision 27.11.2026): its
-# size, shape, fill, mark and border live only in ui.css. A page places a box; it never draws one.
+# Every check box is the shared .ui-checkbox and every radio the shared .ui-radio (DESIGN "Controls and editable
+# choices", owner decision 27.11.2026): their size, shape, fill, mark and border live only in ui.css. A page places a
+# box; it never draws one.
 CHECKBOX_PAINT = re.compile(r"(?:^|[;{\s])(?:width|height|min-width|border[\w-]*|background[\w-]*|accent-color|appearance"
                             r"|-webkit-appearance)\s*:", re.I)
-CHECKBOX_SUBJECT = re.compile(r"\[type=[\"']?checkbox|\.ui-checkbox|\.md-checkbox|\.message-share-check", re.I)
+CHECKBOX_SUBJECT = re.compile(r"\[type=[\"']?(?:checkbox|radio)|\.ui-checkbox|\.ui-radio|\.md-checkbox|\.message-share-check", re.I)
 
 
 def checkbox_paint_outside_the_control(css):
@@ -317,7 +318,7 @@ def checkbox_paint_outside_the_control(css):
     found = []
     for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", without_comments(css)):
         target = re.sub(r":not\((?:[^()]|\([^()]*\))*\)", "", selector)
-        if re.search(r"\[type=[\"']?checkbox", target, re.I) or (CHECKBOX_SUBJECT.search(target) and CHECKBOX_PAINT.search(body)):
+        if re.search(r"\[type=[\"']?(?:checkbox|radio)", target, re.I) or (CHECKBOX_SUBJECT.search(target) and CHECKBOX_PAINT.search(body)):
             found.append(" ".join(selector.split()))
     return found
 
@@ -328,34 +329,39 @@ def test_only_the_shared_control_draws_a_check_box():
              for rule in checkbox_paint_outside_the_control(css)]
     assert not found, "A page places a check box, never sizes, recolours or reshapes it:\n" + "\n".join(found)
     ui = without_comments(sheets["web/ui.css"])
-    shared = re.search(r"\n\.ui-checkbox \{([^}]*)\}", ui)[1]
+    shared = re.search(r"\n\.ui-checkbox, \.ui-radio \{([^}]*)\}", ui)[1]
     assert "border-radius: var(--checkbox-radius);" in shared and "width: var(--checkbox-size);" in shared
     assert len(re.findall(r"--checkbox-radius:", ui)) == 1, "one token flips every box between round and square"
     assert "--checkbox-radius: 50%;" in ui, "the owner's shape: round"
+    assert ".ui-radio { border-radius: 50%; }" in ui, "a radio stays a circle whatever the check box's shape"
 
     assert checkbox_paint_outside_the_control('.local-toggle input[type="checkbox"] { cursor: pointer; }')
     assert checkbox_paint_outside_the_control(".x .ui-checkbox { width: 18px; }")
     assert checkbox_paint_outside_the_control(".md-checkbox { border-radius: 4px; }")
     assert not checkbox_paint_outside_the_control(".x > .ui-checkbox { grid-column: 1; margin-top: 2px; }")
+    assert checkbox_paint_outside_the_control('.x input[type="radio"] { margin: 0; }')
     assert not checkbox_paint_outside_the_control("input:not(.ui-control):not(.ui-checkbox) { border: 1px solid; }")
 
 
-CHECKBOX_TYPE = re.compile(r"""type\s*=\s*\\?["']checkbox""")
-DOM_CHECKBOX_TYPE = re.compile(r"""\.type\s*=\s*['"]checkbox|setAttribute\(\s*['"]type['"]\s*,\s*['"]checkbox""")
+CHECKBOX_TYPE = re.compile(r"""type\s*=\s*\\?["'](checkbox|radio)""")
+DOM_CHECKBOX_TYPE = re.compile(r"""(?:\.type\s*=\s*|setAttribute\(\s*['"]type['"]\s*,\s*)['"](checkbox|radio)""")
+SHARED_CLASS = {"checkbox": "ui-checkbox", "radio": "ui-radio"}
 
 
 def checkbox_inputs_outside_the_control(js):
-    """Check box inputs a module builds without the shared class: a template's <input …> tag, or a DOM-built input
+    """Check box and radio inputs a module builds without their shared class: a template's <input …> tag, or a DOM-built input
     whose type is set within three lines of no ui-checkbox class. A switch (role="switch") is its own control."""
     found = []
     for tag in re.findall(r"<input\b[^>]*>", js):
-        if CHECKBOX_TYPE.search(tag) and "ui-checkbox" not in tag and 'role="switch"' not in tag:
+        kind = CHECKBOX_TYPE.search(tag)
+        if kind and not re.search(rf"\b{SHARED_CLASS[kind[1]]}\b", tag) and 'role="switch"' not in tag:
             found.append(" ".join(tag.split())[:120])
     lines = js.splitlines()
     for index, line in enumerate(lines):
-        if DOM_CHECKBOX_TYPE.search(line):
+        kind = DOM_CHECKBOX_TYPE.search(line)
+        if kind:
             near = "\n".join(lines[max(0, index - 3):index + 4])
-            if "ui-checkbox" not in near and "switch" not in near:
+            if not re.search(rf"\b{SHARED_CLASS[kind[1]]}\b", near) and "switch" not in near:
                 found.append(f"line {index + 1}: {line.strip()[:120]}")
     return found
 
@@ -370,3 +376,19 @@ def test_every_module_check_box_is_the_shared_control():
     assert not checkbox_inputs_outside_the_control('html = `<input class="ui-checkbox" type="checkbox" data-x>`;')
     assert not checkbox_inputs_outside_the_control("const box = document.createElement('input');\nbox.type = 'checkbox';\nbox.className = 'ui-checkbox';")
     assert not checkbox_inputs_outside_the_control('html = `<input type="checkbox" role="switch" data-x>`;')
+    assert checkbox_inputs_outside_the_control('html = `<input class="ui-checkbox" type="radio" name="x">`;')
+    assert not checkbox_inputs_outside_the_control('html = `<input class="ui-radio" type="radio" name="x">`;')
+
+
+def attach_command_tray_rules(sheets):
+    """Every rule, in any sheet, whose subject is the terminal command tray itself."""
+    return [(name, " ".join(selector.split())) for name, css in sheets.items()
+            for selector, _ in re.findall(r"([^{}]+)\{([^{}]*)\}", without_comments(css))
+            if any(part.strip() == ".harness-attach-command" for part in selector.split(","))]
+
+
+def test_the_terminal_command_tray_is_defined_once():
+    sheets = {path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8") for path in first_party_sheets()}
+    assert [name for name, _ in attach_command_tray_rules(sheets)] == ["web/style.css"], attach_command_tray_rules(sheets)
+    assert len(attach_command_tray_rules({"a": ".harness-attach-command { margin: 0; }",
+                                          "b": ".harness-attach-command { padding: 0; }"})) == 2

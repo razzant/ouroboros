@@ -281,11 +281,10 @@
     --space-3: 12px;
     --space-4: 16px;
     --space-5: 24px;
-    /* The check box (DESIGN "Controls and editable choices"): one glyph size, its one shape (round, owner decision
-       27.11.2026; 4px here makes every box square at once) and its one mark, white on the accent. */
+    /* The check box (DESIGN "Controls and editable choices"): one glyph size and its one shape (round, owner
+       decision 27.11.2026; 4px here makes every box square at once). */
     --checkbox-size: 16px;
     --checkbox-radius: 50%;
-    --checkbox-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.5 8.3 7 10.8l4.6-5.3' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     /* Smallest result measure before a neighbouring action wraps below it. */
     --result-copy-min-width: 12rem;
     /* Bounded scroll region for the Updates restore list (DESIGN section 5:
@@ -911,10 +910,11 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
    - .ui-model-chooser .ui-model-options .ui-model-option .ui-model-option-name .ui-model-option-meta
      .ui-model-option-priced .ui-model-empty — the editable model chooser (model_chooser.js): its suggestions never
      become an allowlist.
-   - .ui-checkbox .is-checked — a choice its form's own Save applies: every check box and radio in the product,
-     one drawn glyph (--checkbox-size, --checkbox-radius, --checkbox-mark); a drawn box that is not an input (a task
-     list's mark, a share part's own) wears the class too, .is-checked or aria-checked its state. No page sizes,
-     recolours or reshapes it.
+   - .ui-checkbox .is-checked — tick any: a choice its form's own Save applies, every check box in the product, one
+     drawn glyph (--checkbox-size, --checkbox-radius, its tick a mask in the crimson ink) on a real input; a drawn box that is not an
+     input (a task list's mark, a share part's own) wears the class too, .is-checked or aria-checked its state.
+   - .ui-radio — pick one: the same glyph, always a circle, a dot when chosen. No page sizes, recolours or reshapes
+     either.
    - .ui-switch .ui-switch-track .ui-switch-thumb .is-locked — a change that acts at once: a label around an input
      with role="switch", then its track and thumb. Green when on; locked or disabled, it loses its colour, never its
      size; a write in flight is disabled and aria-busy, in its value's colour, dimmed. A page never draws a switch of
@@ -1499,7 +1499,7 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
     line-height: var(--line-meta);
 }
 .ui-field-inline { flex-direction: row; align-items: center; flex-wrap: wrap; }
-label.ui-field-inline:has(> input.ui-checkbox[type="radio"]) {
+label.ui-field-inline:has(> input.ui-radio) {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
     align-items: start;
@@ -1613,7 +1613,7 @@ textarea.ui-control { resize: vertical; }
         box-shadow: 0 0 0 3px var(--focus-accent-ring);
     }
 }
-.ui-checkbox {
+.ui-checkbox, .ui-radio {
     box-sizing: border-box;
     -webkit-appearance: none;
     appearance: none;
@@ -1631,22 +1631,44 @@ textarea.ui-control { resize: vertical; }
     color: transparent;
     font-size: 0;
     cursor: pointer;
+    position: relative;
 }
-.ui-checkbox[type="radio"] { border-radius: 50%; }
+/* The mark: the crimson ink cut by a tick, shown when ticked; it never mirrors in a right-to-left interface. */
+.ui-checkbox::before {
+    content: "";
+    position: absolute;
+    inset: -1.5px;
+    visibility: hidden;
+    background: var(--tone-crimson-ink);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.5 8.3 7 10.8l4.6-5.3' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% 100% no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.5 8.3 7 10.8l4.6-5.3' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% 100% no-repeat;
+}
+.ui-radio { border-radius: 50%; }
 .ui-checkbox:is(:checked, [aria-checked="true"], .is-checked), [aria-checked="true"] > .ui-checkbox {
     border-color: var(--accent);
     background-color: var(--accent);
-    background-image: var(--checkbox-mark);
 }
-.ui-checkbox[type="radio"]:checked { background: radial-gradient(var(--accent) 0 34%, transparent 40%); }
-.ui-checkbox:disabled { opacity: var(--control-disabled-opacity); cursor: not-allowed; }
-.ui-checkbox:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+:is(.ui-checkbox:is(:checked, [aria-checked="true"], .is-checked), [aria-checked="true"] > .ui-checkbox):not(:indeterminate)::before {
+    visibility: visible;
+}
+.ui-checkbox:indeterminate {
+    border-color: var(--accent);
+    background-color: transparent;
+    background-image: linear-gradient(var(--accent), var(--accent));
+    background-size: 50% 2px;
+}
+.ui-radio:checked { border-color: var(--accent); background-image: radial-gradient(var(--accent) 0 34%, transparent 40%); }
+:is(.ui-checkbox, .ui-radio):disabled { opacity: var(--control-disabled-opacity); cursor: not-allowed; }
+:is(.ui-checkbox, .ui-radio):focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 @media (pointer: coarse) {
     :root { --checkbox-size: 20px; }
 }
-/* Forced colours drop the drawn fill and mark: there the box is the system's own. */
+/* Forced colours drop the drawn fill and mark: there an input is the system's own box, and a drawn mark that is not
+   an input keeps its paint so its state still shows. */
 @media (forced-colors: active) {
-    input.ui-checkbox { -webkit-appearance: auto; appearance: auto; }
+    input:is(.ui-checkbox, .ui-radio) { -webkit-appearance: auto; appearance: auto; }
+    input.ui-checkbox::before { content: none; }
+    .ui-checkbox:not(input) { forced-color-adjust: none; }
 }
 /* The switch: a label holding a checkbox with role="switch" and aria-checked, then its track and thumb, for a change
    that acts at once (a .ui-checkbox belongs to a form with its own Save). Green when on. One that cannot be used now
