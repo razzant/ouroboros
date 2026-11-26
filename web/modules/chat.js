@@ -2006,7 +2006,7 @@ export function createChatInstance({
         return Boolean(changed || queued || subagentChanged);
     }
 
-    const earlyRows = createEarlyTextBubbles(messagesDiv, drawTextBubble, insertMessageNode, releaseMessageNode);
+    const earlyRows = createEarlyTextBubbles(messagesDiv, drawTextBubble, insertMessageNode, releaseMessageNode, withStableViewport);
     function addMessage(text, role, markdown = false, timestamp = null, isProgress = false, opts = {}) {
         const { meta, ts, legacyKey, messageKey, deliveryKey } = messageIdentity(text, role, timestamp, isProgress, opts, chatId);
         const bubbles = () => [...messagesDiv.querySelectorAll('.chat-bubble')];
@@ -2024,7 +2024,9 @@ export function createChatInstance({
             return chatDecision.renderRoutingDecision(prior, opts.chatAnnotation) || originChanged || quoteChanged;
         }
         if (prior || (messageKey && seenMessageKeys.has(messageKey))) return false;
-        const matched = opts.historyId && priorHistoryBubble(bubbles, opts, replayKeys, legacyKey, chatId);
+        const address = role === 'assistant' && !opts.originProjected && opts.reply?.row_address;
+        const existing = opts.historyId && earlyRows.get(address);
+        const matched = opts.historyId && !existing && priorHistoryBubble(bubbles, opts, replayKeys, legacyKey, chatId);
         if (matched) {
             recordBubble(matched);
             chatDecision.renderRoutingDecision(matched, opts.chatAnnotation);
@@ -2033,8 +2035,6 @@ export function createChatInstance({
             const restored = syncSavedProjectContext(matched, opts.originProjected, opts.originId);
             return restored || adopted || quoteChanged;
         }
-        const address = role === 'assistant' && !opts.originProjected && opts.reply?.row_address;
-        const existing = opts.historyId && earlyRows.get(address);
         if (existing) { earlyRows.delete(address); rememberMessageKey(`window|${address}`); }
         const { bubble, rich } = drawTextBubble(text, role, { markdown, ts, isProgress, meta, legacyKey, opts, existing });
         insertMessageNode(bubble, { forceStick: !!opts.forceStick, reorderExisting: Boolean(existing) });
@@ -2286,6 +2286,7 @@ export function createChatInstance({
                     });
                     if (msg.role === 'user') confirmOwnerRow(msg);
                 }
+                if (newest && !catchUp.owed) windowReturn.drop();
                 earlyRows.clear(newest && !catchUp.owed ? null : messages);
                 _historyRow = null;
                 for (const [tid, ending] of endings) {
@@ -3089,12 +3090,12 @@ export function createChatInstance({
     const isMyThread = msg => chatThreadAccepts(msg, isMain, chatId, state.projectChatIds);
     const isMyLogThread = msg => chatLogThreadAccepts(msg, isMain, chatId, state.projectChatIds);
     const windowReturn = createWindowReturn({ socket: ws.socket, doc: document, chatId, projectId,
-        accepts: isMyThread, knownChild: id => subagentChildParents.has(id) });
+        accepts: isMyThread, knownChild: id => subagentChildParents.has(id), onInvalidate: () => earlyRows.forget() });
     const windowFollower = () => !readingHistory() && !reading.returning && !archive?.active && !replies.revealing
         && !page.hidden && messagesDiv.offsetParent !== null && !messagesDiv.closest('[inert]');
     function forgetWindowReturn() {
         windowReturn.drop();
-        if (!document.hidden) withStableViewport(earlyRows.clear);
+        earlyRows.forget();
     }
 
     onWs('chat', (msg) => {
@@ -3422,7 +3423,7 @@ export function createChatInstance({
         forgetWindowReturn,
         leave: (windowHidden = false) => {
             if (leaving) return;
-            if (windowHidden && windowFollower() && presentHeld() && reading.nearBottom()) windowReturn.hold();
+            if (windowHidden) windowReturn.hold(windowFollower() && presentHeld() && reading.nearBottom());
             roomProfile.left();  // copies shown on the core's word leave the feed, kept (chat_preview.js)
             catchUp.cancel(recentRequest);  // its return reads, and says so, anew
             // Left in an outage (down after the page's socket opened), it will not hear the reconnect that forgets a
@@ -3440,9 +3441,8 @@ export function createChatInstance({
             reviewHydrator.resume(); drawOwedTimelines();
             if (outageAway) { const doubted = outageAway; outageAway = null; showOutage(doubted); }
             roomProfile.stayed();  // an opening's saved text owed since paints at once (chat_preview.js)
-            const rows = windowReturn.take();
-            if (!document.hidden) withStableViewport(() => earlyRows.show(windowFollower()
-                && (isMain || state.projectChatIds.has(chatId)) ? rows : []));
+            if (isMain || state.projectChatIds.has(chatId)) earlyRows.show(windowReturn.take(windowFollower()));
+            else forgetWindowReturn();
         },
         // How the room was opened (app.js): pressed open by a pointer, its focus corners wait for a key.
         quietFocus: (quiet) => messagesDiv.classList.toggle('is-quiet-focus', Boolean(quiet)),

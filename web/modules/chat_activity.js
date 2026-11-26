@@ -1086,8 +1086,6 @@ export function partitionLocalEchoJournal(journal, serverClientMessageIds) {
     return { confirmed, unconfirmed };
 }
 
-export { buildMessageKey } from './chat_history_replay.js';
-
 // Only a reload onto changed code earns a feed notice; any other reload reason or reconnect is silent.
 export function restartNoticeText(reason = '') {
     return reason === 'sha-change' ? 'Restart complete' : '';

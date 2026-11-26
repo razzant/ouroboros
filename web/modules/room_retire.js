@@ -245,9 +245,9 @@ const WINDOW_ROWS = 12, WINDOW_TEXT_BYTES = 64 * 1024;
 const rowRoom = /^row:(\d+)@[^#\s]+#[a-f0-9]{12}$/;
 
 /** The small exception to an away room's socket custody. A shown follower that the window hides may keep the words of
- * its own ordinary assistant rows. No re-dispatch, snapshots, other appearances, or log subscription. One hiding, one
- * positively scoped connection. On loss of proof or of the bound, the ordinary history read alone fills the gap. */
-export function createWindowReturn({ socket, doc, chatId, projectId, accepts, knownChild }) {
+ * its own ordinary assistant rows. No re-dispatch, snapshots, other appearances, or log subscription. The same bounded
+ * batch can span hides until reconciliation; on loss of proof or the bound only ordinary history fills the gap. */
+export function createWindowReturn({ socket, doc, chatId, projectId, accepts, knownChild, onInvalidate = () => {} }) {
     let lease = null;
     function drop() {
         const old = lease;
@@ -256,35 +256,38 @@ export function createWindowReturn({ socket, doc, chatId, projectId, accepts, kn
     }
     const connected = scope => Boolean(scope) && socket?.isConnected?.() === true && !socket.foreignProfile?.()
         && socket.servingProfileScope?.() === scope && socket.ws;
+    function invalidate() { drop(); onInvalidate(); }
     return {
         drop,
-        hold() {
+        hold(ready = true) {
+            if (lease?.valid()) return;
             drop();
             const scope = documentScope(doc), connection = connected(scope);
-            if (!doc.hidden || !connection) return;
+            if (!ready || !doc.hidden || !connection) return;
             const rows = new Map();
             const valid = () => connected(scope) === connection && documentScope(doc) === scope;
             let used = 0;
             function keep(msg) {
-                if (!isWindowText(msg, knownChild) || msg.chat_id !== chatId || msg.project_id && msg.project_id !== projectId
+                if (!doc.hidden || !isWindowText(msg, knownChild) || msg.chat_id !== chatId || msg.project_id && msg.project_id !== projectId
                         || !accepts(msg)) return;
-                if (!doc.hidden || !valid()) return drop();
+                if (!valid()) return invalidate();
                 const address = msg.row_address;
                 if (typeof address !== 'string' || Number(rowRoom.exec(address)?.[1]) !== chatId
-                        || typeof msg.ts !== 'string' || !Number.isFinite(Date.parse(msg.ts)) || typeof msg.content !== 'string') return drop();
+                        || typeof msg.ts !== 'string' || !Number.isFinite(Date.parse(msg.ts)) || typeof msg.content !== 'string') return invalidate();
                 if (!msg.content || rows.has(address)) return;
                 // Retain only presentation fields and the physical address, never the producer's frame.
                 used += 2 * (msg.content.length + address.length + msg.ts.length);
-                if (rows.size >= WINDOW_ROWS || used > WINDOW_TEXT_BYTES) return drop();
+                if (rows.size >= WINDOW_ROWS || used > WINDOW_TEXT_BYTES) return invalidate();
                 rows.set(address, { address, text: msg.content, ts: msg.ts, markdown: msg.markdown === true,
                     initiator: msg.initiator === 'consciousness' ? 'consciousness' : '' });
             }
-            lease = { rows, valid, off: [socket.on('chat', keep), socket.on('close', drop),
-                socket.on('projects_changed', msg => { if (projectId && (!msg?.chat_id || Number(msg.chat_id) === chatId)) drop(); })] };
+            lease = { rows, valid, shown: 0, off: [socket.on('chat', keep), socket.on('close', invalidate),
+                socket.on('projects_changed', msg => { if (projectId && (!msg?.chat_id || Number(msg.chat_id) === chatId)) invalidate(); })] };
         },
-        take() {
-            const rows = !doc.hidden && lease?.valid() ? [...lease.rows.values()] : [];
-            drop();
+        take(following = true) {
+            if (doc.hidden || !lease?.valid()) { drop(); return null; }
+            const rows = following ? [...lease.rows.values()].slice(lease.shown) : [];
+            lease.shown = lease.rows.size;
             return rows;
         },
     };

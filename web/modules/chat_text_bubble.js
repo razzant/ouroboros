@@ -121,7 +121,8 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
             }
         }
         stampNodeTimestamp(bubble, ts);
-        if (opts.wordsOnly) return { bubble, rich: false };
+        if (opts.wordsOnly) { bubble.dataset.windowWords = ''; return { bubble, rich: false }; }
+        delete bubble.dataset.windowWords;
         if (notice?.details && opts.narration !== true) bubble.querySelector('.message')
             .after(rawDetails(document, notice.details, tr('chat.notice.details', 'Details')));
         decorateContactSource(bubble, opts.presenceContact);
@@ -147,7 +148,7 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
 }
 
 /** Keep only the early nodes still awaiting the saved row that can adopt them. */
-export function createEarlyTextBubbles(feed, draw, insert, release) {
+export function createEarlyTextBubbles(feed, draw, insert, release, write = fn => fn()) {
     const nodes = new Map();
     function clear(rows = null) {
         if (!nodes.size) return false;
@@ -158,22 +159,26 @@ export function createEarlyTextBubbles(feed, draw, insert, release) {
         }
         return changed;
     }
+    const forget = () => { if (!document.hidden && nodes.size) write(clear); };
     return {
         get: address => nodes.get(address),
         delete: address => nodes.delete(address),
         show(rows) {
-            const removed = clear();
-            if (!rows.length) return removed;
+            if (rows === null) return forget();
+            if (document.hidden || !rows.length) return;
             const mounted = new Set([...feed.querySelectorAll('.chat-bubble.assistant[data-row-address]')]
                 .map(node => node.dataset.rowAddress));
-            for (const { address, text, markdown, ts, initiator } of rows) {
-                if (mounted.has(address)) continue;
-                const { bubble } = draw(text, 'assistant', { markdown, ts, meta: { initiator }, opts: { wordsOnly: true } });
-                nodes.set(address, bubble);
-                insert(bubble, { forceStick: true });
-            }
-            return removed || nodes.size > 0;
+            const pending = rows.filter(({ address }) => !mounted.has(address) && !nodes.has(address));
+            if (pending.length) write(() => {
+                for (const { address, text, markdown, ts, initiator } of pending) {
+                    const { bubble } = draw(text, 'assistant', { markdown, ts, meta: { initiator }, opts: { wordsOnly: true } });
+                    nodes.set(address, bubble);
+                    insert(bubble, { forceStick: true });
+                }
+                return true;
+            });
         },
         clear,
+        forget,
     };
 }

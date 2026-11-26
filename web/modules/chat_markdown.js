@@ -474,22 +474,23 @@ export function renderChatMarkdown(text, { softBreaks = false, onPlain = null } 
     }
 }
 
-/** Mount blocks with their CSS contract. Enhancement stays with the owning
- * bubble/card so replacing content does not create another resource owner. */
+/** Mount blocks with their CSS contract; the bubble/card owns enhancement. */
 export function mountChatMarkdown(host, text, options = {}) {
     host.classList.add('ui-rich-content');
     host.innerHTML = renderChatMarkdown(text, options);
 }
 
 function highlightCodeIn(root) {
+    const api = globalThis.hljs;
+    if (!api) return;
+    const selection = root.ownerDocument?.getSelection?.();
+    const ranges = !selection?.isCollapsed && selection?.rangeCount
+        ? Array.from({ length: selection.rangeCount }, (_, i) => selection.getRangeAt(i)) : [];
     root.querySelectorAll?.('.md-code-block pre > code').forEach((code) => {
         const source = code.textContent || '';
-        // A block past the rich-block bound stays plain text: highlighting it would
-        // hold the main thread; it still reads and copies exactly.
-        if (source.length > MAX_RICH_BLOCK_SOURCE_LENGTH) return;
+        // Leave long or selected code as readable, copyable text; do not replace a selection's nodes.
+        if (source.length > MAX_RICH_BLOCK_SOURCE_LENGTH || ranges.some(range => range.intersectsNode?.(code))) return;
         const language = codeLanguage(code);
-        const api = globalThis.hljs;
-        if (!api) return;
         try {
             const result = language && api.getLanguage(language)
                 ? api.highlight(source, { language, ignoreIllegals: true })
@@ -986,7 +987,7 @@ export function enhanceChatMarkdown(rootEl, { onDomWrite = writeDirectly, onThem
     return () => cleanupState(rootEl, state);
 }
 
-/** Destroy markdown resources rooted at or below an element. */
+/** Call before bubble removal: Chart.js keeps rendered charts registered until destroy(). */
 export function destroyChatMarkdown(rootEl) {
     if (!rootEl) return;
     for (const root of new Set([rootEl, ...(rootEl.querySelectorAll?.('[data-chat-markdown-enhanced]') || [])])) {
@@ -995,6 +996,3 @@ export function destroyChatMarkdown(rootEl) {
     for (const root of [rootEl, ...(rootEl.querySelectorAll?.('[data-md-rendered]') || [])]) RENDERED_BINDINGS.get(root)?.();
     for (const root of [rootEl, ...(rootEl.querySelectorAll?.('[data-md-compact]') || [])]) COMPACT_BINDINGS.get(root)?.();
 }
-
-// Any future bubble-removal path in chat.js MUST call destroyChatMarkdown() or Chart
-// instances leak (Chart.js keeps a static registry that only destroy() releases).

@@ -3,7 +3,7 @@
 // reserved answer, an unconfirmed Stop and a cut failure reason. The room itself is exercised by the browser stand.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildMessageKey } from '../modules/chat_activity.js';
+import { buildMessageKey } from '../modules/chat_history_replay.js';
 import { usd, letterCardView } from '../modules/peer_letter_card.js';
 
 const fact = (over = {}) => ({ letter_id: 'L1', place_id: 'p', to: 'Velm', to_seed: 'b', text: 'Count.', title: '',

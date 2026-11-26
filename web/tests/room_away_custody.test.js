@@ -8,6 +8,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 import { createChatInstance } from '../modules/chat.js';
 import { createEarlyTextBubbles, createTextBubbles } from '../modules/chat_text_bubble.js';
+import { enhanceChatMarkdown } from '../modules/chat_markdown.js';
 import { createRoomRetirement, createWindowReturn, roomSocket } from '../modules/room_retire.js';
 import { installDesktopShellLinkInterceptor } from '../modules/ui_helpers.js';
 import { installDom, PREVIEW_SCOPE, restoreDom, roomKey, walkCard } from './chat_dom_fixture.js';
@@ -219,8 +220,9 @@ const speech = (chatId, n, content = 'old answer', extra = {}) => ({ role: 'assi
 
 test('a delivered direct answer opens its ordinary link on return and keeps equal words during adoption', (t) => {
     const { doc, win, restore } = installCardDom();
-    t.after(restore);
-    const prior = { marked: globalThis.marked, DOMPurify: globalThis.DOMPurify };
+    let disposeMarkdown;
+    t.after(() => { try { disposeMarkdown?.(); } finally { restore(); } });
+    const prior = { marked: globalThis.marked, DOMPurify: globalThis.DOMPurify, hljs: globalThis.hljs };
     t.after(() => Object.assign(globalThis, prior));
     const parser = {};
     vm.runInNewContext(readFileSync(new URL('../marked.min.js', import.meta.url), 'utf8'), parser);
@@ -228,6 +230,18 @@ test('a delivered direct answer opens its ordinary link on return and keeps equa
     // The home double records entry through the sanitizer, not the sanitizer's own behavior.
     const sanitized = t.mock.fn(html => html);
     globalThis.DOMPurify = { sanitize: sanitized };
+    // The card double implements compound selectors only. Supply the three code selectors used by Markdown.
+    const element = Object.getPrototypeOf(doc.body);
+    const select = element.querySelectorAll;
+    t.mock.method(element, 'querySelectorAll', function (selector) {
+        const insidePre = code => code.parentElement?.tagName === 'PRE';
+        if (selector === 'pre > code') return select.call(this, 'code').filter(insidePre);
+        if (selector === 'code:not(pre code)') return select.call(this, 'code').filter(code => !code.closest('pre'));
+        if (selector === '.md-code-block pre > code') {
+            return select.call(this, 'code').filter(code => insidePre(code) && code.closest('.md-code-block'));
+        }
+        return select.call(this, selector);
+    });
     const create = doc.createElement;
     doc.createElement = (tag) => {
         const node = create(tag);
@@ -250,12 +264,17 @@ test('a delivered direct answer opens its ordinary link on return and keeps equa
     const draw = createTextBubbles({ chatMedia: { attachCopyControl() {} }, replies: { decorate }, feed });
     const early = createEarlyTextBubbles(feed, draw, node => feed.append(node), node => node.remove());
     const target = 'https://docs.example.test/guide';
-    const frame = speech(1, 1, `Read **these words** in the [guide](${target}).`, { markdown: true, _is_direct_chat: true });
+    const frame = speech(1, 1, [`Read **these words** in the [guide](${target}).`, '',
+        '```js', 'answer()', '```', '', '```js', 'control()', '```'].join('\n'), { markdown: true, _is_direct_chat: true });
     early.show([{ address: frame.row_address, text: frame.content, ts: frame.ts, markdown: frame.markdown }]);
     const bubble = early.get(frame.row_address);
     const body = bubble.querySelector('.message');
     const link = body.querySelector('a[href]');
     const selectedWord = body.querySelector('strong').firstChild;
+    const [selectedCode, otherCode] = body.querySelectorAll('code');
+    const selectedText = selectedCode.firstChild;
+    assert.ok(body.querySelector('.md-code-copy'));
+    assert.equal(bubble.dataset.windowWords, '', 'the provisional code Copy is hidden by the window-words rule');
     assert.equal(link.getAttribute('href'), target);
     assert.ok(sanitized.mock.calls.some(call => call.arguments[0].includes(target)));
     assert.equal(link.click().defaultPrevented, true, 'the ordinary shell interceptor owns this link');
@@ -272,6 +291,13 @@ test('a delivered direct answer opens its ordinary link on return and keeps equa
     assert.equal(body.querySelector('strong').firstChild, selectedWord);
     assert.equal(body.hasAttribute('data-reply-body'), true);
     assert.equal(adopted.dataset.historyId, 'saved-direct');
+    doc.getSelection = () => ({ isCollapsed: false, rangeCount: 1, getRangeAt: () => ({ intersectsNode: node => node === selectedCode }) });
+    const highlight = source => ({ value: `<span>${source}</span>` });
+    globalThis.hljs = { getLanguage: () => true, highlight, highlightAuto: highlight };
+    disposeMarkdown = enhanceChatMarkdown(adopted);
+    assert.equal(selectedCode.firstChild, selectedText, 'canonical enhancement must not detach the selected text');
+    assert.equal(otherCode.classList.contains('hljs'), true, 'an unselected block is still highlighted');
+    assert.equal(adopted.dataset.windowWords, undefined, 'normal Copy is offered after adoption');
     assert.equal(decorate.mock.callCount(), 1);
     assert.equal(link.click().defaultPrevented, true);
     assert.deepEqual(opened, [target, target]);
@@ -303,11 +329,16 @@ for (const chatId of [1, 7]) test(`hidden follower ${chatId}: show words before 
         const live = speech(chatId, 4, 'live speech from work', { task_id: 'root', root_task_id: 'root', system_type: 'proactive_message' });
         const child = speech(chatId, 5, 'child belongs to a card', { task_id: 'child', root_task_id: 'root' });
         const ambiguous = speech(chatId, 6, 'task without proved lineage', { task_id: 'unproved' });
+        const retry = speech(chatId, 7, 'physical retry answer', { task_id: 'retry', root_task_id: 'root',
+            delegation_role: 'root', task_phase: 'finalizing', task_terminal_status: 'completed', delivery_id: 'final:retry' });
+        const unprovedRetry = speech(chatId, 10, 'retry role unproved', { task_id: 'unproved-retry', root_task_id: 'root' });
+        const conflictingRetry = speech(chatId, 11, 'retry has a parent', { ...retry, content: 'retry has a parent',
+            task_id: 'nested-retry', parent_task_id: 'root', row_address: speech(chatId, 11).row_address });
         const other = speech(19, 1, 'another room', { also_rooms: [chatId] });
         const nodes = text => f.messages.children.filter(node => node.innerHTML.includes(text));
 
         f.hide();
-        for (const frame of [sameMs, legacy, root, live, child, ambiguous, other, legacy]) f.socket.fire('chat', frame);
+        for (const frame of [sameMs, legacy, root, live, child, ambiguous, retry, unprovedRetry, conflictingRetry, other, legacy]) f.socket.fire('chat', frame);
         assert.equal(nodes('old answer').length, 0, 'words never repaint the hidden feed');
         f.show();
         const early = nodes('old answer');
@@ -316,10 +347,32 @@ for (const chatId of [1, 7]) test(`hidden follower ${chatId}: show words before 
         assert.equal(nodes('live speech from work').length, 1);
         assert.equal(nodes('child belongs to a card').length + nodes('another room').length, 0);
         assert.equal(nodes('task without proved lineage').length, 0);
+        assert.equal(nodes(retry.content).length, 1, 'a host-marked root retry is standalone speech');
+        assert.equal(nodes(unprovedRetry.content).length + nodes(conflictingRetry.content).length, 0);
+        assert.equal(nodes(retry.content)[0].dataset.rowAddress, undefined, 'a retry gains no early Reply target');
         assert.equal(early[0].dataset.historyId, undefined);
         assert.equal(early[0].dataset.rowAddress, undefined, 'no Reply target until the row is confirmed');
         assert.equal(early[0].querySelector('[data-reply-body]'), null);
         assert.ok(!walkCard(f.messages, 'root'), 'early rendering does not give finalizing authority');
+        assert.ok(!walkCard(f.messages, 'retry'));
+
+        f.hide();
+        f.show();
+        assert.deepEqual(nodes('old answer'), early, 'an empty repeat return keeps the actual nodes');
+        f.hide();
+        const twin = { ...live, row_address: speech(chatId, 8).row_address, delivery_id: 'proactive:second' };
+        f.socket.fire('chat', twin);
+        const firstProactive = nodes(live.content)[0];
+        assert.equal(nodes(live.content).length, 1, 'no hidden paint');
+        f.show();
+        assert.deepEqual(nodes('old answer'), early, 'a return with new words keeps the old nodes too');
+        assert.equal(nodes(live.content)[0], firstProactive);
+        const secondProactive = nodes(live.content)[1];
+        assert.ok(secondProactive);
+        const visibleTwin = { ...live, row_address: speech(chatId, 9).row_address, delivery_id: 'proactive:third' };
+        f.socket.fire('chat', visibleTwin);
+        const visibleProactive = nodes(live.content).find(node => node.dataset.rowAddress === visibleTwin.row_address);
+        assert.ok(visibleProactive, 'a physically different equal live reply is not deduplicated');
 
         const cmid = await f.send('a new question');
         const sending = () => document.byId.get('chat-status').textContent;
@@ -328,12 +381,17 @@ for (const chatId of [1, 7]) test(`hidden follower ${chatId}: show words before 
         assert.equal(nodes('old answer').length, 2);
         assert.match(sending(), /Sending/, 'a delayed legacy repeat cannot settle a different send');
 
-        deliver([legacy, sameMs, root, live].map((frame, index) => ({ ...frame, text: frame.content,
+        deliver([legacy, sameMs, root, live, twin, visibleTwin, retry].map((frame, index) => ({ ...frame, text: frame.content,
             history_id: `row-${index}`, history_position: { source: 'chat', offset: index } })));
         await settle();
         assert.deepEqual(nodes('old answer').map(node => node.dataset.rowAddress), [legacy.row_address, sameMs.row_address]);
         assert.deepEqual(nodes('old answer').map(node => node.dataset.historyId), ['row-0', 'row-1']);
         assert.equal(nodes('old answer')[0], early[1], 'the stamped saved row moves the same early node into its canonical slot');
+        for (const [node, frame, index] of [[firstProactive, live, 3], [secondProactive, twin, 4], [visibleProactive, visibleTwin, 5]]) {
+            assert.equal(node.dataset.rowAddress, frame.row_address, 'each Reply retains the exact physical row');
+            assert.equal(node.dataset.historyId, `row-${index}`);
+        }
+        assert.equal(nodes(retry.content)[0].dataset.rowAddress, retry.row_address);
         f.socket.fire('chat', legacy);
         assert.match(sending(), /Sending/, 'an exact late repeat after canonical adoption is also not a live conclusion');
         assert.equal(nodes('old answer').length, 2);
@@ -359,7 +417,7 @@ test('window return declines overflow and loses its lease on a scope change or s
         assert.equal(socket.listening('log'), 0);
         invalidate();
         doc.hidden = false;
-        assert.deepEqual(lease.take(), []);
+        assert.equal(lease.take(), null);
         for (const event of ['chat', 'close', 'projects_changed']) assert.equal(socket.listening(event), 0, event);
     }
 });

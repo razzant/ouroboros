@@ -115,7 +115,9 @@ export function isWindowText(row, knownChild) {
         && !row.is_progress && !row.card_row && !row.msg_type && !row.narration && !row.relay && !row.origin_projected
         && !row.text_placeholder && !row.attachments?.length && !row.presence_contact
         && !row.parent_task_id && !row.subagent_task_id && row.delegation_role !== 'subagent'
-        && (!row.task_id || row.task_id === row.root_task_id && !knownChild(row.task_id));
+        // RoomResolver can attest a physical retry as a root of the original logical work.
+        && (!row.task_id || !knownChild(row.task_id) && !!row.root_task_id
+            && (row.task_id === row.root_task_id || row.delegation_role === 'root'));
 }
 
 /**
