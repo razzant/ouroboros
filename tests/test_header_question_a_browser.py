@@ -797,7 +797,11 @@ def test_extensions_pages_and_existing_toolbar_survive_a_narrow_content_column(e
             page.locator('#skills-pane-installed').wait_for(state='visible')
             lead = page.locator('#page-skills [data-shell-back]')
             assert lead.get_attribute('aria-label') == lead.get_attribute('title') == 'Back to Settings'
-            assert lead.evaluate('n => !n.textContent.trim() && Math.abs(n.offsetWidth - n.offsetHeight) < 1')
+            # A return to another place names it (owner 27.11.2026): `‹ Settings`, then the page's own name, one line.
+            named = lead.evaluate("""n => ({words: n.querySelector('.shell-back-label')?.innerText.trim() || '',
+                wide: n.offsetWidth > n.offsetHeight, name: n.closest('.section-lead-page')
+                    .querySelector('[data-extensions-lead-name]').getBoundingClientRect().width})""")
+            assert named['words'] == 'Settings' and named['wide'] and named['name'] > 1, (column, named)
             assert page.locator('#page-skills [data-shell-back]:visible').count() == 1
             for selector in ('#skills-update-all', '#skills-refresh'):
                 button = page.locator(selector)
