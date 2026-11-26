@@ -217,3 +217,74 @@ def test_the_fallback_hands_off_this_roots_real_stores_with_the_dialogue_open(ma
     finally:
         store.forget_handoffs()
         store.close_connections()
+
+
+@pytest.mark.parametrize("outcome", ["bootstrap", "deps_refused", "imports_refused", "exit_follows", "reset_unconfirmed"])
+def test_stable_checkout_handoff_reopens_inline_history_only_if_serving_continues(managed, monkeypatch, outcome):
+    import asyncio
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from ouroboros import dialogue_store, store
+    from ouroboros.gateway import history_reader
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from tests.test_store import publish
+
+    repo, drive, _calls, _first = managed
+    dev, stable = _store_aware_point(repo)
+    _failing_dev_smoke(monkeypatch, repo, dev)
+    if outcome == "deps_refused":
+        monkeypatch.setattr(git_ops, "sync_runtime_dependencies", lambda *, reason: (
+            (False, "synthetic dependency failure") if reason.endswith("_fallback_stable") else (True, "")))
+    if outcome == "imports_refused":
+        monkeypatch.setattr(git_ops, "import_test", lambda: {"ok": False})
+    if outcome == "reset_unconfirmed":
+        from supervisor import git_ops_reset
+
+        checkout = git_ops_reset._checkout_outcome
+
+        def lost_reset_result(branch, reason, unsynced_policy):
+            result = checkout(branch, reason, unsynced_policy)
+            return (False, "synthetic lost reset result") if branch == git_ops.BRANCH_STABLE else result
+
+        monkeypatch.setattr(git_ops_reset, "_checkout_outcome", lost_reset_result)
+
+    publish(drive)
+    dialogue_store.ensure(drive)
+    dialogue_store.append(drive, "chat", {"direction": "out", "chat_id": 1, "text": "kept after checkout"})
+    reader = history_reader.HistoryReader()
+    reader.bind(drive)
+    monkeypatch.setattr(history_reader, "reader", reader)
+    get_history = make_chat_history_endpoint(drive)
+
+    async def read():
+        observed = []
+        token = history_reader.READ_PATH.set(observed.append)
+        try:
+            response = await get_history(SimpleNamespace(query_params={}))
+        finally:
+            history_reader.READ_PATH.reset(token)
+        return response.status_code, response.body, observed
+
+    try:
+        status, baseline, _ = asyncio.run(read())
+        assert status == 200 and b"kept after checkout" in baseline
+        reader.start(drive, Path(__file__).resolve().parents[1])
+        assert reader.ready.wait(8), reader._failure
+        assert asyncio.run(read()) == (200, baseline, ["child"])
+        reason = {"bootstrap": "bootstrap", "imports_refused": "agent_restart_request"}.get(outcome, "owner_restart")
+        ok, message = git_ops.safe_restart(reason=reason)
+        assert ok is (outcome in {"bootstrap", "exit_follows"}), message
+        assert _git(repo, "rev-parse", "HEAD") == stable and _git(repo, "rev-parse", "ouroboros") == dev
+        assert not reader.live_children()
+        if outcome in {"exit_follows", "reset_unconfirmed"}:
+            assert asyncio.run(read())[::2] == (503, ["handoff"])
+        else:
+            assert asyncio.run(read()) == (200, baseline, ["server"])
+        reader.start(drive, repo)
+        assert not reader.live_children(), "never start a child from the changed checkout"
+    finally:
+        reader.stop()
+        assert reader.wait_stopped() == ""
+        store.forget_handoffs()
+        store.close_connections()

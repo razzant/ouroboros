@@ -23,6 +23,7 @@ import os
 import pathlib
 import subprocess
 import sys
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -287,6 +288,12 @@ def active_update_tx() -> Dict[str, Any]:
     return tx or {"phase": "corrupt"}
 
 
+def assisted_checkout_active() -> bool:
+    """A boot may already have conflict markers or will re-materialize them."""
+    status, tx = read_update_tx_strict()
+    return status == "valid" and tx.get("phase") in _ASSISTED_PHASES
+
+
 def authorized_assisted_task_strict(
     task_id: str, task_metadata: Optional[Dict[str, Any]] = None
 ) -> Tuple[str, Dict[str, Any]]:
@@ -478,6 +485,17 @@ def apply_managed_merge_update(branch: str, merge_commit: str) -> Tuple[bool, st
     return True, f"applied merge {merge_commit[:12]} to {branch}"
 
 
+@contextmanager
+def _before_rollback_tree_effects(proven: bool = True):
+    """Retain the original failure and its phase at a preparation-only boundary."""
+    try:
+        yield
+    except Exception as exc:
+        if proven:
+            exc.before_tree_effects = True
+        raise
+
+
 def rollback_managed_update(
     reason: str = "update_rollback", *, reopen_writer_admission: bool = True
 ) -> Tuple[bool, str]:
@@ -494,16 +512,19 @@ def rollback_managed_update(
     BEFORE any marker write or destructive reset/checkout/clean (the raw marker stays
     byte-identical, left for the owner); a corrupt marker keeps its raw evidence and
     refuses on the missing pre_update_sha exactly as before."""
-    status, tx = read_update_tx_strict()
+    from ouroboros.store_switch import UnappliedCheckout
+
+    with _before_rollback_tree_effects():
+        status, tx = read_update_tx_strict()
     if status == "future":
-        return False, (
+        return UnappliedCheckout(False,
             "update tx marker was recorded by a newer version of Ouroboros; "
             "rollback refuses to interpret it — marker left untouched for the owner"
         )
     pre = str(tx.get("pre_update_sha") or "")
     branch = str(tx.get("pre_update_branch") or _g.BRANCH_DEV)
     if not pre:
-        return False, "no pre_update_sha in update tx marker"
+        return UnappliedCheckout(False, "no pre_update_sha in update tx marker")
     # Read the write-ahead fact BEFORE phase writes or any reset. A restore
     # may have changed files even when its final marker never reached disk.
     if tx.get("stash_restore"):
@@ -515,62 +536,63 @@ def rollback_managed_update(
         if not _g._clear_update_intent():
             return False, "rollback could not clear update intent; " + result.note
         return _finish_rollback(tx, pre, branch, reason, result, reopen_writer_admission)
-    tx["phase"] = "rolling_back"
-    tx["rollback_reason"] = str(reason or "update_rollback")
-    write_update_tx(tx)
-    # Legacy replay guard: a durable stash_restored marker proves a completed
-    # apply. It retains that meaning for older transactions. When
-    # HEAD already sits at the pre-update SHA on the right branch, the repo part
-    # of the rollback is done — skip the destructive re-reset and re-restore.
-    resume_with_restored_work = False
-    if bool(tx.get("stash_restored")):
-        rc_rh, resumed_head, _rhe = _g.git_capture(["git", "rev-parse", "--verify", "HEAD"])
-        rc_rb, resumed_branch, _rbe = _g.git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-        resume_with_restored_work = (
-            rc_rh == 0 and resumed_head == pre and rc_rb == 0 and resumed_branch == branch
-        )
-    # Disarm launcher replay before touching the checkout. If interrupted from
-    # here onward, the durable rolling_back phase resumes this exact operation.
-    if not _g._clear_update_intent():
-        return False, "rollback could not clear update intent before restoring the repository"
+    # A first rollback's preparation cannot move the checkout. A resumed marker
+    # may follow tree effects from an earlier attempt even if this call has run none.
+    fresh_rollback = tx.get("phase") not in {"rolling_back", MARKER_CLEANUP_RETRY_PHASE} and not tx.get("stash_restored")
+    with _before_rollback_tree_effects(fresh_rollback):
+        tx["phase"] = "rolling_back"
+        tx["rollback_reason"] = str(reason or "update_rollback")
+        write_update_tx(tx)
+        # Legacy stash_restored: if HEAD and branch match, skip reset and re-apply.
+        resume_with_restored_work = False
+        if tx.get("stash_restored"):
+            rc_rh, resumed_head, _rhe = _g.git_capture(["git", "rev-parse", "--verify", "HEAD"])
+            rc_rb, resumed_branch, _rbe = _g.git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+            resume_with_restored_work = (rc_rh == 0 and resumed_head == pre and rc_rb == 0 and resumed_branch == branch)
+        # Disarm launcher replay before touching the tree; rolling_back can resume.
+        if not _g._clear_update_intent():
+            message = "rollback could not clear update intent before restoring the repository"
+            return UnappliedCheckout(False, message) if fresh_rollback else (False, message)
     if resume_with_restored_work:
         return _finish_rollback(tx, pre, branch, reason, StashRestoreResult("restored"), reopen_writer_admission)
-    # Fresh rescue BEFORE the destructive reset; the persisted pointer is the replay guard.
-    if not tx.get("rollback_rescue"):
-        _g.rescue_into_tx(tx, key="rollback_rescue", reason=str(reason),
-                          context="rollback", writer=write_update_tx)
 
-    def _fail(message: str) -> Tuple[bool, str]:
+    def _fail(message: str, *, unapplied: bool = False) -> Tuple[bool, str]:
         # Drop the marker (best-effort) so a RETRY re-rescues the tree it actually finds.
         if tx.pop("rollback_rescue", None) is not None:
             try:
                 write_update_tx(tx)
             except Exception:
                 _g.log.warning("could not drop the stale rollback_rescue marker", exc_info=True)
-        return False, message
+        return UnappliedCheckout(False, message) if unapplied else (False, message)
 
-    failed_ref = _preserve_failed_update_attempt(tx)
-    if failed_ref:
-        tx["failed_update_ref"] = failed_ref
-        write_update_tx(tx)
-    # These commands only reach the verified target below. A checkout that already IS it
-    # (read directly, never inferred from a refused first step) is left alone, so an index
-    # lock Git cannot take stops only a rollback that still has tree work to do. A clean index
-    # can still belong to an unfinished operation (an empty cherry-pick or revert): its marker
-    # denies only the skip, since reset ends those but leaves a stopped sequence or rebase.
-    in_place = not _rollback_target_unmet(pre, branch) and not any(
-        (_g._git_dir() / name).exists()
-        for name in ("CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "rebase-merge", "rebase-apply"))
+    with _before_rollback_tree_effects(fresh_rollback):
+        # The saved rescue and branch keep failed work; neither changes the tree.
+        if not tx.get("rollback_rescue"):
+            _g.rescue_into_tx(tx, key="rollback_rescue", reason=str(reason), context="rollback", writer=write_update_tx)
+        if failed_ref := _preserve_failed_update_attempt(tx):
+            tx["failed_update_ref"] = failed_ref
+            write_update_tx(tx)
+        # Skip tree commands only for the verified target, without an unfinished Git operation.
+        in_place = not _rollback_target_unmet(pre, branch) and not any(
+            (_g._git_dir() / name).exists()
+            for name in ("CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "rebase-merge", "rebase-apply"))
     if not in_place:
-        for cmd, failure in (
+        from ouroboros.gateway.history_reader import reader
+        from supervisor.git_ops_reset import _index_lock_refused
+
+        if blocked := reader.retire_for_checkout(_g.current_drive_root()):
+            return _fail(blocked, unapplied=fresh_rollback)
+        for step, (cmd, failure) in enumerate((
                 (["git", "reset", "--hard", "HEAD"], "rollback reset failed before checkout"),
                 (["git", "clean", "-fd"], "rollback clean failed before checkout"),
                 (["git", "checkout", "-B", branch, pre], f"rollback checkout -B {branch} {pre[:12]} failed"),
                 (["git", "reset", "--hard", pre], f"rollback reset --hard {pre[:12]} failed"),
-                (["git", "clean", "-fd"], "rollback clean failed")):
-            rc, _out, error = _g.git_capture(cmd)
+                (["git", "clean", "-fd"], "rollback clean failed"))):
+            rc, out, error = _g.git_capture(cmd)
             if rc != 0:
-                return _fail(f"{failure}: {error}")
+                unapplied = fresh_rollback and step == 0 and _index_lock_refused(
+                    cmd, subprocess.CompletedProcess(cmd, rc, out, error))
+                return _fail(f"{failure}: {error}", unapplied=unapplied)
         detail = _rollback_target_unmet(pre, branch)
         if detail:
             return _fail(f"rollback could not be verified: {detail}")
@@ -960,8 +982,11 @@ def rollback_managed_update_on_boot(reason: str) -> Tuple[bool, str]:
 
 def _rollback_raised(exc: Exception) -> Tuple[bool, str]:
     """A boot rollback door that raised: an unfinished rollback naming its cause."""
+    from ouroboros.store_switch import UnappliedCheckout
+
     _g.log.warning("boot rollback failed", exc_info=True)
-    return False, f"rollback raised {type(exc).__name__}: {exc}"
+    message = f"rollback raised {type(exc).__name__}: {exc}"
+    return UnappliedCheckout(False, message) if getattr(exc, "before_tree_effects", False) else (False, message)
 
 
 def _boot_smoke_rollback(tx: Dict[str, Any], reason: str) -> Tuple[bool, str, Dict[str, Any]]:

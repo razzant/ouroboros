@@ -321,15 +321,12 @@ def _body_refusal() -> dict:
 
 
 def rollback_through_door(target: str, *, door: str, request_restart: Callable[[], bool]) -> tuple[int, dict]:
-    """The one Rollback procedure (the UI button; the agent's ``vcs_rollback``, P4-S): lock,
-    resolve, stop every writer (other tasks are interrupted at once), then either record the
-    authority switch for the restart exit (a target without the store) or restore the
-    checkout now; the restart follows either way, unless Git refused the restore's reset at its
-    index lock (409 ``restore_not_applied``: no restart; the aborted-update path decides readmission).
-    Returns the HTTP status and payload."""
+    """UI and ``vcs_rollback`` (P4-S): lock, resolve, interrupt writers; restore now or defer
+    the store switch until restart exit. Index lock refusal (409 ``restore_not_applied``)
+    does not restart; the aborted-update path decides task readmission."""
     from supervisor.git_ops import DRIVE_ROOT, REPO_DIR, git_capture, rollback_to_version
     from supervisor.git_ops_reset import IndexLockRefusal, refusal_parts
-    from ouroboros.store_switch import reset_profile_refusal, switch_or_reset
+    from ouroboros.store_switch import HistoryHandoff, reset_profile_refusal, switch_or_reset
 
     reason = _ROLLBACK_REASONS[door]
     if managed := _body_refusal():
@@ -350,10 +347,11 @@ def rollback_through_door(target: str, *, door: str, request_restart: Callable[[
         if blockers:
             fence = _fence_failure(blockers)
             return fence.status_code, json.loads(fence.body)
+        handoff = HistoryHandoff()
         try:
             ok, msg, deferred = switch_or_reset(
                 DRIVE_ROOT, REPO_DIR, target_sha=target_sha.strip(), target_ref=target, reason=reason, door=door,
-                reset=lambda: rollback_to_version(target_sha, reason=reason))
+                reset=lambda: rollback_to_version(target_sha, reason=reason), handoff=handoff)
         except IndexLockRefusal as exc:
             if not exc.before_tree_effects:
                 raise
@@ -370,6 +368,8 @@ def rollback_through_door(target: str, *, door: str, request_restart: Callable[[
         except Exception:
             log.warning("rollback restart request failed", exc_info=True)
             restarting = False
+        if not restarting:
+            handoff.resume_inline()
         return 200, {"status": "ok" if restarting else "restart_required", "message": msg,
                      "restarting": restarting, "switch_deferred": deferred}
     finally:
@@ -755,7 +755,7 @@ def _fence_failure(blockers: list[str], stash_note: str = "") -> JSONResponse:
     )
 
 
-def _rollback_fenced_update(reason: str, error: str, **extra: Any) -> JSONResponse:
+def _rollback_fenced_update(reason: str, error: str, *, handoff=None, **extra: Any) -> JSONResponse:
     from supervisor.update_merge import (
         active_update_tx, mark_update_tx_gate_blocked, rollback_managed_update, write_update_tx, _rollback_target_unmet,
     )
@@ -770,6 +770,8 @@ def _rollback_fenced_update(reason: str, error: str, **extra: Any) -> JSONRespon
     update_progress.advance("rolling_back")
     ok, message = rollback_managed_update(reason)
     if ok:
+        if handoff is not None:
+            handoff.resume_inline(restored=True)
         _respawn_workers_after_failed_update()
         return JSONResponse(
             {"error": error, "rolled_back": not unapplied, "outcome": "not_applied" if unapplied else "rolled_back",
@@ -822,37 +824,28 @@ def _abandon_replace_refused_before_tree(tx: Dict[str, Any], exc: BaseException)
                                      cmd=cmd, stderr=detail)
 
 
-def _restart_response(request: Request, *, strategy: str, plan: dict, keep_branch: str = "") -> JSONResponse:
+def _restart_response(request: Request, *, strategy: str, plan: dict, keep_branch: str = "", handoff=None) -> JSONResponse:
+    details = {"strategy": strategy, "merge_plan": plan, **({"keep_branch": keep_branch} if keep_branch else {})}
+    restart_error = "restart callback is unavailable"
     try:
         restarting = _request_restart(request)
     except Exception as exc:
         log.warning("managed update restart request failed", exc_info=True)
         restarting = False
         restart_error = f"{type(exc).__name__}: {exc}"
-    else:
-        restart_error = "restart callback is unavailable" if not restarting else ""
-    if not restarting:
-        try:
-            from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV
-            import os
+    if restarting:
+        update_progress.advance("restart_requested")
+        return JSONResponse({"status": "ok", "restarting": True, **details})
+    if handoff is not None:
+        handoff.resume_inline()
+    try:
+        import os
+        from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV
 
-            os.environ.pop(PLANNED_RESTART_TRANSACTION_ENV, None)
-        except Exception:
-            log.warning("failed to disarm managed update restart transaction", exc_info=True)
-        return JSONResponse(
-            {
-                "status": "restart_required",
-                "error": restart_error,
-                "strategy": strategy,
-                "merge_plan": plan,
-                **({"keep_branch": keep_branch} if keep_branch else {}),
-            }
-        )
-    update_progress.advance("restart_requested")
-    return JSONResponse(
-        {"status": "ok", "restarting": True, "strategy": strategy, "merge_plan": plan,
-         **({"keep_branch": keep_branch} if keep_branch else {})}
-    )
+        os.environ.pop(PLANNED_RESTART_TRANSACTION_ENV, None)
+    except Exception:
+        log.warning("failed to disarm managed update restart transaction", exc_info=True)
+    return JSONResponse({"status": "restart_required", "error": restart_error, **details})
 
 
 def _stash_local_work_fenced(
@@ -1265,15 +1258,16 @@ def _apply_smart_update_fenced(
         blockers = _quiesce_repo_writers("smart")
         if blockers:
             return _fence_failure(blockers)
-        # Stash-first (Q9): the owner's dirty + untracked work moves to a stash
-        # BEFORE the authoritative replan, so the final plan — conflict inventory
-        # and lane choice included — describes the exact clean tree the merge
-        # will actually run on.
-        from supervisor.git_ops import BRANCH_DEV as _branch_dev
+        from ouroboros.gateway.history_reader import reader
+        from supervisor.git_ops import BRANCH_DEV, DRIVE_ROOT
 
+        if blocked := reader.retire_for_checkout(DRIVE_ROOT):
+            _respawn_workers_after_failed_update()  # the pool stopped; no checkout ran
+            return _fence_failure([blocked])
+        # Q9: stash first so the replan's lane and conflicts describe the exact clean tree.
         update_progress.advance("preparing")
         tx, stash_failure = _stash_local_work_fenced(
-            branch=_branch_dev,
+            branch=BRANCH_DEV,
             base_sha=expected_base_sha,
             target_sha=expected_target_sha,
             plan=plan,
@@ -1367,7 +1361,7 @@ def _apply_replace_recovery_fenced(
 ) -> JSONResponse:
     import uuid
 
-    from ouroboros.store_switch import switch_or_reset
+    from ouroboros.store_switch import HistoryHandoff, switch_or_reset
     from supervisor.git_ops import (
         BRANCH_DEV,
         DRIVE_ROOT,
@@ -1401,6 +1395,7 @@ def _apply_replace_recovery_fenced(
         lock_fh = acquire_update_lock()
     except RuntimeError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
+    handoff = HistoryHandoff()
     try:
         if active_update_tx():
             return JSONResponse({"error": "a managed update is already in progress"}, status_code=409)
@@ -1453,14 +1448,15 @@ def _apply_replace_recovery_fenced(
             checkout_ok, checkout_msg, deferred = switch_or_reset(
                 DRIVE_ROOT, REPO_DIR, target_sha=expected_target_sha, target_ref=str(tx["target_ref"]),
                 reason="ui_update_apply", door="update_replace",
-                reset=lambda: checkout_and_reset(BRANCH_DEV, reason="ui_update_apply", unsynced_policy="rescue_and_reset"))
+                reset=lambda: checkout_and_reset(BRANCH_DEV, reason="ui_update_apply", unsynced_policy="rescue_and_reset"),
+                handoff=handoff)
         except Exception as exc:
             from supervisor.git_ops_reset import refusal_parts, refusal_text
 
             abandoned = _abandon_replace_refused_before_tree(tx, exc)
             if abandoned is None:
                 return _rollback_fenced_update(
-                    "replace_checkout_exception", f"recovery checkout failed: {refusal_text(exc)}", **payload
+                    "replace_checkout_exception", f"recovery checkout failed: {refusal_text(exc)}", handoff=handoff, **payload
                 )
             if not abandoned.get("abandoned"):  # its cleanup failed: the tx holds, as at boot
                 return JSONResponse({"error": abandoned.get("reason"), "rolled_back": False,
@@ -1472,7 +1468,7 @@ def _apply_replace_recovery_fenced(
             }, status_code=409)
         if not checkout_ok:
             return _rollback_fenced_update(
-                "replace_checkout_failed", f"recovery checkout failed: {checkout_msg}", **payload
+                "replace_checkout_failed", f"recovery checkout failed: {checkout_msg}", handoff=handoff, **payload
             )
         tx["phase"] = "pending_boot_smoke"
         write_update_tx(tx)
@@ -1481,17 +1477,17 @@ def _apply_replace_recovery_fenced(
             smoke = update_restart_smoke()
             if not smoke.get("ok"):
                 return _rollback_fenced_update(
-                    "replace_pre_restart_smoke_failed", "pre-restart smoke failed", smoke=smoke
+                    "replace_pre_restart_smoke_failed", "pre-restart smoke failed", handoff=handoff, smoke=smoke
                 )
             tx["pre_restart_smoke"] = "passed"
             write_update_tx(tx)
-        return _restart_response(request, strategy="replace", plan=plan2, keep_branch=str(payload.get("keep_branch") or ""))
+        return _restart_response(request, strategy="replace", plan=plan2,
+                                 keep_branch=str(payload.get("keep_branch") or ""), handoff=handoff)
     except Exception as exc:
         log.error("managed replace recovery failed after writer fence", exc_info=True)
         if active_update_tx():
             return _rollback_fenced_update(
-                "replace_update_exception",
-                f"managed recovery failed: {type(exc).__name__}: {exc}",
+                "replace_update_exception", f"managed recovery failed: {type(exc).__name__}: {exc}", handoff=handoff,
             )
         _respawn_workers_after_failed_update()
         return json_exception(exc, 500)  # recorded once above, with its stack
