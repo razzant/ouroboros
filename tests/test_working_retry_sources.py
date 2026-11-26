@@ -55,6 +55,9 @@ def test_a_restarted_helper_s_first_request_carries_its_held_owner_row_once(tmp_
         {"model": "openai/test-model", "provider": "openai", "use_local": False},
         SimpleNamespace(status="confirmed", stale=False, window_tokens=500_000, route_fp="test-route")))
     chat, words, task_id = 1, "Please make the chart titles blue.", "helper-1"
+    # The tree's root row is the owner-Pause authority every lifecycle-bound member reads (``owner_pause.member_fence``);
+    # a scheduling root has it, open with no Pause, as ``tests/test_budget_pause_lineage.py`` seeds its root.
+    write_task_result(root, "root", "running", chat_id=0, root_task_id="root")
     if place == "room":
         chat = int(create_project(root, "quotas", name="Quotas")["chat_id"])
         bind_task_to_project(root, "root", "quotas", chat, origin={"absent": "system"})
