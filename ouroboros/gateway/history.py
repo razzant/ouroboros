@@ -1543,6 +1543,9 @@ def _render_history_response(
     if not classified and not named:  # direct-address reads can miss rows a Project would inherit
         for gaps in stream_gaps.values():
             gaps.add("room_unclassified")
+    if result_cache[_READS].projection_failed:  # a terminal projection cut short: the rows it left hold no truth
+        for gaps in stream_gaps.values():
+            gaps.add(PROJECTION_FAILED)
     if result_cache[_READS].failed or PROJECTION_FAILED in (stream_gaps["chat"] | stream_gaps["progress"]):
         tokens.pop("after_cursor", None)  # a read that failed part-way is read whole again, never continued
     window = _window_metadata(

@@ -473,3 +473,33 @@ def test_words_revised_while_a_settlement_is_answered_send_the_window_to_its_new
     monkeypatch.setattr(owner, name, original)
     _, newest = _read(tmp_path)
     assert "corrected caption" in [row.get("text") for row in newest["messages"]]
+
+
+def test_a_newest_page_whose_projection_failed_part_way_names_no_arrivals_cursor(tmp_path, monkeypatch):
+    """A newest page that lost part of its task projection is no window to continue: without ``after_cursor`` the
+    client reads the newest page again (CLIENT_CONTRACT "New arrivals"), which projects it whole once it can."""
+    import ouroboros.tool_call_log as tool_call_log
+
+    _asking(tmp_path)
+    _task(tmp_path, "done", "completed", 1)
+    ds.append(tmp_path, "chat", {"ts": TS.format(1), "direction": "out", "chat_id": 1, "task_id": "done", "text": "ok"})
+    original, fail = tool_call_log.replay_evidence_for_tasks, {"on": True}
+
+    def evidence(*args, **kwargs):
+        if fail["on"]:
+            raise OSError("evidence unreadable")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(tool_call_log, "replay_evidence_for_tasks", evidence)
+    status, partial = _read(tmp_path)
+    assert status == 200 and partial["messages"] and partial["page_cursor"]
+    assert "after_cursor" not in partial  # nothing to continue from: the next read of arrivals is a newest page
+    # The window says what it lacks (a client owes the room a whole read again: ``*_projection_failed``).
+    assert {"chat_projection_failed", "progress_projection_failed"} <= set(partial["window"]["truncated_by"])
+    assert partial["window"]["complete"] is False
+    assert all("projection_failed" in span["gaps"] for span in partial["coverage"]["spans"].values())
+    fail["on"] = False
+    status, whole = _read(tmp_path)
+    assert status == 200 and whole["after_cursor"] and not any("projection" in cause for cause in whole["window"]["truncated_by"])
+    done = next(row for row in whole["messages"] if row.get("task_id") == "done")
+    assert done.get("task_terminal_status") == "completed" != next(
+        row for row in partial["messages"] if row.get("task_id") == "done").get("task_terminal_status")
