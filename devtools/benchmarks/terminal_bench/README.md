@@ -366,9 +366,9 @@ trials report (the adapter class `name()`), and the trial join also uses that
 name. A run launched with bare `--agent-import-path` records
 `agents[0].name = null` and can NEVER pass ("no matching agent in job config",
 terminal-bench-2-1#121 — four of our submissions were gated by exactly this).
-`run_tb.py` therefore generates `agent_job_config.json` (agents[].name =
-"Ouroboros Installed" + import_path + kwargs) and launches via
-`harbor run -c <config>`; the job config on the Hub is immutable, so this is
+`run_tb.py` therefore generates a job config (agents[].name =
+"Ouroboros Installed" + import_path + kwargs; read the file the saved `--config`
+names) and launches via `harbor run -c <config>`; the job config on the Hub is immutable, so this is
 unfixable after upload. Optional: `OUROBOROS_EFFORT_TASK` at launch is recorded
 as `kwargs.reasoning_effort` (the submission's effort label) and forwarded back
 into the container, so the declared effort equals the effective one.

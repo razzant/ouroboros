@@ -3402,13 +3402,13 @@ def test_run_tb_keeps_n_as_the_n_concurrent_shorthand():
 _OWN_JOB = "<own job>"  # the job directory Harbor makes from this launch's own job config
 
 
-def _harbor_job_trial(job, reward):
+def _harbor_job_trial(job, reward, name="sample-task__1"):
     """One trial of a synthetic Harbor job, named after its job so a ledger shows whose it is. Its
     collected artifacts hold a scored `result.json` from the task environment, which is no trial."""
-    trial = job / "sample-task__1"
-    (trial / "artifacts").mkdir(parents=True)
+    trial = job / name
+    (trial / "artifacts").mkdir(parents=True, exist_ok=True)
     (trial / "result.json").write_text(json.dumps({
-        "task_name": "sample-task", "trial_name": f"{job.name}/sample-task__1",
+        "task_name": "sample-task", "trial_name": f"{job.name}/{name}",
         "verifier_result": None if reward is None else {"rewards": {"reward": reward}},
     }), encoding="utf-8")
     (trial / "artifacts" / "result.json").write_text(json.dumps({
@@ -3504,8 +3504,11 @@ def test_run_tb_reads_only_its_own_harbor_job(
     extra = json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))["extra"]
     assert (extra["outcome"], extra["harness_exit_code"]) == (outcome, harbor_exit)
     assert extra["harbor_job"]["binding"] == binding
+    # k=1 grades a fresh job debug_only; a resumed one is a partial named-job observation.
+    assert extra["report_grade"] == ("partial_named_job" if binding == "reused" else "debug_only")
     assert extra["harbor_job"]["job_dir"] == ("" if "/" in own["name"] else str((jobs / own["name"]).resolve()))
     ledger_path = root / "disclosure_ledger.json"
+    assert extra["disclosure_ledger"] == (str(ledger_path) if ledger_path.exists() else "")
     if binding not in ("invocation", "named_job"):
         assert not ledger_path.exists()
         assert extra["harbor_trials"] == {"n_trials": 0, "reward_distribution": {}}
@@ -3514,6 +3517,93 @@ def test_run_tb_reads_only_its_own_harbor_job(
     assert [trial["trial_name"] for trial in ledger["trials"]] == [f"{own['name']}/sample-task__1"]
     assert ledger["run"]["harbor_job"] == extra["harbor_job"]
     assert extra["harbor_trials"]["n_trials"] == 1
+
+
+_INTERRUPTED = "<interrupted>"  # a trial directory Harbor left without a result.json
+_LOCKED = "<locked>"  # a scored trial whose result cannot be read at the baseline only
+
+
+@pytest.mark.usefixtures("_clean_seed_provenance")
+@pytest.mark.parametrize(
+    "before,harbor_writes,harbor_exit,outcome,exit_code,counted",
+    [
+        pytest.param({"t1": _INTERRUPTED}, {"t2": 1.0}, 0, "completed", 0, ["t2"], id="first-new-result"),
+        pytest.param({"t1": 1.0}, {}, 0, "trials_unverified", 1, [], id="old-scored-alone"),
+        pytest.param({"t1": 1.0}, {"t2": None}, 0, "no_scored_trials", 1, ["t2"], id="old-scored-new-unscored"),
+        # A replaced result counts, and its numeric zero is a scored zero.
+        pytest.param({"t1": None, "t2": 1.0}, {"t1": 0.0}, 0, "completed", 0, ["t1"], id="changed-result"),
+        pytest.param({"t1": 1.0}, {"t2": 1.0}, 2, "harness_nonzero_exit", 2, ["t2"], id="new-result-nonzero-exit"),
+        # An unknown baseline never counts, even readable afterwards; its known sibling still does.
+        pytest.param({"t1": _LOCKED, "t2": 1.0}, {"t2": 0.0}, 0, "completed", 0, ["t2"], id="unreadable-baseline"),
+    ],
+)
+def test_run_tb_counts_only_new_or_changed_trials_of_a_resumed_named_job(
+    tmp_path, monkeypatch, before, harbor_writes, harbor_exit, outcome, exit_code, counted,
+):
+    """razzant/ouroboros#4315 review: resuming an existing named job skipped its first scored trial.
+    Only trials whose result appeared or changed during this dispatch count, never an unchanged
+    earlier one. Under otherwise leaderboard-grade settings (k=5) the manifest and the ledger say it
+    is a partial named-job observation, not a leaderboard one. A reused run root's earlier ledger is
+    not named as this run's."""
+    from devtools.benchmarks.terminal_bench import run_tb
+
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    root = tmp_path / "run"
+    job = root / "submission" / "submissions" / "terminal-bench" / "2.1" / "ouroboros__example-model" / "job" / "named-job"
+    for trial, reward in before.items():
+        if reward == _INTERRUPTED:
+            (job / trial).mkdir(parents=True)
+        else:
+            _harbor_job_trial(job, 1.0 if reward == _LOCKED else reward, trial)
+    baseline = {"open": True}
+    read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path):
+        if baseline["open"] and path.parent.name in [t for t, r in before.items() if r == _LOCKED]:
+            raise PermissionError(f"unreadable: {path}")
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    (root / "disclosure_ledger.json").write_text("{}", encoding="utf-8")  # an earlier run's
+    base = tmp_path / "base.json"
+    base.write_text(json.dumps({"job_name": "named-job"}), encoding="utf-8")
+    monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "fake-harbor 0.0.0")
+
+    during = {}
+
+    def harbor_run(_argv):
+        baseline["open"] = False
+        during.update(json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))["extra"])
+        for trial, reward in harbor_writes.items():
+            _harbor_job_trial(job, reward, trial)
+        return harbor_exit
+
+    calls, unexpected = [], []
+    monkeypatch.setattr(run_tb.subprocess, "run", _fake_harbor(calls, harbor_run, unexpected))
+    assert run_tb.main([
+        "--model", "example/model", "--k", "5", "--allow-dirty-seed",
+        "--harbor-bin", "fake-harbor", "--task", "sample-task", "--run-root", str(root),
+        "--settings-path", str(settings), "--base-job-config", str(base), "--execute",
+    ]) == exit_code
+    assert unexpected == [] and len(calls) == 1
+    extra = json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))["extra"]
+    assert extra["outcome"] == outcome
+    partial = {"leaderboard_valid": False, "report_grade": "partial_named_job"}
+    for record in (during, extra):  # already while Harbor runs
+        assert {key: record[key] for key in partial} == partial and record["report_grade_warning"]
+    assert extra["harbor_job"] == {"job_dir": str(job.resolve()), "binding": "reused", "trials": "new_or_changed"}
+    assert extra["harbor_trials"]["n_trials"] == len(counted)
+    ledger = json.loads((root / "disclosure_ledger.json").read_text(encoding="utf-8"))
+    if not counted:
+        assert ledger == {} and extra["disclosure_ledger"] == ""
+        return
+    assert extra["disclosure_ledger"] == str(root / "disclosure_ledger.json")
+    assert [trial["trial_name"] for trial in ledger["trials"]] == [f"named-job/{name}" for name in counted]
+    assert ledger["run"]["harbor_job"] == extra["harbor_job"]
+    assert {key: ledger["run"][key] for key in partial} == partial
+    # Without a readable baseline nothing of an existing job counts.
+    assert run_tb.attributed_harbor_job(job, generated=False, existed=True, before=None)[0] is None
 
 
 @pytest.mark.usefixtures("_clean_seed_provenance")

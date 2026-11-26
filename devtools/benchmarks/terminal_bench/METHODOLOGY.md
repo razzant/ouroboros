@@ -69,11 +69,19 @@ the ledger and outcome read only this launch's job, from its `<job>/<trial>/resu
 nothing that resolves outside it. `extra.harbor_job.binding` scopes those trials: `invocation` (the
 generated name: they are this invocation's, also after a non-zero exit) or `named_job` (a base
 `job_name` absent before the dispatch: they are that named job's, which does not show which launch
-created them when several run under the same name, so they are no per-command result). No trial
-counts for `reused` (the named job existed before the dispatch: Harbor resumes or refuses it) or
-`unattributed` (the job never appeared, or its name leaves the jobs dir): neither writes a ledger,
-and the outcome fails closed (`trials_unverified`, or Harbor's non-zero exit); every job stays on
-disk. Independent measurements need distinct job names and distinct run roots.
+created them when several run under the same name, so they are no per-command result) or `reused`
+(the named job existed before the dispatch: Harbor resumes or refuses it). For `reused`,
+`harbor_job.trials` is `new_or_changed`: only trials whose `result.json` appeared or changed in
+content during the dispatch count, so the ledger is this resume's part, not the job's cumulative
+score, which Harbor's own job result keeps; the manifest and ledger grade it `partial_named_job`
+with `leaderboard_valid: false`, whatever `k` and settings (the submission tree is unchanged). An
+unchanged earlier trial, or one unreadable before or after, never counts. Nothing counts for
+`unattributed` (the job never appeared, or its name leaves the jobs dir). A `reused` job with
+nothing counted and an `unattributed` one write no ledger: `extra.disclosure_ledger` stays empty
+(an earlier ledger in a reused run root is not this run's) and the outcome fails closed
+(`trials_unverified`, or Harbor's non-zero exit). A fresh job without scored trials still writes
+its ledger (`no_scored_trials`). Every job stays on disk. Independent measurements need distinct job
+names and distinct run roots.
 
 ## Dataset identity (v6.79.0 — matters for any non-TB2.1 Harbor dataset)
 
@@ -272,8 +280,8 @@ leaderboard" for the verified mechanics. Methodology-relevant consequences:
   records `agents[0].name = null` in the job config, which static analysis
   can never match against the trial-side agent name — the submission is
   permanently invalid and the uploaded job config cannot be fixed post hoc
-  (terminal-bench-2-1#121). `run_tb.py` generates `agent_job_config.json`
-  accordingly; `OUROBOROS_EFFORT_TASK` is recorded as the declared
+  (terminal-bench-2-1#121). `run_tb.py` generates such a job config (the file
+  the saved `--config` names); `OUROBOROS_EFFORT_TASK` is recorded as the declared
   `reasoning_effort` of the submission key and forwarded into the container.
 - CI requires an **ATIF trajectory for every rewarded trial** (the direct
   `trajectory.json` upload; the trial row must carry `trajectory_path`). The
