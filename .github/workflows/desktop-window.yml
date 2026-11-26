@@ -1,0 +1,66 @@
+name: TEMPORARY qualification - Windows packaging acceptance (not a release)
+
+on:
+  workflow_dispatch:
+    inputs:
+      verified_ref_sha:
+        description: Head SHA of the verification branch you reviewed. Every job refuses to run on any other commit.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-packaging-acceptance
+  cancel-in-progress: false
+
+jobs:
+  explorer_zip:
+    name: old ZIP in Explorer (explorer-qa scripts)
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/qualification/windows-packaging-acceptance' && github.sha == inputs.verified_ref_sha }}
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Check out the scripts only, from the verified ref
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: explorer-qa
+
+      - name: The scripts are exactly the reviewed ones
+        shell: pwsh
+        run: |
+          $pins = [ordered]@{
+            'explorer-qa/ExplorerCapture.cs'   = '7eebc686201e49b7cf8ce75144e7ea77130fcfe85a546f45486335ff80c51ab3'
+            'explorer-qa/capture-explorer.ps1' = 'e674be6eff0c60b85afef2686038ec0a00f4e5babdb24f0b6cd84a06837fe61a'
+          }
+          foreach ($file in $pins.Keys) {
+            $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $pins[$file]) { throw "$file differs from the reviewed bytes" }
+          }
+
+      - name: Choose the run root
+        id: root
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP ('ouroboros-explorer-qa-' + [guid]::NewGuid().ToString('N'))
+          "root=$root" >> $env:GITHUB_OUTPUT
+          "evidence=$root\evidence" >> $env:GITHUB_OUTPUT
+
+      - name: Capture the published ZIP in Explorer, in the ZIP and extracted
+        shell: pwsh
+        env:
+          OUROBOROS_EXPLORER_QA: '1'
+        run: |
+          powershell.exe -NoProfile -NonInteractive -Sta -File .\explorer-qa\capture-explorer.ps1 -RunRoot "${{ steps.root.outputs.root }}"
+          if ($LASTEXITCODE -ne 0) { throw "Explorer capture failed: exit $LASTEXITCODE" }
+
+      - name: Upload only the evidence (the two PNG frames and short facts)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: old-zip-explorer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.root.outputs.evidence }}
+          if-no-files-found: warn
+          retention-days: 7

@@ -1,0 +1,15 @@
+# One text form for every checkout, whatever the OS and its core.autocrlf: text is LF in the index and in
+# every working tree. Byte-compared fixtures, content-hashed assets, generated locks and the reference books'
+# line- and byte-addressed chapters then read the same on Windows as on macOS and Linux. Git still detects
+# binary files and leaves them as they are.
+* text=auto eol=lf
+
+# Windows batch scripts keep the line ending cmd.exe expects.
+*.cmd text eol=crlf
+
+# Recorded provider wire (SSE / JSON bodies) is byte-exact evidence: no line-ending
+# conversion at commit or checkout, so the replay corpus always sees the recorded bytes.
+tests/fixtures/llm_wire/** -text -whitespace
+
+# A benchmark probe recorded with CRLF stays as recorded.
+devtools/benchmarks/swe_bench_pro/e1v2/run_csv_probe.csv -text
