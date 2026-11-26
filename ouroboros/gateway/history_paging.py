@@ -973,7 +973,7 @@ def _held_rows(page, messages, shown, reads):
     newest page (``_text_revision``). A task is not held when the page projects it with another task's document or
     rows, or with what only a newest page decides: an overlaid successor or a child drive's replica, a child or a
     parent of one (the newest page anchors and places children), a folded review group or a review presented for
-    another task, folded model waits, a historical receipt; nor when it shows no stored row of it (only its current
+    another task, folded model waits, a row stamped with a historical receipt; nor when it shows no stored row of it (only its current
     work, or only rows fixed elsewhere, ``ROOM_FIXED_ROW_TYPES``, that show no facts of it); one not held in a window is
     never held again in it."""
     if not any(column == "appearance" for column, _key in page["lens"]["chat"].keys):  # Main and Projects only
@@ -998,7 +998,9 @@ def _held_rows(page, messages, shown, reads):
             blocked |= {task, str(row.get("parent_task_id") or ""), str(row.get("subagent_task_id") or "")}
         if not task or row.get("role") == "user" or row.get("system_type") in ROOM_FIXED_ROW_TYPES:
             continue  # an owner's row (its receipts and delivery are the notes stamp's and the pending send's), a fixed row
-        if (row.get("historical_terminal") or row.get("system_type") == "task_model_wait"
+        # A row stamped with the page's newest receipt (its result gone) is the page's choice; the task's own receipt
+        # (replay evidence, the one row keeping ``summary_kind``) projects its stored row with the result, like any row.
+        if (row.get("historical_terminal") and not row.get("summary_kind") or row.get("system_type") == "task_model_wait"
                 or row.get("history_id") in page.get("stripped", ())):
             blocked.add(task)
         elif isinstance(position := row.get("history_position"), dict):  # else a carrier projected anew each read

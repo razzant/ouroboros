@@ -254,13 +254,15 @@ def test_held_rows_leave_out_tasks_the_page_shows_through_another_or_without_a_r
                 _row("plain", 3, role="user"),  # an owner's row: never held
                 _row("stripped", 4),  # a child's row shown without its lineage
                 _row("receipt", 5, historical_terminal={"status": "completed"}),
+                _row("own", 14, historical_terminal={"status": "completed"}, system_type="task_summary",
+                     summary_kind="terminal_root_projection"),  # the task's own receipt, not a page's stamp: held
                 _row("pinned", 6, system_type="project_started"), _row("waits", 13, system_type="task_model_wait"),
                 _row("reviewer", 8, presentation_owner_task_id="owner"), _row("owner", 9),
                 _row("grouped", 10, review_group={"attempts": [{"task_id": "attempt"}]}), _row("attempt", 11),
                 {"task_id": "carried_only", "role": "system", "system_type": "task_evidence"}]
-    shown = {"plain", "stripped", "receipt", "pinned", "waits", "reviewer", "owner", "grouped", "attempt", "carried_only"}
+    shown = {"plain", "stripped", "receipt", "own", "pinned", "waits", "reviewer", "owner", "grouped", "attempt", "carried_only"}
     # The answer the page drew no row of is still evidence its question's row was projected with.
-    assert history_paging._held_rows(page, messages, shown, _Reads()) == {"plain": [[1, 12], [7]]}  # a fixed row: no facts
+    assert history_paging._held_rows(page, messages, shown, _Reads()) == {"plain": [[1, 12], [7]], "own": [[14], []]}  # a fixed row: no facts
     place = {**page, "lens": {"chat": history_paging.RoomLens((("chat_id", 9),))}}
     assert history_paging._held_rows(place, messages, shown, _Reads()) is None  # a place room holds none
 
@@ -294,6 +296,44 @@ def _as_newest_shows(root, read):
     for row in [*read.get("repairs", ()), *read["messages"]]:
         if row.get("history_id"):
             assert shown.get(row["history_id"]) == row, row["history_id"]
+
+
+@pytest.mark.parametrize("polled_before_settling", [False, True])
+def test_a_main_task_ending_with_its_canonical_receipt_is_answered_as_the_newest_page_shows_it(
+        tmp_path, monkeypatch, polled_before_settling):
+    """The real ending of a Main root: its answer, its result, the canonical ``task_summary`` its terminal projection
+    appends (Main draws it only as a receipt) and the settlement that retires the debt (a Main root owes no mirror)."""
+    from ouroboros.post_task_checkpoint import settle_terminal_projection
+    from ouroboros.project_dialogue import append_terminal_task_projection
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    mirrored = []
+    monkeypatch.setattr("supervisor.terminal_delivery.enqueue_terminal_delivery", lambda *a, **k: mirrored.append(a))
+    _task(tmp_path, "work", "running", 0)
+    ds.append(tmp_path, "chat", {"ts": TS.format(0), "direction": "in", "chat_id": 1, "text": "please"})
+    ds.append(tmp_path, "progress", {"ts": TS.format(1), "chat_id": 1, "task_id": "work", "content": "working on it"})
+    _, page = _read(tmp_path)
+    cursor = page["after_cursor"]
+    ds.append(tmp_path, "chat", {"ts": TS.format(2), "direction": "out", "chat_id": 1, "task_id": "work",
+                                 "text": "the final answer"})
+    write_task_result(tmp_path, "work", "completed", result="the final answer", chat_id=1)
+    task, done = {"id": "work", "chat_id": 1}, {"status": "completed", "chat_id": 1}
+    assert append_terminal_task_projection(tmp_path, "work", task, load_task_result(tmp_path, "work"), done)
+    if polled_before_settling:  # still owed: what arrived carries its facts, the receipt among them
+        status, going = _read(tmp_path, cursor)
+        assert status == 200 and "repairs" not in going
+        cursor = going["after_cursor"]
+    assert settle_terminal_projection(tmp_path, "work", task=task, event=done) == "settled" and mirrored == []
+    status, read = _read(tmp_path, cursor)
+    assert status == 200, read
+    card = next(row for row in read["repairs"] if row.get("is_progress"))
+    assert (card["outcome_phase"], card["task_terminal_status"]) == ("done", "completed")
+    if not polled_before_settling:
+        assert [row.get("system_type") or row["text"] for row in read["messages"]] == ["the final answer", "task_summary"]
+        assert read["window"]["latest_message"]["history_id"] == read["messages"][0]["history_id"]
+    _as_newest_shows(tmp_path, read)
+    status, quiet = _read(tmp_path, read["after_cursor"])
+    assert status == 200 and quiet["messages"] == [] and "repairs" not in quiet
 
 
 def test_rows_sent_again_keep_their_stored_order_before_what_arrived(tmp_path):
