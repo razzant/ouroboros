@@ -203,11 +203,27 @@ def render_domain_map(manifest: Manifest) -> str:
         L.append("")
         L.append(f"### {d} — {manifest.domains[d]}")
         L.append("")
+        if manifest.references.get(d):
+            L.append("Owning manuals: " + ", ".join(f"`{ref}`" for ref in manifest.references[d]))
+            L.append("")
         for path in mods_by_domain[d]:
             mark = " *" if path in manifest.proposed else ""
             L.append(f"- `{path}`{mark}")
     L.append("")
     return "\n".join(L)
+
+
+def reference_findings(manifest, root: pathlib.Path) -> list[str]:
+    """``[references]``: every domain names its owning manuals, each an existing file; a
+    non-domain key is an existing path prefix. The lookup and review packets read this table."""
+    findings = [f"references: domain {d} has no [references] row" for d in sorted(manifest.domains)
+                if not manifest.references.get(d)]
+    for key, paths in sorted(manifest.references.items()):
+        if key not in manifest.domains and not (root / key.rstrip("/")).exists():
+            findings.append(f"references: key {key!r} is neither a domain nor an existing path")
+        findings.extend(f"references: {key!r} names a missing manual {ref}"
+                        for ref in paths if not (root / ref).is_file())
+    return findings
 
 
 def run_checks(root: pathlib.Path = REPO_ROOT) -> tuple[list[str], list[str]]:
@@ -220,6 +236,7 @@ def run_checks(root: pathlib.Path = REPO_ROOT) -> tuple[list[str], list[str]]:
     if bad_domains:
         findings.append(f"manifest names unknown domains: {bad_domains}")
         return findings, notes
+    findings.extend(reference_findings(manifest, root))
 
     tracked = tracked_population(root)
     for path in sorted(tracked - set(manifest.modules)):

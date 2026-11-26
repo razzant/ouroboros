@@ -394,6 +394,98 @@ def test_architecture_fact_vocabulary_is_closed():
         "facade_consumers",
         "persistence_entities_written_by",
         "protected_contracts_affected",
+        "module_map",
     )
     with pytest.raises(ValueError, match="owner_of"):
         architecture_fact_rows(REPO, "unknown_fact x")
+
+
+# --- module_map: the live module addresses that replace a hand-kept tree -------------
+
+def _tracked(prefix: str) -> list[str]:
+    import subprocess
+    out = subprocess.run(["git", "-C", str(REPO), "ls-files", prefix], capture_output=True, check=True)
+    return out.stdout.decode("utf-8").split()
+
+
+def test_module_map_answers_through_the_real_registry_on_this_tree(tmp_path, monkeypatch):
+    """The audited defect: through the registry ``module_map web/modules/`` once parsed the
+    whole repository, hit the walk limit and printed a complete-looking "0 modules".
+    The lookup now walks only the named prefix, path-only, and leads come from each file."""
+    from ouroboros import code_intelligence
+    from ouroboros.code_intelligence_module_map import header_comment_lead, python_lead
+    from ouroboros.tools.registry import ToolRegistry
+
+    scopes = []
+    real_build = code_intelligence.build_code_inventory
+
+    def recording_build(root, **kwargs):
+        scopes.append((kwargs.get("scope"), kwargs.get("parse")))
+        return real_build(root, **kwargs)
+
+    monkeypatch.setattr(code_intelligence, "build_code_inventory", recording_build)
+    registry = ToolRegistry(repo_dir=REPO, drive_root=tmp_path / "data")
+
+    def module_map(arg: str, **extra) -> str:
+        return registry.execute("query_code", {"op": "architecture", "query": f"module_map {arg}",
+                                               "root": "system_repo", "limit": 500, **extra})
+
+    web = module_map("web/modules/")
+    shipped = [path for path in _tracked("web/modules/") if "/tests/" not in path]
+    assert f"web/modules ({len(shipped)} file(s))" in web and "QUERY_CODE_TRUNCATED" not in web
+    capture = (REPO / "web/modules/media_capture.js").read_text(encoding="utf-8")
+    assert f"web/modules/media_capture.js — {header_comment_lead(capture)}" in web
+    assert header_comment_lead(capture)
+    assert scopes == [("web/modules", False)]  # only the prefix, never a parse of the world
+
+    review = module_map("ouroboros/review.py")
+    lead = python_lead((REPO / "ouroboros/review.py").read_text(encoding="utf-8"))
+    assert lead and f"ouroboros/review.py (D06) — {lead}" in review
+    assert "06-4-self-change-and-review.md" in review
+
+    empty = module_map("web/no_such_dir/")
+    assert "(0 file(s))" in empty and "no files under this prefix (enumeration complete)" in empty
+
+    whole_web = module_map("web/")
+    assert "web/tests/" not in whole_web.split("left out", 1)[1] and "under tests/ left out" in whole_web
+    assert "web/tests/" in module_map("web/tests/")
+
+    domains = module_map("domains")
+    assert "D06 — Review stack" in domains and "docs/architecture/06-4-self-change-and-review.md" in domains
+    assert '"web/" | manuals:' not in domains and "web/ | manuals:" in domains
+    d06 = module_map("D06")
+    assert "ouroboros/review.py — " in d06 and "docs/CHECKLISTS.md" in d06
+
+
+def test_module_map_cut_answers_are_typed_incomplete_never_a_complete_zero(tmp_path, monkeypatch):
+    from ouroboros import code_intelligence
+    from ouroboros.code_intelligence_architecture import ARCHITECTURE_LIMIT_MARKER, load_domain_manifest
+    from ouroboros.code_intelligence_module_map import module_map_rows
+    from ouroboros.tools.registry import ToolRegistry
+
+    # A spent deadline keeps every address, path-only, and says which leads were not read.
+    rows = module_map_rows(REPO, "ouroboros/tools/", load_domain_manifest(REPO), deadline=0.0)
+    limit = [row for row in rows if row.startswith(ARCHITECTURE_LIMIT_MARKER)]
+    assert len(limit) == 1 and "module_map_time_limit" in limit[0]
+    assert "ouroboros/tools/query_code.py" in rows
+
+    monkeypatch.setattr(code_intelligence, "_MAX_ENUMERATION_PATHS", 2)
+    registry = ToolRegistry(repo_dir=REPO, drive_root=tmp_path / "data")
+    cut = registry.execute("query_code", {"op": "architecture", "query": "module_map web/modules/",
+                                          "root": "system_repo"})
+    assert "QUERY_CODE_TRUNCATED" in cut and "enumeration_entry_limit" in cut
+    assert "enumeration complete" not in cut
+    with pytest.raises(ValueError, match="repository-relative"):
+        module_map_rows(REPO, "web/../..", load_domain_manifest(REPO))
+    with pytest.raises(ValueError, match="repository-relative"):
+        module_map_rows(REPO, "/etc", load_domain_manifest(REPO))
+
+
+def test_module_leads_are_the_files_own_first_words():
+    from ouroboros.code_intelligence_module_map import header_comment_lead, python_lead
+
+    assert python_lead('#!/usr/bin/env python\n# c\n\n"""First line.\n\nMore."""\nx = 1\n') == "First line."
+    assert python_lead("import os\n") == "" and python_lead('x = """not a docstring"""\n') == ""
+    assert header_comment_lead("// One\n// two\nexport const x = 1;\n") == "One two"
+    assert header_comment_lead("/**\n * Block\n * header\n */\nlet y;\n") == "Block header"
+    assert header_comment_lead("export const z = 1; // trailing\n") == ""
