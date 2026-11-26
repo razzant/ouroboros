@@ -643,8 +643,11 @@ def _upsert_issue(call, github, issues, block, pr, head, run_url, record, curren
     if issues is None:
         return None  # the open issues are unknown: a new one could duplicate one of them
     author = ((pr or {}).get("user") or {}).get("login", "")
+    # A browser red from a stale run never joins an issue that records a newer observation: it gets its own, under
+    # its own head, for the current head's recheck to settle. A leg's red is still refused and stays owed.
     existing = next((issue for issue in issues if issue["number"] not in record["closed"]
-                     and issue_key(issue["block"]) == issue_key(block) and _joins(issue["block"], block)), None)
+                     and issue_key(issue["block"]) == issue_key(block) and _joins(issue["block"], block)
+                     and (system_of(block) != "browser" or current(issue))), None)
     if existing is None:
         ok, issue = call("create an issue", github.post, "issues", {
             "title": issue_title(block, pr), "labels": [LABEL],

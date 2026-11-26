@@ -43,7 +43,8 @@ more), and then:
   tier-3 modules and hub files are named only.
 - ATTRIBUTION, the owner's rule (2026-11-25: name the author only when the comparison with the base confirms it, else
   "not attributed"): a merge is named only when the window holds exactly one first-parent commit, whose first parent
-  is the base, and the red passed whole at the base (setup, call and teardown). A test absent at the base is not
+  is the base, and the red passed whole at the base (setup, call and teardown); a masked id (`***`, which two raw
+  parameters can share) never names one. A test absent at the base is not
   attributed ("not present at the base"); one that failed there is pre-existing; an inconclusive base answer is
   unknown. Unattributed reds list their candidate merges: the window's commits that touched the files that selected
   the test (its module, the changed files that chose it, a sentinel's guarded files), else all of them, saying none
@@ -56,7 +57,7 @@ pull request gets one comment. It writes only for a window whose base and head b
 chain, base first, and that the hand-over names (BASE, HEAD_SHA). Off the `ouroboros` branch (a trial) it holds a
 read-only token and DryGitHub records the writes it would make. It retires (narrows or closes) issues only while this
 run's head is still the branch tip; past it, `reconcile` first drops each test a newer head recorded green and holds
-one the open issue of its kind cannot take. A refused write or a red no open issue carries fails it, named in its
+one a newer head recorded failing. A refused write or a red no open issue carries fails it, named in its
 summary; the check job's outputs stay with the run, so re-running the route job alone offers that hand-over again.
 """
 from __future__ import annotations
@@ -94,6 +95,7 @@ SKIPS = "permitted-skips.json"  # beside each session's projection: the skips te
 ROUTING_LIMIT = 100_000  # the encoded hand-over travels as a job output and an environment variable
 STEPS = ("install", "run", "confirm", "compare", "recheck")  # the check job passes each step's outcome as BROWSER_<STEP>_OUTCOME
 RETIRE_NOTE = "An older rerun cannot retire this branch’s open failures."  # route()'s own note, no refused write
+MASK = "***"  # a redacted part of a public test id (tests/ci_evidence.py): raw parameters behind it can differ
 
 
 # --- the plugin: which skips the lane permits, decided while the report still carries its reason ---------------------
@@ -509,7 +511,8 @@ def attribute(plan: dict, red: list[str], compared: dict) -> list[dict]:
     """route()'s verdicts by the owner's rule: a culprit only for a window of one merge whose first parent is the
     window's base (`head_parent`, read by the selector) and whose base ran the red whole and green; pre-existing only
     where the base showed that test fail; else unattributed with its candidate merges (`fallback`: none touched the
-    files that selected it, so all of the window's). Each verdict keeps its own window base (`window`), so an issue
+    files that selected it, so all of the window's). A masked id (two raw parameters can share it) is never
+    attributed. Each verdict keeps its own window base (`window`), so an issue
     that gains tests from a later window keeps both."""
     commits, results = plan.get("commits") or [], compared.get("results") or {}
     inconclusive, base = compared.get("inconclusive") or {}, plan.get("base") or ""
@@ -524,6 +527,9 @@ def attribute(plan: dict, red: list[str], compared: dict) -> list[dict]:
             verdicts.append({"id": node, "verdict": "unattributed", "at_base": "dependencies", **candidates,
                              "window": base, "why": "uv.lock differs between the window's base and head: the base "
                                                     "was not run"})
+        elif MASK in node:
+            verdicts.append({"id": node, "verdict": "unattributed", "at_base": "unknown", **candidates, "window": base,
+                             "why": f"its id is masked (`{MASK}`): the base's test of that id may be another case"})
         elif answer == "failed":
             verdicts.append({"id": node, "verdict": "pre-existing", "at_base": "failed", "window": base})
         elif answer == "passed" and one_merge:
@@ -631,31 +637,27 @@ def reconcile(data: dict, github, chain: list[str]) -> tuple[dict, dict[str, str
     """(hand-over, settled, held) of a run whose head is no longer the branch tip, before anything is written.
 
     A test whose latest record from a newer first-parent head is green is settled: this run neither files, extends
-    nor comments for it. A test the open issue of its kind cannot take (that issue records a newer observation, and
-    an older one never joins it) is held for the check at the current head, named, never a refused write. Every
-    other test is handed over as usual: an open issue keeps it for the recheck at the current head."""
+    nor comments for it. One a newer head recorded failing, which no open issue lists, is held for the check at the
+    current head, named. Every other test is handed over as usual: an open issue keeps it for the recheck at the
+    current head (one of its kind that records a newer observation cannot take it, so it gets its own)."""
     head = data["head"]
     if head not in chain:
         raise ValueError(f"{head[:12]} is not on the branch's first-parent chain")
     position = {sha: index for index, sha in enumerate(chain)}
     newer = lambda sha: position.get(sha, len(chain)) < position[head]  # noqa: E731
     records = dispositions(github)
-    verdicts = {row["id"]: row for row in data.get("verdicts") or []}
-    settled, held = {}, {}
+    settled, held, latest = {}, {}, {}
     for node in sorted({*(data.get("red") or ()), *(data.get("flaky") or ())}):
         later = [(position[sha], -order, state, sha) for order, (sha, state) in enumerate(records.get(node, ()))
                  if newer(sha)]
-        if later and min(later)[2] == "green":  # the newest head's last record
-            settled[node] = min(later)[3]
+        if later:
+            latest[node] = min(later)  # the newest head's last record
+        if later and latest[node][2] == "green":
+            settled[node] = latest[node][3]
     issues = [issue for issue in routing.open_issues(github) if routing.system_of(issue["block"]) == SYSTEM]
     for node in sorted(set(data.get("red") or ()) - set(settled)):
-        verdict = verdicts.get(node) or {"verdict": "unattributed"}
-        if verdict["verdict"] == "culprit" or any(node in issue["block"]["ids"] for issue in issues):
-            continue
-        blocking = [issue["number"] for issue in issues if issue["block"].get("kind") == verdict["verdict"]
-                    and issue.get("observed") and newer(issue["observed"])]
-        if blocking:
-            held[node] = f"#{blocking[0]} records a newer observation"
+        if node in latest and not any(node in issue["block"]["ids"] for issue in issues):
+            held[node] = f"the newer `{latest[node][3][:12]}` recorded it failing"
     gone = set(settled) | set(held)
     kept = {**data, "red": [node for node in data.get("red") or [] if node not in gone],
             "flaky": [node for node in data.get("flaky") or [] if node not in gone],

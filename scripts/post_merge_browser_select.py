@@ -12,8 +12,9 @@ window job runs `scope` to decide whether to start that workflow; its `check` jo
 anything, then runs `plan`.
 
 - A module is a `ui_browser` module when its code declares the marker: a `pytestmark`, or a decorator of a test, a
-  test class or a method of one, read with `ast` (a module that does not parse counts by its text and runs whole,
-  so its collection error surfaces). A string or a comment that mentions the marker declares nothing.
+  test class or a method of one, read with `ast` (a module that does not parse counts by its text, or as the base
+  declared it, and runs whole, so its collection error surfaces). A string or a comment that mentions the marker
+  declares nothing.
 - The check APPLIES when a commit of the window touches `web/**`, a `ui_browser` module (at the head, or at the base
   where the window deleted it or took its marker away), a file under `tests/` that such a module names (a helper or a
   fixture), or the browser lane every browser test loads (SHARED: tests/browser_lane.py and the conftests), which
@@ -125,10 +126,10 @@ def first_parent(sha: str, cwd: Path = REPO) -> str:
 
 
 def _marks(expression) -> bool:
-    """Whether an expression names `mark.ui_browser` (`pytest.mark.ui_browser`, called, listed or in `marks=`)."""
-    return any(isinstance(node, ast.Attribute) and node.attr == "ui_browser" and (
-        isinstance(node.value, ast.Name) and node.value.id == "mark"
-        or isinstance(node.value, ast.Attribute) and node.value.attr == "mark") for node in ast.walk(expression))
+    """Whether an expression names the marker: an attribute chain ending in `.ui_browser`, whatever names
+    `pytest.mark` (`pytest.mark.ui_browser`, `m.ui_browser` after `from pytest import mark as m`), called, listed or in
+    `marks=`."""
+    return any(isinstance(node, ast.Attribute) and node.attr == "ui_browser" for node in ast.walk(expression))
 
 
 def _pytestmark(statement) -> bool:
@@ -478,6 +479,18 @@ def base_modules(base: str, changed, head_modules, cwd: Path = REPO) -> set[str]
     return found
 
 
+def unparsed_at_head(paths, root: Path) -> dict[str, str]:
+    """{path: head source} of `base_modules` the head still holds but cannot parse (its marker spelled so that the
+    text test misses it): a candidate, planned whole, so its collection error is never a GREEN on the sentinels."""
+    found = {}
+    for path in sorted(paths):
+        if (root / path).is_file():
+            text = (root / path).read_text(encoding="utf-8", errors="replace")
+            if lane_tests(path, text) is None:
+                found[path] = text
+    return found
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="post_merge_browser_select.py", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -495,6 +508,7 @@ def main(argv: list[str] | None = None) -> int:
     commits = window_commits(args.base, args.head)
     modules = tree_modules(REPO)
     deleted = base_modules(args.base, sorted({path for commit in commits for path in commit["files"]}), modules)
+    modules.update(unparsed_at_head(deleted, REPO))
     if args.command == "scope":  # whether the window is the owner's scope; an empty plan is the check's to report
         applies, why = applicability(sorted({path for commit in commits for path in commit["files"]}), modules, deleted)
         print(f"applicable={'true' if applies else 'false'}")

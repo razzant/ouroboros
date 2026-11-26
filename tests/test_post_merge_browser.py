@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -92,6 +93,23 @@ def test_a_browser_module_is_one_whose_code_declares_the_marker():
     # This very module names the marker in its strings only: it is no browser module, and touching it applies nothing.
     own = (ROOT / "tests/test_post_merge_browser.py").read_text(encoding="utf-8")
     assert "pytest.mark.ui_browser" in own and not sel.declares_ui_browser(own)
+
+
+def test_a_marker_through_any_name_of_pytest_mark_declares_a_browser_module():
+    """Round 6 (b1): `from pytest import mark as m` with `@m.ui_browser` or `pytestmark = m.ui_browser` (listed or
+    called) marks the module whatever the base name is; the lane keeps those tests and the window applies."""
+    alias = "from pytest import mark as m\n"
+    texts = {"tests/test_alias_decorator.py": alias + "\n@m.ui_browser\ndef test_x():\n    pass\n",
+             "tests/test_alias_single.py": alias + "pytestmark = m.ui_browser\n\n\ndef test_x():\n    pass\n",
+             "tests/test_alias_listed.py": alias + "pytestmark = [m.ui_browser]\n\n\ndef test_x():\n    pass\n",
+             "tests/test_alias_called.py": ("import pytest\nmarks = pytest.mark\n\n\nclass TestK:\n    @marks.ui_browser()\n"
+                                            "    def test_x(self):\n        pass\n"),
+             "tests/test_alias_docker.py": alias + "pytestmark = [m.ui_browser_docker]\n"}
+    found = sel.ui_modules(texts)
+    assert set(found) == set(texts) - {"tests/test_alias_docker.py"}
+    for path, text in found.items():
+        assert all(lane for _, _, _, lane in sel.lane_tests(path, text)), path
+    assert sel.applicability(["tests/test_alias_decorator.py"], found)[0]
 
 
 def test_only_interface_changes_apply_and_nothing_else_is_green():
@@ -410,6 +428,43 @@ def test_an_unparseable_mixed_module_runs_whole_and_its_collection_error_is_neve
         Path(d), {"rows": [], "selected": None})})
     found = pmb.judge(path, plan)
     assert found["outcome"] == "partial" and found["once"] == {mixed: "did not collect"}
+
+
+def test_a_base_browser_module_the_head_cannot_parse_runs_whole_and_is_never_green(tmp_path, monkeypatch):
+    """Round 6 (b2): a browser module at the base that the head breaks, with a marker its text test misses
+    (`pytest.mark .ui_browser`), is planned whole, so its collection error makes the check partial or red, never
+    GREEN on the sentinels alone."""
+    (tmp_path / "repo").mkdir()
+    repo = repository(tmp_path / "repo")
+    (repo / "scripts").mkdir()
+    shutil.copy(ROOT / "scripts/post_merge_browser_select.py", repo / "scripts")
+    for module in ("tests/test_room_work_browser.py", "tests/test_living_cards_browser.py"):
+        (repo / module).write_text(MODULES[module])
+    broken = "tests/test_broken_browser.py"
+    (repo / broken).write_text(UI + "\n\ndef test_a():\n    pass\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / broken).write_text("import pytest\npytestmark = [pytest.mark .ui_browser]\n\n\ndef test_a(:\n    pass\n")
+    git(repo, "commit", "-qam", "head")
+    out = tmp_path / "plan.json"
+    done = subprocess.run([sys.executable, "-I", "-S", str(repo / "scripts/post_merge_browser_select.py"), "plan",
+                           "--base", base, "--head", "HEAD", "--out", str(out)], cwd=repo, capture_output=True,
+                          text=True, timeout=120)
+    assert done.returncode == 0, done.stdout + done.stderr
+    plan = {**json.loads(out.read_text()), "base": "b" * 40, "head": "h" * 40}
+    assert plan["applicable"] and broken in plan["args"], plan["args"]
+    assert [row_["tests"] for row_ in plan["selected"] if row_["module"] == broken] == [None]
+    nodes = [LIVING, ROOM]
+    path = evidence(tmp_path / "run", monkeypatch, selected=nodes, rows=[r for node in nodes for r in whole(node)],
+                    verdict={"verdict": "red", "flaky": [], "failed": [
+                        {"nodeid": broken, "attempts": [{"phase": "collect", "error_type": "CollectionError"}]}]})
+    sessions = {path / "head": {"rows": [r for node in nodes for r in whole(node)], "selected": nodes,
+                                "collection": [broken], "collection_skips": []}}
+    monkeypatch.setattr(pmb.pmc, "read_session", lambda d: {"running": [], **sessions.get(
+        Path(d), {"rows": [], "selected": None})})
+    found = pmb.judge(path, plan)
+    assert found["outcome"] == "partial" and found["once"] == {broken: "did not collect"}
 
 
 def test_non_ascii_and_control_character_paths_are_read_whole_and_outputs_stay_one_line(tmp_path):
@@ -944,6 +999,19 @@ def test_a_merge_is_named_only_when_its_first_parent_is_the_windows_base():
     assert "introduced by" not in text and "not attributed (its one commit's first parent is not" in text
 
 
+def test_a_masked_id_never_names_a_merge():
+    """Round 6 (c1): the evidence keeps redacted node ids (`***`), so two different raw parameters, the base's and the
+    head's, can share one public id: the base's answer for it may be another case's. Such a red is not attributed and
+    lists its candidates, whatever the base answered; an unmasked id still names the one merge."""
+    masked, plain = "tests/test_a_browser.py::test_x[***]", "tests/test_a_browser.py::test_x[case]"
+    one = {**PLAN, "commits": PLAN["commits"][:1], "head_parent": "b" * 40}
+    for answer in ("passed", "failed", "absent"):
+        [verdict] = pmb.attribute(one, [masked], {"results": {masked: answer}})
+        assert verdict["verdict"] == "unattributed" and verdict["candidates"] == ["1" * 40], answer
+        assert verdict["at_base"] == "unknown" and "masked" in verdict["why"], answer
+    assert pmb.attribute(one, [plain], {"results": {plain: "passed"}})[0]["verdict"] == "culprit"
+
+
 def test_the_selector_reads_the_heads_first_parent(tmp_path):
     repo = repository(tmp_path)
     (repo / "f").write_text("0")
@@ -1220,38 +1288,68 @@ class History(Tip):
 
 def test_an_older_red_routed_after_a_newer_green_files_and_comments_nothing(tmp_path, monkeypatch):
     """Decision 1 (round 4, Astra 1, Carbon, Neon): a run of an older window that reaches the writer after a newer
-    head closed the issue as green neither files, reopens nor comments for that test. A test the open issue of its
-    kind cannot take (it records a newer observation) is held for the current head instead of failing every rerun;
-    any other stale red is filed as usual, so the current head's recheck settles it."""
-    older, newer, settled, held, filed = "f" * 40, "e" * 40, "tests/test_x_browser.py::t", "tests/test_z_browser.py::t", \
+    head closed the issue as green neither files, reopens nor comments for that test. Any other stale red is filed as
+    usual, so the current head's recheck settles it; one the open issue of its kind cannot take (that issue records a
+    newer observation) gets its own issue instead of failing every rerun (round 6, a1)."""
+    older, newer, settled, own, filed = "f" * 40, "e" * 40, "tests/test_x_browser.py::t", "tests/test_z_browser.py::t", \
         "tests/test_w_browser.py::t"
+    chain = [newer, older, "b" * 40]
     github = History(newer, issues=[tracking_issue(5, {"os": "browser", "kind": "unattributed", "ids": [settled]},
                                                    head=older)], label=True)
-    monkeypatch.setattr(pmb, "_ancestor", lambda first, second: True)
-    monkeypatch.setattr(pmb, "_chain", lambda ref: [newer, older, "b" * 40], raising=False)
+    monkeypatch.setattr(pmb, "_ancestor", lambda first, second: chain.index(first) >= chain.index(second))
+    monkeypatch.setattr(pmb, "_chain", lambda ref: chain, raising=False)
     current = {**DATA, "head": newer, "red": [], "verdicts": [], "rechecked": {settled: "passed"}}
     code, _, record = route(tmp_path, monkeypatch, github, current)
     assert code == 0 and record["record"]["closed"] == [5]
     github.issues[7] = dict(tracking_issue(7, {"os": "browser", "kind": "unattributed", "ids": ["tests/test_y.py::t"]},
                                            head=newer), state="open", labels=[{"name": routing.LABEL}])
     comments, issues = len(github.comments), set(github.issues)
-    late = {**DATA, "head": older, "red": [settled, held, filed], "verdicts": [
+    late = {**DATA, "head": older, "red": [settled, own, filed], "verdicts": [
         {"id": settled, "verdict": "unattributed", "at_base": "passed", "window": "b" * 40, "candidates": ["1" * 40]},
-        {"id": held, "verdict": "unattributed", "at_base": "absent", "window": "b" * 40, "candidates": ["1" * 40]},
+        {"id": own, "verdict": "unattributed", "at_base": "absent", "window": "b" * 40, "candidates": ["1" * 40]},
         {"id": filed, "verdict": "pre-existing", "at_base": "failed", "window": "b" * 40}]}
     code, text, record = route(tmp_path, monkeypatch, github, late)
     assert code == 0 and record["retire"] is False
-    [created] = record["record"]["created"]
-    assert set(github.issues) - issues == {created} and routing.parse_machine_block(
-        github.issues[created]["body"])["ids"] == [filed]  # never the settled test's issue again
-    assert github.issues[5]["state"] == "closed" and github.issues[7]["body"].count(held) == 0
-    assert not any(settled in body or held in body for _, body in github.comments[comments:])
-    assert f"`{settled}` passed at the newer `eeeeeeeeeeee`: not handed over." in text
-    assert f"`{held}` is held for the check at the current head: #7 records a newer observation." in text
+    created = record["record"]["created"]
+    assert set(github.issues) - issues == set(created) and sorted(routing.parse_machine_block(
+        github.issues[number]["body"])["ids"] for number in created) == [[filed], [own]]  # never the settled test's
+    assert github.issues[5]["state"] == "closed" and github.issues[7]["body"].count(own) == 0
+    assert not any(settled in body or own in body for _, body in github.comments[comments:])
+    assert f"`{settled}` passed at the newer `eeeeeeeeeeee`: not handed over." in text and "is held" not in text
     # What newer heads recorded did not read: nothing is handed over, and a rerun offers it again.
     blind = History(newer, issues=[], label=True, fail=[("GET", "issues")])
     code, text, _ = route(tmp_path, monkeypatch, blind, late)
     assert code == 1 and "Nothing handed over: what newer heads recorded did not read" in text and not blind.posts
+
+
+def test_a_late_red_no_newer_head_recorded_is_handed_over_beside_a_newer_issue_of_its_kind(tmp_path, monkeypatch):
+    """Round 6 (a1): a stale run's red that no newer head recorded is handed over, never held: the open issue of its
+    kind records a newer observation of another test and cannot take an older one, so the red gets its own issue
+    under its own head, which the current head's recheck settles. Only a test a newer head recorded failing is held.
+    Nothing is closed or reopened."""
+    older, newer = "f" * 40, "e" * 40
+    chain = [newer, older, "b" * 40]
+    lost, other, seen = ("tests/test_a_browser.py::test_lost", "tests/test_b_browser.py::test_other",
+                         "tests/test_c_browser.py::test_seen")
+    github = History(newer, issues=[tracking_issue(7, {"os": "browser", "kind": "unattributed", "ids": [other]},
+                                                   head=newer)], label=True)
+    github.issues[9] = {**tracking_issue(9, {"os": "browser", "kind": "unattributed", "ids": [seen]}, head=newer),
+                        "state": "closed", "labels": [{"name": routing.LABEL}]}
+    monkeypatch.setattr(pmb, "_ancestor", lambda first, second: chain.index(first) >= chain.index(second))
+    monkeypatch.setattr(pmb, "_chain", lambda ref: chain)
+    late = {**DATA, "head": older, "red": [lost, seen], "verdicts": [
+        {"id": node, "verdict": "unattributed", "at_base": "passed", "window": "b" * 40, "candidates": ["1" * 40]}
+        for node in (lost, seen)]}
+    code, text, record = route(tmp_path, monkeypatch, github, late)
+    assert code == 0 and record["retire"] is False and not record["record"]["untracked"], text
+    [created] = record["record"]["created"]
+    assert routing.parse_machine_block(github.issues[created]["body"])["ids"] == [lost]
+    assert github.issues[created]["state"] == "open" and f"Found failing at `{older}`" in github.issues[created]["body"]
+    assert routing.parse_machine_block(github.issues[7]["body"])["ids"] == [other]
+    assert github.issues[7]["state"] == "open" and github.issues[9]["state"] == "closed"
+    assert record["record"]["closed"] == [] and record["record"]["narrowed"] == []
+    assert f"`{lost}` is held" not in text
+    assert f"`{seen}` is held for the check at the current head: the newer `eeeeeeeeeeee` recorded it failing." in text
 
 
 def test_the_writer_hands_over_only_the_window_its_run_was_given(tmp_path, monkeypatch):
@@ -1350,11 +1448,12 @@ def test_the_pilot_ends_on_its_date_or_at_the_first_release_after_v7_12_1(tmp_pa
     assert "a pilot until PILOT_UNTIL or the first release after PILOT_RELEASE" in (
         ROOT / ".github/workflows/post-merge.yml").read_text(encoding="utf-8")
 
-    def dispatch(today, tags):
-        tools = tmp_path / today / "-".join(tags)
+    def dispatch(today, tags, *, unread=None):
+        tools = tmp_path / today / ("-".join(tags) or "unread")
         tools.mkdir(parents=True)
         listed = "".join(f"{index:040x}\trefs/tags/{tag}\n" for index, tag in enumerate(tags))
-        for name, body in (("date", f"echo {today}"), ("git", f"printf '{listed}'"),
+        tags_read = f"printf '{listed}'" if unread is None else f"echo 'fatal: unable to access' >&2; exit {unread}"
+        for name, body in (("date", f"echo {today}"), ("git", tags_read),
                            ("gh", f'echo "$@" >> "{tools}/gh.log"')):
             (tools / name).write_text(f"#!/bin/sh\n{body}\n")
             (tools / name).chmod(0o755)
@@ -1371,6 +1470,10 @@ def test_the_pilot_ends_on_its_date_or_at_the_first_release_after_v7_12_1(tmp_pa
     assert dispatch("2026-12-01", ["v7.12.1", "v7.12.2"])[1] == "browser pilot ended: release (v7.12.2); re-enable by PR.\n"
     assert dispatch("2026-12-02", ["v7.12.1", "v7.12.10", "v7.13.0-alpha.1"])[1].startswith(
         "browser pilot ended: release (v7.12.10)")
+    # Round 6 (d1): release tags that cannot be read end nothing by themselves and start nothing either.
+    assert dispatch("2026-12-03", [], unread=128) == (
+        "", "browser pilot skipped: release tags could not be read (exit 128)\n")
+    assert dispatch("2026-12-11", [], unread=128)[1].startswith("browser pilot ended: date")
 
 
 def test_the_route_jobs_run_no_test_and_only_the_trial_routes_dry():
