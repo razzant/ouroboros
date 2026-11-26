@@ -54,9 +54,8 @@ _REPLACED = {"protocol": "openai-compatible", "replaced": "ollama"}
 _SHOW_FIELDS = {"details": dict, "model_info": dict, "capabilities": list, "modelfile": str, "template": str}
 #: The ``/v1`` verdict a read left for the one physical send that follows it (``limit_compatible_send``).
 _VERDICT = "route_verdict"
-#: When that verdict's read was made (``time.monotonic``): an accounting wait that outlives it expires it,
-#: so a delayed send re-reads instead of trusting a decision made before the wait (``limit_compatible_send``).
-_VERDICT_AT = "route_verdict_at"
+#: The accounting wait generation at preparation; a later wait entry expires the verdict.
+_VERDICT_WAIT_GENERATION = "route_verdict_wait_generation"
 log = logging.getLogger(__name__)
 
 
@@ -166,12 +165,14 @@ def _address(target):
 
 
 def _set_verdict(target, verdict):
-    """The ``/v1`` verdict of the read made just now, stamped with when (``_VERDICT_AT``)."""
-    target[_VERDICT], target[_VERDICT_AT] = verdict, time.monotonic()
+    """The ``/v1`` verdict of the read made just now and its accounting wait generation."""
+    from ouroboros._usage_wait import presend_wait_generation
+
+    target[_VERDICT], target[_VERDICT_WAIT_GENERATION] = verdict, presend_wait_generation()
 
 
 def _pop_verdict(target, default=None):
-    target.pop(_VERDICT_AT, None)
+    target.pop(_VERDICT_WAIT_GENERATION, None)
     return target.pop(_VERDICT, default)
 
 
@@ -634,20 +635,21 @@ def limit_compatible_send(target, send, resolve=None):
     expires with the wait it did not survive. A Settings Test keeps the form it checks. What withholds a send
     raises before it; what admits it stays with the call (``_admitted``). A connection no read decides (a
     public one) only takes its slot."""
-    from ouroboros._usage_wait import presend_wait_after
+    from ouroboros._usage_wait import presend_wait_generation
     from ouroboros.model_concurrency import limit_physical_send
 
     if "ollama_probe_no_proxy" not in target:
         return limit_physical_send(target, send)
     from ouroboros.llm_attempt import require_physical_dispatch_window
-    prepared_at = target.pop(_VERDICT_AT, 0.0)
+    prepared_generation = target.pop(_VERDICT_WAIT_GENERATION, None)
     prepared = [_pop_verdict(target)]  # made for this send, never for a later one
     waited = []  # this dispatch was decided right after its slot wait
 
-    def decide():
+    def take_prepared():
         verdict, prepared[0] = prepared[0], None
-        if verdict is not None and presend_wait_after(prepared_at):
-            verdict = None  # an accounting wait outlived the read that decided: this send reads again
+        return verdict if verdict is not None and prepared_generation == presend_wait_generation() else None
+
+    def decide(verdict=None):
         _admitted(target, verdict if verdict is not None else _read_verdict(target, resolve))
 
     def after_wait():
@@ -656,24 +658,24 @@ def limit_compatible_send(target, send, resolve=None):
         waited.append(True)
 
     async def admitted_send_async():
-        from ouroboros._usage_wait import presend_off_loop
+        from ouroboros._usage_wait import presend_read_off_loop
         if waited:
             waited.clear()
-        elif prepared[0] is not None:
-            decide()
+        elif (verdict := take_prepared()) is not None:
+            decide(verdict)
         else:
-            await presend_off_loop(decide)
+            await presend_read_off_loop(decide)
             require_physical_dispatch_window()  # Pause may have arrived during the read
         return await send()
 
     def admitted_send():
         if waited:
             waited.clear()
+        elif (verdict := take_prepared()) is not None:
+            decide(verdict)
         else:
-            reads = prepared[0] is None
             decide()
-            if reads:
-                require_physical_dispatch_window()
+            require_physical_dispatch_window()
         return send()
 
     return limit_physical_send(target, admitted_send_async if inspect.iscoroutinefunction(send) else admitted_send,
