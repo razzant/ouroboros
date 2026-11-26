@@ -131,9 +131,9 @@ def estimate_context_prompt_tokens(
     )
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, IMAGE_BLOCK_CHAR_EQUIVALENT
 
-    def project(value: Any, *, part: bool = False) -> Any:
+    def project(value: Any, *, part: bool = False, envelope: bool = False) -> Any:
         if isinstance(value, list):
-            return [project(item, part=part) for item in value]
+            return [project(item, part=part, envelope=envelope) for item in value]
         if not isinstance(value, dict):
             return value
         private = {key: item for key, item in value.items() if custody_private_key(key)}
@@ -148,6 +148,10 @@ def estimate_context_prompt_tokens(
         # tool schemas and other JSON are opaque even when their keys resemble an image block.
         row = dict(value)
         row.pop("_context_capsule", None)
+        # A provider's sealed setup may carry a Chat-shaped messages envelope
+        # rather than events. Only recognize that envelope at the input boundary.
+        if envelope and "role" not in row and isinstance(row.get("messages"), list):
+            row["messages"] = project(row["messages"])
         if row.get("type") == "function_call_output" and isinstance(row.get("output"), list):
             row["output"] = project(row["output"], part=True)
         for key in ("content", "parts", "events", "item", "clientContent", "turns"):
@@ -173,7 +177,7 @@ def estimate_context_prompt_tokens(
         if isinstance(message.get("content"), list) else message for message in messages]
 
     def serialized(projected_messages: Any, projected_tools: Any) -> str:
-        text = _compact_json({"messages": project(projected_messages), "tools": projected_tools})
+        text = _compact_json({"messages": project(projected_messages, envelope=True), "tools": projected_tools})
         counted("request_serializations", key=hash(text))
         return text
 

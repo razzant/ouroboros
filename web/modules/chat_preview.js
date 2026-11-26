@@ -466,7 +466,7 @@ export function createRoomProfileLifecycle({
     }
 
     const lifecycle = {
-        storeKey, foreignProfile, fetchHistory, awaitInitialHydration, waitForHydrationWindow, startOpening,
+        profileScope, storeKey, foreignProfile, fetchHistory, awaitInitialHydration, waitForHydrationWindow, startOpening,
         get initialHydration() { return initialHydrationPromise; },
         settleInitialHydration(promise) { initialHydrationPromise = promise; },
         resetInitialHydration() { initialHydrationPromise = null; },

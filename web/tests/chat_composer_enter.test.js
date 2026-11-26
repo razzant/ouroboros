@@ -153,7 +153,9 @@ for (const door of ['socket', 'bridge']) for (const newer of [false, true]) {
             accept();
             await Promise.resolve();
             assert.equal(c.input.value, newer ? 'my next message' : '');
-            assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft', 7)), newer ? 'my next message' : null);
+            assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft', 7)), null);
+            assert.equal(JSON.parse(sessionStorage.getItem(roomKey('ouro_chat_text_v1', 7)))?.text ?? null,
+                newer ? 'my next message' : null);
             assert.equal(sessionStorage.getItem(roomKey('ouro_chat_reply', 7)), keptReply);
             assert.equal(c.instance.hasPendingWork(), true, 'the staged file remains');
             assert.equal(c.byId('messages').querySelectorAll('.chat-bubble.user').length, 0);
@@ -571,7 +573,7 @@ test('after a reload, Send again resends the same id, quote and files, and Send 
     } finally { f.close(); }
 });
 
-test('a badge kept in the newer draft keeps its own upload ref, not the removed badge\'s', async () => {
+for (const newerText of [false, true]) test(`a kept badge keeps its upload after ${newerText ? 'a text edit' : 'a staging-only edit'}`, async () => {
     const reply = { address: 'row:1@a#1', role: 'assistant', excerpt: { start_utf16: 3, text: 'star atlas' } };
     const names = [];
     const f = deferredSaveRoom({ savedReply: reply, uploads: () => {
@@ -585,16 +587,20 @@ test('a badge kept in the newer draft keeps its own upload ref, not the removed 
         f.type('with both files');
         f.beginSave();
         f.press();
-        // The owner drops the first badge and edits the words while the send waits on the room's
+        // The owner drops the first badge while the send waits on the room's
         // save; the submitted message still goes out with the files it snapshotted, and the kept
         // badge must take its own ref — never the removed one's by position.
         f.removeBadge(0);
-        f.type('a newer draft');
+        if (newerText) f.type('a newer draft');
         f.resolveSave(true);
         await f.settle();
         assert.equal(f.frames.length, 1);
         assert.equal(f.frames[0].attachments.length, 2, 'Send fixes the files before waiting');
-        assert.equal(f.input.value, 'a newer draft', 'the newer draft is not consumed');
+        const remaining = newerText ? 'a newer draft' : 'with both files';
+        assert.equal(f.input.value, remaining, 'the newer draft is not consumed');
+        const selected = localStorage.getItem(roomKey('ouro_chat_text_v1'));
+        assert.equal(localStorage.getItem(`${roomKey('ouro_chat_text_v1')}:edit:${selected}`), remaining,
+            'the retained words are still the cold draft');
         const keptVersion = JSON.parse(globalThis.sessionStorage.getItem(roomKey('ouro_chat_draft_version')) || 'null');
         assert.deepEqual(keptVersion?.uploads?.map((item) => item.filename), [names[1]],
             'the kept badge keeps its own completed upload and so survives a reload');
