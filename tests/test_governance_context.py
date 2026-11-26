@@ -486,13 +486,15 @@ def test_a_packet_body_reviewer_carries_the_whole_invariants_chapter_in_its_base
         assert _paths(context).count("docs/architecture/10-key-invariants.md") == 1
 
 
-def test_a_retrieving_body_reviewer_owes_the_invariants_as_a_required_read(repo):
-    _with_invariants(repo)
+def test_a_retrieving_body_reviewer_gets_the_installed_invariants_inline_as_it_gets_bible(repo):
+    """A retrieving seat may be a session confined to the proposal's tree, where the same relative path holds the
+    proposed chapter: like BIBLE, the installed chapter travels inline in tier 1, never as a pointer to a root."""
+    chapter = _with_invariants(repo)
     context = _context(repo, delivery="retrieving")
     row = next(row for row in context.manifest if row["path"] == "docs/architecture/10-key-invariants.md")
-    assert (row["tier"], row["disposition"]) == (1, "required")
-    assert "One owner per store" not in context.stable_inline
-    assert "REQUIRED before you judge: read `docs/architecture/10-key-invariants.md`" in context.navigation
+    assert (row["tier"], row["disposition"]) == (1, "inline")
+    assert chapter.read_text(encoding="utf-8") in context.stable_inline
+    assert "UNAVAILABLE" not in context.navigation and "REQUIRED before you judge" not in context.navigation
 
 
 @pytest.mark.parametrize("delivery", ["packet", "retrieving"])
@@ -506,7 +508,7 @@ def test_missing_invariants_are_disclosed_and_a_broken_sibling_does_not_hide_the
     (repo / "docs" / "architecture" / "01-core.md").unlink()  # the book no longer assembles
     context = _context(repo, delivery=delivery)
     row = next(row for row in context.manifest if row["path"] == "docs/architecture/10-key-invariants.md")
-    assert row["disposition"] == ("inline" if delivery == "packet" else "required")
+    assert row["disposition"] == "inline" and "UNAVAILABLE" not in context.navigation
 
 
 def test_a_chapter_opening_is_selectable_and_a_listing_gives_only_its_matching_lines(repo):
@@ -515,10 +517,14 @@ def test_a_chapter_opening_is_selectable_and_a_listing_gives_only_its_matching_l
     (repo / "docs" / "architecture" / "01-core.md").write_text(
         "# 1. Core\n\nThe opening names ouroboros/project_dialogue.py before any heading.\n\n"
         "```\nouroboros/project_dialogue.py — the dialogue owner\nouroboros/other.py — unrelated\n```\n\n"
-        "An untouched opening paragraph.\n\n## Unrelated\n\nNothing touched here.\n",
+        "An untouched opening paragraph.\n\n## Unrelated\n\nNothing touched here.\n\n"
+        "## Dialogue owner\n\nWhy ouroboros/project_dialogue.py owns the dialogue.\n",
         encoding="utf-8", newline="\n")
     context = _context(repo, touched_paths=["ouroboros/project_dialogue.py"])
     inline = _paths(context, "inline", tier=3)
+    # Authored prose is admitted before a listing's lines, which take only what share is left.
+    listing = "docs/architecture/01-core.md#opening block 2 (excerpt: its lines naming a touched file)"
+    assert inline.index("docs/architecture/01-core.md#Dialogue owner") < inline.index(listing)
     assert "docs/architecture/01-core.md#opening block 1" in inline
     assert "docs/architecture/01-core.md#opening block 2 (excerpt: its lines naming a touched file)" in inline
     assert "The opening names ouroboros/project_dialogue.py before any heading." in context.selected_inline
