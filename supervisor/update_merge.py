@@ -939,7 +939,7 @@ def _cleanup_observed(tx: Dict[str, Any]) -> Dict[str, Any]:
     reason = tx.get("gate_blocked_reason")
     if reason == "rollback_restart_pending":
         return _observed(tx, tx.get("rollback_outcome") or "rolled_back")
-    if reason == "replace_abandon_tx_cleanup_failed":
+    if reason in ("replace_abandon_tx_cleanup_failed", _ABANDON_INTENT_CLEANUP):
         return _observed(tx, "not_applied")
     if reason == "stash_marker_cleanup_failed" and tx.get("gate_blocked_from_phase") == "pending_boot_smoke":
         return _observed(tx, "applied")
@@ -1389,10 +1389,14 @@ def abort_orphaned_assisted_tx(
             release_update_lock(lock_fh)
 
 
+_ABANDON_INTENT_CLEANUP = "replace_abandon_intent_cleanup_failed"
+
+
 def abandon_unapplied_replace(head: str, **event: Any) -> Dict[str, Any]:
-    """Disarm a replace that never moved HEAD off ``pre_update_sha`` (intent, then tx); earlier rescue/keep refs stay."""
+    """Disarm a replace that never moved HEAD off ``pre_update_sha`` (intent, then tx); earlier rescue/keep refs stay.
+    A failed cleanup leaves the clear-only phase: bootstrap defers over it and boot only retries the unlinks."""
     if not _g._clear_update_intent():
-        mark_update_tx_gate_blocked("replace_abandon_intent_cleanup_failed")
+        mark_update_tx_gate_blocked(_ABANDON_INTENT_CLEANUP, cleanup_only=True)
         return {"finalized": False, "reason": "could not disarm replace replay"}
     cleared = clear_update_tx()
     if cleared is None:
@@ -1570,12 +1574,14 @@ def _finalize_managed_update_locked(supervisor_ready: bool) -> Dict[str, Any]:
         return _rollback_incomplete(tx, {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg})
     if phase in _ASSISTED_PHASES:
         return _rollback_incomplete(tx, _recover_assisted_on_boot(tx, supervisor_ready))
-    if phase == MARKER_CLEANUP_RETRY_PHASE:
-        # This includes completed rollback crossing a process restart:
-        # bootstrap kept the files, so ONLY unlink, never reset/reapply.
+    abandoned_replace = tx.get("gate_blocked_reason") == _ABANDON_INTENT_CLEANUP  # its intent may remain
+    if phase == MARKER_CLEANUP_RETRY_PHASE or (phase == GATE_BLOCKED_PHASE and abandoned_replace):
+        # This includes completed rollback crossing a process restart and a replace abandoned before
+        # its tree (gate_blocked when 7.7 recorded it): bootstrap kept the files, so ONLY unlink
+        # (that replace's intent first), never reset/reapply.
         stash_note = (str(tx.get("gate_blocked_detail") or "")
                       if tx.get("gate_blocked_reason") == "rollback_restart_pending" else "")
-        cleared = clear_update_tx()
+        cleared = clear_update_tx() if not abandoned_replace or _g._clear_update_intent() else False
         if cleared is True:
             _log_supervisor({"type": "managed_update_cleanup_retry_succeeded",
                              "reason": str(tx.get("gate_blocked_reason") or ""), "stash_note": stash_note})

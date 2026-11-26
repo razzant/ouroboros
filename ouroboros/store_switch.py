@@ -73,6 +73,10 @@ class UnappliedCheckout(NamedTuple):
     before_tree_effects = True
 
 
+class SwitchIntentPending(RuntimeError):
+    """``record_switch_intent`` refused before writing: the earlier intent stays its own door's."""
+
+
 class UnappliedSwitch(NamedTuple):
     """The same switch result shape, preserving proof of refusal before tree effects."""
 
@@ -149,7 +153,7 @@ def record_switch_intent(root: Any, *, target_sha: str, target_ref: str, reason:
     if door not in DOORS:
         raise ValueError(f"unknown switch door: {door}")
     if (root / INTENT_REL).exists():
-        raise RuntimeError(f"a switch intent is already recorded: {root / INTENT_REL}")
+        raise SwitchIntentPending(f"a switch intent is already recorded: {root / INTENT_REL}")
     intent = {"target_sha": str(target_sha), "target_ref": str(target_ref), "reason": str(reason), "door": door,
               "requested_at": utc_now_iso()}
     atomic_write_json(root / INTENT_REL, intent, fsync=True)

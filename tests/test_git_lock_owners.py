@@ -1162,6 +1162,175 @@ def test_bootstrap_still_replays_an_armed_intent_whose_target_has_the_store(repl
     assert _git(scene.repo, "rev-parse", "HEAD") == scene.target and result["finalized"] is True, result
 
 
+def _local_work(repo):
+    """Owner work a Replace refused before its tree must leave as it is: an unstaged edit, a staged file
+    and an untracked draft (bytes, owner and mode), the index, HEAD, branch and stash list."""
+    (repo / "seed.txt").write_bytes(b"unstaged owner edit\n")
+    (repo / "staged.txt").write_bytes(b"staged owner file\n")
+    _git(repo, "add", "staged.txt")
+    (repo / "draft.txt").write_bytes(b"untracked owner draft\n")
+    queries = (("status", "--porcelain"), ("ls-files", "-s"), ("diff", "--cached"), ("rev-parse", "HEAD"),
+               ("rev-parse", "--abbrev-ref", "HEAD"), ("stash", "list"))
+    return lambda: ({name: ((repo / name).read_bytes(), (repo / name).stat().st_uid, (repo / name).stat().st_mode)
+                     for name in ("seed.txt", "staged.txt", "draft.txt")}, [_git(repo, *query) for query in queries])
+
+
+def _observe_boot_tree_doors(monkeypatch):
+    """A launcher-managed tree whose two rewriting doors are recorded, never run; Evolution stays out of it."""
+    from supervisor import evolution_lifecycle, update_merge
+
+    seen = {"checkouts": [], "rollbacks": []}
+    monkeypatch.setattr(git_ops, "_is_launcher_managed_repo", lambda: True)  # a tree bootstrap may reset
+    monkeypatch.setattr(git_ops, "checkout_and_reset", lambda *a, **_kw: seen["checkouts"].append(a) or (False, "observer"))
+    monkeypatch.setattr(update_merge, "rollback_managed_update_on_boot",
+                        lambda reason: seen["rollbacks"].append(reason) or (False, "observer"))
+    monkeypatch.setattr(evolution_lifecycle, "disable_evolution_projection", lambda: None)
+    monkeypatch.setattr(evolution_lifecycle, "pause_evolution_campaign", lambda *_a: {})
+    return seen
+
+
+@pytest.mark.parametrize("recorded_as", ["clear_only", "gate_blocked_by_7_7"])
+def test_a_pre_tree_refusal_whose_cleanup_failed_keeps_local_work_through_the_next_starts(
+        replace_scene, monkeypatch, recorded_as):
+    """A refused Replace whose update intent could not be removed was read by the next start as a rollback
+    order (gate_blocked), resetting a dirty tree. Now bootstrap defers over the clear-only marker and the boot
+    finalizer only retries the unlinks, however many starts that takes; a marker 7.7 wrote as gate_blocked
+    for the same reason is read the same way."""
+    from ouroboros import store_switch
+    from ouroboros.gateway.history_reader import reader
+    from supervisor import update_merge
+
+    scene, real_clear = replace_scene, git_ops._clear_update_intent
+    snapshot = _local_work(scene.repo)
+    before = snapshot()
+    monkeypatch.setattr(reader, "prepare_handoff", lambda _root: (object(), ""))
+    monkeypatch.setattr(reader, "continue_inline", lambda _token: None)
+    monkeypatch.setattr(store_switch, "_hand_off_stores", lambda _root: "synthetic store busy")
+    monkeypatch.setattr(git_ops, "_clear_update_intent", lambda: False)
+
+    status, body = scene.apply(scene.target)
+
+    assert (status, body["rolled_back"], body["restart_required"]) == (500, False, True), body
+    assert scene.events["fenced"] == [] and snapshot() == before
+    tx = update_merge.read_update_tx_strict()[1]
+    assert (tx["phase"], tx["gate_blocked_reason"]) == (update_merge.MARKER_CLEANUP_RETRY_PHASE,
+                                                        "replace_abandon_intent_cleanup_failed")
+    if recorded_as == "gate_blocked_by_7_7":
+        update_merge.write_update_tx({**tx, "phase": update_merge.GATE_BLOCKED_PHASE})
+    seen = _observe_boot_tree_doors(monkeypatch)
+
+    (ok, message), result = _next_boot(scene, monkeypatch)  # the intent still cannot be removed
+    assert not ok and "restart was deferred" in message, message
+    assert result == {"finalized": False, "reason": "marker cleanup still failing"}, result
+    assert git_ops._read_update_intent()["target_sha"] == scene.target and snapshot() == before
+
+    monkeypatch.setattr(git_ops, "_clear_update_intent", real_clear)
+    (ok, message), result = _next_boot(scene, monkeypatch)
+    assert not ok and "restart was deferred" in message, message  # bootstrap ran first, over the retained marker
+    assert result["finalized"] is True and result["observed"]["outcome"] == "not_applied", result
+    assert update_merge.boot_outcome_notice(result)["text"] == "The last update was not applied."
+    assert update_merge.read_update_tx_strict()[0] == "absent" and not git_ops._read_update_intent()
+    assert snapshot() == before and seen == {"checkouts": [], "rollbacks": []}
+    assert not _rows(scene.data, "managed_update_rolled_back")
+
+
+@pytest.mark.parametrize("cleanup", ["cleared", "intent_cleanup_failed"])
+def test_a_replace_refused_by_an_earlier_switch_intent_keeps_that_intent_and_local_work(replace_scene, monkeypatch, cleanup):
+    """A store-less Replace cannot record its switch over another door's pending one: refused before the
+    write, it is abandoned (or held clear-only) instead of rolled back, and the earlier intent stays its own
+    door's, byte for byte, to the seam the next boot hands it to."""
+    from ouroboros import store_switch
+    from supervisor import update_merge
+
+    scene, real_clear = replace_scene, git_ops._clear_update_intent
+    snapshot = _local_work(scene.repo)
+    store_switch.record_switch_intent(scene.data, target_sha=scene.target, target_ref="official",
+                                      reason="owner rollback", door="ui_rollback")
+    earlier = (scene.data / store_switch.INTENT_REL).read_bytes()
+    before = snapshot()
+    if cleanup == "intent_cleanup_failed":
+        monkeypatch.setattr(git_ops, "_clear_update_intent", lambda: False)
+
+    status, body = scene.apply(scene.storeless)
+
+    assert scene.events["fenced"] == [] and not scene.events["restarts"] and snapshot() == before
+    assert (scene.data / store_switch.INTENT_REL).read_bytes() == earlier
+    if cleanup == "cleared":
+        assert (status, body["reason"], body["outcome"], body["rolled_back"]) == (
+            409, "replace_checkout_refused", "not_applied", False), body
+        assert "a switch intent is already recorded" in body["error"]
+        assert update_merge.read_update_tx_strict()[0] == "absent" and not git_ops._read_update_intent()
+        return
+    assert (status, body["rolled_back"]) == (500, False), body
+    monkeypatch.setattr(git_ops, "_clear_update_intent", real_clear)
+    seen, resumed = _observe_boot_tree_doors(monkeypatch), []
+    monkeypatch.setattr(store_switch, "resume_pending_switch",
+                        lambda root, **_kw: resumed.append(store_switch.read_switch_intent(root)))
+
+    (ok, message), result = _next_boot(scene, monkeypatch)
+
+    assert resumed == [json.loads(earlier)]  # handed to its own seam, never consumed by the Replace
+    assert not ok and "restart was deferred" in message, message
+    assert result["finalized"] is True and result["observed"]["outcome"] == "not_applied", result
+    assert update_merge.read_update_tx_strict()[0] == "absent" and not git_ops._read_update_intent()
+    assert (scene.data / store_switch.INTENT_REL).read_bytes() == earlier
+    assert snapshot() == before and seen == {"checkouts": [], "rollbacks": []}
+
+
+def test_a_pre_tree_refusal_whose_first_tx_unlink_met_a_busy_bootstrap_keeps_local_work_at_the_next_start(
+        replace_scene, monkeypatch):
+    """The first cleanup removed the intent but the tx unlink met a busy bootstrap transition (``None``): the
+    marker stays ``applying_replace``. The next bootstrap blocks over the dirty tree (an active transaction
+    selects rescue_and_block; no intent to replay), then the finalizer sees HEAD at the base and abandons."""
+    from ouroboros import store_switch
+    from ouroboros.gateway.history_reader import reader
+    from supervisor import evolution_lifecycle, update_merge
+
+    scene, real_clear_tx = replace_scene, update_merge.clear_update_tx
+    snapshot = _local_work(scene.repo)
+    before = snapshot()
+    monkeypatch.setattr(reader, "prepare_handoff", lambda _root: (object(), ""))
+    monkeypatch.setattr(reader, "continue_inline", lambda _token: None)
+    monkeypatch.setattr(store_switch, "_hand_off_stores", lambda _root: "synthetic store busy")
+    monkeypatch.setattr(update_merge, "clear_update_tx", lambda: None)
+
+    status, body = scene.apply(scene.target)
+
+    assert (status, body["rolled_back"], body["restart_required"]) == (500, False, True), body
+    assert update_merge.read_update_tx_strict()[1]["phase"] == "applying_replace" and not git_ops._read_update_intent()
+    assert scene.events["fenced"] == [] and snapshot() == before
+    monkeypatch.setattr(update_merge, "clear_update_tx", real_clear_tx)
+    rollbacks = []
+    monkeypatch.setattr(update_merge, "rollback_managed_update_on_boot", lambda reason: rollbacks.append(reason) or (False, "observer"))
+    monkeypatch.setattr(evolution_lifecycle, "disable_evolution_projection", lambda: None)
+    monkeypatch.setattr(evolution_lifecycle, "pause_evolution_campaign", lambda *_a: {})
+
+    monkeypatch.setattr(git_ops, "_is_launcher_managed_repo", lambda: True)  # bootstrap may reset this tree
+    (ok, message), result = _next_boot(scene, monkeypatch)  # the real bootstrap checkout door runs
+
+    assert not ok and "Reset blocked (" in message, message
+    assert result["abandoned"] is True and result["observed"]["outcome"] == "not_applied", result
+    assert update_merge.read_update_tx_strict()[0] == "absent" and not git_ops._read_update_intent()
+    assert snapshot() == before and not rollbacks
+    assert not _rows(scene.data, "managed_update_rolled_back")
+
+
+@pytest.mark.parametrize("reason", ["rollback_restart_pending", "replace_abandon_tx_cleanup_failed"])
+def test_other_clear_only_markers_still_unlink_only_the_transaction(tmp_path, monkeypatch, reason):
+    from supervisor import update_merge
+
+    monkeypatch.setattr(git_ops, "REPO_DIR", _repo(tmp_path))
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path / "data")
+    (tmp_path / "data" / "logs").mkdir(parents=True)
+    intents = []
+    monkeypatch.setattr(git_ops, "_clear_update_intent", lambda: intents.append(1) or True)
+    update_merge.write_update_tx({"phase": update_merge.MARKER_CLEANUP_RETRY_PHASE, "pre_update_sha": "b" * 40,
+                                  "gate_blocked_reason": reason, "attempt_id": "a1"})
+
+    assert update_merge.finalize_managed_update_on_boot(supervisor_ready=True)["finalized"] is True
+    assert update_merge.read_update_tx_strict()[0] == "absent" and intents == []
+
+
 @pytest.mark.parametrize(("operation", "held"), [("cherry-pick", False), ("revert", True)])
 def test_a_clean_index_with_an_unfinished_operation_is_not_a_finished_rollback(
         replace_scene, update_lanes, held, operation):

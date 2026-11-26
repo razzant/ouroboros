@@ -796,13 +796,15 @@ def _rollback_fenced_update(reason: str, error: str, *, handoff=None, **extra: A
 def _replace_refusal_response(tx: dict, failure: tuple[bool, str, bool] | Exception, payload: dict) -> JSONResponse | None:
     """Only a producer's no-tree-effect proof can disarm this Replace without rollback."""
     import subprocess
-    from ouroboros.store_switch import UnappliedSwitch
+    from ouroboros.store_switch import SwitchIntentPending, UnappliedSwitch
     from supervisor.git_ops_reset import IndexLockRefusal, refusal_parts
     from supervisor.update_merge import settle_replace_refusal
 
     git_failure = None
     if isinstance(failure, UnappliedSwitch):
         before, cause, detail = True, "pre_checkout_refused", failure.message
+    elif isinstance(failure, SwitchIntentPending):  # refused before its write; the earlier intent stays its door's
+        before, cause, detail = True, "pre_checkout_refused", f"switch refused: {failure}"
     elif isinstance(failure, subprocess.CalledProcessError):
         cmd, detail = refusal_parts(failure)
         before = isinstance(failure, IndexLockRefusal) and failure.before_tree_effects
