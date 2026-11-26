@@ -1308,10 +1308,22 @@ def _return_physical_claim(attempt_id: str) -> None:
 
 
 def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseException,
-                                request: Optional[AttemptRequest] = None) -> str:
+                                request: Optional[AttemptRequest] = None, *, dispatch_seq: Optional[int] = None) -> str:
     """Route a raised provider send to its honest terminal ledger state."""
     if getattr(exc, "receiver_abandoned", False):  # owner Pause: the sender settles it late; still dispatched
         return "dispatched"
+    from ouroboros._usage_wait import PresendReadCancelled, bounded_cleanup
+
+    if (isinstance(exc, PresendReadCancelled) and dispatch_seq is not None
+            and exc.attempt_id == reservation.attempt_id):
+        # The joined preparatory read never entered the wire sender. Do not apply its proof
+        # to a row already changed by another settlement, even if that row accepts late receipts.
+        with bounded_cleanup():
+            row = _transition(reservation, "released", _allow_dispatched_release=True, _expected_seq=dispatch_seq,
+                              reason="before_dispatch_failed:PresendReadCancelled")
+        if row["state"] == "released":
+            _return_physical_claim(reservation.attempt_id)
+        return row["state"]
     if isinstance(exc, ProcessingNotStarted) and refusal_conflicts(exc):
         exc.processing_refusal_conflict = True
     payload = _retain_physical_failure(reservation, exc=exc)
@@ -1530,8 +1542,10 @@ async def execute_physical_attempt_async(
         if manifest_ref is not None and not isinstance(manifest_ref, dict):
             raise TypeError("before_dispatch must return a manifest ref object or None")
         prepared_capture = _record_attempt_capture(reservation, request, "reserved", candidate_manifest_ref=manifest_ref)
-        request = with_dispatch_stamp(request, await presend_off_loop(mark_dispatched, reservation,
-                               candidate_manifest_ref=manifest_ref, local_answer_owner_pid=os.getpid()))
+        dispatch_stamp = await presend_off_loop(
+            mark_dispatched, reservation, candidate_manifest_ref=manifest_ref, local_answer_owner_pid=os.getpid(),
+        )
+        request = with_dispatch_stamp(request, dispatch_stamp)
         dispatch_capture = replace(prepared_capture, state="dispatched", physical_context=request.physical_context)
         _LAST_PHYSICAL_ATTEMPT.set(dispatch_capture)
     except BaseException as exc:
@@ -1547,7 +1561,8 @@ async def execute_physical_attempt_async(
         except BaseException as exc:
             terminal_state = "dispatched"
             try:
-                terminal_state = await presend_off_loop(_terminalize_failed_attempt, reservation, exc, request)
+                terminal_state = await presend_off_loop(_terminalize_failed_attempt, reservation, exc, request,
+                                                        dispatch_seq=dispatch_stamp[0])
             except Exception:
                 log.exception("Failed to mark provider attempt unresolved: %s", reservation.attempt_id)
             _record_attempt_capture(
