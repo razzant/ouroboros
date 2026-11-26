@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import xml.etree.ElementTree as ET
+from collections import Counter
+from html import unescape
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import yaml
 
@@ -19,6 +23,10 @@ REPO = Path(__file__).resolve().parents[1]
 SITE = REPO / "site"
 DOCS = REPO / "docs"
 ORIGIN = "https://ouroboros-agent.ai"
+NOVEMBER_SHA256 = "9976660610a53f0352a8df529943653de20d17f605741fe47a8ffc3fa8345709"
+NOVEMBER_CARD = "card/editions/2026.11-en.png"
+NOVEMBER_CARD_SHA256 = "15d6fbada68b212adcd9e483b99a29a1bf0811e104617a5f898030f21b2db779"
+RATING_GRADES = {"S", "A", "B", "C"}
 INDEXABLE = {
     "/": SITE / "index.html",
     "/about/": SITE / "about" / "index.html",
@@ -175,15 +183,61 @@ def test_rating_publication_is_complete_and_source_bound():
     assert files == {p.relative_to(generated) for p in generated.rglob("*") if p.is_file()}
     assert files
     for path in files:
-        assert (source / path).read_bytes() == (generated / path).read_bytes(), path
+        assert (source / path).read_bytes() == (generated / path).read_bytes(), f"rating mirrors differ: {path}"
     data = json.loads((source / "data/latest.json").read_text(encoding="utf-8"))
     assert data["status"] == "final"
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", data["published"])
     archived = source / "data/editions" / data["edition"] / "edition.json"
     assert archived.read_bytes() == (source / "data/latest.json").read_bytes()
+    if data["method_version"] >= 4:
+        _assert_rating_column_reasons(data)
+        _assert_rating_reviewers(data)
+        _assert_rating_votes(data)
+        _assert_rating_static_publication(source, data)
+    else:
+        assert data["method_version"] == 3
+        _assert_rating_per_kind_reasons(data)
+    _assert_rating_wrappers_and_asset_versions(source)
+    for path in (SITE / "index.html", DOCS / "index.html"):
+        assert 'href="/llm-rating/"' in path.read_text(encoding="utf-8")
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    for theme in ("light", "dark"):
+        image = f"docs/llm-rating/card/latest-en-{theme}.png"
+        assert image in readme and (REPO / image).is_file()
+    if data["method_version"] >= 4:
+        image = "docs/llm-rating/card/latest-en-light.png"
+        alts = [tag.get("alt", "") for tag in _tags(readme, "img") if tag.get("src") == image]
+        assert len(alts) == 1, "README must have one rating card img"
+        assert re.search(r"\bcolumns?\b", alts[0], re.I) and not re.search(r"\bkinds?\s+of\s+work\b", alts[0], re.I), (
+            "README rating card alt must describe columns, not kinds of work"
+        )
+
+
+def test_rating_november_archive_is_frozen_and_graded():
+    archive = "data/editions/2026.11/edition.json"
+    for mirror in (SITE / "public" / "llm-rating", DOCS / "llm-rating"):
+        raw = (mirror / archive).read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == NOVEMBER_SHA256, f"2026.11 archive SHA-256 changed: {mirror}"
+        november = json.loads(raw)
+        assert november["edition"] == "2026.11" and november["method_version"] == 3
+        _assert_rating_per_kind_reasons(november)
+        latest = json.loads((mirror / "data/latest.json").read_text(encoding="utf-8"))
+        if latest["edition"] != "2026.11" and latest["method_version"] >= 4:
+            _assert_rating_archive_share_head(mirror)
+
+
+def _assert_rating_per_kind_reasons(data):
+    assert any(cell["grade"] is not None for cell in data["cells"]), "a per-kind edition must carry graded cells"
     groups = {group["id"]: group for group in data["groups"]}
     works = {work["id"]: work for work in data["works"]}
     models = {model["id"]: model for model in data["models"]}
+    main = {gid for gid, group in groups.items() if group["main"]}
+    assert main
+    rated = [m for m in models.values() if m.get("rank") is not None]
+    assert rated
+    for model in rated:
+        for gid in main:
+            assert model["groups"].get(gid, {}).get("grade") in RATING_GRADES, (model["id"], gid)
     for cell in data["cells"]:
         if cell["grade"] is None:
             continue
@@ -195,15 +249,324 @@ def test_rating_publication_is_complete_and_source_bound():
             assert axis["grade"] == cell["grade"]
             reason = axis["reason"]
         assert all(reason.get(language, "").strip() for language in ("en", "ru"))
-    for path in (SITE / "index.html", DOCS / "index.html"):
-        assert 'href="/llm-rating/"' in path.read_text(encoding="utf-8")
-    readme = (REPO / "README.md").read_text(encoding="utf-8")
-    for theme in ("light", "dark"):
-        image = f"docs/llm-rating/card/latest-en-{theme}.png"
-        assert image in readme and (REPO / image).is_file()
 
 
-def _tags(page: str, name: str) -> list[dict[str, str]]:
+def _assert_rating_column_reasons(data):
+    assert data["cells"] == [], "method >= 4 requires cells == []"
+    main = {group["id"] for group in data["groups"] if group["main"]}
+    assert len(main) == data["totals"]["columns"] > 0
+    grounds = {"carried", "case", "cards", "role", "open", "coordinator"}
+    rated = [model for model in data["models"] if model.get("rank") is not None]
+    assert {model["id"] for model in rated} == {model["id"] for model in data["models"] if model["status"] == "rated"}
+    assert len(rated) == data["totals"]["models"]["rated"] > 0
+    for model in rated:
+        assert main <= model["groups"].keys(), model["id"]
+        for gid in main:
+            entry = model["groups"][gid]
+            where = (model["id"], gid)
+            assert entry.get("grade") in RATING_GRADES, where
+            assert entry.get("ground") in grounds, where
+            for language in ("en", "ru"):
+                reason = entry.get("reason", {}).get(language)
+                assert isinstance(reason, str) and reason.strip(), (*where, language)
+
+
+def _assert_rating_reviewers(data):
+    reviewers = data.get("reviewers")
+    assert isinstance(reviewers, dict), "method >= 4 requires the reviewers object"
+    rows = reviewers.get("rows")
+    assert isinstance(rows, list) and rows, "reviewers.rows must be non-empty"
+    families = {model["id"]: model["family"] for model in data["models"]}
+    ids = families.keys()
+    for row in rows:
+        assert row["model"] in ids, ("reviewers.rows model", row["model"])
+        _assert_rating_remark_counts(row, "checked")
+    _assert_rating_remark_counts(reviewers["recheck"], "remarks")
+    readers = reviewers["recheck"].get("readers")
+    assert isinstance(readers, list) and len(readers) >= 2 and all(r in ids for r in readers), (
+        "reviewer recheck requires at least two known readers", readers
+    )
+    original = {row["model"] for row in rows} | {reviewers.get("unbound", {}).get("requested")}
+    reader_families = {families[r] for r in readers}
+    assert len(set(readers)) == len(readers) and len(reader_families) >= 2, "reviewer recheck needs distinct readers from two families"
+    assert reader_families.isdisjoint(families[r] for r in original & ids), "reviewer recheck readers cannot be from the original seats' families"
+    for key, model_field, prose_fields in (
+        ("advice", "who", ("text",)),
+        ("examples", "models", ("title", "text")),
+    ):
+        entries = reviewers.get(key)
+        assert isinstance(entries, list) and entries, f"reviewers.{key} must be non-empty"
+        for entry in entries:
+            models = entry.get(model_field)
+            assert isinstance(models, list) and models and all(isinstance(mid, str) and mid in ids for mid in models), (key, models)
+            for field in prose_fields:
+                text = entry.get(field)
+                assert isinstance(text, dict) and all(isinstance(text.get(lang), str) and text[lang].strip() for lang in ("en", "ru")), (key, field)
+
+
+def _assert_rating_remark_counts(row, total):
+    fields = ("confirmed", "open", "refuted", total)
+    assert all(type(row.get(key)) is int and row[key] >= 0 for key in fields), ("reviewer counts", row)
+    assert sum(row[key] for key in fields[:-1]) == row[total], ("inconsistent reviewer counts", row)
+
+
+def _assert_rating_vote_verdict(item, models, columns, scale):
+    counts = item["counts"]
+    first, second = counts["first"], counts["second"]
+    winner = None if first == second else int(second > first)
+    actual = item.get("winner")
+    assert "winner" in item and type(actual) is type(winner) and actual == winner, (
+        "votes pair winner disagrees with counts", item["models"], actual, winner
+    )
+    column = item["column"]
+    assert column is None or column in columns, ("votes pair must refer to a main column", column)
+    letters = [m.get("groups", {}).get(column, {}).get("grade") for m in models]
+    if None in letters:
+        assert item.get("letters") is None, ("votes pair has letters without two ranked entries", item["models"], column)
+        expected = "no_column"
+    else:
+        assert item.get("letters") == letters, ("votes pair letters disagree with ranking", item["models"], column)
+        if letters[0] == letters[1]:
+            expected = "same_letter"
+        elif winner is None:
+            expected = "no_majority"
+        else:
+            expected = "agree" if scale.index(letters[winner]) < scale.index(letters[1 - winner]) else "disagree"
+    assert item.get("verdict") == expected, ("votes pair verdict disagrees with winner and ranking", item["models"], expected)
+
+
+def _assert_rating_votes(data):
+    votes = data.get("votes")
+    assert isinstance(votes, dict), "method >= 4 requires the votes object"
+    assert votes.get("source") == "final" and votes.get("complete") is True, "votes must be final and complete"
+    models_by_id = {m["id"]: m for m in data["models"]}
+    columns = {g["id"] for g in data["groups"] if g["main"]}
+    scale = [tier["id"] for tier in data["scale"]]
+
+    def bilingual(item, field):
+        text = item.get(field)
+        assert isinstance(text, dict) and all(
+            isinstance(text.get(lang), str) and text[lang].strip() for lang in ("en", "ru")
+        ), ("votes bilingual text", field, item)
+
+    def count(item, field):
+        value = item.get(field)
+        assert type(value) is int and value >= 0, ("votes non-negative integer", field, item)
+        return value
+
+    item_totals = {}
+    for key, labels in (("pairs", ("first", "second", "tie", "abstain")),
+                        ("annotations", ("supported", "contradicted", "insufficient"))):
+        items = votes.get(key)
+        assert isinstance(items, list) and items, f"votes.{key} must be non-empty"
+        assigned_total = counted_total = 0
+        for item in items:
+            bilingual(item, "description")
+            if key == "pairs":
+                models = item.get("models")
+                assert isinstance(models, list) and len(models) == 2 and all(
+                    isinstance(mid, str) and mid in models_by_id for mid in models
+                ) and models[0] != models[1], ("votes pairs must name two known models", item)
+            else:
+                bilingual(item, "established")
+            counts = item.get("counts")
+            assert isinstance(counts, dict) and counts.keys() == set(labels), ("votes count labels", key, item)
+            assigned, counted = count(item, "assigned"), sum(count(counts, label) for label in labels)
+            assert counted <= assigned, ("votes item count exceeds assigned", key, item)
+            if key == "pairs":
+                _assert_rating_vote_verdict(item, [models_by_id[mid] for mid in models], columns, scale)
+                if item["verdict"] == "disagree":
+                    bilingual(item, "explain")
+            assigned_total += assigned
+            counted_total += counted
+        item_totals[key] = (assigned_total, counted_total)
+
+    voters = votes.get("voters")
+    assert isinstance(voters, list) and voters, "votes.voters must be non-empty"
+    counted_statuses = {"counted", "partially_counted"}
+    returned_statuses = counted_statuses | {"excluded", "format_invalid", "evidence_unavailable", "model_mismatch", "duplicate_response"}
+    statuses = returned_statuses | {"not_sent", "no_response", "access_unavailable", "model_error", "delivery_unknown"}
+    status_counts, prior_table_counts = Counter(), Counter()
+    seen_models = set()
+    totals = {"with_pairs": 0, "with_annotations": 0}
+    roster_tallies = Counter()
+    for voter in voters:
+        model, status, prior = voter.get("model"), voter.get("status"), voter.get("prior_table")
+        assert model in models_by_id and model not in seen_models, ("votes voter must be a unique known model", voter)
+        assert status in statuses and prior in {"seen", "not_detected", "unknown"}, ("votes voter status", voter)
+        seen_models.add(model)
+        status_counts[status] += 1
+        prior_table_counts[prior] += 1
+        counts = voter.get("counts")
+        assert isinstance(counts, dict), ("votes voter counts", voter)
+        for kind, suffix in (("pairwise", "pairs"), ("annotations", "annotations")):
+            assigned, counted = (count(counts, kind + "_" + key) for key in ("assigned", "counted"))
+            assert counted <= assigned, ("votes voter count exceeds assigned", voter)
+            roster_tallies[(suffix, "assigned")] += assigned
+            roster_tallies[(suffix, "counted")] += counted
+            totals["with_" + suffix] += counted > 0
+        assert (counts["pairwise_counted"] + counts["annotations_counted"] > 0) == (status in counted_statuses), (
+            "votes voter counted status disagrees with counts", voter
+        )
+
+    rated = {m["id"] for m in data["models"] if m["status"] == "rated"}
+    assert rated <= seen_models, ("votes roster must include every rated version", sorted(rated - seen_models))
+    # Fable 5.1 is catalogued as historical context, but was not a voter in this edition.
+    if data["edition"] == "2026.12":
+        assert "claude-fable-5.1" not in seen_models, "Fable 5.1 is not a voter in 2026.12"
+
+    for key, pair in item_totals.items():
+        assert pair == (roster_tallies[(key, "assigned")], roster_tallies[(key, "counted")]), (
+            "votes tally disagrees with voter list", key, pair, roster_tallies
+        )
+    participation = votes.get("participation")
+    assert isinstance(participation, dict), "votes.participation must be an object"
+    totals.update(invited=len(voters), returned=sum(status_counts[s] for s in returned_statuses),
+                  counted_ballots=sum(status_counts[s] for s in counted_statuses))
+    for field, total in totals.items():
+        assert count(participation, field) == total, ("votes participation disagrees with voter list", field, total)
+    for field, expected in (("status_counts", status_counts), ("prior_table_counts", prior_table_counts)):
+        value = participation.get(field)
+        assert isinstance(value, dict), ("votes participation counts", field)
+        assert {key: count(value, key) for key in value} == dict(expected), ("votes participation disagrees with voter list", field, expected)
+
+
+def _assert_rating_archive_share_head(mirror):
+    page = mirror / "2026.11.html"
+    assert page.is_file(), "missing November archive share page"
+    html = page.read_text(encoding="utf-8")
+    head = html.split("</head>", 1)[0]
+    tags = _tags(head)
+    metas = _tags(head, "meta")
+    url = f"{ORIGIN}/llm-rating/2026.11.html"
+    card = NOVEMBER_CARD
+    digest = hashlib.sha256((mirror / card).read_bytes()).hexdigest()
+    assert digest == NOVEMBER_CARD_SHA256, f"2026.11 archive PNG SHA-256 changed: {mirror}"
+    digest = digest[:10]
+    for file in ("index.html", "editions.html", "2026.11.html"):
+        bodies = _tags((mirror / file).read_text(encoding="utf-8"), "body")
+        assert len(bodies) == 1
+        cards = json.loads(bodies[0].get("data-archive-cards", "{}"))
+        assert cards.get("2026.11") == digest, ("November data-archive-cards must point to the frozen PNG", file)
+    assert [tag.get("href") for tag in tags if tag.get("rel") == "canonical"] == [url], "November archive canonical URL"
+    fields = [
+        ("property", "og:url", url),
+        ("property", "og:image", f"{ORIGIN}/llm-rating/{card}?v={digest}"),
+        ("name", "twitter:image", f"{ORIGIN}/llm-rating/{card}?v={digest}"),
+    ]
+    for attr, key, expected in fields:
+        assert [tag.get("content") for tag in metas if tag.get(attr) == key] == [expected], ("November archive", key)
+    for attr, key in (("name", "description"), ("property", "og:image:alt"), ("name", "twitter:image:alt")):
+        values = [tag.get("content", "") for tag in metas if tag.get(attr) == key]
+        assert len(values) == 1 and all(s in values[0] for s in ("Edition 2026.11", "11 models", "32 kinds of work")), ("November archive", key)
+    assert re.search(r"<title>[^<]*Edition 2026\.11</title>", head), "November archive title"
+    fallback = re.findall(r"<noscript\b[^>]*>(.*?)</noscript>", html, flags=re.I | re.S)
+    assert len(fallback) == 1, "missing November no-JavaScript fallback"
+    body = html.split("</head>", 1)[1]
+    assert not re.search(r"data/latest\.(?:json|js)|card/(?:latest-|full-|og-)", body), (
+        "November no-JavaScript fallback must not link to latest files"
+    )
+    assert {tag.get("href") for tag in _tags(fallback[0], "a")} == {
+        "data/editions/2026.11/edition.json", card
+    }, "November no-JavaScript fallback must link frozen data and card"
+    _assert_rating_relative_asset_versions(mirror, page.name, _tags(html))
+
+
+def _assert_rating_static_publication(source, data):
+    edition = data["edition"]
+    book = json.loads((source / "data/editions/index.json").read_text(encoding="utf-8"))
+    assert book["latest"] == edition, "edition index must name the final edition as latest"
+    rows = {row["edition"]: row for row in book["editions"]}
+    assert len(rows) == len(book["editions"]) and edition in rows, "edition index must list the final edition exactly once"
+    on_disk = {p.parent.name for p in (source / "data/editions").glob("*/edition.json")}
+    assert rows.keys() == on_disk, "edition index must cover all shipped editions"
+    latest = rows[edition]
+    for k in ("status", "method_version", "period", "published"):
+        assert latest[k] == data[k], ("edition index metadata disagrees with final edition", k)
+    totals = data["totals"]
+    for k, expected in {"models_rated": totals["models"]["rated"], "work_types": totals["work_types"],
+                        "columns": totals["columns"], "cases": totals["cases"],
+                        "top": [m["short"] for m in data["models"] if m["status"] == "rated"][:3],
+                        "changelog": data["notes"]["changelog"]}.items():
+        assert latest[k] == expected, ("edition index metadata disagrees with final edition", k)
+    assert latest["data"] == f"data/editions/{edition}/edition.json"
+    assert latest["card"] == f"card/editions/{edition}-en.png" and (source / latest["card"]).is_file(), "edition index must link an existing final card"
+
+    home = (source / "index.html").read_text(encoding="utf-8")
+    archive = (source / "editions.html").read_text(encoding="utf-8")
+    for html, tag, targets, message in (
+        (home, "p", ["editions.html"], "static rating must link the editions list"),
+        (archive, "ul", ["index.html" if eid == edition else f"{eid}.html" for eid in rows],
+         "static editions list must link every edition page"),
+    ):
+        links = re.findall(rf'<{tag}\b[^>]*\bid="edition-links"[^>]*>(.*?)</{tag}>', html, re.S)
+        assert len(links) == 1 and [a.get("href") for a in _tags(links[0], "a")] == targets, message
+        assert all((source / target).is_file() for target in targets), message
+
+    pairs = data["votes"]["pairs"]
+    disagreements = [p for p in pairs if p["verdict"] == "disagree"]
+    openings = re.findall(r'<p class="opening-vote">(.*?)</p>', home, re.S)
+    assert len(openings) == 1, "opening vote summary must be present in static HTML"
+    summary = openings[0]
+    counts = re.search(r'<b>([^<]+)</b>', summary)
+    assert counts and re.search(rf'\b{len(pairs):,} comparisons?, {len(disagreements):,} against my letters\b', unescape(counts[1])), (
+        "static opening vote counts disagree with latest.json"
+    )
+    if disagreements:
+        pair = disagreements[0]
+        w, n = pair["winner"], 1 - pair["winner"]
+        names = {m["id"]: m["short"] for m in data["models"]}
+        column = next(g["name"]["en"] for g in data["groups"] if g["id"] == pair["column"])
+        tally = (pair["counts"]["first"], pair["counts"]["second"])
+        letters = pair["letters"]
+        example = f"{column}: {names[pair['models'][w]]} — {tally[w]:,}:{tally[n]:,} against {names[pair['models'][n]]} (my letters: {letters[w]} and {letters[n]})."
+        spans = re.findall(r'<span>([^<]+)</span>', summary)
+        assert [unescape(text).strip() for text in spans] == [example], "static opening vote example disagrees with latest.json"
+    assert [a.get("href") for a in _tags(summary, "a")] == ["#votes"], "static opening vote must link to #votes"
+    assert any(tag.get("id") == "votes" for tag in _tags(home, "p")), "static opening vote needs a #votes destination"
+
+
+def _assert_rating_wrappers_and_asset_versions(source):
+    for wrapper, payload, variable in (
+        ("data/latest.js", "data/latest.json", "OUROBOROS_RATING"),
+        ("data/editions.js", "data/editions/index.json", "OUROBOROS_EDITIONS"),
+    ):
+        text = (source / wrapper).read_text(encoding="utf-8")
+        prefix, suffix = f"window.{variable}=", ";\n"
+        assert text.startswith(prefix) and text.endswith(suffix), wrapper
+        assert json.loads(text[len(prefix):-len(suffix)]) == json.loads((source / payload).read_text(encoding="utf-8")), f"{wrapper} payload differs from {payload}"
+    for page, data_js in (("index.html", "data/latest.js"), ("editions.html", "data/editions.js")):
+        html = (source / page).read_text(encoding="utf-8")
+        tags = _tags(html)
+        preview = [tag for tag in tags if tag.get("property") == "og:image"]
+        assert len(preview) == 1, page
+        for language in ("en", "ru"):
+            card = source / f"card/og-{language}.png"
+            assert preview[0][f"data-v-{language}"] == hashlib.sha256(card.read_bytes()).hexdigest()[:10], (page, card)
+        social = [tag["content"] for tag in tags if tag.get("property") == "og:image" or tag.get("name") == "twitter:image"]
+        assert social == [f"{ORIGIN}/llm-rating/card/og-en.png?v={preview[0]['data-v-en']}"] * 2, page
+        _assert_rating_relative_asset_versions(source, page, tags, data_js)
+
+
+def _assert_rating_relative_asset_versions(source, page, tags, data_js=None):
+    urls = [tag[attr] for tag in tags for attr in ("href", "src") if attr in tag]
+    versioned = set()
+    for url in urls:
+        parsed = urlsplit(url)
+        if parsed.scheme or parsed.netloc:
+            continue
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        if "v" in params:
+            digest = hashlib.sha256((source / parsed.path.lstrip("/")).read_bytes()).hexdigest()[:10]
+            assert params["v"] == [digest], f"{page}: {url} does not carry asset digest {digest}"
+            versioned.add(parsed.path)
+    required = {"assets/site.css", "assets/app.js", "assets/strings.js"}
+    if data_js:
+        required.add(data_js)
+    assert required <= versioned, page
+
+
+def _tags(page: str, name: str | None = None) -> list[dict[str, str]]:
     """The attributes of every ``<name>`` tag of a page, as an HTML parser reads them."""
     from html.parser import HTMLParser
 
@@ -211,7 +574,7 @@ def _tags(page: str, name: str) -> list[dict[str, str]]:
 
     class Collector(HTMLParser):
         def handle_starttag(self, tag, attrs):
-            if tag == name:
+            if name is None or tag == name:
                 found.append({key: value or "" for key, value in attrs})
 
     Collector().feed(page)

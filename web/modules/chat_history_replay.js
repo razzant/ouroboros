@@ -1,12 +1,8 @@
 /** Historical rows enrich the existing timeline without acquiring live authority. */
 import { foldWaitRow } from './task_checkpoints.js';
 import { childLineCause } from './log_events.js';
-
-export function compareHistoryPosition(left, right) {
-    if (!left || !right) return 0;
-    const stream = String(left.source || '').localeCompare(String(right.source || ''));
-    return stream || Number(left.offset) - Number(right.offset);
-}
+import { compareHistoryPosition } from './chat_timeline_order.js';
+export { compareHistoryPosition } from './chat_timeline_order.js';
 
 export function historyRowIds(row) {
     return [row.history_id, ...(row.review_group?.attempts || []).map(attempt => attempt.history_id)].filter(Boolean);
@@ -100,11 +96,13 @@ export function adoptsRetainedCopy(node, opts) {
 
 export function matchesHistoryBubble(node, opts, legacyKey, chatId) {
     const data = node.dataset;
+    const address = opts.reply?.row_address;
+    if (data.rowAddress && address && data.rowAddress !== address) return false;
     if (opts.originId && data.originId === opts.originId) return true;
     if (!opts.clientMessageId) return !data.historyId && data.messageKey === legacyKey;
     if (opts.originProjected || data.originProjected || data.clientMessageId !== opts.clientMessageId) return false;
     if (data.historyId && data.historyId !== opts.historyId) return false;
-    if (data.rowAddress && opts.reply?.row_address) return data.rowAddress === opts.reply.row_address;
+    if (data.rowAddress && address) return true;
     return ownerRowRoom({ row_address: data.rowAddress }, data.ownerChatId ?? chatId) === ownerRowRoom(opts.reply, chatId);
 }
 
@@ -112,8 +110,64 @@ export function matchesHistoryBubble(node, opts, legacyKey, chatId) {
 export function messagePlacementKey(opts, legacyKey) {
     if (opts.historyId) return `history:${opts.historyId}`;
     if (opts.originId) return `origin|${opts.originId}`;
-    const address = opts.reply?.role === 'user' && opts.reply.row_address;
+    const address = ['user', 'assistant'].includes(opts.reply?.role) && opts.reply.row_address;
     return address ? `row|${address}` : legacyKey;
+}
+
+/** Legacy delivery correlation; client ids are scoped to the room the owner wrote in. */
+export function buildMessageKey(role, text, timestamp, opts = {}) {
+    if (opts.clientMessageId) {
+        const room = role === 'user' && opts.ownerChatId !== opts.chatId ? `room:${opts.ownerChatId}|` : '';
+        return `${room}client|${opts.clientMessageId}`;
+    }
+    if (role !== 'user' && !opts.isProgress && opts.taskId) {
+        return [
+            'task',
+            role,
+            opts.systemType || '',
+            ...(opts.letterPartKey ? [opts.letterPartKey] : []),
+            opts.source || '',
+            opts.taskId,
+            text,
+        ].join('|');
+    }
+    if (!timestamp) return '';
+    return [
+        role,
+        opts.isProgress ? '1' : '0',
+        opts.systemType || '',
+        opts.source || '',
+        opts.senderLabel || '',
+        opts.senderSessionId || '',
+        opts.taskId || '',
+        timestamp,
+        text,
+    ].join('|');
+}
+
+/** The same stored fields label and identify a row. No node or read custody is acquired here. */
+export function messageIdentity(text, role, timestamp, isProgress, opts, chatId) {
+    const meta = Object.fromEntries([
+        'clientMessageId', 'senderLabel', 'senderSessionId', 'source', 'initiator',
+        'systemType', 'taskId', 'projectId', 'projectName', 'taskName', 'handoffId',
+        'originId', 'completionLimitation', 'deliveryId', 'letterPartKey',
+    ].map(key => [key, opts[key] || '']));
+    const ts = timestamp || new Date().toISOString();
+    meta.ownerChatId = ownerRowRoom(opts.reply, chatId);
+    const legacyKey = buildMessageKey(role, text, ts, { ...meta, isProgress, chatId });
+    return { meta, ts, legacyKey, messageKey: messagePlacementKey(opts, legacyKey),
+        deliveryKey: opts.deliveryId ? `delivery:${opts.deliveryId}` : '' };
+}
+
+export function priorHistoryBubble(bubbles, opts, keys, legacyKey, chatId) {
+    const address = opts.reply?.role === 'assistant' && !opts.originProjected && opts.reply.row_address;
+    if (address && (!keys || keys.address.has(address))) {
+        const exact = bubbles().find(({ dataset }) => !dataset.originProjected && dataset.rowAddress === address);
+        if (exact) return exact;
+    }
+    const mounted = !keys || keys.client.has(opts.clientMessageId)
+        || keys.origin.has(opts.originId) || keys.legacy.has(legacyKey);
+    return mounted ? bubbles().find(node => matchesHistoryBubble(node, opts, legacyKey, chatId)) : null;
 }
 
 /** Reuse a mounted node for its live echo without changing the attribution of a retained copy. */
@@ -121,11 +175,12 @@ export function livePriorBubble(bubbles, opts, keys, legacyKey, chatId) {
     if (opts.originId) return (!keys || keys.origin.has(opts.originId))
         ? bubbles().find(node => node.dataset.originId === opts.originId) : null;
     const row = opts.reply;
-    const address = row?.role === 'user' ? row.row_address : '';
+    const address = ['user', 'assistant'].includes(row?.role) ? row.row_address : '';
     const room = ownerRowRoom(row, chatId);
     if (keys && !address && !keys.legacy.has(legacyKey)) return null;
-    return bubbles().find(({ dataset: data }) => {
-        if (address && data.rowAddress) return data.rowAddress === address;
+    const nodes = bubbles();
+    return (address && nodes.find(({ dataset }) => dataset.rowAddress === address)) || nodes.find(({ dataset: data }) => {
+        if (address && data.rowAddress) return false;
         if (data.messageKey !== legacyKey) return false;
         if (row?.role !== 'user') return !data.originProjected;
         if (data.originProjected && (address || data.rowAddress)) return false;
@@ -136,28 +191,29 @@ export function livePriorBubble(bubbles, opts, keys, legacyKey, chatId) {
 /** During a page replay, every identity key a mounted bubble carries (a superset: keys are only added, `note`): a row
  * looks for its prior bubble only when one could be mounted, not by scanning the feed per row (O(rows²) a page). */
 export function createReplayKeys() {
-    const keys = { history: new Set(), client: new Set(), origin: new Set(), legacy: new Set() };
+    const keys = { history: new Set(), client: new Set(), origin: new Set(), legacy: new Set(), address: new Set() };
     keys.note = (node) => {
         if (!node) return;
         const nodes = node.classList?.contains('chat-bubble') ? [node] : [];
         for (const bubble of [...nodes, ...(node.querySelectorAll?.('.chat-bubble') || [])]) {
-            const { historyId, clientMessageId, originId, messageKey } = bubble.dataset || {};
+            const { historyId, clientMessageId, originId, messageKey, rowAddress } = bubble.dataset || {};
             if (historyId) keys.history.add(historyId);
             if (clientMessageId) keys.client.add(clientMessageId);
             if (originId) keys.origin.add(originId);
             if (messageKey) keys.legacy.add(messageKey);
+            if (rowAddress) keys.address.add(rowAddress);
         }
     };
     return keys;
 }
 
 export function stampHistoryNode(node, id, position) {
-    if (!node || !id) return;
+    if (!node || !id) return false;
     node.dataset.historyId = id;
-    if (position) {
-        node.dataset.historySource = position.source;
-        node.dataset.historyOffset = String(position.offset);
-    }
+    if (!position || (node.dataset.historySource === position.source && node.dataset.historyOffset === String(position.offset))) return false;
+    node.dataset.historySource = position.source;
+    node.dataset.historyOffset = String(position.offset);
+    return true;
 }
 
 // Cause facts only a frame that states them replaces: an absent key keeps the last stated value, an explicit

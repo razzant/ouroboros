@@ -1202,6 +1202,15 @@ def _refresh_planning_threshold(ctx: Any, budget_remaining_usd: Optional[float],
     old = getattr(ctx, "_cost_ceiling", None)
     if not isinstance(old, task_pacing.CostCeiling) or old.state not in {
             task_pacing.COST_CEILING_ACTIVE, task_pacing.COST_CEILING_EXHAUSTED_SOFT_LAND}:
+        # Q10 keeps a disabled stop disarmed; its start cap may since have moved (an
+        # amendment raises it, a late billing correction lowers it) — fresh either way,
+        # the stop itself never re-arms.
+        if isinstance(old, task_pacing.CostCeiling) and old.state == task_pacing.COST_CEILING_DISABLED:
+            live = (_loop_tree_accounting(refresh=True, max_age_sec=0.0, strict=True) or {}).get("root_limit_usd")
+            if live is not None and (old.root_cap_usd is None or float(live) != float(old.root_cap_usd)):
+                ctx._cost_ceiling = task_pacing.CostCeiling(
+                    state=old.state, ceiling_usd=old.ceiling_usd, root_cap_usd=float(live),
+                    planning_margin_usd=old.planning_margin_usd, basis=old.basis)
         return {"refreshed": False, "reason": "no_ceiling",
                 **({"ceiling_state": old.state, "ceiling_basis": old.basis}
                    if isinstance(old, task_pacing.CostCeiling) else {})}
@@ -1251,7 +1260,8 @@ def _refresh_planning_threshold(ctx: Any, budget_remaining_usd: Optional[float],
     if root_cap is not None:
         components.append(root_cap - spent)
     if float(fresh) > 0:
-        # The authored percentage: the task's own, or the root's it was resolved under.
+        # The authored percentage: the task's own, or the root's it was resolved under;
+        # amount basis — the share applies to the wallet observed at THIS Resume.
         profile = task_pacing.cost_stop_policy(ctx)["profile"]
         pct = max(0, min(100, int(profile.get("cost_hard_stop_pct") or 0)))
         if pct > 0:

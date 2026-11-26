@@ -69,6 +69,7 @@ class TestTreeFedDecidingValue:
             result = _check_budget_limits(**args)
         assert result is None
 
+
     def test_unknown_tree_falls_back_to_own_cost_never_zero(self, tmp_path):
         """No telemetry for this tree → the deciding value falls back to own
         cost (a real number), never a coerced $0 that would disable the stop.
@@ -270,6 +271,69 @@ class TestTreeFedDecidingValue:
         _text, usage, _ = result
         assert usage.get("reason_code") == "budget_exhausted"
         assert usage["cost_stop_spend_basis"] == task_pacing.SPEND_BASIS_TREE
+
+
+class TestMidRunWorkCapAmendment:
+    """#4267 area C: a running loop cached its ``CostCeiling`` once at start, so after
+    ``set_task_cost_cap`` raised the work's cap the stop texts and the wrap-up pricing
+    still spoke the start number. The round's own money observation carries the cap the
+    ledger fence admits against; the authored early-stop point keeps its start value."""
+
+    def _ceiling(self):
+        return task_pacing.resolve_cost_ceiling(1900.0, EXPLICIT_50, root_cap_usd=10.0)
+
+    def test_stop_text_names_the_raised_cap_while_the_authored_point_stays(self, tmp_path, monkeypatch):
+        import ouroboros.loop as loop
+
+        ceiling = self._ceiling()
+        assert ceiling.root_cap_usd == 10.0 and ceiling.ceiling_usd == 7.0  # cap minus the planning margin
+        args = _make_args(
+            budget_remaining_usd=1900.0,
+            accumulated_usage={"cost": 8.0, "prompt_tokens": 0, "completion_tokens": 0},
+            cost_ceiling=ceiling,
+            drive_logs=tmp_path,
+        )
+        monkeypatch.setattr(loop, "_loop_tree_accounting",
+                            lambda **kw: {"settled_usd": 8.0, "accounted_usd": 8.0, "root_limit_usd": 20.0})
+        result = _check_budget_limits(**args)
+        assert result is not None  # $8 is over the authored $7 early-stop point
+        text, usage, _ = result
+        assert usage.get("reason_code") == "budget_exhausted"
+        assert "the hard tree cap is $20.00" in text  # the raised cap the fence admits against
+        assert "the in-task cost ceiling $7.00" in text  # the authored point never widened
+
+    def test_the_cached_cap_stands_when_the_observation_reports_no_limit(self, tmp_path, monkeypatch):
+        import ouroboros.loop as loop
+
+        args = _make_args(
+            budget_remaining_usd=1900.0,
+            accumulated_usage={"cost": 8.0, "prompt_tokens": 0, "completion_tokens": 0},
+            cost_ceiling=self._ceiling(),
+            drive_logs=tmp_path,
+        )
+        monkeypatch.setattr(loop, "_loop_tree_accounting",
+                            lambda **kw: {"settled_usd": 8.0, "accounted_usd": 8.0})
+        result = _check_budget_limits(**args)
+        assert result is not None
+        assert "the hard tree cap is $10.00" in result[0]  # unknown is never the default shown as measured
+
+    def test_a_lower_observed_cap_shrinks_the_cached_one_after_a_late_correction(self, tmp_path, monkeypatch):
+        """#4267 area C: a late billing correction of another root's estimate lowers the
+        group-basis effective cap (sibling spend is part of the figure); the pricing must
+        follow it down while the authored early-stop point keeps its start value."""
+        import ouroboros.loop as loop
+
+        args = _make_args(
+            budget_remaining_usd=1900.0,
+            accumulated_usage={"cost": 8.0, "prompt_tokens": 0, "completion_tokens": 0},
+            cost_ceiling=self._ceiling(),
+            drive_logs=tmp_path,
+        )
+        monkeypatch.setattr(loop, "_loop_tree_accounting",
+                            lambda **kw: {"settled_usd": 8.0, "accounted_usd": 8.0, "root_limit_usd": 8.0})
+        result = _check_budget_limits(**args)
+        assert result is not None
+        assert "the hard tree cap is $8.00" in result[0]  # fresh in either direction
 
 
 class TestRootAccountingTelemetry:

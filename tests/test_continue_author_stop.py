@@ -232,7 +232,7 @@ def test_spent_group_money_refuses_the_press_with_nothing_written(tmp_path, monk
 
 
 def test_an_unreadable_ledger_refuses_the_press_as_unknown_never_as_money(tmp_path, monkeypatch):
-    from ouroboros import usage_accounting
+    from ouroboros import usage_store
     from ouroboros.task_results import load_task_result
     from supervisor.continuation_admission import admit_continuation
 
@@ -242,7 +242,9 @@ def test_an_unreadable_ledger_refuses_the_press_as_unknown_never_as_money(tmp_pa
     def unreadable(*_args, **_kwargs):
         raise OSError("ledger unreadable")
 
-    monkeypatch.setattr(usage_accounting, "usage_projection", unreadable)
+    # group_money_spent reads through usage_store.read now, not
+    # usage_accounting.usage_projection: patch the store the reader actually opens.
+    monkeypatch.setattr(usage_store, "read", unreadable)
     assert admit_continuation("stop-root", action_nonce=NONCE) == {"ok": False, "error": "billing_authority_unavailable"}
     assert workers.PENDING == [] and "continued_by" not in load_task_result(data, "stop-root")
 

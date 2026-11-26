@@ -133,6 +133,12 @@ def render_cash(total: tuple) -> dict:
     return dict(zip((*CASH_KEYS, "accounted_usd"), map(float, rounded_cash(total))))
 
 
+def known_room(limit, known) -> Decimal:
+    """Room above the ledger's known spend without rounding the authored limit or the difference."""
+    with exact_money():
+        return decimal_of(limit) - decimal_of(known)
+
+
 def exceeds_limit(total: tuple, limit) -> bool:
     """Whether KNOWN spend has reached ``limit`` (owner Q4-A, #1487).
 

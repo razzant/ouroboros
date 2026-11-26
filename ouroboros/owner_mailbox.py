@@ -782,6 +782,13 @@ def reset_attempt_controls_for_retry(
         return 0
 
 
+def normalize_mailbox_kind(entry: dict) -> dict:
+    """Use the ordinary routing kind without inventing the writer's kind for legacy mail."""
+    if kind := entry.get("kind"):
+        return entry if isinstance(kind, str) else {**entry, "kind": str(kind)}
+    return {**entry, "kind": KIND_OWNER_TEXT, "recorded_kind": ""}
+
+
 def drain_owner_entries(
     drive_root: pathlib.Path,
     task_id: str,
@@ -841,12 +848,13 @@ def drain_owner_entries(
             if not isinstance(entry, dict):
                 complete = False
                 continue
-            if str(entry.get("kind") or KIND_OWNER_TEXT) == KIND_CONTROL_REVOKED:
+            entry = normalize_mailbox_kind(entry)
+            if entry["kind"] == KIND_CONTROL_REVOKED:
                 revoked.add(str(entry.get("text") or ""))
             parsed.append(entry)
         entries = []
         for entry in parsed:
-            kind = str(entry.get("kind") or KIND_OWNER_TEXT)
+            kind = entry["kind"]
             if (kinds is not None and kind not in kinds) or (kinds is None and kind == KIND_MODEL_WAIT):
                 continue
             mid = entry.get("msg_id", "")
@@ -862,7 +870,7 @@ def drain_owner_entries(
                 drained = {
                     "msg_id": mid, "text": text, "kind": kind,
                     "ts": str(entry.get("ts") or ""),
-                    **({} if entry.get("kind") else {"recorded_kind": ""}),  # routing's default is no writer's kind
+                    **({"recorded_kind": entry["recorded_kind"]} if "recorded_kind" in entry else {}),
                 }
                 if isinstance(entry.get("client_surface"), dict) and entry.get("client_surface"):
                     drained["client_surface"] = dict(entry["client_surface"])

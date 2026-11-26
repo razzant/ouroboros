@@ -19,7 +19,9 @@ from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 from decimal import Decimal, InvalidOperation
 
 from ouroboros.usage_ledger import _number
-from ouroboros._usage_money import billing_group_key, monetary_scope_key, ZERO_CASH, cash_contribution, render_cash, exact_money, decimal_of
+from ouroboros._usage_money import (
+    ZERO_CASH, billing_group_key, cash_contribution, decimal_of, exact_money, known_room, monetary_scope_key, render_cash,
+)
 
 REVIEW_ATTRIBUTION_KEYS = ("review_skill", "review_wave_id", "review_slot_id")
 # A row under a review's own custody: every review-substrate send carries its reviewer slot and a
@@ -39,6 +41,247 @@ NO_ORIGINAL_BINDING = "unbound"
 # Source label of a binding taken from a block row's own cap literal: an older
 # or unstamped block that carried nothing usable for that member.
 LEGACY_LIVE_SOURCE = "legacy_live"
+# The raised whole cap of ONE started work, keyed by its billing group (``usage_admission.set_work_cap``): the one
+# binding a later record replaces; the bindings above stay first-row-wins. The downgrade export carries it separately
+# in the watermark, not in attempt rows.
+WORK_CAP_SCOPE = "work_cap"
+# First authored (sourced) root-task cap fact, keyed by ``root_task_id``, materialized so an earlier
+# group-only session or unsourced row in ``("root", root)`` never requires scanning ``attempts``.
+ROOT_CAP_SCOPE = "root_cap"
+_ROOT_CAP_KEYS = ("root_task_id", "root_limit_usd", "root_limit_source", "root_limit_revision")
+ROOT_CAP_AUTHORITY_CAUSES = frozenset({
+    "root_cap_backfill_pending", "root_cap_source_ambiguous", "malformed_root_cap", "root_cap_meta_invalid",
+})
+ORDINARY_GROUP_CAP_SOURCES = frozenset({"", "initial_task_admission", "legacy_default", "ledger_first_row",
+                                        LEGACY_LIVE_SOURCE})
+
+
+def _valid_root_cap_limit(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = _number(value)
+    except OverflowError:
+        return None
+    return parsed if parsed is not None and math.isfinite(parsed) and parsed >= 0 else None
+
+
+def _ordinary_session_followup(row: Dict[str, Any], initial_root: Optional[Dict[str, Any]], limit: float) -> bool:
+    """True when an unsourced finite root attempt after a group-only row is a clear modern ordinary cap."""
+    if not initial_root or "request_root_limit_usd" not in row or row["request_root_limit_usd"] is not None:
+        return False
+    if (str(row.get("billing_group_limit_source") or "") not in ORDINARY_GROUP_CAP_SOURCES
+            or str(initial_root.get("billing_group_limit_source") or "") not in ORDINARY_GROUP_CAP_SOURCES):
+        return False
+    group_limit = _valid_root_cap_limit(initial_root.get("billing_group_limit_usd"))
+    return group_limit is not None and decimal_of(limit) >= decimal_of(group_limit)
+
+
+def root_cap_binding(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A root task's own sourced root-limit fact (finite or explicitly unlimited)."""
+    root = monetary_scope_key(row)
+    if (not root or str(row.get("kind") or "attempt") != "attempt"
+            or str(row.get("task_id") or "") != root or "root_limit_usd" not in row):
+        return None
+    source = str(row.get("root_limit_source") or "")
+    if not source or source == "attempt_request":
+        return None
+    raw = row.get("root_limit_usd")
+    if raw is not None and _valid_root_cap_limit(raw) is None:
+        return None
+    return {key: row[key] for key in _ROOT_CAP_KEYS if key in row}
+
+
+def root_cap_record(row: Dict[str, Any], initial_root: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Confirmed sourced root-cap fact or an ambiguous older root-cap record for ``root_cap``."""
+    root = monetary_scope_key(row)
+    if not root or str(row.get("kind") or "attempt") != "attempt":
+        return None
+    task = str(row.get("task_id") or "")
+    if task and task != root:
+        return None
+    source = str(row.get("root_limit_source") or "")
+    if source == "attempt_request":
+        return None
+    if source:
+        if (confirmed := root_cap_binding(row)) is not None:
+            return confirmed
+        return {"root_task_id": root, "ambiguous": True, "reason": "ambiguous_root_limit_record"}
+    if "root_limit_usd" not in row or row["root_limit_usd"] is None:
+        return None
+    if initial_root and ("root_limit_usd" in initial_root or initial_root.get("root_limit_source")):
+        return None
+    limit = _valid_root_cap_limit(row["root_limit_usd"])
+    if task == root and limit is not None and _ordinary_session_followup(row, initial_root, limit):
+        return None
+    return {"root_task_id": root, "ambiguous": True,
+            **({"root_limit_usd": row["root_limit_usd"]} if limit is not None else {})}
+
+
+def root_cap_error(entry: Any) -> Optional[str]:
+    """Failure cause for a stored ``root_cap`` binding, or ``None`` when valid."""
+    if not isinstance(entry, dict):
+        return "malformed_root_cap"
+    if entry.get("ambiguous"):
+        return "root_cap_source_ambiguous"
+    if "root_limit_usd" not in entry or (
+        entry["root_limit_usd"] is not None and _valid_root_cap_limit(entry["root_limit_usd"]) is None
+    ):
+        return "malformed_root_cap"
+    return None
+
+
+def work_cap_amount(value: Any) -> Optional[float]:
+    try:
+        value = None if isinstance(value, bool) else _number(value)
+    except OverflowError:
+        return None
+    return value if value is not None and math.isfinite(value) and value > 0 else None
+
+
+def owner_cap_at(basis: Any):
+    source = basis.get("source") if isinstance(basis, dict) and basis.get("kind") == "owner_words" else None
+    if not isinstance(source, dict):
+        return None
+    from ouroboros.deadline_utils import parse_deadline_ts
+
+    return parse_deadline_ts(source.get("ts"))
+
+
+def valid_work_cap_basis(basis: Any, limit: float) -> bool:
+    if not isinstance(basis, dict):
+        return False
+    if basis.get("kind") == "own_judgement":
+        return not {"delegated_max_usd", "choose_limit"} & basis.keys()
+    if owner_cap_at(basis) is None:
+        return False
+    if "choose_limit" in basis:
+        maximum = work_cap_amount(basis.get("delegated_max_usd"))
+        return basis["choose_limit"] is True and maximum is not None and maximum >= limit
+    if "delegated_max_usd" not in basis:
+        return True
+    maximum = work_cap_amount(basis["delegated_max_usd"])
+    return maximum is not None and maximum > limit
+
+
+def valid_work_cap(record: Any) -> bool:
+    """A work cap record as ``set_work_cap`` writes it: a finite amount not below the finite original cap it raised,
+    its revision, actor and basis. A delegated decision retains the owner's earlier, bounded instruction."""
+    if not isinstance(record, dict):
+        return False
+    limit, original, previous = (work_cap_amount(record.get(key)) for key in (
+        "limit_usd", "original_limit_usd", "previous_limit_usd"))
+    basis = record.get("basis")
+    if (None in (limit, original, previous) or not original <= previous <= limit
+            or not isinstance(record.get("revision"), str) or not record["revision"]
+            or not isinstance(record.get("by"), dict) or not valid_work_cap_basis(basis, limit)
+            or basis.get("choose_limit")):
+        return False
+    if "owner_decision" not in record:
+        return True
+    owner = record["owner_decision"]
+    if basis["kind"] != "own_judgement" or not isinstance(owner, dict):
+        return False
+    owner_basis = owner.get("basis")
+    if owner_cap_at(owner_basis) is None:
+        return False
+    if owner_basis.get("choose_limit"):
+        return "limit_usd" not in owner and valid_work_cap_basis(owner_basis, limit)
+    floor = work_cap_amount(owner.get("limit_usd"))
+    return (floor is not None and original <= floor <= previous
+            and valid_work_cap_basis(owner_basis, floor) and "delegated_max_usd" in owner_basis
+            and limit <= work_cap_amount(owner_basis["delegated_max_usd"]))
+
+
+def _owner_cap_decision(current: Optional[dict]) -> Optional[dict]:
+    if current and current["basis"]["kind"] == "owner_words":
+        return {"limit_usd": current["limit_usd"], "basis": current["basis"]}
+    return (current or {}).get("owner_decision")
+
+
+def work_cap_change(current, before, limit, basis) -> tuple:
+    """Resolve one monetary decision without losing the last owner source or attributing its grant to this actor."""
+    owner = _owner_cap_decision(current)
+    same = before == limit
+    if limit < before:
+        return "cost_cap_not_raised", False, None
+    if basis["kind"] == "owner_words":
+        # A cited ceiling can be the owner's entire decision. Do not assign the integrator's amount to them.
+        authorization = {"basis": basis} if basis.get("choose_limit") else None
+        if owner and owner_cap_at(basis) <= owner_cap_at(owner["basis"]):
+            if same and (basis == current["basis"] or authorization == owner):
+                return "", False, None  # same source, same decision and unchanged amount
+            return "owner_cap_needs_newer_decision", False, None
+        return "", True, authorization
+    if same:
+        return "", False, None
+    if owner and limit > work_cap_amount(owner["basis"].get("delegated_max_usd") or owner["limit_usd"]):
+        return "owner_cap_binds", False, None
+    return "", True, owner
+
+
+def prefer_group_tie(root_limit, root_source, original_group_cap, group_source) -> bool:
+    """A group remedy on a tie only if no independent root fence would remain."""
+    root_limit, original_group_cap = work_cap_amount(root_limit), work_cap_amount(original_group_cap)
+    return (root_source in (None, "", WORK_CAP_SCOPE) and str(group_source or "") in ORDINARY_GROUP_CAP_SOURCES
+            and root_limit is not None and original_group_cap is not None
+            and decimal_of(original_group_cap) <= decimal_of(root_limit))
+
+
+def group_binds(root_room, group_room, *, prefer_tie: bool) -> bool:
+    return (group_room is not None and (root_room is None or group_room < root_room
+                                       or (group_room == root_room and prefer_tie)))
+
+
+def raised_cap(cap: Optional[dict], limit: Any, source: Any, *, group: bool) -> Tuple[Optional[float], bool]:
+    """An ordinary cap can use its work amendment; an independent or narrower cap holds.
+
+    The Boolean names which record governs, including an owner's unchanged-amount confirmation.
+    """
+    if cap and (original := cap.get("verified_original")):
+        if not group:
+            return (None if limit is None else max(0.0, float(limit))), False
+        bound = float(original["billing_group_limit_usd"])
+        return (bound if limit is None else min(bound, max(0.0, float(limit)))), False
+    if limit is None:
+        return None, False
+    own = max(0.0, float(limit))
+    ordinary = str(source or "") in ORDINARY_GROUP_CAP_SOURCES if group else not source
+    if not cap or not ordinary or decimal_of(str(own)) < decimal_of(cap["original_limit_usd"]):
+        return own, False
+    amended = float(cap["limit_usd"])
+    return (amended, True) if decimal_of(cap["limit_usd"]) >= decimal_of(own) else (own, False)
+
+
+def work_cap_block(caps, rooms, binding, original_group_limit, *, unverified=False, reconcile_pending=False):
+    """Which observed exhausted fence a conversational raise would leave in place, if any.
+
+    Keep an independent cap even when the tightest margin is the other axis. A finite local cap
+    inside an originally unlimited group or below the whole-work cap it started under also holds
+    independently, ahead of unverified-export or pending-reconciliation holds.
+    """
+    exhausted = [axis for axis in (binding, "group" if binding == "root" else "root")
+                 if rooms.get(axis) is not None and decimal_of(rooms[axis]) <= Decimal("1e-9")]
+    if not exhausted:
+        return None
+    original = work_cap_amount(original_group_limit)
+    group_limit, group_source = caps["group"]
+    group_independent = (group_limit is not None and group_source != WORK_CAP_SCOPE
+                         and str(group_source or "") not in ORDINARY_GROUP_CAP_SOURCES)
+    for axis in exhausted:
+        limit, source = caps[axis]
+        source_independent = group_independent if axis == "group" else source not in (None, "", WORK_CAP_SCOPE)
+        narrower = original is not None and decimal_of(limit) < decimal_of(original)
+        if source_independent or original_group_limit is None or narrower:
+            return "independent_cap_exhausted", axis
+    # An independent group can still have room while keeping the authority to raise the root unavailable.
+    if group_independent:
+        return "independent_cap_exhausted", exhausted[0]
+    if unverified:
+        return "work_cap_export_unverified", exhausted[0]
+    if reconcile_pending:
+        return "work_cap_reconcile_pending", exhausted[0]
+    return None
 
 
 def _carried(value: Any, key: str, owner) -> Optional[dict]:
@@ -94,6 +337,7 @@ class BindingIndex:
 
     roots: Dict[str, Any] = field(default_factory=dict)
     groups: Dict[str, Any] = field(default_factory=dict)
+    root_caps: Dict[str, Any] = field(default_factory=dict, compare=False)
     carried: bool = field(default=False, compare=False)
     unbound: set = field(default_factory=set, compare=False)  # (carrier, key) the block left open
     live: dict = field(default_factory=dict, compare=False)  # (carrier, key) -> block literal; None once disputed
@@ -138,6 +382,8 @@ class BindingIndex:
             for index, key in ((self.roots, root), (self.groups, group)):
                 if key:
                     index.setdefault(key, binding)
+        if root and root not in self.root_caps and (root_cap := root_cap_record(row, self.roots.get(root))) is not None:
+            self.root_caps[root] = root_cap
 
 
 def row_ts_epoch(row: Any) -> Optional[float]:
@@ -470,8 +716,8 @@ def _with_limit(summary: Dict[str, Any], limit: Optional[float]) -> Dict[str, An
     (settled) spend — the admission rule's own number; open holds stay beside it."""
     if limit is None:
         return summary
-    summary["limit_usd"] = round(max(0.0, float(limit)), 6)
-    summary["remaining_known_usd"] = round(max(0.0, summary["limit_usd"] - float(summary["settled_usd"])), 6)
+    summary["limit_usd"] = max(0.0, float(limit))
+    summary["remaining_known_usd"] = max(0.0, float(known_room(summary["limit_usd"], summary["settled_usd"])))
     return summary
 
 
@@ -633,17 +879,35 @@ def breakdown_of_rows(rows: Sequence[Dict[str, Any]], degraded: bool) -> Dict[st
     return result
 
 
+def _projection_cap(bucket: Bucket, binding, cap, *, group=False) -> Optional[float]:
+    """A reporting view of recorded caps; the live per-work snapshot also checks all independent axes."""
+    source = "billing_group_limit_source" if group else "root_limit_source"
+    cap = cap if valid_work_cap(cap) else None
+    limit = bucket.min_cap()
+    if group and not bucket.rows and cap is not None:
+        limit = cap["original_limit_usd"]  # the verified admission pin, before its first physical row
+    return raised_cap(cap, limit,
+                      (binding or {}).get(source), group=group)[0]
+
+
 def projection_view(txn: Any, *, root_task_id: str = "", billing_group_id: str = "",
                     limit: Optional[float] = None, include_roots: bool = False,
                     degraded: bool = False) -> Dict[str, Any]:
-    """``usage_projection``'s shape: a group or root (with its minimum
-    recorded cap) or the global total under ``limit``."""
+    """``usage_projection``'s shape: a group or root (with its recorded and amended cap)
+    or the global total under ``limit``."""
     if billing_group_id or root_task_id:
         bucket = txn.bucket("group", billing_group_id) if billing_group_id else txn.bucket("root", root_task_id)
-        return _with_integrity(_with_limit(bucket.render_summary(), bucket.min_cap()), degraded)
+        group = bool(billing_group_id)
+        binding = txn.binding("group" if group else "root", billing_group_id or root_task_id) or {}
+        key = billing_group_id or str(binding.get("billing_group_id") or root_task_id)
+        cap = _projection_cap(bucket, binding, txn.binding(WORK_CAP_SCOPE, key), group=group)
+        return _with_integrity(_with_limit(bucket.render_summary(), cap), degraded)
     result = _with_limit(txn.bucket("global").render_summary(), limit)
     if include_roots:
+        amendments = txn.bindings(WORK_CAP_SCOPE)
+        roots = txn.bindings("root") if amendments else {}
         result["by_root"] = {
-            key: _with_integrity(_with_limit(bucket.render_summary(), bucket.min_cap()), degraded)
-            for key, bucket in txn.buckets("root").items() if key}
+            key: _with_integrity(_with_limit(bucket.render_summary(), _projection_cap(
+                bucket, roots.get(key), amendments.get(str((roots.get(key) or {}).get("billing_group_id") or key)))),
+                degraded) for key, bucket in txn.buckets("root").items() if key}
     return _with_integrity(result, degraded)

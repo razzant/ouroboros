@@ -594,7 +594,7 @@ def routing_action_for_tool(name: object) -> str:
 # set (``FOREGROUND_MUTATIVE_TOOLS``: publication and the file editors) joins it
 # at the authority module.
 OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
-    "pause_task", "resume_task", "continue_task",
+    "pause_task", "resume_task", "continue_task", "set_task_cost_cap",
     "maintain_harness", "free_storage", "propose_payload_release",
     # starting or steering work (tell_task stays: the nanny of a running campaign)
     "start_task", "schedule_subagent", "schedule_followup", "plan_task",

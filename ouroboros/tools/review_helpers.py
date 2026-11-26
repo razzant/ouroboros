@@ -321,8 +321,11 @@ def review_wave_budget_gate(
             "known_usd": admission.get("known_usd"),
             "accounted_usd": admission.get("accounted_usd"),
             **{key: admission.get(key) for key in (
-                "reserved_usd", "unresolved_upper_bound_usd", "binding_axis", "global_limit_usd", "global_known_usd",
+                "reserved_usd", "unresolved_upper_bound_usd", "binding_axis", "binding_axes", "binding_source",
+                "billing_group_id", "binding_can_use_work_cap", "global_limit_usd", "global_known_usd",
                 "global_accounted_usd", "global_reserved_usd", "global_unresolved_upper_bound_usd", "global_remaining_usd")},
+            **{key: admission[key] for key in ("work_binding_axis", "work_binding_source") if key in admission},
+            **({"amendment_state": admission["amendment_state"]} if admission.get("amendment_state") else {}),
             "slots": admission.get("slots"),
             "slot_bounds": admission.get("slot_bounds"),
             "unpriced_slots": unpriced,
@@ -330,9 +333,16 @@ def review_wave_budget_gate(
         }
         unknown = admission.get("admission_unknown")
         if unknown or admission.get("reason") == "billing_authority_unavailable":
-            detail = {"error": unknown} if unknown else {"billing_authority": admission.get("billing_authority")}
+            from ouroboros._usage_rows import ROOT_CAP_AUTHORITY_CAUSES
+
+            cause = str(admission.get("cause") or "")
+            detail = ({"error": unknown} if unknown else {
+                "billing_authority": admission.get("billing_authority"), **({"cause": cause} if cause else {}),
+            })
             event = "review_wave_admission_unavailable" if unknown else "review_wave_billing_authority_unavailable"
             emit_review_event(ctx, {"type": event, **base, **detail, **(extra or {})})
+            if not unknown and cause in ROOT_CAP_AUTHORITY_CAUSES:
+                return admission
             return None  # Exhaustion not established; each seat's reservation remains authoritative.
         if admission.get("fits", True):
             # An admitted wave is normally silent. It must NOT be silent when part of the
@@ -355,17 +365,59 @@ def review_wave_budget_gate(
         return None
 
 
+def review_wave_work_fence(admission: dict, amount: str) -> str:
+    axis = admission.get("work_binding_axis") or admission.get("binding_axis")
+    source = admission.get("work_binding_source") if "work_binding_source" in admission else admission.get("binding_source")
+    group_binds = axis == "group"
+    label = ("this work's own raised cap" if source == "work_cap" else
+             "whole-work billing-group budget fence" if group_binds else "per-task budget fence")
+    group = admission.get("billing_group_id") if group_binds else None
+    return f"{label} {amount}" + (f" for group {group}" if group else "")
+
+
+def _review_wave_work_clause(admission: dict, usd) -> tuple[str, str]:
+    fence = f"{review_wave_work_fence(admission, usd('limit_usd'))}, known spend {usd('known_usd')}"
+    state = admission.get("amendment_state")
+    if state == "unverified_export":
+        return fence, "verify the retained cap record; the conversational cap change cannot amend it while unverified"
+    if state == "reconcile_pending":
+        return fence, "complete exported work-cap reconciliation before amending this work's cap; set_task_cost_cap cannot amend it while reconciliation is pending"
+    if admission.get("binding_can_use_work_cap",
+                     admission.get("work_binding_source", admission.get("binding_source")) == "work_cap"):
+        return fence, ("raise this work's cap conversationally (set_task_cost_cap); the per-task "
+                       "setting does not amend a started work's cap")
+    return fence, "this separate limit is not raised by set_task_cost_cap; resolve that limit at its source"
+
+
+def review_wave_authority_clause(admission: dict) -> Optional[tuple[str, str]]:
+    """``(statement, remedy)`` for an unverifiable root-cap authority refusal, else ``None``."""
+    if admission.get("reason") != "billing_authority_unavailable":
+        return None
+    cause = str(admission.get("cause") or "billing_authority_unavailable")
+    kind = str(admission.get("billing_authority") or "unreadable")
+    remedy = ("run the usage-store startup upgrade (migrate_from_journal) to materialize root_cap bindings"
+              if cause == "root_cap_backfill_pending"
+              else "verify or supply a confirmed root_limit_source for this root")
+    return f"billing authority for this root could not be verified ({kind}: {cause})", remedy
+
+
 def review_wave_binding_fence(admission: dict) -> tuple[str, str]:
-    """Name the binding global/root/group fence and its actual remedy."""
+    """Name every binding global/root/group fence and its actual remedy."""
+    if (authority := review_wave_authority_clause(admission)) is not None:
+        return authority
     usd = lambda key: "unknown" if admission.get(key) is None else f"${float(admission[key]):.6f}"  # noqa: E731
-    if admission.get("binding_axis") == "global":
-        return (f"global budget TOTAL_BUDGET {usd('global_limit_usd')}, known spend {usd('global_known_usd')} "
-                "across every task", "raise TOTAL_BUDGET")
-    if admission.get("binding_axis") == "group":
-        return (f"whole-work billing-group budget fence {usd('limit_usd')}, known spend {usd('known_usd')}",
-                "amend the original billing-group owner's cap explicitly; changing the per-task setting does not amend it")
-    return f"per-task budget fence {usd('limit_usd')}, known spend {usd('known_usd')}", (
-        "raise the per-task budget (OUROBOROS_PER_TASK_COST_USD)")
+    axes = list(admission.get("binding_axes") or ([admission["binding_axis"]] if admission.get("binding_axis") else []))
+    fences, remedies = [], []
+    for axis in axes:
+        if axis == "global":
+            fences.append(f"global budget TOTAL_BUDGET {usd('global_limit_usd')}, known spend {usd('global_known_usd')} "
+                          "across every task")
+            remedies.append("raise TOTAL_BUDGET")
+        elif axis in {"root", "group"}:
+            fence, remedy = _review_wave_work_clause(admission, usd)
+            fences.append(fence)
+            remedies.append(remedy)
+    return (" and the ".join(fences), "; and ".join(remedies)) if fences else _review_wave_work_clause(admission, usd)
 
 
 def cached_prompt_blocks(stable_text: str, dynamic_text: str = "", *, ttl: str | None = None) -> list:

@@ -196,7 +196,10 @@ def _maybe_inject_cost_budget_milestone(
         tree_cost_usd=tree_info.get("settled_usd") if isinstance(tree_info, dict) else None,
         # Whether a tree cap exists at all decides if own cost is the complete
         # picture or a disclosed lower bound (task_pacing.resolve_deciding_spend).
-        root_cap_usd=(cost_ceiling.root_cap_usd if cost_ceiling is not None else None),
+        # This round's own money observation carries the cap the fence admits against; the cached one is fallback.
+        root_cap_usd=(float(tree_info["root_limit_usd"]) if isinstance(tree_info, dict)
+                      and tree_info.get("root_limit_usd") is not None
+                      else (cost_ceiling.root_cap_usd if cost_ceiling is not None else None)),
         whole_work_group=isinstance(tree_info, dict) and tree_info.get("accounting_basis") == "billing_group",
     )
     wallet_note = None if active_use_local else task_pacing.build_wallet_budget_note(

@@ -147,7 +147,8 @@ def _ctx(root, tmp_path):
     )
 
 
-def _run(root, tmp_path, monkeypatch, llm, *, fence: float, env_fence: float | None = None):
+def _run(root, tmp_path, monkeypatch, llm, *, fence: float, env_fence: float | None = None,
+         root_source: str = ""):
     """Run the commit gate with the task's usage scope bound on the orchestrator
     thread (``fence``: the root task's bound limit, the one admission uses) while
     the environment carries ``env_fence`` (a hot-reloaded setting; the same
@@ -155,7 +156,8 @@ def _run(root, tmp_path, monkeypatch, llm, *, fence: float, env_fence: float | N
     monkeypatch.setenv("OUROBOROS_PER_TASK_COST_USD", str(fence if env_fence is None else env_fence))
     monkeypatch.setattr(review, "LLMClient", lambda: llm)
     ctx = _ctx(root, tmp_path)
-    scope = ua.UsageScope(drive_root=root, task_id=ROOT, root_task_id=ROOT, root_limit_usd=fence)
+    scope = ua.UsageScope(drive_root=root, task_id=ROOT, root_task_id=ROOT, root_limit_usd=fence,
+                          root_limit_source=root_source)
     with ua.usage_scope(scope):
         outcome = parallel_review.run_parallel_review(ctx, "wave admission commit")
     return ctx, outcome
@@ -212,14 +214,16 @@ def test_known_spend_at_the_fence_declines_the_wave_at_zero_dollars(gate, tmp_pa
 
     assert llm.calls == [] and _ledger(gate) == before
     said = _returned(ctx, review_err)
-    assert "commit-gate review wave declined before dispatch ($0 spent)" in said
-    assert "Known spend has reached the per-task budget fence $4.000000" in said
+    assert "declined before dispatch ($0 spent)" in said
+    assert "retry this review" in said
+    assert f"Known spend has reached the whole-work billing-group budget fence $4.000000 for group {ROOT}" in said
     assert "known spend=$4.000000, remaining=" in said, "nothing uncounted: no blended or zero hold"
     assert "remaining=$0.000000" in said
     assert "reservation upper bound would have been $5.000000" in said
-    # The root axis binds; the global axis is disclosed beside it with its own remainder.
+    # Equal ordinary root/group limits are one work-cap remedy, not a change to the installation default.
     assert "the global budget $100.000000 alone would leave $96.000000" in said
-    assert "raise the per-task budget (OUROBOROS_PER_TASK_COST_USD)" in said
+    assert "raise this work's cap conversationally (set_task_cost_cap)" in said
+    assert "the per-task setting does not amend a started work's cap" in said
     # Every seat is named with its own bound, in wave order.
     assert said.index("multi_model_review:slot_native coupling/model $3.000000") < said.index(
         "multi_model_review:slot_1 triad/a $1.000000")
@@ -233,7 +237,8 @@ def test_known_spend_at_the_fence_declines_the_wave_at_zero_dollars(gate, tmp_pa
     assert events[0]["seats"] == ["multi_model_review:slot_native", "multi_model_review:slot_1",
                                   "multi_model_review:slot_2"]
     assert events[0]["slot_bounds"] == [3.0, 1.0, 1.0]
-    assert events[0]["binding_axis"] == "root" and events[0]["remaining_usd"] == 0.0
+    assert events[0]["binding_axis"] == "group" and events[0]["remaining_usd"] == 0.0
+    assert events[0]["billing_group_id"] == ROOT and events[0]["binding_can_use_work_cap"] is True
     assert (events[0]["global_limit_usd"], events[0]["global_remaining_usd"]) == (100.0, 96.0)
     # The record carries the refusal text: NOT_DISPATCHED is the first aggregate branch.
     assert "reservation upper bound would have been $5.000000" in ctx._last_review_structured["wave_refusal"]
@@ -253,7 +258,8 @@ def test_global_known_spend_at_the_limit_declines_the_wave_before_any_seat_reser
 
     assert llm.calls == [] and len(_ledger(gate)) == 1  # the other root's attempt only (one current row)
     said = _returned(ctx, review_err)
-    assert "commit-gate review wave declined before dispatch ($0 spent)" in said
+    assert "declined before dispatch ($0 spent)" in said
+    assert "retry this review" in said
     assert "Known spend has reached the global budget TOTAL_BUDGET $100.000000: known spend=$100.000000 across every task" in said
     assert "across every task, remaining=" in said
     assert "remaining=$0.000000" in said
@@ -269,9 +275,32 @@ def test_global_known_spend_at_the_limit_declines_the_wave_before_any_seat_reser
     assert (events[0]["limit_usd"], events[0]["known_usd"]) == (10.0, 0.0)
 
 
+def test_an_amended_work_cap_points_to_the_conversational_operation():
+    """#4267 area C: the work's own raised cap binds (an equal root/group pair included);
+    raising the per-task default moves other works and leaves this one at its fence."""
+    from ouroboros.tools.review_helpers import review_wave_binding_fence
+
+    fence, remedy = review_wave_binding_fence({
+        "binding_axis": "root", "binding_source": "work_cap", "limit_usd": 15.0, "known_usd": 9.0,
+    })
+    assert "this work's own raised cap $15.000000" in fence and "known spend $9.000000" in fence
+    assert "set_task_cost_cap" in remedy
+    assert "OUROBOROS_PER_TASK_COST_USD" not in remedy  # the default is not this work's cap
+
+
+def test_an_amended_work_cap_keeps_its_remedy_on_the_group_axis_too():
+    from ouroboros.tools.review_helpers import review_wave_binding_fence
+
+    fence, remedy = review_wave_binding_fence({
+        "binding_axis": "group", "binding_source": "work_cap", "limit_usd": 15.0, "known_usd": 9.0,
+    })
+    assert "this work's own raised cap" in fence and "set_task_cost_cap" in remedy
+
+
 def test_a_reached_global_limit_admits_a_wave_that_needs_no_paid_admission(gate, monkeypatch):
-    """A reached global limit refuses paid admission only: a wave of subscription seats fits, a wave
-    with one priced seat is declined whole, and a root cap at zero still binds every seat."""
+    """A reached global limit refuses paid admission only: a wave of subscription seats fits and is
+    bound by its own fences — never by the global wallet it cannot draw — while a wave with one
+    priced seat is declined whole, and a root cap at zero still binds every seat."""
     subscription = "claudexor::codex=gpt-6-astra"
     prices = {subscription: None, "triad/free": 0.0, "triad/a": 2.5e-7}
     monkeypatch.setattr(ua, "_reservation_cost", lambda request: prices[request.model])
@@ -282,7 +311,8 @@ def test_a_reached_global_limit_admits_a_wave_that_needs_no_paid_admission(gate,
     wave = dict(root_task_id=ROOT, prompt_chars=10, task_id=ROOT)
     for free_seats in ([subscription], [subscription, "triad/free"]):
         free = ua.review_wave_admission(gate, models=free_seats, root_limit_usd=10.0, **wave)
-        assert (free["fits"], free["binding_axis"], free["remaining_usd"]) == (True, "global", 0.0)
+        assert (free["fits"], free["binding_axis"], free["remaining_usd"]) == (True, "root", 10.0)
+        assert free["global_remaining_usd"] == 0.0  # disclosed beside the wave, never binding it
     mixed = ua.review_wave_admission(gate, models=[subscription, "triad/a"], root_limit_usd=10.0, **wave)
     assert (mixed["fits"], mixed["binding_axis"]) == (False, "global")
     assert mixed["slot_bounds"] == [None, 2.5e-7] and mixed["estimated_wave_usd"] == 2.5e-7
@@ -351,7 +381,9 @@ def test_review_wave_admission_binds_on_the_tighter_of_root_and_global_axes(gate
     assert (unfenced["fits"], unfenced["binding_axis"], unfenced["limit_usd"]) == (True, "global", None)
     assert (unfenced["remaining_usd"], unfenced["global_limit_usd"]) == (4.0, 4.0)
 
-    monkeypatch.setattr(ua, "usage_projection", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("ledger")))
+    from ouroboros import usage_store
+
+    monkeypatch.setattr(usage_store, "read", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("ledger")))
     skeleton = ua.review_wave_admission(gate, root_limit_usd=4.0, global_limit_usd=4.0, **wave)
     assert skeleton["fits"] is None and skeleton["estimated_wave_usd"] is None
     assert skeleton["admission_unknown"] == "RuntimeError"
@@ -748,7 +780,7 @@ def test_raised_root_without_group_amendment_refuses_the_whole_wave(gate, tmp_pa
     event = next(e for e in ctx.pending_events if e.get("type") == "review_wave_budget_insufficient")
     assert event["binding_axis"] == "group" and event["limit_usd"] == 8.0
     assert "whole-work billing-group budget fence" in said
-    assert "amend the original billing-group owner's cap explicitly" in said
+    assert "raise this work's cap conversationally (set_task_cost_cap)" in said
     assert "raise the per-task budget" not in said
     assert [r["status"] for r in ctx._last_triad_raw_results] == ["not_dispatched"] * 3
 
@@ -786,10 +818,29 @@ def test_bound_fence_that_does_not_fit_refuses_even_when_the_environment_is_room
 
     assert llm.calls == [] and len(_ledger(gate)) == 1  # the seeded attempt only (one current row)
     said = _returned(ctx, review_err)
-    assert "per-task budget fence $8.000000" in said
+    assert f"whole-work billing-group budget fence $8.000000 for group {ROOT}" in said
+    assert "raise this work's cap conversationally (set_task_cost_cap)" in said
     assert "remaining=$0.000000" in said
     assert block_reason == "review_wave_budget_insufficient"
     assert coupling.status == "not_dispatched"
+
+
+def test_equal_but_independent_root_fence_does_not_offer_the_group_cap_as_a_remedy(gate, tmp_path, monkeypatch):
+    _seed_settled(gate, fence=8.0, cost=8.0)
+    before = _ledger(gate)
+    llm = LedgerLLM()
+    ctx, (err, coupling, reason, _adv) = _run(
+        gate, tmp_path, monkeypatch, llm, fence=8.0, root_source="authored_root_ceiling")
+    said = _returned(ctx, err)
+
+    assert llm.calls == [] and _ledger(gate) == before
+    assert reason == "review_wave_budget_insufficient" and coupling.status == "not_dispatched"
+    assert "per-task budget fence $8.000000: known spend=$8.000000" in said
+    assert "this separate limit is not raised by set_task_cost_cap" in said
+    assert "raise this work's cap conversationally" not in said
+    event = next(e for e in ctx.pending_events if e.get("type") == "review_wave_budget_insufficient")
+    assert event["binding_axis"] == "root" and event["binding_source"] == "authored_root_ceiling"
+    assert event["binding_can_use_work_cap"] is False
 
 
 @pytest.mark.parametrize("non_task", [False, True])
@@ -872,3 +923,74 @@ def test_a_packet_only_wave_is_admitted_and_then_not_performed(gate, tmp_path, m
     assert block_reason == "coupling_not_performed" and coupling.status == "not_performed"
     assert ctx._last_review_verdict["per_question"] == {"change": "PASS", "coupling": "not_performed"}
     assert REVIEW_JSON_ARRAY_CONTRACT  # the packet seats answered contract A
+
+
+@pytest.mark.parametrize("global_limit,root_source,raised,expected_source,expected_label,expected_work_remedy", [
+    ("4.0", "", None, "ledger_first_row", f"whole-work billing-group budget fence $4.000000 for group {ROOT}", "set_task_cost_cap"),
+    ("3.0", "", None, "ledger_first_row", f"whole-work billing-group budget fence $4.000000 for group {ROOT}", "set_task_cost_cap"),
+    ("3.0", "", 5.0, "work_cap", f"this work's own raised cap $5.000000 for group {ROOT}", "set_task_cost_cap"),
+    ("3.0", "authored_root_ceiling", None, "authored_root_ceiling", "per-task budget fence $4.000000", "resolve that limit at its source"),
+])
+def test_paid_review_refusal_names_both_wallet_and_work_limit_when_both_bind(
+    gate, tmp_path, monkeypatch, global_limit, root_source, raised, expected_source, expected_label, expected_work_remedy,
+):
+    from ouroboros.tools.review_helpers import review_wave_binding_fence
+    from ouroboros.usage_admission import set_work_cap
+
+    _seed_settled(gate, fence=4.0, cost=4.0)
+    if raised is not None:
+        assert set_work_cap(gate, {"id": ROOT, "root_task_id": ROOT}, ROOT, limit_usd=raised,
+                            by={"actor": "owner", "task_id": "test"},
+                            basis={"kind": "owner_words", "source": {"ts": "2026-01-01T00:00:00Z"}})["ok"]
+        _seed_settled(gate, fence=4.0, cost=raised - 4.0)
+    monkeypatch.setenv("TOTAL_BUDGET", global_limit)
+    llm = LedgerLLM()
+    ctx, (review_err, coupling, block_reason, _adv) = _run(
+        gate, tmp_path, monkeypatch, llm, fence=4.0, root_source=root_source)
+
+    assert llm.calls == [] and block_reason == "review_wave_budget_insufficient" and coupling.status == "not_dispatched"
+    said = _returned(ctx, review_err)
+    assert "global budget TOTAL_BUDGET" in said and "raise TOTAL_BUDGET" in said and expected_work_remedy in said
+    assert expected_label in said and "alone would leave $0.000000" not in said
+    event = next(e for e in ctx.pending_events if e.get("type") == "review_wave_budget_insufficient")
+    work_axis = "root" if root_source else "group"
+    assert event["binding_axes"] == (["global", work_axis] if global_limit == "3.0" else [work_axis, "global"])
+    assert (event["work_binding_axis"], event["work_binding_source"]) == (work_axis, expected_source)
+    assert event["binding_can_use_work_cap"] is (not root_source)
+    fence, remedy = review_wave_binding_fence(event)
+    assert "TOTAL_BUDGET" in fence and expected_label in fence and (root_source or "per-task budget fence" not in fence)
+    assert "raise TOTAL_BUDGET" in remedy and expected_work_remedy in remedy
+
+
+def test_free_review_refusal_omits_global_wallet_even_when_wallet_is_exhausted(gate, tmp_path, monkeypatch):
+    from ouroboros.tools.review_helpers import review_wave_binding_fence
+
+    _seed_settled(gate, fence=4.0, cost=4.0)
+    monkeypatch.setenv("TOTAL_BUDGET", "4.0")
+    subscription = "claudexor::codex=gpt-6-astra"
+    monkeypatch.setattr(ua, "_reservation_cost", lambda request: None if request.model == subscription else 0.0)
+    scope = ua.UsageScope(drive_root=gate, task_id=ROOT, root_task_id=ROOT, root_limit_usd=4.0)
+    for kwargs in (
+        {"models": [subscription], "prompt_chars": 10},
+        {"models": [], "session_slots": 1, "prompt_chars": 0},
+        {"models": ["local-model"], "use_local": [True], "prompt_chars": 10},
+    ):
+        with ua.usage_scope(scope):
+            wave = ua.review_wave_admission(gate, root_task_id=ROOT, task_id=ROOT, root_limit_usd=4.0, **kwargs)
+        assert wave["fits"] is False and wave["binding_axes"] == ["group"] and wave["binding_axis"] == "group"
+        assert wave["global_remaining_usd"] == 0.0
+        fence, remedy = review_wave_binding_fence(wave)
+        assert "TOTAL_BUDGET" not in fence and "TOTAL_BUDGET" not in remedy
+        assert "set_task_cost_cap" in remedy
+
+    # Free local API commit-gate wave: decline cites only the work cap, never TOTAL_BUDGET.
+    free_prepared = _prepared(tmp_path)
+    free_prepared["row_plan"]["use_local"] = [True, True, True]
+    monkeypatch.setattr(review, "_prepare_unified_review", lambda *_a, **_k: (free_prepared, None, False))
+    llm = LedgerLLM()
+    ctx, (review_err, coupling, block_reason, _adv) = _run(gate, tmp_path, monkeypatch, llm, fence=4.0)
+    assert llm.calls == [] and block_reason == "review_wave_budget_insufficient" and coupling.status == "not_dispatched"
+    said = _returned(ctx, review_err)
+    assert f"whole-work billing-group budget fence $4.000000 for group {ROOT}" in said
+    assert "set_task_cost_cap" in said
+    assert "TOTAL_BUDGET" not in said and "global budget" not in said

@@ -586,9 +586,11 @@ WORK_LIVES = {
     # A server words the same refusal as a size it will not take and names no number: the request went out inside the
     # reply reservation of the total it states, so the refusal is that total's answer, learned in one round (the
     # transport first repeats a 400 it cannot read without the reasoning replay: ``reasoning_strip_retry_allowed``).
+    # Keep that wall on the third read, not the second: the second part has slightly less repeated padding
+    # so ordinary growth in the production schema envelope does not turn its arrival into a different scenario.
     "a_total_refused_as_a_size_with_no_number": (
         Life(places=(Place("opus", OPUS, density=1.4, marked=True, kind="total_as_a_size"), _A), primary="opus",
-             fallbacks=("a",), reads=(_WIDE,) * 5),
+             fallbacks=("a",), reads=(_WIDE, 59_000) + (_WIDE,) * 3),
         r"first_request@opus( append@opus)*( (system_changed|history_rewritten)@opus( append@opus)*)+", {}, 2),
     # The same server, and a part far denser than the host counts: the first pass's smaller request is refused in the
     # same words. It is still that total's refusal, so the next pass runs and the work stays on its model.
@@ -704,7 +706,8 @@ def test_a_works_life_writes_its_start_only_at_its_entries(name, main_call, monk
     if name in _NAMED_PATHS:
         primary, log = _NAMED_PATHS[name], record["log"]
         refused = [entry for entry in log if entry["kind"] == "refused"]
-        assert refused and all(entry["place"] == primary for entry in refused), (name, refused)
+        assert [(entry["round"], entry["place"]) for entry in refused] == [(4, primary), (4, primary)], (name, refused)
+        assert sum(row.get("kind") == "total" for row in record["windows"]) == 1
         assert {entry["place"] for entry in log if entry["kind"] == "answered"} == {primary}, (name, log)
     if life.second:  # both stories narrowed, each its own way: the tool array, A' and B's head are what they share
         second = record["second"]

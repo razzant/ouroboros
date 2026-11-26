@@ -378,12 +378,17 @@ def run_parallel_review(
 
             if not hasattr(ctx, "_review_degraded_reasons"):
                 ctx._review_degraded_reasons = []
+            authority_block = "billing authority for this root could not be verified" in wave_refusal.lower()
             ctx._review_degraded_reasons.append(
+                "review_not_dispatched_billing_authority_unavailable: billing authority for this root "
+                "could not be verified, so no seat was dispatched ($0 spent)" if authority_block else
                 "review_not_dispatched_budget_admission: known spend has reached a budget "
-                "fence of the commit-gate wave, so no seat was dispatched ($0 spent)"
+                "fence for this review wave, so no seat was dispatched ($0 spent)"
             )
             ctx._last_review_critical_findings = []
-            ctx._last_review_block_reason = "review_wave_budget_insufficient"
+            ctx._last_review_block_reason = (
+                "review_wave_billing_authority_unavailable" if authority_block else "review_wave_budget_insufficient"
+            )
             from ouroboros.review_ledger import CouplingOutcome
 
             ctx._last_coupling_result = CouplingOutcome(status="not_dispatched")
@@ -391,7 +396,10 @@ def run_parallel_review(
                 getattr(ctx, "_triad_withheld_seat_records", []) or []
             ) + triad_not_dispatched_records(prepared.get("row_plan") or {}, wave_refusal)
             _handle_review_block_or_warning(
-                ctx, wave_refusal, "The commit-gate review wave was declined before dispatch (budget fence); nothing was reviewed. ")
+                ctx, wave_refusal,
+                "The review wave was declined before dispatch (billing authority unavailable); nothing was reviewed. "
+                if authority_block else
+                "The review wave was declined before dispatch (budget fence); nothing was reviewed. ")
         else:
             # ---- Phase 2: submit the prepared wave to the executor. ----
             try:

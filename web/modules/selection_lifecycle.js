@@ -90,3 +90,33 @@ export function bindDocumentSelectionDismissal(doc = globalThis.document, { onPr
     doc.addEventListener('pointerdown', handler, true);
     return () => doc.removeEventListener?.('pointerdown', handler, true);
 }
+
+const RETAINED_SELECTION_RELEASED = 'ouro:retained-selection-released';
+export function notifyRetainedSelectionReleased(doc) {
+    // Let the shell restore the native range (or finish the pointer press) before resuming writes.
+    queueMicrotask(() => doc?.dispatchEvent?.(new Event(RETAINED_SELECTION_RELEASED)));
+}
+
+// Rich text replacement waits for both the document Selection and the room's retained copy of it.
+export function writeUnselected(node, state, onDomWrite, write, stale = () => false) {
+    const doc = node.ownerDocument;
+    const events = ['selectionchange', 'visibilitychange', RETAINED_SELECTION_RELEASED];
+    const stop = () => {
+        if (state.deferred.delete(stop)) for (const event of events) doc.removeEventListener(event, paint);
+    };
+    const paint = () => {
+        if (state.destroyed || stale() || node.isConnected === false) return stop();
+        const selection = doc?.getSelection?.();
+        if (doc?.hidden || state.keptSelection?.() || (!selection?.isCollapsed && Array.from({ length: selection?.rangeCount || 0 },
+            (_, i) => selection.getRangeAt(i)).some(range => range.intersectsNode?.(node)))) {
+            if (!state.deferred.has(stop)) {
+                state.deferred.add(stop);
+                for (const event of events) doc.addEventListener(event, paint);
+            }
+            return;
+        }
+        stop();
+        onDomWrite(write);
+    };
+    paint();
+}
