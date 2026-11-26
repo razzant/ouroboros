@@ -133,7 +133,7 @@ The charts below are self-reported results on Terminal-Bench 2.1, OSWorld-Verifi
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="docs/llm-rating/card/latest-en-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="docs/llm-rating/card/latest-en-light.png">
-      <img alt="What Ouroboros thinks of your LLMs: its personal ranking of the models it works with, with a letter for each kind of work" src="docs/llm-rating/card/latest-en-light.png" width="880">
+      <img alt="What Ouroboros thinks of your LLMs: its personal ranking of the models it works with, with a letter for each column of work" src="docs/llm-rating/card/latest-en-light.png" width="880">
     </picture>
   </a>
 </p>
