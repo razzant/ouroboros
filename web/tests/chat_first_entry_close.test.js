@@ -27,8 +27,9 @@ const CHAT_ID = 2;
 
 // `openedBeforeRoom`: the page's socket opens first and the room mounts on it (a Project opened later).
 function makeEntry(t, { openedBeforeRoom = false } = {}) {
-    const reads = [];     // every newest/page read the room made: held until the test answers it, cancelled by its signal
+    const reads = [];     // every newest/page/after read the room made: held until the test answers it, cancelled by its signal
     const sockets = [];   // every socket attempt the page's client made
+    let readingArrivals = 0;
     class FakeSocket {
         static CONNECTING = 0;
         static OPEN = 1;
@@ -43,6 +44,10 @@ function makeEntry(t, { openedBeforeRoom = false } = {}) {
         if (address.pathname === '/api/chat/history') {
             return new Promise((resolve, reject) => {
                 const read = {
+                    cursor: address.searchParams.get('cursor'),
+                    mode: address.searchParams.get('mode') || (address.searchParams.get('cursor') ? 'page' : 'newest'),
+                    reason: address.searchParams.get('reason') || '',
+                    decision: address.searchParams.get('decision') || '',
                     aborted: false,
                     release: (body) => resolve({ ok: true, status: 200, json: async () => ({ profile_scope: PREVIEW_SCOPE, ...body }) }),
                 };
@@ -75,6 +80,7 @@ function makeEntry(t, { openedBeforeRoom = false } = {}) {
         ws: roomSocket(ws),
         state: { activePage: 'chat', projectChatIds: new Set([CHAT_ID]), unreadCount: 0 },
         updateUnreadBadge() {},
+        onReadingLatest: () => { readingArrivals += 1; },
         stateSnapshots: {
             begin: () => ({ generation: 1, requestedAt: Date.now() }),
             gate() { return Promise.resolve(this.begin()); },
@@ -97,19 +103,36 @@ function makeEntry(t, { openedBeforeRoom = false } = {}) {
         restoreDom(prior);
     });
     const messages = globalThis.document.byId.get('chat-messages');
+    const composer = globalThis.document.byId.get('chat-input-area');
+    const scrollBtn = globalThis.document.byId.get('chat-scroll-bottom');
+    const box = (top, bottom) => ({ top, bottom, left: 0, right: 100, width: 100, height: bottom - top });
+    messages.getBoundingClientRect = () => box(0, 20);
+    composer.getBoundingClientRect = () => box(20, 60);
+    const placeAtTop = (id) => {
+        const rect = ElementStub.prototype.getBoundingClientRect;
+        ElementStub.prototype.getBoundingClientRect = function () {
+            if (this.dataset?.historyId !== id) return rect.call(this);
+            const top = -messages.scrollTop;
+            return { top, bottom: top + 20, left: 0, right: 100, width: 100, height: 20 };
+        };
+        t.after(() => { ElementStub.prototype.getBoundingClientRect = rect; });
+    };
     const row = (id, role, text, n) => ({ role, chat_id: CHAT_ID, source: 'web', text, content: text, ts: isoAt(n), history_id: id,
         history_position: { source: 'chat', offset: n } });
-    const history = () => ({
+    const history = (extra = {}) => ({
         messages: [row('chat:q1', 'user', 'Where did we stop yesterday?', 1), row('chat:a1', 'assistant', 'At the release notes draft.', 2)],
         progress: [], has_more: false, page_cursor: 'page:1', next_cursor: null, after_cursor: null,
         window: { complete: true, truncated_by: [] }, coverage: null,
+        ...extra,
     });
     return {
-        ws, reads, sockets, instance, open, history,
+        ws, reads, sockets, instance, open, history, row, messages, placeAtTop,
         connect() { ws.connect(); },
         // A failed or lost socket attempt, as the browser reports it: an error, then the close.
         close(index) { sockets[index].readyState = FakeSocket.CLOSED; sockets[index].onerror?.(); sockets[index].onclose(); },
         status: () => mount.querySelector('.status-badge')?.textContent || '',
+        scrollLabel: () => scrollBtn?.getAttribute('aria-label') || '',
+        arrivals: () => readingArrivals,
         shown: () => messages.querySelectorAll('[data-history-id]').map((n) => n.dataset.historyId),
         buttons: () => messages.querySelectorAll('button').map((b) => b.textContent),
     };
@@ -186,4 +209,143 @@ test('W3 control: a room mounted on an already-open socket has its read cancelle
     r.reads[0].release(r.history());
     await quiet();
     assert.equal(r.instance.hasPaintedHistory(), false);
+});
+
+test('cold boot before first socket opens preserves one-shot unread landing over HTTP and waits for connected paint for read credit', async (t) => {
+    const r = makeEntry(t);
+    r.placeAtTop('chat:late');
+    const lateRow = { ...r.row('chat:late', 'assistant', 'Arrived last, written earlier.', 0), ts: isoAt(0) };
+    await until(() => r.reads.length === 1);
+
+    void r.instance.showLatest({ arrive: true });
+    const boot = r.instance.refreshHistory({ revision: 1 });
+    r.reads[0].release(r.history({
+        messages: [lateRow, r.row('chat:q1', 'user', 'Follow up', 1), r.row('chat:a1', 'assistant', 'Earlier reply', 2)],
+        after_cursor: 'after:1',
+        window: { complete: true, truncated_by: [], latest_message: { history_id: 'chat:late', out_of_order: true } },
+    }));
+    await until(() => r.reads.length === 2);
+    assert.equal(r.reads[1].mode, 'after');
+    r.reads[1].release({ messages: [], after_cursor: 'after:2', window: { complete: false, truncated_by: ['page'] } });
+    const bootReceipt = await boot;
+    await quiet();
+
+    assert.equal(bootReceipt.painted, false, 'read credit waits until socket connects and paints');
+    assert.equal(r.arrivals(), 0, 'onReadingLatest is withheld while unopened');
+    assert.equal(r.messages.scrollTop, 0, 'one-shot unread landing still lands on the newest message over healthy HTTP');
+    assert.notEqual(r.scrollLabel(), 'Retry loading latest messages');
+
+    // First real socket open shares initial HTTP and credits on connected paint without an extra whole newest.
+    r.connect();
+    r.open(0);
+    await quiet();
+    const afterOpen = r.instance.refreshHistory({ revision: 1 });
+    await until(() => r.reads.length === 3);
+    assert.equal(r.reads[2].mode, 'after');
+    assert.equal(r.reads[2].cursor, 'after:2');
+    r.reads[2].release({ messages: [], after_cursor: 'after:3', window: { complete: false, truncated_by: ['page'] } });
+    const connected = await afterOpen;
+    assert.deepEqual([connected.painted, connected.read], [true, true]);
+    assert.equal(r.reads.filter((e) => e.mode === 'newest').length, 1, 'no extra whole newest after first open');
+});
+
+test('a failed first socket attempt before any open leaves no fake retry, walks older pages to land unread, and avoids an extra newest on first open', async (t) => {
+    const r = makeEntry(t);
+    r.placeAtTop('chat:old');
+    r.connect();
+    await until(() => r.reads.length === 1);
+
+    r.close(0);  // first socket attempt fails before any open
+    await quiet();
+    void r.instance.showLatest({ arrive: true });
+    const boot = r.instance.refreshHistory({ revision: 1 });
+    r.reads[0].release(r.history({
+        has_more: true, next_cursor: 'older:1', after_cursor: 'after:1',
+        window: { complete: false, truncated_by: ['page'], latest_message: { history_id: 'chat:old', out_of_order: true } },
+    }));
+    await until(() => r.reads.length === 2);
+    assert.equal(r.reads[1].mode, 'after', 'first close before open must not set fake catchUp.owed');
+    r.reads[1].release({ messages: [], after_cursor: 'after:2', window: { complete: false, truncated_by: ['page'] } });
+    await until(() => r.reads.length === 3);
+    assert.equal(r.reads[2].cursor, 'older:1', 'unread opening walks older pages over healthy HTTP');
+    r.reads[2].release({
+        messages: [{ ...r.row('chat:old', 'assistant', 'Older latest arrival', 0), ts: isoAt(0) }],
+        has_more: false, page_cursor: 'page:older:1', next_cursor: null,
+        window: { complete: false, truncated_by: ['page'] },
+    });
+    const bootReceipt = await boot;
+    await quiet();
+
+    assert.equal(r.reads[0].aborted, false);
+    assert.equal(bootReceipt.painted, false, 'read credit is withheld before first socket open');
+    assert.equal(r.arrivals(), 0);
+    assert.ok(r.shown().includes('chat:old'), 'older page delivered the newest message');
+    assert.equal(r.messages.scrollTop, 0, 'one-shot unread landing reached the older newest message');
+    assert.notEqual(r.scrollLabel(), 'Retry loading latest messages', 'first close before open leaves no fake Retry button');
+
+    r.connect();
+    r.open(1);
+    await quiet();
+    const afterOpen = r.instance.refreshHistory({ revision: 1 });
+    await until(() => r.reads.length === 4);
+    assert.equal(r.reads[3].mode, 'after', 'first open uses after, not a second whole newest');
+    assert.equal(r.reads[3].cursor, 'after:2');
+    r.reads[3].release({ messages: [], after_cursor: 'after:3', window: { complete: false, truncated_by: ['page'] } });
+    const connected = await afterOpen;
+    assert.deepEqual([connected.painted, connected.read], [true, true]);
+    assert.equal(r.reads.filter((e) => e.mode === 'newest').length, 1, 'no extra whole newest forced by fake catchUp.owed');
+});
+
+test('control: a post-open disconnect during unread opening starts no reads, preserves the one-shot landing, and withholds credit if disconnect precedes paint', async (t) => {
+    const r = makeEntry(t, { openedBeforeRoom: true });
+    r.placeAtTop('chat:late2');
+    await until(() => r.reads.length === 1);
+    r.reads[0].release(r.history({ after_cursor: 'after:1' }));
+    await quiet();
+
+    // 1. Real disconnect after a prior open: 0 reads started, one-shot landing preserved for reconnect.
+    r.close(0);
+    await quiet();
+    const readsBefore = r.reads.length;
+    void r.instance.showLatest({ arrive: true });
+    const offline = await r.instance.refreshHistory({ revision: 2 });
+    assert.equal(offline.painted, false);
+    assert.equal(r.reads.length, readsBefore, 'post-open disconnect starts 0 reads');
+
+    r.connect();
+    r.open(1);
+    await until(() => r.reads.length === readsBefore + 1);
+    assert.equal(r.reads[readsBefore].mode, 'newest');
+    const reconn = r.instance.refreshHistory({ revision: 2 });
+    r.reads[readsBefore].release(r.history({
+        messages: [{ ...r.row('chat:late2', 'assistant', 'Late after reconnect', 0), ts: isoAt(0) },
+            r.row('chat:q1', 'user', 'q1', 1), r.row('chat:a1', 'assistant', 'a1', 2)],
+        after_cursor: 'after:2',
+        window: { complete: true, truncated_by: [], latest_message: { history_id: 'chat:late2', out_of_order: true } },
+    }));
+    await until(() => r.reads.length === readsBefore + 2);
+    r.reads[readsBefore + 1].release({ messages: [], after_cursor: 'after:3', window: { complete: false, truncated_by: ['page'] } });
+    const afterReconn = await reconn;
+    await quiet();
+    assert.deepEqual([afterReconn.painted, afterReconn.read], [true, true]);
+    assert.equal(r.messages.scrollTop, 0, 'one-shot unread landing survived the post-open disconnect and landed on reconnect');
+
+    // 2. Disconnect after read completes but before the 2-rAF paint finishes grants no read credit.
+    const priorRaf = globalThis.requestAnimationFrame;
+    const queuedRafs = [];
+    globalThis.requestAnimationFrame = (fn) => { queuedRafs.push(fn); return queuedRafs.length; };
+    t.after(() => { globalThis.requestAnimationFrame = priorRaf; });
+
+    const prePaint = r.instance.refreshHistory({ revision: 3 });
+    await until(() => r.reads.length === readsBefore + 3);
+    r.reads[readsBefore + 2].release({
+        messages: [r.row('chat:a3', 'assistant', 'New message', 3)],
+        after_cursor: 'after:4',
+        window: { complete: false, truncated_by: ['page'], latest_message: { history_id: 'chat:a3', out_of_order: false } },
+    });
+    await until(() => queuedRafs.length > 0);
+    r.close(1);  // disconnect BEFORE paint frames run
+    while (queuedRafs.length) queuedRafs.shift()();
+    const disconnectedBeforePaint = await prePaint;
+    assert.equal(disconnectedBeforePaint.painted, false, 'read credit requires connected paint');
 });

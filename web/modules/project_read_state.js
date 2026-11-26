@@ -22,8 +22,10 @@ const searched = (window) => window?.latest_message === null && Number.isSafeInt
 
 /**
  * @param {{
- *   read: (fresh: boolean, whole: boolean | (() => boolean), why: object|null) => Promise<boolean>,  // true when the read succeeded;
- *       `whole`: the newest page; `why`: the read's tags its caller named (`refresh`), else the receipt's own
+ *   read: (fresh: boolean, whole: boolean | (() => boolean), why: object|null, current: () => boolean) => Promise<boolean>,  // true when the read succeeded;
+ *       `whole`: the newest page; `why`: the read's tags its caller named (`refresh`), else the receipt's own; `current`: still allowed to read
+ *   isConnected?: () => boolean,  // false before first open or while disconnected: read credit waits for connected paint
+ *   isUnopened?: () => boolean,   // true before any first socket open: healthy HTTP reads and one-shot landing may proceed
  *   isShown: () => boolean,
  *   isReadingLatest: (latest: undefined|null|object) => boolean,  // the reader is at `latest`
  *   onReadingLatest?: () => void,
@@ -36,7 +38,9 @@ const searched = (window) => window?.latest_message === null && Number.isSafeInt
  * }} facts
  */
 export function createProjectReadReceipt({ read, isShown, isReadingLatest, onReadingLatest = () => {}, land = () => {},
-    arriving = () => null, older = async () => ({}), present = async () => {}, delivered = () => false, onNote = () => {} }) {
+    arriving = () => null, older = async () => ({}), present = async () => {}, delivered = () => false, onNote = () => {},
+    isConnected = () => true, isUnopened = () => false }) {
+    const canRead = () => isConnected() || isUnopened();
     let generation = 0;
     let coveredRevision = 0;
     let readingLatest = false;
@@ -81,8 +85,8 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
     async function arrive(readable) {
         const token = arriving();
         if (token === null || reaching === token) return;
-        const owed = () => arriving() === token && isShown() && unreached();
-        const returning = () => arriving() === token && isShown() && newest() === undefined;
+        const owed = () => arriving() === token && isShown() && canRead() && unreached();
+        const returning = () => arriving() === token && isShown() && canRead() && newest() === undefined;
         const reach = readable && owed();
         if (reach) {
             reaching = token;
@@ -96,6 +100,7 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
                 }
             } finally { if (reaching === token) reaching = null; }
         }
+        if (!canRead()) return;
         land(readable && isShown() ? newest() : null, token);
         // Landed after the opening read's own paint: the landing reports where the reader is.
         if (reach) note();
@@ -104,7 +109,7 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
     // window shown again, another newest message) reports the current position once.
     const note = ({ discrete = false } = {}) => {
         onNote();
-        const latest = isReadingLatest(newest());
+        const latest = isConnected() && isReadingLatest(newest());
         if (latest && (discrete || !readingLatest)) onReadingLatest();
         readingLatest = latest;
     };
@@ -144,15 +149,17 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
         async refresh({ revision = 0, why = null } = {}) {
             const own = ++generation;
             const target = Math.max(0, Number(revision) || 0);
-            const readable = await read(target > coveredRevision, () => newest() === null && !searched(recentRead.window), why);
-            const covered = readable && newest() !== null;
+            if (!canRead()) return { painted: false, revision: target };
+            const readable = await read(target > coveredRevision, () => newest() === null && !searched(recentRead.window), why, canRead);
+            if (!canRead()) return { painted: false, revision: target };
+            const covered = isConnected() && readable && newest() !== null;
             if (covered && target > coveredRevision) coveredRevision = target;
             if (own !== generation) return { painted: false, revision: target };
             void arrive(readable);
             if (!covered || !isShown()) return { painted: false, revision: target };
             // Two frames cover layout followed by paint/composite.
             await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-            const painted = own === generation && isShown();
+            const painted = own === generation && isShown() && isConnected();
             if (painted) onNote();
             const atLatest = painted && isReadingLatest(newest());
             // A withheld read lowers the edge, so the next arrival retries it.
@@ -160,7 +167,7 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
             return { painted, read: atLatest, revision: target };
         },
         note,
-        // Each admitted recent read, before its rows are drawn. One that cannot
+        // Each admitted recent read, once its rows are drawn. One that cannot
         // name the newest message leaves no revision covered, so the next refresh
         // reads again: a healed source names it without a new revision.
         recent({ window, coverage, recentVersion }) {
