@@ -698,6 +698,7 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
     from ouroboros import loop
     from ouroboros.answer_facts import card_reference_view, mark_press_arrival, row_source
     from ouroboros.owner_words import OWNER_PRESS, answered_card_reply, answered_card_source, owner_place_accounts, reply_target
+    from ouroboros.safety_evidence import verified_chat_mail_kind
     from ouroboros.tool_access import canonical_data_root
 
     if isinstance(entry.get("host_carried"), dict):
@@ -745,6 +746,7 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
                                              "quiz_id": (answered or {}).get("quiz_id") or carried_answer.get("quiz_id"),
                                              "client_message_id": row.get("client_message_id"),
                                              "chat_id": str(_row_chat_id(row)), "ts": row.get("ts"),
+                                             "mail_kind": verified_chat_mail_kind(row, source, living) if addressed else "",
                                              "row_sha256": owner_row_identity(row)["row_sha256"],
                                              "relay_source_root": str(source_root) if source_root and str(source_root) != str(root) else ""},
                                      reply_to=replied)

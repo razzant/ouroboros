@@ -383,6 +383,15 @@ def test_queued_retry_checks_ordinary_resume_authority_before_accepting_a_start(
     from tests._owner_pause_ended_helpers import _pending, _resume
 
     _hung_first_attempt(host, monkeypatch, clock)
+    if rail == "root_cap":
+        from ouroboros import usage_accounting as ua
+
+        scope = ua.UsageScope(drive_root=host.root, task_id="held", root_task_id="held",
+                              root_limit_usd=None, billing_group_id="held", billing_group_limit_usd=None, source="test")
+        with ua.usage_scope(scope):
+            attempt = ua.reserve_attempt(ua.AttemptRequest(model="m", provider="openai", reservation_usd=5.0))
+            ua.mark_dispatched(attempt)
+            ua.settle_attempt(attempt, {"prompt_tokens": 1}, cost_usd=5.0, cost_final=True)
     _pending(host.root, "held", "lost", tree="held")  # The original worker sent the request before the pause.
     historical_timeout_retry(clock)
     [retry] = _successors(host)
@@ -406,8 +415,10 @@ def test_queued_retry_checks_ordinary_resume_authority_before_accepting_a_start(
         elif rail == "global_read":
             fault.setattr("supervisor.state.budget_remaining", unreadable)
         elif rail == "root_cap":
-            fault.setattr("ouroboros.usage_accounting.usage_projection", lambda *_a, **_kw: {
-                "settled_usd": 5.0, "accounted_usd": 5.0, "limit_usd": 5.0})
+            prior = load_task_result(host.root, "held", strict=True)
+            patch_document(host.root, "held", lambda r: {**r, "billing_group": {
+                "billing_group_id": "held", "billing_group_limit_usd": 5.0,
+                "billing_group_limit_source": "initial_task_admission", "billing_group_limit_revision": "r1"}})
         elif rail == "group_zero":
             prior = load_task_result(host.root, "held", strict=True)
             patch_document(host.root, "held", lambda r: {**r, "billing_group": {
@@ -422,7 +433,7 @@ def test_queued_retry_checks_ordinary_resume_authority_before_accepting_a_start(
         assert refusal["error"] == error and not refusal.get("acceptable_unknown")
         assert not custody.invocation_record(host.root, "lost").get("resume_decisions")
         assert not read_fence(host.root, "held").get("resume_grant") and "held" in queue.BUDGET_ROOT_FENCES
-    if rail == "group_zero":
+    if rail in {"root_cap", "group_zero"}:
         patch_document(host.root, "held", lambda r: {**r, "billing_group": prior.get("billing_group") or {}})
     if rail == "paid":
         # At the same reached global limit, local work still returns. A zero task timeout adds no bound.

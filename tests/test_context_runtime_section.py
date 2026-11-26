@@ -1247,3 +1247,70 @@ def test_runtime_carries_setup_for_shared_inputs_and_not_for_declared_ones(tmp_p
     declared = json.loads(build_runtime_section(env, {"id": "task-2", "type": "task", "input_sources": "declared"})
                           .split("\n\n", 1)[1])
     assert "setup" not in declared
+
+
+def test_runtime_budget_block_shows_the_addressed_works_effective_cap(tmp_path, monkeypatch):
+    """#4267 area C: a newly started helper must be told the cap its tree is admitted
+    against — the addressed work's money snapshot, which an owner amendment may have
+    raised past the per-task default — not the default itself."""
+    from types import SimpleNamespace
+
+    from ouroboros import usage_admission
+    from ouroboros.context_runtime_facts import _runtime_budget_info
+
+    monkeypatch.setenv("OUROBOROS_PER_TASK_COST_USD", "10")
+    seen = {}
+
+    def snapshot(root, task, root_id, *, root_limit=None):
+        seen.update(root=root, task=task, root_id=root_id, root_limit=root_limit)
+        # A GROUP-basis snapshot: sibling roots' spend rides in the allowance, and the
+        # root has its own (here looser) limit — the runtime block must co-observe it.
+        return {"root_limit_usd": 15.0, "settled_usd": 9.0, "remaining_known_usd": 6.0,
+                "binding_axis": "group",
+                "root_axis": {"limit_usd": 20.0, "settled_usd": 2.0, "accounted_usd": 2.0,
+                              "source": "", "revision": None},
+                "group_axis": {"limit_usd": 15.0, "settled_usd": 9.0, "accounted_usd": 9.0,
+                               "source": "initial_task_admission", "revision": None}}
+
+    monkeypatch.setattr(usage_admission, "task_money_snapshot", snapshot)
+    env = SimpleNamespace(drive_root=tmp_path)
+    task = {"id": "t-helper", "root_task_id": "t-root", "budget_drive_root": str(tmp_path)}
+    info = _runtime_budget_info(env, task)
+    assert info["per_task_tree_cap_usd"] == 15.0  # group-basis allowance, sibling spend included
+    assert info["per_task_tree_cap_basis"] == "task_money_snapshot"
+    assert info["per_task_tree_group_spent_usd"] == 9.0  # the whole billing group's known spend
+    assert info["per_task_tree_room_usd"] == 6.0  # what THIS tree can still add on that basis
+    assert info["per_task_root_limit_usd"] == 20.0  # the root's own cap, labelled separately
+    assert "Effective hard cap for THIS task's WHOLE tree" in info["per_task_tree_cap_rule"]
+    assert "whole billing GROUP's KNOWN spend" in info["per_task_tree_cap_rule"]
+    assert "set_task_cost_cap" in info["per_task_tree_cap_rule"]
+    assert seen["root_id"] == "t-root" and seen["root_limit"] == 10.0  # the default is the fallback input
+
+
+def test_runtime_budget_block_labels_the_default_separately_when_the_work_cap_is_unknown(
+        tmp_path, monkeypatch):
+    """Unknown is never the default shown as measured (P1): when the work's own cap
+    cannot be read, the setting is named as the DEFAULT for new works and no number is
+    shown for this task; the two endings at the real cap keep their exact contract."""
+    from types import SimpleNamespace
+
+    from ouroboros import usage_admission
+    from ouroboros.context_runtime_facts import _runtime_budget_info
+
+    monkeypatch.setenv("OUROBOROS_PER_TASK_COST_USD", "10")
+    monkeypatch.setattr(usage_admission, "task_money_snapshot",
+                        lambda *a, **k: {"root_limit_usd": None})
+    env = SimpleNamespace(drive_root=tmp_path)
+    info = _runtime_budget_info(env, {"id": "t2", "root_task_id": "t2"})
+    assert "per_task_tree_cap_usd" not in info
+    assert info["per_task_tree_cap_default_usd"] == 10.0
+    rule = info["per_task_tree_cap_rule"]
+    assert "DEFAULT cap for new works" in rule and "could not be read" in rule
+    assert "pauses with its work saved" in rule and "budget_exhausted" in rule
+    assert "no paid recap" in rule and "the task pauses" not in rule
+    # A task with no id at all never reaches for the store.
+    calls = []
+    monkeypatch.setattr(usage_admission, "task_money_snapshot",
+                        lambda *a, **k: calls.append(1) or {"root_limit_usd": None})
+    info2 = _runtime_budget_info(env, {})
+    assert calls == [] and info2["per_task_tree_cap_default_usd"] == 10.0
