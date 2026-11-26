@@ -230,6 +230,45 @@ test('R1 reproducer: pending saved echo pushed out of bounded 150-row newest nev
     assert.equal(r.status(), 'Starting…');
 });
 
+for (const dispatch of ['dispatched', 'ended-host', 'pending']) {
+    test(`Load more reads the exact saved send beyond newest (${dispatch})`, async (t) => {
+        const r = makeRoom(t);
+        r.push(r.page([r.assistantRow('chat:before', 'Previously visible')]));
+        await until(() => r.reads.length === 1);
+        await quiet();
+
+        const words = 'My earlier send';
+        const cmid = r.send(words);
+        const own = { sender_session_id: r.sessionIdOf(cmid), row_address: 'row:2@2026-11-26T10:00:01Z#aaaaaaaaaaaa' };
+        const owed = r.userRow(cmid, words, { ...own, ingress_dispatched: undefined, ingress_pending: true });
+        r.rawWs.emit('chat', owed);
+        assert.equal(r.status(), 'Sending');
+
+        r.disconnect();
+        r.push(r.page([r.assistantRow('chat:later', 'A later row')], {
+            has_more: true, next_cursor: 'older:owed', window: { complete: false, truncated_by: ['quota'] },
+        }));
+        r.reconnect();
+        await until(() => r.shown().includes('chat:later'));
+        await quiet();
+        assert.equal(r.status(), 'Sending', 'newest omitted this send');
+
+        r.push(r.page([r.userRow(cmid, words, { ...own, ingress_pending: dispatch === 'pending',
+            ingress_dispatched: dispatch === 'dispatched' })]));
+        const loadMore = r.messages.querySelector('.chat-load-older-btn');
+        assert.equal(loadMore.textContent, 'Load more history');
+        await loadMore.listeners.get('click')[0]();
+        await quiet();
+        assert.deepEqual(r.reads.map(({ mode }) => mode), ['newest', 'newest', 'older']);
+        assert.equal(r.reads.at(-1).cursor, 'older:owed');
+        assert.deepEqual(r.actions(cmid), dispatch === 'ended-host' ? ['send_as_new'] : []);
+        assert.equal(r.bubble(cmid).querySelector('[data-ingress-saved]')?.textContent,
+            dispatch === 'ended-host' ? 'Saved; delivery not confirmed.' : 'Input saved');
+        assert.equal(r.status(), dispatch === 'pending' ? 'Sending' : 'Starting…');
+        assert.equal(r.sent.length, 1, 'reading any receipt sends nothing itself');
+    });
+}
+
 test('R1: a still-pending row and an old server\'s row without ingress facts keep Sending; a durable routing receipt settles', async (t) => {
     const r = makeRoom(t);
     await until(() => r.reads.length === 1);
@@ -834,4 +873,23 @@ test('R1 unit: createCatchUp marks the sends a return left waiting like a discon
     assert.equal(pending.has('held'), false, 'a newer read answering for it settles it');
     assert.equal(pending.has('queued'), true, 'a frame the socket has not written is the queue\'s, never settled');
     catchUp.end(read);
+});
+
+test('an older receipt must have been requested since the loss and cannot confirm freshness', () => {
+    const pending = new Map();
+    const catchUp = createCatchUp(() => {}, 50, pending);
+    catchUp.trackSend('held', false);
+    const newest = catchUp.stampRead(true);
+    const stale = catchUp.stampRead(false);
+    catchUp.cancel(undefined, true);
+    catchUp.confirmPage({ recentVersion: stale }, ['held']);
+    assert.equal(pending.has('held'), true, 'older read began before the disconnect');
+    catchUp.confirmPage({ recentVersion: catchUp.stampRead(false), window: {
+        truncated_by: ['chat_projection_failed'],
+    } }, ['held']);
+    assert.equal(pending.has('held'), true, 'partial projection is not a receipt');
+    catchUp.confirmPage({ recentVersion: catchUp.stampRead(false) }, ['held']);
+    assert.equal(pending.has('held'), false, 'an exact receipt from a fresh page answers for the send');
+    assert.equal(catchUp.newestRequest, newest, 'older reads are not the newest request');
+    assert.equal(catchUp.owed, true, 'neither an older receipt nor a partial read repairs the window');
 });

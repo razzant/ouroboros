@@ -215,7 +215,8 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
  * absence, however a page bounds it; a late pre-disconnect response cannot. A disconnect, and the read beginning a
  * reconnect or a return (a window hidden on a live connection hears no start or end frame either), mark the sends still
  * waiting: only a later admitted read carrying the host's own row for one (`answeredOwnerIds`) ends that wait; in a
- * window that missed nothing the live start does. `confirmWindow` returns whether the read was
+ * window that missed nothing the live start does. An older page can answer for its exact send without
+ * confirming freshness of the window. `confirmWindow` returns whether the read was
  * whole; a fault owes repair even without an absence. `end` ends only the matching read's
  * feedback; `cancel` records absence. `retry` distinguishes an unconfirmed attempt from absence alone. */
 const cutWindow = ({ reason_code: refused, window } = {}) => Boolean(refused)
@@ -245,8 +246,9 @@ export function answeredOwnerIds(rows, pending, { chatId, sessionId, localOwnerR
     return matched;
 }
 
-export function createCatchUp(changed, bound = 300, pending = null) {
+export function createCatchUp(changed, bound = 300, pending = null, owner = null) {
     let timer = null, active = false, reading = null, gate = null, after = null, failed = false, awaited = null;
+    let readVersion = 0, newestRequest = 0;
     const stop = () => { clearTimeout(timer); timer = null; };
     const wake = () => { const current = gate; gate = null; current?.resolve(); };
     const arm = (read) => {
@@ -277,7 +279,15 @@ export function createCatchUp(changed, bound = 300, pending = null) {
         }
         return settled;
     };
+    const confirmSends = ({ recentVersion }, rows) =>
+        settleSends(recentVersion, owner ? answeredOwnerIds(rows, pending, owner()) : rows);
     return {
+        stampRead(newest) {
+            readVersion += 1;
+            if (newest) newestRequest = readVersion;
+            return readVersion;
+        },
+        get newestRequest() { return newestRequest; },
         get active() { return active; },
         get reading() { return reading; },
         get wait() { return gate?.promise || null; },
@@ -297,18 +307,19 @@ export function createCatchUp(changed, bound = 300, pending = null) {
             const entry = pending?.get(String(id || ''));
             if (entry) entry.queued = false;
         },
-        confirmWindow(data = {}, confirmedIds = null) {
+        confirmPage(data, rows) { if (!degradedWindow(data) && confirmSends(data, rows)) changed(); },
+        confirmWindow(data = {}, rows = null) {
             const { recentVersion } = data;
             const cut = cutWindow(data);
             const degraded = degradedWindow(data);
             if (cut) after = Math.max(after ?? 0, recentVersion);
             else if (!degraded && recentVersion > after) after = null;
             failed = after !== null;
-            if (!degraded) settleSends(recentVersion, confirmedIds);
+            if (!degraded) confirmSends(data, rows);
             return !cut && !(degraded && after !== null);
         },
         async settled(current) { while (current() && gate) await gate.promise; },
-        begin(current, read = null, requested = 0, reconnect = false) {
+        begin(current, read = null, requested = readVersion, reconnect = false) {
             stop();
             after = requested;
             reading = read;
@@ -323,7 +334,7 @@ export function createCatchUp(changed, bound = 300, pending = null) {
             if (read) failed = after !== null;
             if (active || read && failed) { active = false; changed(); }
         },
-        cancel(requested = 0, disconnected = false) {
+        cancel(requested = readVersion, disconnected = false) {
             stop(); failed ||= Boolean(reading); active = false; reading = null; awaited = null; wake(); after = requested;
             if (disconnected) markDisconnected(requested);
         },

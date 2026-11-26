@@ -17,7 +17,7 @@ import { createChatMedia, showTaskIncidentToast } from './chat_media.js';
 import { createEarlyTextBubbles, createTextBubbles } from './chat_text_bubble.js';
 import { endLetters, letterRow } from './peer_letter_card.js';
 import { noticeLine } from './host_notice_text.js';
-import { createCatchUp, createWindowReturn, answeredOwnerIds } from './room_retire.js';
+import { createCatchUp, createWindowReturn } from './room_retire.js';
 import { createChatPreview, createRoomProfileLifecycle } from './chat_preview.js';
 import { createUnconfirmedSends } from './chat_attachments.js';
 import { createChatDecision } from './chat_decision.js';
@@ -195,7 +195,7 @@ export function createChatInstance({
     const roomProfile = createRoomProfileLifecycle({
         ws, doc: document, chatId, isMain, isProjectOpening,
         isDestroyed: () => destroyed, isLeaving: () => leaving,
-        readHistory: args => apiClient.chatHistory(args), nextRecentVersion: () => ++recentRequest,
+        readHistory: args => apiClient.chatHistory(args), nextReadVersion: newest => catchUp.stampRead(newest),
         syncHistory, loadPreferences: () => apiClient.uiPreferences(),
         onPreferences: applyUiPreferences,
         getPreview: () => preview, reconcileSavedSends, kept: () => unconfirmed,
@@ -472,7 +472,8 @@ export function createChatInstance({
     let activeLiveGroupId = '';
     // A return's or reconnect's read: status once out past its bound, ↓ Retry once it ends unconfirmed (shown only,
     // as a hidden feed reads as at its end).
-    const catchUp = createCatchUp(() => { syncChatStatus(); if (isInstanceVisible()) updateScrollButton(); }, 300, pendingSubmissions);
+    const catchUp = createCatchUp(() => { syncChatStatus(); if (isInstanceVisible()) updateScrollButton(); }, 300, pendingSubmissions,
+        () => ({ chatId, sessionId: chatSessionId, localOwnerRow }));
     let pendingRestartNotice = '';
     try {
         pendingRestartNotice = restartNoticeText(new URL(window.location.href).searchParams.get('_ouro_reason') || '');
@@ -2709,12 +2710,12 @@ export function createChatInstance({
     let recentHistoryIds = new Set();
     let beforePartialIds = null;
     const retainedRecentIds = () => new Set([...recentHistoryIds, ...(beforePartialIds || [])]);
-    let recentRequest = 0, recentApplied = 0;
+    let recentApplied = 0;
     // Commit a drawn newest response once, including ↓; the preview follows it.
     function acceptRecentWindow(data, messages) {
         if (data.recentVersion <= recentApplied) return false;
         recentApplied = data.recentVersion;
-        const whole = catchUp.confirmWindow(data, answeredOwnerIds(messages, pendingSubmissions, { chatId, sessionId: chatSessionId, localOwnerRow }));
+        const whole = catchUp.confirmWindow(data, messages);
         if (!catchUp.owed) withStableViewport(() => { const c = earlyRows.clear(messages,
             data.window?.complete === true && (data.has_more ?? data.hasMore) === false ? 'complete' : 'bounded'); windowReturn.settle(earlyRows.get); return c; });
         preview.save(messages, data);
@@ -2818,8 +2819,6 @@ export function createChatInstance({
     const historyControls = createHistoryControls(messagesDiv, pageNote || page.querySelector('.chat-panel-statusbar'), {
         archive, isVisible: historyVisible,
     });
-    const { olderButton: loadOlderBtn } = historyControls;
-
     // The first gate closed to arrivals ('' none: a hydrated, healthy window that needs no rebuild).
     const arrivalGate = () => (!historyLoaded ? 'not_loaded' : !lastHistorySyncSucceeded ? 'prior_failed'
         : catchUp.owed ? 'catch_up_owed' : liveCardBound.isArmed() ? 'live_card_bound' : '');
@@ -2839,7 +2838,10 @@ export function createChatInstance({
                 withStableViewport(() => releaseHistoryIds(new Set([...oldRecentIds,
                     ...historyStamps(messagesDiv).map(([id]) => id)])));
                 readReceipt.settle();
-            } else if (!isRecent) readReceipt.page(descriptor);
+            } else if (!isRecent) {
+                readReceipt.page(descriptor);
+                catchUp.confirmPage(descriptor, messages);
+            }
         },
         releasePage: descriptor => {
             const ids = pageHistoryIds.get(descriptor.id) || [];
@@ -2894,7 +2896,7 @@ export function createChatInstance({
         }
         return snapshot.error ? historyPager.retry() : historyPager.edge('older');
     }
-    loadOlderBtn.addEventListener('click', loadOlderHistory);
+    historyControls.olderButton.addEventListener('click', loadOlderHistory);
 
     function settleHistoryViewport() {
         if (destroyed || reading.pending || !historyLoaded || !isInstanceVisible()) return;
@@ -3302,7 +3304,7 @@ export function createChatInstance({
     let wsHasConnectedOnce = false, closedSinceOpen = false;
 
     onWs('open', (msg) => {
-        const openedVisit = visit, readOnOpen = recentRequest;
+        const openedVisit = visit, readOnOpen = catchUp.newestRequest;
         // A return across a close it heard (shown or away) is a reconnect.
         const reason = msg?.resumed && !closedSinceOpen ? 'resume' : 'reconnect';
         closedSinceOpen = false;
@@ -3331,11 +3333,11 @@ export function createChatInstance({
             clearReloadParams();
         };
         const read = roomProfile.openHistory(() => (openedVisit !== visit || closedSinceOpen || !wsUp() ? false
-            : reason === 'resume' && recentRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
+            : reason === 'resume' && catchUp.newestRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
             : isReconnect ? historyPager.read({ fromReconnect: true, whole: true, reason, current: () => catchUp.reading === read })
                 : waitForHydrationWindow().then(awaitInitialHydration)))
             .then(settled, settled);
-        if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit, read, readOnOpen, reason === 'reconnect');
+        if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit, read, undefined, reason === 'reconnect');
     });
 
     // A disconnect: written sends not yet saved say so and the room shows the outage; away, which sends it doubts is
@@ -3343,7 +3345,7 @@ export function createChatInstance({
     onWs('close', () => {
         forgetWindowReturn();
         closedSinceOpen = true;
-        catchUp.cancel(recentRequest, true);
+        catchUp.cancel(undefined, true);
         if (ws.previouslyConnected?.()) historyReadAbort?.abort();  // a first attempt failing supersedes no read
         historyPager.cancelArrivals(); historyResyncScheduler.cancel();
         if (leaving) { outageAway = [...outageAway || [], ...unconfirmed.written()]; return; }
@@ -3427,7 +3429,7 @@ export function createChatInstance({
             if (leaving) return;
             if (windowHidden) windowReturn.hold(windowFollower() && reading.nearBottom(), presentHeld());
             roomProfile.left();  // copies shown on the core's word leave the feed, kept (chat_preview.js)
-            catchUp.cancel(recentRequest);  // its return reads, and says so, anew
+            catchUp.cancel();  // its return reads, and says so, anew
             // Left in an outage (down after the page's socket opened), it will not hear the reconnect that forgets a
             // readiness polled meanwhile. Before the first open there is none: that open keeps the boot read.
             if (ws.isConnected?.() === false && ws.previouslyConnected?.()) hostStart.forget();
