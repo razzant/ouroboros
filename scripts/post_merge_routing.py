@@ -43,6 +43,13 @@ _AUTHOR = re.compile(r" by `([^`\n]+)` landed\. First bad commit")  # a culprit 
 _OBSERVED = re.compile(r"^(?:Found failing|Still not passing) at `([0-9a-f]{40})`: ", re.M)
 _FORWARD = "This check blocks nothing and reverts nothing; the fix goes forward in a new pull request."
 _COMMENT_LIMIT = 60_000  # GitHub refuses a comment longer than 65,536 characters
+# Per-test notes of the browser check's base comparison (scripts/post_merge_browser.py), each {test id: value}: what the
+# window's base showed, and the window's merges that may have caused the red. No leg writes them.
+PER_ID = ("at_base", "candidates")
+_AT_BASE = {"passed": "passed at the window's base", "absent": "absent from the window's base",
+            "unknown": "not settled at the window's base",
+            "dependencies": "not compared: uv.lock differs between the window's base and head",
+            "error": "not comparable at the window's base"}
 
 
 class GitHub:
@@ -226,16 +233,40 @@ def issue_body(block: dict, *, head: str, run_url: str, author: str = "", seen: 
                    "of its window is blamed.")
     else:
         opening = f"These tests fail on `ouroboros` on {system}, but the post-merge check could not find the merge that broke them."
-        if block.get("candidates"):  # the browser check's window comparison: unconfirmed, never a culprit
-            opening += (" They passed at the window's base; candidate merges, none confirmed: "
-                        + ", ".join(f"`{sha}`" for sha in block["candidates"]) + ".")
-    rows = "\n".join(f"- {_named(nodeid)}" for nodeid in block["ids"])
+        at_base = block.get("at_base") if isinstance(block.get("at_base"), dict) else {}
+        if at_base and all(at_base.get(nodeid) in ("passed", "absent") for nodeid in block["ids"]):
+            opening += (" They passed at, or were absent from, the window's base, and that window held more than one "
+                        "merge: each row lists its candidate merges, none confirmed.")
+        elif at_base:
+            opening += " Each row says what the window's base showed and lists its candidate merges, none confirmed."
+    rows = "\n".join(f"- {_named(nodeid)}{_note(block, nodeid)}" for nodeid in block["ids"])
     sized = sum(nodeid.startswith(SIZE_PREFIX) for nodeid in block["ids"])  # a size test is never found gone: `_size_hint`
     gone = ("" if sized == len(block["ids"]) else ", or finds one outside the size check gone" if sized
             else ", or finds it gone")
     return (f"{opening}\n\n{rows}\n\n{seen} at `{head}`: {run_url}\n\n{_FORWARD}{_size_hint(block)} The "
             f"post-merge check takes a test off this list when a check on {system} runs it and it passes{gone}, "
             f"and closes this issue when none is left.\n\n{machine_block(block)}\n")
+
+
+def _note(block: dict, nodeid: str) -> str:
+    """A browser red's own comparison with the window's base, if its block keeps one."""
+    at_base, candidates = (block.get(key) if isinstance(block.get(key), dict) else {} for key in PER_ID)
+    parts = ([_AT_BASE.get(at_base[nodeid], f"{at_base[nodeid]} at the window's base")] if nodeid in at_base else []) + (
+        ["candidate merges " + ", ".join(f"`{sha}`" for sha in candidates[nodeid])] if candidates.get(nodeid) else [])
+    return ": " + "; ".join(parts) if parts else ""
+
+
+def _keep(block: dict, ids) -> dict:
+    """`block` tracking `ids`, its per-test notes (PER_ID) kept for those alone."""
+    ids = list(ids)
+    kept = {**block, "ids": ids}
+    for key in PER_ID:
+        notes = {nodeid: value for nodeid, value in (block.get(key) or {}).items() if nodeid in ids} \
+            if isinstance(block.get(key), dict) else {}
+        kept.pop(key, None)
+        if notes:
+            kept[key] = notes
+    return kept
 
 
 def find_merged_pr(github, sha: str) -> dict | None:
@@ -416,9 +447,10 @@ def route(github, *, classification: dict, attribution: dict, head: str, run_url
         block, pr = {"format": 1, "os": system, "kind": key[0], "ids": sorted(groups[key])}, None
         if base:
             block["base"] = base
-        candidates = sorted({sha for row in verdicts if row["id"] in block["ids"] for sha in row.get("candidates", ())})
-        if candidates:
-            block["candidates"] = candidates
+        for field in PER_ID:  # the browser check's per-test base comparison; a leg's verdicts carry none
+            notes = {row["id"]: row[field] for row in verdicts if row["id"] in block["ids"] and row.get(field)}
+            if notes:
+                block[field] = notes
         if key[0] == "culprit":
             pr = call(f"find the pull request of {key[1][:12]}", find_merged_pr, github, key[1])[1]
             block.update(culprit=key[1], last_good=key[2], pr=pr["number"] if pr else None)
@@ -569,7 +601,7 @@ def _close_green(call, github, issues, failed, node_green, head, run_url, rechec
                 record["closed"].append(number)
         elif gone:
             # The machine block keeps what is still not green; the comments are the record of what left it.
-            rest = {**block, "ids": [nodeid for nodeid in block["ids"] if nodeid not in gone]}
+            rest = _keep(block, [nodeid for nodeid in block["ids"] if nodeid not in gone])
             texts = _retired_comments(gone, head=head, run_url=run_url, system=system, left=len(rest["ids"]))
             if (all(call(f"comment on #{number}", github.post, f"issues/{number}/comments", {"body": text})[0]
                     for text in texts)
@@ -624,7 +656,13 @@ def _upsert_issue(call, github, issues, block, pr, head, run_url, record, curren
             return None
         # What the issue recorded stays; a field its block predates (an issue opened before the
         # legs has no `base`) comes from this run, or a size id added to it could never be measured.
-        merged = {**block, **existing["block"], "ids": sorted(known | set(added))}
+        merged = {**block, **existing["block"]}
+        for field in PER_ID:  # per test: what the issue recorded stays, an added test brings its own
+            mine, theirs = (value if isinstance(value, dict) else {} for value in (block.get(field),
+                                                                                   existing["block"].get(field)))
+            if mine or theirs:
+                merged[field] = {**mine, **theirs}
+        merged = _keep(merged, sorted(known | set(added)))
         ok, updated = call(f"update #{number}", github.patch, f"issues/{number}", {"body": issue_body(
             merged, head=head, run_url=run_url, author=author or existing.get("author", ""))})
         if ok and _tracks(updated, merged):

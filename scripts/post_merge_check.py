@@ -1063,27 +1063,9 @@ class Prober:
             record["answers"] = dict.fromkeys(ids, "error")
             return {nodeid: ("error", excluded.get(nodeid, "this revision could not answer it")) for nodeid in ids}
         tree = self.work / f"pmc-{label}"
-        partial = ("--no-checkout",) if reason else ()
-        added = False
         try:
-            _git("worktree", "add", "--detach", "--quiet", *partial, str(tree), sha)
-            added = True
-            if partial:
-                _git("read-tree", sha, cwd=tree)
-                _git("restore", f"--source={sha}", "--worktree", "--", ".", f":(exclude,literal){PROTECTED}", cwd=tree)
-                if omitted := _git("ls-files", "--", PROTECTED, cwd=tree):
-                    if omitted != PROTECTED:
-                        raise OSError(f"`{PROTECTED}` is not a single index entry")
-                    _git("update-index", "--skip-worktree", "--", PROTECTED, cwd=tree)
-                try:
-                    (tree / PROTECTED).lstat()
-                except FileNotFoundError:
-                    pass
-                else:
-                    raise OSError(f"`{PROTECTED}` exists in the projected worktree")
+            add_worktree(tree, sha, omit_protected=bool(reason))
         except (OSError, subprocess.SubprocessError) as error:
-            if added:
-                remove_worktree(tree)
             record["error"] = f"the worktree failed: {error}"
             return dict.fromkeys(ids, "error")
         try:
@@ -1112,6 +1094,24 @@ def lint_answers(tree: Path, findings, lint, *, omitted: str = "") -> dict[str, 
     present = lint(tree, paths) if paths else {}
     return {finding: ("error" if path == omitted or (present is None and path in paths)
                       else "fail" if present and finding in present else "pass") for finding, path in files.items()}
+
+
+def add_worktree(tree: Path, sha: str, *, omit_protected: bool = False) -> None:
+    """A detached worktree of `sha` at `tree`, with `omit_protected` all but PROTECTED (`protected_projection`)."""
+    _git("worktree", "add", "--detach", "--quiet", *(("--no-checkout",) if omit_protected else ()), str(tree), sha)
+    try:
+        if omit_protected:
+            _git("read-tree", sha, cwd=tree)
+            _git("restore", f"--source={sha}", "--worktree", "--", ".", f":(exclude,literal){PROTECTED}", cwd=tree)
+            if omitted := _git("ls-files", "--", PROTECTED, cwd=tree):
+                if omitted != PROTECTED:
+                    raise OSError(f"`{PROTECTED}` is not a single index entry")
+                _git("update-index", "--skip-worktree", "--", PROTECTED, cwd=tree)
+            if os.path.lexists(tree / PROTECTED):
+                raise OSError(f"`{PROTECTED}` exists in the projected worktree")
+    except (OSError, subprocess.SubprocessError):
+        remove_worktree(tree)  # what this added, whatever failed in it
+        raise
 
 
 def remove_worktree(tree: Path) -> None:

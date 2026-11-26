@@ -8,7 +8,7 @@ Candidates use `candidate/<task>` and private pins (§6). Auto-push sends branch
 
 ### CI topology
 
-Keyless `post-merge.yml` coalesces `ouroboros` pushes without blocking merges. Linux/WAL and Windows/PERSIST select each first-parent change and retry reds once; Linux adds ruff F, size vs base and cost (8min k=30; k=100 opt-in). RED separates comparable blame (omitting old fixtures), cost/stage gaps and cost xfails; per-OS `post-merge-red` issues notify PRs until pass (size: same base) or removal (non-size). Base advances only when one attempt measures both legs, hands off reds and has no cost failure; dispatch seeds bootstrap/recovery. A pilot `browser` job (`scripts/post_merge_browser*.py`) runs beside the legs when a window touches `web/**` or browser tests, ends with them and is continue-on-error.
+Keyless `post-merge.yml` coalesces `ouroboros` pushes without blocking merges. Linux/WAL and Windows/PERSIST select each first-parent change and retry reds once; Linux adds ruff F, size vs base and cost (8min k=30; k=100 opt-in). RED separates comparable blame (omitting old fixtures), cost/stage gaps and cost xfails; per-OS `post-merge-red` issues notify PRs until pass (size: same base) or removal (non-size). Base advances only when one attempt measures both legs, hands off reds and has no cost failure; dispatch seeds bootstrap/recovery. The window dispatches pilot `post-merge-browser.yml` on `web/**`, browser tests, their helpers or browser infra, outside group, verdict and base; it names a merge only in base-confirmed one-merge windows.
 
 | Tier | Jobs | Trust boundary |
 |---|---|---|

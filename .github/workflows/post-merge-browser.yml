@@ -1,0 +1,322 @@
+# Post-merge browser check (pilot): the browser tests a window that changes the interface affects.
+#
+# Owner choice 1 (2026-11-25): a narrow, non-blocking browser check of the post-merge windows that touch web/, a
+# browser test, a file such a test names or the shared browser infrastructure; one Ubuntu runner, both engines; the
+# full browser lane stays in the release run and the manual dispatch. post-merge.yml's window job starts this workflow
+# with its frozen window (`gh workflow run`, actions: write); it is a run of its own, so it never holds the post-merge
+# concurrency group, never becomes that run's conclusion or a leg's verdict, never moves the window's base, and
+# ouroboros/update_qualification.py, which reads post-merge.yml's runs, never reads it. `scope` decides without a
+# browser (not applicable: `check` is skipped, never green); `check` runs the plan with a read-only token, compares
+# each red with the window's base and judges (scripts/post_merge_browser_select.py chooses, scripts/post_merge_browser.py
+# judges and hands over); `route` hands the reds over and runs no test: on `ouroboros` with the only write permissions
+# here, elsewhere (a trial dispatched with base and head on any branch) dry, with a read-only token. A red whose
+# author's task has ended is Ouroboros's to take over.
+# The pilot lasts two weeks after it is enabled or until the next release, whichever comes first; it stops if a release
+# run waited because of it, if more than half of its reds are FLAKY or not attributed, or if post-merge windows grow
+# noticeably longer. A push that changes this file runs it once over that push, so GitHub knows the workflow before
+# it reaches the default branch: a workflow_dispatch needs that.
+
+name: Post-merge browser check
+run-name: Post-merge browser check ${{ inputs.head || github.sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: The window's base, its last measured commit (full SHA)
+        required: true
+        type: string
+      head:
+        description: The window's head (full SHA)
+        required: true
+        type: string
+      budget:
+        description: A trial only (a branch other than ouroboros) - the test budget in seconds
+        required: false
+        type: string
+  push:
+    branches:
+      - ouroboros
+    paths:
+      - .github/workflows/post-merge-browser.yml
+
+permissions: {}
+
+# One run per window head at a time; a second start for the same head waits (never a run of another window).
+concurrency:
+  group: post-merge-browser-${{ inputs.head || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  scope:
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: ubuntu-latest
+    timeout-minutes: 21
+    permissions:
+      contents: read
+    outputs:
+      applicable: ${{ steps.scope.outputs.applicable }}
+      base: ${{ steps.window.outputs.base }}
+      head: ${{ steps.window.outputs.head }}
+    steps:
+      - name: Name the window
+        id: window
+        timeout-minutes: 1
+        env:
+          INPUT_BASE: ${{ inputs.base }}
+          INPUT_HEAD: ${{ inputs.head }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          base="${INPUT_BASE:-$BEFORE}"
+          head="${INPUT_HEAD:-$GITHUB_SHA}"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || ! "$head" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::base and head must be full commit SHAs"
+            exit 1
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 5
+        with:
+          ref: ${{ steps.window.outputs.head }}
+          fetch-depth: 0  # the window's commits
+          persist-credentials: false
+      - name: Decide whether the browser check applies
+        id: scope
+        timeout-minutes: 3
+        env:
+          BASE: ${{ steps.window.outputs.base }}
+          HEAD_SHA: ${{ steps.window.outputs.head }}
+        run: python3 -I -S scripts/post_merge_browser_select.py scope --base "$BASE" --head "$HEAD_SHA" | tee -a "$GITHUB_OUTPUT"
+      - name: Not applicable, so no browser test runs and nothing is green
+        if: steps.scope.outputs.applicable == 'false'
+        timeout-minutes: 1
+        env:
+          WHY: ${{ steps.scope.outputs.why }}
+        run: 'echo "Not applicable: $WHY"'
+
+  check:
+    needs: scope
+    if: needs.scope.outputs.applicable == 'true'
+    name: post-merge browser check (pilot)
+    runs-on: ubuntu-latest
+    # Above the sum of its step ceilings plus ten minutes, so a step's own ceiling always ends first and the evidence
+    # is uploaded; a typical run takes about 40 minutes.
+    timeout-minutes: 186
+    permissions:
+      contents: read
+      issues: read  # the open browser issues to recheck, the accepted failures
+      actions: read  # the weights of earlier browser runs
+    outputs:
+      outcome: ${{ steps.outcome.outputs.outcome }}
+      routing: ${{ steps.outcome.outputs.routing }}
+    env:
+      BASE: ${{ needs.scope.outputs.base }}
+      HEAD_SHA: ${{ needs.scope.outputs.head }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 5
+        with:
+          ref: ${{ needs.scope.outputs.head }}
+          fetch-depth: 0  # the window's commits and the base worktree
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        id: setup_python
+        timeout-minutes: 10
+        with:
+          interpreter: shipped  # as the UI lane (ui-browser.yml)
+          install-project: 'false'
+      # The UI lane's own weights (each node's median over the last three tables) for the estimate; without them the
+      # plan keeps its module cap and counts every candidate as unknown.
+      - name: Read the weights of earlier browser runs
+        id: weights
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -I -S scripts/ci_shard_plan.py --out "$RUNNER_TEMP/browser-weights" --repo "$GITHUB_REPOSITORY"
+          --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --sha "$HEAD_SHA"
+      - name: Choose the browser tests of the window
+        id: plan
+        timeout-minutes: 3
+        env:
+          TRIAL_BUDGET: ${{ github.ref != 'refs/heads/ouroboros' && inputs.budget || '' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/post-merge-browser"
+          python3 -I -S scripts/post_merge_browser_select.py plan --base "$BASE" --head "$HEAD_SHA" \
+            --out "$RUNNER_TEMP/post-merge-browser/plan.json" --args-out "$RUNNER_TEMP/post-merge-browser/args.txt" \
+            --durations "$RUNNER_TEMP/browser-weights/ci-durations.json" ${TRIAL_BUDGET:+--budget-seconds "$TRIAL_BUDGET"} \
+            >> "$GITHUB_OUTPUT"
+      # As the UI lane installs them (#2895), with three-minute download attempts: three bounded stages of two attempts
+      # take at most 19.5 minutes and leave this ceiling eight more for dpkg's single run.
+      - name: Install Chromium and WebKit
+        id: install_browsers
+        if: ${{ !cancelled() && steps.plan.outputs.applicable == 'true' }}
+        timeout-minutes: 28
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: python -I -S scripts/ci_browser_install.py --attempt-seconds 180 --pinned-node --pinned-chromium chromium webkit
+      - name: Let Chromium's sandbox start on this runner
+        id: sandbox
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        timeout-minutes: 2
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      # The UI lane's invocation over the plan, in its order: one retry (FLAKY), the session stopped between tests at
+      # its budget (`--session-timeout`); the plugin records the skips tests/browser_lane.py permits.
+      - name: Run the selected browser tests on their engines
+        id: run
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 75
+        env:
+          GH_TOKEN: ${{ github.token }}  # read-only; only ci_retry's accepted-failure check reads it
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+          SESSION: ${{ steps.plan.outputs.session_seconds }}
+        run: |
+          evidence="$RUNNER_TEMP/post-merge-browser"
+          mapfile -t TESTS < "$evidence/args.txt"
+          if [ "${#TESTS[@]}" -eq 0 ]; then echo "::error::the plan names no test"; exit 1; fi  # never the whole lane
+          xvfb-run -a python -I -S scripts/ci_retry.py --evidence-dir "$evidence/head" \
+            --accepted tests/accepted_failures.json -- \
+            python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/post-merge-browser-raw/head" -- \
+            python -m pytest "${TESTS[@]}" -m ui_browser -p scripts.post_merge_browser -vv --tb=short --timeout=900 \
+            --session-timeout="$SESSION" --ci-evidence-dir="$evidence/head"
+      - name: Run each confirmed red at the window's base
+        id: compare
+        if: ${{ !cancelled() && steps.run.outcome != 'skipped' }}
+        continue-on-error: true
+        timeout-minutes: 22
+        env:
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: >-
+          xvfb-run -a python3 scripts/post_merge_browser.py compare --evidence-dir "$RUNNER_TEMP/post-merge-browser"
+          --plan "$RUNNER_TEMP/post-merge-browser/plan.json"
+      - name: Recheck the open browser issues at the head
+        id: recheck
+        if: ${{ !cancelled() && steps.run.outcome != 'skipped' }}
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}  # read-only: lists the open issues; the sessions run without it
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: >-
+          xvfb-run -a python3 scripts/post_merge_browser.py recheck --evidence-dir "$RUNNER_TEMP/post-merge-browser"
+          --plan "$RUNNER_TEMP/post-merge-browser/plan.json"
+      - name: Judge the browser check and prepare its hand-over
+        id: outcome
+        if: ${{ !cancelled() }}
+        timeout-minutes: 3
+        env:
+          BROWSER_INSTALL_OUTCOME: ${{ steps.install_browsers.outcome }}
+          BROWSER_RUN_OUTCOME: ${{ steps.run.outcome }}
+          BROWSER_COMPARE_OUTCOME: ${{ steps.compare.outcome }}
+          BROWSER_RECHECK_OUTCOME: ${{ steps.recheck.outcome }}
+        run: >-
+          python3 scripts/post_merge_browser.py outcome --evidence-dir "$RUNNER_TEMP/post-merge-browser"
+          --plan "$RUNNER_TEMP/post-merge-browser/plan.json"
+      - name: Upload the browser evidence
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: post-merge-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/post-merge-browser/
+          retention-days: 14
+          if-no-files-found: ignore
+      # Green only for GREEN or FLAKY: red or checked partially fails this job, never a post-merge run.
+      - name: Fail unless the browser check is green
+        id: verdict
+        if: ${{ !cancelled() }}
+        timeout-minutes: 2
+        run: python3 scripts/post_merge_browser.py verdict --evidence-dir "$RUNNER_TEMP/post-merge-browser"
+
+  # The hand-over runs no test. Only on `ouroboros` does it hold the write permissions; `route-trial` below is the same
+  # job for a trial on another branch, with a read-only token and dry routing. Re-running this job alone offers a
+  # refused hand-over again: the check job's outputs stay with the run.
+  route:
+    needs: [scope, check]
+    if: ${{ !cancelled() && needs.check.result != 'skipped' && github.ref == 'refs/heads/ouroboros' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 24
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 5
+        with:
+          ref: ${{ needs.scope.outputs.head }}
+          fetch-depth: 0  # whether an issue's observation precedes this head
+          persist-credentials: false
+      - name: Hand each red to its author and to Ouroboros as the browser system
+        id: route
+        timeout-minutes: 6
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROUTING: ${{ needs.check.outputs.routing }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: >-
+          python3 -I -S scripts/post_merge_browser.py route --run-url "$RUN_URL"
+          --out "$RUNNER_TEMP/post-merge-browser-route/routing.json"
+      - name: Upload the hand-over record
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: post-merge-browser-route-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/post-merge-browser-route/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  route-trial:
+    needs: [scope, check]
+    if: ${{ !cancelled() && needs.check.result != 'skipped' && github.ref != 'refs/heads/ouroboros' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 24
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 5
+        with:
+          ref: ${{ needs.scope.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record the hand-over a run on ouroboros would make
+        id: route
+        timeout-minutes: 6
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROUTING: ${{ needs.check.outputs.routing }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: >-
+          python3 -I -S scripts/post_merge_browser.py route --dry-run --run-url "$RUN_URL"
+          --out "$RUNNER_TEMP/post-merge-browser-route/routing.json"
+      - name: Upload the hand-over record
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: post-merge-browser-route-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/post-merge-browser-route/
+          retention-days: 14
+          if-no-files-found: ignore
