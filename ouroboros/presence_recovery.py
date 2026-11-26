@@ -33,6 +33,64 @@ def queue_kept(row: Mapping[str, Any]) -> bool:
                 or str(row.get("status") or "") == "scheduled" or owner.get("kind") == "pooled")
 
 
+def _saved_queue_row(drive_root: Path, task_id: str) -> str | None:
+    from ouroboros.queue_observation import load_queue_document
+
+    document = load_queue_document(drive_root)
+    if document.get("_snapshot_invalid"):
+        return None
+    return "listed" if any(isinstance(row, dict) and str(row.get("id") or row.get("task_id") or "") == task_id
+                           for lane in ("running", "pending") for row in document.get(lane) or ()) else ""
+
+
+def _queue_uses_saved(q, drive_root):
+    from supervisor.queue_snapshot import saved_queue_unowned
+
+    return Path(q.DRIVE_ROOT).resolve() != Path(drive_root).resolve() or saved_queue_unowned()
+
+
+def _running_row(meta):
+    return ("lane" if meta.get("lane") == "conversation" else "running") if isinstance(meta, dict) else ""
+
+
+def copy_queue_custody_inputs(drive_root: Path):
+    """Freeze just the whereabouts of IDs; the history worker still reads durable custody."""
+    from ouroboros.utils import in_worker_process
+    from supervisor import queue as q
+    from supervisor.queue_snapshot import saved_queue_decision
+
+    if in_worker_process():
+        return None
+    if Path(q.DRIVE_ROOT).resolve() != drive_root.resolve() or saved_queue_decision() is True:
+        return "saved"
+    if not q._queue_lock.acquire(blocking=False):
+        if saved_queue_decision() is True:  # restore may have claimed the saved queue between the checks
+            return "saved"
+        raise RuntimeError("live queue custody unavailable for the history reader")
+    try:
+        decision = saved_queue_decision()
+        if decision is True:
+            return "saved"
+        rows = {tid: _running_row(meta) for tid, meta in q.RUNNING.items()}
+        rows.update((str(row.get("id") or ""), "pending") for row in q.PENDING)
+        return {"live": rows, "saved_path": str(q.QUEUE_SNAPSHOT_PATH) if decision is None else ""}
+    finally:
+        q._queue_lock.release()
+
+
+def copied_queue_row(drive_root: Path, task_id: str, root: str, snapshot):
+    if str(drive_root.resolve()) != root or snapshot == "saved":
+        return _saved_queue_row(drive_root, task_id)
+    if snapshot is None:
+        return None
+    if path := snapshot["saved_path"]:
+        from supervisor.queue_snapshot import snapshot_names_work
+
+        if snapshot_names_work(path):
+            return _saved_queue_row(drive_root, task_id)
+    return snapshot["live"].get(task_id, "")
+
+
 def _queue_row(drive_root: Path, task_id: str) -> str | None:
     """Where the queue of ``drive_root`` holds this id, read only in the server process: ``pending``,
     ``running`` (a project-lane continuation), ``lane`` (a carried turn's own conversation row) or "".
@@ -44,34 +102,24 @@ def _queue_row(drive_root: Path, task_id: str) -> str | None:
         if in_worker_process():
             return None
         from supervisor import queue as q
-        from supervisor.queue_snapshot import saved_queue_unowned
-
         # This process's live maps answer for its own root once it took (restored or published) the saved queue;
         # before that, the saved document is the queue's only word on this id.
-        if Path(q.DRIVE_ROOT).resolve() != Path(drive_root).resolve() or saved_queue_unowned():
-            from ouroboros.queue_observation import load_queue_document
-
-            document = load_queue_document(Path(drive_root))
-            if document.get("_snapshot_invalid"):
-                return None
-            return "listed" if any(isinstance(row, dict) and str(row.get("id") or row.get("task_id") or "") == task_id
-                                   for lane in ("running", "pending") for row in document.get(lane) or ()) else ""
+        if _queue_uses_saved(q, drive_root):
+            return _saved_queue_row(drive_root, task_id)
         if not q._queue_lock.acquire(timeout=5.0):
             return None
         try:
             if any(str(row.get("id") or "") == task_id for row in q.PENDING):
                 return "pending"
-            meta = q.RUNNING.get(task_id)
-            if not isinstance(meta, dict):
-                return ""
-            return "lane" if meta.get("lane") == "conversation" else "running"
+            return _running_row(q.RUNNING.get(task_id))
         finally:
             q._queue_lock.release()
     except Exception:
         return None
 
 
-def queue_custody(drive_root: Path | None, task_id: str, stored: Mapping[str, Any] | None = None) -> str:
+def queue_custody(drive_root: Path | None, task_id: str, stored: Mapping[str, Any] | None = None,
+                  *, queue_row=None) -> str:
     """The queue's custody of one Presence id, read before any start, loss stamp or end.
 
     ``terminal``: a canonical terminal, which outranks every pause fact. ``queued``: saved work the
@@ -104,7 +152,10 @@ def queue_custody(drive_root: Path | None, task_id: str, stored: Mapping[str, An
         return ""
     if queue_kept(row):
         return CUSTODY_QUEUED
-    where = _queue_row(Path(drive_root), task_id)
+    try:
+        where = (queue_row or _queue_row)(Path(drive_root), task_id)
+    except Exception:
+        where = None
     if where is None or where == "listed":
         return CUSTODY_UNKNOWN
     return CUSTODY_QUEUED if where in {"pending", "running"} else ""
@@ -211,7 +262,8 @@ def record_unresolved_turn(drive_root: Path, task_id: str) -> bool:
     return True
 
 
-def attempt_ended(stored: Mapping[str, Any], drive_root: Path | None = None) -> bool:
+def attempt_ended(stored: Mapping[str, Any], drive_root: Path | None = None,
+                  *, locally_live: bool | None = None, queue_row=None, observer: dict | None = None) -> bool:
     """Whether nothing can still write this Presence attempt's row.
 
     A positive live observation here wins over every record: an execution still finishing
@@ -228,17 +280,20 @@ def attempt_ended(stored: Mapping[str, Any], drive_root: Path | None = None) -> 
     from ouroboros.review_operation import controller_state
 
     task_id = str(stored.get("task_id") or stored.get("id") or "")
-    if presence_turn_is_live(task_id, drive_root=drive_root):
+    is_live = presence_turn_is_live(task_id, drive_root=drive_root) if locally_live is None else locally_live
+    if is_live:
         return False
     if str(stored.get("status") or "") in {"completed", "failed", "cancelled"}:
         return True
-    if task_id and queue_custody(drive_root, task_id, stored) in CUSTODY_HOLDS:
+    override = {"queue_row": queue_row} if queue_row is not None else {}
+    if task_id and queue_custody(drive_root, task_id, stored, **override) in CUSTODY_HOLDS:
         return False
     if stored.get("presence_recovery_recorded"):
         return True
     owner = stored.get("execution_owner") if isinstance(stored.get("execution_owner"), Mapping) else {}
     parked = stored.get("presence_continuation") if isinstance(stored.get("presence_continuation"), Mapping) else {}
-    return controller_state(owner.get("controller") or parked.get("author_controller")) == "dead"
+    identity = owner.get("controller") or parked.get("author_controller")
+    return controller_state(identity, **({"observer": observer} if observer is not None else {})) == "dead"
 
 
 def retained_work_view(stored: Mapping[str, Any], reference: str,

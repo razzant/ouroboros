@@ -10,44 +10,37 @@ from typing import Any, Dict, Optional, Tuple
 def rollback_to_version(tag_or_sha: str, reason: str = "manual_rollback") -> Tuple[bool, str]:
     """Restore one exact commit after pinning committed and dirty local state.
 
-    Raises ``IndexLockRefusal`` (``before_tree_effects``) when Git refused its single reset
-    while taking this checkout's index lock: the keep branch and rescue made before it stay.
+    A refusal during preparation says ``before_tree_effects`` on the tuple outcome.
+    Git's refusal to lock its sole reset carries the same fact on ``IndexLockRefusal``.
     """
+    from ouroboros.store_switch import UnappliedCheckout
     from supervisor import git_ops as _g
 
-    rc, target_sha, error = _g.git_capture(
-        ["git", "rev-parse", "--verify", f"{tag_or_sha}^{{commit}}"]
-    )
-    if rc != 0:
-        return False, f"Cannot resolve {tag_or_sha}: {error}"
-    keep_ok, keep_branch = _g.preserve_local_ref_branch("HEAD", prefix="rollback-keep")
-    if not keep_ok:
-        return False, f"Could not preserve current HEAD before rollback: {keep_branch}"
-
-    repo_state = _g._collect_repo_sync_state()
+    # Ref preservation and rescue copy evidence, but cannot replace working
+    # source. Only the reset below enters the uncertain tree-effect boundary.
     try:
-        rescue = _g._create_rescue_snapshot(
-            branch=repo_state.get("current_branch", "unknown"),
-            reason=reason,
-            repo_state=repo_state,
-        )
+        rc, target_sha, error = _g.git_capture(["git", "rev-parse", "--verify", f"{tag_or_sha}^{{commit}}"])
+        if rc != 0:
+            return UnappliedCheckout(False, f"Cannot resolve {tag_or_sha}: {error}")
+        keep_ok, keep_branch = _g.preserve_local_ref_branch("HEAD", prefix="rollback-keep")
+        if not keep_ok:
+            return UnappliedCheckout(False, f"Could not preserve current HEAD before rollback: {keep_branch}")
+        repo_state = _g._collect_repo_sync_state()
+        rescue = _g._create_rescue_snapshot(branch=repo_state.get("current_branch", "unknown"),
+                                           reason=reason, repo_state=repo_state)
+        if rescue.get("diff_error"):
+            return UnappliedCheckout(False, "Rescue snapshot could not capture tracked changes; checkout was left "
+                                           f"unchanged: {rescue['diff_error']}")
+        if incomplete := _g._rescue_untracked_incomplete(rescue):
+            return UnappliedCheckout(False, f"Untracked-file rescue was incomplete; checkout was left unchanged: {incomplete}")
+        cmd = ["git", "reset", "--hard", target_sha]
+        _g._guard_live_repo_destructive_git(cmd)
     except Exception as exc:
-        _g.log.warning("Rescue snapshot failed before rollback: %s", exc)
-        return False, f"Rescue snapshot failed; checkout was left unchanged: {exc}"
-    if rescue.get("diff_error"):
-        return False, (
-            "Rescue snapshot could not capture tracked changes; checkout was left unchanged: "
-            f"{rescue['diff_error']}"
-        )
-    incomplete = _g._rescue_untracked_incomplete(rescue)
-    if incomplete:
-        return False, (
-            "Untracked-file rescue was incomplete; checkout was left unchanged: "
-            f"{incomplete}"
-        )
-
-    cmd = ["git", "reset", "--hard", target_sha]
-    _g._guard_live_repo_destructive_git(cmd)
+        _g.log.warning("Rollback preparation failed", exc_info=True)
+        return UnappliedCheckout(False, f"Rollback preparation failed; checkout was left unchanged: {exc}")
+    except BaseException as exc:
+        exc.before_tree_effects = True
+        raise
     rc, out, error = _g.git_capture(cmd, repair_index=False)
     if rc != 0:
         from supervisor.git_ops_reset import IndexLockRefusal, _index_lock_refused

@@ -236,6 +236,12 @@ _LIVE_LOCK = threading.Lock()
 _LIVE_PRESENCE_TASKS: set[tuple[str, str]] = set()
 
 
+def snapshot_local_presence_tasks() -> list:
+    """Positive (root, task) liveness observations for a reader outside this process."""
+    with _LIVE_LOCK:
+        return sorted(_LIVE_PRESENCE_TASKS)
+
+
 def presence_turn_is_live(task_id: str, *, drive_root: Path | None = None) -> bool:
     """Root-scoped local liveness; never an owner-addressable actor."""
     with _LIVE_LOCK:

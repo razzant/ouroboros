@@ -126,3 +126,40 @@ def test_smoke_failure_or_changed_tree_never_certifies_bootstrap(bootstrap, monk
     assert calls == ["reset", "reset", "smoke"]
     assert git_ops.safe_restart(reason="bootstrap")[0]
     assert calls == ["reset", "reset", "smoke"]
+
+
+@pytest.mark.parametrize("checkout_changes", [False, True])
+def test_first_managed_boot_keeps_reader_only_for_its_unchanged_checkout(bootstrap, monkeypatch, checkout_changes):
+    """A first boot has no receipt; prove a real interpreter stays ready (same tree) or retires (new tree)."""
+    from pathlib import Path
+
+    import server
+    from ouroboros.gateway import history_reader
+
+    repo, drive, calls = bootstrap
+    assert not (drive / "state" / "git_bootstrap.json").exists()
+    selected = _git(repo, "rev-parse", "HEAD")
+    if checkout_changes:
+        _git(repo, "checkout", "--detach", "HEAD^")
+    monkeypatch.setattr(server, "REPO_DIR", repo)
+    monkeypatch.setattr(server, "DATA_DIR", drive)
+    monkeypatch.setattr(server, "_launcher_managed_repo_matches", lambda: True)
+    monkeypatch.setattr(server, "_has_active_evolution_transaction", lambda: False)
+    monkeypatch.setattr(git_ops, "init", lambda **_kw: None)
+    monkeypatch.setattr(git_ops, "ensure_repo_present", lambda: None)
+    reader = history_reader.HistoryReader()
+    monkeypatch.setattr(history_reader, "reader", reader)
+    reader.start(drive, Path(__file__).resolve().parents[1])
+    try:
+        assert reader.ready.wait(8), reader._failure
+        process = reader._process
+        ok, message = server._bootstrap_supervisor_repo({}, git_ops_module=git_ops)
+        assert ok, message
+        assert "smoke" in calls and _git(repo, "rev-parse", "HEAD") == selected
+        if checkout_changes:
+            assert process.poll() is not None and not reader.ready.is_set()
+        else:
+            assert reader._process is process and process.poll() is None and reader.ready.is_set()
+    finally:
+        reader.stop()
+        assert reader.wait_stopped() == ""

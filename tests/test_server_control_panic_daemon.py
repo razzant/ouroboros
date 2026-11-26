@@ -148,7 +148,7 @@ def test_panic_requests_the_held_restart_successor_in_its_request_phase(monkeypa
 
 
 @pytest.mark.parametrize("fault", [
-    "executor-import", "request-thread", "bounded-all",
+    "executor-import", "request-thread", "bounded-all", "history-reader",
 ])
 def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, fault):
     """An accepted Panic keeps termination, independent requests and bounded writes.
@@ -157,7 +157,9 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
     OS stops are test-owned doubles, while the flag write and completion path are real.
     """
     import builtins
+
     from ouroboros import server_control
+    from ouroboros.gateway import history_reader
     from ouroboros.maintenance import child as packer
     from ouroboros.startup_historical_audit import audit
     from ouroboros.storage import count as storage_count
@@ -211,6 +213,8 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
         monkeypatch.setattr(server_control, "_persist_panic_controls", lambda _: calls.append("controls"))
         monkeypatch.setattr(threading.Thread, "start", start)
         monkeypatch.setattr(threading, "Thread", thread)
+        monkeypatch.setattr(history_reader, "reader", SimpleNamespace(
+            stop=fail if fault == "history-reader" else lambda: calls.append("history-stop")))
         if fault == "audit":
             monkeypatch.setattr(audit, "stop", fail)
         else:
@@ -231,9 +235,10 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
                children=(child,), configure=configure, ingress=fault.startswith("ingress-"))
     assert server_control._restart_stop_requested is True
     assert not {"panic-startup-audit", "panic-maintenance", "panic-storage-count", "panic-storage-free"} & set(created_threads)
-    # The four native stops run synchronously first; one failing never skips the others.
+    # The native stops run synchronously first; one failing never skips the others.
     first = 2 if fault.startswith("ingress-") else 0
-    head = [name for name, broken in (("audit-stop", fault == "audit"), ("packer-stop", fault == "packer"),
+    head = [name for name, broken in (("history-stop", fault == "history-reader"),
+                                      ("audit-stop", fault == "audit"), ("packer-stop", fault == "packer"),
                                       ("storage-stop", fault == "storage"), ("free-stop", fault == "free"))
             if not broken]
     assert calls[first:first + len(head)] == head
@@ -252,13 +257,14 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
             assert set(diagnostics[0]["requests"]) == {
                 "local-model", "daemon", "commands", "executors", "services", "companions",
                 "restart-successor", "scope-census", "child-123", "startup-audit", "maintenance", "storage-count",
-                "storage-free", "kept-services",
+                "storage-free", "kept-services", "room-history-reader",
             }
             # The installation-scope census is one more independent request; this root planted no marker.
             assert diagnostics[0]["requests"]["scope-census"] == {"requested": False, "reason": "no installation marker planted"}
-    if fault in {"audit", "packer", "storage", "free", "model", "daemon", "request-thread"}:
+    if fault in {"audit", "packer", "storage", "free", "model", "daemon", "request-thread", "history-reader"}:
         owner = {"audit": "startup-audit", "packer": "maintenance", "storage": "storage-count", "free": "storage-free",
-                 "model": "local-model", "daemon": "daemon", "request-thread": "commands"}[fault]
+                 "model": "local-model", "daemon": "daemon", "request-thread": "commands",
+                 "history-reader": "room-history-reader"}[fault]
         assert diagnostics[0]["requests"][owner]["requested"] is False
         assert "injected " + fault in diagnostics[0]["requests"][owner]["error"]
 

@@ -935,8 +935,9 @@ def _boot_managed_update_tasks() -> None:
         from supervisor.update_merge import active_update_tx, boot_outcome_notice, finalize_managed_update_on_boot
 
         ready = _wait_for_supervisor_update_finalize()
-        # Observation only: the finalizer's result and every decision below stay its own.
-        result = observe_boot(finalize_managed_update_on_boot, ready=ready, bootstrap_ok=_bootstrap_ok is True)
+        # Keep any exact store transfer with this boot's restart decision.
+        with store_switch.capture_history_handoff() as handoff:
+            result = observe_boot(finalize_managed_update_on_boot, ready=ready, bootstrap_ok=_bootstrap_ok is True)
         # A failed bootstrap (dependency sync or the import test of this tree) is not a
         # ready generation even when the supervisor thread survived it: the adoption
         # of a tree that does not import is returned, not finalized.
@@ -963,6 +964,8 @@ def _boot_managed_update_tasks() -> None:
             close_repo_writer_admission("managed_update:rollback_restart")
             _request_restart_exit()
             return
+        if result.get("rolled_back") is True and not result.get("rollback_deferred"):
+            handoff.resume_inline()  # completed restore, no restart follows
         advance_recovery_point(ready and _bootstrap_ok is True and result.get("rolled_back") is not True)
         update_status = compute_managed_update_status(fetch=True)
         try:
@@ -1125,15 +1128,15 @@ async def lifespan(app):
         return
     has_local = needs_local_model_autostart(settings)
 
+    from ouroboros.gateway.history_reader import begin_generation
+    history_reader = begin_generation(lifespan_drive_root) if live else None
     if live:
         store_switch.start(lifespan_drive_root, repo_dir=REPO_DIR, request_restart=_request_restart_exit)  # a pending switch, then the import owner off the ready path (P1)
-
     if not _exit_signalled.is_set():
-        _supervisor_stop.clear()  # a fresh lifespan owns a fresh generation (symmetric with the teardown set)
-    body_stop = threading.Event()  # lifespan ownership survives a cognitive supervisor revival; the boot coordinator's stop
+        _supervisor_stop.clear()  # symmetric with teardown
+    body_stop = threading.Event()  # lifespan-owned, survives supervisor revival
     start_body = bind_body_lifespan(
         lifespan_drive_root, body_stop, collection_ready=_supervisor_ready.is_set) if live else (lambda: None)
-    # A provider-ready boot starts the supervisor once the store published and the extensions registered.
     startup_provider_ready = has_startup_ready_provider(settings)
     if not startup_provider_ready:  # readiness follows the store's publication (store_switch.when_ready below)
         _supervisor_init_done.set()
@@ -1142,11 +1145,9 @@ async def lifespan(app):
     boot = SimpleNamespace(host_service_task=None, host_service_server=None, host_service_listener=ExitStack(),
                            extension_reconcile_task=None)
 
-    # --- at the store's publication (on the import thread): the dialogue first, repairs after ---
     def _dialogue() -> None:
-        """A surviving dialogue is cut over here even providerless (T2: reads before old repairs).
-        Only a provider-ready generation opens the owner bridge; providerless messages get no
-        executor, so its bridge opens with the supervisor a later settings save starts."""
+        """Import callback: cut over surviving dialogue before repairs (T2), even providerless.
+        Open the owner bridge once provider-ready: here, or when settings start the supervisor."""
         from ouroboros import dialogue_store
 
         has_dialogue = dialogue_store.present(lifespan_drive_root) or dialogue_store.holds_dialogue_files(lifespan_drive_root)
@@ -1157,11 +1158,11 @@ async def lifespan(app):
                 e.is_set() for e in (body_stop, _supervisor_stop, _restart_requested, _exit_signalled)))
 
     def _after_extensions() -> None:
-        """The body runtime and the supervisor (or the providerless recovery and readiness), only
-        once the extensions registered their bus subscribers: the first tick may consume an
-        overdue note, and a subscriber attached later never sees it."""
+        """Ready stores and subscribers, before any worker consumes their events (even providerless)."""
         if body_stop.is_set() or not _await_extensions_ready(body_stop):
             return
+        if history_reader is not None:
+            history_reader.start(lifespan_drive_root, REPO_DIR, check_checkout=True)
         start_body()
         if not startup_provider_ready:  # after the store's publication: recovery writes, then readiness (P1)
             if not body_stop.is_set():
@@ -1250,11 +1251,10 @@ async def lifespan(app):
         maintenance_child.stop()
         begin_owned_stop(lifespan_drive_root, cause=server_stop_cause())  # the grace starts here; cause and pending stops are recorded before any wait
         log.info("Server shutting down...")
-        # Let the loop leave its current tick BEFORE workers are killed and the
-        # bridge/Manager go down: a tick still running would otherwise respawn
-        # a killed worker or meet BrokenPipe/EOF. Bounded well inside the
-        # launcher's force-exit budget; the stop flag already suppresses the
-        # crash counter if the join times out.
+        if history_reader is not None:
+            history_reader.stop()
+        # Let the tick leave before killing workers or closing their bridge, or it can respawn
+        # a killed worker or meet EOF. Bounded inside the force-exit budget; stop suppresses crash counting.
         supervisor_thread = _supervisor_thread
         if supervisor_thread is not None and supervisor_thread.is_alive():
             supervisor_thread.join(timeout=2)
@@ -1374,7 +1374,7 @@ def _emergency_process_cleanup() -> dict:
     """Kill child processes, workers and companions; the kill census. The main and
     Host Service listeners close with this process: no port is swept."""
     from ouroboros.startup_historical_audit import live_background_children, stop_background_children
-    background = stop_background_children()  # the maintenance child, the Storage count and Free
+    background = stop_background_children()
     with suppress(Exception):  # a teardown cut short may not have stopped the local model: ask the loaded one, if any
         if (model := sys.modules["ouroboros.local_model"].get_manager(create=False)) is not None:  # no import: it waits
             model.panic_stop(request_only=True)  # its server, an install and a stop still waiting: no lock, no wait
@@ -1384,9 +1384,7 @@ def _emergency_process_cleanup() -> dict:
         from supervisor.workers import kill_workers, last_worker_exit_census
         cleanup_kwargs = _restart_cleanup_kwargs()
         if _restart_requested.is_set():
-            # A restart that hung past the uvicorn shutdown timeout still reaches
-            # here; finalize running tasks as an honest interrupted-by-restart,
-            # not a worker death.
+            # Even after a Uvicorn timeout, finalize tasks as interrupted by restart, not worker death.
             cleanup_status, cleanup_reason = _shutdown_task_cleanup_args(True)
             cleanup_kwargs.update(terminal_status=cleanup_status, result_reason=cleanup_reason,
                                   stop_source="server_shutdown")
@@ -1413,7 +1411,9 @@ def _emergency_process_cleanup() -> dict:
             child.join(timeout=2)
         except Exception:
             pass
-    if _restart_requested.is_set():  # only the restart that carried an adoption can arm it; never a wait
+    if _restart_requested.is_set() and not panic_termination_requested():
+        from ouroboros.gateway.history_reader import reader
+        reader.wait_stopped()  # unfinished history still appears in the census below
         body_adoption.arm(DATA_DIR, worker_exits=worker_exits,
                           live_children=multiprocessing.active_children() + live_background_children(background),
                           owned_stop=owned_stop, owner_restart=_owner_restart_requested.is_set())

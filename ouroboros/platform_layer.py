@@ -1070,6 +1070,18 @@ def kill_process_on_port(port: int) -> None:
 
 # Embedded Python paths.
 
+def direct_python_command(command: List[str], *, windows: bool = IS_WINDOWS, executable: str = sys.executable,
+                          base: str = getattr(sys, "_base_executable", "") or sys.executable,
+                          ) -> tuple[list[str], dict[str, str]]:
+    """Start the interpreter itself when its PID owns the session. A Windows venv
+    redirector adds a child; launch the base with the venv marker as in CPython's
+    multiprocessing (bpo-35797), preserving the venv and the measured PID."""
+    if (windows and command and os.path.normcase(command[0]) == os.path.normcase(executable)
+            and os.path.normcase(base) != os.path.normcase(executable)):
+        return [base, *command[1:]], {"__PYVENV_LAUNCHER__": executable}
+    return list(command), {}
+
+
 def embedded_python_candidates(base_dir: pathlib.Path) -> List[pathlib.Path]:
     """Return candidate embedded python-build-standalone paths."""
     root = base_dir / "python-standalone"
