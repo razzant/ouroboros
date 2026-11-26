@@ -128,6 +128,23 @@ test('only the shell\'s measured state for this document is written, and zero re
     assert.equal(page.properties.size, 0);
 });
 
+test('the lights\' centre is written only when the shell reports one, and the page\'s band is the window\'s handle', () => {
+    const page = boot();
+    page.parseMeta();
+    page.push({ doc: 1_791_100_000_000.25, top: 66, start: 79, mid: 25.5 });
+    assert.deepEqual(Object.fromEntries(page.properties),
+        { '--window-chrome-top': '66px', '--window-chrome-start': '79px', '--window-chrome-mid': '25.5px' });
+    assert.equal(page.press({ clientY: 45 }).prevented, true, 'inside the lights\' row (51 px): the window\'s');
+    assert.equal(page.press({ clientY: 60 }).prevented, false, 'under the row, inside the native bar: the page\'s content');
+    assert.equal(page.press({ clientY: 60, detail: 2 }).prevented, false, 'nor a double-click that would zoom the window');
+    page.push({ doc: 1_791_100_000_000.25, top: 66, start: 79 });  // an older shell, or no centre inside the band
+    assert.deepEqual(Object.fromEntries(page.properties), { '--window-chrome-top': '66px', '--window-chrome-start': '79px' });
+    assert.equal(page.press({ clientY: 60 }).prevented, true, 'without a centre the whole measured band is the handle');
+    page.push({ doc: 1_791_100_000_000.25, top: 66, start: 79, mid: 25.5 });
+    page.push({ doc: 1_791_100_000_000.25, top: 0, start: 0, mid: 0 });  // full screen or the ordinary bar
+    assert.equal(page.properties.size, 0);
+});
+
 test('a plain left press in the band, off any control, drags; a second press is the title bar double-click', () => {
     const page = boot();
     page.parseMeta();

@@ -38,6 +38,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DOC_A = 1_791_100_000_000.25
 DOC_B = DOC_A + 5_250.5  # the next document of the same window
 TITLE_BAR, TOOLBAR_BAND = 28.0, 52.0  # the stand-in AppKit's bar heights (a native run measures real ones)
+LIGHTS_MID = 20.0  # the stand-in traffic lights' vertical centre from the window's top, above the band's own centre
 WINDOW_NUMBER = 42  # the stand-in window's number; another window's presses carry another
 
 
@@ -98,8 +99,9 @@ class TitleBar:
 
 
 class Button:
-    def __init__(self, container, x, title_bar):
+    def __init__(self, container, x, title_bar, window_height=lambda: 750.0):
         self.container, self.x, self.hidden_flag, self.title_bar = container, x, False, title_bar
+        self.window_height, self.mid = window_height, LIGHTS_MID
 
     def isDescendantOf_(self, view):
         return view is self.container
@@ -114,8 +116,8 @@ class Button:
         return Rect(0, 0, 14, 16)
 
     def convertRect_toView_(self, rect, view):
-        assert view is None  # window coordinates
-        return Rect(self.x, 18, rect.size.width, rect.size.height)
+        assert view is None  # window coordinates: origin at the window's bottom-left, as AppKit's
+        return Rect(self.x, self.window_height() - self.mid - rect.size.height / 2, rect.size.width, rect.size.height)
 
 
 class Toolbar:
@@ -156,7 +158,8 @@ class NSWindow:
         theme = View(children=[self.content, self.fill])
         self.content.parent = theme
         self.title_bar = TitleBar()
-        self.buttons = [Button(self.fill if fill_holds_buttons else View(), x, self.title_bar) for x in (19, 39, 59)]
+        self.buttons = [Button(self.fill if fill_holds_buttons else View(), x, self.title_bar,
+                               lambda: self._frame.size.height) for x in (19, 39, 59)]
         self.fail_on = None
         self._delegate = PywebviewDelegate()
 
@@ -486,7 +489,7 @@ def test_the_window_starts_integrated_and_an_undeclaring_first_document_returns_
     assert native.frame() == Rect(100, 100, 1100, 750)
     declare(chrome, DOC_A, integrated=False)
     assert_ordinary(native)
-    assert mac.webview.evaluated == [{"doc": DOC_A, "top": 0, "start": 0}]
+    assert mac.webview.evaluated == [{"doc": DOC_A, "top": 0, "start": 0, "mid": 0}]
 
 
 def test_a_declaring_document_gets_the_integrated_bar_and_only_its_measured_geometry(mac):
@@ -500,14 +503,36 @@ def test_a_declaring_document_gets_the_integrated_bar_and_only_its_measured_geom
     assert (native.separator, native.tabbing) == (wc._SEPARATOR_NONE, wc._TABBING_DISALLOWED)
     assert native.frame() == Rect(100, 100, 1100, 750), "the window keeps the size the launcher asked for"
     assert all(not button.hidden_flag for button in native.buttons)  # the real traffic lights stay
-    assert mac.webview.evaluated == [{"doc": DOC_A, "top": TOOLBAR_BAND, "start": 73.0}]
+    assert mac.webview.evaluated == [{"doc": DOC_A, "top": TOOLBAR_BAND, "start": 73.0, "mid": LIGHTS_MID}]
 
 
-def test_page_zoom_turns_points_into_css_pixels(mac):
-    mac.webview.zoom = 1.25
+@pytest.mark.parametrize("zoom", [1.25, 0.8])  # a larger and a smaller Interface size than the native points
+def test_page_zoom_turns_points_into_css_pixels(mac, zoom):
+    mac.webview.zoom = zoom
     chrome, _window, _native = shown()
     declare(chrome, DOC_A)
-    assert mac.webview.evaluated == [{"doc": DOC_A, "top": round(TOOLBAR_BAND / 1.25, 2), "start": round(73 / 1.25, 2)}]
+    assert mac.webview.evaluated == [{"doc": DOC_A, "top": round(TOOLBAR_BAND / zoom, 2), "start": round(73 / zoom, 2),
+                                     "mid": round(LIGHTS_MID / zoom, 2)}]
+
+
+def test_the_lights_centre_is_reported_only_inside_the_band(mac):
+    """The page stands its header row on the lights' centre (style.css --window-chrome-row); a centre the buttons do not
+    give inside the band is never sent, and the page keeps the whole band as its row, as before the centre existed."""
+    chrome, _window, native = shown()
+    declare(chrome, DOC_A)
+    assert mac.webview.evaluated[-1]["mid"] == LIGHTS_MID and 0 < LIGHTS_MID < TOOLBAR_BAND
+    for button in native.buttons:
+        button.mid = TOOLBAR_BAND + 4  # below the band: not a line the band's row can stand on
+    chrome.zoom_changed()
+    assert mac.webview.evaluated[-1] == {"doc": DOC_A, "top": TOOLBAR_BAND, "start": 73.0, "mid": 0}
+    for button in native.buttons:
+        button.mid, button.hidden_flag = LIGHTS_MID, True  # no visible buttons: no centre and no far edge
+    chrome.zoom_changed()
+    assert mac.webview.evaluated[-1] == {"doc": DOC_A, "top": TOOLBAR_BAND, "start": 0, "mid": 0}
+    for button in native.buttons:
+        button.hidden_flag = False
+    chrome.zoom_changed()
+    assert mac.webview.evaluated[-1] == {"doc": DOC_A, "top": TOOLBAR_BAND, "start": 73.0, "mid": LIGHTS_MID}
 
 
 def test_an_undeclared_document_gets_the_ordinary_bar_back_and_reserves_nothing(mac):
@@ -517,7 +542,7 @@ def test_an_undeclared_document_gets_the_ordinary_bar_back_and_reserves_nothing(
     assert_ordinary(native)
     assert native.fill.colors == ["clear", "window-background"]  # pywebview's own fill again
     assert native.frame() == Rect(100, 100, 1100, 750)
-    assert mac.webview.evaluated[-1] == {"doc": DOC_B, "top": 0, "start": 0}
+    assert mac.webview.evaluated[-1] == {"doc": DOC_B, "top": 0, "start": 0, "mid": 0}
 
 
 def test_a_reload_of_a_declaring_page_tells_the_new_document_without_touching_the_window(mac):
@@ -526,7 +551,7 @@ def test_a_reload_of_a_declaring_page_tells_the_new_document_without_touching_th
     calls = list(native.calls)
     declare(chrome, DOC_B)
     assert native.calls == calls
-    assert mac.webview.evaluated[-1] == {"doc": DOC_B, "top": TOOLBAR_BAND, "start": 73.0}
+    assert mac.webview.evaluated[-1] == {"doc": DOC_B, "top": TOOLBAR_BAND, "start": 73.0, "mid": LIGHTS_MID}
 
 
 def test_an_older_documents_late_messages_never_undo_a_newer_one(mac):
@@ -558,10 +583,10 @@ def test_full_screen_hides_the_toolbar_band_reserves_nothing_and_defers_the_swit
     declare(chrome, DOC_A)
     mac.observers["NSWindowWillEnterFullScreenNotification"](None)
     assert native.toolbar().visible is False, "no permanent band over a full-screen page"
-    assert mac.webview.evaluated[-1] == {"doc": DOC_A, "top": 0, "start": 0}
+    assert mac.webview.evaluated[-1] == {"doc": DOC_A, "top": 0, "start": 0, "mid": 0}
     declare(chrome, DOC_B, integrated=False)  # a replaced UI arrives in full screen
     assert native.mask & wc._FULL_SIZE_CONTENT, "the style mask never changes in full screen"
-    assert mac.webview.evaluated[-1] == {"doc": DOC_B, "top": 0, "start": 0}
+    assert mac.webview.evaluated[-1] == {"doc": DOC_B, "top": 0, "start": 0, "mid": 0}
     mac.observers["NSWindowWillExitFullScreenNotification"](None)
     assert native.toolbar().visible is True
     mac.observers["NSWindowDidExitFullScreenNotification"](None)
@@ -576,7 +601,7 @@ def test_the_toolbar_band_is_back_after_full_screen_though_appkit_ends_the_exit_
     mac.observers["NSWindowWillEnterFullScreenNotification"](None)
     leave_full_screen(mac, native)
     assert native.toolbar().visible is True
-    assert mac.webview.evaluated[-1] == {"doc": DOC_A, "top": TOOLBAR_BAND, "start": 73.0}
+    assert mac.webview.evaluated[-1] == {"doc": DOC_A, "top": TOOLBAR_BAND, "start": 73.0, "mid": LIGHTS_MID}
 
     declare(chrome, DOC_B, integrated=False)  # an older UI, then the new one arrives in full screen
     mac.observers["NSWindowWillEnterFullScreenNotification"](None)
@@ -584,7 +609,7 @@ def test_the_toolbar_band_is_back_after_full_screen_though_appkit_ends_the_exit_
     assert_ordinary(native)
     leave_full_screen(mac, native)
     assert native.mask & wc._FULL_SIZE_CONTENT and native.toolbar().visible is True
-    assert mac.webview.evaluated[-1] == {"doc": DOC_B + 1, "top": TOOLBAR_BAND, "start": 73.0}
+    assert mac.webview.evaluated[-1] == {"doc": DOC_B + 1, "top": TOOLBAR_BAND, "start": 73.0, "mid": LIGHTS_MID}
     assert all(state["top"] in (0, TOOLBAR_BAND) for state in mac.webview.evaluated), \
         "the page is never told to reserve the bare title bar under the integrated one"
 
@@ -596,7 +621,7 @@ def test_a_failed_switch_restores_the_ordinary_bar_and_is_not_retried(mac):
     declare(chrome, DOC_A)
     native.fail_on = None
     assert_ordinary(native)
-    assert mac.webview.evaluated == [{"doc": DOC_A, "top": 0, "start": 0}]
+    assert mac.webview.evaluated == [{"doc": DOC_A, "top": 0, "start": 0, "mid": 0}]
     declare(chrome, DOC_B)
     assert_ordinary(native)
 
@@ -606,7 +631,7 @@ def test_a_fill_that_does_not_hold_the_traffic_lights_is_never_cleared(mac):
     declare(chrome, DOC_A, choice="dark")
     assert_ordinary(native)
     assert native.fill.colors == []
-    assert mac.webview.evaluated == [{"doc": DOC_A, "top": 0, "start": 0}]
+    assert mac.webview.evaluated == [{"doc": DOC_A, "top": 0, "start": 0, "mid": 0}]
     assert native.appearances == [("appearance", "DarkAqua")], "the palette still follows the page"
 
 
@@ -746,7 +771,7 @@ def test_unreadable_geometry_returns_the_ordinary_bar_instead_of_reserving_nothi
     declare(chrome, DOC_A)
     native.fail_on = None
     assert_ordinary(native)
-    assert mac.webview.evaluated == [{"doc": DOC_A, "top": 0, "start": 0}]
+    assert mac.webview.evaluated == [{"doc": DOC_A, "top": 0, "start": 0, "mid": 0}]
     declare(chrome, DOC_B)  # for this window's lifetime, as after a refused switch
     assert_ordinary(native)
 
@@ -761,7 +786,7 @@ def test_unreadable_geometry_at_the_end_of_full_screen_returns_the_ordinary_bar(
     mac.observers["NSWindowDidExitFullScreenNotification"](None)
     native.fail_on = None
     assert_ordinary(native)
-    assert mac.webview.evaluated[-1] == {"doc": DOC_A, "top": 0, "start": 0}
+    assert mac.webview.evaluated[-1] == {"doc": DOC_A, "top": 0, "start": 0, "mid": 0}
 
 
 def test_a_state_webkit_refused_is_told_again(mac):
@@ -781,7 +806,7 @@ def test_a_state_webkit_refused_is_told_again(mac):
     assert refusals and mac.webview.evaluated == []
     mac.observers["NSWindowWillExitFullScreenNotification"](None)  # any later change publishes again
     mac.observers["NSWindowDidExitFullScreenNotification"](None)
-    assert mac.webview.evaluated == [{"doc": DOC_A, "top": TOOLBAR_BAND, "start": 73.0}]
+    assert mac.webview.evaluated == [{"doc": DOC_A, "top": TOOLBAR_BAND, "start": 73.0, "mid": LIGHTS_MID}]
 
 
 def test_the_window_appearance_follows_the_painted_choice_and_system_inherits(mac):
@@ -2346,6 +2371,33 @@ def test_the_page_reserves_room_only_under_the_measured_state():
     assert "window-chrome" not in re.sub(r"/\*.*?\*/", "", _read("web/ui.css"), flags=re.S)
 
 
+def _assert_header_line_follows_the_lights(css):
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    rows = re.findall(r"--window-chrome-row:\s*([^;]+);", css)
+    assert rows == ["max(var(--control-h-float), calc(2 * var(--window-chrome-mid, calc(var(--window-chrome-top) / 2))))"], rows
+    assert not re.search(r"--window-chrome-mid\s*:", css), "a default centre would hide an older shell's whole band"
+    reserving = [m.group(0) for m in re.finditer(r"var\(--window-chrome-top\)", css)]
+    assert len(reserving) == 1, "every band the page reserves is the lights' row; only the row reads the native band"
+
+
+def test_the_header_line_is_the_lights_line_and_falls_back_to_the_whole_band():
+    """With the shell's centre the page's band is twice it (as much air under the lights' line as above it), never
+    shorter than a control; without it the expression is the native band itself, today's geometry. Both directions
+    fail when the rule is broken."""
+    css = _read("web/style.css")
+    _assert_header_line_follows_the_lights(css)
+    with pytest.raises(AssertionError):  # a constant centre: the page guesses
+        _assert_header_line_follows_the_lights(css.replace(
+            ":root[data-window-chrome=\"integrated\"] {\n    --window-chrome-top: 0px;",
+            ":root[data-window-chrome=\"integrated\"] {\n    --window-chrome-mid: 25.5px;\n    --window-chrome-top: 0px;", 1))
+    with pytest.raises(AssertionError):  # a band reserved from the native height again
+        _assert_header_line_follows_the_lights(css.replace("min-height: var(--window-chrome-row);",
+                                                           "min-height: var(--window-chrome-top);", 1))
+    with pytest.raises(AssertionError):  # no fallback: an older shell would reserve nothing
+        _assert_header_line_follows_the_lights(css.replace(
+            "calc(2 * var(--window-chrome-mid, calc(var(--window-chrome-top) / 2)))", "calc(2 * var(--window-chrome-mid))"))
+
+
 @pytest.mark.parametrize("selector", [
     ':root[data-window-chrome="integrated"] :is(.chat, .project), .unguarded',
     '.unguarded, :root[data-window-chrome="integrated"] :where(.chat, .project)',
@@ -2358,8 +2410,8 @@ def test_a_functional_selector_does_not_hide_an_unguarded_geometry_reader(select
 
 def test_the_shell_writes_exactly_the_names_the_page_reads():
     script = wc.DOCUMENT_SCRIPT
-    for name in ("--window-chrome-top", "--window-chrome-start"):
+    for name in ("--window-chrome-top", "--window-chrome-start", "--window-chrome-mid"):
         assert f"setProperty('{name}'" in script and f"removeProperty('{name}')" in script
-        assert f"var({name})" in _read("web/style.css")
+        assert f"var({name}" in _read("web/style.css")
     assert "root.dataset.windowChrome = 'integrated'" in script
     assert 'meta[name="ouroboros-window-chrome"]' in script and f"messageHandlers.{wc.HANDLER}" in script
