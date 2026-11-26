@@ -5,15 +5,18 @@ its caller reports, and a redirect never carries a private chat elsewhere.
 Synthetic transports and fake request dispatch only: no socket, endpoint, key or model is used.
 """
 import asyncio
+import threading
+from contextlib import asynccontextmanager
 
 import httpx
 import pytest
 
-from tests._ollama import TARGET, MESSAGES, GatewayHTTP, LlamaCppHTTP, OllamaHTTP, _chat_completion
+from tests._ollama import MESSAGES, TARGET, GatewayHTTP, LlamaCppHTTP, OllamaHTTP, _chat_completion
 from tests._ollama import install_http as install_http
-from tests.test_llm_ollama_gateway import GATEWAY, MODEL, _shown, _store, _test_settings
-from tests.test_llm_ollama_gateway import _unstreamed_client, world as world
 from tests._usage_store_testing import attempt_rows_in_start_order
+from tests._usage_store_testing import root as root
+from tests.test_llm_ollama_gateway import GATEWAY, MODEL, _shown, _store, _test_settings, _unstreamed_client
+from tests.test_llm_ollama_gateway import world as world
 
 
 def _answer(content):
@@ -321,7 +324,7 @@ def test_an_accounting_wait_outlives_the_prepared_verdict_and_the_send_reads_aga
     from ouroboros.llm_routing import resolve_target
 
     monkeypatch.setattr(model_concurrency, "limit_physical_send", lambda route, send, after_wait=None: send)
-    monkeypatch.setattr(_usage_wait, "_LAST_PRESEND_WAIT", 0.0)
+    monkeypatch.setattr(_usage_wait, "_PRESEND_WAIT_GENERATION", 0)
     world.settings["OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED"] = GATEWAY
     server = install_http(GatewayHTTP())
 
@@ -344,6 +347,135 @@ def test_an_accounting_wait_outlives_the_prepared_verdict_and_the_send_reads_aga
     with pytest.raises(UnidentifiedRouteWithheld) as withheld:
         llm_ollama.limit_compatible_send(delayed, lambda: sent.append(1), resolve=resolve)()
     assert withheld.value.code == "ollama_guard_consent" and len(sent) == 1, "the expired verdict admits nothing"
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("wait_entries", [0, 1, 2])
+def test_prepared_verdict_follows_accounting_wait_order_with_equal_clock_ticks(monkeypatch, asynchronous, wait_entries):
+    from types import SimpleNamespace
+
+    from ouroboros import _usage_wait, llm_attempt, llm_ollama, model_concurrency
+
+    clock = SimpleNamespace(monotonic=lambda: 42.0)
+    monkeypatch.setattr(_usage_wait, "time", clock)
+    monkeypatch.setattr(llm_ollama, "time", clock)
+    monkeypatch.setattr(_usage_wait, "_PRESEND_WAIT_GENERATION", 0)
+    monkeypatch.setattr(model_concurrency, "limit_physical_send", lambda route, send, after_wait=None: send)
+    calls = []
+    monkeypatch.setattr(llm_attempt, "require_physical_dispatch_window", lambda: calls.append("check"))
+
+    def read_verdict(_target, _resolve):
+        calls.append("read")
+        return "fresh", "test"
+
+    async def off_loop(callback):
+        calls.append("off-loop")
+        return callback()
+
+    def send():
+        calls.append("send")
+        return "answer"
+
+    async def send_async():
+        return send()
+
+    monkeypatch.setattr(llm_ollama, "_read_verdict", read_verdict)
+    monkeypatch.setattr(_usage_wait, "presend_off_loop", off_loop)
+    target = {"ollama_probe_no_proxy": True}
+    _usage_wait._note_presend_wait()  # An earlier entry does not expire subsequently prepared work.
+    llm_ollama._set_verdict(target, ("prepared", "test"))
+    dispatch = llm_ollama.limit_compatible_send(target, send_async if asynchronous else send)
+    generation = _usage_wait.presend_wait_generation()
+    for entry in range(1, wait_entries + 1):
+        _usage_wait._note_presend_wait()
+        assert _usage_wait.presend_wait_generation() == generation + entry
+
+    assert (asyncio.run(dispatch()) if asynchronous else dispatch()) == "answer"
+    expected = ["off-loop"] if asynchronous and wait_entries else []
+    if wait_entries:
+        expected.extend(["read", "check"])
+    assert calls == [*expected, "send"]
+    assert target["route_caution"] == ("fresh" if wait_entries else "prepared")
+
+
+@pytest.mark.parametrize("phase, prior_state", [
+    ("stale-read", None), ("queued-read", None), ("sender", None),
+    ("stale-read", "unresolved"), ("stale-read", "settled"),
+])
+def test_cancelled_compatible_presend_read_keeps_exact_attempt_custody(root, monkeypatch, phase, prior_state):
+    from ouroboros import _usage_wait, llm_ollama, model_concurrency
+    from ouroboros import usage_accounting as ua
+    from ouroboros.llm_attempt import physical_attempt_headroom
+
+    monkeypatch.setattr(_usage_wait, "_PRESEND_WAIT_GENERATION", 0)
+    request = ua.AttemptRequest(model="stub", provider="local", drive_root=root, reservation_usd=1.0)
+    other = ua.reserve_attempt(request)
+    ua.mark_dispatched(other)
+    other_row, = attempt_rows_in_start_order(root)
+
+    @asynccontextmanager
+    async def slot(*args, **kwargs):
+        yield (lambda: None) if phase == "queued-read" else None
+
+    monkeypatch.setattr(model_concurrency, "model_call_slot_async", slot)
+
+    async def exercise():
+        blocked, unblock = asyncio.Event(), threading.Event()
+        loop, read_ended, sent, captures = asyncio.get_running_loop(), [], [], []
+
+        def read(*_):
+            loop.call_soon_threadsafe(blocked.set)
+            assert unblock.wait(5), "test never released its preparatory reader"
+            read_ended.append(True)
+            return "fresh", "test"
+
+        async def sender():
+            sent.append(True)
+            blocked.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(llm_ollama, "_read_verdict", read)
+        target = {"ollama_probe_no_proxy": True}
+        llm_ollama._set_verdict(target, ("prepared", "test"))
+        dispatch = llm_ollama.limit_compatible_send(target, sender)
+        if phase == "stale-read":
+            _usage_wait._note_presend_wait()
+
+        def bind(reservation):
+            captures.append(reservation)
+
+        with ua.physical_attempt_limit(1):
+            task = asyncio.create_task(ua.execute_physical_attempt_async(request, dispatch, before_dispatch=bind))
+            try:
+                await asyncio.wait_for(blocked.wait(), timeout=5)
+                before = attempt_rows_in_start_order(root)[-1]
+                assert before["state"] == "dispatched"
+                if prior_state == "unresolved":
+                    ua.mark_unresolved(captures[0], "independent observation")
+                elif prior_state == "settled":
+                    ua.settle_attempt(captures[0], {}, cost_usd=0.25, cost_final=True)
+                previous = attempt_rows_in_start_order(root)[-1]
+                task.cancel("stop waiting")
+                await asyncio.sleep(0)  # deliver cancellation while the read is still blocked
+            finally:
+                unblock.set()
+            with pytest.raises(asyncio.CancelledError, match="stop waiting") as cancelled:
+                await asyncio.wait_for(task, timeout=5)
+            expected = prior_state or ("unresolved" if phase == "sender" else "released")
+            assert cancelled.value.physical_attempt_capture.state == expected
+            assert physical_attempt_headroom() == (1 if expected == "released" else 0)
+        untouched, row = attempt_rows_in_start_order(root)
+        assert untouched == other_row
+        assert row["attempt_id"] == captures[0].attempt_id
+        assert row["state"] == expected
+        if prior_state:
+            assert row == previous
+        if expected == "released":
+            assert row["reason"] == "before_dispatch_failed:PresendReadCancelled"
+        assert sent == ([True] if phase == "sender" else [])
+        assert read_ended == ([] if phase == "sender" else [True])
+
+    asyncio.run(exercise())
 
 
 def test_a_caution_counts_as_told_only_once_a_line_carried_it(install_http, world):

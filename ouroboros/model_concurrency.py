@@ -408,8 +408,8 @@ def limit_physical_send(route: dict, send: Callable, *, after_wait: Callable | N
     async def dispatch_async():
         async with model_call_slot_async(model, local, route=route, check=require_physical_dispatch_window) as check_queued_send:
             if check_queued_send and after_wait:
-                from ouroboros._usage_wait import presend_off_loop
-                await presend_off_loop(after_wait)
+                from ouroboros._usage_wait import presend_read_off_loop
+                await presend_read_off_loop(after_wait)
                 check_queued_send()
             require_physical_dispatch_window()
             return await send()
