@@ -15,9 +15,10 @@
 # ended is Ouroboros's to take over: it reads the open post-merge-red issues (ouroboros/update_qualification.py
 # `post_merge_reds`). A manual dispatch is supported only for a window whose head contains this pilot (its check
 # scripts run from the head).
-# The pilot lasts two weeks after it is enabled or until the next release, whichever comes first; it stops if a release
-# run waited because of it, if more than half of its reds are FLAKY or not attributed, or if post-merge windows grow
-# noticeably longer. A push that changes this file only registers the workflow (a workflow_dispatch needs GitHub to
+# The pilot lasts until 2026-12-10 or the first release after v7.12.1, whichever comes first: post-merge.yml's
+# `browser-dispatch` then starts nothing (PILOT_UNTIL, PILOT_RELEASE; re-enabled by a pull request). It stops earlier if
+# a release run waited because of it, if more than half of its reds are FLAKY or not attributed, or if post-merge
+# windows grow noticeably longer. A push that changes this file only registers the workflow (a workflow_dispatch needs GitHub to
 # know it before it reaches the default branch): it checks nothing.
 
 name: Post-merge browser check
@@ -304,6 +305,8 @@ jobs:
         timeout-minutes: 6
         env:
           GH_TOKEN: ${{ github.token }}
+          BASE: ${{ needs.check.outputs.base }}  # the trusted pair: the hand-over must name exactly this window
+          HEAD_SHA: ${{ needs.check.outputs.head }}
           ROUTING: ${{ needs.check.outputs.routing }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: >-
@@ -340,6 +343,8 @@ jobs:
         timeout-minutes: 6
         env:
           GH_TOKEN: ${{ github.token }}
+          BASE: ${{ needs.check.outputs.base }}
+          HEAD_SHA: ${{ needs.check.outputs.head }}
           ROUTING: ${{ needs.check.outputs.routing }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: >-

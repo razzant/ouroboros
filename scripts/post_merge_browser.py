@@ -25,13 +25,14 @@ more), and then:
   report; a parametrized relative never counts, and a fixture's CandidateError in setup, a collection error or an
   unfinished test is inconclusive (unknown). Where uv.lock differs, or the protected file differs (its base checkout
   would need a skip-worktree index, which the browser fixtures refuse), nothing is compared: every red is unknown.
-- RECHECK: the tests of the open browser issues that this run neither saw fail nor passed whole run once at the head,
-  the same way and with the same exact answers, within RECHECK_SECONDS.
+- RECHECK: the tests of the open browser issues that this run neither saw fail (FLAKY and ACCEPTED included) nor
+  passed whole run once at the head, the same way and with the same exact answers, within RECHECK_SECONDS.
 - OUTCOME (`judge`): GREEN when every requested node was collected, completed setup, call and teardown in one attempt
   and passed, both sentinel cases included (FLAKY: passed on its retry, listed, never handed over); RED for a test with
   two completed failure observations, handed over whatever else the run left partial; CHECKED PARTIALLY, each item
   named with its cause, when anything requested did not run or is not explained: no plan, a plan with nothing to run
-  (the missing sentinels named), no verdict of scripts/ci_retry.py, a changed or same-named module (tier 1 or 2)
+  (the missing sentinels named), no verdict of scripts/ci_retry.py (each failure then counts its completed
+  observations, one per attempt: two are RED, one gets the confirm step's), a changed or same-named module (tier 1 or 2)
   the budget or the cap dropped, a requested argument or collector skipped or broken at collection or never
   collected, a selected test that never ran or did not run whole, a skip that tests/browser_lane.py `permitted_skip`
   does not allow (the permitted ones are listed; this module, loaded as a plugin by the head session, records which
@@ -41,20 +42,22 @@ more), and then:
   `excluded`: Caddy tests, tests `-m ui_browser` deselects) is named, neither green evidence nor partial; dropped
   tier-3 modules and hub files are named only.
 - ATTRIBUTION, the owner's rule (2026-11-25: name the author only when the comparison with the base confirms it, else
-  "not attributed"): a merge is named only when the window holds exactly one first-parent commit and the red passed
-  whole at the base (setup, call and teardown). A test absent at the base is not attributed ("not present at the
-  base"); one that failed there is pre-existing; an inconclusive base answer is unknown. Unattributed reds list their
-  candidate merges: the window's commits that touched the files that selected the test (its module, the changed
-  files that chose it, a sentinel's guarded files), else all of them; the cause may lie elsewhere.
+  "not attributed"): a merge is named only when the window holds exactly one first-parent commit, whose first parent
+  is the base, and the red passed whole at the base (setup, call and teardown). A test absent at the base is not
+  attributed ("not present at the base"); one that failed there is pre-existing; an inconclusive base answer is
+  unknown. Unattributed reds list their candidate merges: the window's commits that touched the files that selected
+  the test (its module, the changed files that chose it, a sentinel's guarded files), else all of them, saying none
+  touched them; the cause may lie elsewhere.
 
 The `route` job runs no test and no code of the window: from the dispatching workflow's own revision it reads the
 check job's hand-over as data and calls scripts/post_merge_routing.py `route` with the system `browser`, so its issues
 are `post-merge-red` issues of their own system, each red with its own base answer and candidates, and a culprit's
 pull request gets one comment. It writes only for a window whose base and head both lie on `ouroboros`'s first-parent
-chain, base first. Off the `ouroboros` branch (a trial) it holds a read-only token and DryGitHub records the writes it
-would make. It retires (narrows or closes) issues only while this run's head is still the branch tip. A
-refused write or a red no open issue carries fails it, named in its summary; the check job's outputs stay with the run,
-so re-running the route job alone offers that hand-over again.
+chain, base first, and that the hand-over names (BASE, HEAD_SHA). Off the `ouroboros` branch (a trial) it holds a
+read-only token and DryGitHub records the writes it would make. It retires (narrows or closes) issues only while this
+run's head is still the branch tip; past it, `reconcile` first drops each test a newer head recorded green and holds
+one the open issue of its kind cannot take. A refused write or a red no open issue carries fails it, named in its
+summary; the check job's outputs stay with the run, so re-running the route job alone offers that hand-over again.
 """
 from __future__ import annotations
 
@@ -78,7 +81,7 @@ from scripts import post_merge_browser_select as selection  # noqa: E402
 from scripts import post_merge_check as pmc  # noqa: E402
 from scripts import post_merge_routing as routing  # noqa: E402
 from scripts.post_merge_bisect import comparable, probe_files, protected_projection  # noqa: E402
-from tests.ci_verdicts import observed_outcomes  # noqa: E402
+from tests.ci_verdicts import expected_failures, observed_outcomes  # noqa: E402
 
 SYSTEM = "browser"
 TEST_SECONDS = 900  # the UI lane's per-test bound (ui-browser.yml)
@@ -176,7 +179,7 @@ def judge(evidence: Path, plan: dict) -> dict:
     result = {"outcome": "partial", "partial": [], "red": [], "once": {}, "failed_then_skipped": [], "flaky": [],
               "accepted": [], "not_run": [], "unfinished": [], "skipped": [], "permitted": {},
               "missing_sentinels": [], "dropped": [], "collection_skipped": [], "not_collected": {}, "confirmed": [],
-              "unconfirmed": [], "passed": 0, "planned": None, "verdict": None, "reason": ""}
+              "unconfirmed": [], "xfailed": [], "passed": 0, "planned": None, "verdict": None, "reason": ""}
     if not plan:
         result["partial"].append("the job stopped before it chose the tests: nothing ran")
         return result
@@ -195,9 +198,20 @@ def judge(evidence: Path, plan: dict) -> dict:
     sessions = [first, *(pmc.read_session(path) for path in _rounds(head))]
     ran: dict[str, dict] = {}
     whole: set[str] = set()  # ran whole (setup, call and teardown passed) in one attempt: the only pass that counts
+    failures: dict[str, list[dict]] = {}  # each attempt's failure observation of a test, in order
+    passed_later: set[str] = set()  # ran whole in an attempt after one where it failed
+    xfailed: set[str] = set()  # ran and failed as its xfail marker expects: completed, neither passed nor skipped
     for session in sessions:
-        whole |= pmc._ran_whole(session)[0]
+        shared = pmc._shared(session)  # one public id for several tests: no pass of it is one test's (as the legs)
+        session_whole = {node for node in pmc._ran_whole(session)[0]
+                         if not any(pmc._inside(other, node) for other in shared)}
+        whole |= session_whole
+        xfailed |= set(expected_failures(session["rows"]))
         for node, observed in observed_outcomes(session["rows"]).items():
+            if observed["outcome"] == "failed":
+                failures.setdefault(node, []).append(observed)
+            elif node in failures and node in session_whole:
+                passed_later.add(node)
             if ran.get(node, {}).get("outcome") != "failed":
                 ran[node] = observed
     confirm = _read(Path(evidence) / CONFIRM) or {}
@@ -231,10 +245,20 @@ def judge(evidence: Path, plan: dict) -> dict:
         else:  # a retry, or a first attempt, that never finished: the first failure stays visible, nothing is routed
             result["once"][node] = (f"failed ({_first(attempts[0])}); its retry did not finish ({_first(attempts[1])})"
                                     if _completed(attempts[0]) else _once(attempts[0], result["reason"]))
-    if not verdict:  # no verdict: a failure the session saw gets the confirmation's retry, else is only reported
-        result["once"] = {node: "failed; its retry never ran" for node, observed in ran.items()
-                          if observed["outcome"] == "failed"}
-        result["unconfirmed"] = sorted(node for node in result["once"] if _completed(ran[node]))
+    if not verdict:  # no verdict: each failure counts its completed observations, one per attempt
+        for node, seen_failing in failures.items():
+            completed = [attempt for attempt in seen_failing if _completed(attempt)]
+            if len(completed) >= 2:
+                result["red"].append(node)  # two completed failure observations: the confirmed red stays routed
+            elif completed and node in passed_later:
+                result["flaky"] = sorted({*result["flaky"], node})
+            elif completed and len(seen_failing) == 1:
+                result["once"][node] = "failed; its retry never ran"
+                result["unconfirmed"].append(node)  # its one observation: the confirm step gives the second
+            elif completed:
+                result["once"][node] = f"failed ({_first(completed[0])}); its retry did not finish"
+            else:
+                result["once"][node] = _once(seen_failing[0], "")
     # The time limit (or a killed run) left these with one completed failure: the confirm step ran each once more.
     for node in sorted(result["unconfirmed"]):
         answer = (confirm.get("results") or {}).get(node)
@@ -247,8 +271,9 @@ def judge(evidence: Path, plan: dict) -> dict:
             result["flaky"] = sorted({*result["flaky"], node})
     result["red"].sort()
     seen = set(result["red"]) | set(result["once"]) | set(result["failed_then_skipped"])
+    result["xfailed"] = sorted(xfailed - seen)
     result["skipped"] = sorted(node for node, observed in ran.items() if observed["outcome"] == "skipped"
-                               and node not in permitted and node not in seen)
+                               and node not in permitted and node not in seen and node not in xfailed)
     result["permitted"] = {node: permitted[node] for node in sorted(permitted)
                            if ran.get(node, {}).get("outcome") == "skipped"}
     if planned is not None:
@@ -279,7 +304,7 @@ def judge(evidence: Path, plan: dict) -> dict:
             result["missing_sentinels"].append(f"{scenario}: the head no longer defines {row['test']}")
         elif planned is not None and scenario not in planned:
             result["missing_sentinels"].append(f"{scenario}: the session did not collect this case")
-        elif scenario not in whole and scenario not in seen and scenario not in permitted:
+        elif not ({scenario} & (whole | seen | set(permitted) | confirmed_pass | xfailed | set(result["accepted"]))):
             result["missing_sentinels"].append(f"{scenario}: it did not complete")
     result["passed"] = sum(observed["outcome"] == "passed" and node in whole for node, observed in ran.items()
                            if node not in seen and node not in result["flaky"])
@@ -296,7 +321,7 @@ def judge(evidence: Path, plan: dict) -> dict:
             result["partial"].append(label)
     explained = (result["red"] or result["once"] or result["failed_then_skipped"] or result["not_run"]
                  or result["unfinished"] or result["skipped"] or result["collection_skipped"]
-                 or result["not_collected"])
+                 or result["not_collected"] or set(result["flaky"]) & confirmed_pass)  # a failure confirm resolved
     if verdict and verdict.get("verdict") not in ("green", "flaky", "accepted") and not explained:
         result["partial"].append("scripts/ci_retry.py says " + str(verdict.get("verdict")) + " and no test explains it"
                                  + (f": {result['reason']}" if result["reason"] else ""))
@@ -423,6 +448,13 @@ def same_run_passes(directory: Path, ids) -> dict[str, str]:
             and not any(pmc._inside(other, node) for other in shared)}
 
 
+def failed_here(judged: dict) -> list[str]:
+    """Every test that failed in this run's head session, however it was judged afterwards (RED, FLAKY, ACCEPTED,
+    once, then skipped): no pass of this run retires an open issue's test for it."""
+    return sorted({*judged.get("red", ()), *judged.get("once", ()), *judged.get("failed_then_skipped", ()),
+                   *judged.get("flaky", ()), *judged.get("accepted", ())})
+
+
 def recheck(evidence: Path, plan: dict, judged: dict, github, *, run=None) -> dict:
     """recheck.json: the open browser issues' tests, settled by this run's whole passes or run once at the head."""
     record = {"format": 1, "head": plan.get("head"), "listed": False, "issues": [], "same_run": {}, "rechecked": {}}
@@ -431,8 +463,7 @@ def recheck(evidence: Path, plan: dict, judged: dict, github, *, run=None) -> di
     except Exception as error:  # noqa: BLE001 -- an unread list retires nothing
         record["warning"] = f"the open browser issues did not read: {routing._reason(error)}"
         return record
-    seen = set(judged["red"]) | set(judged["once"]) | set(judged["failed_then_skipped"])  # fails here: no pass settles
-    ids = sorted({node for issue in issues for node in issue["block"]["ids"]} - seen)
+    ids = sorted({node for issue in issues for node in issue["block"]["ids"]} - set(failed_here(judged)))
     record.update(listed=True, issues=sorted(issue["number"] for issue in issues))
     record["same_run"] = same_run_passes(Path(evidence) / "head", ids)
     rest = [node for node in ids if node not in record["same_run"]]
@@ -475,32 +506,38 @@ def relevant_files(plan: dict, node: str) -> set[str]:
 
 
 def attribute(plan: dict, red: list[str], compared: dict) -> list[dict]:
-    """route()'s verdicts by the owner's rule: a culprit only for a one-merge window whose base ran the red whole and
-    green; pre-existing only where the base showed that test fail; else unattributed with its candidate merges. Each
-    verdict keeps its own window base (`window`), so an issue that gains tests from a later window keeps both."""
+    """route()'s verdicts by the owner's rule: a culprit only for a window of one merge whose first parent is the
+    window's base (`head_parent`, read by the selector) and whose base ran the red whole and green; pre-existing only
+    where the base showed that test fail; else unattributed with its candidate merges (`fallback`: none touched the
+    files that selected it, so all of the window's). Each verdict keeps its own window base (`window`), so an issue
+    that gains tests from a later window keeps both."""
     commits, results = plan.get("commits") or [], compared.get("results") or {}
     inconclusive, base = compared.get("inconclusive") or {}, plan.get("base") or ""
+    one_merge = len(commits) == 1 and bool(base) and plan.get("head_parent") == base
     verdicts = []
     for node in red:
         files = relevant_files(plan, node)
-        candidates = [c["sha"] for c in commits if files & set(c["files"])] or [c["sha"] for c in commits]
+        matched = [c["sha"] for c in commits if files & set(c["files"])]
+        candidates = {"candidates": matched or [c["sha"] for c in commits], **({} if matched else {"fallback": True})}
         answer = results.get(node, "unknown")
         if compared.get("dependencies_differ"):
-            verdicts.append({"id": node, "verdict": "unattributed", "at_base": "dependencies", "candidates": candidates,
+            verdicts.append({"id": node, "verdict": "unattributed", "at_base": "dependencies", **candidates,
                              "window": base, "why": "uv.lock differs between the window's base and head: the base "
                                                     "was not run"})
         elif answer == "failed":
             verdicts.append({"id": node, "verdict": "pre-existing", "at_base": "failed", "window": base})
-        elif answer == "passed" and len(commits) == 1:
+        elif answer == "passed" and one_merge:
             verdicts.append({"id": node, "verdict": "culprit", "culprit": commits[0]["sha"], "last_good": base,
                              "at_base": answer, "window": base})
         else:
             at_base = answer if answer in ("passed", "absent", "error") else "unknown"
-            why = (f"the window holds {len(commits)} merges and the base does not tell them apart" if at_base == "passed"
+            why = (f"the window holds {len(commits)} merges and the base does not tell them apart"
+                   if at_base == "passed" and len(commits) != 1
+                   else "its one commit's first parent is not the window's base" if at_base == "passed"
                    else "not present at the base" if at_base == "absent"
                    else f"its answer at the base was inconclusive: {inconclusive[node]}" if node in inconclusive
                    else f"its answer at the base was {answer}")
-            verdicts.append({"id": node, "verdict": "unattributed", "at_base": at_base, "candidates": candidates,
+            verdicts.append({"id": node, "verdict": "unattributed", "at_base": at_base, **candidates,
                              "window": base, "why": why})
     return verdicts
 
@@ -540,16 +577,90 @@ def _ancestor(older: str, newer: str) -> bool:
                           capture_output=True).returncode == 0
 
 
-def hand_over(data: dict, github, *, run_url: str, retire: bool, origin=None, ancestor=_ancestor) -> dict:
+def hand_over(data: dict, github, *, run_url: str, retire: bool, origin=None, ancestor=None) -> dict:
     same, rechecked = data.get("same_run") or {}, data.get("rechecked") or {}
+    # A test that failed in this run's head session (FLAKY, ACCEPTED, not confirmed) retires no issue here.
+    held = {*(data.get("red") or ()), *(data.get("flaky") or ()), *(data.get("failed_here") or ())}
     return routing.route(
         github, classification={"failed": [{"id": node} for node in data.get("red") or []],
                                 "flaky": [{"id": node, "retry": "passed"} for node in data.get("flaky") or []],
                                 "base": data.get("base")},
         attribution={"verdicts": data.get("verdicts") or []}, head=data["head"], run_url=run_url,
-        recheck=lambda ids: {node: rechecked.get(node, "unknown") for node in ids},
-        same_run=lambda ids: {node: same[node] for node in ids if node in same},
-        system=SYSTEM, owed=(), retire=retire, ancestor=ancestor, origin=origin)
+        recheck=lambda ids: {node: "unknown" if node in held else rechecked.get(node, "unknown") for node in ids},
+        same_run=lambda ids: {node: same[node] for node in ids if node in same and node not in held},
+        system=SYSTEM, owed=(), retire=retire, ancestor=ancestor or _ancestor, origin=origin)
+
+
+_GREEN_AT = re.compile(r"Green at `([0-9a-f]{40})` on ")  # an issue left, or closed, by a whole pass (routing)
+_ALSO_AT = re.compile(r"Also failing at `([0-9a-f]{40})`:")  # a test that joined an issue (routing)
+_LISTED = re.compile(r"^- `([^`\n]+)`", re.M)
+
+
+def _chain(ref: str) -> list[str]:
+    """The first-parent commits of `origin/<ref>`, newest first, from the route job's own full clone."""
+    done = subprocess.run(["git", "rev-list", "--first-parent", f"origin/{ref}"], cwd=REPO, capture_output=True,
+                          text=True)
+    return done.stdout.split() if done.returncode == 0 else []
+
+
+def dispositions(github) -> dict[str, list[tuple[str, str]]]:
+    """{test id: [(head, "red" | "green"), ...]}: what the browser issues, open and closed, record of each test, in
+    the order recorded: an issue's observation (`Found failing at` / `Still not passing at`) and `Also failing at`
+    comment are red there; a `Green at` comment is green for the tests it lists, or for all of a closed issue's."""
+    found: dict[str, list[tuple[str, str]]] = {}
+    for item in github.pages(f"issues?state=all&labels={routing.LABEL}"):
+        block = routing.parse_machine_block(item.get("body") or "")
+        if "pull_request" in item or block is None or routing.system_of(block) != SYSTEM:
+            continue
+        for sha in routing._OBSERVED.findall(item.get("body") or ""):
+            for node in block["ids"]:
+                found.setdefault(node, []).append((sha, "red"))
+        for comment in github.pages(f"issues/{item['number']}/comments"):
+            text = (comment or {}).get("body") or ""
+            if green := _GREEN_AT.match(text):
+                listed = _LISTED.findall(text) or (block["ids"] if item.get("state") == "closed" else [])
+                for node in listed:
+                    found.setdefault(node, []).append((green.group(1), "green"))
+            elif also := _ALSO_AT.match(text):
+                for node in _LISTED.findall(text):
+                    found.setdefault(node, []).append((also.group(1), "red"))
+    return found
+
+
+def reconcile(data: dict, github, chain: list[str]) -> tuple[dict, dict[str, str], dict[str, str]]:
+    """(hand-over, settled, held) of a run whose head is no longer the branch tip, before anything is written.
+
+    A test whose latest record from a newer first-parent head is green is settled: this run neither files, extends
+    nor comments for it. A test the open issue of its kind cannot take (that issue records a newer observation, and
+    an older one never joins it) is held for the check at the current head, named, never a refused write. Every
+    other test is handed over as usual: an open issue keeps it for the recheck at the current head."""
+    head = data["head"]
+    if head not in chain:
+        raise ValueError(f"{head[:12]} is not on the branch's first-parent chain")
+    position = {sha: index for index, sha in enumerate(chain)}
+    newer = lambda sha: position.get(sha, len(chain)) < position[head]  # noqa: E731
+    records = dispositions(github)
+    verdicts = {row["id"]: row for row in data.get("verdicts") or []}
+    settled, held = {}, {}
+    for node in sorted({*(data.get("red") or ()), *(data.get("flaky") or ())}):
+        later = [(position[sha], -order, state, sha) for order, (sha, state) in enumerate(records.get(node, ()))
+                 if newer(sha)]
+        if later and min(later)[2] == "green":  # the newest head's last record
+            settled[node] = min(later)[3]
+    issues = [issue for issue in routing.open_issues(github) if routing.system_of(issue["block"]) == SYSTEM]
+    for node in sorted(set(data.get("red") or ()) - set(settled)):
+        verdict = verdicts.get(node) or {"verdict": "unattributed"}
+        if verdict["verdict"] == "culprit" or any(node in issue["block"]["ids"] for issue in issues):
+            continue
+        blocking = [issue["number"] for issue in issues if issue["block"].get("kind") == verdict["verdict"]
+                    and issue.get("observed") and newer(issue["observed"])]
+        if blocking:
+            held[node] = f"#{blocking[0]} records a newer observation"
+    gone = set(settled) | set(held)
+    kept = {**data, "red": [node for node in data.get("red") or [] if node not in gone],
+            "flaky": [node for node in data.get("flaky") or [] if node not in gone],
+            "verdicts": [row for row in data.get("verdicts") or [] if row["id"] not in gone]}
+    return kept, settled, held
 
 
 def route_lines(data: dict, record: dict, *, dry: bool, notes: list[str], writes=None) -> list[str]:
@@ -581,6 +692,12 @@ def command_route(args, environ=os.environ) -> int:
                  "it exceeded the job output's limit (its evidence keeps routing-input.json). Nothing was handed over."]
         _summary(environ, lines)
         return 1
+    trusted = (environ.get("BASE", ""), environ.get("HEAD_SHA", ""))  # the window this workflow run was given
+    if (data.get("base"), data.get("head")) != trusted:
+        _summary(environ, ["## Post-merge browser hand-over", "", f"Nothing handed over: the hand-over names "
+                           f"`{data.get('base')}..{data.get('head')}`, not the window of this run "
+                           f"`{trusted[0]}..{trusted[1]}`."])
+        return 1
     github = (DryGitHub if dry else routing.GitHub)(environ.get("GITHUB_REPOSITORY", ""), environ.get("GH_TOKEN", ""))
     notes = []
     try:
@@ -590,6 +707,18 @@ def command_route(args, environ=os.environ) -> int:
     except Exception as error:  # noqa: BLE001 -- an unconfirmed tip retires nothing
         retire = False
         notes.append(f"The branch tip did not read ({routing._reason(error)}): this run retires no issue.")
+    if not retire:  # an older window, routed late: reconcile each test with what newer heads recorded first
+        try:
+            data, settled, held = reconcile(data, github, _chain(environ.get("GITHUB_REF", "")
+                                                                 .removeprefix("refs/heads/") or routing.BRANCH))
+        except Exception as error:  # noqa: BLE001 -- unreconciled, an older red could reopen a resolved one
+            _summary(environ, ["## Post-merge browser hand-over" + (" (dry: a trial off `ouroboros`)" if dry else ""),
+                               "", *[f"- {note}" for note in notes], "", "Nothing handed over: what newer heads "
+                               f"recorded did not read ({routing._reason(error)}). Re-running this job alone offers "
+                               "the hand-over again."])
+            return 1
+        notes += [f"`{node}` passed at the newer `{sha[:12]}`: not handed over." for node, sha in settled.items()]
+        notes += [f"`{node}` is held for the check at the current head: {why}." for node, why in held.items()]
     if not data.get("recheck_listed"):
         notes.append("The check could not list the open browser issues: none of their tests was rechecked.")
     run, attempt = (int(value) if str(value).isdigit() else None
@@ -664,8 +793,10 @@ def summary_lines(plan: dict, judged: dict, verdicts: list[dict], compared: dict
             elif verdict.get("verdict") == "pre-existing":
                 note = " — already red at the base: not attributed"
             else:
-                note = (f" — not attributed ({verdict.get('why', 'no base comparison')}); candidate merges (they "
-                        "touched the files that selected it; the cause may lie elsewhere): "
+                touched = ("none touched the files that selected it, so all of the window's" if verdict.get("fallback")
+                           else "they touched the files that selected it")
+                note = (f" — not attributed ({verdict.get('why', 'no base comparison')}); candidate merges "
+                        f"({touched}; the cause may lie elsewhere): "
                         + ", ".join(f"`{sha[:12]}`" for sha in verdict.get("candidates") or []))
             if node in (judged.get("confirmed") or ()):
                 note = " (its second failure came from the confirm step: the run's time limit gave it no retry)" + note
@@ -676,9 +807,10 @@ def summary_lines(plan: dict, judged: dict, verdicts: list[dict], compared: dict
     for key, label in (("failed_then_skipped", "Failed, then skipped on its retry (never handed over)"),
                        ("flaky", "FLAKY (passed on its retry, never handed over)"),
                        ("accepted", "ACCEPTED (tests/accepted_failures.json)"),
+                       ("xfailed", "XFAIL (failed as their marker expects)"),
                        ("skipped", "Skipped outside the lane's permitted skips"),
                        ("missing_sentinels", "Sentinels not checked")):
-        if judged[key]:
+        if judged.get(key):
             lines += ["", f"{label}:"] + [f"- `{node}`" if key != "missing_sentinels" else f"- {node}"
                                           for node in judged[key]]
     if judged["not_run"]:
@@ -738,7 +870,7 @@ def command_outcome(args, environ=os.environ) -> int:
     compared, rechecked = _read(evidence / "compare.json") or {}, _read(evidence / "recheck.json") or {}
     verdicts = attribute(plan, judged["red"], compared)
     data = {"format": 1, "base": plan.get("base"), "head": plan.get("head"), "outcome": judged["outcome"],
-            "red": judged["red"], "flaky": judged["flaky"], "verdicts": verdicts,
+            "red": judged["red"], "flaky": judged["flaky"], "failed_here": failed_here(judged), "verdicts": verdicts,
             "same_run": rechecked.get("same_run") or {}, "rechecked": rechecked.get("rechecked") or {},
             "recheck_listed": bool(rechecked.get("listed"))}
     _write(evidence / "outcome.json", {**judged, "verdicts": verdicts})

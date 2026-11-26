@@ -156,7 +156,7 @@ def test_it_holds_exactly_the_permissions_of_its_hand_over_and_no_secret():
     assert [step["id"] for step in steps if "GH_TOKEN" in (step.get("env") or {})] == [
         "base", "growth", "route", "browser_dispatch"]
     [dispatch] = dispatch_job["steps"]
-    assert dispatch["run"].startswith("gh workflow run post-merge-browser.yml ")
+    assert "\ngh workflow run post-merge-browser.yml " in dispatch["run"]
 
 
 def test_every_action_is_pinned_by_commit_or_local():
@@ -193,7 +193,9 @@ def test_the_browser_check_is_a_workflow_of_its_own_that_the_post_merge_readers_
     # One runner (decision 1): a branch's windows wait in one group, FIFO, up to 100 pending (`queue: max`), so a
     # window's pending run is never replaced; the one writer is the one running window's route job.
     assert BROWSER["concurrency"]["queue"] == "max" and BROWSER["concurrency"]["cancel-in-progress"] is False
-    assert "post-merge-browser-{0}', github.ref_name" in BROWSER["concurrency"]["group"]
+    assert BROWSER["concurrency"]["group"] == (
+        "${{ github.event_name == 'push' && format('post-merge-browser-register-{0}', github.sha) "
+        "|| format('post-merge-browser-{0}', github.ref_name) }}")  # a register push never shares the windows' line
     assert not any("concurrency" in job for job in BROWSER["jobs"].values())
 
 

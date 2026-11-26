@@ -6,14 +6,14 @@
         [--durations ci-durations.json] [--budget-seconds N] [--args-out args.txt]
 
 .github/workflows/post-merge-browser.yml (owner choice 1, 2026-11-25: a narrow, non-blocking browser check of the
-windows that change the interface; a pilot for two weeks after it is enabled or until the next release) runs a small
+windows that change the interface; a pilot until 2026-12-10 or the first release after v7.12.1) runs a small
 set chosen here, browserless and deterministic, from the window's first-parent commits BASE..HEAD. post-merge.yml's
 window job runs `scope` to decide whether to start that workflow; its `check` job asks again before it installs
 anything, then runs `plan`.
 
 - A module is a `ui_browser` module when its code declares the marker: a `pytestmark`, or a decorator of a test, a
-  test class or a method of one, read with `ast` (a module that does not parse counts by its text, so its collection
-  error surfaces). A string or a comment that mentions the marker declares nothing.
+  test class or a method of one, read with `ast` (a module that does not parse counts by its text and runs whole,
+  so its collection error surfaces). A string or a comment that mentions the marker declares nothing.
 - The check APPLIES when a commit of the window touches `web/**`, a `ui_browser` module (at the head, or at the base
   where the window deleted it or took its marker away), a file under `tests/` that such a module names (a helper or a
   fixture), or the browser lane every browser test loads (SHARED: tests/browser_lane.py and the conftests), which
@@ -24,7 +24,8 @@ anything, then runs `plan`.
   changed `web/` file (`web/room_work.css` → `test_room_work_browser.py`); (3) a module that names a changed `web/`
   file (`chat_cards.js`), test helper or fixture, or imports from a changed module whose change reaches beyond its
   tests. A module runs whole, unless every reason that chose it is a change confined to some of its tests: then it
-  runs those tests (a hunk that only deletes lines is confined to none: the module runs whole). A changed test that
+  runs those tests (a hunk that only deletes lines, or removes a base line outside the base's tests, is confined to
+  none: the module runs whole). A changed test that
   the lane's `-m ui_browser` deselects (a Docker-only test) is EXCLUDED by the lane, named, never passed. A file or stem more than WIDE modules name (`chat.js`, `style.css`, the stem `chat`) is a hub: it
   selects nothing apart from the module named exactly after it, and stays with the release lane. Within a tier the
   window's commits take turns (each commit's cheapest candidate first), so one large merge cannot crowd out the
@@ -96,17 +97,31 @@ _UI_TEXT = re.compile(r"\bmark\.ui_browser\b(?!_)")  # a module that does not pa
 
 
 def git(*args: str, cwd: Path = REPO) -> str:
-    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
-                          encoding="utf-8").stdout
+    return subprocess.run(["git", "-c", "core.quotePath=false", *args], cwd=cwd, check=True, capture_output=True,
+                          text=True, encoding="utf-8", errors="replace").stdout
+
+
+def one_line(text: str) -> str:
+    """`text` for a single-line Actions output (`name=value`): a backslash or control character in a path is escaped."""
+    return re.sub(r"[\\\x00-\x1f\x7f]", lambda match: "\\" + {"\\": "\\", "\n": "n", "\t": "t"}.get(
+        match.group(), f"x{ord(match.group()):02x}"), text)
 
 
 def window_commits(base: str, head: str, cwd: Path = REPO) -> list[dict]:
-    """[{sha, files}] of each first-parent commit of BASE..HEAD, oldest first, each against its first parent."""
+    """[{sha, files}] of each first-parent commit of BASE..HEAD, oldest first, each against its first parent. Paths
+    are read NUL-delimited (`-z`): git never quotes them there, whatever bytes they hold."""
     rows = []
     for sha in git("rev-list", "--first-parent", "--reverse", f"{base}..{head}", cwd=cwd).split():
-        files = git("diff", "--name-only", "--no-renames", f"{sha}^1", sha, cwd=cwd).split("\n")
+        files = git("diff", "--name-only", "-z", "--no-renames", f"{sha}^1", sha, cwd=cwd).split("\0")
         rows.append({"sha": sha, "files": sorted(path for path in files if path)})
     return rows
+
+
+def first_parent(sha: str, cwd: Path = REPO) -> str:
+    """`sha^1`, or "" for a root commit: a merge is named only when it is the window's one commit after its base."""
+    done = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{sha}^1^{{commit}}"], cwd=cwd,
+                          capture_output=True, text=True)
+    return done.stdout.strip() if done.returncode == 0 else ""
 
 
 def _marks(expression) -> bool:
@@ -197,21 +212,39 @@ def applicability(changed: list[str], head_modules: dict[str, str], base_modules
                    "shared browser infrastructure")
 
 
+def _span(text: str) -> range:
+    """The lines of one side of a hunk header (`12,3`, `12`; `12,0` is none)."""
+    start, _, count = text.partition(",")
+    return range(int(start), int(start) + (int(count) if count else 1))
+
+
 def changed_lines(base: str, head: str, paths, cwd: Path = REPO) -> dict[str, set[int]]:
     """{module: head line numbers the window changed} from one `git diff -U0 BASE HEAD`; a hunk that only deletes
-    lines adds line 0, which no test holds, so its module runs whole (`changed_tests`)."""
+    lines, or removes or replaces a base line outside the base's tests (a helper, a fixture, an import), adds line 0,
+    which no test holds, so its module runs whole (`changed_tests`)."""
     paths = sorted(paths)
     if not paths:
         return {}
     lines: dict[str, set[int]] = {}
-    current = None
+    removed: dict[str, set[int]] = {}
+    current = old = None
     for line in git("diff", "-U0", "--no-renames", base, head, "--", *paths, cwd=cwd).splitlines():
-        if line.startswith("+++ "):
+        if line.startswith("--- "):
+            old = line[6:] if line.startswith("--- a/") else None
+        elif line.startswith("+++ "):
             current = line[6:] if line.startswith("+++ b/") else None
         elif line.startswith("@@") and current:
-            start, _, count = line.split("+", 1)[1].split(" ", 1)[0].partition(",")
-            first, many = int(start), int(count) if count else 1
-            lines.setdefault(current, set()).update(range(first, first + many) if many else (0,))
+            before, after = line.split(" ", 3)[1:3]
+            new = _span(after[1:])
+            lines.setdefault(current, set()).update(new or (0,))
+            if old == current and _span(before[1:]):
+                removed.setdefault(current, set()).update(_span(before[1:]))
+    for module, numbers in removed.items():
+        shown = subprocess.run(["git", "show", f"{base}:{module}"], cwd=cwd, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+        spans = collectable_spans(module, shown.stdout) if shown.returncode == 0 else None
+        if spans is None or any(not any(first <= number <= last for first, last, _ in spans) for number in numbers):
+            lines[module].add(0)
     return lines
 
 
@@ -366,12 +399,15 @@ def select(commits: list[dict], head_modules: dict[str, str], *, base_modules=()
     fallback = _fallback(table)
     for module, row in list(candidates.items()):
         tests = None if row["whole"] else changed_tests(module, head_modules[module], lines.get(module))
-        marked = lane_tests(module, head_modules[module]) or ()
-        if tests is not None:  # a changed test the lane deselects is excluded by the lane, never passed
+        marked = lane_tests(module, head_modules[module])
+        if marked is None:  # it does not parse: passed whole, so its collection error is the session's to report
+            tests = None
+        elif tests is not None:  # a changed test the lane deselects is excluded by the lane, never passed
             kept = {name for _, _, name, lane in marked if lane}
             plan["excluded"] += [{"module": test, "why": DESELECTED} for test in tests if test not in kept]
             tests = [test for test in tests if test in kept]
-        if any(_under(key, module) for key in EXCLUDED):  # its Caddy tests stay out: the others run by their ids
+        if marked is not None and any(_under(key, module) for key in EXCLUDED):  # its Caddy tests stay out: the
+            # others run by their ids
             wanted = tests if tests is not None else [name for _, _, name, lane in marked if lane]
             plan["excluded"] += [{"module": test, "why": EXCLUDED[test]} for test in wanted if test in EXCLUDED]
             tests = [test for test in wanted if test not in EXCLUDED]
@@ -462,7 +498,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "scope":  # whether the window is the owner's scope; an empty plan is the check's to report
         applies, why = applicability(sorted({path for commit in commits for path in commit["files"]}), modules, deleted)
         print(f"applicable={'true' if applies else 'false'}")
-        print(f"why={why}")
+        print(f"why={one_line(why)}")
         return 0
     table = None
     if args.durations and args.durations.is_file():
@@ -470,7 +506,7 @@ def main(argv: list[str] | None = None) -> int:
     touched = {path for commit in commits for path in commit["files"] if path in modules}
     plan = select(commits, modules, base_modules=deleted, table=table, budget_seconds=args.budget_seconds,
                   lines=changed_lines(args.base, args.head, touched))
-    plan.update(base=args.base, head=args.head, timed=table is not None,
+    plan.update(base=args.base, head=args.head, head_parent=first_parent(args.head), timed=table is not None,
                 session_seconds=session_seconds(args.budget_seconds))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(plan, indent=1) + "\n", encoding="utf-8")

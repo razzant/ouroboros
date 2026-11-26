@@ -44,9 +44,9 @@ _OBSERVED = re.compile(r"^(?:Found failing|Still not passing) at `([0-9a-f]{40})
 _FORWARD = "This check blocks nothing and reverts nothing; the fix goes forward in a new pull request."
 _COMMENT_LIMIT = 60_000  # GitHub refuses a comment longer than 65,536 characters
 # Per-test notes of the browser check's base comparison (scripts/post_merge_browser.py), each {test id: value}: what its
-# window's base showed, that base, and the window's merges that touched the files that selected the test. A test keeps
-# its own when it joins an issue from a later window. No leg writes them.
-PER_ID = ("at_base", "window", "candidates")
+# window's base showed, that base, and the window's merges that touched the files that selected the test (`fallback`:
+# none did, so all of them). A test keeps its own when it joins an issue from a later window. No leg writes them.
+PER_ID = ("at_base", "window", "candidates", "fallback")
 _AT_BASE = {"passed": "passed at its window's base", "absent": "not present at its window's base",
             "failed": "failed at its window's base", "unknown": "not settled at its window's base",
             "dependencies": "not compared: uv.lock differs between its window's base and head",
@@ -236,8 +236,8 @@ def issue_body(block: dict, *, head: str, run_url: str, author: str = "", seen: 
         opening = f"These tests fail on `ouroboros` on {system}, but the post-merge check could not find the merge that broke them."
         if isinstance(block.get("at_base"), dict) and block["at_base"]:
             opening += (" Each row says what its own window's base showed and lists that window's candidate merges, "
-                        "none confirmed: the merges that touched the files that selected the test. The cause may lie "
-                        "elsewhere.")
+                        "none confirmed: the merges that touched the files that selected the test, or all of them "
+                        "where none did. The cause may lie elsewhere.")
     rows = "\n".join(f"- {_named(nodeid)}{_note(block, nodeid)}" for nodeid in block["ids"])
     sized = sum(nodeid.startswith(SIZE_PREFIX) for nodeid in block["ids"])  # a size test is never found gone: `_size_hint`
     gone = ("" if sized == len(block["ids"]) else ", or finds one outside the size check gone" if sized
@@ -249,11 +249,14 @@ def issue_body(block: dict, *, head: str, run_url: str, author: str = "", seen: 
 
 def _note(block: dict, nodeid: str) -> str:
     """A browser red's own comparison with the window's base, if its block keeps one."""
-    at_base, window, candidates = (block.get(key) if isinstance(block.get(key), dict) else {} for key in PER_ID)
+    at_base, window, candidates, fallback = (block.get(key) if isinstance(block.get(key), dict) else {}
+                                             for key in PER_ID)
     shown = f" `{window[nodeid][:12]}`" if isinstance(window.get(nodeid), str) and window[nodeid] else ""
     parts = ([_AT_BASE.get(at_base[nodeid], f"{at_base[nodeid]} at its window's base") + shown]
              if nodeid in at_base else []) + (
-        ["candidate merges " + ", ".join(f"`{sha}`" for sha in candidates[nodeid])] if candidates.get(nodeid) else [])
+        ["candidate merges " + ("(none touched the files that selected it, so all of its window's) "
+                                if fallback.get(nodeid) else "") + ", ".join(f"`{sha}`" for sha in candidates[nodeid])]
+        if candidates.get(nodeid) else [])
     return ": " + "; ".join(parts) if parts else ""
 
 
