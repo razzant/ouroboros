@@ -143,7 +143,7 @@ def test_a_window_showing_a_pending_send_keeps_the_refusal_until_its_next_newest
 
     _asking(tmp_path)
     pending = {"on": True}
-    monkeypatch.setattr(ingress, "delivery_facts", lambda row, chat: {"ingress_pending": True} if pending["on"] else {})
+    monkeypatch.setattr(ingress, "delivery_facts", lambda row, chat, **_: {"ingress_pending": True} if pending["on"] else {})
     ds.append(tmp_path, "chat", {"ts": TS.format(3), "direction": "in", "chat_id": 1, "text": "do it",
                                  "client_message_id": "c1", "ingress_accepted": True})
     _, page = _read(tmp_path)
@@ -419,7 +419,7 @@ def test_a_window_that_stops_holding_keeps_the_versions_its_rows_showed(tmp_path
     _asking(tmp_path)
     _, page = _read(tmp_path)
     seen = _cursor(page["after_cursor"])["tasks"]["asker"]
-    monkeypatch.setattr(ingress, "delivery_facts", lambda row, chat: {"ingress_pending": True})
+    monkeypatch.setattr(ingress, "delivery_facts", lambda row, chat, **_: {"ingress_pending": True})
     ds.append(tmp_path, "chat", {"ts": TS.format(3), "direction": "in", "chat_id": 1, "text": "do it",
                                  "client_message_id": "c1", "ingress_accepted": True})
     _task(tmp_path, "asker", "running", 0, title="later")

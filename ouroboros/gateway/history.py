@@ -794,10 +794,7 @@ def _collect_chat_rows(
                     rec["late_report_id"] = entry["late_report_id"]
             if rec["role"] == "user" and entry.get("ingress_accepted") is True:
                 rec["ingress_accepted"] = True
-                # Proven undispatched, entered, or this live process's and pending; an ended process's: nothing.
-                live = LIVE.get()
-                rec.update(delivery_facts(entry, entry_chat) if live is None else
-                           delivery_facts(entry, entry_chat, bus_root=live["message_bus_root"]))
+                rec.update(delivery_facts(entry, entry_chat, drive_root=chat_path.parent.parent))
             if isinstance(entry.get("presence_contact"), dict):
                 rec["presence_contact"] = dict(entry["presence_contact"])
             if role == "user" and entry.get("attachments"):  # the same views the live echo carried
