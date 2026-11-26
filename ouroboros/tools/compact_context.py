@@ -482,7 +482,7 @@ def _inspect(ctx, observed: dict, *, offset: int, not_applied=()) -> str:
     its units, the paging, the view revision, the ``restore_checkpoint`` of the observation it lists (a newer
     observation has its own, so a listed unit always restores from its page) and the retained ordinary-memory
     map (``_ordinary_memory``'s continuation read). A page holds at least one unit, so paging always advances:
-    only page one's shared fields can leave no room for it.
+    only page one's shared fields can leave no room for it, and then page one says so first (``limitation``).
     ``not_applied`` names the note and selectors this call carried: inspection lists the view and applies none."""
     from ouroboros.context_compaction import (_capsule_metadata, _first_line, context_units, note_written,
                                               owner_protected_unit_ids, unit_kind)
@@ -589,8 +589,8 @@ def _inspect(ctx, observed: dict, *, offset: int, not_applied=()) -> str:
     told = {"not_applied": ", ".join(not_applied) + ": inspection lists the view and applies nothing; send them again "
             "with inspect=false."} if not_applied else {}
 
-    def render(page: list, next_offset) -> str:
-        return json.dumps({**told, **body, "offset": start,
+    def render(page: list, next_offset, over="") -> str:
+        return json.dumps({**({"limitation": over} if over else {}), **told, **body, "offset": start,
                            "total": len(rows), "units": page,
                            **({"next_offset": next_offset} if next_offset is not None else {})},
                           ensure_ascii=False, separators=(",", ":"))
@@ -602,7 +602,12 @@ def _inspect(ctx, observed: dict, *, offset: int, not_applied=()) -> str:
             break
         page = candidate
     end = start + len(page)
-    return render(page, end if end < len(rows) else None)
+    following = end if end < len(rows) else None
+    whole = render(page, following)
+    if start or len(whole) <= limit:  # a later page's rows are small; only page one's shared fields can run over
+        return whole
+    return render(page, following, f"This page runs over this tool's {limit:,}-character page ({len(whole):,}): the "
+                  "fields page one shares took the room. Later pages carry only units; continue at next_offset.")
 
 
 def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = False, offset: int = 0,

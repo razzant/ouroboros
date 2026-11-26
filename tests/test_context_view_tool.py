@@ -1044,3 +1044,20 @@ def test_an_inspection_names_the_note_and_selectors_it_did_not_apply(tmp_path, m
     assert seen["units"] == plain["units"] and getattr(ctx, "_pending_compaction", None) is None
     assert all(name in seen["not_applied"] for name in asked)
 
+
+def test_an_inspection_page_stays_within_its_result_limit_or_says_what_it_could_not_show(tmp_path, monkeypatch):
+    """A view whose shared diagnostics are large (many tool schemas): page one stays within the tool's result limit or
+    names what it could not show and how to read it, and next_offset continues on the same observed revision."""
+    from ouroboros import tool_capabilities
+
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: 6000)
+    schemas = [{"type": "function", "function": {"name": f"a_tool_with_a_long_descriptive_name_number_{n:04d}",
+                                                  "description": "Reads one thing.", "parameters": {"type": "object"}}}
+               for n in range(300)]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, [*_source()[:2], *(row for index in range(20) for row in _read(f"r{index}"))], schemas)
+    text = _compact_context(ctx, inspect=True)
+    first = json.loads(text)
+    assert len(text) <= 6000 or first.get("limitation")
+    following = json.loads(_compact_context(ctx, inspect=True, offset=first["next_offset"]))
+    assert following["view_revision"] == first["view_revision"] and following["units"]
