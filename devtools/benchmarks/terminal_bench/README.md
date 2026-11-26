@@ -448,12 +448,17 @@ note deleted/retried trial dirs drop their cost record, so the on-disk sum is a 
   `--build-timeout-multiplier` (run_tb) map to
   `--agent-setup-timeout-multiplier` / `--environment-build-timeout-multiplier` (harbor).
 - **Resume semantics of `run_tb.py` vs `harbor job resume`:** default unnamed `run_tb.py`
-  calls create a fresh Harbor job each call; pointing `--base-job-config` at an existing
-  `job_name` records only a partial named-job observation (not leaderboard-valid, and
-  overlapping writers cannot be told apart). For robust campaign continuation use
-  **`harbor job resume -p <jobdir> [-f <ErrorType>]`** (keeps completed trials, re-runs
-  pending + `-f`-removed errored-artifact trials); wrap it in a retry loop so a transient
-  SSL/DNS blip just re-resumes instead of restarting.
+  calls create a fresh Harbor job each call. An explicit base `job_name` is unreserved
+  (`leaderboard_valid: false`, overlapping writers cannot be told apart); when stored
+  `config.json` or prior direct trials exist, `run_tb.py` records only a partial named-job
+  observation (`new_or_changed` valid trials). Harbor deletes incomplete direct subdirectories
+  (without `result.json`) on resume, so root-level names (`.` or `""`) need their own dedicated
+  jobs directory (`--submission-root`). Resuming an old forced-build job through `run_tb.py` may
+  need explicit `--force-build` so the config matches `config.json`; for robust campaign
+  continuation use **`harbor job resume -p <jobdir> [-f <ErrorType>]`**, which reads the saved
+  `config.json` directly (keeps completed trials, re-runs pending + `-f`-removed errored-artifact
+  trials) — wrap it in a retry loop so a transient SSL/DNS blip just re-resumes instead of
+  restarting.
 - **install-timeout on slow mirrors** (`RuntimeError: Command timed out after 1200s`) and
   AgentSetupTimeout are infra, not capability. Published task images do not prevent them,
   because the agent installs in every container whatever its image; the opt-in
@@ -523,9 +528,11 @@ from `--dataset`. Frontier-Bench runs on the pinned 0.18.0 (measured — see MET
 
 Ledgered smoke runs should go through the wrapper so `run_manifest.json` and
 the denominator-preserving `result_index.jsonl` are written beside the Harbor
-official output. Its manifest derives Main/Light/fallback and the one API actor
-from the exact `--model` CLI value (plus an explicit Light override), never from
-ambient Heavy or a settings-template model:
+official output. The wrapper passes an invocation-unique `--job-name` and reads
+only that job's `result.json` (never another job in a shared directory). Its
+manifest derives Main/Light/fallback and the one API actor from the exact
+`--model` CLI value (plus an explicit Light override), never from ambient Heavy
+or a settings-template model:
 
 ```bash
 PYTHONPATH=/Users/anton/Ouroboros/repo \

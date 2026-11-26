@@ -7,9 +7,11 @@ import argparse
 import json
 import os
 import pathlib
+import secrets
 import shlex
 import subprocess
 import sys
+from datetime import datetime
 from typing import Any, Mapping
 
 if __package__ in {None, ""}:
@@ -30,10 +32,16 @@ from devtools.benchmarks.common.run_roots import (
     assert_outside_repo,
     repo_root_from_devtools,
     run_root as default_run_root,
+    safe_join_under,
 )
 
 
 AGENT_IMPORT = "devtools.benchmarks.terminal_bench.harbor_installed_agent:OuroborosTerminalBenchAgent"
+
+
+def generated_job_name() -> str:
+    """Invocation-unique Harbor job name in Harbor's timestamp shape plus a random suffix."""
+    return f"{datetime.now():%Y-%m-%d__%H-%M-%S}__{secrets.token_hex(4)}"
 
 
 def add_force_build_option(parser: argparse.ArgumentParser) -> None:
@@ -132,21 +140,22 @@ def harbor_command(
             "--yes",
         ]
     )
+    job_name = str(opts.get("job_name") or "").strip()
+    if job_name:
+        cmd.extend(["--job-name", job_name])
     for task_name in task_names:
         cmd.extend(["--include-task-name", task_name])
     cmd.extend(force_build_flag(opts.get("force_build")))
     return cmd
 
 
-def _harbor_results(run_root: pathlib.Path) -> list[pathlib.Path]:
-    return sorted(path.resolve(strict=False) for path in run_root.glob("*/result.json") if path.is_file())
-
-
-def _new_harbor_result(run_root: pathlib.Path, before: set[pathlib.Path]) -> pathlib.Path:
-    new_results = [path for path in _harbor_results(run_root) if path not in before]
-    if len(new_results) != 1:
-        raise RuntimeError(f"expected exactly one new Harbor result.json, found {len(new_results)}")
-    return new_results[0]
+def _own_harbor_result(run_root: pathlib.Path, job_name: str) -> pathlib.Path:
+    """Expected `<run_root>/<job_name>/result.json` for this launch's own Harbor job."""
+    job_dir = safe_join_under(run_root, job_name)
+    result_path = safe_join_under(job_dir, "result.json")
+    if not result_path.is_file():
+        raise RuntimeError(f"expected Harbor result.json for job {job_name!r}, not found at {result_path}")
+    return result_path
 
 
 def _harbor_task_outcomes(result_path: pathlib.Path) -> list[dict[str, object]]:
@@ -235,6 +244,7 @@ def main() -> int:
     actual_include_filters = args.task or []
     effective_n_tasks = len(actual_include_filters) if actual_include_filters else int(args.n_tasks)
     task_names = actual_include_filters or [f"selection-slot-{idx + 1}" for idx in range(effective_n_tasks)]
+    job_name = generated_job_name()
     cmd = harbor_command(
         task_names=actual_include_filters,
         model=actor_slots["OUROBOROS_MODEL"],
@@ -247,7 +257,7 @@ def main() -> int:
         agent_setup_timeout_multiplier=args.agent_setup_timeout_multiplier,
         environment_build_timeout_multiplier=args.environment_build_timeout_multiplier,
         light_model=actor_slots["OUROBOROS_MODEL_LIGHT"],
-        options={"force_build": args.force_build, "host_settings_path": str(settings_path)},
+        options={"force_build": args.force_build, "host_settings_path": str(settings_path), "job_name": job_name},
     )
     ledger_output = (
         assert_file_output_outside_repo(pathlib.Path(args.ledger_output), repo_root)
@@ -312,7 +322,6 @@ def main() -> int:
         harbor_result_error = ""
         observed_outcomes: list[dict[str, object]] = []
         if args.execute:
-            before_results = set(_harbor_results(run_root))
             try:
                 completed = subprocess.run(
                     cmd,
@@ -331,7 +340,7 @@ def main() -> int:
                 reason = "harbor_returncode_0" if returncode == 0 else "harbor_returncode_nonzero"
                 official_eval_status = "completed" if returncode == 0 else "failed"
                 try:
-                    harbor_result = _new_harbor_result(run_root, before_results)
+                    harbor_result = _own_harbor_result(run_root, job_name)
                 except Exception as exc:
                     harbor_result_error = str(exc)
                     status = "harness_failed"

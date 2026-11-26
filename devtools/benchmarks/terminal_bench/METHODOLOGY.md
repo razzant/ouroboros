@@ -51,55 +51,76 @@ whether that image was pulled or built.
 
 Without this field, read the saved command (`official_command`, `harbor_command.*`) if there is
 one. Earlier wrapper versions appended `--force-build` to every `--execute` argv and not to a
-preview. A record lacking the field is not dated by that alone (a run refused before argv
-assembly has no command either), and neither the flag nor its absence shows whether any image was
-pulled or built.
+preview. Resuming an older forced-build job through `run_tb.py` may need explicit `--force-build`
+(or matching `environment.force_build` in `--base-job-config`) so the config matches the saved
+`config.json`; native `harbor job resume -p <job_dir>` uses the saved config directly. A record
+lacking the field is not dated by that alone (a run refused before argv assembly has no command
+either), and neither the flag nor its absence shows whether any image was pulled or built.
 
-## Job attribution (`run_tb.py`)
+## Job attribution (`run_tb.py` and `run_harbor_smoke.py`)
 
-When a launch assembles a Harbor invocation, it creates its own
+`run_harbor_smoke.py` passes an invocation-unique `--job-name` (`YYYY-MM-DD__HH-MM-SS__<8 hex>`)
+and resolves only `<run_root>/<job_name>/result.json`, never scanning the shared jobs directory for
+a peer's result.
+
+In `run_tb.py`, when a launch assembles a Harbor invocation, it creates its own
 `agent_job_config.<invocation>.json`, and when an `--execute` run produces an attributable ledger
 (dry runs, refusals, unattributed jobs, and reused named jobs with no accepted new/changed trials
 write none), it creates its own authoritative `disclosure_ledger.<invocation>.json` in its
 `--run-root`, never rewritten by another launch. Its manifest's `official_command` names
 `agent_job_config.<invocation>.json` and its `extra.disclosure_ledger` names
-`disclosure_ledger.<invocation>.json` (absent on previews/refusals, empty when an `--execute` run
-writes no ledger), so a manifest's ledger reference identifies that invocation and cannot alias a
-peer's trials even if launches overlap in the same `--run-root` (including the default
-`tb21_ouroboros_run`). The manifest names that command and the image policy before Harbor starts
-(`extra.recovery_checkpoint`). The unversioned files in `--run-root` (`run_manifest.json`,
-`harbor_command.txt`, and `disclosure_ledger.json`, which is updated atomically as a latest
-compatibility view whenever a ledger is written) are shared last-writer-wins conveniences, not a
-consistent tuple under overlap; give every launch its own `--run-root` for independent reporting.
+`disclosure_ledger.<invocation>.json` (absent on previews/refusals, initialized to `""` in the
+pre-dispatch checkpoint and kept `""` when an `--execute` run writes no ledger), so a manifest's
+ledger reference identifies that invocation and cannot alias a peer's trials even if launches
+overlap in the same `--run-root` (including the default `tb21_ouroboros_run`). Before Harbor
+starts (`extra.recovery_checkpoint`), the manifest already records `official_command`,
+`agent_environment_force_build`, `harbor_job`, `disclosure_ledger: ""`, and the job-name scope.
+The unversioned files in `--run-root` (`run_manifest.json`, `harbor_command.txt`, and
+`disclosure_ledger.json`, which is updated atomically as a latest compatibility view whenever a
+ledger is written) are shared last-writer-wins conveniences, not a consistent tuple under overlap;
+give every launch its own `--run-root` for independent reporting.
 
 Default unnamed runs create a fresh Harbor job each call (`YYYY-MM-DD__HH-MM-SS__<8 hex>`, Harbor's
-timestamp shape plus a random suffix); a base `job_name` passes unchanged, including an explicit
-`.` (which Harbor 0.18 treats as the jobs dir itself). Launches that share `--submission-root`,
-model, and dataset share one jobs dir and one `metadata.yaml` (use separate `--submission-root`
-directories when runs need different metadata). The ledger and outcome read only this launch's job,
-from direct `<job>/<trial>/result.json` files and nothing deeper or resolving outside it — so an
-explicit `job_name: "."` counts legitimate direct trials without recursively scanning sibling jobs
-or counting sibling job-level `result.json` files. `extra.harbor_job.binding` scopes those trials:
-`invocation` (the generated name: they are this invocation's, also after a non-zero exit),
-`named_job` (a base `job_name` absent before dispatch: they are the trials observed in that named
-job, and overlapping writers under the same name cannot be told apart, so it is no per-command
-proof), or `reused` (the named job existed before dispatch: Harbor resumes or refuses it). For
-`reused`, `harbor_job.trials` is `new_or_changed`: only valid trial `result.json` files (JSON
-objects carrying `task_name` or `verifier_result`) observed to appear or change in content during
-the invocation count, and overlapping writers cannot be told apart. The ledger is this resume's
-partial observation, not the job's cumulative score (which Harbor's own job result keeps), and the
-manifest and ledger grade it `partial_named_job` with `leaderboard_valid: false`, whatever `k` and
-settings (the submission tree is unchanged). Unchanged earlier trials, trials unreadable before or
-after, and malformed or non-trial JSON files never count. Nothing counts for `unattributed` (the
-job never appeared, or its name is empty or leaves the jobs dir). A `reused` job with zero accepted
-trial rows (including malformed-only or non-trial-only deltas) and an `unattributed` one write no
-ledger and leave any existing `disclosure_ledger.json` untouched: `extra.disclosure_ledger` stays
-empty and the outcome fails closed (`trials_unverified`, or Harbor's non-zero exit). Genuine
+timestamp shape plus a random suffix) and keep their ordinary grades (`leaderboard_valid`,
+`debug_only`, `local_low_k`). An explicit base `job_name` passes unchanged — including root-level
+`.` and `""`, which Harbor 0.18 both resolve to `--jobs-dir` itself and which stay distinct from an
+omitted `job_name`. Launches that share `--submission-root`, model, and dataset share one jobs dir
+and one `metadata.yaml` (use separate `--submission-root` directories when runs need different
+metadata). The ledger and outcome read only this launch's job, from direct
+`<job>/<trial>/result.json` files and nothing deeper or resolving outside it — so root-level `.` or
+`""` counts legitimate direct trials without recursively scanning sibling jobs or counting sibling
+job-level `result.json` files.
+
+`extra.harbor_job` (`{job_dir, binding, trials}`) records this scope in both preview and execute:
+`invocation` (the generated name: trials are this invocation's, also after a non-zero exit);
+`named_job` (an explicit base `job_name` with neither stored `config.json` nor prior direct trial
+results: a pre-existing empty/parent directory — including one created by a preview with `.` or
+`""` — is not by itself a Harbor resume, but because an unreserved operator-selected name can
+overlap even on first observation, this run record never claims `leaderboard_valid: true` and
+grades `named_job` when `k >= 5` with otherwise faithful settings, without disabling running,
+submitting, or image flags); `reused` (stored `<job>/config.json` — which makes Harbor resume a
+matching config or refuse a different one — or prior direct trial results / unreadable direct
+entries existed before dispatch). For `reused`, `harbor_job.trials` is `new_or_changed`: only valid
+trial `result.json` files (JSON objects carrying `task_name` or `verifier_result`) observed to
+appear or change in content during the invocation count, and overlapping writers cannot be told
+apart. The ledger is this run's partial observation, not the job's cumulative score (which Harbor's
+own job result keeps), and both preview and execute grade it `partial_named_job` with
+`leaderboard_valid: false`, whatever `k` and settings (the submission tree is unchanged). Unchanged
+earlier trials, trials unreadable before or after, and malformed or non-trial JSON files never
+count. Nothing counts for `unattributed` (`trials: "none"`, when the job never appeared, or its
+name is non-string, collapsing like `sub/..`, or leaves the jobs dir). A `reused` job with zero
+accepted trial rows (including malformed-only or non-trial-only deltas) and an `unattributed` one
+write no ledger and leave any existing `disclosure_ledger.json` untouched: `extra.disclosure_ledger`
+stays empty and the outcome fails closed (`trials_unverified`, or Harbor's non-zero exit). Genuine
 unscored trial rows (e.g. `reward: null`) still write a ledger (`no_scored_trials`), numeric zero
 counts as scored (`completed`), and a fresh job without scored trials still writes its ledger
-(`no_scored_trials`). Every job stays on disk. Independent measurements need distinct job names,
-distinct `--run-root` directories, and separate `--submission-root` directories when metadata
-differs.
+(`no_scored_trials`).
+
+Harbor deletes incomplete direct subdirectories (those without `result.json`) when resuming a job,
+so root-level job names (`.` or `""`) need their own dedicated jobs directory (`--submission-root`)
+and must not share a jobs directory with other jobs. Independent measurements need generated or
+distinct reserved job names, distinct `--run-root` directories, and separate `--submission-root`
+directories when metadata differs.
 
 ## Dataset identity (v6.79.0 — matters for any non-TB2.1 Harbor dataset)
 
@@ -222,7 +243,8 @@ assumed in two places that used to hardcode TB2.1:
   `--harbor-bin` and leaving `venv-tb` frozen at 0.18.0 so published TB2.1 numbers keep their
   harness. Note `--base-job-config` is OURS, not a harbor flag — harbor only ever had
   `-c/--config`, in both versions. Since v6.79.0 the manifest and the disclosure ledger record
-  `harbor_bin` / `harbor_version` / `harbor_env_effective`, so the harness and backend behind a
+  `harbor_bin` / `harbor_version` / `harbor_env_effective` (CLI `--harbor-env` > `--base-job-config`
+  `environment.import_path`/`type` > Harbor's default `docker`), so the harness and backend behind a
   number are read off the artifact instead of reconstructed from operator memory; an
   un-interrogable binary records `harbor_version: ""` (visibly unknown, never assumed).
 
