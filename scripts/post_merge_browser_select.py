@@ -8,8 +8,8 @@
 .github/workflows/post-merge-browser.yml (owner choice 1, 2026-11-25: a narrow, non-blocking browser check of the
 windows that change the interface; a pilot for two weeks after it is enabled or until the next release) runs a small
 set chosen here, browserless and deterministic, from the window's first-parent commits BASE..HEAD. post-merge.yml's
-window job runs `scope` to decide whether to start that workflow; its own `scope` job asks again, its `check` job runs
-`plan`.
+window job runs `scope` to decide whether to start that workflow; its `check` job asks again before it installs
+anything, then runs `plan`.
 
 - A module is a `ui_browser` module when its code declares the marker: a `pytestmark`, or a decorator of a test, a
   test class or a method of one, read with `ast` (a module that does not parse counts by its text, so its collection
@@ -34,13 +34,16 @@ window job runs `scope` to decide whether to start that workflow; its own `scope
   order wherever an argument overlaps a wider one, so scripts/post_merge_browser.py (a plugin of the head session)
   moves the two exact cases to the front of the collected items. A sentinel whose test the head no longer defines is
   named, never passed to pytest; scripts/post_merge_browser.py names a scenario the session did not collect or
-  complete. A plan with nothing to run is NOT APPLICABLE.
+  complete. An applicable window whose plan has nothing to run (no candidate, no sentinel the head defines) is not
+  runnable: scripts/post_merge_browser.py reports it CHECKED PARTIALLY, naming the missing sentinels, and no browser
+  is installed.
 - The plan takes candidates in that order while the estimate fits BUDGET_SECONDS and at most MAX_MODULES of them; the
   rest are DROPPED and named with their reasons. The estimate counts each node once: the run's frozen weight table
   (scripts/ci_shard_plan.py `ci-durations.json`, `ui_nodes`, milliseconds) times a node; a candidate the table does
   not time weighs the table's median module and is counted as unknown; a sentinel's nodes count under the sentinel.
-- `browser`-marked modules without `ui_browser` run in no lane and are not candidates; neither are the modules that
-  need the Caddy only the full lane installs (EXCLUDED, named as excluded by the lane).
+- `browser`-marked modules without `ui_browser` run in no lane and are not candidates; neither are the tests that
+  need the Caddy only the full lane installs (EXCLUDED, named as excluded by the lane): a module of such tests runs
+  its other tests by their ids.
 
 Stdlib only: the window job runs `scope` on the runner's bare interpreter.
 """
@@ -64,7 +67,13 @@ BUDGET_SECONDS = 2100
 SESSION_FACTOR = 1.3
 MIN_STEM = 4  # shorter stems (`app`, `ws`) match by accident
 CADDY = "needs the Caddy only the full lane installs"
-EXCLUDED = {"tests/test_separate_ui_browser.py": CADDY, "tests/test_client_views_browser.py": CADDY}
+# A module or a test (its node id without parameters) the plan never passes: those that start a Caddy proxy. The rest of
+# tests/test_client_views_browser.py stubs its network in the page and runs normally.
+EXCLUDED = {"tests/test_separate_ui_browser.py": CADDY,
+            **{f"tests/test_client_views_browser.py::{name}": CADDY for name in (
+                "test_independent_pages_sign_in_configure_and_use_the_real_core",
+                "test_copied_builtin_parent_recovers_a_broken_selected_setup",
+                "test_builtin_recovery_is_a_whole_working_page_before_and_after_auth")}}
 DESELECTED = "`-m ui_browser` deselects it (a Docker-only or unmarked test)"
 # (scenario, the web/ files it guards): the 7.12.0 release lane found these WebKit-only product regressions
 # (web/modules/chat_cards.js: job 137377977467; web/room_work.css: job 138790711236).
@@ -296,7 +305,7 @@ def select(commits: list[dict], head_modules: dict[str, str], *, base_modules=()
     index = token_index(head_modules) if index is None else index
     lines = lines or {}
     applies, why = applicability(changed, head_modules, base_modules, index)
-    plan = {"format": 2, "applicable": applies, "reason": why, "changed": changed,
+    plan = {"format": 2, "applicable": applies, "runnable": False, "reason": why, "changed": changed,
             "commits": [{"sha": c["sha"], "files": c["files"]} for c in commits],
             "shared": [path for path in changed if shared(path)],
             "budget_ms": budget_seconds * 1000, "max_modules": max_modules, "selected": [], "dropped": [],
@@ -357,15 +366,20 @@ def select(commits: list[dict], head_modules: dict[str, str], *, base_modules=()
     fallback = _fallback(table)
     for module, row in list(candidates.items()):
         tests = None if row["whole"] else changed_tests(module, head_modules[module], lines.get(module))
+        marked = lane_tests(module, head_modules[module]) or ()
         if tests is not None:  # a changed test the lane deselects is excluded by the lane, never passed
-            kept = {name for _, _, name, marked in lane_tests(module, head_modules[module]) or () if marked}
+            kept = {name for _, _, name, lane in marked if lane}
             plan["excluded"] += [{"module": test, "why": DESELECTED} for test in tests if test not in kept]
             tests = [test for test in tests if test in kept]
-            if not tests:
-                del candidates[module]
-                for own in offered.values():
-                    own.discard(module)
-                continue
+        if any(_under(key, module) for key in EXCLUDED):  # its Caddy tests stay out: the others run by their ids
+            wanted = tests if tests is not None else [name for _, _, name, lane in marked if lane]
+            plan["excluded"] += [{"module": test, "why": EXCLUDED[test]} for test in wanted if test in EXCLUDED]
+            tests = [test for test in wanted if test not in EXCLUDED]
+        if tests is not None and not tests:
+            del candidates[module]
+            for own in offered.values():
+                own.discard(module)
+            continue
         estimate, engines, timed = _timed(table, tests or [module], minus=pinned)
         row.update(tests=tests, estimate_ms=estimate if timed else fallback, timed=timed, nodes=engines)
     # Each commit's own candidates take turns, so one large merge cannot crowd out the others of its window.
@@ -394,8 +408,11 @@ def select(commits: list[dict], head_modules: dict[str, str], *, base_modules=()
             plan["args"].append(arg)
     plan["estimate_ms"] = used
     plan["unknown_modules"] = sum(not row["timed"] for row in plan["selected"])
-    if not plan["args"]:  # nothing to run is no check: pytest without arguments would run the whole lane
-        plan.update(applicable=False, reason=f"{why}, but no browser test matches it and no sentinel is present")
+    plan["runnable"] = bool(plan["args"])
+    if not plan["args"]:  # never pytest without arguments (the whole lane): checked partially, nothing installed
+        missing = [row["scenario"] for row in plan["sentinels"] if not row["present"]]
+        plan["reason"] = (f"{why}, but no browser test matches it and the head defines no sentinel"
+                          + (f" (missing: {', '.join(missing)})" if missing else ""))
     return plan
 
 
@@ -442,10 +459,10 @@ def main(argv: list[str] | None = None) -> int:
     commits = window_commits(args.base, args.head)
     modules = tree_modules(REPO)
     deleted = base_modules(args.base, sorted({path for commit in commits for path in commit["files"]}), modules)
-    if args.command == "scope":  # the plan without weights: whether anything would run
-        plan = select(commits, modules, base_modules=deleted)
-        print(f"applicable={'true' if plan['applicable'] else 'false'}")
-        print(f"why={plan['reason']}")
+    if args.command == "scope":  # whether the window is the owner's scope; an empty plan is the check's to report
+        applies, why = applicability(sorted({path for commit in commits for path in commit["files"]}), modules, deleted)
+        print(f"applicable={'true' if applies else 'false'}")
+        print(f"why={why}")
         return 0
     table = None
     if args.durations and args.durations.is_file():
@@ -460,6 +477,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.args_out:
         args.args_out.write_text("".join(arg + "\n" for arg in plan["args"]), encoding="utf-8")
     print(f"applicable={'true' if plan['applicable'] else 'false'}")
+    print(f"runnable={'true' if plan['runnable'] else 'false'}")
     print(f"modules={len(plan['selected'])}")
     print(f"session_seconds={plan['session_seconds']}")
     print(f"dropped={len(plan['dropped'])}")

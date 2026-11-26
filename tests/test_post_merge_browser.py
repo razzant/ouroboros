@@ -15,6 +15,7 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
+import pytest
 import yaml
 
 from scripts import post_merge_browser as pmb
@@ -280,13 +281,56 @@ def test_the_budget_and_the_module_cap_drop_the_lowest_priority_and_name_it():
     assert (sel.BUDGET_SECONDS, sel.MAX_MODULES) == (2100, 24)
 
 
-def test_a_plan_with_nothing_to_run_is_not_applicable_and_caddy_stays_with_the_full_lane():
-    plan = sel.select(commits(["web/tests/x.test.js"]), {"tests/test_other_browser.py": UI})
-    assert plan["args"] == [] and plan["applicable"] is False
-    assert plan["reason"].endswith("no browser test matches it and no sentinel is present")
-    for module in ("tests/test_separate_ui_browser.py", "tests/test_client_views_browser.py"):  # advisory 3
-        caddy = sel.select(commits([module]), {**MODULES, module: UI})
-        assert caddy["selected"] == [] and caddy["excluded"] == [{"module": module, "why": sel.CADDY}]
+def test_an_eligible_window_with_nothing_to_run_is_checked_partially_naming_the_missing_sentinels(
+        tmp_path, monkeypatch, capsys):
+    """Decision 6 (A5): scope reads applicability itself, so a web/ window whose plan is empty (both sentinel modules
+    gone, a hub file only) still starts the check, which ends CHECKED PARTIALLY before installing a browser."""
+    modules = {f"tests/test_hub_{n}_browser.py": UI + "# style.css\n" for n in range(11)}
+    plan = sel.select(commits(["web/style.css"]), modules)
+    assert plan["applicable"] is True and plan["runnable"] is False and plan["args"] == []
+    assert plan["reason"].endswith(f"no browser test matches it and the head defines no sentinel (missing: {LIVING}, "
+                                   f"{ROOM})")
+    monkeypatch.setattr(sel, "window_commits", lambda base, head: commits(["web/style.css"]))
+    monkeypatch.setattr(sel, "tree_modules", lambda root: modules)
+    monkeypatch.setattr(sel, "base_modules", lambda base, changed, head_modules: set())
+    assert sel.main(["scope", "--base", "b" * 40, "--head", "h" * 40]) == 0
+    assert capsys.readouterr().out.startswith("applicable=true\nwhy=1 changed file(s) under web/")
+    found = pmb.judge(tmp_path, {**plan, "base": "b" * 40, "head": "h" * 40})
+    assert found["outcome"] == "partial" and found["missing_sentinels"] == [
+        f"{LIVING}: the head no longer defines {LIVING_TEST}", f"{ROOM}: the head no longer defines {ROOM_TEST}"]
+    assert found["partial"][0].startswith("the plan has nothing to run: 1 changed file(s) under web/")
+    text = "\n".join(pmb.summary_lines(plan, found, [], {}, {}))
+    assert "CHECKED PARTIALLY" in text and f"- {ROOM}: the head no longer defines {ROOM_TEST}" in text
+    install = STEPS["check"]["install_browsers"]["if"]
+    assert "steps.plan.outputs.runnable == 'true'" in install  # nothing to run: no browser is installed
+
+
+CLIENT = "tests/test_client_views_browser.py"
+CLIENT_TEXT = UI + "".join(f"\n\ndef {name}():\n    pass\n" for name in (
+    "test_example_message_ids_work_on_insecure_and_secure_origins",
+    "test_independent_pages_sign_in_configure_and_use_the_real_core",
+    "test_copied_builtin_parent_recovers_a_broken_selected_setup",
+    "test_builtin_recovery_is_a_whole_working_page_before_and_after_auth"))
+
+
+def test_only_the_tests_that_start_a_caddy_stay_with_the_full_lane():
+    """Decision 7 (A6): the separate-interface module needs Caddy whole; in tests/test_client_views_browser.py only the
+    three tests that start a Caddy proxy do, and the rest runs by its ids on its declared engines."""
+    caddy = sel.select(commits(["tests/test_separate_ui_browser.py"]), {**MODULES, "tests/test_separate_ui_browser.py": UI})
+    assert caddy["selected"] == [] and caddy["excluded"] == [{"module": "tests/test_separate_ui_browser.py",
+                                                              "why": sel.CADDY}]
+    proxied = [f"{CLIENT}::{name}" for name in ("test_independent_pages_sign_in_configure_and_use_the_real_core",
+                                                "test_copied_builtin_parent_recovers_a_broken_selected_setup",
+                                                "test_builtin_recovery_is_a_whole_working_page_before_and_after_auth")]
+    for lines in (None, {CLIENT: {1}}):  # the module whole (a change outside its tests), and that same reach by line
+        plan = sel.select(commits([CLIENT]), {**MODULES, CLIENT: CLIENT_TEXT}, lines=lines)
+        [row] = [row for row in plan["selected"] if row["module"] == CLIENT]
+        assert row["tests"] == [f"{CLIENT}::test_example_message_ids_work_on_insecure_and_secure_origins"]
+        assert row["tests"][0] in plan["args"] and CLIENT not in plan["args"]
+        assert sorted(item["module"] for item in plan["excluded"]) == sorted(proxied)
+    narrowed = sel.select(commits([CLIENT]), {**MODULES, CLIENT: CLIENT_TEXT}, lines={CLIENT: {9}})  # in a Caddy test
+    assert all(row["module"] != CLIENT for row in narrowed["selected"]) and narrowed["excluded"] == [
+        {"module": proxied[0], "why": sel.CADDY}]
 
 
 DOCKER = ("import pytest\n\n\n@pytest.mark.ui_browser\ndef test_page():\n    pass\n\n\n"
@@ -362,8 +406,8 @@ def evidence(tmp_path, monkeypatch, *, selected, rows, verdict, rounds=(), skips
         sessions[head / f"retry-{number}"] = {"rows": round_rows, "selected": None}
     if skips is not None:
         (head / pmb.SKIPS).write_text(json.dumps({"format": 1, "permitted": skips}))
-    monkeypatch.setattr(pmb.pmc, "read_session", lambda directory: sessions.get(
-        Path(directory), {"rows": [], "selected": None}))
+    monkeypatch.setattr(pmb.pmc, "read_session", lambda directory: {"running": [], **sessions.get(
+        Path(directory), {"rows": [], "selected": None})})
     return tmp_path
 
 
@@ -408,7 +452,8 @@ def test_a_requested_collector_skipped_or_never_collected_is_partial_beside_a_pa
     path = evidence(tmp_path / "s", monkeypatch, selected=[node], rows=whole(node), verdict=green)
     sessions = {path / "head": {"rows": whole(node), "selected": [node], "collection_skips": ["tests/test_b_browser.py"],
                                 "collection": []}}
-    monkeypatch.setattr(pmb.pmc, "read_session", lambda d: sessions.get(Path(d), {"rows": [], "selected": None}))
+    monkeypatch.setattr(pmb.pmc, "read_session", lambda d: {"running": [], **sessions.get(
+        Path(d), {"rows": [], "selected": None})})
     found = pmb.judge(path, plan)
     assert found["outcome"] == "partial" and found["collection_skipped"] == ["tests/test_b_browser.py"]
     assert found["not_collected"] == {"tests/test_c_browser.py::test_y": "the session collected no test it names"}
@@ -447,6 +492,59 @@ def test_an_unfinished_retry_is_partial_with_its_first_failure_and_never_routed(
     assert cut["outcome"] == "partial" and cut["red"] == []
     text = "\n".join(pmb.summary_lines(PLAN, cut, [], {}, {}))
     assert "- `cut`: failed (call: AssertionError); its retry did not finish" in text
+
+
+def test_a_pass_counts_only_whole_in_its_attempt_and_an_interrupted_test_is_named(tmp_path, monkeypatch):
+    """Decision 3 (A2): one failure passed its retry while another test was interrupted in teardown and stayed in the
+    session's running list. Its passing call is no completed test: CHECKED PARTIALLY, named, never counted passed."""
+    first = [row("flaky", "failed"), row("cut", phase="setup"), row("cut")]  # its teardown never reported
+    found = pmb.judge(evidence(tmp_path, monkeypatch, selected=["flaky", "cut"], rows=first, rounds=[whole("flaky")],
+                               verdict={"verdict": "flaky", "failed": [], "flaky": [{"nodeid": "flaky"}]}), PLAN)
+    assert found["outcome"] == "partial" and found["unfinished"] == ["cut"] and found["passed"] == 0
+    assert found["flaky"] == ["flaky"] and "a selected test did not run whole (setup, call and teardown)" in found[
+        "partial"]
+    text = "\n".join(pmb.summary_lines(PLAN, found, [], {}, {}))
+    assert "Not checked: did not run whole (setup, call and teardown):\n- `cut`" in text
+    # The same test whole: GREEN with FLAKY tests.
+    done = pmb.judge(evidence(tmp_path / "w", monkeypatch, selected=["flaky", "cut"],
+                              rows=[row("flaky", "failed"), *whole("cut")], rounds=[whole("flaky")],
+                              verdict={"verdict": "flaky", "failed": [], "flaky": [{"nodeid": "flaky"}]}), PLAN)
+    assert done["outcome"] == "flaky" and done["unfinished"] == [] and done["passed"] == 1
+
+
+def test_a_failure_the_time_limit_left_unretried_is_run_again_and_a_second_failure_is_handed_over(
+        tmp_path, monkeypatch):
+    """Decision 8 (Opus): a session that reaches its time limit leaves ci_retry no lane block, so it retries nothing.
+    The confirm step runs each completed single failure once more: a second failure is RED and handed over beside
+    what stays partial, a whole pass is FLAKY, an unclear answer keeps it reported only."""
+    reason = "3 collected test(s) never ran, and no lane block or crash record names them"
+    verdict = {"verdict": "red", "flaky": [], "reason": reason, "failed": [
+        {"nodeid": node, "attempts": [{"phase": "call", "error_type": "AssertionError"}]} for node in ("a", "b", "c")]
+        + [{"nodeid": "k", "attempts": [{"phase": "crash", "error_type": "InFlight"}]}]}
+    path = evidence(tmp_path, monkeypatch, selected=["a", "b", "c", "k", "never"],
+                    rows=[row(node, "failed") for node in "abc"], verdict=verdict)
+    judged = pmb.judge(path, PLAN)
+    assert judged["unconfirmed"] == ["a", "b", "c"] and judged["red"] == []  # a killed test has no completed failure
+    asked = []
+    monkeypatch.setattr(pmb.pmc, "recheck_ids", lambda ids, directory, **options: asked.append(ids) or {
+        "a": "failed", "b": "passed", "c": "unknown"})
+    monkeypatch.setattr(pmb, "exact_answers", lambda directory, answers, at: ({}, {}))
+    (path / pmb.CONFIRM).write_text(json.dumps(pmb.confirm(path, PLAN, judged)))
+    assert asked == [["a", "b", "c"]]
+    found = pmb.judge(path, PLAN)
+    assert found["red"] == ["a"] and found["confirmed"] == ["a"] and found["flaky"] == ["b"]
+    assert found["outcome"] == "red" and found["partial"] and set(found["once"]) == {"c", "k"}
+    assert found["not_run"] == ["k", "never"]
+    text = "\n".join(pmb.summary_lines(PLAN, found, [], {}, {}))
+    assert "RED, AND CHECKED PARTIALLY" in text and "- `a` (its second failure came from the confirm step" in text
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "output"))
+    (path / "plan.json").write_text(json.dumps(PLAN))
+    pmb.command_outcome(SimpleNamespace(evidence_dir=str(path), plan=str(path / "plan.json")),
+                        environ={"GITHUB_OUTPUT": str(tmp_path / "output")})
+    routed = pmb.decode((tmp_path / "output").read_text().split("routing=", 1)[1].strip())
+    assert routed["red"] == ["a"] and routed["outcome"] == "red"  # handed over although the run was partial
+    assert pmb.confirm(path, PLAN, {"unconfirmed": []}) == {"format": 1, "head": "h" * 40, "ids": [], "results": {},
+                                                             "inconclusive": {}}
 
 
 def test_red_needs_two_observed_failures(tmp_path, monkeypatch):
@@ -497,7 +595,10 @@ def test_an_empty_selection_a_lost_verdict_or_an_unexplained_one_is_never_green(
                                    verdict={"verdict": "green", "failed": [], "flaky": []}), PLAN)
     assert no_export["outcome"] == "partial" and no_export["planned"] is None
     assert pmb.judge(tmp_path, {})["outcome"] == "partial"  # the job stopped before its plan
-    assert pmb.judge(tmp_path, {"applicable": False, "reason": "r"})["outcome"] == "partial"  # never green
+    outside = pmb.judge(tmp_path, {"applicable": False, "reason": "r"})  # a manual dispatch outside the scope
+    assert outside["outcome"] == "not-applicable" and outside["outcome"] not in pmb.PASSING
+    assert "\n".join(pmb.summary_lines({"reason": "r"}, outside, [], {}, {})).endswith(
+        "No browser test ran, so nothing here is green.")
 
 
 def test_a_sentinel_case_the_session_did_not_collect_or_complete_is_named(tmp_path, monkeypatch):
@@ -533,6 +634,10 @@ def test_only_the_lanes_permitted_skips_pass_and_their_reason_decides(tmp_path, 
                                rows=[row(pinch, "skipped", "setup"), row(webkit, "skipped", "setup")],
                                verdict={"verdict": "green", "failed": [], "flaky": []}, skips=recorded), PLAN)
     assert found["skipped"] == [webkit] and found["outcome"] == "partial"  # same prefix, another reason
+    assert found["permitted"] == {pinch: "applies no synthetic touch pinch"}
+    text = "\n".join(pmb.summary_lines(PLAN, found, [], {}, {}))  # decision 10: the permitted skips are listed
+    assert ("Skipped as the lane permits (tests/browser_lane.py PLATFORM_SKIPS):\n"
+            f"- `{pinch}`: applies no synthetic touch pinch") in text
     pmb._PERMITTED.clear()
 
 
@@ -604,12 +709,39 @@ def test_compare_runs_nothing_where_the_lock_differs_and_never_trusts_a_worktree
     blobs["h" * 40] = "1"
     added, removed = [], []
     monkeypatch.setattr(pmb, "protected_projection", lambda head, base, git: ("same", ""))
-    monkeypatch.setattr(pmb.pmc, "add_worktree", lambda tree, sha, omit_protected: (tree.mkdir(), added.append(sha)))
+    monkeypatch.setattr(pmb.pmc, "add_worktree", lambda tree, sha: (tree.mkdir(), added.append(sha)))
     monkeypatch.setattr(pmb.pmc, "remove_worktree", lambda tree: removed.append(tree))
     monkeypatch.setattr(pmb.pmc, "_git", lambda *args, cwd=None: "0" * 40)  # some other commit
     stale = pmb.compare(tmp_path, PLAN, red, run=lambda args, directory: 0 / 0)
     assert stale["results"] == {red[0]: "unknown"} and "not at the window's base" in stale["error"]
     assert added == ["b" * 40] and len(removed) == 1 and not removed[0].parent.exists()  # removed in finally
+
+
+def test_a_base_that_needs_the_protected_file_held_off_disk_is_never_run_and_blames_nobody(tmp_path, monkeypatch):
+    """Decision 5 (A9, Carbon): the base would need a skip-worktree index, which the browser fixtures refuse in setup
+    (CandidateError): every red is unknown, so not attributed, never pre-existing. A base without the file at all is
+    an ordinary checkout and runs."""
+    red = ["tests/test_living_cards_browser.py::test_new[webkit]"]
+    monkeypatch.setattr(pmb.pmc, "_blob", lambda sha, path: "1")
+    monkeypatch.setattr(pmb, "protected_projection", lambda head, base, git: (
+        "different", "`tests/test_repo_health_smoke.py` differs from the head"))
+    monkeypatch.setattr(pmb.pmc, "add_worktree", lambda *args, **options: 0 / 0)
+    found = pmb.compare(tmp_path, PLAN, red, run=lambda args, directory: 0 / 0)
+    assert found["results"] == {red[0]: "unknown"} and "the browser fixtures refuse" in found["inconclusive"][red[0]]
+    one = {**PLAN, "commits": PLAN["commits"][:1]}
+    [verdict] = pmb.attribute(one, red, found)
+    assert verdict["verdict"] == "unattributed" and verdict["at_base"] == "unknown"
+    started = []
+
+    def checkout(tree, sha):
+        started.append(sha)
+        raise OSError("stop after the checkout began")
+
+    monkeypatch.setattr(pmb, "protected_projection", lambda head, base, git: ("absent", "gone at this revision"))
+    monkeypatch.setattr(pmb, "comparable", lambda files, **options: (red, {}, None))
+    monkeypatch.setattr(pmb.pmc, "add_worktree", checkout)
+    monkeypatch.setattr(pmb.pmc, "remove_worktree", lambda tree: None)
+    assert pmb.compare(tmp_path, PLAN, red)["results"] == {red[0]: "unknown"} and started == ["b" * 40]
 
 
 def test_the_recheck_settles_the_open_issues_by_whole_passes_first_and_skips_what_this_run_saw_fail(
@@ -666,15 +798,16 @@ def test_a_base_failure_needs_a_failed_report_of_that_test(tmp_path, monkeypatch
     recheck semantics the legs use stay as they are."""
     reds = ["tests/test_x_browser.py::test_red", "tests/test_x_browser.py::test_new", "tests/test_y_browser.py::t",
             "tests/test_z_browser.py::test_hang"]
-    session = {"rows": [row(reds[0], "failed"), row(reds[3], "failed", "crash")],
+    session = {"rows": [row(reds[0], "failed"), row(reds[3], "failed", "crash")], "running": [], "final": False,
                "collection": ["tests/test_y_browser.py"], "selected": None}
     monkeypatch.setattr(pmb.pmc, "read_session", lambda directory: session)
-    found = pmb.observed_failures(tmp_path, dict.fromkeys(reds, "failed") | {reds[1]: "absent"})
-    assert found == {reds[2]: "did not collect at the base", reds[3]: "did not finish at the base"}
+    found, why = pmb.exact_answers(tmp_path, dict.fromkeys(reds, "failed") | {reds[1]: "absent"}, at="at the base")
+    assert found == {reds[2]: "unknown", reds[3]: "unknown"}
+    assert why == {reds[2]: "did not collect at the base", reds[3]: "did not finish at the base"}
     monkeypatch.setattr(pmb.pmc, "_blob", lambda sha, path: "1")
     monkeypatch.setattr(pmb, "protected_projection", lambda head, base, git: ("same", ""))
     monkeypatch.setattr(pmb, "comparable", lambda files, **options: ([reds[0], reds[2], reds[3]], {}, None))
-    monkeypatch.setattr(pmb.pmc, "add_worktree", lambda tree, sha, omit_protected: tree.mkdir())
+    monkeypatch.setattr(pmb.pmc, "add_worktree", lambda tree, sha: tree.mkdir())
     monkeypatch.setattr(pmb.pmc, "remove_worktree", lambda tree: None)
     monkeypatch.setattr(pmb.pmc, "_git", lambda *args, cwd=None: "b" * 40)
     monkeypatch.setattr(pmb.pmc, "recheck_ids", lambda ids, directory, **options: dict.fromkeys(ids, "failed"))
@@ -682,6 +815,43 @@ def test_a_base_failure_needs_a_failed_report_of_that_test(tmp_path, monkeypatch
     assert compared["results"] == {reds[0]: "failed", reds[2]: "unknown", reds[3]: "unknown"}
     verdicts = {row["id"]: row for row in pmb.attribute(PLAN, [reds[0], reds[2]], compared)}
     assert verdicts[reds[0]]["verdict"] == "pre-existing" and verdicts[reds[2]]["verdict"] == "unattributed"
+
+
+def test_only_the_exact_node_answers_at_the_base_and_in_a_recheck(tmp_path, monkeypatch):
+    """Decision 4 (A3): `--ci-listed` keeps a test's parametrizations under its plain id and `recheck_ids` aggregates
+    them; a parametrized relative never counts. A pass needs the exact node, once and whole; a failure its own report;
+    a fixture's CandidateError in setup is a refusal of the checkout, not the test's failure."""
+    ok, bad, refused, twice = ("tests/test_x_browser.py::test_ok", "tests/test_x_browser.py::test_bad",
+                               "tests/test_x_browser.py::test_refused", "tests/test_x_browser.py::test_twice")
+    rows = (whole(f"{ok}[base-only]") + [row(f"{bad}[base-only]", "failed")]
+            + [{**row(refused, "failed", "setup"), "error_type": "CandidateError"}] + whole(twice) + whole(twice))
+    session = {"rows": rows, "running": [], "final": True, "collection": [],
+               "selected": [f"{ok}[base-only]", f"{bad}[base-only]", refused, twice, twice]}
+    monkeypatch.setattr(pmb.pmc, "read_session", lambda directory: session)
+    answers = {ok: "passed", bad: "failed", refused: "failed", twice: "passed"}
+    found, why = pmb.exact_answers(tmp_path, answers, at="at the base")
+    assert found == {ok: "absent", bad: "absent", refused: "unknown", twice: "unknown"}
+    assert why == {refused: "its fixture refused the checkout at the base (CandidateError)",
+                   twice: "that exact test did not run whole, once, at the base"}
+    one = {**PLAN, "commits": PLAN["commits"][:1]}
+    verdicts = {row["id"]: row for row in pmb.attribute(one, list(answers), {"results": {**answers, **found},
+                                                                             "inconclusive": why})}
+    assert {node: row["verdict"] for node, row in verdicts.items()} == dict.fromkeys(answers, "unattributed")
+    # A module that did not collect at the base selects nothing: its `failed` is that, never absent.
+    session.update(rows=[], selected=[], collection=["tests/test_x_browser.py"])
+    assert pmb.exact_answers(tmp_path, {bad: "failed"}, at="at the base") == (
+        {bad: "unknown"}, {bad: "did not collect at the base"})
+    session["collection"] = []
+    # The exact node itself: a whole pass names the one merge, its own failure is pre-existing.
+    session.update(rows=whole(ok) + [row(bad, "failed")], selected=[ok, bad])
+    assert pmb.exact_answers(tmp_path, {ok: "passed", bad: "failed"}, at="at the base") == ({}, {})
+    # The open issues' recheck takes the same exact answers.
+    issue = tracking_issue(5, {"os": "browser", "kind": "unattributed", "ids": [ok]})
+    session.update(rows=whole(f"{ok}[other]"), selected=[f"{ok}[other]"])
+    monkeypatch.setattr(pmb.pmc, "recheck_ids", lambda ids, directory, **options: dict.fromkeys(ids, "passed"))
+    rechecked = pmb.recheck(tmp_path, PLAN, {"red": [], "once": {}, "failed_then_skipped": []},
+                            FakeGitHub(issues=[issue]))
+    assert rechecked["rechecked"] == {ok: "absent"}
 
 
 def test_a_sentinel_is_compared_through_the_files_it_guards():
@@ -921,12 +1091,16 @@ def test_the_route_jobs_run_no_test_and_only_the_trial_routes_dry():
     """Permissions, tokens and pinning: tests/test_post_merge_workflow.py; ceilings and the install's bound:
     tests/test_ci_diagnostic_workflows.py."""
     for name in ("route", "route-trial"):
-        assert JOBS[name]["needs"] == ["scope", "check"] and "needs.check.result != 'skipped'" in JOBS[name]["if"]
+        assert JOBS[name]["needs"] == "check" and "needs.check.outputs.applicable == 'true'" in JOBS[name]["if"]
         run = STEPS[name]["route"]["run"]
         assert run.startswith("python3 -I -S scripts/post_merge_browser.py route") and "pytest" not in run
         assert ("--dry-run" in run) == (name == "route-trial")
         assert STEPS[name]["route"]["env"]["ROUTING"] == "${{ needs.check.outputs.routing }}"
-    assert JOBS["check"]["if"] == "needs.scope.outputs.applicable == 'true'"  # not applicable: skipped, never green
+        # Decision 2: the dispatching workflow's own revision, never the window's head, and no checkout of it later.
+        checkout = next(step for step in JOBS[name]["steps"] if "actions/checkout" in step.get("uses", ""))
+        assert "ref" not in checkout["with"] and checkout["with"]["persist-credentials"] is False
+        assert not any("git checkout" in step.get("run", "") for step in JOBS[name]["steps"])
+    assert set(JOBS) == {"register", "check", "route", "route-trial"}  # decision 12: no separate scope job
     run = STEPS["check"]["run"]["run"]
     assert "-p scripts.post_merge_browser" in run and "--session-timeout=\"$SESSION\"" in run
     assert "scripts/ci_retry.py" in run and "--require-ui-browser" not in run  # a subset proves no lane
@@ -936,10 +1110,11 @@ def _scope_step(steps):
     return next(step for step in steps if step.get("id") in ("scope", "browser_scope") and "run" in step)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the workflow steps run under bash on Ubuntu")
 def test_a_selector_that_crashes_fails_its_scope_step_in_both_workflows(tmp_path):
     """Finding 12: under the default `bash -e`, `selector | tee` exits with tee's status; pipefail makes a crash fail
     the step instead of an empty "not applicable"."""
-    for steps in (POST_MERGE["jobs"]["window"]["steps"], JOBS["scope"]["steps"]):
+    for steps in (POST_MERGE["jobs"]["window"]["steps"], JOBS["check"]["steps"]):
         script = _scope_step(steps)["run"].replace("python3 -I -S scripts/post_merge_browser_select.py scope",
                                                     "python3 -c 'raise SystemExit(1)'")
         done = subprocess.run(["bash", "-e", "-c", script], env={"GITHUB_OUTPUT": str(tmp_path / "out"),
@@ -947,9 +1122,10 @@ def test_a_selector_that_crashes_fails_its_scope_step_in_both_workflows(tmp_path
         assert done.returncode != 0, script
 
 
-def test_the_writer_hands_over_only_a_first_parent_window_of_ouroboros(tmp_path):
-    """Finding 7: the route job checks out its own revision and runs the head's routing code only when the head is in
-    origin/ouroboros and the base is a first-parent ancestor of it; otherwise it hands nothing over and says why."""
+@pytest.mark.skipif(sys.platform == "win32", reason="the workflow steps run under bash on Ubuntu")
+def test_the_writer_hands_over_only_a_window_on_the_first_parent_chain_of_ouroboros(tmp_path):
+    """Decision 2 (A1, Carbon, Opus): base and head both on origin/ouroboros's first-parent chain, base first, or
+    nothing is handed over and the summary says why. A head merged through a second parent never qualifies."""
     (tmp_path / "r").mkdir()
     repo = repository(tmp_path / "r")
     (repo / "f").write_text("0")
@@ -973,19 +1149,30 @@ def test_the_writer_hands_over_only_a_first_parent_window_of_ouroboros(tmp_path)
         summary.write_text("")
         subprocess.run(["bash", "-e", "-c", script], cwd=repo, check=True, env={
             "BASE": base_sha, "HEAD_SHA": head_sha, "GITHUB_OUTPUT": str(out), "GITHUB_STEP_SUMMARY": str(summary),
-            "PATH": "/usr/bin:/bin:/opt/homebrew/bin"})
+            "RUNNER_TEMP": str(tmp_path), "PATH": "/usr/bin:/bin:/opt/homebrew/bin"})
         return out.read_text().strip(), summary.read_text()
 
-    assert trusted(base, head) == ("trusted=true", "") and git(repo, "rev-parse", "HEAD") == head
-    git(repo, "checkout", "-q", "topic")
-    assert trusted(base, topic)[0] == "trusted=true"  # merged code, though off the first parent of the tip
-    off, text = trusted(topic, head)  # the topic commit is no first-parent ancestor of the head
-    assert off == "trusted=false" and "not a first-parent window of ouroboros" in text
+    assert trusted(base, head) == ("trusted=true", "")
+    assert git(repo, "rev-parse", "HEAD") == head  # nothing of the window is checked out
+    for window in ((base, topic), (topic, head), (head, base), (head, head)):  # second parent, reversed, empty
+        off, text = trusted(*window)
+        assert off == "trusted=false" and "not a window on the first-parent chain of ouroboros" in text, window
     git(repo, "checkout", "-qb", "elsewhere", base)
     (repo / "h").write_text("2")
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "unmerged")
     assert trusted(base, git(repo, "rev-parse", "HEAD"))[0] == "trusted=false"  # not in ouroboros
+
+
+def test_one_concurrency_group_queues_every_window_in_order():
+    """Decision 1 (Carbon, A4, A10): one group for the workflow's windows of a branch, nothing cancelled in progress,
+    `queue: max` (GitHub: up to 100 pending, FIFO; incompatible only with cancel-in-progress: true). No job holds a
+    group of its own, and a register push never shares the windows' group."""
+    concurrency = FLOW["concurrency"]
+    assert concurrency["cancel-in-progress"] is False and concurrency["queue"] == "max"
+    assert concurrency["group"] == ("${{ github.event_name == 'push' && format('post-merge-browser-register-{0}', "
+                                    "github.sha) || format('post-merge-browser-{0}', github.ref_name) }}")
+    assert not any("concurrency" in job for job in JOBS.values())
 
 
 def test_the_run_step_ends_just_above_the_session_so_the_outcome_is_still_judged():
@@ -1000,7 +1187,15 @@ def test_the_check_writes_its_outcome_before_the_upload_and_fails_only_after_it(
     order = [step.get("id") or step.get("name") for step in JOBS["check"]["steps"]]
     upload = next(step for step in JOBS["check"]["steps"] if "upload-artifact" in step.get("uses", ""))
     assert order.index("outcome") < order.index(upload["name"]) < order.index("verdict") == len(order) - 1
-    assert upload["if"] == "${{ always() }}" and STEPS["check"]["outcome"]["if"] == "${{ !cancelled() }}"
-    assert JOBS["check"]["outputs"] == {"outcome": "${{ steps.outcome.outputs.outcome }}",
+    applicable = "steps.scope.outputs.applicable == 'true'"
+    assert upload["if"] == "${{ always() }}" and STEPS["check"]["outcome"]["if"] == f"${{{{ !cancelled() && {applicable} }}}}"
+    assert order.index("window") < order.index("scope") < order.index("setup_python") < order.index("install_browsers")
+    assert order.index("run") < order.index("confirm") < order.index("compare")
+    for step in ("setup_python", "weights", "plan"):  # a manual dispatch outside the scope installs nothing
+        assert STEPS["check"][step]["if"] == applicable, step
+    assert JOBS["check"]["outputs"] == {"applicable": "${{ steps.scope.outputs.applicable }}",
+                                        "base": "${{ steps.window.outputs.base }}",
+                                        "head": "${{ steps.window.outputs.head }}",
+                                        "outcome": "${{ steps.outcome.outputs.outcome }}",
                                         "routing": "${{ steps.outcome.outputs.routing }}"}
     assert set(STEPS["check"]["outcome"]["env"]) == {f"BROWSER_{step.upper()}_OUTCOME" for step in pmb.STEPS}

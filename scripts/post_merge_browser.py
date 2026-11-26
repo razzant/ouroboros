@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The post-merge browser check (pilot): judge the head session, compare its reds with the window's base, hand over.
 
+    python scripts/post_merge_browser.py confirm --evidence-dir DIR --plan plan.json
     python scripts/post_merge_browser.py compare --evidence-dir DIR --plan plan.json
     python scripts/post_merge_browser.py recheck --evidence-dir DIR --plan plan.json
     python scripts/post_merge_browser.py outcome --evidence-dir DIR --plan plan.json
@@ -14,26 +15,30 @@ leg, verdict or base, and ouroboros/update_qualification.py reads post-merge.yml
 plan of scripts/post_merge_browser_select.py once through scripts/ci_retry.py (DIR/head: a failed test runs once
 more), and then:
 
-- COMPARE: the confirmed reds run once at the window's BASE in a worktree that keeps the historical fixture off disk
-  where its blob differs from the head's (post_merge_check `add_worktree`, `comparable`), through post_merge_check
+- CONFIRM: a failure with one completed observation and no retry (the session reached its time limit, so ci_retry
+  retried nothing, or the run was killed) runs once more at the head within CONFIRM_SECONDS: a second failure is RED,
+  a whole pass FLAKY.
+- COMPARE: the confirmed reds run once at the window's BASE in a plain worktree through post_merge_check
   `recheck_ids`: their modules are collected whole and only the listed tests run (`--ci-listed`), so an id the base
-  lacks (a new test, a renamed one or a changed parameter) is absent and stops no other. `recheck_ids` counts a
-  module that did not collect, or a test still running, as failed for each id inside it; here a base failure needs a
-  failed setup, call or teardown report of that test, and anything else is inconclusive (unknown). Where uv.lock
-  differs between base and head the base would run in the head's environment: nothing is compared.
+  lacks (a new test, a renamed one or a changed parameter) is absent and stops no other. Answers are for the exact
+  node (`exact_answers`): a pass needs that node run whole, once; a failure its own failed setup, call or teardown
+  report; a parametrized relative never counts, and a fixture's CandidateError in setup, a collection error or an
+  unfinished test is inconclusive (unknown). Where uv.lock differs, or the protected file differs (its base checkout
+  would need a skip-worktree index, which the browser fixtures refuse), nothing is compared: every red is unknown.
 - RECHECK: the tests of the open browser issues that this run neither saw fail nor passed whole run once at the head,
-  the same way, within RECHECK_SECONDS.
-- OUTCOME (`judge`): GREEN when every requested node was collected, completed setup, call and teardown and passed,
-  both sentinel cases included (FLAKY: passed on its retry, listed, never handed over); RED for a test with two
-  completed failure observations; CHECKED PARTIALLY, each item named with its cause, when anything requested did not
-  run or is not explained: no plan or no verdict of scripts/ci_retry.py, a changed or same-named module (tier 1 or 2)
+  the same way and with the same exact answers, within RECHECK_SECONDS.
+- OUTCOME (`judge`): GREEN when every requested node was collected, completed setup, call and teardown in one attempt
+  and passed, both sentinel cases included (FLAKY: passed on its retry, listed, never handed over); RED for a test with
+  two completed failure observations, handed over whatever else the run left partial; CHECKED PARTIALLY, each item
+  named with its cause, when anything requested did not run or is not explained: no plan, a plan with nothing to run
+  (the missing sentinels named), no verdict of scripts/ci_retry.py, a changed or same-named module (tier 1 or 2)
   the budget or the cap dropped, a requested argument or collector skipped or broken at collection or never
-  collected, a selected test that never ran, a skip that tests/browser_lane.py `permitted_skip` does not allow (this
-  module, loaded as a plugin by the head session, records which skips it allowed and moves the sentinel cases to the
-  front), a failure without a second completed observation (a retry that skipped or did not finish: the first
+  collected, a selected test that never ran or did not run whole, a skip that tests/browser_lane.py `permitted_skip`
+  does not allow (the permitted ones are listed; this module, loaded as a plugin by the head session, records which
+  skips it allowed and moves the sentinel cases to the front), a failure without a second completed observation (a retry that skipped or did not finish: the first
   failure is shown, nothing is handed over), a sentinel case the head no longer collects or completes, or a red
   verdict of ci_retry that no test explains. Red and partial can hold together. What the lane excludes (the plan's
-  `excluded`: Caddy modules, tests `-m ui_browser` deselects) is named, neither green evidence nor partial; dropped
+  `excluded`: Caddy tests, tests `-m ui_browser` deselects) is named, neither green evidence nor partial; dropped
   tier-3 modules and hub files are named only.
 - ATTRIBUTION, the owner's rule (2026-11-25: name the author only when the comparison with the base confirms it, else
   "not attributed"): a merge is named only when the window holds exactly one first-parent commit and the red passed
@@ -42,10 +47,12 @@ more), and then:
   candidate merges: the window's commits that touched the files that selected the test (its module, the changed
   files that chose it, a sentinel's guarded files), else all of them; the cause may lie elsewhere.
 
-The `route` job runs no test: scripts/post_merge_routing.py `route` with the system `browser`, so its issues are
-`post-merge-red` issues of their own system, each red with its own base answer and candidates, and a culprit's pull
-request gets one comment. Off the `ouroboros` branch (a trial) it holds a read-only token and DryGitHub records the
-writes it would make. It retires (narrows or closes) issues only while this run's head is still the branch tip. A
+The `route` job runs no test and no code of the window: from the dispatching workflow's own revision it reads the
+check job's hand-over as data and calls scripts/post_merge_routing.py `route` with the system `browser`, so its issues
+are `post-merge-red` issues of their own system, each red with its own base answer and candidates, and a culprit's
+pull request gets one comment. It writes only for a window whose base and head both lie on `ouroboros`'s first-parent
+chain, base first. Off the `ouroboros` branch (a trial) it holds a read-only token and DryGitHub records the writes it
+would make. It retires (narrows or closes) issues only while this run's head is still the branch tip. A
 refused write or a red no open issue carries fails it, named in its summary; the check job's outputs stay with the run,
 so re-running the route job alone offers that hand-over again.
 """
@@ -77,10 +84,12 @@ SYSTEM = "browser"
 TEST_SECONDS = 900  # the UI lane's per-test bound (ui-browser.yml)
 COMPARE_SECONDS = 240  # the base session starts no test after this; post-merge-browser.yml's compare step allows more
 RECHECK_SECONDS = 180  # the open issues' recheck at the head; its step allows a test begun at the edge to finish
+CONFIRM_SECONDS = 180  # the second observation of failures the run's time limit left without a retry; likewise
+CONFIRM = "confirm.json"
 PASSING = ("green", "flaky")
 SKIPS = "permitted-skips.json"  # beside each session's projection: the skips tests/browser_lane.py allows
 ROUTING_LIMIT = 100_000  # the encoded hand-over travels as a job output and an environment variable
-STEPS = ("install", "run", "compare", "recheck")  # the check job passes each step's outcome as BROWSER_<STEP>_OUTCOME
+STEPS = ("install", "run", "confirm", "compare", "recheck")  # the check job passes each step's outcome as BROWSER_<STEP>_OUTCOME
 RETIRE_NOTE = "An older rerun cannot retire this branch’s open failures."  # route()'s own note, no refused write
 
 
@@ -165,23 +174,33 @@ def _once(attempt: dict, reason: str) -> str:
 def judge(evidence: Path, plan: dict) -> dict:
     """The outcome of DIR/head: its first session, ci_retry's rounds and verdict.json, against the plan."""
     result = {"outcome": "partial", "partial": [], "red": [], "once": {}, "failed_then_skipped": [], "flaky": [],
-              "accepted": [], "not_run": [], "skipped": [], "missing_sentinels": [], "dropped": [],
-              "collection_skipped": [], "not_collected": {}, "passed": 0, "planned": None, "verdict": None,
-              "reason": ""}
+              "accepted": [], "not_run": [], "unfinished": [], "skipped": [], "permitted": {},
+              "missing_sentinels": [], "dropped": [], "collection_skipped": [], "not_collected": {}, "confirmed": [],
+              "unconfirmed": [], "passed": 0, "planned": None, "verdict": None, "reason": ""}
     if not plan:
         result["partial"].append("the job stopped before it chose the tests: nothing ran")
         return result
     if not plan.get("applicable"):
-        result["partial"].append(f"the check's plan has nothing to run: {plan.get('reason', '')}")
+        result.update(outcome="not-applicable", reason=plan.get("reason", ""))
+        return result
+    if plan.get("runnable") is False:  # the owner's scope, yet nothing to run: never pytest without arguments
+        result["missing_sentinels"] = [f"{row['scenario']}: the head no longer defines {row['test']}"
+                                       for row in plan.get("sentinels") or [] if not row.get("present")]
+        result["partial"].append(f"the plan has nothing to run: {plan.get('reason', '')}")
+        if result["missing_sentinels"]:
+            result["partial"].append("a sentinel was not checked")
         return result
     head = Path(evidence) / "head"
     verdict, first = _read(head / "verdict.json"), pmc.read_session(head)
     sessions = [first, *(pmc.read_session(path) for path in _rounds(head))]
     ran: dict[str, dict] = {}
+    whole: set[str] = set()  # ran whole (setup, call and teardown passed) in one attempt: the only pass that counts
     for session in sessions:
+        whole |= pmc._ran_whole(session)[0]
         for node, observed in observed_outcomes(session["rows"]).items():
             if ran.get(node, {}).get("outcome") != "failed":
                 ran[node] = observed
+    confirm = _read(Path(evidence) / CONFIRM) or {}
     permitted = {}
     for directory in (head, *_rounds(head)):
         permitted.update((_read(directory / SKIPS) or {}).get("permitted") or {})
@@ -203,6 +222,8 @@ def judge(evidence: Path, plan: dict) -> dict:
             continue
         if len(attempts) < 2:
             result["once"][node] = _once(attempts[0], result["reason"])
+            if _completed(attempts[0]):
+                result["unconfirmed"].append(node)
         elif all(_completed(attempt) for attempt in attempts[:2]):
             result["red"].append(node)  # two completed failure observations
         elif attempts[1].get("error_type") == "Skipped" and _completed(attempts[0]):
@@ -210,14 +231,34 @@ def judge(evidence: Path, plan: dict) -> dict:
         else:  # a retry, or a first attempt, that never finished: the first failure stays visible, nothing is routed
             result["once"][node] = (f"failed ({_first(attempts[0])}); its retry did not finish ({_first(attempts[1])})"
                                     if _completed(attempts[0]) else _once(attempts[0], result["reason"]))
-    if not verdict:  # no verdict: a failure the session saw is reported, never handed over
+    if not verdict:  # no verdict: a failure the session saw gets the confirmation's retry, else is only reported
         result["once"] = {node: "failed; its retry never ran" for node, observed in ran.items()
                           if observed["outcome"] == "failed"}
+        result["unconfirmed"] = sorted(node for node in result["once"] if _completed(ran[node]))
+    # The time limit (or a killed run) left these with one completed failure: the confirm step ran each once more.
+    for node in sorted(result["unconfirmed"]):
+        answer = (confirm.get("results") or {}).get(node)
+        if answer == "failed":
+            result["once"].pop(node)
+            result["red"].append(node)
+            result["confirmed"].append(node)
+        elif answer == "passed":
+            result["once"].pop(node)
+            result["flaky"] = sorted({*result["flaky"], node})
+    result["red"].sort()
     seen = set(result["red"]) | set(result["once"]) | set(result["failed_then_skipped"])
     result["skipped"] = sorted(node for node, observed in ran.items() if observed["outcome"] == "skipped"
                                and node not in permitted and node not in seen)
+    result["permitted"] = {node: permitted[node] for node in sorted(permitted)
+                           if ran.get(node, {}).get("outcome") == "skipped"}
     if planned is not None:
         result["not_run"] = sorted((set(planned) - set(ran)) | set(verdict.get("not_run") or []))
+    # A pass counts only whole in its attempt: a test interrupted after its call (in teardown, say) did not finish.
+    confirmed_pass = {node for node, answer in (confirm.get("results") or {}).items() if answer == "passed"}
+    result["unfinished"] = sorted(
+        node for node, observed in ran.items() if node not in seen and node not in result["not_run"]
+        and node not in whole and node not in confirmed_pass
+        and (observed["outcome"] == "passed" or node in result["flaky"]))
     # What was requested and never became a selected test: a collector skipped or broken at collection, or an
     # argument that collected nothing (a module the plan asked for whole, one changed test).
     skips, broken = first.get("collection_skips") or [], first.get("collection") or []
@@ -238,9 +279,9 @@ def judge(evidence: Path, plan: dict) -> dict:
             result["missing_sentinels"].append(f"{scenario}: the head no longer defines {row['test']}")
         elif planned is not None and scenario not in planned:
             result["missing_sentinels"].append(f"{scenario}: the session did not collect this case")
-        elif ran.get(scenario, {}).get("outcome") not in ("passed", "failed") and scenario not in permitted:
+        elif scenario not in whole and scenario not in seen and scenario not in permitted:
             result["missing_sentinels"].append(f"{scenario}: it did not complete")
-    result["passed"] = sum(observed["outcome"] == "passed" for node, observed in ran.items()
+    result["passed"] = sum(observed["outcome"] == "passed" and node in whole for node, observed in ran.items()
                            if node not in seen and node not in result["flaky"])
     for key, label in (("dropped", "a changed or same-named browser module was not checked (budget or cap)"),
                        ("collection_skipped", "a requested collector was skipped at collection"),
@@ -248,11 +289,14 @@ def judge(evidence: Path, plan: dict) -> dict:
                        ("once", "a failure got no second completed observation"),
                        ("failed_then_skipped", "a failure skipped on its retry"),
                        ("skipped", "a test skipped outside the lane's permitted skips"),
-                       ("not_run", "a selected test never ran"), ("missing_sentinels", "a sentinel was not checked")):
+                       ("not_run", "a selected test never ran"),
+                       ("unfinished", "a selected test did not run whole (setup, call and teardown)"),
+                       ("missing_sentinels", "a sentinel was not checked")):
         if result[key]:
             result["partial"].append(label)
     explained = (result["red"] or result["once"] or result["failed_then_skipped"] or result["not_run"]
-                 or result["skipped"] or result["collection_skipped"] or result["not_collected"])
+                 or result["unfinished"] or result["skipped"] or result["collection_skipped"]
+                 or result["not_collected"])
     if verdict and verdict.get("verdict") not in ("green", "flaky", "accepted") and not explained:
         result["partial"].append("scripts/ci_retry.py says " + str(verdict.get("verdict")) + " and no test explains it"
                                  + (f": {result['reason']}" if result["reason"] else ""))
@@ -285,7 +329,7 @@ def run_session(tree: Path, args, directory: Path, *, pytest=None) -> int:
 
 def compare(evidence: Path, plan: dict, red: list[str], *, run=None) -> dict:
     """compare.json: each confirmed red at the window's base, {id: passed|failed|absent|skipped|xfailed|unknown|error};
-    `inconclusive` names why a `recheck_ids` failure became unknown (no failed report of that test at the base)."""
+    `inconclusive` names why an answer became unknown (`exact_answers`, or a base that cannot be checked out whole)."""
     base, head = plan.get("base") or "", plan.get("head") or ""
     record = {"format": 1, "base": base, "head": head, "ids": sorted(red), "results": {},
               "dependencies_differ": False, "excluded": {}, "inconclusive": {}}
@@ -295,6 +339,13 @@ def compare(evidence: Path, plan: dict, red: list[str], *, run=None) -> dict:
         record["dependencies_differ"] = True
         return record
     protection = protected_projection(head, base, pmc._git)
+    if protection[1] and protection[0] != "absent":
+        # The base would need the protected file held off disk (skip-worktree), and the browser fixtures' checkout
+        # refuses such an index (tests/candidate_checkout.py): every answer would be that refusal, never the test's.
+        why = f"the base was not run: {protection[1]}, and the browser fixtures refuse a projected checkout"
+        record["results"] = dict.fromkeys(red, "unknown")
+        record["inconclusive"] = dict.fromkeys(red, why)
+        return record
     kept, excluded, _ = comparable(probe_files(red, routing.SIZE_PREFIX), revision=base, protection=protection,
                                    git=pmc._git)
     record["excluded"] = excluded
@@ -304,14 +355,15 @@ def compare(evidence: Path, plan: dict, red: list[str], *, run=None) -> dict:
     work = Path(tempfile.mkdtemp(prefix="post-merge-browser-base-", dir=os.environ.get("RUNNER_TEMP") or None))
     tree = work / "base"
     try:
-        pmc.add_worktree(tree, base, omit_protected=bool(protection[1]))
+        pmc.add_worktree(tree, base)
         if pmc._git("rev-parse", "HEAD", cwd=tree) != base:
             raise OSError(f"the worktree is not at the window's base {base}")
-        record["results"].update(pmc.recheck_ids(
+        answers = pmc.recheck_ids(
             kept, Path(evidence) / "base", head=base, read_source=pmc.tree_source(base), budget=COMPARE_SECONDS,
-            run=run or (lambda args, directory: run_session(tree, args, directory))))
-        record["inconclusive"] = observed_failures(Path(evidence) / "base", record["results"])
-        record["results"].update(dict.fromkeys(record["inconclusive"], "unknown"))
+            run=run or (lambda args, directory: run_session(tree, args, directory)))
+        record["results"].update(answers)
+        exact, record["inconclusive"] = exact_answers(Path(evidence) / "base", answers, at="at the base")
+        record["results"].update(exact)
     except (OSError, subprocess.SubprocessError) as error:
         record["error"] = f"the base did not run: {error}"
         record["results"].update({node: "unknown" for node in kept if node not in record["results"]})
@@ -322,20 +374,41 @@ def compare(evidence: Path, plan: dict, red: list[str], *, run=None) -> dict:
     return record
 
 
-def observed_failures(directory: Path, results: dict) -> dict[str, str]:
-    """{id: why} for each `failed` answer of the base session that no failed setup, call or teardown report of that
-    test shows: its module or collector did not collect, or it was still running when the session ended. Such an
-    answer says nothing about the test, so it is no proof that the red was there before the window."""
+def exact_answers(directory: Path, answers: dict, *, at: str) -> tuple[dict[str, str], dict[str, str]]:
+    """(answers, {id: why unknown}) of `recheck_ids` for exact node ids: `recheck_ids` answers for every test an id
+    covers, and its `--ci-listed` selection keeps a test's parametrizations under its plain id. Here a pass needs that
+    exact node, once, run whole; a failure needs that node's own failed setup, call or teardown report, and a
+    CandidateError in setup is the fixture's refusal of the checkout, not the test's. An exact node a complete session
+    never selected while it selected or reported a parametrization of it is absent; any other answer that the exact
+    node does not show is unknown."""
     session = pmc.read_session(directory)
-    failed = {row["nodeid"] for row in session["rows"]
-              if row["outcome"] == "failed" and row["phase"] in ("setup", "call", "teardown")}
-    found = {}
-    for node, answer in results.items():
-        if answer != "failed" or any(pmc._inside(other, node) for other in failed):
+    rows = [row for row in session["rows"] if row["phase"] in ("setup", "call", "teardown")]
+    failed = {row["nodeid"] for row in rows if row["outcome"] == "failed"
+              and not (row["phase"] == "setup" and row.get("error_type") == "CandidateError")}
+    refused = {row["nodeid"] for row in rows if row["outcome"] == "failed" and row["phase"] == "setup"
+               and row.get("error_type") == "CandidateError"}
+    whole, shared = pmc._ran_whole(session)[0], pmc._shared(session)
+    reported, selected = {row["nodeid"] for row in session["rows"]}, session["selected"]
+    result, why = {}, {}
+    for node, answer in answers.items():
+        if answer not in ("passed", "failed", "xfailed"):
             continue
-        broken = any(pmc._inside(node, other) or pmc._inside(other, node) for other in session["collection"])
-        found[node] = "did not collect at the base" if broken else "did not finish at the base"
-    return found
+        relatives = {other for other in reported | set(selected or ()) if other != node and pmc._inside(other, node)}
+        if (relatives and node not in reported and session["final"] and selected is not None
+                and node not in selected):
+            result[node] = "absent"  # only another parametrization of it ran: the exact test is not there
+        elif answer == "failed" and node not in failed:
+            result[node] = "unknown"
+            why[node] = (f"its fixture refused the checkout {at} (CandidateError)" if node in refused
+                         else f"did not collect {at}" if any(pmc._inside(node, other) or pmc._inside(other, node)
+                                                             for other in session["collection"])
+                         else f"only another parametrization of it failed {at}" if any(
+                             pmc._inside(other, node) for other in failed)
+                         else f"did not finish {at}")
+        elif answer == "passed" and (node not in whole or node in shared):
+            result[node] = "unknown"
+            why[node] = f"that exact test did not run whole, once, {at}"
+    return result, why
 
 
 def same_run_passes(directory: Path, ids) -> dict[str, str]:
@@ -367,6 +440,23 @@ def recheck(evidence: Path, plan: dict, judged: dict, github, *, run=None) -> di
         record["rechecked"] = pmc.recheck_ids(
             rest, Path(evidence) / "recheck", head=plan.get("head") or "", read_source=pmc.working_source,
             budget=RECHECK_SECONDS, run=run or (lambda args, directory: run_session(REPO, args, directory)))
+        exact, record["inconclusive"] = exact_answers(Path(evidence) / "recheck", record["rechecked"], at="at the head")
+        record["rechecked"].update(exact)
+    return record
+
+
+def confirm(evidence: Path, plan: dict, judged: dict, *, run=None) -> dict:
+    """confirm.json: the failures the run left with one completed observation (its session reached its time limit,
+    so scripts/ci_retry.py retried nothing, or the run was killed) run once more at the head, exact answers only:
+    `judge` hands over a second failure as RED and reads a whole pass as FLAKY."""
+    ids = sorted(judged.get("unconfirmed") or [])
+    record = {"format": 1, "head": plan.get("head"), "ids": ids, "results": {}, "inconclusive": {}}
+    if ids:
+        answers = pmc.recheck_ids(ids, Path(evidence) / "confirm", head=plan.get("head") or "",
+                                  read_source=pmc.working_source, budget=CONFIRM_SECONDS,
+                                  run=run or (lambda args, directory: run_session(REPO, args, directory)))
+        exact, record["inconclusive"] = exact_answers(Path(evidence) / "confirm", answers, at="on its second run")
+        record["results"] = {**answers, **exact}
     return record
 
 
@@ -523,13 +613,15 @@ def _shown(nodes, limit: int = 40) -> list[str]:
 
 def summary_lines(plan: dict, judged: dict, verdicts: list[dict], compared: dict, rechecked: dict,
                   steps: dict | None = None) -> list[str]:
-    title = {"green": "GREEN", "flaky": "GREEN with FLAKY tests", "red": "RED",
-             "partial": "CHECKED PARTIALLY"}[judged["outcome"]]
+    title = {"green": "GREEN", "flaky": "GREEN with FLAKY tests", "red": "RED", "partial": "CHECKED PARTIALLY",
+             "not-applicable": "NOT APPLICABLE"}[judged["outcome"]]
     if judged["outcome"] == "red" and judged["partial"]:
         title += ", AND CHECKED PARTIALLY"
     lines = [f"## Post-merge browser check (pilot): {title}", "",
              f"Window `{(plan.get('base') or '')[:12]}..{(plan.get('head') or '')[:12]}` "
              f"({len(plan.get('commits') or [])} merge(s)): {plan.get('reason', '')}."]
+    if judged["outcome"] == "not-applicable":
+        return lines + ["", "No browser test ran, so nothing here is green."]
     sentinels = plan.get("sentinels") or []
     lines += ["", f"Selected {len(plan.get('selected') or [])} module(s) and "
                   f"{sum(bool(row.get('present')) for row in sentinels)} WebKit sentinel test(s), estimated "
@@ -556,6 +648,8 @@ def summary_lines(plan: dict, judged: dict, verdicts: list[dict], compared: dict
     if judged.get("not_collected"):
         lines += ["", "Not checked: requested, never collected:"] + [
             f"- `{arg}`: {cause}" for arg, cause in sorted(judged["not_collected"].items())]
+    if judged.get("unfinished"):
+        lines += ["", "Not checked: did not run whole (setup, call and teardown):"] + _shown(judged["unfinished"])
     unfinished = {step: outcome for step, outcome in (steps or {}).items() if outcome not in ("success", "skipped", "")}
     if unfinished:
         lines += ["", "Steps that did not finish: " + ", ".join(f"{step} ({outcome})" for step, outcome in
@@ -573,6 +667,8 @@ def summary_lines(plan: dict, judged: dict, verdicts: list[dict], compared: dict
                 note = (f" — not attributed ({verdict.get('why', 'no base comparison')}); candidate merges (they "
                         "touched the files that selected it; the cause may lie elsewhere): "
                         + ", ".join(f"`{sha[:12]}`" for sha in verdict.get("candidates") or []))
+            if node in (judged.get("confirmed") or ()):
+                note = " (its second failure came from the confirm step: the run's time limit gave it no retry)" + note
             lines.append(f"- `{node}`{note}")
     if judged["once"]:
         lines += ["", "Failed, not confirmed (reported, never handed over):"] + [
@@ -587,6 +683,9 @@ def summary_lines(plan: dict, judged: dict, verdicts: list[dict], compared: dict
                                           for node in judged[key]]
     if judged["not_run"]:
         lines += ["", f"Not executed ({len(judged['not_run'])}):"] + _shown(judged["not_run"])
+    if judged.get("permitted"):
+        lines += ["", "Skipped as the lane permits (tests/browser_lane.py PLATFORM_SKIPS):"] + [
+            f"- `{node}`: {pattern}" for node, pattern in judged["permitted"].items()]
     if compared.get("dependencies_differ"):
         lines += ["", "uv.lock differs between the window's base and head: no red was run at the base."]
     elif compared.get("error"):
@@ -619,6 +718,12 @@ def command_compare(args, environ=os.environ) -> int:
     return 0
 
 
+def command_confirm(args, environ=os.environ) -> int:
+    evidence, plan = Path(args.evidence_dir), _read(Path(args.plan)) or {}
+    _write(evidence / CONFIRM, confirm(evidence, plan, judge(evidence, plan)))
+    return 0
+
+
 def command_recheck(args, environ=os.environ) -> int:
     evidence, plan = Path(args.evidence_dir), _read(Path(args.plan)) or {}
     github = routing.GitHub(environ.get("GITHUB_REPOSITORY", ""), environ.get("GH_TOKEN", ""))
@@ -638,7 +743,7 @@ def command_outcome(args, environ=os.environ) -> int:
             "recheck_listed": bool(rechecked.get("listed"))}
     _write(evidence / "outcome.json", {**judged, "verdicts": verdicts})
     _write(evidence / "routing-input.json", data)
-    encoded = encode(data)
+    encoded = encode(data) if judged["outcome"] != "not-applicable" else ""
     if len(encoded) > ROUTING_LIMIT:
         print(f"::error::the hand-over input takes {len(encoded)} characters, over {ROUTING_LIMIT}: routing-input.json "
               "in the evidence keeps it, and the route job hands nothing over")
@@ -650,17 +755,18 @@ def command_outcome(args, environ=os.environ) -> int:
 
 
 def command_verdict(args, environ=os.environ) -> int:
-    """The check job's own conclusion: green only for GREEN or FLAKY."""
+    """The check job's own conclusion: green only for GREEN or FLAKY. A window outside the owner's scope ran nothing
+    and fails nothing (its summary says NOT APPLICABLE)."""
     judged = _read(Path(args.evidence_dir) / "outcome.json") or {}
     print(f"post-merge browser check: {judged.get('outcome', 'no outcome')}")
-    return 0 if judged.get("outcome") in PASSING else 1
+    return 0 if judged.get("outcome") in (*PASSING, "not-applicable") else 1
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="post_merge_browser.py", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("compare", "recheck", "outcome", "verdict"):
+    for name in ("confirm", "compare", "recheck", "outcome", "verdict"):
         command = commands.add_parser(name)
         command.add_argument("--evidence-dir", required=True)
         if name != "verdict":
@@ -670,7 +776,7 @@ def main(argv: list[str] | None = None) -> int:
     route.add_argument("--out", default="routing.json", help="the hand-over record")
     route.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
-    return {"compare": command_compare, "recheck": command_recheck, "outcome": command_outcome,
+    return {"confirm": command_confirm, "compare": command_compare, "recheck": command_recheck, "outcome": command_outcome,
             "verdict": command_verdict, "route": command_route}[args.command](args)
 
 

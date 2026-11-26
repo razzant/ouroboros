@@ -35,7 +35,7 @@ UI_JOBS = ["scope", "ui-shard", "ui-manifest", "ui-smoke"]
 FULL_LANE = "${{ needs.scope.outputs.run_browser == 'true' }}"
 # The single-scenario PARTIAL DIAGNOSTIC is a job of the push wrapper, its only selector.
 PARTIAL = ("ui-browser-push.yml", "ui-diagnostic")
-BROWSER_CHECK_JOBS = ("scope", "check", "route", "route-trial")  # post-merge-browser.yml, the post-merge pilot
+BROWSER_CHECK_JOBS = ("check", "route", "route-trial")  # post-merge-browser.yml, the post-merge pilot
 
 
 def _workflow(name):

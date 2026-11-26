@@ -5,14 +5,16 @@
 # the full browser lane stays in the release run and the manual dispatch. post-merge.yml's `browser-dispatch` job
 # starts this workflow with the window's frozen base and head; it is a run of its own, so it never holds the
 # post-merge concurrency group, never becomes that run's conclusion or a leg's verdict, never moves the window's base,
-# and ouroboros/update_qualification.py, which reads post-merge.yml's runs, never reads it. `scope` decides without a
-# browser (not applicable: `check` is skipped, never green); `check` runs the plan with a read-only token, compares
-# each red with the window's base and judges (scripts/post_merge_browser_select.py chooses, scripts/post_merge_browser.py
-# judges and hands over); `route` hands the reds over and runs no test: on `ouroboros` with the only write permissions
-# here, one at a time, and only for a window inside `ouroboros`'s first-parent history; elsewhere (a trial
-# dispatched on another branch) dry, with a read-only token. A red whose author's task has ended is Ouroboros's to take
-# over: it reads the open post-merge-red issues (ouroboros/update_qualification.py `post_merge_reds`).
-# A manual dispatch is supported only for a window whose head contains this pilot (its scripts run from the head).
+# and ouroboros/update_qualification.py, which reads post-merge.yml's runs, never reads it. `check` first decides
+# without a browser (a window outside the owner's scope ends NOT APPLICABLE before anything is installed, never
+# green), then runs the plan with a read-only token, compares each red with the window's base and judges
+# (scripts/post_merge_browser_select.py chooses, scripts/post_merge_browser.py judges and hands over); `route` hands the
+# reds over and runs no test and no code of the window: from this workflow's own revision, on `ouroboros` with the only
+# write permissions here, and only for a window whose base and head lie on `ouroboros`'s first-parent chain, base
+# first; elsewhere (a trial dispatched on another branch) dry, with a read-only token. A red whose author's task has
+# ended is Ouroboros's to take over: it reads the open post-merge-red issues (ouroboros/update_qualification.py
+# `post_merge_reds`). A manual dispatch is supported only for a window whose head contains this pilot (its check
+# scripts run from the head).
 # The pilot lasts two weeks after it is enabled or until the next release, whichever comes first; it stops if a release
 # run waited because of it, if more than half of its reds are FLAKY or not attributed, or if post-merge windows grow
 # noticeably longer. A push that changes this file only registers the workflow (a workflow_dispatch needs GitHub to
@@ -44,10 +46,13 @@ on:
 
 permissions: {}
 
-# One run per window head at a time; a second start for the same head waits (never a run of another window).
+# One runner: the windows of a branch run one at a time, in the order they started waiting (FIFO), and `queue: max`
+# keeps up to 100 of them pending instead of replacing the pending one. A trial branch has its own line, and a push
+# that only registers this file never waits behind, or displaces, a window.
 concurrency:
-  group: post-merge-browser-${{ inputs.head || github.sha }}
+  group: ${{ github.event_name == 'push' && format('post-merge-browser-register-{0}', github.sha) || format('post-merge-browser-{0}', github.ref_name) }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   register:
@@ -60,81 +65,60 @@ jobs:
         timeout-minutes: 1
         run: echo "post-merge-browser.yml is known to GitHub; a push checks no window."
 
-  scope:
+  check:
     if: github.repository == 'razzant/ouroboros' && github.event_name == 'workflow_dispatch'
+    name: post-merge browser check (pilot)
     runs-on: ubuntu-latest
-    timeout-minutes: 21
+    # Above the sum of its step ceilings plus ten minutes, so a step's own ceiling always ends first and the evidence
+    # is uploaded; a typical run takes about 40 minutes.
+    timeout-minutes: 186
     permissions:
       contents: read
+      issues: read  # the open browser issues to recheck, the accepted failures
+      actions: read  # the weights of earlier browser runs
     outputs:
       applicable: ${{ steps.scope.outputs.applicable }}
       base: ${{ steps.window.outputs.base }}
       head: ${{ steps.window.outputs.head }}
+      outcome: ${{ steps.outcome.outputs.outcome }}
+      routing: ${{ steps.outcome.outputs.routing }}
+    env:
+      BASE: ${{ inputs.base }}
+      HEAD_SHA: ${{ inputs.head }}
     steps:
       - name: Name the window
         id: window
         timeout-minutes: 1
-        env:
-          INPUT_BASE: ${{ inputs.base }}
-          INPUT_HEAD: ${{ inputs.head }}
         run: |
-          base="$INPUT_BASE"
-          head="$INPUT_HEAD"
-          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || ! "$head" =~ ^[0-9a-f]{40}$ ]]; then
+          if [[ ! "$BASE" =~ ^[0-9a-f]{40}$ || ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::base and head must be full commit SHAs"
             exit 1
           fi
-          echo "base=$base" >> "$GITHUB_OUTPUT"
-          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         timeout-minutes: 5
         with:
           ref: ${{ steps.window.outputs.head }}
-          fetch-depth: 0  # the window's commits
+          fetch-depth: 0  # the window's commits and the base worktree
           persist-credentials: false
+      # The owner's scope, decided before anything is installed. A selector that fails fails this step, never an empty
+      # "not applicable"; an applicable window whose plan is empty ends CHECKED PARTIALLY below, still browserless.
       - name: Decide whether the browser check applies
         id: scope
         timeout-minutes: 3
-        env:
-          BASE: ${{ steps.window.outputs.base }}
-          HEAD_SHA: ${{ steps.window.outputs.head }}
         run: |
-          set -o pipefail  # a selector that fails fails this step, never an empty "not applicable"
+          set -o pipefail
           python3 -I -S scripts/post_merge_browser_select.py scope --base "$BASE" --head "$HEAD_SHA" | tee -a "$GITHUB_OUTPUT"
       - name: Not applicable, so no browser test runs and nothing is green
         if: steps.scope.outputs.applicable == 'false'
         timeout-minutes: 1
         env:
           WHY: ${{ steps.scope.outputs.why }}
-        run: 'echo "Not applicable: $WHY"'
-
-  check:
-    needs: scope
-    if: needs.scope.outputs.applicable == 'true'
-    name: post-merge browser check (pilot)
-    runs-on: ubuntu-latest
-    # Above the sum of its step ceilings plus ten minutes, so a step's own ceiling always ends first and the evidence
-    # is uploaded; a typical run takes about 40 minutes.
-    timeout-minutes: 161
-    permissions:
-      contents: read
-      issues: read  # the open browser issues to recheck, the accepted failures
-      actions: read  # the weights of earlier browser runs
-    outputs:
-      outcome: ${{ steps.outcome.outputs.outcome }}
-      routing: ${{ steps.outcome.outputs.routing }}
-    env:
-      BASE: ${{ needs.scope.outputs.base }}
-      HEAD_SHA: ${{ needs.scope.outputs.head }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        timeout-minutes: 5
-        with:
-          ref: ${{ needs.scope.outputs.head }}
-          fetch-depth: 0  # the window's commits and the base worktree
-          persist-credentials: false
+        run: 'echo "Not applicable: $WHY" | tee -a "$GITHUB_STEP_SUMMARY"'
       - uses: ./.github/actions/setup-python-env
         id: setup_python
+        if: steps.scope.outputs.applicable == 'true'
         timeout-minutes: 10
         with:
           interpreter: shipped  # as the UI lane (ui-browser.yml)
@@ -143,6 +127,7 @@ jobs:
       # plan keeps its module cap and counts every candidate as unknown.
       - name: Read the weights of earlier browser runs
         id: weights
+        if: steps.scope.outputs.applicable == 'true'
         continue-on-error: true
         timeout-minutes: 3
         env:
@@ -152,6 +137,7 @@ jobs:
           --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --sha "$HEAD_SHA"
       - name: Choose the browser tests of the window
         id: plan
+        if: steps.scope.outputs.applicable == 'true'
         timeout-minutes: 3
         env:
           TRIAL_BUDGET: ${{ github.ref != 'refs/heads/ouroboros' && inputs.budget || '' }}
@@ -165,7 +151,7 @@ jobs:
       # take at most 19.5 minutes and leave this ceiling eight more for dpkg's single run.
       - name: Install Chromium and WebKit
         id: install_browsers
-        if: ${{ !cancelled() && steps.plan.outputs.applicable == 'true' }}
+        if: ${{ !cancelled() && steps.plan.outputs.runnable == 'true' }}
         timeout-minutes: 28
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
@@ -203,6 +189,20 @@ jobs:
             python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/post-merge-browser-raw/head" -- \
             python -m pytest "${TESTS[@]}" -m ui_browser -p scripts.post_merge_browser -vv --tb=short --timeout=900 \
             --session-timeout="$SESSION" --ci-evidence-dir="$evidence/head"
+      # A failure the session's time limit (or a killed run) left with one observation runs once more at the head.
+      - name: Run once more each failure that got no retry
+        id: confirm
+        if: ${{ !cancelled() && steps.run.outcome != 'skipped' }}
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: >-
+          xvfb-run -a python3 scripts/post_merge_browser.py confirm --evidence-dir "$RUNNER_TEMP/post-merge-browser"
+          --plan "$RUNNER_TEMP/post-merge-browser/plan.json"
       - name: Run each confirmed red at the window's base
         id: compare
         if: ${{ !cancelled() && steps.run.outcome != 'skipped' }}
@@ -232,11 +232,12 @@ jobs:
           --plan "$RUNNER_TEMP/post-merge-browser/plan.json"
       - name: Judge the browser check and prepare its hand-over
         id: outcome
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.scope.outputs.applicable == 'true' }}
         timeout-minutes: 3
         env:
           BROWSER_INSTALL_OUTCOME: ${{ steps.install_browsers.outcome }}
           BROWSER_RUN_OUTCOME: ${{ steps.run.outcome }}
+          BROWSER_CONFIRM_OUTCOME: ${{ steps.confirm.outcome }}
           BROWSER_COMPARE_OUTCOME: ${{ steps.compare.outcome }}
           BROWSER_RECHECK_OUTCOME: ${{ steps.recheck.outcome }}
         run: >-
@@ -255,23 +256,21 @@ jobs:
       # Green only for GREEN or FLAKY: red or checked partially fails this job, never a post-merge run.
       - name: Fail unless the browser check is green
         id: verdict
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.scope.outputs.applicable == 'true' }}
         timeout-minutes: 2
         run: python3 scripts/post_merge_browser.py verdict --evidence-dir "$RUNNER_TEMP/post-merge-browser"
 
-  # The hand-over runs no test. Only on `ouroboros` does it hold the write permissions, one route at a time (its
-  # writers re-read an issue right before they write it), and only for a window inside `ouroboros`'s first-parent
-  # history: the workflow's own revision verifies that before the head's routing code is checked out. `route-trial`
-  # below is the same job for a trial on another branch, with a read-only token and dry routing. Re-running this job
-  # alone offers a refused hand-over again: the check job's outputs stay with the run.
+  # The hand-over runs no test and no code of the window. Only on `ouroboros` does it hold the write permissions, and
+  # only for a window whose base and head both lie on `ouroboros`'s first-parent chain, base first; the workflow-level
+  # group keeps one run, and so one writer, at a time (its writers still re-read an issue right before they write it).
+  # It runs this workflow's own revision and reads the check job's hand-over as data. `route-trial` below is the same
+  # job for a trial on another branch, with a read-only token and dry routing. Re-running this job alone offers a
+  # refused hand-over again: the check job's outputs stay with the run.
   route:
-    needs: [scope, check]
-    if: ${{ !cancelled() && needs.check.result != 'skipped' && github.ref == 'refs/heads/ouroboros' }}
+    needs: check
+    if: ${{ !cancelled() && needs.check.outputs.applicable == 'true' && github.ref == 'refs/heads/ouroboros' }}
     runs-on: ubuntu-latest
     timeout-minutes: 27
-    concurrency:
-      group: post-merge-browser-route
-      cancel-in-progress: false
     permissions:
       contents: read
       issues: write
@@ -280,22 +279,23 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         timeout-minutes: 5
         with:
-          fetch-depth: 0  # the window's history and origin/ouroboros; this workflow's own revision is checked out
+          fetch-depth: 0  # origin/ouroboros's history; this workflow's own revision is checked out, never the head
           persist-credentials: false
-      - name: Hand over only a window of ouroboros's first-parent history
+      - name: Hand over only a window on ouroboros's first-parent chain
         id: trusted
         timeout-minutes: 3
         env:
-          BASE: ${{ needs.scope.outputs.base }}
-          HEAD_SHA: ${{ needs.scope.outputs.head }}
+          BASE: ${{ needs.check.outputs.base }}
+          HEAD_SHA: ${{ needs.check.outputs.head }}
         run: |
-          if git merge-base --is-ancestor "$HEAD_SHA" origin/ouroboros \
-              && git rev-list --first-parent "$HEAD_SHA" | grep -Fqx "$BASE"; then
-            git checkout --quiet --detach "$HEAD_SHA"  # merged, reviewed code: its routing reads its own records
+          git rev-list --first-parent origin/ouroboros > "$RUNNER_TEMP/first-parent"
+          head_at="$(grep -nFx -e "$HEAD_SHA" "$RUNNER_TEMP/first-parent" | cut -d: -f1 || true)"
+          base_at="$(grep -nFx -e "$BASE" "$RUNNER_TEMP/first-parent" | cut -d: -f1 || true)"
+          if [[ -n "$head_at" && -n "$base_at" && "$head_at" -lt "$base_at" ]]; then
             echo "trusted=true" >> "$GITHUB_OUTPUT"
           else
             echo "trusted=false" >> "$GITHUB_OUTPUT"
-            printf '## Post-merge browser hand-over\n\nNothing handed over: %s..%s is not a first-parent window of ouroboros, so no code of it runs with this token.\n' \
+            printf '## Post-merge browser hand-over\n\nNothing handed over: %s..%s is not a window on the first-parent chain of ouroboros (both on it, base first).\n' \
               "$BASE" "$HEAD_SHA" >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Hand each red to its author and to Ouroboros as the browser system
@@ -321,8 +321,8 @@ jobs:
           if-no-files-found: ignore
 
   route-trial:
-    needs: [scope, check]
-    if: ${{ !cancelled() && needs.check.result != 'skipped' && github.ref != 'refs/heads/ouroboros' }}
+    needs: check
+    if: ${{ !cancelled() && needs.check.outputs.applicable == 'true' && github.ref != 'refs/heads/ouroboros' }}
     runs-on: ubuntu-latest
     timeout-minutes: 24
     permissions:
@@ -333,8 +333,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         timeout-minutes: 5
         with:
-          ref: ${{ needs.scope.outputs.head }}
-          fetch-depth: 0
+          fetch-depth: 0  # this workflow's own revision, as `route`
           persist-credentials: false
       - name: Record the hand-over a run on ouroboros would make
         id: route

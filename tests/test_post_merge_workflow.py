@@ -169,7 +169,7 @@ def test_every_action_is_pinned_by_commit_or_local():
         "./.github/actions/") for step in browser if "uses" in step)
     # No checkout of the browser check keeps the token on disk for the tests it runs.
     checkouts = [step for step in browser if step.get("uses", "").startswith("actions/checkout@")]
-    assert len(checkouts) == 4 and all(step["with"]["persist-credentials"] is False for step in checkouts)
+    assert len(checkouts) == 3 and all(step["with"]["persist-credentials"] is False for step in checkouts)
     assert not any("uses" in step for step in WORKFLOW["jobs"]["browser-dispatch"]["steps"])
 
 
@@ -190,18 +190,16 @@ def test_the_browser_check_is_a_workflow_of_its_own_that_the_post_merge_readers_
            "status": "completed", "conclusion": "failure", "head_sha": "a" * 40, "id": 1, "run_attempt": 1}
     assert update_qualification.range_candidate(run) is False
     assert not any(update_qualification._LEG.fullmatch(job.get("name") or "") for job in BROWSER["jobs"].values())
-    # One run per window head at a time: no group spans two windows, so no window's pending run is ever dropped.
-    assert BROWSER["concurrency"] == {"group": "post-merge-browser-${{ inputs.head || github.sha }}",
-                                      "cancel-in-progress": False}
-    # The issue writers take turns across every window (finding 16); nothing else waits for another window.
-    assert {name for name, job in BROWSER["jobs"].items() if "concurrency" in job} == {"route"}
-    assert BROWSER["jobs"]["route"]["concurrency"] == {"group": "post-merge-browser-route", "cancel-in-progress": False}
+    # One runner (decision 1): a branch's windows wait in one group, FIFO, up to 100 pending (`queue: max`), so a
+    # window's pending run is never replaced; the one writer is the one running window's route job.
+    assert BROWSER["concurrency"]["queue"] == "max" and BROWSER["concurrency"]["cancel-in-progress"] is False
+    assert "post-merge-browser-{0}', github.ref_name" in BROWSER["concurrency"]["group"]
+    assert not any("concurrency" in job for job in BROWSER["jobs"].values())
 
 
 def test_the_browser_check_writes_issues_only_from_its_route_job_on_ouroboros():
     jobs = BROWSER["jobs"]
     assert BROWSER["permissions"] == {}
-    assert jobs["scope"]["permissions"] == {"contents": "read"}
     assert jobs["check"]["permissions"] == {"contents": "read", "issues": "read", "actions": "read"}
     assert jobs["route"]["permissions"] == {"contents": "read", "issues": "write", "pull-requests": "write"}
     assert jobs["route-trial"]["permissions"] == {"contents": "read", "issues": "read", "pull-requests": "read"}
@@ -215,11 +213,13 @@ def test_the_browser_check_writes_issues_only_from_its_route_job_on_ouroboros():
     # A push only registers the workflow: no window is checked over it (finding 17).
     assert jobs["register"] == {**jobs["register"], "if": "github.event_name == 'push'", "permissions": {}}
     assert not any("uses" in step for step in jobs["register"]["steps"])
-    assert "github.event_name == 'workflow_dispatch'" in jobs["scope"]["if"]
-    # The writer checks out this workflow's own revision, verifies the window, and only then the head (finding 7).
+    assert "github.event_name == 'workflow_dispatch'" in jobs["check"]["if"]
+    # The writer runs this workflow's own revision, never the head's code, and writes only after it verified that
+    # base and head lie on ouroboros's first-parent chain (decision 2).
     route = jobs["route"]["steps"]
     assert "ref" not in route[0]["with"] and [step.get("id") for step in route[1:3]] == ["trusted", "route"]
     assert route[2]["if"] == "steps.trusted.outputs.trusted == 'true'"
+    assert "git rev-list --first-parent origin/ouroboros" in route[1]["run"] and "git checkout" not in route[1]["run"]
 
 
 def test_probes_import_their_own_tree_because_no_project_is_installed():
