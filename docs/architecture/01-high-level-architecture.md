@@ -13,7 +13,7 @@ Addresses and each module's own lead come from the code, not from this chapter: 
 
 Relationships the modules do not state themselves:
 
-- `ouroboros/context.py` is the public facade that assembles Main's context and carries the subagent catalog; `context_timing.py` only times its host sections. `ouroboros/memory.py` (`Memory`) owns scratchpad rendering and folding, identity and chat-history queries.
+- `ouroboros/context.py` is the public facade that assembles Main's context and carries the subagent catalog; `context_timing.py` only times its host sections. `ouroboros/memory.py` (`Memory`) owns scratchpad rendering and folding, identity and chat-history queries. `ouroboros/tools/skill_exec.py` registers `list_skills`, `skill_review`, `skill_exec` (runtime allowlist; gated by enablement, review and content hash), `toggle_skill` and `skill_owner_action` (§13).
 - `supervisor/task_reaper.py` never retries a timed-out task, keeps reaping an unconfirmed death and mints no cancel intents. For an in-slot wait mark, `wait_for_tasks` in `supervisor/cognitive_operations.py` names the responsible parent; no durable ledger backs it.
 - `ouroboros/agent.py`: a crashed task projects its captured loop evidence or `loop_evidence_unavailable`, never invented token or round counters (§6.1 Task lifecycle).
 - `ouroboros/task_tree_ledger.py` keeps `data/task_trees/<root>/blackboard.jsonl` (`tree_note`/`tree_read`); a Project root's finalization mirrors it into the Project journal.

@@ -7,7 +7,8 @@ domains (a Python manifest domain, or a touched ``web/`` file's directory): touc
 first, then their neighbours, each with its own lead. ``blocks`` returns the whole block and a
 touched-only form whose text says how many neighbour rows it left out and how to list them;
 the caller admits the first that fits its inline share and records the rest as navigation. An
-unreadable manifest is a named problem the caller records, never an empty block.
+unreadable manifest is a named problem the caller records, never an empty block. A plan seat
+without tools gets the compact domain index instead (``domains_index``).
 """
 
 from __future__ import annotations
@@ -62,3 +63,14 @@ def blocks(root: pathlib.Path, touched: Iterable[str]) -> Tuple[str, str, int, s
     lead = ("Module rows of the touched domains (own docstring/header leads; touched modules first). "
             "The architecture book keeps no module tree.")
     return "\n\n".join([lead, *whole]), "\n\n".join([lead, *reduced]), left_out, ""
+
+
+def domains_index(root: pathlib.Path) -> str:
+    """``module_map domains`` for a plan seat that cannot call it; an unreadable manifest is named, never dropped."""
+    from ouroboros.code_intelligence_architecture import load_domain_manifest
+    from ouroboros.code_intelligence_module_map import module_map_rows
+
+    try:
+        return "\n".join(module_map_rows(pathlib.Path(root), "domains", load_domain_manifest(root)))
+    except ValueError as exc:
+        return f"⚠️ OMISSION NOTE: the domain index is unavailable ({exc})."

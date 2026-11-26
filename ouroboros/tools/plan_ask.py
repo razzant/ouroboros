@@ -295,24 +295,14 @@ def stable_prompt(ctx: Any, *, body: bool, system_root: pathlib.Path, by_retriev
     architecture = _governance_text(system_root, "docs/ARCHITECTURE.md") if body else ""
     design_map = (design_navigation(_governance_text(system_root, "docs/DESIGN.md") or None,
                                     source=str(pathlib.Path(system_root) / "docs/DESIGN.md")) if body else None)
-    domains = _domains_table(system_root) if body and not by_retrieval else None
+    from ouroboros.tools.governance_module_rows import domains_index
+    domains = domains_index(system_root) if body and not by_retrieval else None
     return plan_packet.build_stable_prompt(
         checklist_section=checklist, body=body,
         bible_text=bible or None, architecture_text=architecture or None,
         bible_locator=str(pathlib.Path(system_root) / "BIBLE.md"),
         architecture_locator=str(pathlib.Path(system_root) / "docs" / "ARCHITECTURE.md"),
         governance_by_retrieval=by_retrieval, design_nav_map=design_map, domains_table=domains)
-
-
-def _domains_table(system_root: pathlib.Path) -> str:
-    """``module_map domains`` for a seat that cannot call it; an unreadable manifest is named, never dropped."""
-    from ouroboros.code_intelligence_architecture import load_domain_manifest
-    from ouroboros.code_intelligence_module_map import module_map_rows
-
-    try:
-        return "\n".join(module_map_rows(pathlib.Path(system_root), "domains", load_domain_manifest(system_root)))
-    except ValueError as exc:
-        return f"⚠️ OMISSION NOTE: the domain index is unavailable ({exc})."
 
 
 def _prior_transcript(state_root: pathlib.Path, task_id: str, participant_row: Mapping[str, Any]) -> Optional[List[Dict[str, Any]]]:
