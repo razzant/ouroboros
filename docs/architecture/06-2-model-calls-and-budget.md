@@ -1,6 +1,6 @@
 # 6.2 Agent Core — Model Calls, Usage & Budget
 
-This part gives me my model calls and their money: API, local and caller-owned subscription routes, how a role picks its model (`switch_model` stays inside the role's bounds), how quota and auth waits hold work, and how every attempt and dollar settles in `state/usage.sqlite` ([USAGE_STORE](../USAGE_STORE.md)). `inspect_subagent` shows an actor's dated passive quota facts ([PASSIVE_QUOTA_READ](../PASSIVE_QUOTA_READ.md)); the ledger records attempts, not live quota. An unknown price stays unknown, never zero and never a veto, while a known budget ceiling refuses new paid admission and `set_task_cost_cap` sets a started work's cap.
+This part gives me my model calls and their money: API, local and caller-owned subscription routes, how a role picks its model (`switch_model` stays inside the role's bounds), how quota and auth waits hold work, and how every attempt and dollar settles in `state/usage.sqlite` ([USAGE_STORE](../USAGE_STORE.md)). `inspect_subagent` shows an actor's dated passive quota facts ([PASSIVE_QUOTA_READ](../PASSIVE_QUOTA_READ.md)); the ledger records attempts, not live quota. An unknown price stays unknown, never zero and never a veto, while a known budget ceiling refuses new paid admission and `set_task_cost_cap` raises a started work's total cap on my owner's cited words, keeping what was spent.
 
 ### Usage ledger substrate vs. accounting policy
 

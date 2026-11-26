@@ -1,6 +1,6 @@
 # 6.3 Agent Core — Delegated Subagents & Vendor Maintenance
 
-This part gives me helpers: API children and nannies scheduled with `schedule_subagent`, and external coding-agent sessions through the managed Claudexor transport (`delegate_start`, `delegate_wait`), plus the maintenance of those vendor programs. I read a result before any patch lands (`get_task_result`) and integrate an eligible patch explicitly (`integrate_subagent_patch`, `integrate_delegated_patch`). A child inherits cancellation and receives my owner's later words as context, never a fresh grant, silent write authority or unreviewed promotion into my body; cancel intent precedes proof of exit.
+This part gives me helpers: API children and nannies scheduled with `schedule_subagent`, and external coding-agent sessions through the managed Claudexor transport (`delegate_start`, `delegate_wait`), plus the maintenance of those vendor programs. I read a result before any patch lands (`get_task_result` by a child's task id, `delegate_wait` by a run id) and integrate an eligible patch explicitly (`integrate_subagent_patch`, `integrate_delegated_patch`). A child inherits cancellation and receives my owner's later words as context, never a fresh grant, silent write authority or unreviewed promotion into my body; cancel intent precedes proof of exit.
 
 ### Delegated subagents (Claudexor transport + the nanny)
 
