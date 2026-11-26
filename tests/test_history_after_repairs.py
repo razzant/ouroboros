@@ -425,3 +425,22 @@ def test_a_broken_packed_cursor_is_invalid_and_none_is_issued_past_its_inflate_b
     monkeypatch.setattr(history_paging, "_UNPACKED_CURSOR_BYTES", 64)  # it could not read back what it packed
     status, page = _read(tmp_path)
     assert status == 200 and page["after_cursor"] == plain["after_cursor"]
+
+
+def test_a_read_receipt_placed_only_by_its_client_id_holds_nothing(tmp_path):
+    """An older receipt (written before receipts named their row) is placed by finding its client id among the
+    dialogue's rows; a stamped read is no different: that placement is the dialogue's, not the journal's."""
+    from ouroboros.chat_annotations import append_chat_annotation
+
+    _asking(tmp_path)
+    ds.append(tmp_path, "chat", {"ts": TS.format(3), "direction": "in", "chat_id": 1, "text": "faster please",
+                                 "client_message_id": "c1"})
+    append_chat_annotation(tmp_path, "c1", action="steer_task", target="asker", status="read", source_chat_id=1)
+    _, page = _read(tmp_path)
+    owner = next(row for row in page["messages"] if row.get("client_message_id") == "c1")
+    assert owner["chat_annotation"] == {"source_row_address": owner["row_address"], "action": "steer_task",
+                                        "target": "asker", "status": "read"}  # the wire receipt as before
+    assert "held" not in _cursor(page["after_cursor"])
+    _task(tmp_path, "asker", "completed", 0)
+    status, refused = _read(tmp_path, page["after_cursor"])
+    assert (status, refused["detail"]) == (409, "task_settled")

@@ -36,7 +36,7 @@ from ouroboros.checkpoint_waits import wait_episode
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, is_a2a_chat_id
 from ouroboros.dialogue_positions import skipped_between
 from ouroboros.subagent_messages import DELIVERY_KINDS, is_conversation_card_content as _card_content
-from ouroboros.chat_annotations import _ANNOTATIONS_NAME
+from ouroboros.chat_annotations import _ANNOTATIONS_NAME, InferredPlacement
 from ouroboros.gateway.completion_gist import short_gist
 from ouroboros.project_dialogue import ROOM_FIXED_ROW_TYPES, owner_message_entries
 from ouroboros.room_archive import ordinary_room
@@ -959,8 +959,8 @@ def _held_rows(page, messages, shown, reads):
     rows were projected with though the page drew none of them. None: this window shows what such a read could not
     bring up to date, so a task that settles takes the newest page again (``task_settled``) until the next one: a room
     other than Main or a Project (a place's rows also project its accounts and decisions), an owner's send shown
-    pending (its dispatch can enter with no row to say so), a routing receipt without a row address (its owner is found
-    among the dialogue's rows, which can change without the journal), words revised in place since the window's
+    pending (its dispatch can enter with no row to say so), a routing receipt whose row the journal does not name (an
+    older one placed by its client id, ``InferredPlacement``: the dialogue's rows can move it without the journal), words revised in place since the window's
     newest page (``_text_revision``). A task is not held when the page projects it with another task's document or
     rows, or with what only a newest page decides: an overlaid successor or a child drive's replica, a child or a
     parent of one (the newest page anchors and places children), a folded review group or a review presented for
@@ -970,7 +970,8 @@ def _held_rows(page, messages, shown, reads):
         return None
     carried = page.get("held") if page.get("after") else {}
     if carried is None or any(row.get("ingress_pending") or isinstance(note := row.get("chat_annotation"), dict)
-                              and "source_row_address" not in note for row in messages):
+                              and ("source_row_address" not in note or isinstance(note, InferredPlacement))
+                              for row in messages):
         return None
     overlays = {task: reads.overlaid({task}) - {task} for task in shown} if reads is not None else {}
     blocked = {*getattr(reads, "replica_results", ()), *(task for task, after in overlays.items() if after),

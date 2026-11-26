@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, Optional
 
 from ouroboros import dialogue_store as ds
 from ouroboros.checkpoint_waits import wait_episode
-from ouroboros.chat_annotations import HistoryPageReceipts
+from ouroboros.chat_annotations import HistoryPageReceipts, owner_row_receipt as _user_annotation
 from ouroboros.chat_uploads import attachment_views
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_a2a_chat_id
 from ouroboros.dialogue_provenance import agent_note_text, declared_author
@@ -45,7 +45,7 @@ from ouroboros.project_completion_facts import (
     attach_current_outcomes, copy_task_summary_metadata as _copy_task_summary_metadata,
     matches_history_attempt, matches_result_attempt, recorded_attempt, remember_terminal, same_attempt_ending,
 )
-from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES, ROUTING_RECEIPT_FIELDS
+from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES
 from ouroboros.room_appearances import frame_project, room_project
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS, delegated_activity_meta, executor_observation_meta, show_requested_executor_route, subagent_message_meta
@@ -201,19 +201,6 @@ def _project_history_context(
                 raise StoreError("Project origins unavailable") from None
             log.debug("Failed to load canonical Project source refs", exc_info=True)
     return project_chat_ids, source_refs, all_task_bindings(data_dir), rooms, classified
-
-
-def _user_annotation(
-    role: str,
-    client_message_id: str,
-    annotations: Dict[str, Any],
-    chat_id: int | None = None, address: str = "",
-) -> Optional[Dict[str, Any]]:
-    annotation = annotations.get((chat_id, client_message_id, address) if chat_id is not None else client_message_id)
-    if role != "user" or not isinstance(annotation, dict):
-        return None
-    # The live frame's fields, so a reload paints what the frame did (#968), plus the row's `detail`.
-    return {key: annotation[key] for key in (*ROUTING_RECEIPT_FIELDS, "detail") if key in annotation}
 
 
 def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, receipts=None, quotes=None) -> list:
