@@ -383,7 +383,7 @@ def run_parallel_review(
                 "review_not_dispatched_billing_authority_unavailable: billing authority for this root "
                 "could not be verified, so no seat was dispatched ($0 spent)" if authority_block else
                 "review_not_dispatched_budget_admission: known spend has reached a budget "
-                "fence of the commit-gate wave, so no seat was dispatched ($0 spent)"
+                "fence for this review wave, so no seat was dispatched ($0 spent)"
             )
             ctx._last_review_critical_findings = []
             ctx._last_review_block_reason = (
@@ -397,9 +397,9 @@ def run_parallel_review(
             ) + triad_not_dispatched_records(prepared.get("row_plan") or {}, wave_refusal)
             _handle_review_block_or_warning(
                 ctx, wave_refusal,
-                "The commit-gate review wave was declined before dispatch (billing authority unavailable); nothing was reviewed. "
+                "The review wave was declined before dispatch (billing authority unavailable); nothing was reviewed. "
                 if authority_block else
-                "The commit-gate review wave was declined before dispatch (budget fence); nothing was reviewed. ")
+                "The review wave was declined before dispatch (budget fence); nothing was reviewed. ")
         else:
             # ---- Phase 2: submit the prepared wave to the executor. ----
             try:

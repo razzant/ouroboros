@@ -905,9 +905,9 @@ def admit_commit_gate_wave(ctx, seats) -> str | None:
     if admission is None:
         return None
     if (authority := rh.review_wave_authority_clause(admission)) is not None:
-        return (f"⚠️ REVIEW_BLOCKED: commit-gate review wave declined before dispatch ($0 spent). "
+        return ("⚠️ REVIEW_BLOCKED: Review wave declined before dispatch ($0 spent). "
                 f"Refused because {authority[0]}; no budget exhaustion was claimed. "
-                f"No reviewer seat of the wave was dispatched: {authority[1]}, then retry the same commit.")
+                f"No reviewer seat of the wave was dispatched: {authority[1]}, then retry this review.")
     from ouroboros._usage_money import known_room
     from ouroboros.cost_projection import uncounted_money_text, usd_text
 
@@ -936,10 +936,10 @@ def admit_commit_gate_wave(ctx, seats) -> str | None:
         fence = work_fence
     remedy = rh.review_wave_binding_fence(admission)[1]
     return (
-        "⚠️ REVIEW_BLOCKED: commit-gate review wave declined before dispatch ($0 spent). "
+        "⚠️ REVIEW_BLOCKED: Review wave declined before dispatch ($0 spent). "
         f"Known spend has reached {fence}. The wave's reservation upper bound would have been {usd(wave)} ("
         + "; ".join(f"{s['surface']}:{s['slot_id']} {s['model']} {usd(bounds[i])}" for i, s in enumerate(seats))
-        + f"). No reviewer seat of the wave was dispatched: {remedy}, then retry the same commit."
+        + f"). No reviewer seat of the wave was dispatched: {remedy}, then retry this review."
     )
 
 
