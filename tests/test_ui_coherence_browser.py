@@ -106,7 +106,7 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
     # The edge reaches one edge length below the bar on every layout, the desk included; the deep step stops short of
     # it by the part of the taper the soft step finishes alone. This history read left Main's note under the bar: a
     # later sibling at the bar's own level, it paints over the edge as the capsules do, so its words stay sharp.
-    reach = 48
+    reach = 32
     assert pieces["tint"]["height"] == pytest.approx(paint["bar"] + reach, abs=1), paint
     assert pieces["soft"]["height"] == pytest.approx(paint["bar"] + reach, abs=1), paint
     assert pieces["deep"]["height"] == pytest.approx(paint["bar"] + reach - (reach + 24) / 2, abs=1), paint

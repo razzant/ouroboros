@@ -3710,7 +3710,7 @@ becomes a row of the work list (below). The room's and the drawer's × give way 
 
 Everything that scrolls ends in the same edge (owner decision 27.11.2026): one curve, `--edge-curve` (smoothstep from
 opaque to clear, flat at both ends, so neither end of a fade reads as a line), over one length, `--edge-length`
-(48 px), both in `web/ui.css`. A new scroller takes `.scroll-fade-y` / `.scroll-fade-x` (`scroll_fade.js` marks where
+(32 px), both in `web/ui.css`. A new scroller takes `.scroll-fade-y` / `.scroll-fade-x` (`scroll_fade.js` marks where
 more waits), a clipped preview `[data-fold-clipped]`, and a painted fade (a colour into what passes under it) is the
 colour masked by `linear-gradient(var(--edge-curve))`; a sheet sets only where an edge is and how long, never a
 gradient, curve or blur of its own. The Widgets board (20.10) stays crisp and a room's feed (21.10) unmasked.

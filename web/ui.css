@@ -201,7 +201,7 @@
     --glass: blur(18px);
     /* The one edge of everything that scrolls (DESIGN "One edge"): its length, its curve (smoothstep, from opaque to
        clear, flat at both ends so neither end draws a line) and a room edge's two blur steps, in both themes. */
-    --edge-length: 48px;
+    --edge-length: 32px;
     --edge-curve: #000, rgb(0 0 0 / .972) 10%, rgb(0 0 0 / .896) 20%, rgb(0 0 0 / .784) 30%, rgb(0 0 0 / .648) 40%,
         rgb(0 0 0 / .5) 50%, rgb(0 0 0 / .352) 60%, rgb(0 0 0 / .216) 70%, rgb(0 0 0 / .104) 80%, rgb(0 0 0 / .028) 90%,
         transparent;
