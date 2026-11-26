@@ -348,6 +348,20 @@ def live_contribution_projection() -> List[Dict[str, Any]]:
         ])
 
 
+def published_widget_titles() -> Dict[str, tuple[str, str, List[str]]]:
+    """``{skill: (skill_dir, revision, titles)}``, read under one lock: the headers of the widget tabs each
+    publication this process holds registered, with the resolved folder and revision it loaded them from (maybe
+    older than the folder's bytes while a call holds it). A name unloading or holding no tab is absent; a caller
+    binds the titles to a folder (and a release) itself, never to the name alone."""
+    with _lock:
+        out: Dict[str, tuple[str, str, List[str]]] = {}
+        for name, bundle in _extensions.items():
+            titles = [str((_ui_tabs.get(key) or {}).get("title") or "").strip() for key in bundle.ui_tabs]
+            if name not in _unloading and bundle.skill_dir and any(titles):
+                out[name] = (str(bundle.skill_dir), str(bundle.content_hash or ""), [t for t in titles if t])
+        return out
+
+
 def published_skill_contributions(skill_name: str, revision: str, skill_dir: pathlib.Path) -> Optional[List[Dict[str, Any]]]:
     """This installed release's visible entries. An empty publication is final; None means it is not visible."""
     directory = str(skill_dir.resolve())

@@ -91,14 +91,18 @@ class InstalledSkill(TypedDict, total=False):
     provenance: Dict[str, Any]  # a ClawHub install record
     identity_collision: bool
     collision_row_id: str  # display identity for one colliding directory, never an operation target
-    # The install record joined with the cached catalog of its source (skill_source_catalog.install_listing): source {id (the connected source it
-    # matches now, whatever id it was installed under; absent when none does), name, kind, part (as recorded)}, official (exact endorsed bytes),
-    # release, basis, base_known, modified (null: base unknown), update_available {version, digest} | null, withdrawn ({reason, version} for a withdrawn release), left_source,
-    # turn_on_when_ready, installed_by, installed_at, and reason and task_id when the record has them (an install Ouroboros made says why and in which task); check {by, notes,
-    # at}, pending_update {version, digest}, and update_rejected {version, digest, reason: review_blockers|review_unfinished|preflight_failed, at}. null: not installed from a
-    # source (made here, a local folder, a built-in seed).
+    # Install record and cached update facts; see CLIENT_CONTRACT §11.
     install: Optional[Dict[str, Any]]
-    category: List[str]  # the source's category ids for this skill, [] when it has none
+    source_key: Optional[str]  # opaque key of the original install origin; null when unknown
+    registry_slug: str  # a registry-origin install's full slug, namespace kept; absent otherwise
+    title: str  # its manifest's title, else its first place label; "" none
+    widget_title: str  # the title its manifest's widget declares (ui_tab.title); "" none
+    search_names: List[str]  # other full names for search (place labels, this folder's live widget headers, a ClawHub row's registry name); absent: none
+    connects: List[str]  # the services it connects ("Slack"), [] none
+    icon: Dict[str, str]  # its icon_spec; {} the fallback
+    category: List[str]  # the category ids of the entry presenting it (catalog_id), [] none
+    catalog_id: Optional[str]  # <source_id>/<name> of the item listing its own source's entry, read at the address its record names (never another source's, nor a reused id's other repository); null: none, no catalog sheet
+    catalog_title: str  # that entry's title; absent: none
     # A deployment policy requires this name: the server's requirement row with its when_unmet (client
     # SettingsDeploymentRequirement); the switch is the organization's and no removal, update or repair is offered.
     deployment: Dict[str, Any]

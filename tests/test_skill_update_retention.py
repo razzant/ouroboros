@@ -457,19 +457,20 @@ def test_registry_update_uses_new_trust_and_retains_review_rollback(tmp_path, mo
     from tests.test_marketplace_api import _patch_clawhub_install_pipeline
 
     drive = tmp_path / "data"
-    row = {"id": "registry", "name": "Registry", "kind": "registry", "url": "https://example.invalid",
+    row = {"id": "registry", "name": "Registry", "kind": "registry", "url": "http://127.0.0.1:38481/api/v1",
            "trust": "trusted" if trust == "review" else "review", "confirmed": True}
     monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps([row]))
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setattr("ouroboros.config.SETTINGS_PATH", drive / "settings.json")
     monkeypatch.delenv("OUROBOROS_SKILLS_REPO_PATH", raising=False)
     storage = _patch_clawhub_install_pipeline(monkeypatch, tmp_path, auto_specs=[])
-    first = storage.install_skill(drive, tmp_path, slug="demo", auto_review=False)
+    first = storage.install_skill(drive, tmp_path, slug="demo", auto_review=False, registry_url=row["url"])
     assert first.ok
     old = find_skill(drive, "demo")
     save_review_state(drive, "demo", SkillReviewState(status="clean", content_hash=old.content_hash))
     previous = read_install_record(drive, "demo")
-    monkeypatch.setattr(storage, "_registry_info", lambda slug: ClawHubSkillSummary(slug=slug, latest_version="2.0.0"))
+    monkeypatch.setattr(storage, "_registry_info", lambda slug, *, registry_url=None: ClawHubSkillSummary(
+        slug=slug, latest_version="2.0.0"))
     original_stage = storage._stage_archive
     def stage(*args, **kwargs):
         staged = original_stage(*args, **kwargs)
@@ -505,6 +506,25 @@ def test_registry_update_uses_new_trust_and_retains_review_rollback(tmp_path, mo
         restored = read_install_record(drive, "demo")
         assert restored["release"] == previous["release"]
         assert restored["update_rejected"]["reason"] == "review_blockers"
+
+
+def test_a_direct_registry_install_records_its_actual_origin_not_an_unrelated_row(tmp_path, monkeypatch):
+    from ouroboros.marketplace.provenance import read_provenance
+    from ouroboros.skill_sources import effective_registry_url
+    from tests.test_marketplace_api import _patch_clawhub_install_pipeline
+
+    drive = tmp_path / "data"
+    other = {"id": "other", "name": "Other", "kind": "registry", "url": "http://127.0.0.1:38482/api/v1",
+             "trust": "trusted", "confirmed": True}
+    monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps([other]))
+    monkeypatch.setattr("ouroboros.config.SETTINGS_PATH", drive / "settings.json")
+    monkeypatch.delenv("OUROBOROS_SKILLS_REPO_PATH", raising=False)
+    storage = _patch_clawhub_install_pipeline(monkeypatch, tmp_path, auto_specs=[])
+    assert storage.install_skill(drive, tmp_path, slug="demo", auto_review=False).ok
+    record = read_install_record(drive, "demo")
+    origin = effective_registry_url(None)
+    assert record["basis"] == "review" and record["source"].get("id") != "other"
+    assert record["source"]["url"] == origin and read_provenance(drive, "demo")["registry_url"] == origin
 
 
 # --- Rollback copies keep links as links; a failed landing returns the payload, then its runtime ---

@@ -14,8 +14,8 @@ import { skillSourcesApi } from './api_client.js';
 import { installedSkillModel } from './skill_card_renderer.js';
 import { openSkillDetailSheet } from './skill_detail_sheet.js';
 import {
-    buttonHtml, catalogWhoHtml, chipHtml, connectsServices, connectsText, countsAsYoursText, factsText, officialMarkHtml, plural, relativeAge,
-    skillIconHtml, skipReviewButtonHtml, statusHtml, trustSentence, versionText,
+    buttonHtml, catalogWhoHtml, chipHtml, connectsServices, connectsText, countsAsYoursText, factsText, nameMatch, officialMarkHtml, plural,
+    relativeAge, skillIconHtml, skillNames, skillOfferChanged, skipReviewButtonHtml, statusHtml, trustSentence, versionText,
     skillTitle,
 } from './skill_presentation.js';
 
@@ -48,19 +48,20 @@ export function sortCatalogItems(items, sort, query = '') {
     if (sort === 'name') return list.sort(byName);
     if (sort === 'updated') return list.sort((a, b) => (timeOf(b) - timeOf(a)) || byName(a, b));
     if (sort === 'best' && query) {
-        const q = query.toLowerCase();
-        const rank = (item) => (String(item.name).toLowerCase() === q ? 0 : String(item.name).toLowerCase().startsWith(q) ? 1 : 2);
+        // The card whose printed title or id is what was typed comes first, then one that starts with it.
+        const rank = (item) => Math.min(nameMatch(query, skillNames(item)), 2);
         return list.sort((a, b) => rank(a) - rank(b) || votesOf(b) - votesOf(a) || byName(a, b));
     }
     return list.sort((a, b) => votesOf(b) - votesOf(a) || byName(a, b));
 }
 
-/** Local text filter over the loaded catalogs (name, description, author, category labels). */
+/** Local text filter over the loaded catalogs: the card's names as typed (title or id, space, `_` and `-` alike),
+ *  else the words as typed in its name, description, author, source or category labels. */
 export function matchesQuery(item, query, categoryLabels = new Map()) {
     const q = String(query || '').trim().toLowerCase();
     if (!q) return true;
     const cats = (item.category || []).map((id) => categoryLabels.get(id) || id);
-    return [item.name, item.description, item.owner, item.source_name, ...cats]
+    return nameMatch(q, skillNames(item)) < 3 || [item.name, item.description, item.owner, item.source_name, ...cats]
         .some((text) => String(text || '').toLowerCase().includes(q));
 }
 
@@ -77,7 +78,9 @@ export function categoryCounts(items, categories) {
 
 /** The recommended skills the owner does not have yet (the «Recommended to start» shelf). */
 export function recommendedMissing(items, installedByName) {
-    return items.filter((item) => item.recommended && !item.withdrawn && !installedByName.has(item.name));
+    // Install all is for vacant names, not an occupied name or one whose install is still in flight.
+    return items.filter((item) => item.recommended && !item.withdrawn
+        && !installedByName.has(item.name) && !resolveInstalled(item, installedByName).installed);
 }
 
 /**
@@ -90,10 +93,50 @@ export function shelfItems(catalog, installedByName, { query = '', source = 'all
     return recommendedMissing(Array.isArray(catalog.items) ? catalog.items : [], installedByName);
 }
 
-function installedHere(item, row) {
-    // A copy without a source record counts as this one; a recorded copy needs this source's id: the host
-    // names the connected source the copy matches now (none: no id), whatever id it was installed under.
-    return row && !row.lifecycle_virtual && (!row.install || row.install.source?.id === item.source_id) ? row : null;
+const hasSourceKey = (row) => row != null && Object.hasOwn(row, 'source_key');
+const sameSource = (a, b) => typeof a?.source_key === 'string' && a.source_key !== '' && a.source_key === b?.source_key;
+
+export function installedHere(item, row) {
+    if (!row || row.lifecycle_virtual || row.identity_collision) return false;
+    if (hasSourceKey(item) || hasSourceKey(row)) {
+        const local = row.source === 'user_repo' || row.install?.source?.kind === 'local';
+        return sameSource(item, row) && (item.registry_slug ? row.registry_slug === item.registry_slug
+            : row.name === item.name || (local && Boolean(row.catalog_id && row.catalog_id === item.id)));
+    }
+    if (item.registry_slug) {
+        const source = row.install?.source;
+        return source?.kind === 'registry' && source.id === item.source_id && row.provenance?.slug === item.registry_slug;
+    }
+    // Only an old host uses the detail address to relate the installed copy to a catalog entry.
+    return row.catalog_id !== undefined ? row.catalog_id === item.id
+        : row.name === item.name && (!row.install || row.install.source?.id === item.source_id);
+}
+
+/** Registry leaf names are not local install identities. Git can still offer a named occupant for comparison. */
+function resolveInstalled(item, listing) {
+    const occupant = listing?.get(item.name);
+    if (installedHere(item, occupant)) return { installed: occupant };
+    if (item.registry_slug || item.source_key || !hasSourceKey(item)) {
+        for (const row of listing?.values() || []) if (installedHere(item, row)) return { installed: row };
+    }
+    // Equal bytes with unknown installed origin allow a jump to that card, not an installed action or a replacement.
+    if (occupant && originUnknown(occupant) && item.digest && item.digest === occupant.content_hash) return { sameFiles: occupant };
+    // So does a copy of unknown origin the listing itself ties to this entry (its detail address, a registry's full
+    // slug): Install or Compare could only fail on it or act on an origin nobody can name.
+    const tied = [...(listing?.values() || [])].find((row) => originUnknown(row)
+        && ((row.catalog_id && row.catalog_id === item.id) || (item.registry_slug && row.registry_slug === item.registry_slug && row.install?.source?.id === item.source_id)));
+    if (tied) return { tied };
+    return { other: !item.registry_slug && !occupant?.lifecycle_virtual ? occupant : null };
+}
+
+/** An installed copy on a host that names origins, whose own origin it cannot name. */
+function originUnknown(row) {
+    return hasSourceKey(row) && !row.source_key && !row.lifecycle_virtual && !row.identity_collision;
+}
+
+export function offeredUpdate(item, installed) {
+    const update = installed?.install?.update_available;
+    return update?.digest && item.digest === update.digest ? update : null;
 }
 
 /**
@@ -113,6 +156,11 @@ export function installPolicy(item, catalogSources = []) {
  * been read) and the installs started here.
  */
 export function browseCardState(item, { policy = installPolicy(item), installed = null, listed = true, pending = null, failure = '', reviewing = false, live = {}, pageModules = {} } = {}) {
+    return cardState(item, { policy, listed, pending, failure, reviewing, live, pageModules,
+        ...resolveInstalled(item, installed ? new Map([[installed.name, installed]]) : null) });
+}
+
+function cardState(item, { policy, installed, other, sameFiles, tied, listed, pending, failure, reviewing, live, pageModules }) {
     const id = escapeHtml(item.id);
     const act = (label, action, tone = 'default', extra = '') => buttonHtml(label, { tone, attrs: `data-browse-action="${action}" data-item="${id}"${extra ? ` ${extra}` : ''}` });
     if (pending && !installed?.lifecycle_virtual) {
@@ -133,20 +181,24 @@ export function browseCardState(item, { policy = installPolicy(item), installed 
             note: `${escapeHtml(failure)} Nothing was installed.`,
         };
     }
-    if (!listed && item.installed) {
+    if (!listed && item.installed && !(item.registry_slug && item.installed.state === 'name_taken')) {
         // The catalog's own join, until the installed listing (which carries every action) has been read.
         return item.installed.state === 'name_taken'
             ? { status: statusHtml(`You have another “${escapeHtml(item.name)}” (from ${escapeHtml(item.installed.source_name || 'another source')})`, 'warn'), action: '' }
             : { status: statusHtml(`Installed · ${escapeHtml(versionText(item.installed.version))}`, 'muted'), action: '' };
     }
-    if (installed && !installed.lifecycle_virtual) {
-        if (!installedHere(item, installed)) {
-            const other = installed.install?.source?.name || 'another source';
-            return { status: statusHtml(`You have another “${escapeHtml(item.name)}” (from ${escapeHtml(other)})`, 'warn'), action: act('Compare…', 'compare') };
-        }
+    if (other) {
+        const source = other.install?.source?.name || 'another source';
+        return { status: statusHtml(`You have another “${escapeHtml(item.name)}” (from ${escapeHtml(source)})`, 'warn'), action: act('Compare…', 'compare') };
+    }
+    if (sameFiles || tied) {
+        return { status: statusHtml(sameFiles ? 'Same files installed · source unknown' : 'Installed · source unknown', 'muted'),
+            action: act('Open in Installed', 'installed') };
+    }
+    if (installed) {
         const model = installedSkillModel(installed, { reviewing, live, pageModules });
         const v = escapeHtml(versionText(installed.version));
-        const update = installed.install?.update_available;
+        const update = offeredUpdate(item, installed);
         const retryUpdate = update && installed.install?.update_rejected;
         if (model.modified && !retryUpdate && !model.needs) return { status: statusHtml(`Installed · modified here`, 'muted'), action: act('Details', 'open', 'ghost') };
         if (installed.lifecycle_pending) return { status: statusHtml(escapeHtml(installed.lifecycle_kind === 'update' ? 'Updating…' : 'Working…'), 'muted', { work: true }), action: '' };
@@ -246,6 +298,22 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         for (const item of [...(state.search?.items || []), ...(state.browse?.items || [])]) if (!seen.has(item.id)) seen.set(item.id, item);
         return seen;
     };
+    // The row each card on the board was drawn from: a card opens and reports the row it shows, so a listing row and
+    // a search row that share an id but differ in title never redirect each other's card.
+    let drawnById = new Map();
+    function sourcePresent(item) {
+        const { rows, error, problem } = host.sourceSnapshot();
+        return Array.isArray(rows) && !error && !problem ? rows.some((row) => row.id === item.source_id) : null;
+    }
+    function staleSource(item, fromSheet = false) {
+        const shown = fromSheet && state.sheet?.item === item ? state.sheet : null;
+        if (shown?.handle.offerChanged || (shown?.sourceSeen && sourcePresent(item) === false)) return true;
+        const current = drawnById.get(item.id) || allKnownItems().get(item.id);
+        if (current && current !== item && (skillOfferChanged(item, current)
+            || ((hasSourceKey(item) || hasSourceKey(current)) && !sameSource(item, current)))) return true;
+        const row = shown?.installedName ? host.installedByName()?.get(shown.installedName) : null;
+        return row && (hasSourceKey(item) || hasSourceKey(row)) && !installedHere(item, row);
+    }
     // The registry shown on its own: chosen by name, with nothing typed.
     const browsedRegistry = () => (state.query ? null : sourceRows().find((source) => source.kind === 'registry' && source.id === state.source) || null);
 
@@ -340,13 +408,12 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         return parts.join(' · ');
     }
 
-    function stateFor(item) {
-        const listing = host.installedByName();
+    function stateFor(item, listing = host.installedByName()) {
         const pageModules = host.pageModuleFacts?.() || {};
         const pending = state.pending.get(item.id) || null;
-        return browseCardState(item, {
+        return cardState(item, {
             policy: policyOf(item),
-            installed: listing?.get(item.name) || null, listed: Boolean(listing),
+            ...resolveInstalled(item, listing), listed: Boolean(listing),
             pending, failure: state.failures.get(item.id) || '',
             live: host.live?.(), pageModules,
         });
@@ -354,8 +421,9 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
 
     function gridHtml(items, key, showCategory) {
         const labels = categoryLabels();
+        const listing = host.installedByName();
         return `<div class="skills-board" data-browse-grid="${key}">${items.map((item) => renderBrowseCard(item, {
-            state: stateFor(item), categoryLabels: labels, showCategory,
+            state: stateFor(item, listing), categoryLabels: labels, showCategory,
         })).join('')}</div>`;
     }
 
@@ -451,6 +519,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         const shelf = shelfItems(state.catalog, host.installedByName(), state);
         // Shown once: Hide dismisses the shelf on this device for good (SPEC §8.2).
         const showShelf = shelf.length > 0 && !readHiddenShelf();
+        drawnById = new Map(items.map((item) => [item.id, item]));  // the shelf's cards are among them: it stands on the unfiltered board
         let html = '';
         if (showShelf) {
             const copy = escapeHtml(shelfCopy(shelf));
@@ -477,6 +546,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         // the first layout gives the reader back the place the browser clamped, once.
         layoutGrids(held ? () => { if (held && scroller.scrollTop < held) scroller.scrollTop = held; held = 0; } : null);
         paintMore(Boolean(browsing && items.length && state.browse?.cursor));
+        repaintSheet();
     }
 
     function browseEmptyHtml(source) {
@@ -489,17 +559,17 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
     /** Repaint only the action rows (installed listing changed); scroll position and grids stay. */
     function repaintStates() {
         if (destroyed) return;
-        const known = allKnownItems();
+        const listing = host.installedByName();
         for (const card of board.querySelectorAll('[data-item].marketplace-card')) {
-            const item = known.get(card.dataset.item);
+            const item = drawnById.get(card.dataset.item);
             if (!item) continue;
-            const installed = host.installedByName()?.get(item.name);
+            const { installed } = resolveInstalled(item, listing);
             const pending = state.pending.get(item.id);
             if (pending && installed && !installed.lifecycle_virtual && (pending.phase === 'installing'
                 || installed.enabled || installed.review_status !== 'pending' || installed.skill_review?.current?.lifecycle_status)) {
                 state.pending.delete(item.id);
             }
-            const next = stateFor(item);
+            const next = stateFor(item, listing);
             const row = card.querySelector('.skills-card-action-row');
             const html = `${next.status}<div class="skills-card-actions-end">${next.action || ''}</div>`;
             if (row && row.innerHTML !== html) row.innerHTML = html;
@@ -515,11 +585,21 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             }
         }
         // An open sheet's head mirrors the card's one action for the entry it shows, never another found by its id.
-        if (state.sheet && !state.sheet.handle.closed) state.sheet.handle.setActions(sheetActions(state.sheet.item));
+        repaintSheet();
+    }
+
+    // A refresh or another source leaves the registry's earlier answer, and any still on its way, describing a list
+    // no longer shown: it is dropped while the query and filters stay, and Enter asks again.
+    function dropSearch() {
+        searchGeneration += 1;
+        state.search = null;
+        state.searching = false;
+        state.searchError = '';
     }
 
     async function load({ refresh = false } = {}) {
         const current = ++loadGeneration;
+        if (refresh) dropSearch();
         const [catalog] = await Promise.allSettled([host.catalog({ refresh }), host.sources({ replace: refresh })]);
         if (destroyed || current !== loadGeneration) return;
         if (catalog.status === 'fulfilled') { state.catalog = catalog.value; state.catalogError = ''; }
@@ -531,7 +611,8 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
 
     async function searchRegistry() {
         const query = state.query;
-        if (!query || !registry()) return;
+        const source = registry();
+        if (!query || !source) return;
         const current = ++searchGeneration;
         state.searching = true;
         state.searchError = '';
@@ -610,7 +691,12 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         state.pending.set(item.id, { phase: 'installing', startedAt: Date.now() });
         repaintStates();
         try {
-            const result = await api.install(item.id, { turnOnWhenReady: true, replace });
+            const result = await api.install(item.id, {
+                turnOnWhenReady: true, replace,
+                ...(item.source_key ? { expectedSourceKey: item.source_key } : {}),
+                ...(item.digest ? { expectedDigest: item.digest } : {}),
+                ...(item.registry_slug && item.version ? { version: item.version } : {}),
+            });
             if (result?.already_installed) {
                 state.pending.delete(item.id);
                 host.toast(`${item.name} is already installed from ${item.source_name || 'this source'}.`, 'muted');
@@ -625,7 +711,10 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             // A typed refusal about what is already installed is said once; the card then shows
             // Compare… or Update from the refreshed listing. Anything else failed this install.
             const code = err?.body?.code || '';
-            if (['name_taken', 'name_collision', 'update_instead'].includes(code)) host.toast(`${item.name}: ${err.message}`, 'warn');
+            if (code === 'candidate_changed') {
+                if (state.sheet?.item === item) state.sheet.handle.rejectOffer();
+                host.toast('This offer changed. Refresh Browse and try again.', 'warn');
+            } else if (['name_taken', 'name_collision', 'update_instead'].includes(code)) host.toast(`${item.name}: ${err.message}`, 'warn');
             else state.failures.set(item.id, err?.message || String(err));
         }
         repaintStates();
@@ -639,11 +728,20 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         return /data-browse-action="open"/.test(html) ? '' : html.replaceAll('data-browse-action=', 'data-sheet-action=');
     };
 
+    function repaintSheet() {
+        const shown = state.sheet;
+        if (!shown || shown.handle.closed) return;
+        if (sourcePresent(shown.item) === true) shown.sourceSeen = true;
+        if (staleSource(shown.item, true)) shown.handle.rejectOffer();
+        else shown.handle.setActions(sheetActions(shown.item));
+    }
+
     function openSheet(item, opener) {
         state.sheet?.handle.close();
         const currentOpener = currentControl(opener);
+        const { installed } = resolveInstalled(item, host.installedByName());
         const handle = openSkillDetailSheet({
-            item, installed: installedHere(item, host.installedByName()?.get(item.name)),
+            item, installed,
             policy: policyOf(item),
             actionsHtml: sheetActions(item),
             // A registry hit has no entry to read until it is installed; its card is all there is.
@@ -652,41 +750,61 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             onAction: (action, button) => act(action, button, currentOpener, item),
             returnFocus: currentOpener,
         });
-        state.sheet = { item, handle };
+        state.sheet = { item, handle, installedName: installed?.name, sourceSeen: sourcePresent(item) === true };
+        repaintSheet();
     }
 
     // A sheet acts on the entry it shows (`shown`); a card on the entry it was drawn from.
     async function act(action, node, sheetOpener = null, shown = null) {
-        const item = shown || allKnownItems().get(node?.dataset?.item || '');
+        const item = shown || drawnById.get(node?.dataset?.item || '');
         if (action === 'hide_shelf') { writeHiddenShelf('1'); render(); return; }
         if (action === 'browse_more') { await showMore(); return; }
         if (action === 'browse_retry') { await retryBrowse(); return; }
         if (action === 'install_all') {
             const missing = shelfItems(state.catalog, host.installedByName(), state);
             await host.confirmFirstStart?.();
-            for (const entry of missing) await install(entry);
+            for (const entry of missing) if (!staleSource(entry)) await install(entry);
             return;
         }
         if (!item) return;
-        const installed = host.installedByName()?.get(item.name) || null;
         if (action === 'open') { openSheet(item, node); return; }
-        if (action === 'install') { await host.confirmFirstStart?.(item.source_id); await install(item); return; }
+        const stale = () => {
+            const changed = staleSource(item, shown !== null);
+            if (changed && shown && state.sheet?.item === item) state.sheet.handle.rejectOffer();
+            return changed;
+        };
+        if (stale()) return;
+        const resolve = () => resolveInstalled(item, host.installedByName());
+        const { installed, other, sameFiles, tied } = resolve();
+        if (action === 'install') {
+            if (installed || other || sameFiles || tied) return;
+            await host.confirmFirstStart?.(item.source_id, () => !stale());
+            const now = resolve();
+            if (!stale() && !now.installed && !now.other && !now.sameFiles && !now.tied) await install(item);
+            return;
+        }
         if (action === 'compare') {
             // Replace is one host operation: the other copy goes only when this one has landed.
-            if (await host.compare(item, installed) === 'replace') await install(item, { replace: true });
+            if (other && await host.compare(item, other) === 'replace' && !stale() && resolve().other === other) {
+                await install(item, { replace: true });
+            }
             return;
         }
         if (action === 'installed' || action === 'widgets') {
+            const opened = installed || (action === 'installed' ? sameFiles || tied : null);
+            if (!opened) return;
             // A departed sheet has no focus target; its opening control on Browse is the return.
             const opener = sheetOpener ? sheetOpener() : node;
             if (sheetOpener) state.sheet?.handle.close();
-            if (action === 'installed') await host.showInstalled(item.name, opener);
-            else await host.runInstalledAction(item.name, 'open_widgets', sheetOpener ? { opener } : undefined);
+            if (action === 'installed') await host.showInstalled(opened.name, opener);
+            else await host.runInstalledAction(opened.name, 'open_widgets', sheetOpener ? { opener } : undefined);
             return;
         }
+        if (!installed) return;  // a stale control must not act on a different installed copy
         const map = { skip: 'attest_review', update: 'update', turn_on: 'turn_on' };
         if (map[action]) {
-            await host.runInstalledAction(item.name, map[action]);
+            if (action === 'update' && !offeredUpdate(item, installed)) return;
+            await host.runInstalledAction(installed.name, map[action], { browseItem: item });
             repaintStates();
         }
     }
@@ -723,7 +841,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         searchRegistry();
         ensureBrowse();
     };
-    const onSource = () => { state.source = sourceSelect.value; state.search = null; state.browse = null; render(); if (state.query) searchRegistry(); else ensureBrowse(); };
+    const onSource = () => { state.source = sourceSelect.value; dropSearch(); state.browse = null; render(); if (state.query) searchRegistry(); else ensureBrowse(); };
     const onSort = () => { state.sort = sortSelect.value; render(); ensureBrowse(); };
     const onOfficial = () => { state.officialOnly = officialToggle.checked; render(); };
     pane.addEventListener('click', onPaneClick);
@@ -739,9 +857,10 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         show: (options) => (loaded = load(options)),
         refresh: () => (loaded = load({ refresh: true })),
         repaintStates,
+        repaintSheet,
         /** What the Official mark of a shown entry may say of its source: the entry's own facts, or null. */
         officialSource(id) {
-            const item = allKnownItems().get(id);
+            const item = drawnById.get(id);
             return item ? { ...policyOf(item), url: item.repo_url } : null;
         },
         async searchFor(name) {

@@ -539,10 +539,15 @@ export const skillSourcesApi = {
     item: (sourceId, name, init = {}) => fetchJson(`/api/skill-catalog/item/${encodeURIComponent(sourceId)}/${encodeURIComponent(name)}`, { cache: 'no-store', ...init }),
     /**
      * `replace` confirms replacing the other skill of the same name.
+     * The optional facts name the source and release shown on the card; `version` pins a registry release.
      * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/skill_source_contracts.py::SkillCatalogInstallResponse`.
      */
-    install: (id, { turnOnWhenReady = true, replace = false } = {}) => jsonPost('/api/skill-catalog/install',
-        { id, turn_on_when_ready: turnOnWhenReady, ...(replace ? { replace: true } : {}) }, STRICT),
+    install: (id, { turnOnWhenReady = true, replace = false, expectedSourceKey, expectedDigest, version } = {}) => jsonPost('/api/skill-catalog/install', {
+        id, turn_on_when_ready: turnOnWhenReady, ...(replace ? { replace: true } : {}),
+        ...(expectedSourceKey ? { expected_source_key: expectedSourceKey } : {}),
+        ...(expectedDigest ? { expected_digest: expectedDigest } : {}),
+        ...(version ? { version } : {}),
+    }, STRICT),
     /**
      * The exact candidate the owner saw (`digest`) against the local revision it was shown with
      * (`localDigest`): either one changing makes the host refuse instead of acting on a stale dialog.

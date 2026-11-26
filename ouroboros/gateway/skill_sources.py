@@ -248,7 +248,7 @@ async def api_skill_catalog(request: Request) -> JSONResponse:
 
 def _search(drive_root: pathlib.Path, repo_dir: pathlib.Path, query: str, source: str, *, sort: str = "",
             cursor: str = "") -> Dict[str, Any]:
-    from ouroboros.skill_source_catalog import catalog_view, registry_browse, registry_items
+    from ouroboros.skill_source_catalog import catalog_view, matches_words, registry_browse, registry_items
     from ouroboros.skill_sources import load_sources
 
     rows = load_sources()
@@ -260,9 +260,7 @@ def _search(drive_root: pathlib.Path, repo_dir: pathlib.Path, query: str, source
             return {"items": [], "registry_error": f"{named_registry['name']}: {exc}"[:300]}
         return {"items": page["items"], **({"next_cursor": page["next_cursor"]} if page["next_cursor"] else {})}
     view = catalog_view(drive_root, rows=rows, refresh=True, repo_dir=repo_dir)
-    words = [word for word in query.lower().split() if word]
-    items = [item for item in view["items"] if (not source or item["source_id"] == source) and all(
-        word in f"{item['name']} {item.get('description', '')}".lower() for word in words)]
+    items = [item for item in view["items"] if (not source or item["source_id"] == source) and matches_words(item, query)]
     out: Dict[str, Any] = {"items": items}
     for row in rows:
         if row["kind"] == "registry" and query.strip() and (not source or source == row["id"]):
@@ -318,12 +316,19 @@ async def api_skill_catalog_install(request: Request) -> JSONResponse:
         return json_error("id must be <source_id>/<name>", 400)
     replace = body.get("replace") is True
     turn_on = body.get("turn_on_when_ready") is not False
+    expected_source_key = str(body.get("expected_source_key") or "").strip()
+    expected_digest = str(body.get("expected_digest") or "").strip()
+    version = str(body.get("version") or "").strip()
     drive_root, repo_dir = request_drive_root(request), request_repo_dir(request)
     try:
-        plan = await asyncio.to_thread(plan_install, drive_root, item_id, replace=replace, repo_dir=repo_dir)
+        plan = await asyncio.to_thread(plan_install, drive_root, item_id, replace=replace, repo_dir=repo_dir,
+                                       expected_source_key=expected_source_key,
+                                       expected_digest=expected_digest)
     except SkillInstallError as exc:
         return _refusal(exc)
     name = plan["name"] or item_id.partition("/")[2]
+    # A registry hit carries no digest on its card; its disclosed version pins the marketplace release.
+    reg_version = version if plan["row"]["kind"] == "registry" else ""
     if plan["already_installed"]:
         return JSONResponse({"ok": True, "job_id": "", "name": name, "basis": plan["basis"], "already_installed": True})
     from ouroboros.deployment_extensions import install_refusal
@@ -333,7 +338,9 @@ async def api_skill_catalog_install(request: Request) -> JSONResponse:
     job_id = await _start_job(
         "install", name, f"Installing {name} from {plan['row']['name']}",
         lambda progress: install_item(drive_root, item_id, replace=replace, actor="owner",
-                                      turn_on_when_ready=turn_on, repo_dir=repo_dir, progress=progress),
+                                      turn_on_when_ready=turn_on, repo_dir=repo_dir, progress=progress,
+                                      expected_source_key=expected_source_key,
+                                      expected_digest=expected_digest, version=reg_version),
         _after_install(drive_root, repo_dir))
     return JSONResponse({"ok": True, "job_id": job_id, "name": name, "basis": plan["basis"]})
 
