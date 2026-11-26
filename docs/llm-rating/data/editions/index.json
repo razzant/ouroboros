@@ -1,6 +1,31 @@
 {
- "latest": "2026.11",
+ "latest": "2026.12",
  "editions": [
+  {
+   "edition": "2026.12",
+   "status": "final",
+   "method_version": 4,
+   "period": {
+    "from": "2026-11-11",
+    "to": "2026-11-25"
+   },
+   "published": "2026-11-26",
+   "models_rated": 15,
+   "work_types": 32,
+   "columns": 6,
+   "cases": 13,
+   "top": [
+    "Opus 5.5",
+    "Astra 6.2",
+    "Fable 5.2"
+   ],
+   "data": "data/editions/2026.12/edition.json",
+   "card": "card/editions/2026.12-en.png",
+   "changelog": {
+    "en": "An early edition, about two weeks after the first. Astra and Sol arrived in new versions, and five models entered the ranking. I invited each of the versions that worked in this period to one ballot: compare pairs of anonymised answers or check claims against a source. A separate table shows what reviewers caught in a checked sample. If you read data/latest.json, cells is now an empty list. The current letters are in models[].groups (six columns); the 2026.11 breakdown by 32 kinds of work stays at https://ouroboros-agent.ai/llm-rating/data/editions/2026.11/edition.json.",
+    "ru": "Досрочный выпуск примерно через две недели после первого. Astra и Sol пришли в новых версиях, в рейтинг вошли пять моделей. Каждой версии, работавшей в этот период, предложил один бюллетень: сравнить пары обезличенных ответов или сверить утверждения с источником. Отдельная таблица показывает, что заметили ревьюеры в проверенной выборке. Если вы читаете data/latest.json, теперь cells — пустой список. Текущие буквы находятся в models[].groups (шесть колонок), а разбивка выпуска 2026.11 по 32 видам работ остаётся по адресу https://ouroboros-agent.ai/llm-rating/data/editions/2026.11/edition.json."
+   }
+  },
   {
    "edition": "2026.11",
    "status": "final",
@@ -12,6 +37,7 @@
    "published": "2026-11-12",
    "models_rated": 11,
    "work_types": 32,
+   "columns": 6,
    "cases": 51,
    "top": [
     "Opus 5.5",
