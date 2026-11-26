@@ -1026,3 +1026,21 @@ def test_no_fold_changes_a_review_index_before_its_note_and_a_stale_one_after_it
     at = _notes(tail)[-1]
     assert tail[:at] == view[:at] and at == len(view) - 3
     assert sum(row == old for row in tail) == 1 and tail[2] == old  # the copy after the note left, the start's stays
+
+
+def test_an_inspection_names_the_note_and_selectors_it_did_not_apply(tmp_path, monkeypatch):
+    """Both directions: an inspect call that also carries a note and selectors returns the inventory and names each of
+    them as not applied; a plain inspect names nothing."""
+    messages = [*_source()[:2], *_read("r0"), *_read("r1")]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, messages, [])
+    plain = json.loads(_compact_context(ctx, inspect=True))
+    assert "not_applied" not in plain and plain["units"]
+    unit = plain["units"][0]
+    asked = dict(working_note="What I learned.", keep_unit_ids=[unit["unit_id"]], view_address=["F2:row:1"],
+                 replace_note_ids=["note-1"], schema_names=["read_file"], fold_last_n=1,
+                 restore_unit_refs=[{"checkpoint_ref": "c", "unit_id": unit["unit_id"], "raw_sha256": unit["raw_sha256"]}])
+    seen = json.loads(_compact_context(ctx, inspect=True, **asked))
+    assert seen["units"] == plain["units"] and getattr(ctx, "_pending_compaction", None) is None
+    assert all(name in seen["not_applied"] for name in asked)
+
