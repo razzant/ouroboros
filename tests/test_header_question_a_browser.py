@@ -370,8 +370,8 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         settings_bar = page.evaluate(BAR, 'settings')
         assert settings_bar['lead'] and 'data-lead' in settings_bar['attrs'] and 'data-empty' not in settings_bar['attrs']
         assert settings_bar['height'] == 66, settings_bar
-        # The macOS window: the bar is the band, its controls centred on it; an empty header (Widgets) is only the
-        # window's handle over the page, and the page's first card sits one inset (not two) under the band.
+        # The macOS window: the bar is the band, its controls centred on it; Widgets' band holds its name (owner
+        # 27.11.2026), and the page's first card sits one inset (not two) under the band.
         for top in (66, 52, 33):
             _band(page, top)
             for name in ('skills', 'files'):
@@ -388,9 +388,10 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         page.locator('.widgets-card').first.wait_for()
         widgets = page.evaluate("""() => ({bar: document.querySelector('#page-widgets .app-page-header').getBoundingClientRect().height,
             empty: document.querySelector('#page-widgets .app-page-header').hasAttribute('data-empty'),
+            name: document.querySelector('#page-widgets .app-page-title').getBoundingClientRect().width,
             card: document.querySelector('.widgets-card').getBoundingClientRect().top,
             margin: getComputedStyle(document.querySelector('#widgets-list')).marginTop})""")
-        assert widgets['empty'] and widgets['bar'] == 52 and widgets['margin'] == '0px', widgets
+        assert not widgets['empty'] and widgets['name'] > 1 and widgets['bar'] == 52 and widgets['margin'] == '0px', widgets
         assert abs(widgets['card'] - (52 + 16)) <= 1, widgets
         setup_browser.capture(page, f'bar-a-widgets-band-{engine}-956')
         # The Dashboard's vertical list keeps its nodes and focus through a resize. On a phone a row opens a
@@ -475,12 +476,12 @@ BOARD_EDGES = """() => {
     const page = document.querySelector('#page-widgets'), band = page.querySelector('.app-page-header');
     const list = page.querySelector('.widgets-scroll'), style = getComputedStyle(list);
     const b = band.getBoundingClientRect(), l = list.getBoundingClientRect();
-    // Every point of the band across the board lands on the window's handle, never on a card or its frame, even
-    // while a card passes under it.
+    // Every point of the band across the board lands on the band (the window's handle, its name), never on a card or
+    // its frame: the board starts under it.
     const missed = [];
     for (let y = b.top + 1; y < b.bottom; y += 10) for (let x = l.left + 1; x < l.right; x += 20) {
         const hit = document.elementFromPoint(x, y);
-        if (hit !== band) missed.push([x, y, hit ? hit.className || hit.tagName : '']);
+        if (!band.contains(hit)) missed.push([x, y, hit ? hit.className || hit.tagName : '']);
     }
     const under = [...page.querySelectorAll('.widgets-card')].some((c) => {
         const r = c.getBoundingClientRect(); return r.top < b.bottom && r.bottom > b.top; });
@@ -494,13 +495,12 @@ BOARD_EDGES = """() => {
 
 
 @pytest.mark.parametrize('theme', ['light', 'dark'])
-def test_the_widgets_board_scrolls_with_crisp_edges_under_its_plain_band(engine_ui, theme):
+def test_the_widgets_board_scrolls_with_crisp_edges_under_its_named_band(engine_ui, theme):
     """The owner's window (1100 × 750, macOS band): scrolled, the board's live cards keep crisp edges where the list
-    cuts them, with no fade (DESIGN "Widgets board"), while other scroll bodies keep `.scroll-fade-y`. The band is
-    the window's, not a row of the page (owner 22.10: the empty strip cut the board): the board starts at the window's
-    top edge, its first row below the band, scrolled cards pass under the band, and a press anywhere in the band still
-    lands on the window's handle. A frame the owner keeps running is the same frame, never reloaded, across
-    scrolling, another page and a phone width."""
+    cuts them, with no fade (DESIGN "Widgets board"), while other scroll bodies keep `.scroll-fade-y`. The band holds
+    the place's name (owner 27.11.2026, place-name A), so the board starts under it and its cards stop at its edge,
+    crisp; a press anywhere in the band lands on the band (the window's handle), never on a card. A frame the owner
+    keeps running is the same frame, never reloaded, across scrolling, another page and a phone width."""
     engine = engine_ui['engine']
     settle = '() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))'
     loads = []
@@ -532,16 +532,24 @@ def test_the_widgets_board_scrolls_with_crisp_edges_under_its_plain_band(engine_
         setup_browser.capture(page, f'widgets-board-scrolled-{engine}-{theme}-1100')
         assert edges['scrolled'] == 300 and edges['room'] > 300, edges
         assert edges['mask'] in (None, 'none') and edges['webkitMask'] in (None, 'none'), 'no fade over the cards'
-        assert edges['empty'] and edges['band'] == 52 and edges['listTop'] == 0 and edges['cursor'] == 'auto', edges
-        assert edges['padTop'] >= 52 + 16 - 0.5 and edges['under'], edges
+        assert not edges['empty'] and edges['band'] == 52 and edges['listTop'] == 52 and edges['cursor'] == 'auto', edges
+        # A scrolled card reaches under the band only as clipped geometry: no point of the band lands on it (missed).
+        assert abs(edges['padTop'] - 16) <= 0.5 and edges['under'], edges
         assert not edges['missed'] and edges['frame'] and edges['page'] <= 0, edges
-        # A dragged card: the band lets the pointer through to the board's top edge, where the engine scrolls a drag
-        # upward, and is the window's handle again once the card is dropped.
-        through = """dragging => { const card = document.querySelector('#widgets-list .widgets-card');
-            card.toggleAttribute('data-widget-lifted', dragging); const l = document.querySelector('#page-widgets .widgets-scroll');
-            return Boolean(document.elementFromPoint(l.getBoundingClientRect().left + 40, 10)?.closest('.widgets-scroll')); }"""
-        assert page.evaluate(through, True), 'a drag reaches the board under the band'
-        assert not page.evaluate(through, False), 'at rest the band is the handle'
+        # A card carried up into the named band still scrolls the board under it (widget_reorder.js reads the
+        # scroller's box, the press holds the pointer), up to the board's top, and is dropped back unsaved by Escape.
+        head = page.locator('#widgets-list .widgets-card-head').nth(2)
+        head.scroll_into_view_if_needed()
+        page.locator('#page-widgets .widgets-scroll').evaluate("el => { el.scrollTop += 200; }")
+        box = head.bounding_box()
+        page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+        page.mouse.down()
+        page.mouse.move(box['x'] + box['width'] / 2, 300, steps=8)
+        page.mouse.move(box['x'] + box['width'] / 2, 20, steps=12)
+        page.wait_for_function("document.querySelector('#page-widgets .widgets-scroll').scrollTop === 0", timeout=8000)
+        assert page.locator('#widgets-list [data-widget-lifted]').count() == 1, 'the card is still carried at the top'
+        page.keyboard.press('Escape')
+        page.mouse.up()
         # Another page's scroll body keeps the shared fade.
         _goto(page, 'settings')
         settings = page.locator('#page-settings [data-settings-home]').element_handle()  # the home is the scroll body

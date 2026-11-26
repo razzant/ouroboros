@@ -405,3 +405,41 @@ def test_a_telegram_sections_tabs_stay_pressable_beside_every_action_that_left_t
     assert all(p['reached'] and p['within'] for p in rows + actions), (rows, actions)
     assert all(p['top'] >= name_bottom for p in actions), f'an action starts on the line under the name: {name_bottom}, {actions}'
 
+
+
+# What a section's band paints as a title or a Back: the place's name, a page's name, the shell's return.
+BAND_WORDS = """() => {
+    const page = document.querySelector('#content > .page.active');
+    const shown = (el) => { const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+        return r.width > 1 && r.height > 1 && s.visibility !== 'hidden' && s.clipPath !== 'inset(50%)'; };
+    const header = page.querySelector(':scope > .app-page-header');
+    return {page: page.id, titles: [...header.querySelectorAll('.app-page-title, .app-page-lead-title')].filter(shown)
+        .map((el) => el.textContent.trim()), backs: [...header.querySelectorAll('[data-shell-back]')].filter(shown).length,
+        telegramBack: document.documentElement.dataset.telegramBack || null};
+}"""
+
+
+def test_a_telegram_tablet_band_shows_one_title_and_telegrams_back_alone(shell_ui):
+    """Places that say their own name on a desk (owner 27.11.2026: Circles, Widgets, Dashboard over its list) and a page
+    reached by a jump, whose return names Settings on a desk: in Telegram's fullscreen on a tablet (the docked layout)
+    the host's one title slot holds one title, and Telegram's Back is the only Back."""
+    page = telegram_page(shell_ui, 1024, 768, telegram_sdk(fullscreen='grant', insets={'top': 24, 'bottom': 20},
+                                                           content={'top': 46}))
+    boot(page, shell_ui)
+    page.wait_for_function("() => document.documentElement.dataset.telegramFullscreen === 'active'")
+    assert page.locator('html').get_attribute('data-layout') == 'docked'
+    seen = {}
+    for name in ('circles', 'widgets', 'dashboard', 'settings'):
+        open_nav(page, name)
+        rest(page)
+        seen[name] = page.evaluate(BAND_WORDS)
+    # A jump from Settings into Dashboard › Costs: the return is owed, Telegram draws its Back.
+    page.evaluate("() => window.dispatchEvent(new CustomEvent('ouro:open-dashboard', { detail: { tab: 'costs' } }))")
+    page.wait_for_function("() => document.querySelector('#page-dashboard.active > .app-page-header[data-return]')")
+    rest(page)
+    seen['jump'] = page.evaluate(BAND_WORDS)
+    facts(f'telegram-tablet-band-words-{shell_ui["engine"]}', seen)
+    shot(page, f'telegram-tablet-jump-{shell_ui["engine"]}')
+    for name, band in seen.items():
+        assert len(band['titles']) <= 1 and band['backs'] == 0, (name, seen)
+    assert seen['jump']['telegramBack'] == 'back' and seen['jump']['titles'] == ['Costs'], seen

@@ -79,16 +79,23 @@ test('header actions use the floating control tokens while Back keeps the round 
     assert.doesNotMatch(css, /\.app-page-header \.shell-back[^}]*--control-h:/);
 });
 
-test('Back is the shell\'s round control: the chevron alone, where it leads in its name and tooltip', () => {
+test('Back is the shell\'s round control; a return to another place names it on a desk (owner 27.11.2026)', () => {
     const html = renderBackControl({ to: 'Tools', title: 'Settings › Tools', attrs: 'data-shell-back' });
     assert.match(html, /^<button type="button" class="shell-icon-control shell-back" data-shell-back aria-label="Back to Settings › Tools" title="Back to Settings › Tools"><svg [^>]*>(?:(?!<\/svg>)[\s\S])*<\/svg><\/button>$/,
-        'one round icon control; no word is drawn beside the chevron');
+        'one round icon control; its words are written by bindPageBack only for a return to another place');
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
     assert.match(css, /\.shell-icon-control \{[^}]*width: var\(--control-h-float\);[^}]*height: var\(--control-h-float\);/);
     assert.match(css, /\.shell-back > svg \{ translate: 0\.75px 0; \}/, 'the chevron\'s stroke is centred in the circle');
-    assert.doesNotMatch(css, /shell-back-name|\.shell-back \{[^}]*(width|padding|font)/, 'no named capsule: no width, padding or word of its own');
+    assert.doesNotMatch(css, /(^|\n)\.shell-back \{[^}]*(width|padding|font)/, 'the circle has no width, padding or word of its own');
+    // The capsule: the same control, on a desk only, its words one line ending in an ellipsis; the stack layout keeps
+    // the circle (the label is not drawn there), so a phone and a narrow window lose nothing to it.
+    assert.match(css, /\.shell-back-label \{ display: none; \}/);
+    assert.match(css, /html\[data-layout="docked"\] \.shell-back\[data-named\] \{[^}]*width: auto;[^}]*max-width: min\(16rem, 100%\);/);
+    assert.match(css, /html\[data-layout="docked"\] \.shell-back\[data-named\] > \.shell-back-label \{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/);
+    assert.doesNotMatch(css, /html\[data-layout="stack"\][^{]*\.shell-back-label/, 'no capsule in the stack layout');
     assert.match(css, /\.app-page-return \{ display: flex; align-items: center; flex: none; order: -1; \}/);
-    assert.doesNotMatch(css, /\.app-page-return \{[^}]*max-width/, 'nothing to truncate');
+    assert.match(css, /\.app-page-header\[data-return-named\] \.app-page-return \{ flex-shrink: 1; min-width: 0; \}/,
+        'only a named return yields width, to its own ellipsis');
 });
 
 test('Telegram sections keep a visible drawer control and one title baseline inside both host buttons', () => {
@@ -392,9 +399,16 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
         layout('stack');
         assert.deepEqual([names(home), names(toolbar)], [['files-breadcrumb', 'files-browser-actions'], ['refresh']]);
         off();
-        // A header with nothing of its own to place (Widgets) binds nothing.
-        assert.equal(typeof bindPageHeader(el('app-page-header', el('app-page-title-block', el('app-page-lead')))), 'function');
+        // A header that holds the place's name alone (Widgets, owner 27.11.2026) is the desk band too; nothing moves.
+        const nameOnly = el('app-page-header', el('app-page-title-block'));
+        const offName = bindPageHeader(nameOnly);
+        assert.ok(nameOnly.attrs.has('data-lead'), 'a desk: its name on the band, as Circles\' is');
+        layout('stack');
+        assert.ok(!nameOnly.attrs.has('data-lead'), 'the stack layout: the base header, ☰ and the name');
+        layout('docked');
+        offName();
         assert.equal(listeners.size, 0);
+        assert.equal(typeof bindPageHeader(null), 'function', 'no header, nothing bound');
         // A bar whose one action is already in it (Circles): nothing moves, yet on a desk it lays out as the band of
         // every named page, and goes back to the base header in the stack layout.
         const barOnly = el('app-page-header', el('app-page-title-block', el('app-page-lead')), el('app-page-toolbar', el('new')));
@@ -453,6 +467,68 @@ test('a named return occupies one shell slot in both layouts, and clearing relea
     top = null; notify();
     assert.equal(header.querySelector('[data-shell-back]'), null);
     assert.equal(header.hasAttribute('data-return'), false);
+});
+
+test('a place the sidebar names by its glyph alone says its name; Files and Settings keep their own words', () => {
+    const read = (name) => readFileSync(new URL(`../modules/${name}`, import.meta.url), 'utf8');
+    // Circles and Widgets at the band's start, Dashboard over its list (owner 27.11.2026, place-name A).
+    assert.match(read('circles.js'), /renderPageHeader\(\{ page: 'circles', named: false,/);
+    assert.match(read('widgets.js'), /renderPageHeader\(\{ page: 'widgets', named: false \}\)/);
+    assert.match(read('widgets.js'), /bindPageHeader\(document\.querySelector\('#page-widgets > \.app-page-header'\)\)/,
+        'Widgets\' name stands on the desk band, as Circles\' does');
+    assert.match(read('dashboard.js'), /renderPageHeader\(\{ page: 'dashboard', named: false, leadHtml \}\)/);
+    // The other direction: the band names Files by its location and Settings by its search, and Extensions, reached
+    // through Settings, keeps Settings chosen in the sidebar (outside this decision); their title stays for readers.
+    assert.doesNotMatch(read('extensions.js'), /named: false/);
+    assert.doesNotMatch(read('files.js'), /named: false/);
+    assert.doesNotMatch(read('settings.js'), /named: false/);
+    const named = renderPageHeader({ page: 'widgets', named: false });
+    assert.doesNotMatch(named, /data-sidebar-names|data-empty/, 'a visible name: never the hidden title, never an empty band');
+    assert.equal((named.match(/<h2/g) || []).length, 1, 'one heading for readers, the one shown');
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.match(css, /html\[data-layout="docked"\] \.app-page-header\[data-sidebar-names\] \.app-page-title \{\n    position: absolute;/,
+        'only a header the band already names hides its title');
+    const unnamed = 'html[data-layout="docked"] .section-place > .app-page-header:not([data-sidebar-names])';
+    assert.ok(css.includes(`${unnamed} > .app-page-title-block { display: grid; }`), 'the name shares the lead\'s row');
+    const wide = css.slice(css.indexOf(`${unnamed} > .app-page-title-block > *`));
+    assert.match(wide, /@container sectionplace \(min-width: 40rem\) \{\n[^\n]*\.app-page-title-row \{\n\s*width: calc\(var\(--section-rail-w\) - var\(--section-rail-start\) - var\(--section-rail-end\)\);/,
+        'two panes: the name is as wide as the list\'s column, over the list');
+    assert.doesNotMatch(css, /#page-widgets \.app-page-header\[data-empty\]|\[data-empty\]:not\(\[data-return\]\) ~ \.widgets-scroll/,
+        'the board starts under its named band; no empty-band rule of its own survives');
+    // After a return to another place the page names itself beside the capsule, in two panes as in one.
+    assert.match(css, /html\[data-layout="docked"\] #content \.app-page-header\[data-return-named\] \.section-lead-page > \.app-page-lead-title \{\n\s*position: static;/);
+});
+
+test('a return to another place names it beside the chevron; a level or a move inside one place keeps the circle', (t) => {
+    const { mount } = setup(t), page = new NodeStub();
+    page.innerHTML = renderPageHeader({ page: 'dashboard', named: false,
+        leadHtml: '<span class="section-lead-page"><span data-page-return></span></span>' });
+    mount.append(page);
+    const header = page.querySelector('.app-page-header');
+    let top = { id: 'jump', page: true, destination: 'dashboard:costs', returnTo: { key: 'settings:' },
+        back: { label: 'Settings', title: 'Settings' } }, notify;
+    t.after(bindPageBack({ layers: { page: () => top, onChange: fn => { notify = fn; return () => {}; }, back: () => {} },
+        currentHeader: () => header }));
+    const button = header.querySelector('[data-shell-back]');
+    const words = () => button.querySelector('.shell-back-label')?.textContent ?? null;
+    assert.equal(words(), 'Settings', 'Settings → Costs: `‹ Settings`');
+    assert.ok(button.hasAttribute('data-named') && header.hasAttribute('data-return-named'), 'the page\'s name shows after it');
+    assert.equal(button.getAttribute('aria-label'), 'Back to Settings', 'one accessible name, as before');
+    top = { ...top, destination: 'dashboard:costs', returnTo: { key: 'settings:consciousness' },
+        back: { label: 'Consciousness', title: 'Settings › Consciousness' } }; notify();
+    assert.deepEqual(button.querySelector('.shell-back-label').children.map((step) => step.textContent), ['Settings', 'Consciousness'],
+        'each step its own words, so the interface language reaches them; style.css draws the ›');
+    top = { ...top, returnTo: { key: 'project:p1' }, back: { label: 'Nova', title: 'Nova' } }; notify();
+    assert.ok(button.querySelector('.shell-back-label').hasAttribute('data-i18n-skip'), 'a Project\'s name stays as its owner wrote it');
+    // The other direction: a jump between two pages of one place, and a level, keep the round control.
+    top = { ...top, destination: 'settings:models', returnTo: { key: 'settings:consciousness' } }; notify();
+    assert.equal(words(), null, 'Settings › Consciousness → Settings › Models: one place, the circle');
+    assert.ok(!button.hasAttribute('data-named') && !header.hasAttribute('data-return-named'));
+    top = { id: 'level', page: true, back: { label: 'Dashboard' } }; notify();
+    assert.equal(words(), null, 'a level\'s Back is the circle');
+    assert.equal(button.getAttribute('aria-label'), 'Back to Dashboard');
+    top = null; notify();
+    assert.ok(!header.hasAttribute('data-return-named'), 'a spent return leaves no mark');
 });
 
 test('a level shows only the owed jump, then its own parent, in either layout', (t) => {

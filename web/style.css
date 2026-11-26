@@ -138,9 +138,36 @@ html[data-layout="stack"] .shell-icon-control {
 /* Back (page_header.js renderBackControl; DESIGN "Page header"): the app's one Back, the shell's round icon control
    holding the chevron-left alone, its stroke centred in the circle (the glyph sits 0.75px left on its canvas); where
    it leads is its tooltip and accessible name. It stands first in a header's row, 8px before the place's name, tabs
-   or capsules, and never shrinks. */
+   or capsules, and never shrinks. A return to another place says where it leads (owner 27.11.2026): on a desk the
+   same capsule holds the chevron and the destination's words (`‹ Settings`), a long one ending in an ellipsis; the
+   stack layout keeps the circle, its words in its name. */
 .shell-back { flex: none; }
 .shell-back > svg { translate: 0.75px 0; }
+.shell-back-label { display: none; }
+html[data-layout="docked"] .shell-back[data-named] {
+    width: auto;
+    max-width: min(16rem, 100%);
+    padding-inline: var(--space-1) var(--space-3);
+    gap: var(--space-1);
+    font-size: var(--type-meta);
+    font-weight: 600;
+}
+html[data-layout="docked"] .shell-back[data-named] > svg { flex: none; translate: none; }
+html[data-layout="docked"] .shell-back[data-named] > .shell-back-label {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.shell-back-label > span + span::before { content: " › "; }
+/* A place's box too narrow for its widest band (the capsule, the page's name and two actions: about 22rem) keeps the
+   circle; its words stay in its name. */
+@container sectionplace (max-width: calc(22rem - 0.02px)) {
+    html[data-layout="docked"] .shell-back[data-named] { width: var(--control-h-float); padding-inline: 0; }
+    html[data-layout="docked"] .shell-back[data-named] > .shell-back-label { display: none; }
+    html[data-layout="docked"] .shell-back[data-named] > svg { translate: 0.75px 0; }
+}
 
 /* A desk has a docked sidebar: no ☰ in the headers (the stack layout shows it) and no drawer × (.nav-rail). */
 .mobile-nav-toggle {
@@ -1519,8 +1546,11 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
     text-overflow: ellipsis;
 }
 
-/* Where the sidebar's chosen row already names the place, a desk shows no title (the h2 stays for readers), and
-   a header with nothing else to say takes no room (owner Q3=A). A Project keeps its name in every layout. */
+/* Where the band already names the place by other words (Files' location, Settings' search over its list), a desk
+   shows no title (the h2 stays for readers), and a header with nothing else to say takes no room (owner Q3=A). A
+   place the sidebar names by its glyph alone says its name (owner 27.11.2026): Circles and Widgets at the band's
+   start, the Dashboard over its list, where Settings keeps its search. A Project keeps
+   its name in every layout. */
 html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title {
     position: absolute;
     width: 1px;
@@ -1529,6 +1559,32 @@ html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title 
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
+}
+html[data-layout="docked"] .section-place > .app-page-header:not([data-sidebar-names]) > .app-page-title-block { display: grid; }
+html[data-layout="docked"] .section-place > .app-page-header:not([data-sidebar-names]) > .app-page-title-block > * { grid-area: 1 / 1; }
+@container sectionplace (min-width: 40rem) {
+    html[data-layout="docked"] .section-place > .app-page-header:not([data-sidebar-names]) .app-page-title-row {
+        width: calc(var(--section-rail-w) - var(--section-rail-start) - var(--section-rail-end));
+        margin-inline-start: calc(var(--section-rail-start) - var(--page-header-padding-x));
+        padding-inline-start: var(--space-3);
+    }
+}
+/* Widgets' band holds its name alone: without the macOS band (a browser, Windows, Linux) its row is as low as the
+   name needs, where it drew no row before; in the macOS window the band is the window's height, as Circles'. */
+:root:not([data-window-chrome="integrated"])[data-layout="docked"] #page-widgets > .app-page-header[data-lead] {
+    min-height: 0;
+    padding-block: var(--page-header-padding-y) 0;
+}
+/* One column holding a page: Back and the page's name take the row; the place's name stays for readers. */
+@container sectionplace (max-width: calc(40rem - 0.02px)) {
+    html[data-layout="docked"] .section-place[data-section-view="page"] > .app-page-header:not([data-sidebar-names]) .app-page-title {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+    }
 }
 html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
     position: absolute;
@@ -1555,14 +1611,6 @@ html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
     overflow: visible;
     clip-path: none;
     padding: 0;
-}
-:root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty]:not([data-return]) ~ .widgets-scroll {
-    padding-top: calc(var(--space-4) + var(--window-chrome-top));
-}
-/* While a card is dragged the band lets the pointer through to the board, whose top edge is where the engine scrolls
-   a drag upward; at rest the band is the window's handle. */
-:root[data-window-chrome="integrated"][data-layout="docked"] #page-widgets .app-page-header[data-empty]:not([data-return]):has(~ .widgets-scroll .widgets-card[data-widget-lifted]) {
-    pointer-events: none;
 }
 
 .app-page-toolbar,
@@ -1622,6 +1670,8 @@ html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
 .app-page-return { display: flex; align-items: center; flex: none; order: -1; }
 .app-page-return:empty { display: none; }
 html[data-telegram-back="back"] .app-page-return { display: none; }
+/* A named return yields its width before the page's name does: its words end in an ellipsis. */
+.app-page-header[data-return-named] .app-page-return { flex-shrink: 1; min-width: 0; }
 .app-page-header[data-return] > .app-page-title-block { display: flex; align-items: center; gap: var(--space-2); }
 .app-page-header[data-return="column"] > .app-page-title-block { display: block; }
 .app-page-header[data-return] .app-page-lead { flex: 1; }
@@ -7133,6 +7183,14 @@ html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow:
         margin: -1px;
         overflow: hidden;
         clip-path: inset(50%);
+    }
+    /* After a return that names another place, the page says its own name beside it: `‹ Settings  Costs`. */
+    html[data-layout="docked"] #content .app-page-header[data-return-named] .section-lead-page > .app-page-lead-title {
+        position: static;
+        width: auto;
+        height: auto;
+        margin: 0;
+        clip-path: none;
     }
     /* Two panes whose band holds nothing (the open page has no controls, no return is owed; dashboard.js writes
        data-controls): on a desk the header lies over the page as the band, the macOS window's handle where it has one,
