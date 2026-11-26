@@ -784,14 +784,11 @@ def governance_context(
                          "the map is never inlined whole; chapter navigation above"))
         if not packet or not names:
             continue
-        units = [(start, f"opening block {number}", text, is_code)
-                 for number, (start, text, is_code) in enumerate(_opening_units(chapter), 1)]
-        units += [(heading.span.start_byte, heading.title, chapter.text_at(heading.section), False)
+        units = [(start, f"opening block {number}", text)
+                 for number, (start, text, _code) in enumerate(_opening_units(chapter), 1)]
+        units += [(heading.span.start_byte, heading.title, chapter.text_at(heading.section))
                   for heading in _top_sections(chapter)]
-        for start, title, body, is_code in units:
-            if is_code:  # a listing (the module tree) gives its lines that name a touched file, not all of itself
-                body = "\n".join(line for line in body.splitlines() if _mentions(line, names)[0])
-                title += " (excerpt: its lines naming a touched file)"
+        for start, title, body in units:
             files, mentions = _mentions(body, names)
             if not files:
                 continue

@@ -474,8 +474,9 @@ def test_a_packet_reviewer_gets_the_touched_domains_module_rows_touched_first(re
     from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH
 
     context = _context(_with_manifest(repo))
-    assert MODULE_ROWS_PATH in _paths(context, "inline", tier=3)
+    assert _paths(context, "inline").count(MODULE_ROWS_PATH) == 1
     text = context.selected_inline
+    assert text.count("ouroboros/project_dialogue.py — The touched module's own lead.") == 1
     touched = text.index("ouroboros/project_dialogue.py — The touched module's own lead.")
     assert touched < text.index("ouroboros/n00.py — Neighbour 00") and "docs/architecture/01-core.md" in text
     # A reviewer with tools calls the lookup itself.
@@ -562,9 +563,10 @@ def test_missing_invariants_are_disclosed_and_a_broken_sibling_does_not_hide_the
     assert row["disposition"] == ("inline" if delivery == "packet" else "required")
 
 
-def test_a_chapter_opening_is_selectable_and_a_listing_gives_only_its_matching_lines(repo):
-    """Text before a chapter's first subheading was beyond selection; each opening block now is a unit, and a
-    code listing (the module tree) gives only its lines that name a touched file, not all of itself."""
+def test_a_chapter_opening_is_selectable_block_by_block(repo):
+    """Text before a chapter's first subheading was beyond selection; each opening block now is a unit, a code
+    block included (its fence lines are no unit). The book keeps no module tree, so a listing is selected like
+    any other block; module rows reach a packet reviewer through the touched domains' block."""
     (repo / "docs" / "architecture" / "01-core.md").write_text(
         "# 1. Core\n\nThe opening names ouroboros/project_dialogue.py before any heading.\n\n"
         "```\nouroboros/project_dialogue.py — the dialogue owner\nouroboros/other.py — unrelated\n```\n\n"
@@ -573,9 +575,9 @@ def test_a_chapter_opening_is_selectable_and_a_listing_gives_only_its_matching_l
     context = _context(repo, touched_paths=["ouroboros/project_dialogue.py"])
     inline = _paths(context, "inline", tier=3)
     assert "docs/architecture/01-core.md#opening block 1" in inline
-    assert "docs/architecture/01-core.md#opening block 2 (excerpt: its lines naming a touched file)" in inline
+    assert "docs/architecture/01-core.md#opening block 2" in inline
     assert "The opening names ouroboros/project_dialogue.py before any heading." in context.selected_inline
-    assert "the dialogue owner" in context.selected_inline and "ouroboros/other.py" not in context.selected_inline
+    assert "the dialogue owner" in context.selected_inline and "```" not in context.selected_inline
     assert "An untouched opening paragraph." not in context.selected_inline
     assert "opening block" not in _context(repo, delivery="retrieving").selected_inline
 
