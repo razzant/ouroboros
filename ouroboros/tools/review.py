@@ -432,7 +432,7 @@ def _triad_governance_context(ctx: ToolContext, touched_paths: list,
                               checklist_section: str, api_models: list, api_slots: list,
                               *, delivery: str = "packet", governance_root=None,
                               layer: str = "body", subject_root: Optional[pathlib.Path] = None,
-                              review_words=None):
+                              review_words=None, module_rows_root=None):
     """The triad's shared governance tiers for either delivery class.
 
     ``governance_root`` is the installed body (a frozen subject names it; the
@@ -465,6 +465,7 @@ def _triad_governance_context(ctx: ToolContext, touched_paths: list,
         layer=layer,
         subject_root=subject_root,
         review_words=review_words,
+        module_rows_root=module_rows_root,
     )
 
 
@@ -663,7 +664,8 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     words_section = words.render(section_budget(_triad_governance_usable_window(api_models, api_slots))) if api_models else ""
     governance = _triad_governance_context(
         ctx, touched_paths, checklist_section, api_models, api_slots,
-        governance_root=governance_root, layer=layer, subject_root=subject_root, review_words=words)
+        governance_root=governance_root, layer=layer, subject_root=subject_root, review_words=words,
+        module_rows_root=target_repo)
 
     # Build touched-file pack for full current context (managed: the reviewed
     # resolution set; binary rows carry the M0 baseline identity). A plain

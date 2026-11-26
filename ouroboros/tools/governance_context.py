@@ -579,6 +579,7 @@ def governance_context(
     subject_root: Any = None,
     manifest_facts: Any = None,
     review_words: Any = None,
+    module_rows_root: Any = None,
 ) -> GovernanceContext:
     """Tier the governance corpus for ONE reviewer of ONE change.
 
@@ -593,7 +594,9 @@ def governance_context(
     body) runs the three tiers; ``core`` (any other subject) runs
     :func:`_core_layer_context` over ``subject_root``; ``skill`` (a skill payload)
     runs :func:`_skill_layer_context` over ``manifest_facts`` (``type`` and the
-    manifest's ``declares``)."""
+    manifest's ``declares``). ``module_rows_root`` is the reviewed subject's tree, from which a body
+    packet's module rows are read (``governance_module_rows``); without it they come from ``repo_dir``
+    and say so."""
     from ouroboros.tools.review_helpers import load_checklist_section, load_governance_doc
 
     if layer not in GOVERNANCE_LAYERS:
@@ -798,20 +801,22 @@ def governance_context(
             sections.append(((is_code, -files * 1000 - mentions, chapter.source_path, start),
                              path, path, f"mentions {files} touched file(s), {mentions} time(s)"))
             chapter_text[path] = body
-    if packet and touched:  # no module tree in the book: the touched domains' rows, neighbours yield first
-        from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH, blocks
-        whole, reduced, left_out, problem = blocks(root, touched)
-        if problem:
-            rows.append(_row(MODULE_ROWS_PATH, 3, "navigation", 0, problem))
-        elif whole and not _admit(MODULE_ROWS_PATH, MODULE_ROWS_PATH, whole, 3, "module rows of the touched domains") \
-                and left_out:
-            _admit(MODULE_ROWS_PATH, MODULE_ROWS_PATH, reduced, 3,
-                   f"touched module rows only; {left_out} neighbour row(s) left out, said in the block")
+    # No module tree in the book: touched modules' rows before the sections naming them, neighbours after.
+    from ouroboros.tools import governance_module_rows as gmr
+    modules = gmr.module_rows(Path(module_rows_root or root), touched, subject_tree=module_rows_root is not None) \
+        if packet and touched else gmr.ModuleRows()
+    if modules.problem:
+        rows.append(_row(gmr.MODULE_ROWS_PATH, 3, "navigation", 0, modules.problem))
+    mine = bool(modules.touched) and _admit(gmr.MODULE_ROWS_PATH, gmr.MODULE_ROWS_PATH, modules.touched, 3,
+                                            f"rows of the touched modules, read from {modules.source}")
     for order, path, title, reason in sorted(sections):
         _admit(path, title, chapter_text.get(path, ""), 3, reason)
+    neighbours = bool(modules.neighbours) and _admit(gmr.NEIGHBOUR_ROWS_PATH, gmr.NEIGHBOUR_ROWS_PATH,
+                                                     modules.neighbours, 3, "neighbour modules of the touched domains")
+    module_notice = gmr.notice(modules, touched_delivered=mine, neighbours_delivered=neighbours)
 
     # --- navigation -------------------------------------------------------
-    pointers = [_checklist_pointer(bool(checklist_text.strip()), shared_inline), invariants_pointer]
+    pointers = [_checklist_pointer(bool(checklist_text.strip()), shared_inline), invariants_pointer, module_notice]
     design_map = ""
     if DESIGN_PATH not in inline_texts:
         delivered = next((row["path"] for row in rows if row["disposition"] == "inline"

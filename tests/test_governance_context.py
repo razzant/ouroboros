@@ -459,7 +459,7 @@ def test_retrieving_triad_receives_shared_tiers_in_its_actual_task(repo, monkeyp
 # --- module rows of the touched domains (the book keeps no module tree) ----------
 
 def _with_manifest(repo: pathlib.Path, neighbours: int = 30) -> pathlib.Path:
-    (repo / "ouroboros").mkdir()
+    (repo / "ouroboros").mkdir(exist_ok=True)
     rows = {"ouroboros/project_dialogue.py": "The touched module's own lead."}
     rows.update({f"ouroboros/n{i:02d}.py": f"Neighbour {i:02d} " + "words " * 25 for i in range(neighbours)})
     for path, lead in rows.items():
@@ -470,44 +470,100 @@ def _with_manifest(repo: pathlib.Path, neighbours: int = 30) -> pathlib.Path:
     return repo
 
 
-def test_a_packet_reviewer_gets_the_touched_domains_module_rows_touched_first(repo):
-    from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH
+def _module_paths(context: GovernanceContext) -> list[str]:
+    from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH, NEIGHBOUR_ROWS_PATH
+
+    return [row["path"] for row in context.manifest if row["path"] in (MODULE_ROWS_PATH, NEIGHBOUR_ROWS_PATH)]
+
+
+TOUCHED_ROW = "ouroboros/project_dialogue.py (D01) — The touched module's own lead."
+SECTION = "The loop mentions ouroboros/project_dialogue.py."
+
+
+def test_touched_rows_come_before_the_sections_naming_them_and_neighbours_after(repo):
+    from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH, NEIGHBOUR_ROWS_PATH
 
     context = _context(_with_manifest(repo))
-    assert _paths(context, "inline").count(MODULE_ROWS_PATH) == 1
     text = context.selected_inline
-    assert text.count("ouroboros/project_dialogue.py — The touched module's own lead.") == 1
-    touched = text.index("ouroboros/project_dialogue.py — The touched module's own lead.")
-    assert touched < text.index("ouroboros/n00.py — Neighbour 00") and "docs/architecture/01-core.md" in text
+    assert text.count(TOUCHED_ROW) == 1
+    assert text.index(TOUCHED_ROW) < text.index(SECTION) < text.index("ouroboros/n00.py (D01) — Neighbour 00")
+    assert [p for p in _paths(context, "inline") if p in (MODULE_ROWS_PATH, NEIGHBOUR_ROWS_PATH)] == [
+        MODULE_ROWS_PATH, NEIGHBOUR_ROWS_PATH]
+    assert "Module rows of the touched files were NOT delivered" not in context.navigation
+    assert "neighbour module row(s)" not in context.navigation
+    # Without the subject's own tree the rows say they describe the installed one.
+    assert "read from the installed tree" in text
     # A reviewer with tools calls the lookup itself.
-    assert MODULE_ROWS_PATH not in _paths(_context(repo, delivery="retrieving"))
+    assert _module_paths(_context(repo, delivery="retrieving")) == []
 
 
-def test_module_rows_that_do_not_fit_keep_the_touched_rows_and_say_what_left(repo):
+def test_neighbour_rows_yield_to_the_sections_and_the_packet_says_what_it_lacks(repo):
     from ouroboros.tools.governance_context import _render
-    from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH, blocks
+    from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH, NEIGHBOUR_ROWS_PATH, module_rows
 
     _with_manifest(repo)
-    whole, reduced, left_out, problem = blocks(repo, ["ouroboros/project_dialogue.py"])
-    assert left_out == 30 and not problem
+    rows = module_rows(repo, ["ouroboros/project_dialogue.py"], subject_tree=False)
     roomy = _context(repo)
-    before = sum(estimate_tokens(_render(title, text)) for title, text in roomy.inline_sections
-                 if title in {row["path"] for row in _rows(roomy, "inline", tier=2)})
-    between = (estimate_tokens(_render(MODULE_ROWS_PATH, whole)) + estimate_tokens(_render(MODULE_ROWS_PATH, reduced))) // 2
-    tight = _context(repo, usable_window_tokens=int((before + between) / REVIEW_GOVERNANCE_INLINE_SHARE) + 1)
-    module_rows = [row for row in tight.manifest if row["path"] == MODULE_ROWS_PATH]
-    assert [row["disposition"] for row in module_rows] == ["navigation", "inline"], module_rows
-    assert "30 neighbour row(s) left out" in tight.selected_inline and "module_map D01" in tight.selected_inline
-    assert "ouroboros/project_dialogue.py — The touched module's own lead." in tight.selected_inline
+    tier2 = sum(estimate_tokens(_render(title, text)) for title, text in roomy.inline_sections
+                if title in {row["path"] for row in _rows(roomy, "inline", tier=2)})
+    first = (estimate_tokens(_render(MODULE_ROWS_PATH, rows.touched))
+             + estimate_tokens(_render("docs/architecture/01-core.md#Core loop", SECTION)))
+    window = int((tier2 + first + estimate_tokens(_render(NEIGHBOUR_ROWS_PATH, rows.neighbours)) // 2)
+                 / REVIEW_GOVERNANCE_INLINE_SHARE) + 1
+    tight = _context(repo, usable_window_tokens=window)
+    assert TOUCHED_ROW in tight.selected_inline and SECTION in tight.selected_inline
     assert "ouroboros/n00.py" not in tight.selected_inline
+    assert "30 neighbour module row(s) of the touched domains were NOT delivered" in tight.navigation
+    # Nothing fits: the touched rows' absence is said in band, not only in the manifest.
+    starved = _context(repo, usable_window_tokens=0)
+    assert TOUCHED_ROW not in starved.selected_inline
+    assert "Module rows of the touched files were NOT delivered" in starved.navigation
 
 
-def test_an_unreadable_manifest_is_a_named_navigation_row_not_an_empty_block(repo):
+def test_an_unreadable_manifest_is_said_in_the_packet_not_only_in_the_manifest(repo):
     from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH
 
-    rows = [row for row in _context(repo).manifest if row["path"] == MODULE_ROWS_PATH]
+    context = _context(repo)
+    rows = [row for row in context.manifest if row["path"] == MODULE_ROWS_PATH]
     assert [row["disposition"] for row in rows] == ["navigation"]
     assert "module rows unavailable" in rows[0]["reason"]
+    assert "Module rows of the touched files were NOT delivered (module rows unavailable" in context.navigation
+
+
+def test_root_modules_and_nested_web_folders_give_each_path_once_from_its_entries(repo):
+    _with_manifest(repo, neighbours=1)
+    manifest = (repo / "ouroboros" / "domains.toml").read_text(encoding="utf-8")
+    (repo / "ouroboros" / "domains.toml").write_text(manifest + '"server.py" = "D01"\n', encoding="utf-8")
+    (repo / "server.py").write_text('"""The server entry point."""\n', encoding="utf-8")
+    (repo / "web" / "modules").mkdir(parents=True)
+    (repo / "web" / "ui.css").write_text("/* The shared stylesheet. */\n", encoding="utf-8")
+    for name in ("a", "b"):
+        (repo / "web" / "modules" / f"{name}.js").write_text(f"// Module {name}.\nexport const x = 1;\n",
+                                                             encoding="utf-8")
+    context = _context(repo, touched_paths=["server.py", "web/ui.css", "web/modules/a.js"])
+    text = context.selected_inline
+    assert "server.py (D01) — The server entry point." in text and "server.py (not in" not in text
+    assert text.count("web/modules/a.js — Module a.") == 1 and text.count("web/modules/b.js — Module b.") == 1
+    assert "web/ui.css — The shared stylesheet." in text
+    assert text.index("web/modules/a.js") < text.index("web/modules/b.js")  # touched before every neighbour
+
+
+def test_rows_come_from_the_reviewed_subjects_tree_when_the_seam_supplies_it(repo, tmp_path):
+    _with_manifest(repo, neighbours=1)
+    subject = tmp_path / "subject"
+    (subject / "ouroboros").mkdir(parents=True)
+    (subject / "ouroboros" / "domains.toml").write_text(
+        (repo / "ouroboros" / "domains.toml").read_text(encoding="utf-8") + '"ouroboros/brand_new.py" = "D01"\n',
+        encoding="utf-8")
+    (subject / "ouroboros" / "brand_new.py").write_text('"""The proposed module."""\n', encoding="utf-8")
+    (subject / "ouroboros" / "project_dialogue.py").write_text('"""The proposed lead."""\n', encoding="utf-8")
+    touched = ["ouroboros/brand_new.py", "ouroboros/project_dialogue.py"]
+    subject_view = _context(repo, touched_paths=touched, module_rows_root=subject).selected_inline
+    assert "ouroboros/brand_new.py (D01) — The proposed module." in subject_view
+    assert "ouroboros/project_dialogue.py (D01) — The proposed lead." in subject_view
+    assert "read from the reviewed subject's tree" in subject_view
+    installed_view = _context(repo, touched_paths=touched).selected_inline
+    assert TOUCHED_ROW in installed_view and "brand_new.py" not in installed_view
 
 
 # --- the body's cross-cutting invariants and chapter openings -------------------
