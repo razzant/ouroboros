@@ -61,6 +61,7 @@ export function bubbleWords(text, role, { markdown = false, systemType = '', sou
  */
 export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ownProjectId = '',
     onDomWrite = (write) => write() }) {
+    const earlyPresentation = new WeakMap();
     return function draw(text, role, { markdown = false, ts, isProgress = false, meta, legacyKey = '', opts = {}, existing = null }) {
         const pending = !!opts.pending;
         const ephemeral = !!opts.ephemeral;
@@ -105,8 +106,9 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
                 ${footer}
             `;
         } else {
-            // Adopt the saved presentation without detaching equal words (and their selection or focused link).
-            if (body.innerHTML !== rendered) body.innerHTML = rendered;
+            // Overflow can decorate mounted markup. Compare the serializer's two outputs, not its output with live DOM.
+            if (earlyPresentation.get(bubble) !== rendered) body.innerHTML = rendered;
+            earlyPresentation.delete(bubble);
             body.classList.toggle('ui-rich-content', richMarkdown);
             const sender = bubble.querySelector('.sender');
             if (sender && sender.textContent !== label) sender.textContent = label;
@@ -121,7 +123,11 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
             }
         }
         stampNodeTimestamp(bubble, ts);
-        if (opts.wordsOnly) { bubble.dataset.windowWords = ''; return { bubble, rich: false }; }
+        if (opts.wordsOnly) {
+            earlyPresentation.set(bubble, rendered);
+            bubble.dataset.windowWords = '';
+            return { bubble, rich: false };
+        }
         delete bubble.dataset.windowWords;
         if (notice?.details && opts.narration !== true) bubble.querySelector('.message')
             .after(rawDetails(document, notice.details, tr('chat.notice.details', 'Details')));

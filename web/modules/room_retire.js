@@ -26,6 +26,7 @@
 
 import { documentScope } from './chat_preview.js';
 import { isWindowText } from './chat_row_placement.js';
+import { notifyRetainedSelectionReleased } from './selection_lifecycle.js';
 
 function keptRanges(page) {
     const selection = page.ownerDocument?.getSelection?.();
@@ -59,12 +60,17 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
     const rememberSelection = (inst) => {
         if (inst && !inst.page.hidden) inst.keptRanges = keptRanges(inst.page) || inst.keptRanges;
     };
+    const releaseSelection = inst => {
+        if (!inst.keptRanges) return;
+        inst.keptRanges = null;
+        notifyRetainedSelectionReleased(inst.page.ownerDocument);
+    };
     const restoreSelection = (inst) => {
         if (!inst?.keptRanges) return;
         // The shell first exposes the room and releases its layer's inert. WebKit cannot select inside either.
         if (inst.page.closest?.('[inert]') || inst.page.getClientRects && !inst.page.getClientRects().length) return;
         if (!inst.keptRanges.every(([start, , end]) => start.isConnected && end.isConnected)
-            || giveBackRanges(inst.page, inst.keptRanges)) inst.keptRanges = null;
+            || giveBackRanges(inst.page, inst.keptRanges)) releaseSelection(inst);
     };
     // A room on screen keeps no copy: its live selection is its own. An ordinary press (selection_lifecycle.js) ends
     // the copies of every shown room; the window shown again (`keepCovered`) those of the rooms no layer covers, as a
@@ -73,7 +79,7 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
     const forgetShownSelections = (others = [], { keepCovered = false } = {}) => {
         for (const inst of [...instances.values(), ...others]) {
             if (!inst || inst.ws?.paused || inst.page?.hidden) continue;
-            if (!keepCovered || !inst.page?.closest?.('[inert]')) inst.keptRanges = null;
+            if (!keepCovered || !inst.page?.closest?.('[inert]')) releaseSelection(inst);
         }
     };
     // A room leaving the screen: the selection in it is kept, then it leaves (chat.js), its socket view goes away.
@@ -260,7 +266,7 @@ export function createWindowReturn({ socket, doc, chatId, projectId, accepts, kn
     return {
         drop,
         hold(following = true, ready = following) {
-            if (lease?.valid()) { lease.collecting = following; return; }
+            if (lease?.valid()) { lease.collecting &&= following; return; }
             drop();
             const scope = documentScope(doc), connection = connected(scope);
             if (!following || !ready || !doc.hidden || !connection) return;
@@ -286,7 +292,8 @@ export function createWindowReturn({ socket, doc, chatId, projectId, accepts, kn
         },
         take(following = true) {
             if (doc.hidden || !lease?.valid()) { drop(); return null; }
-            const rows = following ? [...lease.rows.values()].slice(lease.shown) : [];
+            lease.collecting &&= following;
+            const rows = lease.collecting ? [...lease.rows.values()].slice(lease.shown) : [];
             lease.shown = lease.rows.size;
             return rows;
         },

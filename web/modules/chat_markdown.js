@@ -5,6 +5,7 @@ import { copyTextToClipboard } from './ui_helpers.js';
 import { tr } from './i18n.js';
 import { isRestoringFocus, measureEdges, revealPastFade, syncFoldTabIndex } from './scroll_fade.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
+import { writeUnselected } from './selection_lifecycle.js';
 
 const CHART_TYPES = new Set([
     'bar', 'line', 'pie', 'doughnut', 'polarArea', 'radar', 'scatter', 'bubble',
@@ -489,45 +490,15 @@ function highlightCodeIn(root) {
         ? Array.from({ length: selection.rangeCount }, (_, i) => selection.getRangeAt(i)) : [];
     codeNodes.forEach((code) => {
         const source = code.textContent || '';
-        // Leave long or selected code as readable, copyable text; do not replace a selection's nodes.
         if (source.length > MAX_RICH_BLOCK_SOURCE_LENGTH || ranges.some(range => range.intersectsNode?.(code))) return;
         const language = codeLanguage(code);
         try {
             const result = language && api.getLanguage(language)
-                ? api.highlight(source, { language, ignoreIllegals: true })
-                : api.highlightAuto(source);
+                ? api.highlight(source, { language, ignoreIllegals: true }) : api.highlightAuto(source);
             code.innerHTML = result.value;
             code.classList.add('hljs');
-        } catch {
-            code.textContent = source;
-        }
+        } catch { code.textContent = source; }
     });
-}
-
-// Replacing rich source DOM (even the prose beside a formula) can detach a selection's endpoints.
-function writeUnselected(node, state, onDomWrite, write, stale = () => false) {
-    const doc = node.ownerDocument;
-    const stop = () => {
-        if (!state.deferred.delete(stop)) return;
-        doc.removeEventListener('selectionchange', paint);
-        doc.removeEventListener('visibilitychange', paint);
-    };
-    const paint = () => {
-        if (state.destroyed || stale() || node.isConnected === false) return stop();
-        const selection = doc?.getSelection?.();
-        if (doc?.hidden || (!selection?.isCollapsed && Array.from({ length: selection?.rangeCount || 0 },
-            (_, i) => selection.getRangeAt(i)).some(range => range.intersectsNode?.(node)))) {
-            if (!state.deferred.has(stop)) {
-                state.deferred.add(stop);
-                doc.addEventListener('selectionchange', paint);
-                doc.addEventListener('visibilitychange', paint);
-            }
-            return;
-        }
-        stop();
-        onDomWrite(write);
-    };
-    paint();
 }
 
 /** Math in `root`'s text drawn by the vendored KaTeX auto-render, as a mounted message is enhanced; a formula it cannot
@@ -642,23 +613,12 @@ function mermaidSourceOf(node) {
     return typeof stored === 'string' ? stored : (node.textContent || '');
 }
 
-/** Put rendered diagrams back to their source so a re-render repaints them. */
-function resetMermaidNodes(root) {
-    const nodes = Array.from(root.querySelectorAll?.('.md-mermaid[data-mermaid-source]') || []);
-    if (root.matches?.('.md-mermaid[data-mermaid-source]')) nodes.unshift(root);
-    for (const node of nodes) {
-        node.classList?.remove?.('is-rendered');
-        node.textContent = node.dataset.mermaidSource;
-        // Mermaid refuses to re-run a node it has already claimed.
-        node.removeAttribute('data-processed');
-    }
-    return nodes.length;
-}
-
-async function renderMermaidNodes(root, state, onDomWrite, epoch = state.epoch) {
+async function renderMermaidNodes(root, state, onDomWrite, repaint = false) {
+    const epoch = state.epoch;
     const stale = () => state.destroyed || state.epoch !== epoch || root.isConnected === false;
-    const foundNodes = Array.from(root.querySelectorAll?.('.md-mermaid') || []);
-    if (root.matches?.('.md-mermaid')) foundNodes.unshift(root);
+    const selector = repaint ? '.md-mermaid[data-mermaid-source]' : '.md-mermaid';
+    const foundNodes = Array.from(root.querySelectorAll?.(selector) || []);
+    if (root.matches?.(selector)) foundNodes.unshift(root);
     const nodes = [];
     const fail = (node, source, message) => writeUnselected(node, state, onDomWrite, () => {
         degradeMermaid(node, source, message);
@@ -690,7 +650,11 @@ async function renderMermaidNodes(root, state, onDomWrite, epoch = state.epoch) 
         if (node.isConnected === false) continue;
         const source = mermaidSourceOf(node);
         node.dataset.mermaidSource = source;
-        const rendered = node.cloneNode(true);
+        // Reset only a new stage node. The mounted source or SVG stays readable/selectable until replacement.
+        const rendered = node.cloneNode(false);
+        rendered.classList.remove('is-rendered');
+        rendered.removeAttribute('data-processed');
+        rendered.textContent = source;
         const stage = document.createElement('div');
         stage.className = 'md-mermaid-stage';
         stage.setAttribute('aria-hidden', 'true');
@@ -708,8 +672,7 @@ async function renderMermaidNodes(root, state, onDomWrite, epoch = state.epoch) 
             await api.run({ nodes: [rendered], suppressErrors: true });
             hardenMermaidLinks(rendered);
             stage.remove();
-            // A theme switch during this await already reset the node and started
-            // a fresh pass; this SVG is in the old palette and must be dropped.
+            // A theme switch during this await started a fresh pass; drop the old palette's SVG.
             if (stale() || node.isConnected === false) return;
             if (rendered.childNodes?.length) {
                 const scroll = document.createElement('div');
@@ -913,14 +876,14 @@ function cleanupState(root, state) {
 }
 
 /** Enhance mounted markdown and return a disposer for resources acquired here. */
-export function enhanceChatMarkdown(rootEl, { onDomWrite = writeDirectly, onThemeDomWrite = onDomWrite } = {}) {
+export function enhanceChatMarkdown(rootEl, { onDomWrite = writeDirectly, onThemeDomWrite = onDomWrite, keptSelection } = {}) {
     if (!rootEl) return () => {};
     destroyChatMarkdown(rootEl);
     const state = {
         charts: new Set(), timers: new Set(), deferred: new Set(), clickHandler: null, frame: null, destroyed: false,
         // Bumped by every repaint so a diagram render still awaiting mermaid from
         // the previous palette discards its result instead of racing this one in.
-        epoch: 0, unsubscribeTheme: null, disposeScrollers: null,
+        epoch: 0, unsubscribeTheme: null, disposeScrollers: null, keptSelection,
     };
     state.clickHandler = async (event) => {
         const button = event.target?.closest?.('[data-code-copy]');
@@ -954,25 +917,27 @@ export function enhanceChatMarkdown(rootEl, { onDomWrite = writeDirectly, onThem
         if (state.destroyed || rootEl.isConnected === false) return;
         for (const chart of state.charts) applyChartTheme(chart, CHART_THEMED.get(chart) || {});
         state.epoch += 1;
-        // The reset collapses each SVG back to a line of text, so it goes through
-        // the caller's local DOM writer, preserving scroll without new activity.
-        let pending = 0;
-        onThemeDomWrite(() => { pending = resetMermaidNodes(rootEl); return pending > 0; });
-        if (pending) void renderMermaidNodes(rootEl, state, onThemeDomWrite);
+        void renderMermaidNodes(rootEl, state, onThemeDomWrite, true);
     });
+    const bindScrollers = () => {
+        state.disposeScrollers ??= bindMarkdownScrollers(rootEl, RICH_SELECTORS);
+    };
     const start = () => {
         if (state.destroyed || rootEl.isConnected === false) return;
-        if (hasAny(rootEl, ['.md-code-block'])) onDomWrite(() => { highlightCodeIn(rootEl); return true; });
+        if (hasAny(rootEl, ['.md-code-block'])) {
+            const highlight = () => { highlightCodeIn(rootEl); return true; };
+            if (rootEl.ownerDocument?.hidden || keptSelection?.()) writeUnselected(rootEl, state, onDomWrite, highlight);
+            else onDomWrite(highlight);
+        }
         if (typeof globalThis.renderMathInElement === 'function' && /\$\$|\\[[(]/.test(rootEl.textContent || '')) {
             writeUnselected(rootEl, state, onDomWrite, () => {
                 renderLatexIn(rootEl);
                 rootEl.querySelectorAll('.katex-display').forEach(formula => formula.classList.add('scroll-fade-x'));
+                if (hasAny(rootEl, RICH_SELECTORS)) bindScrollers();
                 return true;
             });
         }
-        if (typeof ResizeObserver === 'function' && hasAny(rootEl, [...RICH_SELECTORS, '.md-mermaid'])) {
-            state.disposeScrollers = bindMarkdownScrollers(rootEl, RICH_SELECTORS);
-        }
+        if (hasAny(rootEl, [...RICH_SELECTORS, '.md-mermaid'])) bindScrollers();
         void renderMermaidNodes(rootEl, state, onDomWrite);
         const mountCharts = () => {
             state.frame = null;

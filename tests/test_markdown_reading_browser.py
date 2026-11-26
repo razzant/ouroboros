@@ -216,6 +216,90 @@ def open_chat(ui, width, height=900):
     return page
 
 
+def test_early_reply_adoption_preserves_enhanced_words_and_enables_code_copy(reading_ui):
+    page = open_chat(reading_ui, 420)
+    linked_table = WIDE_TABLE.replace("Requests", "[Requests](https://example.com/requests)")
+    page.evaluate(r"""async (text) => {
+        const {createEarlyTextBubbles, createTextBubbles} = await import('/static/modules/chat_text_bubble.js');
+        const {bindCompactMarkdown, enhanceChatMarkdown} = await import('/static/modules/chat_markdown.js');
+        const feed = document.querySelector('#chat-messages');
+        bindCompactMarkdown(feed);
+        const draw = createTextBubbles({chatMedia: {attachCopyControl() {}}, replies: {decorate() {}}, feed});
+        const rows = createEarlyTextBubbles(feed, draw, node => feed.append(node), node => node.remove());
+        const saved = {ts: '2026-09-28T10:00:10Z', meta: {}, opts: {historyId: 'copy-and-table-fixture'}};
+        rows.show([{address: 'fixture', text, ts: saved.ts}]);
+        const bubble = rows.get('fixture');
+        bubble.id = 'early-fence-fixture';
+        window.adoptFixture = () => {
+            const link = bubble.querySelector('td a');
+            const selected = link.firstChild;
+            link.focus({preventScroll: true});
+            const range = document.createRange(); range.selectNodeContents(link);
+            getSelection().removeAllRanges(); getSelection().addRange(range);
+            draw(text, 'assistant', {...saved, existing: bubble});
+            enhanceChatMarkdown(bubble);
+            return {
+                link: link === bubble.querySelector('td a'), focus: link === document.activeElement,
+                selection: getSelection().anchorNode === selected || getSelection().anchorNode === link,
+            };
+        };
+    }""", linked_table + "\n\n```text\ncopy only the saved fence\n```")
+    reply = page.locator("#early-fence-fixture")
+    reply.locator('.md-table-wrap[role="region"][tabindex="0"]').wait_for(timeout=5_000)
+    copy = reply.locator(".md-code-copy")
+    assert copy.evaluate("node => getComputedStyle(node).display") == "none"
+    copy.evaluate("node => node.click()")
+    assert page.evaluate("window.__copied") is None
+    assert page.evaluate("window.adoptFixture()") == {"link": True, "focus": True, "selection": True}
+    assert copy.evaluate("node => getComputedStyle(node).display") != "none"
+    copy.click(timeout=3_000)
+    page.wait_for_function("window.__copied !== null", timeout=3_000)
+    expected = reply.locator('pre > code').text_content()
+    assert expected.strip() == "copy only the saved fence"
+    assert page.evaluate("window.__copied") == expected
+    assert reading_ui["foreign"] == []
+
+
+def test_formula_waits_for_retained_room_selection_then_gets_scroll_region(reading_ui):
+    page = open_chat(reading_ui, 780)
+    page.evaluate(r"""async () => {
+        const {enhanceChatMarkdown} = await import('/static/modules/chat_markdown.js');
+        const {createRoomRetirement} = await import('/static/modules/room_retire.js');
+        const page = document.createElement('section');
+        const bubble = document.createElement('div');
+        bubble.className = 'chat-bubble assistant'; bubble.id = 'retained-math-fixture';
+        const msg = document.createElement('div');
+        msg.className = 'message ui-rich-content';
+        const authored = 'Keep these selected words beside $$' + 'abcdefghijklmnop+'.repeat(12) + 'q$$';
+        msg.textContent = authored; bubble.append(msg); page.append(bubble);
+        document.querySelector('#chat-messages').append(page);
+        const selection = getSelection();
+        const pick = (node, from, to) => {
+            const range = document.createRange(); range.setStart(node, from); range.setEnd(node, to);
+            selection.removeAllRanges(); selection.addRange(range);
+        };
+        const node = msg.firstChild;
+        pick(node, 5, 25);
+        const inst = {page};
+        const rooms = createRoomRetirement({instances: new Map([['math', inst]])});
+        rooms.rememberSelection(inst); page.inert = true;
+        const outside = document.querySelector('#chat-messages .chat-bubble .sender').firstChild;
+        pick(outside, 0, 1);
+        enhanceChatMarkdown(bubble, {keptSelection: () => !!inst.keptRanges});
+        window.restoreFixture = () => {
+            page.inert = false; rooms.restoreSelection(inst);
+            return node.isConnected && selection.toString() === authored.slice(5, 25);
+        };
+    }""")
+    reply = page.locator("#retained-math-fixture")
+    assert reply.locator(".katex-display").count() == 0
+    assert page.evaluate("window.restoreFixture()")
+    page.evaluate("getSelection().removeAllRanges()")
+    formula = reply.locator('.katex-display[role="region"][tabindex="0"][data-scroll-end]')
+    formula.wait_for(timeout=5_000)
+    assert formula.get_attribute("aria-label") == "Scrollable formula"
+
+
 def mount_project_panel(page):
     """A real secondary chat instance in the Project panel (440px at this viewport)."""
     page.evaluate("""async () => {

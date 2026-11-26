@@ -285,6 +285,7 @@ test('a delivered direct answer opens its ordinary link on return and keeps equa
 
     const saved = { ts: frame.ts, markdown: true, meta: {}, opts: { historyId: 'saved-direct', reply: frame,
         evidenceRef: { href: '/api/tasks/test/evidence', label: 'Evidence' } } };
+    body.querySelector('strong').setAttribute('tabindex', '0'); // stand-in for the scroller's live enhancement
     const adopted = draw(frame.content, 'assistant', { ...saved, existing: bubble }).bubble;
     assert.equal(adopted.querySelector('.message'), body);
     assert.equal(body.querySelector('a[href]'), link);
@@ -447,10 +448,24 @@ test('window return leaves an older reading position alone and waits for canonic
     } finally { f.close(); }
 });
 
+test('leaving the live edge disables early collection until this window sequence settles', () => {
+    const socket = pageSocket();
+    const doc = { hidden: true, querySelector: () => ({ content: PREVIEW_SCOPE }) };
+    const lease = createWindowReturn({ socket, doc, chatId: 7, projectId: 'p1', accepts: () => true, knownChild: () => false });
+    const hide = following => { doc.hidden = true; lease.hold(following); };
+    const show = (following = true) => { doc.hidden = false; return lease.take(following).map(row => row.text); };
+    hide(true); socket.fire('chat', speech(7, 1, 'first')); assert.deepEqual(show(), ['first']);
+    hide(false); socket.fire('chat', speech(7, 2, 'while reading')); assert.deepEqual(show(false), []);
+    hide(true); socket.fire('chat', speech(7, 3, 'after the gap')); assert.deepEqual(show(), []);
+    lease.drop();
+    hide(true); socket.fire('chat', speech(7, 4, 'fresh sequence')); assert.deepEqual(show(), ['fresh sequence']);
+    lease.drop();
+});
+
 const savedSpeech = (frame, offset) => ({ ...frame, text: frame.content, history_id: `saved-${offset}`,
     history_position: { source: 'chat', offset } });
 
-for (const chatId of [1, 7]) test(`saved-only, early and live replies in one millisecond follow saved positions (${chatId})`, async () => {
+for (const chatId of [1, 7]) test(`saved-only, early and live replies in one millisecond follow time before offsets (${chatId})`, async () => {
     const f = fixture({ chatId });
     try {
         await f.instance.refreshHistory({ revision: 1 });
@@ -462,10 +477,10 @@ for (const chatId of [1, 7]) test(`saved-only, early and live replies in one mil
         f.socket.fire('chat', frames[2]);
         const [early, live] = bubbles();
         assert.ok(early && live && early !== live);
-        deliver(frames.map(savedSpeech));
+        deliver(frames.map((frame, index) => savedSpeech(frame, [3, 1, 2][index])));
         await settle();
         const rows = bubbles();
-        assert.deepEqual(rows.map(node => node.dataset.historyOffset), ['0', '1', '2']);
+        assert.deepEqual(rows.map(node => node.dataset.historyOffset), ['3', '1', '2']);
         assert.deepEqual(rows.map(node => node.dataset.rowAddress), frames.map(frame => frame.row_address));
         assert.equal(rows[1], early);
         assert.equal(rows[2], live);

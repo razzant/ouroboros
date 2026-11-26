@@ -638,8 +638,7 @@ export function createChatInstance({
     }
 
     function enhanceMountedMarkdown(root) {
-        // Late diagrams/fallbacks can add keyboard stops after the fold was measured.
-        // Refresh only their own bubble, inside the existing viewport transaction.
+        // Late rich content refreshes its own fold inside the viewport write.
         const foldedWrite = writer => (mutate, options) => writer(() => {
             const changed = mutate();
             refreshProjectAnswerFold(root.closest?.('.project-answer'));
@@ -648,6 +647,7 @@ export function createChatInstance({
         return enhanceChatMarkdown(root, {
             onDomWrite: foldedWrite(_remoteActivityDepth > 0 ? withRemoteActivity : withStableViewport),
             onThemeDomWrite: foldedWrite(withStableViewport),
+            keptSelection: () => self?.keptRanges?.length > 0,
         });
     }
     const {

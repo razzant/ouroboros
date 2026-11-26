@@ -6,6 +6,7 @@ import {
     durableChatMediaUrl,
     isNonTerminalMediaHistoryRow,
     rawTimestampEpoch,
+    stampNodeTimestamp,
 } from '../modules/chat_activity.js';
 import { insertTimelineNode } from '../modules/chat_render_batch.js';
 import { normalizeLogTs } from '../modules/log_events.js';
@@ -101,6 +102,26 @@ test('raw source timestamps become numeric epoch values', () => {
     assert.equal(rawTimestampEpoch('2026-07-18T12:00:00Z'), Date.parse('2026-07-18T12:00:00Z'));
     assert.equal(rawTimestampEpoch(1234), 1234);
     assert.equal(Number.isNaN(rawTimestampEpoch('not-a-timestamp')), true);
+});
+
+test('timeline stamps normalize time zones; exact ties use physical position', () => {
+    const saved = (id, ts, offset) => {
+        const node = makeNode(id);
+        stampNodeTimestamp(node, ts);
+        Object.assign(node.dataset, { historySource: 'chat', historyOffset: String(offset) });
+        return node;
+    };
+    const a = saved('first', '2026-11-04T12:40:00.123001+03:00', 3);
+    const b = saved('tie', '2026-11-04T09:40:00.1230010Z', 4);
+    const c = saved('third', '2026-11-04T09:40:00.123002Z', 1);
+    const legacy = saved('legacy', '2026-11-04T09:40:00.123Z', 5);
+    const timeline = makeTimeline([]);
+    for (const node of [c, b, legacy, a]) insertTimelineNode(timeline, node);
+    assert.deepEqual(ids(timeline), ['legacy', 'first', 'tie', 'third']);
+    assert.equal(stampNodeTimestamp(c, '2026-11-04T09:40:00.123003Z', { anchor: true }), false);
+    assert.equal(stampNodeTimestamp(c, '2026-11-04T09:40:00.123001Z', { anchor: true }), true);
+    insertTimelineNode(timeline, c);
+    assert.deepEqual(ids(timeline), ['legacy', 'third', 'first', 'tie']);
 });
 
 test('log timestamps include the date outside today', () => {

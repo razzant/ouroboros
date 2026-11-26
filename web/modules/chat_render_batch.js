@@ -7,6 +7,7 @@ import { appendDelegatedItem, reconcileDelegatedItems } from './delegated_activi
 import { isStoreMigrating } from './api_client.js';
 import { tr } from './i18n.js';
 import { replaceScrollFade, restoreFocusWithoutReveal } from './scroll_fade.js';
+import { compareTimelineTime } from './chat_activity.js';
 
 const nodePosition = node => node?.dataset?.historySource
     ? { source: node.dataset.historySource, offset: Number(node.dataset.historyOffset) } : null;
@@ -215,7 +216,7 @@ export function createHistoryResyncScheduler({
 
 /**
  * Insert a top-level timeline node chronologically while keeping typing last.
- * Equal timestamps preserve arrival order; timestamp-free nodes append.
+ * Equal timestamps use saved position, then arrival order; timestamp-free nodes append.
  * (Moved from chat.js — that module sits at its byte ceiling.)
  */
 // A focused text control keeps its own caret; Chromium mirrors it into the
@@ -270,18 +271,14 @@ function restoreSelection(doc, scope, { active, caret, selection, ranges }) {
 }
 
 export function insertTimelineNode(messages, node, typing = null, kept = null) {
-    const rawNodeTs = node?.dataset?.ts;
-    const nodeTs = rawNodeTs == null || rawNodeTs === '' ? NaN : Number(rawNodeTs);
     let before = null;
-    if (Number.isFinite(nodeTs)) {
+    if (node?.dataset?.ts) {
         const children = messages?.children || [];
         for (let index = 0; index < children.length; index += 1) {
             const child = children[index];
             if (child === node || child === typing) continue;
-            const rawChildTs = child?.dataset?.ts;
-            const childTs = rawChildTs == null || rawChildTs === '' ? NaN : Number(rawChildTs);
-            if (Number.isFinite(childTs) && (childTs > nodeTs
-                    || childTs === nodeTs && compareHistoryPosition(nodePosition(child), nodePosition(node)) > 0)) {
+            const order = compareTimelineTime(child.dataset, node.dataset);
+            if (order > 0 || order === 0 && compareHistoryPosition(nodePosition(child), nodePosition(node)) > 0) {
                 before = child;
                 break;
             }
