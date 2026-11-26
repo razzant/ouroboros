@@ -4528,6 +4528,7 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     right: var(--space-2);
 }
 .md-code-copy.is-copied { color: var(--status-ok-fg); }
+[data-window-words] .md-code-copy { display: none; }
 
 .md-code-block .hljs-comment,
 .md-code-block .hljs-quote { color: #8b8294; font-style: italic; }

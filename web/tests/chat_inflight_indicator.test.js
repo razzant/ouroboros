@@ -26,13 +26,11 @@ test('review-only owner anchors do not advertise foreground task activity', () =
 });
 
 test('only a legacy unkeyed model final clears unscoped state; a System row settles its own submission', () => {
-    // The cleanup guard also requires positive terminal evidence. Keep this
-    // source contract resilient to the guard's explicit conjunction.
-    const cleanupStart = chatSource.indexOf('if (!finalizing && (!explicitTaskId || typedTerminal))');
-    const finalCleanup = chatSource.slice(
-        cleanupStart,
-        chatSource.indexOf("if (msg.system_type === 'task_summary')", cleanupStart),
-    );
+    // Pin the conclusion branch by its neighbouring phases, not the expression calculating eligibility.
+    const cleanupStart = chatSource.indexOf('// Finalizing awaits task_done/census.');
+    const cleanupEnd = chatSource.indexOf("if (msg.system_type === 'task_summary')", cleanupStart);
+    assert.ok(cleanupStart >= 0 && cleanupEnd > cleanupStart);
+    const finalCleanup = chatSource.slice(cleanupStart, cleanupEnd);
     assert.match(
         finalCleanup,
         /} else if \(unkeyedFrameEndsTurn\(msg\)\) \{[^}]*?activeDirectActivities\.clear\(\);[^}]*?pendingSubmissions\.clear\(\);\s*} else pendingSubmissions\.delete\(String\(msg\.client_message_id \|\| ''\)\);\s*}/,

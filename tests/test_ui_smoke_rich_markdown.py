@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import textwrap
+from pathlib import Path
 
 import pytest
 
 from ouroboros import dialogue_store
 from ouroboros.test_evidence import diagnostic_directory
-
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 from tests.ui_console_errors import record_console_errors, record_failed_loads, unexpected_console_errors
 
@@ -345,3 +345,105 @@ def test_ui_browser_mermaid_load_failure_retries(direct_server_with_data):  # no
         if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
             pytest.skip(str(exc))
         raise
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_ui_browser_early_reply_enhancement_keeps_formula_paragraph_selection(engine):
+    """Use the ordinary adopted bubble and vendored decorators, with no live server or external traffic."""
+    pytest.importorskip('playwright.sync_api')
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    web = Path(__file__).resolve().parents[1] / 'web'
+    origin = 'http://markdown.test'
+    shell = """<!doctype html><script src='/marked.min.js'></script><script src='/purify.min.js'></script>
+        <script src='/highlight.min.js'></script><script src='/chart.umd.min.js'></script>
+        <script src='/mermaid.min.js'></script><script src='/vendor/katex/katex.min.js'></script>
+        <script src='/vendor/katex/contrib/auto-render.min.js'></script><main></main>"""
+
+    def local(route):
+        url = route.request.url
+        if url == origin + '/':
+            route.fulfill(status=200, content_type='text/html', body=shell)
+        elif url.startswith(origin + '/'):
+            name = url.removeprefix(origin + '/')
+            asset = (web / name).resolve()
+            if web in asset.parents and asset.is_file() and asset.suffix == '.js':
+                route.fulfill(status=200, content_type='application/javascript', path=asset)
+            else:
+                route.abort()
+        else:
+            route.abort()
+
+    with sync_playwright() as pw:
+        try:
+            browser = getattr(pw, engine).launch(headless=True)
+        except PlaywrightError as exc:
+            if 'Executable doesn\'t exist' in str(exc) or 'playwright install' in str(exc).lower():
+                pytest.skip(str(exc))
+            raise
+        try:
+            page = browser.new_page()
+            page.route('**/*', local)
+            page.goto(origin)
+            result = page.evaluate(r"""async () => {
+                const { createTextBubbles } = await import('/modules/chat_text_bubble.js');
+                const { enhanceChatMarkdown } = await import('/modules/chat_markdown.js');
+                const feed = document.querySelector('main');
+                const draw = createTextBubbles({ feed, chatMedia: { attachCopyControl() {} }, replies: { decorate() {} } });
+                const text = 'total \\(x^2\\) and [guide](https://example.test/guide)';
+                const early = draw(text, 'assistant', { meta: {}, opts: { wordsOnly: true } }).bubble;
+                feed.append(early);
+                const link = early.querySelector('a[href]');
+                link.focus();
+                const selected = early.querySelector('.message p').firstChild;
+                const selection = document.getSelection();
+                selection.setBaseAndExtent(selected, 5, selected, 0);
+                const adopted = draw(text, 'assistant', { meta: {}, existing: early,
+                    opts: { historyId: 'saved', historyPosition: { source: 'chat', offset: 0 } } });
+                enhanceChatMarkdown(adopted.bubble);
+                const before = { words: String(selection), sameRange: selection.anchorNode === selected && selection.anchorOffset === 5,
+                    sameLink: early.querySelector('a[href]') === link };
+                selection.removeAllRanges();
+                const plain = document.createElement('div');
+                plain.textContent = 'Ordinary assistant words';
+                feed.append(plain);
+                const getSelection = document.getSelection.bind(document);
+                let reads = 0;
+                document.getSelection = () => { reads++; return getSelection(); };
+                try { enhanceChatMarkdown(plain); } finally { document.getSelection = getSelection; }
+                return { ...before, reads };
+            }""")
+            assert result == {'words': 'total', 'sameRange': True, 'sameLink': True, 'reads': 0}
+            page.locator('.chat-bubble .katex').wait_for(timeout=5_000)
+            # Both source blocks actually get replaced by the product. Read them through a range
+            # before starting the enhancement, then release it and observe the real replacements.
+            rich = page.evaluate("""async () => {
+                const { enhanceChatMarkdown } = await import('/modules/chat_markdown.js');
+                const root = document.createElement('div');
+                root.innerHTML = '<div class="md-mermaid">graph TD; A-->B</div><div class="md-chart"></div>';
+                root.lastElementChild.textContent = JSON.stringify({ type: 'bar', data: { labels: ['a'],
+                    datasets: [{ data: [1] }] }, options: { animation: false, responsive: false } });
+                document.querySelector('main').append(root);
+                const [from, to] = [...root.children].map(node => node.firstChild);
+                const sel = document.getSelection();
+                sel.setBaseAndExtent(from, 0, to, 8);
+                const original = String(sel);
+                const render = mermaid.run;
+                const diagram = new Promise(resolve => { mermaid.run = async (...args) => {
+                    try { return await render.apply(mermaid, args); }
+                    finally { mermaid.run = render; requestAnimationFrame(resolve); }
+                }; });
+                enhanceChatMarkdown(root);
+                await diagram;
+                await new Promise(resolve => requestAnimationFrame(resolve));
+                const kept = sel.anchorNode === from && sel.focusNode === to && String(sel) === original;
+                sel.removeAllRanges();
+                return kept;
+            }""")
+            assert rich, 'replacing the chart or diagram source cannot detach either end of the selection'
+            page.locator('.md-chart canvas').wait_for(timeout=5_000)
+            page.locator('.md-mermaid svg').wait_for(timeout=10_000)
+        finally:
+            browser.close()

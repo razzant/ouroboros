@@ -730,7 +730,11 @@ const rooms = createRoomRetirement({ instances: projectInstances, cancelPaint: c
 
 // Main is away while nothing of it shows (behind another page, covered by a Project, a hidden window); back, it returns.
 function syncMainLifetime(how = 'return') {
-    if (state.activePage !== 'chat' || (navState.activeProjectId && roomCoversMain()) || document.hidden) rooms.suspend(mainChat);
+    if (state.activePage !== 'chat' || (navState.activeProjectId && roomCoversMain())) rooms.suspend(mainChat);
+    else if (document.hidden) {
+        // A registry repaint while still hidden does not end an otherwise unchanged window return.
+        if (how === 'window' || !mainChat.ws.paused) rooms.suspend(mainChat, how === 'window');
+    }
     else if (mainChat.ws.paused) {
         rooms.restore(mainChat);
         enterMain(how, false);
@@ -739,7 +743,7 @@ function syncMainLifetime(how = 'return') {
 document.addEventListener('visibilitychange', () => {
     syncMainLifetime('window');
     const inst = projectInstances.get(navState.activeProjectId);
-    if (inst) (document.hidden ? rooms.suspend : rooms.restore)(inst);
+    if (inst) document.hidden ? rooms.suspend(inst, true) : rooms.restore(inst);
     // Back on screen the live selection is the rooms' own; the copy kept while hidden would undo its later end. A room
     // under the drawer holds none: its copy waits for the drawer to close.
     if (!document.hidden) rooms.forgetShownSelections([mainChat], { keepCovered: true });

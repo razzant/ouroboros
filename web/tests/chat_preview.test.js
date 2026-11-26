@@ -9,7 +9,9 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { createChatPreview, clearChatPreviews, forgetProjectPreviews, forgetUnlistedProjectPreviews, previewsRefused,
     previewEntryKey, PREVIEW_FAMILY, PREVIEW_KEY } from '../modules/chat_preview.js';
-import { senderLabel } from '../modules/chat_activity.js';
+import { senderLabel, stampNodeTimestamp } from '../modules/chat_activity.js';
+import { stampHistoryNode } from '../modules/chat_history_replay.js';
+import { insertTimelineNode } from '../modules/chat_render_batch.js';
 import { installDom, memoryStorage, restoreDom, PREVIEW_SCOPE } from './chat_dom_fixture.js';
 
 // A second proven data profile: its rooms are not this one's, though the installation is the same.
@@ -206,14 +208,44 @@ test('equal times follow stream position exactly as the feed compares it, before
     assert.deepEqual([ids()[0], ids().at(-1), ids().length], ['chat:79', 'chat:0', 80]);
 });
 
-test('the feed\'s own tie rule orders the preview: imported from chat_history_replay.js, never restated here', async () => {
-    // Astra R2: a restated comparator agrees today (the test above pins it) and would silently fork with the next
-    // change to compareHistoryPosition. chat_history_replay.js imports only task_checkpoints.js, whose start row reads
-    // the Context capsule's sentences (context_observation.js → i18n.js → api_client.js → this module): every name
-    // read across that loop is read inside a function, so the order the modules evaluate in does not matter.
-    const source = await readFile(new URL('../modules/chat_preview.js', import.meta.url), 'utf8');
-    assert.match(source, /^import \{ compareHistoryPosition \} from '\.\/chat_history_replay\.js';$/m);
-    assert.doesNotMatch(source, /localeCompare/, 'no second copy of the stream comparison');
+test('the 80-row preview keeps the same newest rows as the feed when timestamps differ below a millisecond', t => {
+    const f = fixture(t), preview = f.make(), feed = f.mount.ownerDocument.createElement('div');
+    const rows = [
+        row('newer', 'Written earlier in the stream', { ts: '2026-11-03T15:00:00.123002+03:00',
+            history_position: { source: 'chat', offset: 1 } }),
+        row('older', 'Written later in the stream', { ts: '2026-11-03T12:00:00.123001Z',
+            history_position: { source: 'chat', offset: 2 } }),
+        ...Array.from({ length: 79 }, (_, n) => row(`after:${n}`, `after ${n}`, { ts: '2026-11-03T12:00:01Z' })),
+    ];
+    for (const entry of rows) {
+        const bubble = feed.ownerDocument.createElement('div');
+        stampNodeTimestamp(bubble, entry.ts);
+        stampHistoryNode(bubble, entry.history_id, entry.history_position);
+        insertTimelineNode(feed, bubble);
+    }
+    preview.save(rows);
+    preview.destroy();
+    const fresh = f.make();
+    assert.equal(fresh.show(), true);
+    const painted = f.painted().children.slice(1).map(node => node.dataset.previewHistoryId);
+    assert.deepEqual(feed.children.slice(0, 2).map(node => node.dataset.historyId), ['older', 'newer']);
+    assert.deepEqual(painted, feed.children.slice(-80).map(node => node.dataset.historyId));
+    fresh.destroy();
+});
+
+test('precision survives successive arrivals to a legacy millisecond preview entry', t => {
+    const f = fixture(t), preview = f.make();
+    const at = Date.parse('2026-11-03T12:00:00.123Z');
+    f.values.set(PREVIEW_KEY, '{"v":3}');
+    f.values.set(previewEntryKey(PREVIEW_SCOPE, [1, '']), JSON.stringify({ read: 1,
+        rows: [{ id: 'legacy', text: 'Still saved', role: 'assistant', speaker: 'Ouroboros', at, pos: ['chat', '90'] }] }));
+    const arrival = (id, fraction, offset) => row(id, id, { ts: `2026-11-03T12:00:00.${fraction}Z`,
+        history_position: { source: 'chat', offset } });
+    preview.append([arrival('last', '123002', 1)]);
+    preview.append([arrival('middle', '123001', 2), arrival('split', '123000', 3)]);
+    assert.deepEqual(f.rows().map(item => item.id), ['split', 'legacy', 'middle', 'last']);
+    assert.equal(f.rows()[1].text, 'Still saved');
+    preview.destroy();
 });
 
 test('a Project the registry says is going away takes its saved text in the profile that said so; every other room keeps its own', t => {

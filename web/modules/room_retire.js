@@ -24,6 +24,10 @@
  * saved: `hasPendingWork`, marked `data-pending-work`). Memory grows with the rooms visited, not with the rooms whose
  * work runs. app.js owns when; this owns what leaving and being away are. */
 
+import { documentScope } from './chat_preview.js';
+import { isWindowText } from './chat_row_placement.js';
+import { notifyRetainedSelectionReleased } from './selection_lifecycle.js';
+
 function keptRanges(page) {
     const selection = page.ownerDocument?.getSelection?.();
     const inside = (node) => Boolean(node && page.contains(node));
@@ -56,12 +60,17 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
     const rememberSelection = (inst) => {
         if (inst && !inst.page.hidden) inst.keptRanges = keptRanges(inst.page) || inst.keptRanges;
     };
+    const releaseSelection = inst => {
+        if (!inst.keptRanges) return;
+        inst.keptRanges = null;
+        notifyRetainedSelectionReleased(inst.page.ownerDocument);
+    };
     const restoreSelection = (inst) => {
         if (!inst?.keptRanges) return;
         // The shell first exposes the room and releases its layer's inert. WebKit cannot select inside either.
         if (inst.page.closest?.('[inert]') || inst.page.getClientRects && !inst.page.getClientRects().length) return;
         if (!inst.keptRanges.every(([start, , end]) => start.isConnected && end.isConnected)
-            || giveBackRanges(inst.page, inst.keptRanges)) inst.keptRanges = null;
+            || giveBackRanges(inst.page, inst.keptRanges)) releaseSelection(inst);
     };
     // A room on screen keeps no copy: its live selection is its own. An ordinary press (selection_lifecycle.js) ends
     // the copies of every shown room; the window shown again (`keepCovered`) those of the rooms no layer covers, as a
@@ -70,15 +79,16 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
     const forgetShownSelections = (others = [], { keepCovered = false } = {}) => {
         for (const inst of [...instances.values(), ...others]) {
             if (!inst || inst.ws?.paused || inst.page?.hidden) continue;
-            if (!keepCovered || !inst.page?.closest?.('[inert]')) inst.keptRanges = null;
+            if (!keepCovered || !inst.page?.closest?.('[inert]')) releaseSelection(inst);
         }
     };
     // A room leaving the screen: the selection in it is kept, then it leaves (chat.js), its socket view goes away.
-    const leave = (inst) => {
+    const leave = (inst, windowHidden = false) => {
         if (!inst) return;
+        if (!windowHidden) inst.forgetWindowReturn?.();  // also ends a window's suspension when the room itself leaves
         if (inst.ws?.paused) return;
         rememberSelection(inst);
-        inst.leave?.();
+        inst.leave?.(windowHidden);
         inst.ws?.pause?.();
     };
     // Main has the same lifetime as a retained Project, but the shell owns its visibility (also while covered).
@@ -185,7 +195,10 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
         // bounded list): a room kept for one has nothing to return to. Called with none, it lets go the rooms said
         // earlier whose exit or work has ended since. The only release before the page ends.
         forget(...pids) {
-            for (const pid of pids) forgotten.add(pid);
+            for (const pid of pids) {
+                forgotten.add(pid);
+                (instances.get(pid) || retiring.get(pid))?.forgetWindowReturn?.();
+            }
             release();
         },
     };
@@ -231,6 +244,77 @@ export function createCatchUp(changed, bound = 300) {
             if (active || read && failed) { active = false; changed(); }
         },
         cancel(requested = 0) { stop(); failed ||= Boolean(reading); active = false; reading = null; after = requested; },
+    };
+}
+
+const WINDOW_ROWS = 12, WINDOW_TEXT_BYTES = 64 * 1024;
+const rowRoom = /^row:(\d+)@[^#\s]+#[a-f0-9]{12}$/;
+
+/** The small exception to an away room's socket custody. A shown follower that the window hides may keep the words of
+ * its own ordinary assistant rows. No re-dispatch, snapshots, other appearances, or log subscription. The same bounded
+ * batch can span hides until reconciliation; on loss of proof or the bound only ordinary history fills the gap. */
+export function createWindowReturn({ socket, doc, chatId, projectId, accepts, knownChild, onInvalidate = () => {} }) {
+    let lease = null;
+    function drop() {
+        const old = lease;
+        lease = null;
+        old?.off.forEach(dispose => dispose());
+    }
+    const connected = scope => Boolean(scope) && socket?.isConnected?.() === true && !socket.foreignProfile?.()
+        && socket.servingProfileScope?.() === scope && socket.ws;
+    function invalidate() { drop(); onInvalidate(); }
+    const cost = ({ text, address, ts }) => 2 * (text.length + address.length + ts.length);
+    return {
+        drop,
+        // A settled page releases the captured batch, other than words still held in the feed by the reader.
+        // Those words keep the same proof and count towards the same bound on the next hide.
+        settle(held) {
+            if (!lease) return;
+            if (!lease.valid()) return invalidate();
+            for (const address of lease.rows.keys()) if (!held(address)) lease.rows.delete(address);
+            if (!lease.rows.size) return drop();
+            lease.shown = lease.rows.size;
+            lease.settled = true;
+        },
+        release(address) {
+            if (lease?.settled && lease.rows.delete(address) && --lease.shown === 0) drop();
+        },
+        hold(following = true, ready = following) {
+            if (lease?.valid()) {
+                lease.collecting = following && (lease.settled ? ready : lease.collecting);
+                lease.settled = false;
+                return;
+            }
+            if (lease) invalidate();
+            const scope = documentScope(doc), connection = connected(scope);
+            if (!following || !ready || !doc.hidden || !connection) return;
+            const rows = new Map();
+            const valid = () => connected(scope) === connection && documentScope(doc) === scope;
+            function keep(msg) {
+                if (!doc.hidden || !lease?.collecting || !isWindowText(msg, knownChild) || msg.chat_id !== chatId || msg.project_id && msg.project_id !== projectId
+                        || !accepts(msg)) return;
+                if (!valid()) return invalidate();
+                const address = msg.row_address;
+                if (typeof address !== 'string' || Number(rowRoom.exec(address)?.[1]) !== chatId
+                        || typeof msg.ts !== 'string' || !Number.isFinite(Date.parse(msg.ts)) || typeof msg.content !== 'string') return invalidate();
+                if (!msg.content || rows.has(address)) return;
+                // Retain only presentation fields and the physical address, never the producer's frame.
+                const row = { address, text: msg.content, ts: msg.ts, markdown: msg.markdown === true,
+                    initiator: msg.initiator === 'consciousness' ? 'consciousness' : '' };
+                if (rows.size >= WINDOW_ROWS || [...rows.values()].reduce((used, saved) => used + cost(saved), cost(row)) > WINDOW_TEXT_BYTES) return invalidate();
+                rows.set(address, row);
+            }
+            lease = { rows, valid, shown: 0, collecting: true, settled: false, off: [socket.on('chat', keep), socket.on('close', invalidate),
+                socket.on('connection_profile', () => { if (!valid()) invalidate(); }),
+                socket.on('projects_changed', msg => { if (projectId && (!msg?.chat_id || Number(msg.chat_id) === chatId)) invalidate(); })] };
+        },
+        take(following = true) {
+            if (doc.hidden || !lease?.valid()) { drop(); return null; }
+            lease.collecting &&= following;
+            const rows = lease.collecting ? [...lease.rows.values()].slice(lease.shown) : [];
+            lease.shown = lease.rows.size;
+            return rows;
+        },
     };
 }
 
