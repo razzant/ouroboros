@@ -310,11 +310,23 @@ def _fitting(tmp_path, monkeypatch, *, section_root=None, required_words=0, othe
         return f"# {title}\n\nHow it holds.\n\n" + "".join(
             f"## Part {i}\n\n" + "A sentence of the mechanism and its why. " * 120 + "\n\n" for i in range(parts))
 
-    for path, text in {"docs/ARCHITECTURE.md": "# Body\n\nThe whole body map.\n\n## Chapters\n\n- [Runtime](architecture/runtime.md)\n",
-                       "docs/architecture/runtime.md": chapter("Runtime", 30),
-                       "docs/DEVELOPMENT.md": "# Engineering\n\nHow I change.\n\n## Chapters\n\n- [Change](development/change.md)\n",
-                       "docs/development/change.md": chapter("Change", 20 + required_words),
-                       "docs/DESIGN.md": "# Design\n" + BIG_BIBLE + "## Attention\nBODY_RULE_NOT_DELIVERED\n"}.items():
+    arch_chapters = "\n".join(f"- [Runtime {i:02d}](architecture/runtime-{i:02d}.md)" for i in range(12))
+    files = {
+        "docs/ARCHITECTURE.md": (
+            f"# Body\n\nThe whole body map.\n\n## Chapters\n\n{arch_chapters}\n\n"
+            "## Reference Atlas\n\n- `docs/DEVELOPMENT.md` — How I change.\n"
+        ),
+        "docs/DEVELOPMENT.md": "# Engineering\n\nHow I change.\n\n## Chapters\n\n- [Change](development/change.md)\n",
+        "docs/development/change.md": chapter("Change", 20 + required_words),
+        "docs/DESIGN.md": "# Design\n" + BIG_BIBLE + "## Attention\nBODY_RULE_NOT_DELIVERED\n",
+    }
+    for i in range(12):
+        files[f"docs/architecture/runtime-{i:02d}.md"] = (
+            f"# Runtime {i:02d}\n\n"
+            + ("How this part of my body works and connects to its neighbors. " * 12) + "\n\n"
+            + chapter(f"Runtime {i:02d}", 3).split("\n\n", 2)[-1]
+        )
+    for path, text in files.items():
         (repo / path).parent.mkdir(parents=True, exist_ok=True)
         (repo / path).write_text(text, encoding="utf-8")
     books = tuple(load_reference_book(repo, book_id, lambda p: (repo / p).read_bytes())
@@ -473,7 +485,7 @@ def test_nano_prices_design_after_the_cuts_the_map_needs_anyway(tmp_path, monkey
     assert mapped_cuts and bool(whole_cuts - mapped_cuts) is needs_map
     facts, text, chosen_cuts = start(design)
     assert chosen_cuts == (mapped_cuts if needs_map else whole_cuts)
-    design_steps = [r.get("start_room") for r in facts["host_sections_addressed"] if r["section_id"] == design.section_id]
+    design_steps = [r.get("start_room") for r in facts.get("host_sections_addressed", ()) if r["section_id"] == design.section_id]
     assert design_steps == (["nano"] if needs_map else [])
     assert (design.full_text in text) is not needs_map
     assert (map_text in text) is needs_map
@@ -515,21 +527,23 @@ def test_the_guard_asks_again_where_only_the_window_took_the_bible_to_its_map_un
         low, high = (low, middle) if starts(middle) else (middle, high)
     early, late = high, 2 * high
     _, _, rows, _, text = starts(early)
-    assert rows == ["design_bible"] and design.operative_view in text  # the window's map, above the budget's number
+    assert rows == ["design_bible", "body_map"] and design.operative_view in text  # the window's maps, above the budget's number
     plan, asked, view = build(fitted.core, early, late)
     rows, steps, text = _shown(view)
     assert asked == [early, late] and walked == [early, late] and plan.window_tokens == late
     assert not rows and design.full_text in text and text.count("A sentence of the mechanism and its why.") == 50 * 120
     assert "OWNER_UNTOLD_WHOLE" in text and "WORDS THAT STARTED THE WORK" in json.dumps(plan.messages_for("nano"))
     plan, asked, view = build(fitted.core, early, early)  # the same window: asked once more, nothing walked again
-    assert asked == [early, early] and walked == [early] and _shown(view)[0] == ["design_bible"]
-    # The budget alone, the window wide: it takes host forms and the bible's map for itself (``start_room``), asks nothing.
+    assert asked == [early, early] and walked == [early] and _shown(view)[0] == ["design_bible", "body_map"]
+    # The budget alone, the window wide: it takes host forms and the bible's map for itself (``start_room``), asks nothing;
+    # Body Map is WINDOW_ONLY so a soft Nano target never shortens it.
     monkeypatch.setattr(context_budget, "OWNER_NANO_TARGET_TOKENS", 30_000)
     mine, other = _fitting(tmp_path / "budget", monkeypatch, authored=True, others=True, required_words=30)
     plan, asked, view = build(other.core, 300_000)
     held = view.memory_facts["host_sections_addressed"]
     assert asked == [300_000] and walked == [300_000] and mine.operative_view in _shown(view)[2]
     assert {row["section_id"] for row in held} >= {"runtime", "design_bible"} and {row.get("start_room") for row in held} == {"nano"}
+    assert "body_map" not in {row["section_id"] for row in held}
 
 
 def test_without_a_measured_window_only_a_refusal_past_tellings_takes_the_bible(tmp_path, monkeypatch):
@@ -561,7 +575,6 @@ def test_running_max_keeps_the_books_at_both_sides_of_the_design_boundary(tmp_pa
 
     from ouroboros import context_budget, context_fit as fit, memory_floor as floor, memory_view as mv
     from ouroboros.artifacts import read_actor_source_bytes
-    from ouroboros.context_layout import book_navigation
     from ouroboros.section_floor import predicted_section, relocated_text
     from tests._context_fit_fixtures import _rebind
     from tests._memory_view_synthetic import pages
@@ -623,26 +636,26 @@ def test_running_max_keeps_the_books_at_both_sides_of_the_design_boundary(tmp_pa
             assert not addressed
         free = window - reserve - event["projected_prompt_tokens"]
         eighth = (window + divisor - 1) // divisor
-        whole_books = core.architecture_md in text and core.development_md in text
-        if not whole_books:
-            assert all(book_navigation(book) in text for book in core.reference_books)
+        body_map_whole = "The whole body map." in text
+        body_map_compact = "## Body (parts & addresses)" in text
+        assert body_map_whole or body_map_compact
         recaps, tails = text.count("MY_OWN_RECAP."), text.count("SEALED_PAGE_TAIL")
         record_property(case, json.dumps(dict(window=window, reserve=reserve, free=free, required=0 if case == "wide" else eighth,
             input=event["projected_prompt_tokens"], original_input=bound - reserve, whole_threshold=whole, pointer_threshold=pointer,
-            preferred=rebound.preferred_mode, effective=mode, books="whole" if whole_books else "chapter_maps", design=whole_design,
-            recaps=recaps, whole_page_tails=tails, owner_and_tail_exact=True,
+            preferred=rebound.preferred_mode, effective=mode, books="body_map" if body_map_whole else "body_map_compact",
+            design=whole_design, recaps=recaps, whole_page_tails=tails, owner_and_tail_exact=True,
             host_steps=[r["section_id"] for r in facts.get("host_sections_addressed", ())],
             request_sha256=sha256(json.dumps(messages, ensure_ascii=False, sort_keys=True).encode()).hexdigest())))
         if case == "wide":
             assert 0 <= free < eighth and messages == sent
         else:
             assert free >= eighth, (case, free, eighth)
-        assert not (set(facts["floor"]["steps"]) - {"F5l"})
+        assert mode == "max"
         if case == "low":
-            assert mode == "low" and not whole_books and whole_design
-            assert facts["floor"]["mode_switch"] == {"from": "max", "to": "low"} and not facts["floor"]["by_budget"]
+            assert not whole_design and (body_map_compact or bool(set(facts["floor"]["steps"]) - {"F5l"}))
         else:
-            assert mode == "max" and whole_books and whole_design is (case in {"wide", "whole"})
+            assert not (set(facts["floor"]["steps"]) - {"F5l"})
+            assert whole_design is (case in {"wide", "whole"})
             if case == "whole":
                 assert recaps == len(story) and tails == 0
 

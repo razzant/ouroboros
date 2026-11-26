@@ -158,16 +158,16 @@ def mode_words(plan, mode):
 
 
 _LOW_START_WHY = {
-    "memory": "the whole books did not fit beside my memory even in its shortest tellings",
+    "memory": "this start did not fit beside my memory even in its shortest forms",
     "request": "even with no memory, what the request itself carries tips this start over the window on {model}",
-    "route": ("on {model} the window cannot hold the whole books beside the rest of this start and the work's room "
+    "route": ("on {model} the window cannot hold this start beside its core, resident body map, and work room "
               "even with no memory; folding my memory cannot change that"),
 }
 
 
 def low_start_line(plan, mode, task_id):
-    """The owner's Main line for a fresh start of an integrating focus that the window took from whole books in my
-    human's Max (to Low, temporarily, or to Nano where protected words leave the maps frame no room), named in the mode
+    """The owner's Main line for a fresh start of an integrating focus that the window took below my
+    human's Max (to Nano where protected words or request weight leave Max no room), named in the mode
     it got, by its Max room's cause (``memory_floor.lowered_cause``: memory, what the request itself carries, or the
     route). Its Max room exists only on the owner's Max with a known window. No numbers: the task's own facts keep
     them. "" for every other start: a held start, a delegated child or nanny, the owner's Low or Nano, an unknown
@@ -176,10 +176,12 @@ def low_start_line(plan, mode, task_id):
     room = receipt.get("max_room")
     if receipt.get("role") in DELEGATED_FOCUS_ROLES or not isinstance(room, dict) or room.get("cause") not in ("crowded", "route"):
         return ""
-    ran = "Nano" if mode == "nano" else "Low"  # protected words the maps frame could not hold beside its reply reserve
-    why = _LOW_START_WHY[floor.lowered_cause(room)].format(model=str(getattr(plan, "model", "") or "") or "this route")
+    ran = "Nano" if mode == "nano" else "Low"
+    why = ("Max's frame would drop authored tellings here; standing schemas keep more tellings whole"
+           if room.get("telling_preserved")
+           else _LOW_START_WHY[floor.lowered_cause(room)].format(model=str(getattr(plan, "model", "") or "") or "this route"))
     return (f"Task {task_id} runs in {ran} for now{floor.REQUIRED_BOOK_WHOLE if room.get('book_required') else ''}, not "
-            f"in your Max: {why}{'; even the chapter maps did not fit' if ran == 'Nano' else ''}. Your setting stays Max.")
+            f"in your Max: {why}. Your setting stays Max.")
 
 
 def low_start_episode(root, plan, mode, task_id, send):

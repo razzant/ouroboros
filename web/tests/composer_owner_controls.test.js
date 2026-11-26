@@ -661,6 +661,10 @@ test('each recorded reason of a lower request reads as its own sentence; a lower
     const said = ['memory', 'request', 'route', 'window', 'after_start'].map(reason);
     assert.ok(said.every(Boolean) && new Set(said).size === said.length, said.join(' | '));
     assert.equal(reason(''), '', 'an unknown start (no recorded reason) is not given one');
+    const bodyMapFact = { ...sent('nano', { cause: 'memory', id: 'work-bm' }),
+        context_attempt: { ...sent('nano', { cause: 'memory', id: 'work-bm' }).context_attempt, books: 'body_map' } };
+    m.controls.syncState({ context_mode: 'max', active_chat_activities: [bodyMapFact] });
+    assert.match(closed(m).fact[1], /^Nano for now, not Max: this start did not fit beside the history\./);
     m.controls.destroy();
 });
 

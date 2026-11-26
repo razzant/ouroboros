@@ -141,7 +141,7 @@ def restored_capture(state: Mapping) -> dict:
     capture = dict(state.get(CAPTURE_KEY) or {"entries": state.get("held_note_sections", [])})
     if "book_maps" not in capture:
         observed = (state.get("context_observations") or {}).get("_last_context_observation") or {}
-        if observed.get("memory_mode") == "low":
+        if observed.get("memory_mode") in ("max", "low", "nano"):
             rows = (observed.get("memory_facts") or {}).get("host_sections_addressed") or ()
             capture["book_maps"] = [row for row in rows if row.get("section_id") in BOOK_MAPS]
     if capture["entries"]:
@@ -158,7 +158,9 @@ def continuation_capture(plan: Any, mode: str | None) -> dict:
 
     core = getattr(plan, "core", None)
     entries = [part for part in getattr(core, "dynamic_sections", ()) if isinstance(part, HeldNoteSection)]
-    low_facts = getattr(getattr(plan, "low_projection", None), "memory_facts", None) or {}
+    map_mode = mode if mode in {"max", "low", "nano"} else "low"
+    map_proj = plan.projection(map_mode) if hasattr(plan, "projection") else getattr(plan, "low_projection", None)
+    low_facts = getattr(map_proj, "memory_facts", None) or {}
     book_maps = [row for row in low_facts.get("host_sections_addressed", ())
                  if row.get("section_id") in BOOK_MAPS and not row.get("predicted")]
     if not entries:

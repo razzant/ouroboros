@@ -15,12 +15,14 @@ def test_book_maps_keep_their_chapters_and_paths_and_retain_the_map(tmp_path):
     assert len(section.operative_view) < len(section.full_text) / 4
     assert "(navigation map)" not in section.operative_view  # the per-chapter heading index stays retained
     books = (book, load_reference_book(repo, "development"))
-    parts, development = context_layout.reference_doc_sections(None, context_mode="nano", include_development=True,
+    parts, development = context_layout.reference_doc_sections(None, context_mode="nano", include_development=False,
                                                                books=books)
-    assert [getattr(part, "section_id", None) for part in parts][:2] == ["architecture_map", "development_map"]
-    full, _dev = context_layout.reference_doc_sections(None, context_mode="max", include_development=False,
-                                                        books=books)
-    assert not isinstance(full[0], HostSection) or full[0].operative_view is None  # Max keeps the book resident
+    assert development == ""
+    assert [getattr(part, "section_id", None) for part in parts] == ["body_map"]
+    full, dev_max = context_layout.reference_doc_sections(None, context_mode="max", include_development=False,
+                                                          books=books)
+    assert dev_max == "" and full == parts
+    assert isinstance(full[0], HostSection) and full[0].operative_view is not None
 
 
 def test_world_and_subagents_keep_names_and_state(tmp_path, monkeypatch):

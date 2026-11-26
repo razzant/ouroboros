@@ -19,21 +19,21 @@ def core(root, marked):
                    dynamic_head_text='', dynamic_head_sections=())
 
 
-@pytest.mark.parametrize('marked,mode', [(True, 'max'), (False, 'low')])
-@pytest.mark.parametrize('late_gate', [False, True])
-def test_both_max_gates_use_ordinary_forms_not_whole_story(tmp_path, monkeypatch, marked, mode, late_gate):
-    if late_gate:
-        monkeypatch.setattr(mf, 'max_room_lost', lambda _fact: False)
+@pytest.mark.parametrize('marked', [True, False])
+def test_both_max_gates_use_ordinary_forms_not_whole_story(tmp_path, monkeypatch, marked):
+    """Under unified Body Map, Max stays Max in both cases: marked pages fold via ordinary F5l with zero emergency
+    forms, while unmarked pages fold via emergency forms directly inside Max without a spurious Max->Low switch."""
     plan = scale.build(tmp_path, monkeypatch, window=100000, captured=core(tmp_path, marked))
-    assert plan.initial_mode == mode
-    shown = plan.projection(mode)
+    assert plan.initial_mode == 'max'
+    shown = plan.projection('max')
     assert shown.calibrated_tokens + 10000 <= 100000
     if marked:
         assert shown.memory_facts['floor']['steps'].get('F5l')
         assert not shown.memory_facts['floor']['forms']['emergency']
     else:
         assert shown.memory_facts['max_room']['need'] > 100000
-    if marked and not late_gate:
+        assert shown.memory_facts['floor']['forms']['emergency']
+    if marked:
         for ratio in (0.83, 1.003, 1.17):
             window = 100000
             monkeypatch.setattr(scale.cf, '_route_calibration_ratio', lambda *a, **kw: ratio)

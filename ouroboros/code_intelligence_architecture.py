@@ -1,6 +1,6 @@
 """Architecture facts over the pinned domain/contract/persistence carriers (CPL-3).
 
-Five pure queries whose consumer #1 is Ouroboros itself (self-evolution):
+Six pure queries whose consumer #1 is Ouroboros itself (self-evolution):
 
 - ``owner_of(path|symbol)`` — the domain owner per ``ouroboros/domains.toml``;
 - ``domain_dependencies(d)`` — the manifest-baseline direction edges of one domain;
@@ -10,7 +10,10 @@ Five pure queries whose consumer #1 is Ouroboros itself (self-evolution):
   per ``docs/PERSISTENCE.md``;
 - ``protected_contracts_affected(diff)`` — the protected surfaces
   (``runtime_mode_policy`` inventories) and frozen-contract rows
-  (ARCHITECTURE §11.1) a change set touches.
+  (ARCHITECTURE §11.1) a change set touches;
+- ``module_map(domains|<D01..>|<prefix>)`` — live Python/JS module leads
+  projected from ``ouroboros/domains.toml``, Python docstrings, and ``web/``
+  headers.
 
 Everything here derives from the repository's sources: the domain manifest,
 the books, local syntax and the protected-path declarations. No LLM or
@@ -26,7 +29,7 @@ from __future__ import annotations
 import ast
 import pathlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Tuple
 
 from ouroboros import work_domain
@@ -45,6 +48,7 @@ ARCHITECTURE_FACTS = (
     "facade_consumers",
     "persistence_entities_written_by",
     "protected_contracts_affected",
+    "module_map",
 )
 
 # A top-level ``from <module> import name`` carrying the F401-noqa marker is a re-export.
@@ -64,12 +68,13 @@ _DIFF_RENAME = re.compile(r"^rename (?:from|to) (\S+)$", re.MULTILINE)
 
 @dataclass(frozen=True)
 class DomainManifest:
-    """The parsed domain manifest: vocabulary, assignment, baseline edges."""
+    """The parsed domain manifest: vocabulary, assignment, references, baseline edges."""
 
     domains: Dict[str, str]        # "D02" -> title
     modules: Dict[str, str]        # repo-relative path -> domain id
     graph_allowed: Tuple[str, ...]  # strict baseline "D01->D02" pairs
     lazy_only: Tuple[str, ...]      # lazy-only baseline pairs
+    references: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
 
 
 def _read_carrier(repo_root: pathlib.Path, relpath: str) -> str:
@@ -86,27 +91,51 @@ def _read_carrier(repo_root: pathlib.Path, relpath: str) -> str:
         ) from exc
 
 
-def load_domain_manifest(repo_root: pathlib.Path) -> DomainManifest:
+def load_domain_manifest(
+    repo_root: pathlib.Path,
+    *,
+    read_bytes: Callable[[str], bytes] | None = None,
+) -> DomainManifest:
     try:  # Python 3.11+
         import tomllib
     except ImportError:  # pragma: no cover - 3.10 venvs ship tomli
         import tomli as tomllib
 
-    raw = _read_carrier(repo_root, DOMAIN_MANIFEST_RELPATH)
+    if read_bytes is not None:
+        try:
+            raw = read_bytes(DOMAIN_MANIFEST_RELPATH).decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ValueError(f"architecture carrier {DOMAIN_MANIFEST_RELPATH} is unreadable ({exc})") from exc
+    else:
+        raw = _read_carrier(repo_root, DOMAIN_MANIFEST_RELPATH)
     try:
         data = tomllib.loads(raw)
     except Exception as exc:
         raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} does not parse as TOML: {exc}") from exc
+    for section in ("domains", "modules", "references", "graph"):
+        val = data.get(section)
+        if val is not None and not isinstance(val, dict):
+            raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} section {section!r} must be a TOML table")
     graph = data.get("graph") or {}
+    for key in ("allowed", "lazy_only"):
+        val = graph.get(key)
+        if val is not None and not isinstance(val, list):
+            raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} graph.{key} must be a list")
     for path in data.get("modules") or {}:
         pure = pathlib.PurePosixPath(path)
         if pure.is_absolute() or ".." in pure.parts or "\\" in path:
             raise ValueError("domain module paths must stay relative to their repository")
+    refs = {
+        str(k): tuple(str(v) for v in vals)
+        for k, vals in (data.get("references") or {}).items()
+        if isinstance(vals, list)
+    }
     return DomainManifest(
         domains={str(k): str(v) for k, v in (data.get("domains") or {}).items()},
         modules={str(k): str(v) for k, v in (data.get("modules") or {}).items()},
         graph_allowed=tuple(str(p) for p in graph.get("allowed") or ()),
         lazy_only=tuple(str(p) for p in graph.get("lazy_only") or ()),
+        references=refs,
     )
 
 
@@ -632,6 +661,183 @@ def protected_contracts_affected(
 
 
 # ---------------------------------------------------------------------------
+# module_map (live docstring / header projection over domains.toml & web/)
+# ---------------------------------------------------------------------------
+
+def _module_lead(
+    repo_root: pathlib.Path,
+    relpath: str,
+    *,
+    read_bytes: Callable[[str], bytes] | None = None,
+) -> str:
+    """First-line summary of a Python module docstring or JS header comment; "" when absent."""
+    root = pathlib.Path(repo_root).resolve(strict=False)
+    full = (root / relpath).resolve(strict=False)
+    if full != root and root not in full.parents:
+        return ""
+    if read_bytes is not None:
+        try:
+            text = read_bytes(relpath).decode("utf-8", errors="replace")
+        except (OSError, ValueError, KeyError):
+            return ""
+    else:
+        if not work_domain.is_file(full):
+            return ""
+        try:
+            text = work_domain.read_text(full)
+        except work_domain.WorkDomainUnsettled:
+            raise
+        except OSError:
+            return ""
+    if relpath.endswith(".py"):
+        try:
+            doc = ast.get_docstring(ast.parse(text, filename=relpath)) or ""
+        except SyntaxError:
+            return ""
+        first = next((line.strip() for line in doc.splitlines() if line.strip()), "")
+        return first[:160]
+    if relpath.endswith((".js", ".mjs", ".ts")):
+        lines = text.splitlines()
+        comment_lines: List[str] = []
+        in_block = False
+        for raw in lines[:16]:
+            stripped = raw.strip()
+            if in_block:
+                closed = "*/" in stripped
+                chunk = stripped.split("*/", 1)[0] if closed else stripped
+                chunk = chunk.lstrip("*").strip()
+                if chunk:
+                    comment_lines.append(chunk)
+                if closed or len(" ".join(comment_lines)) >= 160:
+                    break
+                continue
+            if not stripped:
+                if comment_lines:
+                    break
+                continue
+            if stripped.startswith("//"):
+                body = stripped[2:].strip()
+                if body:
+                    comment_lines.append(body)
+            elif stripped.startswith("/*"):
+                closed = "*/" in stripped[2:]
+                body = (stripped[2:].split("*/", 1)[0] if closed else stripped[2:]).lstrip("*").strip()
+                if body:
+                    comment_lines.append(body)
+                if closed:
+                    break
+                in_block = True
+            else:
+                break
+        return " ".join(c for c in comment_lines if c)[:160]
+    return ""
+
+
+def _confined_rel_prefix(root: pathlib.Path, arg: str) -> tuple[str, pathlib.Path]:
+    """Validate that a ``module_map`` path prefix stays strictly inside ``root``."""
+    raw = str(arg or "").strip().replace("\\", "/")
+    if raw.startswith("/") or (len(raw) >= 2 and raw[1] == ":"):
+        raise ValueError(f"module_map prefix must be repository-relative, not absolute: {arg!r}")
+    parts = [p for p in raw.split("/") if p and p != "."]
+    if not parts or any(p == ".." for p in parts):
+        raise ValueError(f"module_map prefix escapes repository root: {arg!r}")
+    rel = "/".join(parts)
+    if raw.endswith("/") and not rel.endswith("/"):
+        rel += "/"
+    resolved_root = root.resolve(strict=False)
+    resolved_target = (resolved_root / rel.rstrip("/")).resolve(strict=False)
+    if resolved_target != resolved_root and resolved_root not in resolved_target.parents:
+        raise ValueError(f"module_map prefix escapes repository root: {arg!r}")
+    return rel, resolved_target
+
+
+def module_map_rows(
+    repo_root: pathlib.Path,
+    target: str,
+    *,
+    inventory: CodeInventory | Callable[[], CodeInventory] | None = None,
+    read_bytes: Callable[[str], bytes] | None = None,
+) -> List[str]:
+    """Live module map projected from ``domains.toml``, Python docstrings, and ``web/`` headers."""
+    root = pathlib.Path(repo_root)
+    resolved_root = root.resolve(strict=False)
+    manifest = load_domain_manifest(root, read_bytes=read_bytes)
+    arg = str(target or "").strip().replace("\\", "/")
+    if not arg:
+        raise ValueError("module_map requires 'domains', a domain id (e.g. D06), or a path prefix (e.g. web/modules/)")
+    if arg.lower() in {"domains", "all"}:
+        counts: Dict[str, int] = {}
+        for dom in manifest.modules.values():
+            counts[dom] = counts.get(dom, 0) + 1
+        rows = [
+            f"{dom} — {manifest.domains[dom]} ({counts.get(dom, 0)} modules)"
+            + (f" | manuals: {', '.join(manifest.references[dom])}" if manifest.references.get(dom) else "")
+            for dom in sorted(manifest.domains)
+        ]
+        for key in sorted(k for k in manifest.references if k not in manifest.domains):
+            rows.append(f"{key} | manuals: {', '.join(manifest.references[key])}")
+        return rows
+    upper = arg.upper()
+    if upper in manifest.domains:
+        mods = sorted(path for path, dom in manifest.modules.items() if dom == upper)
+        manuals = ", ".join(manifest.references.get(upper, ())) or "—"
+        rows = [f"{upper} — {manifest.domains[upper]} ({len(mods)} modules) | manuals: {manuals}"]
+        for path in mods:
+            lead = _module_lead(root, path, read_bytes=read_bytes)
+            rows.append(f"{path} — {lead}" if lead else path)
+        return rows
+    prefix, base_dir = _confined_rel_prefix(root, arg)
+    if prefix.startswith("web/") or prefix == "web":
+        want_tests = prefix == "web/tests" or prefix.startswith("web/tests/")
+        if inventory is not None:
+            inv = inventory() if callable(inventory) else inventory
+            inv_files = getattr(inv, "files", None) or ()
+            files = sorted(
+                rel for rel in (str(getattr(f, "path", getattr(f, "relpath", f))).replace("\\", "/") for f in inv_files)
+                if (rel == prefix.rstrip("/") or rel.startswith(prefix.rstrip("/") + "/"))
+                and rel.endswith((".js", ".mjs", ".ts"))
+                and "/node_modules/" not in f"/{rel}/"
+                and (want_tests or not rel.startswith("web/tests/"))
+            )
+        else:
+            if not base_dir.exists():
+                return [f"{prefix}: no matching files under {root}"]
+            candidates = (base_dir.rglob("*") if base_dir.is_dir() else [base_dir])
+            files = []
+            for p in candidates:
+                if p.suffix not in {".js", ".mjs", ".ts"}:
+                    continue
+                resolved = p.resolve(strict=False)
+                if resolved != resolved_root and resolved_root not in resolved.parents:
+                    continue
+                if not work_domain.is_file(resolved):
+                    continue
+                rel = resolved.relative_to(resolved_root).as_posix()
+                if "/node_modules/" in f"/{rel}/" or (not want_tests and rel.startswith("web/tests/")):
+                    continue
+                files.append(rel)
+            files = sorted(dict.fromkeys(files))
+        manuals = ", ".join(manifest.references.get("web/", ())) or "—"
+        rows = [f"{prefix} ({len(files)} JS/TS modules) | manuals: {manuals}"]
+        for rel in files:
+            lead = _module_lead(root, rel, read_bytes=read_bytes)
+            rows.append(f"{rel} — {lead}" if lead else rel)
+        return rows
+    matched = sorted(path for path in manifest.modules if path == prefix or path.startswith(prefix))
+    if not matched:
+        return [f"{prefix}: no modules matched in {DOMAIN_MANIFEST_RELPATH} or web/"]
+    rows = []
+    for path in matched:
+        dom = manifest.modules[path]
+        manuals = ", ".join(manifest.references.get(dom, ()))
+        lead = _module_lead(root, path, read_bytes=read_bytes)
+        suffix = f" — {lead}" if lead else ""
+        ref_tag = f" [manuals: {manuals}]" if manuals else ""
+        rows.append(f"{path} ({dom}){suffix}{ref_tag}")
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # The query_code op=architecture renderer
 # ---------------------------------------------------------------------------
 
@@ -703,6 +909,8 @@ def architecture_fact_rows(
             f"{row.entity} [{row.section}] writer: {row.writer_cell}"
             for row in writes
         ]
+    if fact == "module_map":
+        return module_map_rows(root, arg, inventory=inventory, read_bytes=read_book_bytes)
     impact = protected_contracts_affected(root, arg, read_book_bytes=read_book_bytes)
     rows = [
         f"{len(impact.paths)} changed path(s): {len(impact.protected)} protected, "

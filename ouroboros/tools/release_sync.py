@@ -577,7 +577,10 @@ def version_carrier_desyncs(
         badge_token = f"version-{_shields_escape(version)}-green"
         if extract_readme_badge_version(readme_text) != version or badge_token not in readme_text:
             desync.append(f"README.md badge (expected {version} / {badge_token})" if detailed else "README.md badge")
-    if arch_text and extract_architecture_header_version(arch_text) != version:
+    # Expand-contract: keep syncing transitional `# Ouroboros vX.Y.Z` on disk so
+    # pre-migration installations update cleanly, while tolerating a headerless
+    # entrypoint so a later release can retire the version carrier cleanly.
+    if arch_text and (found_arch := extract_architecture_header_version(arch_text)) and found_arch != version:
         desync.append(f"docs/ARCHITECTURE.md header (expected # Ouroboros v{version})" if detailed else "ARCHITECTURE.md header")
     # tests/test_gateway_parity.py pins this to VERSION, so it is a release
     # carrier like the others; leaving it out of the sync made every release

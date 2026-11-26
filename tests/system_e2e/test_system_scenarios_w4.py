@@ -325,15 +325,12 @@ def test_s18_carrier_conflict_resolves_to_official_version_and_transfers_carrier
             # tree's own carrier-sync authority reports zero desyncs.
             from ouroboros.tools.release_sync import (
                 check_worktree_version_sync,
-                extract_architecture_header_version,
                 extract_readme_badge_version,
             )
 
             assert (clone / "VERSION").read_text(encoding="utf-8").strip() == S18_OFFICIAL_VERSION
             readme = (clone / "README.md").read_text(encoding="utf-8")
             assert extract_readme_badge_version(readme) == S18_OFFICIAL_VERSION, "README badge not transferred"
-            arch = (clone / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
-            assert extract_architecture_header_version(arch) == S18_OFFICIAL_VERSION, "ARCHITECTURE header not transferred"
             assert f'version = "{S18_OFFICIAL_VERSION}"' in (clone / "pyproject.toml").read_text(encoding="utf-8")
             assert check_worktree_version_sync(clone) == "", "carrier desync after the update"
 

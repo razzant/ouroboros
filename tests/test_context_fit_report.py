@@ -65,7 +65,7 @@ def test_a_directly_required_handbook_is_reported_whole_in_every_mode(tmp_path, 
         return [row['form'] for row in result['blocks'] if row['block'] == 'DEVELOPMENT']
 
     assert development(True) == ['whole']
-    assert development(False) == (['orientation'] if mode == 'max' else [])
+    assert development(False) == []
 
 
 def test_the_start_text_is_written_as_the_mind_reads_it_and_a_declared_density_prices_the_start(tmp_path):

@@ -26,7 +26,7 @@ from ouroboros import memory_view as mv
 from ouroboros import memory_view_conversations as conversations
 from ouroboros import memory_view_legacy as legacy
 from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ordinary_pairs, normalized, swallowed,
-                                    form_counts, holding_room, Selection, supersedes, WorkPrices, restore,
+                                    form_counts, holding_room, Selection, stage_of, supersedes, WorkPrices, restore,
                                     ORDINARY_STAGES, TELLING_STAGES, ROOM_STEPS)
 from ouroboros.memory_form_facts import holding_lines, telling_emergency, physical_floor
 from ouroboros.memory_view_work import PROGRAM_HISTORY_HEAD, has_program_history, model_room as model_room
@@ -275,12 +275,6 @@ def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: I
             "parts": sorted(([name, tokens] for name, tokens in parts.items()), key=lambda part: -part[1])}
 
 
-def max_room_lost(fact: Mapping[str, Any]) -> bool:
-    """Max cannot hold whole books here: my memory, even in its shortest telling of the whole horizon
-    (``telling_level``), does not fit beside them and the work's room (``telling_need``; ``need`` before it existed)."""
-    return fact.get("telling_need", fact["need"]) > fact["window"]
-
-
 def with_max_room(facts: Mapping[str, Any], fact: Optional[Mapping[str, Any]], mode: str,
                   required_book: int = 0) -> Dict[str, Any]:
     """The view facts with the start's settled Max room: ``held`` when Max kept whole books (``cuts``: the steps past
@@ -325,9 +319,7 @@ WHOSE = (("mine", ("knowledge", "source registry", "scratchpad", "held note head
 
 
 def gate_need(fact: Mapping[str, Any]) -> int:
-    """What the books gate weighed (``max_room_lost``): whole books, my memory at the gate's level (my shortest telling
-    of the whole horizon, ``telling_level``), the work's room and the reply reserve; the ordinary need where no telling
-    was priced, the gate then weighing that."""
+    """Measured start need at ``telling_level`` beside the work's room and reply reserve."""
     return fact.get("telling_need", fact["need"])
 
 
@@ -403,22 +395,22 @@ def addressed_text(steps: Mapping[str, Any]) -> str:
 
 def measure_text(fact: Mapping[str, Any], *, parts: bool = False, pages: Optional[Mapping[str, Any]] = None,
                  composition: str = "") -> str:
-    """The host's measure of one start in the provable parts; the mind judges what they mean: the gate's need
-    (``gate_need``: whole books, my memory at the gate's level, the work's room, the reply reserve) against the window,
-    the ordinary need (my memory with no shortened form) under that name and the need with no memory; with ``parts``
-    the measure by whose part it is (``WHOSE``), else the tool schemas and the need without them too; ``composition``
-    names my memory at the gate's level by kind (``context_view_facts.telling_parts``). ``pages``
-    (``unfolded_pages`` of the same snapshot) names how many unfolded pages there are and where they pile up."""
+    """The host's measure of one start in the provable parts; the mind judges what they mean: the telling need
+    (``gate_need``: core + resident Body Map, my memory at its shortest tellings, the work's room, the reply reserve)
+    against the window, the ordinary need (my memory with no shortened form) under that name and the need with no
+    memory; with ``parts`` the measure by whose part it is (``WHOSE``), else the tool schemas and the need without
+    them too; ``composition`` names my memory at its shortest tellings by kind (``context_view_facts.telling_parts``).
+    ``pages`` (``unfolded_pages`` of the same snapshot) names how many unfolded pages there are and where they pile up."""
     window, gate = fact["window"], gate_need(fact)
     unfolded = pages_text(pages) if pages is not None else f"pages no part or account holds yet {fact['unfolded']:,}"
-    text = (f"window {window:,}; the gate's need {gate:,}, {'headroom' if gate <= window else 'short by'} "
+    text = (f"window {window:,}; the telling need {gate:,}, {'headroom' if gate <= window else 'short by'} "
             f"{abs(window - gate):,}; the ordinary need {fact['need']:,}; with no memory {fact['zero_need']:,}")
     if not parts:  # the parts name the schemas whose; here they and the need without them stand alone
         text += f"; tool schemas {fact['schemas']:,}; without them {fact['floor_need']:,}"
     if parts:
         named, grouped = dict(fact["parts"]), {name for _whose, names in WHOSE for name in names}
-        kinds = f" ({composition})" if composition and fact.get("telling") else ""  # what keeps the books out, by kind
-        listed = {"mine": [f"my memory at the gate's level {fact.get('telling', fact['story'] + fact['room']):,}{kinds}"],
+        kinds = f" ({composition})" if composition and fact.get("telling") else ""
+        listed = {"mine": [f"my memory at its shortest tellings {fact.get('telling', fact['story'] + fact['room']):,}{kinds}"],
                   "what the request itself carries": [f"tool schemas {fact['schemas']:,}"], "my human's": []}
         for whose, names in WHOSE:
             listed[whose] += [f"{name} {named[name]:,}" for name in names if name in named]
@@ -434,20 +426,23 @@ def measure_text(fact: Mapping[str, Any], *, parts: bool = False, pages: Optiona
             f"Max room of {fact['allowance']:,}")
 
 
-_LOWERED_WORDS = {"memory": "Whole books, my memory at the gate's level and the work's room need",
-                  "request": "With no memory, whole books, what the request itself carries and the work's room need",
-                  "route": ("With no memory and no tool schemas, whole books beside the rest of this start (my core, the "
-                            "host's sections and the assignment) and the work's room need")}
+_LOWERED_WORDS = {"memory": "Max, my memory at its shortest tellings and the work's room need",
+                  "request": "With no memory, what the request itself carries and the work's room need",
+                  "route": ("With no memory and no tool schemas, my core, resident body map, the host's sections, "
+                            "the assignment and the work's room need")}
 
 
 def lowered_line(mode: str, lowered_from: str, fact: Optional[Mapping[str, Any]] = None) -> str:
     """Why a start left the owner's mode, in measured parts: facts only, never an instruction or a possibility."""
     if mode != "low":
+        if fact and fact.get("telling_preserved"):
+            return (f"{lowered_from.capitalize()}'s frame would drop authored tellings here; "
+                    f"this task runs in {mode.capitalize()} with standing schemas so more tellings stay whole.")
         return (f"The window cannot hold {lowered_from.capitalize()} with even the shortest view of my memory; "
                 f"this task runs in {mode.capitalize()}.")
     head = f"{TEMPORARY_LOW}; my human's mode is {lowered_from.capitalize()}."
     if not fact:
-        return f"{head} The whole books did not fit beside my memory and the work's room."
+        return f"{head} The window could not hold {lowered_from.capitalize()} beside my memory and the work's room."
     cause, need = lowered_need(fact)
     short = need - fact["window"]
     route = (", a disclosed fact of this route: folding my memory or dropping tool schemas cannot make room here"
@@ -459,10 +454,10 @@ def lowered_line(mode: str, lowered_from: str, fact: Optional[Mapping[str, Any]]
 
 def required_book_note(*, lowered: bool, book_tokens: int, free: Optional[int], work: int) -> str:
     """What a start says of this task's directly required handbook, appended after every ordinary choice (owner
-    1.11.2026): a Low its room lowered keeps that book whole, and a work room left short at planning is a fact,
+    1.11.2026): a lowered start keeps that book whole, and a work room left short at planning is a fact,
     never a veto, without a present-tense remaining count that later map yields would make stale.
     ``book_tokens`` and ``free`` are calibrated; ``free`` is None when nothing measured the start's room."""
-    lines = ["This task's directly required handbook stays whole beside these chapter maps."] if lowered else []
+    lines = ["This task's directly required handbook stays whole beside the resident Body Map."] if lowered else []
     if free is not None and free < work:
         lines.append(f"Start room at planning was smaller than the {work:,} tokens requested: "
                      f"this task's directly required handbook takes {book_tokens:,} tokens.")
@@ -631,8 +626,15 @@ def ordinary_level(snapshot, stages_of=ORDINARY_STAGES):
 
 
 def telling_level(snapshot):
-    """My shortest telling of the whole horizon: what a Max start prices beside whole books (``max_room_lost``)."""
+    """My shortest telling of the whole horizon: every source keeps my telling or its conversation's line."""
     return ordinary_level(snapshot, TELLING_STAGES)
+
+
+def emergency_item_count(snapshot, level) -> int:
+    """Count distinct per-source elements in ``level`` past ``TELLING_STAGES`` (excluding aggregate count flags)."""
+    return len({ident.removeprefix("bare:") for step, idents in level.addressed
+                if not step.endswith("a") for ident in idents
+                if stage_of(snapshot, step, ident) not in TELLING_STAGES})
 
 
 def owner_rows(snapshot: mv.MemoryViewSnapshot) -> Dict[str, Mapping[str, Any]]:
@@ -938,7 +940,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     reports_miss = binds or (report_nano_miss and kept is None and mode == owner_mode == "nano"
                              and target is not None and (window is None or target < window))
     floor, keeps = ((TARGET_FLOOR, TARGET_KEEPS) if binds else (TELLING_STAGES, frozenset())  # the one order (4A)
-                    if telling_floor or mode == "max" and (kept is None or start_work) else (None, frozenset()))
+                    if telling_floor else (None, frozenset()))
     size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))
     room_bound = allowances["window"] if binds else allowances["margin"]  # a target's miss is its own fact, below
     uncovered = uncovered_owner_rows(snapshot)
@@ -1021,7 +1023,7 @@ def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: 
 # Host producers before the whole-or-outline sections, then the memory walk, all under the same
 # start budget. Running views narrow only under physical pressure or a refusal.
 HOST_STEPS = ("runtime", "review_pool", "review_continuity", "installed_skills", "drive_state",
-              "world", "subagents", "architecture_map", "development_map", "return_facts_words")
+              "world", "subagents", "body_map", "return_facts_words")
 # Optional reference sections keep their whole excerpt beside my shortest tellings until physical pressure.
 OPTIONAL_STEPS = ("design_bible",)
 
@@ -1047,10 +1049,10 @@ def untold_forms(snapshot, level):
     return frozenset((step, ident) for step, ids in level.addressed for ident in ids
                      if stages[step, ident] not in ORDINARY_STAGES)
 
-# Host forms only the window's own start bound takes: my WORLD map stays whole while that bound holds the request with
-# memory at its shortest forms, whatever soft frame the start has (memory audit 15.11.2026, F7); when the bound cannot
-# hold it, it still steps before memory.
-WINDOW_ONLY = ("world",)
+# Host forms only the window's own start bound takes: my WORLD map and resident Body Map stay whole while that bound
+# holds the request with memory at its shortest forms, whatever soft frame or role the start has (BIBLE P1; memory
+# audit 15.11.2026, F7); when the physical bound cannot hold them, they still step before memory.
+WINDOW_ONLY = ("world", "body_map")
 # The facts beside my human's word (``return_facts``) and the people's newest words beside them (``return_facts_words``,
 # owner 18.11.2026, 1A): they stand while the window's start bound holds the request with memory at my shortest telling
 # and the books as the frame holds them, whatever a target or a selected Low asks; past it the words step first to their
@@ -1061,7 +1063,7 @@ TELLING_SPARED = ("return_facts", "return_facts_words")
 # target or desired work room shortens them; a cold return keeps the chapter lists it held, retaining the current
 # full map when a chapter changed (``replay_book_maps``). A directly required handbook's first request that cannot go out takes them in this
 # order, its own map first, after the optional maps (owner 23.11.2026, 1; ``yield_for_book``).
-BOOK_MAPS = ("development_map", "architecture_map")
+BOOK_MAPS = ("body_map",)
 
 
 def _held_note_steps(sections, receipts, fits, *, form="summary"):
@@ -1138,8 +1140,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     never reach Low, and books that paid a deficit leave no host step to pay it again.
     A ``WINDOW_ONLY`` section steps only while the request with memory at its shortest forms (``shortest``) exceeds
     ``window_bound``, the window's own start bound: neither an owner's target nor the start's own room shortens it.
-    A ``TELLING_SPARED`` section steps only while the window cannot hold the request with memory at my shortest telling
-    and the books as the frame holds them (``told``: ``max_room_lost``'s own test), so before the books or a telling.
+    A ``TELLING_SPARED`` section steps only while the window cannot hold the request at my shortest telling (``told``).
     Given ``maps_told`` (an integrating Low start's own test, which asks no work room), ``BOOK_MAPS`` are spared so too;
     ``listed``, the chapter lists a cold return's accepted view showed (``replay_book_maps``), stand as shown.
     Held heads yield last (``_held_note_steps``). A map frame that holds them passes ``held_least(addressed,
@@ -1234,7 +1235,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         mapped = maps_told is not None and part.section_id in BOOK_MAPS
         telling = part.section_id in TELLING_SPARED or mapped
         spared = part.section_id in WINDOW_ONLY or telling
-        if part.section_id in WINDOW_ONLY and window_bound is not None and sent_least <= window_bound:
+        if not telling and part.section_id in WINDOW_ONLY and window_bound is not None and sent_least <= window_bound:
             continue  # the window's start bound holds it beside memory's shortest forms: no soft frame shortens it
         test = maps_told if mapped else told
         if telling and (test(addressed) if test else window_bound is None or current <= window_bound):
@@ -1344,22 +1345,20 @@ def replay_book_maps(sections, saved, core, *, retain=None):
 
 def step_book_map(plan: Any, mode: str, *, maps: Optional[bool] = None) -> Optional[Any]:
     """``plan`` with its required handbook's next yield (``yield_for_book``) in ``mode``'s shown view, for an unread
-    start whose first request cannot go out (Low takes optional maps then ``BOOK_MAPS`` when ``maps`` holds; Nano
-    takes only optional maps such as DESIGN, never ARCH/DEV); None where nothing is left, the frame holds no captured
-    core, or its shown view is not this capture's rendering. Only the yielded section's text changes: memory, its
-    notes, mode, schemas and reserves stay as the start chose them."""
+    start whose first request cannot go out (optional maps then ``BOOK_MAPS`` when ``maps`` holds in any mode);
+    None where nothing is left or the shown view no longer matches. Only the yielded section's text changes."""
     from ouroboros.context_fit import _governance_blocks, _request_tokens
     from ouroboros.section_floor import render_sections
 
     core = getattr(plan, "core", None)
-    if (core is None or mode not in ("low", "nano") or getattr(plan, f"{mode}_projection", None) is None
+    if (core is None or mode not in ("max", "low", "nano") or getattr(plan, f"{mode}_projection", None) is None
             or not core.required_book_tokens(mode)):
         return None
     shown = plan.projection(mode)
-    governance = _governance_blocks(None, core, mode="low")
+    governance = _governance_blocks(None, core, mode="low" if mode == "nano" else mode)
     common = governance[0] if not isinstance(governance[0], str) else ()
     rows = list(shown.memory_facts.get("host_sections_addressed", ()))
-    allow_maps = (mode == "low") if maps is None else bool(maps and mode == "low")
+    allow_maps = (mode in ("max", "low", "nano")) if maps is None else bool(maps and mode in ("max", "low", "nano"))
     stepped = yield_for_book((*core.dynamic_head_sections, *common), rows, core, maps=allow_maps)
     system = json.loads(shown.system_content_json)
 

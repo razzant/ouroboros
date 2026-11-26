@@ -452,52 +452,53 @@ def test_a_pairwise_start_fit_is_the_production_start_fit_and_writes_nothing(tmp
 
 def test_a_lower_mode_names_its_cause_from_the_plans_own_start_facts(tmp_path, monkeypatch):
     """``context_measurement.mode_cause`` reads why a candidate renders below the owner's mode from the plan alone:
-    a start the window lowered because memory crowded its Max room is ``memory``; a Max start renders no cause; a
-    lower mode the task took after a Max start is ``after_start``. The physical context carries both facts."""
+    under unified Body Map, a Max start lowered by the physical window steps to Nano with its measured cause
+    (``route``/``request``/``memory``); a Max start renders no cause; a lower mode taken after a Max start is
+    ``after_start``. The physical context carries both facts."""
     from ouroboros.context_measurement import measure_main_fit, mode_cause
 
     def plan_at(window):
         return scale.build(tmp_path, monkeypatch, window=window)
 
-    held, crowded = plan_at(1_000_000), None
-    for window in (300_000, 200_000, 150_000, 120_000, 100_000, 92_000):
+    held, lowered = plan_at(1_000_000), None
+    for window in (150_000, 120_000, 100_000, 90_000, 80_000):
         candidate = plan_at(window)
-        if candidate.initial_mode == 'low' and mf.crowded_by_memory(
-                candidate.projection('low').memory_facts.get('max_room')):
-            crowded = candidate
+        if candidate.initial_mode == 'nano' and candidate.start[1] in mf.LOWERED_CAUSES:
+            lowered = candidate
             break
-    assert held.initial_mode == 'max' and crowded is not None
-    assert mode_cause(crowded, 'low') == 'memory' and mode_cause(held, 'max') == ''
-    assert mode_cause(held, 'low') == 'after_start' and mode_cause(crowded, 'nano') == 'after_start'
+    assert held.initial_mode == 'max' and lowered is not None
+    expected_cause = lowered.start[1]
+    assert mode_cause(lowered, 'nano') == expected_cause and mode_cause(held, 'max') == ''
+    assert mode_cause(held, 'low') == 'after_start' and mode_cause(held, 'nano') == 'after_start'
     # A Max start whose window was not known (``unmeasured``) lowered nothing: it is no cause the usage ledger accepts,
     # even beside an owner's mode that differs from the start's (a carried plan), and a lower mode after it is after_start.
     unmeasured = dataclasses.replace(held, start=('max', 'unmeasured'))
     assert mode_cause(unmeasured, 'max') == '' and mode_cause(unmeasured, 'low') == 'after_start'
     assert mode_cause(dataclasses.replace(unmeasured, preferred_mode='low'), 'max') == 'after_start'
-    disposition = measure_main_fit(crowded, crowded.messages_for('low'), scale.tools(), profile='task_local_low',
-                                   rendered_mode='low', round_id='e:round:1')
+    disposition = measure_main_fit(lowered, lowered.messages_for('nano'), scale.tools(), profile='task_local_nano',
+                                   rendered_mode='nano', round_id='e:round:1')
     physical = cf._physical_context_for_fit(disposition)
-    assert (physical.preferred_mode, physical.rendered_mode, physical.mode_cause) == ('max', 'low', 'memory')
+    assert (physical.preferred_mode, physical.rendered_mode, physical.mode_cause) == ('max', 'nano', expected_cause)
     # The start is its own fact (``ContextFitPlan.start``): a route rebind that lowers a Max start for a smaller
     # window (``initial_mode`` follows that selection) is a lower mode taken after the start, and the next-start
-    # read says the task started in Max; a Low start narrowed again keeps its start's cause.
-    assert held.start == ('max', '') and crowded.start == ('low', 'memory')
-    for window in (300_000, 200_000, 150_000, 120_000, 100_000):  # as ``loop_model_call`` rebinds: the new record
+    # read says the task started in Max; a lowered start narrowed again keeps its start's cause.
+    assert held.start == ('max', '') and lowered.start == ('nano', expected_cause)
+    for window in (120_000, 100_000, 90_000, 80_000):  # as ``loop_model_call`` rebinds: the new record
         record = plan_at(window).window_record
         rebound = dataclasses.replace(held, window_record=record, window_tokens=record.total_equivalent).reproject_for_route(
             window_tokens=record.total_equivalent, known_window=True, ratio=1.0, output_reserve=held.output_reserve_tokens,
             tool_schemas=scale.tools(), start_mode='max', current_messages=held.messages_for('max'))
-        if rebound.initial_mode == 'low':
+        if rebound.initial_mode == 'nano':
             break
-    assert rebound.initial_mode == 'low' and rebound.start == held.start
-    assert (rebound.projection('low').memory_facts.get('floor') or {}).get('mode_switch')  # the rebind's own switch
-    assert mode_cause(rebound, 'low') == 'after_start'
+    assert rebound.initial_mode == 'nano' and rebound.start == held.start
+    assert (rebound.projection('nano').memory_facts.get('floor') or {}).get('mode_switch')  # the rebind's own switch
+    assert mode_cause(rebound, 'nano') == 'after_start'
     fit = mf.counterfactual_starts(rebound, {'as captured': mv.snapshot_from_json(rebound.core.memory_view_json)})
     assert fit['frame']['started'] == 'max'
-    narrowed = crowded.reproject_for_route(
-        window_tokens=crowded.window_tokens, known_window=True, ratio=1.0, output_reserve=crowded.output_reserve_tokens,
-        tool_schemas=scale.tools(), start_mode='low', refused_tokens=2_000, current_messages=crowded.messages_for('low'))
-    assert narrowed.initial_mode == 'low' and mode_cause(narrowed, 'low') == 'memory'
+    narrowed = lowered.reproject_for_route(
+        window_tokens=lowered.window_tokens, known_window=True, ratio=1.0, output_reserve=lowered.output_reserve_tokens,
+        tool_schemas=scale.tools(), start_mode='nano', refused_tokens=2_000, current_messages=lowered.messages_for('nano'))
+    assert narrowed.initial_mode == 'nano' and mode_cause(narrowed, 'nano') == expected_cause
 
 
 @pytest.mark.parametrize("old_effort,new_effort", [("high", "none"), ("none", "high")])

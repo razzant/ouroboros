@@ -44,26 +44,26 @@ def sent(monkeypatch):
 
 def test_a_start_memory_lowered_to_low_says_so_without_numbers_or_advice():
     line = low_start_line(_plan(_room()), "low", "rootA")
-    assert line == ("Task rootA runs in Low for now, not in your Max: the whole books did not fit beside my memory even "
-                    "in its shortest tellings. Your setting stays Max.")
+    assert line == ("Task rootA runs in Low for now, not in your Max: this start did not fit beside my memory even "
+                    "in its shortest forms. Your setting stays Max.")
     assert not any(char.isdigit() for char in line) and len(line.splitlines()) == 1  # numbers stay in the task's facts
     assert not any(word in line for word in ("may bring", "should", "must", "fold", "episode", "again"))
-    # A start that protected words took past the maps frame to Nano is named Nano, never Max (``context_fit``)
+    # A start that protected words took past Max to Nano is named Nano, never Max (``context_fit``)
     assert low_start_line(_plan(_room()), "nano", "rootA") == (
-        "Task rootA runs in Nano for now, not in your Max: the whole books did not fit beside my memory even in its "
-        "shortest tellings; even the chapter maps did not fit. Your setting stays Max.")
+        "Task rootA runs in Nano for now, not in your Max: this start did not fit beside my memory even in its "
+        "shortest forms. Your setting stays Max.")
 
 
 def test_what_the_request_carries_and_the_route_send_their_own_lines():
     """Consilium of 22.11.2026 (P6, P7): the opening line goes for every cause, each in its own words, no numbers."""
-    request = _room(zero_need=1_100_000, floor_need=950_000)  # the books fit without the tool schemas, not with them
+    request = _room(zero_need=1_100_000, floor_need=950_000)  # fits without tool schemas, not with them
     assert low_start_line(_plan(request, model="opus"), "low", "rootA") == (  # a period per model: the line names it
         "Task rootA runs in Low for now, not in your Max: even with no memory, what the request itself carries tips "
         "this start over the window on opus. Your setting stays Max.")
     assert "over the window on this route. Your" in low_start_line(_plan(request), "low", "rootA")  # no model named
     assert low_start_line(_plan(_room("route"), model="opus"), "low", "rootA") == (
-        "Task rootA runs in Low for now, not in your Max: on opus the window cannot hold the whole books beside the rest "
-        "of this start and the work's room even with no memory; folding my memory cannot change that. Your setting stays Max.")
+        "Task rootA runs in Low for now, not in your Max: on opus the window cannot hold this start beside its core, "
+        "resident body map, and work room even with no memory; folding my memory cannot change that. Your setting stays Max.")
     assert "on this route the window" in low_start_line(_plan(_room("route")), "low", "rootA")  # no model named
 
 
@@ -80,9 +80,14 @@ def test_every_other_start_gets_no_line(plan):
 def test_a_measured_crowded_start_gets_its_line(monkeypatch):
     core = _core()
     held = _fact(_start(core, 2_000_000, monkeypatch))
-    plan = _start(core, _crowded_window(held), monkeypatch)
-    assert plan.initial_mode == "low" and _fact(plan)["cause"] == "crowded"
-    assert low_start_line(plan, plan.initial_mode, "wake").startswith("Task wake runs in Low for now, not in your Max:")
+    # Under the unified Body Map, a crowded start holds Max by folding memory in place;
+    # only a route/physical shortfall steps Max down to Nano and emits the owner start line.
+    crowded = _start(core, _crowded_window(held), monkeypatch)
+    assert crowded.initial_mode == "max" and _fact(crowded)["cause"] == "held"
+    assert low_start_line(crowded, crowded.initial_mode, "wake") == ""
+    short = _start(core, held["floor_need"] - held["work"] - 10_000, monkeypatch)
+    assert short.initial_mode == "nano" and _fact(short)["cause"] in ("crowded", "route")
+    assert low_start_line(short, short.initial_mode, "wake").startswith("Task wake runs in Nano for now, not in your Max:")
     assert low_start_line(_start(core, 2_000_000, monkeypatch), "max", "wake") == ""
 
 

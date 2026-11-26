@@ -600,7 +600,9 @@ def test_the_brief_carries_the_index_the_governance_tiers_and_both_manifests(tmp
     assert "REQUIRED SOURCES" in task and "list is a MINIMUM" in task
     assert "prompts/SYSTEM.md (added" in task          # a touched prompt is owed in full
     assert manifest["native_required_sources_ref"]["policy"] == SCOPE_REQUIRED_SOURCES_POLICY
-    assert manifest["native_required_sources_ref"]["required_source_count"] == 1
+    # Touched prompts/SYSTEM.md plus unconditionally required docs/architecture/10-key-invariants.md.
+    assert manifest["native_required_sources_ref"]["required_source_count"] == 2
+    assert "docs/architecture/10-key-invariants.md" in task
     assert manifest["brief_chars"] == len(task)
     # The two parts are both there, and the Part 2 brief is hashed on its own.
     assert "## Part 1 — The change" in task and "## Part 2 — Coupling questions" in task

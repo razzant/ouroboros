@@ -179,6 +179,10 @@ def _compact_schema(value: Any) -> Any:
             compacted[key_text] = _compact_dependencies(item)
         else:
             compacted[key_text] = deepcopy(item)
+    enum_values = compacted.get("enum")
+    if (compacted.get("type") == "string" and isinstance(enum_values, list)
+            and enum_values and all(isinstance(v, str) for v in enum_values)):
+        compacted.pop("type", None)
     return compacted
 
 

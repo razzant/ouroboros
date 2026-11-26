@@ -9,7 +9,7 @@ import { mergeHistoricalTimelineItem } from '../modules/chat_history_replay.js';
 import { foldWaitRow, waitEpisode } from '../modules/task_checkpoints.js';
 import { buildTimelineItemHtml } from '../modules/chat_activity.js';
 import { projectResultArtifacts } from '../modules/result_files.js';
-import { causeOf, contextShown, lowMissedOf, observeContext } from '../modules/context_observation.js';
+import { asSent, causeOf, contextShown, lowMissedOf, observeContext } from '../modules/context_observation.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 import {
@@ -21,7 +21,7 @@ import {
 test('#931 every typed checkpoint kind names itself; only a kindless one is periodic', () => {
     // One family per producer module, so a kind that loses its label shows up here.
     for (const [kind, label] of [
-        ['context_fit_low_retry', 'Books shown as chapter navigation during context-size recovery'],
+        ['context_fit_low_retry', 'Context view narrowed during context-size recovery'],
         ['context_fit_refused', 'Context-size check found no room for results'],
         ['context_fit_route_rebound', 'Context fit rebound the route'],
         ['context_fit_physical_mode', 'Context starts in a smaller mode'],
@@ -197,7 +197,7 @@ test('#931 typed checkpoints are task facts in the expanded card, never narratio
     });
     assert.equal(lowRetry.visible, true);
     assert.equal(lowRetry.phase, 'warn');
-    assert.equal(lowRetry.headline, 'Books shown as chapter navigation during context-size recovery');
+    assert.equal(lowRetry.headline, 'Context view narrowed during context-size recovery');
     // Distinct kinds on the same round are distinct rows, so one never hides another.
     const keyOf = (kind) => summarizeChatLiveEvent({
         type: 'task_checkpoint', task_id: 't1', checkpoint_kind: kind, round: 4,
@@ -225,6 +225,19 @@ test('a book map shortened for a required handbook names its own map, one row pe
     assert.equal(summarizeLogEvent({ type: 'task_checkpoint', checkpoint_kind: 'context_fit_low_retry', round: 4,
         book_map: 'architecture_map' }).headline, 'Preparing a smaller request: Architecture map shortened to its chapter list');
     assert.equal(row('design_bible').headline, 'Preparing a smaller request: Design bible shortened to its map');
+    assert.equal(row('body_map').headline, 'Preparing a smaller request: Body map shortened to its parts list');
+    assert.equal(asSent({ applied: 'max', books: 'body_map' }).applied, 'max');
+    assert.equal(asSent({ applied: 'max', books: 'maps' }).applied, 'low');
+    // Fresh unified Body Map sends name the actual Max-view constraint, never legacy "whole books".
+    assert.equal(
+        causeOf({ preferred_at_send: 'max', applied: 'nano', books: 'body_map', cause: 'memory' }, 'max'),
+        'Nano for now, not Max: this start did not fit beside the history.');
+    assert.equal(
+        causeOf({ preferred_at_send: 'max', applied: 'nano', books: 'body_map', cause: 'request' }, 'max'),
+        'Nano for now, not Max: even without the history, the request leaves Max no room.');
+    assert.equal(
+        causeOf({ preferred_at_send: 'max', applied: 'nano', books: 'body_map', cause: 'route' }, 'max'),
+        'Nano for now, not Max: this model’s window cannot hold Max.');
 });
 
 test('a Low size-recovery checkpoint does not claim a physical retry', () => {
@@ -233,7 +246,7 @@ test('a Low size-recovery checkpoint does not claim a physical retry', () => {
         model: 'openai/test-model', round: 4, context_tokens: 23000,
     };
     const view = summarizeLogEvent(event);
-    assert.equal(view.headline, 'Books shown as chapter navigation during context-size recovery');
+    assert.equal(view.headline, 'Context view narrowed during context-size recovery');
     assert.equal(view.phase, 'warn');
     assert.ok(view.meta.includes('r4') && view.meta.includes('~23000 tok'));
     assert.ok(!view.meta.some(item => /retry/i.test(item)));

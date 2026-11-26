@@ -230,19 +230,26 @@ def _wake_context(tmp_path):
 def test_wake_context_includes_architecture_md(tmp_path):
     """A consciousness wake-up reads the same governance artifacts as any Main turn."""
     repo_dir = tmp_path / "repo"
-    (repo_dir / "docs").mkdir(parents=True)
+    (repo_dir / "docs" / "architecture").mkdir(parents=True)
     (repo_dir / "BIBLE.md").write_text("# BIBLE", encoding="utf-8")
     (repo_dir / "docs" / "ARCHITECTURE.md").write_text(
-        "# ARCHITECTURE\n\nThis is the architecture doc.", encoding="utf-8"
+        "# ARCHITECTURE\n\nThis is the architecture doc.\n\n## Chapters\n\n"
+        "- [1. Intro](architecture/01-intro.md)\n",
+        encoding="utf-8",
+    )
+    (repo_dir / "docs" / "architecture" / "01-intro.md").write_text(
+        "# 1. Intro\n\nResident Body Map opening paragraph.\n",
+        encoding="utf-8",
     )
 
     context = _wake_context(tmp_path)
 
-    assert "## ARCHITECTURE.md" in context, (
-        "the wake-up's Main context must include a '## ARCHITECTURE.md' section. "
+    assert "docs/ARCHITECTURE.md" in context or "docs/architecture/01-intro.md" in context, (
+        "the wake-up's Main context must include the resident Body Map from docs/ARCHITECTURE.md. "
         "This is a core governance artifact — see docs/DEVELOPMENT.md."
     )
     assert "This is the architecture doc." in context
+    assert "Resident Body Map opening paragraph." in context
 
 
 def test_wake_context_architecture_before_knowledge_base(tmp_path):
@@ -257,7 +264,7 @@ def test_wake_context_architecture_before_knowledge_base(tmp_path):
 
     context = _wake_context(tmp_path)
 
-    arch_pos = context.find("## ARCHITECTURE.md")
+    arch_pos = context.find("docs/ARCHITECTURE.md")
     kb_pos = context.find("## Knowledge base")
     assert arch_pos != -1, "ARCHITECTURE.md section not found in the wake-up's context"
     if kb_pos != -1:

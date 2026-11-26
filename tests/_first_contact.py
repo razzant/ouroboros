@@ -24,6 +24,8 @@ def _episode(tmp_path, monkeypatch, server, *, chat="first-contact", direct=Fals
             shutil.copyfile(REPO / name, repo / name)
     if (REPO / "docs/architecture").is_dir() and not (repo / "docs/architecture").exists():
         shutil.copytree(REPO / "docs/architecture", repo / "docs/architecture")
+    if (REPO / "docs/development").is_dir() and not (repo / "docs/development").exists():
+        shutil.copytree(REPO / "docs/development", repo / "docs/development")
     # The fake server shows no program (its /props answers 404): the owner's consent for its address lets Main send.
     cfg = keyless_settings(server, OUROBOROS_CONTEXT_MODE="max", OUROBOROS_REASONING_SUMMARY="off",
                            OUROBOROS_CONSCIOUSNESS_SAFETY_MODE="off",

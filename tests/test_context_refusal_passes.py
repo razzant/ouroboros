@@ -217,7 +217,7 @@ def test_the_wire_profile_still_names_every_transport():
     assert _wire_surface({"provider": "anthropic"}) == "messages"
 
 
-@pytest.mark.parametrize("scenario", ["enough", "maps", "none"])
+@pytest.mark.parametrize("scenario", ["enough", "none"])
 def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, monkeypatch, scenario):
     """Real fitting, loop, attempt settlement and Chat HTTP; the second chat has no provider-usage anchor."""
     import json
@@ -258,10 +258,11 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
                 text = json.dumps(body["messages"], ensure_ascii=False)
                 if self.limit is None:
                     # E refuses the uncut view, but can hold its ordinary telling plus a real required book.
-                    self.limit = {"enough": raw - 1_000, "maps": raw - 120_000, "none": 100_000}[scenario]
+                    # N sits strictly below Nano's smallest legal standing-tool form (~73k).
+                    self.limit = {"enough": raw - 1_000, "none": 30_000}[scenario]
                 rooms = tuple(i for i in range(16) if room_needle(FIRST_ROOM + i) in text)
                 self.wire.append(dict(raw=raw, status=400 if raw >= self.limit else 200,
-                    books="sweep_cancel_intents" in text, bible="owed on body changes" in text,
+                    books="## Body" in text, bible="owed on body changes" in text,
                     development="Hermetic preflight isolation" in text, story=len(rooms), rooms=rooms,
                     cap=body.get("max_tokens"), owner="fixture 3896" in text,
                     facts=re.findall(r"\[CONTEXT_FACTS\][^|]+\| mode ([^|]+)", text)))
@@ -274,7 +275,7 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
     with Numberless() as server:
         seed = _episode(tmp_path, monkeypatch, server)
         drive, repo = seed.drive, seed.tools._ctx.repo_dir
-        shutil.copytree(Path(__file__).resolve().parents[1] / "docs/development", repo / "docs/development")
+        shutil.copytree(Path(__file__).resolve().parents[1] / "docs/development", repo / "docs/development", dirs_exist_ok=True)
         page = _turn_shapes._page
         def told_page(room, ids, text):
             return {**page(room, ids, f"Room {room} settled its mock work.\n\n{text}"),
@@ -282,7 +283,7 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
         # Fixture input, not a patched fit: the whole page has a genuine shorter telling beside its address.
         with monkeypatch.context() as shapes:
             shapes.setattr(_turn_shapes, "_page", told_page)
-            lay_rooms(drive, 16, 143_000 if scenario == "enough" else 100_000)
+            lay_rooms(drive, 16, 260_000 if scenario == "enough" else 100_000)
         memory = Memory(drive_root=drive, repo_dir=repo)
         env = SimpleNamespace(repo_dir=repo, drive_root=drive, repo_path=lambda p: repo / p, drive_path=lambda p: drive / p)
         if scenario == "enough":
@@ -304,10 +305,8 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
 
         def send(room, key, *, required=False, dispatch_key=None):
             settings = keyed(key)
-            # M/N use a short A2 to exercise the just-under-refusal trap. In E only memory may pay the difference.
-            short = scenario != "enough" and room in {7102, 7105, 7106}
             task = {**seed.task, "id": f"first-contact-{room}", "chat_id": room, "_is_direct_chat": True,
-                    "text": f"fixture 3896 {room} " + "synthetic titles " * (4 if short else 300)}
+                    "text": f"fixture 3896 {room} " + "synthetic titles " * 300}
             if scenario == "enough":
                 task["workspace_root"] = str(foreign)
             row = dialogue_store.append(drive, "chat", {"direction": "in", "source": "web", "user_id": 1,
@@ -335,7 +334,7 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
         first, a1, target_a = send(7101, "synthetic-a-3896")
         refused, before_maps, _any = cw.first_contact_limits(target_a, a1[0]["cap"])
         assert refused == a1[0]["raw"], (a1, ce._read(drive).get("main_first_contact"))
-        assert before_maps == (a1[1]["raw"] if scenario != "enough" else 0), (a1, ce._read(drive).get("main_first_contact"))
+        assert before_maps == 0, (a1, ce._read(drive).get("main_first_contact"))
         second, a2, _ = send(7102, "synthetic-a-3896")
         if scenario == "enough":  # the handbook a chat requires is no memory's debt: the same tellings fold
             required, with_handbook, _ = send(7106, "synthetic-a-3896", required=True)
@@ -346,22 +345,17 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
             assert with_handbook[0]["rooms"] == a2[0]["rooms"], (a2, with_handbook)
             print({"required A2": with_handbook})
         other, b1, _ = send(7103, "synthetic-b-3896")
-        if scenario == "maps":
-            required, with_handbook, _ = send(7104, "synthetic-a-3896", required=True)
-            assert required.initial_mode == "low" and required.core.development_required
-            assert len(with_handbook) == 1 and with_handbook[0]["development"] and not with_handbook[0]["books"]
         # A's fact shaped the fit; B resolved at dispatch: B's first POST is the ordinary view, one plan, no extra call.
         hinted, rotated, _ = send(7105, "synthetic-a-3896", dispatch_key="synthetic-b-3896")
         assert hinted.first_contact_normal is not None, scenario
         assert rotated[0]["books"] and rotated[0]["story"] == a1[0]["story"], (a1, rotated)
         # Its own facts only: the unsent hinted preparation's row is gone, the ordinary view's row is B1's.
         assert len(rotated[0]["facts"]) == 1 and rotated[0]["facts"] == b1[0]["facts"], (b1, rotated)
-        assert scenario == "enough" or rotated[0]["facts"] != a2[0]["facts"], (a2, rotated)  # A2 sent chapter maps
         assert sends[7105].first_contact_normal is None
         assert not sends[7105].projection(sends[7105].initial_mode).memory_facts.get("first_contact_preference")
-        if scenario == "none":  # a refused hinted maps send is no Max bound, and the next start keeps its tellings
+        if scenario == "none":  # a refused hinted send keeps folding monotonically on the next start
             _third, a3, _ = send(7106, "synthetic-a-3896")
-            assert a3[0]["story"] == a2[0]["story"] and not a3[0]["books"], (a2, a3)
+            assert a3[0]["story"] <= a2[0]["story"] and a3[0]["books"], (a2, a3)
             assert a3[0]["raw"] <= a2[0]["raw"] + 2_000, (a2, a3)
         keyed("synthetic-a-3896")
     print({"limit": server.limit, "A1": a1, "A2": a2, "B1": b1})
@@ -369,14 +363,10 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
         assert a1 and a2 and b1 and all(row["status"] == 400 for row in a1 + a2 + b1), (a1, a2, b1)
         assert a2[0]["raw"] >= min(row["raw"] for row in a1) - 2_000, (a1, a2)
     else:
-        assert [row["status"] for row in a1] == ([400, 400, 200] if scenario == "maps" else [400, 200]), a1
+        assert [row["status"] for row in a1] == [400, 200], a1
         assert [row["status"] for row in a2] == [200], (a1, a2)
-    if scenario == "maps":  # the actual alternate A2 Max is just under F1, not past its margin
-        alternate = cf.bounded_prompt_tokens_for_payload({"messages": second.messages_for("max"),
-            "tools": json.loads(second.start_tool_schemas_json)}, 0)
-        assert before_maps - cf.reclaim_low_water_margin(None, before_maps) < alternate < before_maps
     assert b1[0]["status"] == 400 and b1[0]["books"] and b1[0]["story"] == a1[0]["story"], (a1, b1)
-    assert a2[0]["books"] is (scenario == "enough") and a2[0]["story"] < a1[0]["story"]
+    assert a2[0]["books"] and a2[0]["story"] < a1[0]["story"]
     assert all(row["bible"] and row["owner"] and row["cap"] == a1[0]["cap"] for row in a1 + a2 + b1)
     assert all(plan.window_record.usable is None and plan.preferred_mode == "max" for plan in (first, second, other))
     assert second.projection(second.initial_mode).memory_facts["first_contact_preference"]
@@ -862,11 +852,10 @@ def test_a_measured_second_pass_cannot_hide_an_unhelpful_book_switch(tmp_path, m
 
     monkeypatch.setattr(lmc, "_run_emergency_address_pass", shed_unseen)
     assert lmc._apply_refusal_pass(ctx, lmc.REFUSAL_PASSES[1], measure(ctx), 2_000, 1_000)
-    if useful:
-        assert ctx.active_context_mode == "low" and ctx.messages[0] != shown and not unseen
-    else:
-        assert unseen == [("unseen_bodies", "max", 2_000)]
-        assert ctx.context_fit_plan is plan and ctx.messages[0] == shown
+    # Unified Body Map (BIBLE P1): Max and Low carry the identical Body Map so the books step
+    # saves zero tokens regardless of raw architecture_md size; unseen_bodies pays the measured excess.
+    assert unseen == [("unseen_bodies", "max", 2_000)]
+    assert ctx.context_fit_plan is plan and ctx.messages[0] == shown
 
 
 @pytest.mark.parametrize("refused", [False, True])
@@ -890,7 +879,7 @@ def test_a_just_chosen_body_pays_last_and_only_what_a_providers_refusal_left(mon
         assert changed is bool(paid or chosen)
 
 
-@pytest.mark.parametrize("ceiling,mode", [(0, "low"), (200_000, "low"), (50_000, "nano")])
+@pytest.mark.parametrize("ceiling,mode", [(0, "max"), (200_000, "max"), (50_000, "nano")])
 def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_path, monkeypatch, ceiling, mode):
     from ouroboros import capability_evidence as ce, context_fit as cf, memory_view as mv
     from ouroboros.context_window import record_observation
@@ -907,7 +896,7 @@ def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_pa
             ce.CapabilityEvidence(1_000_000, "confirmed", "metadata", "books-route")))
     assert plan.initial_mode == "max"
     ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode="max", messages=plan.messages_for("max"),
-        tools=SimpleNamespace(_ctx=SimpleNamespace()), tool_schemas=[], accumulated_usage={}, task_id="books01",
+        tools=SimpleNamespace(_ctx=SimpleNamespace(), schemas=lambda **_kw: []), tool_schemas=[], accumulated_usage={}, task_id="books01",
         event_queue=None, drive_logs=tmp_path / "logs", round_idx=2)
     def measure(ctx, **_kwargs):
         return cf.measure_main_fit(ctx.context_fit_plan, ctx.messages, [],
@@ -918,14 +907,16 @@ def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_pa
     monkeypatch.setattr(lmc, "invalidate_task_cache_splits", lambda *_a: None)
     if ceiling:
         record_observation(tmp_path, plan.route_fp, refused=ceiling)
-    lmc._reproject_actual_overflow_low(ctx)
-    assert ctx.active_context_mode == ctx.tools._ctx.active_context_mode == mode
-    from ouroboros.transcript_prefix import SCOPED_SANCTION_ATTR  # the next send names this rebuild (C2 S4)
-    assert getattr(ctx.tools._ctx, SCOPED_SANCTION_ATTR) == {"system": "low_retry"}
-    assert ctx.messages[0] == ctx.context_fit_plan.projection(mode).system_message()
-    assert ctx.context_fit_plan.window_record is not None
-    # A refused total charges the whole reply reserve; the stated one, not refused yet, the reply floor
-    # (``WindowRecord.admitted``): the round's frame is that line plus the reserve.
-    fit = measure(ctx).measurement
-    assert fit.capacity_total_tokens - fit.response_reserve_tokens == (ceiling - fit.response_reserve_tokens if ceiling else 1_000_000 - 8_192)
-    assert ctx.context_fit_plan.window_record.source.startswith("refusal" if ceiling else "metadata")
+    # Exercise production books_must_save=True: non-overflowing ceilings stay Max (Low saves nothing),
+    # while a genuinely tight physical ceiling steps down to Nano without aborting early.
+    lmc._reproject_actual_overflow_low(ctx, books_must_save=True)
+    assert ctx.active_context_mode == mode
+    if mode != "max":
+        assert ctx.tools._ctx.active_context_mode == mode
+        from ouroboros.transcript_prefix import SCOPED_SANCTION_ATTR  # the next send names this rebuild (C2 S4)
+        assert getattr(ctx.tools._ctx, SCOPED_SANCTION_ATTR) == {"system": "low_retry"}
+        assert ctx.messages[0] == ctx.context_fit_plan.projection(mode).system_message()
+        assert ctx.context_fit_plan.window_record is not None
+        fit = measure(ctx).measurement
+        assert fit.capacity_total_tokens - fit.response_reserve_tokens == ceiling - fit.response_reserve_tokens
+        assert ctx.context_fit_plan.window_record.source.startswith("refusal")

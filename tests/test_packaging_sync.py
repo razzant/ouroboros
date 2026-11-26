@@ -311,14 +311,16 @@ def test_server_workers_init_reads_manifest_branches_not_hardcoded_strings():
 
 
 def test_architecture_module_tree_lists_all_live_extension_http_endpoints():
-    """The module map keeps an entry for ``ouroboros/gateway/extensions.py``,
-    and the §4 endpoint registry (the map entry points there) lists the
-    skill routes the module registers, including the Phase 5 review surface
-    ``POST /api/skills/{skill}/review``."""
+    """The live module map (``ouroboros/domains.toml`` + module docstring lead) keeps an entry
+    for ``ouroboros/gateway/extensions.py``, and the §4 endpoint registry lists the skill routes
+    the module registers, including the Phase 5 review surface ``POST /api/skills/{skill}/review``."""
+    from ouroboros.code_intelligence_architecture import module_map_rows
+
     architecture = architecture_text(REPO)
 
-    # Module map entry for ``gateway/extensions.py``.
-    assert re.search(r"^\s*extensions\.py — ", architecture, re.MULTILINE)
+    # Live module map entry for ``gateway/extensions.py`` (replaces retired static Ch.1 tree).
+    ext_rows = module_map_rows(REPO, "ouroboros/gateway/extensions.py")
+    assert any(row.startswith("ouroboros/gateway/extensions.py (") for row in ext_rows), ext_rows
     for route in ("toggle", "delete", "review"):
         assert f"| POST | `/api/skills/{{skill}}/{route}` |" in architecture
 

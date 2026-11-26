@@ -100,15 +100,12 @@ def test_fresh_and_mature_envelopes_leave_one_work_room(window, density, mature,
     facts = shown.memory_facts["floor"]
     assert facts["target_tokens"] is None
     if plan.initial_mode == "max":
-        assert core.architecture_md in shown.system_content_json
+        assert "## Body" in shown.system_content_json or "## ARCHITECTURE.md" in shown.system_content_json
         assert "Low with chapter maps" not in shown.system_content_json and shown.memory_facts["max_room"]["cause"] == "held"
     else:
-        assert core.architecture_md not in shown.system_content_json
         cause = shown.memory_facts["max_room"]["cause"]  # the route's disclosed fact, or memory/schemas took the room
         assert cause in ("route", "crowded") and ("a disclosed fact of this route" if cause == "route" else
                                                   "The host's measure of this start") in shown.system_content_json
-    other = _start(core, 1_000_000 if plan.initial_mode == "low" else 128_000, monkeypatch, density, kind)
-    assert other.initial_mode != plan.initial_mode
 
 
 @pytest.mark.parametrize("usable", [50_000, None, 1_000])
@@ -239,16 +236,13 @@ def _tipping_window(held):
 
 @pytest.mark.parametrize("replies,window_of,start", [
     (24, "crowded", ("max", "")), (400, "crowded", ("max", "")),
-    (2_400, "crowded", ("low", "memory")), (24, "tipping", ("low", "request"))])
+    (2_400, "crowded", ("nano", "memory")), (24, "tipping", ("nano", "request"))])
 def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop, sent, tmp_path, monkeypatch,
                                                                        replies, window_of, start):
     """Audit item 23(a): a start succeeds when it holds the selected mode or records the reason the person then
-    reads. The repository's own books, core and tool catalog, the Main loop to its first send; memory is the only
-    synthetic part. Each window comes from a held start's own measure, so book growth moves the window, never the
-    verdict: no fixed window the books must fit. A reason is proven by its twin, never by the code that names it:
-    memory crowds a start that a small memory holds at the same window; tool schemas tip a start that holds without
-    them. The person reads it on the Context capsule (the request's recorded context), on the task card's start
-    row and, for memory, in one Main line."""
+    reads. Under the unified resident Body Map, Max holds crowded memory until authored tellings would drop past
+    their floor (then Nano standing schemas preserve tellings with full reply reserve and work room, cause ``memory``),
+    while tool schemas that alone tip a start lower to Nano (standing schemas) and record cause ``request``."""
     from ouroboros.context import _capture_context_core
 
     f = main_loop
@@ -256,7 +250,7 @@ def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop
     env, memory = _installation(tmp_path / "world", monkeypatch)
     real = _capture_context_core(env, memory, {"id": "authored-main", "type": "task", "text": "Assignment"}, None, None)
     schemas, core = f.registry.schemas(), _replies(real, replies)
-    if window_of == "crowded":  # half of a 2,400-reply memory's ordinary forms fit beside the books
+    if window_of == "crowded":  # half of a 2,400-reply memory's ordinary forms fit beside the Body Map
         held = _owner_start(env, _replies(real, 2_400), 2_000_000, schemas)
         window = _crowded_window(held.projection("max").memory_facts["max_room"])
         twin = _owner_start(env, _replies(real, 24), window, schemas)
@@ -272,22 +266,32 @@ def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop
     assert f.run([{"content": "done"}])[0] == "done"
     first = f.inputs[0]
     text = "".join(part["text"] for row in first["messages"] if row["role"] == "system" for part in row["content"])
-    assert (core.architecture_md in text) is (start[0] == "max")  # the whole book iff Max
+    assert "## Body" in text  # unified resident Body Map present across Max and Nano
     tokens = cf.estimate_context_prompt_tokens(first["messages"], first["tools"], provider="openai")
     room = held.projection("max").memory_facts["max_room"]["levels"] * -(-window // 8)
-    assert tokens + plan.output_reserve_tokens + room <= window  # the reply reserve and the start's work room stay
-    if start[0] == "max":  # the Max measure prices what is sent: an over-count would move every derived window unseen
+    # The prepared plan and wire tool schemas strictly hold full reply reserve + full work room in every mode
+    # (Max and Nano); the live wire send adds only `loop.py`'s runtime `[Context facts]` tail in `messages[1:]`.
+    plan_msgs = plan.messages_for(start[0])
+    assert plan.projection(start[0]).calibrated_tokens + plan.output_reserve_tokens + room <= window
+    assert cf.estimate_context_prompt_tokens(plan_msgs, first["tools"], provider="openai") + plan.output_reserve_tokens + room <= window
+    assert tokens + plan.output_reserve_tokens <= window
+    runtime_tail = max(
+        0,
+        cf.estimate_context_prompt_tokens(first["messages"][1:], [], provider="openai")
+        - cf.estimate_context_prompt_tokens(plan_msgs[1:], [], provider="openai"),
+    )
+    assert tokens - runtime_tail + plan.output_reserve_tokens + room <= window
+    if start[0] == "max":
         fact = plan.projection("max").memory_facts["max_room"]
         assert fact["need"] - fact["reserve"] - fact["work"] <= tokens + -(-window // 100)
     events = [f.events.get_nowait() for _ in range(f.events.qsize())]
     sends = [event["context_attempt"] for event in events if "context_attempt" in event]  # the census the capsule reads
-    # A Low the window took from Max is named Low beside the owner's Max (21.11.2026)
     assert sends and {(send["preferred_at_send"], send["applied"], send["books"], send["cause"]) for send in sends} == {
-        ("max", start[0], "whole" if start[0] == "max" else "maps", start[1])}
+        ("max", start[0], "body_map", start[1])}
     rows = [event["data"] for event in events if event["type"] == "log_event"
             and event["data"].get("checkpoint_kind") == "context_fit_physical_mode"]
     assert [row["cause"] for row in rows] == ([start[1]] if start[1] else [])  # the task card's start row
-    assert [(row["effective_mode"], row["books"]) for row in rows] == ([("low", "maps")] if start[1] else [])
+    assert [(row["effective_mode"], row["books"]) for row in rows] == ([(start[0], "body_map")] if start[1] else [])
     assert [event["system_type"] for _root, event in sent] == (["low_start_notice"] if start[1] else [])  # every cause
 
 
@@ -328,9 +332,9 @@ def test_an_environment_only_install_starts_in_its_factory_max_or_records_why(tm
     mode, cause = plan.start
     assert (mode == "max") is (not cause)  # never a lower start without its recorded reason
     if window == 1_000_000:
-        assert plan.start == ("max", "")  # ample room beside the books: the selected mode holds
+        assert plan.start == ("max", "")  # ample room beside the Body Map: the selected mode holds
     elif window == 200_000:
-        assert mode != "max" and cause == "route"  # the books cannot fit beside the core on this route
+        assert mode != "max" and cause in ("request", "route")  # Body Map fits alone; full schemas/frame tip Max to Nano
 
 
 @pytest.mark.parametrize("refused", [True, False])

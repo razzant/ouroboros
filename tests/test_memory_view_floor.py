@@ -203,9 +203,8 @@ def test_an_owner_target_keeps_every_conversation_by_its_line_and_only_the_windo
 
 
 def test_a_max_start_keeps_memory_at_my_tellings_while_the_books_stay_whole():
-    """Owner 15.11.2026 (4A): beside whole books my memory yields far conversations to their lines and no further;
-    this room's replies become openings and addresses only in a start the window took to chapter maps (rendered
-    ``low``), where only the window bounds the walk."""
+    """Under unified Body Map (BIBLE P1), Max carries no whole engineering books to drop before folding memory:
+    when the physical window requires it, Max walks memory cleanly down through F2 just like task-local Low."""
     replies = [syn.spoken(i, "ouroboros", 1_000) for i in range(400)]
     groups = [syn.conversation(i, words=3, word_chars=2_000) for i in range(40)]
     snapshot = syn.snapshot(conversations=groups, room_facts=syn.room("1", lane1=replies))
@@ -215,9 +214,8 @@ def test_a_max_start_keeps_memory_at_my_tellings_while_the_books_stay_whole():
                                        output_reserve=65_536, ratio=1, non_memory_tokens=50_000)
     held, maps = fit("max"), fit("low")
     held_steps, maps_steps = dict(held.level.addressed), dict(maps.level.addressed)
-    assert held_steps.get("F6g") and not {"F2", "F7a", "F6a"} & set(held_steps)
-    assert "shortest forms exceeds it" in held.note  # the books' own step is the next one (context_fit)
-    assert maps_steps.get("F2") and "Start room is smaller" not in maps.note
+    assert held_steps.get("F6g") and held_steps.get("F2") and not {"F7a", "F6a"} & set(held_steps)
+    assert maps_steps == held_steps and "Start room is smaller" not in held.note
 
 
 def test_giveback_keeps_a_reply_prefix_and_never_returns_kept_choices():
@@ -571,16 +569,17 @@ def test_lows_target_never_counts_the_windows_cut_of_my_humans_words():
 
 
 def test_a_max_start_keeps_my_humans_words_while_its_books_are_whole():
-    """The one order at a start (owner 15.11.2026, 4A; consilium 17.11): a Max start floored at my tellings never turns
-    my human's words into addresses beside whole books; when the window cannot hold it the books go to chapter maps
-    first, and only that frame lets the window take them."""
+    """Under unified Body Map (BIBLE P1), Max carries no whole books to drop before owner words: when the physical
+    window itself cannot hold uncovered owner words, Max addresses the oldest rows (matching task-local Low) instead
+    of halting prematurely; when the window fits them, F7 stays untouched."""
     rows = [{**syn.spoken(i, "human", 8_000), "owner_side": True} for i in range(3)]
     snap = syn.snapshot(room_facts=syn.room("1", lane1=rows))
-    frame = dict(window_tokens=80_000, known_window=True, output_reserve=65_536, ratio=1, non_memory_tokens=10_000)
-    start = mf.render_view_for_mode(snap, mode="max", owner_mode="max", **frame)
-    assert "F7" not in start.facts["floor"]["steps"]
-    maps = mf.render_view_for_mode(snap, mode="low", owner_mode="max", lowered_from="max", **frame)
-    assert maps.facts["floor"]["steps"].get("F7")  # the chapter-map frame: the window may take the oldest
+    tight = dict(window_tokens=80_000, known_window=True, output_reserve=65_536, ratio=1, non_memory_tokens=10_000)
+    start = mf.render_view_for_mode(snap, mode="max", owner_mode="max", **tight)
+    maps = mf.render_view_for_mode(snap, mode="low", owner_mode="max", lowered_from="max", **tight)
+    assert start.facts["floor"]["steps"].get("F7") and start.facts["floor"]["steps"] == maps.facts["floor"]["steps"]
+    roomy = mf.render_view_for_mode(snap, mode="max", owner_mode="max", **{**tight, "window_tokens": 120_000})
+    assert "F7" not in roomy.facts["floor"]["steps"]
 
 
 def test_short_notes_still_have_selectable_forms_and_a_saving_aggregate():

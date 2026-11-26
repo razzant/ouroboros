@@ -130,12 +130,11 @@ OBSERVED = frozenset({"dispatched", "settled", "unresolved"})  # a send the ledg
 
 
 def shown_mode(rendered_mode: str, *, compact: bool = False) -> Tuple[str, str]:
-    """``(mode, books)``: the mode a send is named in and its books' form, the one fact every surface reads. A start
-    the window took from my human's Max renders the ``low`` frame and is named Low: it runs in Low, temporarily, for
-    the window, while the owner's choice stays Max beside it (``preferred_at_send``, owner 21.11.2026). Low and Nano
-    show chapter maps; Max shows the whole books unless its actor reads them as maps by design (a delegated child,
-    ``compact``)."""
-    return rendered_mode, "whole" if rendered_mode == "max" and not compact else "maps"
+    """``(mode, books)``: the mode a send is named in and its reference form, the one fact every surface reads.
+    Under the unified Body Map layout (BIBLE P1), every mode and focus carries ``body_map``; historical rows of
+    17-22 Nov 2026 carried ``whole`` or ``maps`` and stay readable by UI projections (``context_observation.asSent``)."""
+    del compact
+    return rendered_mode, "body_map"
 
 
 class ContextAttemptObservation(TypedDict, total=False):
@@ -150,7 +149,7 @@ class ContextAttemptObservation(TypedDict, total=False):
     round_id: str
     preferred_at_send: Literal["", "max", "low", "nano"]  # the task plan's owner mode when it sent
     applied: Literal["max", "low", "nano"]  # the mode the send is named in (``shown_mode``): Low for Low under Max
-    books: Literal["whole", "maps"]  # the books' form in this send
+    books: Literal["body_map", "whole", "maps"]  # the books' form in this send
     profile: Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
     cause: Literal["", "memory", "request", "route", "window", "after_start"]  # why applied is lower than preferred_at_send; "" also when unknown
     target_missed: bool  # this send exceeded the owner's mode target (``context_target_miss``)

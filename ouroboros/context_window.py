@@ -368,6 +368,8 @@ _COVER = "cover"  # the one accepted row standing for the replies the bound fold
 
 def _start_form(physical) -> str:
     origins = (physical.prefix or {}).get("origins", ())
+    if physical.rendered_mode == "nano":
+        return "nano"
     if physical.rendered_mode == "low":
         return ("maps" if physical.preferred_mode == "max" and physical.automatic_pass_used and "low_retry" in origins
                 else "low")

@@ -481,8 +481,8 @@ def test_a_size_terminal_names_the_final_candidate_it_refused(round_call, monkey
     ("size", "prediction"),  # the fallback's own admission: its book, window and reserve, never the restored primary's
     ("prediction", "size"),  # the provider's later refusal replaces the primary's prediction, its book arithmetic too
     ("prediction", "bad_request"),  # the primary's prediction named apart, without book arithmetic outside a size end
-    # A Max primary on a body task holds the book with no addition: the walk restores its 0, the refusing Low
-    # fallback's own book stays named, with its admission's arithmetic or, refused by the provider, without any.
+    # A Max primary without a directly required handbook carries 0 book tokens: the walk restores its 0, while the
+    # refusing Low fallback's own required book stays named with its admission's arithmetic.
     ("max_transient", "prediction"), ("max_size", "prediction"), ("max_transient", "size"),
     ("max_size", "bad_request"),  # outside a size end no handbook line, whoever carries the requirement
 ])
@@ -501,8 +501,8 @@ def test_a_failed_walk_names_each_size_refusal_with_its_own_route(round_call, mo
     from ouroboros.loop_transport import stamp_owner_provider_message
 
     held, primary = primary.startswith("max_"), primary.removeprefix("max_")
-    mode = "max" if held else "low"  # both routes carry the task's required handbook
-    ctx = round_call(200_000, book_chars=8_000, body=held, words=4_000, mode=mode)
+    mode = "max" if held else "low"
+    ctx = round_call(200_000, book_chars=0 if held else 8_000, body=held, words=4_000, mode=mode)
     primary_plan = ctx.context_fit_plan
     fallback_plan = replace(_real_plan(preferred=mode, window=500_000, book_chars=8_000, body=held),
                             model="anthropic/fallback", route_fp="route-b", provider="anthropic")

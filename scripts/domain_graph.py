@@ -211,6 +211,7 @@ class Manifest:
     domains: dict[str, str]
     modules: dict[str, str]                 # path -> domain id
     proposed: set[str]
+    references: dict[str, list[str]] = field(default_factory=dict)  # domain/prefix -> owning manuals
     graph_allowed: list[str] = field(default_factory=list)      # "D01->D02"
     cycle_groups: list[list[str]] = field(default_factory=list)
     lazy_only: list[str] = field(default_factory=list)
@@ -226,6 +227,7 @@ def load_manifest(path: pathlib.Path = MANIFEST_PATH) -> Manifest:
     raw = path.read_bytes()
     data = tomllib.loads(raw.decode("utf-8"))
     graph = data.get("graph", {})
+    refs = {str(k): [str(v) for v in vals] for k, vals in (data.get("references") or {}).items()}
     return Manifest(
         path=path,
         raw_bytes=raw,
@@ -233,6 +235,7 @@ def load_manifest(path: pathlib.Path = MANIFEST_PATH) -> Manifest:
         domains=data["domains"],
         modules=data["modules"],
         proposed=set(data.get("classification", {}).get("proposed", [])),
+        references=refs,
         graph_allowed=list(graph.get("allowed", [])),
         cycle_groups=[list(g) for g in graph.get("cycle_groups", [])],
         lazy_only=list(graph.get("lazy_only", [])),

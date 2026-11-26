@@ -1,17 +1,18 @@
-"""A change does not make a reference book, BIBLE.md or the prompts larger (the official line's rule).
+"""Two-tier documentation size discipline (BIBLE P7, Fork 2=A):
 
-Each book is measured as the UTF-8 length of its COMPOSED text (the entrypoint and every
-listed chapter, ``reference_books.compose_book``) at this change's tip and at its event base;
-BIBLE.md, and the prompt files together, as their UTF-8 bytes (``reference_books.RULED_TEXTS``).
-The rule is pairwise: there is no stored number and no reserve, so text a change adds to a
-book is paid in the same book in the same change (DEVELOPMENT "Paying down a size cap").
+- **Tier A (always-resident texts):** ``BIBLE.md``, ``prompts/*.md`` (as one text), and the
+  rendered resident Body Map + Reference Atlas (``reference_books.body_map_bytes``) obey the
+  strict pairwise ``<= +0 B`` rule against the contribution base.
+- **Tier B (pulled engineering manuals):** book chapters under ``docs/architecture/`` and
+  ``docs/development/`` carry NO whole-book shrink-only cap; each chapter must fit inside one
+  default ``read_file`` (2,000 lines and 80,000 chars) and split by subject with rationale
+  intact. Over-band standalone >80 KB docs carry shrink-only debt until back inside the band.
 
-The opt-in ``size_ratchet`` lane is excluded from default local runs. Manual/tag CI
-has no per-change base, so this comparison skips there. Local qualification supplies
-``OURO_SIZE_RATCHET_BASE_REF``; unset ``OURO_BOOK_GROWTH_MODE`` then means ``block``.
-``scripts/book_growth_mode.py`` retains event-specific block/warn/approved semantics
-for explicit callers; an owner's ``book-growth`` label can approve an exception.
-Every local information surface reports the balance without blocking (BIBLE P3 c5).
+The opt-in ``size_ratchet`` lane is excluded from default local runs. Manual/tag CI has no
+per-change base, so pairwise comparison skips there (chapter-band checks still run on the
+checkout). Local qualification supplies ``OURO_SIZE_RATCHET_BASE_REF``; unset
+``OURO_BOOK_GROWTH_MODE`` then means ``block``. An owner's ``book-growth`` label can approve
+an exception; local information surfaces report balances without blocking (BIBLE P3 c5).
 """
 from __future__ import annotations
 
@@ -22,7 +23,19 @@ import subprocess
 import pytest
 
 from ouroboros.reference_books import (
-    BOOK_ENTRYPOINTS, RULED_TEXTS, compose_book, load_reference_book, ruled_text_sizes, text_name,
+    BOOK_CHAPTER_MAX_CHARS,
+    BOOK_CHAPTER_MAX_LINES,
+    BOOK_ENTRYPOINTS,
+    RULED_TEXTS,
+    STANDALONE_REFERENCE_DOCS,
+    body_map_bytes,
+    chapter_band_overages,
+    compose_book,
+    load_reference_book,
+    ruled_text_sizes,
+    standalone_doc_over_band,
+    standalone_doc_size,
+    text_name,
 )
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -109,17 +122,41 @@ def _assert_no_unapproved_growth(capsys, measured) -> None:
 
 
 @pytest.mark.size_ratchet
-def test_a_change_does_not_grow_a_reference_book(capsys):
+def test_a_change_does_not_grow_the_body_map_or_exceed_chapter_band(capsys):
+    mode = (os.environ.get(MODE_ENV) or "block").strip()
+    band_faults: list[str] = []
+    for book_id, entrypoint in BOOK_ENTRYPOINTS.items():
+        for chapter_path, lines, chars in chapter_band_overages(REPO, book_id):
+            msg = (f"{chapter_path} exceeds one default read ({lines:,} lines / {chars:,} chars; "
+                   f"band {BOOK_CHAPTER_MAX_LINES:,} lines / {BOOK_CHAPTER_MAX_CHARS:,} chars); "
+                   "split by subject with rationale intact (BIBLE P7).")
+            if mode in ("approved", "warn"):
+                with capsys.disabled():
+                    print(f"::{'notice' if mode == 'approved' else 'warning'} file={chapter_path}::{msg}")
+            else:
+                band_faults.append(msg)
+    assert not band_faults, "Pulled book chapter band violations:\n" + "\n".join(band_faults)
     _assert_no_unapproved_growth(capsys, [
-        (book_id, entrypoint, lambda ref, book_id=book_id: composed_bytes(REPO, book_id, ref))
-        for book_id, entrypoint in BOOK_ENTRYPOINTS.items()])
+        ("body_map", BOOK_ENTRYPOINTS["architecture"], lambda ref: body_map_bytes(REPO, ref)),
+    ])
 
 
 @pytest.mark.size_ratchet
 def test_a_change_does_not_grow_bible_or_the_prompts(capsys):
-    _assert_no_unapproved_growth(capsys, [
+    def _standalone_bytes(rel: str, ref: str = "") -> int | None:
+        sizes = standalone_doc_size(REPO, rel, ref)
+        return None if sizes is None else sum(sizes.values())
+
+    measured = [
         (text_id, path, lambda ref, text_id=text_id: ruled_text_bytes(REPO, text_id, ref))
-        for text_id, path in RULED_TEXTS.items()])
+        for text_id, path in RULED_TEXTS.items()
+    ]
+    # Over-band standalone specs (> 2,000 lines or > 80,000 chars) retain shrink-only debt
+    # (`<= +0 B` vs contribution base) until reduced or split inside the one-default-read band.
+    for rel in STANDALONE_REFERENCE_DOCS:
+        if standalone_doc_over_band(REPO, rel):
+            measured.append((rel, rel, lambda ref, rel=rel: _standalone_bytes(rel, ref)))
+    _assert_no_unapproved_growth(capsys, measured)
 
 
 # ---------------------------------------------------------------- the decision, unmarked
@@ -429,14 +466,15 @@ def test_push_mode_reaches_the_size_lane_and_only_growth_fails(monkeypatch, caps
     monkeypatch.setenv("GITHUB_REF", PUSH_ENV["REF"])
     consumer = sys.modules[__name__]
     monkeypatch.setattr(consumer, "growth_base", lambda repo, ref: "base")
-    monkeypatch.setattr(consumer, "composed_bytes", lambda repo, book_id, ref="": 100 if ref else tip)
+    monkeypatch.setattr(consumer, "body_map_bytes", lambda repo, ref="": 100 if ref else tip)
+    monkeypatch.setattr(consumer, "chapter_band_overages", lambda repo, book_id: ())
     if passes:
-        test_a_change_does_not_grow_a_reference_book(capsys)
+        test_a_change_does_not_grow_the_body_map_or_exceed_chapter_band(capsys)
         if tip <= 100:
             assert capsys.readouterr().out == ""
     else:
         with pytest.raises(AssertionError, match="grew by 1 bytes"):
-            test_a_change_does_not_grow_a_reference_book(capsys)
+            test_a_change_does_not_grow_the_body_map_or_exceed_chapter_band(capsys)
 
 
 @pytest.mark.parametrize("text_id,name", [("constitution", "BIBLE.md"), ("prompts", "Prompts")])

@@ -153,7 +153,12 @@ def section_fact(part, addressed, receipts, books):
         path = ref.get('path') if isinstance(ref, dict) else None
         if family != 'held_note' and isinstance(path, str) and re.fullmatch(r'source_handles/context_checkpoints/host-[a-zA-Z0-9_.-]+\.md', path):
             fact['retained_source'] = {'path': path, 'sha256': ref.get('sha256')}
-    if book := books.get(family.removesuffix('_map')):
+    if kind == 'body_map' and (book := books.get('architecture')):
+        fact['family'] = 'body_map'
+        fact['form'] = 'chapter_links' if kind in addressed else 'body_map'
+        fact['sources'] = [{'path': source.source_path, 'sha256': source.sha256,
+                            'bytes': len(source.raw)} for source in (book.entrypoint, *book.chapters)]
+    elif book := books.get(family.removesuffix('_map')):
         fact['family'] = book.book_id
         fact['form'] = ('chapter_links' if kind in addressed else 'chapter_map') if kind.endswith('_map') else 'whole_book'
         fact['sources'] = [{'path': source.source_path, 'sha256': source.sha256,
@@ -166,7 +171,7 @@ def layout_witnesses(core, governance, addressed, receipts, live, *, story_whole
     """Coordinates of the renderer's already-joined blocks; group names never come from text."""
     common, handbook, shared, story, head, room, dynamic, stable, changing = live
     books = {book.book_id: book for book in core.reference_books}
-    own_block = core.docs_need_development or core.development_required
+    own_block = bool(core.development_required)
     receipts = {receipt['section_id']: receipt for receipt in receipts}
 
     def typed(parts):

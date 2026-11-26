@@ -214,6 +214,59 @@ def test_preflight_check(subtests, monkeypatch, tmp_path):
                     assert needle in result, f"missing {needle!r} in: {result!r}"
 
 
+def test_preflight_new_module_requires_manifest_docstring_and_owning_manual(monkeypatch, tmp_path):
+    """Tightened BIBLE P6 new-module gate: positive path passes; missing manifest row, missing
+    module docstring, unrelated ARCHITECTURE.md edit, or wrong chapter each block at the seam."""
+    from ouroboros import commit_admission
+
+    review = _get_review_module()
+    manifest = (
+        '[domains]\nD06 = "Review"\n'
+        '[references]\nD06 = ["docs/architecture/06-4-self-change-and-review.md"]\n'
+        '[modules]\n"ouroboros/new_mod.py" = "D06"\n'
+    )
+    manifest_missing = (
+        '[domains]\nD06 = "Review"\n'
+        '[references]\nD06 = ["docs/architecture/06-4-self-change-and-review.md"]\n'
+        '[modules]\n"ouroboros/other.py" = "D06"\n'
+    )
+    arch_hdr = "# Ouroboros v3.24.0 — Body Map & Architecture Reference\n"
+
+    def _run(staged_files: str, files: dict[str, str]):
+        monkeypatch.setattr(review, "_git_show_staged", lambda _r, p: files.get(p))
+        monkeypatch.setattr(commit_admission, "_head_text", lambda _r, p: files.get(p))
+        return review._preflight_check("add new module", staged_files, tmp_path)
+
+    base_files = {
+        "ouroboros/domains.toml": manifest,
+        "ouroboros/new_mod.py": '"""New module lead."""\nX = 1\n',
+        "docs/ARCHITECTURE.md": arch_hdr,
+    }
+    # 1) Positive path: listed in domains.toml + docstring + declared owning manual -> PASS.
+    assert _run(
+        "A  ouroboros/new_mod.py\nM  ouroboros/domains.toml\nM  docs/architecture/06-4-self-change-and-review.md",
+        base_files,
+    ) is None
+    # 2) Unlisted in domains.toml -> BLOCKED.
+    err = _run(
+        "A  ouroboros/new_mod.py\nM  docs/architecture/06-4-self-change-and-review.md",
+        {**base_files, "ouroboros/domains.toml": manifest_missing},
+    )
+    assert err and "missing from staged `ouroboros/domains.toml`" in err
+    # 3) Missing module docstring -> BLOCKED.
+    err = _run(
+        "A  ouroboros/new_mod.py\nM  docs/architecture/06-4-self-change-and-review.md",
+        {**base_files, "ouroboros/new_mod.py": "X = 1\n"},
+    )
+    assert err and "lack a module docstring lead" in err
+    # 4) Unrelated docs/ARCHITECTURE.md edit does NOT satisfy a declared owning manual -> BLOCKED.
+    err = _run("A  ouroboros/new_mod.py\nM  docs/ARCHITECTURE.md", base_files)
+    assert err and "declared owning manuals" in err and "06-4-self-change-and-review.md" in err
+    # 5) Wrong chapter (not in D06 [references]) -> BLOCKED.
+    err = _run("A  ouroboros/new_mod.py\nM  docs/architecture/01-high-level-architecture.md", base_files)
+    assert err and "declared owning manuals" in err and "06-4-self-change-and-review.md" in err
+
+
 # ---------------------------------------------------------------------------
 # Check 7: P9 history limits in _preflight_check (v4.41.0)
 # ---------------------------------------------------------------------------

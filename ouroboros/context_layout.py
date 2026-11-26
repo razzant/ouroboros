@@ -1,12 +1,14 @@
-"""Reference-book views for Main, children and background cognition.
+"""Resident Body Map + Reference Atlas and reference-book views for all foci.
 
-Main Max keeps the full Architecture capability/WHY map for every task class;
-its Development handbook remains tied to the active self-body binding. Low and
-Nano carry both books' authored chapter introductions and physical pointers.
-Children use that compact orientation; their memory view (``memory_view.ROLE_DEFAULTS``)
-decides what of my story and room they carry, the heads of the notes that claim their room
-stand beside it (``held_notes``), and parent-selected details arrive through ordinary source
-reads and working views.
+Every mode (`max`, `low`, `nano`) and focus (Main, Projects, wakes, Presence,
+children, nannies) carries one byte-identical, cache-invariant Body Map +
+Reference Atlas (`body_map_section`, from `docs/ARCHITECTURE.md` entrypoint and
+authored chapter openings, with zero line ranges and zero version stamps). Deep
+engineering manuals (`ARCHITECTURE` chapters, `DEVELOPMENT`, specs) are drawn on
+demand when working on Ouroboros's body; a task's explicit
+`context_requires_development=true` adds the whole development handbook in any
+mode. `book_navigation` remains available for reviewers that need line-ranged
+chapter maps.
 
 Source bytes belong to ReferenceBook; this module only renders the selected
 view. Stable full prefixes contain no cwd, task identity or revision counters.
@@ -19,7 +21,14 @@ import pathlib
 import re
 from typing import Any, List, Mapping, Optional
 
-from ouroboros.reference_books import ReferenceBook, compose_book, load_reference_book, overview_book
+from ouroboros.reference_books import (
+    ReferenceBook,
+    body_map_book,
+    compose_book,
+    has_body_map_atlas,
+    load_reference_book,
+    overview_book,
+)
 
 # Protected core: always rendered in full, in every context mode. Encoded as
 # data so a drift-guard test can assert no future change demotes it. The marks I
@@ -230,8 +239,7 @@ def author_design_source(ctx: Any, task: Mapping[str, Any]) -> tuple[pathlib.Pat
     The recognized body's book first (``task_design_source``). Otherwise the installed one, never an unadopted
     candidate the context is bound to (``body_candidate.serving_repo_dir_for``): for work the task itself declares
     Ouroboros's (``context_requires_self_body_docs`` true, from a foreign folder too), and for work whose body is
-    unknown yet not proven foreign (a project room without a folder), as the handbook stays resident there
-    (``context_input_selection.development_resident``: missing facts never narrow it). A false or absent declaration
+    unknown yet not proven foreign (a project room without a folder: missing facts never narrow it). A false or absent declaration
     narrows nothing: the contract writes false for silence. Proven-foreign work without the declaration gets none;
     children, nannies and background work of the body keep it (no on-demand surface narrows it).
     """
@@ -329,11 +337,38 @@ def book_map_section(book: ReferenceBook, section_id: str) -> str:
     if book.legacy or not book.chapters:
         return navigation
     title = book.entrypoint.headings[0].title if book.entrypoint.headings else book.book_id
+    title = re.sub(r"^(Ouroboros)\s+v\S+\s*[—-]\s*", r"\1 — ", title, count=1)
     chapters = [f"- {chapter.headings[0].title if chapter.headings else chapter.source_path}: "
                 f"`{chapter.source_path}`" for chapter in book.chapters]
     return HostSection(section_id, navigation, "\n".join([
         f"## {title} (chapters)", "", *chapters, "",
         'Each chapter reads with `read_file(root="system_repo", path=...)` at its physical path.']))
+
+
+def body_map_section(book: ReferenceBook) -> str:
+    """The cache-invariant resident Body Map + Reference Atlas as a HostSection.
+
+    Its operative view (used only when a physically small window needs the room, BIBLE P1)
+    steps the Map down to the names and addresses of every chapter and indexed manual.
+    """
+    from ouroboros.section_floor import HostSection  # section_floor reads TIER0_ALWAYS_FULL from here
+
+    rendered = body_map_book(book).text
+    if book.legacy or not book.chapters:
+        return rendered
+    title = book.entrypoint.headings[0].title if book.entrypoint.headings else book.book_id
+    title = re.sub(r"^(Ouroboros)\s+v\S+\s*[—-]\s*", r"\1 — ", title, count=1)
+    chapters = [f"- {chapter.headings[0].title if chapter.headings else chapter.source_path}: "
+                f"`{chapter.source_path}`" for chapter in book.chapters]
+    atlas_lines = [
+        line for line in book.entrypoint.text.splitlines()
+        if line.startswith("- `docs/") or line.startswith("- `ouroboros/") or line.startswith("- `README.md")
+    ]
+    compact_lines = [f"## {title} (parts & addresses)", "", *chapters]
+    if atlas_lines:
+        compact_lines.extend(["", "### Reference Atlas", *[line.split(" — ", 1)[0] for line in atlas_lines]])
+    compact_lines.extend(["", 'Read any manual with `read_file(root="system_repo", path=...)`.'])
+    return HostSection("body_map", rendered, "\n".join(compact_lines))
 
 
 def architecture_context_section(
@@ -343,31 +378,22 @@ def architecture_context_section(
     text: str | None = None,
     book: ReferenceBook | None = None,
 ) -> str:
-    """ARCHITECTURE.md: full in max, navigation map in low. Empty if unreadable."""
+    """Resident Body Map + Reference Atlas in every mode (BIBLE P1). Empty if unreadable."""
+    del context_mode  # unified across max/low/nano and all foci
     if book is None and text is None:
         try:
             book = load_reference_book(env.repo_dir, "architecture", lambda path: env.repo_path(path).read_bytes())
         except (OSError, ValueError) as exc:
             return f"Reference book source unavailable: docs/ARCHITECTURE.md. {exc}. Full context is not established."
     if book is not None:
-        # View intent, not a migration flag: a compact mode asks for the
-        # navigable overview and a full mode asks for the composition. Both
-        # answers are defined for a legacy revision too.
-        if context_mode in {"low", "nano"}:
-            return book_map_section(book, "architecture_map")
-        if text is None:
-            text = compose_book(book)
+        return body_map_section(book)
     if text is None:
         text = _read_doc(env, "docs/ARCHITECTURE.md")
     if not text.strip():
         return ""
-    if context_mode in {"low", "nano"}:
-        return generate_doc_nav_map(
-            text, title="ARCHITECTURE.md", rel_path="docs/ARCHITECTURE.md"
-        )
-    from ouroboros.section_floor import report_text
-
-    return report_text("## ARCHITECTURE.md\n\n" + text, "architecture")
+    return generate_doc_nav_map(
+        text, title="ARCHITECTURE.md", rel_path="docs/ARCHITECTURE.md"
+    )
 
 
 def whole_development_book(text: str) -> str:
@@ -381,67 +407,61 @@ def reference_doc_sections(
     env: Any,
     *,
     context_mode: str,
-    include_development: bool,
+    include_development: bool = False,
     architecture_text: str | None = None,
     development_text: str | None = None,
     books: tuple[ReferenceBook, ...] = (),
     required_book: bool = False,
 ) -> tuple[List[str], str]:
-    """Return common reference sections and the separate handbook block.
+    """Return common resident Body Map + Reference Atlas and optional explicit handbook block.
 
-    Max's common sections do not depend on the caller's handbook inclusion: its
-    own block holds the handbook or, without it, the handbook's chapter map.
-    Compact modes orient the mind to both books and retain exact physical
-    pointers; they never turn a composed-book line into a file address. A task's
-    direct requirement adds the whole book as that block, its map staying in the
-    common sections so every task keeps one shared prefix.
+    Every mode (`max`, `low`, `nano`) and focus receives the exact same cache-invariant
+    Body Map + Reference Atlas in `parts` (Block A′), with zero line numbers or version
+    stamps. Engineering manuals are not preloaded by mode or task class (BIBLE P1); only
+    a task's explicit `required_book=True` (`context_requires_development=true`) returns
+    the whole development handbook in `development` (Block D) in any mode.
     """
+    del include_development  # ordinary preloading retired under BIBLE P1; only explicit required_book loads Block D
     parts: List[str] = []
     development = ""
     by_id = {book.book_id: book for book in books}
 
+    arch_book = by_id.get("architecture")
     arch_section = architecture_context_section(
         env,
         context_mode=context_mode,
         text=architecture_text,
-        book=by_id.get("architecture"),
+        book=arch_book,
     )
     if arch_section:
         parts.append(arch_section)
 
-    development_book = by_id.get("development")
-    if development_book is None and development_text is None:
-        try:
-            development_book = load_reference_book(env.repo_dir, "development", lambda path: env.repo_path(path).read_bytes())
-        except (OSError, ValueError) as exc:
-            development_text = f"Reference book source unavailable: docs/DEVELOPMENT.md. {exc}. Full context is not established."
-    dev_text = (
-        development_text
-        if development_text is not None
-        else _read_doc(env, "docs/DEVELOPMENT.md")
-    )
-    if development_book is not None and development_text is None:
-        dev_text = compose_book(development_book)
-    if dev_text.strip():
-        # The chapter map is a host section (its chapter list the operative view) wherever a book exists.
-        chapters = (book_map_section(development_book, "development_map") if development_book is not None
-                    else generate_doc_nav_map(dev_text, title="DEVELOPMENT.md", rel_path="docs/DEVELOPMENT.md"))
-        if context_mode in {"low", "nano"}:
-            parts.append(chapters)
-            development = whole_development_book(dev_text) if required_book else ""
-        else:  # Max: the handbook or its chapter map, in its own block, so the common sections stay shared
-            development = whole_development_book(dev_text) if include_development else chapters
+    if required_book:
+        development_book = by_id.get("development")
+        if development_book is None and development_text is None and env is not None:
+            try:
+                development_book = load_reference_book(
+                    env.repo_dir, "development", lambda path: env.repo_path(path).read_bytes()
+                )
+            except (OSError, ValueError) as exc:
+                development_text = (
+                    f"Reference book source unavailable: docs/DEVELOPMENT.md. {exc}. "
+                    "Full context is not established."
+                )
+        dev_text = (
+            development_text
+            if development_text is not None
+            else (compose_book(development_book) if development_book is not None
+                  else (_read_doc(env, "docs/DEVELOPMENT.md") if env is not None else ""))
+        )
+        if dev_text.strip():
+            development = whole_development_book(dev_text)
 
-    # README (user-facing) and CHECKLISTS (reviewers load their own copy) are not
-    # inlined in the agent context in any mode.
-    books_note = (
-        "Reference books: `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`. "
-        "If a book is not inlined, read it on demand. "
-        if context_mode not in {"low", "nano"} else ""
-    )
-    parts.append(
-        "## Reference docs available on demand\n\n" + books_note
-        + "Not inlined in the working context: `README.md`, `docs/CHECKLISTS.md`. "
-        "Read them in full (untruncated) with `read_file(root=\"system_repo\", path=...)` when relevant."
-    )
+    if arch_book is None or not has_body_map_atlas(arch_book):
+        parts.append(
+            "## Reference docs available on demand\n\n"
+            "Not inlined in the working context: `docs/DEVELOPMENT.md`, `docs/DESIGN.md`, "
+            "`docs/PERSISTENCE.md`, `docs/CHECKLISTS.md`, `README.md`. "
+            "Read them in full (untruncated) with `read_file(root=\"system_repo\", path=...)` when relevant."
+        )
     return parts, development

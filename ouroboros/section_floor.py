@@ -155,16 +155,13 @@ def section_inventory(plan, mode, facts):
 
 
 def _governance_blocks(env: Any, core: Any, *, mode: str, reference_docs: Callable) -> Tuple[Any, ...]:
-    # D-ARCH (owner, 2026-08-08): the reference-doc form follows the RENDERED
-    # mode directly — ARCHITECTURE is full in max for every task class and the
-    # nav map in low; DEVELOPMENT inclusion is the caller's mode-independent
-    # decision carried on the core (the former per-task force_low_docs lever is
-    # gone: workspace binding no longer shapes the docs).
+    # Unified Body Map + Reference Atlas in Block A' across all modes and foci (BIBLE P1);
+    # only a task's explicit `development_required` adds the whole handbook in Block D.
     static_parts = [report_text(core.base_prompt, "system"), report_text("## BIBLE.md\n\n" + core.bible_md, "bible")]
     sections, development = reference_docs(
         env,
-        context_mode="low" if core.compact_reference_docs else mode,
-        include_development=core.docs_need_development or core.development_required,
+        context_mode=mode,
+        include_development=core.development_required,
         required_book=core.development_required,
         architecture_text=core.architecture_md,
         development_text=core.development_md,
@@ -203,7 +200,7 @@ def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room
     common, *handbook = render_governance(governance, addressed)
     semi = render_sections(core.semi_stable_sections, core.semi_stable_text, addressed)
     dynamic = render_sections(core.dynamic_sections, core.dynamic_text, addressed)
-    own_block = core.docs_need_development or core.development_required
+    own_block = bool(core.development_required)
     connections = core.connections[mode == "nano"]
     shared = "\n\n".join(part for part in (*(() if own_block else handbook), semi, connections) if part)
     stable = (common, *(handbook if own_block else ()), "\n\n".join(part for part in (shared, story) if part))

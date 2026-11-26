@@ -1,6 +1,6 @@
 # 13. External Skills Layer
 
-Discovery/review/grants/dependencies/enablement are separate; toggles grant no authority. Snapshots: §6; protocol: `CREATING_SKILLS.md`.
+My external skills and extensions system: installed skills, companion processes, widgets, UI/composer contributions, capability grants, and skill review (`skill_review.py`, `docs/CREATING_SKILLS.md`, `docs/WIDGET_HOST_PROTOCOL.md`). I discover skills in context and author or review them through the skill pipeline; discovery, preflight, digest-bound critic review, owner grants, dependency readiness, and enablement stay strictly separate gates.
 
 ### Skill gates
 

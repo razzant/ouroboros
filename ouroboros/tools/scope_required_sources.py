@@ -276,7 +276,9 @@ def render_required_sources(rows: Sequence[Dict[str, Any]], *, layer: str = "bod
                   if row.get("coverage_basis") == "delivered_inline" else "")
         if row.get("preimage_of"):
             detail += f"; preimage of {row['preimage_of']}"
-        if row.get("root") in ("artifact_store", "session_root"):
+        if row.get("governance_of"):
+            detail += f"; executing governance copy of {row['governance_of']}"
+        if row.get("root") in ("artifact_store", "session_root", "system_repo"):
             detail += f"; root={row['root']}"
         if row.get("reason"):
             detail += f"; {row['reason']}"

@@ -1043,16 +1043,15 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
 
 
 def _reproject_actual_overflow_low(ctx: _RoundModelCallContext, *, books_must_save: bool = False) -> None:
-    """Size recovery lowers Max's books; a smaller physical frame may require Nano.
+    """Size recovery reprojects a physically overflowing Max view to a smaller frame (Nano when needed).
 
-    Low keeps the refused Max view's memory level, never its unsent startup view (``select_mode``)."""
+    Keeps the refused Max view's memory level, never its unsent startup view (``select_mode``)."""
     if ctx.active_context_mode != "max" or ctx.context_fit_plan is None:
         return
     plan = ctx.context_fit_plan
     fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True)
     window = fit.measurement.capacity_total_tokens
-    trials = (route_schema_trials(ctx.tools, ctx.messages, ctx.tool_schemas, "max", plan.model, plan.provider == "local")
-              if books_must_save and window is not None else None)
+    trials = route_schema_trials(ctx.tools, ctx.messages, ctx.tool_schemas, "max", plan.model, plan.provider == "local")
     rebound = plan.reproject_for_route(
         window_tokens=window or 0, known_window=window is not None,
         ratio=fit.measurement.measurement_density, output_reserve=int(plan.output_reserve_tokens),
@@ -1538,7 +1537,7 @@ def _apply_refusal_step(ctx: _RoundModelCallContext, step: str, fit: Any, target
         receipt = _run_emergency_address_pass(ctx, fit, rung=step, goal_tokens=goal)
         return max(0, int(receipt.reclaimed_tokens or 0)) if receipt.status == "applied" else None
     if step not in ("floor", "memory_rest", "books") or (step == "books" and ctx.active_context_mode != "max"):
-        return None  # outside Max the books already show as navigation
+        return None  # outside Max, no Max->Nano frame step-down applies
     current = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True) if step == "books" else fit
     before = (current or fit).measurement.estimated_input_tokens
 
@@ -1547,7 +1546,7 @@ def _apply_refusal_step(ctx: _RoundModelCallContext, step: str, fit: Any, target
         return max(0, before - after.measurement.estimated_input_tokens) if after is not None else 0
 
     if step == "books":
-        _reproject_actual_overflow_low(ctx, books_must_save=target is not None)
+        _reproject_actual_overflow_low(ctx, books_must_save=True)
         return shed_since_before() if ctx.active_context_mode != "max" else None
     # The rest of the measured excess with the slack (a slack-only ask outlines nothing), else a known window's
     # deficit with it, else its slack alone (a probe, not a measured density), else memory detail alone, or after

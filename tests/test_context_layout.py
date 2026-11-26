@@ -116,8 +116,10 @@ def test_the_real_architecture_book_navigation_exposes_all_h4_groups():
     book = load_reference_book(repo, "architecture")
     m = cl.book_navigation(book)
 
-    assert "## 6. Agent Core (navigation map)" in m
-    assert "Source: `docs/architecture/06-agent-core.md`" in m
+    assert "## 6.1 Agent Core — Loop, Tools & Safety (navigation map)" in m
+    assert "Source: `docs/architecture/06-1-loop-tools-and-safety.md`" in m
+    assert "## 6.5 Agent Core — Planning, Memory, Skills & External Tools (navigation map)" in m
+    assert "Source: `docs/architecture/06-5-planning-memory-and-skills.md`" in m
     # A composed-book offset is never a locator; the read instruction is stated
     # once, over the physical Source paths.
     assert 'read_file(root="system_repo", path=...)' in m
@@ -155,7 +157,7 @@ def test_the_real_architecture_book_navigation_exposes_all_h4_groups():
 
     # Those ranges address the chapter file, so they resolve there and nowhere
     # else: the entrypoint has one section and cannot answer for them.
-    chapter = next(c for c in book.chapters if c.source_path.endswith("06-agent-core.md"))
+    chapter = next(c for c in book.chapters if c.source_path.endswith("06-1-loop-tools-and-safety.md"))
     start, end = _range("  ", "Tool capability and execution")
     lines = chapter.text.split("\n")
     assert lines[start - 1].startswith("### Tool capability and execution")
@@ -177,34 +179,29 @@ def test_nav_map_no_heading_fallback_names_all_supported_depths():
 
 
 def test_reference_doc_sections_preserve_max_and_orient_both_books_in_low():
-    """Max retains its full bodies; Low names both complete retrievable books."""
+    """Unified Body Map layout: max and low carry the same resident orientation; DEVELOPMENT only loads when explicitly required."""
     arch = "## Arch A\n\nARCHBODY\n"
     dev = "## Dev A\n\nDEVBODY\n"
 
-    def _render(mode, include_dev):
+    def _render(mode, *, required=False):
         parts, development = cl.reference_doc_sections(
             None,
             context_mode=mode,
-            include_development=include_dev,
+            include_development=required,
+            required_book=required,
             architecture_text=arch,
             development_text=dev,
         )
         return "\n\n".join([*parts, development])
 
-    max_no_dev = _render("max", False)
-    assert "ARCHBODY" in max_no_dev  # ARCH full in max even without dev context
-    assert "DEVBODY" not in max_no_dev
-    assert "docs/DEVELOPMENT.md" in max_no_dev  # pointer, never silent
+    max_plain = _render("max", required=False)
+    low_plain = _render("low", required=False)
+    assert max_plain == low_plain
+    assert "ARCHBODY" not in max_plain
+    assert "DEVBODY" not in max_plain
+    assert "docs/DEVELOPMENT.md" in max_plain  # pointer, never silent
 
-    max_dev = _render("max", True)
-    assert "ARCHBODY" in max_dev and "DEVBODY" in max_dev
-
-    low_dev = _render("low", True)
-    assert "ARCHBODY" not in low_dev  # nav map in low
-    assert "navigation map" in low_dev
-    assert "DEVBODY" not in low_dev
-    assert "## DEVELOPMENT.md (navigation map)" in low_dev
-
-    low_no_dev = _render("low", False)
-    assert "DEVBODY" not in low_no_dev
-    assert "docs/DEVELOPMENT.md" in low_no_dev
+    for mode in ("max", "low"):
+        with_required = _render(mode, required=True)
+        assert "ARCHBODY" not in with_required
+        assert "## DEVELOPMENT.md\n\n" in with_required and "DEVBODY" in with_required

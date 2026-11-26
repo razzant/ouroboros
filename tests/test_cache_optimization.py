@@ -50,11 +50,18 @@ def test_build_llm_messages_marks_every_stable_block_before_the_changing_tail():
     assert all(block["cache_control"] == {"type": "ephemeral"} and block["text"].strip() for block in stable)
     assert "cache_control" not in dynamic
     assert stable[0]["text"].startswith("You are Ouroboros.")
-    assert stable[1]["text"].startswith("## DEVELOPMENT.md\n")
+    assert len(stable) == 2  # [A', B] in ordinary Max (Block D freed for breakpoint #4)
     assert "## My story" in stable[-1]["text"]
     from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
 
     assert system_msg[STABLE_PREFIX_BLOCKS_KEY] == len(stable)
+    # Explicit context_requires_development=True restores Block D between A' and B.
+    req_msgs, _ = build_llm_messages(env=env, memory=memory, task={
+        "id": "t1-dev", "type": "task", "text": "hi",
+        "task_contract": {"context_requires_development": True},
+    })
+    req_stable = req_msgs[0]["content"][:-1]
+    assert len(req_stable) == 3 and req_stable[1]["text"].startswith("## DEVELOPMENT.md\n")
 
 
 def test_a_held_head_changes_c_before_the_assignment_and_keeps_a_prime_d_and_b(tmp_path, monkeypatch):
@@ -74,7 +81,8 @@ def test_a_held_head_changes_c_before_the_assignment_and_keeps_a_prime_d_and_b(t
     monkeypatch.setattr(context, "_queue_context_fact", lambda _task: {"note": "Queue observation unavailable."})
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
     evidence = SimpleNamespace(route_fp="held-cache", status="asserted", stale=False, window_tokens=1_000_000)
-    task = {"id": "cache-held", "type": "task", "chat_id": 1, "text": "Newest owner words for the cache test."}
+    task = {"id": "cache-held", "type": "task", "chat_id": 1, "text": "Newest owner words for the cache test.",
+            "task_contract": {"context_requires_development": True}}
     heading, head = "## Held knowledge notes", "One fact from the held head."
     tools = [{"type": "function", "function": {"name": "read_fixture", "parameters": {"type": "object"}}}]
 

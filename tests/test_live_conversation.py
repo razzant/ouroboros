@@ -594,8 +594,7 @@ def test_primary_voice_start_room_policy_pays_its_frames_keeps_opened_sessions_u
     base = fit.build_context_fit_plan(host_world.env, core, host_world.task, preferred_mode='max', tool_schemas=host.schemas,
                                       nano_base=host.plan.start_nano_base, route_resolver=host.turn.resolve_route)
     options = LiveOptions(instructions='Call feature instructions. ' * 20, languages=('en-US',))
-    maps = [context_layout.book_navigation(load_reference_book(host_world.env.repo_dir, book))
-            for book in ('architecture', 'development')]
+    maps = [context_layout.body_map_book(load_reference_book(host_world.env.repo_dir, 'architecture')).text]
 
     def text_of(messages):
         content = messages[0]['content']
@@ -618,10 +617,10 @@ def test_primary_voice_start_room_policy_pays_its_frames_keeps_opened_sessions_u
             session, _, evidence = session_candidate(host, factory, options)
         return text_of(session.wire['messages']), evidence
 
-    assert base.initial_mode == 'low' and base.preferred_mode == 'max'  # no owner target: only a window folds this view
-    base_text = text_of(base.messages_for('low'))
+    assert base.initial_mode == 'max' and base.preferred_mode == 'max'  # unified Body Map fits in Max
+    base_text = text_of(base.messages_for('max'))
     assert all(whole_map in base_text for whole_map in maps) and pages_of(base_text) == (80, 0)
-    host.messages[:] = copy.deepcopy(base.messages_for('low'))
+    host.messages[:] = copy.deepcopy(base.messages_for('max'))
     whole = measure_session_wire(host, base, host.messages, host.schemas, factory, options)[2]['fit']['measurement'][
         'estimated_input_tokens']
     reserve = host.model.facts.working_reserve_tokens

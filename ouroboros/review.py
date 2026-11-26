@@ -1424,7 +1424,7 @@ def diff_pulse(
         if status is not None:
             break
     else:  # nothing to diff against here; the touched books keep whatever balance they have
-        return book_balance_note(root, [str(path) for path in paths or ()])
+        return book_balance_note(root, [str(path) for path in paths or ()], source="index" if staged else "worktree")
     changed: dict[str, tuple[int, int]] = {}
     for row in numstat.decode("utf-8", "replace").split("\0"):
         plus, _, rest = row.partition("\t")
@@ -1445,6 +1445,12 @@ def diff_pulse(
     modules: list[tuple[GatedModule, int, int]] = []
     for path in shown:
         try:
+            if staged and _is_gated_module_path(path):
+                staged_raw = _git_bytes(root, "--no-optional-locks", "show", f":{path}")
+                if staged_raw is not None:
+                    text = staged_raw.decode("utf-8")
+                    modules.append((GatedModule(path, len(text.splitlines()), len(staged_raw)), *changed.get(path, (0, 0))))
+                    continue
             modules.extend((module, *changed.get(module.path, (0, 0)))
                            for module in iter_gated_modules(root, repo_paths=[path]))
         except (OSError, ValueError):  # deleted, outside the checkout or not UTF-8 text: no size to show
@@ -1485,7 +1491,9 @@ def diff_pulse(
     fact = (f"Diff pulse since {since}: files {len(changed)}, lines +{added}/-{deleted} (net {added - deleted:+d}); "
             f"new files: {listed(new)}; module lines (target {TARGET_MODULE_LINES}, cap {MAX_MODULE_LINES}): "
             f"{listed(sizes)}{suite}.")
-    return "\n".join(part for part in (fact, shape, book_balance_note(root, shown), DIFF_PULSE_QUESTION) if part)
+    from ouroboros.code_shape_facts import diff_pulse_tail_parts
+    return "\n".join(part for part in (fact, shape, *diff_pulse_tail_parts(
+        root, base, staged, shown, _change_texts, changed, DIFF_PULSE_QUESTION)) if part)
 
 
 def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any]:

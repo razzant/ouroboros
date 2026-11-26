@@ -1,6 +1,6 @@
 # 11. Frozen Contracts v1 (`ouroboros/contracts/`)
 
-§11.1 freezes `ouroboros/contracts/`. `gateway/schema.py` publishes Python wire shapes at `GET /api/contract`. JSDoc keeps client views, open payload fields and legacy replies without a matching named schema. `web/modules/api_types.js` retains the `VERSION` carrier and limits owned by `tools/core_artifacts.py` (links, quiz options) and `gateway/task_decision.py` (comments).
+My backward-compatible frozen ABI layer (`ouroboros/contracts/` frozen by §11.1; Python wire shapes published at `GET /api/contract` by `gateway/schema.py`; `web/modules/api_types.js` retains only the `VERSION` carrier and limits owned by `tools/core_artifacts.py` and `gateway/task_decision.py`, while JSDoc keeps client views, open payload fields and legacy replies without a matching named schema). Before modifying any frozen payload or contract file I inspect `query_code(op="architecture", query="protected_contracts_affected <paths>")` and this chapter; frozen shapes extend explicitly or ship versioned successors without breaking existing consumers.
 
 ### 11.1 What is frozen
 

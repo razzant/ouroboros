@@ -1072,7 +1072,9 @@ def test_the_commit_gate_judges_a_bound_candidate_by_the_serving_handbook_and_re
         _, heading, delivered = text.partition(f"\n## {PROTOCOL_CHAPTER}\n")
         assert heading and delivered.index(SERVING_DEV_RULE) < delivered.index(CANDIDATE_DEV_RULE), slot_id
         assert "-" + SERVING_DEV_RULE in text and "+" + CANDIDATE_DEV_RULE in text, slot_id
-        assert text.count(SERVING_DEV_RULE) == 2, slot_id  # the delivered rule and the diff's removed line
+        # Delivered rule + diff removed line (+ Contact #3 removed-prose pulse when present in diff_pulse).
+        expected_count = 3 if "Removed governance prose lines" in text else 2
+        assert text.count(SERVING_DEV_RULE) == expected_count, slot_id
         if slot_id != "t1":  # the retrieving seats inline the serving constitution too
             assert SERVING_RULE in text, slot_id
     assert shared.git(serving, "status", "--porcelain") == ""

@@ -141,11 +141,18 @@ const LOWERING = ['memory', 'request', 'route', 'window', 'after_start'];
 export function causeOf(fact, preferred) {
     const asked = said(fact.preferred_at_send);
     const ran = said(fact.applied);
+    const bodyMap = fact.books === 'body_map';
     switch (asked && fact.cause) {
-    case 'memory': return fmt('{mode} for now, not {chosen}: the whole books do not fit beside the history.', { mode: ran, chosen: asked });
-    case 'request': return fmt('{mode} for now, not {chosen}: even without the history, the request leaves the whole books no room.', { mode: ran, chosen: asked });
-    case 'route': return fmt('{mode} for now, not {chosen}: this model’s window cannot hold the whole books.', { mode: ran, chosen: asked });
-    case 'window': return fact.applied === 'low' && fact.preferred_at_send === 'max'  // rows of 17-22 Nov: schemas tipped it
+    case 'memory': return bodyMap
+        ? fmt('{mode} for now, not {chosen}: this start did not fit beside the history.', { mode: ran, chosen: asked })
+        : fmt('{mode} for now, not {chosen}: the whole books do not fit beside the history.', { mode: ran, chosen: asked });
+    case 'request': return bodyMap
+        ? fmt('{mode} for now, not {chosen}: even without the history, the request leaves {chosen} no room.', { mode: ran, chosen: asked })
+        : fmt('{mode} for now, not {chosen}: even without the history, the request leaves the whole books no room.', { mode: ran, chosen: asked });
+    case 'route': return bodyMap
+        ? fmt('{mode} for now, not {chosen}: this model’s window cannot hold {chosen}.', { mode: ran, chosen: asked })
+        : fmt('{mode} for now, not {chosen}: this model’s window cannot hold the whole books.', { mode: ran, chosen: asked });
+    case 'window': return fact.applied === 'low' && fact.preferred_at_send === 'max' && !bodyMap  // rows of 17-22 Nov: schemas tipped it
         ? fmt('{mode} for now, not {chosen}: the whole books did not fit beside the rest of the start.', { mode: ran, chosen: asked })
         : fmt('{mode} did not fit at the start.', { mode: asked });
     case 'after_start': return fmt('The work moved to {mode} after it started.', { mode: ran });

@@ -202,6 +202,9 @@ def render_domain_map(manifest: Manifest) -> str:
     for d in sorted(manifest.domains):
         L.append("")
         L.append(f"### {d} — {manifest.domains[d]}")
+        if refs := manifest.references.get(d):
+            L.append("")
+            L.append("Owning manuals: " + ", ".join(f"`{r}`" for r in refs))
         L.append("")
         for path in mods_by_domain[d]:
             mark = " *" if path in manifest.proposed else ""
@@ -220,6 +223,23 @@ def run_checks(root: pathlib.Path = REPO_ROOT) -> tuple[list[str], list[str]]:
     if bad_domains:
         findings.append(f"manifest names unknown domains: {bad_domains}")
         return findings, notes
+
+    arch_entry = root / "docs/ARCHITECTURE.md"
+    atlas_present = arch_entry.is_file() and "## Reference Atlas" in arch_entry.read_text(encoding="utf-8", errors="replace")
+    if atlas_present and not manifest.references:
+        findings.append("references: [references] table is missing/empty while docs/ARCHITECTURE.md carries ## Reference Atlas")
+    if manifest.references:
+        missing_ref_domains = sorted(d for d in manifest.domains if not manifest.references.get(d))
+        if missing_ref_domains:
+            findings.append(f"references: domains missing [references] manual entries: {missing_ref_domains}")
+        for key, paths in sorted(manifest.references.items()):
+            if key not in manifest.domains:
+                prefix_target = root / key.rstrip("/")
+                if not prefix_target.exists():
+                    findings.append(f"references: non-domain prefix key {key!r} does not exist under {root}")
+            for ref_path in paths:
+                if not (root / ref_path).is_file():
+                    findings.append(f"references: [references][{key!r}] points to missing file: {ref_path}")
 
     tracked = tracked_population(root)
     for path in sorted(tracked - set(manifest.modules)):

@@ -408,3 +408,170 @@ def pulse_line(
             text += f", {len(missed)} unreadable not counted: {named}" if missed else ""
         parts.append(("tests: " if test else "") + text)
     return f"Code shape: {'; '.join(parts)}." if parts else ""
+
+
+def _is_governance_markdown(path: str) -> bool:
+    """Whether ``path`` is a tracked governance or specification Markdown document."""
+    from ouroboros.reference_books import book_path_role, ruled_text_of, standalone_reference_of
+
+    norm = str(path or "").replace("\\", "/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    if book_path_role(norm) or ruled_text_of(norm) or standalone_reference_of(norm):
+        return True
+    return norm.startswith("docs/") and norm.endswith(".md")
+
+
+def body_ownership_pulse(
+    root: pathlib.Path,
+    shown: list[str],
+    staged: bool,
+    *,
+    all_changed: Iterable[str] | None = None,
+) -> str:
+    """Factual ownership line: touched code/prompt/skill paths -> owning manuals & matching invariants.
+
+    Reads ``ouroboros/domains.toml`` ``[references]`` unioned with exact-path chapter mentions and
+    all numbered invariants in ``docs/architecture/10-key-invariants.md`` (matching exact paths,
+    extension-qualified basenames, snake_case stems, or qualified ``stem.``/``stem::`` symbols).
+    Purely diagnostic, never a gate.
+    """
+    from ouroboros.reference_books import _git_bytes, resolve_body_references, source_reader
+
+    code_paths = [p for p in shown if not str(p).startswith(("docs/", "tests/"))]
+    if not code_paths:
+        return ""
+    diff_universe = shown if all_changed is None else all_changed
+    changed_set = {str(p).replace("\\", "/").removeprefix("./") for p in diff_universe}
+    idx_reader = source_reader(root, source="index") if staged else None
+    dirty_wt: set[str] = set()
+    if staged:
+        wt_raw = _git_bytes(root, "--no-optional-locks", "diff", "--name-only", "-z")
+        untracked_raw = _git_bytes(root, "--no-optional-locks", "ls-files", "--others", "--exclude-standard", "-z", "--", "docs/architecture", "docs/development")
+        if wt_raw is None or untracked_raw is None:
+            dirty_wt.add("*")
+        else:
+            dirty_wt = {p.replace("\\", "/").removeprefix("./") for raw in (wt_raw, untracked_raw) for p in raw.decode("utf-8", "replace").split("\0") if p}
+    index_needed = changed_set | dirty_wt
+
+    def _fast_staged_reader(rel: str) -> bytes:
+        norm_rel = str(rel).replace("\\", "/").removeprefix("./")
+        if idx_reader is not None and ("*" in index_needed or norm_rel in index_needed):
+            return idx_reader(norm_rel)
+        return (root / norm_rel).read_bytes()
+
+    reader = _fast_staged_reader if (staged and ("*" in index_needed or any(
+        p in {"ouroboros/domains.toml", "docs/ARCHITECTURE.md", "docs/DEVELOPMENT.md"} or p.startswith(("docs/architecture/", "docs/development/"))
+        for p in index_needed
+    ))) else None
+    refs = resolve_body_references(root, code_paths, read_bytes=reader, include_mentions=True)
+    manuals = refs.get("manuals") or ()
+    if not manuals:
+        return ""
+    manual_tags = [f"{m} ({'touched' if m in changed_set else 'untouched in diff'})" for m in manuals]
+    matched_invariants: list[str] = []
+    try:
+        inv_bytes = (_fast_staged_reader if staged else (lambda p: (root / p).read_bytes()))("docs/architecture/10-key-invariants.md")
+        inv_text = inv_bytes.decode("utf-8", errors="replace")
+        exact_tokens: set[str] = set()
+        qualified_stems: set[str] = set()
+        for p in code_paths:
+            norm = str(p).replace("\\", "/").removeprefix("./")
+            base = norm.rsplit("/", 1)[-1]
+            stem = base.rsplit(".", 1)[0] if "." in base else base
+            exact_tokens.add(norm)
+            if "." in base:
+                exact_tokens.add(base)
+            if "_" in stem:
+                exact_tokens.add(stem)
+            elif len(stem) >= 3:
+                qualified_stems.add(stem)
+        for line in inv_text.splitlines():
+            m = re.match(r"^(\d+)\.\s+", line)
+            if not m:
+                continue
+            hit = any(re.search(rf"(?<![A-Za-z0-9_-]){re.escape(tok)}(?![A-Za-z0-9_-])", line) for tok in exact_tokens)
+            if not hit and qualified_stems:
+                hit = any(re.search(rf"(?<![A-Za-z0-9_-]){re.escape(stem)}(?:\.|::)", line) for stem in qualified_stems)
+            if hit:
+                matched_invariants.append(f"§10#{m.group(1)}")
+    except (OSError, ValueError):
+        pass
+    inv_part = f"; matching invariants: {', '.join(matched_invariants)}" if matched_invariants else ""
+    return f"Owning manuals: {', '.join(manual_tags)}{inv_part}."
+
+
+def removed_governance_prose_pulse(
+    root: pathlib.Path,
+    base: str,
+    staged: bool,
+    shown: list[str],
+    change_texts_fn: Callable[..., tuple[dict[str, str | None], dict[str, str | None]]],
+    *,
+    all_changed: Iterable[str] | None = None,
+) -> str:
+    """P5-clean set-diff of removed prose lines in touched governance Markdown vs ``base``.
+
+    Excludes lines that still appear verbatim in ANY changed governance doc across ``all_changed``
+    in the current tree/index so splits and relocations across separate edits produce zero noise.
+    Zero keyword heuristics.
+    """
+    gov_shown = [p for p in shown if _is_governance_markdown(p)]
+    if not gov_shown:
+        return ""
+    diff_universe = shown if all_changed is None else all_changed
+    gov_all = list(dict.fromkeys([*gov_shown, *(p for p in diff_universe if _is_governance_markdown(p))]))
+    at_base, current = change_texts_fn(root, base, staged, gov_shown, gov_all)
+    surviving_lines = {
+        line.strip()
+        for p in gov_all
+        for line in (current.get(p) or "").splitlines()
+        if line.strip()
+    }
+    removed: list[tuple[str, int, str]] = []
+    for p in gov_shown:
+        old = at_base.get(p)
+        if not old:
+            continue
+        in_fence = False
+        for lineno, line in enumerate(old.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence or not stripped or stripped.startswith(("#", "---", "|---", "<!--")):
+                continue
+            if stripped not in surviving_lines:
+                removed.append((p, lineno, stripped))
+    if not removed:
+        return ""
+    cap = 12
+    sample = [f"  - {p}:{ln}: {line[:140]}{'…' if len(line) > 140 else ''}" for p, ln, line in removed[:cap]]
+    diff_flag = "--cached " if staged else ""
+    more = (
+        f"\n  (+{len(removed) - cap} more removed governance prose line(s); "
+        f"inspect full diff via `git diff {diff_flag}{base[:12]} -- {' '.join(gov_shown[:4])}`)"
+        if len(removed) > cap else ""
+    )
+    return f"Removed governance prose lines ({len(removed)} not relocated verbatim):\n" + "\n".join(sample) + more
+
+
+def diff_pulse_tail_parts(
+    root: pathlib.Path,
+    base: str,
+    staged: bool,
+    shown: list[str],
+    change_texts_fn: Callable[..., tuple[dict[str, str | None], dict[str, str | None]]],
+    all_changed: Iterable[str] | None,
+    tail_question: str,
+) -> tuple[str, ...]:
+    """Assemble diagnostic diff_pulse tail lines (ownership, removed governance prose, book balance, prompt)."""
+    from ouroboros.reference_books import book_balance_note
+
+    diff_paths = shown if all_changed is None else list(all_changed)
+    return (
+        body_ownership_pulse(root, shown, staged, all_changed=diff_paths),
+        removed_governance_prose_pulse(root, base, staged, shown, change_texts_fn, all_changed=diff_paths),
+        book_balance_note(root, shown, source="index" if staged else "worktree"),
+        tail_question,
+    )
