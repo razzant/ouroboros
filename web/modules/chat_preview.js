@@ -364,7 +364,8 @@ export const ordinaryUnavailability = (error, chatId, scope) => {
 /** Profile-bound first opening and the room's canonical history read door (chat.js). */
 export function createRoomProfileLifecycle({
     ws, doc, chatId, isMain, isProjectOpening,
-    isDestroyed, isLeaving, readHistory, nextRecentVersion, syncHistory, loadUiPreferences,
+    isDestroyed, isLeaving, readHistory, nextRecentVersion, syncHistory,
+    loadUiPreferences = null, loadPreferences = null, onPreferences = () => {},
     getPreview, onPreviewShown, reconcileSavedSends, kept = () => null,
 }) {
     // Per-thread storage so a project thread never bleeds into the main chat. A document that proves
@@ -438,6 +439,23 @@ export function createRoomProfileLifecycle({
         });
     }
 
+    let prefsRequest = 0, prefsSettled = 0;
+    function refreshPreferences() {
+        const seq = ++prefsRequest;
+        const settle = (prefs) => {
+            if (isDestroyed() || seq <= prefsSettled) return;
+            prefsSettled = seq;
+            if (prefs && typeof prefs === 'object') onPreferences(prefs);
+        };
+        try {
+            if (!loadPreferences) return Promise.resolve(loadUiPreferences?.()).catch(() => {});
+            return Promise.resolve(loadPreferences()).then(settle, () => settle(null));
+        } catch {
+            settle(null);
+            return Promise.resolve();
+        }
+    }
+
     // Every read of this room (newest, a page, ↓, arrivals): a current one refused for authentication takes the saved text.
     async function fetchHistory(cursor, options = {}) {
         const recentVersion = cursor == null ? nextRecentVersion() : 0, sent = { socket: servingSocket(), epoch };
@@ -454,19 +472,25 @@ export function createRoomProfileLifecycle({
     async function startOpening() {
         // The owners below exist first: no read stands between opening and saved text.
         await null;
-        if (!isDestroyed()) {
-            showPreview();
-            previewOwed = !getPreview().shown() && !foreignProfile() && ws?.canShowSavedProfile?.() !== true;
-        }
-        await loadUiPreferences();
+        if (isDestroyed()) return;
+        showPreview();
+        previewOwed = !getPreview().shown() && !foreignProfile() && ws?.canShowSavedProfile?.() !== true;
+        void refreshPreferences();
         // Main waits for hydration; Projects pass through. History reads share one flight.
         await waitForHydrationWindow();
         if (isDestroyed()) return;
         await awaitInitialHydration();
     }
 
+    // Preferences refresh independently of history; history starts on the next microtask so open/resume hooks finish first.
+    function openHistory(run) {
+        if (isDestroyed()) return Promise.resolve(false);
+        void refreshPreferences();
+        return Promise.resolve().then(() => (isDestroyed() ? false : run()));
+    }
+
     const lifecycle = {
-        profileScope, storeKey, foreignProfile, fetchHistory, awaitInitialHydration, waitForHydrationWindow, startOpening,
+        profileScope, storeKey, foreignProfile, fetchHistory, awaitInitialHydration, waitForHydrationWindow, startOpening, openHistory,
         get initialHydration() { return initialHydrationPromise; },
         settleInitialHydration(promise) { initialHydrationPromise = promise; },
         resetInitialHydration() { initialHydrationPromise = null; },

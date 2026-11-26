@@ -196,7 +196,9 @@ export function createChatInstance({
         ws, doc: document, chatId, isMain, isProjectOpening,
         isDestroyed: () => destroyed, isLeaving: () => leaving,
         readHistory: args => apiClient.chatHistory(args), nextRecentVersion: () => ++recentRequest,
-        syncHistory, loadUiPreferences, getPreview: () => preview, reconcileSavedSends, kept: () => unconfirmed,
+        syncHistory, loadPreferences: () => apiClient.uiPreferences(),
+        onPreferences: applyUiPreferences,
+        getPreview: () => preview, reconcileSavedSends, kept: () => unconfirmed,
         onPreviewShown: () => { updateMessagesPadding(); reading.followAfterLayout(true); },
     });
     const { storeKey, foreignProfile, fetchHistory, awaitInitialHydration, waitForHydrationWindow } = roomProfile;
@@ -250,6 +252,7 @@ export function createChatInstance({
     // Every ws.on subscription's disposer, released together in destroy().
     const wsDisposers = [];
     const onWs = (event, fn) => wsDisposers.push(ws.on(event, fn));
+    const wsUp = () => ws.isConnected?.() !== false;
     const replies = createChatReplies({ chatId, feed: messagesDiv, input, composerArea: inputArea, key: storeKey('ouro_chat_reply'),
         reading: () => reading, onDomWrite: withStableViewport, history: () => historyReveal,
         navigate: revealQuotedSource, present: () => !destroyed && isInstanceVisible(), onDraftChange: () => composer?.invalidateDraft() });
@@ -286,17 +289,6 @@ export function createChatInstance({
             { excludeAnchorNode: node }),
         focusAfterRemoval: () => input?.focus?.({ preventScroll: true }),
     });
-
-    async function loadUiPreferences() {
-        try {
-            const prefs = await apiClient.uiPreferences();
-            if (destroyed) return;
-            nestedSubagentsExpanded = prefs?.nested_subagents_expanded === true;
-            emptyWelcome?.setPreference(prefs?.welcome);
-        } catch {
-            nestedSubagentsExpanded = false;
-        }
-    }
 
     // Sent attachment messages not yet confirmed saved: "Send again" with one id, kept by this tab across a reload.
     const unconfirmed = createUnconfirmedSends({ send: (frame, options) => ws.send(frame, options),
@@ -1421,6 +1413,24 @@ export function createChatInstance({
         return record?.root?.isConnected ? withStableViewport(mutate) : mutate();
     }
 
+    function applyUiPreferences(prefs) {
+        nestedSubagentsExpanded = prefs?.nested_subagents_expanded === true;
+        if (prefs) emptyWelcome?.setPreference(prefs.welcome);
+        const value = nestedSubagentsExpanded ? '1' : '0';
+        const cards = [...liveCardRecords.values()].filter(r => r.isSubagent
+            && !explicitCardExpansion.has(r.groupId) && r.root?.dataset?.expanded !== value);
+        if (!cards.length) return;
+        withStableViewport(() => {
+            let changed = false;
+            for (const record of cards) {
+                if (!setLiveCardExpanded(record, nestedSubagentsExpanded)) continue;
+                changed = true;
+                if (nestedSubagentsExpanded && !leaving) hydrateOpenSettledChild(record, hydrateCardReviews);
+            }
+            return changed;
+        });
+    }
+
     // A window shown again keeps the reading intent (data readiness positions it); hidden, it ends an unread opening
     // still owed; a room away stays put (its return: `resume`).
     const handleVisibility = () => {
@@ -1483,7 +1493,7 @@ export function createChatInstance({
     const historyResyncScheduler = createHistoryResyncScheduler({
         isReplayActive: () => _historyReplayActive,
         // Re-arm if the joined sync fetched its window before the arm.
-        run: tags => historyPager.read({ ...tags }).catch(() => {}).then(() => {
+        run: tags => historyPager.read({ ...tags, current: () => !closedSinceOpen && wsUp() }).catch(() => {}).then(() => {
             if (!destroyed && !leaving && lastHistorySyncSucceeded && liveCardBound.isArmed()) scheduleHistorySync('bound_recheck');
         }),
     });
@@ -2362,8 +2372,8 @@ export function createChatInstance({
                 if (historyControls.beginRecent()) syncLoadOlderControl();
                 const data = await fetchHistory(null, { signal: abort.signal, tags: { ...tags, mode: 'newest' } });
                 // A closed, left or superseded room takes no late response.
-                if (destroyed || startedVisit !== visit || foreignProfile()) {
-                    lastHistorySyncSucceeded = false;
+                if (destroyed || startedVisit !== visit || abort.signal.aborted || foreignProfile()) {
+                    if (!abort.signal.aborted) lastHistorySyncSucceeded = false;
                     roomProfile.resetInitialHydration();
                     return false;
                 }
@@ -2421,7 +2431,7 @@ export function createChatInstance({
                 roomProfile.noteCanonicalHistory(wasFirstLoad);
                 return messages.length > 0;
             } catch (err) {
-                if (destroyed || startedVisit !== visit) { roomProfile.resetInitialHydration(); return false; }
+                if (destroyed || startedVisit !== visit || abort.signal.aborted) { roomProfile.resetInitialHydration(); return false; }
                 lastHistorySyncSucceeded = false;
                 preview.failed(err);
                 emptyWelcome?.historyRead(false);
@@ -2452,9 +2462,10 @@ export function createChatInstance({
     const RECEIPT = { reason: 'read_receipt' };  // its reads and the pages its opening walks
     const readReceipt = createProjectReadReceipt({ onNote: sharedRead.sample,
         read: async (fresh, whole, why) => {
-            await (!fresh && (catchUp.reading || !catchUp.owed && roomProfile.initialHydration)
-                || historyPager.read({ whole, ...RECEIPT, ...why, decision: whole && 'latest_unknown' }));
-            return lastHistorySyncSucceeded && !catchUp.owed;
+            if (!wsUp()) return false;
+            await (!fresh && (catchUp.wait || !catchUp.owed && roomProfile.initialHydration)
+                || historyPager.read({ whole, ...RECEIPT, ...why, current: wsUp, decision: whole && 'latest_unknown' }));
+            return wsUp() && lastHistorySyncSucceeded && !catchUp.owed;
         },
         // A destroyed page reports hidden===false, hence the lifecycle flag.
         isShown: () => !destroyed && !leaving && !page.hidden && !archive?.active,
@@ -2465,14 +2476,14 @@ export function createChatInstance({
         onReadingLatest, arriving: () => reading.arriving, delivered: newestFacts.delivered,
         older: async current => {
             await historyPager.whenIdle();
-            if (!current()) return {};
+            if (!current() || !wsUp()) return {};
             const direction = readReceipt.continuation(pagerRecent);
             // A failed present keeps the existing horizon repair.
             if (direction === 'latest') return historyPager.latest(null, RECEIPT);
             if (direction && !historyPager.getState().error) return historyPager.older(RECEIPT);
-            return historyPager.edge('older', { current, tags: RECEIPT });
+            return historyPager.edge('older', { current: () => current() && wsUp(), tags: RECEIPT });
         },
-        present: current => historyPager.whenIdle().then(() => current() && historyPager.getState().canNewer && historyPager.latest(null, RECEIPT)),
+        present: current => historyPager.whenIdle().then(() => current() && wsUp() && historyPager.getState().canNewer && historyPager.latest(null, RECEIPT)),
         land: (latest, token) => reading.land(() => newestMessageOffset(latest, newestFacts), token),
     });
 
@@ -2567,10 +2578,10 @@ export function createChatInstance({
         if (!arrive || !needed) follow();
         if (!needed) return;
         try {
-            const shared = catchUp.reading || historySyncPromise || !historyLoaded && opening.then(awaitInitialHydration);
+            const shared = catchUp.wait || historySyncPromise || !historyLoaded && opening.then(awaitInitialHydration);
             await shared;
             await catchUp.settled(current);
-            if (!current() || shared && !lastHistorySyncSucceeded) return;
+            if (!current() || shared && (!lastHistorySyncSucceeded || !wsUp())) return;
             if (!presentHeld() && (await historyPager.latest(current, { reason })).status !== 'applied') return;
             await catchUp.settled(current);  // a reconnect during that read still owes feedback
             if (current() && !catchUp.owed && arrive) follow();
@@ -3319,13 +3330,10 @@ export function createChatInstance({
             }
             clearReloadParams();
         };
-        const read = loadUiPreferences()
-            // A return shares its paint receipt's newest read during preferences, even a refusal; a real reconnect owes
-            // a read newer than any it interrupted.
-            .then(() => (destroyed || openedVisit !== visit ? false
-                : reason === 'resume' && recentRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
-                : isReconnect ? historyPager.read({ fromReconnect: true, whole: true, reason, current: () => catchUp.reading === read })
-                    : waitForHydrationWindow().then(awaitInitialHydration)))
+        const read = roomProfile.openHistory(() => (openedVisit !== visit || closedSinceOpen || !wsUp() ? false
+            : reason === 'resume' && recentRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
+            : isReconnect ? historyPager.read({ fromReconnect: true, whole: true, reason, current: () => catchUp.reading === read })
+                : waitForHydrationWindow().then(awaitInitialHydration)))
             .then(settled, settled);
         if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit, read, readOnOpen, reason === 'reconnect');
     });
@@ -3336,6 +3344,7 @@ export function createChatInstance({
         forgetWindowReturn();
         closedSinceOpen = true;
         catchUp.cancel(recentRequest, true);
+        historyReadAbort?.abort(); historyPager.cancelArrivals(); historyResyncScheduler.cancel();
         if (leaving) { outageAway = [...outageAway || [], ...unconfirmed.written()]; return; }
         showOutage();
     });

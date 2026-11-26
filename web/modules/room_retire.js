@@ -240,8 +240,17 @@ export function dispatchedOwnerIds(rows, pending, { chatId, sessionId, localOwne
 }
 
 export function createCatchUp(changed, bound = 300, pending = null) {
-    let timer = null, active = false, reading = null, after = null, failed = false, awaited = null;
+    let timer = null, active = false, reading = null, gate = null, after = null, failed = false, awaited = null;
     const stop = () => { clearTimeout(timer); timer = null; };
+    const wake = () => { const current = gate; gate = null; current?.resolve(); };
+    const arm = (read) => {
+        wake();
+        if (!read) return;
+        let resolve;
+        const promise = new Promise((done) => { resolve = done; });
+        gate = { promise, resolve };
+        if (typeof read.then === 'function') read.then(() => { if (reading === read) wake(); }, () => { if (reading === read) wake(); });
+    };
     const markDisconnected = (requested) => {
         if (!pending) return;
         for (const entry of pending.values()) {
@@ -265,9 +274,10 @@ export function createCatchUp(changed, bound = 300, pending = null) {
     return {
         get active() { return active; },
         get reading() { return reading; },
+        get wait() { return gate?.promise || null; },
         // A real reconnect's own whole read, still to come or out: the room's other reads wait for it, then read only
         // what is left (a return shares its paint receipt's read instead).
-        get reconnecting() { return awaited && awaited === reading ? reading : null; },
+        get reconnecting() { return awaited && awaited === reading ? gate?.promise || null : null; },
         get owed() { return after !== null; },
         get retry() { return after !== null && failed && !reading; },
         wouldConfirm(data = {}) {
@@ -291,23 +301,24 @@ export function createCatchUp(changed, bound = 300, pending = null) {
             if (!degraded) settleSends(recentVersion, confirmedIds);
             return !cut && !(degraded && after !== null);
         },
-        async settled(current) { while (current() && reading) await reading; },
+        async settled(current) { while (current() && gate) await gate.promise; },
         begin(current, read = null, requested = 0, reconnect = false) {
             stop();
             after = requested;
             reading = read;
             awaited = reconnect ? read : null;
             if (reconnect) markDisconnected(requested);
+            arm(read);
             timer = setTimeout(() => { timer = null; if (current()) { active = true; changed(); } }, bound);
         },
         end(read = null) {
             if (read !== reading) return;
-            stop(); reading = null;
+            stop(); reading = null; awaited = null; wake();
             if (read) failed = after !== null;
             if (active || read && failed) { active = false; changed(); }
         },
         cancel(requested = 0, disconnected = false) {
-            stop(); failed ||= Boolean(reading); active = false; reading = null; after = requested;
+            stop(); failed ||= Boolean(reading); active = false; reading = null; awaited = null; wake(); after = requested;
             if (disconnected) markDisconnected(requested);
         },
     };

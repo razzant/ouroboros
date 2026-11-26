@@ -401,18 +401,19 @@ export function createChatHistoryPager({
     // page again, which re-anchors it and lets go of what that page no longer holds.
     const arrivable = () => Boolean(after) && arrived <= Math.max(windowRows, 210);
     const unarrivable = () => ({ decision: after ? 'window_overflow' : 'no_cursor' });  // the gate `arrivable` closed
-    const startArrivals = ask => (!alive() ? Promise.resolve({ status: 'disposed' })
+    const startArrivals = ask => (!alive() || ask.currents?.some(ok => ok()) === false ? Promise.resolve({ status: 'disposed' })
         : arrivable() ? readArrivals(ask) : Promise.resolve({ status: 'unavailable', leg: unarrivable() }));
     // One read in flight and at most one queued behind it, so every caller gets a read
     // begun after its call; a queued read reconciles as a reconnect when any caller it
     // serves is one, and is made for the reason of the first.
-    function arrivals(fromReconnect, tags) {
-        if (queued) { queued.fromReconnect ||= fromReconnect; return queued.promise; }
-        if (!arrival) return startArrivals({ fromReconnect, ...tags });
-        const ask = { fromReconnect, ...tags };
+    function arrivals(fromReconnect, tags, current = () => true) {
+        if (queued) { queued.fromReconnect ||= fromReconnect; queued.currents.push(current); return queued.promise; }
+        if (!arrival) return startArrivals({ fromReconnect, ...tags, currents: [current] });
+        const ask = { fromReconnect, ...tags, currents: [current] };
         ask.promise = arrival.promise.then(() => {
             if (queued !== ask) return { status: 'disposed' };
-            queued = null; return startArrivals(ask);
+            queued = null;
+            return startArrivals(ask);
         });
         queued = ask;
         return ask.promise;
@@ -428,13 +429,13 @@ export function createChatHistoryPager({
         // A superseded reconnect leaves its queued read to the current catch-up.
         if (!alive() || !current()) return Promise.resolve(false);
         const inFlight = newestInFlight() || !fromReconnect && catchingUp();
-        if (inFlight) return inFlight.then(() => started === visit && read({ fromReconnect, whole, current, reason, decision, detail }));
+        if (inFlight) return inFlight.then(() => started === visit && current() && read({ fromReconnect, whole, current, reason, decision, detail }));
         if (whole || !canArrive() || !(arrival || arrivable())) {
             // The first gate that chose the newest page, in the order they are weighed.
             const gate = whole ? decision || 'explicit_whole' : !canArrive() ? arrivalGate() : unarrivable().decision;
             return readNewest({ fromReconnect, ...why({ reason, decision: gate, detail }) });
         }
-        return arrivals(fromReconnect, { reason, decision }).then(result => started === visit && (result.status === 'applied'
+        return arrivals(fromReconnect, { reason, decision }, current).then(result => started === visit && current() && (result.status === 'applied'
             || (result.status !== 'disposed' && alive() && readNewest({ fromReconnect, ...why({ reason, detail, ...result.leg }) }))));
     }
 
@@ -541,6 +542,12 @@ export function createChatHistoryPager({
             if (released.length) publish();
             return released;
         },
+        // Abort in-flight/queued arrivals on disconnect without forgetting `after` or the reader's pages.
+        cancelArrivals() {
+            arrival?.abort.abort();
+            arrival = null;
+            queued = null;
+        },
         // A retained room stops reads without releasing its pages or the reader's chain.
         suspend() {
             visit += 1;
@@ -557,6 +564,8 @@ export function createChatHistoryPager({
             pending?.abort.abort();
             arrival?.abort.abort();
             pending = null;
+            arrival = null;
+            queued = null;
             failure = null;
             after = null;
             for (const entry of cache.values()) release(entry);
