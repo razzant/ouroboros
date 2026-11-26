@@ -1,4 +1,4 @@
-// W2 R2 (standalone): preference-independent history start, waiter wakeup on
+// Preference-independent history start, waiter wakeup on
 // cancellation/supersession, no new reads on close, proper return/provisional
 // semantics, and one fresh newest read on ordinary close/open with a usable cursor.
 import assert from 'node:assert/strict';
@@ -215,7 +215,7 @@ function makeReconnectRoom(t, { chatId = 2, hangPreferences = false, onPreferenc
     };
 }
 
-test('R2: hung preferences never stall initial open, reconnect recovery, or read receipt', async (t) => {
+test('hung preferences never stall initial open, reconnect recovery, or read receipt', async (t) => {
     const r = makeReconnectRoom(t, { hangPreferences: true });
     await until(() => r.reads.length === 1);
     await quiet();
@@ -251,7 +251,7 @@ test('R2: hung preferences never stall initial open, reconnect recovery, or read
     ]);
 });
 
-test('R2: ordinary close/open requests one fresh newest even with a usable cursor, then resumes on-connected after', async (t) => {
+test('ordinary close/open requests one fresh newest even with a usable cursor, then resumes on-connected after', async (t) => {
     const r = makeReconnectRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
@@ -279,7 +279,7 @@ test('R2: ordinary close/open requests one fresh newest even with a usable curso
     assert.equal(r.reads.at(-1).cursor, 'after:3');
 });
 
-test('R2: close aborts in-flight reads, wakes waiting receipt/showLatest immediately, and starts 0 reads while closed', async (t) => {
+test('close aborts in-flight reads, wakes waiting receipt/showLatest immediately, and starts 0 reads while closed', async (t) => {
     const r = makeReconnectRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
@@ -335,7 +335,7 @@ test('R2: close aborts in-flight reads, wakes waiting receipt/showLatest immedia
     assert.deepEqual(r.reads.at(-1), { mode: 'newest', cursor: null, reason: 'reconnect', decision: 'explicit_whole', detail: '' });
 });
 
-test('R2: return shares one newest with its receipt and ordinary after preserves provisional windowReturn bubbles', async (t) => {
+test('return shares one newest with its receipt and ordinary after preserves provisional windowReturn bubbles', async (t) => {
     const r = makeReconnectRoom(t, { hasMore: true });
     await until(() => r.reads.length === 1);
     await quiet();
@@ -386,7 +386,7 @@ test('R2: return shares one newest with its receipt and ordinary after preserves
     assert.equal(Object.hasOwn(provisional.dataset, 'windowWords'), false);
 });
 
-test('R2: late preferences expand displayed non-explicit child cards without re-reading and newest response wins', async (t) => {
+test('late preferences expand displayed non-explicit child cards without re-reading and newest response wins', async (t) => {
     const prefResolvers = new Map();
     const nestedRows = [
         {
@@ -493,7 +493,7 @@ test('R2: late preferences expand displayed non-explicit child cards without re-
     assert.equal(r.reads.length, 3, 'preferences resolution issues no extra history reads');
 });
 
-test('R2 unit: createCatchUp wakes waiters on cancel/supersession and pager drops superseded or cancelled arrivals', async () => {
+test('createCatchUp wakes waiters on cancel/supersession and pager drops superseded or cancelled arrivals', async () => {
     // 1. createCatchUp waiter wake on supersession and cancellation.
     const catchUp = createCatchUp(() => {}, 50);
     catchUp.begin(() => true, new Promise(() => {}), 1, true);

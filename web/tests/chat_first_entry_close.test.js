@@ -1,4 +1,4 @@
-// W3: the page's first socket attempt fails before any open while the room's first newest read is already out.
+// The page's first socket attempt fails before any open while the room's first newest read is already out.
 // Through the real client modules (ws.js, the room's socket view and the chat instance) over a fictional history.
 // That read runs over HTTP and works; with no connection that ever opened there is nothing for it to be older than,
 // so it finishes and paints (no cancelled page, no loading pill left with nothing to retry). A close after a
@@ -138,7 +138,7 @@ function makeEntry(t, { openedBeforeRoom = false } = {}) {
     };
 }
 
-test('W3: a first socket attempt that fails before any open leaves the first newest read to paint', async (t) => {
+test('a first socket attempt that fails before any open leaves the first newest read to paint', async (t) => {
     const r = makeEntry(t);
     r.connect();
     await until(() => r.reads.length === 1);
@@ -155,7 +155,7 @@ test('W3: a first socket attempt that fails before any open leaves the first new
     assert.equal(r.buttons().includes('Loading saved history…'), false, 'no loading pill is left with nothing behind it');
 });
 
-test('W3: the first open after such a close finds the history read and asks for no second newest page', async (t) => {
+test('the first open after such a close finds the history read and asks for no second newest page', async (t) => {
     const r = makeEntry(t);
     r.connect();
     await until(() => r.reads.length === 1);
@@ -175,7 +175,7 @@ test('W3: the first open after such a close finds the history read and asks for 
 
 // The control: what the first close must not change. Once a connection happened, a close supersedes the read it
 // interrupts (a late answer draws nothing) and the reconnect reads again.
-test('W3 control: after a connection happened, a close still cancels the read in flight and the reconnect reads again', async (t) => {
+test('control: after a connection happened, a close still cancels the read in flight and the reconnect reads again', async (t) => {
     const r = makeEntry(t);
     r.connect();
     await until(() => r.reads.length === 1);
@@ -199,7 +199,7 @@ test('W3 control: after a connection happened, a close still cancels the read in
     assert.deepEqual(r.shown(), ['chat:q1', 'chat:a1'], 'the reconnect read paints the history');
 });
 
-test('W3 control: a room mounted on an already-open socket has its read cancelled by the next close', async (t) => {
+test('control: a room mounted on an already-open socket has its read cancelled by the next close', async (t) => {
     const r = makeEntry(t, { openedBeforeRoom: true });
     await until(() => r.reads.length === 1);
 

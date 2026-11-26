@@ -1,4 +1,4 @@
-// W2 R1: disconnected send reconciliation through the real chat instance.
+// Disconnected send reconciliation through the real chat instance.
 // Only a matching local owner row in a successfully DRAWN, qualifying source response begun after a disconnect (or
 // after a hidden window's return) may end the wait for a send, and only by the host's own answer: its dispatch
 // entered (Sending settles into Starting…), or its process ended and it knows nothing (the wait ends in the bubble's
@@ -187,7 +187,7 @@ function makeRoom(t, { chatId = 2, asPanel = true, initialOnline = true, afterCu
     };
 }
 
-test('R1 reproducer: pending saved echo pushed out of bounded 150-row newest never falsely settles Sending', async (t) => {
+test('pending saved echo pushed out of bounded 150-row newest never falsely settles Sending', async (t) => {
     const r = makeRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
@@ -269,7 +269,7 @@ for (const dispatch of ['dispatched', 'ended-host', 'pending']) {
     });
 }
 
-test('R1: a still-pending row and an old server\'s row without ingress facts keep Sending; a durable routing receipt settles', async (t) => {
+test('a still-pending row and an old server\'s row without ingress facts keep Sending; a durable routing receipt settles', async (t) => {
     const r = makeRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
@@ -313,7 +313,7 @@ test('R1: a still-pending row and an old server\'s row without ingress facts kee
 // A host process that ended took the row's dispatch with it, and the new one can say nothing about it: the saved row
 // carries neither `ingress_dispatched` nor `ingress_pending`. A window that outlived the restart then stands where a
 // reload stands: nothing it waits for, the kept copy in doubt ("Saved; delivery not confirmed", Send as new).
-test('R1: an ended host\'s saved row ends the wait in an explicit delivery doubt, never in success or a resend', async (t) => {
+test('an ended host\'s saved row ends the wait in an explicit delivery doubt, never in success or a resend', async (t) => {
     const r = makeRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
@@ -347,7 +347,7 @@ test('R1: an ended host\'s saved row ends the wait in an explicit delivery doubt
 });
 
 // An old echo is a read begun before the disconnect: it answers for the host that ended, not for this window's wait.
-test('R1: a pre-disconnect read answering late cannot end the wait with an ended host\'s row; a read after the reconnect does', async (t) => {
+test('a pre-disconnect read answering late cannot end the wait with an ended host\'s row; a read after the reconnect does', async (t) => {
     const r = makeRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
@@ -380,7 +380,7 @@ test('R1: a pre-disconnect read answering late cannot end the wait with an ended
 // Our row says what the host knows of the dispatch: it entered (`ingress_dispatched`), or its process ended and it knows
 // nothing. Either way only OUR row, in a read begun after the disconnect, is the host's word on this wait.
 for (const [kind, facts] of [['dispatched', {}], ['ended-host', { ingress_dispatched: undefined }]]) {
-    test(`R1: same-id-but-not-ours rows never settle Sending; next qualifying read with our ${kind} row does`, async (t) => {
+    test(`same-id-but-not-ours rows never settle Sending; next qualifying read with our ${kind} row does`, async (t) => {
         const r = makeRoom(t);
         await until(() => r.reads.length === 1);
         await quiet();
@@ -421,7 +421,7 @@ for (const [kind, facts] of [['dispatched', {}], ['ended-host', { ingress_dispat
     });
 }
 
-test('R1: failed, cut, and source_unavailable reads never settle; unrelated receipt Retry settles on clean newest', async (t) => {
+test('failed, cut, and source_unavailable reads never settle; unrelated receipt Retry settles on clean newest', async (t) => {
     const r = makeRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
@@ -467,7 +467,7 @@ test('R1: failed, cut, and source_unavailable reads never settle; unrelated rece
     assert.deepEqual(r.reads.map((entry) => entry.mode), ['newest', 'newest', 'newest', 'newest', 'newest']);
 });
 
-test('R1 draw-before-confirm: transient render fault on syncHistory first-load branch (applyPage recent) keeps Sending until Retry paints', async (t) => {
+test('transient render fault on syncHistory first-load branch (applyPage recent) keeps Sending until Retry paints', async (t) => {
     const r = makeRoom(t, { initialOnline: false });
     r.push({ httpStatus: 503, body: { error: 'booting' } });
     await until(() => r.reads.length === 1);
@@ -501,7 +501,7 @@ test('R1 draw-before-confirm: transient render fault on syncHistory first-load b
     assert.equal(r.status(), 'Starting…', 'Retry after transient first-load draw fault paints and settles Sending');
 });
 
-test('R1 draw-before-confirm: transient render fault on syncHistory non-rechained branch keeps Sending until Retry paints', async (t) => {
+test('transient render fault on syncHistory non-rechained branch keeps Sending until Retry paints', async (t) => {
     const r = makeRoom(t);
     const seed = r.assistantRow('chat:seed', 'Seed message', 0);
     r.push(r.page([seed]));
@@ -537,7 +537,7 @@ test('R1 draw-before-confirm: transient render fault on syncHistory non-rechaine
     assert.equal(r.status(), 'Starting…', 'Retry after transient non-rechained draw fault paints and settles Sending');
 });
 
-test('R1 draw-before-confirm: transient render fault on historyPager.applyPage (latest via showLatest) keeps Sending until Retry paints', async (t) => {
+test('transient render fault on historyPager.applyPage (latest via showLatest) keeps Sending until Retry paints', async (t) => {
     const r = makeRoom(t);
     const seed = r.assistantRow('chat:seed-latest', 'Seed message', 0);
     r.push(r.page([seed]));
@@ -582,7 +582,7 @@ test('R1 draw-before-confirm: transient render fault on historyPager.applyPage (
     assert.equal(r.status(), 'Starting…', 'Retry via showLatest paints and settles Sending into Starting…');
 });
 
-test('R1: same-socket cut-only Retry without a real reconnect must not settle a live send', async (t) => {
+test('same-socket cut-only Retry without a real reconnect must not settle a live send', async (t) => {
     const r = makeRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
@@ -613,7 +613,7 @@ test('R1: same-socket cut-only Retry without a real reconnect must not settle a 
     assert.equal(r.status(), 'Online');
 });
 
-test('R1: pre-close late read, offline-queued send flushed on open, and new send born on new socket are never falsely settled', async (t) => {
+test('pre-close late read, offline-queued send flushed on open, and new send born on new socket are never falsely settled', async (t) => {
     const r = makeRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
@@ -662,7 +662,7 @@ test('R1: pre-close late read, offline-queued send flushed on open, and new send
     assert.equal(r.status(), 'Starting…', 'once flushed and new-socket sends get receipts, room transitions to Starting…');
 });
 
-test('R1: already-connected chat_source_unavailable still acks paint without settling an earlier disconnected send', async (t) => {
+test('already-connected chat_source_unavailable still acks paint without settling an earlier disconnected send', async (t) => {
     const r = makeRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
@@ -710,7 +710,7 @@ test('R1: already-connected chat_source_unavailable still acks paint without set
 // A window hidden without a socket break (a background tab, a room another place replaced) is deaf to the start and the
 // end of its turn, yet nothing marked its waiting sends the way a disconnect does. On the same connection its return read
 // is the first news, and the host's own dispatched row for the send is that news, as it is after a reconnect.
-test('R1: a hidden window that missed the start frames stops waiting once its return read shows the send dispatched', async (t) => {
+test('a hidden window that missed the start frames stops waiting once its return read shows the send dispatched', async (t) => {
     const r = makeRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
@@ -739,7 +739,7 @@ test('R1: a hidden window that missed the start frames stops waiting once its re
     assert.deepEqual(r.actions(cmid), []);
 });
 
-test('R1: a hidden window\'s return read that shows the send still pending, or another tab\'s row, keeps waiting for the live start', async (t) => {
+test('a hidden window\'s return read that shows the send still pending, or another tab\'s row, keeps waiting for the live start', async (t) => {
     const r = makeRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
@@ -768,7 +768,7 @@ test('R1: a hidden window\'s return read that shows the send still pending, or a
     assert.equal(r.status(), 'Online', 'the live start, heard again, ends it');
 });
 
-test('R1: a visible window that never hid keeps waiting for the live start, and so does a send made after a return', async (t) => {
+test('a visible window that never hid keeps waiting for the live start, and so does a send made after a return', async (t) => {
     const r = makeRoom(t);
     await until(() => r.reads.length === 1);
     await quiet();
@@ -800,7 +800,7 @@ test('R1: a visible window that never hid keeps waiting for the live start, and 
     assert.equal(r.status(), 'Online');
 });
 
-test('R1 unit: createCatchUp distinguishes connected partial reads from post-disconnect settlement', () => {
+test('createCatchUp distinguishes connected partial reads from post-disconnect settlement', () => {
     const pending = new Map();
     const catchUp = createCatchUp(() => {}, 50, pending);
     assert.equal('needsWhole' in catchUp, false);
@@ -852,7 +852,7 @@ test('R1 unit: createCatchUp distinguishes connected partial reads from post-dis
     assert.equal(pending.has('live-1'), false, 'next qualifying read with dispatched match settles live-1');
 });
 
-test('R1 unit: createCatchUp marks the sends a return left waiting like a disconnect does, and nothing else', () => {
+test('createCatchUp marks the sends a return left waiting like a disconnect does, and nothing else', () => {
     const pending = new Map();
     const catchUp = createCatchUp(() => {}, 50, pending);
     catchUp.trackSend('held', false);
