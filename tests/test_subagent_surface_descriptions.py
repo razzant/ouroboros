@@ -33,6 +33,15 @@ def test_schedule_and_integration_describe_the_three_write_surfaces():
     assert "shared external_workspace files are verified without reapplying" in prompt
 
 
+def test_both_patch_integrators_state_the_protected_path_condition_their_code_enforces():
+    """integrate_delegated_patch applies the same own-body protected-path gate as integrate_subagent_patch
+    (Pro or Cyber Pro; a nested acting parent in Pro needs protected_paths_grant): both leads say so."""
+    sentence = ("Own-body protected-path changes require Pro or Cyber Pro runtime mode (in Pro, a nested acting "
+                "parent also needs protected_paths_grant).")
+    leads = {entry.name: " ".join(entry.schema["description"].split()) for entry in integration_tools()}
+    assert sentence in leads["integrate_subagent_patch"] and sentence in leads["integrate_delegated_patch"]
+
+
 _WIRE_PROFILES = {"full": {}, "readonly": {"mode": "local_readonly_subagent"},
                   "acting": {"mode": "acting_subagent", "surface": "self_worktree", "root_task_id": "projection"}}
 _GEOMETRY = ("workspace", "directory_strategy", "scope_paths")

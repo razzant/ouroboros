@@ -137,7 +137,8 @@ _START_TASK_DESCRIPTION = (
 
 
 _MESSAGE_DESTINATION_DESCRIPTION = (
-    "'current' (default): this work's room. 'main': also the "
+    "'current' (default): this work's room; a wake or scheduled root already in Main omits destination or "
+    "uses 'current', which reaches the owner there. 'main': also the "
     "owner's main chat while this work lives in an owner-visible Project "
     "room, for an expected result, a decision or a substantial change to "
     "what the owner relies on (such as lost promised verification or "
