@@ -7604,21 +7604,22 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 .toast-muted,
 .toast-info { color: var(--status-neutral-fg); }
 /* A notice's one way back (host_modules.js recovery) follows its words on the same line when they fit. */
-.toast .toast-action { display: inline-flex; flex-shrink: 0; margin-left: var(--space-2); vertical-align: middle; }
+.toast .toast-action { display: inline-flex; flex-shrink: 0; margin-inline-start: var(--space-2); vertical-align: middle; }
 /* With a close, the words take the first row beside it and the action the row under them. One line of words is
    centred on the close; several start level with it, so the close keeps the top-right corner. */
 .toast:has(> .toast-dismiss) { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-2); row-gap: var(--space-2); }
 .toast > .toast-words:has(~ .toast-dismiss) { min-width: 0; grid-column: 1; grid-row: 1; align-self: center; }
-.toast > .toast-action:has(~ .toast-dismiss) { grid-column: 1; grid-row: 2; margin-left: 0; justify-self: start; }
+.toast > .toast-action:has(~ .toast-dismiss) { grid-column: 1; grid-row: 2; margin-inline-start: 0; justify-self: start; }
 /* The close: a small plain × in the corner, no plate or shadow (owner 27.11.2026); its ink deepens on hover. Under a
-   finger its reach is the touch minimum (.ui-hit-area), wider than the glyph. */
+   finger its reach is the touch minimum (.ui-hit-area), wider than the glyph. A right-to-left interface mirrors the
+   toast inside (the × at its inline end) while the stack keeps the top right. */
 .toast > .toast-dismiss {
     grid-column: 2;
     grid-row: 1;
     align-self: start;
     width: 20px;
     height: 20px;
-    margin: 0 calc(-1 * var(--space-1)) 0 0;
+    margin-inline-end: calc(-1 * var(--space-1));
     padding: 0;
     display: inline-flex;
     align-items: center;
