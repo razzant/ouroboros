@@ -33,7 +33,7 @@ jobs:
         run: |
           $pins = [ordered]@{
             'explorer-qa/ExplorerCapture.cs'   = '7eebc686201e49b7cf8ce75144e7ea77130fcfe85a546f45486335ff80c51ab3'
-            'explorer-qa/capture-explorer.ps1' = 'e674be6eff0c60b85afef2686038ec0a00f4e5babdb24f0b6cd84a06837fe61a'
+            'explorer-qa/capture-explorer.ps1' = '9875d901f97aee2f62e8b0cfee1741be91e966dc569a039d117bcb2e003f9ed7'
           }
           foreach ($file in $pins.Keys) {
             $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()

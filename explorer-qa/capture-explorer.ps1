@@ -1,4 +1,6 @@
 # Windows PowerShell 5.1, STA. Disposable interactive Windows desktop only.
+# Each view (in the ZIP, extracted) is captured on its own: the file's row where UI Automation gives its bounds, else only the folder
+# view (the file list) after the folder, its content and the file are verified; otherwise nothing, with the reason.
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$RunRoot)
 Set-StrictMode -Version 3
@@ -26,9 +28,50 @@ $report = [ordered]@{
     schema = 1; source = [ordered]@{
         url = $url; member = $member; zip_expected = $expectedZip; exe_expected = $expectedExe
     }; host = [ordered]@{}; frames = [ordered]@{}; visual = 'unconfirmed'; stage = 'host'
-    method = 'Windows Explorer Shell.Application + on-screen UI Automation row + PrintWindow of that window, cut to the target row'
+    method = 'Windows Explorer Shell.Application + PrintWindow of that window, cut to the on-screen UI Automation row, else to its folder view (SHELLDLL_DefView) alone'
     app_executed = $false
 }
+$expectedNames = @()  # the public archive's own Ouroboros folder, read after its digest is checked
+
+# The folder view of ONE Explorer window: a window class, not a localized name, and only that window's own descendants are walked.
+$shellViewSource = @'
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Runtime.InteropServices;
+using System.Text;
+namespace ExplorerQa {
+    public static class ShellView {
+        [StructLayout(LayoutKind.Sequential)] private struct RECT { public int L, T, R, B; }
+        private delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
+        [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr lParam);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassNameW(IntPtr hwnd, StringBuilder name, int max);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
+        [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+        [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out int pid);
+        [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
+
+        // Screen rectangles of the visible SHELLDLL_DefView windows below "top", rooted at it (GA_ROOT) and owned by its process.
+        public static Rectangle[] Visible(IntPtr top, int processId) {
+            List<Rectangle> found = new List<Rectangle>();
+            EnumProc callback = delegate (IntPtr hwnd, IntPtr lParam) {
+                StringBuilder name = new StringBuilder(64);
+                GetClassNameW(hwnd, name, name.Capacity);
+                int owner;
+                RECT r;
+                if (name.ToString() == "SHELLDLL_DefView" && IsWindowVisible(hwnd) && GetAncestor(hwnd, 2) == top &&
+                    GetWindowThreadProcessId(hwnd, out owner) != 0 && owner == processId && GetWindowRect(hwnd, out r)) {
+                    found.Add(Rectangle.FromLTRB(r.L, r.T, r.R, r.B));
+                }
+                return true;
+            };
+            EnumChildWindows(top, callback, IntPtr.Zero);
+            GC.KeepAlive(callback);
+            return found.ToArray();
+        }
+    }
+}
+'@
 
 # Explorer's Document, and its Folder, are empty (nullable) while it is still navigating: '' then, never an error under StrictMode.
 function Get-ViewPath($view) {
@@ -59,8 +102,28 @@ function Get-ExplorerWindows {
     }
 }
 
+# Why no row could be used, as counts only (no names): elements carrying the file's name, and how many items fail each demand.
+function Get-RowCounts($bounds) {
+    try {
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+        $all = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $named))
+        $items = @($all | Where-Object { $_.Current.ControlType.Id -in $ct::ListItem.Id, $ct::DataItem.Id })
+        return [ordered]@{
+            named = $all.Count; list_or_data_items = $items.Count
+            offscreen = @($items | Where-Object { $_.Current.IsOffscreen }).Count
+            empty_bounds = @($items | Where-Object { $_.Current.BoundingRectangle.IsEmpty }).Count
+            other_process = @($items | Where-Object { $_.Current.ProcessId -ne $explorerProcess.Id }).Count
+            beyond_window = @($items | Where-Object {
+                $r = $_.Current.BoundingRectangle
+                -not $r.IsEmpty -and ($r.Left -lt $bounds.Left -or $r.Right -gt $bounds.Right -or $r.Top -lt $bounds.Top -or $r.Bottom -gt $bounds.Bottom)
+            }).Count
+        }
+    } catch { return [ordered]@{ unreadable = $_.Exception.GetType().Name } }
+}
+
 function Read-Frame([string]$label, [string]$folder) {
-    $facts = [ordered]@{ stage = 'navigate'; shell = $null; row = $null; png = $null }
+    $facts = [ordered]@{ status = 'not_captured'; frame_type = $null; stage = 'navigate'; skip_reason = 'folder_not_navigated'; error = $null
+        shell = $null; window = $null; row = $null; row_unavailable = $null; content = $null; list_area = $null; png = $null }
     $report.frames[$label] = $facts
     $win.Navigate2($folder)
     $view = Wait-For {
@@ -68,11 +131,13 @@ function Read-Frame([string]$label, [string]$folder) {
     } "Explorer did not navigate to the required $label folder (ZIP namespace may be unavailable)."
 
     $facts.stage = 'shell_item'
+    $facts.skip_reason = 'expected_file_not_exact'
     $item = $view.Folder.ParseName('Ouroboros.exe')
     if ($null -eq $item -or $item.IsFolder -or $item.Path -ine (Join-Path $folder 'Ouroboros.exe')) {
         throw "No exact Shell file in $label; refusing to capture a substitute row."
     }
     # Details = FVM_DETAILS (4). Re-read on the active view, after each navigation.
+    $facts.skip_reason = 'details_view_not_accepted'
     $view.CurrentViewMode = 4
     $mode = Wait-For {
         $d = $win.Document
@@ -85,6 +150,7 @@ function Read-Frame([string]$label, [string]$folder) {
     }
 
     $facts.stage = 'window_and_row'
+    $facts.skip_reason = 'window_not_usable'
     $bounds = [ExplorerQa.Native]::WindowBounds($hwnd)
     $dpi = [ExplorerQa.Native]::GetDpiForWindow($hwnd)
     $monitor = [Windows.Forms.Screen]::FromHandle($hwnd).Bounds
@@ -94,54 +160,99 @@ function Read-Frame([string]$label, [string]$folder) {
     $facts.window = [ordered]@{ hwnd = $hwnd.ToInt64(); pid = $explorerProcess.Id; dpi = $dpi
         rect = @($bounds.X,$bounds.Y,$bounds.Width,$bounds.Height)
         monitor_rect = @($monitor.X,$monitor.Y,$monitor.Width,$monitor.Height) }
-    if ($label -eq 'extracted') {
+    if ($label -eq 'extracted' -and $report.frames['in-zip'].status -eq 'captured') {  # there is a pair to compare
         $first = $report.frames['in-zip'].window
+        $facts.skip_reason = 'window_changed_since_the_first_view'
         if ($dpi -ne $first.dpi -or ($facts.window.rect -join ',') -ne ($first.rect -join ',') -or
             ($facts.window.monitor_rect -join ',') -ne ($first.monitor_rect -join ',')) {
             throw 'Window geometry, display or DPI changed between frames.'
         }
     }
 
-    $row = Wait-For {
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
-        $matches = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $namedItem) |
-            Where-Object {
-                $c = $_.Current
-                -not $c.IsOffscreen -and -not $c.BoundingRectangle.IsEmpty -and
-                $c.ProcessId -eq $explorerProcess.Id -and $c.BoundingRectangle.Width -gt 0 -and
-                $c.BoundingRectangle.Height -gt 0 -and $c.BoundingRectangle.Left -ge $bounds.Left -and
-                $c.BoundingRectangle.Right -le $bounds.Right -and $c.BoundingRectangle.Top -ge $bounds.Top -and
-                $c.BoundingRectangle.Bottom -le $bounds.Bottom
-            })
-        if ($matches.Count -eq 1) { $matches[0] }
-    } "No unique on-screen Ouroboros row exposed by Explorer UI Automation in $label."
-    $current = $row.Current
-    $r = $current.BoundingRectangle
-    $rowPixels = [Drawing.Rectangle]::FromLTRB(
-        [int][Math]::Ceiling($r.Left - $bounds.Left), [int][Math]::Ceiling($r.Top - $bounds.Top),
-        [int][Math]::Floor($r.Right - $bounds.Left), [int][Math]::Floor($r.Bottom - $bounds.Top))
-    $facts.row = [ordered]@{ name = $current.Name; control = $current.ControlType.ProgrammaticName
-        rect_in_window = @($rowPixels.X,$rowPixels.Y,$rowPixels.Width,$rowPixels.Height) }
+    $row = $null
+    try {
+        $row = Wait-For {
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+            $matches = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $namedItem) |
+                Where-Object {
+                    $c = $_.Current
+                    -not $c.IsOffscreen -and -not $c.BoundingRectangle.IsEmpty -and
+                    $c.ProcessId -eq $explorerProcess.Id -and $c.BoundingRectangle.Width -gt 0 -and
+                    $c.BoundingRectangle.Height -gt 0 -and $c.BoundingRectangle.Left -ge $bounds.Left -and
+                    $c.BoundingRectangle.Right -le $bounds.Right -and $c.BoundingRectangle.Top -ge $bounds.Top -and
+                    $c.BoundingRectangle.Bottom -le $bounds.Bottom
+                })
+            if ($matches.Count -eq 1) { $matches[0] }
+        } "No unique on-screen Ouroboros row exposed by Explorer UI Automation in $label."
+    } catch {
+        Write-Warning $_.Exception.Message
+        $facts.row_unavailable = [ordered]@{ reason = 'no_unique_row_with_readable_bounds_inside_the_window'; counts = (Get-RowCounts $bounds) }
+    }
+    if ($null -ne $row) {
+        $current = $row.Current
+        $r = $current.BoundingRectangle
+        $rowPixels = [Drawing.Rectangle]::FromLTRB(
+            [int][Math]::Ceiling($r.Left - $bounds.Left), [int][Math]::Ceiling($r.Top - $bounds.Top),
+            [int][Math]::Floor($r.Right - $bounds.Left), [int][Math]::Floor($r.Bottom - $bounds.Top))
+        $facts.row = [ordered]@{ name = $current.Name; control = $current.ControlType.ProgrammaticName
+            rect_in_window = @($rowPixels.X,$rowPixels.Y,$rowPixels.Width,$rowPixels.Height) }
+    } else {
+        # The file list alone: only in the verified folder, holding nothing but the public archive's own entries, and its one folder view.
+        $facts.stage = 'list_area'
+        $facts.skip_reason = 'folder_changed_before_its_content_was_checked'
+        if ((Get-ViewPath $win.Document) -ine $folder) { throw "Explorer left the $label folder." }
+        $facts.skip_reason = 'folder_content_not_the_expected_synthetic_one'
+        $shownNames = @(foreach ($entry in $win.Document.Folder.Items()) { [IO.Path]::GetFileName([string]$entry.Path) })
+        $unexpected = @($shownNames | Where-Object { $_ -notin $expectedNames })
+        $facts.content = [ordered]@{ items_shown = $shownNames.Count; items_in_the_archive_folder = $expectedNames.Count; unexpected = $unexpected.Count }
+        if ($unexpected.Count -ne 0 -or 'Ouroboros.exe' -notin $shownNames) { throw "The $label view holds something other than the expected content." }
+        $facts.content.brought_into_view = $true
+        # SVSI_ENSUREVISIBLE (8) alone: scrolls to the file and selects nothing. If refused, the frame is judged by pixels.
+        try { $win.Document.SelectItem($item, 8) } catch { $facts.content.brought_into_view = $false; Write-Warning $_.Exception.Message }
+        Start-Sleep -Seconds 2  # shell icons are drawn after the rows
+        $facts.skip_reason = 'folder_view_window_not_unique'
+        $views = @([ExplorerQa.ShellView]::Visible($hwnd, $explorerProcess.Id))
+        $facts.list_area = [ordered]@{ folder_view_windows = $views.Count; rect_in_window = $null }
+        if ($views.Count -ne 1) { throw "$($views.Count) visible folder views in the $label window." }
+        $area = $views[0]
+        $facts.skip_reason = 'folder_view_not_a_part_of_the_window'
+        if (-not $bounds.Contains($area) -or $area.Top -le $bounds.Top -or $area.Width -lt 240 -or $area.Height -lt 120) {
+            throw "The folder view of $label is not a large enough part below the window's top edge."
+        }
+        $listPixels = [Drawing.Rectangle]::new($area.X - $bounds.X, $area.Y - $bounds.Y, $area.Width, $area.Height)
+        $facts.list_area.rect_in_window = @($listPixels.X, $listPixels.Y, $listPixels.Width, $listPixels.Height)
+    }
     $facts.stage = 'capture'
     # Re-bind immediately before pixels: tab changes and temporary overlays are not the test.
+    $facts.skip_reason = 'view_changed_before_capture'
     if ((Get-ViewPath $win.Document) -ine $folder -or [int]$win.Document.CurrentViewMode -ne 4 -or
         [ExplorerQa.Native]::WindowBounds($hwnd) -ne $bounds -or
         [ExplorerQa.Native]::GetDpiForWindow($hwnd) -ne $dpi -or
         [int]$win.Document.SelectedItems().Count -ne 0) { throw "Folder/view/geometry changed or selection is nonempty in $label." }
-    $bitmap = [ExplorerQa.Native]::Capture($hwnd, $bounds, $rowPixels)
+    $facts.skip_reason = 'capture_failed_blank_or_changed'
+    if ($null -ne $row) { $bitmap = [ExplorerQa.Native]::Capture($hwnd, $bounds, $rowPixels) }
+    else { $bitmap = [ExplorerQa.Native]::Capture($hwnd, $bounds, $listPixels) }
     try {
         if ($win.Busy -or (Get-ViewPath $win.Document) -ine $folder -or
-            -not [ExplorerQa.Native]::HasRowInk($bitmap, [Drawing.Rectangle]::new(0, 0, $bitmap.Width, $bitmap.Height))) { throw "Folder changed or the row is blank in $label." }
+            -not [ExplorerQa.Native]::HasRowInk($bitmap, [Drawing.Rectangle]::new(0, 0, $bitmap.Width, $bitmap.Height))) { throw "Folder changed or the frame is blank in $label." }
+        if ($null -eq $row) {
+            $after = @([ExplorerQa.ShellView]::Visible($hwnd, $explorerProcess.Id))
+            if ($after.Count -ne 1 -or $after[0] -ne $area) { throw "The folder view moved during the $label capture." }
+        }
         $name = "$label.png"
         $png = Join-Path $evidence $name
         $bitmap.Save($png, [Drawing.Imaging.ImageFormat]::Png)
         $facts.png = [ordered]@{ file = $name; sha256 = (Get-FileHash -LiteralPath $png -Algorithm SHA256).Hash.ToLowerInvariant() }
     } finally { $bitmap.Dispose() }
+    if ($null -ne $row) { $facts.frame_type = 'row' } else { $facts.frame_type = 'list_area' }
     $facts.stage = 'captured_pending_visual_inspection'
+    $facts.status = 'captured'
+    $facts.skip_reason = $null
 }
 
 $win = $null
 $oldDpi = [IntPtr]::Zero
+$incomplete = $true
 try {
     $os = Get-CimInstance -ClassName Win32_OperatingSystem
     $report.host = [ordered]@{
@@ -166,18 +277,26 @@ try {
     $report.source.exe_actual = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($report.source.exe_actual -ne $expectedExe) { throw 'Extracted executable SHA-256 mismatch.' }
     $report.source.exe_has_zone_identifier = $null -ne (Get-Item -LiteralPath $exe -Stream Zone.Identifier -ErrorAction SilentlyContinue)
+    $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+    try {
+        $expectedNames = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') } |
+            Where-Object { $_.StartsWith('Ouroboros/') -and $_.Length -gt 10 } |
+            ForEach-Object { $_.Substring(10).Split('/')[0] } | Sort-Object -Unique)
+    } finally { $archive.Dispose() }
+    $report.source.folder_entries = $expectedNames.Count
 
     $report.stage = 'desktop'
     Add-Type -AssemblyName System.Drawing, System.Windows.Forms, UIAutomationClient, UIAutomationTypes, WindowsBase
     Add-Type -Path (Join-Path $PSScriptRoot 'ExplorerCapture.cs') -ReferencedAssemblies System.Drawing
+    Add-Type -TypeDefinition $shellViewSource -ReferencedAssemblies System.Drawing
     $oldDpi = [ExplorerQa.Native]::SetThreadDpiAwarenessContext([IntPtr](-4)) # Per-monitor V2.
     if ($oldDpi -eq [IntPtr]::Zero) { throw 'Failed to bind capture thread to physical pixels.' }
     $ae = [System.Windows.Automation.AutomationElement]
     $ct = [System.Windows.Automation.ControlType]
-    $namedItem = [System.Windows.Automation.AndCondition]::new(
-        [System.Windows.Automation.OrCondition]::new(
-            [System.Windows.Automation.PropertyCondition]::new($ae::NameProperty, 'Ouroboros.exe'),
-            [System.Windows.Automation.PropertyCondition]::new($ae::NameProperty, 'Ouroboros')),
+    $named = [System.Windows.Automation.OrCondition]::new(
+        [System.Windows.Automation.PropertyCondition]::new($ae::NameProperty, 'Ouroboros.exe'),
+        [System.Windows.Automation.PropertyCondition]::new($ae::NameProperty, 'Ouroboros'))
+    $namedItem = [System.Windows.Automation.AndCondition]::new($named,
         [System.Windows.Automation.OrCondition]::new(
             [System.Windows.Automation.PropertyCondition]::new($ae::ControlTypeProperty, $ct::ListItem),
             [System.Windows.Automation.PropertyCondition]::new($ae::ControlTypeProperty, $ct::DataItem)))
@@ -197,13 +316,20 @@ try {
     }
     $report.host.explorer = [ordered]@{ name = $explorerProcess.ProcessName; pid = $explorerProcess.Id
         binary_version = (Get-Item -LiteralPath (Join-Path $env:SystemRoot 'explorer.exe')).VersionInfo.FileVersion }
-    $report.stage = 'in-zip'
-    Read-Frame 'in-zip' ($zip + '\Ouroboros')
-    $report.stage = 'extracted'
-    Read-Frame 'extracted' $diskFolder
+    foreach ($target in @(@('in-zip', ($zip + '\Ouroboros')), @('extracted', $diskFolder))) {
+        $report.stage = $target[0]
+        try { Read-Frame $target[0] $target[1] }  # a view that fails never stops the other one
+        catch {
+            $report.frames[$target[0]].error = $_.Exception.GetType().Name  # the message stays in the job log
+            Write-Warning "$($target[0]) not captured: $($_.Exception.Message)"
+        }
+    }
+    $captured = @($report.frames.Keys | Where-Object { $report.frames[$_].status -eq 'captured' })
+    $report.captured_views = $captured
     $report.stage = 'capture_complete'
-    $report.visual = 'pending_visual_inspection'
-    Write-Host 'Both Explorer frames captured; icon appearance still requires visual inspection.'
+    $report.visual = if ($captured.Count -eq 2) { 'pending_visual_inspection' } elseif ($captured.Count -eq 1) { 'partial_pending_visual_inspection' } else { 'failed_to_capture' }
+    $incomplete = $captured.Count -ne 2
+    Write-Host "Explorer views captured: $($captured.Count) of 2; icon appearance still requires visual inspection."
 } catch {
     $report.visual = 'failed_to_capture_confirmed_pair'
     # the published report keeps the exception type only ($report.stage says where); the message stays in the job log
@@ -214,3 +340,4 @@ try {
     if ($oldDpi -ne [IntPtr]::Zero) { [void][ExplorerQa.Native]::SetThreadDpiAwarenessContext($oldDpi) }
     if ($null -ne $win) { try { $win.Quit() } catch { Write-Warning 'Could not close the owned Explorer window; runner disposal will close it.' } }
 }
+if ($incomplete) { exit 1 }  # a partial result is reported and uploaded, never a success
