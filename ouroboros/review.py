@@ -1400,13 +1400,13 @@ def diff_pulse(
     without a cached official ref the line says so and measures from HEAD; it measures from
     HEAD too, naming the base, when the base's side cannot be read here (a partial clone never
     fetches it). With no diff readable at all, the touched books' balance stands alone. ``staged``
-    reads the index (what a commit or a review subject holds), otherwise the worktree and
-    its untracked files. ``paths`` names the modules and books shown (an edit's files);
-    omitted, every changed path is. A shown test source adds the suite's facts (declared
-    items, new test modules, ``serial`` marks, recorded test-seconds, its lines); a shown
-    Python source adds the code-shape line (``code_shape_facts``: module handles and the
-    calls through them, re-exported names, a test's patched product-module names and ``git init``
-    call sites). A fact for the mind, never a gate: one shape and one question for any size, and
+    reads the index (what a commit or a review subject holds) for the diff, the module sizes and
+    the books' balance, otherwise the worktree and its untracked files. ``paths`` names the modules
+    and books shown (an edit's files); omitted, every changed path is. A shown test source adds the
+    suite's facts (declared items, new test modules, ``serial`` marks, recorded test-seconds, its
+    lines); a shown Python source adds the code-shape line (``code_shape_facts``: module handles
+    and the calls through them, re-exported names, a test's patched product-module names and
+    ``git init`` call sites). A fact for the mind, never a gate: one shape and one question for any size, and
     the list bounds are presentation only, counting the rest.
     """
     from ouroboros.reference_books import _git_bytes, book_balance_note, contribution_base
@@ -1424,7 +1424,7 @@ def diff_pulse(
         if status is not None:
             break
     else:  # nothing to diff against here; the touched books keep whatever balance they have
-        return book_balance_note(root, [str(path) for path in paths or ()])
+        return book_balance_note(root, [str(path) for path in paths or ()], staged=staged)
     changed: dict[str, tuple[int, int]] = {}
     for row in numstat.decode("utf-8", "replace").split("\0"):
         plus, _, rest = row.partition("\t")
@@ -1442,15 +1442,6 @@ def diff_pulse(
                 changed[path] = (_untracked_lines(root / path), 0)
                 new.append(path)
     shown = list(dict.fromkeys(str(path) for path in paths)) if paths is not None else list(changed)
-    modules: list[tuple[GatedModule, int, int]] = []
-    for path in shown:
-        try:
-            modules.extend((module, *changed.get(module.path, (0, 0)))
-                           for module in iter_gated_modules(root, repo_paths=[path]))
-        except (OSError, ValueError):  # deleted, outside the checkout or not UTF-8 text: no size to show
-            continue
-    # Most grown first, then the largest: where the change put its weight.
-    modules.sort(key=lambda row: (row[2] - row[1], -row[0].line_count, row[0].path))
 
     def listed(items: list[str]) -> str:
         more = f" (+{len(items) - limit} more)" if len(items) > limit else ""
@@ -1460,7 +1451,24 @@ def diff_pulse(
     rows = {path: changed[path] for path in shown if path in changed and path.endswith((".py", ".js"))
             and "tests" in pathlib.PurePosixPath(path).parts[:-1]}
     python = [path for path in shown if path in changed and path.endswith(".py")]
-    at_base, current = _change_texts(root, base, staged, python, list(dict.fromkeys([*rows, *python])))
+    # Staged, a module's size is the index's (read in the same batch), never the worktree's later edits.
+    gated = [path for path in shown if _is_gated_module_path(path)] if staged else []
+    at_base, current = _change_texts(root, base, staged, python, list(dict.fromkeys([*rows, *python, *gated])))
+    modules: list[tuple[GatedModule, int, int]] = []
+    for path in shown:
+        if staged:
+            if (text := current.get(path)) is not None and path in gated:
+                text = text.replace("\r\n", "\n").replace("\r", "\n")
+                modules.append((GatedModule(path, len(text.splitlines()), len(text.encode())),
+                                *changed.get(path, (0, 0))))
+            continue
+        try:
+            modules.extend((module, *changed.get(module.path, (0, 0)))
+                           for module in iter_gated_modules(root, repo_paths=[path]))
+        except (OSError, ValueError):  # deleted, outside the checkout or not UTF-8 text: no size to show
+            continue
+    # Most grown first, then the largest: where the change put its weight.
+    modules.sort(key=lambda row: (row[2] - row[1], -row[0].line_count, row[0].path))
     created = set(new)
     # A side the file has but that was not read is unknown to both readers, never an addition or a deletion.
     unread = [path for path in python if at_base[path] is None and path not in created
@@ -1485,7 +1493,8 @@ def diff_pulse(
     fact = (f"Diff pulse since {since}: files {len(changed)}, lines +{added}/-{deleted} (net {added - deleted:+d}); "
             f"new files: {listed(new)}; module lines (target {TARGET_MODULE_LINES}, cap {MAX_MODULE_LINES}): "
             f"{listed(sizes)}{suite}.")
-    return "\n".join(part for part in (fact, shape, book_balance_note(root, shown), DIFF_PULSE_QUESTION) if part)
+    return "\n".join(part for part in (fact, shape, book_balance_note(root, shown, staged=staged), DIFF_PULSE_QUESTION)
+                     if part)
 
 
 def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any]:
