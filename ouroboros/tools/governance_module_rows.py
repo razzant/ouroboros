@@ -1,97 +1,121 @@
-"""Module rows a packet-only body reviewer gets for the files its change touches.
+"""Module rows a packet-only body reviewer gets for the domains its change touches.
 
-The architecture book carries no hand-kept module tree: addresses and leads come from the
-code through the ``module_map`` lookup (``code_intelligence_module_map``). A reviewer whose
-packet is all it sees cannot call that lookup, so the packet carries the rows itself, built
-from structured ``(path, owner, lead)`` entries, never by re-parsing display text.
+The architecture book carries no hand-kept module tree; a reviewer whose packet is all it
+sees cannot call the ``module_map`` lookup, and the touched files themselves already reach it
+through the change. What the old tree also gave such a reviewer was the neighbourhood: which
+domain owns a touched path, which manuals own that domain, and one line per other module of
+it, so that a duplicate mechanism is visible. That neighbourhood is read from the INSTALLED
+system only, the root the rules are read from, through the same readers as the lookup:
+nothing of the proposed tree is loaded or parsed here (the change carries its own text).
 
-Two blocks, so they never crowd out the chapter sections that name a touched file: the
-touched modules' rows (every touched manifest module or ``web/`` file, each once, with its
-own lead or a note that the reviewed tree does not hold it), admitted before those sections,
-and the neighbour rows (the rest of each touched domain, or the touched ``web/`` file's
-own folder, each path once), admitted after them. The rows are read from the reviewed
-subject's tree when the seam supplies it, else from the installed tree, and the block says
-which. Whatever is not delivered is said in the packet's navigation (``notice``), and an
-unreadable manifest is a named problem. A plan seat without tools gets the compact domain
-index instead (``domains_index``).
+Two blocks: the domain block (a heading, each group's head row from ``[references]``, and a
+marker per touched path: touched, or new in this change) goes before the chapter sections
+naming the touched files; the neighbour block (``path — lead`` rows) after them. When the
+share cannot hold them, neighbour rows go first and the domain block last, and the packet
+says what it lacks (``notice``). Every fixed sentence here is in ``contract_material``, so
+the commit-review contract counts what a seat is handed.
 """
 
 from __future__ import annotations
 
 import pathlib
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, List
 
 MODULE_ROWS_PATH = "ouroboros/domains.toml#module_map"
 NEIGHBOUR_ROWS_PATH = "ouroboros/domains.toml#module_map (neighbours)"
 
+HEADING = ("Domains owning the touched paths, as the installed system describes them (`ouroboros/domains.toml`); "
+           "the touched files themselves are in the change below.")
+NEIGHBOUR_HEADING = "Other modules of those domains and folders in the installed system, each with its own lead:"
+HEAD_ROW = "- ouroboros/domains.toml ({group}: {title}, {count} files; manuals: {manuals})"
+TOUCHED_ROW = "- {path} (touched in this change)"
+NEW_ROW = "- {path} (new in this change; its domain assignment, if any, is in the change)"
+NO_LEAD_ROW = "- {path} (no docstring or header lead)"
+CUT_LISTING = ("Some rows of these groups are missing or have no lead: the installed tree's listing or a file read "
+               "stopped short.")
+UNAVAILABLE = ("Module rows of the touched paths were NOT delivered: the installed `ouroboros/domains.toml` is "
+               "unavailable; the review's governance manifest records why.")
+DOMAINS_NOT_DELIVERED = ("Module rows of the touched paths were NOT delivered: the inline share was exhausted. The "
+                         "installed `ouroboros/domains.toml` and each module's docstring hold them.")
+NEIGHBOURS_NOT_DELIVERED = ("{count} neighbour module row(s) were NOT delivered: the inline share was exhausted after "
+                            "the sections naming the touched files.")
+
 
 @dataclass
 class ModuleRows:
-    touched: str = ""
+    domains: str = ""
     neighbours: str = ""
     neighbour_count: int = 0
     problem: str = ""
-    source: str = ""
 
 
-def module_rows(root: pathlib.Path, touched: Iterable[str], *, subject_tree: bool) -> ModuleRows:
-    """Both blocks for the touched paths, read at ``root`` (the subject's tree when ``subject_tree``)."""
-    from ouroboros.code_intelligence_architecture import ARCHITECTURE_LIMIT_MARKER, load_domain_manifest
-    from ouroboros.code_intelligence_module_map import module_map, render_entry
+def module_rows(root: pathlib.Path, touched: Iterable[str]) -> ModuleRows:
+    """Both blocks for ``touched``, read from the installed tree at ``root``."""
+    from ouroboros.code_intelligence_architecture import load_domain_manifest
+    from ouroboros.code_intelligence_module_map import module_map
 
     root = pathlib.Path(root)
-    source = "the reviewed subject's tree" if subject_tree else (
-        "the installed tree; this seam did not supply the subject's own tree, so a proposed lead may differ")
     try:
         manifest = load_domain_manifest(root)
-    except ValueError as exc:
-        return ModuleRows(problem=f"module rows unavailable: {exc}", source=source)
-    groups: dict = {}  # module_map argument -> (label, touched paths)
+    except (ValueError, OSError) as exc:
+        return ModuleRows(problem=f"module rows unavailable: {exc}")
+    groups: dict = {}  # module_map argument -> touched paths it owns
+    new: List[str] = []
     for path in sorted(set(touched)):
         domain = manifest.modules.get(path)
         if domain:
-            groups.setdefault(domain, (f"{domain} — {manifest.domains.get(domain, '')}", []))[1].append(path)
+            groups.setdefault(domain, []).append(path)
         elif path.startswith("web/") and "/" in path:
-            folder = path.rsplit("/", 1)[0]
-            groups.setdefault(folder, (folder + "/", []))[1].append(path)
-    mine, others, limits, seen = [], [], [], set()
-    for arg, (label, paths) in groups.items():
+            groups.setdefault(path.rsplit("/", 1)[0], []).append(path)
+        elif path.endswith(".py") and path.startswith(("ouroboros/", "supervisor/")):
+            new.append(path)
+    touched_set, seen = set(touched), set()
+    heads, markers, others, cut = [], [], [], False
+    for arg, paths in groups.items():
         answer = module_map(root, arg, manifest)
-        limits.extend(f"{ARCHITECTURE_LIMIT_MARKER} {note}" for note in answer.limits)
-        found = {entry[0]: entry for entry in answer.entries}
-        for path in paths:
-            if path not in seen:
+        cut = cut or bool(answer.limits)
+        listed = {entry[0] for entry in answer.entries}
+        if arg in manifest.domains:
+            title, manuals = manifest.domains[arg], manifest.references.get(arg, ())
+        else:
+            owners = [key for key in manifest.references if key not in manifest.domains
+                      and (arg + "/").startswith(key.rstrip("/") + "/")]
+            title, manuals = "web folder", manifest.references.get(max(owners, key=len), ()) if owners else ()
+        heads.append(HEAD_ROW.format(group=arg, title=title, count=len(answer.entries),
+                                     manuals=", ".join(manuals) or "none named"))
+        markers += [(TOUCHED_ROW if path in listed or path in manifest.modules else NEW_ROW).format(path=path)
+                    for path in paths]
+        for path, _owner, lead in answer.entries:  # each path once, across overlapping groups
+            if path not in touched_set and path not in seen:
                 seen.add(path)
-                mine.append(render_entry(found[path]) if path in found else f"{path} (not in that tree: new or deleted)")
-        # A web folder's neighbours are its own files, not its subfolders' (those are their own groups).
-        group = [entry for entry in answer.entries if entry[0] not in seen
-                 and (arg in manifest.domains or entry[0].rsplit("/", 1)[0] == arg)]
-        if group:
-            seen.update(entry[0] for entry in group)
-            others.append("\n".join([f"### {label}", *(render_entry(entry) for entry in group)]))
-    if not mine:
-        return ModuleRows(source=source)
-    lead = f"Module rows of the touched files, read from {source} (each file's own docstring/header lead)."
-    touched_block = "\n".join([lead, *mine, *limits])
-    neighbours = ("Neighbour modules of the touched domains and web folders, read from the same tree.\n\n"
-                  + "\n\n".join(others)) if others else ""
-    count = sum(block.count("\n") for block in others)
-    return ModuleRows(touched_block, neighbours, count, "", source)
+                others.append(f"- {path} — {lead}" if lead else NO_LEAD_ROW.format(path=path))
+    markers += [NEW_ROW.format(path=path) for path in new]
+    if not heads and not markers:
+        return ModuleRows()
+    domains = "\n".join([HEADING, *heads, *markers, *([CUT_LISTING] if cut else [])])
+    neighbours = "\n".join([NEIGHBOUR_HEADING, *others]) if others else ""
+    return ModuleRows(domains, neighbours, len(others))
 
 
-def notice(rows: ModuleRows, *, touched_delivered: bool, neighbours_delivered: bool) -> str:
+def notice(rows: ModuleRows, *, domains_delivered: bool, neighbours_delivered: bool) -> str:
     """The packet's in-band statement of module evidence it does not carry; ``""`` when all arrived."""
     if rows.problem:
-        return f"Module rows of the touched files were NOT delivered ({rows.problem})."
-    parts = []
-    if rows.touched and not touched_delivered:
-        parts.append("Module rows of the touched files were NOT delivered: the inline share was exhausted; "
-                     "the touched files themselves are in this packet.")
+        return UNAVAILABLE
+    if rows.domains and not domains_delivered:
+        return DOMAINS_NOT_DELIVERED + (" " + NEIGHBOURS_NOT_DELIVERED.format(count=rows.neighbour_count)
+                                        if rows.neighbours else "")
     if rows.neighbours and not neighbours_delivered:
-        parts.append(f"{rows.neighbour_count} neighbour module row(s) of the touched domains were NOT delivered: "
-                     "the inline share was exhausted after the sections naming the touched files.")
-    return " ".join(parts)
+        return NEIGHBOURS_NOT_DELIVERED.format(count=rows.neighbour_count)
+    return ""
+
+
+def contract_material() -> list:
+    """Every fixed line this module can hand a seat, over placeholders (commit-review contract material; no I/O)."""
+    neighbours = NEIGHBOURS_NOT_DELIVERED.format(count="⟨count⟩")
+    return [HEADING, NEIGHBOUR_HEADING, CUT_LISTING, UNAVAILABLE, DOMAINS_NOT_DELIVERED, neighbours,
+            DOMAINS_NOT_DELIVERED + " " + neighbours,
+            HEAD_ROW.format(group="⟨group⟩", title="⟨title⟩", count="⟨count⟩", manuals="⟨manuals⟩")]
 
 
 def domains_index(root: pathlib.Path) -> str:

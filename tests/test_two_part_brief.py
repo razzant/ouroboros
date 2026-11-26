@@ -166,3 +166,103 @@ def test_packet_fit_failure_is_a_typed_error(tmp_path, monkeypatch):
     monkeypatch.setattr(review_admission, "fit_triad_prompt", lambda *a, **k: ("", 0, "pack does not fit"))
     with pytest.raises(ValueError, match="pack does not fit"):
         build_two_part_brief(frozen, PACKET, goal="raise f", commit_message="bump f")
+
+
+# --- the installed domains of the touched paths, for a packet seat (no module tree in the book) ------------
+
+def _installed_and_subject(tmp_path, *, manifest=True):
+    """An installed body (the governance root) and a clone of it whose index is the reviewed subject."""
+    installed = tmp_path / "installed"
+    (installed / "ouroboros").mkdir(parents=True)
+    _git(installed, "init", "-q")
+    for key, value in (("user.email", "t@example.com"), ("user.name", "t"), ("commit.gpgsign", "false")):
+        _git(installed, "config", key, value)
+    leads = {"ouroboros/a.py": "Installed lead of a.", "ouroboros/b.py": "Lead of b.", "ouroboros/c.py": "Lead of c."}
+    for path, lead in leads.items():
+        (installed / path).write_text(f'"""{lead}"""\n', encoding="utf-8")
+    if manifest:
+        (installed / "ouroboros" / "domains.toml").write_text(
+            '[domains]\nD06 = "Review stack"\n\n[references]\nD06 = ["docs/architecture/06-4.md"]\n\n[modules]\n'
+            + "".join(f'"{path}" = "D06"\n' for path in leads), encoding="utf-8")
+    _git(installed, "add", "-A")
+    _git(installed, "commit", "-q", "-m", "installed")
+    subject = tmp_path / "subject"
+    _git(tmp_path, "clone", "-q", str(installed), str(subject))
+    for key, value in (("user.email", "t@example.com"), ("user.name", "t"), ("commit.gpgsign", "false")):
+        _git(subject, "config", key, value)
+    return installed, subject
+
+
+def _packet_brief(tmp_path, installed, subject):
+    data = tmp_path / "data"
+    (data / "logs").mkdir(parents=True, exist_ok=True)
+    ctx = SimpleNamespace(repo_dir=str(subject), drive_root=str(data), task_id="t-rows", task_metadata=None,
+                          _review_history=[], _review_advisory=[], _review_iteration_count=0,
+                          drive_logs=lambda: data / "logs")
+    spec = ReviewSubjectSpec(root_kind="system_repo", root=str(subject), kind="index", surface="commit_gate",
+                             layer="body", governance_root=str(installed))
+    return build_two_part_brief(freeze_subject(ctx, spec), PACKET, goal="g", commit_message="m")["system"]
+
+
+def _module_block(system):
+    from ouroboros.tools.governance_module_rows import HEADING
+
+    start = system.index(HEADING)
+    return system[start:system.index("\n\n", start)]
+
+
+def test_a_packet_seat_gets_the_installed_domain_and_neighbours_never_a_working_copy_lead(tmp_path):
+    installed, subject = _installed_and_subject(tmp_path)
+    (subject / "ouroboros" / "a.py").write_text('"""STAGED lead of a."""\n', encoding="utf-8")
+    _git(subject, "add", "-A")
+    (subject / "ouroboros" / "a.py").write_text('"""WORKTREE lead of a."""\n', encoding="utf-8")  # after staging
+    system = _packet_brief(tmp_path, installed, subject)
+    block = _module_block(system)
+    assert "- ouroboros/domains.toml (D06: Review stack, 3 files; manuals: docs/architecture/06-4.md)" in block
+    assert "- ouroboros/a.py (touched in this change)" in block
+    assert "- ouroboros/b.py — Lead of b." in system and "- ouroboros/c.py — Lead of c." in system
+    # No row carries a working-copy lead as the reviewed tree's (the touched file reaches the seat with the change).
+    assert "WORKTREE" not in block and "STAGED" not in block and "STAGED lead of a." in system
+
+
+def test_a_new_and_a_deleted_module_are_named_from_the_installed_manifest(tmp_path):
+    installed, subject = _installed_and_subject(tmp_path)
+    (subject / "ouroboros" / "new.py").write_text('"""Proposed new module."""\n', encoding="utf-8")
+    manifest = (subject / "ouroboros" / "domains.toml").read_text(encoding="utf-8")
+    (subject / "ouroboros" / "domains.toml").write_text(
+        manifest.replace('"ouroboros/b.py" = "D06"\n', "") + '"ouroboros/new.py" = "D06"\n', encoding="utf-8")
+    (subject / "ouroboros" / "b.py").unlink()
+    _git(subject, "add", "-A")
+    block = _module_block(_packet_brief(tmp_path, installed, subject))
+    assert "- ouroboros/new.py (new in this change; its domain assignment, if any, is in the change)" in block
+    assert "- ouroboros/b.py (touched in this change)" in block  # deleted: its installed domain still answers
+    assert "(D06: Review stack, 3 files;" in block and "Proposed new module." not in block
+
+
+def test_a_tight_window_and_a_missing_manifest_are_said_in_counted_words(tmp_path, monkeypatch):
+    from ouroboros.tools import review as review_tool
+    from ouroboros.tools.commit_gate import commit_review_contract_material
+    from ouroboros.tools.governance_module_rows import (DOMAINS_NOT_DELIVERED, HEADING, NEIGHBOURS_NOT_DELIVERED,
+                                                        UNAVAILABLE)
+
+    def strings(value):
+        if isinstance(value, str):
+            return [value]
+        items = value.values() if isinstance(value, dict) else value if isinstance(value, (list, tuple)) else ()
+        return [text for item in items for text in strings(item)]
+
+    contract = "\n".join(strings(commit_review_contract_material()))
+    installed, subject = _installed_and_subject(tmp_path / "roomy")
+    (subject / "ouroboros" / "a.py").write_text('"""Changed."""\n', encoding="utf-8")
+    _git(subject, "add", "-A")
+    assert HEADING in _packet_brief(tmp_path / "roomy", installed, subject)
+    monkeypatch.setattr(review_tool, "_triad_governance_usable_window", lambda *a, **k: 0)
+    starved = _packet_brief(tmp_path / "roomy", installed, subject)
+    assert HEADING not in starved and DOMAINS_NOT_DELIVERED in starved
+    assert DOMAINS_NOT_DELIVERED in contract and NEIGHBOURS_NOT_DELIVERED.format(count="⟨count⟩") in contract
+    monkeypatch.undo()
+    bare, subject = _installed_and_subject(tmp_path / "bare", manifest=False)
+    (subject / "ouroboros" / "a.py").write_text('"""Changed."""\n', encoding="utf-8")
+    _git(subject, "add", "-A")
+    unavailable = _packet_brief(tmp_path / "bare", bare, subject)
+    assert UNAVAILABLE in unavailable and UNAVAILABLE in contract and "Errno" not in unavailable
