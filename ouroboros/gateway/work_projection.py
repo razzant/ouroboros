@@ -241,9 +241,12 @@ def tree_review_operation(drive_root: Any, task_id: str, *, sent_only: bool = Fa
     """Whether a review ``task_id`` launched still runs (``sent_only``: one it already sent): the tree census's
     review read for ``/api/state``, beside ``tree_model_handoffs``."""
     from ouroboros import review_operation
+    from ouroboros.gateway.history_live import LIVE
 
+    live = LIVE.get()
+    observed = {} if live is None else {"live_owners": live["review_operations"], "observer": live["controller"]}
     return review_operation.task_has_live_review_operation(drive_root, task_id, sent_only=sent_only,
-                                                           result_loader=result_loader)
+                                                           result_loader=result_loader, **observed)
 
 
 def tree_review_reads(drive_root: Any, root_id: str):

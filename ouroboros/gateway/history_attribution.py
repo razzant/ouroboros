@@ -120,6 +120,10 @@ def drain() -> dict:
 
 def recorded(endpoint):
     """The history route's ``endpoint`` with each GET it serves counted; counting never fails or delays the read."""
+    from starlette.responses import Response
+
+    from ouroboros.gateway.history_reader import ReaderDisconnected
+
     @functools.wraps(endpoint)
     async def read(request):
         started, response, decoded = time.perf_counter(), None, {}
@@ -127,6 +131,10 @@ def recorded(endpoint):
         try:
             response = await endpoint(request)
             return response
+        except ReaderDisconnected:
+            # The peer is already gone. End the ASGI call normally while the
+            # counters still record one unanswered read (no status or bytes).
+            return Response(status_code=499)
         finally:
             DECODED_CURSOR.reset(token)
             if getattr(request, "method", "GET") == "GET":  # a HEAD's answer carries no page

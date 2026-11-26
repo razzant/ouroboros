@@ -383,8 +383,10 @@ def _target_lacks_store(sha: str) -> bool:
 
 def checkout_and_reset(branch: str, reason: str = "unspecified",
                        unsynced_policy: str = "ignore") -> Tuple[bool, str]:
+    from ouroboros.store_switch import UnappliedCheckout
+
     if refusal := body_replacement_refusal():  # the administrator's tree: no fetch, checkout, reset, clean or record
-        return False, refusal
+        return UnappliedCheckout(False, refusal)
     receipt = _bootstrap_receipt()
     if reason == "bootstrap" and receipt and receipt.get("branch") == branch:
         if receipt == _bootstrap_snapshot():
@@ -392,7 +394,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                                    invalidate_bootstrap=False)
             return True, "unchanged bootstrap"
     _forget_bootstrap_receipt()
-    before_head = _go().git_capture(["git", "rev-parse", "HEAD"])[1].strip()
+    rc_head, before_head, _ = _go().git_capture(["git", "rev-parse", "HEAD"])
     managed_meta = _go()._read_managed_repo_meta()
     fetch_remote = ""
     target_ref = ""
@@ -450,7 +452,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                     },
                 )
                 detail = intent_sha[:12] if intent_sha else "missing SHA"
-                return False, (
+                return UnappliedCheckout(False,
                     f"Managed update intent is invalid ({detail}); checkout was left unchanged. "
                     + ("The marker was cleared." if cleared else "The marker could not be cleared.")
                 )
@@ -481,16 +483,17 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
         admission_result = _go()._admission_gate_for_unsynced_tree(
             branch, reason, policy, update_intent_target)
         if admission_result is not None:
-            return admission_result
+            return UnappliedCheckout(*admission_result)  # the pre-tree gate returns only refusals
 
-    remote_ref_exists = False
-    if target_ref:
-        remote_ref_exists = subprocess.run(
-            ["git", "rev-parse", "--verify", target_ref],
-            cwd=str(_go().REPO_DIR),
-            capture_output=True,
-        ).returncode == 0
+    rc_target, resolved, _ = _go().git_capture(["git", "rev-parse", "--verify", target_ref or branch])
+    remote_ref_exists = bool(target_ref) and rc_target == 0
+    from ouroboros.gateway.history_reader import reader
 
+    # A clean same-tree bootstrap may bind a branch but cannot replace the reader's imports.
+    same_boot_tree = (reason == "bootstrap" and not rc_head and not rc_target and before_head == resolved
+                      and bool(before_head) and _go().git_capture(["git", "status", "--porcelain"])[:2] == (0, ""))
+    if not same_boot_tree and (blocked := reader.retire_for_checkout(_go().current_drive_root())):
+        return UnappliedCheckout(False, blocked)
     done: List[str] = []  # tree-mutating commands completed by this call (`_tree_step`)
     if remote_ref_exists:
         if update_intent_target:
@@ -498,7 +501,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                 branch, target_ref, update_intent,
             )
             if not preserve_ok:
-                return False, f"Could not preserve local branch before official update: {preserve_msg}"
+                return UnappliedCheckout(False, f"Could not preserve local branch before official update: {preserve_msg}")
             if preserve_msg and preserve_msg != intent_keep_branch:
                 _go().append_jsonl(
                     _go().DRIVE_ROOT / "logs" / "supervisor.jsonl",
@@ -709,7 +712,7 @@ def advance_recovery_point(ready: bool) -> str:
     return head
 
 
-def _recovery_checkout(reason: str) -> Tuple[bool, str]:
+def _recovery_checkout(reason: str, handoff) -> Tuple[bool, str]:
     """The recovery point, checked out through the store-switch owner: a target that cannot read this
     installation's stores is never started automatically (a typed failure; the owner restores); one that can
     gets the stores handed off, then the branch is checked out as before (the dev branch is never rewritten)."""
@@ -726,7 +729,8 @@ def _recovery_checkout(reason: str) -> Tuple[bool, str]:
         return _checkout_outcome(stable, why, "rescue_and_reset")
     ok, message, _deferred = store_switch.switch_or_reset(_go().current_drive_root(), repo, target_sha=target, target_ref=stable,
                                                           reason=why, door="safe_restart_fallback",
-                                                          reset=lambda: _checkout_outcome(stable, why, "rescue_and_reset"))
+                                                          reset=lambda: _checkout_outcome(stable, why, "rescue_and_reset"),
+                                                          handoff=handoff)
     return ok, message
 
 
@@ -739,11 +743,7 @@ def _forget_dependency_fingerprint() -> None:
 
 
 def _checkout_outcome(branch: str, reason: str, unsynced_policy: str) -> Tuple[bool, str]:
-    """``checkout_and_reset`` whose Git refusal is a failed outcome, never a raise.
-
-    Git explains the refusal (e.g. an ``index.lock`` another process holds or a
-    crash left); it is recorded once and returned in Git's own words (``refusal_text``).
-    """
+    """Record the checkout refusal once, preserving Git's words and whether the tree was touched."""
     try:
         return _go().checkout_and_reset(branch, reason=reason, unsynced_policy=unsynced_policy)
     except subprocess.CalledProcessError as exc:
@@ -753,7 +753,11 @@ def _checkout_outcome(branch: str, reason: str, unsynced_policy: str) -> Tuple[b
             {"ts": _go().utc_now_iso(), "type": "checkout_step_failed", "reason": reason,
              "target_branch": branch, "cmd": cmd, "returncode": exc.returncode, "stderr": detail},
         )
-        return False, refusal_text(exc)
+        message = refusal_text(exc)
+        if not getattr(exc, "before_tree_effects", False):
+            return False, message
+        from ouroboros.store_switch import UnappliedCheckout
+        return UnappliedCheckout(False, message)
 
 
 def _git_said(exc: subprocess.CalledProcessError) -> str:
@@ -820,33 +824,30 @@ def safe_restart(
     if t["ok"]:
         return True, f"OK: {_go().BRANCH_DEV}"
 
-    _go().append_jsonl(
-        _go().current_drive_root() / "logs" / "supervisor.jsonl",
-        {
-            "ts": _go().utc_now_iso(),
-            "type": "safe_restart_dev_import_failed",
-            "reason": reason,
-            "branch": _go().BRANCH_DEV,
-            "stdout": t.get("stdout", ""),
-            "stderr": t.get("stderr", ""),
-            "returncode": t.get("returncode", -1),
-        },
-    )
+    _go().append_jsonl(_go().current_drive_root() / "logs" / "supervisor.jsonl",
+                       {"ts": _go().utc_now_iso(), "type": "safe_restart_dev_import_failed",
+                        "reason": reason, "branch": _go().BRANCH_DEV,
+                        "stdout": t.get("stdout", ""), "stderr": t.get("stderr", ""),
+                        "returncode": t.get("returncode", -1)})
 
-    ok_s, err_s = _recovery_checkout(reason)
-    if not ok_s:
-        return False, (err_s if err_s.startswith("recovery_point_predates_stores")
-                       else f"Failed checkout {_go().BRANCH_STABLE}: {err_s}")
+    from ouroboros.store_switch import current_history_handoff
 
-    deps_ok_s, deps_msg_s = _go().sync_runtime_dependencies(reason=f"{reason}_fallback_stable")
-    if not deps_ok_s:
-        return False, f"Failed deps for {_go().BRANCH_STABLE}: {deps_msg_s}"
-
-    t2 = _go().import_test()
-    if t2["ok"]:
-        return True, f"OK: fell back to {_go().BRANCH_STABLE}"
-
-    return False, "Both branches failed import (dev and stable)"
+    handoff, restarting = current_history_handoff(), False
+    try:
+        ok_s, err_s = _recovery_checkout(reason, handoff)
+        if not ok_s:
+            return False, (err_s if err_s.startswith("recovery_point_predates_stores")
+                           else f"Failed checkout {_go().BRANCH_STABLE}: {err_s}")
+        deps_ok_s, deps_msg_s = _go().sync_runtime_dependencies(reason=f"{reason}_fallback_stable")
+        if not deps_ok_s:
+            return False, f"Failed deps for {_go().BRANCH_STABLE}: {deps_msg_s}"
+        if _go().import_test()["ok"]:
+            restarting = reason != "bootstrap"  # bootstrap continues in this same process
+            return True, f"OK: fell back to {_go().BRANCH_STABLE}"
+        return False, "Both branches failed import (dev and stable)"
+    finally:
+        if not restarting:
+            handoff.resume_inline()
 
 
 def _record_checkout_facts(facts: dict, *, invalidate_bootstrap: bool = True, stamp_observed: bool = True) -> None:

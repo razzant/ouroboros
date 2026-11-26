@@ -232,20 +232,42 @@ def _row_key(key) -> bool:
             and type(key[2]) is int and key[2] >= 0)
 
 
+def _unpack_cursor(value):
+    if not isinstance(value, str) or len(value) > _CURSOR_CHARS:
+        raise ValueError
+    packed = value.startswith("z")  # a plain cursor is base64 of ``{"``: it starts with ``e``
+    encoded = value[packed:]
+    decoded = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
+    if packed:
+        inflate = zlib.decompressobj()
+        decoded = inflate.decompress(decoded, _UNPACKED_CURSOR_BYTES)
+        if not inflate.eof or inflate.unconsumed_tail:
+            raise ValueError
+    cursor = json.loads(decoded)
+    if not isinstance(cursor, dict) or cursor.get("v") != 1 or cursor.get("kind") not in {"older", "page", "after"}:
+        raise ValueError
+    return cursor
+
+
+def _cursor_window(cursor):
+    return (not cursor or (cursor["kind"] == "page" and cursor.get("recent") is True),
+            bool(cursor) and cursor["kind"] == "after")
+
+
+def live_overlays(cursor, around):
+    """Admission hints only; the assembly still validates selectors against the real room view."""
+    if around is not None:
+        return False, False
+    try:
+        recent, after = _cursor_window(_unpack_cursor(cursor) if cursor else None)
+    except (ValueError, TypeError, RecursionError, zlib.error):
+        return False, False  # the malformed cursor cannot select a page
+    return recent or after, not cursor or after
+
+
 def decode_cursor(value, thread_id, view):
     try:
-        if not isinstance(value, str) or len(value) > _CURSOR_CHARS:
-            raise ValueError
-        packed = value.startswith("z")  # a plain cursor is base64 of ``{"``: it starts with ``e``
-        decoded = base64.b64decode(value[packed:] + "=" * (-len(value[packed:]) % 4), altchars=b"-_", validate=True)
-        if packed:
-            inflate = zlib.decompressobj()
-            decoded = inflate.decompress(decoded, _UNPACKED_CURSOR_BYTES)
-            if not inflate.eof or inflate.unconsumed_tail:
-                raise ValueError
-        cursor = json.loads(decoded)
-        if not isinstance(cursor, dict) or cursor.get("v") != 1 or cursor.get("kind") not in {"older", "page", "after"}:
-            raise ValueError
+        cursor = _unpack_cursor(value)
         for field in ("upper", "before"):
             if set(cursor[field]) != set(_SOURCES):
                 raise ValueError
@@ -617,8 +639,7 @@ def select_history_page(data_dir, thread_id, view, cursor, quotas, predicates, c
         quotas = continuation["quotas"]
         if any(quotas[key] > caps[key] for key in quotas):
             raise HistoryCursorError("history_cursor_invalid", 400)
-    recent = not continuation or (continuation["kind"] == "page" and continuation["recent"])
-    after = bool(continuation) and continuation["kind"] == "after"
+    recent, after = _cursor_window(continuation)
     selections, upper, before, page_ends, importing = {}, {}, {}, {}, []
     horizon, chains, chrono = {}, {}, {}
     for source, quota in (("chat", "human"), ("progress", "progress")):
@@ -662,8 +683,6 @@ def select_history_page(data_dir, thread_id, view, cursor, quotas, predicates, c
             importing.append(source)
     if importing and not any(selections[source][0] for source in _SOURCES):
         raise StoreMigrating("Dialogue history is still importing")  # nothing on this page is readable yet
-    if settled and (decoded := DECODED_CURSOR.get()) is not None:
-        decoded["repairs"] = REPAIR_SETTLED
     evidence = []
     answer_seq = continuation.get("answer_seq") if continuation and continuation["kind"] == "page" else None
     if answer_seq is not None:
@@ -904,6 +923,8 @@ def history_page_tokens(page, messages=(), reads=None):
         again = [row.get("history_id") in page["repair_ids"] or not row.get("history_id")
                  and row.get("task_id") in page["repaired"] for row in messages]
         repairs = [short_gist(row) for row, sent in zip(messages, again) if sent]
+        if repairs and (decoded := DECODED_CURSOR.get()) is not None:
+            decoded["repairs"] = REPAIR_SETTLED
         messages[:] = [row for row, sent in zip(messages, again) if not sent]
         return {"has_more": False, "next_cursor": None, "page_cursor": None, "after_cursor": after_cursor,
                 **({"repairs": repairs} if repairs else {})}

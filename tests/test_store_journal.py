@@ -232,7 +232,7 @@ def test_a_door_reset_hands_every_store_off_out_of_wal_first(tmp_path, monkeypat
         assert txn.meta("retained") == 1
 
 
-@pytest.mark.parametrize("outcome", ["refused_before_tree_effects", "failed", "raised"])
+@pytest.mark.parametrize("outcome", ["refused_before_tree_effects", "early_return", "failed", "raised"])
 def test_a_reset_that_changed_nothing_hands_the_stores_back(tmp_path, monkeypatch, outcome):
     """After a successful hand-off: a reset refused before any tree effect leaves this process running
     on its own stores, in the rollback journal until a boot chooses again; any other failure may
@@ -250,18 +250,23 @@ def test_a_reset_that_changed_nothing_hands_the_stores_back(tmp_path, monkeypatc
 
     def reset():
         assert handed in store._HANDED_OFF
+        if outcome == "early_return":
+            from supervisor import git_ops, update_recovery
+            monkeypatch.setattr(git_ops, "git_capture", lambda *_: (1, "", "target disappeared"))
+            return update_recovery.rollback_to_version("v-old")
         if outcome == "failed":
             return False, "the reset failed"
         raise Refused("git refused the reset")
 
-    if outcome == "failed":
+    if outcome in {"failed", "early_return"}:
         assert store_switch.switch_or_reset(tmp_path, tmp_path, target_sha="0" * 40, target_ref="v-old", reason="t",
-                                            door="ui_rollback", reset=reset) == (False, "the reset failed", False)
+                                            door="ui_rollback", reset=reset) == (
+            False, "the reset failed" if outcome == "failed" else "Cannot resolve v-old: target disappeared", False)
     else:
         with pytest.raises(Refused):
             store_switch.switch_or_reset(tmp_path, tmp_path, target_sha="0" * 40, target_ref="v-old", reason="t",
                                          door="ui_rollback", reset=reset)
-    assert (handed in store._HANDED_OFF) is (outcome != "refused_before_tree_effects")
+    assert (handed in store._HANDED_OFF) is (outcome not in {"refused_before_tree_effects", "early_return"})
     store.forget_handoffs()
 
 

@@ -87,7 +87,7 @@ def controller_identity() -> Dict[str, Any]:
     return {**_SELF[pid], "session": str(current_custody_session_id() or "")}
 
 
-def controller_state(identity: Any) -> str:
+def controller_state(identity: Any, *, observer: dict | None = None) -> str:
     """Return proven ``local``, ``alive``, ``dead`` or ``unknown``.
     No live pid (including zombies) proves the controller gone. Kernel births of one
     validated kind decide (``process_identity.same_birth``); without them an equal
@@ -97,7 +97,8 @@ def controller_state(identity: Any) -> str:
     record on a reused pid stays unknown until that process ends. For our own pid
     (pid and birth survive exec; this process mints its identity
     once), a different birth names another holder, and distinct nonempty custody sessions
-    prove the pre-exec controller gone; another process's session cannot prove that."""
+    prove the pre-exec controller gone; another process's session cannot prove that.
+    A delegated read can carry the serving process's measured identity as observer."""
     from ouroboros.process_identity import process_kernel_birth, same_birth
 
     try:
@@ -107,8 +108,8 @@ def controller_state(identity: Any) -> str:
     if pid <= 0:
         return "unknown"
     birth, kernel = str(identity.get("birth") or ""), str(identity.get("kernel_birth") or "")
-    if pid == os.getpid():
-        own = controller_identity()
+    if pid == (os.getpid() if observer is None else observer.get("pid")):
+        own = controller_identity() if observer is None else observer
         same = same_birth(own.get("kernel_birth"), kernel)
         if same is None:
             if not birth or not own["birth"]:
@@ -551,8 +552,15 @@ def _task_operation_entries(root: Any, task_id: str, *, result_loader=None) -> I
         yield owner, subject, entry
 
 
+def live_review_owner_ids() -> list[str]:
+    """Process-owned positive witnesses, without reviewer requests or state bodies."""
+    with _LOCK:
+        return [owner for owner, operation in _LIVE.items() if not operation.closed]
+
+
 def task_has_live_review_operation(root: Any, task_id: str, *, exclude_owner_id: str = '',
-                                   sent_only: bool = False, result_loader=None, probe_controller: bool = True) -> bool:
+                                   sent_only: bool = False, result_loader=None, probe_controller: bool = True,
+                                   live_owners=None, observer=None) -> bool:
     """Physical review ownership; unsent preparation is excluded by ``sent_only``.
 
     In a custody write, ``probe_controller=False`` treats an open durable pointer as possibly
@@ -565,11 +573,17 @@ def task_has_live_review_operation(root: Any, task_id: str, *, exclude_owner_id:
             continue
         if not probe_controller:
             return True
-        with _LOCK:
-            live = _LIVE.get(owner)
-        if live is not None and not live.closed:
+        if live_owners is None:
+            with _LOCK:
+                operation = _LIVE.get(owner)
+                local_live = operation is not None and not operation.closed
+        else:
+            local_live = owner in live_owners
+        if local_live:
             return True
-        if controller_state(entry.get("controller")) in {"alive", "unknown"}:
+        identity = entry.get("controller")
+        state = controller_state(identity) if observer is None else controller_state(identity, observer=observer)
+        if state in {"alive", "unknown"}:
             return True
     return False
 

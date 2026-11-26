@@ -697,15 +697,12 @@ _LOCAL_CONNECTIONS = threading.local()
 _CONNECTION_POOLS: weakref.WeakSet = weakref.WeakSet()
 _CONNECTION_GUARD = threading.Condition(threading.RLock())
 
-
 @contextlib.contextmanager
 def connection(path: pathlib.Path, tier: str, *, wait_sec: float = 0.0, identity: Optional[tuple] = None,
                opener: Optional[Callable[..., sqlite3.Connection]] = None) -> Iterator[sqlite3.Connection]:
-    """Lease this thread's connection; no transaction survives a returned lease.
-
-    A nested access keeps its historical independent transaction (a temporary connection),
-    never commits or rolls back the caller's transaction. A new file ``identity`` (the caller's stat, never one
-    across a wait) or tier invalidates the cached connection. Name-tier callers hold their name lock throughout."""
+    """Lease this thread's connection; no transaction survives return. A nested lease opens an
+    independent connection, never commits or rolls back its caller. A changed file identity or tier
+    invalidates idle handles. Name-tier callers keep their lock throughout."""
     path = pathlib.Path(os.path.abspath(path))
     key, opener = str(path), opener or connect
     identity = file_identity(path) if identity is None else identity  # a stat waits for the GIL: never under the guard
@@ -757,14 +754,13 @@ def connection(path: pathlib.Path, tier: str, *, wait_sec: float = 0.0, identity
                 _CONNECTION_GUARD.notify_all()
 
 
-def _close_cached(selected: Callable[[str], bool], *, idle_only: bool = False) -> None:
-    """Close every thread's idle cached handle whose file ``selected`` names: all or none.
-
-    The lifecycle owner must quiesce users first. An active lease refuses the handoff
-    with StoreBusy; it is never interrupted or silently rolled back by another thread.
-    ``idle_only`` closes the idle ones and leaves a leased handle to its thread instead."""
+def _close_cached(selected: Callable[[str], bool], *, idle_only: bool = False,
+                  local_pool: Optional[_ThreadConnections] = None) -> None:
+    """Release selected handles all-or-none after quiescence. Active leases refuse handoff;
+    ``idle_only`` leaves them with their thread, never silently rolling back its transaction."""
     with _CONNECTION_GUARD:
-        entries = [(pool, name, entry) for pool in list(_CONNECTION_POOLS)
+        pools = list(_CONNECTION_POOLS) if local_pool is None else (local_pool,)
+        entries = [(pool, name, entry) for pool in pools
                    for name, entry in pool.entries.items() if selected(name)]
         if idle_only:
             entries = [item for item in entries if not item[2].active]
@@ -781,17 +777,21 @@ def close_connections(path: Optional[pathlib.Path] = None) -> None:
     _close_cached(lambda name: key is None or name == key)
 
 
+@contextlib.contextmanager
+def thread_read_connections():
+    """At the child build's boundary, release its thread's handles, including other drives."""
+    try:
+        yield
+    finally:
+        if pool := getattr(_LOCAL_CONNECTIONS, "pool", None):
+            _close_cached(lambda _: True, local_pool=pool)
+
+
 def close_connections_under(root: pathlib.Path, *, idle_only: bool = False) -> None:
-    """Close this process's cached handles on stores inside ROOT before ROOT moves or goes.
-
-    Windows refuses to rename a folder while a file below it is open, and on any system a
-    handle kept past the move holds the moved files' space. Another process (a pool worker
-    that ran the task) releases its own, ``idle_only``: a late thread's lease stays with
-    that thread, which closes it on exit. Contract as ``_close_cached``; paths resolve
-    outside the pool guard, so a slow volume never stalls other stores' leases."""
+    """Before moving ROOT, release handles (Windows rename, retained blocks). Workers leave active
+    leases to their threads via ``idle_only``. Resolve paths off-lock so slow volumes do not stall unrelated leases."""
     def canonical(name: Any) -> str:
-        return os.path.normcase(os.path.realpath(name))  # a short or linked spelling names the same file
-
+        return os.path.normcase(os.path.realpath(name))
     prefix = os.path.join(canonical(root), "")
     with _CONNECTION_GUARD:
         names = {name for pool in list(_CONNECTION_POOLS) for name in pool.entries}

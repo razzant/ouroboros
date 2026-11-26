@@ -71,8 +71,9 @@ def queue_task_rows(snapshot: Dict[str, Any]):
 class TaskReads:
     """The documents, queue snapshot and cancel intents one read of many tasks uses."""
 
-    def __init__(self, drive_root: Any) -> None:
+    def __init__(self, drive_root: Any, *, history_live=None) -> None:
         self.root = pathlib.Path(drive_root)
+        self.history_live = history_live
         self._documents: Dict[Tuple[str, str], Optional[str]] = {}  # (root, task id) -> view text
         self._decoded: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}  # this read's own lookups, never handed out
         self._queue: Dict[str, Dict[str, Any]] = {}

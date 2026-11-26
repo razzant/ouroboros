@@ -530,6 +530,7 @@ ouroboros/ — agent core and shared runtime (§6)
     places_api.py — owner place/circle choices (every write is my human's; §12)
     peer_contracts.py, peer_letters_api.py — peer-link doors, `/api/letters*` (§4, §12)
     history.py, history_deliveries.py — Chat projection, `msg_type` (§3)
+    history_reader.py, history_live.py, history_response.py — history process, admission facts, shared response (§3)
     history_paging.py, history_chronology.py, history_attribution.py, chat_search.py, chat_archive.py, recall.py — dialogue pages, Project `latest_arrival`, search, read-only archive, read reasons per minute, neighbour door (no history copy; §3)
     _helpers.py — `request_json_or`, error envelope, `run_sync_to_completion`
   tools/ — Auto-discovered tool plugins (§6)
