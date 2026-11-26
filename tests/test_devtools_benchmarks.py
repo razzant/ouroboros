@@ -3204,9 +3204,10 @@ _IMAGE_FLAGS = ("--force-build", "--no-force-build")
 
 
 def _fake_harbor(calls, write_result, unexpected):
-    """Strict stand-in for `harbor run`: records the argv and writes a synthetic result. Any other
-    child command (a real harbor, docker, anything) is recorded and refused; nothing reaches the
-    system. Seed provenance keeps its own `subprocess.run` captured at import (`manifests`)."""
+    """Strict stand-in for `harbor run`: records the argv, writes a synthetic result and exits with
+    what `write_result` returns (0 for nothing). Any other child command (a real harbor, docker,
+    anything) is recorded and refused; nothing reaches the system. Seed provenance keeps its own
+    `subprocess.run` captured at import (`manifests`)."""
 
     def run(cmd, *args, **kwargs):
         argv = [str(token) for token in cmd] if isinstance(cmd, (list, tuple)) else [str(cmd)]
@@ -3214,10 +3215,21 @@ def _fake_harbor(calls, write_result, unexpected):
             unexpected.append(argv)
             raise AssertionError(f"unexpected child command: {argv[:2]}")
         calls.append(argv)
-        write_result(argv)
-        return subprocess.CompletedProcess(cmd, 0)
+        return subprocess.CompletedProcess(cmd, write_result(argv) or 0)
 
     return run
+
+
+@pytest.fixture
+def _clean_seed_provenance(monkeypatch):
+    """A clean seed record for launches that already pass `--allow-dirty-seed`: seed provenance has
+    its own tests, and its git probes of this checkout only slow these launches down."""
+    from devtools.benchmarks.common import manifests
+
+    monkeypatch.setattr(manifests, "repo_provenance", lambda repo_dir: {
+        "repo_dir": str(repo_dir), "schema": "ouroboros.benchmark.repo_provenance.v1",
+        "git_available": True, "status_available": True, "head": "0" * 40, "dirty": False,
+    })
 
 
 def _image_flags(cmd):
@@ -3229,9 +3241,21 @@ def _without_root(cmd, root):
     return [str(token).replace(str(root), "<root>") for token in cmd]
 
 
+def _generated_identity(cmd):
+    """The identity run_tb generated for one launch: the suffix of the job config file it names."""
+    return Path(cmd[cmd.index("--config") + 1]).name.removeprefix("agent_job_config.").removesuffix(".json")
+
+
+def _without_generated(cmd, root):
+    """`_without_root`, with the launch's generated identity replaced too."""
+    identity = _generated_identity(cmd)
+    return [token.replace(identity, "<invocation>") for token in _without_root(cmd, root)]
+
+
 _NOT_A_BOOLEAN = "UNRESOLVED-BASE-VALUE-SENTINEL"
 
 
+@pytest.mark.usefixtures("_clean_seed_provenance")
 @pytest.mark.parametrize(
     "base_environment,choice,expected_flags,expected_policy",
     [
@@ -3254,7 +3278,8 @@ def test_run_tb_image_build_choice_is_the_same_in_preview_and_execution(
     It now decides dispatch only: the previewed and the dispatched argv are the same, and carry an
     image flag only for an explicit choice. The recorded policy follows Harbor's precedence
     (command line > base job config > Harbor's default false), and a base value that is not a
-    literal boolean stays in the job config for Harbor to validate, unresolved and never echoed."""
+    literal boolean stays in the job config for Harbor to validate, unresolved and never echoed.
+    Only the identity each launch generates for itself differs between the two."""
     from devtools.benchmarks.terminal_bench import run_tb
 
     settings = tmp_path / "settings.json"
@@ -3267,7 +3292,9 @@ def test_run_tb_image_build_choice_is_the_same_in_preview_and_execution(
     monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "fake-harbor 0.0.0")
 
     def write_trial(cmd):
-        trial = Path(cmd[cmd.index("--jobs-dir") + 1]) / "job-1" / "sample-task__1"
+        # As Harbor does: the job directory is the job config's `job_name`.
+        config = json.loads(Path(cmd[cmd.index("--config") + 1]).read_text(encoding="utf-8"))
+        trial = Path(cmd[cmd.index("--jobs-dir") + 1]) / config["job_name"] / "sample-task__1"
         trial.mkdir(parents=True)
         (trial / "result.json").write_text(json.dumps({
             "task_name": "sample-task", "trial_name": "sample-task__1",
@@ -3276,7 +3303,7 @@ def test_run_tb_image_build_choice_is_the_same_in_preview_and_execution(
 
     calls, unexpected = [], []
     monkeypatch.setattr(run_tb.subprocess, "run", _fake_harbor(calls, write_trial, unexpected))
-    argvs = {}
+    argvs, configs = {}, {}
     for mode, extra in (("preview", []), ("execute", ["--execute"])):
         root = tmp_path / mode
         assert run_tb.main([
@@ -3286,16 +3313,22 @@ def test_run_tb_image_build_choice_is_the_same_in_preview_and_execution(
             "--settings-path", str(settings), *base_args, *choice, *extra,
         ]) == 0
         manifest = json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))
-        argvs[mode] = _without_root(manifest["official_command"], root)
+        command = manifest["official_command"]
+        argvs[mode] = _without_generated(command, root)
         assert manifest["extra"]["agent_environment_force_build"] == expected_policy
-        job_config_path = manifest["official_command"][manifest["official_command"].index("--config") + 1]
-        written = json.loads(Path(job_config_path).read_text(encoding="utf-8"))
+        written = json.loads(Path(command[command.index("--config") + 1]).read_text(encoding="utf-8"))
         # The base reaches Harbor intact; an explicit choice rides the argv, not the job config.
         assert written.get("environment") == base_environment
+        # No base `job_name`: the generated identity names the Harbor job too.
+        assert written["job_name"] == _generated_identity(command)
+        configs[mode] = written
     assert unexpected == []
     assert len(calls) == 1
-    # The whole previewed argv is the whole dispatched one, run root aside.
-    assert argvs["preview"] == argvs["execute"] == _without_root(calls[0], tmp_path / "execute")
+    # Two nameless launches carry distinct identities, and their configs differ in nothing else.
+    assert configs["preview"].pop("job_name") != configs["execute"].pop("job_name")
+    assert configs["preview"] == configs["execute"]
+    # The whole previewed argv is the whole dispatched one, run root and generated identity aside.
+    assert argvs["preview"] == argvs["execute"] == _without_generated(calls[0], tmp_path / "execute")
     assert _image_flags(calls[0]) == expected_flags
     ledger = json.loads((tmp_path / "execute" / "disclosure_ledger.json").read_text(encoding="utf-8"))
     assert ledger["run"]["agent_environment_force_build"] == expected_policy
@@ -3305,6 +3338,7 @@ def test_run_tb_image_build_choice_is_the_same_in_preview_and_execution(
     assert _NOT_A_BOOLEAN not in printed.out + printed.err
 
 
+@pytest.mark.usefixtures("_clean_seed_provenance")
 @pytest.mark.parametrize(
     "choice,expected_flags,expected_policy",
     [
@@ -3352,6 +3386,207 @@ def test_terminal_bench_smoke_image_build_choice_is_the_same_in_preview_and_exec
     assert len(calls) == 1
     assert argvs["preview"] == argvs["execute"] == _without_root(calls[0], tmp_path / "execute")
     assert _image_flags(calls[0]) == expected_flags
+
+
+def test_run_tb_keeps_n_as_the_n_concurrent_shorthand():
+    """`--n 3` was argparse's abbreviation of `--n-concurrent 3` until `--no-force-build` also
+    began with `--n` and made it ambiguous (razzant/ouroboros#4315)."""
+    from devtools.benchmarks.terminal_bench import run_tb
+
+    parser = run_tb._build_arg_parser()
+    assert parser.parse_args(["--n", "3"]).n_concurrent == 3
+    assert parser.parse_args(["--n=4"]).n_concurrent == 4
+    assert parser.parse_args(["--no-force-build"]).force_build is False
+
+
+_OWN_JOB = "<own job>"  # the job directory Harbor makes from this launch's own job config
+
+
+def _harbor_job_trial(job, reward):
+    """One trial of a synthetic Harbor job, named after its job so a ledger shows whose it is. Its
+    collected artifacts hold a scored `result.json` from the task environment, which is no trial."""
+    trial = job / "sample-task__1"
+    (trial / "artifacts").mkdir(parents=True)
+    (trial / "result.json").write_text(json.dumps({
+        "task_name": "sample-task", "trial_name": f"{job.name}/sample-task__1",
+        "verifier_result": None if reward is None else {"rewards": {"reward": reward}},
+    }), encoding="utf-8")
+    (trial / "artifacts" / "result.json").write_text(json.dumps({
+        "task_name": "sample-task", "trial_name": "collected-artifact",
+        "verifier_result": {"rewards": {"reward": 1.0}},
+    }), encoding="utf-8")
+
+
+@pytest.mark.usefixtures("_clean_seed_provenance")
+@pytest.mark.parametrize(
+    "job_name,before,harbor_writes,harbor_exit,outcome,exit_code,binding",
+    [
+        pytest.param(None, {}, {_OWN_JOB: 1.0}, 0, "completed", 0, "invocation", id="fresh"),
+        # An older scored job lends nothing to an unscored new one beside it.
+        pytest.param(None, {"older-job": 1.0}, {_OWN_JOB: None}, 0,
+                     "no_scored_trials", 1, "invocation", id="unscored-beside-scored"),
+        # A crash leaves this launch's own trials: disclosed, and the exit still decides the outcome.
+        pytest.param(None, {}, {_OWN_JOB: 0.0}, 3,
+                     "harness_nonzero_exit", 3, "invocation", id="crash-in-own-job"),
+        # This launch's Harbor failed before making its job while a concurrent launch scored the only
+        # new one: that reward is not this run's.
+        pytest.param(None, {}, {"peer-job": 1.0}, 2,
+                     "harness_nonzero_exit", 2, "unattributed", id="failed-before-own-job-beside-peer"),
+        # A fresh named job, its ordinary name with a space and Unicode: scored, scoped to that job.
+        pytest.param("named job ü", {"older-job": 1.0}, {_OWN_JOB: 0.0}, 0,
+                     "completed", 0, "named_job", id="named-fresh-space-unicode"),
+        # The named job's trials stay scoped to it after a failed Harbor run, whose exit decides.
+        pytest.param("named-job", {}, {_OWN_JOB: 1.0}, 1,
+                     "harness_nonzero_exit", 1, "named_job", id="named-after-failure"),
+        # Harbor resumed an existing job of that name and ran no new trial: no new result.
+        pytest.param("named-job", {"named-job": 1.0}, {}, 0,
+                     "trials_unverified", 1, "reused", id="named-reused-without-new-trial"),
+        # Passed to Harbor unchanged, but a name leaving the jobs dir is never read.
+        pytest.param("../escape", {}, {_OWN_JOB: 1.0}, 0,
+                     "trials_unverified", 1, "unattributed", id="name-leaving-jobs-dir"),
+    ],
+)
+def test_run_tb_reads_only_its_own_harbor_job(
+    tmp_path, monkeypatch, job_name, before, harbor_writes, harbor_exit, outcome, exit_code, binding,
+):
+    """razzant/ouroboros#4315: launches sharing a submission root share Harbor's jobs dir, and the
+    disclosure scan walked all of it, so an unscored job reported an older job's reward as its own.
+    A launch now names its job positively (the base `job_name`, else an invocation-unique one in its
+    own job config) and reads only that job's trials, scoped to this invocation or to the named job;
+    a job that existed before the dispatch, or lies outside the jobs dir, yields no ledger and the
+    outcome fails closed. While Harbor runs, the manifest already names the command and the image
+    policy."""
+    import re
+
+    from devtools.benchmarks.terminal_bench import run_tb
+
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    root = tmp_path / "run"
+    jobs = root / "submission" / "submissions" / "terminal-bench" / "2.1" / "ouroboros__example-model" / "job"
+    for job, reward in before.items():
+        _harbor_job_trial(jobs / job, reward)
+    base_args = []
+    if job_name is not None:
+        base = tmp_path / "base.json"
+        base.write_text(json.dumps({"job_name": job_name}), encoding="utf-8")
+        base_args = ["--base-job-config", str(base)]
+    monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "fake-harbor 0.0.0")
+    during, own = {}, {}
+
+    def harbor_run(argv):
+        during.update(json.loads((root / "run_manifest.json").read_text(encoding="utf-8")))
+        config = json.loads(Path(argv[argv.index("--config") + 1]).read_text(encoding="utf-8"))
+        own["name"] = config["job_name"]  # as Harbor does, the job is named by its config
+        for job, reward in harbor_writes.items():
+            name = own["name"] if job == _OWN_JOB else job
+            _harbor_job_trial(Path(argv[argv.index("--jobs-dir") + 1]) / name, reward)
+        return harbor_exit
+
+    calls, unexpected = [], []
+    monkeypatch.setattr(run_tb.subprocess, "run", _fake_harbor(calls, harbor_run, unexpected))
+    assert run_tb.main([
+        "--model", "example/model", "--k", "1", "--allow-low-k", "--allow-dirty-seed",
+        "--harbor-bin", "fake-harbor", "--task", "sample-task", "--run-root", str(root),
+        "--settings-path", str(settings), *base_args, "--execute",
+    ]) == exit_code
+    assert unexpected == [] and len(calls) == 1
+    if job_name is None:  # invocation-unique, written into the job config, in Harbor's timestamp shape
+        assert own["name"] == _generated_identity(calls[0])
+        assert re.fullmatch(r"\d{4}-\d\d-\d\d__\d\d-\d\d-\d\d__[0-9a-f]{8}", own["name"])
+    else:
+        assert own["name"] == job_name  # a base name passes unchanged
+    assert during["extra"]["outcome"] == "running"
+    assert during["extra"]["recovery_checkpoint"]["phase"] == "harbor_dispatch"
+    assert during["official_command"] == run_tb.redacted_command(calls[0])
+    assert during["extra"]["agent_environment_force_build"] == {"force_build": False, "source": "harbor_default"}
+
+    extra = json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))["extra"]
+    assert (extra["outcome"], extra["harness_exit_code"]) == (outcome, harbor_exit)
+    assert extra["harbor_job"]["binding"] == binding
+    assert extra["harbor_job"]["job_dir"] == ("" if "/" in own["name"] else str((jobs / own["name"]).resolve()))
+    ledger_path = root / "disclosure_ledger.json"
+    if binding not in ("invocation", "named_job"):
+        assert not ledger_path.exists()
+        assert extra["harbor_trials"] == {"n_trials": 0, "reward_distribution": {}}
+        return
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert [trial["trial_name"] for trial in ledger["trials"]] == [f"{own['name']}/sample-task__1"]
+    assert ledger["run"]["harbor_job"] == extra["harbor_job"]
+    assert extra["harbor_trials"]["n_trials"] == 1
+
+
+@pytest.mark.usefixtures("_clean_seed_provenance")
+def test_run_tb_dispatches_the_job_config_its_own_command_names(tmp_path, monkeypatch):
+    """razzant/ouroboros#4315: overlapping launches wrote one shared `agent_job_config.json`, so a
+    conflicting preview started between a launch's write and its dispatch handed Harbor the
+    preview's config. Every launch now creates its own config file and never rewrites it, even when
+    both use the default run root (and so one submission root): Harbor reads the config the
+    dispatching launch wrote, and two nameless launches carry distinct job identities."""
+    from devtools.benchmarks.terminal_bench import run_tb
+
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)  # no --run-root: both launches use the default one under here
+
+    def launch(force_build, *extra):
+        base = tmp_path / f"base-{str(force_build).lower()}.json"
+        base.write_text(json.dumps({"environment": {"force_build": force_build}}), encoding="utf-8")
+        return run_tb.main([
+            "--model", "example/model", "--k", "1", "--allow-low-k", "--allow-dirty-seed",
+            "--harbor-bin", "fake-harbor", "--task", "sample-task", "--settings-path", str(settings),
+            "--base-job-config", str(base), *extra,
+        ])
+
+    overlapping = []
+
+    def harbor_version(_binary):
+        # Probed after this launch created its job config and before it dispatches.
+        if not overlapping:
+            overlapping.append("started")
+            overlapping.append(launch(False))
+        return "fake-harbor 0.0.0"
+
+    dispatched = []
+
+    def harbor_run(argv):
+        config = json.loads(Path(argv[argv.index("--config") + 1]).read_text(encoding="utf-8"))
+        dispatched.append(config)
+        _harbor_job_trial(Path(argv[argv.index("--jobs-dir") + 1]) / config["job_name"], 1.0)
+
+    calls, unexpected = [], []
+    monkeypatch.setattr(run_tb, "harbor_version", harbor_version)
+    monkeypatch.setattr(run_tb.subprocess, "run", _fake_harbor(calls, harbor_run, unexpected))
+    assert launch(True, "--execute") == 0
+    assert overlapping == ["started", 0] and unexpected == [] and len(calls) == 1
+    run_root = tmp_path / "tb21_ouroboros_run"
+    configs = {path.name: json.loads(path.read_text(encoding="utf-8"))
+               for path in run_root.glob("agent_job_config.*.json")}
+    own_file = Path(calls[0][calls[0].index("--config") + 1]).name
+    assert len(configs) == 2 and configs.pop(own_file) == dispatched[0]  # still what Harbor read
+    assert dispatched[0]["environment"] == {"force_build": True}
+    (preview,) = configs.values()
+    assert preview["environment"] == {"force_build": False}
+    assert preview["job_name"] != dispatched[0]["job_name"]
+    manifest = json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["official_command"] == calls[0]
+    assert (manifest["extra"]["outcome"], manifest["extra"]["harbor_job"]["binding"]) == ("completed", "invocation")
+
+
+def test_run_tb_ledger_reads_no_trial_linked_from_outside_its_job(tmp_path):
+    """razzant/ouroboros#4315: the ledger reads only what resolves inside its own job, so a trial
+    entry linking to a scored trial elsewhere is not that job's trial."""
+    from devtools.benchmarks.terminal_bench import run_tb
+
+    job = tmp_path / "jobs" / "own-job"
+    _harbor_job_trial(job, 0.0)
+    _harbor_job_trial(tmp_path / "elsewhere", 1.0)
+    try:
+        (job / "linked-trial").symlink_to(tmp_path / "elsewhere" / "sample-task__1", target_is_directory=True)
+    except OSError as exc:  # e.g. Windows without the symlink privilege
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    ledger = run_tb.write_disclosure_ledger(job_dir=job, out_path=tmp_path / "ledger.json", run_meta={})
+    assert [trial["trial_name"] for trial in ledger["trials"]] == ["own-job/sample-task__1"]
 
 
 def test_container_env_never_forwards_model_fallback(tmp_path, monkeypatch):

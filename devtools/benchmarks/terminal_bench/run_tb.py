@@ -13,10 +13,12 @@ import json
 import os
 import pathlib
 import re
+import secrets
 import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Mapping
 
 if __package__ in {None, ""}:
@@ -114,7 +116,9 @@ class HarborCommandConfig:
     n_concurrent: int
     task_filters: list[str]
     settings_path: pathlib.Path
-    execute: bool  # dispatch only; never shapes the argv
+    # Read by nothing here: `main()` dispatches on its own `--execute`, and the argv never depends on
+    # it. Kept so existing constructor callers stay valid.
+    execute: bool
     light_model: str
     safety_mode: str = "light"
     setup_timeout_multiplier: float = 1.0
@@ -126,6 +130,13 @@ class HarborCommandConfig:
     harbor_env: str = ""
     # Harbor's `--force-build`/`--no-force-build` when chosen; None emits neither flag.
     force_build: bool | None = None
+    # The file `--config` names. `main()` gives every launch its own file in the run root, outside
+    # the submission tree, so no other launch can change what a dispatched argv names; None keeps
+    # `<jobs_dir>/agent_job_config.json`.
+    job_config_path: pathlib.Path | None = None
+    # Harbor's `job_name` when the base job config names none (`main()`: invocation-unique); "" lets
+    # Harbor pick its timestamp. A base `job_name` always passes unchanged.
+    job_name: str = ""
 
 
 def _host_roster_raw(settings: Mapping[str, Any] | None) -> Any:
@@ -468,7 +479,7 @@ def confined_submission_subtree(raw_subtree: str, *, dataset: str) -> list[str]:
     it — and validating an ancestor does not confine its descendant. `--submission-subtree ../../..`
     (or a family derived from a `--dataset` such as `org/..-2-1`, since `submission_subtree` splits
     the name and does not judge it) walks straight back out of the checked root and writes
-    `metadata.yaml` / `agent_job_config.json` wherever it lands — including inside the Ouroboros
+    `metadata.yaml` and Harbor's jobs wherever it lands — including inside the Ouroboros
     repository that guard exists to keep out of benchmark output. So the components that are about
     to BE created are what get validated here, before anything is created.
 
@@ -498,8 +509,9 @@ def confined_submission_subtree(raw_subtree: str, *, dataset: str) -> list[str]:
 
 
 def _write_agent_job_config(config: HarborCommandConfig) -> tuple[pathlib.Path, dict]:
-    """Write the agents[] section of the Harbor JobConfig for `harbor run -c`; return its path
-    and the merged mapping (the one read of a base job config).
+    """Write the agents[] section of the Harbor JobConfig for `harbor run -c` to
+    `config.job_config_path`; return its path and the merged mapping (the one read of a base job
+    config).
 
     The agent MUST be launched through a job config rather than the bare
     `--agent-import-path` flag: the flag path records `agents[0].name = null`
@@ -544,9 +556,13 @@ def _write_agent_job_config(config: HarborCommandConfig) -> tuple[pathlib.Path, 
         # set survives verbatim, while the agents[] block — including agents[0].name, whose
         # absence permanently invalidates a submission — always stays ours.
         job_config = _deep_merge(_load_job_config(config.base_job_config), job_config)
-    config.jobs_dir.mkdir(parents=True, exist_ok=True)
-    path = config.jobs_dir / "agent_job_config.json"
-    path.write_text(json.dumps(job_config, indent=2) + "\n", encoding="utf-8")
+    if config.job_name and "job_name" not in job_config:
+        job_config["job_name"] = config.job_name
+    path = config.job_config_path or config.jobs_dir / "agent_job_config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # A launch's own file is created once and never rewritten; the shared default stays rewritable.
+    with path.open("x" if config.job_config_path else "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(job_config, indent=2) + "\n")
     return path, job_config
 
 
@@ -611,7 +627,7 @@ def harbor_command(config: HarborCommandConfig) -> list[str]:
 
 
 def harbor_invocation(config: HarborCommandConfig) -> tuple[list[str], dict[str, Any]]:
-    """The harbor argv and the configured image policy, from the job config written here."""
+    """The harbor argv and the job config its `--config` names, as written here."""
     job_config_path, job_config = _write_agent_job_config(config)
     cmd = [
         config.harbor_bin,
@@ -644,9 +660,9 @@ def harbor_invocation(config: HarborCommandConfig) -> tuple[list[str], dict[str,
     # docker daemon, and Frontier-Bench was verified to run there end-to-end on harbor 0.18.0 (the
     # oracle solution of a real FB task scored reward 1.0 through the separate-environment
     # verifier), so a cloud sandbox provider is NOT required despite upstream's CI/leaderboard runs
-    # using `--env modal`. Emit the flag ONLY when explicitly chosen so the default path stays
-    # byte-identical to every published TB2.1 command; when omitted, the effective backend is
-    # harbor's own default, which is what the manifest/ledger record.
+    # using `--env modal`. Emit the flag ONLY when explicitly chosen: without it the argv names no
+    # backend and harbor's own default runs, which the manifest/ledger record as
+    # `harbor_env_effective`.
     if str(config.harbor_env or "").strip():
         cmd.extend(["--env", str(config.harbor_env).strip()])
     # Setup/build timeout multipliers default to 1.0 (Harbor static_validation rejects non-1.0
@@ -691,11 +707,47 @@ def harbor_invocation(config: HarborCommandConfig) -> tuple[list[str], dict[str,
     for task in config.task_filters:
         cmd.extend(["--include-task-name", task])
     cmd.extend(force_build_flag(config.force_build))
-    return cmd, agent_environment_force_build(config.force_build, job_config)
+    return cmd, job_config
 
 
-def write_disclosure_ledger(*, jobs_dir: pathlib.Path, out_path: pathlib.Path, run_meta: dict) -> dict:
-    """Walk Harbor's jobs dir, read every trial result.json, and write a denominator-preserving
+def harbor_job_dir(jobs_dir: pathlib.Path, job_config: Mapping[str, Any]) -> pathlib.Path | None:
+    """`<jobs-dir>/<job_name>`, where Harbor writes this job config's job, when the name is a string
+    that stays inside the jobs dir (`safe_join_under`; spaces and Unicode are ordinary names). Any
+    other name still reaches Harbor unchanged for its own validation, but is never resolved here, so
+    nothing outside this job is read."""
+    name = job_config.get("job_name")
+    try:
+        path = safe_join_under(jobs_dir, name) if isinstance(name, str) else None
+    except ValueError:
+        return None
+    return None if path is None or path == pathlib.Path(jobs_dir).resolve() else path
+
+
+def attributed_harbor_job(
+    job_dir: pathlib.Path | None, *, generated: bool, existed: bool,
+) -> tuple[pathlib.Path | None, dict[str, Any]]:
+    """The job directory whose trials this run records, if any, and their scope (`binding`).
+
+    The job is identified by its name, never by what else appeared in a shared jobs dir:
+    `invocation` — the invocation-unique name this launch put in its job config, so the trials are
+    this invocation's (also after a non-zero exit); `named_job` — an operator's base `job_name` that
+    did not exist before the dispatch: its trials are that named job's, which does not prove which
+    launch created them when several run under the same name. No trials otherwise: `reused` — the
+    job existed before the dispatch (Harbor resumes or refuses it, and its earlier trials are no new
+    result), or `unattributed` — the directory never appeared, or its name leaves the jobs dir."""
+    if job_dir is not None and existed:
+        binding = "reused"
+    elif job_dir is None or not job_dir.is_dir():
+        binding = "unattributed"
+    else:
+        binding = "invocation" if generated else "named_job"
+    record = {"job_dir": str(job_dir or ""), "binding": binding}
+    return (job_dir if binding in {"invocation", "named_job"} else None), record
+
+
+def write_disclosure_ledger(*, job_dir: pathlib.Path, out_path: pathlib.Path, run_meta: dict) -> dict:
+    """Read each trial's `<trial>/result.json` in one Harbor job (nothing nested deeper, such as
+    collected artifacts, and nothing a link resolves outside the job) and write a denominator-preserving
     disclosure ledger: reward distribution, exception_info histogram (AgentTimeoutError /
     ApiRateLimitError counts -- the latency / rate-limit failure signal Anton asked for), per-task
     pass rate, cost and wall-time. Honest-by-construction so a write-up can disclose how many
@@ -704,10 +756,11 @@ def write_disclosure_ledger(*, jobs_dir: pathlib.Path, out_path: pathlib.Path, r
     import collections
 
     trials: list[dict] = []
-    for result_json in sorted(pathlib.Path(jobs_dir).rglob("result.json")):
+    for result_json in sorted(pathlib.Path(job_dir).glob("*/result.json")):
+        trial = result_json.parent.name
         try:
-            data = json.loads(result_json.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            data = json.loads(safe_join_under(job_dir, trial, "result.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):  # unreadable, or resolving outside this job: not its trial
             continue
         if not isinstance(data, dict):
             continue
@@ -733,8 +786,8 @@ def write_disclosure_ledger(*, jobs_dir: pathlib.Path, out_path: pathlib.Path, r
         # artifact (the harness cuts container egress at the finish line, so the agent's own
         # finalization/summary LLM calls die on DNS) rather than a real mid-run provider fault.
         captured_after_cancellation = False
-        run_summary_path = result_json.parent / "agent" / "ouroboros-run-summary.json"
         try:
+            run_summary_path = safe_join_under(job_dir, trial, "agent", "ouroboros-run-summary.json")
             run_summary = json.loads(run_summary_path.read_text(encoding="utf-8"))
             if isinstance(run_summary, dict):
                 captured_after_cancellation = bool(run_summary.get("captured_after_cancellation"))
@@ -898,8 +951,9 @@ def classify_harbor_outcome(ledger: dict | None, returncode: int) -> tuple[str, 
     Three facts kept apart, only the last being a result:
 
     ``no_scored_trials``   no trial reached the verifier — an INFRA zero (also covers zero trials).
-    ``trials_unverified``  the ledger could not be built, so there is no evidence of a result;
-                           fail closed, because unknown success is not success.
+    ``trials_unverified``  the ledger could not be built, or no job is this dispatch's own evidence
+                           (`attributed_harbor_job`), so there is no evidence of a result; fail
+                           closed, because unknown success is not success.
     ``completed``          at least one trial carries a numeric reward. An all-zero reward
                            distribution over scored trials is a GENUINE zero and stays `completed`.
     """
@@ -932,7 +986,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="", help="measured/declared model; or use --all-model to set every slot")
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--low-k-floor", type=int, default=5, help="k below this is graded local/low-confidence (debug_only at k=1) in report_grade (default 5).")
-    parser.add_argument("--n-concurrent", type=int, default=1)
+    # `--n` names this option explicitly: it was argparse's abbreviation of it before
+    # `--no-force-build` made that prefix ambiguous.
+    parser.add_argument("--n-concurrent", "--n", type=int, default=1)
     parser.add_argument("--task", action="append", default=[], help="optional include-task-name; repeatable")
     parser.add_argument("--safety-mode", default="light", choices=["full", "light", "off"],
                         help="LLM safety mode inside the task container (default light; off disables the LLM safety pass, deterministic guards stay)")
@@ -1219,6 +1275,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         job_dir.mkdir(parents=True, exist_ok=True)
         metadata_path.write_text(metadata_text, encoding="utf-8")
+        # One identity per launch, fixed before anything is written: it names this launch's own job
+        # config file and, unless the base job config names the job, the Harbor job itself.
+        invocation = f"{datetime.now():%Y-%m-%d__%H-%M-%S}__{secrets.token_hex(4)}"
         harbor_config = HarborCommandConfig(
             dataset=args.dataset,
             model=args.model,
@@ -1239,12 +1298,16 @@ def main(argv: list[str] | None = None) -> int:
             verifier_env=tuple(args.verifier_env or []),
             harbor_env=args.harbor_env,
             force_build=args.force_build,
+            job_config_path=run_root / f"agent_job_config.{invocation}.json",
+            job_name=invocation,
         )
         # Recorded from the ASSEMBLED config, not from `args`: the job config below is what the
         # adapter reads, so binding the manifest to the same object is what keeps the recorded
         # model and the executed model from ever drifting apart.
         augment_manifest(manifest, harbor_config)
-        cmd, force_build_policy = harbor_invocation(harbor_config)
+        cmd, job_config = harbor_invocation(harbor_config)
+        own_job = harbor_job_dir(job_dir, job_config)
+        force_build_policy = agent_environment_force_build(args.force_build, job_config)
         harbor_version_value = harbor_version(args.harbor_bin)
         manifest["official_command"] = redacted_command(cmd)
         manifest["extra"]["harbor_version"] = harbor_version_value
@@ -1265,11 +1328,18 @@ def main(argv: list[str] | None = None) -> int:
         if not args.execute:
             final.update({"outcome": "command_generated", "exit_code": 0})
             return 0
+        # Durable before Harbor can spend: a run stopped mid-job still records its command and policy.
+        final.checkpoint("harbor_dispatch")
+        own_job_existed = own_job is not None and own_job.exists()
         completed = subprocess.run(cmd, cwd=repo, env={**os.environ, "PYTHONPATH": str(repo)})
         ledger: dict | None = None
         try:
-            ledger = write_disclosure_ledger(
-                jobs_dir=job_dir,
+            harbor_job, final["harbor_job"] = attributed_harbor_job(
+                own_job, generated=job_config.get("job_name") == invocation, existed=own_job_existed,
+            )
+            # A job this run cannot attribute is no evidence: no ledger, so the outcome fails closed.
+            ledger = None if harbor_job is None else write_disclosure_ledger(
+                job_dir=harbor_job,
                 out_path=run_root / "disclosure_ledger.json",
                 run_meta={
                     "dataset": args.dataset,
@@ -1288,6 +1358,7 @@ def main(argv: list[str] | None = None) -> int:
                     "harbor_version": harbor_version_value,
                     "harbor_env_effective": harbor_env_effective,
                     "agent_environment_force_build": force_build_policy,
+                    "harbor_job": final["harbor_job"],
                     "harbor_returncode": int(completed.returncode),
                 },
             )
@@ -1306,7 +1377,8 @@ def main(argv: list[str] | None = None) -> int:
                       "harness_exit_code": code, "harbor_trials": trials})
         if outcome != "completed":
             print(f"[run_tb] harbor job did not produce a result: outcome={outcome} "
-                  f"harness_exit_code={code} trials={json.dumps(trials)}", file=sys.stderr)
+                  f"harness_exit_code={code} trials={json.dumps(trials)} "
+                  f"harbor_job={json.dumps(final.get('harbor_job'))}", file=sys.stderr)
         return exit_code
 
 

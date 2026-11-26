@@ -35,11 +35,12 @@ OWNER IMMEDIATELY.**
 
 ## Task images
 
-Harbor's `environment.force_build` (default `false`) governs the agent's trial environment: when
-`false` and a task declares a published image, Harbor prefers it to a build; otherwise Harbor uses
-the task's own environment definition. Both launchers pass `--force-build`/`--no-force-build` only
-for an explicit choice, identically in a preview and an `--execute` run; otherwise Harbor's job
-configuration decides.
+Harbor's `environment.force_build` (default `false`) governs the agent's trial environment. In the
+0.18 Docker backend, `false` runs a task that declares a published image on that image, and
+`--force-build` requests a build from the task's environment definition: a task that declares an
+image but ships no Dockerfile still runs on the image. Both launchers pass
+`--force-build`/`--no-force-build` only for an explicit choice, identically in a preview and an
+`--execute` run; otherwise Harbor's job configuration decides.
 
 `agent_environment_force_build` (`run_manifest.json` `extra`; for `run_tb.py` also
 `disclosure_ledger.json` `run`) records the configured value and its `source`: `cli`,
@@ -50,7 +51,29 @@ whether that image was pulled or built.
 Without this field, read the saved command (`official_command`, `harbor_command.*`) if there is
 one. Earlier wrapper versions appended `--force-build` to every `--execute` argv and not to a
 preview. A record lacking the field is not dated by that alone (a run refused before argv
-assembly has no command either), and the flag does not show that any image was rebuilt.
+assembly has no command either), and neither the flag nor its absence shows whether any image was
+pulled or built.
+
+## Job attribution (`run_tb.py`)
+
+Each launch creates its own job config, `agent_job_config.<invocation>.json` in its `--run-root`,
+and never rewrites it, so no other launch, even one in the same run root, changes what a dispatched
+command names. Its manifest names that command and the image policy before Harbor starts
+(`extra.recovery_checkpoint`). The manifest, `harbor_command.txt` and the ledger are per run root:
+give every launch its own.
+
+Without a base `job_name`, the config names the Harbor job after the invocation
+(`YYYY-MM-DD__HH-MM-SS__<8 hex>`, Harbor's timestamp shape plus a random suffix); a base `job_name`
+passes unchanged. Launches that share `--submission-root`, model and dataset share one jobs dir, and
+the ledger and outcome read only this launch's job, from its `<job>/<trial>/result.json` files and
+nothing that resolves outside it. `extra.harbor_job.binding` scopes those trials: `invocation` (the
+generated name: they are this invocation's, also after a non-zero exit) or `named_job` (a base
+`job_name` absent before the dispatch: they are that named job's, which does not show which launch
+created them when several run under the same name, so they are no per-command result). No trial
+counts for `reused` (the named job existed before the dispatch: Harbor resumes or refuses it) or
+`unattributed` (the job never appeared, or its name leaves the jobs dir): neither writes a ledger,
+and the outcome fails closed (`trials_unverified`, or Harbor's non-zero exit); every job stays on
+disk. Independent measurements need distinct job names and distinct run roots.
 
 ## Dataset identity (v6.79.0 — matters for any non-TB2.1 Harbor dataset)
 

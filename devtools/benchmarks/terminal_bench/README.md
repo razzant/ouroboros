@@ -482,11 +482,17 @@ python devtools/benchmarks/terminal_bench/run_tb.py \
 For a targeted smoke, add repeated `--task` filters before `--execute`, for
 example `--task pypi-server --task hf-model-inference --task qemu-alpine-ssh`.
 
+Give every launch its own `--run-root` for its manifest, saved command and ledger; its job
+config file is its own in any case. Launches may share `--submission-root`; each reads only
+its own Harbor job, and a base `job_name` scopes that evidence to the named job. Independent
+measurements need distinct job names and run roots (METHODOLOGY "Job attribution").
+
 Task images: by default neither launcher passes an image flag, so Harbor's job
 configuration decides (for `run_tb.py`, a `--base-job-config` `environment.force_build`,
 else Harbor's default `false`). `--force-build` / `--no-force-build` pass Harbor's own flag,
-which overrides it. `--execute` does not change the image flags: a preview and a dispatched
-run carry the same ones. See METHODOLOGY "Task images".
+which overrides it; `--force-build` requests a build and does not guarantee one. `--execute`
+does not change the image flags: a preview and a dispatched run carry the same ones. See
+METHODOLOGY "Task images".
 
 The launcher refuses to start from a dirty/unidentifiable seed checkout (the shared
 `benchmark_run_manifest` gate, fail-closed since v6.75.0); `--allow-dirty-seed` records the
