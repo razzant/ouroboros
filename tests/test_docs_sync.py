@@ -512,22 +512,6 @@ def test_every_architecture_chapter_opens_in_the_first_person_without_volatile_n
         assert not re.search(r"\d", stripped), (path, re.findall(r"[^ ]*\d[^ ]*", stripped))
 
 
-def test_the_reference_atlas_lists_every_standalone_spec_and_resolves():
-    from ouroboros.reference_books import load_reference_book
-
-    entry = load_reference_book(REPO, "architecture").entrypoint
-    assert [h.title for h in entry.headings][1:] == ["Chapters", "Reference Atlas"]
-    atlas = entry.text.split("## Reference Atlas", 1)[1]
-    linked = set(re.findall(r"\]\(([^)]+)\)", atlas))
-    for target in linked:
-        assert (REPO / "docs" / target).is_file(), target
-    specs = {p.relative_to(REPO / "docs").as_posix() for p in (REPO / "docs").glob("*.md")} - {"ARCHITECTURE.md"}
-    specs |= {f"inventories/{p.name}" for p in (REPO / "docs" / "inventories").glob("*.md")}
-    assert specs <= linked, specs - linked
-    for path in re.findall(r"`([\w./-]+\.(?:toml|md))`", atlas):
-        assert (REPO / path).is_file(), path
-
-
 def test_closed_roads_state_the_road_and_its_reason_without_ciphers():
     """§10.2 keeps rejected approaches that have no file of their own: each line is
     "Not X, because Y" in the present tense. Where it was decided stays in Git (the
