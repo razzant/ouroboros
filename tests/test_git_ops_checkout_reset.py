@@ -259,6 +259,8 @@ def test_checkout_and_reset_preserves_local_head_on_managed_restart(monkeypatch,
     def fake_git_capture(cmd):
         if cmd == ["git", "rev-parse", "HEAD"]:
             return 0, "before-head", ""
+        if cmd == ["git", "rev-parse", "--verify", "ouroboros"]:  # the local branch, never managed/ouroboros
+            return 0, "local-sha", ""
         raise AssertionError(cmd)
 
     monkeypatch.setattr(git_ops, "git_capture", fake_git_capture)
@@ -325,6 +327,7 @@ def test_checkout_and_reset_cleans_untracked_after_managed_restart_rescue(monkey
     )
     monkeypatch.setattr(git_ops, "append_jsonl", lambda _path, _payload: None)
     monkeypatch.setattr(git_ops, "git_capture", lambda cmd: (0, "before-head", "") if cmd == ["git", "rev-parse", "HEAD"]
+                        else (0, "local-sha", "") if cmd == ["git", "rev-parse", "--verify", "ouroboros"]
                         else (_ for _ in ()).throw(AssertionError(cmd)))
 
     calls = []
@@ -384,6 +387,7 @@ def test_checkout_and_reset_does_not_rescue_for_only_managed_ahead_commits(monke
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("ahead-only restart should not rescue")),
     )
     monkeypatch.setattr(git_ops, "git_capture", lambda cmd: (0, "before-head", "") if cmd == ["git", "rev-parse", "HEAD"]
+                        else (0, "local-sha", "") if cmd == ["git", "rev-parse", "--verify", "ouroboros"]
                         else (_ for _ in ()).throw(AssertionError(cmd)))
 
     def fake_run(cmd, cwd=None, capture_output=False, text=False, check=False, env=None):
@@ -595,6 +599,8 @@ def test_checkout_and_reset_applies_explicit_update_intent(monkeypatch, tmp_path
             return 0, "before-head", ""
         if cmd == ["git", "rev-parse", "--verify", "remote-sha^{commit}"]:
             return 0, "remote-sha", ""
+        if cmd == ["git", "rev-parse", "--verify", "remote-sha"]:  # the checkout's source: the intent's exact SHA
+            return 0, "remote-sha", ""
         if cmd == ["git", "rev-list", "--left-right", "--count", "ouroboros...remote-sha"]:
             return 0, "0 1", ""
         raise AssertionError(cmd)
@@ -605,8 +611,6 @@ def test_checkout_and_reset_applies_explicit_update_intent(monkeypatch, tmp_path
 
     def fake_run(cmd, cwd=None, capture_output=False, text=False, check=False, env=None):
         calls.append(cmd)
-        if cmd == ["git", "rev-parse", "--verify", "remote-sha"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="remote-sha\n", stderr="")
         if cmd[:4] == ["git", "checkout", "-B", "ouroboros"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[:2] == ["git", "reset"]:
@@ -670,6 +674,8 @@ def test_checkout_and_reset_preserves_ahead_head_before_update_intent(monkeypatc
         capture_calls.append(cmd)
         if cmd == ["git", "rev-parse", "--verify", "remote-sha^{commit}"]:
             return 0, "remote-sha", ""
+        if cmd == ["git", "rev-parse", "--verify", "remote-sha"]:
+            return 0, "remote-sha", ""
         if cmd == ["git", "rev-list", "--left-right", "--count", "ouroboros...remote-sha"]:
             return 0, "2 1", ""
         if cmd[:2] == ["git", "branch"] and cmd[-1] == "ouroboros":
@@ -679,8 +685,6 @@ def test_checkout_and_reset_preserves_ahead_head_before_update_intent(monkeypatc
     monkeypatch.setattr(git_ops, "git_capture", fake_git_capture)
 
     def fake_run(cmd, cwd=None, capture_output=False, text=False, check=False, env=None):
-        if cmd == ["git", "rev-parse", "--verify", "remote-sha"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="remote-sha\n", stderr="")
         if cmd[:2] in (["git", "reset"], ["git", "clean"], ["git", "checkout"]):
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[:2] == ["git", "rev-parse"] and cmd[-1] == "HEAD":
@@ -728,6 +732,8 @@ def test_checkout_and_reset_blocks_when_update_ahead_check_fails(monkeypatch, tm
             return 0, "before-head", ""
         if cmd == ["git", "rev-parse", "--verify", "remote-sha^{commit}"]:
             return 0, "remote-sha", ""
+        if cmd == ["git", "rev-parse", "--verify", "remote-sha"]:
+            return 0, "remote-sha", ""
         if cmd == ["git", "rev-list", "--left-right", "--count", "ouroboros...remote-sha"]:
             return 128, "", "bad revision"
         raise AssertionError(cmd)
@@ -737,22 +743,23 @@ def test_checkout_and_reset_blocks_when_update_ahead_check_fails(monkeypatch, tm
     checkout_calls = []
 
     def fake_run(cmd, cwd=None, capture_output=False, text=False, check=False, env=None):
-        checkout_calls.append(cmd)
-        if cmd == ["git", "rev-parse", "--verify", "remote-sha"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="remote-sha\n", stderr="")
+        checkout_calls.append(cmd)  # every tree step would run here: the refusal precedes them all
         raise AssertionError(cmd)
 
     monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
 
-    ok, message = git_ops.checkout_and_reset(
+    outcome = git_ops.checkout_and_reset(
         "ouroboros",
         reason="ui_update_apply",
         unsynced_policy="ignore",
     )
+    ok, message = outcome
 
     assert ok is False
     assert "Could not preserve local branch before official update" in message
     assert ["git", "checkout", "-B", "ouroboros", "remote-sha"] not in checkout_calls
+    # A refusal that proves no tree step ran: no rollback may then restore over the local work.
+    assert getattr(outcome, "before_tree_effects", False) is True
 
 def test_checkout_and_reset_invalid_update_intent_never_falls_back_to_branch_tip(
     monkeypatch, tmp_path
