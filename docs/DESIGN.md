@@ -647,11 +647,11 @@ into one "+N" whose list holds them) and steps aside with them.
 **One object whose corner never grows.** The field is one floating object: a staged
 reply (Replies) is its first line, and the text row with "+", the words, the mic and
 Send its last. Its corner is the sheet radius, half its one-line height, and stays as
-the words grow: one line is a capsule, a paragraph a card with the same corner, never
-an oval. "+", the mic and Send ride on the words' last line, never their middle. The
-reply panel inside is concentric (the sheet radius less the field's 8 px inset) with no
-hairline of its own; the text row has no surface; the field takes the float shadow and
-the focus ring, drawn as shadows, so a border never adds to its height (owner 20.10, 1C).
+the words grow from a capsule to a card. "+", mic and Send ride on the last line.
+The reply panel is concentric (sheet radius less 8 px), without a hairline; the text
+row has no surface. Float and focus shadows add no height (owner 20.10, 1C).
+After Quit, the same room, profile and origin restore saved draft text only;
+refused writes keep the field. Restoring never sends.
 
 **A Send rises into the feed.** An accepted Send lifts a copy of the new bubble from
 where the draft stood, its words on the draft's, to the bubble's place in 340 ms on the
@@ -3605,7 +3605,7 @@ rows through its exit and stays whole and quiet for its return; only its tasks'
 incidents still toast (§4). A reader a room opened closes when another place covers it; a Project room left also
 pauses what it plays, Main plays on, and a hidden window closes and pauses nothing. Visited rooms keep
 their state until page teardown or project deletion; memory grows with visits;
-past the page only the saved preview (History edges) keeps words. Main is quiet only while
+past the page the preview and draft can keep words. Main is quiet only while
 nothing of it shows: beside a docked Project it stays live; covered by a Project (the
 phone's card, a finger's docked column), behind another page or in a hidden window it is away. Docked,
 moving between destinations stays instant, and a section's page arrives beside its list on `--motion-fade`; the Project panel comes in from the window's right edge
