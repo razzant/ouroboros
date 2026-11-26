@@ -10,15 +10,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros import dialogue_store as ds
-from ouroboros.gateway import history_attribution, history_paging
+from ouroboros.gateway import history_attribution, history_paging, history_reader
 from ouroboros.gateway.history import make_chat_history_endpoint
-from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
+from tests._dialogue import confirm_first_use, healthy_main_fixture, import_all  # noqa: F401 -- "healthy_main"
 from tests._store_shared import seed_result
+from tests.test_room_history_reader import reader  # noqa: F401 -- the real history reader's fixture
 
 TS = "2026-10-16T10:00:{:02d}Z"
 QUESTION = {"quiz_id": "q1", "question": "Which?", "options": ["a", "b"]}
@@ -712,3 +714,64 @@ def test_an_issued_arrivals_cursor_fits_a_request_line_with_its_longest_query(tm
     assert status == 200 and page["page_cursor"] and "after_cursor" not in page, len(page.get("after_cursor") or "")
     status, held = _read(tmp_path)  # held rows travel packed: whatever it issues fits as well
     assert status == 200 and len(_LONGEST_QUERY.format(held.get("after_cursor") or "")) <= _REQUEST_LINE
+
+
+def test_the_real_reader_serves_and_counts_a_settlement_read_as_the_server_does(tmp_path, reader):  # noqa: F811
+    """The reader is another process: ``repairs`` and their count cross the IPC (its reply names them, the controller
+    copies that into the read's counted words). One settled state, two clients, each asked of the server and then of the
+    reader: a window that applies ``repairs`` gets its held rows projected anew beside the arrival, an older client the
+    refusal; the same bytes and the same counted words, one count per read."""
+    confirm_first_use(tmp_path)
+    import_all(tmp_path)
+    _asking(tmp_path)
+    _, applying = _read(tmp_path)
+    _, older = _read(tmp_path, repair=False)  # a client that did not ask: its cursor holds no rows
+    shown = {row["history_id"]: row for row in applying["messages"]}
+    _task(tmp_path, "asker", "completed", 0, owner_quiz={"q1": {**QUESTION, "state": "closed"}})
+    ds.append(tmp_path, "chat", {"ts": TS.format(9), "direction": "out", "chat_id": 1, "task_id": "asker",
+                                 "text": "the final answer"})
+    requests = {"applying": {"chat_id": "1", "cursor": applying["after_cursor"], "repair": "settled"},
+                "older": {"chat_id": "1", "cursor": older["after_cursor"]}}
+    endpoint = history_attribution.recorded(make_chat_history_endpoint(tmp_path))
+
+    async def ask(path):
+        answers = {}
+        for client, params in requests.items():
+            taken = []
+            token = history_reader.READ_PATH.set(taken.append)
+            try:
+                response = await endpoint(SimpleNamespace(query_params=params, method="GET"))
+            finally:
+                history_reader.READ_PATH.reset(token)
+            assert taken == [path]
+            [counted] = history_attribution.drain()["groups"]  # this read's cause alone
+            answers[client] = (response.status_code, response.body,
+                               {key: value for key, value in counted.items() if key not in ("total_ms", "max_ms")})
+        return answers
+
+    async def exercise():
+        history_attribution.drain()
+        server = await ask("server")
+        reader.start(tmp_path, Path(__file__).resolve().parents[1])
+        assert await asyncio.to_thread(reader.ready.wait, 8), reader._failure
+        return server, await ask("child")
+    server, child = asyncio.run(exercise())
+    assert child == server
+
+    status, body, counted = child["applying"]
+    read = json.loads(body)
+    assert status == 200 and _ids(read["repairs"]) == _ids(applying["messages"]) and len(read["repairs"]) == 3
+    assert [row["text"] for row in read["messages"]] == ["the final answer"]  # the arrival, apart from the repairs
+    assert read["window"]["latest_message"]["history_id"] == read["messages"][0]["history_id"]
+    question = next(row for row in read["repairs"] if row.get("msg_type") == "quiz")
+    assert (shown[question["history_id"]]["quiz"]["state"], question["quiz"]["state"]) == ("open", "closed")
+    narration = next(row for row in read["repairs"] if row.get("is_progress"))
+    assert "task_terminal_status" not in shown[narration["history_id"]]
+    assert narration["task_terminal_status"] == "completed"
+    assert (counted["status"], counted["mode"], counted["repairs"], counted["n"]) == ("200", "after", "settled", 1)
+
+    status, body, counted = child["older"]
+    refused = json.loads(body)
+    assert (status, refused["reason_code"], refused["detail"]) == (409, "history_delta_reset", "task_settled")
+    assert "repairs" not in refused and "repairs" not in counted
+    assert (counted["status"], counted["mode"], counted["refusal"], counted["n"]) == ("409", "after", "task_settled", 1)
