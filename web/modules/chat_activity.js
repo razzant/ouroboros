@@ -17,6 +17,8 @@ import { fmt, tr } from './i18n.js';
 import { ownerMessageBubble } from './chat_history_replay.js';
 import { placeIngressNote } from './chat_attachments.js';
 import { hostRowDisplayText, hostSentenceText, noticeBody } from './host_notice_text.js';
+import { rawTimestampEpoch } from './chat_timeline_order.js';
+export { rawTimestampEpoch, stampNodeTimestamp } from './chat_timeline_order.js';
 export { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
 import {
     projectMarkdownLines, MARKDOWN_FENCED_CODE, accountedUpperBound,
@@ -330,31 +332,6 @@ export function toolEvidenceView(fold = null) {
     };
 }
 
-const subMillisecond = raw => typeof raw === 'string'
-    ? (/:\d{2}\.\d{3}(\d+)(?:Z|[+-]\d{2}:?\d{2})?$/i.exec(raw.trim())?.[1] || '').replace(/0+$/, '') : '';
-
-// Keep data-ts in milliseconds for elapsed time/labels; exact ISO fractions break ties before append positions.
-const compareTail = (a = '', b = '') => a === b ? 0 : a > b ? 1 : -1;
-export function compareTimelineTime(a, b) {
-    if (!a?.ts || !b?.ts) return NaN;
-    const delta = Number(a.ts) - Number(b.ts);
-    return delta === 0 ? compareTail(a.tsTail, b.tsTail) : delta;
-}
-
-// Anchor mode only moves a node's effective timestamp earlier so replay cannot teleport it downward.
-export function stampNodeTimestamp(node, raw, { anchor = false } = {}) {
-    if (!node) return false;
-    const epoch = rawTimestampEpoch(raw);
-    if (!Number.isFinite(epoch)) return false;
-    const tsTail = subMillisecond(raw);
-    const order = anchor ? compareTimelineTime({ ts: String(epoch), tsTail }, node.dataset) : NaN;
-    if (order >= 0) return false;
-    if (node.dataset.ts !== String(epoch)) node.dataset.ts = String(epoch);
-    if (tsTail) node.dataset.tsTail = tsTail;
-    else delete node.dataset.tsTail;
-    return order < 0;
-}
-
 export function durableChatMediaUrl(value) {
     const url = String(value || '');
     return /^\/api\/tasks\/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\/artifacts\/chat-media-[0-9a-f]{64}\.(png|jpg|gif|webp|mp4|webm)$/.test(url) ? url : '';
@@ -625,13 +602,6 @@ export function bindContentButton(el, onActivate, isActive = () => true) {
             if (!event.repeat) el.click();
         }
     });
-}
-
-/** Convert a raw source timestamp to sortable epoch milliseconds. */
-export function rawTimestampEpoch(raw) {
-    if (raw == null || raw === '') return NaN;
-    const epoch = typeof raw === 'number' ? raw : Date.parse(String(raw));
-    return Number.isFinite(epoch) ? epoch : NaN;
 }
 
 function optionalFiniteNumber(value) {

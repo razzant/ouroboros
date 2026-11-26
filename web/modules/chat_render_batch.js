@@ -1,16 +1,13 @@
 // Chat timeline ordering, keyed item reconciliation and reading anchors.
 // These helpers own no history source, navigation or task authority.
-import { adoptsCardRowAddress, compareHistoryPosition, timelineReadFields } from './chat_history_replay.js';
+import { adoptsCardRowAddress, timelineReadFields } from './chat_history_replay.js';
 import { foldWaitRow } from './task_checkpoints.js';
 import { measure } from './layout_batch.js';
 import { appendDelegatedItem, reconcileDelegatedItems } from './delegated_activity.js';
 import { isStoreMigrating } from './api_client.js';
 import { tr } from './i18n.js';
 import { replaceScrollFade, restoreFocusWithoutReveal } from './scroll_fade.js';
-import { compareTimelineTime } from './chat_activity.js';
-
-const nodePosition = node => node?.dataset?.historySource
-    ? { source: node.dataset.historySource, offset: Number(node.dataset.historyOffset) } : null;
+import { compareTimelineOrder } from './chat_timeline_order.js';
 
 // A feed holding only chrome has no conversation: the history control, the typing
 // indicator, Main's empty-state greeting and an ephemeral notice (Restart
@@ -255,16 +252,20 @@ export function keepSelection(doc) {
         const range = selection.getRangeAt(index);
         return [range.startContainer, range.startOffset, range.endContainer, range.endOffset];
     });
-    return { active, caret, selection, ranges };
+    const endpoints = ranges.length === 1 && selection.anchorNode && selection.focusNode
+        ? [selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset] : null;
+    return { active, caret, selection, ranges, endpoints };
 }
 
 const intactRange = ([start, , end]) => start.isConnected && end.isConnected;
-function restoreSelection(doc, scope, { active, caret, selection, ranges }) {
+function restoreSelection(doc, scope, { active, caret, selection, ranges, endpoints }, partial = false) {
     if (active && scope.contains?.(active) && doc.activeElement !== active) restoreFocusWithoutReveal(active);
     if (caret) restoreTextControlCaret(active, caret);
-    if (!ranges.length) return;
+    const connected = partial ? ranges.filter(intactRange) : ranges.every(intactRange) ? ranges : [];
+    if (!connected.length) return;
+    if (endpoints && typeof selection.setBaseAndExtent === 'function') return selection.setBaseAndExtent(...endpoints);
     selection.removeAllRanges();
-    for (const [start, from, end, to] of ranges) {
+    for (const [start, from, end, to] of connected) {
         const range = doc.createRange();
         range.setStart(start, from); range.setEnd(end, to); selection.addRange(range);
     }
@@ -277,8 +278,7 @@ export function insertTimelineNode(messages, node, typing = null, kept = null) {
         for (let index = 0; index < children.length; index += 1) {
             const child = children[index];
             if (child === node || child === typing) continue;
-            const order = compareTimelineTime(child.dataset, node.dataset);
-            if (order > 0 || order === 0 && compareHistoryPosition(nodePosition(child), nodePosition(node)) > 0) {
+            if (compareTimelineOrder(child.dataset, node.dataset) > 0) {
                 before = child;
                 break;
             }
@@ -289,10 +289,10 @@ export function insertTimelineNode(messages, node, typing = null, kept = null) {
     const doc = messages.ownerDocument;
     // Only a mounted row that moves can lose the focus, caret or selection in it; a new row is just inserted. A page
     // that moves many rows passes the selection it read once (`kept`).
-    const { active, caret, selection, ranges } = node.isConnected ? kept || keepSelection(doc) : { ranges: [] };
+    const saved = node.isConnected ? kept || keepSelection(doc) : null;
     if (target) messages.insertBefore(node, target);
     else messages.appendChild(node);
-    restoreSelection(doc, node, { active, caret, selection, ranges: ranges.every(intactRange) ? ranges : [] });
+    if (saved) restoreSelection(doc, node, saved);
     return { before };
 }
 
@@ -426,7 +426,7 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
             const at = owed.get(el) || before || { scroll: timelineScroll(record) };
             const { scroll } = at;
             const byKey = new Map(Array.from(el.children).map((node) => [node.dataset.liveLineKey, node]));
-            const { active, caret, selection, ranges } = scroll ? at.kept || keepSelection(el.ownerDocument) : { ranges: [] };
+            const saved = scroll ? at.kept || keepSelection(el.ownerDocument) : null;
             let changed = false;
             let moved = false;
             record.items.forEach((item, index) => {
@@ -448,7 +448,7 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
                 node.remove();
                 changed = true;
             }
-            if (moved) restoreSelection(el.ownerDocument, el, { active, caret, selection, ranges: ranges.filter(intactRange) });
+            if (moved && saved) restoreSelection(el.ownerDocument, el, saved, true);
             // Only a new newest line keeps a pinned timeline at its end; a disclosure
             // or late full output keeps the line being read where it is. The scroll is
             // written once the batch's writes are done, with every other card's (layout_batch.js).

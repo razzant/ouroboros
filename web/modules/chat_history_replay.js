@@ -1,12 +1,8 @@
 /** Historical rows enrich the existing timeline without acquiring live authority. */
 import { foldWaitRow } from './task_checkpoints.js';
 import { childLineCause } from './log_events.js';
-
-export function compareHistoryPosition(left, right) {
-    if (!left || !right) return 0;
-    const stream = String(left.source || '').localeCompare(String(right.source || ''));
-    return stream || Number(left.offset) - Number(right.offset);
-}
+import { compareHistoryPosition } from './chat_timeline_order.js';
+export { compareHistoryPosition } from './chat_timeline_order.js';
 
 export function historyRowIds(row) {
     return [row.history_id, ...(row.review_group?.attempts || []).map(attempt => attempt.history_id)].filter(Boolean);

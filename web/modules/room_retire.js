@@ -263,16 +263,33 @@ export function createWindowReturn({ socket, doc, chatId, projectId, accepts, kn
     const connected = scope => Boolean(scope) && socket?.isConnected?.() === true && !socket.foreignProfile?.()
         && socket.servingProfileScope?.() === scope && socket.ws;
     function invalidate() { drop(); onInvalidate(); }
+    const cost = ({ text, address, ts }) => 2 * (text.length + address.length + ts.length);
     return {
         drop,
+        // A settled page releases the captured batch, other than words still held in the feed by the reader.
+        // Those words keep the same proof and count towards the same bound on the next hide.
+        settle(held) {
+            if (!lease) return;
+            if (!lease.valid()) return invalidate();
+            for (const address of lease.rows.keys()) if (!held(address)) lease.rows.delete(address);
+            if (!lease.rows.size) return drop();
+            lease.shown = lease.rows.size;
+            lease.settled = true;
+        },
+        release(address) {
+            if (lease?.settled && lease.rows.delete(address) && --lease.shown === 0) drop();
+        },
         hold(following = true, ready = following) {
-            if (lease?.valid()) { lease.collecting &&= following; return; }
-            drop();
+            if (lease?.valid()) {
+                lease.collecting = following && (lease.settled ? ready : lease.collecting);
+                lease.settled = false;
+                return;
+            }
+            if (lease) invalidate();
             const scope = documentScope(doc), connection = connected(scope);
             if (!following || !ready || !doc.hidden || !connection) return;
             const rows = new Map();
             const valid = () => connected(scope) === connection && documentScope(doc) === scope;
-            let used = 0;
             function keep(msg) {
                 if (!doc.hidden || !lease?.collecting || !isWindowText(msg, knownChild) || msg.chat_id !== chatId || msg.project_id && msg.project_id !== projectId
                         || !accepts(msg)) return;
@@ -282,12 +299,13 @@ export function createWindowReturn({ socket, doc, chatId, projectId, accepts, kn
                         || typeof msg.ts !== 'string' || !Number.isFinite(Date.parse(msg.ts)) || typeof msg.content !== 'string') return invalidate();
                 if (!msg.content || rows.has(address)) return;
                 // Retain only presentation fields and the physical address, never the producer's frame.
-                used += 2 * (msg.content.length + address.length + msg.ts.length);
-                if (rows.size >= WINDOW_ROWS || used > WINDOW_TEXT_BYTES) return invalidate();
-                rows.set(address, { address, text: msg.content, ts: msg.ts, markdown: msg.markdown === true,
-                    initiator: msg.initiator === 'consciousness' ? 'consciousness' : '' });
+                const row = { address, text: msg.content, ts: msg.ts, markdown: msg.markdown === true,
+                    initiator: msg.initiator === 'consciousness' ? 'consciousness' : '' };
+                if (rows.size >= WINDOW_ROWS || [...rows.values()].reduce((used, saved) => used + cost(saved), cost(row)) > WINDOW_TEXT_BYTES) return invalidate();
+                rows.set(address, row);
             }
-            lease = { rows, valid, shown: 0, collecting: true, off: [socket.on('chat', keep), socket.on('close', invalidate),
+            lease = { rows, valid, shown: 0, collecting: true, settled: false, off: [socket.on('chat', keep), socket.on('close', invalidate),
+                socket.on('connection_profile', () => { if (!valid()) invalidate(); }),
                 socket.on('projects_changed', msg => { if (projectId && (!msg?.chat_id || Number(msg.chat_id) === chatId)) invalidate(); })] };
         },
         take(following = true) {

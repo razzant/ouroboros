@@ -153,25 +153,61 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
     };
 }
 
-/** Keep only the early nodes still awaiting the saved row that can adopt them. */
-export function createEarlyTextBubbles(feed, draw, insert, release, write = fn => fn(), shown = () => {}) {
+/** Reconcile early words against saved history without tearing away an interaction outside a bounded page. */
+export function createEarlyTextBubbles(feed, draw, insert, release, write = fn => fn(), shown = () => {},
+    kept = () => [], retired = () => {}) {
+    const doc = feed.ownerDocument;
     const nodes = new Map();
-    function clear(rows = null) {
+    const omitted = new Set();
+    let invalidated = false;
+    function remove(address, node) {
+        nodes.delete(address); omitted.delete(address);
+        release(node); retired(address);
+    }
+    function held(node) {
+        if (node.contains(doc.activeElement)) return true;
+        const selection = doc.getSelection?.();
+        const ranges = !selection?.isCollapsed ? Array.from({ length: selection?.rangeCount || 0 }, (_, i) => selection.getRangeAt(i)) : [];
+        if (ranges.some(range => range.intersectsNode?.(node))) return true;
+        return (kept() || []).some(([start, from, end, to]) => {
+            if (!start.isConnected || !end.isConnected) return false;
+            try {
+                const range = doc.createRange();
+                range.setStart(start, from); range.setEnd(end, to); return range.intersectsNode(node);
+            }
+            catch { return false; }
+        });
+    }
+    function clear(rows = null, scope = '') {
         if (!nodes.size) return false;
         let changed = false;
-        for (const address of rows ? rows.map(row => row.row_address) : nodes.keys()) {
-            const node = nodes.get(address);
-            if (node) { nodes.delete(address); release(node); changed = true; }
+        const named = new Set(rows?.map(row => row.row_address));
+        for (const [address, node] of nodes) {
+            if (!rows || scope === 'complete' || named.has(address)) { remove(address, node); changed = true; }
+            else if (scope) omitted.add(address);
         }
-        return changed;
+        return releaseOmitted() || changed;
     }
-    const forget = () => { if (!document.hidden && nodes.size) write(clear); };
+    function releaseOmitted() {
+        if (doc.hidden) return false;
+        const due = [...omitted].filter(address => !held(nodes.get(address)));
+        for (const address of due) remove(address, nodes.get(address));
+        return due.length > 0;
+    }
+    const forget = () => { invalidated = doc.hidden; if (!invalidated && nodes.size) write(clear); };
+    const onRelease = () => { if (omitted.size && !doc.hidden) write(releaseOmitted); };
+    const onBlur = () => { if (omitted.size) queueMicrotask(onRelease); };  // focus is still moving
+    const events = ['selectionchange', 'ouro:retained-selection-released'];
+    for (const event of events) doc.addEventListener(event, onRelease);
+    feed.addEventListener('focusout', onBlur);
     return {
         get: address => nodes.get(address),
-        delete: address => nodes.delete(address),
+        delete(address) { nodes.delete(address); omitted.delete(address); retired(address); },
         show(rows) {
+            if (invalidated) forget();
             if (rows === null) return forget();
-            if (document.hidden || !rows.length) return;
+            onRelease();
+            if (doc.hidden || !rows.length) return;
             const mounted = new Set([...feed.querySelectorAll('.chat-bubble.assistant[data-row-address]')]
                 .map(node => node.dataset.rowAddress));
             const pending = rows.filter(({ address }) => !mounted.has(address) && !nodes.has(address));
@@ -186,5 +222,10 @@ export function createEarlyTextBubbles(feed, draw, insert, release, write = fn =
         },
         clear,
         forget,
+        destroy() {
+            for (const event of events) doc.removeEventListener(event, onRelease);
+            feed.removeEventListener('focusout', onBlur);
+            nodes.clear(); omitted.clear();
+        },
     };
 }

@@ -609,12 +609,10 @@ export function createChatInstance({
     // Far rows skipped once laid out (style.css); a restyle may change every row's size at once, and the reading owner
     // places the passage again.
     let rowSleep = createRowSleep({ feed: messagesDiv, onRestyle: () => reading.reflow() });
-    // A fitted line re-fits on the frame after its width changed (text_fit.js): a reader at the newest message is placed
-    // there again once the room's lines are sized (Main shown again laid out its newest message first).
+    // Text fitting changes layout a frame later; a follower lands again.
     const offRefit = onRefit((els) => { if (reading.stick && els.some((el) => messagesDiv.contains(el))) reading.reflow(); });
     const reading = createChatReadingPosition({
         feed: messagesDiv, alive: () => !destroyed,
-        // A row asleep that the write changed is laid out before the place is restored (chat_row_sleep.js).
         afterWrite: () => { rowSleep.flush(); roomWork?.update(); }, activity: () => { _hasNewActivity = true; },
         updateButton: updateScrollButton,
         visible: () => !destroyed && isInstanceVisible(),
@@ -2007,7 +2005,8 @@ export function createChatInstance({
     }
 
     const earlyRows = createEarlyTextBubbles(messagesDiv, drawTextBubble, insertMessageNode, releaseMessageNode,
-        withStableViewport, address => rememberMessageKey(`window|${address}`));
+        withStableViewport, address => rememberMessageKey(`window|${address}`), () => self?.keptRanges,
+        address => windowReturn.release(address));
     function addMessage(text, role, markdown = false, timestamp = null, isProgress = false, opts = {}) {
         const { meta, ts, legacyKey, messageKey, deliveryKey } = messageIdentity(text, role, timestamp, isProgress, opts, chatId);
         const bubbles = () => [...messagesDiv.querySelectorAll('.chat-bubble')];
@@ -2106,9 +2105,9 @@ export function createChatInstance({
     }
     // `requestedAt` dates the question records in these rows.
     function applyHistoryMessages(messages, { fromReconnect = false, archived = false, direction = '', anchor = null,
-        requestedAt, newest = direction === 'recent' || direction === 'latest' } = {}) {
-        // A returning room reads arrivals instead of receiving socket frames. Only newly drawn content marks ↓:
-        // the first page, older pages and adopting a stored identity for already seen live words stay quiet.
+        requestedAt, window, hasMore, newest = direction === 'recent' || direction === 'latest' } = {}) {
+        const sourceRows = messages;  // even rows withheld from replay carry their exact identity
+        // ↓ hears only new words, not an older page or an adopted identity.
         const reportActivity = historyLoaded && !archived;
         const knownRows = reportActivity ? new Set(messagesDiv.children) : null;
         const knownCards = new Map([...liveCardRecords].map(([id, record]) => [id, reportActivity
@@ -2287,8 +2286,9 @@ export function createChatInstance({
                     });
                     if (msg.role === 'user') confirmOwnerRow(msg);
                 }
-                if (newest && !catchUp.owed) windowReturn.drop();
-                earlyRows.clear(newest && !catchUp.owed ? null : messages);
+                const settled = newest && !catchUp.owed;
+                earlyRows.clear(sourceRows, settled && (window?.complete === true && hasMore === false ? 'complete' : 'bounded'));
+                if (settled) windowReturn.settle(earlyRows.get);
                 _historyRow = null;
                 for (const [tid, ending] of endings) {
                     if (!ending) continue;
@@ -2379,13 +2379,13 @@ export function createChatInstance({
                 const oldRecentIds = retainedRecentIds();
                 const admitted = acceptRecentWindow(data, messages);
                 const pagerBeforeRecent = historyPager.getState();
-                // Older reading keeps its chain; a follower's healthy read restores the present, also after ↓ failed.
                 const reader = readingHistory(), returning = reading.returning;
                 const rechainRecent = admitted && !catchUp.owed && (!reader || returning) && pagerBeforeRecent.initialized
                     && (returning || pagerBeforeRecent.away && (fromReconnect || recovering || pagerBeforeRecent.retryReturn)
                         || !pagerBeforeRecent.canNewer && [...oldRecentIds].some(id => !recentHistoryIds.has(id)));
                 const result = historyPager.acceptRecent(data, rechainRecent && { fromReconnect });
-                if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect, newest: admitted, requestedAt: data.requestedAt });
+                if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect, newest: admitted,
+                    requestedAt: data.requestedAt, window: data.window, hasMore: data.has_more });
                 withStableViewport(() => releaseHistoryIds(!admitted || rechainRecent || reader
                     || historyPager.getState().canNewer ? [] : oldRecentIds));
                 // Arrivals that landed meanwhile may lie past this page: read them again.
@@ -2554,10 +2554,11 @@ export function createChatInstance({
     function presentHeld() {
         return historyLoaded && !catchUp.owed && !historyWindow?.failed && !historyPager.getState().away && !historyWindow?.horizonGap;
     }
-    // ↓ moves now. One claim owns the read and landing; new reading cancels it, repeated physical presses share it.
+    let resumeGeneration;  // Main's automatic return isn't a new navigation away from the live edge.
     async function showLatest({ arrive = false, reason = 'navigate' } = {}) {
         if (reading.returning && reading.arriving === null && !arrive) { reading.followAfterLayout(); return; }
         const at = visit, claim = reading.claim(arrive === true);
+        if (reason === 'resume') resumeGeneration = reading.generation;
         const current = () => !destroyed && at === visit && claim();
         historyPager.toPresent();
         cardRowAnchors.toPresent();
@@ -2582,8 +2583,7 @@ export function createChatInstance({
         } finally { reading.wait(current, false); }
     }
     scrollBottomBtn?.addEventListener('click', showLatest);
-    // Return keeps older reading, ↓ marked, newer messages unread (owner 2026-11-03). Follower
-    // restores place while catching up. Leaving keeps it and cancels the pending move.
+    // Return as left: older reading or following.
     function resume(arrive = false) {
         if ((reading.target || reading).stick === false) {
             _hasNewActivity ||= arrive; reading.position(); updateScrollButton(); return;
@@ -2595,8 +2595,7 @@ export function createChatInstance({
     const keepPlace = () => { if (isInstanceVisible()) { reading.cancel(); reading.request(); } };
 
     function updateMessagesPadding(preserveStickiness = true) {
-        // A room not displayed (Main behind a page) measures its bars as 0: it keeps the reserves it was laid out
-        // with, or it would come back with its newest message under the composer.
+        // Off screen, keep the last nonzero reserves.
         if (leaving || !page.getClientRects().length) return false;
         // Stage only changed CSS properties; then apply the measurements in one timeline transaction.
         const changes = [];
@@ -3092,7 +3091,8 @@ export function createChatInstance({
     const isMyLogThread = msg => chatLogThreadAccepts(msg, isMain, chatId, state.projectChatIds);
     const windowReturn = createWindowReturn({ socket: ws.socket, doc: document, chatId, projectId,
         accepts: isMyThread, knownChild: id => subagentChildParents.has(id), onInvalidate: () => earlyRows.forget() });
-    const windowFollower = () => !readingHistory() && !reading.returning && !archive?.active && !replies.revealing
+    const windowFollower = () => reading.stick && (resumeGeneration === reading.generation || !reading.pending && !reading.returning)
+        && !archive?.active && !replies.revealing
         && !page.hidden && messagesDiv.offsetParent !== null && !messagesDiv.closest('[inert]');
     function forgetWindowReturn() {
         windowReturn.drop();
@@ -3304,15 +3304,12 @@ export function createChatInstance({
         const isReconnect = typeof msg?.previouslyConnected === 'boolean'
             ? msg.previouslyConnected
             : wsHasConnectedOnce;
-        // A real reconnect forgets the start as the close did: a body polled while the socket was down
-        // may predate the restart. Room's return (`resumed`) is none: `leave` forgot an outage it left
-        // in, `stay` one it slept through.
+        // A body polled during a real outage may predate the restart.
         if (isReconnect && !msg?.resumed) hostStart.forget();
         mainWaiting?.setConnected(true);
         refreshHeaderControlState();
         syncChatStatus();
-        // A changed-code reload owes one notice. Main exists from startup: if away at first open, it hears only
-        // resume's synthetic reconnect but still owes that notice. A Project mounted later owes none.
+        // Main owes a changed-code notice even if away at first open; a Project mounted later owes none.
         if (isReconnect && !wsHasConnectedOnce && !isMain) pendingRestartNotice = '';
         const restartNotice = pendingRestartNotice;
         wsHasConnectedOnce = true;
@@ -3445,11 +3442,10 @@ export function createChatInstance({
         },
         // How the room was opened (app.js): pressed open by a pointer, its focus corners wait for a key.
         quietFocus: (quiet) => messagesDiv.classList.toggle('is-quiet-focus', Boolean(quiet)),
-        // Full teardown (P3): all acquired resources (ws subscriptions, window/document listeners,
-        // timers), then buffered collections, DOM last. Idempotent; late rAF/async continuations no-op on `destroyed`.
+        // Release resources before removing the DOM; late callbacks see `destroyed`.
         destroy() {
             if (destroyed) return;
-            forgetWindowReturn();
+            windowReturn.drop(); earlyRows.destroy();
             destroyed = true;
             catchUp.cancel();
             historyReadAbort?.abort();

@@ -481,7 +481,7 @@ export function mountChatMarkdown(host, text, options = {}) {
     host.innerHTML = renderChatMarkdown(text, options);
 }
 
-function highlightCodeIn(root) {
+function highlightCodeIn(root, state, onDomWrite) {
     const api = globalThis.hljs;
     const codeNodes = api && root.querySelectorAll?.('.md-code-block pre > code');
     if (!codeNodes?.length) return;
@@ -490,14 +490,22 @@ function highlightCodeIn(root) {
         ? Array.from({ length: selection.rangeCount }, (_, i) => selection.getRangeAt(i)) : [];
     codeNodes.forEach((code) => {
         const source = code.textContent || '';
-        if (source.length > MAX_RICH_BLOCK_SOURCE_LENGTH || ranges.some(range => range.intersectsNode?.(code))) return;
-        const language = codeLanguage(code);
-        try {
-            const result = language && api.getLanguage(language)
-                ? api.highlight(source, { language, ignoreIllegals: true }) : api.highlightAuto(source);
-            code.innerHTML = result.value;
-            code.classList.add('hljs');
-        } catch { code.textContent = source; }
+        if (source.length > MAX_RICH_BLOCK_SOURCE_LENGTH) return;
+        // A fence the reader has selected keeps its plain text only while that
+        // selection lives: the highlight waits in the same bounded deferral a
+        // hidden document uses (selection_lifecycle) and paints, through the
+        // caller's viewport writer, once the selection clears.
+        const paint = () => {
+            const language = codeLanguage(code);
+            try {
+                const result = language && api.getLanguage(language)
+                    ? api.highlight(source, { language, ignoreIllegals: true }) : api.highlightAuto(source);
+                code.innerHTML = result.value;
+                code.classList.add('hljs');
+            } catch { code.textContent = source; }
+        };
+        if (ranges.some(range => range.intersectsNode?.(code))) writeUnselected(code, state, onDomWrite, paint);
+        else paint();
     });
 }
 
@@ -627,6 +635,10 @@ async function renderMermaidNodes(root, state, onDomWrite, repaint = false) {
     for (const node of foundNodes) {
         const source = mermaidSourceOf(node);
         if (source.length > MAX_RICH_BLOCK_SOURCE_LENGTH) {
+            // Park before the guarded degrade: a theme event while the fallback
+            // waits on a selection must leave the repaint selector a fence to
+            // find, or the epoch it discards takes the fallback with it.
+            node.dataset.mermaidSource = source;
             fail(node, source, 'Diagram could not be rendered.');
         } else {
             // Park before awaiting the library: a theme event during its first
@@ -925,7 +937,7 @@ export function enhanceChatMarkdown(rootEl, { onDomWrite = writeDirectly, onThem
     const start = () => {
         if (state.destroyed || rootEl.isConnected === false) return;
         if (hasAny(rootEl, ['.md-code-block'])) {
-            const highlight = () => { highlightCodeIn(rootEl); return true; };
+            const highlight = () => { highlightCodeIn(rootEl, state, onDomWrite); return true; };
             if (rootEl.ownerDocument?.hidden || keptSelection?.()) writeUnselected(rootEl, state, onDomWrite, highlight);
             else onDomWrite(highlight);
         }

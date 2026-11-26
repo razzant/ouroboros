@@ -293,6 +293,44 @@ test('a palette switch mid-render keeps selected Mermaid source until its replac
     } finally { dom.restore(); }
 });
 
+test('a theme switch while an oversized Mermaid fallback waits on a selection still mounts the fallback', async () => {
+    const dom = installDom();
+    installMermaid();
+    const { enhanceChatMarkdown } = await import(`../modules/chat_markdown.js?oversized-theme=${Date.now()}`);
+    try {
+        // A fence past the rich-block cap that the reader has selected: the
+        // degrade waits in the bounded selection deferral instead of painting.
+        const oversize = mermaidFence(`graph TD;${'A-->B;'.repeat(7000)}`);
+        const doc = oversize.ownerDocument = new EventTarget();
+        let held = true;
+        doc.getSelection = () => ({ isCollapsed: !held, rangeCount: 1,
+            getRangeAt: () => ({ intersectsNode: (node) => node === oversize }) });
+        const root = mountRoot(dom, oversize);
+        const dispose = enhanceChatMarkdown(root);
+        await flush(2);
+        // The guarded degrade parks its source so the repaint selector still finds it.
+        assert.equal(oversize.dataset.mermaidSource, oversize._text,
+            'the oversized fence parks the source before its guarded fallback');
+        assert.equal(root.childNodes[0], oversize, 'the selected oversized fence keeps its text while selected');
+
+        dom.setTheme('light');
+        dom.announce();
+        await flush(2);
+        // A palette move during the deferral must not take the fallback with it.
+        assert.equal(root.childNodes[0], oversize, 'a theme event cannot drop a waiting oversized fence');
+
+        held = false;
+        doc.dispatchEvent(new Event('selectionchange'));
+        const mounted = root.childNodes[0];
+        assert.ok(/(?:^|\s)md-mermaid-error(?:\s|$)/.test(mounted.className)
+            && /(?:^|\s)md-code-block(?:\s|$)/.test(mounted.className),
+            'the oversized diagram degrades to its readable source block once the selection clears');
+        assert.ok(mounted.textContent.includes(oversize._text),
+            'the fallback keeps the diagram source readable as its code text');
+        dispose();
+    } finally { dom.restore(); }
+});
+
 test('a disposed message stops following the theme and releases its charts', async () => {
     const dom = installDom();
     const built = fakeChartLib();

@@ -1482,10 +1482,10 @@ chrome: the Project status bar, or Main's floating note on its float-sheet backi
 A room first opens at its newest message, whatever its age or others' traffic. A return within the page
 session finds it as left: following, it follows the fresh end; reading older history, it
 keeps that passage, its disclosures and selection unless an ordinary click dismissed it, ↓ marked,
-newer messages unread. It reads what it missed as on reconnect. A window shown again can first paint
-delivered words and ordinary chat links in a room it hid while the room followed the newest message,
-while the connection stays live. Shown words survive repeat hides; reading back stops collection until history settles.
-Saved history owns order, controls and read credit. Equal words keep their nodes and selection even after decoration.
+newer messages unread. It reads what it missed as on reconnect. A room left following can show delivered
+words and links before that read on the same socket. Automatic return keeps collecting across hides; reading back
+stops it. Omitted words stay provisional while selected or focused if the page is bounded; exact disproof wins.
+Saved history owns order, controls and read credit; equal words keep their nodes and selection.
 A long read still says `Updating…`. Explicit navigation wins: a question from its Main mirror, an exact quoted
 message, a search match or a row of the room's work status. Its landing reads the bounded page around
 the target as the room's history: `Load more history` continues older from it and `Scroll to latest message`

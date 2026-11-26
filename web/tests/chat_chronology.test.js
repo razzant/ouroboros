@@ -209,3 +209,48 @@ test('rows a page moves keep the selection the page read once; each mounted move
     insertTimelineNode(timeline, alone, typing);
     assert.equal(reads, 1, 'a move outside a page reads the selection itself');
 });
+
+test('moving an adopted bubble preserves the anchor and focus of its backward selection', () => {
+    const timeline = makeTimeline([makeNode('other', 2), makeNode('adopted', 3)]);
+    const bubble = timeline.children[1], words = { isConnected: true };
+    const selection = { rangeCount: 1, anchorNode: words, anchorOffset: 6, focusNode: words, focusOffset: 2,
+        getRangeAt: () => ({ startContainer: words, startOffset: 2, endContainer: words, endOffset: 6 }),
+        removeAllRanges() { assert.fail('would lose direction'); },
+        setBaseAndExtent(...points) { this.restored = points; } };
+    timeline.ownerDocument = { getSelection: () => selection };
+    bubble.isConnected = true;
+    bubble.dataset.ts = '1';
+    insertTimelineNode(timeline, bubble);
+    assert.deepEqual(ids(timeline), ['adopted', 'other']);
+    assert.deepEqual(selection.restored, [words, 6, words, 2]);
+});
+
+test('a move with more than one selection range still restores all ranges', () => {
+    const other = makeNode('other', 2), bubble = makeNode('adopted', 3);
+    const timeline = makeTimeline([other, bubble]);
+    const a = { isConnected: true }, b = { isConnected: true }, restored = [];
+    const selection = { rangeCount: 2, anchorNode: a, anchorOffset: 4, focusNode: b, focusOffset: 1,
+        getRangeAt(index) {
+            const text = [a, b][index];
+            return { startContainer: text, startOffset: 1, endContainer: text, endOffset: 4 };
+        },
+        removeAllRanges() { restored.push('clear'); },
+        addRange(range) { restored.push([range.start, range.end]); },
+        setBaseAndExtent() { assert.fail('would collapse the selection to one range'); } };
+    timeline.ownerDocument = { getSelection: () => selection,
+        createRange: () => ({ setStart(node, offset) { this.start = [node, offset]; }, setEnd(node, offset) { this.end = [node, offset]; } }) };
+    bubble.isConnected = true;
+    bubble.dataset.ts = '1';
+    insertTimelineNode(timeline, bubble);
+    assert.deepEqual(restored, ['clear', [[a, 1], [a, 4]], [[b, 1], [b, 4]]]);
+});
+
+test('restamping a mounted node already before its target does not read the selection', () => {
+    const mounted = makeNode('unchanged', 1), target = makeNode('target', 2);
+    const timeline = makeTimeline([mounted, target]);
+    mounted.isConnected = true;
+    mounted.nextElementSibling = target;
+    timeline.ownerDocument = { getSelection() { assert.fail('no move, no selection read'); } };
+    assert.equal(insertTimelineNode(timeline, mounted).before, target);
+    assert.deepEqual(ids(timeline), ['unchanged', 'target']);
+});

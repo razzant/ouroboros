@@ -9,6 +9,7 @@ import vm from 'node:vm';
 import { createChatInstance } from '../modules/chat.js';
 import { createEarlyTextBubbles, createTextBubbles } from '../modules/chat_text_bubble.js';
 import { enhanceChatMarkdown } from '../modules/chat_markdown.js';
+import { isWindowText } from '../modules/chat_row_placement.js';
 import { createRoomRetirement, createWindowReturn, roomSocket } from '../modules/room_retire.js';
 import { installDesktopShellLinkInterceptor } from '../modules/ui_helpers.js';
 import { installDom, PREVIEW_SCOPE, restoreDom, roomKey, walkCard } from './chat_dom_fixture.js';
@@ -46,7 +47,7 @@ function pageSocket() {
     };
 }
 
-function fixture({ detail = null, chatId = 7 } = {}) {
+function fixture({ detail = null, chatId = 7, observeDocument = false } = {}) {
     const reads = [];
     let history = { messages: [], window: { complete: true } };
     const env = installDom(async (url) => {
@@ -56,6 +57,15 @@ function fixture({ detail = null, chatId = 7 } = {}) {
             ? { profile_scope: PREVIEW_SCOPE, ...await history }
             : { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true }) };
     });
+    if (observeDocument) {
+        const events = new Map();
+        document.addEventListener = (type, fn) => {
+            if (!events.has(type)) events.set(type, new Set());
+            events.get(type).add(fn);
+        };
+        document.removeEventListener = (type, fn) => events.get(type)?.delete(fn);
+        document.dispatchEvent = event => [...(events.get(event.type) || [])].forEach(fn => fn(event));
+    }
     globalThis.sessionStorage.setItem('ouro_chat_session_id', ME);
     const socket = pageSocket();
     let generation = 0;
@@ -78,7 +88,7 @@ function fixture({ detail = null, chatId = 7 } = {}) {
         show() { document.hidden = false; rooms.restore(instance); },
         delayHistory() {
             let deliver;
-            history = new Promise(resolve => { deliver = messages => resolve({ messages, window: { complete: true } }); });
+            history = new Promise(resolve => { deliver = (messages, facts) => resolve({ messages, window: { complete: true }, ...facts }); });
             return deliver;
         },
         async send(text) {
@@ -545,4 +555,124 @@ test('a second hide while reading back keeps the shown early words but no longer
         assert.equal(bubble(early), first);
         assert.equal(bubble(later).dataset.historyId, 'saved-1');
     } finally { f.close(); }
+});
+
+// Only Main's actual shell resumes reading after it restores the room.
+function mainVisibility(f, unread) {
+    const source = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+    const functions = ['mainOnScreen', 'enterMain', 'syncMainLifetime'].map(name =>
+        source.match(new RegExp(`^function ${name}\\([^\\n]*\\{[\\s\\S]*?^}`, 'm'))[0]);
+    const listener = source.match(/^document\.addEventListener\('visibilitychange', \(\) => \{[\s\S]*?^\}\);/m)[0];
+    let change;
+    vm.runInNewContext([...functions, listener].join('\n'), {
+        document: { get hidden() { return document.hidden; }, addEventListener(_type, fn) { change = fn; } },
+        state: { activePage: 'chat' }, navState: { activeProjectId: null }, rooms: f.rooms, mainChat: f.instance,
+        projectInstances: new Map(), mainUnreadCount: () => unread,
+        acknowledgeMainAfterPaint: () => assert.fail('the window return leaves read credit to canonical history'),
+    });
+    return hidden => { document.hidden = hidden; change(); };
+}
+
+for (const [unread, back] of [[0, false], [2, false], [2, true]]) {
+    test(`Main's visibility change keeps collecting while resume waits (${unread} unread, reading back: ${back})`, async () => {
+        const f = fixture({ chatId: 1 });
+        try {
+            await f.instance.refreshHistory({ revision: 1 }); await settle();
+            const change = mainVisibility(f, unread), deliver = f.delayHistory();
+            const first = speech(1, 1, 'first hidden reply'), second = speech(1, 2, 'second hidden reply');
+            const bubble = frame => f.messages.children.find(node => node.innerHTML.includes(frame.content));
+            change(true); f.socket.fire('chat', first); change(false);
+            const kept = bubble(first);
+            assert.ok(kept);
+            await settle();  // Main's automatic resume now waits for HTTP
+            if (back) {
+                const feed = f.messages;
+                feed.scrollHeight = 1200; feed.scrollTop = 220;
+                for (const wheel of feed.listeners.get('wheel')) wheel({ type: 'wheel', target: feed, deltaY: -100, timeStamp: 1000 });
+                for (const scroll of feed.listeners.get('scroll')) scroll({ target: feed });
+            }
+            change(true); f.socket.fire('chat', second); change(false);
+            assert.equal(bubble(first), kept);
+            assert.equal(Boolean(bubble(second)), !back, 'only the human ends early collection');
+            if (back) assert.equal(f.messages.scrollTop, 220);
+            deliver([savedSpeech(first, 0), savedSpeech(second, 1)]); await settle();
+            assert.equal(bubble(second).dataset.rowAddress, second.row_address);
+        } finally { f.close(); }
+    });
+}
+
+for (const outcome of ['selection ends', 'focus ends', 'older adoption', 'registry revokes', 'complete miss', 'placement mismatch']) {
+    test(`retiring early words after history: ${outcome}`, async () => {
+        const f = fixture({ observeDocument: true });
+        try {
+            await f.instance.refreshHistory({ revision: 1 }); await settle();
+            const deliver = f.delayHistory(), early = speech(7, 1, 'the provisional words');
+            const bubble = () => f.messages.children.find(node => node.innerHTML.includes(early.content));
+            f.hide(); f.socket.fire('chat', early); f.show();
+            const row = bubble(), body = row.querySelector('.message');
+            const text = document.createTextNode(early.content);
+            body.append(text);  // the fixture's HTML parser doesn't create text nodes
+            const range = { startContainer: text, endContainer: text, startOffset: 0, endOffset: 3,
+                intersectsNode: node => node.contains(text) };
+            if (outcome === 'focus ends') document.activeElement = body;
+            else document.getSelection = () => ({ rangeCount: 1, isCollapsed: false, getRangeAt: () => range });
+
+            const owners = Array.from({ length: 150 }, (_, i) => savedSpeech(speech(7, i + 5, `owner text ${i}`,
+                { role: 'user', ts: '2026-11-04T09:41:00Z' }), i + 5));
+            const bounded = { has_more: true, page_cursor: 'present', next_cursor: 'older',
+                window: { complete: false, truncated_by: ['quota'] } };
+            const mismatch = outcome === 'placement mismatch', absent = outcome === 'complete miss';
+            deliver(mismatch ? [savedSpeech({ ...early, role: 'system', content: 'a canonical System row' }, 0), ...owners] : owners,
+                absent ? { has_more: false, page_cursor: 'present' } : bounded);
+            await settle();
+            if (mismatch || absent) {
+                assert.equal(bubble(), undefined, 'canonical disproof outranks the interaction');
+                if (mismatch) assert.ok(f.messages.children.some(node => node.dataset.rowAddress === early.row_address
+                    && node.classList.contains('system')));
+                return;
+            }
+            assert.equal(bubble(), row, 'bounded omission is not disproof');
+            assert.equal(text.parentNode, body);
+            assert.equal(row.dataset.historyId, undefined);
+            assert.equal(row.dataset.rowAddress, undefined);
+            assert.equal(body.hasAttribute('data-reply-body'), false);
+            if (outcome === 'registry revokes') f.socket.fire('projects_changed', { chat_id: 7 });
+            else if (outcome === 'older adoption') {
+                const older = f.delayHistory(), button = f.instance.page.querySelector('.chat-load-older-btn');
+                for (const click of button.listeners.get('click')) click();
+                older([savedSpeech(early, 0)], { has_more: false, page_cursor: 'older' });
+                await settle();
+                assert.equal(bubble(), row, 'an older exact row adopts, never duplicates');
+                assert.equal(row.dataset.rowAddress, early.row_address);
+                assert.equal(row.dataset.historyId, 'saved-0');
+                return;
+            } else {
+                document.getSelection = () => null; document.activeElement = null;
+                if (outcome === 'focus ends') {
+                    for (const release of f.messages.listeners.get('focusout') || []) release({ target: body });
+                } else document.dispatchEvent(new Event('selectionchange'));
+            }
+            await settle();
+            assert.equal(bubble(), undefined);
+        } finally { f.close(); }
+    });
+}
+
+test('only standalone local assistant words are eligible for window return', () => {
+    const known = id => id === 'known-child';
+    const root = { task_id: 'root', root_task_id: 'root' };
+    for (const [note, extra, eligible] of [
+        ['ordinary reply', {}, true], ['root speech', { ...root, system_type: 'proactive_message' }, true],
+        ['typed root final', { ...root, task_terminal_status: 'completed' }, true],
+        ['physical root retry', { ...root, task_id: 'retry', delegation_role: 'root' }, true],
+        ['owner', { role: 'user' }, false], ['System', { role: 'system' }, false],
+        ['progress', { is_progress: true }, false], ['narration', { narration: true }, false],
+        ['placed review', { ...root, card_row: 'reviews' }, false], ['task summary', { ...root, system_type: 'task_summary' }, false],
+        ['relay', { relay: {} }, false], ['origin projection', { origin_projected: true }, false],
+        ['media', { msg_type: 'photo' }, false], ['attachment', { attachments: [{}] }, false],
+        ['attachment placeholder', { text_placeholder: true }, false], ['connector attribution', { presence_contact: {} }, false],
+        ['child speech', { ...root, task_id: 'child', delegation_role: 'subagent', system_type: 'proactive_message' }, false],
+        ['known child', { task_id: 'known-child', root_task_id: 'known-child' }, false],
+        ['unproved root retry', { ...root, task_id: 'retry' }, false],
+    ]) assert.equal(isWindowText(speech(7, 1, 'some words', extra), known), eligible, note);
 });

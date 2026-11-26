@@ -259,6 +259,60 @@ test('parseChartConfig exposes only allowlisted chart and dataset keys', () => {
     });
 });
 
+test('a selected code fence keeps its plain text only while that selection lives, then resumes highlighting through the viewport writer', async () => {
+    const prior = { document: globalThis.document, hljs: globalThis.hljs };
+    let held = true;
+    // writeUnselected defers on the node's own document; the selection lives there too.
+    const doc = new EventTarget();
+    doc.getSelection = () => ({ isCollapsed: !held, rangeCount: 1,
+        getRangeAt: () => ({ intersectsNode: (node) => node === selectedCode }) });
+    const fence = (text) => {
+        const code = {
+            isConnected: true, textContent: text, classList: new Set(['language-js']),
+            get innerHTML() { return this._html ?? this.textContent; },
+            set innerHTML(value) { this._html = String(value); },
+        };
+        code.ownerDocument = doc;
+        return code;
+    };
+    const selectedCode = fence('const selected = true;');
+    const plainCode = fence('const plain = true;');
+    const root = {
+        isConnected: true, ownerDocument: doc, matches: () => false,
+        querySelector: (selector) => (selector === '.md-code-block' ? selectedCode : null),
+        querySelectorAll: (selector) => (selector === '.md-code-block pre > code' ? [selectedCode, plainCode] : []),
+        setAttribute() {}, removeAttribute() {}, addEventListener() {}, removeEventListener() {},
+    };
+    globalThis.document = { createElement: () => ({}) };
+    globalThis.hljs = {
+        getLanguage: () => true,
+        highlight: (source, { language }) => ({ value: `<span data-lang="${language}">${source}</span>` }),
+    };
+    let writes = 0;
+    try {
+        const dispose = enhanceChatMarkdown(root, { onDomWrite: (write) => { writes += 1; return write(); } });
+        // The unselected fence paints at once through the same writer.
+        assert.equal(plainCode.innerHTML, '<span data-lang="js">const plain = true;</span>');
+        assert.ok(plainCode.classList.has('hljs'));
+        // The selected fence keeps the reader's exact bytes untouched.
+        assert.equal(selectedCode.innerHTML, 'const selected = true;');
+        assert.equal(selectedCode.classList.has('hljs'), false);
+        assert.equal(writes, 1);
+
+        held = false;
+        doc.dispatchEvent(new Event('selectionchange'));
+        // One selectionchange paints the deferred fence and releases its deferral.
+        assert.equal(selectedCode.innerHTML, '<span data-lang="js">const selected = true;</span>');
+        assert.ok(selectedCode.classList.has('hljs'));
+        assert.equal(writes, 2);
+        assert.equal(selectedCode.textContent, 'const selected = true;', 'the highlighted text still reads as written');
+        dispose();
+    } finally {
+        globalThis.document = prior.document;
+        globalThis.hljs = prior.hljs;
+    }
+});
+
 test('chart success and error writes use the supplied viewport boundary', () => {
     const prior = { document: globalThis.document, Chart: globalThis.Chart };
     const node = (text) => ({
