@@ -378,23 +378,38 @@ def read_book_section(book: ReferenceBook, title: str) -> BookView:
                            span.end_line - span.start_line + 1)
 
 
-# --------------------------------------------------------------------------- book balance
+# --------------------------------------------------------------------------- text balance
 # A measurement, never a gate (BIBLE P3 c5). The size lane needs an explicit
-# contribution base; ordinary manual/tag CI cannot certify per-change book growth.
+# contribution base; ordinary manual/tag CI cannot certify per-change growth.
+#
+# The size rule (owner decision 2A, 2026-11-25) follows what a mind carries. What every mind carries in every
+# request ends no larger than at its contribution base: BIBLE.md, the prompts as one text (owner decision 3A,
+# 2026-10-28: words moved between prompt files cost nothing, a new prompt file is growth) and the rendered Body
+# Map. A book chapter is read on demand, so its limit is physical: one default ``read_file``; a chapter that
+# outgrows it is split by subject with its reasons kept. The large standalone documents have no size rule: their
+# delta is shown as a fact. A base from before the Map existed renders none and is not compared.
 
 BOOK_GROWTH_RULE = (
-    "Each touched book, BIBLE.md and the prompts (prompts/*.md as one text) must end no larger "
-    "than at its contribution base; added text is paid in the same text by a statement that leaves, "
-    "never by a lost fact (DEVELOPMENT \"Paying down a size cap\"). Manual/tag "
-    "CI without that base does not verify this rule. The owner's book-growth label can approve "
-    "an exception; local commits are not blocked."
+    "BIBLE.md, the prompts (prompts/*.md as one text) and the rendered Body Map (the Architecture entry, each "
+    "chapter's opening and the Reference Atlas) ride every request, so each must end no larger than at its "
+    "contribution base; added text is paid in the same text by a statement that leaves, never by a lost fact "
+    "(DEVELOPMENT \"Paying down a size cap\"). Manual/tag CI without that base does not verify this rule. "
+    "The owner's book-growth label can approve an exception; local commits are not blocked."
+)
+# One default ``read_file``: its line window (the tool's ``max_lines`` default) and its result limit in characters
+# (``tool_capabilities.TOOL_RESULT_LIMITS``), both pinned to their owners by ``tests/test_reference_book_readers.py``.
+CHAPTER_READ_LINES, CHAPTER_READ_CHARS = 2000, 80_000
+CHAPTER_BAND_RULE = (
+    f"A book chapter is read on demand in one default read_file ({CHAPTER_READ_LINES:,} lines, {CHAPTER_READ_CHARS:,} "
+    "characters); a chapter that outgrows it is split by subject with its reasons kept, never trimmed to fit."
 )
 
-# The constitution and the prompts follow the books' growth rule (owner decision 3A, 2026-10-28):
-# every mind and check loads them. The prompt files are one text, so words moved between them
-# cost nothing and a new prompt file is growth.
 RULED_TEXTS = {"constitution": "BIBLE.md", "prompts": "prompts"}
-_TEXT_NAMES = {"constitution": "BIBLE.md", "prompts": "Prompts"}
+BODY_MAP_TEXT = "body_map"
+# Large documents read on demand outside the two books: their size delta is a fact in the balance, under no rule.
+STANDALONE_DOCS = ("docs/DESIGN.md", "docs/PERSISTENCE.md", "docs/CLIENT_CONTRACT.md", "docs/CREATING_SKILLS.md",
+                   "docs/CHECKLISTS.md")
+_TEXT_NAMES = {"constitution": "BIBLE.md", "prompts": "Prompts", BODY_MAP_TEXT: "Body Map"}
 
 
 def ruled_text_of(path: str) -> str:
@@ -407,8 +422,8 @@ def ruled_text_of(path: str) -> str:
 
 
 def text_name(text_id: str) -> str:
-    """How a book or ruled text is named in a balance line."""
-    return _TEXT_NAMES.get(text_id) or f"{text_id.title()} book"
+    """How a book, a ruled text or a standalone document is named in a balance line."""
+    return _TEXT_NAMES.get(text_id) or (text_id if text_id in STANDALONE_DOCS else f"{text_id.title()} book")
 
 
 @dataclass(frozen=True)
@@ -420,12 +435,14 @@ class BookBalance:
     upstream: str                          # local official development ref, "" when unavailable
     changed: tuple[tuple[str, int], ...]   # sources whose bytes differ from HEAD, with their delta
     merge_base: str = ""                   # exact measured commit, never the feature's tracking tip
+    ruled: bool = True                     # False: a book or standalone document, whose size is a fact under no rule
+    over_read: tuple[tuple[str, int, int], ...] = ()  # a book's chapters past one default read: (path, lines, chars)
 
     @property
     def owed(self) -> int:
-        """Known growth for warning consumers: contribution when measured, else HEAD only."""
+        """Known growth of a ruled text for warning consumers: contribution when measured, else HEAD only."""
         delta = self.vs_upstream if self.vs_upstream is not None else self.vs_head
-        return max(0, delta or 0)
+        return max(0, delta or 0) if self.ruled else 0
 
 
 _OFFLINE_GIT = {"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""}
@@ -569,26 +586,82 @@ def ruled_text_sizes(root: Path, text_id: str, ref: str = "", *, staged: bool = 
     return sizes or None
 
 
+def _source_reader(root: Path, ref: str = "", *, staged: bool = False) -> Callable[[str], bytes]:
+    """One path's bytes in the working tree, the index (``staged``) or at ``ref``; ``OSError`` where absent."""
+    def read(path: str) -> bytes:
+        if not ref and not staged:
+            return (Path(root) / path).read_bytes()
+        raw = _git_bytes(Path(root), "show", f"{ref}:{path}")
+        if raw is None:
+            raise FileNotFoundError(f"{ref or 'index'}:{path}")
+        return raw
+    return read
+
+
+def body_map_sizes(root: Path, text_id: str = BODY_MAP_TEXT, ref: str = "", *, staged: bool = False) -> dict[str, int] | None:
+    """UTF-8 bytes of the Body Map this code renders from the books in the working tree, the index or at ``ref``.
+    ``None`` where no Map can be measured: a book that is there but unreadable, or a tree from before the Map's
+    sources existed (a single-file book, an entrypoint without its Reference Atlas), which offers nothing to compare."""
+    try:
+        reader = _source_reader(root, ref, staged=staged)
+        architecture = load_reference_book(Path(root), "architecture", reader)
+        if architecture.legacy or not _atlas_rows(architecture.entrypoint):
+            return None
+        # The Map names the handbook's chapters: a tree that holds no handbook names none, and one whose handbook
+        # cannot be read is unmeasured (the outer refusal), never a smaller Map.
+        try:
+            reader(BOOK_ENTRYPOINTS["development"])
+        except OSError:
+            development = None
+        else:
+            development = load_reference_book(Path(root), "development", reader)
+        return {text_id: len(body_map(architecture, development)[0].text.encode("utf-8"))}
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def chapters_over_one_read(root: Path, book_id: str, ref: str = "", *, staged: bool = False) -> tuple[tuple[str, int, int], ...]:
+    """``(path, lines, characters)`` of each chapter of ``book_id`` that one default ``read_file`` cannot hold.
+    Raises where the book cannot be read: an unmeasured chapter is unknown, never within the band."""
+    book = load_reference_book(Path(root), book_id, _source_reader(root, ref, staged=staged))
+    sized = ((chapter.source_path, len(chapter.text.splitlines()), len(chapter.text)) for chapter in book.chapters)
+    return tuple(row for row in sized if row[1] > CHAPTER_READ_LINES or row[2] > CHAPTER_READ_CHARS)
+
+
+def standalone_sizes(root: Path, path: str, ref: str = "", *, staged: bool = False) -> dict[str, int] | None:
+    """UTF-8 bytes of one standalone document there, ``None`` when absent."""
+    try:
+        return {path: len(_source_reader(root, ref, staged=staged)(path))}
+    except OSError:
+        return None
+
+
 def ruled_text_paths(root: Path) -> list[str]:
     """The working-tree files of every ruled text, for a caller that measures everything."""
     return [path for text_id in RULED_TEXTS for path in (ruled_text_sizes(root, text_id) or {})]
 
 
 def book_balances(root: Path, paths: Iterable[str] | None = None, *, staged: bool = False) -> list[BookBalance]:
-    """The balance of every book or ruled text ``paths`` touch (all of them when ``None``), measured in the
-    working tree or, ``staged``, in the index a commit would hold; never raises."""
+    """The balance of every text ``paths`` touch (all of them when ``None``), measured in the working tree or,
+    ``staged``, in the index a commit would hold; never raises. Ruled texts (``BIBLE.md``, the prompts, and the
+    Body Map whenever a book source is touched) carry what they owe; a book and a standalone document carry their
+    size as a fact, a book also its chapters past one read (an unreadable book is left out, so named by the caller)."""
     paths = None if paths is None else list(paths)
     wanted = list(BOOK_ENTRYPOINTS) if paths is None else sorted(
         {book_id for book_id, entry in BOOK_ENTRYPOINTS.items()
          for path in paths if book_entrypoint_for(path) == entry})
     texts = list(RULED_TEXTS) if paths is None else sorted({ruled_text_of(path) for path in paths} - {""})
-    if not wanted and not texts:
+    alone = [path for path in STANDALONE_DOCS if paths is None or path in paths]
+    if not wanted and not texts and not alone:
         return []
     upstream, base = contribution_base(root)
-    measures = [(book_id, book_source_sizes, composed_size) for book_id in wanted]
-    measures += [(text_id, ruled_text_sizes, lambda sizes: sum(sizes.values())) for text_id in texts]
+    plain = lambda sizes: sum(sizes.values())  # noqa: E731
+    measures = [(text_id, ruled_text_sizes, plain, True) for text_id in texts]
+    measures += [(BODY_MAP_TEXT, body_map_sizes, plain, True)] if wanted else []
+    measures += [(book_id, book_source_sizes, composed_size, False) for book_id in wanted]
+    measures += [(path, standalone_sizes, plain, False) for path in alone]
     balances: list[BookBalance] = []
-    for text_id, sizes_at, total in measures:
+    for text_id, sizes_at, total, ruled in measures:
         now = sizes_at(root, text_id, staged=staged)
         if now is None:
             continue
@@ -597,11 +670,15 @@ def book_balances(root: Path, paths: Iterable[str] | None = None, *, staged: boo
         changed = tuple((path, now.get(path, 0) - (head or {}).get(path, 0))
                         for path in dict.fromkeys([*now, *(head or {})])
                         if now.get(path, 0) != (head or {}).get(path, 0))
+        try:
+            over = chapters_over_one_read(root, text_id, staged=staged) if text_id in BOOK_ENTRYPOINTS else ()
+        except (OSError, ValueError, KeyError):
+            continue  # sized but unreadable as a book: unmeasured, never within the band
         balances.append(BookBalance(
             text_id, total(now),
             total(now) - total(head) if head is not None else None,
             total(now) - total(at_base) if at_base is not None else None,
-            upstream, changed, base))
+            upstream, changed if text_id != BODY_MAP_TEXT else (), base, ruled, over))
     return balances
 
 
@@ -618,17 +695,22 @@ def render_book_balance(balance: BookBalance) -> str:
         line += "; contribution unknown"
     if balance.changed:
         line += " (" + ", ".join(f"{Path(path).stem} {delta:+,}" for path, delta in balance.changed) + ")"
+    if not balance.ruled:
+        line += " [a fact: read on demand, under no size rule]"
+    if balance.over_read:
+        line += " [past one read: " + ", ".join(
+            f"{Path(path).name} {lines:,} lines/{chars:,} characters" for path, lines, chars in balance.over_read) + "]"
     return line
 
 
 def book_balance_note(root: Path, paths: Iterable[str], *, staged: bool = False) -> str:
-    """The footer for a write to Ouroboros's own body; ``""`` when no book or ruled text was written.
+    """The footer for a write to Ouroboros's own body; ``""`` when no book, ruled text or standalone document was written.
     ``staged`` measures the index (a staged commit's subject), otherwise the working tree.
 
     Callers decide that ``root`` is the body (the system repository or its bound candidate):
     a user's project with a ``docs/architecture`` folder never receives this note.
     """
-    touched = [path for path in paths if book_path_role(path) or ruled_text_of(path)]
+    touched = [path for path in paths if book_path_role(path) or ruled_text_of(path) or path in STANDALONE_DOCS]
     if not touched:
         return ""
     balances = book_balances(root, touched, staged=staged)
@@ -639,8 +721,12 @@ def book_balance_note(root: Path, paths: Iterable[str], *, staged: bool = False)
                    if entry in wanted and book_id not in available]
     unavailable += [f"{text_name(text_id)} balance unavailable"
                     for text_id in sorted({ruled_text_of(path) for path in touched} - {""} - available)]
+    if wanted - {""} and BODY_MAP_TEXT not in available:  # a book source changed and no Map renders from this tree
+        unavailable.append(f"{text_name(BODY_MAP_TEXT)} balance unavailable")
     lines = [render_book_balance(balance) for balance in balances] + unavailable
-    if any(balance.owed for balance in balances):
-        return "ℹ️ Text growth:\n" + "\n".join(lines) + "\n" + BOOK_GROWTH_RULE
+    rules = ([BOOK_GROWTH_RULE] if any(balance.owed for balance in balances) else []) + (
+        [CHAPTER_BAND_RULE] if any(balance.over_read for balance in balances) else [])
+    if rules:
+        return "ℹ️ Text growth:\n" + "\n".join([*lines, *rules])
     measured = not unavailable and all(balance.vs_upstream is not None for balance in balances)
     return "ℹ️ Text growth: " + "; ".join(lines) + ("; nothing owed." if measured else ".")

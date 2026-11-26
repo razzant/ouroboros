@@ -1,13 +1,17 @@
-"""A change does not make a reference book, BIBLE.md or the prompts larger (the official line's rule).
+"""A change does not make what every mind carries larger, and a book chapter stays within one read (the official line's rule).
 
-Each book is measured as the UTF-8 length of its COMPOSED text (the entrypoint and every
-listed chapter, ``reference_books.compose_book``) at this change's tip and at its event base;
-BIBLE.md, and the prompt files together, as their UTF-8 bytes (``reference_books.RULED_TEXTS``).
-The rule is pairwise: there is no stored number and no reserve, so text a change adds to a
-book is paid in the same book in the same change (DEVELOPMENT "Paying down a size cap").
+What rides every request is measured at this change's tip and at its event base: BIBLE.md and the prompt
+files together as their UTF-8 bytes (``reference_books.RULED_TEXTS``), and the Body Map as the bytes this
+code renders from the books there (``reference_books.body_map_sizes``). The rule is pairwise: there is no
+stored number and no reserve, so text a change adds is paid in the same text in the same change (DEVELOPMENT
+"Paying down a size cap"). A base from before the Map existed renders none: that change has no earlier Map
+to compare with, and none is invented. A text that cannot be measured at the tip is a failure, never a zero.
+
+A book chapter is read on demand, so its limit is physical and needs no base: one default ``read_file``
+(``reference_books.chapters_over_one_read``). The large standalone documents are under no rule here.
 
 The opt-in ``size_ratchet`` lane is excluded from default local runs. Manual/tag CI
-has no per-change base, so this comparison skips there. Local qualification supplies
+has no per-change base, so the pairwise comparison skips there. Local qualification supplies
 ``OURO_SIZE_RATCHET_BASE_REF``; unset ``OURO_BOOK_GROWTH_MODE`` then means ``block``.
 ``scripts/book_growth_mode.py`` retains event-specific block/warn/approved semantics
 for explicit callers; an owner's ``book-growth`` label can approve an exception.
@@ -22,7 +26,7 @@ import subprocess
 import pytest
 
 from ouroboros.reference_books import (
-    BOOK_ENTRYPOINTS, RULED_TEXTS, compose_book, load_reference_book, ruled_text_sizes, text_name,
+    BODY_MAP_TEXT, BOOK_ENTRYPOINTS, RULED_TEXTS, body_map_sizes, chapters_over_one_read, ruled_text_sizes, text_name,
 )
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -53,38 +57,33 @@ def growth_base(repo: pathlib.Path, ref: str | None) -> str:
     return resolved.stdout.decode("ascii").strip() if resolved.returncode == 0 else ""
 
 
-def composed_bytes(repo: pathlib.Path, book_id: str, ref: str = "") -> int | None:
-    """The composed book's UTF-8 bytes in the checkout, or at ``ref``; ``None`` when absent there."""
-    reader = None
-    if ref:
-        def reader(path: str) -> bytes:
-            return _git(repo, "show", f"{ref}:{path}").stdout
-    try:
-        return len(compose_book(load_reference_book(repo, book_id, reader)).encode("utf-8"))
-    except (OSError, ValueError, KeyError, subprocess.CalledProcessError):
-        if not ref:
-            raise
-        return None
-
-
 def ruled_text_bytes(repo: pathlib.Path, text_id: str, ref: str = "") -> int | None:
     """The ruled text's UTF-8 bytes in the checkout, or at ``ref``; ``None`` when absent there."""
     sizes = ruled_text_sizes(repo, text_id, ref)
     return None if sizes is None else sum(sizes.values())
 
 
-def book_growth_verdict(book_id: str, base: int | None, tip: int, mode: str) -> tuple[bool, str]:
-    """``(passes, message)`` for one book or ruled text; the message is empty when it did not grow."""
+def body_map_bytes(repo: pathlib.Path, ref: str = "") -> int | None:
+    """The rendered Body Map's UTF-8 bytes in the checkout, or at ``ref``; ``None`` where no Map renders."""
+    sizes = body_map_sizes(repo, BODY_MAP_TEXT, ref)
+    return None if sizes is None else sum(sizes.values())
+
+
+def book_growth_verdict(book_id: str, base: int | None, tip: int | None, mode: str) -> tuple[bool, str]:
+    """``(passes, message)`` for one ruled text; the message is empty when it did not grow. A tip that could
+    not be measured fails in every mode: an unknown size is never a size that fits."""
+    name = f"the {text_name(book_id)}" if book_id in (*BOOK_ENTRYPOINTS, BODY_MAP_TEXT) else text_name(book_id)
+    if tip is None:
+        return False, f"{name} could not be measured at this change's tip, so its growth is unknown."
     if base is None or tip <= base:
         return True, ""
-    name = f"the {text_name(book_id)}" if book_id in BOOK_ENTRYPOINTS else text_name(book_id)
     if mode == "approved":
         return True, f"{name} grows by {tip - base} bytes; the repository owner approved it (book-growth label)."
     if mode == "warn":
         return True, (f"{name} grows by {tip - base} bytes; advisory for outside contributors and forks. "
                       "Official maintainers will make room at integration.")
-    return False, (f"{name} grew by {tip - base} bytes ({base} -> {tip}); a change ends each book, BIBLE.md "
-                   "and the prompts no larger than at its base, so pay in the same text as DEVELOPMENT "
+    return False, (f"{name} grew by {tip - base} bytes ({base} -> {tip}); a change ends BIBLE.md, the prompts "
+                   "and the Body Map no larger than at its base, so pay in the same text as DEVELOPMENT "
                    "\"Paying down a size cap\" says "
                    "(the owner's book-growth label on the PR is the only exception).")
 
@@ -99,7 +98,7 @@ def _assert_no_unapproved_growth(capsys, measured) -> None:
     mode = (os.environ.get(MODE_ENV) or "block").strip()
     faults: list[str] = []
     for text_id, path, measure in measured:
-        passes, message = book_growth_verdict(text_id, measure(base), measure("") or 0, mode)
+        passes, message = book_growth_verdict(text_id, measure(base), measure(""), mode)
         if message and passes:  # an annotation in the job log; a captured print would never reach it
             with capsys.disabled():
                 print(f"::{'notice' if mode == 'approved' else 'warning'} file={path}::{message}")
@@ -109,10 +108,18 @@ def _assert_no_unapproved_growth(capsys, measured) -> None:
 
 
 @pytest.mark.size_ratchet
-def test_a_change_does_not_grow_a_reference_book(capsys):
+def test_a_change_does_not_grow_the_body_map(capsys):
     _assert_no_unapproved_growth(capsys, [
-        (book_id, entrypoint, lambda ref, book_id=book_id: composed_bytes(REPO, book_id, ref))
-        for book_id, entrypoint in BOOK_ENTRYPOINTS.items()])
+        (BODY_MAP_TEXT, BOOK_ENTRYPOINTS["architecture"], lambda ref: body_map_bytes(REPO, ref))])
+
+
+@pytest.mark.size_ratchet
+def test_every_book_chapter_fits_one_default_read():
+    """Physical, so measured at the tip alone and in every run of the lane; an unreadable book raises."""
+    over = {book_id: chapters_over_one_read(REPO, book_id) for book_id in BOOK_ENTRYPOINTS}
+    assert not any(over.values()), (
+        f"chapters past one default read_file (path, lines, characters): {over}; split each by subject with its "
+        "reasons kept (DEVELOPMENT \"Paying down a size cap\")")
 
 
 @pytest.mark.size_ratchet
@@ -130,29 +137,62 @@ def test_a_change_does_not_grow_bible_or_the_prompts(capsys):
     (1000, 1480, "approved", True, "owner approved"),
     (1000, 900, "block", True, ""),
     (1000, 1000, "block", True, ""),
-    (None, 5000, "block", True, ""),  # a book new in this change has no base to grow from
+    (None, 5000, "block", True, ""),  # the change that creates the Map has no earlier Map to grow from
+    (1000, None, "block", False, "could not be measured"),  # an unmeasured tip is unknown, never zero
+    (1000, None, "approved", False, "could not be measured"),
 ])
 def test_book_growth_verdict(base, tip, mode, passes, said):
-    verdict = book_growth_verdict("architecture", base, tip, mode)
+    verdict = book_growth_verdict(BODY_MAP_TEXT, base, tip, mode)
     assert verdict[0] is passes
     assert (said in verdict[1]) if said else verdict[1] == ""
 
 
-def test_composed_bytes_measure_the_book_at_the_base_commit(tmp_path):
-    entry = "# Architecture\n\nIntro café.\n\n## Chapters\n\n- [One](architecture/01-one.md)\n"
-    chapter = "# One\n\nThe first chapter, naïve.\n"
-    for path, text in {BOOK_ENTRYPOINTS["architecture"]: entry, "docs/architecture/01-one.md": chapter}.items():
-        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / path).write_text(text, encoding="utf-8", newline="\n")
+def _book_tree(root, chapter="# One\n\nWhat this part gives me.\n", atlas=True):
+    entry = ("# Architecture\n\nThe map of my body.\n\n## Chapters\n\n- [One](architecture/01-one.md)\n"
+             + ("\n## Reference Atlas\n\n- [DESIGN.md](DESIGN.md) — the interface.\n" if atlas else ""))
+    handbook = "# Development\n\nHow a change is made.\n\n## Chapters\n\n- [Rules](development/01-rules.md)\n"
+    for path, text in {BOOK_ENTRYPOINTS["architecture"]: entry, "docs/architecture/01-one.md": chapter,
+                       BOOK_ENTRYPOINTS["development"]: handbook, "docs/development/01-rules.md": "# Rules\n\nThe rules.\n"}.items():
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text(text, encoding="utf-8", newline="\n")
+    return entry
+
+
+def test_the_body_map_is_measured_as_rendered_and_a_tree_before_it_offers_no_base(tmp_path):
+    _book_tree(tmp_path, atlas=False)
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "add", "-A")
-    _git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
-    expected = len((entry + "\n\n" + chapter).encode("utf-8"))
-    assert composed_bytes(tmp_path, "architecture", "HEAD") == expected == composed_bytes(tmp_path, "architecture")
-    (tmp_path / "docs/architecture/01-one.md").write_text(chapter + "More.\n", encoding="utf-8", newline="\n")
-    assert composed_bytes(tmp_path, "architecture", "HEAD") == expected  # the base does not move with the checkout
-    assert composed_bytes(tmp_path, "architecture") == expected + len("More.\n")
-    assert composed_bytes(tmp_path, "development", "HEAD") is None  # absent at the base
+    _git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "before the Map")
+    assert body_map_bytes(tmp_path, "HEAD") is None and body_map_bytes(tmp_path) is None  # no Atlas: no Map, no baseline
+    _book_tree(tmp_path)
+    created = body_map_bytes(tmp_path)
+    assert created and book_growth_verdict(BODY_MAP_TEXT, body_map_bytes(tmp_path, "HEAD"), created, "block") == (True, "")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "the Map")
+    # A chapter's body is not in the Map: an edit below its opening moves no resident byte; its opening does.
+    chapter = tmp_path / "docs/architecture/01-one.md"
+    chapter.write_text(chapter.read_text(encoding="utf-8") + "\n## Detail\n\nMechanism.\n", encoding="utf-8", newline="\n")
+    assert body_map_bytes(tmp_path) == created == body_map_bytes(tmp_path, "HEAD")
+    _book_tree(tmp_path, chapter="# One\n\nWhat this part gives me, and more.\n")
+    grown = body_map_bytes(tmp_path)
+    assert grown == created + len(", and more")
+    assert book_growth_verdict(BODY_MAP_TEXT, body_map_bytes(tmp_path, "HEAD"), grown, "block")[0] is False
+    # The Map names the handbook's chapters: with that book there but unreadable the Map is unmeasured, never smaller.
+    (tmp_path / "docs/development/01-rules.md").unlink()
+    assert body_map_bytes(tmp_path) is None
+    assert book_growth_verdict(BODY_MAP_TEXT, created, body_map_bytes(tmp_path), "approved")[0] is False
+
+
+def test_a_chapter_past_one_read_is_named_and_an_unreadable_book_is_an_error(tmp_path):
+    _book_tree(tmp_path)
+    assert chapters_over_one_read(tmp_path, "architecture") == ()
+    long = "# One\n\nWhat this part gives me.\n" + "line\n" * 2000
+    _book_tree(tmp_path, chapter=long)
+    assert chapters_over_one_read(tmp_path, "architecture") == (
+        ("docs/architecture/01-one.md", len(long.splitlines()), len(long)),)
+    (tmp_path / "docs/architecture/01-one.md").unlink()
+    with pytest.raises(OSError):  # unmeasured is unknown, never within the band
+        chapters_over_one_read(tmp_path, "architecture")
 
 
 def test_growth_base_is_the_event_base_and_nothing_else(tmp_path):
@@ -429,14 +469,14 @@ def test_push_mode_reaches_the_size_lane_and_only_growth_fails(monkeypatch, caps
     monkeypatch.setenv("GITHUB_REF", PUSH_ENV["REF"])
     consumer = sys.modules[__name__]
     monkeypatch.setattr(consumer, "growth_base", lambda repo, ref: "base")
-    monkeypatch.setattr(consumer, "composed_bytes", lambda repo, book_id, ref="": 100 if ref else tip)
+    monkeypatch.setattr(consumer, "body_map_bytes", lambda repo, ref="": 100 if ref else tip)
     if passes:
-        test_a_change_does_not_grow_a_reference_book(capsys)
+        test_a_change_does_not_grow_the_body_map(capsys)
         if tip <= 100:
             assert capsys.readouterr().out == ""
     else:
         with pytest.raises(AssertionError, match="grew by 1 bytes"):
-            test_a_change_does_not_grow_a_reference_book(capsys)
+            test_a_change_does_not_grow_the_body_map(capsys)
 
 
 @pytest.mark.parametrize("text_id,name", [("constitution", "BIBLE.md"), ("prompts", "Prompts")])

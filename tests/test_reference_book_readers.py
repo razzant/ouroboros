@@ -203,7 +203,7 @@ def test_a_chapter_read_is_an_ordinary_result_under_the_measured_frame():
     assert "docs/architecture/" in UNTRUNCATED_REPO_READ_PREFIXES
 
 
-def test_every_chapter_fits_one_read_page_and_a_smaller_frame_still_gets_a_range():
+def test_every_chapter_fits_one_read_page_and_a_smaller_frame_still_gets_a_range(tmp_path):
     """Measured rather than assumed: every chapter of both books fits the default
     80,000-char read page (chapter 6 is split by subject to keep it so), yet a chapter
     read is whole only under a frame that actually holds it: a smaller frame receives
@@ -214,6 +214,13 @@ def test_every_chapter_fits_one_read_page_and_a_smaller_frame_still_gets_a_range
     from ouroboros.tool_capabilities import TOOL_RESULT_LIMITS, UNTRUNCATED_REPO_READ_PREFIXES
     from ouroboros.tool_result_delivery import RESULT_VIEW_MARKER
 
+    from ouroboros import reference_books
+    from ouroboros.tools.registry import ToolRegistry
+
+    # The chapter band of the size rule is the default read itself: its two numbers are the tool's own.
+    read_file = next(row for row in ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data").schemas() if row["function"]["name"] == "read_file")
+    assert reference_books.CHAPTER_READ_LINES == read_file["function"]["parameters"]["properties"]["max_lines"]["default"]
+    assert reference_books.CHAPTER_READ_CHARS == TOOL_RESULT_LIMITS["read_file"]
     chapters = [chapter for book_id in BOOK_ENTRYPOINTS for chapter in load_reference_book(REPO, book_id).chapters]
     for chapter in chapters:
         assert chapter.source_path.startswith(UNTRUNCATED_REPO_READ_PREFIXES)
