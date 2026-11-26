@@ -451,12 +451,12 @@ async def api_update_check(_request: Request) -> JSONResponse:
         return json_exception(exc)
 
 
-def _respawn_workers_after_failed_update() -> None:
+def _respawn_workers_after_failed_update(expected_reason: str = "") -> None:
     """Revive workers when an update aborts after they were stopped (no restart follows)."""
     try:
         from supervisor.workers import ensure_worker_pool_started, open_repo_writer_admission_after_update_abort
 
-        if open_repo_writer_admission_after_update_abort():
+        if open_repo_writer_admission_after_update_abort(expected_reason):
             ensure_worker_pool_started(allow_disabled_restart=True)
     except Exception:
         log.warning("update_apply: failed to respawn workers after aborted update", exc_info=True)
@@ -793,35 +793,40 @@ def _rollback_fenced_update(reason: str, error: str, *, handoff=None, **extra: A
     )
 
 
-def _abandon_replace_refused_before_tree(tx: Dict[str, Any], exc: BaseException) -> Dict[str, Any] | None:
-    """Abandon this replace as unapplied, as boot does, when Git refused its FIRST tree step for
-    the held index lock; ``None`` leaves the fenced rollback in charge of anything else.
-
-    Both facts are ``IndexLockRefusal.before_tree_effects`` (Git's own refusal on every attempt,
-    no earlier tree step); the live tx must still be this attempt and HEAD its base. The rescue
-    snapshot and keep branch made before the checkout stay and are reported by the caller.
-    """
+def _replace_refusal_response(tx: dict, failure: tuple[bool, str, bool] | Exception, payload: dict) -> JSONResponse | None:
+    """Only a producer's no-tree-effect proof can disarm this Replace without rollback."""
     import subprocess
-    from supervisor.git_ops import git_capture
+    from ouroboros.store_switch import UnappliedSwitch
     from supervisor.git_ops_reset import IndexLockRefusal, refusal_parts
-    from supervisor.update_merge import abandon_unapplied_replace, read_update_tx_strict, write_update_tx
+    from supervisor.update_merge import settle_replace_refusal
 
-    if not isinstance(exc, subprocess.CalledProcessError):
+    git_failure = None
+    if isinstance(failure, UnappliedSwitch):
+        before, cause, detail = True, "pre_checkout_refused", failure.message
+    elif isinstance(failure, subprocess.CalledProcessError):
+        cmd, detail = refusal_parts(failure)
+        before = isinstance(failure, IndexLockRefusal) and failure.before_tree_effects
+        cause = "index_lock_refused"
+        git_failure = {"cmd": cmd, "stderr": detail, "returncode": failure.returncode, "before_tree_effects": before}
+    else:
         return None
-    status, live = read_update_tx_strict()
-    if status != "valid" or live.get("phase") != "applying_replace" or live.get("attempt_id") != tx.get("attempt_id"):
-        return None
-    cmd, detail = refusal_parts(exc)
-    before = isinstance(exc, IndexLockRefusal) and exc.before_tree_effects
-    live["git_failure"] = {"cmd": cmd, "stderr": detail, "returncode": exc.returncode, "before_tree_effects": before}
-    write_update_tx(live)
-    if not before:
-        return None
-    rc_h, head, _error = git_capture(["git", "rev-parse", "--verify", "HEAD"])
-    if rc_h != 0 or not head or head != str(live.get("pre_update_sha") or ""):
-        return None
-    return abandon_unapplied_replace(head, cause="index_lock_refused", attempt_id=str(live["attempt_id"]),
-                                     cmd=cmd, stderr=detail)
+    try:
+        result = settle_replace_refusal(tx, before_tree_effects=before, cause=cause, detail=detail, git_failure=git_failure)
+        if result is None:
+            return None
+        if not result.get("abandoned"):
+            raise RuntimeError(result.get("reason") or "could not disarm the replacement")
+    except Exception as exc:
+        if not before:
+            raise
+        # Even failed custody cleanup cannot justify a destructive rollback of untouched local files.
+        return JSONResponse({**payload, "error": str(exc), "rolled_back": False, "restart_required": True}, status_code=500)
+    _respawn_workers_after_failed_update("managed_update:replace_recovery")
+    if git_failure:
+        detail = f"Git refused its first checkout step: {detail}"
+    return JSONResponse({**payload, "error": f"the update was not applied: {detail}", "outcome": "not_applied",
+                         "reason": "replace_not_applied" if git_failure else "replace_checkout_refused",
+                         "abandoned": True, "rolled_back": False}, status_code=409)
 
 
 def _restart_response(request: Request, *, strategy: str, plan: dict, keep_branch: str = "", handoff=None) -> JSONResponse:
@@ -1445,29 +1450,20 @@ def _apply_replace_recovery_fenced(
             update_progress.advance("applying")
             # A target without the store: the switch intent, the checkout moves at the restart exit
             # (store_switch); its smoke is the post-boot one the pending transaction already runs.
-            checkout_ok, checkout_msg, deferred = switch_or_reset(
+            checkout = switch_or_reset(
                 DRIVE_ROOT, REPO_DIR, target_sha=expected_target_sha, target_ref=str(tx["target_ref"]),
                 reason="ui_update_apply", door="update_replace",
                 reset=lambda: checkout_and_reset(BRANCH_DEV, reason="ui_update_apply", unsynced_policy="rescue_and_reset"),
                 handoff=handoff)
         except Exception as exc:
-            from supervisor.git_ops_reset import refusal_parts, refusal_text
+            from supervisor.git_ops_reset import refusal_text
 
-            abandoned = _abandon_replace_refused_before_tree(tx, exc)
-            if abandoned is None:
-                return _rollback_fenced_update(
-                    "replace_checkout_exception", f"recovery checkout failed: {refusal_text(exc)}", handoff=handoff, **payload
-                )
-            if not abandoned.get("abandoned"):  # its cleanup failed: the tx holds, as at boot
-                return JSONResponse({"error": abandoned.get("reason"), "rolled_back": False,
-                                     "restart_required": True, **payload}, status_code=500)
-            _respawn_workers_after_failed_update()
-            return JSONResponse({
-                "error": f"the update was not applied: Git refused its first checkout step: {refusal_parts(exc)[1]}",
-                "reason": "replace_not_applied", "abandoned": True, "rolled_back": False, **payload,
-            }, status_code=409)
+            return _replace_refusal_response(tx, exc, payload) or _rollback_fenced_update(
+                "replace_checkout_exception", f"recovery checkout failed: {refusal_text(exc)}", handoff=handoff, **payload
+            )
+        checkout_ok, checkout_msg, deferred = checkout
         if not checkout_ok:
-            return _rollback_fenced_update(
+            return _replace_refusal_response(tx, checkout, payload) or _rollback_fenced_update(
                 "replace_checkout_failed", f"recovery checkout failed: {checkout_msg}", handoff=handoff, **payload
             )
         tx["phase"] = "pending_boot_smoke"

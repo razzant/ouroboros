@@ -493,9 +493,11 @@ def replace_scene(tmp_path, monkeypatch, replacement_history):
     monkeypatch.setattr(git_ops, "update_state", lambda mutate, **_kw: mutate({}))
     monkeypatch.setattr(git_ops, "_managed_update_target", lambda *_a: ("", "", "official"))
     events = {"fenced": [], "respawned": 0, "restarts": []}
+    writer_fences = []
     monkeypatch.setattr(control, "_quiesce_repo_writers", lambda _reason: [])
     monkeypatch.setattr(control, "_respawn_workers_after_failed_update",
-                        lambda: events.__setitem__("respawned", events["respawned"] + 1))
+                        lambda reason="": writer_fences.append(reason) or
+                        events.__setitem__("respawned", events["respawned"] + 1))
     real_fenced = control._rollback_fenced_update
     monkeypatch.setattr(control, "_rollback_fenced_update",
                         lambda reason, error, **extra: events["fenced"].append(reason) or real_fenced(reason, error, **extra))
@@ -505,7 +507,8 @@ def replace_scene(tmp_path, monkeypatch, replacement_history):
 
     app = Starlette(routes=[Route("/api/update/apply", control.api_update_apply, methods=["POST"])])
     app.state.request_restart = lambda **kw: events["restarts"].append(kw)
-    scene = SimpleNamespace(repo=repo, data=data, base=base, target=target, storeless=storeless, events=events)
+    scene = SimpleNamespace(repo=repo, data=data, base=base, target=target, storeless=storeless,
+                            events=events, writer_fences=writer_fences)
 
     def post(strategy, to, **plan_fields):
         plan = {"kind": "clean", "available": True, "base_sha": scene.base, "target_sha": to, "target_ref": "official",
@@ -519,6 +522,80 @@ def replace_scene(tmp_path, monkeypatch, replacement_history):
 
     scene.post, scene.apply = post, lambda to: post("replace", to)
     return scene
+
+
+@pytest.mark.parametrize("case", ["reader", "store", "checkout", "unknown", "different_attempt", "different_pin",
+                                  "different_head", "different_branch", "intent_cleanup_failed"])
+def test_replace_only_abandons_when_pre_tree_refusal_owns_the_base_and_transaction(replace_scene, monkeypatch, case):
+    from ouroboros import store_switch
+    from ouroboros.gateway import control
+    from ouroboros.gateway.history_reader import reader
+    from supervisor import update_merge
+    from starlette.responses import JSONResponse
+
+    scene = replace_scene
+    local = {"seed.txt": b"unstaged local edit\n", "new.txt": b"untracked local file\n"}
+    for name, content in local.items():
+        (scene.repo / name).write_bytes(content)
+    status_before = _git(scene.repo, "status", "--porcelain")
+    token = object()
+    reads, rollback = [], []
+    monkeypatch.setattr(reader, "prepare_handoff", lambda root: (
+        token, "room history server read still in use" if case == "reader" else ""))
+    monkeypatch.setattr(reader, "continue_inline", reads.append)
+    real_capture = git_ops.git_capture
+
+    def hand_off(root):
+        assert root.resolve() == scene.data.resolve()
+        status, tx = update_merge.read_update_tx_strict()
+        assert status == "valid" and tx["phase"] == "applying_replace"
+        if case in {"different_attempt", "different_pin"}:
+            key = "attempt_id" if case == "different_attempt" else "target_sha"
+            update_merge.write_update_tx({**tx, key: "a different saved operation"})
+        if case in {"different_head", "different_branch"}:
+            flag = "--verify" if case == "different_head" else "--abbrev-ref"
+            monkeypatch.setattr(git_ops, "git_capture", lambda cmd, *a, **kw: (
+                (0, "not the pinned base", "") if cmd == ["git", "rev-parse", flag, "HEAD"] else
+                real_capture(cmd, *a, **kw)))
+        return "synthetic store busy" if case != "checkout" and case != "unknown" else ""
+
+    def checkout(*a, **kw):
+        if case == "checkout":
+            return store_switch.UnappliedCheckout(False, "synthetic checkout preparation refused")
+        if case == "unknown":
+            return False, "synthetic checkout may have changed the tree"
+        pytest.fail("checkout must not be attempted after a refused handoff")
+
+    monkeypatch.setattr(store_switch, "_hand_off_stores", hand_off)
+    monkeypatch.setattr(git_ops, "checkout_and_reset", checkout)
+    monkeypatch.setattr(control, "_rollback_fenced_update", lambda reason, *_a, **_kw: (
+        rollback.append(reason) or JSONResponse({"rollback_selected": True}, status_code=409)))
+    if case == "intent_cleanup_failed":
+        monkeypatch.setattr(git_ops, "_clear_update_intent", lambda: False)
+    status, body = scene.apply(scene.target)
+    assert {name: (scene.repo / name).read_bytes() for name in local} == local
+    assert _git(scene.repo, "rev-parse", "HEAD") == scene.base
+    assert _git(scene.repo, "rev-parse", "--abbrev-ref", "HEAD") == "ouroboros"
+    assert _git(scene.repo, "status", "--porcelain") == status_before
+    assert not scene.events["restarts"]
+    if case == "unknown":
+        assert status == 409 and body["rollback_selected"] and rollback == ["replace_checkout_failed"]
+        assert not reads and not scene.writer_fences and update_merge.read_update_tx_strict()[0] == "valid"
+        return
+    assert reads == [token] and not rollback
+    if case not in {"reader", "store", "checkout"}:
+        assert status == 500 and body["restart_required"] and not body["rolled_back"]
+        assert not scene.writer_fences and update_merge.read_update_tx_strict()[0] == "valid"
+        assert git_ops._read_update_intent()["target_sha"] == scene.target
+        assert not _rows(scene.data, "managed_update_replace_apply_abandoned")
+        return
+    assert status == 409 and body["outcome"] == "not_applied" and body["abandoned"] and not body["rolled_back"]
+    assert "the update was not applied" in body["error"] and body["reason"] == "replace_checkout_refused"
+    assert scene.writer_fences == ["managed_update:replace_recovery"] and scene.events["respawned"] == 1
+    assert update_merge.read_update_tx_strict()[0] == "absent" and not git_ops._read_update_intent()
+    assert body["rescue"] and _git(scene.repo, "rev-parse", body["keep_branch"]) == scene.base
+    [row] = _rows(scene.data, "managed_update_replace_apply_abandoned")
+    assert row["head"] == scene.base and row["cause"] == "pre_checkout_refused" and row["attempt_id"]
 
 
 def test_a_replace_refused_at_its_first_tree_step_by_a_held_lock_is_abandoned_unapplied(replace_scene, monkeypatch):

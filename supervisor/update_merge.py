@@ -1404,6 +1404,26 @@ def abandon_unapplied_replace(head: str, **event: Any) -> Dict[str, Any]:
     return {"finalized": False, "abandoned": True, "reason": "replace_not_applied"}
 
 
+def settle_replace_refusal(tx: dict, *, before_tree_effects: bool, cause: str, detail: str,
+                           git_failure: Optional[dict] = None) -> Optional[dict]:
+    """Under the apply lock, disarm only this replacement. None leaves rollback in charge."""
+    status, live = read_update_tx_strict()
+    keys = ("attempt_id", "pre_update_sha", "pre_update_branch", "target_sha", "strategy", "phase")
+    if status != "valid" or any(not tx.get(key) or live.get(key) != tx[key] for key in keys):
+        return {"reason": "could not confirm the matching replacement transaction"} if before_tree_effects else None
+    if git_failure is not None:
+        live["git_failure"] = git_failure
+        write_update_tx(live)
+    if not before_tree_effects:
+        return None
+    # A dirty tree and index are expected; only verify the pinned branch and HEAD.
+    if (_g.git_capture(["git", "rev-parse", "--verify", "HEAD"])[:2] != (0, live["pre_update_sha"])
+            or _g.git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])[:2] != (0, live["pre_update_branch"])):
+        return {"reason": "could not confirm the replacement's original checkout"}
+    event = {"cmd": git_failure["cmd"], "stderr": detail} if git_failure else {"detail": detail}
+    return abandon_unapplied_replace(live["pre_update_sha"], cause=cause, attempt_id=live["attempt_id"], **event)
+
+
 def _recover_replace_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dict[str, Any]:
     """Resume the narrow crash window between replace rescue and pending smoke."""
     pre = str(tx.get("pre_update_sha") or "")

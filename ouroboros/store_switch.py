@@ -73,6 +73,14 @@ class UnappliedCheckout(NamedTuple):
     before_tree_effects = True
 
 
+class UnappliedSwitch(NamedTuple):
+    """The same switch result shape, preserving proof of refusal before tree effects."""
+
+    ok: bool
+    message: str
+    deferred: bool
+
+
 def _progress(root: pathlib.Path, phase: str, **facts: Any) -> None:
     outcomes = (read_json_dict(root / PROGRESS_REL) or {}).get("outcomes", [])
     current = {"phase": phase, "at": utc_now_iso(), **facts}
@@ -260,7 +268,7 @@ def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: st
     accepted wake transitions are written in the form a target without their reader reads (best effort, its
     outcome logged: ``_export_wake_transitions``). Returns ``(ok, message, deferred)``."""
     if refusal := reset_profile_refusal(root, repo_dir, target_sha):
-        return False, refusal, False
+        return UnappliedSwitch(False, refusal, False)
     needs = switch_needs(repo_dir, target_sha)
     if any(needs.get(name) for name in _DEFERRING):
         record_switch_intent(root, target_sha=target_sha, target_ref=target_ref, reason=reason, door=door)
@@ -274,7 +282,7 @@ def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: st
     handoff = handoff if handoff is not None else current_history_handoff()
     if refusal := handoff.prepare(root) or _hand_off_stores(root):
         handoff.resume_inline(restored=True)  # the checkout never ran
-        return False, f"switch refused: a store could not be handed off ({refusal})", False
+        return UnappliedSwitch(False, f"switch refused: a store could not be handed off ({refusal})", False)
     try:
         outcome = reset()
     except BaseException as exc:
@@ -285,6 +293,7 @@ def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: st
     handoff.checkout_confirmed = ok
     if not ok and getattr(outcome, "before_tree_effects", False):
         handoff.resume_inline(restored=True)
+        return UnappliedSwitch(False, message, False)
     return ok, message, False
 
 
