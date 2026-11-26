@@ -27,7 +27,7 @@ def test_it_runs_after_pushes_to_ouroboros_only_and_in_the_official_repository_o
     triggers = WORKFLOW.get("on", WORKFLOW.get(True))  # PyYAML's YAML 1.1 spelling of "on"
     assert set(triggers) == {"push", "workflow_dispatch"} and triggers["push"] == {"branches": ["ouroboros"]}
     assert triggers["workflow_dispatch"]["inputs"]["base"]["required"] is True
-    assert set(WORKFLOW["jobs"]) == {"window", "post-merge"}
+    assert set(WORKFLOW["jobs"]) == {"window", "post-merge", "browser"}  # the browser check: test_post_merge_browser.py
     assert WINDOW["if"] == JOB["if"] == "github.repository == 'razzant/ouroboros' && github.ref == 'refs/heads/ouroboros'"
     assert JOB["runs-on"] == "${{ matrix.os }}" and JOB["timeout-minutes"] == 165
 
@@ -84,7 +84,8 @@ def test_the_matrix_uses_one_shared_base_and_keeps_the_same_receipt_on_both_syst
     assert WINDOW["steps"][-1]["name"] == (
         "Post-merge ${{ fromJSON(steps.base.outputs.window).continuous && 'confirmed' || 'provisional' }} "
         "base ${{ steps.base.outputs.base }}")
-    assert WINDOW["outputs"] == {"window": "${{ steps.base.outputs.window }}"}
+    assert WINDOW["outputs"] == {"window": "${{ steps.base.outputs.window }}",
+                                 "browser": "${{ steps.browser_scope.outputs.applicable }}"}
     assert JOB["env"]["BASE"] == "${{ fromJSON(needs.window.outputs.window).base }}"
     assert STEPS["base"]["env"] == {"WINDOW": "${{ needs.window.outputs.window }}"}
     assert '"$WINDOW" > "$RUNNER_TEMP/$EVIDENCE_NAME/base.json"' in STEPS["base"]["run"]

@@ -34,7 +34,10 @@ NODE_LANE = "node-lane"
 LINT_PREFIX = "ruff "  # a lint finding's id: "ruff <code> <path> <name>"
 SIZE_PREFIX = "size "  # a size check test's id: "size <nodeid>"
 BOOK_BUDGETS = "tests/test_reference_book_budgets.py"  # the size check's module that measures the books and prompts
-SYSTEMS = {"linux": "Linux", "windows": "Windows"}
+SYSTEMS = {"linux": "Linux", "windows": "Windows"}  # the legs: scripts/post_merge_window.py waits for each
+# Every system that owns issues, by the name its issues read: the legs and the browser check
+# (scripts/post_merge_browser.py), which is no leg; none reads, extends or closes another's issues.
+NAMES = {**SYSTEMS, "browser": "the browser check (Ubuntu)"}
 _BLOCK = re.compile(r"<!-- post-merge-red (\{.*?\}) -->", re.S)
 _AUTHOR = re.compile(r" by `([^`\n]+)` landed\. First bad commit")  # a culprit issue's opening (issue_body)
 _OBSERVED = re.compile(r"^(?:Found failing|Still not passing) at `([0-9a-f]{40})`: ", re.M)
@@ -203,7 +206,7 @@ def _size_hint(block: dict) -> str:
 
 
 def issue_title(block: dict, pr: dict | None) -> str:
-    on = f"Post-merge red on {SYSTEMS[system_of(block)]}"
+    on = f"Post-merge red on {NAMES[system_of(block)]}"
     if block["kind"] == "culprit":
         return (f"{on}: #{pr['number']} {pr.get('title', '')}".strip()[:120] if pr
                 else f"{on}: {block['culprit'][:12]}")
@@ -213,7 +216,7 @@ def issue_title(block: dict, pr: dict | None) -> str:
 
 
 def issue_body(block: dict, *, head: str, run_url: str, author: str = "", seen: str = "Found failing") -> str:
-    system = SYSTEMS[system_of(block)]
+    system = NAMES[system_of(block)]
     if block["kind"] == "culprit":
         merge = f"#{block['pr']}" if block.get("pr") else f"commit `{block['culprit'][:12]}`"
         opening = (f"Tests on `ouroboros` fail on {system} since {merge}" + (f" by `{author}`" if author else "")
@@ -223,6 +226,9 @@ def issue_body(block: dict, *, head: str, run_url: str, author: str = "", seen: 
                    "of its window is blamed.")
     else:
         opening = f"These tests fail on `ouroboros` on {system}, but the post-merge check could not find the merge that broke them."
+        if block.get("candidates"):  # the browser check's window comparison: unconfirmed, never a culprit
+            opening += (" They passed at the window's base; candidate merges, none confirmed: "
+                        + ", ".join(f"`{sha}`" for sha in block["candidates"]) + ".")
     rows = "\n".join(f"- {_named(nodeid)}" for nodeid in block["ids"])
     sized = sum(nodeid.startswith(SIZE_PREFIX) for nodeid in block["ids"])  # a size test is never found gone: `_size_hint`
     gone = ("" if sized == len(block["ids"]) else ", or finds one outside the size check gone" if sized
@@ -410,6 +416,9 @@ def route(github, *, classification: dict, attribution: dict, head: str, run_url
         block, pr = {"format": 1, "os": system, "kind": key[0], "ids": sorted(groups[key])}, None
         if base:
             block["base"] = base
+        candidates = sorted({sha for row in verdicts if row["id"] in block["ids"] for sha in row.get("candidates", ())})
+        if candidates:
+            block["candidates"] = candidates
         if key[0] == "culprit":
             pr = call(f"find the pull request of {key[1][:12]}", find_merged_pr, github, key[1])[1]
             block.update(culprit=key[1], last_good=key[2], pr=pr["number"] if pr else None)
@@ -420,7 +429,7 @@ def route(github, *, classification: dict, attribution: dict, head: str, run_url
         if pr and (number is None or number in record["created"] + record["updated"]):
             login = (pr.get("user") or {}).get("login", "")
             text = ((f"@{login} " if login else "") + f"the post-merge check found tests on `ouroboros` that fail on "
-                    f"{SYSTEMS[system]} since this pull request was merged:\n\n"
+                    f"{NAMES[system]} since this pull request was merged:\n\n"
                     + "\n".join(f"- {_named(n)}" for n in block["ids"])
                     + f"\n\nFirst bad commit: `{block['culprit']}` (this merge); last good commit: "
                     f"`{block['last_good']}`. Checked at `{head}`: {run_url}\n\n{_FORWARD}{_size_hint(block)}"
@@ -550,7 +559,7 @@ def _close_green(call, github, issues, failed, node_green, head, run_url, rechec
     for issue in issues:
         block, number = issue["block"], issue["number"]
         gone = [nodeid for nodeid in block["ids"] if green(block, nodeid)]
-        system = SYSTEMS[system_of(block)]
+        system = NAMES[system_of(block)]
         if gone and len(gone) == len(block["ids"]):
             text = (f"Green at `{head}` on {system}: every test this issue tracks passes on `ouroboros` or no longer "
                     f"exists ({run_url}). Closing.")
