@@ -157,7 +157,26 @@ def write_root(root):
 
 
 MIND = {'kind': 'mind', 'task_id': 'install', 'focus': {'role': 'root', 'task_id': 'install'}}
-FRESH = {'identity': 1800, 'scratchpad': 900, 'overview': 1500, 'marks': (40, 90, 150, 220, 300)}
+FRESH = {'identity': 1800, 'scratchpad': 900, 'overview': 1500, 'notes': 6, 'people': 2, 'rooms': 1, 'owner_rows': 2,
+         'own_replies': 3, 'owner_main': 3, 'accounts': 0, 'marks': (40, 90, 150, 220, 300), 'quoted': 3, 'anchored': 1,
+         'global': 2}
+
+
+def _mature_marks(count=158, low=39, median=113, high=431):
+    """Mark lengths in estimator tokens with the measured minimum, median and maximum: the lower half rises evenly to
+    the median, the upper half to the maximum."""
+    half = count // 2
+    return tuple(round(low + (median - low) * i / (half - 1)) for i in range(half)) + tuple(
+        round(median + (high - median) * (i + 1) / (count - half)) for i in range(count - half))
+
+
+# Shaped like the measured owner install (counts and lengths only, synthetic text): about 450 knowledge notes with
+# authored summaries for people's notes, 158 marks (115 with a quote, 40 with an anchor, 112 global), 103 other rooms
+# with 414 owner messages, an open Main room with 98 own replies of finished works whose summary is longer than the
+# reply and 14 short owner rows, five selected accounts.
+MATURE = {'identity': PROTECTED['identity'], 'scratchpad': PROTECTED['scratchpad'], 'overview': PROTECTED['shared_understanding'],
+          'notes': 450, 'people': 60, 'rooms': 103, 'owner_rows': 414, 'own_replies': 98, 'owner_main': 14, 'accounts': 5,
+          'marks': _mature_marks(), 'quoted': 115, 'anchored': 40, 'global': 112}
 
 
 def _page(store, room, i, size):
@@ -167,32 +186,62 @@ def _page(store, room, i, size):
 
 def install(drive, shape='fresh'):
     """A synthetic drive the ordinary build reads over the real checkout: authored identity, scratchpad and overview,
-    an activated chronicle whose marks the views keep, Main and a project room with their rows. ``fresh``: a new
-    install after a few days of use."""
+    knowledge notes, an activated chronicle whose marks the views keep, Main and other rooms with their rows and
+    accounts. ``fresh``: a new install after a few days of use; ``mature``: ``MATURE``'s shape. Not built here: MCP
+    servers with their instructions and running works with open questions (they reach the request through the tool
+    registry and the task store, which this drive does not carry)."""
     from ouroboros import dialogue_store as ds
     from ouroboros.chronicle_store import ChronicleStore
     from ouroboros.projects_registry import create_project
 
-    sizes = FRESH
+    sizes = MATURE if shape == 'mature' else FRESH
     memory = drive / 'memory'
     (memory / 'knowledge').mkdir(parents=True, exist_ok=True)
     (drive / 'logs').mkdir(exist_ok=True)
     (memory / 'identity.md').write_text(text('Identity', sizes['identity']), encoding='utf-8')
     (memory / 'scratchpad.md').write_text(text('Scratchpad', sizes['scratchpad']), encoding='utf-8')
     (memory / 'knowledge' / 'overview.md').write_text('# Overview\n' + text('Overview', sizes['overview']), encoding='utf-8')
+    for i in range(sizes['notes']):  # authored notes as their files hold them (their writer's history is no input)
+        person = i < sizes['people']
+        summary = f"summary: {text(f'Summary {i}', 160)}\n" if person or i % 3 == 0 else ''
+        (memory / 'knowledge' / f'note-{i:03d}.md').write_text(
+            f"---\ntype: {'person' if person else 'topic'}\n{summary}---\n# Note {i}\n\n" + text(f'Note {i}', 900),
+            encoding='utf-8')
     store = ChronicleStore(drive)
     store.ensure_activated()
-    project = create_project(drive, 'fresh-project', name='Fresh project')
-    for i in range(6):
-        ds.append(drive, 'chat', {'chat_id': 1, 'direction': 'in' if i % 2 == 0 else 'out', 'task_id': f'turn-{i}',
-                                  'ts': f'2026-11-2{i}T10:00:00+00:00', 'text': text(f'Main row {i}', 300)}, emit_live=False)
-    ds.append(drive, 'chat', {'chat_id': project['chat_id'], 'direction': 'in', 'ts': '2026-11-21T09:00:00+00:00',
-                              'text': text('Project words', 200)}, emit_live=False)
-    target = _page(store, '1', 0, 900)
+    rooms = [create_project(drive, f'room-{i:03d}', name=f'Room {i}')['chat_id'] for i in range(sizes['rooms'])]
+    for i in range(sizes['owner_rows']):
+        ds.append(drive, 'chat', {'chat_id': rooms[i % len(rooms)], 'direction': 'in', 'ts': f'2026-10-{1 + i % 28:02d}T09:00:00+00:00',
+                                  'text': text(f'Owner words {i}', 240)}, emit_live=False)
+    for i in range(sizes['own_replies']):
+        ds.append(drive, 'chat', {'chat_id': 1, 'direction': 'system', 'type': 'task_summary', 'status': 'completed',
+                                  'ts': f'2026-11-{1 + i % 25:02d}T10:00:00+00:00', 'task_id': f'work-{i}',
+                                  'text': text(f'Finished work {i} and what it changed', 700)}, emit_live=False)
+        ds.append(drive, 'chat', {'chat_id': 1, 'direction': 'out', 'ts': f'2026-11-{1 + i % 25:02d}T10:00:01+00:00',
+                                  'task_id': f'work-{i}', 'text': text(f'Reply {i}', 300)}, emit_live=False)
+    for i in range(sizes['owner_main']):
+        ds.append(drive, 'chat', {'chat_id': 1, 'direction': 'in', 'ts': f'2026-11-26T0{i % 10}:00:00+00:00',
+                                  'task_id': f'turn-{i}', 'text': text(f'Short owner row {i}', 120)}, emit_live=False)
+    pages = [_page(store, '1', i, 1800) for i in range(max(2, sizes['accounts'] * 2))]
+    for i in range(sizes['accounts']):
+        account = store.publish_account(room_id='1', text=text(f'Selected account {i}', 1800),
+                                        sources=[pages[2 * i]['id']], author=MIND)
+        assert account.ok and store.select_account(account.record['id'], replaces=[pages[2 * i]['id']], author=MIND,
+                                                   reason='This account carries the page.').ok
     for i, size in enumerate(sizes['marks']):
-        assert store.mark({'node_id': target['id']}, text(f'Mark {i}', size * 4), MIND, room_id='1',
-                          scope='global' if i % 2 else 'room', quote=text(f'Quote {i}', 80) if i < 3 else None).ok
+        assert store.mark({'node_id': pages[-1]['id']}, text(f'Mark {i}', size * 4), MIND, room_id='1',
+                          scope='global' if i < sizes['global'] else 'room',
+                          quote=text(f'Quote {i}', 120) if i < sizes['quoted'] else None,
+                          anchor={'tool': 'read_file'} if i < sizes['anchored'] else None).ok
     return drive
+
+
+def installed(tmp_path, shape):
+    """A private copy of the run's ``shape`` installation (built once per run: ``tests/_worlds``)."""
+    from tests import _worlds
+
+    return _worlds.clone(_worlds.world(f'memory-scale-{shape}-v1', lambda folder: install(folder, shape)),
+                         tmp_path / f'drive-{shape}')
 
 
 def env_on(drive):
@@ -203,3 +252,33 @@ def env_on(drive):
 
     repo = pathlib.Path(__file__).resolve().parents[1]
     return Env(repo_dir=repo, drive_root=drive), Memory(drive_root=drive, repo_dir=repo)
+
+
+def call_routes():
+    """``(skill, model id, RouteFacts)`` of every model the shipped call catalogues offer (``skills/*/plugin.py``)."""
+    import importlib.util
+    import pathlib
+
+    routes = []
+    for skill in ('gemini_live', 'grok_realtime', 'openai_realtime'):
+        path = pathlib.Path(__file__).resolve().parents[1] / 'skills' / skill / 'plugin.py'
+        spec = importlib.util.spec_from_file_location(f'_catalog_{skill}', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        routes += [(skill, model.id, model.facts) for model in module.CATALOG.models]
+    return routes
+
+
+def route_resolver(window, basis, working_reserve, *, provider='synthetic', calls=None, facts=None):
+    """A resolver answering one route: its window, unit basis and working reserve, as a catalogue states them."""
+    from dataclasses import asdict
+
+    route_facts = asdict(facts) if facts is not None else {'working_reserve_tokens': working_reserve, 'basis': basis}
+    evidence = SimpleNamespace(route_fp=f'{provider}-route', status='confirmed', stale=False, window_tokens=window,
+                               source='catalogue', route_facts=route_facts)
+
+    def resolve(task, *, allow_fetch):
+        if calls is not None:
+            calls.append(allow_fetch)
+        return {'provider': provider, 'model': provider}, evidence
+    return resolve

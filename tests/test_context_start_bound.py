@@ -113,11 +113,14 @@ def test_a_frame_just_under_the_window_reaches_the_ordinary_fit_unchanged(drive,
 @pytest.mark.parametrize("mode", ["max", "low", "nano"])
 @pytest.mark.parametrize("route", [("grok", 80_000, "estimator"), ("gemini", 92_000, "provider"),
                                    ("openai", 133_554, "provider"), ("text-85k", 85_000, "provider")])
-def test_the_bound_never_exceeds_the_fitted_minimum(drive, monkeypatch, route, mode):
+@pytest.mark.parametrize("shape", ["fresh", "mature"])
+def test_the_bound_never_exceeds_the_fitted_minimum(tmp_path, monkeypatch, shape, route, mode):
     """The identity ``bound <= fitted minimum``: the fitter's own refusal at the window its core alone fills, memory
     rendered beside it. The windows are the shipped catalogues' (``skills/*/plugin.py``) and a hard 85k text route;
     the comparison is made at the window that forces the fitter's minimum."""
     provider, _window, basis = route
+    monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)
+    drive = scale.installed(tmp_path, shape)
     unfit_bound = refused_by_bound(drive, monkeypatch, mode=mode)
     monkeypatch.setattr(bound, "refuse_before_capture", lambda *_a, **_kw: None)
 
