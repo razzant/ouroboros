@@ -900,36 +900,16 @@ html[data-layout="stack"] .resize-handle { display: none; }
 :is(.chat-quiz-project, .chat-live-bound-pointer) .chat-live-project-name { font-weight: 600; }
 
 /* A Project root's final answer in Main is an ordinary Ouroboros message (docs/DESIGN.md
-   "Project completion mirror"): folded when it is long, with the Project chip under it. The
-   seven-line footprint stays fixed while the painted tail borrows footer whitespace. JS
-   compensates the actual extension (including answers shorter than the tail); full text stays selectable. */
+   "Project completion mirror"): folded to seven lines when it is longer, with the Project chip under it. The fold
+   (project_answer.js marks its clipped body) ends on the shared edge, two lines deep, in every state. */
 .chat-bubble.project-answer {
     --project-reference-backing: var(--voice-ouroboros);
     --project-answer-line: calc(var(--type-section) * var(--line-body));
     --project-answer-lines: 7;
     --project-answer-fold: calc(var(--project-answer-line) * var(--project-answer-lines));
-    --project-answer-tail: calc(var(--project-answer-line) * 2);
 }
 .chat-bubble.project-answer > .message { max-height: var(--project-answer-fold); overflow: hidden; }
-.chat-bubble.project-answer.is-folded > .message {
-    max-height: calc(var(--project-answer-fold) + var(--project-answer-tail));
-    margin-bottom: var(--project-answer-compensation, 0px);
-    -webkit-mask-image: linear-gradient(to bottom, black 0, black calc(var(--project-answer-line) * 25 / 6), rgba(0,0,0,.94) calc(var(--project-answer-line) * 31 / 6), rgba(0,0,0,.65) calc(var(--project-answer-line) * 6), rgba(0,0,0,.25) var(--project-answer-fold), rgba(0,0,0,.07) calc(var(--project-answer-line) * 95 / 12), transparent calc(var(--project-answer-line) * 9));
-    mask-image: linear-gradient(to bottom, black 0, black calc(var(--project-answer-line) * 25 / 6), rgba(0,0,0,.94) calc(var(--project-answer-line) * 31 / 6), rgba(0,0,0,.65) calc(var(--project-answer-line) * 6), rgba(0,0,0,.25) var(--project-answer-fold), rgba(0,0,0,.07) calc(var(--project-answer-line) * 95 / 12), transparent calc(var(--project-answer-line) * 9));
-}
-/* Width changes defer measurement: retain the CSS-only footprint until the feed settles. */
-[data-resizing] .chat-bubble.project-answer.is-folded > .message {
-    max-height: var(--project-answer-fold);
-    margin-bottom: 0;
-    -webkit-mask-image: linear-gradient(180deg, black 60%, transparent 100%);
-    mask-image: linear-gradient(180deg, black 60%, transparent 100%);
-}
-/* A limitation and its disclosure own the space before Project; never paint over their words. */
-.chat-bubble.project-answer:has(> .project-answer-limitation, > .project-ending-details) { --project-answer-tail: 0px; }
-.chat-bubble.project-answer.is-folded > .message:has(~ .project-answer-limitation, ~ .project-ending-details) {
-    -webkit-mask-image: linear-gradient(180deg, black 60%, transparent 100%);
-    mask-image: linear-gradient(180deg, black 60%, transparent 100%);
-}
+.chat-bubble.project-answer > .message[data-fold-clipped] { --scroll-fade-edge: calc(var(--project-answer-line) * 2); }
 .chat-bubble.project-answer > :is(.system-message-actions, .msg-time) { position: relative; z-index: 1; }
 /* Reply, actions and Copy stand above both, so a finger's whole reach around each stays the control's. */
 .chat-bubble:is(.project-answer, .system) > .chat-message-actions { z-index: 2; }

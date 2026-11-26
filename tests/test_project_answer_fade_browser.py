@@ -96,7 +96,7 @@ def capture(page, bubble, path):
     ("webkit", "light", 390), ("webkit", "dark", 390),
     ("chromium", "light", 1100), ("chromium", "dark", 1100),
 ], indirect=True)
-def test_extended_fade_keeps_main_mirror_footprint_and_actions(project_chat, tmp_path):
+def test_folded_fade_keeps_main_mirror_footprint_and_actions(project_chat, tmp_path):
     chat = project_chat
     page, expect = chat["page"], chat["expect"]
     page.set_viewport_size({"width": chat["width"], "height": 750})
@@ -105,12 +105,14 @@ def test_extended_fade_keeps_main_mirror_footprint_and_actions(project_chat, tmp
     facts = {}
     bubble = emit(page, "fade-long", ANSWER)
     facts["long"] = stable_footprint(page, bubble)
-    assert facts["long"]["message"]["height"] == 216
-    assert facts["long"]["margin"] == -48
+    # Seven lines, the last two fading on the shared edge (ui.css [data-fold-clipped]); nothing paints past the fold.
+    assert facts["long"]["message"]["height"] == 168
+    assert facts["long"]["margin"] == 0
     assert facts["long"]["folded"]
+    assert facts["long"]["mask"].startswith("linear-gradient(") and "rgba(0, 0, 0, 0.5)" in facts["long"]["mask"], facts["long"]
     assert bubble.locator('.message a').get_attribute('tabindex') == '-1'
     capture(page, bubble, evidence / f"{stem}.png")
-    # Real controls retain the complete answer and Project destination, even below the painted tail.
+    # Real controls retain the complete answer and Project destination.
     bubble.locator('.chat-message-copy').click()
     assert page.evaluate('copiedText') == ANSWER
     bubble.locator('.chat-message-reply').click()
@@ -156,8 +158,8 @@ def test_extended_fade_keeps_main_mirror_footprint_and_actions(project_chat, tmp
                 assert bubble.evaluate(GEOMETRY) == expected
             facts[f"{scale}px-{lines}-lines"] = expected
 
-    # During width movement the production owner defers JS measurement. The CSS fallback
-    # must preserve the old geometry BEFORE a settle refresh, including a stale long-tail margin.
+    # During width movement the production owner defers JS measurement: the fold and its fade keep the geometry
+    # BEFORE a settle refresh.
     bubble.locator('.message').evaluate("m=>{m.textContent='A visible result with enough words to wrap. '.repeat(12);m.style.whiteSpace='normal';}")
     refresh(page, bubble)
     bubble.evaluate("b=>b.parentElement.setAttribute('data-resizing','')")
@@ -178,6 +180,7 @@ def test_extended_fade_keeps_main_mirror_footprint_and_actions(project_chat, tmp
     facts["warning"] = stable_footprint(page, warning)
     assert facts["warning"]["message"]["height"] == 168
     assert facts["warning"]["margin"] == 0
+    assert facts["warning"]["mask"] == facts["long"]["mask"], 'a limitation under the answer changes nothing in its fade'
     assert warning.locator('.project-answer-limitation').bounding_box()['y'] >= warning.locator('.message').bounding_box()['y'] + 168
     warning.locator('.project-ending-details > summary').click()
     expect(warning.locator('.project-ending-details > p')).to_be_visible()
