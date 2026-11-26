@@ -1,10 +1,10 @@
 # 1. High-Level Architecture
 
-My runtime topology across desktop launcher (`launcher.py`), Starlette/uvicorn server (`server.py`), build-free SPA (`web/`), CLI/headless entry (`ouroboros.cli`), Android host, and `~/Ouroboros/` data layout. To locate any Python or `web/` module live without a stale static tree, I call `query_code(op="architecture", query="module_map <D01..D20|prefix|domains>")` or inspect `ouroboros/domains.toml`. The server admits, routes, observes, and kills under one `state/server.lock`; every focus of my mind runs in a custodied worker, and `devtools/` stays outside runtime imports.
+My runtime topology across desktop launcher (`launcher.py`), Starlette/uvicorn server (`server.py`), build-free SPA (`web/`), CLI/headless entry (`ouroboros.cli`), Android host, and `~/Ouroboros/` data layout. To locate any Python or `web/` module live without a stale static tree, I call `query_code(op="architecture", query="module_map <domain|prefix|domains>", root="system_repo")` or inspect `ouroboros/domains.toml`. The server admits, routes, observes, and kills under one `state/server.lock`; every focus of my mind runs in a custodied worker, and `devtools/` stays outside runtime imports.
 
 ### Live module map (projected from source)
 
-The former hand-maintained module tree is retired: `ouroboros/domains.toml` is the single canonical assignment of every tracked runtime Python module to domains `D01`–`D20` and maps each domain (plus `web/`, `prompts/`, `skills/`, `android/`, `scripts/`) to its owning manuals under `[references]`. Query live module summaries (AST docstrings and `web/` header comments) with `query_code(op="architecture", query="module_map <domain|prefix|domains>")` or `python scripts/check_domains.py --map`. Launcher recovery still requires an importable shell (§2).
+The former hand-maintained module tree is retired: `ouroboros/domains.toml` is the single canonical assignment of every tracked runtime Python module to its domain and maps each domain (plus `web/`, `prompts/`, `skills/`, `android/`, `scripts/`) to its owning manuals under `[references]`. Query live module summaries (AST docstrings and `web/` header comments) with `query_code(op="architecture", query="module_map <domain|prefix|domains>", root="system_repo")` or `python scripts/check_domains.py --map`. Launcher recovery still requires an importable shell (§2).
 
 ### Code navigation
 

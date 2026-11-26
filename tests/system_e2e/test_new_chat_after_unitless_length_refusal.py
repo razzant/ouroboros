@@ -41,19 +41,18 @@ tool-less one that leads the first send or a differently capped retry included. 
 or the room's memory is not the owner's message. ``check_wire`` reads every room of every scenario that way, the
 negative control and stage R included.
 
-THREE FIXED LINES, one and the same number for baseline and candidate, each placed from what this stand has actually
-measured on the wire (the R1 review records of 2026-11-22, quoted beside each line below):
+THREE FIXED LINES, each placed from what this stand measures on the wire under the unified resident Body Map +
+Reference Atlas (replacing the retired 600 KB whole-books-to-maps rung):
 
-* ``enough`` (E) = 528,000, measured refused first sends 558,651 / 558,751 / 567,688 / 574,354 / 595,110 above it
-  and the measured accepted forms 430,172 / 436,294 (the cold walk) and 498,025 (the hinted first send) under it:
-  ~30,000 mock tokens of room on both sides. The memory carrier's own legal smaller form brings the request under
-  the line; the books stay whole.
-* ``maps`` (M) = 310,000, with the refused smaller Max form measured at 415,652 / 420,834 / 420,935 (105,000+ above)
-  and the maps rung measured at 157,140 / 162,498 (147,000+ below): both whole books and the smaller memory form are
-  refused; only the books' maps pass.
-* ``none`` (N) = 100,000, below every measured form including the maps rung (157,140, i.e. 57,000+ above): nothing
-  legal passes, so nothing may be dropped to pass. Every room still sends, is refused and ends its turn ``failed``
-  (``agent_task_pipeline._durable_terminal_status``: the host's terminal for a size refusal no recovery undid).
+* ``enough`` (E) = 240,000, between the measured refused full-Max first send (~310k) and the folded-memory Max form
+  (~172k): ~67k+ mock tokens of room on both sides. The memory carrier's own legal smaller form brings the request
+  under the line while keeping the Body Map and full toolset intact; A2 starts folded and passes in one POST.
+* ``standing`` (S) = 120,000, between the refused folded-memory Max form (~172k) and Nano's standing toolset (~73k):
+  both full Max and folded Max are refused; Nano's standing toolset rescues the turn over HTTP while keeping the
+  resident Body Map, BIBLE and owner words intact. A2 starts folded (skipping full Max) and steps to standing tools.
+* ``none`` (N) = 40,000, strictly below Nano's smallest legal standing-tool form (~73k, 30k+ clearance): nothing
+  legal passes, so nothing mandatory (BIBLE, owner words, Body Map, standing tools) may be dropped to pass. Every room
+  still sends, walks down to the standing toolset, is refused and ends its turn ``failed``.
 
 ``CLEARANCE`` is asserted from the recorded sizes of every scenario's own run: at a scenario's FIXED line, no request
 that belongs to a turn may sit inside 10,000 mock tokens of it (stage R's line is derived from the run, so it is read
@@ -161,28 +160,20 @@ ZAI_REFUSAL = {"error": {"code": "1261", "message": "Prompt too long", "type": "
 CHAT = {"A1": 7101, "A2": 7102, "B1": 7103, "A3": 7104}
 #: Which rooms each scenario speaks, in order. A3 is the negative control's recovery stage only, and it is the LAST
 #: room of every scenario, so the control key's evidence is always taken before anything moves.
-ROOMS = {"enough": ("A1", "A2", "B1"), "maps": ("A1", "A2", "B1"), "none": ("A1", "A2", "B1", "A3")}
+ROOMS = {"enough": ("A1", "A2", "B1"), "standing": ("A1", "A2", "B1"), "none": ("A1", "A2", "B1", "A3")}
 #: The synthetic transport key each room's own sends must ride, asserted after ``partition`` chose them.
 TRANSPORT_KEY = {"A1": KEY_A, "A2": KEY_A, "B1": KEY_B, "A3": KEY_A}
 #: The owner's words: a room's short marker (``room_marker``) opens them and the synthetic title below pads them. The
 #: recovery stage speaks them by the same rule, its own line read from what THIS run refused.
 BASE_WORDS = "Привет! Ты на связи? Проверь контекст, пожалуйста."
 TITLE_UNIT = " Синтетический заголовок комнаты номер 3896."  # 46 bytes of padding per unit, nothing else differs
-# A1 and B1 carry a long synthetic title (~9 KB) in every scenario. A2's title is set per scenario on purpose: as long
-# as A1's in E, where the only thing that can make its accepted first send smaller is the memory's ordinary telling;
-# a short one in M, where the smaller Max form A2 could send must stay a hair (~2 %) under A1's refused one and still
-# over the line, which a bare "smaller than what was refused" check would take for a step. A1's own exchange enters
-# A2's memory, so in M only a title gap well past that growth makes A2's form smaller than A1's. A3 speaks A2's
-# weights: the two chats differ only in what the account has already been shown, which is the whole point of stage R.
 TITLE_UNITS = {"enough": {"A1": 200, "A2": 200, "B1": 200, "A3": 200},
-               "maps": {"A1": 200, "A2": 10, "B1": 200, "A3": 10},
+               "standing": {"A1": 200, "A2": 200, "B1": 200, "A3": 200},
                "none": {"A1": 200, "A2": 10, "B1": 200, "A3": 10}}
 BIBLE_KEPT = "owed on body changes"  # a BIBLE.md line: mandatory text, never folded
-CHAPTER_BODY = "sweep_cancel_intents"  # whole-chapter text (ARCHITECTURE 05): present in the whole books, gone in their maps
-MAPS_MARK = "docs/architecture/05-supervisor-loop.md"  # the maps name each chapter's physical file
-#: A line only the Development book carries (docs/development/05) — the witness tests/test_context_refusal_passes.py
-#: reads; "Pragmatic SOLID" also stands in BIBLE.md, so it could not tell the book from the mandatory text. Recorded and
-#: printed, never asserted (see the module docstring).
+BODY_MAP_HEADING = "## Body"  # resident Body Map section heading (detailed or compact parts list)
+BODY_MAP_MARK = "docs/architecture/05-supervisor-loop.md"  # permanent chapter address carried in the Body Map
+#: A line only the Development book carries (docs/development/05) — recorded and printed, never asserted.
 DEV_MARK = "Hermetic preflight isolation"
 #: The documented post-turn Light draft opens with one of these two sentences, verbatim from ouroboros/memory_fallback.py
 #: (``_PAGE``, line 65; ``_PART``, line 70), and is a lone tool-less user message. It is the ONLY kind of request a
@@ -194,13 +185,10 @@ LIGHT_DRAFT_OPENINGS = ("You are a helper drafting one memory page for Ouroboros
 LEAD_UNIT = "Room {room} closed its arc: the work it shipped is told here, one follow-up is still open."
 BODY_FILLER = "What this room settled, and why it matters to the rest of the work. "  # as tests/_stand.lay_rooms
 STORY_ROOMS, STORY_TOKENS = 20, 100_000  # synthetic story: its weight is what the memory carrier can give back
-#: Fixed lines, priced from the measured forms quoted in the module docstring, one and the same number for baseline
-#: and candidate. E moved from 500,000 to 528,000: the old line sat 1,975 mock tokens under the accepted hinted
-#: first send (498,025) this scenario exists to prove, and 30,000+ of measured room on each side is what the
-#: separation check below can then actually stand behind.
-THRESHOLD = {"enough": 528_000, "maps": 310_000, "none": 100_000}
+#: Fixed lines, priced from the measured forms under the unified resident Body Map + Reference Atlas:
+#: full Max ~310k, folded Max ~172k, Nano standing toolset ~73k.
+THRESHOLD = {"enough": 240_000, "standing": 120_000, "none": 40_000}
 CLEARANCE = 10_000  # no turn's request may sit inside this of its scenario's line; asserted from this run's sizes
-MARGIN = 50_000  # M's trap: the refused smaller Max form must sit this far over the line (measured: 105,000+)
 #: Stage R's line: the size this account's own route last put on the wire, plus the spread the same stand measured
 #: between two new chats' first sends in ONE run (558,651 against 574,354: 15,703 mock tokens) taken twice over, so
 #: the guard cannot cry wolf on noise while a re-inflated story (~133,000 mock tokens here) still cannot pass it.
@@ -417,12 +405,12 @@ def describe(rows: list[dict]) -> str:
 
 def mark(row: dict, words: str) -> dict:
     """The carrier's own states read from the bytes the model was given: bodies still whole (the needle), the authored
-    leads a telling keeps, the books beside them, and the mandatory text named apart. ``owner_words`` is the room's
-    WHOLE words inside a user-role input: a copy elsewhere in the request does not count."""
+    leads a telling keeps, the resident Body Map beside them, and the mandatory text named apart. ``owner_words`` is
+    the room's WHOLE words inside a user-role input: a copy elsewhere in the request does not count."""
     text = row["text"]
     return {**{k: v for k, v in row.items() if k not in ("text", "user_texts")},
             "owner_words": any(words in part for part in row["user_texts"]),
-            "chapter_body": CHAPTER_BODY in text, "maps": MAPS_MARK in text, "bible": BIBLE_KEPT in text,
+            "body_map": BODY_MAP_HEADING in text and BODY_MAP_MARK in text, "bible": BIBLE_KEPT in text,
             "dev": DEV_MARK in text,
             "bodies": sum(room_needle(FIRST_ROOM + i) in text for i in range(STORY_ROOMS)),
             "leads": sum(page_lead(FIRST_ROOM + i) in text for i in range(STORY_ROOMS))}
@@ -480,7 +468,7 @@ def table(result: dict) -> str:
         for n, row in enumerate(got["posts"], 1):
             lines.append(
                 f"  #{n} seq={row['seq']} http={row['status']} cap={row['max_tokens']} mock_tokens={row['n_prompt']} bytes={row['raw_bytes']}"
-                f" books={'whole' if row['chapter_body'] else 'maps' if row['maps'] else 'none'}"
+                f" body_map={row['body_map']}"
                 f" tools={row['tools']} bible={row['bible']} words={row['owner_words']}"
                 f" story_bodies={row['bodies']} story_leads={row['leads']} key={'A' if row['auth'] == 'Bearer ' + KEY_A else 'B' if row['auth'] == 'Bearer ' + KEY_B else '?'}"
                 f" dev={row['dev']} path={row['path']!r} model={row['model']!r}")
@@ -814,69 +802,61 @@ def _ledger_selfcheck() -> None:
                                               "posts": [{"status": last}]}}}, "A2", "")
 
 
-def cold_walk_and_control(result: dict, *, accepted_books: str) -> None:
-    """True on every tree, and only about LEGACY recovery: A1 meets the refusal with nothing learned, B1 is an
-    unaffected control on another key of the same runtime, the upstream HTTP really decided, and nothing mandatory
-    was given up or bought with a shorter answer. Nothing here asks the post-refusal emergency walk to keep the
-    authored tellings: this stand measures it giving all 20 up on both trees (see the module docstring)."""
+def cold_walk_and_control(result: dict, *, accepted_tools: str) -> None:
+    """Cold recovery and unaffected control: A1 meets the refusal with nothing learned, B1 is an unaffected control
+    on another key of the same runtime, the upstream HTTP really decided, and mandatory text (BIBLE, owner words,
+    resident Body Map) survives every send without changing the reply cap."""
     a1, a2, b1 = (result["rooms"][room]["posts"] for room in ("A1", "A2", "B1"))
     evidence = check_wire(result)  # owner's whole words, schemas and one reply cap on EVERY send of every room
     for room, posts, key in (("A1", a1, KEY_A), ("A2", a2, KEY_A), ("B1", b1, KEY_B)):
         got = result["rooms"][room]
         assert got["status"] == "completed" and ANSWER in got["text"], f"{room}: no usable answer\n{evidence}"
         assert all(row["auth"] == f"Bearer {key}" for row in posts), f"{room}: wrong transport key\n{evidence}"
-        assert all(row["bible"] for row in posts), f"{room}: mandatory text lost\n{evidence}"
-        # The upstream really decided: the 400 is the model's own answer to a request at or over the line, the 200 its
-        # answer to one under it, so a pass cannot come from a skipped send.
+        assert all(row["bible"] and row["body_map"] for row in posts), f"{room}: mandatory text or Body Map lost\n{evidence}"
         for row in posts:
             over = row["n_prompt"] >= result["threshold"]
             assert row["status"] == (400 if over else 200), f"{room}: HTTP does not follow the line\n{evidence}"
-            # The pricing claim, checked against this run rather than asserted from a comment: a line that sits on
-            # top of a form this stand produces is a fixture defect, and it must say so on both trees.
             assert abs(row["n_prompt"] - result["threshold"]) >= CLEARANCE, (
                 f"{room}: a turn's request sits within {CLEARANCE} of the line {result['threshold']}; "
                 f"the threshold must move with the measured forms\n{evidence}")
     # A1: the very first full Max request of the route is refused, then the walk is accepted in the named form.
-    assert a1[0]["status"] == 400 and a1[0]["chapter_body"] and not a1[0]["maps"], evidence
-    assert a1[-1]["status"] == 200 and a1[-1]["n_prompt"] < a1[0]["n_prompt"], evidence
-    assert (a1[-1]["chapter_body"], a1[-1]["maps"]) == ((True, False) if accepted_books == "whole" else (False, True)), evidence
-    # B1: another account has taught the route nothing: it sends the same class of first request as A1's, then walks.
-    assert b1[0]["status"] == 400 and b1[0]["chapter_body"] and not b1[0]["maps"], f"B1 changed class\n{evidence}"
+    assert a1[0]["status"] == 400 and a1[0]["body_map"], evidence
+    assert a1[-1]["status"] == 200 and a1[-1]["n_prompt"] < a1[0]["n_prompt"] and a1[-1]["body_map"], evidence
+    if accepted_tools == "full":
+        assert a1[-1]["tools"] == a1[0]["tools"] and b1[-1]["tools"] == b1[0]["tools"], evidence
+    else:
+        assert a1[-1]["tools"] < a1[0]["tools"] and b1[-1]["tools"] < b1[0]["tools"], evidence
+    # B1: another account has taught the route nothing: it sends the same full Max first request as A1, then walks.
+    assert b1[0]["status"] == 400 and b1[0]["body_map"] and b1[0]["tools"] == a1[0]["tools"], f"B1 changed class\n{evidence}"
     assert b1[0]["bodies"] == a1[0]["bodies"] == STORY_ROOMS, f"B1's first send was already folded\n{evidence}"
     assert a1[0]["raw_bytes"] <= b1[0]["raw_bytes"] < 1.1 * a1[0]["raw_bytes"], f"B1's first send is no full Max form\n{evidence}"
     assert b1[-1]["status"] == 200, evidence
     assert result["base_url"].startswith("http://127.0.0.1:"), evidence
-    # The refused first send really carried the whole carrier (every room's body, and with it its lead); and where the
-    # scenario NAMES the memory's own smaller form as the accepted rung (E: books still whole), a body has to have
-    # actually left. At the maps rung the books are the step, and the fit may hand a body back. What the recovery
-    # send leaves of the tellings is deliberately not claimed here: that is the hinted first send's promise.
     assert a1[0]["leads"] == a1[0]["bodies"] == STORY_ROOMS, f"A1's refused first send does not carry the whole carrier\n{evidence}"
-    if accepted_books == "whole":
+    if accepted_tools == "full":
         for room, posts in (("A1", a1), ("B1", b1)):
-            assert posts[-1]["bodies"] < STORY_ROOMS, f"{room}: no story body left the accepted whole-books send\n{evidence}"
+            assert posts[-1]["bodies"] < STORY_ROOMS, f"{room}: no story body left the accepted folded Max send\n{evidence}"
 
 
 def test_enough_cold_walk_and_control(scenario):
-    """E, any tree: the smaller memory form (books whole) is the first accepted rung of A1 and B1."""
-    cold_walk_and_control(scenario("enough"), accepted_books="whole")
+    """E: the smaller memory form (full toolset + Body Map intact) is the first accepted rung of A1 and B1."""
+    cold_walk_and_control(scenario("enough"), accepted_tools="full")
 
 
-def test_maps_cold_walk_and_control(scenario):
-    """M, any tree: whole books and the smaller memory form are both refused; the maps are A1's and B1's accepted rung."""
-    result = scenario("maps")
-    cold_walk_and_control(result, accepted_books="maps")
+def test_standing_cold_walk_and_control(scenario):
+    """S: full Max and folded Max are both refused; Nano standing toolset rescues A1 and B1 with Body Map intact."""
+    result = scenario("standing")
+    cold_walk_and_control(result, accepted_tools="standing")
     a1 = result["rooms"]["A1"]["posts"]
-    assert len(a1) >= 3 and a1[1]["status"] == 400 and a1[1]["chapter_body"] and a1[1]["n_prompt"] < a1[0]["n_prompt"], table(result)
+    assert len(a1) >= 3 and a1[1]["status"] == 400 and a1[1]["tools"] == a1[0]["tools"] and a1[1]["n_prompt"] < a1[0]["n_prompt"], table(result)
 
 
 def test_enough_candidate_a2_first_send_is_the_smaller_max_form(scenario):
-    """Candidate, E: A2's first POST is the memory's ordinary telling, accepted at once, books still whole."""
+    """Candidate, E: A2's first POST is the memory's ordinary telling, accepted at once with full tools and Body Map."""
     result = scenario("enough")
     a1, a2 = result["rooms"]["A1"]["posts"], result["rooms"]["A2"]["posts"]
     evidence = check_wire(result)
     assert_a2_single_send(result, evidence, "the route hint did not shape its first send")
-    # A2 is asked here with words as long as A1's: nothing it was told makes its send smaller, only the form the
-    # refusal taught the route to start with.
     assert len(owner_words("enough", "A2")) >= len(owner_words("enough", "A1")), (
         f"A2's words must not be the shorter ones in E\n{evidence}")
     first = a2[0]
@@ -886,72 +866,52 @@ def test_enough_candidate_a2_first_send_is_the_smaller_max_form(scenario):
     assert a1[0]["bodies"] == a1[0]["leads"] == STORY_ROOMS, f"A1's refused first is not the whole carrier\n{evidence}"
     assert first["bodies"] < a1[0]["bodies"], f"the memory's long bodies are still in A2's first send\n{evidence}"
     assert first["leads"] == STORY_ROOMS, f"A2's first send fell below the authored leads\n{evidence}"
-    assert first["chapter_body"] and not first["maps"], f"the books were demoted though the memory form sufficed\n{evidence}"
-    assert first["bible"] and first["owner_words"] and first["tools"], evidence
-    assert_answered(result, "A2", evidence)  # and that one accepted send ended the turn as an ordinary answer
+    assert first["body_map"] and first["tools"] == a1[0]["tools"], f"Body Map or full toolset lost when memory folding sufficed\n{evidence}"
+    assert first["bible"] and first["owner_words"], evidence
+    assert_answered(result, "A2", evidence)
 
 
-def test_maps_candidate_a2_first_send_is_the_maps(scenario):
-    """Candidate, M: A2's first POST is the books' maps at HTTP 200, not merely a request smaller than A1's refused one."""
-    result = scenario("maps")
+def test_standing_candidate_a2_folds_memory_then_steps_to_standing_tools(scenario):
+    """Candidate, S: A2 skips full Max by starting folded (20/20 leads + full tools), then rescues via standing tools."""
+    result = scenario("standing")
     a1, a2 = result["rooms"]["A1"]["posts"], result["rooms"]["A2"]["posts"]
     evidence = check_wire(result)
     line = result["threshold"]
-    assert len(owner_words("maps", "A2")) < len(owner_words("maps", "A1")), "A2's synthetic title must be the shorter one"
-    # The trap: A1's refused smaller Max form is far over the line, so a "formally smaller" form of A2 is no step.
-    assert a1[1]["status"] == 400 and a1[1]["chapter_body"] and a1[1]["n_prompt"] > line + MARGIN, evidence
-    if len(a2) > 1:  # the tree walked: A2's first retry is exactly the trap, a hair under A1's refused form and still refused
-        assert a2[1]["status"] == 400 and a2[1]["chapter_body"], evidence
-        assert line + MARGIN < a2[1]["n_prompt"] < a1[1]["n_prompt"] < 1.05 * a2[1]["n_prompt"], f"A2's retry is not the trap\n{evidence}"
-    assert_a2_single_send(result, evidence, "its first send was not the maps")
-    first = a2[0]
-    assert first["status"] == 200 and first["n_prompt"] < line - MARGIN, f"A2's first send was not admitted\n{evidence}"
-    assert first["maps"] and not first["chapter_body"], f"A2's first send is not the maps form\n{evidence}"
-    assert first["leads"] == STORY_ROOMS, f"the maps form fell below the memory's tellings\n{evidence}"
-    assert first["bible"] and first["owner_words"] and first["tools"], evidence
-    assert_answered(result, "A2", evidence)  # and that one accepted send ended the turn as an ordinary answer
+    assert a1[1]["status"] == 400 and a1[1]["n_prompt"] > line + CLEARANCE, evidence
+    first, last = a2[0], a2[-1]
+    assert first["status"] == 400 and first["raw_bytes"] < a1[0]["raw_bytes"], evidence
+    assert first["bodies"] < a1[0]["bodies"] and first["leads"] == STORY_ROOMS, f"A2 first send did not fold tellings cleanly\n{evidence}"
+    assert first["tools"] == a1[0]["tools"] and first["body_map"], evidence
+    assert last["status"] == 200 and last["n_prompt"] < line - CLEARANCE, f"A2 did not recover under standing tools\n{evidence}"
+    assert last["tools"] < first["tools"] and last["body_map"] and last["bible"] and last["owner_words"], evidence
+    assert_answered(result, "A2", evidence)
 
 
 def test_below_every_legal_form_nothing_mandatory_is_dropped_or_refused_unsent(scenario):
-    """Negative control, any tree: with no legal form under the line the BIBLE line, the owner's words and the books'
-    maps are never given up to look smaller, and one earlier refusal never makes the next chat skip the send.
-
-    A1 walks the whole ladder (the whole books, the smaller Max form, the maps) and every step is refused. A2 and B1 may
-    start lower on a tree that learned something, but each of them really sends at least one request over HTTP, keeps
-    its mandatory text in every request, keeps the authored tellings in its first send and never goes under A1's
-    smallest legal form (the maps)."""
+    """Negative control: below Nano's standing-toolset floor, BIBLE, owner words and Body Map are never dropped,
+    and an earlier refusal never makes the next chat skip sending."""
     result = scenario("none")
     a1, a2, b1 = (result["rooms"][room]["posts"] for room in ("A1", "A2", "B1"))
-    evidence = check_wire(result)  # N and A3 included: whole words, schemas and one reply cap on every refused send too
-    assert len(a1) >= 3 and a1[-1]["maps"] and not a1[-1]["chapter_body"], f"A1 did not reach the maps\n{evidence}"
+    evidence = check_wire(result)
+    assert len(a1) >= 3 and a1[-1]["tools"] < a1[0]["tools"] and a1[-1]["body_map"], f"A1 did not reach Nano standing tools\n{evidence}"
     smallest = min(row["n_prompt"] for row in a1)
     for room, posts in (("A1", a1), ("A2", a2), ("B1", b1)):
         assert posts, f"{room}: a refusal elsewhere made this chat send nothing\n{evidence}"
         assert all(row["status"] == 400 and row["n_prompt"] >= result["threshold"] for row in posts), evidence
         assert all(row["n_prompt"] - result["threshold"] >= CLEARANCE for row in posts), (
             f"{room}: a turn's send sits within {CLEARANCE} of the irreducible line\n{evidence}")
-        assert all(row["bible"] and row["owner_words"] and row["tools"] for row in posts), f"{room}: mandatory text lost\n{evidence}"
+        assert all(row["bible"] and row["owner_words"] and row["tools"] and row["body_map"] for row in posts), (
+            f"{room}: mandatory text or Body Map lost\n{evidence}")
         assert min(row["n_prompt"] for row in posts) >= smallest - 15_000, f"{room}: under the smallest legal form\n{evidence}"
-        assert min(posts, key=lambda row: row["n_prompt"])["maps"], f"{room}: the books left the request\n{evidence}"
-        # The hinted first send keeps what a telling is owed, before any retry: the promise the route makes about the
-        # NEXT chat is not allowed to buy its size by dropping the authored leads.
         assert posts[0]["leads"] == STORY_ROOMS, f"{room}: its FIRST send fell below the authored leads\n{evidence}"
-    # No request was ever admitted, so no room ends as the model's answer: the durable terminal of a size refusal that no
-    # recovery undid is the host's failed one. Nothing here asks which recovery stages a tree walked to get there.
     for room in ("A1", "A2", "B1"):
         assert terminal_class(result["rooms"][room]) == "failed", (
             f"{room}: the turn ended {terminal_class(result['rooms'][room])!r}, not failed\n{evidence}")
 
 
 def test_none_a3_after_the_line_recovers_does_not_inflate_its_first_send(scenario):
-    """Every tree: after every legal form was refused at N's line, stage R puts the account back on key A and raises
-    the line to what this account's own route last sent, plus the measured spread between two new chats' first sends.
-    A fresh chat must then be admitted by that FIRST send, and must not hand back the long story bodies it did not
-    need at that rung: a route that re-inflates a new chat's first send after its own smaller send was refused is
-    refused again by the same HTTP path, which is the failure this stage exists to catch.
-
-    Nothing is written beforehand, the line comes from this run's own refusals, and B1's evidence is taken before it
-    moves — the control's own first send is still the whole-books class refused at N's line."""
+    """After every legal form was refused at N's line, stage R puts the account back on key A and raises the line to
+    A2's refused first send plus RECOVERY_SPREAD. A3 must be admitted by that FIRST send without re-inflating bodies."""
     result = scenario("none")
     evidence = check_wire(result)
     a2 = result["rooms"]["A2"]["posts"]
@@ -959,10 +919,7 @@ def test_none_a3_after_the_line_recovers_does_not_inflate_its_first_send(scenari
     assert result["recovered_line"] > result["threshold"], f"stage R never moved the line\n{evidence}"
     assert a3, f"A3: the recovery stage sent nothing\n{evidence}"
     assert a2, f"A2 sent nothing, so stage R has no reference to read\n{evidence}"
-    # The account really came back: a stage whose line is read from key A is worthless if the send still rides key B.
     assert all(row["auth"] == f"Bearer {KEY_A}" for row in a3), f"A3 did not run on the restored key A\n{evidence}"
-    # The bound is the size THIS account's own route last put on the wire: A2's first send, refused at N's line. Not
-    # a rung A1's emergency walk happened to reach — the two are different claims about different things.
     last_sent = a2[0]["n_prompt"]
     assert result["refused_before_recovery"] == last_sent, (
         f"stage R's line is not read from the send it follows\n{evidence}")
@@ -975,10 +932,8 @@ def test_none_a3_after_the_line_recovers_does_not_inflate_its_first_send(scenari
         f"A3's first send carries more whole story bodies than the send this account's route itself just made "
         f"({a2[0]['bodies']} of {STORY_ROOMS} rooms still whole)\n{evidence}")
     assert first["leads"] == STORY_ROOMS, f"A3's first send fell below the authored leads\n{evidence}"
-    assert first["bible"] and first["owner_words"] and first["tools"], evidence
-    assert_answered(result, "A3", evidence)  # the admitted chat ended as an ordinary answer, not only with an HTTP 200
-    # The control is still the control: another key of the same runtime was refused its own whole-books first send at
-    # N's line, before stage R moved anything.
+    assert first["bible"] and first["owner_words"] and first["tools"] and first["body_map"], evidence
+    assert_answered(result, "A3", evidence)
     b1 = result["rooms"]["B1"]["posts"]
-    assert b1[0]["status"] == 400 and b1[0]["chapter_body"] and not b1[0]["maps"], f"B1's control changed\n{evidence}"
+    assert b1[0]["status"] == 400 and b1[0]["body_map"] and b1[0]["bodies"] == STORY_ROOMS, f"B1's control changed\n{evidence}"
     assert all(row["auth"] == f"Bearer {KEY_B}" for row in b1), f"B1's evidence was not all taken on key B\n{evidence}"

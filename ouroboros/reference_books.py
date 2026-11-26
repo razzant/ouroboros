@@ -557,7 +557,7 @@ def read_book_section(book: ReferenceBook, title: str) -> BookView:
 #   Body Map + Reference Atlas obey strict pairwise `<= +0 B` vs contribution base.
 # - Tier B (pulled engineering manuals): book chapters have no whole-book shrink-only cap;
 #   each chapter stays within one default `read_file` (2,000 lines / 80,000 chars) and splits
-#   by subject rather than deleting rationale. Standalone >80 KB specs report factual deltas.
+#   by subject rather than deleting rationale. Over-band standalone specs (>80 KB) carry shrink-only debt.
 
 BOOK_GROWTH_RULE = (
     "Always-resident texts — BIBLE.md, the prompts (prompts/*.md as one text), and the rendered "

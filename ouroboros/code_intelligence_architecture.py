@@ -775,7 +775,7 @@ def module_map_rows(
             inv = inventory() if callable(inventory) else inventory
             inv_files = getattr(inv, "files", None) or ()
             files = sorted(
-                rel for rel in (str(getattr(f, "relpath", f)).replace("\\", "/") for f in inv_files)
+                rel for rel in (str(getattr(f, "path", getattr(f, "relpath", f))).replace("\\", "/") for f in inv_files)
                 if (rel == prefix.rstrip("/") or rel.startswith(prefix.rstrip("/") + "/"))
                 and rel.endswith((".js", ".mjs", ".ts"))
                 and "/node_modules/" not in f"/{rel}/"

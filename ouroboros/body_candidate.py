@@ -1352,7 +1352,8 @@ def own_body_reference_note(ctx: Any, target: Any, opened_root: str, *, active_r
         if body_root is None:
             return ""
         rel = physical.relative_to(body_root).as_posix()
-        if rel.startswith(("docs/", "tests/")):
+        if not (rel.startswith(("ouroboros/", "supervisor/", "web/", "prompts/", "scripts/", "desktop/", "skills/", "android/"))
+                or rel in ("server.py", "launcher.py", "colab_launcher.py")):
             return ""
         refs = resolve_body_references(body_root, [rel], include_mentions=True)
         manuals = refs.get("manuals") or ()

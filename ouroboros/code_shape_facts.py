@@ -441,17 +441,29 @@ def body_ownership_pulse(
     code_paths = [p for p in shown if not str(p).startswith(("docs/", "tests/"))]
     if not code_paths:
         return ""
-    reader = source_reader(root, source="index" if staged else "worktree")
+    diff_universe = shown if all_changed is None else all_changed
+    changed_set = {str(p).replace("\\", "/").removeprefix("./") for p in diff_universe}
+    idx_reader = source_reader(root, source="index") if staged else None
+
+    def _fast_staged_reader(rel: str) -> bytes:
+        norm_rel = str(rel).replace("\\", "/").removeprefix("./")
+        if idx_reader is not None and norm_rel in changed_set:
+            return idx_reader(norm_rel)
+        return (root / norm_rel).read_bytes()
+
+    reader = _fast_staged_reader if (staged and any(
+        p == "ouroboros/domains.toml" or p.startswith(("docs/architecture/", "docs/development/"))
+        for p in changed_set
+    )) else None
     refs = resolve_body_references(root, code_paths, read_bytes=reader, include_mentions=True)
     manuals = refs.get("manuals") or ()
     if not manuals:
         return ""
-    diff_universe = shown if all_changed is None else all_changed
-    changed_set = {str(p).replace("\\", "/").removeprefix("./") for p in diff_universe}
     manual_tags = [f"{m} ({'touched' if m in changed_set else 'untouched in diff'})" for m in manuals]
     matched_invariants: list[str] = []
     try:
-        inv_text = reader("docs/architecture/10-key-invariants.md").decode("utf-8", errors="replace")
+        inv_bytes = (_fast_staged_reader if staged else (lambda p: (root / p).read_bytes()))("docs/architecture/10-key-invariants.md")
+        inv_text = inv_bytes.decode("utf-8", errors="replace")
         exact_tokens: set[str] = set()
         qualified_stems: set[str] = set()
         for p in code_paths:
@@ -533,3 +545,24 @@ def removed_governance_prose_pulse(
         if len(removed) > cap else ""
     )
     return f"Removed governance prose lines ({len(removed)} not relocated verbatim):\n" + "\n".join(sample) + more
+
+
+def diff_pulse_tail_parts(
+    root: pathlib.Path,
+    base: str,
+    staged: bool,
+    shown: list[str],
+    change_texts_fn: Callable[..., tuple[dict[str, str | None], dict[str, str | None]]],
+    all_changed: Iterable[str] | None,
+    tail_question: str,
+) -> tuple[str, ...]:
+    """Assemble diagnostic diff_pulse tail lines (ownership, removed governance prose, book balance, prompt)."""
+    from ouroboros.reference_books import book_balance_note
+
+    diff_paths = shown if all_changed is None else list(all_changed)
+    return (
+        body_ownership_pulse(root, shown, staged, all_changed=diff_paths),
+        removed_governance_prose_pulse(root, base, staged, shown, change_texts_fn, all_changed=diff_paths),
+        book_balance_note(root, shown, source="index" if staged else "worktree"),
+        tail_question,
+    )

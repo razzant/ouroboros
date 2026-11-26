@@ -8,7 +8,9 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
 def _git(repo: pathlib.Path, *args: str) -> str:
-    return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    return subprocess.run(
+        ["git", *args], cwd=repo, check=True, capture_output=True, text=True, encoding="utf-8",
+    ).stdout.strip()
 
 
 def test_unified_body_map_is_byte_identical_across_modes_and_cache_invariant():
@@ -547,3 +549,211 @@ def test_bug_five_real_registry_schedule_subagent_and_optional_dev_isolation(tmp
         None, None,
     )
     assert any("DEVELOPMENT.md" in err for err in core_req.reference_book_errors)
+
+
+def test_r2_query_code_web_module_map_and_contact_one_metadata_quiet(tmp_path):
+    from ouroboros.code_intelligence import CodeInventory, FileFact
+    from ouroboros.code_intelligence_architecture import architecture_fact_rows
+    from ouroboros.tools.core_file_tools import _read_file
+    from ouroboros.tools.registry import ToolContext
+
+    # R2-1: real CodeInventory([FileFact(path=...)]) yields live JS/TS module_map rows.
+    inv = CodeInventory(
+        schema_version=1,
+        repo_root=str(REPO),
+        git_head="HEAD",
+        created_at="2026-11-26T00:00:00Z",
+        files=[FileFact(path="web/modules/card_model.js", sha256="a", size=100, language="javascript", token_estimate=25)],
+        coverage={},
+    )
+    rows = architecture_fact_rows(REPO, "module_map web/modules/", inventory=lambda: inv)
+    assert rows and "(1 JS/TS modules)" in rows[0]
+    assert any(r.startswith("web/modules/card_model.js — ") for r in rows[1:])
+
+    # Contact #1 stays quiet on governing/administrative root files (BIBLE.md, VERSION, README.md).
+    ctx = ToolContext(repo_dir=REPO, drive_root=tmp_path / "data", task_id="t-meta")
+    for meta_path in ("BIBLE.md", "VERSION", "README.md"):
+        assert "[Body manual:" not in _read_file(ctx, meta_path, root="system_repo", max_lines=5)
+
+
+def test_r2_retrieving_brief_distinct_roots_broken_sibling_and_candidate_new_module(tmp_path):
+    from ouroboros.tools.governance_context import (
+        BODY_INVARIANTS_CHAPTER,
+        BODY_LAYER,
+        PACKET_DELIVERY,
+        RETRIEVING_DELIVERY,
+        governance_context,
+    )
+    from ouroboros.tools.review_brief_coupling import BriefInputs, build_retrieving_brief
+
+    # R2-5: broken sibling chapter in Architecture still delivers intact 10-key-invariants.md.
+    broken = tmp_path / "broken_gov"
+    (broken / "docs/architecture").mkdir(parents=True)
+    (broken / "docs/ARCHITECTURE.md").write_text(
+        "# Map\n\nIntro.\n\n## Chapters\n\n- [1. Missing](architecture/01-missing.md)\n"
+        "- [10. Invariants](architecture/10-key-invariants.md)\n",
+        encoding="utf-8",
+    )
+    (broken / "docs/architecture/10-key-invariants.md").write_text(
+        "# 10. Key Invariants\n\nLead.\n\n### 10.2 Closed roads\n\n- Keep road closed.\n",
+        encoding="utf-8",
+    )
+    pkt_broken = governance_context(
+        broken, surface="commit", touched_paths=["ouroboros/review.py"],
+        usable_window_tokens=128_000, delivery=PACKET_DELIVERY, layer=BODY_LAYER,
+    )
+    assert BODY_INVARIANTS_CHAPTER in pkt_broken.inline_whole_documents
+    ret_broken = governance_context(
+        broken, surface="commit", touched_paths=["ouroboros/review.py"],
+        usable_window_tokens=128_000, delivery=RETRIEVING_DELIVERY, layer=BODY_LAYER,
+    )
+    assert any(r["path"] == BODY_INVARIANTS_CHAPTER and r["disposition"] == "required" for r in ret_broken.manifest)
+
+    # R2-2: isolated candidate modifying 10-key-invariants.md gets system_repo row (native) and materialized
+    # review-governance artifact (delegated) with exact gov_root SHA.
+    cand = tmp_path / "cand"
+    (cand / "docs/architecture").mkdir(parents=True)
+    (cand / "ouroboros").mkdir(parents=True)
+    (cand / "docs/architecture/10-key-invariants.md").write_text(
+        "# 10. Key Invariants\n\nCANDIDATE_MODIFIED_COPY\n", encoding="utf-8",
+    )
+    (cand / "ouroboros/domains.toml").write_text(
+        (REPO / "ouroboros/domains.toml").read_text(encoding="utf-8").replace(
+            "[modules]\n", '[modules]\n"ouroboros/brand_new_r2.py" = "D06"\n', 1,
+        ),
+        encoding="utf-8",
+    )
+    (cand / "ouroboros/brand_new_r2.py").write_text('"""Brand new candidate module lead."""\nX = 1\n', encoding="utf-8")
+    _git(cand, "init", "-q")
+    _git(cand, "add", "-A")
+    _git(cand, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+
+    src_root = tmp_path / "sources"
+    native_brief = BriefInputs(
+        checklist_section="chk", governance_repo_dir=REPO,
+        touched_paths=("docs/architecture/10-key-invariants.md",), required_sources=[],
+        delegated=False, source_root=str(src_root), task_id="t-nat",
+    )
+    _, nat_manifest = build_retrieving_brief(cand, native_brief)
+    nat_gov = [r for r in nat_manifest["native_required_sources"] if r.get("disposition") == "governance_required"]
+    assert len(nat_gov) == 1 and nat_gov[0]["root"] == "system_repo" and nat_gov[0]["path"] == BODY_INVARIANTS_CHAPTER
+
+    del_brief = BriefInputs(
+        checklist_section="chk", governance_repo_dir=REPO,
+        touched_paths=("docs/architecture/10-key-invariants.md",), required_sources=[],
+        delegated=True, source_root=str(src_root), task_id="t-del",
+    )
+    _, del_manifest = build_retrieving_brief(cand, del_brief)
+    del_gov = [r for r in del_manifest["native_required_sources"] if r.get("disposition") == "governance_required"]
+    assert len(del_gov) == 1 and del_gov[0].get("governance_of") == BODY_INVARIANTS_CHAPTER
+    assert del_gov[0].get("root") == "session_root"
+    assert str(del_gov[0].get("path") or "").startswith(".review-drive/t-del/")
+    assert del_manifest["native_data_root"] == str(src_root)
+
+    # R2-3: candidate-only brand-new module still produces affected-domain module map in packet seats.
+    pkt_new = governance_context(
+        REPO, surface="commit", touched_paths=["ouroboros/brand_new_r2.py"],
+        usable_window_tokens=200_000, delivery=PACKET_DELIVERY, layer=BODY_LAYER, module_map_root=cand,
+    )
+    dom_sec = next(text for title, text in pkt_new.inline_sections if "Affected domain module map" in title)
+    assert "ouroboros/brand_new_r2.py — Brand new candidate module lead." in dom_sec
+
+
+def test_r2_nano_continuation_preserves_compact_body_map_and_telling_vs_schemas(tmp_path):
+    from ouroboros import context_fit, held_notes, memory_floor
+    from tests import _memory_view_synthetic as syn
+    from tests.test_section_floor import _core, _host_facts, _plan, booked
+
+    # R2-4: stepped Nano compact Body Map survives continuation_capture -> restored_capture -> cold Nano fit.
+    import dataclasses
+    core = dataclasses.replace(
+        booked(_core(tmp_path, snapshot=syn.snapshot()), tmp_path, body="Mechanism text. " * 60),
+        development_required=True, development_md="## DEVELOPMENT.md\n\nHandbook body. " * 200,
+    )
+    roomy = _plan(core, 2_000_000, "nano")
+    stepped = memory_floor.step_book_map(roomy, "nano", maps=True)
+    assert stepped is not None
+    assert [r["section_id"] for r in _host_facts(stepped, "nano")] == ["body_map"]
+    cap = held_notes.continuation_capture(stepped, "nano")
+    assert cap and cap[held_notes.CAPTURE_KEY]["book_maps"]
+    restored = held_notes.restored_capture(cap)
+    cold = _plan(dataclasses.replace(core, held_note_resume=restored), 2_000_000, "nano")
+    assert [r["section_id"] for r in _host_facts(cold, "nano")] == ["body_map"]
+    assert "## Body (parts & addresses)" in cold.messages_for("nano")[0]["content"][0]["text"]
+
+    # R2-6: integrating Max start chooses Nano standing schemas to preserve 20/20 authored leads
+    # rather than erasing tellings to keep reloadable tool schemas.
+    from ouroboros.chronicle_lead import LEAD_RULE_VERSION
+    pages = [
+        dict(p, lead_rule=LEAD_RULE_VERSION, text=(f"Room {i} authored lead sentence " + "detail " * 25 + ". ") + syn.prose(2_500))
+        for i, p in enumerate(syn.pages(30, 2_500))
+    ]
+    snap = syn.snapshot(story=pages)
+    core_t = booked(_core(tmp_path / "t", snapshot=snap), tmp_path / "t", body="Short. ")
+    standing = [
+        {"type": "function", "function": {"name": name, "description": "Standing tool.", "parameters": {"type": "object", "properties": {}}}}
+        for name in ("read_file", "enable_tools", "memory_read", "finish_task")
+    ]
+    extra = [
+        {"type": "function", "function": {"name": f"extra_tool_{i}", "description": "Reloadable syntax. " * 220, "parameters": {"type": "object", "properties": {}}}}
+        for i in range(40)
+    ]
+    all_tools = standing + extra
+    empty_snap = syn.snapshot(story=[])
+    core_empty = booked(_core(tmp_path / "te", snapshot=empty_snap), tmp_path / "te", body="Short. ")
+    max_fixed = context_fit.estimate_context_prompt_tokens(
+        _plan(core_empty, 2_000_000, "max").messages_for("max"), all_tools,
+    )
+    nano_fixed = context_fit.estimate_context_prompt_tokens(
+        _plan(core_empty, 2_000_000, "nano").messages_for("nano"), standing,
+    )
+    assert max_fixed > nano_fixed + 10_000
+    telling_toks = memory_floor.tokens_of(memory_floor.mv.story_chars(snap, memory_floor.telling_level(snap)))
+    assert telling_toks > 1_000
+    # Window fits Max with emergency memory (no tellings), overflows Max with tellings, and fits Nano with tellings.
+    tight_win = max_fixed + 8_192 + max(400, telling_toks // 3)
+    tight_plan = context_fit.build_context_fit_plan(
+        None, core_t, {"id": "r2-6", "chat_id": 1}, preferred_mode="max",
+        route_resolver=lambda *_a, **_kw: (
+            {"provider": "test", "model": "fixture"},
+            type("Ev", (), {"route_fp": "r2-6", "status": "asserted", "stale": False, "window_tokens": tight_win})(),
+        ),
+        tool_schemas=all_tools,
+    )
+    assert tight_plan.initial_mode == "nano"
+    tight_level = memory_floor.kept_level(snap, tight_plan.projection("nano").memory_facts)
+    assert memory_floor.level_is_telling(snap, tight_level)
+
+
+def test_r2_corrupt_domains_manifest_preflight_and_staged_module_line_count(tmp_path):
+    from ouroboros.review import diff_pulse
+    from ouroboros.tools import review as review_tools
+
+    # R2-9: corrupt staged domains.toml fails preflight instead of silently falling back.
+    repo = tmp_path / "bad_dom"
+    (repo / "ouroboros").mkdir(parents=True)
+    (repo / "docs/architecture").mkdir(parents=True)
+    (repo / "ouroboros/domains.toml").write_text('[domains]\nD01 = "Core"\n[modules]\n', encoding="utf-8")
+    (repo / "docs/ARCHITECTURE.md").write_text("# Map\n", encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+    (repo / "ouroboros/domains.toml").write_text("[modules\nBROKEN_TOML =", encoding="utf-8")
+    (repo / "ouroboros/new_mod.py").write_text('"""Lead."""\nX = 1\n', encoding="utf-8")
+    (repo / "docs/ARCHITECTURE.md").write_text("# Map\n\nUpdated.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    res = review_tools._preflight_check("add mod", "A  ouroboros/new_mod.py\nM  docs/ARCHITECTURE.md", str(repo))
+    assert res is not None and "could not be parsed" in res
+
+    # Staged diff_pulse reports staged module line count, not dirty worktree line count.
+    repo2 = tmp_path / "staged_lines"
+    (repo2 / "ouroboros").mkdir(parents=True)
+    (repo2 / "ouroboros/tiny.py").write_text('"""Tiny."""\nX = 1\n', encoding="utf-8", newline="\n")
+    _git(repo2, "init", "-q")
+    _git(repo2, "add", "-A")
+    _git(repo2, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+    (repo2 / "ouroboros/tiny.py").write_text('"""Tiny."""\nX = 1\nY = 2\n', encoding="utf-8", newline="\n")
+    _git(repo2, "add", "ouroboros/tiny.py")
+    (repo2 / "ouroboros/tiny.py").write_text('"""Tiny."""\n' + "Z = 1\n" * 15, encoding="utf-8", newline="\n")
+    pulse = diff_pulse(repo2, ["ouroboros/tiny.py"], staged=True)
+    assert "ouroboros/tiny.py 3 (+1/-0)" in pulse

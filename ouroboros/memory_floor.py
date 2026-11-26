@@ -26,7 +26,7 @@ from ouroboros import memory_view as mv
 from ouroboros import memory_view_conversations as conversations
 from ouroboros import memory_view_legacy as legacy
 from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ordinary_pairs, normalized, swallowed,
-                                    form_counts, holding_room, Selection, supersedes, WorkPrices, restore,
+                                    form_counts, holding_room, Selection, stage_of, supersedes, WorkPrices, restore,
                                     ORDINARY_STAGES, TELLING_STAGES, ROOM_STEPS)
 from ouroboros.memory_form_facts import holding_lines, telling_emergency, physical_floor
 from ouroboros.memory_view_work import PROGRAM_HISTORY_HEAD, has_program_history, model_room as model_room
@@ -275,12 +275,6 @@ def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: I
             "parts": sorted(([name, tokens] for name, tokens in parts.items()), key=lambda part: -part[1])}
 
 
-def max_room_lost(fact: Mapping[str, Any]) -> bool:
-    """Max cannot hold whole books here: my memory, even in its shortest telling of the whole horizon
-    (``telling_level``), does not fit beside them and the work's room (``telling_need``; ``need`` before it existed)."""
-    return fact.get("telling_need", fact["need"]) > fact["window"]
-
-
 def with_max_room(facts: Mapping[str, Any], fact: Optional[Mapping[str, Any]], mode: str,
                   required_book: int = 0) -> Dict[str, Any]:
     """The view facts with the start's settled Max room: ``held`` when Max kept whole books (``cuts``: the steps past
@@ -325,9 +319,7 @@ WHOSE = (("mine", ("knowledge", "source registry", "scratchpad", "held note head
 
 
 def gate_need(fact: Mapping[str, Any]) -> int:
-    """What the books gate weighed (``max_room_lost``): whole books, my memory at the gate's level (my shortest telling
-    of the whole horizon, ``telling_level``), the work's room and the reply reserve; the ordinary need where no telling
-    was priced, the gate then weighing that."""
+    """Measured start need at ``telling_level`` beside the work's room and reply reserve."""
     return fact.get("telling_need", fact["need"])
 
 
@@ -443,6 +435,9 @@ _LOWERED_WORDS = {"memory": "Max, my memory at its shortest tellings and the wor
 def lowered_line(mode: str, lowered_from: str, fact: Optional[Mapping[str, Any]] = None) -> str:
     """Why a start left the owner's mode, in measured parts: facts only, never an instruction or a possibility."""
     if mode != "low":
+        if fact and fact.get("telling_preserved"):
+            return (f"{lowered_from.capitalize()}'s full tool schemas would drop authored tellings here; "
+                    f"this task runs in {mode.capitalize()} with standing schemas so tellings stay whole.")
         return (f"The window cannot hold {lowered_from.capitalize()} with even the shortest view of my memory; "
                 f"this task runs in {mode.capitalize()}.")
     head = f"{TEMPORARY_LOW}; my human's mode is {lowered_from.capitalize()}."
@@ -631,8 +626,14 @@ def ordinary_level(snapshot, stages_of=ORDINARY_STAGES):
 
 
 def telling_level(snapshot):
-    """My shortest telling of the whole horizon: what a Max start prices beside whole books (``max_room_lost``)."""
+    """My shortest telling of the whole horizon: every source keeps my telling or its conversation's line."""
     return ordinary_level(snapshot, TELLING_STAGES)
+
+
+def level_is_telling(snapshot, level) -> bool:
+    """True when no addressed element in ``level`` fell past ``TELLING_STAGES`` (authored tellings intact)."""
+    return all(stage_of(snapshot, step, ident) in TELLING_STAGES
+               for step, idents in level.addressed for ident in idents)
 
 
 def owner_rows(snapshot: mv.MemoryViewSnapshot) -> Dict[str, Mapping[str, Any]]:
@@ -1138,8 +1139,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     never reach Low, and books that paid a deficit leave no host step to pay it again.
     A ``WINDOW_ONLY`` section steps only while the request with memory at its shortest forms (``shortest``) exceeds
     ``window_bound``, the window's own start bound: neither an owner's target nor the start's own room shortens it.
-    A ``TELLING_SPARED`` section steps only while the window cannot hold the request with memory at my shortest telling
-    and the books as the frame holds them (``told``: ``max_room_lost``'s own test), so before the books or a telling.
+    A ``TELLING_SPARED`` section steps only while the window cannot hold the request at my shortest telling (``told``).
     Given ``maps_told`` (an integrating Low start's own test, which asks no work room), ``BOOK_MAPS`` are spared so too;
     ``listed``, the chapter lists a cold return's accepted view showed (``replay_book_maps``), stand as shown.
     Held heads yield last (``_held_note_steps``). A map frame that holds them passes ``held_least(addressed,

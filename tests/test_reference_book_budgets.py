@@ -6,7 +6,7 @@
 - **Tier B (pulled engineering manuals):** book chapters under ``docs/architecture/`` and
   ``docs/development/`` carry NO whole-book shrink-only cap; each chapter must fit inside one
   default ``read_file`` (2,000 lines and 80,000 chars) and split by subject with rationale
-  intact. Standalone >80 KB docs report factual deltas without a shrink-only gate.
+  intact. Over-band standalone >80 KB docs carry shrink-only debt until back inside the band.
 
 The opt-in ``size_ratchet`` lane is excluded from default local runs. Manual/tag CI has no
 per-change base, so pairwise comparison skips there (chapter-band checks still run on the

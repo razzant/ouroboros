@@ -258,7 +258,8 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
                 text = json.dumps(body["messages"], ensure_ascii=False)
                 if self.limit is None:
                     # E refuses the uncut view, but can hold its ordinary telling plus a real required book.
-                    self.limit = {"enough": raw - 1_000, "none": 100_000}[scenario]
+                    # N sits strictly below Nano's smallest legal standing-tool form (~73k).
+                    self.limit = {"enough": raw - 1_000, "none": 30_000}[scenario]
                 rooms = tuple(i for i in range(16) if room_needle(FIRST_ROOM + i) in text)
                 self.wire.append(dict(raw=raw, status=400 if raw >= self.limit else 200,
                     books="## Body" in text, bible="owed on body changes" in text,

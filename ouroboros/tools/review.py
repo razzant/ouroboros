@@ -218,13 +218,19 @@ def _preflight_check(commit_message: str, staged_files: str,
             load_domain_references(repo_path, _staged_or_disk_bytes) if has_manifest else ({}, {}, {})
         )
         problems: list[str] = []
-        if has_manifest and modules:
-            unlisted = [f for f in new_logic_files if f not in modules]
-            if unlisted:
+        if has_manifest:
+            if not modules:
                 problems.append(
-                    "New runtime module(s) missing from staged `ouroboros/domains.toml` [modules]: "
-                    f"{unlisted[:5]} (add and stage each row per CPL-1 / BIBLE P6)."
+                    "Staged `ouroboros/domains.toml` could not be parsed or has an empty `[modules]` table; "
+                    "fix and stage `ouroboros/domains.toml` (run `python scripts/check_domains.py`)."
                 )
+            else:
+                unlisted = [f for f in new_logic_files if f not in modules]
+                if unlisted:
+                    problems.append(
+                        "New runtime module(s) missing from staged `ouroboros/domains.toml` [modules]: "
+                        f"{unlisted[:5]} (add and stage each row per CPL-1 / BIBLE P6)."
+                    )
         missing_docstrings: list[str] = []
         for nf in new_logic_files:
             if pathlib.PurePosixPath(nf).name == "__init__.py":

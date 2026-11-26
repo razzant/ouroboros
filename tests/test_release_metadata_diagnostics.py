@@ -252,6 +252,7 @@ def test_free_tool_json_reports_cumulative_books_with_an_explicit_byte_source(ca
     note = result["book_balance"]["note"]
     assert "+18 B vs HEAD" in note and "+36 B vs refs/remotes/official-renamed/ouroboros" in note
     assert "Development book balance unavailable" in note
+    assert "local commits are not blocked" not in note
     assert _diagnose(ctx, source, paths=["change.py"])["book_balance"]["note"] == ""
 
 

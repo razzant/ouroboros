@@ -728,6 +728,7 @@ UNROWED_SOURCE_KINDS = frozenset().union(
         "review-ledger-{*,rl-*-*}-panel-prompt{,-*}-*.txt": "review_ledger.build_wave_record",
         "review-ledger-rl-*-*-*-{failure,pending,response}{,-*}-*.txt": "review_ledger.build_wave_record",
         "review-ledger-rl-*-*-*-{prompt,response}-intention-*.txt": "tools.plan_ask.dispatch_ask",
+        "review-governance-*-*.txt": "tools.review_brief_coupling.build_retrieving_brief",
         "review-preimage-*-*.txt": "tools.review_brief_coupling.build_retrieving_brief",
         "review-staged-diff-*.txt": "tools.review_brief_coupling.build_retrieving_brief",
         "review-turn-*-*.txt": "review_session_preparation.prepare_review_session_request",

@@ -601,30 +601,82 @@ def build_retrieving_brief(
     tree_sha = str((brief.required_sources_ref or {}).get("staged_tree_sha") or "")
     required_rows = (with_inline_sources(brief.required_sources, governance.inline_whole_documents)
                      if brief.required_sources is not None else None)
+    governance_sources = []
     if layer == "body" and required_rows is not None:
         gov_root = pathlib.Path(brief.governance_repo_dir or repo_dir)
-        existing_paths = {str(r.get("path") or "") for r in required_rows}
+        same_root = gov_root.resolve(strict=False) == repo_dir.resolve(strict=False)
+        existing_keys = {(str(r.get("root") or ""), str(r.get("path") or "")) for r in required_rows}
         for grow in governance.manifest:
             if grow.get("disposition") != "required":
                 continue
             gpath = str(grow.get("path") or "")
-            if not gpath or gpath in existing_paths:
+            if not gpath:
                 continue
-            row: Dict[str, Any] = {
-                "root": REQUIRED_SOURCE_ROOT,
-                "path": gpath,
-                "disposition": "governance_required",
-                **({"governance_root": str(gov_root)} if gov_root.resolve(strict=False) != repo_dir.resolve(strict=False) else {}),
-            }
             try:
-                row.update(source_text_identity((gov_root / gpath).read_bytes()))
-                row["coverage_basis"] = "governance_blob"
-            except (OSError, UnicodeDecodeError):
-                row["coverage_basis"] = "source_unavailable"
-                row["reason"] = "the governance tree does not carry readable text at this path"
-            required_rows.append(row)
-            existing_paths.add(gpath)
-        required_rows.sort(key=lambda r: str(r.get("path") or ""))
+                gov_raw = (gov_root / gpath).read_bytes()
+            except OSError:
+                target_root = REQUIRED_SOURCE_ROOT if brief.delegated else "system_repo"
+                if (target_root, gpath) in existing_keys:
+                    continue
+                required_rows.append({
+                    "root": target_root, "path": gpath, "disposition": "governance_required",
+                    "coverage_basis": "source_unavailable",
+                    "reason": "the governance tree does not carry readable text at this path",
+                    **({"governance_root": str(gov_root)} if not same_root else {}),
+                })
+                existing_keys.add((target_root, gpath))
+                continue
+            if not brief.delegated:
+                # Native tool-round seats resolve `root="system_repo"` against REPO_ROOT (gov_root),
+                # matching the prompt instruction and review_skill.py. Keep candidate active_workspace
+                # and executing system_repo rows separately identifiable when both are owed.
+                if ("system_repo", gpath) in existing_keys:
+                    continue
+                row: Dict[str, Any] = {
+                    "root": "system_repo", "path": gpath, "disposition": "governance_required",
+                    **({"governance_root": str(gov_root)} if not same_root else {}),
+                }
+                try:
+                    row.update(source_text_identity(gov_raw), coverage_basis="governance_blob")
+                except UnicodeDecodeError:
+                    row.update(coverage_basis="source_unavailable",
+                               reason="the governance tree does not carry readable UTF-8 text at this path")
+                required_rows.append(row)
+                existing_keys.add(("system_repo", gpath))
+            else:
+                # Delegated AGENT_SESSION seats are confined to repo_dir. If candidate bytes match
+                # executing governance, bind directly to active_workspace; if candidate edited or
+                # removed the file, materialize the executing governance bytes in the review source store.
+                try:
+                    cand_raw = (repo_dir / gpath).read_bytes()
+                except OSError:
+                    cand_raw = None
+                if same_root or cand_raw == gov_raw:
+                    if (REQUIRED_SOURCE_ROOT, gpath) in existing_keys:
+                        continue
+                    row = {"root": REQUIRED_SOURCE_ROOT, "path": gpath, "disposition": "governance_required"}
+                    try:
+                        row.update(source_text_identity(gov_raw), coverage_basis="governance_blob")
+                    except UnicodeDecodeError:
+                        row.update(coverage_basis="source_unavailable",
+                                   reason="the governance tree does not carry readable UTF-8 text at this path")
+                    required_rows.append(row)
+                    existing_keys.add((REQUIRED_SOURCE_ROOT, gpath))
+                else:
+                    src = _store_review_source(
+                        repo_dir, brief, gov_raw, "review-governance-" + hashlib.sha256(gov_raw).hexdigest()[:12])
+                    if src.get("path"):
+                        gov_row = {**src["required_row"], "governance_of": gpath, "disposition": "governance_required",
+                                   "governance_root": str(gov_root)}
+                        required_rows.append(gov_row)
+                        governance_sources.append(src)
+                    else:
+                        required_rows.append({
+                            "root": REQUIRED_SOURCE_ROOT, "path": gpath, "disposition": "governance_required",
+                            "governance_root": str(gov_root), "coverage_basis": "source_unavailable",
+                            "reason": "executing governance copy not delivered: " + str(src.get("error") or "no_source_root"),
+                        })
+        required_rows.sort(key=lambda r: (str(r.get("path") or ""), str(r.get("root") or "")))
     preimage_sources = []
     for row in required_rows or ():
         if row.get("coverage_basis") != "preimage_unavailable":
@@ -744,7 +796,7 @@ def build_retrieving_brief(
         "governance_manifest": governance.manifest,
         "governance_tokens_estimate": governance.tokens_estimate,
         "preimage_sources": preimage_sources,
-        "native_data_root": (str(brief.source_root or "") if preimage_sources
+        "native_data_root": (str(brief.source_root or "") if preimage_sources or governance_sources
                              or delivery.get("diff_delivery") == "paged" or delivery.get("brief_delivery") == "paged" else ""),
         "first_send_bound": bound,
         "brief_chars": len(task_text),

@@ -1047,8 +1047,7 @@ def _reproject_actual_overflow_low(ctx: _RoundModelCallContext, *, books_must_sa
     plan = ctx.context_fit_plan
     fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True)
     window = fit.measurement.capacity_total_tokens
-    trials = (route_schema_trials(ctx.tools, ctx.messages, ctx.tool_schemas, "max", plan.model, plan.provider == "local")
-              if window is not None else None)
+    trials = route_schema_trials(ctx.tools, ctx.messages, ctx.tool_schemas, "max", plan.model, plan.provider == "local")
     rebound = plan.reproject_for_route(
         window_tokens=window or 0, known_window=window is not None,
         ratio=fit.measurement.measurement_density, output_reserve=int(plan.output_reserve_tokens),
