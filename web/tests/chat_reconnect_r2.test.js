@@ -5,7 +5,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { createChatHistoryPager } from '../modules/chat_history.js';
+import { messageRow } from '../modules/message_actions.js';
 import { createCatchUp, roomSocket } from '../modules/room_retire.js';
+import { createCallCards } from '../../skills/live_conversation/ui/call_card.js';
 import { ElementStub, PREVIEW_SCOPE, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const quiet = async (ticks = 12) => {
@@ -111,6 +113,16 @@ function makeReconnectRoom(t, { chatId = 2, hangPreferences = false, onPreferenc
     const priorSocket = globalThis.WebSocket;
     const priorQuery = ElementStub.prototype.querySelector;
     ElementStub.prototype.querySelector = function (selector) {
+        if (String(selector).startsWith(':scope >')) {
+            const parts = String(selector).slice(':scope >'.length).split('>').map((s) => s.trim()).filter(Boolean);
+            let cur = this;
+            for (const part of parts) {
+                const cls = part.startsWith('.') ? part.slice(1).split(/[ :>\[]/)[0].split('.') : [];
+                cur = (cur?.children || []).find((c) => cls.length && cls.every((n) => c.classList?.contains(n))) || null;
+                if (!cur) return null;
+            }
+            return cur;
+        }
         const direct = priorQuery.call(this, selector);
         if (direct) return direct;
         for (const child of this.children) { const found = child.querySelector(selector); if (found) return found; }
@@ -616,4 +628,235 @@ test('overlapping unread receipt avoids a second whole newest after reconnect he
     const laterReads = r.reads.slice(beforeLater);
     assert.equal(laterReads.filter((e) => e.mode === 'newest').length, 2,
         'without after_cursor, a later revision observed after reconnect newest began still reads newest');
+});
+
+function installCaptionTestEnv(t, feed) {
+    const copied = [];
+    const priorClipboard = Object.getOwnPropertyDescriptor(globalThis.navigator || {}, 'clipboard');
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: async (value) => { copied.push(String(value)); } },
+    });
+    const priorTextDesc = Object.getOwnPropertyDescriptor(ElementStub.prototype, 'textContent');
+    Object.defineProperty(ElementStub.prototype, 'textContent', {
+        configurable: true,
+        get() {
+            const own = priorTextDesc.get.call(this);
+            if (own) return own;
+            if (this.classList?.contains('message')) {
+                const raw = this._innerHTML
+                    || /<div class="message[^"]*"[^>]*>([\s\S]*?)<\/div>/.exec(this.parentNode?._innerHTML || '')?.[1]
+                    || '';
+                return raw.replace(/<[^>]+>/g, '');
+            }
+            return '';
+        },
+        set(value) { priorTextDesc.set.call(this, value); },
+    });
+    const observers = new Set();
+    const priorInsert = feed.insertBefore.bind(feed);
+    feed.insertBefore = function (node, before) {
+        const res = priorInsert(node, before);
+        for (const cb of observers) cb();
+        return res;
+    };
+    const doc = globalThis.document;
+    const priorView = doc.defaultView;
+    doc.defaultView = {
+        MutationObserver: class {
+            constructor(cb) { this.cb = cb; }
+            observe(target) { if (target === feed) observers.add(this.cb); }
+            disconnect() { observers.delete(this.cb); }
+        },
+    };
+    t.after(() => {
+        if (priorClipboard) Object.defineProperty(globalThis.navigator, 'clipboard', priorClipboard);
+        else delete globalThis.navigator.clipboard;
+        Object.defineProperty(ElementStub.prototype, 'textContent', priorTextDesc);
+        feed.insertBefore = priorInsert;
+        doc.defaultView = priorView;
+    });
+    return { copied };
+}
+
+test('revised live-call captions after a reconnect newest update words, row address, Copy, Share/action source, Reply, and folded call card in place without duplicating or touching unchanged rows', async (t) => {
+    const callTask = 'call-t1';
+    const initialRows = [
+        { role: 'assistant', chat_id: 2, text: 'ordinary unchanged', content: 'ordinary unchanged', ts: ts(1),
+            history_id: 'chat:1', history_position: { source: 'chat', offset: 1 }, row_address: `row:2@${ts(1)}#111111111111` },
+        { role: 'system', chat_id: 2, system_type: 'call_open', source: 'live_call', client_message_id: 'call:c1:open', task_id: callTask,
+            text: 'Call started. Engine: Realtime.', content: 'Call started. Engine: Realtime.', ts: ts(2),
+            history_id: 'chat:2', history_position: { source: 'chat', offset: 2 }, row_address: `row:2@${ts(2)}#222222222222` },
+        { role: 'user', chat_id: 2, source: 'live_call', client_message_id: 'call:c1:i1', task_id: callTask,
+            text: 'draft owner', content: 'draft owner', ts: ts(3),
+            history_id: 'chat:3', history_position: { source: 'chat', offset: 3 }, row_address: `row:2@${ts(3)}#aaaa00000001` },
+        { role: 'assistant', chat_id: 2, source: 'live_call', system_type: 'model_narration', narration: true, markdown: true,
+            spoken: { call_id: 'c1', item_id: 'i2' }, task_id: callTask,
+            text: 'draft spoken', content: 'draft spoken', ts: ts(4),
+            history_id: 'chat:4', history_position: { source: 'chat', offset: 4 }, row_address: `row:2@${ts(4)}#bbbb00000001` },
+        { role: 'system', chat_id: 2, source: 'live_call', system_type: 'call_heard', task_id: callTask,
+            text: 'Heard in the call: draft heard', content: 'Heard in the call: draft heard', ts: ts(5),
+            history_id: 'chat:5', history_position: { source: 'chat', offset: 5 }, row_address: `row:2@${ts(5)}#cccc00000001` },
+    ];
+    const r = makeReconnectRoom(t, { initialRows });
+    const { copied } = installCaptionTestEnv(t, r.messages);
+    const cards = createCallCards({ feed: r.messages, doc: globalThis.document });
+    t.after(() => cards.destroy());
+
+    await until(() => r.shown().includes('chat:5'));
+    await quiet();
+    cards.scan();
+
+    const byHistory = (id) => r.messages.children.filter((n) => n.dataset?.historyId === id);
+    const ordinaryBefore = byHistory('chat:1')[0];
+    const ownerBefore = byHistory('chat:3')[0];
+    const spokenBefore = byHistory('chat:4')[0];
+    const heardBefore = byHistory('chat:5')[0];
+    assert.ok(ordinaryBefore && ownerBefore && spokenBefore && heardBefore);
+    assert.equal(ownerBefore.classList.contains('call-folded'), true, 'call rows folded into call card');
+    assert.deepEqual(
+        r.messages.querySelector('.call-card').querySelectorAll('.call-line-text').map((n) => n.textContent),
+        ['draft owner', 'draft spoken', 'Heard in the call: draft heard'],
+        'initial folded call card shows the original captions before gap',
+    );
+
+    // Spy on ordinary unchanged bubble's .message innerHTML writes to ensure zero re-renders of ordinary rows.
+    const ordinaryBody = ordinaryBefore.querySelector(':scope > .message');
+    let ordinaryWrites = 0;
+    const htmlDesc = Object.getOwnPropertyDescriptor(ElementStub.prototype, 'innerHTML');
+    Object.defineProperty(ordinaryBody, 'innerHTML', {
+        configurable: true,
+        get() { return htmlDesc.get.call(this); },
+        set(v) { ordinaryWrites += 1; htmlDesc.set.call(this, v); },
+    });
+
+    // Gap: all 3 live-call captions are revised via dialogue_store.revise_text (same history_id & ts, new text & #sha12).
+    r.disconnect();
+    r.rows[2] = { ...r.rows[2], text: 'corrected owner', content: 'corrected owner', row_address: `row:2@${ts(3)}#aaaa00000002` };
+    r.rows[3] = { ...r.rows[3], text: 'corrected spoken', content: 'corrected spoken', row_address: `row:2@${ts(4)}#bbbb00000002` };
+    r.rows[4] = { ...r.rows[4], text: 'Heard in the call: corrected heard', content: 'Heard in the call: corrected heard', row_address: `row:2@${ts(5)}#cccc00000002` };
+    r.reconnect();
+    await until(() => r.reads.length === 2);
+    await quiet();
+
+    // 1. Exact DOM node identity preserved, 0 duplicates, and ordinary unchanged bubble untouched.
+    assert.deepEqual(byHistory('chat:1'), [ordinaryBefore]);
+    assert.deepEqual(byHistory('chat:3'), [ownerBefore]);
+    assert.deepEqual(byHistory('chat:4'), [spokenBefore]);
+    assert.deepEqual(byHistory('chat:5'), [heardBefore]);
+    assert.equal(ordinaryWrites, 0, 'unchanged ordinary bubble is never re-rendered');
+
+    // 2. Words and rowAddress updated in place.
+    assert.equal(ownerBefore.querySelector(':scope > .message').textContent, 'corrected owner');
+    assert.equal(ownerBefore.dataset.rowAddress, `row:2@${ts(3)}#aaaa00000002`);
+    assert.equal(spokenBefore.querySelector(':scope > .message').textContent, 'corrected spoken');
+    assert.equal(spokenBefore.dataset.rowAddress, `row:2@${ts(4)}#bbbb00000002`);
+    assert.equal(heardBefore.querySelector(':scope > .message').textContent, 'Heard in the call: corrected heard');
+    assert.equal(heardBefore.dataset.rowAddress, `row:2@${ts(5)}#cccc00000002`);
+
+    // 3. Copy uses the revised words for all 3 captions.
+    ownerBefore.querySelector('.chat-message-copy').click();
+    spokenBefore.querySelector('.chat-message-copy').click();
+    heardBefore.querySelector('.chat-message-copy').click();
+    await quiet();
+    assert.deepEqual(copied, ['corrected owner', 'corrected spoken', 'Heard in the call: corrected heard']);
+
+    // 4. Share / message actions source reflects the revised rowAddress and answerWords.
+    const spokenActionRow = messageRow(spokenBefore);
+    assert.equal(spokenActionRow.address, `row:2@${ts(4)}#bbbb00000002`);
+    assert.equal(spokenActionRow.answerWords, 'corrected spoken');
+    assert.equal(spokenActionRow.text, 'corrected spoken');
+
+    // 5. Reply uses the revised rowAddress and revised snippet.
+    spokenBefore.querySelector('.chat-message-reply').click();
+    const replyStored = JSON.parse(globalThis.sessionStorage.getItem(`ouro_chat_reply:${PREVIEW_SCOPE}:2`));
+    assert.equal(replyStored.address, `row:2@${ts(4)}#bbbb00000002`);
+    assert.equal(replyStored.snippet, 'corrected spoken');
+
+    // 6. Folded call card refreshed automatically via MutationObserver without manual scan().
+    const cardTexts = r.messages.querySelector('.call-card').querySelectorAll('.call-line-text').map((n) => n.textContent);
+    assert.deepEqual(cardTexts, ['corrected owner', 'corrected spoken', 'Heard in the call: corrected heard']);
+});
+
+test('live-call captions mounted from live frames before history reconcile in place after gap revision without duplicating, while normal owner echo adoption stays untouched', async (t) => {
+    const r = makeReconnectRoom(t);
+    const { copied } = installCaptionTestEnv(t, r.messages);
+    await until(() => r.reads.length === 1);
+    await quiet();
+
+    const callTask = 'call-t2';
+    // Live WS captions arrive before any history read sees them.
+    r.rawWs.emit('chat', {
+        chat_id: 2, role: 'user', source: 'live_call', client_message_id: 'call:c2:i1', task_id: callTask,
+        content: 'live draft owner', ts: ts(2), row_address: `row:2@${ts(2)}#dddd00000001`,
+    });
+    r.rawWs.emit('chat', {
+        chat_id: 2, role: 'assistant', source: 'live_call', system_type: 'model_narration', narration: true, markdown: true,
+        spoken: { call_id: 'c2', item_id: 'i2' }, task_id: callTask,
+        content: 'live draft spoken', ts: ts(3), row_address: `row:2@${ts(3)}#eeee00000001`,
+    });
+    r.rawWs.emit('chat', {
+        chat_id: 2, role: 'system', source: 'live_call', system_type: 'call_heard', task_id: callTask,
+        content: 'Heard in the call: live draft heard', ts: ts(4), row_address: `row:2@${ts(4)}#ffff00000001`,
+    });
+    await quiet();
+
+    const bubblesOf = (pred) => r.messages.children.filter((n) => n.classList?.contains('chat-bubble') && pred(n));
+    const liveOwner = bubblesOf((n) => n.dataset.clientMessageId === 'call:c2:i1')[0];
+    const liveSpoken = bubblesOf((n) => n.classList.contains('assistant') && n.dataset.systemType === 'model_narration')[0];
+    const liveHeard = bubblesOf((n) => n.dataset.systemType === 'call_heard')[0];
+    assert.ok(liveOwner && liveSpoken && liveHeard);
+
+    // Live WS revision while connected updates in place with 0 duplicates.
+    r.rawWs.emit('chat', {
+        chat_id: 2, role: 'user', source: 'live_call', client_message_id: 'call:c2:i1', task_id: callTask,
+        content: 'live revised owner', ts: ts(2), row_address: `row:2@${ts(2)}#dddd00000002`,
+    });
+    await quiet();
+    assert.deepEqual(bubblesOf((n) => n.dataset.clientMessageId === 'call:c2:i1'), [liveOwner]);
+    assert.equal(liveOwner.querySelector(':scope > .message').textContent, 'live revised owner');
+
+    // Control: normal web owner echo stays intact and adopts canonical row cleanly.
+    const cmid = r.send('normal web message');
+    const normalOwner = bubblesOf((n) => n.dataset.clientMessageId === cmid)[0];
+    assert.ok(normalOwner);
+
+    // Gap: all 3 captions revised again before reconnect newest read.
+    r.disconnect();
+    r.rows.push(
+        { role: 'user', chat_id: 2, source: 'live_call', client_message_id: 'call:c2:i1', task_id: callTask,
+            text: 'canonical owner', content: 'canonical owner', ts: ts(2),
+            history_id: 'chat:2', history_position: { source: 'chat', offset: 2 }, row_address: `row:2@${ts(2)}#dddd00000003` },
+        { role: 'assistant', chat_id: 2, source: 'live_call', system_type: 'model_narration', narration: true, markdown: true,
+            spoken: { call_id: 'c2', item_id: 'i2' }, task_id: callTask,
+            text: 'canonical spoken', content: 'canonical spoken', ts: ts(3),
+            history_id: 'chat:3', history_position: { source: 'chat', offset: 3 }, row_address: `row:2@${ts(3)}#eeee00000003` },
+        { role: 'system', chat_id: 2, source: 'live_call', system_type: 'call_heard', task_id: callTask,
+            text: 'Heard in the call: canonical heard', content: 'Heard in the call: canonical heard', ts: ts(4),
+            history_id: 'chat:4', history_position: { source: 'chat', offset: 4 }, row_address: `row:2@${ts(4)}#ffff00000003` },
+        { role: 'user', chat_id: 2, source: 'web', client_message_id: cmid, ingress_accepted: true, ingress_dispatched: true,
+            text: 'normal web message', content: 'normal web message', ts: ts(5),
+            history_id: 'chat:5', history_position: { source: 'chat', offset: 5 }, row_address: `row:2@${ts(5)}#999900000001` },
+    );
+    r.reconnect();
+    await until(() => r.reads.length === 2);
+    await quiet();
+
+    assert.deepEqual(bubblesOf((n) => n.dataset.clientMessageId === 'call:c2:i1'), [liveOwner], 'live owner reconciled in place');
+    assert.deepEqual(bubblesOf((n) => n.classList.contains('assistant') && n.dataset.systemType === 'model_narration'), [liveSpoken], 'live spoken reconciled in place');
+    assert.deepEqual(bubblesOf((n) => n.dataset.systemType === 'call_heard'), [liveHeard], 'live heard reconciled in place');
+    assert.deepEqual(bubblesOf((n) => n.dataset.clientMessageId === cmid), [normalOwner], 'normal web owner adopted in place');
+
+    assert.equal(liveOwner.dataset.historyId, 'chat:2');
+    assert.equal(liveOwner.querySelector(':scope > .message').textContent, 'canonical owner');
+    assert.equal(liveSpoken.dataset.historyId, 'chat:3');
+    assert.equal(messageRow(liveSpoken).address, `row:2@${ts(3)}#eeee00000003`);
+    assert.equal(messageRow(liveSpoken).answerWords, 'canonical spoken');
+    assert.equal(liveHeard.dataset.historyId, 'chat:4');
+    assert.equal(liveHeard.querySelector(':scope > .message').textContent, 'Heard in the call: canonical heard');
+    assert.equal(normalOwner.dataset.historyId, 'chat:5');
+    assert.equal(normalOwner.dataset.rowAddress, `row:2@${ts(5)}#999900000001`);
+    liveSpoken.querySelector('.chat-message-copy').click();
+    await quiet();
+    assert.deepEqual(copied, ['canonical spoken']);
 });

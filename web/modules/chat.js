@@ -8,7 +8,7 @@ import { createRoomHeader, roomBarHtml } from './chat_header.js';
 import { pageLabel } from './pages.js';
 import { showToast } from './toast.js';
 import { ORIGIN_ADDRESSED_NOTICE_TYPES, lineReplyFields, childRowPlacement, placedCardRow, createPlacedCardAnchors, replayConcludesTask } from './chat_row_placement.js';
-import { appendProjectRow, PROJECT_ROW_TYPES, refreshProjectAnswerFold, syncSavedProjectContext } from './project_answer.js';
+import { appendProjectRow, PROJECT_ROW_TYPES, refreshProjectAnswerFold } from './project_answer.js';
 import { createWorkPortals, isPortal, reconcilePortalNotes } from './work_portal.js';
 import { createTaskEpisodes } from './task_episodes.js';
 import { markSwarmLabel, syncSwarmReceipt } from './swarm_presentation.js';
@@ -37,7 +37,7 @@ import { onRefit } from './text_fit.js';
 import { createChatHistoryPager, historyCoverage, historyIslandAtEdge } from './chat_history.js';
 import { createProjectReadReceipt, isAtNewestMessage, newestMessageOffset, readBand } from './project_read_state.js';
 import { createSharedReadTracker } from './read_ahead.js';
-import { adoptsRetainedCopy, createReplayKeys, livePriorBubble, messageIdentity, priorHistoryBubble, ownerMessageBubble, ownerRowRoom, mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
+import { createReplayKeys, findPriorBubble, messageIdentity, priorHistoryBubble, ownerMessageBubble, ownerRowRoom, mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
 import { apiClient, apiFetch, fetchTaskDetailStrict, isStoreMigrating } from './api_client.js';
 import { readStateSnapshot } from './state_snapshots.js';
 import { syncHistoryRetentionItem } from './history_retention.js';
@@ -269,7 +269,7 @@ export function createChatInstance({
     });
     // A text row as its bubble and doors (chat_text_bubble.js); addMessage keeps its identity and its place.
     const drawTextBubble = createTextBubbles({ chatMedia, replies, feed: messagesDiv, isMain, ownProjectId: projectId,
-        onDomWrite: withStableViewport });
+        onDomWrite: withStableViewport, enhanceMarkdown: enhanceMountedMarkdown });
     const mainWaiting = isMain ? createMainWaiting({ page, messagesDiv, insertMessageNode, stampNodeTimestamp,
         openSettings, refresh: refreshHeaderControlState, mutate: withStableViewport,
         decision: () => chatDecision, revealQuestion: (...a) => revealQuestion(...a), reading: () => reading }) : null;
@@ -2025,28 +2025,28 @@ export function createChatInstance({
         const bubbles = () => [...messagesDiv.querySelectorAll('.chat-bubble')];
         const delivered = deliveryKey && seenMessageKeys.has(deliveryKey) && bubbles().find(node => node.dataset.deliveryId === opts.deliveryId);
         if (delivered) return recordBubble(delivered);
-        const prior = opts.historyId
-            ? (replayKeys && !replayKeys.history.has(opts.historyId) ? null
-                : historyNodes(opts.historyId).find(node => node.classList.contains('chat-bubble')))
-            : livePriorBubble(bubbles, opts, replayKeys, legacyKey, chatId);
+        const prior = findPriorBubble(bubbles, historyNodes, opts, replayKeys, legacyKey, chatId);
         if (prior && (opts.historyId || _historyReplayActive)) {
             rememberMessageKey(messageKey);
-            const originChanged = syncSavedProjectContext(prior, opts.originProjected, opts.originId);
-            const quoteChanged = replies.syncDerivedQuestion(prior, opts.reply, { authoritative: true });
+            const changed = drawTextBubble.reconcile(prior, text, role, { markdown, isProgress, meta, legacyKey, opts });
             noteBubbleKeys(prior);
-            return chatDecision.renderRoutingDecision(prior, opts.chatAnnotation) || originChanged || quoteChanged;
+            return chatDecision.renderRoutingDecision(prior, opts.chatAnnotation) || changed;
         }
-        if (prior || (messageKey && seenMessageKeys.has(messageKey))) return false;
+        if (prior) {
+            const revised = drawTextBubble.revise(prior, text, role, { markdown, isProgress, meta, legacyKey, opts });
+            if (revised) { rememberMessageKey(messageKey); noteBubbleKeys(prior); }
+            return revised;
+        }
+        if (messageKey && seenMessageKeys.has(messageKey)) return false;
         const address = role === 'assistant' && !opts.originProjected && opts.reply?.row_address;
         const existing = opts.historyId && earlyRows.get(address);
         const matched = opts.historyId && !existing && priorHistoryBubble(bubbles, opts, replayKeys, legacyKey, chatId);
         if (matched) {
             const placed = recordBubble(matched);
             chatDecision.renderRoutingDecision(matched, opts.chatAnnotation);
-            const adopted = adoptsRetainedCopy(matched, opts) && replies.adopt(opts.reply, matched);
-            const quoteChanged = replies.syncDerivedQuestion(matched, opts.reply, { authoritative: true });
-            const restored = syncSavedProjectContext(matched, opts.originProjected, opts.originId);
-            return placed || restored || adopted || quoteChanged;
+            const changed = drawTextBubble.reconcile(matched, text, role, { markdown, isProgress, meta, legacyKey, opts, adopt: true });
+            noteBubbleKeys(matched);
+            return placed || changed;
         }
         if (existing) earlyRows.delete(address);
         const { bubble, rich } = drawTextBubble(text, role, { markdown, ts, isProgress, meta, legacyKey, opts, existing });
@@ -2054,7 +2054,7 @@ export function createChatInstance({
         if (rich) enhanceMountedMarkdown(bubble);
         chatDecision.renderRoutingDecision(bubble, opts.chatAnnotation);
         if (isMain) reconcilePortalNotes(messagesDiv, bubble);
-        rememberMessageKey(messageKey);
+        rememberMessageKey(messageKey); noteBubbleKeys(bubble);
         if (deliveryKey) rememberMessageKey(deliveryKey);
         if (opts.pending && meta.clientMessageId) pendingUserBubbles.set(meta.clientMessageId, bubble);
         return bubble;
