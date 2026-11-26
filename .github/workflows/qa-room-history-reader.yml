@@ -1,0 +1,64 @@
+# Temporary QA only: one real Panic in a disposable hosted Linux runner and
+# reader stop/SQLite handle evidence on hosted Windows. Do not merge this file.
+name: room-history reader QA (#4287)
+
+'on':
+  push:
+    branches:
+      - qa/4287-room-history-reader
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-room-history-reader-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-panic:
+    name: one real Panic after a child-served GET (hosted Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Bind this pushed QA commit to its one product parent
+        id: link
+        run: python3 -B qa/witness.py --prove-qa-head Linux
+      - uses: ./.github/actions/setup-python-env
+        with:
+          profile: test
+          interpreter: shipped
+          install-project: 'false'
+      - name: Real Panic inside the disposable runner
+        env:
+          PRODUCT_SHA: ${{ steps.link.outputs.product_sha }}
+        run: |
+          .venv/bin/python -B qa/witness.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/hist4287-panic" \
+            --candidate "$PRODUCT_SHA" --hosted-panic-only
+
+  windows-reader:
+    name: reader child, real GET, own-handle stop and SQLite rename (hosted Windows)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Bind this pushed QA commit to its one product parent
+        id: link
+        shell: pwsh
+        run: python -B qa/witness.py --prove-qa-head Windows
+      - uses: ./.github/actions/setup-python-env
+        with:
+          profile: test
+          interpreter: shipped
+          install-project: 'false'
+      - name: Six exact cases on the shipped interpreter, with execution readback
+        shell: pwsh
+        env:
+          PRODUCT_SHA: ${{ steps.link.outputs.product_sha }}
+        run: '& .\.venv\Scripts\python.exe -B qa/witness.py --windows-cases'
