@@ -281,8 +281,10 @@ Setup and environment timeouts are separate:
 >
 > **The faithful way to survive heavy/slow builds is NOT a multiplier — it is a
 > pre-built/pinned image** (`environment.force_build=false`, which 8/10 real
-> accepted submissions use). Pre-build the task images once and reuse them so the
-> default 1.0 build/setup timeouts are never hit.
+> accepted submissions use). Under it Harbor prefers a task's declared published image
+> to a build. Neither launcher changes that setting unless asked (METHODOLOGY "Task
+> images"). It saves the environment build only: the agent still installs in every
+> container during setup.
 
 For heavy Docker builds **in a LOCAL (non-submission) run only**, you may use:
 
@@ -364,9 +366,9 @@ trials report (the adapter class `name()`), and the trial join also uses that
 name. A run launched with bare `--agent-import-path` records
 `agents[0].name = null` and can NEVER pass ("no matching agent in job config",
 terminal-bench-2-1#121 — four of our submissions were gated by exactly this).
-`run_tb.py` therefore generates `agent_job_config.json` (agents[].name =
-"Ouroboros Installed" + import_path + kwargs) and launches via
-`harbor run -c <config>`; the job config on the Hub is immutable, so this is
+`run_tb.py` therefore generates a job config (agents[].name =
+"Ouroboros Installed" + import_path + kwargs; read the file the saved `--config`
+names) and launches via `harbor run -c <config>`; the job config on the Hub is immutable, so this is
 unfixable after upload. Optional: `OUROBOROS_EFFORT_TASK` at launch is recorded
 as `kwargs.reasoning_effort` (the submission's effort label) and forwarded back
 into the container, so the declared effort equals the effective one.
@@ -445,12 +447,26 @@ note deleted/retried trial dirs drop their cost record, so the on-disk sum is a 
 - **`run_tb.py` flag names differ from harbor's:** `--setup-timeout-multiplier` /
   `--build-timeout-multiplier` (run_tb) map to
   `--agent-setup-timeout-multiplier` / `--environment-build-timeout-multiplier` (harbor).
-- **No-resume fragility of `run_tb.py`** (fresh job + `--force-build` each call) vs the
-  robust path: **`harbor job resume -p <jobdir> [-f <ErrorType>]`** continues an existing
-  job (keeps completed trials, re-runs pending + the `-f`-removed errored-artifact trials);
-  wrap it in a retry loop so a transient SSL/DNS blip just re-resumes instead of restarting.
+- **Resume semantics of `run_tb.py` vs `harbor job resume`:** default unnamed `run_tb.py`
+  calls create a fresh Harbor job each call (qualifying generated-name runs remain the
+  leaderboard-submission path). An explicit base `job_name` keeps named full-run outputs and
+  image flags available, but is not `leaderboard_valid` (`leaderboard_valid: false`, because
+  overlapping writers cannot be told apart; leaderboard submission requires a qualifying
+  generated-name run). Invalid, parent-traversing (`..`, `sub/..`), or escaping `job_name` values
+  are refused before writing outputs or dispatching Harbor. When stored `config.json` or prior
+  direct trials exist, `run_tb.py` records only a partial named-job observation (`new_or_changed`
+  valid trials). Harbor deletes incomplete direct subdirectories (without `result.json`) on
+  resume, so root-level names (`.`, `""`, `./`, or the canonical jobs-dir path) need their own
+  dedicated jobs directory (`--submission-root`). Resuming an old forced-build job through
+  `run_tb.py` may need explicit `--force-build` so the config matches `config.json`; for robust
+  campaign continuation use **`harbor job resume -p <jobdir> [-f <ErrorType>]`**, which reads the
+  saved `config.json` directly (keeps completed trials, re-runs pending + `-f`-removed
+  errored-artifact trials) — wrap it in a retry loop so a transient SSL/DNS blip just re-resumes
+  instead of restarting.
 - **install-timeout on slow mirrors** (`RuntimeError: Command timed out after 1200s`) and
-  AgentSetupTimeout are infra, not capability — pre-built images remove this failure class.
+  AgentSetupTimeout are infra, not capability. Published task images do not prevent them,
+  because the agent installs in every container whatever its image; the opt-in
+  `OBO_TB_PIP_CACHE` wheel cache (`run_tb.py`) shortens that install.
 - **Pausing via SIGSTOP + sleep** blows in-flight trials' wall-clock deadlines →
   `deadline_local` reward-0 artifacts on resume; reclassify (reason_code + pause window)
   and re-run those trials before scoring. Don't count infra/pause artifacts as genuine fails.
@@ -478,6 +494,26 @@ python devtools/benchmarks/terminal_bench/run_tb.py \
 For a targeted smoke, add repeated `--task` filters before `--execute`, for
 example `--task pypi-server --task hf-model-inference --task qemu-alpine-ssh`.
 
+Give every launch its own `--run-root` for independent reporting. When a launch assembles a
+Harbor invocation, it writes its own `agent_job_config.<invocation>.json`; when an `--execute`
+launch produces an attributable ledger (dry runs, refusals, unattributed jobs, and resumed
+named jobs with no accepted new/changed trials write none), it writes its own authoritative
+`disclosure_ledger.<invocation>.json` and records that path in `run_manifest.json`. The
+unversioned files in `--run-root` (`run_manifest.json`, `harbor_command.txt`, and the atomic
+latest view `disclosure_ledger.json`) are shared last-writer-wins conveniences, not a
+consistent tuple if launches overlap in the same run root (including the default
+`tb21_ouroboros_run`). Launches that share `--submission-root`, model, and dataset share one
+jobs dir and one `metadata.yaml`: use separate `--submission-root` directories when runs need
+different metadata, and generated job names with distinct `--run-root` directories for independent
+or leaderboard-submittable measurements (METHODOLOGY "Job attribution").
+
+Task images: by default neither launcher passes an image flag, so Harbor's job
+configuration decides (for `run_tb.py`, a `--base-job-config` `environment.force_build`,
+else Harbor's default `false`). `--force-build` / `--no-force-build` pass Harbor's own flag,
+which overrides it; `--force-build` requests a build and does not guarantee one. `--execute`
+does not change the image flags: a preview and a dispatched run carry the same ones. See
+METHODOLOGY "Task images".
+
 The launcher refuses to start from a dirty/unidentifiable seed checkout (the shared
 `benchmark_run_manifest` gate, fail-closed since v6.75.0); `--allow-dirty-seed` records the
 exception instead. Additional readiness flags (v6.79.0, all optional and all off by
@@ -494,11 +530,16 @@ from `--dataset`. Frontier-Bench runs on the pinned 0.18.0 (measured — see MET
 
 ### Terminal-Bench 2.1 smoke
 
-Ledgered smoke runs should go through the wrapper so `run_manifest.json` and
-the denominator-preserving `result_index.jsonl` are written beside the Harbor
-official output. Its manifest derives Main/Light/fallback and the one API actor
-from the exact `--model` CLI value (plus an explicit Light override), never from
-ambient Heavy or a settings-template model:
+Ledgered smoke runs should go through the wrapper so `run_manifest.<job_name>.json`
+(mirrored to `run_manifest.json` as the latest view) and the denominator-preserving
+`result_index.jsonl` are written beside the Harbor official output. The wrapper
+passes an invocation-unique `--job-name`, reads authoritative `task_name` outcomes
+from `<run_root>/<job_name>/<trial>/result.json` cross-checked against
+`<run_root>/<job_name>/result.json` (never scanning a shared directory for another
+job or splitting trial-name suffixes), and links each index row to that invocation's
+manifest. Its manifest derives Main/Light/fallback and the one API actor from the exact
+`--model` CLI value (plus an explicit Light override), never from ambient Heavy
+or a settings-template model:
 
 ```bash
 PYTHONPATH=/Users/anton/Ouroboros/repo \
@@ -516,7 +557,9 @@ they do not write the Ouroboros denominator ledger unless wrapped by
 `--agent-import-path` records `agents[0].name = null` in the job config, which
 the TB2.1 leaderboard CI can never match (see "Submitting to the leaderboard").
 Use `run_tb.py` (which launches via a named job config) for anything that might
-be submitted.
+be submitted. The raw examples below keep Harbor's default image policy; add
+`--force-build` only when you deliberately want task environments built from
+their own definitions.
 
 ```bash
 PYTHONPATH=/Users/anton/Ouroboros/repo \
@@ -531,8 +574,7 @@ harbor run \
   --agent-setup-timeout-multiplier 4 \
   --n-concurrent 1 \
   --n-tasks 1 \
-  --yes \
-  --force-build
+  --yes
 ```
 
 ### Full cached Terminal-Bench 2.0-style dataset
@@ -552,8 +594,7 @@ harbor run \
   --agent-kwarg server_start_timeout_sec=240 \
   --agent-setup-timeout-multiplier 4 \
   --n-concurrent 1 \
-  --yes \
-  --force-build
+  --yes
 ```
 
 ### Full Terminal-Bench 2.1
@@ -573,8 +614,7 @@ harbor run \
   --agent-setup-timeout-multiplier 4 \
   --environment-build-timeout-multiplier 4 \
   --n-concurrent 1 \
-  --yes \
-  --force-build
+  --yes
 ```
 
 ## Model Selection
@@ -693,8 +733,9 @@ Those can be omitted when creating logs-only bundles.
 
 - Old task images with Python 3.9 require adapter-installed Python 3.12 via
   `uv`; this is handled automatically.
-- Some task Docker builds need more than 600 seconds; use
-  `--environment-build-timeout-multiplier`.
+- Some task Docker builds need more than 600 seconds. Under the default image policy
+  Harbor prefers a task's declared published image to a build; otherwise use
+  `--environment-build-timeout-multiplier` in a local run only.
 - Some tasks still hit Harbor `AgentTimeoutError`; verifier can still produce a
   reward if the workspace has enough final state.
 - `RuntimeError` from the adapter should not be used for ordinary Ouroboros

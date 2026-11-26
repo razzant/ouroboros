@@ -400,7 +400,7 @@ def test_native_registry_reads_installed_design_outside_home(tmp_path, monkeypat
 
 # The planning organ (``plan_task``): which subjects are Ouroboros's own body is ONE fact,
 # ``plan_ask.plan_is_body``, recorded on the revision. A body plan's stable prompt
-# (``plan_ask.stable_prompt``) carries BIBLE.md, ARCHITECTURE.md and the installed DESIGN
+# (``plan_ask.stable_prompts``) carries BIBLE.md, ARCHITECTURE.md and the installed DESIGN
 # navigation map to every participant; a non-body plan carries none of them (owner 4.3=A).
 # The retired engine kept a separate "constitutional" gate and sent a body copy or declared
 # own-body research only the map; by the organ's design (body plan = the installed body, a

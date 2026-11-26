@@ -157,12 +157,11 @@ def _skill_subject(folder, *, name="demo", content_hash="hash-one", manifest_jso
 
 
 def _plan_prompts(**kwargs):
-    """The planning organ's stable prompt for both delivery classes (``plan_ask.stable_prompt``):
+    """The planning organ's stable prompt for both delivery classes (``plan_ask.stable_prompts``):
     the packet participant's system prompt and the retrieving participant's session prompt."""
     from ouroboros.tools import plan_ask
 
-    return [plan_ask.stable_prompt(None, system_root=REPO, by_retrieval=by_retrieval, **kwargs)
-            for by_retrieval in (False, True)]
+    return list(plan_ask.stable_prompts(system_root=REPO, **kwargs))
 
 
 @pytest.mark.parametrize("body", [False, True], ids=["core", "body"])

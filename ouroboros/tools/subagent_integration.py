@@ -1550,6 +1550,8 @@ def get_tools() -> List[ToolEntry]:
                     "and keep the copy. Newly captured changes are shown before apply; reject can decide "
                     "immediately, and eligible empty Git captures close as no_changes. An already ready "
                     "capture can be applied; read it before deciding. "
+                    "Own-body protected-path changes require Pro or Cyber Pro runtime mode (in Pro, a nested acting "
+                    "parent also needs protected_paths_grant). "
                     "Undisposed snapshots or directory-copy results remain custody debt; direct runs "
                     "do not create that debt."
                 ),
