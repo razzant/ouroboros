@@ -16,7 +16,7 @@ def plan():
     words = [spoken(0, "human", 4000), spoken(1, "ouroboros", 4000), spoken(2, "human", 4000)]
     words[2]["immune"] = True
     snap = snapshot(room_facts=room(lane1=words), story=pages(2, 8000))
-    core = ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", '"Assignment"', False,
+    core = ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", '"Assignment"',
                        memory_view_json=mv.snapshot_json(snap))
     facts = floor.view_facts(snap, mv.FULL_VIEW, window_tokens=200000, mode="max", allowances={})
     content = _system_blocks(core, _governance_blocks(None, core, mode="max"), mv.render_story(snap), mv.render_room(snap),
@@ -106,7 +106,7 @@ def _host_section_fixture(tmp_path, monkeypatch):
     from ouroboros import context, context_sections
     from ouroboros.context_runtime_facts import snapshot_labelled
     from ouroboros.memory import Memory
-    from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
+    from ouroboros.reference_books import BOOK_ENTRYPOINTS, body_map, compose_book, load_reference_book
     from ouroboros.section_floor import HostSection, capture_sections, labelled_section
     from tests import _nano_context_fixture as shape
     from tests._memory_view_synthetic import conversation
@@ -152,10 +152,13 @@ def _host_section_fixture(tmp_path, monkeypatch):
         docs = {entry: f'# {name.title()}\n\nFixture book.\n\n## Chapters\n\n- [Fixture]({chapter})\n',
                 f'docs/{chapter}': f'# Fixture\n\nIntroduction to {name}.\n\n## Detail\n\nThe full {name} example.\n'}
         books.append(load_reference_book(tmp_path, name, lambda path: docs[path].encode('utf-8')))
-    inputs = {book.book_id + '_md': compose_book(book) for book in books}
+    by_id = {book.book_id: book for book in books}
+    view, parts = body_map(by_id['architecture'], by_id['development'])
     seed, snap = plan()
     snap = replace(snap, conversations=[conversation(0, words=2)])
-    return replace(seed.core, reference_books=tuple(books), docs_need_development=True, **inputs,
+    # The task's contract requires the whole handbook (``context_requires_development``): it rides in every mode.
+    return replace(seed.core, reference_books=tuple(books), body_map=view.text, body_map_parts=parts,
+                   development_md=compose_book(by_id['development']), development_required=True,
                    semi_stable_text='\n\n'.join(stable), semi_stable_sections=capture_sections(stable, prefix='stable'),
                    dynamic_head_text='\n\n'.join(heads), dynamic_head_sections=capture_sections(heads, prefix='head'),
                    dynamic_text='\n\n'.join(dynamic), dynamic_sections=capture_sections(dynamic, prefix='dynamic'),
@@ -202,22 +205,29 @@ def test_compact_context_inspect_keeps_base_governance_addresses(mode, folded, t
     seen = json.loads(inspect)
     assert seen['memory_view_status'] == 'observed_snapshot' and 'next_offset' not in seen
     host = [row for row in seen['units'] if row['kind'] == 'host']
-    books = ['governance_2'] if mode == 'max' else ['architecture_map', 'development_map']
+    # One resident Body Map: a plain part in the owner's Max, host section ``body_map`` in a lowered or chosen frame.
+    books = ['governance_2'] if mode == 'max' else ['body_map']
     expected_ids = [
         'subagents', 'review_pool', 'identity', 'world', 'always_on_skills', 'stable_5',
         'shared_understanding', 'knowledge_index', 'project_knowledge_index', 'head_3', 'head_4',
         'dynamic_0', 'dynamic_1', 'dynamic_2', 'scratchpad', 'registry', 'installed_skills', 'drive_state',
         'runtime', 'dynamic_8', 'review_continuity', 'dynamic_10', 'dynamic_11', 'dynamic_12',
-        'governance_0', 'governance_1', *books, 'governance_3' if mode == 'max' else 'governance_4',
+        'governance_0', 'governance_1', *books,
     ]
     protected = {'identity', 'scratchpad', 'shared_understanding'}
     assert [(row['view_address'], row['section_id'], row['protected']) for row in host] == [
         ('host:' + key, key, key in protected) for key in expected_ids]
 
     local_families = {group['family'] for row in p.projection(mode).assembly_witnesses for group in row['groups']}
-    assert {'system', 'bible', 'architecture', 'development', 'project_journal', 'project_workpad', 'connections',
+    assert {'system', 'bible', 'body_map', 'development', 'project_journal', 'project_workpad', 'connections',
             'recent_progress', 'recent_tools', 'recent_events', 'story'} <= local_families
-    assert (b'The full development example.' in wire) is (mode == 'max')
+    assert 'architecture' not in local_families
+    # The task requires the whole handbook: it rides whole in every mode, as its own block; the Map never carries a
+    # chapter's body. Without that requirement no mode carries it.
+    assert b'The full development example.' in wire and b'The full architecture example.' not in wire
+    _plain, _inspect, unrequired, _next = _host_section_observation(
+        replace(core, development_required=False), mode, folded, tmp_path, monkeypatch)
+    assert b'The full development example.' not in unrequired and b'Introduction to development.' not in unrequired
     assert (b'Page 0.' in wire) is (not folded)
 
     # No report labels in the pre-observer representation. If a producer introduces a public ID

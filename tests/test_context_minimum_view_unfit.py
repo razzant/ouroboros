@@ -20,9 +20,8 @@ def build_minimum_view(root, monkeypatch, shape, *, ratio=1.0, task=None):
     words = {**syn.spoken(1, "human", 340_000 if shape == "memory" else 100),
              "owner_side": True, "immune": True}
     snapshot = syn.snapshot(room_facts=syn.room("1", lane1=[words]))
-    core = fit.ContextCore(base_prompt="SYSTEM", bible_md="BIBLE", architecture_md="# Architecture",
-        development_md="# Development", docs_need_development=False,
-        semi_stable_text="IDENTITY " + "x" * {"fixed": 400_000, "work_room": 300_000}.get(shape, 0),
+    core = fit.ContextCore(base_prompt="SYSTEM", bible_md="BIBLE", body_map="# Architecture",
+        development_md="# Development", semi_stable_text="IDENTITY " + "x" * {"fixed": 400_000, "work_room": 300_000}.get(shape, 0),
         dynamic_text="", user_content_json=json.dumps("Open the call."),
         memory_view_json=memory_view.snapshot_json(snapshot), section_root=str(root))
     monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)

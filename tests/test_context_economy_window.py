@@ -31,7 +31,7 @@ from tests.test_llm_claudexor import setup as gateway_fixture
 from tests.test_model_wait import live_wait as wait_fixture
 from tests.test_subscription_main_wait import main_call as main_call_fixture
 from tests.test_tool_result_delivery import _ctx, _deliver, _row, _source_ref, _view_json
-from tests._context_fit_fixtures import _built, _rebind, _refusal_ctx
+from tests._context_fit_fixtures import _built, _built_with_map_parts, _rebind, _refusal_ctx
 
 # The production send: the real loop, rebind, LLMClient, Claudexor serializer and physical ledger before a fake gateway.
 setup, live_wait, main_call = gateway_fixture, wait_fixture, main_call_fixture
@@ -238,7 +238,10 @@ def test_a_max_rebind_charges_tellings_then_maps_at_the_admitted_line(tmp_path, 
     from ouroboros.memory_forms import stage_of
     from tests._memory_view_synthetic import pages, room, said, snapshot
 
-    core, build = _built(tmp_path / 'w', monkeypatch, books=book_chars, ratio=1)
+    # The Low frame's saving is the Body Map at its parts (a Map of ``book_chars`` whole); without a Map, nothing.
+    core, build = (_built_with_map_parts(tmp_path / 'w', monkeypatch, headings=book_chars // 1_030,
+                                         body="Its facts in detail. " * 48, ratio=1) if book_chars
+                   else _built(tmp_path / 'w', monkeypatch, books=0, ratio=1))
     initial = build(1_000_000)
     owner = said(1, 'human', 'Keep my requirement verbatim; this is governing.', owner_side=True, immune=True)
     story = [{**page, **({'lead_rule': True} if i < 16 else {})} for i, page in enumerate(pages(48, 12_000))]
@@ -294,7 +297,7 @@ def _short_book_plan(monkeypatch, story, *, development_md="", required=False):
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     memory = snapshot(story=story, room_facts=room("1"))
     return cf.build_context_fit_plan(None, cf.ContextCore(
-        "Core", "BIBLE", "", development_md, "Identity", "Facts", '"Assignment"', bool(development_md),
+        "Core", "BIBLE", "", development_md, "Identity", "Facts", '"Assignment"',
         memory_view_json=mv.snapshot_json(memory), development_required=required), {"id": "short-books", "chat_id": 1},
         preferred_mode="max", tool_schemas=[], route_resolver=lambda *_a, **_kw: (
             {"model": "original", "provider": "p"}, ce.CapabilityEvidence(1_000_000, "confirmed", "metadata", "home")))
@@ -326,17 +329,20 @@ def test_nano_cannot_buy_room_by_leaving_its_required_handbook_off_the_scale(tmp
     from ouroboros.context_fit import estimate_context_prompt_tokens as price
     from tests._memory_view_synthetic import pages
 
-    # Max already holds this subject's whole DEVELOPMENT. Compact modes add it back beside both maps.
+    # A task that requires the handbook carries it whole as its own block in every mode, Max included: Nano's
+    # price counts it as Max's does (``required_book_tokens`` is the same in every mode).
     plan = _short_book_plan(monkeypatch, pages(1, 800), required=True,
                             development_md="# Development\n\n## Review\n\n" + "Required handbook. " * 12_000)
     messages = [*plan.messages_for("max"), OWNER]
     raw = price(messages, [])
     window = raw + HEADROOM - 4_000  # not the additive charge of a handbook (Max already carried it)
-    assert plan.core.required_book_tokens("max") == 0 < plan.core.required_book_tokens("nano")
+    assert plan.core.required_book_tokens() > 0
+    assert all("Required handbook." in plan.projection(m).system_content_json for m in ("max", "nano"))
     rebound, mode, _event = _rebind(monkeypatch, tmp_path / "tight", plan, messages, window=window, start_mode="max")
     sizes = {m: price(rebound.reproject_transcript(messages, m), []) for m in ("max", "nano")}
     print({"before": raw, "candidates": sizes, "admitted": window - HEADROOM, "selected": mode})
-    assert mode == "max" and sizes["max"] < sizes["nano"]
+    assert mode == "max" and sizes["max"] <= sizes["nano"]  # Nano buys nothing: the handbook is on its scale too
+    assert "Required handbook." in json.dumps(rebound.reproject_transcript(messages, "nano"))
     assert "Required handbook." in rebound.projection(mode).system_content_json and messages[-1] == OWNER
 
 
@@ -500,7 +506,7 @@ def test_a_route_handover_fits_the_view_in_the_effort_its_next_send_carries(tmp_
     snap = syn.snapshot(room_facts=syn.room("1"), conversations=[],
                         story=[{**page, "lead_rule": True} for page in syn.pages(10, 12_000)])
     core = cf.ContextCore("Core", "BIBLE", "# Architecture\n\n" + "Whole source book. " * 2_000, "", "Identity", "Facts",
-                          json.dumps("Assignment. " + "Retained evidence. " * 14_000), False,
+                          json.dumps("Assignment. " + "Retained evidence. " * 14_000),
                           memory_view_json=mv.snapshot_json(snap))
 
     def stated(window):  # the route's stated metadata total
@@ -576,7 +582,7 @@ def test_a_cold_restore_sends_the_new_capture_at_its_own_level_not_refolded_to_t
                                                                                                   owner, ran, mode):
     """The production owner-wait cold restore (the saved route restored onto the task, then its rebind). The new
     capture is sent in the mode the task ran in, never above the owner's current one: a task-local Low or Nano under
-    the owner's Max gets no Max books back; a saved value that names no mode leaves the owner's."""
+    the owner's Max is not raised back to Max; a saved value that names no mode leaves the owner's."""
     import ouroboros.context
     import ouroboros.loop
     from ouroboros import context_fit
@@ -602,7 +608,8 @@ def test_a_cold_restore_sends_the_new_capture_at_its_own_level_not_refolded_to_t
     assert active == mode == registry._ctx.active_context_mode == rebound.initial_mode
     assert messages[1:len(restored)] == restored[1:]  # the restored tail, then the restart notice
     assert messages[0] == fresh.projection(mode).system_message()  # the new capture, never the old bytes
-    assert (messages[0] == fresh.projection("max").system_message()) is (mode == "max")  # Max books only in Max
+    # One resident Body Map in every mode (no mode has books of its own to give back): the new capture's Map rides.
+    assert any(fresh.core.body_map[:200] in block["text"] for block in messages[0]["content"])
     assert rebound.projection(mode).memory_facts == fresh.projection(mode).memory_facts
 
 
@@ -676,8 +683,8 @@ def test_a_cold_restore_keeps_the_tasks_own_start_not_the_restore_fit(tmp_path, 
 
 def _native(main_call, monkeypatch, tmp_path, *, task_text="hi", owner_mode="low", view=None, books=0, holds_reply=()):
     """The owner's ``owner_mode`` on the fixture's real Claudexor Main call with a captured core (``view``: another
-    memory snapshot in it; ``books``: Max's books grown by that many characters, as ``test_memory_view_modes._built``
-    grows them): ``(ctx, gateway, tools, events, plan(window), windows)``. ``windows`` maps an account
+    memory snapshot in it; ``books``: a real Body Map of about that many characters whole, with its short parts and
+    addresses, ``_reference_book_fixtures.booked``): ``(ctx, gateway, tools, events, plan(window), windows)``. ``windows`` maps an account
     to the window its evidence reports (0: unknown);
     the primary pins account-a, its configured fallback account-b, and every production rebind reads it.
     ``holds_reply``: accounts whose stated total is known to hold the reply too (as after a size refusal), so a request
@@ -724,7 +731,10 @@ def _native(main_call, monkeypatch, tmp_path, *, task_text="hi", owner_mode="low
     task = {"type": "task", "text": task_text, "id": "tmain", "chat_id": 1}
     core = context._capture_context_core(env, memory, task, None, None)
     core = core if view is None else dataclasses.replace(core, memory_view_json=view)
-    core = dataclasses.replace(core, architecture_md=core.architecture_md + "\n\n" + "word " * (books // 5)) if books else core
+    if books:  # the pressure whole books made before the Map was resident: a Map whose frame a window may lower
+        from tests._reference_book_fixtures import booked
+
+        core = booked(core, tmp_path / "w", headings=max(1, books // 1_030), body="Its facts in detail. " * 48)
     schemas = initial_tool_schemas(tools, context_mode=owner_mode)
 
     def plan(window):
@@ -1015,7 +1025,7 @@ def test_an_owner_max_task_in_task_local_low_rebinds_a_fallback_and_its_return_f
     """#1728 on the production send with the owner's Max: the task already runs task-local Low (an earlier
     overflow lowered it). The primary's outcome is unknown, its upstream unobserved; its fallback answers on another
     account and calls switch_model back; the primary answers. Both rebinds start from the mode the task shows. On a
-    window that holds Low every request repeats the previous one byte for byte and Max's books never return;
+    window that holds Low every request repeats the previous one byte for byte and Max's whole Map never returns;
     on one that cannot hold Low even with my shortest memory, Nano narrows the shown Low view, and the
     primary's roomier window keeps Nano: a route never raises the mode."""
     from ouroboros.memory_view import snapshot_json
@@ -1024,7 +1034,8 @@ def test_an_owner_max_task_in_task_local_low_rebinds_a_fallback_and_its_return_f
     from tests import _memory_view_synthetic as syn
 
     ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
-                                                         view=snapshot_json(syn.actor("main")), holds_reply=("account-b",))
+                                                         view=snapshot_json(syn.actor("main")), books=200_000,
+                                                         holds_reply=("account-b",))
     _unobserved_upstream(monkeypatch)
     # The primary holds the Low view it shows with room for this scenario's turns. Every request carries the real
     # tool schemas, so the window is measured from them: their growth must never decide what a return re-cuts.
@@ -1052,7 +1063,7 @@ def test_an_owner_max_task_in_task_local_low_rebinds_a_fallback_and_its_return_f
     rebound = [row for row in _drained(events) if row.get("checkpoint_kind") == "context_fit_route_rebound"]
     mode = {"roomy": "low", "tight": "nano"}[fallback]
     assert [(row["preferred_mode"], row["effective_mode"], row["books"], row["view_kept"]) for row in rebound] == [
-        ("max", mode, "maps", fallback == "roomy"), ("max", mode, "maps", True)]  # a Low for the window is Low (21.11)
+        ("max", mode, "body_map", fallback == "roomy"), ("max", mode, "body_map", True)]  # a Low for the window is Low (21.11)
     assert tools._ctx.active_context_mode == mode and tools._ctx.context_fit_plan.preferred_mode == "max"
     assert tools._ctx.messages[0] == tools._ctx.context_fit_plan.projection(mode).system_message()
     assert ("cannot hold Max with even the shortest view of my memory; this task runs in Nano."  # kept by the return
@@ -1287,7 +1298,7 @@ def test_a_fold_that_only_shortens_the_program_data_row_still_narrows_the_view(t
     addr = row_address(row)
     note = mv._spoken((addr, row_meta(row), 1), row_author(row), {addr["row_sha256"]: row})
     owner = {**syn.spoken(2, "human", 55), "owner_side": True}
-    core = cf.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", json.dumps("How many books?"), False,
+    core = cf.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", json.dumps("How many books?"),
                           memory_view_json=mv.snapshot_json(syn.snapshot(room_facts=syn.room(lane1=[note, owner]))))
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
@@ -1318,10 +1329,10 @@ def test_a_fold_that_only_shortens_the_program_data_row_still_narrows_the_view(t
     assert _coarsen_memory_view(ctx, fit) is False  # the same view again narrows nothing
 
 
-def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_books(main_call, monkeypatch, tmp_path):
+def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_body_map(main_call, monkeypatch, tmp_path):
     """06.11, the other side of the low fold below: when memory's detail can pay what the owner's words passed the
     window's send ceiling by (20,000 past the stated number less the reply floor), memory alone narrows and Max
-    keeps its whole books (29.10)."""
+    keeps its Body Map whole (29.10, for the books it then carried)."""
     from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
     from ouroboros import memory_floor as mf
     from ouroboros.context_fit import bounded_prompt_tokens_for_payload
@@ -1380,6 +1391,7 @@ def test_a_presend_low_fold_publishes_only_the_necessary_concessions(main_call, 
     from tests import _memory_view_synthetic as syn
     from ouroboros import loop_model_call
     from ouroboros.context_window import _start_form
+    from tests._reference_book_fixtures import map_saving
 
     attempts = []
     attach = loop_model_call.with_attempt_prefix
@@ -1403,12 +1415,12 @@ def test_a_presend_low_fold_publishes_only_the_necessary_concessions(main_call, 
     words = "Owner, while you worked: keep the old API alive. "
     # The owner's words pass the line this request is admitted at (the stated window less the reply floor) by
     # 90,000: more than my memory's detail can give (06.11: memory pays in the
-    # first pass), so its floor lowers the books itself, the physical fact BIBLE P1 names; no second pass runs.
+    # first pass), so its floor steps the Body Map to its parts, the physical fact BIBLE P1 names; no second pass runs.
     owner = {"role": "user", "content": words * math.ceil((window - full - 8_192 + 90_000) * 4 / len(words))}
     ctx.messages[:] = [*built.messages_for("max"), owner]
-    full_low = built.reproject_transcript(ctx.messages, "low")
-    assert context_fit.estimate_context_prompt_tokens(full_low, initial_tool_schemas(tools, context_mode="low")) + \
-        8_192 <= window  # after dropping books the original, uncut memory would be admitted
+    full_low = built.reproject_transcript(ctx.messages, "low")  # the Low frame, its Map still whole
+    assert context_fit.estimate_context_prompt_tokens(full_low, initial_tool_schemas(tools, context_mode="low")) - \
+        map_saving(built.core) + 8_192 <= window  # with the Map at its parts the original, uncut memory would be admitted
     first = copy.deepcopy(ctx.messages)
     gateway.results = [_answer(ROUTE, {"role": "assistant", "content": "Kept."})]
     gateway.dispatch = ["response_received"]
@@ -1422,7 +1434,7 @@ def test_a_presend_low_fold_publishes_only_the_necessary_concessions(main_call, 
     # The Max trial did not make enough room; the same pass uses maps. Its checkpoint says what reached the wire.
     checkpoint = 'context_fit_low_retry' if maps_only else 'context_memory_coarsened'
     assert [(row.get("effective_mode"), row.get("books")) for row in rows  # a Low for the window is Low (21.11)
-            if row.get("checkpoint_kind") == checkpoint] == [("low", "maps")]
+            if row.get("checkpoint_kind") == checkpoint] == [("low", "body_map")]
     assert ('context_memory_coarsened' if maps_only else 'context_fit_low_retry') not in kinds
     assert _start_form(attempts[-1]) == 'maps'
     origins = attempts[-1].prefix['origins']
@@ -1446,7 +1458,7 @@ def test_a_presend_low_fold_publishes_only_the_necessary_concessions(main_call, 
     # test_memory_view_floor).
     folded = {step for step, _ident in narrowed}
     assert "F1" in folded and folded - {"F1"}
-    # Max sends [books, handbook, story, rooms notice, turns...]; Low [book navigation, story, rooms notice, turns...].
+    # Max sends [the Body Map whole, story, rooms notice, turns...]; Low [the Map at its parts, story, rooms notice, ...].
     assert len(json.dumps(low[0])) < len(json.dumps(first[0]))
     note = low[2]["content"]
     assert f"Low cuts for the window ({window} tokens)." in note  # Low, temporarily, for the window (owner 21.11)

@@ -193,7 +193,7 @@ def test_a_request_inside_the_reply_reservation_is_known_as_one(tmp_path, monkey
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     monkeypatch.setattr(ce, "resolve_main_token_density", lambda *_a, **_kw: (1.0, "cold_estimate"))
-    core, _snap = _core(True)
+    core, _snap = _core(True, tmp_path)
     plan = cf.build_context_fit_plan(None, core, {"usage_category": "consciousness"}, preferred_mode="max",
         route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "test"},
             ce.CapabilityEvidence(300_000, "confirmed", source, "probe-route", ts=ce.utc_now_iso())))
@@ -278,7 +278,7 @@ def test_a_plan_releases_its_refusal_ceiling_when_the_observation_expires(tmp_pa
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     record_observation(tmp_path, "expiry-route", refused=200_000)
-    core = cf.ContextCore("Core", "", "", "", "", "", '"Assignment"', False)
+    core = cf.ContextCore("Core", "", "", "", "", "", '"Assignment"')
     plan = cf.build_context_fit_plan(None, core, {"type": "chat"}, preferred_mode="low",
         route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "test"},
             ce.CapabilityEvidence(metadata, "confirmed" if metadata else "unprobeable", "metadata", "expiry-route")))
@@ -313,7 +313,7 @@ def test_start_and_in_task_admission_share_the_input_bound(tmp_path, monkeypatch
     monkeypatch.setattr(ce, "resolve_main_token_density", lambda *_a, **_kw: (1.0, "cold_estimate"))
     monkeypatch.setattr(ce, "utc_now_iso", lambda: "2026-10-19T14:56:16+00:00")
     record_observation(tmp_path, "incident", accepted=accepted)
-    core, _snap = _core(True)
+    core, _snap = _core(True, tmp_path)
     plan = cf.build_context_fit_plan(None, core, {"usage_category": "consciousness"}, preferred_mode="max",
         route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "test"},
             ce.CapabilityEvidence(stated, "confirmed" if stated else "unprobeable", "metadata", "incident")))
@@ -322,7 +322,7 @@ def test_start_and_in_task_admission_share_the_input_bound(tmp_path, monkeypatch
     if usable is None:
         assert plan.initial_mode == "max"
         assert not plan.projection("max").memory_facts["floor"]["steps"]
-        assert core.architecture_md in plan.projection("max").system_content_json
+        assert core.body_map in plan.projection("max").system_content_json
         assert "window unknown" in line and "921,227" in line and "2026-10-19" in line
     elif accepted > stated:
         assert "input: accepted 2026-10-19" in line
@@ -348,7 +348,7 @@ def test_presend_refusal_reclaims_an_eighth_of_stated_total_not_shifted_admissio
 
     monkeypatch.setattr(ce, 'canonical_evidence_root', lambda: tmp_path)
     monkeypatch.setattr(cf, '_route_calibration_ratio', lambda *_a, **_kw: 1.0)
-    core = cf.ContextCore('Core', '', '', '', '', '', '"Assignment"', False)
+    core = cf.ContextCore('Core', '', '', '', '', '', '"Assignment"')
     plan = cf.build_context_fit_plan(None, core, {'type': 'task'}, preferred_mode='max',
         route_resolver=lambda *_a, **_kw: ({'provider': 'test', 'model': 'test'},
             ce.CapabilityEvidence(100_000, 'confirmed', 'metadata', 'synthetic')))
@@ -440,7 +440,7 @@ def test_direct_account_scope_survives_same_key_but_not_key_rotation(tmp_path, m
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     monkeypatch.setattr(ce, "probe", lambda _root, **kw: ce.CapabilityEvidence(600_000, "confirmed", "metadata",
         ce.route_fingerprint(**{k: kw[k] for k in ("provider", "model", "base_url", "options")})))
-    core = cf.ContextCore("Core", "", "", "", "", "", '"Assignment"', False)
+    core = cf.ContextCore("Core", "", "", "", "", "", '"Assignment"')
     def start():
         return cf.build_context_fit_plan(None, core, {}, preferred_mode="max", route_resolver=cf.resolve_context_fit_route)
 
@@ -490,7 +490,7 @@ def test_a_claudexor_account_reads_the_acceptances_its_receipts_wrote(tmp_path, 
         return ce.CapabilityEvidence(catalog["window"], "confirmed", "metadata", ce.route_fingerprint(
             provider=kw["provider"], model=kw["model"], base_url=kw["base_url"], options={**kw["options"], **bound}), **bound)
     monkeypatch.setattr(ce, "probe", probe)
-    core = cf.ContextCore("Core", "", "", "", "", "", '"Assignment"', False)
+    core = cf.ContextCore("Core", "", "", "", "", "", '"Assignment"')
 
     def start():
         return cf.build_context_fit_plan(None, core, {}, preferred_mode="max", route_resolver=cf.resolve_context_fit_route)

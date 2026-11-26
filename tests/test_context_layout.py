@@ -177,35 +177,29 @@ def test_nav_map_no_heading_fallback_names_all_supported_depths():
     assert "(no `##`/`###`/`####` headings; read `x.md` directly)" in m
 
 
-def test_reference_doc_sections_preserve_max_and_orient_both_books_in_low():
-    """Max retains its full bodies; Low names both complete retrievable books."""
-    arch = "## Arch A\n\nARCHBODY\n"
+def test_reference_doc_sections_carry_one_body_map_and_the_handbook_only_when_required():
+    """Every mode carries the one resident Body Map (whole in Max; a host section whose operative view is its parts
+    in Low and Nano) and no manual behind it; the whole handbook rides only as a task's own requirement, in any mode.
+    Where no Map could be rendered, both books stay named as addresses, never silently."""
+    from ouroboros.section_floor import HostSection
+
+    body_map = "## Body map\n\nMAPBODY\n"
+    parts = "## Body map (parts and addresses)\n\n- Core: `docs/architecture/core.md`"
     dev = "## Dev A\n\nDEVBODY\n"
-
-    def _render(mode, include_dev):
-        parts, development = cl.reference_doc_sections(
-            None,
-            context_mode=mode,
-            include_development=include_dev,
-            architecture_text=arch,
-            development_text=dev,
-        )
-        return "\n\n".join([*parts, development])
-
-    max_no_dev = _render("max", False)
-    assert "ARCHBODY" in max_no_dev  # ARCH full in max even without dev context
-    assert "DEVBODY" not in max_no_dev
-    assert "docs/DEVELOPMENT.md" in max_no_dev  # pointer, never silent
-
-    max_dev = _render("max", True)
-    assert "ARCHBODY" in max_dev and "DEVBODY" in max_dev
-
-    low_dev = _render("low", True)
-    assert "ARCHBODY" not in low_dev  # nav map in low
-    assert "navigation map" in low_dev
-    assert "DEVBODY" not in low_dev
-    assert "## DEVELOPMENT.md (navigation map)" in low_dev
-
-    low_no_dev = _render("low", False)
-    assert "DEVBODY" not in low_no_dev
-    assert "docs/DEVELOPMENT.md" in low_no_dev
+    for mode in ("max", "low", "nano"):
+        sections, development = cl.reference_doc_sections(context_mode=mode, body_map=body_map,
+                                                          body_map_parts=parts, development_text=dev)
+        [section] = sections
+        assert section == body_map and development == "" and "DEVBODY" not in "\n\n".join(sections), mode
+        if mode == "max":  # nothing shorter to take in the owner's Max
+            assert not isinstance(section, HostSection) or section.operative_view is None
+        else:
+            assert isinstance(section, HostSection) and section.section_id == "body_map"
+            assert section.operative_view == parts
+        _sections, required = cl.reference_doc_sections(context_mode=mode, body_map=body_map, body_map_parts=parts,
+                                                         development_text=dev, required_book=True)
+        assert "DEVBODY" in required and required == cl.whole_development_book(dev), mode
+    [plain], _ = cl.reference_doc_sections(context_mode="low", body_map=body_map)  # a Map with no shorter form
+    assert plain == body_map and (not isinstance(plain, HostSection) or plain.operative_view is None)
+    [pointer], _ = cl.reference_doc_sections(context_mode="max", body_map="")
+    assert "docs/ARCHITECTURE.md" in pointer and "docs/DEVELOPMENT.md" in pointer

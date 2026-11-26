@@ -42,7 +42,6 @@ from ouroboros.context_input_selection import (
     _validate_declared_input_task,
     declared_receipt_section,
     development_required,
-    development_resident,
     required_book_unavailable,
     wake_start_checkpoint,
 )
@@ -917,18 +916,24 @@ def _capture_context_core(
     base_prompt, base_prompt_source = _read_governance_source(
         env, _BASE_PROMPT_PATH, "You are Ouroboros. Your base prompt could not be loaded.")
     bible_md, bible_source = _read_governance_source(env, "BIBLE.md")
-    from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
+    from ouroboros import reference_books
 
-    books, book_text, book_errors = [], {}, []
-    for book_id, entrypoint in BOOK_ENTRYPOINTS.items():
+    # One resident Body Map for every mode and focus, rendered once from both books' sources (BIBLE P1). The
+    # manuals behind it are read on demand; only a task's own requirement sends the whole handbook (section_floor).
+    required = development_required(task)
+    books, book_errors = {}, []
+    for book_id, entrypoint in reference_books.BOOK_ENTRYPOINTS.items():
         try:
-            book = load_reference_book(env.repo_dir, book_id, read_bytes=lambda path: env.repo_path(path).read_bytes())
-            books.append(book)
-            book_text[book_id] = compose_book(book)
+            books[book_id] = reference_books.load_reference_book(
+                env.repo_dir, book_id, read_bytes=lambda path: env.repo_path(path).read_bytes())
         except (OSError, ValueError) as exc:
             log.warning("Reference book unavailable (%s): %s", entrypoint, exc)
             book_errors.append(f"Reference book source unavailable: {entrypoint}. {exc}. Full context is not established.")
-            book_text[book_id] = ""
+    body_map, body_map_parts = "", ""
+    if "architecture" in books:
+        map_view, body_map_parts = reference_books.body_map(books["architecture"], books.get("development"))
+        body_map = map_view.text
+    development_md = reference_books.compose_book(books["development"]) if required and "development" in books else ""
     from ouroboros.context_layout import task_design_navigation
 
     # DESIGN follows the selected body, not document names or task prose. Capture its
@@ -982,14 +987,6 @@ def _capture_context_core(
 
         seen = reach(canonical_root)
     view_spec, view, view_json = _capture_memory_view(task, canonical_root, ctx, declared=declared)
-
-    # Max keeps the full capability/WHY map even for external work: binding a
-    # folder changes tools' default target, not the mind's knowledge of its body.
-    # Its handbook follows the subject of the work (BIBLE P1); Low/Nano and children
-    # receive both books' authored orientation through the same captured-source projection.
-    # A direct requirement is not a subject: fitting reads the subject's default, then adds the book (section_floor).
-    required = development_required(task)
-    docs_need_development = development_resident(task, design_ctx, subject_only=required)
 
     semi_stable_parts, subagent_catalog = [], None
     try:
@@ -1177,8 +1174,8 @@ def _capture_context_core(
         base_prompt=base_prompt,
         base_prompt_source=base_prompt_source,
         bible_source=bible_source, bible_md=bible_md,
-        architecture_md=book_text["architecture"],
-        development_md=book_text["development"],
+        body_map=body_map, body_map_parts=body_map_parts,
+        development_md=development_md,
         semi_stable_text=semi_stable_text,
         dynamic_text="\n\n".join(dynamic_parts),
         semi_stable_sections=capture_sections(semi_stable_parts, prefix="stable"),
@@ -1188,10 +1185,10 @@ def _capture_context_core(
         user_content_json=json.dumps(_first_user_content(task, env, attachment_facts=attachment_facts),
                                      ensure_ascii=False, sort_keys=True),
         initial_attachment_facts=attachment_facts,
-        docs_need_development=docs_need_development, development_required=required,
-        reference_books=tuple(books),
+        development_required=required,
+        reference_books=tuple(books.values()),
         reference_book_errors=tuple(book_errors),
-        compact_reference_docs=is_child,
+        delegated_focus=is_child,
         dynamic_head_text="\n\n".join(head_parts),
         memory_view_json=view_json, memory_view_sequence=view.chronicle_sequence,
         supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),

@@ -1,5 +1,7 @@
 """Start book choice and subsequent route recovery from one captured view."""
 import dataclasses
+from types import SimpleNamespace
+
 import pytest
 from ouroboros import context_budget as cb, memory_floor as mf
 from ouroboros.context_fit import MinimumViewUnfit
@@ -13,21 +15,45 @@ def _on_route(plan, window):
 
 
 
+def _built_with_parts(tmp_path, monkeypatch, *, books, ratio):
+    """``_built``'s start with a parts-and-addresses form of its grown Body Map (the shared fixture's test repository has
+    a single-file book, whose Map has no shorter form), so a lowered frame can stand the Map at its parts."""
+    from ouroboros import context, context_fit
+    from tests._context_fit_fixtures import _TASK
+    from tests._memory_view_context import world
+
+    env, memory, _rooms = world(tmp_path)
+    core = context._capture_context_core(env, memory, dict(_TASK), None, None)
+    core = dataclasses.replace(core, body_map=core.body_map + "\n\n" + "word " * (books // 5),
+                               body_map_parts="## Body map (parts and addresses)\n- Overview: `docs/ARCHITECTURE.md`")
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: ratio)
+
+    def plan(window):
+        evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=window)
+        return context._build_context_fit_plan(env, core, dict(_TASK), preferred_mode="max",
+                                               route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
+    return core, plan
+
+
 def test_honest_max_selects_low_before_folding_story_and_keeps_window_budget(tmp_path, monkeypatch):
-    core, build = _built(tmp_path, monkeypatch, books=600_000, ratio=1)
+    # A Body Map this route's window cannot hold beside my core: the lowered frame stands it at its parts and memory
+    # stays whole (before 26.11.2026 the stimulus was whole books beside their chapter maps).
+    core, build = _built_with_parts(tmp_path, monkeypatch, books=600_000, ratio=1)
+    assert core.section_root and core.section_task_id  # a reader of the Map's full text: it may step to its parts
     roomy = build(1_000_000)
     tight = build(200_000)
-    assert roomy.initial_mode == "max" and core.architecture_md in roomy.max_projection.system_content_json.replace("\\n", "\n")
+    assert roomy.initial_mode == "max" and core.body_map in roomy.max_projection.system_content_json.replace("\\n", "\n")
     assert tight.initial_mode == "low" and tight.preferred_mode == "max"
     floor = tight.projection("low").memory_facts["floor"]
     assert floor["target_tokens"] is None and floor["budget_allowance_tokens"] is None
-    assert floor["mode_switch"] == {"from": "max", "to": "low"}
-    assert ("Low, temporarily, for the window; my human's mode is Max. With no memory and no tool schemas, whole books "
+    assert floor["mode_switch"] == {"from": "max", "to": "low"} and floor["steps"] == {}
+    assert ("Low, temporarily, for the window; my human's mode is Max. With no memory and no tool schemas, the body map "
             "beside the rest of this start (my core, the host's sections and the assignment) and the work's room need ") in (
         tight.low_projection.system_content_json)
-    assert tight.projection("low").memory_facts["max_room"]["cause"] == "route"  # the books alone overflow 200k
+    assert tight.projection("low").memory_facts["max_room"]["cause"] == "route"  # the Map alone overflows 200k
     assert roomy.projection("max").memory_facts["max_room"]["cause"] == "held"
     assert "word word word word" not in tight.low_projection.system_content_json
+    assert "- Overview: `docs/ARCHITECTURE.md`" in tight.low_projection.system_content_json
     assert tight.core_sha256 == roomy.core_sha256
 
 

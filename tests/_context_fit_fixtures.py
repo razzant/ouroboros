@@ -25,7 +25,31 @@ def _built(tmp_path, monkeypatch, *, books=80_000, ratio=None, page_chars=0):
         ChronicleStore(memory.drive_root).ensure_activated()
         _page(memory.drive_root, "1", 10, 11, text="Story. " * (page_chars // 7))
     core = context._capture_context_core(env, memory, dict(_TASK), None, None)
-    core = dataclasses.replace(core, architecture_md=core.architecture_md + "\n\n" + "word " * (books // 5))
+    core = dataclasses.replace(core, body_map=core.body_map + "\n\n" + "word " * (books // 5))
+    if ratio is not None:
+        monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: ratio)
+
+    def plan(window, *, status="asserted", preferred="max", tool_schemas=None):
+        evidence = SimpleNamespace(route_fp="r", status=status, stale=status != "asserted", window_tokens=window)
+        return context._build_context_fit_plan(env, core, dict(_TASK), preferred_mode=preferred, tool_schemas=tool_schemas,
+                                               route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
+    return core, plan
+
+
+def _built_with_map_parts(tmp_path, monkeypatch, *, headings, body="", ratio=None):
+    """``_built`` whose pressure is a real Body Map (``_reference_book_fixtures.booked``): ``headings`` mechanisms of
+    ``body`` size the Map whole, which Max holds, while its parts and addresses stay short, the lawful step a frame
+    the window lowered takes (``memory_floor.lowered_maps``; the capture's reader is ``section_root``)."""
+    from types import SimpleNamespace
+
+    from ouroboros import context, context_fit
+    from tests._memory_view_context import world
+    from tests._reference_book_fixtures import booked
+
+    env, memory, _rooms = world(tmp_path)
+    core = booked(context._capture_context_core(env, memory, dict(_TASK), None, None), tmp_path,
+                  headings=headings, body=body)
+    assert core.section_root and core.section_task_id and len(core.body_map_parts) < len(core.body_map)
     if ratio is not None:
         monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: ratio)
 

@@ -362,57 +362,13 @@ def _explicit_self_body_docs_flag(task: Dict[str, Any]) -> Optional[bool]:
     return None
 
 
-def _task_requires_self_body_docs(task: Dict[str, Any]) -> bool:
-    """Return True when the task is structurally about Ouroboros itself."""
-
-    explicit = _explicit_self_body_docs_flag(task)
-    if explicit is not None:
-        return explicit
-    contract = task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {}
-    task_type = str(task.get("type") or contract.get("task_type") or "").strip().lower()
-    return task_type in {"evolution", "deep_self_review", "review"}
-
-
-def _pointer_surface(task: Dict[str, Any]) -> bool:
-    """BIBLE P1's on-demand surfaces: a delegated subagent, an external API/CLI/scheduled source or actor."""
-    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-    source = str(metadata.get("source") or task.get("source") or "").strip().lower()
-    actor = str(task.get("actor_id") or metadata.get("actor_id") or "").strip().lower()
-    delegation_role = str(task.get("delegation_role") or metadata.get("delegation_role") or "").strip().lower()
-    return (delegation_role == "subagent" or source in {"api_task", "cli", "scheduled_task", "skill_scheduled_task"}
-            or actor in {"cli", "scheduler"})
-
-
-def _bound_tree_is_body(task: Dict[str, Any], ctx: Any) -> Optional[bool]:
-    """Whether the task's bound work tree is Ouroboros's body (a worktree, copy or fork of it): ``True`` when
-    ``body_fact`` recognizes it, ``False`` when it proves a foreign tree, ``None`` without a binding or when
-    the fact is unknown (no git, no remote, an unreadable tree)."""
-    from ouroboros.review_body_fact import BODY_FALSE, BODY_TRUE, body_fact
-    from ouroboros.tools.tool_resolution import system_repo_dir_for
-    from ouroboros.workspace_copies import same_directory
-
-    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-    root = str(task.get("workspace_root") or metadata.get("workspace_root") or "").strip()
-    if not root:
-        return None
-    try:
-        system = system_repo_dir_for(ctx)
-        if same_directory(root, system):
-            return True
-        data = getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)
-        fact = body_fact(root, system_repo=system, data_dir=data).body
-    except Exception:
-        log.debug("bound tree body fact unavailable; the subject stays unknown", exc_info=True)
-        return None
-    return True if fact == BODY_TRUE else False if fact == BODY_FALSE else None
-
-
 def development_required(task: Dict[str, Any]) -> bool:
     """This task's own direct requirement of the whole handbook in every mode (owner 1.11.2026).
 
     Only its contract's ``context_requires_development`` is true: ``start_task`` authors that key for the new
-    task alone, and no descendant or follow-up inherits it. A top-level value alone is the older answer about
-    the subject in Max, and ``context_requires_self_body_docs`` is a subject marker: neither is this requirement.
+    task alone, and no descendant or follow-up inherits it. ``context_requires_self_body_docs`` is a subject marker
+    (it selects whose DESIGN an author carries, ``context_layout.author_design_source``): it is not this requirement,
+    and nothing else preloads the handbook (BIBLE P1).
     """
     contract = task.get("task_contract")
     return isinstance(contract, dict) and contract.get("context_requires_development") is True
@@ -432,27 +388,6 @@ def required_book_unavailable(core: Any) -> Dict[str, Any]:
             "detail": (f"{error} The whole book is this task's own requirement; no map or partial book stands in. "
                        "Restore the source, then Continue with that requirement; changing it needs an explicit new task."),
             "recovery_choices": ["retry_after_source_recovery", "start_explicit_fresh_task"]}
-
-
-def development_resident(task: Dict[str, Any], ctx: Any, *, subject_only: bool = False) -> bool:
-    """Whether docs/DEVELOPMENT.md stays whole in Max, by the subject of the work (BIBLE P1, owner 6A).
-
-    The task's own ``context_requires_development`` wins either way (absent is not false), read from its row and
-    then its contract, which survives restore and Continue; ``subject_only`` asks what the subject alone says. A
-    delegated child or an external API/CLI/scheduled surface gets the pointer unless the task itself asks for the
-    handbook; self-body work keeps it; a bound work tree ``body_fact`` proves foreign gets the pointer. Anything
-    else, an unbound task or a tree whose body fact is unknown, keeps the book: missing facts never narrow it.
-    Project membership is not a signal.
-    """
-    contract = task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {}
-    explicit = None if subject_only else task.get("context_requires_development", contract.get("context_requires_development"))
-    if explicit is not None:
-        return normalize_bool(explicit)
-    if _explicit_self_body_docs_flag(task) is True:
-        return True
-    if _pointer_surface(task):
-        return False
-    return _task_requires_self_body_docs(task) or _bound_tree_is_body(task, ctx) is not False
 
 
 def task_input_pointer(env: Any, task: Dict[str, Any], user_content_json: str) -> Optional[str]:

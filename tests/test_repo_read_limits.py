@@ -4,7 +4,8 @@ Also covers the core governance artifact invariants introduced in the
 'Core Governance Artifacts' section of docs/DEVELOPMENT.md:
   - repo_read default max_lines raised to 2000 so ARCHITECTURE.md is
     readable in a single call.
-  - the wake-up's Main context (build_llm_messages) includes ARCHITECTURE.md.
+  - the wake-up's Main context (build_llm_messages) carries the resident Body Map
+    rendered from ARCHITECTURE.md's sources, never a chapter body or the handbook.
   - Triad review prompt includes ARCHITECTURE.md even when not touched.
   - DEVELOPMENT.md contains the core governance artifact invariant rule.
 """
@@ -227,42 +228,65 @@ def _wake_context(tmp_path):
     return "\n\n".join(block["text"] for block in messages[0]["content"])
 
 
-def test_wake_context_includes_architecture_md(tmp_path):
-    """A consciousness wake-up reads the same governance artifacts as any Main turn."""
+_BOOKS = {
+    "docs/ARCHITECTURE.md": ("# ARCHITECTURE\n\nThis is the map of my body.\n\n## Chapters\n\n"
+                             "- [Runtime](architecture/01-runtime.md)\n- [Tools](architecture/02-tools.md)\n\n"
+                             "## Reference Atlas\n\n- [DESIGN.md](DESIGN.md) — the visual semantics.\n"),
+    "docs/architecture/01-runtime.md": "# 1. Runtime\n\nHow I keep work alive.\n\n## Execution\n\nRUNTIME_CHAPTER_BODY\n",
+    "docs/architecture/02-tools.md": "# 2. Tools\n\nWhat my tools let me do.\n\n## Registry\n\nTOOLS_CHAPTER_BODY\n",
+    "docs/DEVELOPMENT.md": "# DEVELOPMENT\n\nHow I change.\n\n## Chapters\n\n- [Review](development/01-review.md)\n",
+    "docs/development/01-review.md": "# Review protocol\n\nHow a change is reviewed.\n\n## Rules\n\nHANDBOOK_BODY\n",
+}
+
+
+def _write_books(repo_dir):
+    for path, text in _BOOKS.items():
+        (repo_dir / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo_dir / path).write_text(text, encoding="utf-8", newline="\n")
+
+
+def test_wake_context_carries_the_resident_body_map(tmp_path):
+    """A consciousness wake-up reads the same governance artifacts as any Main turn: the Body Map, whole."""
     repo_dir = tmp_path / "repo"
     (repo_dir / "docs").mkdir(parents=True)
     (repo_dir / "BIBLE.md").write_text("# BIBLE", encoding="utf-8")
-    (repo_dir / "docs" / "ARCHITECTURE.md").write_text(
-        "# ARCHITECTURE\n\nThis is the architecture doc.", encoding="utf-8"
-    )
+    _write_books(repo_dir)
 
     context = _wake_context(tmp_path)
 
-    assert "## ARCHITECTURE.md" in context, (
-        "the wake-up's Main context must include a '## ARCHITECTURE.md' section. "
+    assert "## Body map" in context, (
+        "the wake-up's Main context must carry the resident Body Map. "
         "This is a core governance artifact — see docs/DEVELOPMENT.md."
     )
-    assert "This is the architecture doc." in context
+    assert "This is the map of my body." in context
+    for path, opening in (("docs/architecture/01-runtime.md", "How I keep work alive."),
+                          ("docs/architecture/02-tools.md", "What my tools let me do.")):
+        assert f"Source: `{path}`\n{opening}" in context
+    assert "### Reference Atlas\n- `docs/DESIGN.md` — the visual semantics." in context
+    assert "- Review protocol: `docs/development/01-review.md`" in context
+    for body in ("RUNTIME_CHAPTER_BODY", "TOOLS_CHAPTER_BODY", "HANDBOOK_BODY"):
+        assert body not in context  # chapters are read on demand
+    assert "## ARCHITECTURE.md" not in context and "## DEVELOPMENT.md" not in context
 
 
-def test_wake_context_architecture_before_knowledge_base(tmp_path):
-    """ARCHITECTURE.md section must come before knowledge base in the wake-up's context."""
+def test_wake_context_body_map_before_knowledge_base(tmp_path):
+    """The Body Map must come before the knowledge base in the wake-up's context."""
     repo_dir = tmp_path / "repo"
     (repo_dir / "docs").mkdir(parents=True)
     (repo_dir / "BIBLE.md").write_text("# BIBLE", encoding="utf-8")
-    (repo_dir / "docs" / "ARCHITECTURE.md").write_text("# ARCH CONTENT", encoding="utf-8")
+    _write_books(repo_dir)
     kb = tmp_path / "data" / "memory" / "knowledge"
     kb.mkdir(parents=True)
     (kb / "index-full.md").write_text("# Knowledge base index", encoding="utf-8")
 
     context = _wake_context(tmp_path)
 
-    arch_pos = context.find("## ARCHITECTURE.md")
+    map_pos = context.find("## Body map")
     kb_pos = context.find("## Knowledge base")
-    assert arch_pos != -1, "ARCHITECTURE.md section not found in the wake-up's context"
+    assert map_pos != -1, "the Body Map was not found in the wake-up's context"
     if kb_pos != -1:
-        assert arch_pos < kb_pos, (
-            "ARCHITECTURE.md must appear before the knowledge base in the wake-up's context"
+        assert map_pos < kb_pos, (
+            "the Body Map must appear before the knowledge base in the wake-up's context"
         )
 
 
@@ -349,10 +373,12 @@ def test_wake_context_logs_warning_when_architecture_md_missing(tmp_path, caplog
     with caplog.at_level(logging.WARNING, logger="ouroboros.context"):
         context = _wake_context(tmp_path)
 
-    # 1. ARCHITECTURE.md section must be absent from context (file doesn't exist)
-    assert "## ARCHITECTURE.md" not in context, (
-        "ARCHITECTURE.md section should not appear when file is missing"
+    # 1. No Map can be rendered (the file doesn't exist), and the prompt itself names the gap.
+    assert "## ARCHITECTURE.md" not in context and "## Body map" not in context, (
+        "no Body Map should appear when ARCHITECTURE.md is missing"
     )
+    assert "Reference book source unavailable: docs/ARCHITECTURE.md." in context
+    assert "Full context is not established." in context
 
     # 2. a warning naming ARCHITECTURE.md must have been logged
     arch_warnings = [record.getMessage() for record in caplog.records

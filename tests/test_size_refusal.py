@@ -705,7 +705,7 @@ def test_window_learning_uses_the_actors_nano_schema_set(tmp_path, monkeypatch, 
     route = {"model": "fixture", "provider": "openai-compatible"}
     evidence = ce.CapabilityEvidence(1_000_000, "confirmed", "metadata", "call-fixture")
     monkeypatch.setattr(context, "_context_fit_route", lambda *_a, **_kw: (route, evidence))
-    plan = cf.build_context_fit_plan(None, cf.ContextCore("Core", "BIBLE", "", "", "", "", '"Task"', False),
+    plan = cf.build_context_fit_plan(None, cf.ContextCore("Core", "BIBLE", "", "", "", "", '"Task"'),
                                     {}, preferred_mode="low", tool_schemas=full,
                                     route_resolver=context._context_fit_route)
     usage = {}

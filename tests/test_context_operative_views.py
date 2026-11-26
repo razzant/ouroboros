@@ -1,26 +1,29 @@
 """Producer-owned views keep navigation and operative authority under physical pressure."""
-def test_book_maps_keep_their_chapters_and_paths_and_retain_the_map(tmp_path):
+def test_the_body_map_keeps_every_part_and_address_and_retains_the_whole_map(tmp_path):
     from pathlib import Path
 
-    from ouroboros import context_layout
-    from ouroboros.reference_books import load_reference_book
+    from ouroboros import context_layout, reference_books
+    from ouroboros.reference_books import compose_book, load_reference_book
     from ouroboros.section_floor import HostSection
 
     repo = Path(__file__).resolve().parents[1]
-    book = load_reference_book(repo, "architecture")
-    section = context_layout.book_map_section(book, "architecture_map")
-    assert isinstance(section, HostSection) and section.full_text == context_layout.book_navigation(book)
-    for chapter in book.chapters:
-        assert f"`{chapter.source_path}`" in section.operative_view
-    assert len(section.operative_view) < len(section.full_text) / 4
-    assert "(navigation map)" not in section.operative_view  # the per-chapter heading index stays retained
-    books = (book, load_reference_book(repo, "development"))
-    parts, development = context_layout.reference_doc_sections(None, context_mode="nano", include_development=True,
-                                                               books=books)
-    assert [getattr(part, "section_id", None) for part in parts][:2] == ["architecture_map", "development_map"]
-    full, _dev = context_layout.reference_doc_sections(None, context_mode="max", include_development=False,
-                                                        books=books)
-    assert not isinstance(full[0], HostSection) or full[0].operative_view is None  # Max keeps the book resident
+    books = tuple(load_reference_book(repo, book_id) for book_id in ("architecture", "development"))
+    view, parts = reference_books.body_map(*books)
+    section = context_layout.body_map_section(view.text, parts, steppable=True)
+    assert isinstance(section, HostSection) and section.section_id == "body_map"
+    assert (section.full_text, section.operative_view) == (view.text, parts)
+    assert view.text.startswith("## Body map\n") and parts.startswith("## Body map (parts and addresses)")
+    for chapter in (*books[0].chapters, *books[1].chapters):  # every manual of both books keeps its address
+        assert f"`{chapter.source_path}`" in parts
+    assert "`docs/DESIGN.md`" in parts and "`docs/PERSISTENCE.md`" in parts  # the Reference Atlas addresses
+    assert len(parts) < len(view.text) / 4
+    assert "## ARCHITECTURE.md" not in view.text and " lines " not in parts  # no whole book, no line ranges
+    compact, development = context_layout.reference_doc_sections(
+        context_mode="nano", body_map=view.text, body_map_parts=parts, development_text=compose_book(books[1]))
+    assert [getattr(part, "section_id", None) for part in compact] == ["body_map"] and development == ""
+    full, _dev = context_layout.reference_doc_sections(context_mode="max", body_map=view.text, body_map_parts=parts)
+    assert len(full) == 1 and (not isinstance(full[0], HostSection) or full[0].operative_view is None)
+    assert full[0] == view.text  # Max keeps the Map whole: a plain part with nothing shorter to take
 
 
 def test_world_and_subagents_keep_names_and_state(tmp_path, monkeypatch):

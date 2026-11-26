@@ -432,7 +432,7 @@ def session_candidate(host, factory, options, *, observation_fp=None):
 
     running = known and not start_work
     ordered = (running and plan.initial_mode == plan.preferred_mode == "max"
-               and plan.core and not plan.core.compact_reference_docs)
+               and plan.core and not plan.core.delegated_focus)
     if options.resume_handle and not running:
         raw = estimate_context_prompt_tokens([*current, *extra], schemas)
         ratio, _ = _session_density(host, plan, raw)
@@ -526,7 +526,7 @@ def session_candidate(host, factory, options, *, observation_fp=None):
                         tool_schemas=schemas, start_mode=plan.initial_mode,
                         current_messages=[*(sent_rows if running else current), *extra], refused_tokens=goal - room,
                         slack_tokens=room, measured_input_tokens=raw, start_work=False, telling_floor=bool(ordered),
-                        unsent_start=start_work,  # an unsent call start still spares its detailed book maps (#3649)
+                        unsent_start=start_work,  # an unsent call start still spares its whole Body Map (#3649)
                         select_mode="low" if not ordered and plan.initial_mode == "max" else None, **trial_catalogs)
                     if running:
                         rebound = replace(rebound, output_reserve_tokens=plan.output_reserve_tokens,

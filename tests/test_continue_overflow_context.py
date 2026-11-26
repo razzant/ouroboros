@@ -73,9 +73,13 @@ def _run_refusal(registry, messages, task, monkeypatch):
     return inputs
 
 
-@pytest.mark.parametrize("flag", [True, False, None])
-@pytest.mark.parametrize("mode", ["max", "low"])
-def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, foreign_world, flag, mode):
+# A required handbook in Low is left out: a numberless refusal there ends recovery without a fitting request on the
+# base revision too (reported beside this port, not a change of this PR).
+@pytest.mark.parametrize("mode,flag,required", [
+    *[(mode, flag, False) for mode in ("max", "low") for flag in (True, False, None)], ("max", True, True)],
+    ids=["max-self-body", "max-not-self-body", "max-absent", "low-self-body", "low-not-self-body", "low-absent",
+         "max-self-body-requires-handbook"])
+def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, foreign_world, flag, required, mode):
     from ouroboros.agent_startup_checks import validate_task_authority_sources
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.context import build_llm_messages
@@ -94,9 +98,10 @@ def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, fore
     monkeypatch.setattr("ouroboros.context.resolve_context_fit_route", lambda *_a, **_kw: (
         {"model": "openai/test-model", "provider": "openai"},
         SimpleNamespace(route_fp="fixture", status="asserted", stale=False, window_tokens=1_000_000)))
-    workspace = clone(foreign_world, tmp_path / "working-copy")  # proven foreign: only the flag restores the handbook
+    workspace = clone(foreign_world, tmp_path / "working-copy")  # proven foreign: only the contract brings the handbook
     _interrupted(env.drive_root, workspace_root=str(workspace), workspace_mode="external",
-        task_contract={"context": "PREDECESSOR-CONTRACT-SENTINEL", **({FIELD: flag} if flag is not None else {})},
+        task_contract={"context": "PREDECESSOR-CONTRACT-SENTINEL", **({FIELD: flag} if flag is not None else {}),
+                       **({"context_requires_development": True} if required else {})},
         mutation_evidence=_mutation_evidence())
     ack = admit_continuation("pred-1", action_nonce=NONCE)
     assert ack["ok"] and not ack["held"], ack
@@ -115,20 +120,24 @@ def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, fore
     assert brief["source"]["arguments"] == {"task_id": "pred-1", "include_authority": True}
     assert brief["omitted_fields"]["task_contract"] > 0
     assert before["task_contract"]["context"] == "PREDECESSOR-CONTRACT-SENTINEL"
+    core = registry._ctx.context_fit_plan.core
     for index, request in enumerate(inputs):
         system = json.dumps([m for m in request["messages"] if m["role"] == "system"])
         assert "PREDECESSOR-CONTRACT-SENTINEL" not in system and "predecessor_authority" in system
-        # Low projects books as navigation. A Max overflow without numbers narrows memory first and keeps the books
-        # (owner order 7A: memory before books, which wait for a further refusal; 06.11), so the stored inclusion
-        # choice keeps the whole handbook in every Max request here. User content may be blocks.
+        system_text = "\n\n".join(block.get("text", "") for m in request["messages"] if m["role"] == "system"
+                                   for block in m["content"])
+        # Every request carries the resident Body Map. A Max overflow without numbers narrows memory first and keeps
+        # the Map whole (owner order 7A: memory before the books' step, which waits for a further refusal; 06.11).
+        # The task's own requirement keeps the whole handbook in every request, in either mode; no flag adds it.
+        assert "## Body map" in system_text
+        if mode == "max":
+            assert core.body_map in system_text, index
         assert sum(block.get("text", "").startswith("## DEVELOPMENT.md\n")
                    for m in request["messages"] if m["role"] == "system"
-                   for block in m["content"]) == int(flag is True and mode == "max")
-        if mode == "low" or (index == 2 and flag is not True):
-            assert "## DEVELOPMENT.md (navigation map)" in system
+                   for block in m["content"]) == int(required)
         users = json.dumps([m for m in request["messages"] if m["role"] == "user"], ensure_ascii=False)
         assert json.dumps(task["text"], ensure_ascii=False)[1:-1] in users
-    assert registry._ctx.context_fit_plan.core.docs_need_development is bool(flag)
+    assert core.development_required is required and bool(core.development_md) is required
     assert task["task_contract"][FIELD] is bool(flag)
     assert "owner pressed" not in task["text"].lower() and "already in your context" in task["text"]
     assert len({request["model"] for request in inputs}) == 1

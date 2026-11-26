@@ -137,7 +137,7 @@ def test_a_frozen_schema_preview_cannot_pin_cuts_after_current_tools_fit(tmp_pat
 
     monkeypatch.setattr(context, "_context_fit_route", route)
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
-    core = cf.ContextCore("System", "BIBLE", "Architecture", "", "Identity", "Fact", '"Assignment"', False)
+    core = cf.ContextCore("System", "BIBLE", "Architecture", "", "Identity", "Fact", '"Assignment"')
     tools._ctx.context_fit_plan = cf.build_context_fit_plan(None, core, {}, preferred_mode="max", route_resolver=route)
     original = tools._ctx.context_fit_plan.projection("max").system_message()
     monkeypatch.setattr(loop, "_rebind_context_fit_plan", real_rebind)
@@ -189,7 +189,7 @@ def test_restore_prices_and_publishes_only_the_final_nano_catalog(tmp_path, monk
 
     monkeypatch.setattr(context, '_context_fit_route', route)
     monkeypatch.setattr(cf, '_route_calibration_ratio', lambda *_a, **_kw: 1.0)
-    core = cf.ContextCore('System', 'BIBLE', 'Architecture', '', 'Identity', 'Fact', '"Assignment"', False)
+    core = cf.ContextCore('System', 'BIBLE', 'Architecture', '', 'Identity', 'Fact', '"Assignment"')
     tools._ctx.context_fit_plan = cf.build_context_fit_plan(None, core, {}, preferred_mode='low', route_resolver=route)
     monkeypatch.setattr(loop, '_rebind_context_fit_plan', rebind)
     resident = restore(prepared)

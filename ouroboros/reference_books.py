@@ -285,6 +285,74 @@ def overview_book(
     return BookView("\n\n".join(rows), tuple(refs), False)
 
 
+BODY_MAP_ATLAS = "Reference Atlas"
+BODY_MAP_READER = 'Each `Source:` path and Atlas address reads with `read_file(root="system_repo", path=...)`.'
+
+
+def _atlas_rows(entrypoint: MarkdownSource) -> tuple[str, ...]:
+    """The Reference Atlas items, each Markdown link replaced by the repository path it resolves to.
+
+    A link in the entrypoint is relative to ``docs/``; a reader tool takes a repository path, so the resident
+    Map carries that. Spans come from the parsed source: no pattern guesses where a link starts or ends.
+    """
+    section = next((h for h in entrypoint.headings if h.level == 2 and h.title == BODY_MAP_ATLAS), None)
+    if section is None:
+        return ()
+    base = posixpath.dirname(entrypoint.source_path)
+    rows = []
+    for item in entrypoint.list_items:
+        if not section.span.end_byte <= item.start_byte < section.section.end_byte:
+            continue
+        at, parts = item.start_byte, []
+        for link in entrypoint.links:
+            if item.start_byte <= link.span.start_byte and link.span.end_byte <= item.end_byte:
+                target = urlsplit(link.destination)
+                if target.scheme or target.netloc:
+                    continue  # an outside address stays as written
+                path = posixpath.normpath(posixpath.join(base, unquote(target.path)))
+                parts += [entrypoint.raw[at:link.span.start_byte].decode("utf-8"), f"`{path}`"]
+                at = link.span.end_byte
+        rows.append("".join([*parts, entrypoint.raw[at:item.end_byte].decode("utf-8")]).strip())
+    return tuple(rows)
+
+
+def body_map(architecture: ReferenceBook, development: ReferenceBook | None = None) -> tuple[BookView, str]:
+    """The resident Body Map and its parts-and-addresses form (BIBLE P1), both rendered from the book sources.
+
+    The Map is the Architecture entrypoint's authored introduction, each chapter's title, physical path and
+    authored opening, the Reference Atlas and the Development chapters by title and path. It carries no line
+    number, count or release version, so an edit inside a chapter's body or a release leaves its bytes alone;
+    the file on disk keeps its version header (``release_sync``). The second value is what stands when a
+    physical window cannot hold the Map: every chapter of both books and every Atlas address, nothing else.
+    It is ``""`` for a legacy single-file revision, whose only view is its source navigation.
+    """
+    if architecture.legacy:  # one physical file: its navigation is its only view; the other book stays one address away
+        view = overview_book(architecture)
+        return replace(view, text=f"{view.text}\n\nEngineering handbook, read on demand: `{BOOK_ENTRYPOINTS['development']}`."), ""
+    entry = architecture.entrypoint
+    listed = [(chapter.headings[0].title, chapter.source_path) for chapter in architecture.chapters]
+    handbook = [] if development is None or development.legacy else [
+        f"- {chapter.headings[0].title}: `{chapter.source_path}`" for chapter in development.chapters]
+    atlas = _atlas_rows(entry)
+    rows = ["## Body map", entry.text_at(_preamble(entry)).strip(), BODY_MAP_READER]
+    refs = [_ref(architecture, entry, _preamble(entry))]
+    for chapter in architecture.chapters:
+        opening = _preamble(chapter)
+        rows.append(f"### {chapter.headings[0].title}\nSource: `{chapter.source_path}`\n{chapter.text_at(opening).strip()}")
+        refs.extend((_ref(architecture, chapter, chapter.headings[0].span), _ref(architecture, chapter, opening)))
+    if atlas:
+        rows.append(f"### {BODY_MAP_ATLAS}\n" + "\n".join(atlas))
+    if handbook:
+        rows.append("### Development handbook chapters\n" + "\n".join(handbook))
+    parts = ["## Body map (parts and addresses)", "\n".join(f"- {title}: `{path}`" for title, path in listed)]
+    if handbook:
+        parts.append("Development handbook chapters:\n" + "\n".join(handbook))
+    if atlas:  # the address side of each row: what stands before its description
+        parts.append(f"{BODY_MAP_ATLAS}:\n" + "\n".join(row.split(" — ", 1)[0] for row in atlas))
+    parts.append('Each reads with `read_file(root="system_repo", path=...)`.')
+    return BookView("\n\n".join(rows), tuple(refs), False), "\n\n".join(parts)
+
+
 def read_book_range(
     book: ReferenceBook, chapter_path: str, start_line: int = 1,
     max_lines: int | None = None,

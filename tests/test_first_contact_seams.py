@@ -567,8 +567,8 @@ def _prefer(normal, limits, *, required=0, story_after=200_000, mode_after=None,
     from ouroboros.response_limits import dispatch_target
 
     asked = []
-    core = SimpleNamespace(user_content_json='"hi"', supplementary_messages_json="[]", compact_reference_docs=compact,
-                           required_book_tokens=lambda mode: required)
+    core = SimpleNamespace(user_content_json='"hi"', supplementary_messages_json="[]", delegated_focus=compact,
+                           required_book_tokens=lambda: required)
 
     def forms(start_saving):
         asked.append(start_saving)
@@ -586,7 +586,7 @@ def _story(chosen):
     return len(contents[mode][0][-1]["text"].split("\n\n### First-send composition")[0])
 
 
-def test_a_known_window_low_start_folds_its_own_tellings_and_keeps_its_books():
+def test_a_known_window_low_start_folds_its_own_tellings_and_keeps_its_mode():
     normal = (_contents(800_000), "low")
     chosen, asked = _prefer(normal, (0, 0, 150_000))
     assert chosen is not normal and chosen[1] == "low" and _story(chosen) == 200_000 and asked
@@ -600,16 +600,21 @@ def test_the_required_handbook_is_counted_physically_but_never_paid_by_memory():
     assert with_book == [plain[0] - 30_000]
 
 
-def test_the_required_handbook_never_takes_the_books_to_maps():
-    """The ordinary size decides on maps: a folded view under the proven rung's goal stays Max with whole books even
-    when this task's directly required handbook puts the physical request over it."""
+def test_a_followed_maps_refusal_still_bounds_the_fold_and_never_takes_a_frame():
+    """The chapter-maps rung left with the resident books: a refused Max size an earlier same-round maps retry
+    followed (``before maps``) still bounds the fold, and only my tellings pay it; the start stays Max, with or
+    without this task's directly required handbook, whose tokens memory never pays."""
     normal = (_contents(800_000, room={"cause": "held", "cuts": [], "window": 1}), "max")
-    assert _prefer(normal, (140_000, 140_000, 140_000))[0][1] == "low"
-    kept, asked = _prefer(normal, (140_000, 140_000, 140_000), required=30_000)
-    assert kept[1] == "max" and asked and _story(kept) == 200_000  # its tellings folded, its books whole
+    assert _prefer(normal, (400_000, 0, 400_000)) == (normal, [])  # the Max refusal alone: the whole start fits it
+    plain, asked = _prefer(normal, (400_000, 140_000, 140_000))  # the followed maps refusal bounds the fold
+    assert plain[1] == "max" and asked and _story(plain) == 200_000
+    assert plain[0]["max"][1]["first_contact_preference"] is True
+    assert "chapter maps" not in plain[0]["max"][0][-1]["text"]
+    kept, with_book = _prefer(normal, (400_000, 140_000, 140_000), required=30_000)
+    assert kept[1] == "max" and _story(kept) == 200_000 and with_book == [asked[0] - 30_000]
 
 
-def test_a_maps_rung_keeps_the_folded_tellings_and_says_why():
+def test_a_followed_maps_refusal_folds_max_tellings_and_says_why():
     from ouroboros.memory_view_work import PROGRAM_HISTORY_HEAD
 
     held = {"cause": "held", "cuts": ["F2"], "window": 1}
@@ -618,10 +623,12 @@ def test_a_maps_rung_keeps_the_folded_tellings_and_says_why():
     assert folded_data != ordinary_data
     normal = (_contents(800_000, room=held, room_data=ordinary_data), "max")
     chosen, _ = _prefer(normal, (90_000, 120_000, 90_000), story_after=200_000)
-    assert chosen[1] == "low" and _story(chosen) == 200_000  # the folded tellings, not every story body again
-    facts = chosen[0]["low"][1]
-    assert facts["first_contact_preference"] and facts["max_room"]["cause"] == "first_contact"
-    assert chosen[0]["low"][2] == folded_data and chosen[0]["low"][2].startswith(PROGRAM_HISTORY_HEAD)
+    # A followed maps refusal trades no frame any more: Max, the folded tellings, not every story body again.
+    assert chosen[1] == "max" and _story(chosen) == 200_000
+    facts = chosen[0]["max"][1]
+    assert facts["first_contact_preference"] is True and facts["max_room"] == held  # Max's own measure, no new cause
+    assert chosen[0]["max"][2] == folded_data and chosen[0]["max"][2].startswith(PROGRAM_HISTORY_HEAD)
+    assert "chapter maps" not in chosen[0]["max"][0][-1]["text"]
     folded, _ = _prefer(normal, (90_000, 0, 90_000), story_after=200_000)
     assert folded[1] == "max" and _story(folded) == 200_000  # still above F1, yet smaller than the whole: kept
     assert folded[0]["max"][2] == folded_data and isinstance(folded[0]["max"][2], str)
@@ -723,8 +730,9 @@ OTHER = "openai-compatible::other-model"  # the same endpoint and key, another m
 def _hinted_start(seam, tmp_path, monkeypatch, *, maps_rung=False, registry=False):
     """A fresh direct chat's real start fit after its connection refused a comparable larger request, before any send:
     the plan the planner chose (the smaller view with its note, the ordinary one kept beside it) and the plan it would
-    have sent without the hint; with ``maps_rung`` the refusal's chapter-map retry was answered too, so the hint takes
-    the books' maps. Fixture input only: each room's page carries the telling a hint may fold it to."""
+    have sent without the hint; with ``maps_rung`` the refusal was a deeper one an old chapter-map retry followed and
+    answered (``before maps``): it still bounds the fold, yet trades no frame, so both starts stay Max with my tellings
+    folded. Fixture input only: each room's page carries the telling a hint may fold it to."""
     from ouroboros import context, dialogue_store
     from ouroboros import context_fit as cf
     from ouroboros.chronicle_lead import LEAD_RULE_VERSION
@@ -769,9 +777,8 @@ def _hinted_start(seam, tmp_path, monkeypatch, *, maps_rung=False, registry=Fals
         return route, SimpleNamespace(route_fp=route["model"], status="asserted", stale=False, window_tokens=1_000_000)
 
     monkeypatch.setattr(context, "_context_fit_route", resolve)
-    def capture(turn):
-        core = context._capture_context_core(env, memory, turn, None, None)
-        return replace(core, architecture_md=core.architecture_md + "\n\n" + "word " * 80_000)  # whole books beside their maps
+    def capture(turn):  # the resident Body Map as captured: no whole books sit beside it any more
+        return context._capture_context_core(env, memory, turn, None, None)
 
     def fit(turn=task, core=None):
         return context._build_context_fit_plan(env, core or capture(turn), turn, preferred_mode="max", tool_schemas=schemas,
@@ -788,17 +795,20 @@ def _hinted_start(seam, tmp_path, monkeypatch, *, maps_rung=False, registry=Fals
     hinted = fit(core=core)
     assert hinted.first_contact == seam.scope and hinted.first_contact_normal is not None
     assert NOTE in hinted.projection(hinted.initial_mode).system_content_json
-    assert (hinted.initial_mode, ordinary.initial_mode) == (("low" if maps_rung else "max"), "max")
+    assert (hinted.initial_mode, ordinary.initial_mode) == ("max", "max") and hinted.start == ("max", "first_contact")
+    folded = hinted.projection("max")
+    assert folded.memory_facts["first_contact_preference"] is True and folded.estimated_tokens < whole
+    assert "chapter maps" not in folded.system_content_json
     return SimpleNamespace(plan=hinted, ordinary=ordinary, registry=registry, tools=schemas,
                            admit=admit, fit=fit, task=task, drive=memory.drive_root, capture=capture, env=env)
 
 
-@pytest.mark.parametrize('maps_rung', [False, True], ids=['fold-keeps-max', 'selects-low-maps'])
+@pytest.mark.parametrize('maps_rung', [False, True], ids=['fold-keeps-max', 'followed-maps-refusal-keeps-max'])
 def test_first_contact_witnesses_bind_final_selected_blocks(seam, tmp_path, monkeypatch, maps_rung):
     from hashlib import sha256
 
     seed = _hinted_start(seam, tmp_path, monkeypatch, maps_rung=maps_rung)
-    mode = 'low' if maps_rung else 'max'
+    mode = 'max'  # no first-contact rung selects Low any more
     selected = seed.plan.projection(mode)
     blocks = json.loads(selected.system_content_json)
     by_index = {row['block']: row for row in selected.assembly_witnesses}
@@ -814,15 +824,16 @@ def test_first_contact_witnesses_bind_final_selected_blocks(seam, tmp_path, monk
     group = by_index[len(blocks) - 1]['groups'][-1]
     assert group == {'family': 'memory_fit_notes', 'form': 'rendered',
                      'start': len(tail) - len(appendix), 'chars': len(appendix)}
-    assert ('uses chapter maps' in appendix) is maps_rung
+    assert 'chapter maps' not in appendix and 'smaller than its ordinary form' in appendix
     assert NOTE not in seed.plan.ordinary_first_contact().max_projection.system_content_json
 
 
 @pytest.mark.parametrize("early_key,late_key", [("a", None), ("b", "a"), ("a", "b")],
                          ids=["known-window-one-read", "unknown-window-adopts-hint", "unknown-window-drops-old-hint"])
 def test_start_hint_uses_only_the_final_horizon_binding(seam, tmp_path, monkeypatch, early_key, late_key):
-    """An advisory Max→maps is not a physical narrowing. M2 still reads an unknown window again; a second usable
-    route answer at the same size/cap nevertheless changes where the start hint must be read."""
+    """An advisory first-send fold is not a physical narrowing, even where a followed maps refusal bounds it: the start
+    stays Max. M2 still reads an unknown window again; a second usable route answer at the same size/cap nevertheless
+    changes where the start hint must be read."""
     from ouroboros import context_fit as cf, context_view_facts as facts
     from ouroboros.response_limits import bind_context_route
 
@@ -852,29 +863,37 @@ def test_start_hint_uses_only_the_final_horizon_binding(seam, tmp_path, monkeypa
     assert reads == ([False] if late_key is None else [False, True])
     assert scopes == [plan.first_contact]  # no obsolete connection evidence read along the way
     if (late_key or early_key) == "a":
-        assert plan.first_contact == seam.scope and plan.start == ("low", "first_contact_maps")
+        assert plan.first_contact == seam.scope and plan.start == ("max", "first_contact")
+        assert plan.initial_mode == "max" and plan.projection("max").memory_facts["first_contact_preference"] is True
         normal = plan.ordinary_first_contact()
         assert normal.start == ("max", "" if late_key is None else "unmeasured")
-        assert "first-send chapter maps" in facts.mode_words(plan, "low")
-        line = facts.memory_facts(plan, "low")
-        assert "first send chose chapter maps" in line and "that refusal stated no window" in line
-        assert "Max held" not in line and "temporarily, for the window" not in line
-        assert not facts.low_start_line(plan, "low", seed.task["id"])
+        assert facts.mode_words(plan, "max").startswith("max") and "chapter maps" not in facts.mode_words(plan, "max")
+        line = facts.memory_facts(plan, "max")
+        assert "first send chose a smaller memory view" in line and "that refusal stated no window" in line
+        assert "chapter maps" not in line and "temporarily, for the window" not in line
+        assert not facts.low_start_line(plan, "max", seed.task["id"])
     else:
         assert plan.first_contact != seam.scope and plan.first_contact_normal is None
         assert plan.start == ("max", "unmeasured") and plan.window_record.usable is None
 
 
 def test_a_window_lowered_start_keeps_its_cause_beside_an_advisory_memory_fold(seam, tmp_path, monkeypatch):
-    """The known window takes the whole books. The remembered refusal can only choose extra memory folds in Low."""
+    """The known window cannot hold the Max frame even with no memory (cause route), so it runs in Low, temporarily,
+    with the Body Map at its parts and addresses; the remembered refusal can only choose extra memory folds there.
+    Stimulus: a Body Map larger than the window beside its short parts form and a reader for its full text (the
+    resident books' successor of "the window takes the whole books")."""
     from ouroboros import context_fit, context_view_facts as facts, memory_floor
     from ouroboros.context_measurement import mode_cause
     from ouroboros.memory_view import snapshot_from_json
 
     seed = _hinted_start(seam, tmp_path, monkeypatch)
-    core = replace(seed.ordinary.core, architecture_md=seed.ordinary.core.architecture_md + "word " * 800_000)
+    base = seed.ordinary.core
+    core = replace(base, body_map=base.body_map + "word " * 800_000,
+                   body_map_parts=base.body_map_parts or "## Body map (parts and addresses)\n\n- Core: its address.",
+                   section_root=base.section_root or str(tmp_path / "sections"), section_task_id=base.section_task_id or "tmain")
     plan = seed.fit(core=core)
     assert plan.start == ("low", "route") and plan.window_record.usable is not None
+    assert any(row.get("section_id") == "body_map" for row in plan.low_projection.memory_facts["host_sections_addressed"])
     # The stored refusal must actually shape the selected Low horizon; the physical fit alone leaves more memory.
     assert plan.first_contact_normal is not None and plan.low_projection.memory_facts["first_contact_preference"] is True
     assert plan.ordinary_first_contact().start == plan.start
@@ -939,7 +958,7 @@ def test_project_note_exists_before_the_first_physical_owner_row(seam, tmp_path,
     assert start.fit(start.admit("plain-ws-room", 700_012)).first_contact_normal is not None
 
 
-@pytest.mark.parametrize("maps_rung", [False, True], ids=["folded-memory", "chapter-maps"])
+@pytest.mark.parametrize("maps_rung", [False, True], ids=["folded-memory", "followed-maps-refusal"])
 def test_a_route_change_before_the_first_send_does_not_carry_the_refusing_connections_view(
         seam, tmp_path, monkeypatch, maps_rung):
     """#3896 R2: a fresh chat's smaller view answers to the connection that refused. Nothing has been sent when Settings
@@ -1134,12 +1153,13 @@ def test_a_wrap_up_before_the_first_hinted_send_prices_and_sends_the_ordinary_vi
         assert held.initial_mode == (start.ordinary.initial_mode if plain else plan.initial_mode)
 
 
-@pytest.mark.parametrize("maps_rung", [False, True], ids=["folded-memory", "chapter-maps"])
+@pytest.mark.parametrize("maps_rung", [False, True], ids=["folded-memory", "followed-maps-refusal"])
 def test_a_hinted_start_names_its_own_folds_and_no_comparison_repeats_it(seam, tmp_path, monkeypatch, maps_rung):
     """Its receipt names the cuts the first send's preference took (never the window), keeps naming them after a
-    selection redraws the view, and the pairwise start fit of the redrawn plan names the start as it was (Max with
-    chapter maps when the hint chose maps) while leaving each arm unmeasured: the hint's sizes are not this plan's to
-    repeat, and an authored redraw carries the start's own fact, never measuring it again."""
+    selection redraws the view, and the pairwise start fit of the redrawn plan names the start as it was (Max, also
+    where a followed maps refusal bounded the fold: no chapter maps any more) while leaving each arm unmeasured: the
+    hint's sizes are not this plan's to repeat, and an authored redraw carries the start's own fact, never measuring it
+    again."""
     from ouroboros import memory_floor
     from ouroboros.memory_view import snapshot_from_json
 
@@ -1152,15 +1172,17 @@ def test_a_hinted_start_names_its_own_folds_and_no_comparison_repeats_it(seam, t
     assert "first send's smaller view" in redrawn.system_content_json and "cuts for the window" not in redrawn.system_content_json
     assert redrawn.memory_facts.get("first_contact_preference") == view.memory_facts["first_contact_preference"]
     fit = memory_floor.counterfactual_starts(plan, {"now": snapshot_from_json(plan.core.memory_view_json)})
-    assert fit["frame"]["maps"] is maps_rung and "unmeasured" in fit["arms"]["now"]
+    assert fit["frame"]["maps"] is False and fit["frame"]["started"] == "max" and "unmeasured" in fit["arms"]["now"]
     lines = "\n".join(memory_floor.counterfactual_lines(fit))
-    assert ("started in Max with chapter maps" in lines) is maps_rung and "not measured" in lines
+    assert "This task started in max" in lines and "chapter maps" not in lines and "not measured" in lines
 
 
-@pytest.mark.parametrize("maps_rung", [False, True], ids=["folded-memory", "chapter-maps"])
+@pytest.mark.parametrize("maps_rung", [False, True], ids=["folded-memory", "old-chapter-maps-record"])
 @pytest.mark.parametrize("phase,boundary", [("ready", "resumed"), ("candidate", "candidate")])
 def test_a_cold_restore_reads_only_the_start_the_continuation_actually_carried(
         seam, tmp_path, monkeypatch, maps_rung, phase, boundary):
+    """``old-chapter-maps-record``: a continuation written before the resident Body Map carried its start as
+    ``("low", "first_contact_maps")``; no start chooses that any more, yet the record stays readable as that start."""
     from ouroboros import context_fit, memory_floor, owner_wait, working_checkpoint
     from ouroboros.context_measurement import mode_cause
     from ouroboros.memory_view import snapshot_from_json
@@ -1192,6 +1214,9 @@ def test_a_cold_restore_reads_only_the_start_the_continuation_actually_carried(
     assert read["context_start"] == list(context_fit.UNKNOWN_START)
     assert read["context_model_role"] == lost["context_model_role"]
     saved = save(hinted.first_contact_spent())
+    assert saved["context_start"] == ["max", "first_contact"]  # what a start carries now
+    if maps_rung:  # an old record, as written before this change
+        saved["context_start"] = ["low", context_fit.FIRST_CONTACT_START["maps"]]
     read = resume_write(saved)
     assert read["context_start"] == saved["context_start"] != list(ordinary.start)
     assert read["context_model_role"] == saved["context_model_role"]
@@ -1199,5 +1224,6 @@ def test_a_cold_restore_reads_only_the_start_the_continuation_actually_carried(
     assert not restored.projection("max").memory_facts.get("first_contact_preference")  # new capture, old start
     after = memory_floor.counterfactual_starts(restored, {"now": snapshot})
     assert after["frame"]["maps"] is maps_rung and "first send's preference" in after["arms"]["now"]["unmeasured"]
-    assert mode_cause(restored, hinted.initial_mode) == ""  # not a physical Low cause
+    assert ("Max with chapter maps by first-send preference" in "\n".join(memory_floor.counterfactual_lines(after))) is maps_rung
+    assert mode_cause(restored, saved["context_start"][0]) == ""  # not a physical Low cause
     assert saved["context_start"] == save(restored)["context_start"]

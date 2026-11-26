@@ -644,10 +644,9 @@ def test_no_observation_non_claude_main_route_keeps_todays_initial_mode(tmp_path
     _DENSITY_MEMO.clear()
     (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
     core = context_fit.ContextCore(
-        base_prompt="p", bible_md="b", architecture_md="a", development_md="d",
+        base_prompt="p", bible_md="b", body_map="a", development_md="d",
         semi_stable_text="s", dynamic_text="y", user_content_json='"u"',
-        docs_need_development=False,
-    )
+        )
     env = SimpleNamespace(drive_root=str(tmp_path))
     monkeypatch.setattr(context_fit, "reference_doc_sections", lambda *a, **k: ([], ""))
 
@@ -704,10 +703,9 @@ def test_first_successful_call_seeds_density_so_the_next_projection_is_measured(
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     model = "anthropic/claude-fable-5"  # Claude-family, routed through OpenRouter
     core = context_fit.ContextCore(
-        base_prompt="p", bible_md="b", architecture_md="a", development_md="d",
+        base_prompt="p", bible_md="b", body_map="a", development_md="d",
         semi_stable_text="s", dynamic_text="y", user_content_json=json.dumps("u" * 200_000),  # comparable to the 50k send
-        docs_need_development=False,
-    )
+        )
     env = SimpleNamespace(drive_root=str(tmp_path))
     monkeypatch.setattr(context_fit, "reference_doc_sections", lambda *a, **k: ([], ""))
 
@@ -940,8 +938,8 @@ def test_a_cold_child_probes_its_own_route_and_a_failed_probe_stays_an_unknown(t
     monkeypatch.setattr(context, "_context_fit_route", resolver)
     monkeypatch.setattr(context_fit, "reference_doc_sections", lambda *a, **k: ([], ""))
     core = context_fit.ContextCore(
-        base_prompt="p", bible_md="b", architecture_md="a", development_md="d",
-        semi_stable_text="s", dynamic_text="y", user_content_json='"u"', docs_need_development=False)
+        base_prompt="p", bible_md="b", body_map="a", development_md="d",
+        semi_stable_text="s", dynamic_text="y", user_content_json='"u"')
     env, child = SimpleNamespace(drive_root=str(tmp_path)), {"delegation_role": "subagent",
                                                              "task_metadata": {"delegation_role": "subagent"}}
 

@@ -135,7 +135,7 @@ def can_replay_frame(core: Any, saved: list, current: list, receipts: Mapping) -
 
 def restored_capture(state: Mapping) -> dict:
     """The continuation's held-note capture, with the book maps its Low projection or last accepted Low view held as
-    chapter lists (``book_maps``: receipts ``memory_floor.replay_book_maps`` keeps at their current full map)."""
+    Body Map parts list (``book_maps``: receipts ``memory_floor.replay_book_maps`` keeps at the current full Map)."""
     from ouroboros.memory_floor import BOOK_MAPS
 
     capture = dict(state.get(CAPTURE_KEY) or {"entries": state.get("held_note_sections", [])})

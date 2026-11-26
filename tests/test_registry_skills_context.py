@@ -180,47 +180,55 @@ def test_a_calls_real_send_outlines_registry_and_index_only_for_its_physical_ove
         assert {"registry", "knowledge_index"} & shown == ({"knowledge_index"} if over == 3_000 else set())
 
 
-def _shown_max_beside_books(tmp_path):
-    """``(plan, registry section, a floor of its outline's saving)``: a Max view already sent beside large books
-    and the whole registry, then rebound (a fallback or an account switch) to a smaller known window."""
+def _shown_max_beside_a_large_map(tmp_path):
+    """``(plan, registry section, a floor of its outline's saving, a floor of the Map's)``: a Max view already sent
+    beside a large Body Map
+    (with its short parts form and a reader of its full text, so a lowered frame stands it at its parts; before
+    26.11.2026 large whole books beside their chapter maps) and the whole registry, then rebound (a fallback or an
+    account switch) to a smaller known window."""
     from ouroboros.memory_floor import view_tokens
 
     _sources(tmp_path, _registry(40))
     part = _build_registry_section(SimpleNamespace(drive_path=lambda rel: tmp_path / rel))
     core = _synthetic_core(tmp_path, [part], snapshot=syn.snapshot(story=syn.pages(2, 4_000)))
-    shown = _synthetic_plan(dataclasses.replace(core, architecture_md="# Architecture\n\n" + "book word " * 40_000),
-                            2_000_000)
+    whole, parts = "## Body map\n\n" + "book word " * 40_000, "## Body map (parts and addresses)\n- Overview: `a.md`"
+    shown = _synthetic_plan(dataclasses.replace(core, body_map=whole, body_map_parts=parts), 2_000_000)
     assert shown.initial_mode == "max" and part.full_text in _text(shown) and not _host_facts(shown)
-    return shown, part, view_tokens(part.full_text) - view_tokens(part.operative_view) - 100
+    return (shown, part, view_tokens(part.full_text) - view_tokens(part.operative_view) - 100,
+            view_tokens(whole) - view_tokens(parts) - 100)
 
 
 _REBIND = dict(known_window=True, ratio=1, output_reserve=RESERVE, tool_schemas=[], start_mode="max")
 
 
 def test_a_shown_max_view_lowered_by_a_smaller_route_keeps_the_registry_its_low_view_holds(tmp_path):
-    """Low starts from the forms that were shown and owes only what its books left unpaid. Before, the abandoned
+    """Low starts from the forms that were shown and owes only what its Body Map left unpaid. Before, the abandoned
     Max frame's registry outline, bought with the whole Max deficit, reached a Low view that holds it whole."""
-    shown, part, _saving = _shown_max_beside_books(tmp_path)
-    window = shown.low_projection.estimated_tokens + RESERVE + 500  # Low beside the whole registry fits; Max cannot
+    shown, part, _saving, map_saving = _shown_max_beside_a_large_map(tmp_path)
+    # Low (the Map at its parts) beside the whole registry fits; Max cannot. The shown Low projection still carries the
+    # whole Map: only a window takes it to its parts.
+    window = shown.low_projection.estimated_tokens - map_saving + RESERVE + 500
     held = shown.reproject_for_route(window_tokens=window, **_REBIND)
-    assert held.initial_mode == "low" and part.full_text in _text(held) and not _host_facts(held)
+    assert held.initial_mode == "low" and part.full_text in _text(held)
+    assert [row["section_id"] for row in _host_facts(held)] == ["body_map"]  # the registry whole
     assert held.projection("low").estimated_tokens + RESERVE <= window
 
 
 def test_a_lowered_view_still_outlines_for_its_own_overflow_and_keeps_every_shown_form(tmp_path):
     """Controls: a Low view the window cannot hold whole still takes the registry outline, as the window's; an outline
     the window chose for a shown Max view survives that view's lowering, never unfolded."""
-    shown, part, saving = _shown_max_beside_books(tmp_path)
-    low = shown.low_projection.estimated_tokens
+    shown, part, saving, map_saving = _shown_max_beside_a_large_map(tmp_path)
+    low = shown.low_projection.estimated_tokens - map_saving  # the Low frame with the Map at its parts
     tight = shown.reproject_for_route(window_tokens=low + RESERVE - saving // 2, **_REBIND)
-    assert tight.initial_mode == "low" and [row["section_id"] for row in _host_facts(tight)] == ["registry"]
+    assert tight.initial_mode == "low" and {row["section_id"] for row in _host_facts(tight)} == {"body_map", "registry"}
     assert "omitted for the physical window" in _text(tight) and part.full_text not in _text(tight)
     assert tight.projection("low").estimated_tokens + RESERVE <= low + RESERVE - saving // 2
     narrowed = shown.reproject_for_route(window_tokens=shown.max_projection.estimated_tokens + RESERVE - saving // 2,
                                          **_REBIND)
     assert narrowed.initial_mode == "max" and [row["section_id"] for row in _host_facts(narrowed)] == ["registry"]
     lowered = narrowed.reproject_for_route(window_tokens=low + RESERVE + 500, **_REBIND)
-    assert lowered.initial_mode == "low" and _host_facts(lowered) == _host_facts(narrowed)
+    assert lowered.initial_mode == "low" and [row for row in _host_facts(lowered) if row["section_id"] != "body_map"] == (
+        _host_facts(narrowed)) and "body_map" in {row["section_id"] for row in _host_facts(lowered)}
     assert part.full_text not in _text(lowered)
 
 
@@ -244,10 +252,13 @@ def test_an_owner_scale_start_outlines_registry_and_index_only_where_its_folded_
         tmp_path, monkeypatch):
     from tests._memory_scale_fixture import tools
 
-    roomy = _owner_scale_plan(tmp_path, monkeypatch, 400_000)
+    # Before the resident Body Map (26.11.2026) the owner's whole books put this band at 400K (and 300K for the folded
+    # start); the Map is about 100K tokens smaller, so the same shape's band now lies near 310K (scanned: Max with my
+    # memory told from about 300K to 320K, Low for memory below about 290K).
+    roomy = _owner_scale_plan(tmp_path, monkeypatch, 310_000)
     rows, text = _host_facts(roomy), _text(roomy)
     index = next(part for part in roomy.core.dynamic_head_sections if part.section_id == "knowledge_index")
-    # Max keeps the whole books while my memory at its tellings fits beside them (owner 15.11.2026, 4A): its ordinary
+    # Max keeps the Body Map whole while my memory at its tellings fits beside it (owner 15.11.2026, 4A): its ordinary
     # forms do not fit here, its tellings do, so this start holds Max with my memory told. The request it sends holds
     # both sections whole beside its whole one-eighth room: any host step it takes is the start room's, and nothing
     # calls them physical.
@@ -255,9 +266,11 @@ def test_an_owner_scale_start_outlines_registry_and_index_only_where_its_folded_
     assert roomy.initial_mode == "max" and room["cause"] == "held" and room["need"] > room["window"]
     assert _registry(40) in text and index.full_text in text and all(row.get("start_room") for row in rows)
     # Whether this start moves host sections at all turns on its surroundings (in this test none; under the rev_fable
-    # witness three). A start 100K tighter folds its memory and does move them, only for its start room, with the
+    # witness three). A start 10K tighter folds its memory and does move them, only for its start room, with the
     # registry and the index whole (rev_fable 7: the check of start-room steps must not pass on an empty list).
     folded = _owner_scale_plan(tmp_path, monkeypatch, 300_000)
+    steps = [plan.projection("max").memory_facts["floor"]["steps"].get("F6g", 0) for plan in (roomy, folded)]
+    assert folded.initial_mode == "max" and steps[1] > steps[0]  # tighter: more of my memory folded
     folded_rows, folded_text = _host_facts(folded), _text(folded)
     folded_index = next(part for part in folded.core.dynamic_head_sections if part.section_id == "knowledge_index")
     assert folded_rows and all(row.get("start_room") for row in folded_rows)
@@ -269,7 +282,7 @@ def test_an_owner_scale_start_outlines_registry_and_index_only_where_its_folded_
     assert held.initial_mode == "max" and "Holding the room (tokens):" not in _text(held)
     assert "F7" not in roomy.projection(roomy.initial_mode).memory_facts["floor"]["steps"]
     sent = roomy.projection(roomy.initial_mode).estimated_tokens + fit.tool_schema_tokens(tools())
-    assert sent + 10_000 + math.ceil(400_000 / 8) <= 400_000
+    assert sent + 10_000 + math.ceil(310_000 / 8) <= 310_000
     # At 92K even memory's shortest forms leave the window short: both outlines are physical, and they cost fewer
     # owner rows than keeping both whole would.
     tight = _owner_scale_plan(tmp_path, monkeypatch, 92_000)
@@ -282,14 +295,16 @@ def test_an_owner_scale_start_outlines_registry_and_index_only_where_its_folded_
 def _lowered_start(tmp_path, *, immune, extra=0):
     """``(core, owner row, registry)``: two story pages, my earlier reply and a 36,000-character owner row beside an
     authored registry at a known 240K window (density 1, reply reserve 8,192); fixed resident bytes put this shape's
-    edge there, and ``extra`` more resident tokens move it toward Nano."""
+    edge there, and ``extra`` more resident tokens move it toward Nano. The resident Body Map (26.11.2026) changed
+    this core's governance bytes: the fixed part moved from 24,352 to 24,252 (scanned: the registry outline starts at
+    ``extra`` -24, Nano at 6,254, the refusal at 6,470)."""
     _sources(tmp_path, "# Registry\n\n## Source\n" + "authored caveat. " * 1500)
     part = _build_registry_section(SimpleNamespace(drive_path=lambda rel: tmp_path / rel))
     owner = dict(syn.spoken(1, "human", 36_000), owner_side=True, carried=False, immune=immune)
     snapshot = syn.snapshot(story=syn.pages(2, 18_000), room_facts=syn.room(
         "1", lane1=[owner, syn.spoken(2, "ouroboros", 36_000)]))
     core = _synthetic_core(tmp_path, [part], snapshot=snapshot)
-    return dataclasses.replace(core, semi_stable_text=core.semi_stable_text + "x" * 4 * (240_000 - 24_352 + extra)), \
+    return dataclasses.replace(core, semi_stable_text=core.semi_stable_text + "x" * 4 * (240_000 - 24_252 + extra)), \
         owner, part
 
 
@@ -315,7 +330,7 @@ def test_a_start_lowered_from_max_pays_its_whole_receipt_with_the_registry_outli
     assert "F7" not in roomier.projection(roomier.initial_mode).memory_facts["floor"]["steps"]
 
 
-@pytest.mark.parametrize("extra", [6_230, 6_270])
+@pytest.mark.parametrize("extra", [6_260, 6_300])
 def test_a_start_whose_own_low_view_cannot_fit_takes_the_ordinary_nano_its_own_view_holds(tmp_path, extra):
     """More resident bytes: the completed Low view, route receipt included, overflows by 6-46 tokens, while the
     start's own lowered Nano view fits with the protected owner row whole. Before, Low's shortest view priced with a
@@ -331,7 +346,7 @@ def test_a_start_whose_own_nano_view_cannot_fit_refuses_with_that_view(tmp_path)
     """A few more tokens and even the lowered Nano view overflows: a legitimate refusal naming that last view. The
     floor receipt that names reduced forms by kind and what holds the room (plan commit 2, point 10) is 16 tokens
     shorter than the earlier note with its sealing invitation, so this shape's edge lies 16 tokens further."""
-    core, _owner, _part = _lowered_start(tmp_path, immune=True, extra=6_340)
+    core, _owner, _part = _lowered_start(tmp_path, immune=True, extra=6_480)
     with pytest.raises(fit.MinimumViewUnfit, match="Protected owner words and the minimum view") as refused:
         _synthetic_plan(core, 240_000, "max")
     assert refused.value.physical and refused.value.deficit_tokens > 0 and refused.value.memory_view_tokens > 0
@@ -529,3 +544,4 @@ def test_registry_keeps_the_whole_source_when_navigation_cannot_be_parsed(tmp_pa
     monkeypatch.setattr("ouroboros.markdown_source.parse_markdown_source", unavailable)
     part = _build_registry_section(env)
     assert part.full_text.endswith(original) and part.operative_view is None
+

@@ -37,27 +37,40 @@ def _make_env_and_memory(tmpdir: pathlib.Path):
     return env, memory
 
 
-def test_build_llm_messages_marks_every_stable_block_before_the_changing_tail():
+# The stable blocks before the changing tail C: A' (system, BIBLE, the resident Body Map), D (the whole handbook) only
+# for a task whose contract requires it, then B (identity and story). Both shapes keep the count and marker laws.
+_REQUIRES_HANDBOOK = {"task_contract": {"context_requires_development": True}}
+
+
+@pytest.mark.parametrize("required", [False, True], ids=["without_handbook", "with_required_handbook"])
+def test_build_llm_messages_marks_every_stable_block_before_the_changing_tail(required):
     from ouroboros.context import build_llm_messages
 
     tmpdir = pathlib.Path(tempfile.mkdtemp())
     env, memory = _make_env_and_memory(tmpdir)
-    messages, _ = build_llm_messages(env=env, memory=memory, task={"id": "t1", "type": "task", "text": "hi"})
+    task = {"id": "t1", "type": "task", "text": "hi", **(_REQUIRES_HANDBOOK if required else {})}
+    messages, _ = build_llm_messages(env=env, memory=memory, task=task)
     system_msg = messages[0]
     assert system_msg["role"] == "system"
     assert isinstance(system_msg["content"], list)
     stable, dynamic = system_msg["content"][:-1], system_msg["content"][-1]
     assert all(block["cache_control"] == {"type": "ephemeral"} and block["text"].strip() for block in stable)
     assert "cache_control" not in dynamic
+    assert len(stable) == (3 if required else 2), [block["text"][:60] for block in stable]
     assert stable[0]["text"].startswith("You are Ouroboros.")
-    assert stable[1]["text"].startswith("## DEVELOPMENT.md\n")
+    assert "`docs/DEVELOPMENT.md`" in stable[0]["text"]  # A' carries the resident Map, which names the handbook's address
+    handbook = [block for block in system_msg["content"] if "## DEVELOPMENT.md\n" in block["text"]]
+    assert handbook == ([stable[1]] if required else []), [block["text"][:60] for block in handbook]
+    if required:
+        assert stable[1]["text"].startswith("## DEVELOPMENT.md\n")
     assert "## My story" in stable[-1]["text"]
     from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
 
     assert system_msg[STABLE_PREFIX_BLOCKS_KEY] == len(stable)
 
 
-def test_a_held_head_changes_c_before_the_assignment_and_keeps_a_prime_d_and_b(tmp_path, monkeypatch):
+@pytest.mark.parametrize("required", [False, True], ids=["without_handbook", "with_required_handbook"])
+def test_a_held_head_changes_c_before_the_assignment_and_keeps_a_prime_d_and_b(required, tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from ouroboros import context, knowledge
@@ -74,7 +87,9 @@ def test_a_held_head_changes_c_before_the_assignment_and_keeps_a_prime_d_and_b(t
     monkeypatch.setattr(context, "_queue_context_fact", lambda _task: {"note": "Queue observation unavailable."})
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
     evidence = SimpleNamespace(route_fp="held-cache", status="asserted", stale=False, window_tokens=1_000_000)
-    task = {"id": "cache-held", "type": "task", "chat_id": 1, "text": "Newest owner words for the cache test."}
+    task = {"id": "cache-held", "type": "task", "chat_id": 1, "text": "Newest owner words for the cache test.",
+            **(_REQUIRES_HANDBOOK if required else {})}
+    stable = 3 if required else 2  # A', D (only for a task that requires the handbook), B; then C
     heading, head = "## Held knowledge notes", "One fact from the held head."
     tools = [{"type": "function", "function": {"name": "read_fixture", "parameters": {"type": "object"}}}]
 
@@ -94,8 +109,11 @@ def test_a_held_head_changes_c_before_the_assignment_and_keeps_a_prime_d_and_b(t
     assert adopted.ok and adopted.current.revision == original.current.revision
     after = build()
     old_blocks, new_blocks = before[0]["content"], after[0]["content"]
-    assert len(old_blocks) == len(new_blocks) == 4
-    assert old_blocks[:3] == new_blocks[:3] and before[1:] == after[1:]
+    assert len(old_blocks) == len(new_blocks) == stable + 1
+    assert old_blocks[:stable] == new_blocks[:stable] and before[1:] == after[1:]
+    assert any(block["text"].startswith("## DEVELOPMENT.md\n") for block in new_blocks[:stable]) is required
+    assert [isinstance(block.get("cache_control"), dict) for block in new_blocks] == [True] * stable + [False], [
+        (sorted(block), block["text"][:40]) for block in new_blocks]
     assert heading not in old_blocks[-1]["text"]
     assert new_blocks[-1]["text"].count(head) == 1
     assert new_blocks[-1]["text"].partition(heading)[0] == old_blocks[-1]["text"] + "\n\n"
@@ -111,16 +129,21 @@ def test_a_held_head_changes_c_before_the_assignment_and_keeps_a_prime_d_and_b(t
 
     old_wire, new_wire = [marked_wire(rows) for rows in (before, after)]
     old_system, new_system = [wire["messages"][0]["content"] for wire in (old_wire, new_wire)]
-    assert old_system[:3] == new_system[:3]
-    assert all("cache_control" in block for block in new_system[:3])
-    assert heading not in old_system[3]["text"] and head in new_system[3]["text"]
+    # On the marked wire C is the last system block; B may stand split at its shared head when a breakpoint slot is
+    # spare (without D), its bytes unchanged. A' and D end at their own markers, B at one, and none of it moves.
+    wire_stable = len(new_system) - 1
+    assert len(old_system) == len(new_system) and wire_stable >= stable
+    assert old_system[:wire_stable] == new_system[:wire_stable]
+    assert "".join(block["text"] for block in new_system[stable - 1:wire_stable]) == new_blocks[stable - 1]["text"]
+    assert all("cache_control" in block for block in [*new_system[:stable - 1], new_system[wire_stable - 1]])
+    assert heading not in old_system[-1]["text"] and head in new_system[-1]["text"]
     assert LLMClient._payload_cache_breakpoints(new_wire)[-1]["text"] == task["text"]
 
     old_items, new_items = [_request({"source": "codex", "resolved_model": "gpt-6"}, rows, tools, {})["messages"]
                             for rows in (before, after)]
-    assert old_items[:3] == new_items[:3] and all(row["role"] == "system" for row in new_items[:3])
-    assert heading not in str(old_items[3]) and head in str(new_items[3])
-    assert old_items[4:] == new_items[4:] and new_items[4]["content"] == task["text"]
+    assert old_items[:stable] == new_items[:stable] and all(row["role"] == "system" for row in new_items[:stable])
+    assert heading not in str(old_items[stable]) and head in str(new_items[stable])
+    assert old_items[stable + 1:] == new_items[stable + 1:] and new_items[stable + 1]["content"] == task["text"]
 
 
 def test_build_llm_messages_repartitions_stable_vs_dynamic_sections():

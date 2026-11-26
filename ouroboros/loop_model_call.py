@@ -679,7 +679,7 @@ def _shown(plan: Any, mode: str) -> Dict[str, str]:
     """A checkpoint's mode and books as every surface names them (``physical_attempt_context.shown_mode``)."""
     from ouroboros.physical_attempt_context import shown_mode
 
-    effective, books = shown_mode(str(mode), compact=bool(getattr(getattr(plan, "core", None), "compact_reference_docs", False)))
+    effective, books = shown_mode(str(mode))
     return {"effective_mode": effective, "books": books}
 
 
@@ -1043,7 +1043,8 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
 
 
 def _reproject_actual_overflow_low(ctx: _RoundModelCallContext, *, books_must_save: bool = False) -> None:
-    """Size recovery lowers Max's books; a smaller physical frame may require Nano.
+    """Size recovery's books rung: the Low frame, where the Body Map stands as its parts and addresses, which is all
+    that rung has to give since the books left every prompt (the tools stay); a smaller physical frame may require Nano.
 
     Low keeps the refused Max view's memory level, never its unsent startup view (``select_mode``)."""
     if ctx.active_context_mode != "max" or ctx.context_fit_plan is None:
@@ -1059,10 +1060,11 @@ def _reproject_actual_overflow_low(ctx: _RoundModelCallContext, *, books_must_sa
         tool_schemas=ctx.tool_schemas, start_mode="max", current_messages=ctx.messages, select_mode="low",
         tool_frames=(lambda selected: trials(selected).price()) if trials else None,
         measured_input_tokens=fit.measurement.reprojection_input_tokens, admitted=True, books_must_save=books_must_save,
+        books_rung=True,
         unsent_start=start_unread(ctx.tools._ctx, ctx.accumulated_usage),
         reasoning_effort=str(getattr(ctx, "active_effort", "") or ""))  # the shape the round measured
     if (mode := rebound.initial_mode) == ctx.active_context_mode:
-        return  # a non-saving map trial is not a rewrite or a contribution from the books rung
+        return  # a non-saving Low trial is not a rewrite or a contribution from the books rung
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = rebound
     ctx.messages[:] = rebound.reproject_transcript(ctx.messages, mode)
     if trials:
@@ -1527,8 +1529,8 @@ def _apply_refusal_step(ctx: _RoundModelCallContext, step: str, fit: Any, target
     pass still owes (all when unknown). The floor lowers memory's granularity for the rest and the slack, which
     only memory detail and ordinary host forms pay, a whole-or-outline section (``memory_floor``) only a measured
     excess: granularity changes, coverage stays (BIBLE P1). Unknown, it asks a known window's deficit, else that
-    window's slack, else memory detail alone. A measured floor tries maps if tellings miss; the second pass's
-    books rung remains for an unmeasured first pass, and memory's rest can then ask everything.
+    window's slack, else memory detail alone. A measured floor tries the Low frame if tellings miss; the second pass's
+    books rung (the Body Map at its parts) remains for an unmeasured first pass, and memory's rest can then ask everything.
     """
     slack = _refusal_window(ctx, fit)[2] if slack is None else slack
     if step in ("host_copies", "bodies", "unseen_bodies"):
@@ -1538,7 +1540,7 @@ def _apply_refusal_step(ctx: _RoundModelCallContext, step: str, fit: Any, target
         receipt = _run_emergency_address_pass(ctx, fit, rung=step, goal_tokens=goal)
         return max(0, int(receipt.reclaimed_tokens or 0)) if receipt.status == "applied" else None
     if step not in ("floor", "memory_rest", "books") or (step == "books" and ctx.active_context_mode != "max"):
-        return None  # outside Max the books already show as navigation
+        return None  # outside Max the frame already lets the window take the Body Map to its parts
     current = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True) if step == "books" else fit
     before = (current or fit).measurement.estimated_input_tokens
 

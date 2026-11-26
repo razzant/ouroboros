@@ -363,7 +363,8 @@ def test_facts_largest_components_include_core_and_schemas(tmp_path, monkeypatch
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit()]))
     assert append_context_facts(context, money={})
     line = context.messages[-1]["content"]
-    assert "core and books" in line and "tool schemas" in line and "unit:2:3:" in line
+    assert "core and body map" in line and "tool schemas" in line and "unit:2:3:" in line
+    assert "core and books" not in line
 
 
 def test_book_yields_are_offered_on_each_refused_view_after_the_passes(tmp_path, monkeypatch):
@@ -380,7 +381,7 @@ def test_book_yields_are_offered_on_each_refused_view_after_the_passes(tmp_path,
                                          (40_000, False, "child", True), (40_000, False, None, False)):
         context = _ctx(tmp_path)  # a Max start: no send recorded
         context.context_fit_plan.core = SimpleNamespace(
-            compact_reference_docs=False, required_book_tokens=lambda mode, book=book: book * (mode == "low"))
+            delegated_focus=False, required_book_tokens=lambda book=book: book)  # the same in every mode
         context.context_fit_plan.projection = lambda _mode, role=role: SimpleNamespace(
             calibration_ratio=1.0, memory_facts={"role": role} if role else {})
         if composed:  # a first contact composed this Low view: the plan carries it as its own field

@@ -1431,8 +1431,8 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
     deficit, else at least one element) from the level it shows (no target or working margin
     reapplied, nothing addressed unfolds). ``slack`` asks the return-after-fold room beyond it, which only
     memory detail and ordinary host forms pay (``ContextFitPlan.reproject_for_route``): a zero ``saving``
-    beside it is no excess, so no whole-or-outline section pays. A measured first pass can try whole books
-    beside tellings before trying maps; a further or unmeasured refusal keeps its own order."""
+    beside it is no excess, so no whole-or-outline section pays. A measured first pass tries my tellings in Max
+    before the Low frame (the Body Map at its parts); a further or unmeasured refusal keeps its own order."""
     plan = ctx.context_fit_plan
     measurement = fit.measurement
     if plan is None or getattr(plan, "core", None) is None:
@@ -1555,7 +1555,7 @@ def pre_admission_size_refusal(
 def book_yield_due(ctx: Any) -> bool:
     """Whether the refused view still takes its directly required handbook's yields (``_shorten_book_map``): an unread
     (``start_unread``) integrating Low start carrying that handbook (its optional maps, then ``BOOK_MAPS``); an
-    unread Nano start takes only an optional map such as DESIGN, never ARCH/DEV. A helper's or nanny's Low view
+    unread Nano start takes only an optional map such as DESIGN, never the Body Map. A helper's or nanny's Low view
     (``context_fit._integrating``) takes none, as the reviewed 23.11 gate kept it."""
     from ouroboros import memory_floor
     from ouroboros.context_fit import _integrating
@@ -1564,7 +1564,7 @@ def book_yield_due(ctx: Any) -> bool:
     plan = ctx.context_fit_plan
     core = getattr(plan, "core", None)
     if (mode not in ("low", "nano") or core is None or getattr(plan, f"{mode}_projection", None) is None
-            or not core.required_book_tokens(mode) or not start_unread(ctx.tools._ctx, ctx.accumulated_usage)):
+            or not core.required_book_tokens() or not start_unread(ctx.tools._ctx, ctx.accumulated_usage)):
         return False
     facts = plan.projection(mode).memory_facts or {}
     if mode == "low":
@@ -1576,7 +1576,7 @@ def book_yield_due(ctx: Any) -> bool:
 
 def _shorten_book_map(ctx: Any) -> bool:
     """An unread start's request that cannot go out with its directly required handbook takes the book's next yield
-    (``memory_floor.step_book_map``: optional maps, then in an integrating Low start its own map then ARCHITECTURE's;
+    (``memory_floor.step_book_map``: optional maps, then in an integrating Low start the Body Map at its parts;
     owner 23.11.2026, 1), one per refusal, so the sender prices each candidate before another refusal asks more.
     Memory, mode, schemas and reserves stay as chosen; a view a reply read keeps its forms."""
     from ouroboros import memory_floor

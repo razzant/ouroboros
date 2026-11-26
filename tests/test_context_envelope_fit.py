@@ -16,7 +16,7 @@ def test_measured_envelope_prices_physical_pressure_without_changing_window(monk
     if room['notes']:
         room['notes'][0]['text'] = 'Held note label. ' + 'n' * 8000
     snap = syn.snapshot(room_facts=room, story=[], conversations=[])
-    core = cf.ContextCore('Core', 'BIBLE', '', '', 'Identity', 'Facts', '"Assignment"', False,
+    core = cf.ContextCore('Core', 'BIBLE', '', '', 'Identity', 'Facts', '"Assignment"',
                           memory_view_json=mv.snapshot_json(snap))
     monkeypatch.setattr(cf, '_route_calibration_ratio', lambda *a, **kw: ratio)
     plan = cf.build_context_fit_plan(None, core, {'id': 'envelope', '_is_direct_chat': True},
@@ -63,7 +63,7 @@ def test_a_route_reprojection_counts_the_shown_request_as_its_round_does(monkeyp
         'parameters': {'type': 'object', 'properties': {'path': {'type': 'string', 'description': 'A path.'}},
                        'required': ['path']}}} for i in range(60)]  # small enough for a custom catalog to carry
     snap = syn.snapshot(room_facts=syn.room('1'), story=[], conversations=[])
-    core = cf.ContextCore('Core', 'BIBLE', '', '', 'Identity', 'Facts', '"Assignment"', False,
+    core = cf.ContextCore('Core', 'BIBLE', '', '', 'Identity', 'Facts', '"Assignment"',
                           memory_view_json=mv.snapshot_json(snap))
     monkeypatch.setattr(cf, '_route_calibration_ratio', lambda *a, **kw: 1.0)
     plan = cf.build_context_fit_plan(None, core, {'id': 'envelope', '_is_direct_chat': True}, preferred_mode='max',
@@ -114,7 +114,7 @@ def test_program_note_history_keeps_literal_words_as_data(kind):
     snap = syn.snapshot(room_facts=syn.room(lane1=[note, owner]))
 
     def fit(content, opening=""):
-        core = cf.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", json.dumps(content), False,
+        core = cf.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", json.dumps(content),
                               memory_view_json=mv.snapshot_json(snap), opening_program_address=opening)
         return cf.build_context_fit_plan(None, core, {"id": "library"}, preferred_mode="max", tool_schemas=[],
             route_resolver=lambda *a, **kw: ({"provider": "fixture", "model": "fixture"},

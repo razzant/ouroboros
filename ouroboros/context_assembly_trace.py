@@ -153,11 +153,12 @@ def section_fact(part, addressed, receipts, books):
         path = ref.get('path') if isinstance(ref, dict) else None
         if family != 'held_note' and isinstance(path, str) and re.fullmatch(r'source_handles/context_checkpoints/host-[a-zA-Z0-9_.-]+\.md', path):
             fact['retained_source'] = {'path': path, 'sha256': ref.get('sha256')}
-    if book := books.get(family.removesuffix('_map')):
-        fact['family'] = book.book_id
-        fact['form'] = ('chapter_links' if kind in addressed else 'chapter_map') if kind.endswith('_map') else 'whole_book'
-        fact['sources'] = [{'path': source.source_path, 'sha256': source.sha256,
-                            'bytes': len(source.raw)} for source in (book.entrypoint, *book.chapters)]
+    # The resident Body Map names every source it was rendered from; the handbook block is the whole book.
+    cited = list(books.values()) if family == 'body_map' else [books[family]] if family in books else []
+    if cited:
+        fact['form'] = ('map_parts' if kind in addressed else 'body_map') if family == 'body_map' else 'whole_book'
+        fact['sources'] = [{'path': source.source_path, 'sha256': source.sha256, 'bytes': len(source.raw)}
+                           for book in cited for source in (book.entrypoint, *book.chapters)]
     return fact
 
 
@@ -166,7 +167,6 @@ def layout_witnesses(core, governance, addressed, receipts, live, *, story_whole
     """Coordinates of the renderer's already-joined blocks; group names never come from text."""
     common, handbook, shared, story, head, room, dynamic, stable, changing = live
     books = {book.book_id: book for book in core.reference_books}
-    own_block = core.docs_need_development or core.development_required
     receipts = {receipt['section_id']: receipt for receipt in receipts}
 
     def typed(parts):
@@ -195,8 +195,6 @@ def layout_witnesses(core, governance, addressed, receipts, live, *, story_whole
     common_groups, shared_groups, changing_groups = [], [], []
     source_parts = governance[0]
     fragment(common_groups, 'governance', common, () if isinstance(source_parts, str) else typed(source_parts))
-    if not own_block and handbook:
-        shared_groups.extend(span_groups([(handbook_group(), handbook[0])]))
     fragment(shared_groups, 'stable_context', shared[0], typed(core.semi_stable_sections))
     fragment(shared_groups, 'connections', shared[1], ())
     story_fact = {'family': 'story', 'form': 'whole_view' if story_whole else 'shorter', **(story_selection or {})}
@@ -218,7 +216,7 @@ def layout_witnesses(core, governance, addressed, receipts, live, *, story_whole
                                 'start': len(changing), 'chars': len(appendix)})
         changing += appendix
 
-    groups = [common_groups, *([list(span_groups([(handbook_group(), handbook[0])]))] if own_block and handbook else ()), shared_groups]
+    groups = [common_groups, *([list(span_groups([(handbook_group(), handbook[0])]))] if handbook else ()), shared_groups]
     selected = [(block, parts) for block, parts in zip(stable, groups) if block.strip()]
     return tuple(row for i, (block, parts) in enumerate([*selected, (changing, changing_groups)])
                  if (row := source_rows(block, i, parts, changing=i == len(selected))) is not None)

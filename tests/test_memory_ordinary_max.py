@@ -14,7 +14,7 @@ def core(root, marked):
         for page in pages:
             page['lead_rule'] = 1
     snap = syn.snapshot(story=pages, room_facts=syn.room())
-    return replace(scale.core(root, snap), base_prompt='SYSTEM', bible_md='BIBLE', architecture_md='# Architecture\nWhole books.',
+    return replace(scale.core(root, snap), base_prompt='SYSTEM', bible_md='BIBLE', body_map='# Architecture\nWhole books.',
                    semi_stable_text='Identity', semi_stable_sections=(), dynamic_text='', dynamic_sections=(),
                    dynamic_head_text='', dynamic_head_sections=())
 

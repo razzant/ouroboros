@@ -221,8 +221,7 @@ def test_the_route_window_holds_the_whole_scratchpad_or_refuses_typed_never_cuts
     mem.mutate_scratchpad_blocks(lambda _rows: blocks)
     [section] = [sec for sec in build_memory_sections(mem, partition="volatile") if sec.startswith("## Scratchpad")]
     snapshot = syn.snapshot(role="consciousness", story=syn.pages(1, 100), room_facts=syn.room(lane2=3))
-    core = cf.ContextCore("Required core", "Constitution", "b" * 1_000, "", "Identity", section, '"Assignment"',
-                          False, memory_view_json=mv.snapshot_json(snapshot))
+    core = cf.ContextCore("Required core", "Constitution", "b" * 1_000, "", "Identity", section, '"Assignment"', memory_view_json=mv.snapshot_json(snapshot))
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
 
     def start():

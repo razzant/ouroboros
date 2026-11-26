@@ -1,4 +1,4 @@
-"""The Max room of a start: one fact beside whole books, its cause and the words that carry it."""
+"""The Max room of a start: one fact beside the resident Body Map, its cause and the words that carry it."""
 import dataclasses
 import json
 import math
@@ -15,11 +15,17 @@ from ouroboros.tool_policy import select_tool_schemas
 from tests import _memory_view_synthetic as syn
 
 
-def _core(*, pages=40, page_chars=4_000, books=40_000):
+PARTS = "## Body map (parts and addresses)\n" + "- A chapter: `docs/architecture/01-chapter.md`\n" * 30
+
+
+def _core(*, pages=40, page_chars=4_000, map_chars=40_000, root=None):
+    """``map_chars``: the Body Map's characters. With ``root`` the core has a reader of the Map's full text (the
+    retained capture), so a lowered frame stands it at its parts and addresses."""
     snap = syn.snapshot(role="consciousness", story=syn.pages(pages, page_chars), room_facts=syn.room(lane2=3))
     snap = dataclasses.replace(snap, spec=dataclasses.replace(snap.spec, work_room_levels=2))
-    return cf.ContextCore("Required core", "Constitution", "b" * books, "", "Identity", "f" * 1_000, '"Assignment"',
-                          False, memory_view_json=mv.snapshot_json(snap))
+    return cf.ContextCore("Required core", "Constitution", "b" * map_chars, "", "Identity",
+                          "f" * 1_000, '"Assignment"', body_map_parts=PARTS, memory_view_json=mv.snapshot_json(snap),
+                          section_root=str(root or ""), section_task_id="room01" if root else "")
 
 
 def _start(core, window, monkeypatch):
@@ -34,7 +40,7 @@ def _fact(plan):
 
 
 def _crowded_window(held):
-    """A window whose Max frame leaves half of my memory's ordinary forms: the books fit, the memory does not."""
+    """A window whose Max frame leaves half of my memory's ordinary forms: the Body Map fits, the memory does not."""
     fixed = sum(tokens for _name, tokens in held["parts"]) + held["schemas"]
     return math.ceil(((held["story"] + held["room"]) / 2 + held["reserve"] + fixed) / (1 - held["levels"] / 8))
 
@@ -46,13 +52,14 @@ def test_a_roomy_window_holds_max_and_names_the_measured_parts(monkeypatch):
     assert fact["headroom"] == fact["window"] - fact["need"] > 0 and "short" not in fact
     assert fact["levels"] == 2 and fact["window"] == 2_000_000 and fact["floor_need"] <= fact["zero_need"] < fact["need"]
     assert fact["unfolded"] and fact["unfolded"] <= fact["story"]  # 40 pages, none in a part or account yet
-    assert dict(fact["parts"])["books"] > dict(fact["parts"])["runtime facts"] and "tool schemas" not in dict(fact["parts"])
+    assert dict(fact["parts"])["body map"] > dict(fact["parts"])["runtime facts"] and "tool schemas" not in dict(fact["parts"])
+    assert "books" not in dict(fact["parts"])
     line = memory_facts(plan, "max")  # every start, Max held too: the measure part by part, no advice
     assert line.startswith(f"Max room in this captured build: window 2,000,000; the gate's need {fact['need']:,}, headroom "
                            f"{2_000_000 - fact['need']:,}; the ordinary need {fact['need']:,}; with no memory ")  # no telling priced
     assert (f"; mine: my memory at the gate's level {fact['story'] + fact['room']:,}; what the request itself carries: tool "
-            f"schemas {fact['schemas']:,}, runtime facts {dict(fact['parts'])['runtime facts']:,}; my human's: books "
-            f"{dict(fact['parts'])['books']:,}, reply reserve {fact['reserve']:,}, work room {fact['work']:,}; core ") in line
+            f"schemas {fact['schemas']:,}, runtime facts {dict(fact['parts'])['runtime facts']:,}; my human's: body map "
+            f"{dict(fact['parts'])['body map']:,}, reply reserve {fact['reserve']:,}, work room {fact['work']:,}; core ") in line
     assert f"story {fact['story']:,} (40 pages no part or account holds yet, {fact['unfolded']:,} tokens, most in " in line
     assert f"beside a Max room of {fact['allowance']:,}; Max held;" in line
     assert "; marks in view 0" in line and "drafts awaiting" not in line and "shown only by address" not in line
@@ -61,7 +68,7 @@ def test_a_roomy_window_holds_max_and_names_the_measured_parts(monkeypatch):
 def test_the_measure_reads_each_host_section_by_whose_part_and_adds_up(monkeypatch):
     """The split by whose part reads the host's sections by id (``memory_floor.max_room_fact``): knowledge, the source
     registry, scratchpad and held note heads are mine; runtime facts, skills (their lines and always-in-context bodies,
-    review round 1, Astra 2) and subagents what the request itself carries; the books my human's; core and the
+    review round 1, Astra 2) and subagents what the request itself carries; the body map my human's; core and the
     assignment alone. With the tool schemas and memory they are the start's
     whole need at density 1, and a calibrated density is named beside them: the needs apply it, the parts do not."""
     from ouroboros.section_floor import HostSection
@@ -137,8 +144,8 @@ def test_the_design_bible_is_charged_by_its_served_form_never_as_my_knowledge():
     assert "design bible" in line.split("my human's")[1].split(";")[0] and "design bible" not in line.split("my human's")[0].split("mine:")[-1]
 
 
-def test_memory_or_schemas_that_take_the_books_room_are_measured_without_advice(monkeypatch):
-    core = _core()
+def test_memory_or_schemas_that_take_the_max_room_are_measured_without_advice(tmp_path, monkeypatch):
+    core = _core(root=tmp_path)
     held = _fact(_start(core, 2_000_000, monkeypatch))
     plan = _start(core, _crowded_window(held), monkeypatch)
     fact = _fact(plan)
@@ -147,10 +154,13 @@ def test_memory_or_schemas_that_take_the_books_room_are_measured_without_advice(
     gate = fact["telling_need"]  # the gate's need, printed beside the ordinary one (owner 21.11.2026)
     assert fact["zero_need"] <= fact["window"] < gate <= fact["need"] and 0 < fact["telling"] <= fact["story"] + fact["room"]
     shown = plan.low_projection.system_content_json
-    assert (f"Low, temporarily, for the window; my human's mode is Max. Whole books, my memory at the gate's level and the "
+    assert (f"Low, temporarily, for the window; my human's mode is Max. The body map, my memory at the gate's level and the "
             f"work's room need {gate:,}; the window holds {fact['window']:,}; short by {gate - fact['window']:,}. Only the "
             "window cuts my memory here; Low's own target does not bind. The host's measure of this start: window "
             f"{fact['window']:,}; the gate's need {gate:,}, short by ") in shown and "b" * 40_000 not in shown
+    # The lowered frame stands the Map at its parts and addresses before any of my memory goes below a telling.
+    assert "- A chapter: `docs/architecture/01-chapter.md`" in shown
+    assert any(row["section_id"] == "body_map" for row in plan.low_projection.memory_facts["host_sections_addressed"])
     assert f"; the ordinary need {fact['need']:,}; with no memory {fact['zero_need']:,}; mine: " in shown
     assert f"; mine: my memory at the gate's level {fact['telling']:,}; what the request itself carries: " in shown
     assert not any(words in shown for words in ("may bring the books back", "Folding memory", "Max with chapter maps"))
@@ -170,7 +180,7 @@ def test_memory_or_schemas_that_take_the_books_room_are_measured_without_advice(
 
 
 def test_a_max_start_the_window_took_to_nano_is_named_nano_in_its_facts(tmp_path, monkeypatch):
-    """Review round 1 (Astra 4): the owner's shape at 92K leaves even the maps frame no room, so its Max start runs in
+    """Review round 1 (Astra 4): the owner's shape at 92K leaves even the Low frame no room, so its Max start runs in
     Nano; its captured facts name Nano, temporarily, for the window, never the Low words, while a start the window took
     to Low keeps them."""
     from tests import _memory_scale_fixture as scale
@@ -208,14 +218,16 @@ def test_reprojected_restore_names_its_captured_build_not_an_unknown_original_st
     assert "Max room at the start" not in text
 
 
-def test_a_route_whose_window_cannot_hold_the_books_floor_is_a_disclosed_fact(monkeypatch):
-    plan = _start(_core(pages=1, page_chars=100, books=900_000), 200_000, monkeypatch)
+def test_a_route_whose_window_cannot_hold_the_max_floor_is_a_disclosed_fact(tmp_path, monkeypatch):
+    # A Body Map larger than this route's window beside my core: Max cannot be sent, the lowered frame (the Map at
+    # its parts) can, so the start runs in the named temporary Low and the shortfall is the route's fact.
+    plan = _start(_core(pages=1, page_chars=100, map_chars=900_000, root=tmp_path), 200_000, monkeypatch)
     fact = _fact(plan)
     assert plan.initial_mode == "low" and fact["cause"] == "route" and fact["floor_need"] > fact["window"]
-    assert fact["parts"][0][0] == "books"  # largest first
+    assert fact["parts"][0][0] == "body map"  # largest first
     assert fact["telling_need"] >= fact["zero_need"] >= fact["floor_need"]  # the gate's need is printed for every cause
     shown = plan.low_projection.system_content_json
-    assert ("Low, temporarily, for the window; my human's mode is Max. With no memory and no tool schemas, whole books beside "
+    assert ("Low, temporarily, for the window; my human's mode is Max. With no memory and no tool schemas, the body map beside "
             f"the rest of this start (my core, the host's sections and the assignment) and the work's room need "
             f"{fact['floor_need']:,}; the window holds 200,000; short by "
             f"{fact['floor_need'] - 200_000:,}, a disclosed fact of this route: folding my memory or dropping tool schemas "
@@ -243,7 +255,7 @@ def test_a_directly_required_book_at_the_max_boundary_never_lowers_the_start(mon
     assert held.max_projection.memory_facts["floor"] == plain.max_projection.memory_facts["floor"]
     blocks = [block["text"] for block in json.loads(held.max_projection.system_content_json)]
     assert any(text.startswith("## DEVELOPMENT.md\n") for text in blocks)
-    book = math.ceil(held.core.required_book_tokens("max") * held.max_projection.calibration_ratio)
+    book = math.ceil(held.core.required_book_tokens() * held.max_projection.calibration_ratio)
     assert book > 0 and (f"Start room at planning was smaller than the {_fact(held)['work']:,} tokens requested: "
                          f"this task's directly required handbook takes {book:,} tokens.") in blocks[-1]
     assert "requested remain." not in blocks[-1]
@@ -262,7 +274,7 @@ def _wide_start(window, monkeypatch, *, provider="test", effort="", tools=WIDE):
     snap = syn.snapshot(room_facts=syn.room("1"), conversations=[], story=syn.pages(1, 300))
     snap = dataclasses.replace(snap, spec=dataclasses.replace(snap.spec, work_room_levels=2))
     core = cf.ContextCore("Core", "BIBLE", "# Architecture\n\n" + "Full book. " * 2000, "", "Identity", "Facts",
-                          '"Assignment"', False, memory_view_json=mv.snapshot_json(snap))
+                          '"Assignment"', memory_view_json=mv.snapshot_json(snap))
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     return cf.build_context_fit_plan(None, core, {"id": "wide01", "chat_id": 1}, preferred_mode="max", tool_schemas=tools,
         reasoning_effort=effort, route_resolver=lambda *_a, **_kw: (
@@ -338,13 +350,13 @@ def test_the_settled_fact_names_cause_cuts_and_gap(mode, floor_need, cause):
     # floor_need <= window < zero_need: tool schemas tipped this start, which is crowded, never the route's fact
     fact = {"window": 1_000, "allowance": 0, "floor_need": floor_need, "schemas": 200, "zero_need": 1_100,
             "need": 1_230, "story": 60, "room": 70, "unfolded": 20, "levels": 1, "room_id": "1", "reserve": 10,
-            "work": 125, "folds": 0, "parts": [["books", 600], ["core", 40]]}
+            "work": 125, "folds": 0, "parts": [["books", 600], ["core", 40]]}  # a measure recorded before 26.11.2026
     facts = {"floor": {"steps": {"F1": 2, "F6w": 5, "F6a": 1, "F2": 4}}}
     settled = mf.with_max_room(facts, fact, mode)["max_room"]
     assert settled["cause"] == cause and settled["short"] == 230 and "headroom" not in settled
     assert settled["cuts"] == (["F6w", "F2", "F6a"] if cause == "held" else [])  # the ladder's order, F6a last
     assert mf.with_max_room(facts, None, mode) == facts
-    # Memory took the books' room only when everything else fits: here the tool schemas tip it (zero_need > window).
+    # Memory took the Max room only when everything else fits: here the tool schemas tip it (zero_need > window).
     assert not mf.crowded_by_memory(settled) and not mf.crowded_by_memory(None)
     assert mf.crowded_by_memory({**settled, "zero_need": 1_000}) is (cause == "crowded")
     words = mf.lowered_line("low", "max", fact) + mf.measure_text(fact, parts=True)
@@ -354,13 +366,13 @@ def test_the_settled_fact_names_cause_cuts_and_gap(mode, floor_need, cause):
     assert not any(word in words for word in ("must", "should", "please", "failure", "may bring"))  # measures only
 
 
-def test_three_causes_name_what_took_the_whole_books(monkeypatch):
+def test_three_causes_name_what_took_the_max_room(tmp_path, monkeypatch):
     """Owner 21.11.2026 and the consilium of 22.11 (P7): a measure, not blame. ``memory`` when the request would fit
-    with no memory, ``request`` when the books fit without the tool schemas but not with them (F1 #7-#9), ``route``
-    when even that does not fit; each start records its own, and ``window`` stays for other narrowings."""
+    with no memory, ``request`` when the Body Map fits without the tool schemas but not with them (F1 #7-#9),
+    ``route`` when even that does not fit; each start records its own, and ``window`` stays for other narrowings."""
     core = _core()
     memory = _start(core, _crowded_window(_fact(_start(core, 2_000_000, monkeypatch))), monkeypatch)
-    route = _start(_core(pages=1, page_chars=100, books=900_000), 200_000, monkeypatch)
+    route = _start(_core(pages=1, page_chars=100, map_chars=900_000, root=tmp_path), 200_000, monkeypatch)
     roomy = _fact(_wide_start(2_000_000, monkeypatch))  # two eighths of work room: the request band's middle
     request = _wide_start((4 * (roomy["floor_need"] - roomy["work"]) + 2 * roomy["schemas"]) // 3, monkeypatch)
     from ouroboros.context_view_facts import mode_words
@@ -369,7 +381,7 @@ def test_three_causes_name_what_took_the_whole_books(monkeypatch):
         assert plan.start == ("low", cause) and mf.start_cause(plan.low_projection.memory_facts) == cause
         assert mf.lowered_cause(fact) == cause and fact["telling_need"] > fact["window"]
         # Review round 1 (Astra 5, Carbon 2): the facts row's shortfall names its basis, and only beside its own cause:
-        # a cold restore's capture that lost the books for another cause than the recorded one names none.
+        # a cold restore's capture that lost its Max for another cause than the recorded one names none.
         basis = {"memory": "", "request": " with no memory", "route": " with no memory and no tool schemas"}[cause]
         said = f"low, temporarily, for the window (my human's mode: max); cause {cause}"
         assert mode_words(plan, "low") == f"{said}; short {mf.lowered_need(fact)[1] - fact['window']:,}{basis}"
@@ -377,7 +389,7 @@ def test_three_causes_name_what_took_the_whole_books(monkeypatch):
         assert mode_words(dataclasses.replace(plan, start=("low", other)), "low") == said.replace(cause, other)
     fact = _fact(request)
     assert fact["floor_need"] <= fact["window"] < fact["zero_need"]
-    assert (f"With no memory, whole books, what the request itself carries and the work's room need {fact['zero_need']:,}; "
+    assert (f"With no memory, the body map, what the request itself carries and the work's room need {fact['zero_need']:,}; "
             f"the window holds {fact['window']:,}; short by {fact['zero_need'] - fact['window']:,}.") in (
         request.low_projection.system_content_json)
     assert cf.carried_start(["low", "request"]) == ("low", "request") and cf.carried_start(["max", "unmeasured"]) == (
@@ -490,7 +502,7 @@ _VERDICTS = re.compile(r"\b(too|should|must|consider|warning|critical|huge|tiny|
 
 
 def test_the_gate_s_shortest_telling_by_kind_sums_to_its_figure_and_rides_the_facts_row_alone(monkeypatch):
-    """What keeps the books out, by kind: the gate's telling split over the drawn parts sums to the figure the gate
+    """What keeps Max out, by kind: the gate's telling split over the drawn parts sums to the figure the gate
     priced; the facts row (the changing tail) names it, the floor note in the room block stays as it was, and the
     start's Max room fact keeps its fields (no new field rides the event)."""
     from ouroboros.context_view_facts import telling_parts

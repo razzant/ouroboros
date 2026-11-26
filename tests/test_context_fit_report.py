@@ -54,7 +54,8 @@ def test_measurement_uses_ordinary_scale_fitter_and_composition(tmp_path, monkey
 
 @pytest.mark.parametrize('mode', ['low', 'max'])
 def test_a_directly_required_handbook_is_reported_whole_in_every_mode(tmp_path, mode):
-    """A task's own requirement puts the whole handbook in the block Max otherwise fills with its chapter map."""
+    """A task's own requirement puts the whole handbook in its own block, in every mode; without it no mode carries
+    the handbook or a map of it beside the one Body Map, which the report names whole while the window holds it."""
     from dataclasses import replace
 
     core = replace(scale.core(tmp_path), development_md='# Development\n\n## Review\n\n' + 'practice ' * 400)
@@ -62,10 +63,12 @@ def test_a_directly_required_handbook_is_reported_whole_in_every_mode(tmp_path, 
     def development(required):
         result = measure_core(replace(core, development_required=required), scale.tools(), root=tmp_path,
                               window=1_000_000, reserve=10000, mode=mode)
-        return [row['form'] for row in result['blocks'] if row['block'] == 'DEVELOPMENT']
+        return ([row['form'] for row in result['blocks'] if row['block'] == 'DEVELOPMENT'],
+                # the Map's row by its own text (in Max its plain part carries no section id)
+                [row['form'] for row in result['blocks'] if row.get('chars') == len(core.body_map)])
 
-    assert development(True) == ['whole']
-    assert development(False) == (['orientation'] if mode == 'max' else [])
+    assert development(True) == (['whole'], ['whole'])
+    assert development(False) == ([], ['whole'])
 
 
 def test_the_start_text_is_written_as_the_mind_reads_it_and_a_declared_density_prices_the_start(tmp_path):

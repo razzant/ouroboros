@@ -232,8 +232,8 @@ def _near_even_plan(root, monkeypatch, window, tail=61, owner=5199, pad=2, shift
     skills = HostSection('installed_skills', '## skills\n\n' + 's' * (1200 + pad if skills is None else skills),
                          '## skills\n\nPurpose.')
     index = HostSection('knowledge_index', '## knowledge\n\n' + 'k' * 2400, '## knowledge\n\nOutline.')
-    captured = cf.ContextCore(base_prompt='SYSTEM', bible_md='BIBLE', architecture_md='# Architecture', development_md='',
-        docs_need_development=False, semi_stable_text='IDENTITY' + 'i' * identity, dynamic_text='\n\n'.join((runtime, skills)),
+    captured = cf.ContextCore(base_prompt='SYSTEM', bible_md='BIBLE', body_map='# Architecture', development_md='',
+        semi_stable_text='IDENTITY' + 'i' * identity, dynamic_text='\n\n'.join((runtime, skills)),
         dynamic_head_text=index, dynamic_sections=(runtime, skills), dynamic_head_sections=(index,),
         user_content_json=json.dumps('Continue.'), section_root=str(root), section_task_id='task-1',
         memory_view_json=mv.snapshot_json(snap))
@@ -253,7 +253,9 @@ def _hosts(plan):
     # Version 2's receipt and physical forms move the old break-even windows.
     (4765, {}, [('runtime', False), ('installed_skills', False)], 4, 1),
     (5002, {}, [('runtime', False), ('installed_skills', True)], 3, 1),
-    (4045, {'tail': 63, 'owner': 1600, 'pad': 0, 'shift': 0},
+    # The resident Body Map (26.11.2026) renders this core's '# Architecture' shorter than the old book block did: the
+    # same break-even moved from 4045 to the 3,680-3,914 band.
+    (3800, {'tail': 63, 'owner': 1600, 'pad': 0, 'shift': 0},
      [('runtime', False), ('installed_skills', False)], 4, 1),
 ])
 def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, window, shape, hosts, probes_count, walk_forms):
@@ -292,7 +294,8 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
 @pytest.mark.parametrize('window,probes,hosts', [
     # This boundary crosses the receipt's owner-only clause after host reduction:
     # the longer receipt needs another walk, then the index must outline too.
-    (11_394, ['walk', 're-price', 'walk', 're-price', 'walk'],
+    # (11,394 before the resident Body Map shortened this core's governance block: the band now ends at 11,232.)
+    (11_220, ['walk', 're-price', 'walk', 're-price', 'walk'],
      [('runtime', False), ('installed_skills', False), ('knowledge_index', False)]),
     # With this larger window the second re-price fits and the index stays whole.
     (11_444, ['walk', 're-price', 're-price'], [('runtime', False), ('installed_skills', True)]),
@@ -316,7 +319,9 @@ def test_a_host_step_that_grows_the_receipt_walks_the_shortest_view_again(tmp_pa
 def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path, monkeypatch):
     """Owner shape at 92K: Max and Low cannot hold even their least request, so neither walks (Max prices its ordinary
     memory and, for the gate's need it prints, its shortest telling); Nano walks once, then at each of its next three
-    host forms re-prices that level, misses the window (even its shortest view does not fit) and walks again."""
+    host forms re-prices that level, misses the window (even its shortest view does not fit) and walks again; the
+    Body Map's parts (a fourth host form since 26.11.2026, which the old chapter maps were not) re-price without a
+    walk, and the knowledge index's outline after it misses and walks again."""
     render, probes = mf.render_view_for_mode, []
 
     def recorded(*args, **kwargs):
@@ -326,7 +331,8 @@ def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path
 
     monkeypatch.setattr(mf, 'render_view_for_mode', recorded)
     assert scale.build(tmp_path, monkeypatch).initial_mode == 'nano'
-    assert probes == [('re-price', 'max')] * 2 + [('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3
+    assert probes == [('re-price', 'max')] * 2 + [('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3 + [
+        ('re-price', 'nano'), ('re-price', 'nano'), ('walk', 'nano')]
 
 
 @pytest.mark.parametrize("step, target, outlined", [
@@ -342,8 +348,7 @@ def test_the_slack_alone_never_outlines_the_knowledge_index(tmp_path, monkeypatc
 
     index = HostSection("knowledge_index", "## knowledge\n\n" + "k" * 10000, "## knowledge\n\nOutline.")
     core = cf.ContextCore(base_prompt="SYSTEM", bible_md="BIBLE",
-        architecture_md="# Architecture", development_md="", docs_need_development=False,
-        semi_stable_text="IDENTITY", dynamic_text="", dynamic_head_text=index,
+        body_map="# Architecture", development_md="", semi_stable_text="IDENTITY", dynamic_text="", dynamic_head_text=index,
         dynamic_sections=(), dynamic_head_sections=(index,),
         user_content_json=json.dumps("Continue."), section_root=str(tmp_path), section_task_id="slack-probe")
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *a, **kw: 1.0)
@@ -380,6 +385,7 @@ def test_a_pairwise_start_fit_is_the_production_start_fit_and_writes_nothing(tmp
     fitter: fed the very view this task captured, it chooses the start's mode, Max room and host steps; each host
     step is priced at the digest address its capture would publish, and nothing reaches the artifact store."""
     from ouroboros import artifacts
+    from ouroboros.context_fit import _governance_blocks
     from ouroboros.section_floor import predicted_section, retain_section
 
     for window in (92000, 84000, 76000, 68000):  # a frame tight enough that the start addresses a host section
@@ -397,7 +403,9 @@ def test_a_pairwise_start_fit_is_the_production_start_fit_and_writes_nothing(tmp
     assert fit['measured'] and arm['mode'] == plan.initial_mode and arm['max_room'] == shown['max_room']
     assert arm['host'] == [(row['section_id'], row['tokens_saved']) for row in shown['host_sections_addressed']]
     sections = {part.section_id: part for part in (*plan.core.semi_stable_sections, *plan.core.dynamic_head_sections,
-                                                    *plan.core.dynamic_sections)}
+                                                    *plan.core.dynamic_sections,
+                                                    *_governance_blocks(None, plan.core, mode='low')[0])}
+    assert 'body_map' in {row['section_id'] for row in shown['host_sections_addressed']}  # the Map at its parts too
     for row in shown['host_sections_addressed']:  # the same address, hence the same pointer cost
         assert predicted_section(sections[row['section_id']])['reader'] == row['reader']
     # Both arms: one captured frame, only the memory view differs; nothing is fetched or captured again.
@@ -482,7 +490,9 @@ def test_a_lower_mode_names_its_cause_from_the_plans_own_start_facts(tmp_path, m
     # window (``initial_mode`` follows that selection) is a lower mode taken after the start, and the next-start
     # read says the task started in Max; a Low start narrowed again keeps its start's cause.
     assert held.start == ('max', '') and crowded.start == ('low', 'memory')
-    for window in (300_000, 200_000, 150_000, 120_000, 100_000):  # as ``loop_model_call`` rebinds: the new record
+    # Owner shape: the rebind keeps Max down to about 141K and Low holds only a few thousand tokens below it, now that
+    # the Map's parts save little (whole books beside chapter maps once gave Low a wide band); walk down to it.
+    for window in range(150_000, 100_000, -1_000):  # as ``loop_model_call`` rebinds: the new record
         record = plan_at(window).window_record
         rebound = dataclasses.replace(held, window_record=record, window_tokens=record.total_equivalent).reproject_for_route(
             window_tokens=record.total_equivalent, known_window=True, ratio=1.0, output_reserve=held.output_reserve_tokens,
@@ -1031,3 +1041,4 @@ def test_counted_composition_keeps_exact_members_without_focus_or_false_origin_r
     assert "read" not in origin and origin["read_gap"] and origin["ref"] == "chat 1 / origin-a"
     assert "BODY_ONLY" not in json.dumps(result)
     assert result["blocks"]["room"]["json_chars"] == mv.json_chars(mv.render_room(snapshot, level))
+

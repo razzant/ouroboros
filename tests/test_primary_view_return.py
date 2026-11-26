@@ -21,7 +21,7 @@ from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
 from ouroboros.primary_route_observation import hold_selection, record_round_route_result
 from ouroboros.tools.registry import ToolRegistry
 from tests.test_memory_view_lever import plan as synthetic_plan
-from tests._context_fit_fixtures import _built
+from tests._context_fit_fixtures import _built, _built_with_map_parts
 
 WINDOWS = {"primary": 1_000_000, "reserve": 65_537}
 
@@ -77,12 +77,16 @@ def test_a_return_resumes_the_primary_view_byte_for_byte(tmp_path, monkeypatch, 
 
 
 def test_the_primary_own_low_stays_low_after_a_return(tmp_path, monkeypatch, routes):
-    _core, build = _built(tmp_path, monkeypatch, books=600_000, ratio=1)
-    plan = build(200_000)  # the primary's own window could not hold Max at the start
+    # The primary's own window cannot hold Max at the start: a Body Map of about 150,000 tokens whole, whose parts and
+    # addresses a frame the window lowered carries (the books' bytes made this pressure before the Map was resident).
+    core, build = _built_with_map_parts(tmp_path, monkeypatch, headings=600, body="Its facts in detail. " * 48, ratio=1)
+    assert floor.view_tokens(core.body_map) > 140_000 and floor.view_tokens(core.body_map_parts) < 1_000
+    plan = build(200_000)
     monkeypatch.setitem(WINDOWS, "primary", 200_000)
     registry = _registry(tmp_path)
     messages = plan.messages_for(plan.initial_mode)
-    assert plan.initial_mode == "low"
+    assert plan.initial_mode == "low"  # Low, temporarily, for the window: my human's mode stays Max
+    assert plan.projection("low").memory_facts["floor"]["mode_switch"] == {"from": "max", "to": "low"}
     away, away_mode = _leave(plan, registry, messages, "reserve", plan.initial_mode)
     _back, back_mode = _switch(away, registry, messages, "primary", away_mode)
     assert back_mode == "low"

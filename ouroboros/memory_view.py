@@ -1565,7 +1565,7 @@ def working_sources_line(spec: ViewSpec, snapshot: Optional[MemoryViewSnapshot] 
     """
     room = snapshot.room if snapshot is not None and isinstance(snapshot.room, dict) else {}
     where = str(room.get("label") or (f"chat {spec.room_id}" if spec.room_id is not None else ""))
-    loaded = ["the Constitution and system prompt", "the navigation of both books", "your identity"]
+    loaded = ["the Constitution and system prompt", "the body map", "your identity"]
     missing, memory = [], []
     (memory if spec.story else missing).append("the top level of your story")
     if spec.room_id is not None and spec.room_page:

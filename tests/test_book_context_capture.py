@@ -1,4 +1,4 @@
-"""Book projections share captured sources without narrowing Main Max."""
+"""The resident Body Map shares captured sources in every mode; no mode preloads a chapter body."""
 
 import json
 from types import SimpleNamespace
@@ -48,7 +48,7 @@ def _text(plan, mode):
     return "\n".join(p["text"] for p in plan.projection(mode).system_message()["content"])
 
 
-def test_main_max_and_nano_use_the_same_captured_book_bytes(tmp_path):
+def test_main_max_and_nano_use_the_same_captured_body_map_bytes(tmp_path):
     env, core, task = _capture(tmp_path)
     plan = _plan(env, core, task, "nano")
     assert plan.initial_mode == "nano"
@@ -58,12 +58,12 @@ def test_main_max_and_nano_use_the_same_captured_book_bytes(tmp_path):
         assert "My complete identity." in text
         assert "My whole earlier biography." in text
         assert "The complete constitution." in text
-        assert text.count("How I keep work alive.") == 1
-    assert "Full mechanism and WHY." in full and "Full engineering discipline." in full
+        # One Map, the same captured bytes in every mode: each chapter's path and opening, never a chapter body.
+        assert text.count(core.body_map) == 1 and text.count("How I keep work alive.") == 1
+        assert "docs/architecture/runtime.md" in text and "docs/development/change.md" in text
+        assert "Full mechanism and WHY." not in text and "Full engineering discipline." not in text
     assert "Parent's unselected current working note." in full
     assert "Unselected raw parent conversation." in full
-    assert "Full mechanism and WHY." not in nano and "Full engineering discipline." not in nano
-    assert "docs/architecture/runtime.md" in nano and "docs/development/change.md" in nano
     assert str(env.repo_dir) not in plan.projection("max").system_message()["content"][0]["text"]
     # Reading a newer file cannot mutate an already captured source or cached prefix.
     before = json.dumps(plan.messages_for("max"), sort_keys=True)
@@ -72,12 +72,14 @@ def test_main_max_and_nano_use_the_same_captured_book_bytes(tmp_path):
     assert _text(plan, "nano") == nano
 
 
-def test_child_keeps_biography_and_book_orientation_in_max(tmp_path):
+def test_child_keeps_biography_and_the_body_map_in_max(tmp_path):
     env, core, task = _capture(tmp_path, {"delegation_role": "subagent"})
     text = _text(_plan(env, core, task, "max"), "max")
     assert "My whole earlier biography." in text and "My complete identity." in text
-    assert "How I keep work alive." in text and "How changes remain coherent." in text
-    assert "Full mechanism and WHY." not in text
+    # The same resident Body Map as Main: chapter openings and both books' chapter addresses, no chapter body.
+    assert core.body_map in text and "How I keep work alive." in text
+    assert "- Change: `docs/development/change.md`" in text
+    assert "Full mechanism and WHY." not in text and "Full engineering discipline." not in text
     assert "Parent's unselected current working note." not in text
     assert "Unselected raw parent conversation." not in text
     # The child role line is carried verbatim: it no longer names tools or claims the
@@ -113,15 +115,19 @@ def test_a_later_capture_reuses_book_parses_and_restored_mtime_edit_is_fresh(tmp
     assert parses == []
     source = env.repo_path("docs/architecture/runtime.md")
     stamp = source.stat()
-    source.write_bytes(source.read_bytes().replace(b"Full mechanism", b"Next mechanism"))
+    # Same size, restored mtime: an edit of the chapter's opening (which the Map carries) and of its body (read on demand).
+    source.write_bytes(source.read_bytes().replace(b"Full mechanism", b"Next mechanism").replace(b"keep work", b"hold work"))
     os.utime(source, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
     after = context._capture_context_core(env, memory, task, None, None)
     assert parses == ["docs/architecture/runtime.md"]
-    assert after.architecture_md != first.architecture_md and "Next mechanism" in after.architecture_md
+    assert after.body_map != first.body_map and "How I hold work alive." in after.body_map
+    assert "Next mechanism" not in after.body_map  # the body stays behind the Map's address
+    chapter = next(book for book in after.reference_books if book.book_id == "architecture").chapters[0]
+    assert "Next mechanism" in chapter.text
     books._book_source.cache_clear()
     fresh = context._capture_context_core(env, memory, task, None, None)
-    assert (fresh.architecture_md, fresh.development_md, fresh.memory_view_json) == (
-        after.architecture_md, after.development_md, after.memory_view_json)
+    assert (fresh.body_map, fresh.development_md, fresh.memory_view_json) == (
+        after.body_map, after.development_md, after.memory_view_json)
     source.unlink()
     assert context._capture_context_core(env, memory, task, None, None).reference_book_errors
 

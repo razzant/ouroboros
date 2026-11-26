@@ -9,9 +9,9 @@ from types import SimpleNamespace
 import ouroboros.loop_round_limits as limits
 
 
-def _ctx(mode, role, sections=('design_bible',)):
-    plan = SimpleNamespace(
-        core=SimpleNamespace(required_book_tokens=lambda m: 4000 if m == mode else 0,
+def _ctx(mode, role, sections=('design_bible',), book=4000):
+    plan = SimpleNamespace(  # the required handbook costs the same in every mode (``ContextCore.required_book_tokens``)
+        core=SimpleNamespace(required_book_tokens=lambda: book,
                              dynamic_head_sections=tuple(SimpleNamespace(section_id=s) for s in sections)),
         projection=lambda m: SimpleNamespace(memory_facts={'role': role, 'host_sections_addressed': ()}),
     )
@@ -27,6 +27,7 @@ def test_a_helpers_low_view_takes_no_map_yields(monkeypatch):
     assert limits.book_yield_due(_ctx('low', 'child')) is False  # a helper's unread Low start: none, as reviewed
     assert limits.book_yield_due(_ctx('low', None)) is True  # an integrating Low start keeps every yield
     assert limits.book_yield_due(_ctx('nano', 'child')) is True  # Nano takes its optional map alone
+    assert limits.book_yield_due(_ctx('low', None, book=0)) is False  # no required handbook: nothing yields for it
 
 
 def test_a_read_view_or_view_without_the_book_never_yields(monkeypatch):

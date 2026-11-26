@@ -360,8 +360,8 @@ def _live_start_rows(rows):
     return [row for row in rows if _window_age(row["at"]) <= _CONFIRMED_TTL_SEC]
 
 
-#: The Max wire: a whole-book send, whole or with memory folded. ``low`` is any other chapter-map send (a known window's
-#: Low, the owner's Low, a start the hint already took to maps); ``maps`` only a same-round retry after a Max refusal.
+#: The Max wire: a Max send, whole or with memory folded. ``low`` is any other send (a known window's Low, the owner's
+#: Low, a start an older hint took to maps); ``maps`` only a same-round retry after a Max refusal (the books rung).
 _MAX_FORMS = frozenset({"ordinary", "folded"})
 _COVER = "cover"  # the one accepted row standing for the replies the bound folded (``_trim_start_rows``)
 
@@ -433,7 +433,7 @@ def _trim_start_rows(ordered):
 def first_contact_limits(target, reply_cap: int, *, scope=None) -> tuple[int, int, int]:
     """``(Max wire, before maps, any form)``: the raw refused Max-wire size for ordinary folding (a whole send's,
     else a folded one's), the refused Max size a real same-round maps send followed, and the smallest refused size
-    of any form, a refused maps rung included (what a chapter-map start compares with). A chapter-map refusal never
+    of any form, a refused maps rung included (what a Low start compares with). A maps-rung refusal never
     bounds a Max start."""
     from ouroboros import capability_evidence as ce
 

@@ -198,7 +198,7 @@ def test_renewal_and_presend_measure_the_same_provider_effort_shape(tmp_path, mo
     schemas = [{"type": "function", "function": {"name": f"tool_{i}", "description": "Read a fixture path.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}}
         for i in range(60)]
-    core = cf.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", '"Assignment"', False)
+    core = cf.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", '"Assignment"')
     plan = cf.build_context_fit_plan(None, core, {"id": "renewal"}, preferred_mode="max",
         tool_schemas=schemas, reasoning_effort=effort, route_resolver=lambda *_a, **_kw: (
             {"provider": provider, "model": provider + "::fixture"},

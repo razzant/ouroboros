@@ -13,9 +13,10 @@ def test_assembled_sources_survive_split_and_unverified_placement_is_named(tmp_p
     monkeypatch.setenv('OUROBOROS_DATA_DIR', str(root))
     monkeypatch.setenv('OUROBOROS_SETTINGS_PATH', str(root / 'settings.json'))
     monkeypatch.setattr(usage_accounting, 'estimate_cost_optional', lambda *args, **kwargs: 0.01)
-    core = ContextCore(base_prompt='Guide', bible_md='Constitution', architecture_md='Map text',
+    core = ContextCore(base_prompt='Guide', bible_md='Constitution', body_map='Map text',
                        development_md='Handbook', semi_stable_text='', dynamic_text='', user_content_json='null',
-                       docs_need_development=True, semi_stable_sections=(HostSection('identity', 'Identity text'),),
+                       development_required=True,  # the handbook's own block: this task's direct requirement
+                       semi_stable_sections=(HostSection('identity', 'Identity text'),),
                        dynamic_head_sections=(HostSection('knowledge_index', 'Knowledge'),),
                        dynamic_sections=(HostSection('recent_tools', 'Tools ran'),))
     governance = _governance_blocks(None, core, mode='max')
@@ -48,7 +49,8 @@ def test_assembled_sources_survive_split_and_unverified_placement_is_named(tmp_p
         assert request is not None
         assert len(recorded) == len(blocks) == 4
         assert {group['family'] for block in recorded for group in block['groups']} >= {
-            'system', 'bible', 'development', 'identity', 'story', 'knowledge_index', 'room', 'other_conversation', 'recent_tools',
+            'system', 'bible', 'body_map', 'development', 'identity', 'story', 'knowledge_index', 'room',
+            'other_conversation', 'recent_tools',
         }
         assert [block['status'] for block in recorded] == ['located'] * 3 + [
             'position_unverified' if edited else 'located']
@@ -65,9 +67,9 @@ def test_assembled_sources_survive_split_and_unverified_placement_is_named(tmp_p
 
 
 def test_projection_witness_is_bound_to_the_selected_blocks_and_declared_append():
-    core = ContextCore(base_prompt='Guide', bible_md='Constitution', architecture_md='Map text',
+    core = ContextCore(base_prompt='Guide', bible_md='Constitution', body_map='Map text',
                        development_md='Handbook', semi_stable_text='', dynamic_text='', user_content_json='null',
-                       docs_need_development=True, dynamic_sections=(HostSection('recent_tools', 'Tools ran'),))
+                       dynamic_sections=(HostSection('recent_tools', 'Tools ran'),))
     governance = _governance_blocks(None, core, mode='max')
     facts = {'floor': {'steps': {}}}
     system, captured = capture_system_projection(core, governance, 'Story', 'Room', 'max', {}, (), True,
@@ -87,15 +89,17 @@ def test_projection_witness_is_bound_to_the_selected_blocks_and_declared_append(
     assert projection_fields(changed_book, first_contact)['assembly_witnesses'] == ()
 
 
-def test_an_optional_section_this_actor_cannot_read_keeps_the_map_and_names_no_source():
+def test_an_optional_section_this_actor_cannot_read_keeps_the_map_and_names_no_source(tmp_path):
     """``memory_floor._address_optional`` shortens an optional attachment for an actor with no reader and records
     ``source_ref: None``. That section is still witnessed as shortened, without a retained address; every other
-    section keeps its witness."""
+    section keeps its witness. The Body Map's fact names every source of both books it was rendered from, whole
+    (``body_map``) or at its parts (``map_parts``); the required handbook's block is the whole book."""
     from ouroboros.memory_floor import _address_optional
+    from tests._reference_book_fixtures import booked
 
     design = HostSection('design_bible', '## Design bible\n\n' + 'Airy rule. ' * 400, operative_view='## Design bible\n\nAiry.')
-    core = ContextCore(base_prompt='Guide', bible_md='Constitution', architecture_md='Map text', development_md='Handbook',
-                       semi_stable_text='', dynamic_text='', user_content_json='null', docs_need_development=True,
+    core = ContextCore(base_prompt='Guide', bible_md='Constitution', body_map='Map text', development_md='Handbook',
+                       semi_stable_text='', dynamic_text='', user_content_json='null', development_required=True,
                        dynamic_sections=(HostSection('recent_tools', 'Tools ran'), design))
     receipts, addressed = [], {}
     assert _address_optional(design, receipts, addressed, root='', task_id='') > 0
@@ -105,11 +109,30 @@ def test_an_optional_section_this_actor_cannot_read_keeps_the_map_and_names_no_s
     witnesses = projection_fields(system, captured)['assembly_witnesses']
     assert [row['carrier_sha256'] for row in witnesses] == [digest(block['text']) for block in system]
     groups = {group['family']: group for row in witnesses for group in row['groups']}
-    assert {'system', 'bible', 'development', 'recent_tools', 'story'} <= groups.keys()
+    assert {'system', 'bible', 'body_map', 'development', 'recent_tools', 'story'} <= groups.keys()
     shortened = groups['design_bible']
     assert shortened['form'] == 'shorter' and shortened['reason'] == 'physical_window' and 'retained_source' not in shortened
     text = system[shortened.get('block', -1)]['text'] if 'block' in shortened else system[-1]['text']
     assert text[shortened['start']:shortened['start'] + shortened['chars']] == addressed['design_bible']
+
+    books = booked(core, tmp_path)
+    governance = _governance_blocks(None, books, mode='low')
+    body_map = next(part for part in governance[0] if getattr(part, 'section_id', '') == 'body_map')
+    sources = [source.source_path for book in books.reference_books for source in (book.entrypoint, *book.chapters)]
+    assert len(sources) == 4 and any(path.startswith('docs/development/') for path in sources)
+    for stepped in (False, True):
+        receipts, addressed = [], {}
+        if stepped:
+            assert _address_optional(body_map, receipts, addressed, root='', task_id='') > 0
+        system, captured = capture_system_projection(books, governance, 'Story', 'Room', 'low', addressed, receipts,
+                                                      True, shown=None, facts={'floor': {'steps': {}}})
+        groups = {group['family']: group for row in projection_fields(system, captured)['assembly_witnesses']
+                  for group in row['groups']}
+        assert groups['body_map']['form'] == ('map_parts' if stepped else 'body_map')
+        assert [source['path'] for source in groups['body_map']['sources']] == sources
+        assert groups['development']['form'] == 'whole_book'
+        assert [source['path'] for source in groups['development']['sources']] == sources[2:]
+        assert not {'architecture', 'architecture_map', 'development_map'} & groups.keys()
 
 
 def test_a_cold_restore_keeping_low_sends_the_witness_of_its_low_view(tmp_path, monkeypatch):
@@ -135,8 +158,14 @@ def test_a_cold_restore_keeping_low_sends_the_witness_of_its_low_view(tmp_path, 
     def forms(rows):
         return {(group['family'], group['form']) for row in rows for group in row['groups']}
 
-    assert ('architecture', 'whole_book') in forms(fresh.projection('max').assembly_witnesses)
-    assert ('architecture', 'whole_book') not in forms(layout)  # Low's own render, not the fresh start's Max
+    # One resident Body Map in both frames, whole here (the window takes nothing from either): no book's whole text
+    # or chapter map is witnessed in either, and the Map names every source of both books it was rendered from.
+    max_forms, low_forms = forms(fresh.projection('max').assembly_witnesses), forms(layout)
+    assert ('body_map', 'body_map') in max_forms and ('body_map', 'body_map') in low_forms
+    assert not {family for family, _form in max_forms | low_forms} & {'architecture', 'development'}
+    [body] = [group for row in layout for group in row['groups'] if group['family'] == 'body_map']
+    assert [source['path'] for source in body['sources']] == [
+        source.source_path for book in _core.reference_books for source in (book.entrypoint, *book.chapters)]
 
 
 def test_late_contributions_bind_exact_prepared_forms_without_storing_body(tmp_path, monkeypatch):
@@ -383,8 +412,8 @@ def test_failing_room_observation_does_not_replace_rendered_text():
     assert witness.observe(('marks',), 'later') == 'later'
     assert not witness.pieces  # no unwitnessed span is promoted to a memory fit note
 
-    core = ContextCore(base_prompt='Guide', bible_md='Constitution', architecture_md='', development_md='',
-                       semi_stable_text='', dynamic_text='', user_content_json='null', docs_need_development=False)
+    core = ContextCore(base_prompt='Guide', bible_md='Constitution', body_map='', development_md='',
+                       semi_stable_text='', dynamic_text='', user_content_json='null')
     governance = _governance_blocks(None, core, mode='max')
     room = 'reviews\n\nfirst\n\nlater'
     observed = []
@@ -406,9 +435,8 @@ def test_a_book_map_step_keeps_old_witnesses_off_the_changed_blocks():
 
     design = HostSection('design_bible', '## Design bible\n\n' + 'Airy rule. ' * 400,
                           operative_view='## Design bible\n\nAiry.')
-    core = ContextCore(base_prompt='Guide', bible_md='Constitution', architecture_md='Map text', development_md='Handbook',
-                       semi_stable_text='', dynamic_text='', user_content_json='null', docs_need_development=True,
-                       dynamic_sections=(HostSection('recent_tools', 'Tools ran'), design))
+    core = ContextCore(base_prompt='Guide', bible_md='Constitution', body_map='Map text', development_md='Handbook',
+                       semi_stable_text='', dynamic_text='', user_content_json='null', dynamic_sections=(HostSection('recent_tools', 'Tools ran'), design))
     governance = _governance_blocks(None, core, mode='low')
     system, captured = capture_system_projection(core, governance, 'Story', 'Room', 'low', {}, (), True,
                                                   shown=None, facts={'floor': {'steps': {}}})

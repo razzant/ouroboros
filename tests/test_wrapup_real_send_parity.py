@@ -477,7 +477,7 @@ def test_the_forced_lookahead_and_send_share_one_measurement_allowance_and_ident
     monkeypatch.setenv("OPENROUTER_API_KEY", "unused")
     plan = replace(_forced_plan(mode, 128_000), initial_mode=mode)
     source = ('prompts/SYSTEM.md', '1' * 64, 128, '2' * 64)
-    plan = replace(plan, core=ContextCore('', '', '', '', '', '', plan.user_content_json, False,
+    plan = replace(plan, core=ContextCore('', '', '', '', '', '', plan.user_content_json,
                                          base_prompt_source=source))
     owner_ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=mode, task_metadata={}, model_turn_state=None)
     captured = []
@@ -641,6 +641,8 @@ def test_pricing_view_does_not_survive_exact_budget_resume(tmp_path, monkeypatch
     from ouroboros.tools.control_runtime import _switch_model
     from tests import _memory_view_synthetic as syn
     from tests._budget_pause_exact_helpers import _install_queue
+    from tests._reference_book_fixtures import booked
+    from dataclasses import replace
 
     class Captured(BaseException):
         pass  # even a forced-call fallback cannot swallow this executor boundary
@@ -670,8 +672,13 @@ def test_pricing_view_does_not_survive_exact_budget_resume(tmp_path, monkeypatch
     monkeypatch.setattr(context, '_context_fit_route', route)
     snapshot = syn.snapshot(room_facts=syn.room('1'), story=syn.pages(1, 300),
         conversations=[syn.conversation(i, words=10, word_chars=1000) for i in range(10)])
-    core = cf.ContextCore('Core', 'BIBLE', '# Architecture\n' + 'Whole source book. ' * 2000,
-        '', 'Identity', 'Facts', '"Assignment"', False, memory_view_json=mv.snapshot_json(snapshot))
+    # The narrowing stimulus whole books gave: a resident Body Map of about the same size whose parts and addresses a
+    # Low frame carries, its full text one retained read away (the capture's reader: section_root, section_task_id).
+    core = replace(booked(cf.ContextCore('Core', 'BIBLE', '', '', 'Identity', 'Facts', '"Assignment"',
+                                         memory_view_json=mv.snapshot_json(snapshot)),
+                          tmp_path, headings=36, body='Whole source book. ' * 53),
+                   section_root=str(tmp_path), section_task_id='budget-view')
+    assert len(core.body_map) > 36_000 > 20 * len(core.body_map_parts)
     task = {'id': 'budget-view', 'type': 'task', 'chat_id': 1, '_attempt': 1, 'text': 'continue',
             'reasoning_effort': 'none', 'budget_profile': profile}
     def fit(model):
