@@ -1186,10 +1186,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     # Step down on the frame's own price, without drawing it whole. Nano is the last physical rescue, even mid-run.
     last = stays = None
     while True:
-        # A held view stays where Nano can buy no room. Without heads this can be decided before drawing Nano.
+        # A held view stays where Nano can buy no room. Without heads this can be decided before drawing Nano (a cold Nano too).
         stays = (last is not None and not (held_heads or whole_core.development_required)
                  and window - reserve <= last[3] - last[2] and fixed >= last[1])
-        shown = floor.NO_VIEW if stays or (mode != "nano" and overflows()) else running_shown or render()
+        shown = floor.NO_VIEW if stays or (mode != "nano" or kept is None and not cold_resume and current_messages is None and not held_heads) and overflows() else running_shown or render()
         if mode == "nano" or not overflows(shown):
             break
         # A live trial still has to reselect tools and measure its chosen wire reserve.
@@ -1210,12 +1210,13 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     if last is not None and (stays or compare_wire and wire_room(shown) <= last[-2]):
         sent, fixed, reserve, window, boundary, allowances, receipts, shown, _, mode = last
     if kept is None and not cold_resume and current_messages is None and overflows(shown):  # a cold restore still reconciles its saved tools
-        core_alone = overflows()
+        core_alone = overflows()  # then a Nano frame without held heads rendered no memory (the loop's cold skip)
+        from ouroboros.context_start_bound import refusal_parts  # names what the refused request holds
         raise MinimumViewUnfit("Core, assignment, resident control tools and work room cannot fit" if core_alone
                                else "Protected owner words and the minimum view cannot fit the usable input",
                                fixed_tokens=fixed, memory_tokens=floor.tokens_of(shown.story_chars) + floor.tokens_of(shown.room_chars),
-                               reserve_tokens=reserve, window_tokens=window, ratio=ratio,
-                               work_room_tokens=work() if core_alone else 0)
+                               reserve_tokens=reserve, window_tokens=window, ratio=ratio, memory_measured=held_heads or not core_alone,
+                               work_room_tokens=work() if core_alone else 0, parts=refusal_parts(core, sections[mode], receipts, sent.schemas, shown, user_content_json, mode=mode, provider=provider, reasoning_effort=reasoning_effort))
     def optional_map():  # the required handbook's next yield: optional maps, then an unread Low start's book maps
         nonlocal receipts
         receipts = floor.yield_for_book(sections[mode], receipts, core, retain=retain, maps=can_yield_maps and mode == "low") or receipts
