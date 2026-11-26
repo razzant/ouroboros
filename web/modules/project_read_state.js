@@ -22,7 +22,7 @@ const searched = (window) => window?.latest_message === null && Number.isSafeInt
 
 /**
  * @param {{
- *   read: (fresh: boolean, whole: boolean, why: object|null) => Promise<boolean>,  // true when the read succeeded;
+ *   read: (fresh: boolean, whole: boolean | (() => boolean), why: object|null) => Promise<boolean>,  // true when the read succeeded;
  *       `whole`: the newest page; `why`: the read's tags its caller named (`refresh`), else the receipt's own
  *   isShown: () => boolean,
  *   isReadingLatest: (latest: undefined|null|object) => boolean,  // the reader is at `latest`
@@ -144,7 +144,7 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
         async refresh({ revision = 0, why = null } = {}) {
             const own = ++generation;
             const target = Math.max(0, Number(revision) || 0);
-            const readable = await read(target > coveredRevision, newest() === null && !searched(recentRead.window), why);
+            const readable = await read(target > coveredRevision, () => newest() === null && !searched(recentRead.window), why);
             const covered = readable && newest() !== null;
             if (covered && target > coveredRevision) coveredRevision = target;
             if (own !== generation) return { painted: false, revision: target };

@@ -36,7 +36,7 @@ function withSignal(promise, signal) {
     });
 }
 
-function makeReconnectRoom(t, { chatId = 2, hangPreferences = false, onPreferences = null, initialRows = null, hasMore = false } = {}) {
+function makeReconnectRoom(t, { chatId = 2, hangPreferences = false, onPreferences = null, initialRows = null, hasMore = false, afterCursor = true } = {}) {
     const rows = initialRows ? [...initialRows] : [{
         role: 'assistant', chat_id: chatId, text: 'initial 1', content: 'initial 1',
         ts: ts(1), history_id: 'chat:1', history_position: { source: 'chat', offset: 1 },
@@ -45,6 +45,8 @@ function makeReconnectRoom(t, { chatId = 2, hangPreferences = false, onPreferenc
     const held = new Map();
     let prefRequests = 0;
     let cursorSeq = 1;
+    let emitAfterCursor = afterCursor;
+    let windowOverride = null;
 
     const historyResponse = (address, init = {}) => {
         const cursor = address.searchParams.get('cursor');
@@ -56,30 +58,31 @@ function makeReconnectRoom(t, { chatId = 2, hangPreferences = false, onPreferenc
             decision: address.searchParams.get('decision') || '',
             detail: address.searchParams.get('detail') || '',
         });
-        const deliver = () => {
-            const seen = mode === 'after' ? Number(cursor.split(':')[1] || 0) : 0;
-            const slice = mode === 'after' ? rows.slice(seen) : [...rows];
-            const nextAfter = `after:${rows.length}`;
-            const latest = [...slice].reverse().find((row) => row.role === 'assistant' && !row.is_progress);
-            return {
-                ok: true, status: 200,
-                json: async () => ({
-                    profile_scope: PREVIEW_SCOPE,
-                    messages: slice,
-                    progress: [],
-                    has_more: mode === 'newest' ? hasMore : false,
-                    page_cursor: `page:${++cursorSeq}`,
-                    next_cursor: mode === 'newest' && hasMore ? 'older:1' : null,
-                    after_cursor: nextAfter,
-                    window: {
-                        complete: !hasMore && mode === 'newest',
-                        truncated_by: hasMore ? ['quota'] : mode === 'after' ? ['page'] : [],
-                        ...(latest ? { latest_message: { history_id: latest.history_id, out_of_order: false } } : {}),
-                    },
-                    coverage: null,
-                }),
-            };
+        // Model server snapshot time at request start, not response release.
+        const seen = mode === 'after' ? Number(cursor.split(':')[1] || 0) : 0;
+        const slice = mode === 'after' ? rows.slice(seen) : [...rows];
+        const nextAfter = emitAfterCursor ? `after:${rows.length}` : null;
+        const latest = [...slice].reverse().find((row) => row.role === 'assistant' && !row.is_progress);
+        const win = windowOverride ? (typeof windowOverride === 'function' ? windowOverride(mode, slice) : windowOverride) : {
+            complete: !hasMore && mode === 'newest',
+            truncated_by: hasMore ? ['quota'] : mode === 'after' ? ['page'] : [],
+            ...(latest ? { latest_message: { history_id: latest.history_id, out_of_order: false } } : {}),
         };
+        const pageCursor = `page:${++cursorSeq}`;
+        const deliver = () => ({
+            ok: true, status: 200,
+            json: async () => ({
+                profile_scope: PREVIEW_SCOPE,
+                messages: slice,
+                progress: [],
+                has_more: mode === 'newest' ? hasMore : false,
+                page_cursor: pageCursor,
+                next_cursor: mode === 'newest' && hasMore ? 'older:1' : null,
+                after_cursor: nextAfter,
+                window: win,
+                coverage: null,
+            }),
+        });
         const waiter = held.get(mode);
         if (waiter) {
             held.delete(mode);
@@ -195,6 +198,8 @@ function makeReconnectRoom(t, { chatId = 2, hangPreferences = false, onPreferenc
         },
         disconnect() { connected = false; rawWs.ws.readyState = 3; rawWs.emit('close'); },
         reconnect() { connected = true; opened = true; rawWs.ws.readyState = 1; rawWs.emit('open', { previouslyConnected: true }); },
+        setAfterCursor(enabled) { emitAfterCursor = Boolean(enabled); },
+        setWindow(next) { windowOverride = next; },
     };
 }
 
@@ -541,4 +546,74 @@ test('R2 unit: createCatchUp wakes waiters on cancel/supersession and pager drop
     assert.deepEqual(await Promise.all([lead, superseded]), [true, false]);
     assert.equal(seqCalls, 1, 'superseded queued caller starts no second after read');
     assert.equal(seqNewest, 0);
+});
+
+test('overlapping unread receipt avoids a second whole newest after reconnect heals unknown latest or omits after_cursor, while later revisions still read', async (t) => {
+    // 1. Prior unknown latest_message healed by reconnect's fresh newest: overlapping receipt must not force a second whole newest.
+    const r = makeReconnectRoom(t);
+    r.setWindow({ complete: false, truncated_by: ['chat_malformed_jsonl'], latest_message: null });
+    await until(() => r.reads.length === 1);
+    await quiet();
+    assert.equal((await r.instance.refreshHistory({ revision: 1 })).painted, false, 'unknown latest_message leaves revision uncovered');
+
+    r.disconnect();
+    r.pushAssistant(2);
+    r.setWindow(null);  // source healed before reconnect
+    const beforeHealed = r.reads.length;
+    r.reconnect();
+    const healed = await r.instance.refreshHistory({ revision: 2 });
+    await until(() => r.shown().includes('chat:2'));
+    await quiet();
+    assert.deepEqual([healed.painted, healed.read], [true, true]);
+    const healedReads = r.reads.slice(beforeHealed);
+    assert.equal(healedReads.filter((e) => e.mode === 'newest').length, 1,
+        'healed latest_unknown does not force a second whole newest');
+    assert.deepEqual(healedReads.map(({ mode, reason, decision }) => ({ mode, reason, decision })), [
+        { mode: 'newest', reason: 'reconnect', decision: 'explicit_whole' },
+        { mode: 'after', reason: 'read_receipt', decision: '' },
+    ]);
+
+    // 2. Overlapping unread receipt begun before reconnect's HTTP snapshot when server omits after_cursor: no second whole newest.
+    r.disconnect();
+    r.setAfterCursor(false);
+    r.pushAssistant(3);
+    const beforeNoCursor = r.reads.length;
+    r.reconnect();
+    const noCursorReceipt = await r.instance.refreshHistory({ revision: 3 });
+    await until(() => r.shown().includes('chat:3'));
+    await quiet();
+    assert.deepEqual([noCursorReceipt.painted, noCursorReceipt.read], [true, true]);
+    assert.deepEqual(r.reads.slice(beforeNoCursor).map(({ mode, reason, decision }) => ({ mode, reason, decision })), [
+        { mode: 'newest', reason: 'reconnect', decision: 'explicit_whole' },
+    ], 'fresh reconnect HTTP snapshot begun after receipt satisfies it without a second whole newest');
+
+    // 3. Unhealed unknown latest_message on a fresh reconnect begun after receipt: still no false ACK and no duplicate whole newest.
+    r.disconnect();
+    r.setWindow({ complete: false, truncated_by: ['chat_malformed_jsonl'], latest_message: null });
+    const beforeStillUnknown = r.reads.length;
+    r.reconnect();
+    const stillUnknown = await r.instance.refreshHistory({ revision: 4 });
+    await quiet();
+    assert.equal(stillUnknown.painted, false, 'unhealed unknown latest_message grants no credit');
+    assert.equal(r.reads.slice(beforeStillUnknown).filter((e) => e.mode === 'newest').length, 1,
+        'unhealed reconnect snapshot begun after receipt does not immediately repeat whole newest');
+
+    // 4. Control: a later revision arriving AFTER reconnect's HTTP snapshot already started on the wire MUST still be read.
+    r.disconnect();
+    r.setWindow(null);
+    r.pushAssistant(4);
+    const beforeLater = r.reads.length;
+    const releaseReconnect = r.hold('newest');
+    r.reconnect();
+    await until(() => r.reads.length === beforeLater + 1);  // reconnect HTTP snapshot is now in flight with rows up to chat:4
+    r.pushAssistant(5);  // revision 5 arrives after reconnect's snapshot started
+    const laterPromise = r.instance.refreshHistory({ revision: 5 });
+    releaseReconnect();
+    const laterReceipt = await laterPromise;
+    await quiet();
+    assert.deepEqual([laterReceipt.painted, laterReceipt.read], [true, true]);
+    assert.ok(r.shown().includes('chat:5'), 'later revision after reconnect request start is fetched before ACK');
+    const laterReads = r.reads.slice(beforeLater);
+    assert.equal(laterReads.filter((e) => e.mode === 'newest').length, 2,
+        'without after_cursor, a later revision observed after reconnect newest began still reads newest');
 });

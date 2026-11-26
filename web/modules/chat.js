@@ -2465,7 +2465,7 @@ export function createChatInstance({
         read: async (fresh, whole, why) => {
             if (!wsUp()) return false;
             await (!fresh && (catchUp.wait || !catchUp.owed && roomProfile.initialHydration)
-                || historyPager.read({ whole, ...RECEIPT, ...why, current: wsUp, decision: whole && 'latest_unknown' }));
+                || historyPager.read({ whole, ...RECEIPT, ...why, current: wsUp, decision: 'latest_unknown' }));
             return wsUp() && lastHistorySyncSucceeded && !catchUp.owed;
         },
         // A destroyed page reports hidden===false, hence the lifecycle flag.
@@ -2856,7 +2856,7 @@ export function createChatInstance({
             for (const id of messages.flatMap(historyRowIds)) recentHistoryIds.add(id);
             readReceipt.arrived(window);
         },
-        readNewest: syncHistory, newestInFlight: () => historySyncPromise, catchingUp: () => catchUp.reconnecting,
+        readNewest: syncHistory, newestInFlight: () => historySyncPromise, newestRead: () => [catchUp.newestRequest, recentApplied], catchingUp: () => catchUp.reconnecting,
         canArrive: () => !arrivalGate(), arrivalGate,
         rebaseOlderEdge: ({ canNewer, canOlder }) => historyWindow?.horizonGap && !canNewer && !(canOlder && readingHistory()),
         isPageProtected: isHistoryPageProtected,

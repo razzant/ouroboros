@@ -105,6 +105,7 @@ export function createChatHistoryPager({
     arrivalGate = () => '',  // the gate `canArrive` closed, by name: it labels the newest read sent instead
     rebaseOlderEdge = () => false,  // a horizon gap under the window may need the present before going older
     newestInFlight = () => null,
+    newestRead = () => [0, 0],  // [requested, applied] newest versions (chat.js)
     catchingUp = () => null,  // a reconnect's whole read still to come (room_retire.js createCatchUp)
     isPageProtected = () => false,
     onState = () => {},
@@ -425,18 +426,22 @@ export function createChatHistoryPager({
     // arrivals cannot answer, chat's newest read starts within this very call. `reason`
     // and `decision` (a `whole` read's, else the arrivals read's) say why, with `detail`. While a reconnect's whole
     // read is still to come, any other read waits for it and then reads only what is left.
-    function read({ fromReconnect = false, whole = false, current = () => true, reason = '', decision = '', detail = '' } = {}) {
+    function read({ fromReconnect = false, whole = false, current = () => true, reason = '', decision = '', detail = '' } = {},
+        requestedAtStart = newestRead()[0]) {
         const started = visit;
         // A superseded reconnect leaves its queued read to the current catch-up.
         if (!alive() || !current()) return Promise.resolve(false);
         const inFlight = newestInFlight() || !fromReconnect && catchingUp();
-        if (inFlight) return inFlight.then(() => started === visit && current() && read({ fromReconnect, whole, current, reason, decision, detail }));
-        if (whole || !canArrive() || !(arrival || arrivable())) {
+        if (inFlight) return inFlight.then(() => started === visit && current() && read({ fromReconnect, whole, current, reason, decision, detail }, requestedAtStart));
+        const needsWhole = typeof whole === 'function' ? Boolean(whole()) : Boolean(whole);
+        if (needsWhole || !canArrive() || !(arrival || arrivable())) {
+            // A newest snapshot begun after this call already answered for it: no second whole newest.
+            if (!fromReconnect && newestRead()[1] > requestedAtStart) return Promise.resolve(canArrive());
             // The first gate that chose the newest page, in the order they are weighed.
-            const gate = whole ? decision || 'explicit_whole' : !canArrive() ? arrivalGate() : unarrivable().decision;
+            const gate = needsWhole ? decision || 'explicit_whole' : !canArrive() ? arrivalGate() : unarrivable().decision;
             return readNewest({ fromReconnect, ...why({ reason, decision: gate, detail }) });
         }
-        return arrivals(fromReconnect, { reason, decision }, current).then(result => started === visit && current() && (result.status === 'applied'
+        return arrivals(fromReconnect, { reason, decision: typeof whole === 'function' ? '' : decision }, current).then(result => started === visit && current() && (result.status === 'applied'
             || (result.status !== 'disposed' && alive() && readNewest({ fromReconnect, ...why({ reason, detail, ...result.leg }) }))));
     }
 
