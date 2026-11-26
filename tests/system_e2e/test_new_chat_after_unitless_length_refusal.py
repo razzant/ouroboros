@@ -489,7 +489,8 @@ def run_scenario(clone: pathlib.Path, root: pathlib.Path, scenario: str) -> dict
     lay_authored_pages(data, STORY_ROOMS, STORY_TOKENS)  # the memory carrier, before the server's first boot
     with ZaiLikeModel(refuse_at=refuse_at) as model:
         settings = keyless_settings(model, OUROBOROS_CONTEXT_MODE="max", OUROBOROS_REASONING_SUMMARY="off",
-                                    OUROBOROS_CONSCIOUSNESS_SAFETY_MODE="off", OPENAI_COMPATIBLE_API_KEY=KEY_A)
+                                    OUROBOROS_CONSCIOUSNESS_SAFETY_MODE="off", OPENAI_COMPATIBLE_API_KEY=KEY_A,
+                                    OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED=model.base_url)
         server = start_server(clone, root / "server", settings)
         recovered_line = refused_before = 0
         try:
