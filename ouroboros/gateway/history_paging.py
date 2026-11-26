@@ -902,11 +902,11 @@ def history_page_tokens(page, messages=(), reads=None):
     held = _held_rows(page, messages, shown, reads) if page.get("repair") and issues else None
     if page.get("repair") and page.get("after"):
         if page["repaired"] and (held is None and page.get("held") is not None or getattr(reads, "projection_failed", False)
-                                 or held is not None and page["repaired"] - set(held)
+                                 or page["repaired"] - shown or held is not None and page["repaired"] - set(held)
                                  or page["revision_now"]() != page["revised"]):
-            # A task sent again turned out to need another's rows or its projection failed part-way, or words were
-            # revised in place since the revision this read was taken at (they reach a window only through a newest
-            # page): the newest page.
+            # A task sent again turned out to need another's rows, shows no facts of its own on them now (its version
+            # would never move) or its projection failed part-way, or words were revised in place since the revision
+            # this read was taken at (they reach a window only through a newest page): the newest page.
             raise HistoryCursorError("history_delta_reset", detail="task_settled")
         # A task's earlier rows keep the version they were projected at until a read sends them again (``repairs``).
         tasks.update((task, seq) for task, seq in page.get("tasks", {}).items() if task not in page["repaired"])
@@ -969,7 +969,8 @@ def _held_rows(page, messages, shown, reads):
     rows, or with what only a newest page decides: an overlaid successor or a child drive's replica, a child or a
     parent of one (the newest page anchors and places children), a folded review group or a review presented for
     another task, folded model waits, a historical receipt; nor when it shows no stored row of it (only its current
-    work); one not held in a window is never held again in it."""
+    work, or only rows fixed elsewhere, ``ROOM_FIXED_ROW_TYPES``, that show no facts of it); one not held in a window is
+    never held again in it."""
     if not any(column == "appearance" for column, _key in page["lens"]["chat"].keys):  # Main and Projects only
         return None
     carried = page.get("held") if page.get("after") else {}
@@ -990,8 +991,8 @@ def _held_rows(page, messages, shown, reads):
             blocked |= {task, owner, *(str(attempt.get("task_id") or "") for attempt in (group or {}).get("attempts", ()))}
         if row.get("parent_task_id") or row.get("subagent_task_id") or row.get("delegation_role") == "subagent":
             blocked |= {task, str(row.get("parent_task_id") or ""), str(row.get("subagent_task_id") or "")}
-        if not task or row.get("role") == "user":
-            continue  # an owner's row: its receipts and its delivery are the notes stamp's and the pending send's
+        if not task or row.get("role") == "user" or row.get("system_type") in ROOM_FIXED_ROW_TYPES:
+            continue  # an owner's row (its receipts and delivery are the notes stamp's and the pending send's), a fixed row
         if (row.get("historical_terminal") or row.get("system_type") == "task_model_wait"
                 or row.get("history_id") in page.get("stripped", ())):
             blocked.add(task)

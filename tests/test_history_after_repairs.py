@@ -260,7 +260,7 @@ def test_held_rows_leave_out_tasks_the_page_shows_through_another_or_without_a_r
                 {"task_id": "carried_only", "role": "system", "system_type": "task_evidence"}]
     shown = {"plain", "stripped", "receipt", "pinned", "waits", "reviewer", "owner", "grouped", "attempt", "carried_only"}
     # The answer the page drew no row of is still evidence its question's row was projected with.
-    assert history_paging._held_rows(page, messages, shown, _Reads()) == {"plain": [[1, 12], [7]], "pinned": [[6], []]}
+    assert history_paging._held_rows(page, messages, shown, _Reads()) == {"plain": [[1, 12], [7]]}  # a fixed row: no facts
     place = {**page, "lens": {"chat": history_paging.RoomLens((("chat_id", 9),))}}
     assert history_paging._held_rows(place, messages, shown, _Reads()) is None  # a place room holds none
 
@@ -503,3 +503,48 @@ def test_a_newest_page_whose_projection_failed_part_way_names_no_arrivals_cursor
     done = next(row for row in whole["messages"] if row.get("task_id") == "done")
     assert done.get("task_terminal_status") == "completed" != next(
         row for row in partial["messages"] if row.get("task_id") == "done").get("task_terminal_status")
+
+
+def _shown_by_a_notice_and_its_current_work(root, monkeypatch):
+    """A running task this room shows only through a notice fixed to it (a steer not delivered) and the carrier of
+    its current work; the notice shows none of its facts, and once it settles the carrier is gone."""
+    import ouroboros.tool_call_log as tool_call_log
+
+    _asking(root)
+    _task(root, "runner", "running", 1)
+    ds.append(root, "chat", {"ts": TS.format(1), "chat_id": 1, "direction": "system", "type": "steer_not_delivered",
+                             "task_id": "runner", "text": "Runner · not delivered"})
+    live = {"on": True}
+    monkeypatch.setattr("ouroboros.gateway.state._chat_activities_snapshot_safe", lambda *_, **__: [
+        {"activity_id": "runner", "chat_id": 1, "kind": "managed_task", "phase": "working"}] if live["on"] else [])
+    original = tool_call_log.replay_evidence_for_tasks
+    monkeypatch.setattr(tool_call_log, "replay_evidence_for_tasks", lambda root, tasks: {
+        **original(root, tasks), **({"runner": {"observations": [{"tool": "x"}], "coverage": {"shown": 1, "matched": 1}}}
+                                   if "runner" in tasks else {})})
+    _, page = _read(root)
+    rows = [row.get("system_type") for row in page["messages"] if row.get("task_id") == "runner"]
+    assert rows == ["steer_not_delivered", "task_evidence"]
+    live["on"] = False
+    _task(root, "runner", "completed", 1)
+    return page
+
+
+def test_a_task_shown_only_by_a_fixed_notice_and_its_work_is_never_held(tmp_path, monkeypatch):
+    page = _shown_by_a_notice_and_its_current_work(tmp_path, monkeypatch)
+    cursor = _cursor(page["after_cursor"])
+    assert "runner" in cursor["tasks"] and "runner" not in cursor["held"] and "asker" in cursor["held"]
+    status, refused = _read(tmp_path, page["after_cursor"])
+    assert (status, refused["detail"]) == (409, "task_settled")  # as before the repairs: its newest page
+    _, newest = _read(tmp_path)
+    assert "runner" not in _cursor(newest["after_cursor"])["tasks"]  # its notice alone names no version to watch
+
+
+def test_a_repair_that_leaves_its_task_unshown_refuses_instead_of_repeating(tmp_path, monkeypatch):
+    """Rows sent again that show none of their task's facts would carry its old version on: the same repair on every
+    read. A window that held such rows (a cursor naming them, as an older server's did) takes its newest page."""
+    page = _shown_by_a_notice_and_its_current_work(tmp_path, monkeypatch)
+    cursor = _cursor(page["after_cursor"])
+    notice = next(row for row in page["messages"] if row.get("system_type") == "steer_not_delivered")
+    cursor["held"]["runner"] = [[notice["history_position"]["offset"]], []]
+    status, refused = _read(tmp_path, history_paging.encode_cursor(cursor, packed=True))
+    assert (status, refused.get("detail")) == (409, "task_settled"), refused.get("repairs")
