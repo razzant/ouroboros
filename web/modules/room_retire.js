@@ -215,9 +215,53 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
  * absence, however a page bounds it; a late pre-disconnect response cannot. `confirmWindow` returns whether the read was
  * whole; a fault owes repair even without an absence. `end` ends only the matching read's
  * feedback; `cancel` records absence. `retry` distinguishes an unconfirmed attempt from absence alone. */
-export function createCatchUp(changed, bound = 300) {
+const cutWindow = ({ reason_code: refused, window } = {}) => Boolean(refused)
+    || Boolean(window?.truncated_by?.some?.(cause => String(cause).endsWith('_projection_failed')));
+const degradedWindow = (data = {}) => cutWindow(data)
+    || Boolean(data.window?.truncated_by?.some?.(cause => String(cause).endsWith('_source_unavailable')));
+
+/** Local owner rows in a drawn history window that carry explicit host dispatch confirmation for a pending send. */
+export function dispatchedOwnerIds(rows, pending, { chatId, sessionId, localOwnerRow }) {
+    if (!pending?.size || !Array.isArray(rows)) return [];
+    const matched = [];
+    for (const row of rows) {
+        if (row?.role !== 'user' || row.is_progress || row.declared_author) continue;
+        if (row.ingress_accepted !== true || row.ingress_dispatched !== true || row.ingress_pending === true) continue;
+        const id = String(row.client_message_id || '');
+        const entry = id && pending.get(id);
+        if (!entry || !localOwnerRow(row)) continue;
+        if (row.chat_id != null && Number(row.chat_id) !== chatId) continue;
+        if (row.source && row.source !== 'web') continue;
+        if (row.sender_session_id != null && row.sender_session_id !== sessionId) continue;
+        if (entry.rowAddress && row.row_address != null && row.row_address !== entry.rowAddress) continue;
+        matched.push(id);
+    }
+    return matched;
+}
+
+export function createCatchUp(changed, bound = 300, pending = null) {
     let timer = null, active = false, reading = null, after = null, failed = false, awaited = null;
     const stop = () => { clearTimeout(timer); timer = null; };
+    const markDisconnected = (requested) => {
+        if (!pending) return;
+        for (const entry of pending.values()) {
+            if (!entry.queued) entry.disconnectedAfter = Math.max(entry.disconnectedAfter ?? -1, requested);
+        }
+    };
+    const settleSends = (version, confirmedIds = null) => {
+        if (!pending || !(version > 0) || !confirmedIds) return false;
+        const confirmed = confirmedIds instanceof Set ? confirmedIds : new Set(confirmedIds);
+        if (!confirmed.size) return false;
+        let settled = false;
+        for (const id of confirmed) {
+            const entry = pending.get(id);
+            if (entry && entry.disconnectedAfter != null && version > entry.disconnectedAfter) {
+                pending.delete(id);
+                settled = true;
+            }
+        }
+        return settled;
+    };
     return {
         get active() { return active; },
         get reading() { return reading; },
@@ -226,12 +270,26 @@ export function createCatchUp(changed, bound = 300) {
         get reconnecting() { return awaited && awaited === reading ? reading : null; },
         get owed() { return after !== null; },
         get retry() { return after !== null && failed && !reading; },
-        confirmWindow({ recentVersion, reason_code: refused, window }) {
-            const cut = refused || window?.truncated_by?.some?.(cause => String(cause).endsWith('_projection_failed'));
+        wouldConfirm(data = {}) {
+            return !cutWindow(data) && (after === null || (!degradedWindow(data) && data.recentVersion > after));
+        },
+        trackSend(id, queued = false) {
+            if (!pending || !id) return;
+            pending.set(id, { clientMessageId: id, timestamp: Date.now(), queued: Boolean(queued) });
+        },
+        flushSend(id) {
+            const entry = pending?.get(String(id || ''));
+            if (entry) entry.queued = false;
+        },
+        confirmWindow(data = {}, confirmedIds = null) {
+            const { recentVersion } = data;
+            const cut = cutWindow(data);
+            const degraded = degradedWindow(data);
             if (cut) after = Math.max(after ?? 0, recentVersion);
-            else if (recentVersion > after) after = null;
+            else if (!degraded && recentVersion > after) after = null;
             failed = after !== null;
-            return !cut;
+            if (!degraded) settleSends(recentVersion, confirmedIds);
+            return !cut && !(degraded && after !== null);
         },
         async settled(current) { while (current() && reading) await reading; },
         begin(current, read = null, requested = 0, reconnect = false) {
@@ -239,6 +297,7 @@ export function createCatchUp(changed, bound = 300) {
             after = requested;
             reading = read;
             awaited = reconnect ? read : null;
+            if (reconnect) markDisconnected(requested);
             timer = setTimeout(() => { timer = null; if (current()) { active = true; changed(); } }, bound);
         },
         end(read = null) {
@@ -247,7 +306,10 @@ export function createCatchUp(changed, bound = 300) {
             if (read) failed = after !== null;
             if (active || read && failed) { active = false; changed(); }
         },
-        cancel(requested = 0) { stop(); failed ||= Boolean(reading); active = false; reading = null; after = requested; },
+        cancel(requested = 0, disconnected = false) {
+            stop(); failed ||= Boolean(reading); active = false; reading = null; after = requested;
+            if (disconnected) markDisconnected(requested);
+        },
     };
 }
 

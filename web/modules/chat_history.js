@@ -123,7 +123,7 @@ export function createChatHistoryPager({
     let destroyed = false, visit = 0;
     // Where the next read of new arrivals starts, the newest read's row count and the
     // rows read since; the read in flight and at most one queued behind it.
-    let after = null, windowRows = 0, arrived = 0, arrival = null, queued = null, landedArrivals = 0;
+    let after = null, windowRows = 0, arrived = 0, arrival = null, queued = null, landedArrivals = 0, lastDrawError = null;
     const alive = () => !destroyed && isAlive();
     const rowCount = rows => (Array.isArray(rows) ? rows.filter(row => !isReplayEvidenceRow(row)).length : 0);
     // Every newest read (the page, ↓, a recent read applied by chat) restarts the arrivals.
@@ -255,9 +255,15 @@ export function createChatHistoryPager({
             : { id, chain: nextChain, index,
                 requestCursor: data.page_cursor, nextCursor: data.next_cursor ?? null,
                 hasMore: data.has_more, rows: messageCount, loaded: true, coverage: data.coverage ?? null });
-        applyPage(data.messages, { ...page, direction, window: data.window ?? null,
-            recentVersion: data.recentVersion, requestedAt: data.requestedAt, page_cursor: data.page_cursor,
-            project_registry: data.project_registry, anchor: data.anchor ?? null, ...extra });
+        lastDrawError = null;
+        try {
+            applyPage(data.messages, { ...page, direction, window: data.window ?? null,
+                recentVersion: data.recentVersion, requestedAt: data.requestedAt, page_cursor: data.page_cursor,
+                reason_code: data.reason_code, project_registry: data.project_registry, anchor: data.anchor ?? null, ...extra });
+        } catch (error) {
+            lastDrawError = error;
+            throw error;
+        }
         if (!alive()) return { status: 'disposed' };
         // Only a read of the present restarts the arrivals; a page around one place is not the present.
         if (newChain) {
@@ -442,29 +448,41 @@ export function createChatHistoryPager({
         // to `rechain` (a window shifted under a reader following the present):
         // this read then starts the new chain as `latest` would, without reading
         // the same page again; its descriptor carries `rechain` and `rechained`.
-        acceptRecent(data, rechain = null) {
+        acceptRecent(data, rechain = null, draw = null) {
             if (!alive()) return { status: 'disposed' };
-            newest(data);
             const sourceError = sourceReadError(data);
             if (sourceError && !pending) {
+                draw?.();
+                newest(data);
                 failure = { direction: 'recent', index: 0, cursor: null, newChain: true, error: sourceError };
                 publish();
                 return { status: 'error', error: sourceError, cursor: null };
             }
-            // The newest read answers a failed read of the present, the room's own or ↓'s (its Retry is ↓ again).
-            if (!sourceError && (failure?.direction === 'recent' || failure?.direction === 'latest')) { failure = null; publish(); }
-            else if (!sourceError && data?.page_cursor) registryReadableAgain();
-            if (pending || (pages.length && !rechain)) return { status: 'ignored' };
+            if (pending || (pages.length && !rechain)) {
+                draw?.();
+                newest(data);
+                if (!sourceError && (failure?.direction === 'recent' || failure?.direction === 'latest')) { failure = null; publish(); }
+                else if (!sourceError && data?.page_cursor) registryReadableAgain();
+                return { status: 'ignored' };
+            }
+            lastDrawError = null;
             try {
                 const result = pages.length ? land(data, { index: 0, direction: 'latest', newChain: true }, { ...rechain, rechained: true })
                     : land(data, { index: 0, direction: 'recent', newChain: true });
+                newest(data);
                 failure = null;
                 publish();
                 return result;
             } catch (error) {
+                const drawFailed = lastDrawError === error;
+                lastDrawError = null;
+                if (!drawFailed) {
+                    draw?.();
+                    newest(data);
+                }
                 failure = { direction: 'recent', index: 0, cursor: null, newChain: true, error };
                 publish();
-                return { status: 'error', error, cursor: null };
+                return { status: 'error', error, cursor: null, ...(drawFailed ? { drawFailed: true } : {}) };
             }
         },
         older(tags = null) {

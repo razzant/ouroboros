@@ -17,7 +17,7 @@ import { createChatMedia, showTaskIncidentToast } from './chat_media.js';
 import { createEarlyTextBubbles, createTextBubbles } from './chat_text_bubble.js';
 import { endLetters, letterRow } from './peer_letter_card.js';
 import { noticeLine } from './host_notice_text.js';
-import { createCatchUp, createWindowReturn } from './room_retire.js';
+import { createCatchUp, createWindowReturn, dispatchedOwnerIds } from './room_retire.js';
 import { createChatPreview, createRoomProfileLifecycle } from './chat_preview.js';
 import { createUnconfirmedSends } from './chat_attachments.js';
 import { createChatDecision } from './chat_decision.js';
@@ -480,7 +480,7 @@ export function createChatInstance({
     let activeLiveGroupId = '';
     // A return's or reconnect's read: status once out past its bound, ↓ Retry once it ends unconfirmed (shown only,
     // as a hidden feed reads as at its end).
-    const catchUp = createCatchUp(() => { syncChatStatus(); if (isInstanceVisible()) updateScrollButton(); });
+    const catchUp = createCatchUp(() => { syncChatStatus(); if (isInstanceVisible()) updateScrollButton(); }, 300, pendingSubmissions);
     let pendingRestartNotice = '';
     try {
         pendingRestartNotice = restartNoticeText(new URL(window.location.href).searchParams.get('_ouro_reason') || '');
@@ -2055,6 +2055,7 @@ export function createChatInstance({
     }
 
     const localOwnerRow = row => !row.origin_projected && ownerRowRoom(row, chatId) === chatId;
+    const ownerIds = rows => rows.filter((m) => m.role === 'user' && m.client_message_id && localOwnerRow(m)).map((m) => String(m.client_message_id));
 
     function confirmOwnerRow(row) {
         const bubble = ownerMessageBubble(messagesDiv, row, chatId);
@@ -2104,8 +2105,7 @@ export function createChatInstance({
         }
     }
     // `requestedAt` dates the question records in these rows.
-    function applyHistoryMessages(messages, { fromReconnect = false, archived = false, direction = '', anchor = null,
-        requestedAt, quiet, window, hasMore, newest = direction === 'recent' || direction === 'latest' } = {}) {
+    function applyHistoryMessages(messages, { archived = false, direction = '', anchor = null, requestedAt, quiet } = {}) {
         const sourceRows = messages;  // even rows withheld from replay carry their exact identity
         // ↓ hears only new words, not an older page or an adopted identity.
         const reportActivity = historyLoaded && !archived;
@@ -2140,9 +2140,7 @@ export function createChatInstance({
                     return true;
                 });
                 // Retire only local echoes this source snapshot confirms.
-                const localEcho = partitionLocalEchoJournal(localEchoJournal, new Set(messages
-                    .filter((m) => m.role === 'user' && m.client_message_id && localOwnerRow(m))
-                    .map((m) => String(m.client_message_id))));
+                const localEcho = partitionLocalEchoJournal(localEchoJournal, new Set(ownerIds(messages)));
                 for (const entry of localEcho.confirmed) {
                     localEchoJournal.delete(entry.clientMessageId);
                 }
@@ -2236,10 +2234,6 @@ export function createChatInstance({
                         addStoredRow(msg, taskId, { evidenceRef: cardRowEvidenceRef(msg) });
                         continue;
                     }
-                    // History clears Sending; census re-links live turns.
-                    if (fromReconnect && msg.role === 'user' && localOwnerRow(msg) && msg.client_message_id) {
-                        pendingSubmissions.delete(String(msg.client_message_id));
-                    }
                     if (letterRow(msg, messagesDiv, addMessage)) continue;
                     if (msg.is_progress) {
                         // Progress-only/failed tasks still anchor at their first event.
@@ -2286,9 +2280,7 @@ export function createChatInstance({
                     });
                     if (msg.role === 'user') confirmOwnerRow(msg);
                 }
-                const settled = newest && !catchUp.owed;
-                earlyRows.clear(sourceRows, settled && (window?.complete === true && hasMore === false ? 'complete' : 'bounded'));
-                if (settled) windowReturn.settle(earlyRows.get);
+                earlyRows.clear(sourceRows, false);
                 _historyRow = null;
                 for (const [tid, ending] of endings) {
                     if (!ending) continue;
@@ -2378,15 +2370,19 @@ export function createChatInstance({
                 if (data.recentVersion < recentApplied) return lastHistorySyncSucceeded;
                 const messages = Array.isArray(data.messages) ? data.messages : [];
                 const oldRecentIds = retainedRecentIds();
-                const admitted = acceptRecentWindow(data, messages);
+                const admitting = data.recentVersion > recentApplied, nextIds = new Set(messages.flatMap(historyRowIds));
                 const pagerBeforeRecent = historyPager.getState();
                 const reader = readingHistory(), returning = reading.returning;
-                const rechainRecent = admitted && !catchUp.owed && (!reader || returning) && pagerBeforeRecent.initialized
+                const rechainRecent = admitting && catchUp.wouldConfirm(data) && (!reader || returning) && pagerBeforeRecent.initialized
                     && (returning || pagerBeforeRecent.away && (fromReconnect || recovering || pagerBeforeRecent.retryReturn)
-                        || !pagerBeforeRecent.canNewer && [...oldRecentIds].some(id => !recentHistoryIds.has(id)));
-                const result = historyPager.acceptRecent(data, rechainRecent && { fromReconnect });
-                if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect, newest: admitted,
-                    requestedAt: data.requestedAt, window: data.window, hasMore: data.has_more });
+                        || !pagerBeforeRecent.canNewer && [...oldRecentIds].some(id => !nextIds.has(id)));
+                let admitted = false;
+                const result = historyPager.acceptRecent(data, rechainRecent && { fromReconnect }, () => {
+                    applyHistoryMessages(messages, { requestedAt: data.requestedAt });
+                    admitted = acceptRecentWindow(data, messages);
+                });
+                if (result.drawFailed) throw result.error;
+                if (result.status === 'applied') admitted = admitting;
                 withStableViewport(() => releaseHistoryIds(!admitted || rechainRecent || reader
                     || historyPager.getState().canNewer ? [] : oldRecentIds));
                 // Arrivals that landed meanwhile may lie past this page: read them again.
@@ -2512,10 +2508,7 @@ export function createChatInstance({
         // Chat sends carry their minted client_message_id.
         const pendingId = result?.clientMessageId || '';
         if (pendingId) {
-            pendingSubmissions.set(pendingId, {
-                clientMessageId: pendingId,
-                timestamp: Date.now(),
-            });
+            catchUp.trackSend(pendingId, result?.status === 'queued');
             recordLocalEcho(pendingId, text, sentTs);
         }
         syncChatStatus();
@@ -2706,21 +2699,23 @@ export function createChatInstance({
     let beforePartialIds = null;
     const retainedRecentIds = () => new Set([...recentHistoryIds, ...(beforePartialIds || [])]);
     let recentRequest = 0, recentApplied = 0;
-    // Admit each newest response once, including ↓; the preview follows it.
+    // Commit a drawn newest response once, including ↓; the preview follows it.
     function acceptRecentWindow(data, messages) {
         if (data.recentVersion <= recentApplied) return false;
         recentApplied = data.recentVersion;
-        const whole = catchUp.confirmWindow(data);
+        const whole = catchUp.confirmWindow(data, dispatchedOwnerIds(messages, pendingSubmissions, { chatId, sessionId: chatSessionId, localOwnerRow }));
+        if (!catchUp.owed) withStableViewport(() => { const c = earlyRows.clear(messages,
+            data.window?.complete === true && (data.has_more ?? data.hasMore) === false ? 'complete' : 'bounded'); windowReturn.settle(earlyRows.get); return c; });
         preview.save(messages, data);
-        // The newest admitted window (↓ too) owns the failure note.
         historyControls.endRecent(whole ? null : new Error('Some saved history could not be loaded.'), Boolean(data.page_cursor), data);
         recentCoverage = data.coverage ?? null;
         recentHasOrigins = messages.some(row => row.origin_projected);
         readReceipt.recent(data);
-        // Keep the rows held before the fault across a rechain; repeated partial windows replace one another.
         if (whole) beforePartialIds = null;
         else beforePartialIds ??= retainedHistoryIds();
         recentHistoryIds = new Set(messages.flatMap(historyRowIds));
+        syncChatStatus();
+        if (isInstanceVisible()) updateScrollButton();
         return true;
     }
     const pendingHistoryEvictions = new Set();
@@ -2823,18 +2818,17 @@ export function createChatInstance({
         applyPage: (messages, descriptor) => {
             if (foreignProfile()) return;  // another profile's history rows never paint here (#3294)
             const oldRecentIds = retainedRecentIds();
-            const admitted = descriptor.direction === 'latest' && (acceptRecentWindow(descriptor, messages) || descriptor.rechained);
+            const isRecent = descriptor.direction === 'recent' || descriptor.direction === 'latest';
+            applyHistoryMessages(messages, { ...descriptor, archived: !isRecent });
+            const admitted = isRecent && acceptRecentWindow(descriptor, messages);
             pageHistoryIds.set(descriptor.id, new Set(messages.flatMap(historyRowIds)));
-            const archived = descriptor.direction !== 'recent' && descriptor.direction !== 'latest';
-            if (!archived) pagerRecent = descriptor;
-            applyHistoryMessages(messages, { ...descriptor, archived });
-            // The present re-anchors the chain: rows no page or window owns any more
-            // (windows kept while the reader was in older history) go with it.
-            if (admitted) withStableViewport(() => releaseHistoryIds(new Set([...oldRecentIds,
-                ...historyStamps(messagesDiv).map(([id]) => id)])));
-            // An older page drawn can show, or name, the newest arrival without a scroll.
-            if (admitted) readReceipt.settle();
-            else if (archived) readReceipt.page(descriptor);
+            if (isRecent) pagerRecent = descriptor;
+            if (descriptor.direction === 'latest' && admitted) {
+                if (historyLoaded) lastHistorySyncSucceeded = true;
+                withStableViewport(() => releaseHistoryIds(new Set([...oldRecentIds,
+                    ...historyStamps(messagesDiv).map(([id]) => id)])));
+                readReceipt.settle();
+            } else if (!isRecent) readReceipt.page(descriptor);
         },
         releasePage: descriptor => {
             const ids = pageHistoryIds.get(descriptor.id) || [];
@@ -2842,9 +2836,9 @@ export function createChatInstance({
             withStableViewport(() => releaseHistoryIds(ids));
         },
         // Rows stored since the newest read join its window (and the saved preview).
-        applyArrivals: (messages, { window, fromReconnect, requestedAt, repairs, quiet }) => {
+        applyArrivals: (messages, { window, requestedAt, repairs, quiet }) => {
             if (foreignProfile()) return;
-            applyHistoryMessages([...repairs, ...messages], { fromReconnect, requestedAt, quiet });
+            applyHistoryMessages([...repairs, ...messages], { requestedAt, quiet });
             preview.append(messages);
             for (const id of messages.flatMap(historyRowIds)) recentHistoryIds.add(id);
             readReceipt.arrived(window);
@@ -3269,6 +3263,7 @@ export function createChatInstance({
     onWs('outbound_sent', (evt) => {
         const cid = evt?.clientMessageId || '';
         if (cid) {
+            catchUp.flushSend(cid);
             unconfirmed.flushed(cid);
             // A socket write is not durable acceptance (2A): settle the
             // bubble only; `Sending...` retires on authoritative evidence.
@@ -3306,7 +3301,7 @@ export function createChatInstance({
             ? msg.previouslyConnected
             : wsHasConnectedOnce;
         // A body polled during a real outage may predate the restart.
-        if (isReconnect && !msg?.resumed) hostStart.forget();
+        if (isReconnect && reason === 'reconnect') hostStart.forget();
         mainWaiting?.setConnected(true);
         refreshHeaderControlState();
         syncChatStatus();
@@ -3328,11 +3323,11 @@ export function createChatInstance({
             // A return shares its paint receipt's newest read during preferences, even a refusal; a real reconnect owes
             // a read newer than any it interrupted.
             .then(() => (destroyed || openedVisit !== visit ? false
-                : msg?.resumed && recentRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
+                : reason === 'resume' && recentRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
                 : isReconnect ? historyPager.read({ fromReconnect: true, whole: true, reason, current: () => catchUp.reading === read })
                     : waitForHydrationWindow().then(awaitInitialHydration)))
             .then(settled, settled);
-        if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit, read, readOnOpen, !msg?.resumed);
+        if (isReconnect) catchUp.begin(() => !destroyed && openedVisit === visit, read, readOnOpen, reason === 'reconnect');
     });
 
     // A disconnect: written sends not yet saved say so and the room shows the outage; away, which sends it doubts is
@@ -3340,7 +3335,7 @@ export function createChatInstance({
     onWs('close', () => {
         forgetWindowReturn();
         closedSinceOpen = true;
-        catchUp.cancel(recentRequest);
+        catchUp.cancel(recentRequest, true);
         if (leaving) { outageAway = [...outageAway || [], ...unconfirmed.written()]; return; }
         showOutage();
     });
