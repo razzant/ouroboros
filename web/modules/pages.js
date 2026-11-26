@@ -132,6 +132,15 @@ export function mountNavRail(sidebar) {
     sidebar.querySelector('.nav-utilities')?.remove();
 }
 
+/** Find a project and + are the column's first row, before Ouroboros's card (owner 27.11, «Вариант B»): in a macOS
+ * window the traffic lights' row, under a phone's drawer the ×'s. An older document keeps the row in the Projects
+ * section; it moves, so reading, Tab and every surface follow one order. Returns the row. */
+export function leadHeadWithFind(sidebar) {
+    const header = sidebar?.querySelector('.nav-projects-header') || null;
+    if (header) sidebar.querySelector('.sidebar-head')?.prepend(header);
+    return header;
+}
+
 /** The head of the Projects list (owner 13.11: no "Projects" word, no collapse, the list starts with its search): the
  * row is Find a project (projects_nav.js puts the field first in it) and "+" (New project) at its end. The header's
  * toggle, its unread total and its one status mark are gone with the collapse they spoke for: every row carries its

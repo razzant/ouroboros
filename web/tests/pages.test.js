@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { PAGES, ZONES, mountNavRail, navRowFor, pageById, pageLabel, pagesInZone, renderNavRail, renderNavRow, renderNavRows, renderProjectsHeader } from '../modules/pages.js';
+import { PAGES, ZONES, leadHeadWithFind, mountNavRail, navRowFor, pageById, pageLabel, pagesInZone, renderNavRail, renderNavRow, renderNavRows, renderProjectsHeader } from '../modules/pages.js';
 import { PAGE_ICONS, SHELL_ICONS } from '../modules/page_icons.js';
 import { appendHtml, domDouble } from './dom_double.js';
 import { statusMarkHtml } from '../modules/status_mark.js';
@@ -122,6 +122,22 @@ function railDocument(markup) {
 // The double reads ids as attributes: `[id=…]`, never `#…`.
 const versions = (sidebar) => sidebar.querySelectorAll('[id="nav-version"]');
 const kids = (node) => node.children.map((child) => child.className || child.id);
+
+test('Find a project and + are the head\'s first row on every surface, an older document\'s row moved there', () => {
+    const shell = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+    const head = shell.slice(shell.indexOf('<div class="sidebar-head">'), shell.indexOf('<section id="nav-projects"'));
+    assert.match(head.replace(/<!--[\s\S]*?-->/g, ''), /^<div class="sidebar-head">\s*<div class="nav-projects-header"><\/div>/,
+        'index.html: the find row leads the head, before the card the registry renders after it');
+    const older = railDocument('<div class="sidebar-head"><a class="nav-row nav-row-main"></a></div>'
+        + '<section class="nav-section nav-projects"><div class="nav-projects-header"></div><div class="nav-projects-list"></div></section>');
+    const row = leadHeadWithFind(older);
+    assert.equal(row?.className, 'nav-projects-header');
+    assert.deepEqual(kids(older.querySelector('.sidebar-head')), ['nav-projects-header', 'nav-row nav-row-main']);
+    assert.deepEqual(kids(older.querySelector('.nav-projects')), ['nav-projects-list']);
+    leadHeadWithFind(older);  // a second call keeps the one order
+    assert.deepEqual(kids(older.querySelector('.sidebar-head')), ['nav-projects-header', 'nav-row nav-row-main']);
+    assert.equal(leadHeadWithFind(railDocument('<div class="sidebar-head"></div>')), null);
+});
 
 test('mountNavRail: rail and × lead in DOM order, retained HTML reuses its ×, v7.7.0 synthesizes one', () => {
     const shell = readFileSync(new URL('../index.html', import.meta.url), 'utf8');

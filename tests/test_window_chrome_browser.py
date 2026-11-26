@@ -43,12 +43,13 @@ def shell_page(ui, width, height=722):
     return page
 
 
-def apply(page, top=TOP, start=START):
-    # Like the native shell, answer the document's latest declaration (including page-cache returns).
-    page.evaluate("""([top, start]) => {
+def apply(page, top=TOP, start=START, mid=None):
+    # Like the native shell, answer the document's latest declaration (including page-cache returns); an older shell
+    # reports no centre.
+    page.evaluate("""([top, start, mid]) => {
         const doc = window.__shellMessages.filter(message => message.type === 'declare').at(-1).doc;
-        window.__ouroWindowChrome({doc, top, start});
-    }""", [top, start])
+        window.__ouroWindowChrome(mid === null ? {doc, top, start} : {doc, top, start, mid});
+    }""", [top, start, mid])
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
@@ -81,13 +82,15 @@ CONTROLS = """() => [...document.querySelectorAll('a[href], button, input, selec
                          x: r.x, y: r.y, width: r.width, height: r.height }))"""
 LAYOUT = """() => {
     const sidebar = document.getElementById('primary-sidebar');
-    const first = document.querySelector('[data-nav-page="chat"]').getBoundingClientRect();
+    const first = document.querySelector('#primary-sidebar .nav-projects-find').getBoundingClientRect();  // the column's first row
+    const card = document.querySelector('[data-nav-page="chat"]').getBoundingClientRect();
     const toggle = document.querySelector('#page-chat [data-mobile-nav-toggle]');  // a room's ☰: its composer's first control
     const handle = document.querySelector('.resize-handle');
     // The sidebar's top inset lives on its pinned head (#1998: three zones), the band adds to it.
     return { sidebar_position: getComputedStyle(sidebar).position,
              sidebar_padding_top: getComputedStyle(sidebar.querySelector('.sidebar-head')).paddingTop,
              sidebar_width: sidebar.getBoundingClientRect().width, first_row: { x: first.x, y: first.y, width: first.width, height: first.height },
+             card_top: card.y,
              drawer_toggle: toggle ? getComputedStyle(toggle).display : 'absent',
              resize_handle: handle ? getComputedStyle(handle).display : 'absent' };
 }"""
@@ -215,17 +218,52 @@ def test_the_spa_declares_and_reserves_only_the_measured_band(subscription_ui):
     assert restart["y"] < TOP and clear_of_lights(restart), "the header stays level with the lights, beside them"
     capture(page, "window-chrome-integrated-wide")
 
-    page.mouse.click(150, TOP / 2)  # the sidebar's empty band
+    page.mouse.click(150, 3)  # the band above Find a project, the sidebar's first row
     page.mouse.click(restart["x"] + restart["width"] / 2, restart["y"] + restart["height"] / 2)
     page.mouse.click(150, TOP + 200)  # below the band: the page's own press
-    page.mouse.dblclick(150, TOP / 2)
+    page.mouse.dblclick(150, 3)
     assert drags(page) == ["drag", "drag", "double-click"]
 
     apply(page, top=0, start=0)  # full screen or the ordinary bar
     assert page.locator("html").get_attribute("data-window-chrome") is None
     assert page.evaluate("getComputedStyle(document.querySelector('#primary-sidebar .sidebar-head')).paddingTop") == "16px"
-    page.mouse.click(150, TOP / 2)
+    page.mouse.click(150, 3)
     assert drags(page) == ["drag", "drag", "double-click"]
+
+
+MID = 20  # the lights' centre one native run would report beside TOP (LIGHTS spans 18..34 in a sample; any inside the band)
+LINE = """() => { const mid = (s) => { const r = document.querySelector(s).getBoundingClientRect(); return (r.top + r.bottom) / 2; };
+    const top = (s) => document.querySelector(s).getBoundingClientRect().top;
+    return { restart: mid('[data-chat-command="restart"]'), find: mid('#primary-sidebar .nav-projects-find'),
+             add: mid('#nav-projects-add'), findLeft: document.querySelector('#primary-sidebar .nav-projects-find').getBoundingClientRect().left,
+             card: top('.sidebar-head [data-nav-page="chat"]'), rail: top('.nav-rail .nav-row'),
+             header: document.querySelector('.chat-page-header').getBoundingClientRect().height }; }"""
+
+
+def test_the_header_line_stands_on_the_lights_centre_and_an_older_shell_keeps_the_band(subscription_ui):
+    page = shell_page(subscription_ui, 1100)
+    apply(page, mid=MID)
+    line = page.evaluate(LINE)
+    for name in ("restart", "find", "add"):
+        assert line[name] == pytest.approx(MID, abs=0.6), (name, line)  # one line: the lights', the header's, the column's
+    assert line["findLeft"] >= START, line  # the field starts past the lights
+    assert line["header"] == pytest.approx(2 * MID, abs=0.6), line  # as much air under the line as above it
+    assert line["card"] == pytest.approx(line["rail"], abs=0.6) and line["card"] >= 2 * MID, line
+    page.mouse.click(150, 3)  # the empty band above Find a project: the window's handle
+    card = box(page, '.sidebar-head [data-nav-page="chat"]')
+    assert 2 * MID < card["y"] < TOP, card  # the page's column now starts inside the native bar
+    below = (2 * MID + card["y"]) / 2  # the column's plain air between the find row and the card, under the row
+    page.mouse.click(150, below)
+    page.mouse.dblclick(150, below)
+    assert drags(page) == ["drag"], "a press on the page under its row never drags or zooms the window"
+    capture(page, "window-chrome-lights-line")
+    apply(page, mid=MID - 4)  # the same band, the lights 4 px higher: the line follows them
+    assert page.evaluate(LINE)["restart"] == pytest.approx(MID - 4, abs=0.6)
+
+    apply(page)  # an older shell: no centre, the whole band is the row (today's line)
+    line = page.evaluate(LINE)
+    assert line["restart"] == pytest.approx(TOP / 2, abs=0.6) and line["find"] == pytest.approx(TOP / 2, abs=0.6), line
+    assert line["header"] == pytest.approx(TOP, abs=0.6) and line["card"] >= TOP, line
 
 
 def test_narrow_layouts_start_past_the_traffic_lights(subscription_ui):
@@ -325,14 +363,14 @@ def test_from_the_minimum_window_width_every_top_control_clears_the_lights(subsc
     baseline = plain.evaluate(LAYOUT)
     assert baseline["sidebar_position"] != "fixed" and baseline["drawer_toggle"] == "none", "no drawer at this width"
     assert baseline["sidebar_padding_top"] == "16px"
-    assert not clear_of_lights(baseline["first_row"]), "without the reserve the first row would sit under the lights"
+    assert not clear_of_lights(baseline["first_row"]), "without the allowance the first row would sit under the lights"
 
     page = shell_page(ui, width, 600)
     apply(page)
     integrated = page.evaluate(LAYOUT)
     assert integrated["sidebar_position"] == baseline["sidebar_position"] and integrated["drawer_toggle"] == "none"
-    # The approved card starts after the measured window band, with the ordinary head step still below it.
-    assert integrated["first_row"]["y"] >= TOP
+    # Find a project stands in the band past the lights (owner 27.11); the card starts under the band (no centre here).
+    assert integrated["card_top"] >= TOP and integrated["first_row"]["y"] < TOP
     assert clear_of_lights(integrated["first_row"])
     blocked = [c for c in page.evaluate(CONTROLS) if not clear_of_lights(c)]
     assert blocked == []

@@ -406,34 +406,46 @@ html[data-layout="docked"] #primary-sidebar {
    whole-column fallback above. */
 #primary-sidebar > .sidebar-scroll { display: contents; }
 
-/* macOS desktop window (launcher_window_chrome.py): while its transparent title bar covers the page,
-   the shell writes the band's height and the traffic lights' far edge here, measured, in CSS px.
-   The sidebar starts below the band; content reaching the left edge (drawer layout, a project panel
-   as wide as the window) starts past the lights. Without the shell's attribute nothing moves. */
+/* macOS desktop window (launcher_window_chrome.py): while its transparent title bar covers the page, the shell
+   writes, measured in CSS px, the native band's height (--window-chrome-top, where a plain press drags the window),
+   the traffic lights' far edge and, where it reads one inside the band, their vertical centre (--window-chrome-mid).
+   The page's band is the lights' row (owner 27.11, «синхронизовать позиции»): as much air under their line as above
+   it, so every header's controls stand on the lights' line and every first row starts under that row; never shorter
+   than a control (a large Interface size), so nothing is clipped at the window's top. A shell that gives no centre
+   leaves the whole band as the row. Content reaching the left edge (drawer layout, a project panel as
+   wide as the window) starts past the lights. Without the shell's attribute nothing moves. */
 :root[data-window-chrome="integrated"] {
     --window-chrome-top: 0px;
     --window-chrome-start: 0px;
+    --window-chrome-row: max(var(--control-h-float), calc(2 * var(--window-chrome-mid, calc(var(--window-chrome-top) / 2))));
     --window-chrome-clearance: calc(var(--window-chrome-start) + var(--space-3));
-    --page-header-row-h: max(var(--control-h-float), var(--window-chrome-top));
+    --page-header-row-h: var(--window-chrome-row);
 }
-/* The card and the rail's first place stand right under the traffic lights (owner 12.11, the fifth round frames;
-   24.11): a step of air under them, so their tops reach into the band's lower part. The stack layout's drawer clears
-   the band itself (its line below). */
+/* The sidebar's first row is the lights' row: Find a project and + stand on their line past the lights, and the
+   card and the rail's first place start a small step under it (owner 27.11, «Вариант B»). An RTL page keeps the
+   column on the right, away from the lights. The stack layout's drawer clears the band itself (its line below). */
 :root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar {
-    --sidebar-top: calc(var(--space-4) + var(--window-chrome-top));
+    --sidebar-top: calc(max(var(--window-chrome-row), var(--nav-item-h)) + var(--space-2));
+}
+:root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar:not([data-bars-crowd]) > .sidebar-head { padding-top: 0; }
+:root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar:not([data-bars-crowd]) > .sidebar-head > .nav-projects-header {
+    min-height: var(--window-chrome-row);
+}
+:root[data-window-chrome="integrated"]:not([data-layout="stack"]):not([dir="rtl"]) #primary-sidebar:not([data-bars-crowd]) > .sidebar-head > .nav-projects-header {
+    padding-left: max(0px, calc(var(--window-chrome-clearance) - var(--nav-rail-w)));
 }
 /* Once the head scrolls away, the scroller itself must still clear the window buttons. */
 :root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar[data-bars-crowd] {
-    --sidebar-h: calc(var(--vvh) - var(--window-chrome-top));
+    --sidebar-h: calc(var(--vvh) - var(--window-chrome-row));
     --sidebar-top: 0px;
-    margin-top: var(--window-chrome-top);
+    margin-top: var(--window-chrome-row);
 }
 :root[data-window-chrome="integrated"] .onboarding-overlay {
     box-sizing: border-box;
-    padding-top: var(--window-chrome-top);
+    padding-top: var(--window-chrome-row);
 }
 /* Each room's header floats over its transcript and lets a press between its groups through to the row beneath, a
-   link or button the owner cannot see: inside the band this strip takes such a press for the title bar. The
+   link or button the owner cannot see: inside the header's row this strip takes such a press for the title bar. The
    header's groups stay above it; the feed keeps its scrollbar (the global 6px ::-webkit-scrollbar). */
 :root[data-window-chrome="integrated"] :is(.chat-page-header, .project-panel-bar)::after {
     content: "";
@@ -441,24 +453,29 @@ html[data-layout="docked"] #primary-sidebar {
     top: 0;
     left: 0;
     right: 6px;
-    height: var(--window-chrome-top);
+    height: var(--window-chrome-row);
     z-index: -1;
     pointer-events: auto;
 }
 /* On a desk a room's bar (Main's, a docked Project's) is the band's row too, as every page's header is
-   (.app-page-header[data-lead] below): its capsules are centred on the band at every Interface size, the insets
-   shrinking with a shorter band; the transcript's reserve and the history note follow the bar's measured height
+   (.app-page-header[data-lead] below): its capsules are centred on the lights' line at every Interface size, the
+   insets shrinking with a shorter row; the transcript's reserve and the history note follow the bar's measured height
    (chat.js --chat-header-bar). */
 :root[data-window-chrome="integrated"][data-layout="docked"] :is(.chat-page-header, .project-panel-bar) {
     box-sizing: border-box;
-    min-height: var(--window-chrome-top);
-    padding-block: min(10px, max(0px, calc((var(--window-chrome-top) - var(--control-h-float)) / 2)));
+    min-height: var(--window-chrome-row);
+    padding-block: min(10px, max(0px, calc((var(--window-chrome-row) - var(--control-h-float)) / 2)));
 }
 :root[data-window-chrome="integrated"][data-layout="stack"] .project-panel-bar { padding-left: max(14px, var(--window-chrome-clearance)); }
 :root[data-window-chrome="integrated"][data-layout="stack"] #primary-sidebar {
-    --sidebar-top: max(calc(var(--chrome-inset) + var(--inset-top)), calc(var(--space-2) + var(--window-chrome-top)));
+    --sidebar-top: max(calc(var(--chrome-inset) + var(--inset-top)), calc(var(--space-2) + var(--window-chrome-row)));
 }
 :root[data-window-chrome="integrated"][data-layout="stack"] .app-page-header { padding-left: max(12px, var(--window-chrome-clearance)); }
+/* The lights stay on the window's physical left in an RTL page too, over the room's or a page's header there, so that
+   header starts past them; the sidebar's row is clear on the right. */
+:root[data-window-chrome="integrated"][data-layout="docked"][dir="rtl"] :is(.chat-page-header, .project-panel-bar, #content > .page > .app-page-header) {
+    padding-left: max(var(--page-header-padding-x), var(--window-chrome-clearance));
+}
 
 /* Resizable side-section drag handles (v6.33.0). Thin edge strips that resize the sidebar and the Project panel
    (app.js: --drag-width while dragged, the stored width when the drag ends); absent in the stack layout (layout.js). */
@@ -1549,7 +1566,7 @@ html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
     position: absolute;
     inset: 0 6px auto 0;
     z-index: 2;
-    height: var(--window-chrome-top);
+    height: var(--window-chrome-row);
     width: auto;
     margin: 0;
     overflow: visible;
@@ -1557,7 +1574,7 @@ html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
     padding: 0;
 }
 :root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty]:not([data-return]) ~ .widgets-scroll {
-    padding-top: calc(var(--space-4) + var(--window-chrome-top));
+    padding-top: calc(var(--space-4) + var(--window-chrome-row));
 }
 /* While a card is dragged the band lets the pointer through to the board, whose top edge is where the engine scrolls
    a drag upward; at rest the band is the window's handle. */
@@ -1650,7 +1667,7 @@ html[data-layout="docked"] .app-page-header[data-lead]::-webkit-scrollbar { disp
    keeping the tabs' 16px of shadow room (at 100 % they are the 10px and 26px above; once the band is shorter than a
    control the row grows below the band). */
 :root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-lead] {
-    --lead-inset: min(10px, max(0px, calc((var(--window-chrome-top) - var(--control-h-float)) / 2)));
+    --lead-inset: min(10px, max(0px, calc((var(--window-chrome-row) - var(--control-h-float)) / 2)));
     min-height: var(--page-header-row-h);
 }
 :root[data-window-chrome="integrated"][data-layout="docked"] .app-page-lead .app-tab-strip {
@@ -4750,6 +4767,8 @@ html[data-layout="stack"] #primary-sidebar {
     --sidebar-top: calc(var(--chrome-inset) + var(--inset-top));
 }
 html[data-layout="stack"] .nav-rail > .nav-drawer-close { display: inline-flex; margin-bottom: var(--space-1); }
+/* Find a project and + share the ×'s row, centred on it: the head's first row is the ×'s height. */
+html[data-layout="stack"] .sidebar-head > .nav-projects-header { min-height: 44px; }
 /* Pulled past fully open the room gives a little (a rubber band, drawer_drag.js, at most DRAG.rubberMax = 48px) and
    the drawer goes with it; the drawer's surface reaches 64px past its left edge as a solid shadow, so the screen's
    edge never shows through the gap: a shadow paints outside the box, where the drawer's own scroller would clip a
@@ -9620,6 +9639,8 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
    capsule and, at its end, New project: a round capsule of the same material and height, as a messenger's compose
    button stands beside its search field. */
 .nav-projects-header { gap: var(--space-2); margin: var(--space-1) 0 var(--space-2); }
+/* The column's first row (owner 27.11, «Вариант B»): Find a project and + lead the head, the card a step under them. */
+.sidebar-head > .nav-projects-header { margin: 0 0 var(--space-1); }
 .nav-projects-header > .nav-projects-find { flex: 1 1 auto; width: auto; min-width: 0; margin: 0; }
 .nav-projects-header > .nav-projects-add {
     order: 2;

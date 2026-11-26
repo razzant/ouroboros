@@ -41,7 +41,7 @@ import { getInterfaceSize } from './modules/interface_size.js';
 import { initDashboard } from './modules/dashboard.js';
 import { initStorage } from './modules/storage.js';
 import { SHELL_ICONS } from './modules/page_icons.js';
-import { mountNavRail, navRowFor, pageById, renderNavRows, renderProjectsHeader } from './modules/pages.js';
+import { leadHeadWithFind, mountNavRail, navRowFor, pageById, renderNavRows, renderProjectsHeader } from './modules/pages.js';
 import { bindPageBack, renderPageHeader } from './modules/page_header.js';
 import { createRoomHeader, panicButtonHtml } from './modules/chat_header.js';
 import { bindKeyboardViewport } from './modules/keyboard_viewport.js';
@@ -133,7 +133,7 @@ if (primarySidebar?.querySelector('.nav-rail, .sidebar-foot, #nav-version')) mou
 measurePinnedBars(primarySidebar);  // a short window's row scroll margin under its pinned head
 // A short window scrolls the whole column: rows that wait past a pinned bar fade under it (style.css), as the list's do.
 if (primarySidebar) bindScrollFade(primarySidebar);
-const navProjectsHeader = primarySidebar?.querySelector('.nav-projects-header');
+const navProjectsHeader = leadHeadWithFind(primarySidebar);
 if (navProjectsHeader) navProjectsHeader.innerHTML = renderProjectsHeader();
 const navDrawerBackdrop = document.getElementById('nav-drawer-backdrop');
 const projectPanelBackdrop = document.getElementById('project-panel-backdrop');
