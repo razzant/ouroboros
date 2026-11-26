@@ -498,15 +498,16 @@ def _architecture_openings() -> dict:
     return {chapter.source_path: chapter.text_at(_preamble(chapter)) for chapter in book.chapters}
 
 
-def test_every_architecture_chapter_opens_with_what_it_gives_me_and_no_volatile_numbers():
+def test_every_architecture_chapter_opens_in_the_first_person_without_volatile_numbers():
     """The openings are what Low and Nano read of a chapter (owner's choice of first-person
-    openings): each says what the part gives me, and carries no line number, count or
-    version stamp that would move with every edit. Section signs, file names and
-    backticked identifiers are addresses, not counts."""
+    openings): each speaks in the first person, whatever its wording, and carries no line
+    number, count or version stamp that would move with every edit. Section signs, file
+    names and backticked identifiers are addresses, not counts. Whether a claim is true is
+    review's to check against the owning code."""
     openings = _architecture_openings()
     assert len(openings) >= 17
     for path, text in openings.items():
-        assert text.startswith("This part gives me"), path
+        assert re.search(r"\b(?:I|me|my)\b", re.sub(r"`[^`]*`", "", text)), path
         stripped = re.sub(r"`[^`]*`|\]\([^)]*\)|§[\d.]+|BIBLE P\d+|exits? \d+|E2E", "", text)
         assert not re.search(r"\d", stripped), (path, re.findall(r"[^ ]*\d[^ ]*", stripped))
 

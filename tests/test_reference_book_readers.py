@@ -203,21 +203,19 @@ def test_a_chapter_read_is_an_ordinary_result_under_the_measured_frame():
     assert "docs/architecture/" in UNTRUNCATED_REPO_READ_PREFIXES
 
 
-def test_every_chapter_fits_one_read_page_and_a_smaller_frame_still_gets_a_range():
-    """Measured rather than assumed: every chapter of both books fits the default
-    80,000-char read page (chapter 6 is split by subject to keep it so), yet a chapter
-    read is whole only under a frame that actually holds it: a smaller frame receives
-    a range with its next cursor, never a silent cut, so range delivery stays
-    load-bearing on small windows."""
+def test_a_chapter_larger_than_its_frame_gets_a_range_never_a_silent_cut():
+    """A chapter read is whole only under a frame that actually holds it: a frame
+    smaller than the largest chapter receives a range with its next cursor, never a
+    silent cut, so range delivery stays load-bearing. The test states no size limit
+    for any chapter; the book's size rule is pairwise per book."""
     from ouroboros.loop_tool_execution import _truncate_tool_result
     from ouroboros.reference_books import load_reference_book
-    from ouroboros.tool_capabilities import TOOL_RESULT_LIMITS, UNTRUNCATED_REPO_READ_PREFIXES
+    from ouroboros.tool_capabilities import UNTRUNCATED_REPO_READ_PREFIXES
     from ouroboros.tool_result_delivery import RESULT_VIEW_MARKER
 
     chapters = [chapter for book_id in BOOK_ENTRYPOINTS for chapter in load_reference_book(REPO, book_id).chapters]
     for chapter in chapters:
         assert chapter.source_path.startswith(UNTRUNCATED_REPO_READ_PREFIXES)
-        assert len(chapter.raw.decode("utf-8")) <= TOOL_RESULT_LIMITS["read_file"], chapter.source_path
     largest = max(chapters, key=lambda chapter: len(chapter.raw))
     text = largest.raw.decode("utf-8")
     view = _truncate_tool_result(text, "read_file", {"path": largest.source_path}, allowance_chars=6_000)

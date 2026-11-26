@@ -160,6 +160,9 @@ def test_every_base_section_is_still_exactly_one_chapter(book_id):
             i += 1
         if run:
             regrouped.append(title)
+            # A shortened run is a lost chapter: every split file on disk must be in it.
+            on_disk = sorted((REPO / "docs" / book_id).glob(f"{int(number[:-1]):02d}-[0-9]-*.md"))
+            assert len(run) == len(on_disk) and len(run) > 1, (title, run, on_disk)
         elif i < len(chapter_titles):
             regrouped.append(chapter_titles[i])
             i += 1
