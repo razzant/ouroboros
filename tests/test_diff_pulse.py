@@ -511,3 +511,74 @@ def test_every_seat_of_a_body_wave_reads_the_pulse_and_a_core_brief_does_not(
                                                    governance_root=str(repo), surface="change", layer="body"))
     assert pulse in build_two_part_brief(frozen, seat, goal=GOAL, scope=SCOPE)["system"]
     assert fact not in build_two_part_brief(frozen, seat, layer="core", goal=GOAL, scope=SCOPE)["system"]
+
+
+# ---------------------------------------------------------------- the body's manuals beside a change (BIBLE P1)
+_OWNERS = ('[domains]\nD01 = "Core"\n\n[references]\nD01 = ["docs/architecture/01-core.md", "docs/DESIGN.md"]\n'
+           '"web/" = ["docs/architecture/03-web.md"]\n\n[modules]\n"ouroboros/core.py" = "D01"\n')
+_INVARIANTS = ("# 10. Key Invariants\n\nThe rules.\n\n1. **One owner.** `ouroboros/core.py` owns x.\n"
+               "2. **Another file.** `tools/core.py` is not that module.\n3. **Again.** `core.py` keeps y.\n")
+
+
+def _owned_body(root: Path, chapters: dict) -> Path:
+    repo = _body(root)
+    files = {"ouroboros/domains.toml": _OWNERS, "docs/architecture/10-key-invariants.md": _INVARIANTS,
+             "web/app.js": "// app\n", **chapters}
+    for path, text in files.items():
+        _write(repo, path, 1, text)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "manuals")
+    _git(repo, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
+    return repo
+
+
+def test_the_pulse_names_each_touched_files_owning_manuals_and_whether_the_change_touches_them(tmp_path):
+    """One row per file, never a union: the reader sees which file left which manual untouched, and which key
+    invariants name the file (a mention, not a judgment). A fact beside the change, never a gate."""
+    repo = _owned_body(tmp_path / "body", {"docs/architecture/01-core.md": "# 1. Core\n\nThe core.\n"})
+    _write(repo, "ouroboros/core.py", 12)
+    _write(repo, "web/app.js", 2, "// app\n")
+    _write(repo, "docs/architecture/01-core.md", 1, "# 1. Core\n\nThe core, restated.\n")
+    pulse = diff_pulse(repo)
+    assert ("- ouroboros/core.py: docs/architecture/01-core.md (in this change), docs/DESIGN.md (not in this change); "
+            "key invariants that name it: 1, 3") in pulse
+    assert "- web/app.js: docs/architecture/03-web.md (not in this change)" in pulse
+    owners = pulse.split("Owning manuals")[1].split("Removed governed prose")[0]
+    assert owners.count("\n- ") == 2 and "notes.md" not in owners and "01-core.md:" not in owners  # only declared owners' files
+    # Staged, the owners are the index's: a later unstaged manifest edit changes nothing the commit would hold.
+    _git(repo, "add", "ouroboros/core.py")
+    _write(repo, "ouroboros/domains.toml", 1, _OWNERS.replace("01-core.md", "09-other.md"))
+    staged = diff_pulse(repo, ["ouroboros/core.py"], staged=True)
+    assert "- ouroboros/core.py: docs/architecture/01-core.md (not in this change)" in staged and "09-other" not in staged
+    # A tree with no manifest (any other repository) says nothing about owners.
+    assert "Owning manuals" not in diff_pulse(_touched(_body(tmp_path / "plain")))
+
+
+def _touched(repo: Path) -> Path:
+    _write(repo, "ouroboros/core.py", 11)
+    return repo
+
+
+def test_the_pulse_counts_every_removed_line_of_governed_prose_and_says_what_it_does_not_show(tmp_path):
+    """A paragraph moved between changed documents is quiet; one deleted is counted even where a twin survives
+    elsewhere; nothing is cut silently: a long line states the characters left out, a long list the lines left
+    out, and the locator names every changed governed document."""
+    long = "Why this holds: " + "reason " * 60
+    keep = [f"Kept rule {n}." for n in range(3)]
+    gone = [f"Dropped reason {n}." for n in range(13)]
+    one = "# 1. Core\n\n" + "\n\n".join(["Moved paragraph.", "Twin line.", long, *keep, *gone]) + "\n"
+    two = "# 2. Other\n\nTwin line.\n"
+    repo = _owned_body(tmp_path / "body", {"docs/architecture/01-core.md": one, "docs/architecture/02-other.md": two})
+    _write(repo, "docs/architecture/01-core.md", 1, "# 1. Core\n\n" + "\n\n".join(keep) + "\n")
+    _write(repo, "docs/architecture/02-other.md", 1, two + "\nMoved paragraph.\n")
+    pulse = diff_pulse(repo, ["docs/architecture/01-core.md"])
+    assert "Removed governed prose: 15 lines of the base are gone from the changed documents:" in pulse
+    assert "Moved paragraph." not in pulse and "- docs/architecture/01-core.md: Twin line." in pulse
+    assert f"- docs/architecture/01-core.md: {long.strip()[:240]} … (+{len(long.strip()) - 240} characters)" in pulse
+    assert "(3 more removed lines are not shown here; all of them: `git diff " in pulse
+    assert "-- docs/architecture/01-core.md docs/architecture/02-other.md`)" in pulse
+    # A change that removes nothing, and an edit that touches no governed document, say nothing.
+    assert "Removed governed prose" not in diff_pulse(repo, ["ouroboros/core.py"])
+    _git(repo, "checkout", "-q", "--", "docs")
+    _write(repo, "docs/architecture/01-core.md", 1, one + "\nAdded reason.\n")
+    assert "Removed governed prose" not in diff_pulse(repo, ["docs/architecture/01-core.md"])

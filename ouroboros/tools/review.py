@@ -187,31 +187,40 @@ def _preflight_check(commit_message: str, staged_files: str,
     # comment-only .py diff refused for missing tests). See docstring —
     # CHECKLISTS.md items 4/12 own these duties semantically.
 
-    # New logic modules require active ARCHITECTURE.md update.
-    new_logic_files = [
-        f for f in new_files
-        if f.startswith(("ouroboros/", "supervisor/")) and f.endswith(".py")
-    ]
-    # The Architecture book is the obligation, not one file: a new module is
-    # documented in the CHAPTER that owns its subsystem, and demanding an
-    # entrypoint edit would only buy a membership-list touch that documents
-    # nothing. Any staged source of the book satisfies it.
-    from ouroboros.reference_books import BOOK_ENTRYPOINTS, book_entrypoint_for
+    # A new runtime module owes what makes it a row of the map: its `[modules]` entry in the manifest of this same
+    # subject, and a docstring lead (`module_map` reads both; ARCHITECTURE §1). Whether its owning manual says
+    # enough is the reviewer's judgment: the diff pulse names that manual and whether the change touches it, and
+    # no manual edit is demanded here, since a mandatory touch buys an edit that documents nothing (BIBLE P3:
+    # review coverage is diagnostic, never a veto). ``repo_dir``'s index is the subject, a frozen base..head
+    # review's isolated checkout included.
+    new_logic_files = sorted(f for f in new_files if f.startswith(("ouroboros/", "supervisor/")) and f.endswith(".py"))
+    if new_logic_files:
+        import ast
 
-    architecture_entrypoint = BOOK_ENTRYPOINTS["architecture"]
-    documented = any(
-        book_entrypoint_for(staged) == architecture_entrypoint for staged in active_staged
-    )
-    if new_logic_files and not documented:
-        return (
-            "⚠️ PREFLIGHT_BLOCKED: New files added in ouroboros/ or supervisor/ "
-            "but no source of the Architecture book is staged.\n"
-            "  New structural additions must be documented in the Architecture book "
-            f"(`{architecture_entrypoint}` or a `docs/architecture/` chapter) "
-            "(Bible P6: authenticity / architectural mirror).\n"
-            f"  New files: {new_logic_files[:5]}\n"
-            f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
-        )
+        from ouroboros.code_intelligence_architecture import DOMAIN_MANIFEST_RELPATH, load_domain_manifest
+
+        problems = []
+        try:
+            manifest_text = _git_show_staged(repo_dir, DOMAIN_MANIFEST_RELPATH)
+            listed = None if manifest_text is None else load_domain_manifest(pathlib.Path(repo_dir), manifest_text).modules
+        except ValueError as exc:
+            listed, problems = None, [f"`{DOMAIN_MANIFEST_RELPATH}` does not parse: {exc}"]
+        if listed is not None and (unlisted := [f for f in new_logic_files if f not in listed]):
+            problems.append(f"no `[modules]` row in `{DOMAIN_MANIFEST_RELPATH}` for: {unlisted[:5]}")
+        bare = []
+        for path in new_logic_files:
+            source = None if pathlib.PurePosixPath(path).name == "__init__.py" else _git_show_staged(repo_dir, path)
+            try:
+                if source is not None and not (ast.get_docstring(ast.parse(source)) or "").strip():
+                    bare.append(path)
+            except SyntaxError:
+                pass  # the syntax preflight names it
+        if bare:
+            problems.append(f"no module docstring (the map's lead for the module) in: {bare[:5]}")
+        if problems:
+            return ("⚠️ PREFLIGHT_BLOCKED: a new module in ouroboros/ or supervisor/ is not yet a row of the body's "
+                    "map (Bible P6):\n" + "\n".join(f"  - {problem}" for problem in problems)
+                    + f"\n  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}")
 
     # conftest.py must not contain collectable module-level tests.
     conftest_files = [f for f in active_staged if pathlib.Path(f).name == "conftest.py"]

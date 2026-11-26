@@ -75,6 +75,16 @@ class DomainManifest:
     lazy_only: Tuple[str, ...]      # lazy-only baseline pairs
     references: Dict[str, Tuple[str, ...]] = field(default_factory=dict)  # domain or path prefix -> manuals
 
+    def manuals_for(self, path: str) -> Tuple[str, ...]:
+        """The manuals ``[references]`` declares for one repository path: its module domain's, else the longest
+        path key that names it or a folder above it; ``()`` where the manifest declares no owner."""
+        domain = self.modules.get(path)
+        if domain:
+            return self.references.get(domain, ())
+        owners = [key for key in self.references if key not in self.domains
+                  and (path == key or path.startswith(key if key.endswith("/") else key + "/"))]
+        return self.references[max(owners, key=len)] if owners else ()
+
 
 def _read_carrier(repo_root: pathlib.Path, relpath: str) -> str:
     path = pathlib.Path(repo_root) / relpath
@@ -90,13 +100,15 @@ def _read_carrier(repo_root: pathlib.Path, relpath: str) -> str:
         ) from exc
 
 
-def load_domain_manifest(repo_root: pathlib.Path) -> DomainManifest:
+def load_domain_manifest(repo_root: pathlib.Path, raw: str | None = None) -> DomainManifest:
+    """The manifest of ``repo_root``'s working tree, or of ``raw``: its text as another subject holds it (the
+    index a commit would carry), read by that caller."""
     try:  # Python 3.11+
         import tomllib
     except ImportError:  # pragma: no cover - 3.10 venvs ship tomli
         import tomli as tomllib
 
-    raw = _read_carrier(repo_root, DOMAIN_MANIFEST_RELPATH)
+    raw = _read_carrier(repo_root, DOMAIN_MANIFEST_RELPATH) if raw is None else raw
     try:
         data = tomllib.loads(raw)
     except Exception as exc:

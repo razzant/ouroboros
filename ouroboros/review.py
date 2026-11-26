@@ -1453,7 +1453,11 @@ def diff_pulse(
     python = [path for path in shown if path in changed and path.endswith(".py")]
     # Staged, a module's size is the index's (read in the same batch), never the worktree's later edits.
     gated = [path for path in shown if _is_gated_module_path(path)] if staged else []
-    at_base, current = _change_texts(root, base, staged, python, list(dict.fromkeys([*rows, *python, *gated])))
+    from ouroboros import code_shape_facts as shapes
+
+    governed = [path for path in changed if shapes.governed_text(path)]  # every changed one: a move between them is quiet
+    at_base, current = _change_texts(root, base, staged, [*python, *governed], list(dict.fromkeys(
+        [*rows, *python, *gated, *governed, shapes.MANIFEST_PATH, shapes.INVARIANTS_PATH])))
     modules: list[tuple[GatedModule, int, int]] = []
     for path in shown:
         if staged:
@@ -1493,8 +1497,12 @@ def diff_pulse(
     fact = (f"Diff pulse since {since}: files {len(changed)}, lines +{added}/-{deleted} (net {added - deleted:+d}); "
             f"new files: {listed(new)}; module lines (target {TARGET_MODULE_LINES}, cap {MAX_MODULE_LINES}): "
             f"{listed(sizes)}{suite}.")
-    return "\n".join(part for part in (fact, shape, book_balance_note(root, shown, staged=staged), DIFF_PULSE_QUESTION)
-                     if part)
+    # Where the body is touched the host names its manuals (BIBLE P1): owners per file, then the prose that left.
+    owners = shapes.ownership_note(shown, changed, current[shapes.MANIFEST_PATH], current[shapes.INVARIANTS_PATH], limit=limit)
+    prose = shapes.removed_prose_note(governed, at_base, current, locator=(
+        f"git diff {'--cached ' if staged else ''}{base[:12]} -- {' '.join(governed)}")) if set(governed) & set(shown) else ""
+    return "\n".join(part for part in (fact, shape, owners, prose, book_balance_note(root, shown, staged=staged),
+                                       DIFF_PULSE_QUESTION) if part)
 
 
 def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any]:

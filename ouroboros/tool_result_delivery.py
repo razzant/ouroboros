@@ -108,6 +108,25 @@ def typed_result_facts(row: Mapping[str, Any]) -> Dict[str, Any]:
     return facts
 
 
+def delivery_notes(ctx: Any, results: Sequence[Mapping[str, Any]]) -> list:
+    """The host's note for each call of a batch, ``""`` where it has none: what trails the mind's view of the
+    result and never enters the producer's text. A mark the mind tied to an action, met for the first time in the
+    task (``mark_anchors``); and for a read of a file of Ouroboros's own body, the manuals that own it and the
+    chapter of invariants and closed roads (``body_candidate.read_contact``, BIBLE P1), decided by where the read
+    physically resolved (its ``read_view``), so a foreign project's file of the same name gets none."""
+    from ouroboros.body_candidate import read_contact
+    from ouroboros.mark_anchors import anchored_note
+
+    notes = []
+    for row in results:
+        view = (getattr(row.get("tool_result"), "meta", None) or {}).get("read_view") or {}
+        notes.append("\n\n".join(note for note in (
+            anchored_note(ctx, row["fn_name"], row.get("tool_args") or {}),
+            read_contact(ctx, view["target"]) if ctx is not None and row["fn_name"] == "read_file" and view.get("target") else "",
+        ) if note))
+    return notes
+
+
 def prepare_producer_sources(results: Sequence[Mapping[str, Any]], drive_root: Any, task_id: str,
                              notes: Sequence[str] = ()) -> list:
     """Retain clean producer text before measuring its model-visible locator.

@@ -155,27 +155,27 @@ def test_a_touched_chapter_is_withheld_when_the_prefix_carries_its_book(tmp_path
 
 # --- the documentation gate ------------------------------------------------
 
-def test_the_new_module_gate_takes_the_chapter_that_documents_the_module(monkeypatch, tmp_path):
+def test_the_new_module_gate_asks_the_map_row_and_never_a_chapter_edit(monkeypatch, tmp_path):
+    """A new module owes what makes it a row of the map (its ``[modules]`` entry and a docstring lead). No chapter
+    edit is demanded and none stands in for the row: whether the owning manual says enough is the reviewer's
+    judgment, which the diff pulse serves by naming that manual (BIBLE P3; ``tests/test_diff_pulse.py``)."""
     from ouroboros import commit_admission
     from ouroboros.tools import review
 
     # Synthetic staged paths need matching synthetic blobs. Reading the actual
     # checkout's index makes this unit test depend on an in-flight version bump.
-    values = {"VERSION": "1.2.3\n", "docs/ARCHITECTURE.md": "# Ouroboros v1.2.3 — Architecture\n"}
+    values = {"VERSION": "1.2.3\n", "docs/ARCHITECTURE.md": "# Ouroboros v1.2.3 — Architecture\n",
+              "ouroboros/brand_new_owner.py": '"""What the new owner is for."""\n',
+              "ouroboros/domains.toml": '[domains]\nD01 = "Core"\n\n[modules]\n'}
     monkeypatch.setattr(review, "_git_show_staged", lambda repo, path: values.get(path))
     monkeypatch.setattr(commit_admission, "_head_text", lambda repo, path: values.get(path))
     staged = "A  ouroboros/brand_new_owner.py\n"
-    blocked = review._preflight_check("add an owner", staged, tmp_path)
-    assert blocked and "Architecture book" in blocked
+    for documented in ("", "M  docs/ARCHITECTURE.md\n", "M  docs/architecture/01-high-level-architecture.md\n"):
+        blocked = review._preflight_check("add an owner", staged + documented, tmp_path)
+        assert blocked and "no `[modules]` row" in blocked and "Architecture book" not in blocked, documented
 
-    for documented in ("docs/ARCHITECTURE.md", "docs/architecture/01-high-level-architecture.md"):
-        assert review._preflight_check(
-            "add an owner", staged + f"M  {documented}\n", tmp_path,
-        ) is None, documented
-
-    assert review._preflight_check(
-        "add an owner", staged + "M  docs/reference-books-migration.md\n", tmp_path,
-    ) is not None, "a docs file outside the book documents no module"
+    values["ouroboros/domains.toml"] += '"ouroboros/brand_new_owner.py" = "D01"\n'
+    assert review._preflight_check("add an owner", staged, tmp_path) is None, "the row and the docstring are all it owes"
 
 
 # --- chapter reads under the measured first show ---------------------------

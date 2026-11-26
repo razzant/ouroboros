@@ -69,8 +69,10 @@ D20 = "Presence"
 
 [references]
 # HUMAN section: the manuals that own each domain and non-Python surface, for the
-# `module_map` lookup, review packets and plan seats; `scripts/check_domains.py`
-# requires a row per domain and existing files. `--write` leaves it untouched.
+# `module_map` lookup, review packets and plan seats, and for the addresses the host
+# names where the body is read or changed (`body_candidate.read_contact`, the diff
+# pulse's ownership rows); `scripts/check_domains.py` requires a row per domain and
+# existing files. `--write` leaves it untouched. A path with no row gets no address.
 D01 = ["docs/architecture/06-1-loop-tools-and-safety.md"]
 D02 = ["docs/architecture/06-2-model-calls-and-budget.md", "docs/MODEL_SEND_OBSERVABILITY.md", "docs/IMAGE_GENERATION.md"]
 D03 = ["docs/architecture/06-1-loop-tools-and-safety.md", "docs/architecture/06-5-planning-memory-and-skills.md"]
@@ -97,6 +99,11 @@ D20 = ["docs/architecture/12-host-service-companions-and-chat-ids.md"]
 "android/" = ["docs/architecture/01-high-level-architecture.md", "docs/ANDROID_INSTALL.md", "docs/ANDROID_RECOVERY.md"]
 "scripts/" = ["docs/architecture/08-git-branching-ci-and-build.md", "docs/development/14-build-and-ci.md"]
 "devtools/" = ["docs/architecture/01-high-level-architecture.md"]
+"build.sh" = ["docs/architecture/08-git-branching-ci-and-build.md", "docs/development/14-build-and-ci.md"]
+"build_linux.sh" = ["docs/architecture/08-git-branching-ci-and-build.md", "docs/development/14-build-and-ci.md"]
+"build_windows.ps1" = ["docs/architecture/08-git-branching-ci-and-build.md", "docs/development/14-build-and-ci.md"]
+"Dockerfile" = ["docs/architecture/08-git-branching-ci-and-build.md", "docs/DEPLOYMENT.md"]
+".github/" = ["docs/architecture/08-git-branching-ci-and-build.md", "docs/development/14-build-and-ci.md"]
 
 [modules]
 "ouroboros/_usage_settlement.py" = "D16"

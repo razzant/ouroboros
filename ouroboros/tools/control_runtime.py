@@ -98,9 +98,11 @@ def _prepare_self_change(ctx: ToolContext, resume: str = "", in_place: bool = Fa
             return _publish_tool_result(ctx, ToolResult(
                 status="blocked", code="ACCESS_BLOCKED",
                 text="⚠️ CANDIDATE_ALREADY_BOUND: this task already authors a candidate; in_place applies before it."))
+        chosen = (getattr(ctx, "task_metadata", None) or {}).get("body_candidate")  # roads ride the first choice only
         body_candidate.choose_in_place(ctx)
         return ("OK: by your explicit Cyber Pro decision this task writes the serving checkout directly. "
-                "Unfinished edits are live for every reader of that tree.")
+                "Unfinished edits are live for every reader of that tree."
+                + ("" if chosen or not (roads := body_candidate.closed_roads_contact(ctx)) else f"\n\n{roads}"))
     try:
         bound = body_candidate.prepare(ctx, resume=str(resume or "").strip())
     except body_candidate.CandidateRefused as exc:
@@ -138,6 +140,7 @@ def _prepare_self_change(ctx: ToolContext, resume: str = "", in_place: bool = Fa
         + (f" The earlier checkout of this task was gone; its commits remain on branch {bound['previous_branch']}."
            if bound.get("previous_branch") else "") + body_candidate.attribution_note(bound.get("attribution"))
         + (f"\n{neighbours}" if (neighbours := body_candidate.neighbour_note(ctx, with_ended=True)) else "")
+        + (f"\n\n{roads}" if bound["state"] != "bound" and (roads := body_candidate.closed_roads_contact(ctx)) else "")
     )
 
 
