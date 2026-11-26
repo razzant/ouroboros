@@ -639,6 +639,28 @@ def test_a_repair_that_leaves_its_task_unshown_refuses_instead_of_repeating(tmp_
     assert (status, refused.get("detail")) == (409, "task_settled"), refused.get("repairs")
 
 
+def test_a_repair_of_a_task_whose_document_went_before_it_was_projected_refuses(tmp_path, monkeypatch):
+    """The settlement is seen, then its document goes: no version of it is read, so rows sent again as they stood (the
+    question still open) would keep the old one in the cursor, a plausible window that repeats the repair until
+    ``task_missing``. The newest page answers it instead, and nothing is counted as a repair."""
+    from ouroboros import task_store
+
+    _asking(tmp_path)
+    _, page = _read(tmp_path)
+    _task(tmp_path, "asker", "completed", 0)
+    settled_since = history_paging._settled_since
+
+    def vanished(*args, **kwargs):
+        answer = settled_since(*args, **kwargs)
+        task_store.delete_document(tmp_path, "asker")  # after the settlement was seen, before the page is projected
+        return answer
+    monkeypatch.setattr(history_paging, "_settled_since", vanished)
+    history_attribution.drain()
+    status, refused = _read(tmp_path, page["after_cursor"], recorded=True)
+    assert (status, refused.get("detail")) == (409, "task_settled"), refused.get("repairs")
+    assert [(group["status"], group.get("repairs")) for group in history_attribution.drain()["groups"]] == [("409", None)]
+
+
 def test_a_child_whose_row_names_no_lineage_and_its_parent_are_never_held(tmp_path):
     """An earlier attempt's row of a child carries no lineage (it is injected only for the record's attempt), yet the
     page still anchors its parent by the child's record: held, it would bring a parent's carrier along as an arrival."""

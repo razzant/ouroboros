@@ -909,6 +909,7 @@ def history_page_tokens(page, messages=(), reads=None, partial=False):
     if page.get("repair") and page.get("after"):
         if page["repaired"] and (held is None and page.get("held") is not None or partial
                                  or page["repaired"] - shown or held is not None and page["repaired"] - set(held)
+                                 or page["repaired"] - versions.keys()  # its document went: no version to move on from
                                  or page["revision_now"]() != page["revised"]):
             # A task sent again turned out to need another's rows, shows no facts of its own on them now (its version
             # would never move), the read failed or projected part-way (rows it left, or arrivals past a fault: no
