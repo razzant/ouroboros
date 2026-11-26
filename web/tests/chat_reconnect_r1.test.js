@@ -1,13 +1,13 @@
 // W2 R1: disconnected send reconciliation through the real chat instance.
-// Only a matching local owner row in a successfully DRAWN, qualifying source response begun after a disconnect
-// may end the wait for a send, and only by the host's own answer: its dispatch
+// Only a matching local owner row in a successfully DRAWN, qualifying source response begun after a disconnect (or
+// after a hidden window's return) may end the wait for a send, and only by the host's own answer: its dispatch
 // entered (Sending settles into Starting…), or its process ended and it knows nothing (the wait ends in the bubble's
 // delivery doubt, no success claimed, nothing resent). A still-pending row, a foreign or old row, and an ordinary read
 // in a window that missed nothing settle nothing; an existing authoritative receipt still does.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { createCatchUp, roomSocket } from '../modules/room_retire.js';
+import { createCatchUp, createRoomRetirement, roomSocket } from '../modules/room_retire.js';
 import { ElementStub, PREVIEW_SCOPE, installDom, restoreDom } from './chat_dom_fixture.js';
 
 const quiet = async (ticks = 12) => {
@@ -113,6 +113,8 @@ function makeRoom(t, { chatId = 2, asPanel = true, initialOnline = true, afterCu
         globalThis.WebSocket = priorSocket;
         restoreDom(prior);
     });
+    // The window hides and returns as the shell does it (app.js): the room's socket view pauses, the page's socket stays up.
+    const rooms = createRoomRetirement({ instances: new Map([['proj-r1', instance]]) });
     const status = () => mount.querySelector('.status-badge')?.textContent || '';
     const messages = globalThis.document.byId.get('chat-messages');
     const send = (text) => {
@@ -180,6 +182,8 @@ function makeRoom(t, { chatId = 2, asPanel = true, initialOnline = true, afterCu
         setDefault: (body) => { defaultBody = body; },
         disconnect() { connected = false; rawWs.ws.readyState = 3; rawWs.emit('close'); },
         reconnect() { connected = true; opened = true; rawWs.ws.readyState = 1; rawWs.emit('open', { previouslyConnected: true }); },
+        hide() { globalThis.document.hidden = true; rooms.suspend(instance, true); },
+        show() { globalThis.document.hidden = false; rooms.restore(instance); },
     };
 }
 
@@ -664,6 +668,99 @@ test('R1: already-connected chat_source_unavailable still acks paint without set
     assert.equal(r.status(), 'Starting…', 'clean dispatched newest settles Sending into Starting…');
 });
 
+// A window hidden without a socket break (a background tab, a room another place replaced) is deaf to the start and the
+// end of its turn, yet nothing marked its waiting sends the way a disconnect does. On the same connection its return read
+// is the first news, and the host's own dispatched row for the send is that news, as it is after a reconnect.
+test('R1: a hidden window that missed the start frames stops waiting once its return read shows the send dispatched', async (t) => {
+    const r = makeRoom(t);
+    await until(() => r.reads.length === 1);
+    await quiet();
+    assert.equal(r.status(), 'Online');
+
+    const cmid = r.send('Sent, then the window hid');
+    const sessionId = r.sessionIdOf(cmid);
+    await quiet();
+    assert.equal(r.status(), 'Sending');
+
+    r.hide();
+    // The socket never closes; the hidden room hears neither the start nor the end of its turn.
+    r.rawWs.emit('typing', { chat_id: 2, activity_id: 'turn-hidden', kind: 'direct_chat', client_message_id: cmid });
+    r.rawWs.emit('chat', { role: 'assistant', chat_id: 2, content: 'Answered while hidden', ts: isoAt(20) });
+    r.push(r.page([
+        r.userRow(cmid, 'Sent, then the window hid', { sender_session_id: sessionId }),
+        r.assistantRow('chat:answer-hidden', 'Answered while hidden', 2),
+    ]));
+    r.show();
+    await until(() => r.reads.length === 2);
+    await quiet();
+
+    assert.equal(r.instance.hasPaintedHistory(), true);
+    assert.ok(r.shown().includes('chat:answer-hidden'));
+    assert.equal(r.status(), 'Online', 'the return read answers for the send: no wait for frames this window cannot have heard');
+    assert.deepEqual(r.actions(cmid), []);
+});
+
+test('R1: a hidden window\'s return read that shows the send still pending, or another tab\'s row, keeps waiting for the live start', async (t) => {
+    const r = makeRoom(t);
+    await until(() => r.reads.length === 1);
+    await quiet();
+
+    const cmid = r.send('Pending across the hide');
+    const sessionId = r.sessionIdOf(cmid);
+    await quiet();
+    assert.equal(r.status(), 'Sending');
+
+    r.hide();
+    r.push(
+        r.page([r.userRow(cmid, 'Pending across the hide', { sender_session_id: sessionId, ingress_dispatched: undefined, ingress_pending: true })]),
+        r.page([r.userRow(cmid, 'Pending across the hide', { sender_session_id: 'other-tab-session' })]),
+    );
+    r.show();
+    await until(() => r.reads.length === 2);
+    await quiet();
+    assert.equal(r.status(), 'Sending', 'the running host still owes the start: the room keeps waiting for it');
+
+    await r.instance.refreshHistory({ revision: 2 });
+    await quiet();
+    assert.equal(r.status(), 'Sending', 'another tab\'s row with our id confirms nothing');
+
+    r.rawWs.emit('typing', { chat_id: 2, activity_id: 'turn-late', kind: 'direct_chat', client_message_id: cmid });
+    await quiet();
+    assert.equal(r.status(), 'Online', 'the live start, heard again, ends it');
+});
+
+test('R1: a visible window that never hid keeps waiting for the live start, and so does a send made after a return', async (t) => {
+    const r = makeRoom(t);
+    await until(() => r.reads.length === 1);
+    await quiet();
+
+    const first = r.send('Healthy and visible');
+    const sessionId = r.sessionIdOf(first);
+    await quiet();
+    r.push(r.page([r.userRow(first, 'Healthy and visible', { sender_session_id: sessionId })]));
+    await r.instance.refreshHistory({ revision: 2 });
+    await quiet();
+    assert.equal(r.status(), 'Sending', 'an ordinary catch-up read in a healthy visible window waits for the live start');
+    r.rawWs.emit('typing', { chat_id: 2, activity_id: 'turn-first', kind: 'direct_chat', client_message_id: first });
+    await quiet();
+    assert.equal(r.status(), 'Online');
+
+    r.hide();
+    r.show();
+    await until(() => r.reads.length === 3);
+    await quiet();
+    const second = r.send('After the return');
+    await quiet();
+    assert.equal(r.status(), 'Sending');
+    r.push(r.page([r.userRow(second, 'After the return', { sender_session_id: sessionId })]));
+    await r.instance.refreshHistory({ revision: 4 });
+    await quiet();
+    assert.equal(r.status(), 'Sending', 'a send made after the return is the live window\'s own: it waits for its start');
+    r.rawWs.emit('typing', { chat_id: 2, activity_id: 'turn-second', kind: 'direct_chat', client_message_id: second });
+    await quiet();
+    assert.equal(r.status(), 'Online');
+});
+
 test('R1 unit: createCatchUp distinguishes connected partial reads from post-disconnect settlement', () => {
     const pending = new Map();
     const catchUp = createCatchUp(() => {}, 50, pending);
@@ -714,4 +811,27 @@ test('R1 unit: createCatchUp distinguishes connected partial reads from post-dis
 
     assert.equal(catchUp.confirmWindow({ recentVersion: 8, window: { truncated_by: [] } }, ['live-1']), true);
     assert.equal(pending.has('live-1'), false, 'next qualifying read with dispatched match settles live-1');
+});
+
+test('R1 unit: createCatchUp marks the sends a return left waiting like a disconnect does, and nothing else', () => {
+    const pending = new Map();
+    const catchUp = createCatchUp(() => {}, 50, pending);
+    catchUp.trackSend('held', false);
+    catchUp.trackSend('queued', true);
+    const clean = (recentVersion) => ({ recentVersion, window: { truncated_by: [] } });
+
+    // A healthy window marks nothing: its sends wait for the live start, whatever its reads show.
+    assert.equal(catchUp.confirmWindow(clean(2), ['held']), true);
+    assert.equal(pending.has('held'), true);
+
+    // A return on the same connection (not a reconnect) begins at version 2: frames in between may have been missed.
+    const read = Promise.resolve();
+    catchUp.begin(() => true, read, 2, false);
+    assert.equal(catchUp.reconnecting, null, 'a return\'s read is no reconnect\'s: the room\'s other reads do not wait for it');
+    assert.equal(catchUp.confirmWindow(clean(2), ['held', 'queued']), true);
+    assert.equal(pending.has('held'), true, 'a read no newer than the return cannot settle');
+    assert.equal(catchUp.confirmWindow(clean(3), ['held', 'queued']), true);
+    assert.equal(pending.has('held'), false, 'a newer read answering for it settles it');
+    assert.equal(pending.has('queued'), true, 'a frame the socket has not written is the queue\'s, never settled');
+    catchUp.end(read);
 });

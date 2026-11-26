@@ -212,7 +212,10 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
  * separately survives failure and the interval before begin. Leaving, disconnecting and beginning a reconnect record
  * the latest requested history version. Only an admitted newer read that was not cut short (`confirmWindow` takes its
  * answer: a refused source or a projection fault leaves rows out, CLIENT_CONTRACT "Reading history") discharges that
- * absence, however a page bounds it; a late pre-disconnect response cannot. `confirmWindow` returns whether the read was
+ * absence, however a page bounds it; a late pre-disconnect response cannot. A disconnect, and the read beginning a
+ * reconnect or a return (a window hidden on a live connection hears no start or end frame either), mark the sends still
+ * waiting: only a later admitted read carrying the host's own row for one (`answeredOwnerIds`) ends that wait; in a
+ * window that missed nothing the live start does. `confirmWindow` returns whether the read was
  * whole; a fault owes repair even without an absence. `end` ends only the matching read's
  * feedback; `cancel` records absence. `retry` distinguishes an unconfirmed attempt from absence alone. */
 const cutWindow = ({ reason_code: refused, window } = {}) => Boolean(refused)
@@ -310,7 +313,7 @@ export function createCatchUp(changed, bound = 300, pending = null) {
             after = requested;
             reading = read;
             awaited = reconnect ? read : null;
-            if (reconnect) markDisconnected(requested);
+            markDisconnected(requested);  // a return on a live connection missed the same frames
             arm(read);
             timer = setTimeout(() => { timer = null; if (current()) { active = true; changed(); } }, bound);
         },
