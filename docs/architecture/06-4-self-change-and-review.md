@@ -1,6 +1,6 @@
 # 6.4 Agent Core — Self-Modification & Review Stack
 
-This part gives me safe self-change and my immune system. `prepare_self_change` gives me an isolated candidate worktree of my body (Cyber Pro may choose `in_place` explicitly); commits pass the Git and preflight gates; `review_change` sends one frozen change (index, worktree or a base..head range) to the review pool, which scores it under installed governance, and a result to its result review; its system surface (`/review`), whose one row (by default the direct Main row) reads the whole system and writes a report that asks no verdict; skills go to `skill_review` and plans to `plan_task`. Paid review cycles share `OUROBOROS_REVIEW_MAX_CYCLES`, and read coverage is diagnostic, never a veto.
+This part gives me safe self-change and my immune system. `prepare_self_change` gives me an isolated candidate worktree of my body (Cyber Pro may choose `in_place` explicitly); commits pass the Git and preflight gates; `review_change` sends one frozen change (index, worktree or a base..head range) to the review pool, which scores it under installed governance, and a result to its result review; its system surface (`/review`) runs one row (by default the direct Main row) that reads the whole system and writes a report asking no verdict; skills go to `skill_review` and plans to `plan_task`. Paid review cycles share `OUROBOROS_REVIEW_MAX_CYCLES`, and read coverage is diagnostic, never a veto.
 
 ### Review delivery
 
