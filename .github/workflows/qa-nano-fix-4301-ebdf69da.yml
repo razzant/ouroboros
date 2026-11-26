@@ -1,0 +1,72 @@
+name: Nano #4301 targeted Ubuntu QA
+
+on:
+  push:
+    branches: [qa/nano-fix-4301-ebdf69da]
+
+permissions:
+  contents: read
+
+jobs:
+  nano-4301:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PRODUCT_SHA: ebdf69da447909584968f7ef04d88c89fa9e54d5
+      OURO_SIZE_RATCHET_BASE_REF: 2721a286a3b17da52d7544b86fe719034ebbe5a8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 3
+      - name: Verify the workflow-only overlay and detach at the product
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-list --parents -n 1 HEAD)" = "$GITHUB_SHA $PRODUCT_SHA"
+          test "$(git rev-list --parents -n 1 "$PRODUCT_SHA")" = "$PRODUCT_SHA $OURO_SIZE_RATCHET_BASE_REF"
+          test "$(git diff --no-renames --name-status "$PRODUCT_SHA" "$GITHUB_SHA")" = $'A\t.github/workflows/qa-nano-fix-4301-ebdf69da.yml'
+          git checkout --detach "$PRODUCT_SHA"
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test -z "$(git status --porcelain)"
+          printf 'QA overlay: %s\nProduct: %s\nSize base: %s\n' "$GITHUB_SHA" "$PRODUCT_SHA" "$OURO_SIZE_RATCHET_BASE_REF"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          install-project: 'false'
+      - name: Check #4301, image accounting, endpoint consent and size
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git diff --exit-code HEAD --
+          export PYTHONDONTWRITEBYTECODE=1 TMPDIR="$RUNNER_TEMP"
+          python -m pytest -o addopts= -vv -ra --tb=short --junitxml="$RUNNER_TEMP/nano-4301.xml" \
+            tests/test_live_delivery_baselines.py::test_serving_price_uses_same_basis_as_receipt \
+            tests/test_live_image_delivery.py::test_an_engine_wire_counts_its_images_as_images_not_as_base64_text \
+            tests/test_provider_connection_sentinel.py::test_only_the_resolver_names_provider_credential_settings \
+            tests/test_provider_connection_sentinel.py::test_the_guard_sees_a_literal_read_and_ignores_a_docstring \
+            tests/test_provider_connection_api.py::test_a_consent_is_saved_as_the_id_of_its_endpoint_and_read_back_as_the_admission \
+            tests/test_llm_ollama_gateway.py::test_consent_writes_withdraw_honestly_against_the_launch_environment
+          # The event is a branch push, but this sandbox measures one pinned product change.
+          # The book tests intentionally skip pushes outside ouroboros; unset the event only
+          # for this subprocess so the explicit base receives local pairwise semantics.
+          env -u GITHUB_EVENT_NAME OURO_BOOK_GROWTH_MODE=block \
+            python -m pytest -o addopts= -vv -ra --tb=short -m size_ratchet --junitxml="$RUNNER_TEMP/nano-4301-size.xml" \
+              tests/test_smoke.py::test_no_oversized_modules \
+              tests/test_smoke.py::test_size_ratchet_manifest_matches_live_tree \
+              tests/test_smoke.py::test_size_ratchet_transition_against_explicit_base \
+              tests/test_smoke.py::test_no_extremely_oversized_functions \
+              tests/test_repo_health_smoke.py::test_checked_in_manifest_generator_check_is_exact \
+              tests/test_reference_book_budgets.py::test_a_change_does_not_grow_a_reference_book \
+              tests/test_reference_book_budgets.py::test_a_change_does_not_grow_bible_or_the_prompts
+          python - "$RUNNER_TEMP" <<'PY'
+          from pathlib import Path
+          from sys import argv
+          from xml.etree import ElementTree as ET
+
+          for name, expected in (("nano-4301.xml", 8), ("nano-4301-size.xml", 7)):
+              cases = ET.parse(Path(argv[1]) / name).getroot().findall(".//testcase")
+              passed = sum(not any(case.find(tag) is not None for tag in ("skipped", "failure", "error")) for case in cases)
+              if (len(cases), passed) != (expected, expected):
+                  raise SystemExit(f"{name}: {passed} passed of {len(cases)}; expected {expected} without skips")
+              print(f"{name}: all {expected} passed without skips")
+          PY
