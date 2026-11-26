@@ -447,7 +447,9 @@ def test_module_map_answers_through_the_real_registry_on_this_tree(tmp_path, mon
     assert "(0 file(s))" in empty and "no files under this prefix (enumeration complete)" in empty
 
     whole_web = module_map("web/")
-    assert "web/tests/" not in whole_web.split("left out", 1)[1] and "under tests/ left out" in whole_web
+    web_tracked = [path for path in _tracked("web/") if "tests" not in path.split("/")]
+    assert f"web ({len(web_tracked)} file(s))" in whole_web and "under tests/ left out" in whole_web
+    assert "web/tests/" not in whole_web.split("left out", 1)[1]
     assert "web/tests/" in module_map("web/tests/")
 
     domains = module_map("domains")
@@ -467,7 +469,7 @@ def test_module_map_cut_answers_are_typed_incomplete_never_a_complete_zero(tmp_p
     rows = module_map_rows(REPO, "ouroboros/tools/", load_domain_manifest(REPO), deadline=0.0)
     limit = [row for row in rows if row.startswith(ARCHITECTURE_LIMIT_MARKER)]
     assert len(limit) == 1 and "module_map_time_limit" in limit[0]
-    assert "ouroboros/tools/query_code.py" in rows
+    assert any(row.startswith("ouroboros/tools/query_code.py") and " — " not in row for row in rows)
 
     monkeypatch.setattr(code_intelligence, "_MAX_ENUMERATION_PATHS", 2)
     registry = ToolRegistry(repo_dir=REPO, drive_root=tmp_path / "data")
@@ -485,6 +487,10 @@ def test_module_leads_are_the_files_own_first_words():
     from ouroboros.code_intelligence_module_map import header_comment_lead, python_lead
 
     assert python_lead('#!/usr/bin/env python\n# c\n\n"""First line.\n\nMore."""\nx = 1\n') == "First line."
+    # A wrapped first paragraph is the lead, whole: never cut mid-sentence or at a fixed width.
+    long = "word " * 80
+    assert python_lead(f'"""Starts here and\nends {long}there.\n\nSecond."""\n') == f"Starts here and ends {long.strip()} there."
+    assert header_comment_lead("/*\n * One\n * two\n *\n * Later.\n */\n") == "One two"
     assert python_lead("import os\n") == "" and python_lead('x = """not a docstring"""\n') == ""
     assert header_comment_lead("// One\n// two\nexport const x = 1;\n") == "One two"
     assert header_comment_lead("/**\n * Block\n * header\n */\nlet y;\n") == "Block header"
