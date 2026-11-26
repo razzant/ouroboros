@@ -356,6 +356,7 @@ class PreparedConnection:
         except BaseException as exc:
             if isinstance(exc, RealtimeSetupError) and exc.code == 'context_capacity':
                 exc.source_revision = getattr(self, 'source_revision', None)
+                exc.proposed_schemas = getattr(self, 'source_schemas', None)  # the refused proposal, compared by value
             for future in (self.ready, self.result):
                 if not future.done():
                     future.set_exception(exc)

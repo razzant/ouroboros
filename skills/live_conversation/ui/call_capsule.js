@@ -87,6 +87,9 @@ const ENDINGS = {
     backpressure: { words: 'The call fell behind the voice stream', action: 'retry' },
     engine_refused: { words: 'The call could not start: {detail}', bare: 'The call could not start',
         action: 'settings', settings: MODEL },
+    // The room does not fit the engine's window: a fact, with the numbers in the room's System line.
+    context_capacity: { words: 'This room does not fit the selected voice engine; the room has the numbers', calm: true,
+        action: 'settings', settings: MODEL },
     // Admission refusals the server words itself; the table adds only the next step.
     call_model_missing: { action: 'settings', settings: MODEL },
     permission_denied: { sheet: true, words: 'Allow the microphone for Ouroboros in System Settings → Privacy & Security → '

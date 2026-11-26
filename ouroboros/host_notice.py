@@ -47,6 +47,7 @@ STEPS: Dict[str, str] = {
     "reply_to_revert": "Reply if you want it reverted.",
     "reopen_project": "A message from you in this room or a new task reopens it.",
     "inspect_task": "Open the task's details before you start another run.",
+    "open_calls": "The Calls (beta) settings list each voice engine and its window.",
     "restore_kept_changes": "Put your local changes back with the Git command that comes with this message.",
     "inspect_then_restore_kept_changes": ("The automatic restore was interrupted: check the current files first, then put "
                                           "your local changes back with the Git command that comes with this message."),

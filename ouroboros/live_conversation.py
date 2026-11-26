@@ -20,7 +20,7 @@ from dataclasses import replace
 
 from ouroboros.contracts.live_conversation import LiveConfig, LiveOptions
 from ouroboros.contracts.realtime import RealtimeSetupError, canonical_json
-from ouroboros.realtime_setup import _LoopWork, loaded_provider, rows_for_engine
+from ouroboros.realtime_setup import _LoopWork, call_ending, loaded_provider, rows_for_engine, session_refusal_notice
 from ouroboros.realtime_session import joined
 from ouroboros.realtime_turn import RealtimeTurn
 
@@ -188,7 +188,7 @@ class LiveConversationTurn(RealtimeTurn):
                         # A typed stop or failure already unwinding remains the primary reason.
 
         reason, status, detail = "finished", "ok", ""
-        failure = None
+        failure = notice = None
         try:
             presence = (task.get("metadata") or {}).get("presence") or {}
             admitted_presence = (self.spec.opened_by == "skill"
@@ -227,6 +227,8 @@ class LiveConversationTurn(RealtimeTurn):
                               for frame in frames],
                 }).value
                 detail = "An unexpected error ended the call."
+            if reason == "context_capacity" and host is not None and (notice := session_refusal_notice(host)):
+                detail = notice["text"]  # never opened: the refusal's one line, not "Call ended"
             if host is not None:
                 if failure is not None:
                     host.trace["failure"] = failure
@@ -241,7 +243,7 @@ class LiveConversationTurn(RealtimeTurn):
                 with self._lock:
                     self._closed = True
                 try:
-                    close_hub(self.spec.call_id, reason, detail=detail)
+                    close_hub(self.spec.call_id, reason, detail=detail, **({"action": "settings"} if notice else {}))
                     if host is not None:
                         host.observe("host", canonical_json({"type": "call.input_audio",
                             **hub.input_audio_evidence()}))
@@ -250,15 +252,9 @@ class LiveConversationTurn(RealtimeTurn):
                         host.wire.close()  # the call's last records are on disk before it reports finished
                     self.publish({"type": "conversation_finished", "chat_id": self.spec.chat_id,
                                   "call_id": self.spec.call_id, "task_id": ctx.task_id, "reason": reason})
-        if reason == "not_connected":  # nobody joined: one short notice, no transcript to point at
-            words = f"The call did not start: {detail.rstrip('.')}."
-        else:
-            words = ("Call ended. Its transcript is in this room." if status in ("ok", "cancelled") or not detail
-                     else f"Call ended: {detail.rstrip('.')}. Its transcript is in this room.")
-        return words, {
-            "terminal_origin": "host_notice", "execution_status": status, "reason_code": reason,
-            **({"failure": failure} if failure is not None else {}),
-        }, host.trace if host is not None else {"reasoning_notes": [], "tool_calls": []}
+        words, usage = call_ending(reason, status, detail, notice)
+        return words, {**usage, **({"failure": failure} if failure is not None else {})}, (
+            host.trace if host is not None else {"reasoning_notes": [], "tool_calls": []})
 
 
 class WireJournal:
@@ -821,6 +817,10 @@ class ConversationHost:
         await drain_exposure(self)  # the answer that carried this call belongs to the view it binds
         async with self._tools_lock:
             record_request(self, call)
+
+    async def restore_serving_catalog(self, rejected, delivered, revision):
+        from ouroboros.live_tool_lane import restore_serving_catalog
+        return await restore_serving_catalog(self, rejected, delivered, revision)
 
     async def tool_batch(self, calls):
         """Serialize ordinary and feature tools on the effect lane; history stays writable meanwhile."""

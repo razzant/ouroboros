@@ -380,3 +380,80 @@ def test_stale_prepared_successor_then_replacement_open(host_world, monkeypatch,
         assert live.result[1]['reason_code'] == ('finished' if failure == 'none' else 'reconnect_failed')
 
     asyncio.run(scenario())
+
+
+def _run_call(host_world, monkeypatch, handler, *, window=None):
+    """Run the admitted call's real terminal (``LiveConversationTurn.run``) with ``handler`` as the feature's body."""
+    from dataclasses import replace
+    from ouroboros import call_peers
+
+    host = host_world.host
+    turn = host.turn
+    if window is not None:
+        facts = replace(turn.catalog_model.facts, conversation_window_tokens=window)
+        monkeypatch.setattr(turn, 'catalog_model', replace(turn.catalog_model, facts=facts))
+    monkeypatch.setitem(call_peers._HUBS, turn.spec.call_id, host.hub)
+    monkeypatch.setitem(turn.feature, 'handler', handler)
+    seen = {}
+    real = turn.run.__globals__['ConversationHost']
+
+    class Observed(real):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            seen['host'] = self
+
+    monkeypatch.setitem(turn.run.__globals__, 'ConversationHost', Observed)
+    words, usage, _trace = turn.run(host.ctx, list(host.messages), host.tools, task=host.task, initial_effort='')
+    return words, usage, seen['host'], dict(host.hub._state)
+
+
+def _refusing_handler(host_world, *, opened):
+    async def handler(port):
+        from ouroboros.realtime_setup import session_candidate
+        from skills.live_conversation.driver import session_options
+        port._session_opened = opened  # True: the refusal of a renewal of a call that is already serving
+        await asyncio.to_thread(session_candidate, port, host_world.provider['session'], session_options(port))
+    return handler
+
+
+def test_a_session_setup_refusal_before_the_first_connection_says_the_call_did_not_start(host_world, monkeypatch):
+    """Path 2: the ordinary build fitted and the call's own instructions and tools did not. The room's row is the same
+    notice path 1 leaves (code, step), with the measured numbers of the refused candidate, and claims no transcript."""
+    words, usage, host, state = _run_call(host_world, monkeypatch, _refusing_handler(host_world, opened=False),
+                                          window=11_000)
+    measured = host.trace['fit_refusal']['fit']['measurement']
+    row = usage['host_notice_row']
+    assert usage['reason_code'] == 'context_capacity' and usage['execution_status'] == 'infra_failed'
+    assert row['notice']['code'] == 'context_capacity' and row['notice']['step'] == 'open_calls'
+    assert words == row['record'] and 'transcript' not in words and 'context_capacity' not in words
+    takes = measured['capacity_total_tokens'] - measured['response_reserve_tokens']
+    assert row['notice']['values']['need'] == f"{measured['estimated_input_tokens']:,}"
+    assert row['notice']['values']['takes'] == f'{takes:,}'
+    for fact in (f"{measured['capacity_total_tokens']:,}", f"{measured['response_reserve_tokens']:,}", 'fixture'):
+        assert fact in row['notice']['details'], fact
+    assert state['reason'] == 'context_capacity' and state['action'] == 'settings' and state['detail'] == row['text']
+
+
+def test_a_capacity_refusal_after_the_session_opened_keeps_the_call_ended_words(host_world, monkeypatch):
+    """A call that served and then could not renew ended a real call: its words keep the transcript pointer."""
+    from ouroboros.realtime_setup import CONTEXT_CAPACITY_DETAIL, call_ending
+
+    words, usage, _host, state = _run_call(host_world, monkeypatch, _refusing_handler(host_world, opened=True),
+                                           window=11_000)
+    assert (words, usage) == call_ending('context_capacity', 'infra_failed', CONTEXT_CAPACITY_DETAIL)
+    assert 'host_notice_row' not in usage and 'action' not in state
+
+
+def test_end_pressed_before_the_engine_opened_is_the_ordinary_ending(host_world, monkeypatch):
+    """The owner's bye reached the hub while the call prepared: the real driver never opens the engine and the call
+    ends with the ordinary ending, the one a preparation refused after that bye also takes
+    (``tests/test_live_preparation_fit_refusal.py``)."""
+    from ouroboros.realtime_setup import call_ending
+    from skills.live_conversation.driver import run as drive
+
+    hub = host_world.host.hub
+    hub.join(cp.PeerInfo('owner', cp.PEER_OWNER, True, True), 24000)
+    hub.receive_control('owner', {'type': 'bye'})
+    words, usage, host, state = _run_call(host_world, monkeypatch, drive)
+    assert (words, usage) == call_ending('finished', 'ok') and state['reason'] == 'finished'
+    assert not host._session_opened and not host_world.sessions

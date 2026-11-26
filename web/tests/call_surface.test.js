@@ -637,7 +637,7 @@ test('shared-limit endings use the same words and action for both host codes', (
 });
 
 test('unknown ending codes show the server sentence and never the raw code', () => {
-    for (const code of ['context_capacity', 'future_code', 'call_model_missing']) {
+    for (const code of ['future_code', 'call_model_missing']) {
         const sentence = 'This room cannot fit the selected voice model.';
         const shown = callPresentation(ended(code, {detail:sentence, action:'settings'}));
         assert.equal(shown.title, sentence);
@@ -648,6 +648,21 @@ test('unknown ending codes show the server sentence and never the raw code', () 
         assert.equal(bare.small, '');
     }
     assert.equal(callPresentation(ended('owner_bye', {detail:'Provider detail'})).title, 'Call ended');
+});
+
+test('a call that could not start for lack of room is a calm fact with the Calls settings, never amber or a raw code', () => {
+    // The numbers are the room's System line (translated there from its template); the sheet carries none.
+    const sentence = 'The call could not start on voice-test: this room needs 90,123 tokens of input.';
+    const bare = callPresentation(ended('context_capacity'));
+    for (const shown of [callPresentation(ended('context_capacity', { detail: sentence, action: 'settings' })), bare]) {
+        assert.equal(shown.tone, '');
+        assert.equal(shown.light, 'still');
+        assert.equal(shown.title, bare.title);
+        assert.ok(shown.title && !shown.title.includes('context_capacity') && !shown.title.includes('90,123'));
+        assert.equal(shown.actions[0].kind, 'settings');
+        assert.equal(shown.actions[0].path, 'skill/live_conversation');
+        assert.equal(shown.actions[0].label, 'Open Calls');
+    }
 });
 
 test('the real admission opening echo folds into one call card live and after reload', () => {

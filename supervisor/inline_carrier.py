@@ -434,13 +434,15 @@ def _inline_failure(admitted: Dict[str, Any], error: BaseException) -> bool:
 
 
 def _close_failed_call(admitted: Dict[str, Any], e: BaseException):
-    """Notify the admitted call independently of result-store recovery."""
+    """Notify the admitted call independently of result-store recovery.
+
+    A preparation the window refused returns the call's ending ``{"code", "words", "usage"}`` for
+    ``_report_call_context_refusal``: the refusal's notice, or the owner's End when the owner ended the call first."""
     if admitted.get("realtime_turn") is not None:
-        from ouroboros.call_peers import close_hub
+        from ouroboros.call_peers import close_hub, get_hub
         from ouroboros.context_fit import MinimumViewUnfit
-        from ouroboros.contracts.realtime import RealtimeSetupError
         from ouroboros.live_conversation import LiveConversationTurn
-        from ouroboros.realtime_setup import CONTEXT_CAPACITY_DETAIL
+        from ouroboros.realtime_setup import call_ending, preparation_refusal_notice
         from ouroboros.store import StoreBusy
 
         turn = admitted["realtime_turn"]
@@ -448,22 +450,31 @@ def _close_failed_call(admitted: Dict[str, Any], e: BaseException):
             # The live run normally closes its hub. Preparation can fail before it owns that duty.
             # Close before logging too: a busy store must not strand the admitted call.
             if isinstance(e, MinimumViewUnfit):
+                hub = get_hub(turn.spec.call_id)
                 with turn._lock:
                     already_closed, turn._closed = turn._closed, True
-                close_hub(turn.spec.call_id, "context_capacity", detail=CONTEXT_CAPACITY_DETAIL)
+                if hub is not None and hub.ended_by_owner:  # the owner's End came first: it stays the owner's
+                    reason, notice, words = "finished", None, {}
+                    ending = call_ending(reason, "ok")
+                else:
+                    reason, notice = "context_capacity", preparation_refusal_notice(turn, e)
+                    words = {"detail": notice["text"], "action": "settings"}
+                    ending = call_ending(reason, "infra_failed", notice=notice)
+                close_hub(turn.spec.call_id, reason, **words)
                 if not already_closed:
                     turn.publish({"type": "conversation_finished", "chat_id": turn.spec.chat_id,
                                   "call_id": turn.spec.call_id, "task_id": admitted["task"]["id"],
-                                  "reason": "context_capacity"})
-                return RealtimeSetupError("context_capacity", CONTEXT_CAPACITY_DETAIL)
+                                  "reason": reason})
+                return {"code": reason, "words": ending[0], "usage": ending[1]}
             busy = isinstance(e, StoreBusy) or isinstance(e.__cause__, StoreBusy)
             close_hub(turn.spec.call_id, "store_busy" if busy else "call_start_failed",
                       detail=("The local store is busy. Please try the call again." if busy else
                               "The call could not start. Please try again."))
 
 
-def _report_call_context_refusal(admitted, unfit, refusal) -> None:
-    """Finish an admitted call whose ordinary context build failed before the host existed."""
+def _report_call_context_refusal(admitted, unfit, ending) -> None:
+    """Finish an admitted call whose ordinary context build failed before the host existed (``ending``:
+    ``_close_failed_call``'s words and usage). The refusal's measurement is logged either way."""
     from dataclasses import asdict
     from ouroboros.agent_task_pipeline import emit_task_results
 
@@ -471,19 +482,20 @@ def _report_call_context_refusal(admitted, unfit, refusal) -> None:
     measurement = {key: getattr(unfit, key) for key in (
         "fixed_input_tokens", "memory_view_tokens", "estimated_input_tokens", "raw_input_tokens",
         "measurement_density", "response_reserve_tokens", "work_room_tokens", "work_room_deficit_tokens")}
-    measurement.update(capacity_total_tokens=unfit.window_tokens, capacity_deficit_tokens=unfit.deficit_tokens)
+    measurement.update(capacity_total_tokens=unfit.window_tokens, capacity_deficit_tokens=unfit.deficit_tokens,
+                       memory_measured=getattr(unfit, "memory_measured", True))
     event = {"type": "call.fit_refused", "ts": utc_now_iso(), "task_id": task["id"],
-             "call_id": turn.spec.call_id, "reason": refusal.code, "stage": "task_preparation",
+             "call_id": turn.spec.call_id, "reason": "context_capacity", "stage": "task_preparation",
              "fit": {"measurement": measurement}, "physical": unfit.physical,
              "deficit_tokens": unfit.deficit_tokens, "route_facts": asdict(turn.catalog_model.facts),
-             "units": turn.catalog_model.facts.basis}
+             "units": turn.catalog_model.facts.basis,
+             **({"ended_by_owner": True} if ending["code"] != "context_capacity" else {})}
     append_jsonl(agent.env.drive_root / "logs" / "events.jsonl", event)
     events = []
     event_queue = _TurnEventQueue(_pool().get_event_q(), task["id"], admitted["chat_id"],
                                 initiator=str((admitted.get("task_metadata") or {}).get("initiator") or ""))
     emit_task_results(
-        agent.env, agent.memory, agent.llm, events, task, str(refusal),
-        {"terminal_origin": "host_notice", "execution_status": "infra_failed", "reason_code": refusal.code},
+        agent.env, agent.memory, agent.llm, events, task, ending["words"], ending["usage"],
         {"reasoning_notes": [], "tool_calls": [], "fit_refusal": event},
         getattr(agent, "_task_started_ts", time.time()), agent.env.drive_root / "logs",
         ctx=getattr(agent.tools, "_ctx", None), event_queue=event_queue)

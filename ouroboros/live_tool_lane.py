@@ -163,7 +163,8 @@ async def _effect(host, fresh, cached, silent):
                 if host.schemas == base:
                     host.schemas[:] = schemas
                 else:
-                    names = {schema["function"]["name"] for schema in host.schemas}
+                    # Only this effect's additions follow it: a refused catalogue restored while it ran is no new load.
+                    names = {schema["function"]["name"] for schema in (*host.schemas, *base)}
                     host.schemas.extend(schema for schema in schemas if schema["function"]["name"] not in names)
             host.ctx._actor_loaded_tool_names.update(loaded)
             # With no other writer since, what changed beyond the receipts is a handler's own; it follows the unit.
@@ -203,6 +204,31 @@ async def _effect(host, fresh, cached, silent):
     if failure is not None and not isinstance(failure, CallEnded):
         raise failure  # terminal for the call, after its batch is whole in history
     return ToolBatch(rows_for_engine(cached + changes, vision=host.model.vision, schemas=host.schemas), silent=silent)
+
+
+async def restore_serving_catalog(host, rejected, delivered, revision):
+    """A proposed catalogue the next connection refused: the serving call keeps the tools it was delivered.
+
+    Only a still-current proposal rolls back (same history revision, ``host.schemas`` still the refused list and not
+    already the delivered one); the mind is told which change did not apply. Returns that row, or None."""
+    from ouroboros.context_budget import bound_host_row
+
+    async with host._tools_lock:
+        if revision != host._history_version or rejected != host.schemas or host.schemas == list(delivered):
+            return None
+        not_loaded = {s["function"]["name"] for s in rejected} - {s["function"]["name"] for s in delivered}
+        host.schemas[:] = copy.deepcopy(list(delivered))  # the registry's resident list keeps its identity
+        host.ctx._actor_loaded_tool_names.difference_update(not_loaded)
+        note = bound_host_row("call_tool_residency", "[Host fact; not owner words]\n"
+            "The proposed tool catalog did not fit the next connection, so it was not loaded: "
+            + ", ".join(sorted(not_loaded)) + ". My previous tools are still loaded. "
+            "I can use enable_tools to request a smaller set.")
+        host.messages.append(note)
+        host._context_changed()
+        host.observe("host", canonical_json({"type": "call.tool_catalog_refused", "requested_count": len(rejected),
+                                             "serving_count": len(delivered), "not_loaded": sorted(not_loaded)}))
+        await joined(asyncio.to_thread(host.checkpoint, "ready"))
+        return {"role": note["role"], "content": note["content"]}
 
 
 def _ordinary_batch(host, calls, lane):

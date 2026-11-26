@@ -11,25 +11,21 @@ from tests.test_call_task_lifecycle import direct_call as direct_call
 from tests.test_context_minimum_view_unfit import FACTS, build_minimum_view
 
 
-@pytest.mark.parametrize("call,shape", [(True, "memory"), (False, "memory"),
-                                       (True, "fixed"), (False, "fixed"), (True, "fit")])
-def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tmp_path, monkeypatch, call, shape):
+def _prepare_call(world, tmp_path, monkeypatch, call, shape, *, refine=None):
+    """Admit the call (or a text turn) whose ordinary build is ``shape``; ``refine`` may set facts on the refusal."""
     from ouroboros import agent_task_pipeline as pipeline
     from ouroboros.context_fit import MinimumViewUnfit
-    from ouroboros.gateway.tasks import api_task_get
-    from ouroboros.realtime_setup import CONTEXT_CAPACITY_DETAIL
-    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.task_results import write_task_result
     from ouroboros.tools.tool_context import ToolContext
     from ouroboros.utils import append_jsonl
     from supervisor import worker_chat_lane, workers
     from tests.conversation_carrier_support import carry, lane_rows
 
-    world = direct_call
-    events, finished, errors, hosts, post_tasks = world.bus, [], [], [], []
+    seen = SimpleNamespace(finished=[], errors=[], hosts=[], post_tasks=[])
     world.turn.catalog_model = SimpleNamespace(facts=FACTS)
-    world.turn.publish = finished.append
+    world.turn.publish = seen.finished.append
     monkeypatch.setattr(worker_chat_lane, "append_jsonl", append_jsonl)
-    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **kw: post_tasks.append(kw))
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **kw: seen.post_tasks.append(kw))
 
     def prepare(task):
         # The agent creates the durable running row before its ordinary context build; preparation
@@ -40,9 +36,11 @@ def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tm
         try:
             build_minimum_view(tmp_path, monkeypatch, shape, task=task)
         except MinimumViewUnfit as exc:
-            errors.append(exc)
+            if refine is not None:
+                refine(exc)
+            seen.errors.append(exc)
             raise
-        hosts.append(task["id"])  # only a successful preparation may reach the live host
+        seen.hosts.append(task["id"])  # only a successful preparation may reach the live host
         return []
 
     agent = SimpleNamespace(handle_task=prepare, memory=None, llm=None, tools=SimpleNamespace(_ctx=None),
@@ -52,13 +50,31 @@ def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tm
     # (``executor=inline_call``); a text turn is admitted to the lane and carried.
     worker_chat_lane.handle_chat_direct(1, "Open the call.", task_metadata={"execution_transport": world.turn.request},
                                         realtime_turn=world.turn if call else None)
-    [task_id] = list(lane_rows(workers))
+    [seen.task_id] = list(lane_rows(workers))
     if not call:
         if shape == "fit":
             carry(workers, world.spare, agent)
         else:
             with pytest.raises(MinimumViewUnfit):
                 carry(workers, world.spare, agent)
+    seen.emitted = list(world.bus.queue)
+    seen.answers = [row for row in seen.emitted if row["type"] == "send_message"]
+    log = tmp_path / "logs" / "events.jsonl"
+    seen.rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+    return seen
+
+
+@pytest.mark.parametrize("call,shape", [(True, "memory"), (False, "memory"),
+                                       (True, "fixed"), (False, "fixed"), (True, "fit")])
+def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tmp_path, monkeypatch, call, shape):
+    from ouroboros.gateway.tasks import api_task_get
+    from ouroboros.host_notice import STEPS
+    from ouroboros.task_results import load_task_result
+
+    world = direct_call
+    seen = _prepare_call(world, tmp_path, monkeypatch, call, shape)
+    events, finished, errors, hosts, post_tasks = world.bus, seen.finished, seen.errors, seen.hosts, seen.post_tasks
+    task_id, emitted, rows = seen.task_id, seen.emitted, seen.rows
     assert not world.other.closed
     if shape == "fit":
         assert hosts == [task_id] and not world.hub.closed
@@ -66,9 +82,6 @@ def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tm
         return
     assert not hosts and len(errors) == 1
     stored = load_task_result(tmp_path, task_id)
-    emitted = list(events.queue)
-    rows = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text().splitlines()] if (
-        tmp_path / "logs" / "events.jsonl").exists() else []
     if not call:
         # The generic rail: the carrier's own exception terminal and its keyed final (a system frame the
         # supervisor delivers), no call closure, no typed fit refusal.
@@ -87,15 +100,22 @@ def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tm
         assert not any(row["type"] == "call.fit_refused" for row in rows)
         return
 
+    error = errors[0]
     assert world.hub.closed and world.turn._closed
-    assert world.hub._state["reason"] == "context_capacity"
-    assert world.hub._state["detail"] == CONTEXT_CAPACITY_DETAIL
+    state = world.hub._state
+    assert state["reason"] == "context_capacity" and state["action"] == "settings"
     assert len(finished) == 1 and finished[0]["reason"] == "context_capacity"
     assert not world.notices  # no raw-exception reply from the generic worker reporter
-    answers = [row for row in emitted if row["type"] == "send_message"]
+    answers = seen.answers
     # The ordinary outbox sends live and keeps a buffered replay with the same delivery id.
     assert answers and len({row["delivery_id"] for row in answers}) == 1
-    assert all(row["text"] == "context_capacity: " + CONTEXT_CAPACITY_DETAIL for row in answers)
+    for row in answers:  # one System line: the phrase, its step and the numbers behind Details
+        notice = row["progress_meta"]["notice"]
+        assert row["role"] == "system" and notice["code"] == "context_capacity" and notice["step"] == "open_calls"
+        assert row["text"] == state["detail"] and "context_capacity" not in row["text"]
+        for fact in ("92,000", "10,000", f"{error.estimated_input_tokens:,}", FACTS.source):
+            assert fact in notice["details"], (fact, notice["details"])
+        assert ("memory was not measured" in notice["details"]) is (getattr(error, "memory_measured", True) is False)
     done, = [row for row in emitted if row["type"] == "task_done"]
     assert done["status"] == "failed" and done["reason_code"] == "context_capacity"
     assert done["chat_id"] == 1 and done["task_id"] == task_id
@@ -104,14 +124,15 @@ def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tm
     refusal, = [row for row in rows if row["type"] == "call.fit_refused"]
     assert refusal["stage"] == "task_preparation" and refusal["call_id"] == world.turn.spec.call_id
     measured = refusal["fit"]["measurement"]
-    error = errors[0]
     assert measured["fixed_input_tokens"] == error.fixed_input_tokens
     assert measured["memory_view_tokens"] == error.memory_view_tokens
     assert measured["estimated_input_tokens"] == error.estimated_input_tokens
     assert measured["response_reserve_tokens"] == 10_000 and measured["capacity_total_tokens"] == 92_000
+    assert measured["memory_measured"] is getattr(error, "memory_measured", True)
     assert refusal["deficit_tokens"] == measured["capacity_deficit_tokens"] == error.deficit_tokens > 0
     assert stored["status"] == "failed" and stored["reason_code"] == "context_capacity"
     assert stored["outcome_axes"]["execution"]["reason_code"] == "context_capacity"
+    assert stored["result"] == f"{state['detail']} {STEPS['open_calls']}"  # the record: the phrase and its step
     assert len(post_tasks) == 1  # same post-task policy as a refusal in the live host
 
     app = Starlette(routes=[Route("/api/tasks/{task_id}", api_task_get)])
@@ -121,3 +142,46 @@ def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tm
     assert response.status_code == 200
     assert response.json()["status"] == "failed"
     assert response.json()["outcome_axes"]["execution"]["reason_code"] == "context_capacity"
+
+
+def test_a_refusal_carries_parts_and_says_when_memory_was_not_measured(direct_call, tmp_path, monkeypatch):
+    """A refusal that priced no memory is a lower bound: it says "at least" and never prints memory as 0."""
+    from ouroboros.realtime_setup import _NEEDS
+
+    def unmeasured(exc):  # set on the instance: this lane must not depend on the fitter's own attribution
+        exc.memory_measured = False
+        exc.parts = (("identity", 100_000), ("system prompt", 1_234))
+
+    seen = _prepare_call(direct_call, tmp_path, monkeypatch, True, "fixed", refine=unmeasured)
+    assert seen.answers
+    for row in seen.answers:
+        notice = row["progress_meta"]["notice"]
+        assert notice["template"] == _NEEDS[False] and notice["values"]["need"] == f"{seen.errors[0].estimated_input_tokens:,}"
+        assert "identity 100,000" in notice["details"] and "system prompt 1,234" in notice["details"]
+        assert "memory was not measured" in notice["details"] and "memory 0" not in notice["details"]
+    refusal, = [row for row in seen.rows if row["type"] == "call.fit_refused"]
+    assert refusal["fit"]["measurement"]["memory_measured"] is False
+
+
+def test_end_pressed_during_preparation_stays_the_owners_end(direct_call, tmp_path, monkeypatch):
+    """The owner's bye reached the hub before the build refused: the hub, the finished event, the room row and the
+    task record carry the same ending as an End pressed while a fitting preparation ran (``call_ending``; the real
+    driver's ending is pinned in ``tests/test_live_fit_refused.py``), and none names the capacity refusal."""
+    from ouroboros.realtime_setup import call_ending
+    from ouroboros.task_results import load_task_result
+
+    world = direct_call
+    world.hub.receive_control("owner", {"type": "bye"})
+    words, usage = call_ending("finished", "ok")
+    seen = _prepare_call(world, tmp_path, monkeypatch, True, "memory")
+    assert world.hub.closed and world.hub._state["reason"] == usage["reason_code"] and "detail" not in world.hub._state
+    assert [event["reason"] for event in seen.finished] == [usage["reason_code"]]
+    assert seen.answers and {row["text"] for row in seen.answers} == {words}
+    stored = load_task_result(tmp_path, seen.task_id)
+    # The task record classifies that usage as any finished call's (its outcome code is the record's own).
+    assert stored["status"] not in ("failed", "infra_failed") and stored["outcome_axes"]["execution"]["status"] == "ok"
+    assert stored["result"] == words
+    named = json.dumps([world.hub._state, seen.finished, seen.answers, stored])
+    assert "context_capacity" not in named
+    refusal, = [row for row in seen.rows if row["type"] == "call.fit_refused"]  # the measurement is still logged
+    assert refusal["ended_by_owner"] is True
