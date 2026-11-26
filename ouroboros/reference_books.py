@@ -363,7 +363,7 @@ class BookBalance:
 _OFFLINE_GIT = {"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""}
 
 
-def _git_bytes(root: Path, *args: str) -> bytes | None:
+def _git_bytes(root: Path, *args: str, stdin: bytes | None = None) -> bytes | None:
     """stdout of one git read, ``None`` when it fails; a measurement fetches nothing.
 
     A partial clone fetches an object it lacks once a read needs it. Here that read fails instead
@@ -374,7 +374,7 @@ def _git_bytes(root: Path, *args: str) -> bytes | None:
     import subprocess
 
     try:
-        done = subprocess.run(["git", *args], cwd=str(root), capture_output=True, timeout=30,
+        done = subprocess.run(["git", *args], cwd=str(root), capture_output=True, timeout=30, input=stdin,
                               env={**os.environ, **_OFFLINE_GIT})
     except (OSError, subprocess.SubprocessError):
         return None
@@ -421,15 +421,39 @@ def contribution_base(root: Path) -> tuple[str, str]:
     return upstream, base
 
 
-def book_source_sizes(root: Path, book_id: str, ref: str = "") -> dict[str, int] | None:
-    """UTF-8 bytes of each book source, entrypoint first, in the working tree or at ``ref``.
+def _index_sizes(root: Path, where: str) -> dict[str, int] | None:
+    """Blob bytes of the staged files under ``where``: what a commit of the index would hold."""
+    listing = _git_bytes(root, "ls-files", "-s", "-z", "--", where)
+    if listing is None:
+        return None
+    staged = {}  # path -> blob; stage 0 only (an unmerged path has no single staged form)
+    for row in listing.decode("utf-8", "replace").split("\0"):
+        meta, _, path = row.partition("\t")
+        if path and len(fields := meta.split()) == 3 and fields[2] == "0":
+            staged[path] = fields[1]
+    batch = "".join(f"{blob}\n" for blob in staged.values()).encode()
+    checked = _git_bytes(root, "cat-file", "--batch-check", stdin=batch)
+    sizes = [line.split() for line in (checked or b"").decode("ascii", "replace").splitlines()]
+    if checked is None or len(sizes) != len(staged) or any(len(row) != 3 for row in sizes):
+        return None
+    return {path: int(row[2]) for path, row in zip(staged, sizes)}
+
+
+def book_source_sizes(root: Path, book_id: str, ref: str = "", *, staged: bool = False) -> dict[str, int] | None:
+    """UTF-8 bytes of each book source, entrypoint first, in the working tree, the index (``staged``) or at ``ref``.
 
     Only the entrypoint is parsed; chapter bytes are sizes, so a measurement costs one
-    `git show` plus one `git ls-tree` per ref. ``None`` when the book is unreadable there.
+    `git show` plus one `git ls-tree` per ref (the index: `git ls-files` and one `git cat-file`
+    batch). ``None`` when the book is unreadable there.
     """
     root, entry = Path(root), BOOK_ENTRYPOINTS[book_id]
     try:
-        if ref:
+        if staged and not ref:
+            raw, blobs = _git_bytes(root, "show", f":{entry}"), _index_sizes(root, f"docs/{book_id}")
+            if raw is None or blobs is None:
+                return None
+            size_of = blobs.__getitem__
+        elif ref:
             raw = _git_bytes(root, "show", f"{ref}:{entry}")
             listing = _git_bytes(root, "ls-tree", "-r", "-l", "-z", "--full-tree", ref, "--", f"docs/{book_id}")
             if raw is None or listing is None:
@@ -454,11 +478,15 @@ def composed_size(sizes: dict[str, int]) -> int:
     return sum(sizes.values()) + 2 * (len(sizes) - 1)
 
 
-def ruled_text_sizes(root: Path, text_id: str, ref: str = "") -> dict[str, int] | None:
-    """UTF-8 bytes of each file of a ruled text, in the working tree or at ``ref``; ``None`` when absent."""
+def ruled_text_sizes(root: Path, text_id: str, ref: str = "", *, staged: bool = False) -> dict[str, int] | None:
+    """UTF-8 bytes of each file of a ruled text, in the working tree, the index (``staged``) or at ``ref``;
+    ``None`` when absent."""
     root, where = Path(root), RULED_TEXTS[text_id]
     try:
-        if ref:
+        if staged and not ref:
+            sizes = {path: size for path, size in (_index_sizes(root, where) or {}).items()
+                     if ruled_text_of(path) == text_id}
+        elif ref:
             listing = _git_bytes(root, "ls-tree", "-l", "-z", "--full-tree", ref, "--",
                                  where if text_id == "constitution" else f"{where}/")
             rows = [row.partition("\t") for row in (listing or b"").decode("utf-8", "replace").split("\0")]
@@ -478,8 +506,9 @@ def ruled_text_paths(root: Path) -> list[str]:
     return [path for text_id in RULED_TEXTS for path in (ruled_text_sizes(root, text_id) or {})]
 
 
-def book_balances(root: Path, paths: Iterable[str] | None = None) -> list[BookBalance]:
-    """The balance of every book or ruled text ``paths`` touch (all of them when ``None``); never raises."""
+def book_balances(root: Path, paths: Iterable[str] | None = None, *, staged: bool = False) -> list[BookBalance]:
+    """The balance of every book or ruled text ``paths`` touch (all of them when ``None``), measured in the
+    working tree or, ``staged``, in the index a commit would hold; never raises."""
     paths = None if paths is None else list(paths)
     wanted = list(BOOK_ENTRYPOINTS) if paths is None else sorted(
         {book_id for book_id, entry in BOOK_ENTRYPOINTS.items()
@@ -492,7 +521,7 @@ def book_balances(root: Path, paths: Iterable[str] | None = None) -> list[BookBa
     measures += [(text_id, ruled_text_sizes, lambda sizes: sum(sizes.values())) for text_id in texts]
     balances: list[BookBalance] = []
     for text_id, sizes_at, total in measures:
-        now = sizes_at(root, text_id)
+        now = sizes_at(root, text_id, staged=staged)
         if now is None:
             continue
         head = sizes_at(root, text_id, "HEAD")
@@ -524,8 +553,9 @@ def render_book_balance(balance: BookBalance) -> str:
     return line
 
 
-def book_balance_note(root: Path, paths: Iterable[str]) -> str:
+def book_balance_note(root: Path, paths: Iterable[str], *, staged: bool = False) -> str:
     """The footer for a write to Ouroboros's own body; ``""`` when no book or ruled text was written.
+    ``staged`` measures the index (a staged commit's subject), otherwise the working tree.
 
     Callers decide that ``root`` is the body (the system repository or its bound candidate):
     a user's project with a ``docs/architecture`` folder never receives this note.
@@ -533,7 +563,7 @@ def book_balance_note(root: Path, paths: Iterable[str]) -> str:
     touched = [path for path in paths if book_path_role(path) or ruled_text_of(path)]
     if not touched:
         return ""
-    balances = book_balances(root, touched)
+    balances = book_balances(root, touched, staged=staged)
     wanted = {book_entrypoint_for(path) for path in touched}
     available = {balance.book_id for balance in balances}
     unavailable = [f"{text_name(book_id)} balance unavailable"

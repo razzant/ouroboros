@@ -59,6 +59,29 @@ def _evolution_restart_block_reason(ctx: ToolContext) -> str:
     return "commit_reviewed must create a local reviewed commit before evolution restart"
 
 
+def _child_candidate_receipt(ctx: ToolContext, refused: Exception, resume: str) -> str:
+    """A subagent's ordinary call is answered with where it already works, not refused.
+
+    The parent prepares and integrates the candidate; the child's folder is the copy or view its parent
+    selected, so there is nothing to prepare. ``resume=`` names another candidate and stays refused.
+    """
+    from ouroboros.contracts.task_constraint import normalize_task_constraint
+
+    if getattr(refused, "code", "") != "CANDIDATE_NOT_APPLICABLE" or str(resume or "").strip():
+        return ""
+    constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    if getattr(constraint, "mode", "") not in {"acting_subagent", "local_readonly_subagent"}:
+        return ""  # the managed-update resolver shares the code and keeps its refusal
+    from ouroboros.tools.tool_resolution import active_repo_dir_for
+
+    try:
+        where = str(active_repo_dir_for(ctx))
+    except ValueError as exc:
+        where = f"its folder is unavailable ({exc})"
+    return ("OK: no separate body candidate is prepared for a subagent: you work in the workspace or copy your "
+            f"parent selected ({where}); the parent owns candidate preparation and integration.")
+
+
 def _prepare_self_change(ctx: ToolContext, resume: str = "", in_place: bool = False) -> str:
     """Prepare (or deliberately resume) this task's body candidate before authoring or testing."""
     from ouroboros import body_candidate
@@ -81,6 +104,8 @@ def _prepare_self_change(ctx: ToolContext, resume: str = "", in_place: bool = Fa
     try:
         bound = body_candidate.prepare(ctx, resume=str(resume or "").strip())
     except body_candidate.CandidateRefused as exc:
+        if child_receipt := _child_candidate_receipt(ctx, exc, resume):
+            return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=child_receipt))
         return _publish_tool_result(ctx, ToolResult(
             status="blocked", code=exc.code, text=f"⚠️ {exc.code}: {exc.text}"))
     from ouroboros.tools.plan_ask import planning_roots
@@ -235,7 +260,8 @@ def self_change_tool_entries() -> list:
                 "Idempotent. resume deliberately continues ONE exact retained candidate (its id, owner task or "
                 "branch) whose previous owner has ended. The receipt, like the first automatic bind, names other open "
                 "candidates with the paths they have changed, read at that moment. in_place is Cyber Pro's explicit "
-                "decision to edit the serving checkout directly instead."),
+                "decision to edit the serving checkout directly instead. The parent prepares or resumes the candidate; "
+                "a child works in the workspace or copy its parent selected."),
             "parameters": {"type": "object", "properties": {
                 "resume": {"type": "string", "description": "Exact retained candidate to continue; omit for this task's own."},
                 "in_place": {"type": "boolean", "description": "Cyber Pro only: author the serving checkout directly."},

@@ -305,7 +305,12 @@ def restore_acknowledged_task_mail(ctx, drive_root, messages, seen):
     if type(attempt) is not int or attempt <= 1:
         return
     from ouroboros.owner_relay import held_owner_messages
-    held_owner_messages(ctx, defer_persist=True)  # own maps before any writer, without opening a write here; built maps stay
+    held = held_owner_messages(ctx, defer_persist=True)  # own maps before any writer, without opening a write here; built maps stay
+    # This start restored no saved transcript: a row its record holds as having reached this work is told once more when
+    # its carriage is read again, judged by this attempt's built input under its held receipt (``owner_relay.inject_carried``).
+    ctx._untold_carried = {address: True for address, row in held.items()
+                           if isinstance(row, dict) and isinstance(row.get("carried"), dict)
+                           and not row["carried"].get("went_to") and not row["carried"].get("work_reply")}
     acked = acknowledged_task_message_ids(drive_root, ctx.task_id, attempt_key=attempt)
     if not acked:
         return

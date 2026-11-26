@@ -147,8 +147,9 @@ _STRUCTURE = {
     "delegate_start": {"full": "f08b11bb73f9a737", "readonly": "722bc912841f2df4", "acting": "722bc912841f2df4"},
     "delegate_wait": {"full": "a5b3b83441b79479", "readonly": "a5b3b83441b79479", "acting": "a5b3b83441b79479"},
     "wait_tasks": {"full": "50667317e4bef21f", "readonly": "50667317e4bef21f", "acting": "50667317e4bef21f"},
-    # readonly prunes write_surface, write_root, protected_paths_grant and external_tool_grants.
-    "schedule_subagent": {"full": "f770c5c50794d5a2", "readonly": "89f5c5b9ba37c901", "acting": "f770c5c50794d5a2"},
+    # readonly prunes write_surface, write_root, protected_paths_grant and external_tool_grants, and the
+    # write-side geometry workspace, directory_strategy and scope_paths (before those three: 89f5c5b9ba37c901).
+    "schedule_subagent": {"full": "f770c5c50794d5a2", "readonly": "6ba2052cf7a10ece", "acting": "f770c5c50794d5a2"},
 }
 
 

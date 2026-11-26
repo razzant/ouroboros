@@ -114,6 +114,32 @@ def test_with_no_readable_diff_the_touched_books_keep_their_balance(tmp_path):
     assert diff_pulse(repo, [CHAPTER]) == note and diff_pulse(repo) == ""  # unshown, no book is known to be touched
 
 
+def test_a_staged_pulse_sizes_modules_and_books_from_the_index_not_later_worktree_edits(tmp_path):
+    """The staged pulse diffs the index, so its module sizes and book balance read the index too: an
+    unstaged edit made after staging (more lines, more prose, or a revert of the staged growth) must
+    neither mask nor inflate what the commit would hold."""
+    from tests._reference_book_fixtures import _book_repo
+
+    repo = _book_repo(tmp_path / "body")
+    staged_prose, unstaged = "Staged reason.\n", "Unstaged worktree prose, much longer than the staged line.\n"
+    (repo / CHAPTER).write_text(BODY + staged_prose, encoding="utf-8", newline="\n")
+    _write(repo, "ouroboros/loop.py", 4)
+    _git(repo, "add", CHAPTER, "ouroboros/loop.py")
+    (repo / CHAPTER).write_text(BODY + staged_prose + unstaged, encoding="utf-8", newline="\n")
+    _write(repo, "ouroboros/loop.py", 40)
+
+    staged = diff_pulse(repo, [CHAPTER, "ouroboros/loop.py"], staged=True)
+    assert f"+{len(staged_prose)} B vs HEAD" in staged
+    assert f"+{len(staged_prose) + len(unstaged)} B vs HEAD" not in staged
+    assert "ouroboros/loop.py 4 (+3/-0)" in staged and "ouroboros/loop.py 40" not in staged
+    worktree = diff_pulse(repo, [CHAPTER, "ouroboros/loop.py"])
+    assert f"+{len(staged_prose) + len(unstaged)} B vs HEAD" in worktree and "ouroboros/loop.py 40 (+39/-0)" in worktree
+
+    # An unstaged revert cannot hide staged growth either.
+    (repo / CHAPTER).write_text(BODY, encoding="utf-8", newline="\n")
+    assert f"+{len(staged_prose)} B vs HEAD" in diff_pulse(repo, [CHAPTER], staged=True)
+
+
 def test_one_shape_and_one_question_for_any_size(tmp_path):
     """No size is a trigger: a one-line and a five-thousand-line growth of the same
     module read alike, with the same question and nothing that warns."""

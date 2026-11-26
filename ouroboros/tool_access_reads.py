@@ -149,12 +149,13 @@ def readonly_start_folder(value: Any) -> str:
 def admit_child_start_folder(ctx: Any, value: Any, params: dict) -> str:
     """Select an existing parent READ binding; the folder grants no authority."""
     if str(params.get("write_surface") or "").strip().lower() == "genesis":
-        raise ValueError("workspace_root cannot select a starting folder for genesis, which creates its own empty project")
+        raise ValueError("workspace_root cannot select a starting folder for genesis, which creates its own empty project; "
+                         "omit workspace_root")
     folder = readonly_start_folder(value)
     write_root = str(params.get("write_root") or "").strip()
     if (str(params.get("write_surface") or "").strip().lower() == "external_workspace" and write_root
             and pathlib.Path(write_root).expanduser().resolve(strict=False) != pathlib.Path(folder)):
-        raise ValueError("workspace_root and write_root name different folders; select one acting workspace")
+        raise ValueError("workspace_root and write_root name different folders; omit write_root or pass the same folder")
     from ouroboros.tools.tool_resolution import _root_containing_absolute_path
 
     root = _root_containing_absolute_path(ctx, "read_file", folder)

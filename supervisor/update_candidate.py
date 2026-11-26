@@ -694,6 +694,10 @@ def restore_stash_with_marker(tx: Dict[str, Any], context: str) -> StashRestoreR
                 f"stash {stash_sha[:12]}, which is kept. Once the lock is resolved, quit and reopen the app "
                 "(or restart the server process); startup then applies that stash. Do not apply it by hand."))
         else:
+            from ouroboros.gateway.history_reader import reader
+
+            if blocked := reader.retire_for_checkout(_g.current_drive_root()):
+                return StashRestoreResult("incomplete", blocked)
             persist({"status": "applying"})
             result = restore_update_stash(stash_sha, context, before_cleanup=persist)
             persist({"status": result.status, "note": result.note, "evidence": result.evidence})

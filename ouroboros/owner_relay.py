@@ -896,7 +896,7 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
     it is sent, so the quote is delivered as a row of the transcript, which no rebuilding of the view replaces (a
     repeat beside the view's own copy is the cheaper error than a loss). Files are staged either way (by saved
     hash, idempotent). Returns the addresses shown under ``reached this work``."""
-    from ouroboros import loop
+    from ouroboros import context_input_selection, loop
     from ouroboros.answer_facts import card_input, mark_press_arrival, row_source
     from ouroboros.owner_mailbox import passive_facts, passive_mail
     from ouroboros.owner_words import OWNER_PRESS, _chat_ref, task_governing_words
@@ -937,19 +937,20 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
                 birth_ref = {"birth_ref": earlier_ref} if earlier_ref and inherited["ref"] == earlier_ref else {}
                 held[address] = {**copy.deepcopy(row), "carried": {"went_to": standing, **birth_ref, **passive_facts(fact_of)}}
             continue
-        if isinstance(prior, dict) and (not helper or same_prior):
+        retold = helper and same_prior and not went and (getattr(ctx, "_untold_carried", None) or {}).pop(address, False)  # once per address
+        if isinstance(prior, dict) and (not helper or same_prior) and not retold:
             if same_prior and takes_source(prior, row.get("_owner_reply_target")):
                 prior["_owner_reply_target"] = copy.deepcopy(row["_owner_reply_target"])
             prior_fact = prior.get("carried")
             if went or (isinstance(prior_fact, dict) and not prior_fact.get("went_to")) or (
                     not helper and not isinstance(prior_fact, dict)):
                 continue  # the same standing, or addressed already: nothing more to show
-        held[address] = {**copy.deepcopy(row), "carried": {**fact_of, "from": str(entry.get("source_task_id") or ""),
-                                                            "went_to": went, "at": str(entry.get("ts") or "")}}
+        held[address] = prior if retold else {**copy.deepcopy(row), "carried": {  # a retold row keeps the receipt it was held with
+            **fact_of, "from": str(entry.get("source_task_id") or ""), "went_to": went, "at": str(entry.get("ts") or "")}}
         if same_prior and takes_source(held[address], prior.get("_owner_reply_target")):
             held[address]["_owner_reply_target"] = copy.deepcopy(prior["_owner_reply_target"])  # addressed now: its source stays
         if helper:
-            standing = seen_rows.get(digest)
+            standing = (context_input_selection.helper_owner_rows_in_system(ctx, messages) if retold else seen_rows).get(digest)
             seen, from_context = standing in ("context", "tree"), standing == "context"
         else:
             refs = {address, _chat_ref(row) if row.get("client_message_id") else "", earlier_ref}

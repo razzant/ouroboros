@@ -44,6 +44,13 @@ def test_a_body_plan_carries_the_pack_inline_or_as_mandatory_reads_and_refuses_w
                                                  bible_locator="/repo/BIBLE.md", architecture_locator="/repo/docs/ARCHITECTURE.md",
                                                  governance_by_retrieval=True, design_nav_map="## DESIGN map")
     assert "MANDATORY FULL READS" in retrieving and "/repo/BIBLE.md" in retrieving and "BIBLE BODY" not in retrieving
+    assert "Architecture chapters" not in retrieving  # a single-file book has no chapter list to name
+    chaptered = plan_packet.build_stable_prompt(checklist_section="x", body=True, bible_text="B", architecture_text="A",
+                                                architecture_chapter_locators=("/repo/docs/architecture/01-a.md",
+                                                                               "/repo/docs/architecture/02-b.md"),
+                                                governance_by_retrieval=True)
+    assert "whose text is its entrypoint plus every chapter listed below" in chaptered
+    assert "- `/repo/docs/architecture/01-a.md`\n- `/repo/docs/architecture/02-b.md`\n" in chaptered
     assert "Read relevant original DESIGN sections" in retrieving
     with pytest.raises(plan_packet.PlanPacketError):
         plan_packet.build_stable_prompt(checklist_section="x", body=True, bible_text="", architecture_text="ARCH")

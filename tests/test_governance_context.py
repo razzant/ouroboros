@@ -507,3 +507,88 @@ def test_an_unreadable_manifest_is_a_named_navigation_row_not_an_empty_block(rep
     rows = [row for row in _context(repo).manifest if row["path"] == MODULE_ROWS_PATH]
     assert [row["disposition"] for row in rows] == ["navigation"]
     assert "module rows unavailable" in rows[0]["reason"]
+
+
+# --- the body's cross-cutting invariants and chapter openings -------------------
+
+INVARIANTS = ("# 10. Key Invariants\n\nCross-cutting owners.\n\n1. **One owner per store.** Never two writers.\n"
+              "2. **Saved work continues.** Nothing repeats.\n\n### 10.1 Map\n\n| a | b |\n|---|---|\n| x | y |\n")
+
+
+def _with_invariants(repo: pathlib.Path, text: str = INVARIANTS) -> pathlib.Path:
+    chapter = repo / "docs" / "architecture" / "10-key-invariants.md"
+    chapter.write_text(text, encoding="utf-8", newline="\n")
+    entry = repo / "docs" / "ARCHITECTURE.md"
+    entry.write_text(entry.read_text(encoding="utf-8") + "- [10](architecture/10-key-invariants.md)\n",
+                     encoding="utf-8", newline="\n")
+    return chapter
+
+
+def test_a_packet_body_reviewer_carries_the_whole_invariants_chapter_in_its_base_layer(repo):
+    """The numbered invariants sit before the chapter's first subheading, where no section selector reaches:
+    a packet reviewer gets the chapter whole in tier 1 (the stable prefix), whatever the change touches and
+    however small its share; it is not selected again below."""
+    chapter = _with_invariants(repo)
+    for touched, window in ((["web/modules/chat.js"], 1_000_000), ([], 0)):
+        context = _context(repo, touched_paths=touched, usable_window_tokens=window)
+        row = next(row for row in context.manifest if row["path"] == "docs/architecture/10-key-invariants.md")
+        assert (row["tier"], row["disposition"]) == (1, "inline")
+        assert chapter.read_text(encoding="utf-8") in context.stable_inline
+        assert "1. **One owner per store.**" in context.stable_inline
+        assert "10-key-invariants.md#" not in context.selected_inline
+        assert _paths(context).count("docs/architecture/10-key-invariants.md") == 1
+
+
+def test_a_retrieving_body_reviewer_owes_the_invariants_as_a_required_read(repo):
+    _with_invariants(repo)
+    context = _context(repo, delivery="retrieving")
+    row = next(row for row in context.manifest if row["path"] == "docs/architecture/10-key-invariants.md")
+    assert (row["tier"], row["disposition"]) == (1, "required")
+    assert "One owner per store" not in context.stable_inline
+    assert "REQUIRED before you judge: read `docs/architecture/10-key-invariants.md`" in context.navigation
+
+
+@pytest.mark.parametrize("delivery", ["packet", "retrieving"])
+def test_missing_invariants_are_disclosed_and_a_broken_sibling_does_not_hide_them(repo, delivery):
+    context = _context(repo, delivery=delivery)  # the fixture has no chapter 10
+    row = next(row for row in context.manifest if row["path"] == "docs/architecture/10-key-invariants.md")
+    assert row["disposition"] == "navigation" and "unavailable" in row["reason"]
+    assert "is UNAVAILABLE at this governance root" in context.navigation
+
+    _with_invariants(repo)
+    (repo / "docs" / "architecture" / "01-core.md").unlink()  # the book no longer assembles
+    context = _context(repo, delivery=delivery)
+    row = next(row for row in context.manifest if row["path"] == "docs/architecture/10-key-invariants.md")
+    assert row["disposition"] == ("inline" if delivery == "packet" else "required")
+
+
+def test_a_chapter_opening_is_selectable_and_a_listing_gives_only_its_matching_lines(repo):
+    """Text before a chapter's first subheading was beyond selection; each opening block now is a unit, and a
+    code listing (the module tree) gives only its lines that name a touched file, not all of itself."""
+    (repo / "docs" / "architecture" / "01-core.md").write_text(
+        "# 1. Core\n\nThe opening names ouroboros/project_dialogue.py before any heading.\n\n"
+        "```\nouroboros/project_dialogue.py — the dialogue owner\nouroboros/other.py — unrelated\n```\n\n"
+        "An untouched opening paragraph.\n\n## Unrelated\n\nNothing touched here.\n",
+        encoding="utf-8", newline="\n")
+    context = _context(repo, touched_paths=["ouroboros/project_dialogue.py"])
+    inline = _paths(context, "inline", tier=3)
+    assert "docs/architecture/01-core.md#opening block 1" in inline
+    assert "docs/architecture/01-core.md#opening block 2 (excerpt: its lines naming a touched file)" in inline
+    assert "The opening names ouroboros/project_dialogue.py before any heading." in context.selected_inline
+    assert "the dialogue owner" in context.selected_inline and "ouroboros/other.py" not in context.selected_inline
+    assert "An untouched opening paragraph." not in context.selected_inline
+    assert "opening block" not in _context(repo, delivery="retrieving").selected_inline
+
+
+def test_the_real_tree_gives_a_packet_body_reviewer_every_key_invariant():
+    from ouroboros.tools.governance_context import BODY_INVARIANTS_CHAPTER
+
+    real = pathlib.Path(__file__).resolve().parents[1]
+    text = (real / BODY_INVARIANTS_CHAPTER).read_bytes().decode("utf-8")
+    first_subheading = text.index("\n#", 1)
+    numbered = [line for line in text[:first_subheading].splitlines() if line[:1].isdigit()]
+    assert len(numbered) > 10  # the invariants live before the first subheading
+    context = governance_context(real, surface="commit", touched_paths=["ouroboros/review.py"],
+                                 usable_window_tokens=200_000, delivery="packet")
+    assert context.inline_whole_documents[BODY_INVARIANTS_CHAPTER] == text
+    assert all(line in context.stable_inline for line in numbered)

@@ -180,7 +180,8 @@ def with_instruction(row: Mapping[str, Any], line: str) -> str:
     return f"{line}\n\n{instruction}" if line and instruction else line
 
 
-def view(row: Mapping[str, Any], *, drive_root: Optional[pathlib.Path] = None, record_misses: bool = False) -> Dict[str, Any]:
+def view(row: Mapping[str, Any], *, drive_root: Optional[pathlib.Path] = None, record_misses: bool = False,
+         lang: Optional[str] = None) -> Dict[str, Any]:
     """The notice a reader is sent with a row (its live frame, a history read): the stored fields plus ``line``, the
     assembled phrase and step in the install's language. ``{}`` for a row without a notice. Only the send passes
     ``record_misses``; a read (history, search, an operation) neither writes nor wakes the generator."""
@@ -188,7 +189,7 @@ def view(row: Mapping[str, Any], *, drive_root: Optional[pathlib.Path] = None, r
     if not notice:
         return {}
     try:
-        notice["line"] = notice_line(row, drive_root=drive_root, record_misses=record_misses)
+        notice["line"] = notice_line(row, lang, drive_root=drive_root, record_misses=record_misses)
     except Exception:  # a translation fault never holds the row: the English it was written in stays its line
         log.debug("host notice line not assembled; the stored words stand", exc_info=True)
         notice["line"] = notice_line(row, "")

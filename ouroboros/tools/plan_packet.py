@@ -29,7 +29,8 @@ the checklist section is delivered, not paraphrased.
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping, Optional, Sequence
+import pathlib
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 
 class PlanPacketError(ValueError):
@@ -92,6 +93,31 @@ _ROLE = (
 _PLAN_MARKER = "## THE PLAN"
 
 
+def body_governance(system_root: Any, read_text: Callable[[pathlib.Path, str], str]) -> dict:
+    """A body plan's pack sources from ONE capture, for packet and retrieving seats alike: BIBLE, the
+    composed Architecture with the paths of the very chapters it composed, and the DESIGN heading map.
+    A book that cannot be assembled is a typed ``PlanPacketError``, never an empty or entrypoint-only pack."""
+    from ouroboros.context_layout import design_navigation
+    from ouroboros.reference_books import compose_book, load_reference_book
+    from ouroboros.tools.governance_module_rows import domains_index
+
+    root = pathlib.Path(system_root)
+    try:
+        book = load_reference_book(root, "architecture")
+    except (OSError, ValueError, KeyError) as exc:
+        raise PlanPacketError(f"a body plan's pack requires ARCHITECTURE.md; its book could not be assembled ({exc})"
+                              ) from exc
+    return {"bible_text": read_text(root, "BIBLE.md") or None, "architecture_text": compose_book(book) or None,
+            "bible_locator": str(root / "BIBLE.md"), "architecture_locator": str(root / "docs" / "ARCHITECTURE.md"),
+            # The reader's own path form: native separators, so a Windows seat is handed a path it can open.
+            "architecture_chapter_locators": tuple(str(root.joinpath(*chapter.source_path.split("/")))
+                                                   for chapter in book.chapters),
+            "design_nav_map": design_navigation(read_text(root, "docs/DESIGN.md") or None,
+                                                source=str(root / "docs/DESIGN.md")),
+            # The book keeps no module tree: a packet seat gets the domain index (a retrieving seat calls the lookup).
+            "domains_table": domains_index(root)}
+
+
 def build_stable_prompt(
     *,
     checklist_section: str,
@@ -100,6 +126,7 @@ def build_stable_prompt(
     architecture_text: Optional[str] = None,
     bible_locator: str = "BIBLE.md",
     architecture_locator: str = "docs/ARCHITECTURE.md",
+    architecture_chapter_locators: Sequence[str] = (),
     governance_by_retrieval: bool = False,
     design_nav_map: Optional[str] = None,
     domains_table: Optional[str] = None,
@@ -121,12 +148,17 @@ def build_stable_prompt(
         if not architecture_text:
             raise PlanPacketError("a body plan's pack requires ARCHITECTURE.md; none supplied")
         if governance_by_retrieval:
+            # The entrypoint of a chaptered book is its map and membership list; the book is its chapters.
+            chapters = "".join(f"- `{locator}`\n" for locator in architecture_chapter_locators)
             parts.append(
                 "## Governance pack (this plan touches Ouroboros's own body) — MANDATORY FULL READS\n\n"
                 "You are a retrieving participant: before judging, read BOTH documents in full with your own "
                 f"tools — the constitution `{str(bible_locator or 'BIBLE.md').strip()}` and the architecture "
-                f"reference `{str(architecture_locator or 'docs/ARCHITECTURE.md').strip()}`. A packet participant "
-                "receives them inline; you receive them by retrieval (same pack, same authority).\n\n---\n"
+                f"reference `{str(architecture_locator or 'docs/ARCHITECTURE.md').strip()}`"
+                + (", whose text is its entrypoint plus every chapter listed below" if chapters else "")
+                + ". A packet participant receives them inline; you receive them by retrieval (same pack, same "
+                "authority).\n" + (f"\nArchitecture chapters, in book order:\n{chapters}" if chapters else "")
+                + "\n---\n"
             )
         else:
             parts.append(f"## BIBLE.md (constitution — this plan touches Ouroboros's own body)\n\n{bible_text}\n\n---\n")

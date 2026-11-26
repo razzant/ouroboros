@@ -225,7 +225,7 @@ def _load_queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
 _SNAPSHOT_OWNERSHIP_FRESH_SEC = QUEUE_ALIVE_FRESH_SEC
 
 
-def queue_snapshot_observation(snapshot: Dict[str, Any], *, boot: bool = False) -> Dict[str, Any]:
+def queue_snapshot_observation(snapshot: Dict[str, Any], *, boot: bool = False, now=None) -> Dict[str, Any]:
     """Date the existing queue observation, without asserting current capacity.
 
     Context, scheduling receipts and cancellation observations share the same
@@ -244,7 +244,7 @@ def queue_snapshot_observation(snapshot: Dict[str, Any], *, boot: bool = False) 
         stamped = (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
     except (TypeError, ValueError, OverflowError, OSError):
         return observation
-    age = time.time() - stamped
+    age = (time.time() if now is None else now) - stamped
     fresh = age <= _SNAPSHOT_OWNERSHIP_FRESH_SEC
     return {**observation, "age_sec": round(age, 3), "fresh": fresh,
             "freshness": "fresh" if fresh else "stale"}
@@ -296,8 +296,7 @@ def execution_owner_record(drive_root: Any, task: Dict[str, Any], kind: str) -> 
 
 @lru_cache(maxsize=64)
 def _resolved_root(root: str) -> pathlib.Path:
-    """A data root's resolved path, once per process: a page observes each of its tasks, and
-    resolving walks every component of the path (an ``lstat`` each, a GIL hand-off each)."""
+    """Avoid a walk of every path component for each task on a page."""
     return pathlib.Path(root).resolve()
 
 
@@ -343,7 +342,8 @@ def task_execution_observation(
         return observation
     snapshot = queue_snapshot if queue_snapshot is not None else (
         reads.queue_snapshot(drive_root) if reads is not None else _load_queue_snapshot(root))
-    queue_seen = queue_snapshot_observation(snapshot)
+    live = getattr(reads, "history_live", None)
+    queue_seen = queue_snapshot_observation(snapshot, now=None if live is None else live["epoch"])
     queued, _task = (reads.queue_task_status(drive_root, tid) if reads is not None and queue_snapshot is None
                      else _queue_task_status(snapshot, tid))
     # The queue never owns a Presence turn's carried body: it runs in a conversation-lane carrier (or the
@@ -355,19 +355,29 @@ def task_execution_observation(
     if queue_seen["fresh"] and queued in {STATUS_RUNNING, STATUS_SCHEDULED} and (kind != "presence" or not carried):
         return {**observation, **queue_seen, "kind": "pooled", "state": "active",
                 "reason": "queue_ownership", "status": queued}
+    if local := _local_execution_kind(root, tid, live):
+        return {**observation, "kind": local, "state": "active", "source": f"local_{local}", "reason": "local_execution"}
+    return {**observation, "queue_snapshot": queue_seen}
+
+
+def _local_execution_kind(root, tid, live):
+    if live is not None:
+        if [str(root), tid] in live["presence"] or (str(root), tid) in live["presence"]:
+            return "presence"
+        return "direct" if live["direct"].get(tid) == str(root) else ""
     try:
         from ouroboros.presence_runner import presence_turn_is_live
         from supervisor.active_activity import get_direct_activity_registry
 
         if presence_turn_is_live(tid, drive_root=root):
-            return {**observation, "kind": "presence", "state": "active", "source": "local_presence", "reason": "local_execution"}
+            return "presence"
         entry = get_direct_activity_registry().get(tid)
         actor_root = getattr(getattr(getattr(entry, "actor", None), "env", None), "drive_root", None)
         if actor_root is not None and _resolved_root(str(actor_root)) == root:
-            return {**observation, "kind": "direct", "state": "active", "source": "local_direct", "reason": "local_execution"}
+            return "direct"
     except Exception:
         pass  # absence of a positive witness is never a negative observation
-    return {**observation, "queue_snapshot": queue_seen}
+    return ""
 
 
 def task_has_live_queue_ownership(drive_root: pathlib.Path, task_id: str) -> bool:
@@ -551,10 +561,10 @@ def _is_stale_orphan_running_task(
     result: Dict[str, Any],
     events_index: Optional[_EventsTailIndex] = None,
     queue_snapshot: Optional[Dict[str, Any]] = None,
-    *, boot: bool = False,
+    *, boot: bool = False, reads=None,
 ) -> bool:
     observation = task_execution_observation(
-        drive_root, {**result, "task_id": task_id}, queue_snapshot=queue_snapshot,
+        drive_root, {**result, "task_id": task_id}, queue_snapshot=queue_snapshot, reads=reads,
     )
     if observation["state"] == "active" or observation["kind"] != "pooled":
         return False
@@ -586,7 +596,9 @@ def _is_stale_orphan_running_task(
         heartbeat = float((parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp())
     except Exception:
         pass
-    if heartbeat and time.time() - heartbeat < _ORPHAN_RUNNING_GRACE_SECONDS:
+    live = getattr(reads, "history_live", None)
+    now = time.time() if live is None else live["epoch"]
+    if heartbeat and now - heartbeat < _ORPHAN_RUNNING_GRACE_SECONDS:
         return False
     # A stale/missing snapshot cannot prove that a pooled owner is gone (the
     # GR7-1a polarity ``task_has_live_queue_ownership`` already uses).  The
@@ -594,11 +606,8 @@ def _is_stale_orphan_running_task(
     # separate positive recovery fact exists.  A batch caller passes the
     # snapshot it already read, like ``events_index`` above.
     try:
-        snapshot = (
-            queue_snapshot if isinstance(queue_snapshot, dict)
-            else _load_queue_snapshot(pathlib.Path(drive_root))
-        )
-        if not queue_snapshot_observation(snapshot, boot=boot)["fresh"]:
+        snapshot = _load_queue_snapshot(drive_root) if queue_snapshot is None else queue_snapshot
+        if not queue_snapshot_observation(snapshot, boot=boot, now=now)["fresh"]:
             return False
     except Exception:
         return False
@@ -627,22 +636,21 @@ def _project_lost_attempt(merged: Dict[str, Any], reason: str, prior_status: str
 
 
 def _presence_attempt_lost(drive_root: pathlib.Path, result: Dict[str, Any],
-                           queue_snapshot: Optional[Dict[str, Any]] = None) -> bool:
-    """A non-terminal row of a Presence turn whose attempt can no longer change.
-
-    The positive end facts are one rule shared with the Host work view
-    (``presence_recovery.attempt_ended``); age, absence and worker boots prove nothing.
-    """
+                           queue_snapshot: Optional[Dict[str, Any]] = None, *, reads=None) -> bool:
+    """Only positive Host end facts settle a turn.
+    Age, absence and worker boots prove nothing."""
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
     if (str(result.get("status") or "").lower() not in {STATUS_RUNNING, STATUS_INTERRUPTED}
             or not isinstance(metadata.get("presence"), dict)):
         return False
-    observation = task_execution_observation(drive_root, result, queue_snapshot=queue_snapshot)
+    observation = task_execution_observation(drive_root, result, queue_snapshot=queue_snapshot, reads=reads)
     if observation["kind"] != "presence" or observation["state"] == "active":
         return False
-    from ouroboros.presence_recovery import attempt_ended
-
-    return attempt_ended(result, drive_root)
+    from ouroboros.presence_recovery import attempt_ended, copied_queue_row
+    live = getattr(reads, "history_live", None)
+    return attempt_ended(result, drive_root) if live is None else attempt_ended(
+        result, drive_root, locally_live=False, observer=live["controller"],
+        queue_row=lambda root, tid: copied_queue_row(root, tid, live["custody_root"], live["queue_custody"]))
 
 
 def _normalize_workspace_artifact_status(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -1137,7 +1145,7 @@ def effective_task_result(
                 if not merged.get(key) and queue_task.get(key):
                     merged[key] = queue_task.get(key)
         else:
-            if _presence_attempt_lost(pathlib.Path(drive_root), merged, queue_snapshot):
+            if _presence_attempt_lost(pathlib.Path(drive_root), merged, queue_snapshot, reads=reads):
                 # The queue never owns a Presence turn; its own end fact decides, as the work view does.
                 terminal_projection = "presence_attempt_lost"
                 _project_lost_attempt(merged, PRESENCE_ATTEMPT_LOST, parent_status, PRESENCE_ATTEMPT_LOST_NOTICE)
@@ -1157,7 +1165,7 @@ def effective_task_result(
                     )
             elif _is_stale_orphan_running_task(
                 pathlib.Path(drive_root), task_id, merged, _events_index,
-                queue_snapshot=queue_snapshot, boot=_boot,
+                queue_snapshot=queue_snapshot, boot=_boot, reads=reads,
             ):
                 terminal_projection = "pooled_worker_restart"
                 orphan_reason = (
