@@ -505,7 +505,8 @@ def test_a_wrong_shaped_manifest_is_a_named_error_and_a_refused_prefix_is_incomp
     (tmp_path / "ouroboros").mkdir()
     for wrong, named in (("modules = [1, 2]", r"section \[modules\] must be a table"),
                          ("modules = []", r"section \[modules\] must be a table"),
-                         ("[graph]\nallowed = 7", r"\[graph\] allowed must be a list")):
+                         ("[graph]\nallowed = 7", r"\[graph\] allowed must be a list"),
+                         ('[references]\nD01 = "docs/x.md"', r"\[references\] D01 must be a list")):
         (tmp_path / "ouroboros" / "domains.toml").write_text(wrong + "\n", encoding="utf-8")
         with pytest.raises(ValueError, match=named):
             load_domain_manifest(tmp_path)

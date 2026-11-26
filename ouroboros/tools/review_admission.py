@@ -183,9 +183,10 @@ def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
     slot_limits = {key: _slot_input_limit(index) for index, key in enumerate(keys)}
     input_limit = _rv._quorum_input_token_limit(keys, slot_limits)
     prompt, stable_prefix_len = assemble(current_files_section, diff_text)
-    if input_limit and estimate_tokens(prompt) > input_limit and getattr(assemble, "compact_optional_evidence", None):
-        assemble.compact_optional_evidence()
-        prompt, stable_prefix_len = assemble(current_files_section, diff_text)
+    for give_way in getattr(assemble, "optional_evidence", ()):  # in order, each only while the prompt is over
+        if input_limit and estimate_tokens(prompt) > input_limit:
+            give_way()
+            prompt, stable_prefix_len = assemble(current_files_section, diff_text)
     if input_limit and estimate_tokens(prompt) > input_limit:
         # Cold-start density rung: every api slot the full prompt overflows and
         # whose route has no fresh witness gets ONE bounded probe on a slice of
@@ -712,9 +713,7 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
     from ouroboros.review_history import review_dispute_history
 
     def _field(name: str, default: Any = "") -> Any:
-        if isinstance(seat, dict):
-            return seat.get(name, default)
-        return getattr(seat, name, default)
+        return seat.get(name, default) if isinstance(seat, dict) else getattr(seat, name, default)
 
     layer = str(layer or getattr(frozen_subject.spec, "layer", "") or "body")
     review_root = pathlib.Path(frozen_subject.review_root)
@@ -734,8 +733,7 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
                                             task_id=task_id)
     history_section = review_history_brief(review_history, drive_root=drive_root,
                                            repo_root=frozen_subject.spec.root, task_id=task_id)
-    model, slot_id = str(_field("model") or ""), str(_field("slot_id") or "")
-    route = _field("route", None)
+    model, slot_id, route = str(_field("model") or ""), str(_field("slot_id") or ""), _field("route", None)
     delegated = str(getattr(route, "value", route) or "") == "agent_session"
     # The gate's own subject (the system repository's index at HEAD) is the one
     # subject read on its live root; every other frozen subject hands its own
@@ -757,10 +755,10 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
                 "delivery": "retrieving", "manifest": manifest, "stable_prefix_len": 0}
     # A packet seat: the assembled change evidence, fit to the seat's window.
     from ouroboros.tools.review_file_pack import build_touched_file_pack, pack_omission_note, triad_pack_exclusions
+    from ouroboros.tools.governance_context import yield_module_rows
     from ouroboros.review_words import section_budget
 
     words = frozen_subject.review_words
-
     touched_paths = [path for _status, path in frozen_subject.name_status] if frozen_subject.name_status else [
         p.strip() for p in str(_rv.run_cmd(["git", "diff", "--cached", "--name-only"], cwd=review_root) or "").splitlines() if p.strip()]
     slot = ReviewSlot(slot_id=slot_id, model=model, session_profile=str(_field("session_profile") or ""),
@@ -769,7 +767,7 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
     governance = _rv._triad_governance_context(
         None, touched_paths, checklist_section, [model], [slot], governance_root=governance_root, layer=layer,
         subject_root=review_root if layer != "body" else None, review_words=words,
-        change_status={path: status for status, path in frozen_subject.name_status or ()})
+        frozen=frozen_subject)
     managed = frozen_subject.managed
     exclude_paths, exclusion_note = (set(), "") if managed is not None else triad_pack_exclusions(
         review_root, touched_paths, prefix_texts=dict(governance.inline_whole_documents))
@@ -790,11 +788,13 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
             changed_files=changed, rebuttal_section=rebuttal_section, review_history_section=history_section,
             task_evidence_section=task_evidence_section, words_section=words_section)
 
+    def _yield_rows():
+        nonlocal governance
+        governance = yield_module_rows(governance)
     def _compact_words():
         nonlocal words_section
-        words_section = words.omission()
-    if words_section:
-        _assemble.compact_optional_evidence = _compact_words
+        words_section = words.omission() if words_section else ""
+    _assemble.optional_evidence = (_yield_rows, _compact_words)
 
     prompt, stable_len, fit_error = fit_triad_prompt(
         [model], _assemble, files_section, frozen_subject.diff_text, changed, str(review_root), ctx=None,

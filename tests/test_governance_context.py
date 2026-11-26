@@ -456,93 +456,53 @@ def test_retrieving_triad_receives_shared_tiers_in_its_actual_task(repo, monkeyp
     assert 'read_file(root="system_repo"' in task
 
 
-# --- the installed domains of the touched paths (the book keeps no module tree) ----------------------------
+# --- owner rows of the touched paths (the book keeps no module tree) ----------------------------------------
 
-def _with_manifest(repo: pathlib.Path, neighbours: int = 30) -> pathlib.Path:
+def _with_manifest(repo: pathlib.Path) -> pathlib.Path:
     (repo / "ouroboros").mkdir(exist_ok=True)
-    rows = {"ouroboros/project_dialogue.py": "The touched module's own lead."}
-    rows.update({f"ouroboros/n{i:02d}.py": f"Neighbour {i:02d} " + "words " * 25 for i in range(neighbours)})
-    for path, lead in rows.items():
-        (repo / path).write_text(f'"""{lead}"""\n', encoding="utf-8", newline="\n")
+    for name in ("project_dialogue", "other"):
+        (repo / "ouroboros" / f"{name}.py").write_text(f'"""{name} lead."""\n', encoding="utf-8")
     (repo / "ouroboros" / "domains.toml").write_text(
-        '[domains]\nD01 = "Agent core"\n\n[references]\nD01 = ["docs/architecture/01-core.md"]\n\n[modules]\n'
-        + "".join(f'"{path}" = "D01"\n' for path in rows), encoding="utf-8", newline="\n")
+        '[domains]\nD01 = "Agent core"\n\n[references]\nD01 = ["docs/architecture/01-core.md"]\n'
+        '"web/" = ["docs/web.md"]\n\n[modules]\n"ouroboros/project_dialogue.py" = "D01"\n"ouroboros/other.py" = "D01"\n',
+        encoding="utf-8", newline="\n")
     return repo
 
 
-HEAD = "- ouroboros/domains.toml — D01: Agent core; 31 files; manuals: docs/architecture/01-core.md"
+ROW = ("- ouroboros/project_dialogue.py (touched in this change; domain D01: Agent core; "
+       "manuals: docs/architecture/01-core.md)")
 SECTION = "The loop mentions ouroboros/project_dialogue.py."
-TOUCHED = "- ouroboros/project_dialogue.py (D01; touched in this change)"
 
 
-def _neighbour_cost(rows, count):
-    from ouroboros.tools.governance_context import _render
-    from ouroboros.tools.governance_module_rows import NEIGHBOUR_ROWS_PATH, neighbour_text
-
-    return estimate_tokens(_render(NEIGHBOUR_ROWS_PATH, neighbour_text(rows.neighbours[:count])))
-
-
-def _tier2(repo):
-    from ouroboros.tools.governance_context import _render
-
-    roomy = _context(repo)
-    return sum(estimate_tokens(_render(title, text)) for title, text in roomy.inline_sections
-               if title in {row["path"] for row in _rows(roomy, "inline", tier=2)})
-
-
-def _window(tokens: int) -> int:
-    return int(tokens / REVIEW_GOVERNANCE_INLINE_SHARE) + 1
-
-
-def test_the_domain_block_precedes_the_sections_naming_the_change_and_neighbours_follow(repo):
-    from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH, NEIGHBOUR_ROWS_PATH
+def test_one_owner_row_per_touched_path_precedes_the_sections_and_names_no_other_module(repo):
+    from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH
 
     context = _context(_with_manifest(repo))
     text = context.selected_inline
-    assert text.count(HEAD) == 1 and text.count(TOUCHED) == 1
-    assert text.index(HEAD) < text.index(SECTION) < text.index("- ouroboros/n00.py — D01: Neighbour 00")
-    assert "The touched module's own lead." not in text  # the change carries the touched file, not a stale lead
-    assert [p for p in _paths(context, "inline") if p in (MODULE_ROWS_PATH, NEIGHBOUR_ROWS_PATH)] == [
-        MODULE_ROWS_PATH, NEIGHBOUR_ROWS_PATH]
-    assert "Module rows of the touched paths were NOT delivered" not in context.navigation
-    assert "neighbour module row(s) were NOT delivered" not in context.navigation
+    assert text.count(ROW) == 1 and text.index(ROW) < text.index(SECTION)
+    assert "ouroboros/other.py" not in text and "lead." not in text  # no other module of the domain, no lead
+    assert [row["disposition"] for row in context.manifest if row["path"] == MODULE_ROWS_PATH] == ["inline"]
+    starved = _context(repo, usable_window_tokens=0)  # the share does not decide the rows: the fit ladder does
+    assert ROW in starved.selected_inline and SECTION not in starved.selected_inline
     retrieving = _context(repo, delivery="retrieving")  # a reviewer with tools calls the lookup itself
-    assert not [p for p in _paths(retrieving) if p in (MODULE_ROWS_PATH, NEIGHBOUR_ROWS_PATH)]
+    assert MODULE_ROWS_PATH not in _paths(retrieving)
 
 
-def test_each_notice_speaks_only_for_its_own_block_and_neighbours_give_way_from_the_far_end(repo):
-    from ouroboros.tools.governance_module_rows import (DOMAINS_NOT_DELIVERED, MODULE_ROWS_PATH, module_rows,
-                                                        NEIGHBOURS_NOT_DELIVERED)
-    from ouroboros.tools.governance_context import _render
+def test_each_row_carries_its_git_change_both_sides_of_a_rename_and_a_non_ascii_name(repo):
+    from ouroboros.tools.governance_module_rows import module_rows
 
     _with_manifest(repo)
-    many = ["ouroboros/project_dialogue.py", *(f"ouroboros/n{i:02d}.py" for i in range(3, 30))]
-    rows = module_rows(repo, many)
-    assert len(rows.neighbours) == 3  # n00..n02 remain
-    domains = estimate_tokens(_render(MODULE_ROWS_PATH, rows.domains))
-    neighbours = _neighbour_cost(rows, 3)
-    assert neighbours + 40 < domains
-    tier2 = _tier2(repo)
-    section = estimate_tokens(_render("docs/architecture/01-core.md#Core loop", SECTION))
-    # Middle: the domain block does not fit, the section and the neighbours do; only the domain block's notice.
-    middle = _context(repo, touched_paths=many, usable_window_tokens=_window(tier2 + section + neighbours + 40))
-    assert "- ouroboros/n00.py — D01: Neighbour 00" in middle.selected_inline
-    assert DOMAINS_NOT_DELIVERED in middle.navigation and "neighbour module row(s)" not in middle.navigation
-    # Both extremes.
-    roomy = _context(repo, touched_paths=many)
-    assert "NOT delivered: the inline share" not in roomy.navigation
-    starved = _context(repo, touched_paths=many, usable_window_tokens=0)
-    assert DOMAINS_NOT_DELIVERED in starved.navigation and NEIGHBOURS_NOT_DELIVERED.format(
-        missing=3, total=3) in starved.navigation
-    # A share for the domain block, the section and one neighbour: the nearest one stays, the rest are counted.
-    one = _context(repo, touched_paths=["ouroboros/project_dialogue.py"])
-    full = module_rows(repo, ["ouroboros/project_dialogue.py"])
-    first = (estimate_tokens(_render(MODULE_ROWS_PATH, full.domains))
-             + estimate_tokens(_render("docs/architecture/01-core.md#Core loop", SECTION)))
-    cut = _context(repo, usable_window_tokens=_window(tier2 + first + _neighbour_cost(full, 1) + 10))
-    assert "- ouroboros/n00.py — D01" in cut.selected_inline and "- ouroboros/n01.py" not in cut.selected_inline
-    assert NEIGHBOURS_NOT_DELIVERED.format(missing=29, total=30) in cut.navigation
-    assert "NOT delivered: the inline share" not in one.navigation
+    rows = module_rows(repo, ["ignored.py"], [("M", "ouroboros/project_dialogue.py", ""),
+                                              ("R091", "ouroboros/renamed.py", "ouroboros/other.py"),
+                                              ("A", "web/caf\u00e9.js", ""), ("D", "docs/gone.md", "")])
+    assert rows.count == 4 and rows.text.splitlines()[1:] == [
+        "- docs/gone.md (deleted in this change; the installed map has no owner for it)",
+        "- ouroboros/project_dialogue.py (modified in this change; domain D01: Agent core; "
+        "manuals: docs/architecture/01-core.md)",
+        "- ouroboros/renamed.py (renamed from ouroboros/other.py in this change; domain D01: Agent core; "
+        "manuals: docs/architecture/01-core.md)",
+        "- web/caf\u00e9.js (added in this change; surface web/; manuals: docs/web.md)"]
+    assert "ignored.py" not in rows.text  # the change set, when the seam has it, is the one path set
 
 
 def test_an_unreadable_installed_manifest_is_a_typed_notice_not_an_error_text(repo):
@@ -550,7 +510,7 @@ def test_an_unreadable_installed_manifest_is_a_typed_notice_not_an_error_text(re
 
     context = _context(repo)
     rows = [row for row in context.manifest if row["path"] == MODULE_ROWS_PATH]
-    assert [row["disposition"] for row in rows] == ["navigation"] and "module rows unavailable" in rows[0]["reason"]
+    assert [row["disposition"] for row in rows] == ["navigation"] and "owner rows unavailable" in rows[0]["reason"]
     assert UNAVAILABLE in context.navigation and "Errno" not in context.navigation
     (repo / "ouroboros").mkdir(exist_ok=True)
     for wrong in ("modules = []\n", "[graph]\nallowed = 7\n"):  # wrong container types, valid TOML
@@ -558,65 +518,32 @@ def test_an_unreadable_installed_manifest_is_a_typed_notice_not_an_error_text(re
         assert UNAVAILABLE in _context(repo).navigation
 
 
-def test_two_domains_keep_each_path_under_its_own_owner(repo):
-    def owned(first):
-        (repo / "ouroboros").mkdir(exist_ok=True)
-        for name in "abcdef":
-            (repo / "ouroboros" / f"{name}.py").write_text(f'"""Lead of {name}."""\n', encoding="utf-8")
-        (repo / "ouroboros" / "domains.toml").write_text(
-            '[domains]\nD01 = "First"\nD02 = "Second"\n[references]\nD01 = ["docs/first.md"]\n'
-            'D02 = ["docs/second.md"]\n[modules]\n'
-            + "".join(f'"ouroboros/{n}.py" = "{"D01" if n in first else "D02"}"\n' for n in "abcdef"),
-            encoding="utf-8")
-        return _context(repo, touched_paths=[f"ouroboros/{n}.py" for n in "abcd"]).selected_inline
+def test_yielded_rows_leave_every_other_byte_and_say_so_in_counted_words_and_in_the_manifest(repo):
+    from ouroboros.tools.governance_context import _render, yield_module_rows
+    from ouroboros.tools.governance_module_rows import MODULE_ROWS_PATH, YIELD_REASON, YIELDED
 
-    one, two = owned("aef"), owned("abe")
-    assert "- ouroboros/b.py (D02; touched in this change)" in one and "- ouroboros/f.py — D01: Lead of f." in one
-    assert "- ouroboros/b.py (D01; touched in this change)" in two and "- ouroboros/f.py — D02: Lead of f." in two
-    assert one != two
-
-
-def test_a_missing_lead_says_why_and_a_web_head_counts_what_it_leaves_out(repo):
-    _with_manifest(repo, neighbours=2)
-    (repo / "ouroboros" / "n00.py").unlink()  # listed in the manifest, not on disk
-    (repo / "ouroboros" / "n01.py").write_text("x = 1\n", encoding="utf-8")  # read, no docstring
-    (repo / "web" / "modules").mkdir(parents=True)
-    (repo / "web" / "tests").mkdir(parents=True)
-    (repo / "web" / "app.js").write_text("// The app shell.\n", encoding="utf-8")
-    (repo / "web" / "tests" / "app.test.js").write_text("// A test.\n", encoding="utf-8")
-    text = _context(repo, touched_paths=["ouroboros/project_dialogue.py", "web/app.js"]).selected_inline
-    assert "- ouroboros/n00.py (D01; the installed file could not be read)" in text
-    assert "- ouroboros/n01.py (D01; no docstring or header lead)" in text
-    assert "- ouroboros/domains.toml — web: web folder; 1 files, 1 more under tests/ not listed" in text
-
-
-def test_root_modules_and_nested_web_folders_give_each_path_once(repo):
-    _with_manifest(repo, neighbours=1)
-    manifest = (repo / "ouroboros" / "domains.toml").read_text(encoding="utf-8")
-    (repo / "ouroboros" / "domains.toml").write_text(manifest + '"server.py" = "D01"\n', encoding="utf-8")
-    (repo / "server.py").write_text('"""The server entry point."""\n', encoding="utf-8")
-    (repo / "web" / "modules").mkdir(parents=True)
-    (repo / "web" / "app.js").write_text("// The app shell.\n", encoding="utf-8")
-    for name in ("a", "b"):
-        (repo / "web" / "modules" / f"{name}.js").write_text(f"// Module {name}.\nexport const x = 1;\n",
-                                                             encoding="utf-8")
-    text = _context(repo, touched_paths=["server.py", "web/app.js"]).selected_inline
-    assert "- server.py (D01; touched in this change)" in text and "no owner" not in text
-    # A top-level web change keeps its nested neighbourhood, each path once.
-    assert text.count("- web/modules/a.js — web: Module a.") == 1 and text.count("web/modules/b.js") == 1
-    both = _context(repo, touched_paths=["web/app.js", "web/modules/a.js"]).selected_inline
-    assert both.count("web/modules/b.js") == 1 and "- web/modules/a.js (web/modules; touched in this change)" in both
+    context = _context(_with_manifest(repo))
+    rows_block = next(_render(t, x) for t, x in context.inline_sections if t == MODULE_ROWS_PATH)
+    given = yield_module_rows(context)
+    assert ROW not in given.selected_inline and SECTION in given.selected_inline
+    assert given.selected_inline == context.selected_inline.replace(rows_block + "\n\n", "")
+    assert given.navigation == context.navigation + "\n\n" + YIELDED.format(count=1)
+    assert [(r["disposition"], r["reason"]) for r in given.manifest if r["path"] == MODULE_ROWS_PATH] == [
+        ("navigation", YIELD_REASON)]
+    assert context.manifest != given.manifest and ROW in context.selected_inline  # the original is not mutated
+    assert yield_module_rows(given) is given and given.stable_inline == context.stable_inline
 
 
 def test_every_fixed_text_of_the_rows_is_counted_and_only_where_a_packet_seat_sits():
-    """Each template, every change word included, is in the packet contract material; removing any one from
-    ``contract_material`` turns this red. A pool with no packet seat counts none of them."""
+    """Each template, every change word and the empty-manuals word included, is in the packet contract material;
+    removing any one from ``contract_material`` turns this red. A pool with no packet seat counts none of them."""
     from ouroboros.tools import governance_module_rows as gmr
     from ouroboros.tools.governance_context import BODY_LAYER, PACKET_DELIVERY, RETRIEVING_DELIVERY, navigation_material
 
     packet = "\n".join(navigation_material(BODY_LAYER, PACKET_DELIVERY))
-    words = [*gmr.CHANGES.values(), gmr.TOUCHED]
-    expected = [gmr.placeholders(t, change=w) for t in gmr.TEMPLATES for w in (words if "{change}" in t else [""])]
+    words = [gmr.placeholders(word) for word in [*gmr.CHANGES.values(), gmr.TOUCHED]]
+    expected = [gmr.placeholders(t, change=w, manuals=m) for t in gmr.TEMPLATES
+                for w in (words if "{change}" in t else [""]) for m in ("⟨manuals⟩", gmr.NO_MANUALS)]
     assert expected and all(text in packet for text in expected), [t for t in expected if t not in packet]
     retrieving = "\n".join(navigation_material(BODY_LAYER, RETRIEVING_DELIVERY))
     assert not any(text in retrieving for text in expected)
@@ -627,16 +554,17 @@ def test_every_line_a_packet_seat_gets_from_the_rows_is_one_of_the_templates(rep
 
     from ouroboros.tools import governance_module_rows as gmr
 
-    _with_manifest(repo, neighbours=2)
-    (repo / "ouroboros" / "n00.py").write_text("x = 1\n", encoding="utf-8")
-    rows = gmr.module_rows(repo, ["ouroboros/project_dialogue.py", "ouroboros/n01.py", "ouroboros/gone.py"],
-                           status={"ouroboros/n01.py": "M", "ouroboros/gone.py": "D"})
+    _with_manifest(repo)
+    (repo / "ouroboros" / "domains.toml").write_text(
+        (repo / "ouroboros" / "domains.toml").read_text(encoding="utf-8").replace('"web/" = ["docs/web.md"]', '"web/" = []'),
+        encoding="utf-8")
+    rows = gmr.module_rows(repo, [], [("M", "ouroboros/other.py", ""), ("D", "ouroboros/gone.py", ""),
+                                      ("C100", "web/b.js", "web/a.js"), ("T", "x.py", "")])
     shapes = [re.compile("^" + ".+".join(re.escape(part) for part in re.split(r"\{\w+\}", t)) + "$")
               for t in gmr.TEMPLATES]
-    lines = [*rows.domains.splitlines(), *gmr.neighbour_text(rows.neighbours).splitlines()]
+    lines = rows.text.splitlines()
     assert lines and all(any(shape.match(line) for shape in shapes) for line in lines), lines
-    assert "- ouroboros/n01.py (D01; modified in this change)" in lines
-    assert "- ouroboros/gone.py (deleted in this change; the installed map has no owner for it)" in lines
+    assert "- web/b.js (copied from web/a.js in this change; surface web/; manuals: none named)" in lines
 
 
 # --- the body's cross-cutting invariants and chapter openings -------------------
