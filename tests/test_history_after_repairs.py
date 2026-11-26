@@ -178,7 +178,7 @@ def test_held_rows_travel_packed_and_a_window_too_large_even_so_reads_on_without
     status, repaired = _read(tmp_path, page["after_cursor"])
     assert status == 200 and len(repaired["repairs"]) == 2 + 41
     _task(tmp_path, "asker", "running", 0)
-    monkeypatch.setattr(history_paging, "_CURSOR_CHARS", len(plain["after_cursor"]) + 4)
+    monkeypatch.setattr(history_paging, "_CURSOR_CHARS", len(plain["after_cursor"]) + 4 + history_paging._REQUEST_LINE_RESERVE)
     encode = history_paging.encode_cursor  # rows that do not fit even packed: none held, the arrivals go on
     monkeypatch.setattr(history_paging, "encode_cursor", lambda value, packed=False: "z" * 10_000 if packed else encode(value))
     status, page = _read(tmp_path)
@@ -569,3 +569,35 @@ def test_a_child_whose_row_names_no_lineage_and_its_parent_are_never_held(tmp_pa
           root_task_id="parent")
     status, refused = _read(tmp_path, page["after_cursor"])
     assert (status, refused["detail"]) == (409, "task_settled")
+
+
+# The longest request line a client adds to a cursor (``api_client.chatHistory``): the history path, a place's 16-digit
+# chat id, ``repair=settled`` and the four read tags (``history_attribution``: reason, cursor kind, decision, a detail of
+# at most 48 letters).
+_LONGEST_QUERY = ("GET /api/chat/history?chat_id=9007199254740991&cursor={}&repair=settled&reason=bound_recheck"
+                  "&mode=after&decision=base_superseded&detail=" + "d" * 48 + " HTTP/1.1")
+_REQUEST_LINE = 8190  # a common proxy's request-line limit (Apache ``LimitRequestLine``; nginx's 8 KiB buffer)
+
+
+def _many(root, first, count):
+    for index in range(first, first + count):
+        task = f"t{index:063x}"  # as long as a task id may be
+        _task(root, task, "running", 0)
+        ds.append(root, "chat", {"ts": TS.format(0), "direction": "out", "chat_id": 1, "task_id": task, "text": "x"})
+
+
+def test_an_issued_arrivals_cursor_fits_a_request_line_with_its_longest_query(tmp_path):
+    _many(tmp_path, 0, 80)
+    _, small = _read(tmp_path, repair=False)
+    _many(tmp_path, 80, 1)
+    _, one_more = _read(tmp_path, repair=False)
+    step = len(one_more["after_cursor"]) - len(small["after_cursor"])  # each task adds the same versions entry
+    assert len(_LONGEST_QUERY.format(one_more["after_cursor"])) <= _REQUEST_LINE
+    room = _REQUEST_LINE - len(_LONGEST_QUERY.format(""))
+    more = (room - len(one_more["after_cursor"])) // step + 1  # the first window whose cursor would not leave room
+    assert len(one_more["after_cursor"]) + more * step <= history_paging._CURSOR_CHARS  # a token the old bound issued
+    _many(tmp_path, 81, more)
+    status, page = _read(tmp_path, repair=False)
+    assert status == 200 and page["page_cursor"] and "after_cursor" not in page, len(page.get("after_cursor") or "")
+    status, held = _read(tmp_path)  # held rows travel packed: whatever it issues fits as well
+    assert status == 200 and len(_LONGEST_QUERY.format(held.get("after_cursor") or "")) <= _REQUEST_LINE

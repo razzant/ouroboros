@@ -71,6 +71,10 @@ _CHRONOLOGICAL = ":reading-order"
 # Bound on an opaque cursor's length (a query parameter): an ``after`` cursor carries the versions
 # of the tasks its window shows, and a window too large to name them reads its newest page instead.
 _CURSOR_CHARS = 8192
+# What a cursor this server issues leaves of that bound (a read accepts the whole of it): a request line carrying it
+# stays within a common proxy's 8190 bytes with the longest path and query a client adds (a place's chat id,
+# ``repair`` and the read tags of ``history_attribution``, at most 256).
+_REQUEST_LINE_RESERVE = 8192 - 8190 + 256
 # Bound on a packed cursor's JSON once inflated: a cursor that fits the query bound never needs more.
 _UNPACKED_CURSOR_BYTES = 256 * 1024
 # A projection that failed part-way: the rows after the failing one are missing
@@ -916,9 +920,10 @@ def history_page_tokens(page, messages=(), reads=None):
                 "tasks": tasks, "newest": page.get("newest", ""), "lifecycle": lifecycle}
     # Held rows always travel packed (a request line stays short behind a proxy); too many even so: none held.
     after_cursor = encode_cursor({**arrivals, "held": held, "revised": page["revised"]}, packed=True) if held is not None else ""
-    if not after_cursor or len(after_cursor) > _CURSOR_CHARS:
+    issued = _CURSOR_CHARS - _REQUEST_LINE_RESERVE
+    if not after_cursor or len(after_cursor) > issued:
         after_cursor = encode_cursor(arrivals)
-    after_cursor = after_cursor if len(after_cursor) <= _CURSOR_CHARS else None
+    after_cursor = after_cursor if len(after_cursor) <= issued else None
     if page.get("after"):  # a read of what arrived after the window's last read: it never pages older
         if after_cursor is None:
             raise HistoryCursorError("history_delta_reset", detail="cursor_size")
