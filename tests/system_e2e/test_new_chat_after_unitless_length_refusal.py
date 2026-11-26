@@ -41,32 +41,34 @@ tool-less one that leads the first send or a differently capped retry included. 
 or the room's memory is not the owner's message. ``check_wire`` reads every room of every scenario that way, the
 negative control and stage R included.
 
-THREE FIXED LINES, one and the same number for baseline and candidate, each placed from what this stand has actually
-measured on the wire (the R1 review records of 2026-11-22, quoted beside each line below):
+TWO FIXED LINES, each placed from what this stand measured on the wire with the resident Body Map (26 Nov 2026, the
+whole books gone from every request; mock tokens):
 
-* ``enough`` (E) = 528,000, measured refused first sends 558,651 / 558,751 / 567,688 / 574,354 / 595,110 above it
-  and the measured accepted forms 430,172 / 436,294 (the cold walk) and 498,025 (the hinted first send) under it:
-  ~30,000 mock tokens of room on both sides. The memory carrier's own legal smaller form brings the request under
-  the line; the books stay whole.
-* ``maps`` (M) = 310,000, with the refused smaller Max form measured at 415,652 / 420,834 / 420,935 (105,000+ above)
-  and the maps rung measured at 157,140 / 162,498 (147,000+ below): both whole books and the smaller memory form are
-  refused; only the books' maps pass. (Measured before the resident Body Map retired the first-contact maps rung and
-  took the whole books out of every request; see ``THRESHOLD``: the lines are not re-priced yet. M now means: the
-  books rung, the Body Map at its parts, is A1's accepted rung, and A2 starts folded in Max, never in Low by
-  preference.)
-* ``none`` (N) = 100,000, below every measured form including the maps rung (157,140, i.e. 57,000+ above): nothing
-  legal passes, so nothing may be dropped to pass. Every room still sends, is refused and ends its turn ``failed``
-  (``agent_task_pipeline._durable_terminal_status``: the host's terminal for a size refusal no recovery undid).
+* ``enough`` (E) = 292,000, with the refused first sends measured at 311,211 (A1) and 326,074 (B1) above it and the
+  accepted forms at 273,483 (the hinted first send: 13 of 20 bodies, all 20 leads, the Body Map whole) and
+  173,251 / 187,424 (the cold walk) under it: 18,000+ mock tokens of room on both sides. The memory carrier's own
+  legal smaller form brings the request under the line; the Body Map stays whole.
+* ``none`` (N) = 100,000, below every measured form including the books rung, the Body Map at its parts (159,085 /
+  165,408 / 174,508, i.e. 59,000+ above): nothing legal passes, so nothing may be dropped to pass. Every room still
+  sends, is refused and ends its turn ``failed`` (``agent_task_pipeline._durable_terminal_status``: the host's
+  terminal for a size refusal no recovery undid).
+
+A third line, ``maps`` (M), stood here while whole books rode Max: it sat between the smaller Max form and the books'
+chapter maps, a rung that gave 250,000+ mock tokens. The books rung now gives the Body Map's own step, measured at
+7,838 mock tokens (173,246 -> 165,408), which is under ``CLEARANCE`` and under the spread this stand measures between
+two rooms' sends of one run (A1 against B1: 9,100 at that rung), so no fixed line can sit between those two forms for
+both rooms. What M witnessed is kept where sizes are exact, in the real in-process episode of
+``tests/test_context_refusal_passes.py::test_first_contact_preference_reaches_the_next_real_chat_request[maps]``: the
+books rung is the first accepted request of the walk, and the next fresh chat starts in Max with its tellings folded,
+never in Low by preference. N's walk below shows the same ladder on the wire, refused at every rung.
 
 ``CLEARANCE`` is asserted from the recorded sizes of every scenario's own run: at a scenario's FIXED line, no request
 that belongs to a turn may sit inside 10,000 mock tokens of it (stage R's line is derived from the run, so it is read
 from the same recorded sizes rather than guarded by this floor). The same stand measured up to 15,703 mock tokens of
 spread between two new chats' first sends in ONE run (558,651 against 574,354), so a larger floor would be a threshold
 cut by hope rather than by evidence — and a line that drifts onto a form is exactly what this check refuses to hide.
-The line E used to carry (500,000) sat 1,975 under a measured accepted first send, and the single MARGIN of 50,000
-claimed a distance this fixture had never demonstrated at E; MARGIN keeps its place only at M, where the refused
-smaller Max form is measured 105,000+ over the line. Both pricing errors were fixture defects, and the four baseline
-and two candidate test failures they produced say nothing about the feature.
+A line that drifts onto a form is a fixture defect, never a fact about the feature: E's earlier lines (500,000, then
+528,000 while whole books rode Max) each had to move with the measured forms.
 
 The synthetic carrier is laid here by ``lay_authored_pages``, the way ``tests._stand.lay_rooms`` lays a story (real
 chat rows, one published page per closed room, the same needles) with the one thing a modern install's pages carry and
@@ -74,9 +76,7 @@ that story does not: ``metadata.lead_rule`` of the delivered procedure, and a sh
 body. That provenance is what makes a page's lead an ordinary telling (``memory_forms.stage_of`` answers
 ``story_ordinary`` with it and puts the same form below the telling without it), so the carrier's legal smaller form
 gives up the 20 bodies and keeps the 20 leads instead of only moving counters. A2's owner words are as long as A1's in
-E, so in E nothing but that ordinary form can make its first send smaller; in M they are a little shorter, so the
-smaller Max form A2 could send is a few tokens under A1's refused one and still over the line: only the maps may be
-accepted first.
+E, so in E nothing but that ordinary form can make its first send smaller.
 
 WHICH CLAIM BELONGS TO WHOM, kept apart on purpose:
 
@@ -164,7 +164,7 @@ ZAI_REFUSAL = {"error": {"code": "1261", "message": "Prompt too long", "type": "
 CHAT = {"A1": 7101, "A2": 7102, "B1": 7103, "A3": 7104}
 #: Which rooms each scenario speaks, in order. A3 is the negative control's recovery stage only, and it is the LAST
 #: room of every scenario, so the control key's evidence is always taken before anything moves.
-ROOMS = {"enough": ("A1", "A2", "B1"), "maps": ("A1", "A2", "B1"), "none": ("A1", "A2", "B1", "A3")}
+ROOMS = {"enough": ("A1", "A2", "B1"), "none": ("A1", "A2", "B1", "A3")}
 #: The synthetic transport key each room's own sends must ride, asserted after ``partition`` chose them.
 TRANSPORT_KEY = {"A1": KEY_A, "A2": KEY_A, "B1": KEY_B, "A3": KEY_A}
 #: The owner's words: a room's short marker (``room_marker``) opens them and the synthetic title below pads them. The
@@ -173,12 +173,9 @@ BASE_WORDS = "Привет! Ты на связи? Проверь контекс�
 TITLE_UNIT = " Синтетический заголовок комнаты номер 3896."  # 46 bytes of padding per unit, nothing else differs
 # A1 and B1 carry a long synthetic title (~9 KB) in every scenario. A2's title is set per scenario on purpose: as long
 # as A1's in E, where the only thing that can make its accepted first send smaller is the memory's ordinary telling;
-# a short one in M, where the smaller Max form A2 could send must stay a hair (~2 %) under A1's refused one and still
-# over the line, which a bare "smaller than what was refused" check would take for a step. A1's own exchange enters
-# A2's memory, so in M only a title gap well past that growth makes A2's form smaller than A1's. A3 speaks A2's
-# weights: the two chats differ only in what the account has already been shown, which is the whole point of stage R.
+# a short one in N. A3 speaks A2's weights: the two chats differ only in what the account has already been shown,
+# which is the whole point of stage R.
 TITLE_UNITS = {"enough": {"A1": 200, "A2": 200, "B1": 200, "A3": 200},
-               "maps": {"A1": 200, "A2": 10, "B1": 200, "A3": 10},
                "none": {"A1": 200, "A2": 10, "B1": 200, "A3": 10}}
 BIBLE_KEPT = "owed on body changes"  # a BIBLE.md line: mandatory text, never folded
 #: The resident Body Map whole: its own heading, as the raw JSON body escapes the line break after it. No whole book
@@ -201,15 +198,9 @@ LEAD_UNIT = "Room {room} closed its arc: the work it shipped is told here, one f
 BODY_FILLER = "What this room settled, and why it matters to the rest of the work. "  # as tests/_stand.lay_rooms
 STORY_ROOMS, STORY_TOKENS = 20, 100_000  # synthetic story: its weight is what the memory carrier can give back
 #: Fixed lines, priced from the measured forms quoted in the module docstring, one and the same number for baseline
-#: and candidate. E moved from 500,000 to 528,000: the old line sat 1,975 mock tokens under the accepted hinted
-#: first send (498,025) this scenario exists to prove, and 30,000+ of measured room on each side is what the
-#: separation check below can then actually stand behind.
-#: NOT YET RE-PRICED for the resident Body Map (PR 3): every number above and in the module docstring was measured on
-#: a wire that carried the whole books in each Max request; the Map took their place, so every form here is smaller
-#: by them, and M's band (between memory's smaller Max form and the books rung) is now only the Map's own step. These
-#: lines must be measured again on a committed candidate before this module is read as evidence; CLEARANCE then says
-#: by name if a line sits on a form. M's old MARGIN (the 105,000+ the whole books gave) is gone with them.
-THRESHOLD = {"enough": 528_000, "maps": 310_000, "none": 100_000}
+#: and candidate. E stands 18,000+ mock tokens from the nearest measured form on each side (the hinted first send
+#: 273,483 below, A1's refused first send 311,211 above); CLEARANCE says by name if a line comes to sit on a form.
+THRESHOLD = {"enough": 292_000, "none": 100_000}
 CLEARANCE = 10_000  # no turn's request may sit inside this of its scenario's line; asserted from this run's sizes
 #: Stage R's line: the size this account's own route last put on the wire, plus the spread the same stand measured
 #: between two new chats' first sends in ONE run (558,651 against 574,354: 15,703 mock tokens) taken twice over, so
@@ -634,7 +625,7 @@ def scenario(e2e_clone, tmp_path_factory):
     def run(name: str) -> dict:
         if name not in ran:
             ran[name] = run_scenario(e2e_clone, tmp_path_factory.mktemp(f"newchat-{name}"), name)
-            print(table(ran[name]))  # evidence only: exactly one wire table per scenario (E/M/N); HTTP/bytes/key letters, no payloads
+            print(table(ran[name]))  # evidence only: exactly one wire table per scenario (E/N); HTTP/bytes/key letters, no payloads
         return ran[name]
 
     return run
@@ -826,7 +817,7 @@ def _ledger_selfcheck() -> None:
                                               "posts": [{"status": last}]}}}, "A2", "")
 
 
-def cold_walk_and_control(result: dict, *, accepted_books: str) -> None:
+def cold_walk_and_control(result: dict) -> None:
     """True on every tree, and only about LEGACY recovery: A1 meets the refusal with nothing learned, B1 is an
     unaffected control on another key of the same runtime, the upstream HTTP really decided, and nothing mandatory
     was given up or bought with a shorter answer. Nothing here asks the post-refusal emergency walk to keep the
@@ -851,7 +842,7 @@ def cold_walk_and_control(result: dict, *, accepted_books: str) -> None:
     # A1: the very first full Max request of the route is refused, then the walk is accepted in the named form.
     assert a1[0]["status"] == 400 and a1[0]["map_whole"] and not a1[0]["map_parts"], evidence
     assert a1[-1]["status"] == 200 and a1[-1]["n_prompt"] < a1[0]["n_prompt"], evidence
-    assert (a1[-1]["map_whole"], a1[-1]["map_parts"]) == ((True, False) if accepted_books == "whole" else (False, True)), evidence
+    assert a1[-1]["map_whole"] and not a1[-1]["map_parts"], evidence
     # Recovery steps memory and the Body Map, never a tool: every send of a room carries its first send's schemas.
     for room, posts in (("A1", a1), ("B1", b1)):
         assert {row["tools"] for row in posts} == {posts[0]["tools"]}, f"{room}: a recovery send lost a tool\n{evidence}"
@@ -861,28 +852,18 @@ def cold_walk_and_control(result: dict, *, accepted_books: str) -> None:
     assert a1[0]["raw_bytes"] <= b1[0]["raw_bytes"] < 1.1 * a1[0]["raw_bytes"], f"B1's first send is no full Max form\n{evidence}"
     assert b1[-1]["status"] == 200, evidence
     assert result["base_url"].startswith("http://127.0.0.1:"), evidence
-    # The refused first send really carried the whole carrier (every room's body, and with it its lead); and where the
-    # scenario NAMES the memory's own smaller form as the accepted rung (E: the Body Map still whole), a body has to have
-    # actually left. At the books rung the Map's step to its parts is the step, and the fit may hand a body back. What the recovery
-    # send leaves of the tellings is deliberately not claimed here: that is the hinted first send's promise.
+    # The refused first send really carried the whole carrier (every room's body, and with it its lead); and the
+    # accepted rung is the memory's own smaller form (the Body Map still whole), so a body has to have actually left.
+    # What the recovery send leaves of the tellings is deliberately not claimed here: that is the hinted first send's
+    # promise.
     assert a1[0]["leads"] == a1[0]["bodies"] == STORY_ROOMS, f"A1's refused first send does not carry the whole carrier\n{evidence}"
-    if accepted_books == "whole":
-        for room, posts in (("A1", a1), ("B1", b1)):
-            assert posts[-1]["bodies"] < STORY_ROOMS, f"{room}: no story body left the accepted whole-books send\n{evidence}"
+    for room, posts in (("A1", a1), ("B1", b1)):
+        assert posts[-1]["bodies"] < STORY_ROOMS, f"{room}: no story body left the accepted send\n{evidence}"
 
 
 def test_enough_cold_walk_and_control(scenario):
     """E, any tree: the smaller memory form (the Body Map whole) is the first accepted rung of A1 and B1."""
-    cold_walk_and_control(scenario("enough"), accepted_books="whole")
-
-
-def test_maps_cold_walk_and_control(scenario):
-    """M: the whole carrier and the smaller memory form (the Body Map whole) are both refused; the refusal's books rung,
-    the Body Map at its parts and addresses in the Low frame, is A1's and B1's accepted rung."""
-    result = scenario("maps")
-    cold_walk_and_control(result, accepted_books="parts")
-    a1 = result["rooms"]["A1"]["posts"]
-    assert len(a1) >= 3 and a1[1]["status"] == 400 and a1[1]["map_whole"] and a1[1]["n_prompt"] < a1[0]["n_prompt"], table(result)
+    cold_walk_and_control(scenario("enough"))
 
 
 def test_enough_candidate_a2_first_send_is_the_smaller_max_form(scenario):
@@ -905,31 +886,6 @@ def test_enough_candidate_a2_first_send_is_the_smaller_max_form(scenario):
     assert first["map_whole"] and not first["map_parts"], f"the Body Map stepped down though the memory form sufficed\n{evidence}"
     assert first["bible"] and first["owner_words"] and first["tools"] == a1[0]["tools"], evidence
     assert_answered(result, "A2", evidence)  # and that one accepted send ended the turn as an ordinary answer
-
-
-def test_maps_candidate_a2_first_send_is_the_folded_max_form(scenario):
-    """Candidate, M: the chapter-maps first-contact rung is retired. After A1's refusals (the last of which an accepted
-    books rung followed), A2's first POST is Max folded to my tellings: the Body Map whole, never its parts by
-    preference, every authored lead and every tool A1's first send carried. What that refusal taught may still leave it
-    over the line; then the same route recovers, and the request the provider actually accepts keeps all 20 leads
-    wherever a full-lead request of this account went under the line."""
-    result = scenario("maps")
-    a1, a2 = result["rooms"]["A1"]["posts"], result["rooms"]["A2"]["posts"]
-    evidence = check_wire(result)
-    line = result["threshold"]
-    assert len(owner_words("maps", "A2")) < len(owner_words("maps", "A1")), "A2's synthetic title must be the shorter one"
-    assert a1[1]["status"] == 400 and a1[1]["map_whole"] and a1[-1]["map_parts"], evidence  # what A1's round taught
-    first = a2[0]
-    assert first["map_whole"] and not first["map_parts"], f"A2 started in Low by preference\n{evidence}"
-    assert first["leads"] == STORY_ROOMS, f"A2's first send fell below the authored leads\n{evidence}"
-    assert first["n_prompt"] < a1[0]["n_prompt"] and first["bodies"] < a1[0]["bodies"], f"A2's first send is not folded\n{evidence}"
-    assert first["bible"] and first["owner_words"], evidence
-    assert all(row["tools"] == a1[0]["tools"] for row in a2), f"an A2 send lost a tool\n{evidence}"
-    assert all(row["auth"] == f"Bearer {KEY_A}" for row in a2), f"A2 left its route\n{evidence}"
-    assert_answered(result, "A2", evidence)
-    accepted = a2[-1]
-    if any(row["leads"] == STORY_ROOMS and row["n_prompt"] < line for row in (*a1, *a2)):
-        assert accepted["leads"] == STORY_ROOMS, f"the accepted request gave up leads a full-lead request had room for\n{evidence}"
 
 
 def test_below_every_legal_form_nothing_mandatory_is_dropped_or_refused_unsent(scenario):
