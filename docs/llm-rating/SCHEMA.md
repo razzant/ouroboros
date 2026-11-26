@@ -1,6 +1,6 @@
 # Data schema
 
-Schema version 4, from edition 2026.12. The page is drawn from one JSON document per edition. Edition 2026.11 is schema 3; what differs is listed at the end, and the page reads both.
+Schema version 5, from edition 2026.12.1. The page is drawn from one JSON document per edition. Edition 2026.12 is schema 4 and edition 2026.11 is schema 3; what differs is listed at the end, and the page reads all three.
 
 | File | What it is |
 | --- | --- |
@@ -16,8 +16,8 @@ Texts that a reader sees are objects with two keys, `en` and `ru`. Dates are ISO
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `schema` | number | version of this schema: 4 |
-| `edition` | string | edition id, year and month: `2026.12` |
+| `schema` | number | version of this schema: 5 |
+| `edition` | string | edition id, year and month: `2026.12`; a revision of an edition adds a number: `2026.12.1` |
 | `status` | `draft` or `final` | `draft` until every shown case is verified by a second reader, the votes are counted, nothing is pending, and I have locked the letters |
 | `method_version` | number | version of the method, see METHOD.md |
 | `period` | `{from, to}` | first and last day of the work counted for the edition |
@@ -27,17 +27,22 @@ Texts that a reader sees are objects with two keys, `en` and `ru`. Dates are ISO
 | `early` | boolean | true for an edition that came out before its month |
 | `totals` | object | see Totals |
 | `scale` | array | `{id, name}` for each letter in use, best first |
-| `groups` | array | `{id, name, main, works[]}`: the columns of the main table (`main` true) and the group Running; `works` are the kinds of work a group covers |
+| `groups` | array | `{id, name, main, works[], card?}`: the columns of the main table (`main` true) and the group Running; `works` are the kinds of work a group covers; `card` is an optional shorter name for the card images |
 | `works` | array | `{id, group, name, what}`: the kinds of work, the vocabulary of the columns and of the cases |
 | `models` | array | see Model; the ranked models first, in the order of my ranking |
-| `cells` | array | empty in schema 4: letters are given by column only |
+| `cells` | array | empty from schema 4 on: letters are given by column only |
 | `picks` | array | `{group, models[]}`: who holds the top letter in each column |
 | `cases` | array | see Case |
 | `volume` | object | see Volume |
 | `compare` | object or null | see Compare |
 | `votes` | object | see Votes |
 | `reviewers` | object | see Reviewers |
-| `notes` | object | `author`, `review_from`, `changes`, `changelog`, `lead_note`, optional `postscript`; in a draft with cases not yet verified by a second reader, `unverified` counts them |
+| `notes` | object | `author`, `review_from`, `changes`, `changelog`, `lead_note`, optional `postscript` and `place_rule` (what gives a model a place); in a draft with cases not yet verified by a second reader, `unverified` counts them |
+| `views` | object | required for method 5; optional in earlier methods. `{title, lead, columns[], rows[], budget}`: a few models seen three ways. `columns` are `{id, name}` with the ids `quality`, `now`, `budget`; each row is `{model, quality, now, budget}` with a sentence per view; `budget` is `{title, principle, rows[]}`, where each row is `{group, text}`: what to pick for that column on a limited budget. No sums |
+| `faq` | object | required for method 5; optional in earlier methods. `{title, lead, items[]}`; each item is `{q, a}`: a reader's question, retold, and my answer |
+| `revision_of` | string | only in a revision: the edition it revises. A revision keeps that edition's period, token totals, votes and reviewers |
+| `carried` | object | only in a revision: `{from, what[], note, votes_prior_table?}`: `what` lists only unchanged values (including individual `totals.*` fields); `note` is shown above the votes and reviewer sections, and `votes_prior_table` names the earlier table the voters saw |
+| `carried_from` | string | optional: the edition a letter with the ground `carried` comes from, when it is not `previous_edition` |
 
 Models in the rating contributed drafts, not their own rows. The final order, every letter and the published texts are Ouroboros's decisions. Nothing in the data computes a letter or a place.
 
@@ -47,7 +52,7 @@ Models in the rating contributed drafts, not their own rows. The final order, ev
 | --- | --- |
 | `models` | how many models have each status: `rated`, `candidate`, `newcomer`, `first_look`, `earlier` |
 | `work_types`, `work_groups`, `columns` | kinds of work, groups of work, and columns of the main table |
-| `letters` | `{main}`: letters in the main table |
+| `letters` | `{main, empty?}`: letters in the main table, and the cells of the main table without a letter when there are any |
 | `cases` | dated cases in the edition |
 | `tokens` | the total since my first record: `{status, read, lower_bound, read_display, written, written_display, since, definition}`; `read_display` and `written_display` are the short forms shown on the page, cut and never rounded up |
 
@@ -60,11 +65,13 @@ Models in the rating contributed drafts, not their own rows. The final order, ev
 | `family`, `maker` | model line and the company that makes it |
 | `status` | `rated` (in the ranking), `candidate` (a candidate for a place), `newcomer`, `first_look` or `earlier` (an earlier version) |
 | `rank` | place in my ranking, from 1; only for `rated` |
-| `one_liner`, `verdict`, `trust`, `check` | only for `rated`: one sentence, the portrait, what I trust the model with, what I check after it |
-| `groups` | only for `rated`: per column, `{grade, reason, ground, cases?}`. `cases` is optional and defaults to an empty list. `ground` is what the letter rests on: `carried`, `case`, `cards` (checked code reviews), `role`, `open` (preliminary) or `coordinator` (proposed by another model for the row of a model that led the edition) |
+| `one_liner`, `verdict`, `trust`, `check` | only for `rated`: one sentence, the portrait (why the model stands where it stands), what I trust the model with, what I check after it |
+| `role` | only for `rated`: the role the model has in my team today, a short tag beside its name. It moves no place |
+| `delta`, `generations` | optional, only for `rated`: what changed for the model since the previous edition; how this version compares with its predecessor |
+| `groups` | only for `rated`: per column, `{grade, reason, ground, cases?}`. `cases` is optional and defaults to an empty list. `ground` is what the letter rests on: `carried`, `case`, `cards` (checked code reviews), `role`, `open` (preliminary) or `coordinator` (proposed by another model for the row of a model that led the edition). In schema 5 `grade` can be null: the model has had no work of that kind with a known outcome; the ground is then `nodata`, the page shows a dash, and `reason` says what is missing |
 | `picks` | only for `rated`: ids of the columns where this model is my first pick |
 | `flag` | optional short note shown beside the name, for example how little a model worked in the period |
-| `was` | the same version in the previous edition: `{rank, letters}` when it was ranked (letters of the six columns in table order), or `{status}` when it stood apart; absent when it was not there |
+| `was` | the same version in the previous edition: `{rank, letters}` when it was ranked (letters of the columns both editions have, in table order, `-` for a cell without a letter), or `{status}` when it stood apart; absent when it was not there |
 | `note` | for a model apart: what I can say about it without a letter |
 | `cases` | ids of the cases that mention the model; when absent, read as an empty list |
 
@@ -83,7 +90,7 @@ Models in the rating contributed drafts, not their own rows. The final order, ev
 
 ## Compare
 
-`{with, comparable, rows[], left[], bullets[]}`. `rows`: for each ranked model `{model, rank, letters, was}`, where `was` is as in Model. `left`: models ranked in the previous edition and not now, `{model, name, was, now, successor}`. `bullets`: what changed, in words. `notes.changes` lists the same moves one by one: `{model, rank_from, rank}`, `{model, group, from, to}`, `{model, new, rank}`, `{model, left}`.
+`{with, comparable, rows[], left[], bullets[], columns?, new_columns?, title?, note?}`. When the edition added columns, `comparable` lists only the shared columns (earlier fixed-column comparisons use a boolean). `columns` names the columns both editions have (the letters of `rows` and of `was` cover exactly those) and `new_columns` the added ones; `title` and `note` are optional texts of the section.  `rows`: for each ranked model `{model, rank, letters, was}`, where `was` is as in Model. `left`: models ranked in the previous edition and not now, `{model, name, was, now, successor}`. `bullets`: what changed, in words. `notes.changes` lists the same moves one by one: `{model, rank_from, rank}`, `{model, group, from, to}`, `{model, new, rank}`, `{model, left}`.
 
 ## Votes
 
@@ -96,6 +103,7 @@ Models in the rating contributed drafts, not their own rows. The final order, ev
 | `pairs` | one entry per pair of answers: `{description, models, labels, assigned, counts {first, second, tie, abstain}, column, winner, letters, verdict, unverified_counted, weighted_differs, explain}`. `models` are the two authors in the counter's fixed order; `column` the column of my table the pair belongs to; `letters` my two letters there; `verdict` is `agree`, `disagree`, `same_letter`, `no_majority` or `no_column`; `explain` my sentence where the vote goes against my letters |
 | `annotations` | claims checked against a source: `{description, assigned, counts {supported, contradicted, insufficient}, unverified_counted?, claim?, established?}`. The three counts sum to the number of counted answers. `unverified_counted`, when present, says how many of those answers have only a requested-route identity. The optional bilingual `claim` states what was checked; `established` gives the answer beside the counts. |
 | `counting_note` | optional bilingual note on how the ballots were counted and checked |
+| `prior_table_edition` | optional: the edition whose table a voter may have had in context (`prior_table`), for a standalone edition; a revision places this metadata in `carried.votes_prior_table` |
 
 ## Reviewers
 
@@ -106,6 +114,10 @@ Models in the rating contributed drafts, not their own rows. The final order, ev
 Each row: `{model, checked, confirmed, open, refuted, modes, named, chances, alone, invited, answered, no_answer, no_answer_kind, read_only_sessions}`. `checked` are the version's factual remarks in the recheck, each counted once for the version, and `confirmed`, `open` and `refuted` how they came out. `modes`, only where a version merges registered modes, gives the answers of each mode in the recheck. `named` of `chances` are the problems confirmed first that it named on the same working copy and assignment; `named` is null when the reviewer had no comparable seat. `invited` and `answered` are its seats in the assessed reviews.
 
 `unbound` `{requested, answers, mentions, raised, confirmed}` counts the answers whose model the engine did not confirm and their remarks: they count for nobody. `modes_note` is a bilingual text. Each `advice` entry is `{who: [model ids], text: {en, ru}}`. Each `examples` entry is `{models: [model ids], title: {en, ru}, text: {en, ru}}`.
+
+## Schema 4 (edition 2026.12)
+
+Schema 4 had six columns and a letter in every cell of the main table: `grade` was never null and the grounds were `carried`, `case`, `cards`, `role`, `open` and `coordinator`. It had no `role`, `delta` or `generations` in a model, no `views`, `faq`, `revision_of`, `carried` or `carried_from`, and `totals.letters` was `{main}`. Its order answered another question than the order of schema 5, see METHOD.md.
 
 ## Schema 3 (edition 2026.11)
 
