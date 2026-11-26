@@ -1036,7 +1036,8 @@ def test_short_window_clear_and_escape_return_to_the_browse_row_with_visible_foc
     """Real presses in a short window, where the whole column scrolls (480 px: a desk's zones fit from 500). The find
     begins with the field in view (a click brings it there), so Escape, the field's × and Clear search put the row
     that was first in view back at its place, and the keyboard stays in the field, which shows; nothing scrolls after
-    that. Escape is pressed after the owner scrolled the column on through the matches, the field gone from view."""
+    that. Escape is pressed after the owner scrolled the column on through the matches; the field leads the pinned head
+    (owner 27.11), so it stays in view."""
     ui, page = pins_ui, pins_ui["page"]
     page.set_viewport_size({"width": ui["width"], "height": 480})
     seed_archive(ui["root"])
@@ -1055,7 +1056,7 @@ def test_short_window_clear_and_escape_return_to_the_browse_row_with_visible_foc
     expect()(items).to_have_count(0 if how == "clear-command" else 51)
     if how == "escape":
         sidebar.evaluate("el => { el.scrollTop += 600; }")
-        assert not find.evaluate(SHOWS)
+        assert find.evaluate(SHOWS)  # the column's first row stays pinned while the matches scroll under it
         page.keyboard.press("Escape")
     elif how == "clear-button":
         page.locator('#primary-sidebar .nav-find-clear').click()
