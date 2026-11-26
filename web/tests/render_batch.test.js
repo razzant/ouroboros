@@ -214,8 +214,11 @@ test('sticky single-flight never swallows the post-completion resync', () => {
         chatSource.indexOf('function scheduleHistorySync('),
         chatSource.indexOf('function applyLiveCardState('),
     );
-    assert.match(fn, /run: tags => historyPager\.read\(\{ \.\.\.tags \}\)/);  // with the reason its first asker gave
-    assert.doesNotMatch(fn, /awaitInitialHydration/);
+    // A fresh pager read carrying the reason its first asker gave (`...tags` first; the caller may add its own
+    // currency guard after it), never the sticky hydration or the newest read directly. Behaviour:
+    // chat_history_arrivals.test.js 'a card finish takes one read of what arrived' (real 700 ms debounce, reason 'settled').
+    assert.match(fn, /run: tags => historyPager\.read\(\{ \.\.\.tags[,} ]/);
+    assert.doesNotMatch(fn, /awaitInitialHydration|syncHistory\(/);
     // The reconnect branch of the open handler reads the newest page whole (frames sent while away are lost),
     // through the pager. chat_history_integration.test.js exercises queued reconnects and the actual re-fetch.
     assert.match(chatSource, /isReconnect \? historyPager\.read\(\{ fromReconnect: true, whole: true,/);
