@@ -765,3 +765,63 @@ def test_settings_device_change_reaches_live_call_without_stealing_its_capture(s
     form.locator('button[type="submit"]').click()
     assert_ended(page)
     assert not subscription_ui['errors']
+
+
+
+def seed_refused_call(root):
+    """A room after a call its context could not fit (path 1, memory not measured), stored as the host stores it: the
+    call's opening row and the one System line the refusal leaves, its notice built by the real producer."""
+    from ouroboros import dialogue_store
+    from ouroboros.chat_chain import row_address
+    from ouroboros.realtime_setup import capacity_notice
+    from supervisor.message_ingress import _chat_record
+
+    call, task = "c" * 32, "t-refused"
+    said = capacity_notice("grok-voice", {"basis": "estimator", "source": "the engine's catalogue",
+                                          "observed": "2026-11-26"}, stage="task_preparation", need=93_857,
+                           measured=False, reserve=12_000, window=80_000,
+                           parts=(("marks", 37_935), ("constitution", 12_061), ("identity", 11_622)))
+    _root, opening = _chat_record("in", 1, 0, "The owner opened this call. Engine: Grok; no screen vision.",
+                                  ts="2026-11-26T09:00:00+00:00", client_message_id=f"call:{call}:open", task_id=task,
+                                  drive_root=root, message_meta={"role": "system", "system_type": "call_open",
+                                                                 "host_fact": {"kind": "call_open", "call_id": call}})
+    dialogue_store.append(root, "chat", opening)
+    _root, refusal = _chat_record("out", 1, 0, said["text"], ts="2026-11-26T09:00:05+00:00", task_id=task,
+                                  drive_root=root, message_meta={"role": "system", "system_type": "", **said,
+                                                                 "reply_to": {"address": row_address(opening)}})
+    dialogue_store.append(root, "chat", refusal)
+    return said
+
+
+@pytest.mark.parametrize("width", [282, 581, 1280])
+def test_a_call_that_could_not_start_shows_one_line_whose_details_open(subscription_ui, monkeypatch, tmp_path, width):
+    """The room after a refused call reads as one System line, the folded call card, and the refusal's Details (stage,
+    window, reserve, parts) open from that card: its own row, which carries them, is folded out of sight."""
+    from playwright.sync_api import expect
+    from tests._room_browser_shared import serve_chat_history
+
+    root = tmp_path / "data"
+    (root / "state").mkdir(parents=True)
+    said = seed_refused_call(root)
+    page, _ = open_call_ui(subscription_ui, monkeypatch, width=width, scheme="light", engine="grok")
+    # The history endpoint answers for the data profile this document proves, as the host does.
+    serve_chat_history(page, root, page.evaluate(
+        "document.querySelector('meta[name=\"ouroboros-chat-preview-scope\"]')?.content || ''"))
+    page.reload()
+    card = page.locator("#page-chat .call-card")
+    expect(card).to_have_count(1)
+    expect(card).to_have_attribute("data-call-card", "silent")
+    expect(card.locator(".call-card-title")).to_contain_text(said["text"])
+    expect(page.locator("#page-chat .chat-bubble.system:visible")).to_have_count(0)
+    browser.capture(page, f"refused-call-folded-{width}")
+    details = card.locator("details.ui-disclosure")
+    expect(details).to_have_count(1)
+    expect(details.locator("pre")).to_be_hidden()
+    details.locator("summary").click()
+    shown = details.locator("pre")
+    expect(shown).to_be_visible()
+    for fact in ("80,000", "12,000", "marks 37,935", "memory was not measured"):
+        expect(shown).to_contain_text(fact)
+    voice.no_page_scroll(page)
+    browser.capture(page, f"refused-call-details-{width}")
+    assert not subscription_ui["errors"].unexpected(), subscription_ui["errors"].report()

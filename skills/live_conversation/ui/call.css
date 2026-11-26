@@ -561,6 +561,14 @@
     cursor: default;
 }
 
+.call-card-details {
+    padding: 0 var(--space-4) var(--space-3);
+}
+
+.call-card-details:empty {
+    display: none;
+}
+
 .call-card-head {
     flex-wrap: wrap;
 }

@@ -98,9 +98,11 @@ export function createCallCards({ feed, ws = null, doc = feed?.ownerDocument, li
         // The call's own small sign (the visual's, as on Talk) leads the card.
         head.append(sign?.() || element('span', 'call-entry-mark'), title, facts, engineLine);
         const lines = element('div', 'call-card-lines');
-        node.append(head, lines);
-        const card = { id, task: '', call: '', node, head, title, facts, engineLine, lines, open: null, count: 0, span: 0,
-            engine: '', silent: '', hasNotice: false };
+        // A card that is one notice line keeps that notice's Details (its folded row carries them) under the line.
+        const details = element('div', 'call-card-details');
+        node.append(head, details, lines);
+        const card = { id, task: '', call: '', node, head, title, facts, engineLine, lines, details, detailsOf: null,
+            open: null, count: 0, span: 0, engine: '', silent: '', hasNotice: false };
         head.addEventListener?.('click', () => {
             if (card.silent) return;  // one notice line has nothing to open
             const was = following();
@@ -214,6 +216,7 @@ export function createCallCards({ feed, ws = null, doc = feed?.ownerDocument, li
         let last = NaN;
         const notices = [];
         const noticeTexts = [];
+        const noticeRows = [];
         for (const member of members) {
             member.node.classList.add('call-folded');
             if (member.kind === 'opening') {
@@ -228,7 +231,9 @@ export function createCallCards({ feed, ws = null, doc = feed?.ownerDocument, li
             const ts = Number(member.node.dataset.ts);
             if (Number.isFinite(ts)) last = Math.max(Number.isFinite(last) ? last : ts, ts);
             // The closing notice says how the call ended; it reads under the words, not as one of them.
-            if (member.kind === 'notice') { notices.push(line('notice', text)); noticeTexts.push(text); continue; }
+            if (member.kind === 'notice') {
+                notices.push(line('notice', text)); noticeTexts.push(text); noticeRows.push(member.node); continue;
+            }
             spoken.push(line(member.kind, text));
             if (Number.isFinite(ts)) first = Number.isFinite(first) ? Math.min(first, ts) : ts;
         }
@@ -238,6 +243,12 @@ export function createCallCards({ feed, ws = null, doc = feed?.ownerDocument, li
         card.hasNotice = notices.length > 0;
         // Exactly one notice and no words: the call is that line; a second notice keeps an openable card (R15 opus-2).
         card.silent = !isLive(card) && !spoken.length && !streaming.length && noticeTexts.length === 1 ? noticeTexts[0] : '';
+        // Copied once per source row, so a rescan keeps the reader's open Details open.
+        const source = card.silent ? noticeRows[0].querySelector?.('.ui-disclosure') || null : null;
+        if (source !== card.detailsOf) {
+            card.detailsOf = source;
+            card.details.replaceChildren(...(source?.cloneNode ? [source.cloneNode(true)] : []));
+        }
         card.span = Number.isFinite(first) && Number.isFinite(last) ? last - first : 0;
         if (Number.isFinite(first)) card.node.dataset.ts = String(first);
         paint(card);
