@@ -58,3 +58,58 @@ def test_scanners_see_the_shape_they_refuse():
         ':root[data-theme] :is(.chat-header-menu, .task-control-menu)']
     assert translucent_popup_paint('.task-control-menu { background: var(--popup-float); } '
                                    '.chat-header-menu-item { background: var(--surface-float); }') == []
+
+
+# One glass and one shadow for what floats (owner decision 27.11.2026, floating material A): each object below rests on
+# the float shadow token, the toast and the staged file wear the float surface and the one glass with no visible rim,
+# and every veil behind a layer softens with the one scrim filter. A literal shadow, blur or rim is the defect.
+FLOAT_SHADOW = (".toast", ".files-preview-image", ".files-drop-card", ".onboarding-restart-card",
+                ".chat-file-dialog, .document-reader", ".project-panel")
+FLOAT_GLASS = (".toast", ".attach-badge")
+SCRIMS = (".onboarding-overlay-backdrop", ".files-drop-overlay", ".project-panel-backdrop")
+
+
+def floating_material_drift(css: str) -> list[str]:
+    """Named floating objects whose own rule paints a material other than the shared tokens."""
+    rules = {}
+    for selector, body in _rules(css):
+        rules.setdefault(selector, body)  # the object's first, defining rule
+    found = []
+    for selector in FLOAT_SHADOW:
+        body = rules.get(selector, "")
+        if not re.search(r"box-shadow\s*:\s*var\(--elev-float\)", body):
+            found.append(f"{selector} shadow")
+    for selector in FLOAT_GLASS:
+        body = rules.get(selector, "")
+        if not (re.search(r"background\s*:\s*var\(--surface-float\)", body)
+                and re.search(r"(?<!-)backdrop-filter\s*:\s*var\(--glass\)", body)
+                and not re.search(r"border(?:-color)?\s*:\s*[^;]*(?:var\(--(?:accent|status)|rgba?\()", body)):
+            found.append(f"{selector} glass")
+    for selector in SCRIMS:
+        body = rules.get(selector, "")
+        if not re.search(r"(?<!-)backdrop-filter\s*:\s*var\(--scrim-filter\)", body):
+            found.append(f"{selector} veil")
+    return found
+
+
+def test_floating_material_scanner_sees_drift():
+    good = (".toast { background: var(--surface-float); box-shadow: var(--elev-float); backdrop-filter: var(--glass); }"
+            ".attach-badge { background: var(--surface-float); border: 1px solid transparent; backdrop-filter: var(--glass); }"
+            ".files-preview-image { box-shadow: var(--elev-float); } .files-drop-card { box-shadow: var(--elev-float); }"
+            ".onboarding-restart-card { box-shadow: var(--elev-float); }"
+            ".chat-file-dialog, .document-reader { box-shadow: var(--elev-float); }"
+            ".project-panel { box-shadow: var(--elev-float); }"
+            ".onboarding-overlay-backdrop { backdrop-filter: var(--scrim-filter); }"
+            ".files-drop-overlay { backdrop-filter: var(--scrim-filter); }"
+            ".project-panel-backdrop { backdrop-filter: var(--scrim-filter); }")
+    assert floating_material_drift(good) == []
+    bad = good.replace(".toast { background: var(--surface-float);", ".toast { border: 1px solid rgba(255,255,255,.1); "
+                       "background: var(--surface-float);").replace("var(--scrim-filter); }", "blur(10px); }", 1)
+    assert floating_material_drift(bad) == [".toast glass", ".onboarding-overlay-backdrop veil"]
+
+
+def test_floating_objects_wear_the_shared_material():
+    from pathlib import Path
+
+    css = (Path(__file__).resolve().parents[1] / "web" / "style.css").read_text(encoding="utf-8")
+    assert floating_material_drift(css) == []

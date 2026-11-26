@@ -49,7 +49,9 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    menus, popovers and the shared modal dialogs (confirmations, an import, a skill's details) have an opaque neutral
    backing so underlying words cannot bleed through. The rest keep their own paint: the composer field, a note over
    the transcript (the voice offer), toasts and float capsules stay glass, and the document
-   reader and file dialogs keep their near-opaque modal sheet over a scrim.
+   reader and file dialogs keep their near-opaque modal sheet over a scrim. Every floating object rests on the one
+   float shadow, and every veil behind a layer softens with one faint filter (`--scrim-filter`), so the room behind
+   it still reads (owner decision 27.11.2026).
 3. **Colour says who and what.** Each voice colours its own objects: the owner blue,
    Ouroboros rose (its answers, its work cards and its card in the sidebar alike), System amber (gold on dark), a
    Project fuchsia. A role keeps its hue family in both themes and the theme gives it its
@@ -174,7 +176,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
   waits for its motion's end (`web/modules/motion.js`).
 - Where it lives: the values are `web/ui.css` tokens, dark in `:root` and light in
   `:root[data-theme="light"]` (`--elev-*`, `--radius-object` / `-inner` / `-sheet`,
-  `--surface-object` / `-object-opaque` / `-capsule` / `-float` / `-tray` / `-side`, `--glass`, `--voice-*`, `--relay-ledge-*`,
+  `--surface-object` / `-object-opaque` / `-capsule` / `-float` / `-tray` / `-side`, `--glass`, `--scrim-filter`, `--voice-*`, `--relay-ledge-*`,
   `--tone-*` with `--tone-crimson-ink`, `--tone-crimson-soft` / `-soft-ink` and `--tone-crimson-word`,
   `--status-warn-word` / `-error-word`, `--press` / `--press-solid`); the light
   block restates its own values of the hues and tints the dark seed sets differently, and the dark voice materials

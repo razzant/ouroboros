@@ -1405,7 +1405,7 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
     max-height: 100%;
     margin: 0 auto;
     border-radius: var(--radius-inner);
-    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+    box-shadow: var(--elev-float);
 }
 
 .files-preview-frame {
@@ -1423,7 +1423,8 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
     align-items: center;
     justify-content: center;
     background: rgba(var(--menu-rgb), 0.72);
-    backdrop-filter: blur(3px);
+    backdrop-filter: var(--scrim-filter);
+    -webkit-backdrop-filter: var(--scrim-filter);
     z-index: 5;
     pointer-events: none;
 }
@@ -1441,7 +1442,7 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
     font-size: 14px;
     font-weight: 600;
     letter-spacing: 0.01em;
-    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.24);
+    box-shadow: var(--elev-float);
 }
 
 .files-modal-input { margin-top: var(--space-3); }
@@ -2050,8 +2051,8 @@ html[data-layout="stack"] .chat-find {
     font-size: var(--type-meta);
     font-weight: 500;
     background: rgba(var(--composer-rgb), 0.78);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: var(--glass);
+    -webkit-backdrop-filter: var(--glass);
 }
 .status-badge.online { color: var(--status-ok-fg); }
 /* Loading… and Starting… go on by themselves: the meta ink, never amber. */
@@ -2158,7 +2159,8 @@ html[data-layout="stack"] .chat-find {
     position: absolute;
     inset: 0;
     background: rgba(var(--media-rgb), 0.78);
-    backdrop-filter: blur(10px);
+    backdrop-filter: var(--scrim-filter);
+    -webkit-backdrop-filter: var(--scrim-filter);
 }
 
 .onboarding-surface {
@@ -2195,7 +2197,7 @@ html[data-layout="stack"] .chat-find {
     border-radius: var(--radius-inner);
     background: var(--bg-secondary);
     color: var(--text-primary);
-    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
+    box-shadow: var(--elev-float);
 }
 
 .onboarding-restart-card h2 {
@@ -5211,10 +5213,10 @@ html[data-layout="stack"] .chat-page-header > .app-page-actions {
     align-items: center;
     gap: 6px;
     padding: 4px 8px 4px 6px;
-    background: rgba(var(--composer-rgb), 0.78);
-    border: 1px solid var(--accent-35);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    background: var(--surface-float);
+    border: 1px solid transparent;
+    backdrop-filter: var(--glass);
+    -webkit-backdrop-filter: var(--glass);
     border-radius: var(--radius-inner);
     font-size: var(--type-meta);
     color: var(--text-primary);
@@ -9957,7 +9959,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     /* A reading surface is one flat opaque material, even where native backdrop blur is not composited; the
        project's colour lives in its small marks, and underlying Main text must never show through. */
     background: rgb(var(--shell-rgb));
-    box-shadow: -24px 0 64px rgba(0, 0, 0, 0.34);
+    box-shadow: var(--elev-float);
     transform: translateX(18px);
     opacity: 0;
     pointer-events: none;
@@ -10017,8 +10019,8 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     z-index: var(--z-project-scrim);
     cursor: default;
     background: var(--scrim);
-    backdrop-filter: blur(1.5px);
-    -webkit-backdrop-filter: blur(1.5px);
+    backdrop-filter: var(--scrim-filter);
+    -webkit-backdrop-filter: var(--scrim-filter);
     opacity: 0;
     pointer-events: none;
     transition: opacity 180ms ease;
@@ -11065,7 +11067,7 @@ html[data-layout="stack"] .project-panel {
     border-radius: var(--radius-sheet);
     background: var(--ui-modal-bg);
     color: var(--text-primary);
-    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.34);
+    box-shadow: var(--elev-float);
 }
 
 .chat-file-dialog { width: min(420px, calc(100vw - 32px)); }
