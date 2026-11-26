@@ -186,3 +186,37 @@ def test_end_pressed_during_preparation_stays_the_owners_end(direct_call, tmp_pa
     assert "context_capacity" not in named
     refusal, = [row for row in seen.rows if row["type"] == "call.fit_refused"]  # the measurement is still logged
     assert refusal["ended_by_owner"] is True
+
+
+def test_a_start_the_early_bound_refuses_reaches_the_call_as_its_notice(direct_call, tmp_path, monkeypatch):
+    """Across the early bound and the call's refusal: the ordinary build's wrapper (``context.build_context_fit_plan``)
+    refuses before the memory capture; the admitted call receives that refusal as ``MinimumViewUnfit`` and the room's
+    one System line is the lower-bound notice with the bound's parts."""
+    import sys
+
+    from ouroboros import context
+    from ouroboros.realtime_setup import _NEEDS
+    from tests import _memory_scale_fixture as scale
+
+    drive = scale.install(tmp_path / "drive")
+    route = SimpleNamespace(route_fp="synthetic-route", status="confirmed", stale=False, window_tokens=25_000,
+                            source="synthetic", route_facts={"working_reserve_tokens": 10_000, "basis": "estimator"})
+
+    def early(_root, _monkeypatch, _shape, *, task):
+        env, memory = scale.env_on(drive)
+        context.build_context_fit_plan(env, memory, {**task, "_is_direct_chat": True}, preferred_mode="nano",
+                                       tool_schemas=scale.tools(),
+                                       route_resolver=lambda _task, *, allow_fetch: ({"provider": "synthetic"}, route))
+        pytest.fail("the early bound admitted the start")
+
+    monkeypatch.setattr(context, "_capture_memory_view", lambda *_a, **_kw: pytest.fail("the memory capture ran"))
+    monkeypatch.setattr(sys.modules[__name__], "build_minimum_view", early)
+    seen = _prepare_call(direct_call, tmp_path, monkeypatch, True, "early")
+    error, = seen.errors
+    assert error.memory_measured is False and error.memory_view_tokens == 0 and error.window_tokens == 25_000
+    assert direct_call.hub._state["reason"] == "context_capacity" and seen.answers
+    for row in seen.answers:
+        notice = row["progress_meta"]["notice"]
+        assert notice["template"] == _NEEDS[False] and notice["values"]["need"] == f"{error.estimated_input_tokens:,}"
+        assert "memory was not measured" in notice["details"] and "25,000" in notice["details"]
+        assert all(f"{name} {size:,}" in notice["details"] for name, size in error.parts)
