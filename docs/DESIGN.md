@@ -3543,7 +3543,8 @@ are this row; a list groups it under a quiet group name, on a phone one card of 
 
 Settings, Dashboard and Extensions share a list and page layout. From a 40rem section box, the list is a rail
 (`--section-rail-w`) beside its page. The band holds list controls (Settings' search; on phones, in the list) and
-page controls. The chosen row names its page; the heading stays for readers, deeper levels keep their names.
+page controls. The chosen row names its page; the heading stays for readers, deeper levels keep their names, and a page reached by a
+jump from another place shows its name after the named Back (owner decision 27.11.2026).
 A page is always open: initially Models in Settings, Skills in Extensions; later the device's last choice.
 Extensions holds Skills, MCP servers, Browse and Sources. Editors open over their lists; Sources’ Publish one jumps to Skills with Back.
 Narrower, the list stands under the section name and Ouroboros's picture, or the page under Back and its name.
@@ -3660,16 +3661,20 @@ glyphs (`web/modules/page_icons.js`).
 
 ### Page header
 
-The shared header (`web/modules/page_header.js`) draws one row, without decorative icons. Its first control is a round
-Back with the arrow, its destination in its name: the top layer's, peeled one by one (“Back to
-Extensions › Skills”). Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
-(Consciousness model), distinct from its return. Docked, the sidebar identifies a section without pages by its glyph and accessible name.
+The shared header (`web/modules/page_header.js`) draws one row, without decorative icons. Its first control is Back,
+its destination in its name: the top layer's, peeled one by one (“Back to Extensions › Skills”). A return to another
+place shows that destination after the arrow on a desk, in the same capsule (`‹ Settings`, a long one ending in an
+ellipsis), and the page's own name follows it; a level's Back, a move inside one place, the stack layout and a place
+too narrow for its band keep the round arrow (owner decision 27.11.2026). Two panes put it over the page column; one
+column replaces the leading picture. A model role names its destination (Consciousness model), distinct from its
+return. Docked, a place the rail names by a glyph alone says its name: Circles and Widgets at the band's start, the
+Dashboard over its list; Files keeps its location, Settings its search (owner decision 27.11.2026).
 Tabs or Files' location lead its band, actions end it, at one height and shape. Controls share the content's leading inset, centred in native chrome or
 18px below a browser's top. Rails use the shared fade;
 location reveals its folder without widening the rail. Section headings follow
 “A section with pages”; a Project shows its name.
 An empty band draws nothing. Its scroller reaches the window's top; its first row starts below the macOS band,
-which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10), while a room's
+which stays the window's (owner 22.10). Widgets cards end at its named band with crisp edges (owner 20.10, 27.11), while a room's
 feed passes under its bar's frosted edge ("A room's edges"); other moving content fades by principle 9. Empty band space still drags the window. In stack layout the header is one row of 44px controls,
 a page's 18px below a browser's top: one leading control (the picture on a room or section list, the round Back when
 owed), destination name, status, then a room's consciousness chip and Panic. Tabs or filters occupy one line below;
@@ -3685,7 +3690,7 @@ state; a desk's panel beside Main keeps the chip's word. Panic and ×
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
 In Extensions, Back names the return. Each page owns its actions: Skills keeps Refresh and Update all in the header; MCP controls stay with the server.
 Files keeps location and actions in the band, its divider at the window top; the filter heads the list, which
-scrolls under the shared fade. Circles ends the band with New circle; Widgets has no controls.
+scrolls under the shared fade. Circles ends the band with New circle; Widgets' band holds its name alone, as low as the name needs without the macOS band.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
 container, 700 px); narrower, the list comes first and a chosen file replaces it with a round Back to its folder, which
 keeps an unsaved draft: the file's row says `unsaved` (a new file's draft has its own row at the top) and reopens
