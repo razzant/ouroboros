@@ -282,7 +282,7 @@ def _task_objective(ctx: Any) -> str:
     return objective
 
 
-def stable_prompts(ctx: Any, *, body: bool, system_root: pathlib.Path) -> tuple[str, str]:
+def stable_prompts(*, body: bool, system_root: pathlib.Path) -> tuple[str, str]:
     """The packet seat's and the retrieving seat's stable prompts from one governance capture."""
     from ouroboros.tools.review_checklist import load_checklist_section
 
@@ -294,10 +294,6 @@ def stable_prompts(ctx: Any, *, body: bool, system_root: pathlib.Path) -> tuple[
     pack = plan_packet.body_governance(system_root, _governance_text) if body else {}
     return tuple(plan_packet.build_stable_prompt(checklist_section=checklist, body=body, governance_by_retrieval=by_retrieval,
                                                  **pack) for by_retrieval in (False, True))
-
-
-def stable_prompt(ctx: Any, *, body: bool, system_root: pathlib.Path, by_retrieval: bool) -> str:
-    return stable_prompts(ctx, body=body, system_root=system_root)[by_retrieval]
 
 
 def _prior_transcript(state_root: pathlib.Path, task_id: str, participant_row: Mapping[str, Any]) -> Optional[List[Dict[str, Any]]]:
@@ -410,7 +406,7 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Optional[Mappi
     manifest = attach_own_dialogue(ctx, state_root, manifest, f"plan-ask-{task_id}-{ask_id}", persist=True)
     dialogue_section, snapshot_section = render_dialogue(manifest)  # rows before the plan, capture facts after
     try:
-        system_prompt, session_prompt = stable_prompts(ctx, body=body, system_root=system_root)
+        system_prompt, session_prompt = stable_prompts(body=body, system_root=system_root)
     except plan_packet.PlanPacketError as exc:
         raise PlanAskRefused("TOOL_ERROR", f"ERROR: PLAN_ASK_PACK_INCOMPLETE: {exc}. Nothing was written.") from exc
     contents, session_tasks, slot_messages, session_threads, continued = {}, {}, {}, {}, {}

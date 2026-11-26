@@ -32,7 +32,7 @@ def _chapter_tails() -> dict[str, str]:
 def test_a_body_plan_packet_inlines_the_chapters_not_the_membership():
     from ouroboros.tools import plan_ask, plan_packet
 
-    prompt = plan_ask.stable_prompt(None, body=True, system_root=REPO, by_retrieval=False)
+    prompt = plan_ask.stable_prompts(body=True, system_root=REPO)[0]
     assert "inline, in full, for a plan that changes Ouroboros's own body" in prompt
     for path, tail in _chapter_tails().items():
         if path.startswith("docs/architecture/"):
@@ -50,7 +50,7 @@ def test_a_body_plan_packet_inlines_the_chapters_not_the_membership():
 def test_an_ordinary_plan_packet_inlines_no_chapter():
     from ouroboros.tools import plan_ask
 
-    prompt = plan_ask.stable_prompt(None, body=False, system_root=REPO, by_retrieval=False)
+    prompt = plan_ask.stable_prompts(body=False, system_root=REPO)[0]
     for path, tail in _chapter_tails().items():
         assert tail not in prompt, f"an ordinary plan's packet must not inline {path}"
 
@@ -69,7 +69,7 @@ def test_a_retrieving_body_plan_seat_is_handed_every_chapter_from_the_same_captu
         return real(root, book_id, *args, **kwargs)
 
     monkeypatch.setattr(reference_books, "load_reference_book", counted)
-    packet, retrieving = plan_ask.stable_prompts(None, body=True, system_root=REPO)
+    packet, retrieving = plan_ask.stable_prompts(body=True, system_root=REPO)
     assert loads == ["architecture"]
     chapters = real(REPO, "architecture").chapters
     assert len(chapters) > 1
@@ -88,5 +88,5 @@ def test_a_body_plan_whose_book_cannot_be_assembled_is_refused_not_sent_empty(tm
     (tmp_path / "docs/ARCHITECTURE.md").write_text(
         "# Map\n\nThe map.\n\n## Chapters\n\n- [1. Gone](architecture/01-gone.md)\n", encoding="utf-8")
     with pytest.raises(plan_packet.PlanPacketError, match="could not be assembled"):
-        plan_ask.stable_prompts(None, body=True, system_root=tmp_path)
-    assert plan_ask.stable_prompts(None, body=False, system_root=tmp_path)[1]  # an ordinary plan needs no book
+        plan_ask.stable_prompts(body=True, system_root=tmp_path)
+    assert plan_ask.stable_prompts(body=False, system_root=tmp_path)[1]  # an ordinary plan needs no book
