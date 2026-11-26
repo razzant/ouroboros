@@ -18,6 +18,7 @@ from ouroboros import context_fit as fit
 from ouroboros import memory_view
 from ouroboros.contracts.realtime import RouteFacts
 from ouroboros.tool_policy import NANO_RESIDENT_SCHEMA_NAMES, NANO_SCHEMA_META_NAMES
+from tests import _memory_scale_fixture as scale
 from tests import _memory_view_synthetic as syn
 
 FACTS = RouteFacts(conversation_window_tokens=92_000, working_reserve_tokens=10_000, source="synthetic call window")
@@ -106,3 +107,36 @@ def test_the_floors_diagnostics_read_the_calls_own_base(tmp_path, monkeypatch):
     counterfactual = memory_floor.counterfactual_starts(
         plan, {"now": memory_view.snapshot_from_json(plan.core.memory_view_json)})
     assert counterfactual["measured"] and counterfactual["arms"]["now"]["mode"] == "nano"
+
+
+def _fresh_start(tmp_path, monkeypatch, resolve, mode, nano_base):
+    from ouroboros import context
+
+    monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)
+    env, memory = scale.env_on(scale.installed(tmp_path, "fresh"))
+    return context.build_context_fit_plan(env, memory, {"id": "fresh-start", "type": "task", "chat_id": 1, "text": "hi",
+                                                        "_is_direct_chat": True},
+                                          preferred_mode=mode, tool_schemas=scale.tools(), nano_base=nano_base,
+                                          route_resolver=resolve)
+
+
+@pytest.mark.parametrize("route", [pytest.param(route, id=f"{route[0]}:{route[1]}") for route in scale.call_routes()]
+                         + [pytest.param(("text", "85k", None), id="text:85k")])
+def test_the_fresh_fixture_starts_on_every_shipped_call_model_and_on_hard_85k_text_at_the_ordinary_builder(
+        tmp_path, monkeypatch, route):
+    """A new install's start fits every shipped call model's window with its eighth of work room left and no host section
+    addressed for the window, and a hard 85,000-token text route keeps the owner's Nano. This drives the ordinary
+    builder the call's adapter calls; the adapter's ``session_candidate`` itself is not driven here (no keyless stack
+    reaches it for a synthetic drive without a socket), so its ``evidence['work_room']`` is read as the plan's notice."""
+    skill, _model, facts = route
+    if facts is None:
+        resolve, base = scale.route_resolver(85_000, "provider", None), None
+    else:
+        resolve = scale.route_resolver(facts.conversation_window_tokens, facts.basis, facts.working_reserve_tokens,
+                                       provider=skill, facts=facts)
+        base = ("list_available_tools", "enable_tools")
+    plan = _fresh_start(tmp_path, monkeypatch, resolve, "nano", base)
+    shown = plan.projection(plan.initial_mode)
+    assert plan.preferred_mode == "nano" and plan.initial_mode == "nano"
+    assert "Start room is smaller than requested" not in shown.system_content_json  # the eighth is left
+    assert not shown.memory_facts.get("host_sections_addressed"), "no host section addressed for the window"
