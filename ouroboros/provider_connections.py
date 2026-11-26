@@ -27,7 +27,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from ouroboros.provider_models import (
     BUILTIN_CONNECTION, CONNECTIONS_KEY, DIRECT_PROVIDER_DEFAULTS, MODEL_SETTING_KEYS, OPENAI_RESPONSES_DIRECT_DEFAULTS,
-    PROVIDER_CREDENTIAL_GROUPS, PROVIDER_KINDS, RouteParts, choice_error, compatible_endpoint,
+    COMPATIBLE_LEGACY_PAIR, PROVIDER_CREDENTIAL_GROUPS, PROVIDER_KINDS, RouteParts, choice_error, compatible_endpoint,
     compatible_endpoint_configured, connection_id, openai_api_surface, parse_model_route,
 )
 from ouroboros.settings_integrity import runtime_setting
@@ -36,6 +36,9 @@ log = logging.getLogger(__name__)
 Reader = Callable[..., Any]  # read(flat_setting_key, default) -> the raw saved value
 _ROW_META = ("kind", "name", "label", "enabled")
 _SURFACE_KEY = PROVIDER_KINDS["openai"].flat_key("api_surface")
+# The built-in compatible address: the dedicated key and the legacy one it falls back to (``compatible_endpoint``).
+_COMPATIBLE_ADDRESS = PROVIDER_KINDS["openai-compatible"].flat_key("base_url")
+_COMPATIBLE_ADDRESS_KEYS = (_COMPATIBLE_ADDRESS, COMPATIBLE_LEGACY_PAIR[_COMPATIBLE_ADDRESS])
 
 
 def connection_rows(raw: Any) -> tuple[dict, ...]:
@@ -284,7 +287,7 @@ def canonical_builtin_consent(settings: dict, written: Mapping[str, Any]) -> Non
         text = _text(settings.get(key))
         if text == CONSENT_REVOKED:
             return  # an explicit revocation travels unchanged
-        address_touched = any(name in written for name in ("OPENAI_COMPATIBLE_BASE_URL", "OPENAI_BASE_URL"))
+        address_touched = any(name in written for name in _COMPATIBLE_ADDRESS_KEYS)
         if text and not (address_touched and not compatible_endpoint(lambda name: _text(settings.get(name)))[1]):
             settings[key] = consent_token(text)
         else:
@@ -293,7 +296,7 @@ def canonical_builtin_consent(settings: dict, written: Mapping[str, Any]) -> Non
     # A write that empties the address in force (either pair) takes the stored consent with it, so a removed
     # connection never leaves one dangling; rotating the key under a standing address keeps it — consent
     # belongs to the endpoint, not the credential.
-    if (any(name in written for name in ("OPENAI_COMPATIBLE_BASE_URL", "OPENAI_BASE_URL"))
+    if (any(name in written for name in _COMPATIBLE_ADDRESS_KEYS)
             and not compatible_endpoint(lambda name: _text(settings.get(name)))[1]):
         blanked()
 
