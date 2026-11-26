@@ -23,6 +23,9 @@
   var M = {}, W = {}, G = {}, CELL = {}, CASE = {}, RATED = [], MAIN = [];
   // method 4 (2026.12 on): letters by column only, the models' own votes, reviewers and the comparison with the previous edition
   function v4(E) { return (E || state.E).method_version >= 4; }
+  // method 5 (2026.12.1 on): the order by the quality of the work, a role tag beside the name, cells that may have no
+  // letter, three views of a model, readers' questions; a revision carries the votes of the edition it revises
+  function v5(E) { return (E || state.E).method_version >= 5; }
   var live = null;
 
   // ---------- small helpers
@@ -191,8 +194,8 @@
   }
   function archivePage(id) { return validEdition(id) && ARCHIVE_CARDS[id] ? id + '.html' : null; }
   function editionDoc(E, name) {
-    // The frozen November publication has its own method and schema, not the current ones on main.
-    return (E && E.edition === '2026.11' ? REPO + '/blob/llm-rating-2026.11/docs/llm-rating' : SOURCE) + '/' + name;
+    // An archived edition keeps the method and the schema it was published with, at its own tag, not the current ones on main.
+    return (E && ARCHIVE_CARDS[E.edition] ? REPO + '/blob/llm-rating-' + E.edition + '/docs/llm-rating' : SOURCE) + '/' + name;
   }
   function methodLink(E) { return editionDoc(E, 'METHOD.md'); }
   function foot(E) {
@@ -263,8 +266,9 @@
     var draft = E.status !== 'final';
     var vote = v4(E) ? openingVote(E) : '';
     return '<section class="head' + (vote ? ' head-with-vote' : '') + '"><div class="head-main">' +
-      '<p class="eyebrow">' + t('eyebrow', { id: E.edition }) + (E.early ? ' <span class="pill early">' + esc(t('early_pill')) + '</span>' : '') + '</p>' +
-      '<h1>' + esc(t('title')) + '</h1><p class="lead">' + esc(t('lead')) + '</p></div>' +
+      '<p class="eyebrow' + (E.revision_of ? ' revision' : '') + '"><span>' + t('eyebrow', { id: E.edition }) + '</span>' + (E.revision_of ? ' <span class="pill early">' + esc(t('revision_pill', { id: E.revision_of })) + '</span>' :
+        E.early ? ' <span class="pill early">' + esc(t('early_pill')) + '</span>' : '') + '</p>' +
+      '<h1>' + esc(t('title')) + '</h1><p class="lead">' + esc(t(v5(E) ? 'lead_v5' : 'lead')) + '</p></div>' +
       '<div class="head-side"><div class="status' + (draft ? ' draft' : '') + '">' + t(draft ? 'status_draft' : 'status_final', { id: E.edition }) + '</div>' +
       '<div class="sub">' + nb(t('as_of', { date: dateLong(asOf(E)) })) + '</div>' +
       (draft ? '<div class="sub">' + esc(t(draftSub(E))) + '</div>' : '') +
@@ -319,9 +323,12 @@
   function chip(g, cls) { return '<span class="t t-' + (g || 'N') + (cls ? ' ' + cls : '') + '">' + (g || '–') + '</span>'; }
   function chipWords(g) { return g ? g + ', ' + t('tier_' + g) : t('unrated_short'); }
   function legend() {
+    // method 5: a dash is a cell with no work that has an outcome; a ring marks a preliminary letter
+    var extra = v5() ? '<li title="' + esc(t('nodata_long')) + '">' + chip(null) + esc(t('legend_nodata')) + '</li>' +
+      '<li title="' + esc(t('ground_open')) + '"><span class="t t-N g-open" aria-hidden="true"></span>' + esc(t('legend_open')) + '</li>' : '';
     return '<ul class="legend">' + state.E.scale.map(function (s) {
       return '<li title="' + esc(L(s.name)) + '">' + chip(s.id) + esc(t('card_tier_' + s.id)) + '</li>';
-    }).join('') + '</ul>';
+    }).join('') + extra + '</ul>';
   }
   // who holds the top letter in each column of the main table
   function picks(E) {
@@ -330,10 +337,15 @@
     });
     return items.length ? '<div class="picks"><h3>' + chip(top) + esc(t('picks_title')) + '</h3><ul>' + items.join('') + '</ul></div>' : '';
   }
-  function cellBtn(kind, key, r, k, g, who, what, compared) {
-    var words = chipWords(g);
-    return '<button class="t t-' + (g || 'N') + '" type="button" data-' + kind + '="' + esc(key) + '" data-r="' + r + '" data-k="' + k + '" aria-expanded="false" aria-label="' +
-      esc(who + ', ' + what + ': ' + words + (compared ? '; ' + t('letter_compared') : '')) + '" title="' + esc(what + ': ' + words) + '">' + (g || '–') + '</button>';
+  function gradeDisplay(g, x) {
+    var open = x && (x.ground === 'open' || x.ground === 'role');
+    var words = x && !g ? t('nodata_short') : chipWords(g);
+    return { cls: 't t-' + (g || 'N') + (open ? ' g-open' : ''), glyph: g || '–', words: words + (open ? '; ' + t('legend_open') : ''), preliminary: !!open };
+  }
+  function cellBtn(kind, key, r, k, g, who, what, compared, x) {
+    var d = gradeDisplay(g, x);
+    return '<button class="' + d.cls + '" type="button" data-' + kind + '="' + esc(key) + '" data-r="' + r + '" data-k="' + k + '" aria-expanded="false" aria-label="' +
+      esc(who + ', ' + what + ': ' + d.words + (compared ? '; ' + t('letter_compared') : '')) + '" title="' + esc(what + ': ' + d.words) + '">' + d.glyph + '</button>';
   }
   function comparedColumns(E) {
     var columns = {};
@@ -387,7 +399,7 @@
       });
     }
     var corner = '<div class="corner" role="columnheader"><span class="rk" aria-hidden="true">#</span><span>' + esc(t('corner')) + '</span></div>';
-    h.push('<div class="mx" data-group="' + esc(mode) + '" style="--tpl:' + tpl + '" role="table" aria-label="' + esc(t(v4(E) ? 'table_label_v4' : 'table_label')) + '">');
+    h.push('<div class="mx' + (v5(E) ? ' v5' : '') + '" data-group="' + esc(mode) + '" style="--tpl:' + tpl + '" role="table" aria-label="' + esc(t(v4(E) ? 'table_label_v4' : 'table_label')) + '">');
     if (rating) {
       h.push('<div class="hr hr2" role="row">' + corner);
     } else {
@@ -413,11 +425,11 @@
     h.push('</div>');
     RATED.forEach(function (m, r) {
       h.push('<div class="r" role="row"><div class="m" role="rowheader"><button class="mbtn" type="button" data-m="' + esc(m.id) + '" aria-expanded="false" title="' +
-        esc(m.name) + '" aria-label="' + esc(t('rank_label', { n: m.rank }) + ': ' + m.name) + '"><span class="rk">' + m.rank + '</span><span class="nm">' + esc(m.short) + '</span></button></div>');
+        esc(m.name + (m.role ? ' · ' + L(m.role) : '')) + '" aria-label="' + esc(t('rank_label', { n: m.rank }) + ': ' + m.name + (m.role ? ' · ' + t('role_label') + ': ' + L(m.role) : '')) + '"><span class="rk">' + m.rank + '</span><span class="nm">' + esc(m.short) + '</span></button></div>');
       cols.forEach(function (c, k) {
         if (c.gap) h.push(sp);
         var groupVotes = c.g && compared && compared[c.g.id];
-        var inner = c.g ? cellBtn('gc', m.id + '|' + c.g.id, r, k, m.groups[c.g.id].grade, m.short, L(c.g.name), groupVotes && groupVotes.has(m.id))
+        var inner = c.g ? cellBtn('gc', m.id + '|' + c.g.id, r, k, m.groups[c.g.id].grade, m.short, L(c.g.name), groupVotes && groupVotes.has(m.id), v5(E) ? m.groups[c.g.id] : null)
           : cellBtn('c', m.id + '|' + c.w.id, r, k, CELL[m.id + '|' + c.w.id].grade, m.short, L(c.w.name));
         h.push('<div class="c" role="cell">' + inner + '</div>');
       });
@@ -434,7 +446,8 @@
       var compared = comparedColumns(E);
       return '<section class="board" aria-labelledby="board-h"><h2 id="board-h" class="sr">' + esc(t('board_title')) + '</h2>' +
         '<div class="board-head">' + legend() + '<p class="note">' + esc(t('board_hint_v4')) + '</p></div>' +
-        '<p class="hint">' + esc(t('scroll_hint_v4')) + '</p><div class="mxwrap">' + matrix(E, compared) + '</div>' + picks(E) + '</section>' + boardVoteLink(compared);
+        '<p class="hint">' + esc(t('scroll_hint_v4')) + '</p><div class="mxwrap">' + matrix(E, compared) + '</div>' + picks(E) + '</section>' + boardVoteLink(compared) +
+        (v5(E) && E.notes.place_rule ? '<p class="board-votes board-rule">' + esc(L(E.notes.place_rule)) + '</p>' : '');
     }
     var chips = chipBtn('rating', t('view_rating'), MAIN.length) + chipBtn('all', t('all_works'), E.works.length);
     E.groups.forEach(function (g) { chips += chipBtn(g.id, L(g.name), g.works.length); });
@@ -569,7 +582,10 @@
   }
   function groundLine(E, x) {
     if (!x.ground) return '';
-    return '<p class="why use"><b>' + esc(t('basis_label')) + '</b> ' + esc(t('ground_' + x.ground, { prev: E.previous_edition || '' })) + '</p>';
+    var key = 'ground_' + x.ground;
+    if (v5(E) && STR[key + '_v5']) key += '_v5';
+    // a carried letter names the edition it comes from, which a revision keeps from the edition it revises
+    return '<p class="why use"><b>' + esc(t('basis_label')) + '</b> ' + esc(t(key, { prev: E.carried_from || E.previous_edition || '' })) + '</p>';
   }
   function pairNames(p) {
     return p.models.map(function (id, i) { return id && M[id] ? M[id].short : p.labels[i]; });
@@ -590,8 +606,12 @@
   }
   function groupCellV4(E, m, g, x) {
     var covers = g.works.map(function (w) { return '<li>' + esc(L(W[w].name)) + '</li>'; }).join('');
-    return dhead(chip(x.grade), esc(m.short) + ' · ' + esc(L(g.name)), esc(t('tier_long_' + x.grade)) + '.') +
-      '<div class="dg"><div class="dcol">' + why(x.reason) + groundLine(E, x) + columnVotes(E, m, g.id) +
+    var d = gradeDisplay(x.grade, v5(E) ? x : null);
+    var badge = '<span class="' + d.cls + '" role="img" aria-label="' + esc(d.words) + '">' + d.glyph + '</span>';
+    var description = x.grade ? t('tier_long_' + x.grade) : t('nodata_long');
+    if (d.preliminary) description += ' · ' + t('legend_open');
+    return dhead(badge, esc(m.short) + ' · ' + esc(L(g.name)), esc(description) + '.') +
+      '<div class="dg"><div class="dcol">' + why(x.reason) + (x.grade ? groundLine(E, x) : '') + columnVotes(E, m, g.id) +
       '<h4 class="in">' + esc(t('covers_title')) + '</h4><ul class="covers">' + covers + '</ul></div>' +
       '<div class="dcol"><h4>' + esc(t('letters_title')) + '</h4>' + groupLetters(g.id) +
       (x.cases ? '<h4 class="in">' + esc(t('cases_title')) + '</h4>' + casesList(x.cases) : '') + '</div></div>';
@@ -613,10 +633,14 @@
       '<div class="dcol"><h4>' + esc(t('letters_title')) + '</h4>' + groupLetters(g.id) +
       (x.cases ? '<h4 class="in">' + esc(t('cases_title')) + '</h4>' + casesList(x.cases) : '') + '</div></div>';
   }
-  function groupPills(m) {
+  function groupPills(E, m) {
     var out = '';
-    MAIN.forEach(function (g) { out += '<span class="gp">' + chip(m.groups[g.id].grade) + esc(L(g.name)) + '</span>'; });
-    return out ? '<div class="gps">' + out + '</div>' : '';
+    MAIN.forEach(function (g) {
+      var x = m.groups[g.id], name = L(g.name), d = gradeDisplay(x.grade, v5(E) ? x : null);
+      out += '<span class="gp" data-grade-group="' + esc(g.id) + '" title="' + esc(name + ': ' + d.words) + '"><span class="' + d.cls +
+        '" role="img" aria-label="' + esc(d.words) + '">' + d.glyph + '</span>' + esc(name) + '</span>';
+    });
+    return out ? '<div class="gps" data-grade-model="' + esc(m.id) + '">' + out + '</div>' : '';
   }
   function trustCheck(m) {
     return '<p class="tc"><b>' + esc(t('trust_label')) + '</b> ' + esc(L(m.trust)) + '</p><p class="tc"><b>' + esc(t('check_label')) + '</b> ' + esc(L(m.check)) + '</p>';
@@ -635,12 +659,18 @@
     return t('since_label', { id: prev }) + ' ' + what;
   }
   function flagPill(m) { return m.flag ? '<span class="pill flag">' + esc(L(m.flag)) + '</span>' : ''; }
+  // method 5: the role in my team today, a tag beside the name; what changed since the previous edition; the version beside its predecessor
+  function roleTag(m) { return m.role ? '<span class="pill role" title="' + esc(t('role_label')) + '">' + esc(L(m.role)) + '</span>' : ''; }
+  function deltaBox(m) {
+    return (m.delta ? '<p class="tc delta"><b>' + esc(t('delta_label')) + '</b> ' + esc(L(m.delta)) + '</p>' : '') +
+      (m.generations ? '<p class="tc delta"><b>' + esc(t('generations_label')) + '</b> ' + esc(L(m.generations)) + '</p>' : '');
+  }
   function rankBadge(m) { return '<span class="t rkb" aria-label="' + esc(t('rank_label', { n: m.rank })) + '">' + m.rank + '</span>'; }
   function modelHtml(E, id) {
     var m = M[id];
     var since = sinceText(E, m);
     return dhead(rankBadge(m), esc(m.name) + flagPill(m), esc(m.maker) + '. ' + esc(L(m.one_liner))) +
-      '<div class="dg"><div class="dcol"><p class="dlong">' + esc(L(m.verdict)) + '</p>' + groupPills(m) + trustCheck(m) + pickLine(m) + noteBox(m) +
+      '<div class="dg"><div class="dcol">' + (m.role ? '<p class="rolerow">' + roleTag(m) + '</p>' : '') + '<p class="dlong">' + esc(L(m.verdict)) + '</p>' + deltaBox(m) + groupPills(E, m) + trustCheck(m) + pickLine(m) + noteBox(m) +
       (since ? '<p class="tc since">' + esc(since) + '</p>' : '') + factsList(modelFacts(E, m)) + '</div>' +
       '<div class="dcol"><h4>' + esc(t('cases_title')) + '</h4>' + casesList(m.cases) + '</div></div>';
   }
@@ -656,12 +686,13 @@
     var rows = RATED.map(function (m) {
       var since = sinceText(E, m);
       return '<li class="vrow"><div class="who"><h3><span class="rk">' + m.rank + '</span>' + esc(m.name) + '</h3><div class="mk">' + esc(m.maker) + '</div>' +
-        (since || m.flag ? '<div class="mk since">' + esc(since) + (m.flag ? (since ? ' ' : '') + flagPill(m) : '') + '</div>' : '') + groupPills(m) + '</div>' +
-        '<div class="say"><p class="liner">' + esc(L(m.one_liner)) + '</p><p class="long">' + esc(L(m.verdict)) + '</p>' + trustCheck(m) +
+        (m.role ? '<div class="mk rolerow">' + roleTag(m) + '</div>' : '') +
+        (since || m.flag ? '<div class="mk since">' + esc(since) + (m.flag ? (since ? ' ' : '') + flagPill(m) : '') + '</div>' : '') + groupPills(E, m) + '</div>' +
+        '<div class="say"><p class="liner">' + esc(L(m.one_liner)) + '</p><p class="long">' + esc(L(m.verdict)) + '</p>' + deltaBox(m) + trustCheck(m) +
         '<details><summary>' + esc(t('numbers_and_cases')) + '</summary>' + noteBox(m) + factsList(modelFacts(E, m)) + '<h4>' + esc(t('cases_title')) + '</h4>' + casesList(m.cases) + '</details></div></li>';
     });
     var ps = E.notes && E.notes.postscript ? '<p class="ps"><span>' + esc(L(E.notes.postscript)) + '</span></p>' : '';
-    return '<section class="sec" id="models" aria-labelledby="models-h"><h2 id="models-h">' + esc(t('models_title')) + '</h2><p class="note">' + esc(t('models_note')) + '</p><ol class="vlist">' + rows.join('') + '</ol>' + ps + '</section>';
+    return '<section class="sec" id="models" aria-labelledby="models-h"><h2 id="models-h">' + esc(t('models_title')) + '</h2><p class="note">' + esc(t(v5(E) ? 'models_note_v5' : 'models_note')) + '</p><ol class="vlist">' + rows.join('') + '</ol>' + ps + '</section>';
   }
   // earlier versions and newcomers stand apart: a note each, no letters
   function apartList(E, status) {
@@ -691,22 +722,36 @@
       (trial ? '<h3 class="subh">' + esc(t('trial_title')) + '</h3><p class="note">' + esc(t('trial_note')) + '</p><ul class="plain">' + trial + '</ul>' : '') + '</section>';
   }
   function howV4(E) {
-    var tok = E.totals.tokens, V = E.volume, P = V.tokens, prev = E.previous_edition || '', items = [];
+    var tok = E.totals.tokens, V = E.volume, P = V.tokens, prev = E.previous_edition || '', items = [], rev = E.revision_of;
     items.push(t('how_frame'));
-    items.push(t('how_order'));
-    items.push(t('how_grade'));
-    items.push(t('how_columns_v4', { prev: prev }));
-    items.push(t('how_grounds', { prev: prev }));
-    items.push(t('how_votes'));
-    items.push(t('how_reviewers'));
-    items.push(t('how_cases_v4', { n: E.totals.cases }));
+    if (v5(E)) {
+      items.push(t('how_order_v5'));
+      if (E.notes.place_rule) items.push(t('how_place') + ' ' + esc(L(E.notes.place_rule)));
+      items.push(t('how_grade'));
+      items.push(t('how_columns_v5', { columns: E.totals.columns }));
+      items.push(t('how_new_columns'));
+      items.push(t('how_nodata'));
+      items.push(t('how_grounds_v5', { prev: E.carried_from || prev }));
+      items.push(rev ? t('how_votes_rev', { id: rev }) : t('how_votes'));
+      items.push(t('how_reviewers'));
+      items.push(t('how_cases_v5', { n: E.totals.cases }));
+    } else {
+      items.push(t('how_order'));
+      items.push(t('how_grade'));
+      items.push(t('how_columns_v4', { prev: prev }));
+      items.push(t('how_grounds', { prev: prev }));
+      items.push(t('how_votes'));
+      items.push(t('how_reviewers'));
+      items.push(t('how_cases_v4', { n: E.totals.cases }));
+    }
     items.push(t('how_volume', { from: dateDay(E.period.from), to: dateLong(E.period.to), versions: V.versions_with_work, finished: V.versions_with_finished_work,
       led: V.versions_leading_only, works: V.finished_works }));
     items.push(t('how_tokens_v4', { read: L(P.read_display), cache: Math.floor(100 * P.cache_share) + '%', written: L(P.written_display),
       since: dateLong(tok.since), life: L(tok.read_display).replace('+', ''), life_written: L(tok.written_display), definition: L(tok.definition) }));
     if (E.notes.lead_note) items.push(t('how_lead') + ' ' + esc(L(E.notes.lead_note)));
     items.push(t('how_left_out_v4'));
-    items.push(E.status === 'final' ? t('how_made_final_v4') : t(E.notes && E.notes.unverified ? 'how_made_draft_v4_cases' : 'how_made_draft_v4'));
+    if (v5(E) && rev) items.push(t(E.status === 'final' ? 'how_made_final_rev' : E.notes && E.notes.unverified ? 'how_made_draft_rev_cases' : 'how_made_draft_rev', { id: rev }));
+    else items.push(E.status === 'final' ? t('how_made_final_v4') : t(E.notes && E.notes.unverified ? 'how_made_draft_v4_cases' : 'how_made_draft_v4'));
     return '<section class="sec pad" id="how" aria-labelledby="how-h"><h2 id="how-h">' + esc(t('how_title')) + '</h2><ul class="plain">' +
       items.map(function (x) { return '<li>' + x + '</li>'; }).join('') +
       '<li><a href="' + esc(methodLink(E)) + '">' + esc(t('full_method')) + '</a></li></ul></section>';
@@ -739,6 +784,8 @@
   // ---------- method 4: sections under the ranking
   function secNav(E) {
     var items = [['changes', 'sec_changes'], ['votes', 'sec_votes'], ['reviewers', 'sec_reviewers'], ['models', 'sec_models'], ['outside', 'sec_outside'], ['how', 'sec_how']];
+    if (E.views) items.unshift(['views', 'sec_views']);
+    if (E.faq) items.splice(items.length - 2, 0, ['faq', 'sec_faq']);
     return '<nav class="secnav" aria-label="' + esc(t('nav_sections')) + '">' + items.map(function (x) {
       return '<a class="chip" href="#' + x[0] + '">' + esc(t(x[1])) + '</a>';
     }).join('') + '</nav>';
@@ -770,7 +817,8 @@
         was = cmpCell(w.rank, w.letters, null, true);
         moved.push(w.rank === r.rank ? t('ch_place_same') : t('ch_place_moved', { from: w.rank, to: r.rank }));
         var diff = [];
-        MAIN.forEach(function (g, i) {
+        // the letters of a row cover the columns both editions have: all of them, unless the edition added columns
+        (C.columns ? C.columns.map(function (id) { return G[id]; }) : MAIN).forEach(function (g, i) {
           if (w.letters.charAt(i) !== r.letters.charAt(i)) diff.push(t('ch_letters_changed', { column: L(g.name), from: w.letters.charAt(i), to: r.letters.charAt(i) }));
         });
         moved.push(diff.length ? diff.join('; ') : t('ch_letters_same'));
@@ -788,8 +836,8 @@
       left += '<li>' + t('ch_left_line', { name: M[x.model] ? M[x.model].name : x.name, rank: x.was.rank, id: prev, successor: x.successor && M[x.successor] ? M[x.successor].short : '' }) + '</li>';
     });
     var bullets = (C.bullets || []).map(function (b) { return '<li>' + esc(L(b)) + '</li>'; }).join('');
-    return '<section class="sec pad" id="changes" aria-labelledby="changes-h"><h2 id="changes-h">' + esc(t('changes_title', { id: prev })) + '</h2>' +
-      '<p class="note">' + esc(t('changes_note', { id: prev })) + '</p>' +
+    return '<section class="sec pad" id="changes" aria-labelledby="changes-h"><h2 id="changes-h">' + esc(C.title ? L(C.title) : t('changes_title', { id: prev })) + '</h2>' +
+      '<p class="note">' + esc(C.note ? L(C.note) : t('changes_note', { id: prev })) + '</p>' +
       '<ul class="plain bul cols">' + bullets + '</ul>' +
       '<div class="cmpwrap"><table class="cmp"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>' +
       (left ? '<h3 class="subh">' + esc(t('ch_left_title')) + '</h3><ul class="plain">' + left + '</ul>' : '') +
@@ -822,7 +870,9 @@
   function votesSec(E) {
     var V = E.votes;
     if (!V) return '';
-    var prev = E.previous_edition || '', counted = 0, notCounted = 0, none = 0, seen = 0, rows = '';
+    // Only name a prior table when the carried ballot metadata binds it to this revision.
+    var prev = E.carried && E.carried.votes_prior_table, counted = 0, notCounted = 0, none = 0, seen = 0, rows = '';
+    var priorLabel = prev ? t('votes_col_prior', { id: prev }) : t('votes_col_prior_unnamed');
     V.voters.forEach(function (v) {
       var cls = ballotClass(v.status), m = M[v.model];
       if (cls === 'ok') counted++; else if (cls === 'warn') notCounted++; else none++;
@@ -831,9 +881,9 @@
       var identity = v.identity ? '<small class="vote-identity" data-identity="' + esc(v.identity) + '">' +
         esc(v.requested_label ? t('vote_identity_requested_snapshot', { model: v.requested_label }) : t('vote_identity_' + v.identity)) + '</small>' : '';
       rows += '<tr><th scope="row">' + esc(m ? m.short : v.model) + identity + '</th><td data-label="' + esc(t('votes_col_ballot')) + '"><span class="bs ' + cls + '">' + esc(t('vs_' + v.status)) + '</span></td>' +
-        '<td data-label="' + esc(t('votes_col_counted')) + '">' + esc(items) + '</td><td data-label="' + esc(t('votes_col_prior', { id: prev })) + '">' + esc(t('prior_' + v.prior_table)) + '</td></tr>';
+        '<td data-label="' + esc(t('votes_col_counted')) + '">' + esc(items) + '</td><td data-label="' + esc(priorLabel) + '">' + esc(t('prior_' + v.prior_table)) + '</td></tr>';
     });
-    var head = '<tr><th scope="col">' + esc(t('votes_col_version')) + '</th><th scope="col">' + esc(t('votes_col_ballot')) + '</th><th scope="col">' + esc(t('votes_col_counted')) + '</th><th scope="col">' + esc(t('votes_col_prior', { id: prev })) + '</th></tr>';
+    var head = '<tr><th scope="col">' + esc(t('votes_col_version')) + '</th><th scope="col">' + esc(t('votes_col_ballot')) + '</th><th scope="col">' + esc(t('votes_col_counted')) + '</th><th scope="col">' + esc(priorLabel) + '</th></tr>';
     var anns = V.annotations.map(function (a) {
       var c = a.counts;
       return '<li><span>' + esc(L(a.description)) + '</span>' +
@@ -843,9 +893,9 @@
         (a.unverified_counted ? '<small>' + esc(t('ann_unverified', { n: a.unverified_counted })) + '</small>' : '') +
         (a.established ? '<p class="established">' + esc(L(a.established)) + '</p>' : '') + '</li>';
     }).join('');
-    return '<section class="sec pad" id="votes" aria-labelledby="votes-h"><h2 id="votes-h">' + esc(t('votes_title')) + '</h2>' +
-      '<p class="note">' + esc(t('votes_note')) + '</p>' +
-      '<p class="vsum">' + esc(t('votes_summary', { asked: V.voters.length, counted: counted, not_counted: notCounted, none: none })) + (seen ? ' ' + esc(t('votes_prior', { seen: seen, id: prev })) : '') + '</p>' +
+    return '<section class="sec pad" id="votes" aria-labelledby="votes-h"><h2 id="votes-h">' + esc(t('votes_title')) + '</h2>' + carriedNote(E) +
+      '<p class="note">' + esc(E.carried ? t('votes_note_rev', { id: E.carried.from }) : t('votes_note')) + '</p>' +
+      '<p class="vsum">' + esc(t('votes_summary', { asked: V.voters.length, counted: counted, not_counted: notCounted, none: none })) + (prev && seen ? ' ' + esc(t('votes_prior', { seen: seen, id: prev })) : '') + '</p>' +
       '<h3 class="subh">' + esc(t('votes_pairs_title')) + '</h3><ol class="pairs">' + V.pairs.map(pairCard).join('') + '</ol>' +
       '<p class="why note">' + esc(t('votes_boundary')) + '</p>' +
       (anns ? '<h3 class="subh">' + esc(t('votes_checks_title')) + '</h3><p class="note">' + esc(t('votes_checks_note')) + '</p><ul class="anns">' + anns + '</ul>' : '') +
@@ -891,7 +941,7 @@
       return '<li><span class="who">' + a.who.map(function (id) { return '<b>' + esc(nm(id)) + '</b>'; }).join('') + '</span><span>' + esc(L(a.text)) + '</span></li>';
     }).join('');
     var examples = R.examples.map(function (x) { return '<li><h4>' + esc(L(x.title)) + '</h4><p>' + esc(L(x.text)) + '</p></li>'; }).join('');
-    return '<section class="sec pad" id="reviewers" aria-labelledby="reviewers-h"><h2 id="reviewers-h">' + esc(t('rev_title')) + '</h2>' +
+    return '<section class="sec pad" id="reviewers" aria-labelledby="reviewers-h"><h2 id="reviewers-h">' + esc(t('rev_title')) + '</h2>' + carriedNote(E) +
       '<p class="note">' + t('rev_note', { r1: readers[0], r2: readers[1] }) + '</p>' +
       '<div class="rtwrap"><table class="rt rv"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>' +
       (foot ? '<p class="quiet">' + foot + '</p>' : '') +
@@ -903,6 +953,30 @@
       '<p class="why note">' + esc(t('rev_boundary', { remarks: C.remarks, reviews: C.reviews, open: C.open })) + '</p></div>' +
       '<h3 class="subh">' + esc(t('rev_examples_title')) + '</h3><ul class="examples">' + examples + '</ul></section>';
   }
+  // a revision keeps the votes and the reviewers of the edition it revises, and says so above both
+  function carriedNote(E) { return E.carried ? '<p class="why note carried">' + esc(L(E.carried.note)) + '</p>' : ''; }
+  // method 5: the same models from three sides, and what to pick for each kind of work on a limited budget
+  function viewsSec(E) {
+    var V = E.views;
+    if (!V) return '';
+    var head = '<div class="vwr vwh" role="row"><span role="columnheader">' + esc(t('ch_col_model')) + '</span>' +
+      V.columns.map(function (c) { return '<span role="columnheader">' + esc(L(c.name)) + '</span>'; }).join('') + '</div>';
+    var rows = V.rows.map(function (r) {
+      var m = M[r.model];
+      return '<div class="vwr" role="row"><b role="rowheader"><span class="rk">' + m.rank + '</span>' + esc(m.short) + '</b>' +
+        V.columns.map(function (c) { return '<span role="cell" data-label="' + esc(L(c.name)) + '">' + esc(L(r[c.id])) + '</span>'; }).join('') + '</div>';
+    }).join('');
+    var B = V.budget, budget = B.rows.map(function (r) { return '<div><dt>' + esc(L(G[r.group].name)) + '</dt><dd>' + esc(L(r.text)) + '</dd></div>'; }).join('');
+    return '<section class="sec pad" id="views" aria-labelledby="views-h"><h2 id="views-h">' + esc(L(V.title)) + '</h2><p class="note">' + esc(L(V.lead)) + '</p>' +
+      '<div class="vw" role="table" aria-labelledby="views-h">' + head + rows + '</div>' +
+      '<h3 class="subh" id="budget">' + esc(L(B.title)) + '</h3><p class="note">' + esc(L(B.principle)) + '</p><dl class="bud">' + budget + '</dl></section>';
+  }
+  function faqSec(E) {
+    var F = E.faq;
+    if (!F) return '';
+    return '<section class="sec pad" id="faq" aria-labelledby="faq-h"><h2 id="faq-h">' + esc(L(F.title)) + '</h2><p class="note">' + esc(L(F.lead)) + '</p><dl class="qa">' +
+      F.items.map(function (x) { return '<div><dt>' + esc(L(x.q)) + '</dt><dd>' + esc(L(x.a)) + '</dd></div>'; }).join('') + '</dl></section>';
+  }
   function renderRating() {
     var E = state.E;
     if (state.group !== 'rating' && state.group !== 'all' && !E.groups.some(function (g) { return g.id === state.group; })) state.group = 'rating';
@@ -911,8 +985,8 @@
     setHead(t('title'), v4(E) ? t('description_v4', counts) : t('description'), counts, E);
     if (v4(E)) {
       state.group = 'rating';
-      app.innerHTML = bar() + '<main class="shell page">' + hero(E) + board(E) + tiles(E) + secNav(E) + changesSec(E) + votesSec(E) + reviewersSec(E) + modelsList(E) +
-        '<div class="two">' + outside(E) + how(E) + '</div>' + foot(E) + '</main>';
+      app.innerHTML = bar() + '<main class="shell page' + (v5(E) ? ' v5' : '') + '">' + hero(E) + board(E) + tiles(E) + secNav(E) + viewsSec(E) + changesSec(E) + votesSec(E) + reviewersSec(E) + modelsList(E) +
+        faqSec(E) + '<div class="two">' + outside(E) + how(E) + '</div>' + foot(E) + '</main>';
     } else {
       app.innerHTML = bar() + '<main class="shell page">' + hero(E) + board(E) + tiles(E) + modelsList(E) +
         '<div class="two">' + outside(E) + how(E) + '</div>' + foot(E) + '</main>';
@@ -927,7 +1001,8 @@
     var mx = app.querySelector('.mx'), wrap = app.querySelector('.mxwrap');
     if (!mx || !wrap) return;
     var cols = mx.querySelectorAll('.wh').length, side = mx.querySelector('.corner').offsetWidth;
-    mx.classList.toggle('hz', state.group !== 'all' && cols > 0 && (wrap.clientWidth - side) / cols >= 84);
+    // method 5 has a one-word name that needs a wider column to lie flat («Исследование»)
+    mx.classList.toggle('hz', state.group !== 'all' && cols > 0 && (wrap.clientWidth - side) / cols >= (mx.classList.contains('v5') ? 104 : 84));
     var hint = app.querySelector('.hint');
     if (hint) hint.hidden = wrap.scrollWidth <= wrap.clientWidth + 1;
   }
