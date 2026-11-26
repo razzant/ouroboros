@@ -1543,7 +1543,8 @@ def _render_history_response(
     if not classified and not named:  # direct-address reads can miss rows a Project would inherit
         for gaps in stream_gaps.values():
             gaps.add("room_unclassified")
-    if reads.projection_failed:  # a terminal projection cut short: the rows it left hold no truth
+    unread = reads.failed and any(result_cache.get(row.get("task_id")) == {} for row in messages)  # no store answer
+    if reads.projection_failed or unread:  # a terminal projection cut short or a shown task unread: rows without truth
         for gaps in stream_gaps.values():
             gaps.add(PROJECTION_FAILED)
     if partial:  # a read that failed part-way is read whole again, never continued: no settlement is answered either
