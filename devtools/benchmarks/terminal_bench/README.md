@@ -281,8 +281,10 @@ Setup and environment timeouts are separate:
 >
 > **The faithful way to survive heavy/slow builds is NOT a multiplier — it is a
 > pre-built/pinned image** (`environment.force_build=false`, which 8/10 real
-> accepted submissions use). Pre-build the task images once and reuse them so the
-> default 1.0 build/setup timeouts are never hit.
+> accepted submissions use). Under it Harbor prefers a task's declared published image
+> to a build. Neither launcher changes that setting unless asked (METHODOLOGY "Task
+> images"). It saves the environment build only: the agent still installs in every
+> container during setup.
 
 For heavy Docker builds **in a LOCAL (non-submission) run only**, you may use:
 
@@ -445,12 +447,14 @@ note deleted/retried trial dirs drop their cost record, so the on-disk sum is a 
 - **`run_tb.py` flag names differ from harbor's:** `--setup-timeout-multiplier` /
   `--build-timeout-multiplier` (run_tb) map to
   `--agent-setup-timeout-multiplier` / `--environment-build-timeout-multiplier` (harbor).
-- **No-resume fragility of `run_tb.py`** (fresh job + `--force-build` each call) vs the
+- **No-resume fragility of `run_tb.py`** (a fresh job each call) vs the
   robust path: **`harbor job resume -p <jobdir> [-f <ErrorType>]`** continues an existing
   job (keeps completed trials, re-runs pending + the `-f`-removed errored-artifact trials);
   wrap it in a retry loop so a transient SSL/DNS blip just re-resumes instead of restarting.
 - **install-timeout on slow mirrors** (`RuntimeError: Command timed out after 1200s`) and
-  AgentSetupTimeout are infra, not capability — pre-built images remove this failure class.
+  AgentSetupTimeout are infra, not capability. Published task images do not prevent them,
+  because the agent installs in every container whatever its image; the opt-in
+  `OBO_TB_PIP_CACHE` wheel cache (`run_tb.py`) shortens that install.
 - **Pausing via SIGSTOP + sleep** blows in-flight trials' wall-clock deadlines →
   `deadline_local` reward-0 artifacts on resume; reclassify (reason_code + pause window)
   and re-run those trials before scoring. Don't count infra/pause artifacts as genuine fails.
@@ -477,6 +481,12 @@ python devtools/benchmarks/terminal_bench/run_tb.py \
 
 For a targeted smoke, add repeated `--task` filters before `--execute`, for
 example `--task pypi-server --task hf-model-inference --task qemu-alpine-ssh`.
+
+Task images: by default neither launcher passes an image flag, so Harbor's job
+configuration decides (for `run_tb.py`, a `--base-job-config` `environment.force_build`,
+else Harbor's default `false`). `--force-build` / `--no-force-build` pass Harbor's own flag,
+which overrides it. `--execute` does not change the image flags: a preview and a dispatched
+run carry the same ones. See METHODOLOGY "Task images".
 
 The launcher refuses to start from a dirty/unidentifiable seed checkout (the shared
 `benchmark_run_manifest` gate, fail-closed since v6.75.0); `--allow-dirty-seed` records the
@@ -516,7 +526,9 @@ they do not write the Ouroboros denominator ledger unless wrapped by
 `--agent-import-path` records `agents[0].name = null` in the job config, which
 the TB2.1 leaderboard CI can never match (see "Submitting to the leaderboard").
 Use `run_tb.py` (which launches via a named job config) for anything that might
-be submitted.
+be submitted. The raw examples below keep Harbor's default image policy; add
+`--force-build` only when you deliberately want task environments built from
+their own definitions.
 
 ```bash
 PYTHONPATH=/Users/anton/Ouroboros/repo \
@@ -531,8 +543,7 @@ harbor run \
   --agent-setup-timeout-multiplier 4 \
   --n-concurrent 1 \
   --n-tasks 1 \
-  --yes \
-  --force-build
+  --yes
 ```
 
 ### Full cached Terminal-Bench 2.0-style dataset
@@ -552,8 +563,7 @@ harbor run \
   --agent-kwarg server_start_timeout_sec=240 \
   --agent-setup-timeout-multiplier 4 \
   --n-concurrent 1 \
-  --yes \
-  --force-build
+  --yes
 ```
 
 ### Full Terminal-Bench 2.1
@@ -573,8 +583,7 @@ harbor run \
   --agent-setup-timeout-multiplier 4 \
   --environment-build-timeout-multiplier 4 \
   --n-concurrent 1 \
-  --yes \
-  --force-build
+  --yes
 ```
 
 ## Model Selection
@@ -693,8 +702,9 @@ Those can be omitted when creating logs-only bundles.
 
 - Old task images with Python 3.9 require adapter-installed Python 3.12 via
   `uv`; this is handled automatically.
-- Some task Docker builds need more than 600 seconds; use
-  `--environment-build-timeout-multiplier`.
+- Some task Docker builds need more than 600 seconds. Under the default image policy
+  Harbor prefers a task's declared published image to a build; otherwise use
+  `--environment-build-timeout-multiplier` in a local run only.
 - Some tasks still hit Harbor `AgentTimeoutError`; verifier can still produce a
   reward if the workspace has enough final state.
 - `RuntimeError` from the adapter should not be used for ordinary Ouroboros

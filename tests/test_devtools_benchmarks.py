@@ -3186,7 +3186,9 @@ def test_terminal_bench_run_tb_builds_required_agent_kwargs(tmp_path, monkeypatc
     assert kw["reasoning_effort"] == "medium"
     assert "--include-task-name" in cmd
     assert "pypi-server" in cmd
-    assert "--force-build" in cmd
+    # execute=True decides dispatch only: with no explicit image-build choice Harbor gets
+    # neither flag and its own job configuration decides (razzant/ouroboros#4315).
+    assert "--force-build" not in cmd and "--no-force-build" not in cmd
     # 6a: leaderboard-faithful default — Harbor static_validation REJECTS the
     # setup/build timeout multipliers (static_validation.py
     # _trial_timeout_override_fields rejects agent_setup_timeout_multiplier +
@@ -3196,6 +3198,160 @@ def test_terminal_bench_run_tb_builds_required_agent_kwargs(tmp_path, monkeypatc
     assert "--agent-setup-timeout-multiplier" not in cmd
     assert "--environment-build-timeout-multiplier" not in cmd
     assert "--agent-timeout-multiplier" not in cmd
+
+
+_IMAGE_FLAGS = ("--force-build", "--no-force-build")
+
+
+def _fake_harbor(calls, write_result, unexpected):
+    """Strict stand-in for `harbor run`: records the argv and writes a synthetic result. Any other
+    child command (a real harbor, docker, anything) is recorded and refused; nothing reaches the
+    system. Seed provenance keeps its own `subprocess.run` captured at import (`manifests`)."""
+
+    def run(cmd, *args, **kwargs):
+        argv = [str(token) for token in cmd] if isinstance(cmd, (list, tuple)) else [str(cmd)]
+        if argv[0] != "fake-harbor":
+            unexpected.append(argv)
+            raise AssertionError(f"unexpected child command: {argv[:2]}")
+        calls.append(argv)
+        write_result(argv)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    return run
+
+
+def _image_flags(cmd):
+    return [token for token in cmd if token in _IMAGE_FLAGS]
+
+
+def _without_root(cmd, root):
+    """The argv with its own run root replaced, so two runs in different roots compare whole."""
+    return [str(token).replace(str(root), "<root>") for token in cmd]
+
+
+_NOT_A_BOOLEAN = "UNRESOLVED-BASE-VALUE-SENTINEL"
+
+
+@pytest.mark.parametrize(
+    "base_environment,choice,expected_flags,expected_policy",
+    [
+        (None, [], [], {"force_build": False, "source": "harbor_default"}),
+        (None, ["--force-build"], ["--force-build"], {"force_build": True, "source": "cli"}),
+        (None, ["--no-force-build"], ["--no-force-build"], {"force_build": False, "source": "cli"}),
+        ({"type": "docker"}, [], [], {"force_build": False, "source": "harbor_default"}),
+        ({"force_build": True}, [], [], {"force_build": True, "source": "base_job_config"}),
+        ({"force_build": True}, ["--no-force-build"], ["--no-force-build"], {"force_build": False, "source": "cli"}),
+        ({"force_build": False}, [], [], {"force_build": False, "source": "base_job_config"}),
+        # Harbor may coerce this; the launcher leaves it to Harbor rather than resolve a string.
+        ({"force_build": "false"}, [], [], {"force_build": None, "source": "base_job_config"}),
+        ({"force_build": _NOT_A_BOOLEAN}, [], [], {"force_build": None, "source": "base_job_config"}),
+    ],
+)
+def test_run_tb_image_build_choice_is_the_same_in_preview_and_execution(
+    tmp_path, monkeypatch, capsys, base_environment, choice, expected_flags, expected_policy,
+):
+    """razzant/ouroboros#4315: `--execute` used to append `--force-build` to the dispatched argv.
+    It now decides dispatch only: the previewed and the dispatched argv are the same, and carry an
+    image flag only for an explicit choice. The recorded policy follows Harbor's precedence
+    (command line > base job config > Harbor's default false), and a base value that is not a
+    literal boolean stays in the job config for Harbor to validate, unresolved and never echoed."""
+    from devtools.benchmarks.terminal_bench import run_tb
+
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    base_args = []
+    if base_environment is not None:
+        base = tmp_path / "base.json"
+        base.write_text(json.dumps({"environment": base_environment}), encoding="utf-8")
+        base_args = ["--base-job-config", str(base)]
+    monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "fake-harbor 0.0.0")
+
+    def write_trial(cmd):
+        trial = Path(cmd[cmd.index("--jobs-dir") + 1]) / "job-1" / "sample-task__1"
+        trial.mkdir(parents=True)
+        (trial / "result.json").write_text(json.dumps({
+            "task_name": "sample-task", "trial_name": "sample-task__1",
+            "verifier_result": {"rewards": {"reward": 1.0}},
+        }), encoding="utf-8")
+
+    calls, unexpected = [], []
+    monkeypatch.setattr(run_tb.subprocess, "run", _fake_harbor(calls, write_trial, unexpected))
+    argvs = {}
+    for mode, extra in (("preview", []), ("execute", ["--execute"])):
+        root = tmp_path / mode
+        assert run_tb.main([
+            "--model", "example/model", "--k", "1", "--allow-low-k", "--allow-dirty-seed",
+            "--harbor-bin", "fake-harbor", "--task", "sample-task",
+            "--run-root", str(root), "--submission-root", str(root / "submission"),
+            "--settings-path", str(settings), *base_args, *choice, *extra,
+        ]) == 0
+        manifest = json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))
+        argvs[mode] = _without_root(manifest["official_command"], root)
+        assert manifest["extra"]["agent_environment_force_build"] == expected_policy
+        job_config_path = manifest["official_command"][manifest["official_command"].index("--config") + 1]
+        written = json.loads(Path(job_config_path).read_text(encoding="utf-8"))
+        # The base reaches Harbor intact; an explicit choice rides the argv, not the job config.
+        assert written.get("environment") == base_environment
+    assert unexpected == []
+    assert len(calls) == 1
+    # The whole previewed argv is the whole dispatched one, run root aside.
+    assert argvs["preview"] == argvs["execute"] == _without_root(calls[0], tmp_path / "execute")
+    assert _image_flags(calls[0]) == expected_flags
+    ledger = json.loads((tmp_path / "execute" / "disclosure_ledger.json").read_text(encoding="utf-8"))
+    assert ledger["run"]["agent_environment_force_build"] == expected_policy
+    printed = capsys.readouterr()
+    for record in ("run_manifest.json", "disclosure_ledger.json", "harbor_command.txt"):
+        assert _NOT_A_BOOLEAN not in (tmp_path / "execute" / record).read_text(encoding="utf-8")
+    assert _NOT_A_BOOLEAN not in printed.out + printed.err
+
+
+@pytest.mark.parametrize(
+    "choice,expected_flags,expected_policy",
+    [
+        ([], [], {"force_build": False, "source": "harbor_default"}),
+        (["--force-build"], ["--force-build"], {"force_build": True, "source": "cli"}),
+        (["--no-force-build"], ["--no-force-build"], {"force_build": False, "source": "cli"}),
+    ],
+)
+def test_terminal_bench_smoke_image_build_choice_is_the_same_in_preview_and_execution(
+    tmp_path, monkeypatch, choice, expected_flags, expected_policy,
+):
+    """The smoke launcher has no base job config: its argv carries Harbor's image flag only for an
+    explicit choice, identically whether the command is previewed or dispatched, and its manifest
+    records the configured policy (razzant/ouroboros#4315)."""
+    import devtools.benchmarks.terminal_bench.run_harbor_smoke as harbor_smoke
+
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}", encoding="utf-8")
+
+    def write_result(cmd):
+        result = Path(cmd[cmd.index("--jobs-dir") + 1]) / "job" / "result.json"
+        result.parent.mkdir(parents=True)
+        result.write_text(
+            json.dumps({"stats": {"evals": {"eval": {"reward_stats": {"reward": {"1.0": ["sample-task"]}}}}}}),
+            encoding="utf-8",
+        )
+
+    calls, unexpected = [], []
+    monkeypatch.setattr(harbor_smoke.subprocess, "run", _fake_harbor(calls, write_result, unexpected))
+    argvs = {}
+    for mode, extra in (("preview", []), ("execute", ["--execute"])):
+        root = tmp_path / mode
+        monkeypatch.setattr(sys, "argv", [
+            "run_harbor_smoke.py", "--allow-dirty-seed", "--harbor-bin", "fake-harbor",
+            "--task", "sample-task", "--model", "example/model",
+            "--run-root", str(root), "--settings-path", str(settings), *choice, *extra,
+        ])
+        assert harbor_smoke.main() == 0
+        argvs[mode] = _without_root(
+            json.loads((root / "harbor_command.json").read_text(encoding="utf-8"))["cmd"], root,
+        )
+        manifest = json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))
+        assert manifest["extra"]["agent_environment_force_build"] == expected_policy
+    assert unexpected == []
+    assert len(calls) == 1
+    assert argvs["preview"] == argvs["execute"] == _without_root(calls[0], tmp_path / "execute")
+    assert _image_flags(calls[0]) == expected_flags
 
 
 def test_container_env_never_forwards_model_fallback(tmp_path, monkeypatch):
@@ -6120,8 +6276,9 @@ def test_run_tb_job_config_carries_dataset_and_deep_merges_a_base_config(tmp_pat
         harbor_bin="harbor", n_concurrent=1, task_filters=[], settings_path=tmp_path / "s.json",
         execute=False, light_model="m", base_job_config=base,
     )
-    path = run_tb._write_agent_job_config(cfg)
+    path, merged = run_tb._write_agent_job_config(cfg)
     written = json.loads(path.read_text(encoding="utf-8"))
+    assert written == merged
 
     # Upstream keys survive untouched; our agents[] block wins whole (name must stay ours,
     # a null/foreign agents[0].name permanently invalidates a submission).

@@ -41,7 +41,12 @@ from devtools.benchmarks.common.run_roots import (
     safe_benchmark_id,
     safe_join_under,
 )
-from devtools.benchmarks.terminal_bench.run_harbor_smoke import AGENT_IMPORT
+from devtools.benchmarks.terminal_bench.run_harbor_smoke import (
+    AGENT_IMPORT,
+    add_force_build_option,
+    agent_environment_force_build,
+    force_build_flag,
+)
 from ouroboros.config import EFFORT_SCALE
 
 
@@ -109,7 +114,7 @@ class HarborCommandConfig:
     n_concurrent: int
     task_filters: list[str]
     settings_path: pathlib.Path
-    execute: bool
+    execute: bool  # dispatch only; never shapes the argv
     light_model: str
     safety_mode: str = "light"
     setup_timeout_multiplier: float = 1.0
@@ -119,6 +124,8 @@ class HarborCommandConfig:
     agent_env: tuple[str, ...] = ()
     verifier_env: tuple[str, ...] = ()
     harbor_env: str = ""
+    # Harbor's `--force-build`/`--no-force-build` when chosen; None emits neither flag.
+    force_build: bool | None = None
 
 
 def _host_roster_raw(settings: Mapping[str, Any] | None) -> Any:
@@ -490,8 +497,9 @@ def confined_submission_subtree(raw_subtree: str, *, dataset: str) -> list[str]:
     return [safe_benchmark_id(part, field=field) for part in parts]
 
 
-def _write_agent_job_config(config: HarborCommandConfig) -> pathlib.Path:
-    """Write the agents[] section of the Harbor JobConfig for `harbor run -c`.
+def _write_agent_job_config(config: HarborCommandConfig) -> tuple[pathlib.Path, dict]:
+    """Write the agents[] section of the Harbor JobConfig for `harbor run -c`; return its path
+    and the merged mapping (the one read of a base job config).
 
     The agent MUST be launched through a job config rather than the bare
     `--agent-import-path` flag: the flag path records `agents[0].name = null`
@@ -539,7 +547,7 @@ def _write_agent_job_config(config: HarborCommandConfig) -> pathlib.Path:
     config.jobs_dir.mkdir(parents=True, exist_ok=True)
     path = config.jobs_dir / "agent_job_config.json"
     path.write_text(json.dumps(job_config, indent=2) + "\n", encoding="utf-8")
-    return path
+    return path, job_config
 
 
 # Model slots this launcher must NOT copy out of the host settings file: the in-container adapter
@@ -599,11 +607,17 @@ def augment_manifest(manifest: dict, config: HarborCommandConfig) -> None:
 
 
 def harbor_command(config: HarborCommandConfig) -> list[str]:
+    return harbor_invocation(config)[0]
+
+
+def harbor_invocation(config: HarborCommandConfig) -> tuple[list[str], dict[str, Any]]:
+    """The harbor argv and the configured image policy, from the job config written here."""
+    job_config_path, job_config = _write_agent_job_config(config)
     cmd = [
         config.harbor_bin,
         "run",
         "--config",
-        str(_write_agent_job_config(config)),
+        str(job_config_path),
         "--dataset",
         config.dataset,
         "--n-concurrent",
@@ -676,9 +690,8 @@ def harbor_command(config: HarborCommandConfig) -> list[str]:
         cmd.extend(["--ve", value])
     for task in config.task_filters:
         cmd.extend(["--include-task-name", task])
-    if config.execute:
-        cmd.append("--force-build")
-    return cmd
+    cmd.extend(force_build_flag(config.force_build))
+    return cmd, agent_environment_force_build(config.force_build, job_config)
 
 
 def write_disclosure_ledger(*, jobs_dir: pathlib.Path, out_path: pathlib.Path, run_meta: dict) -> dict:
@@ -933,6 +946,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--agent-name", default="Ouroboros")
     parser.add_argument("--org-name", default="Ouroboros")
     parser.add_argument("--execute", action="store_true")
+    add_force_build_option(parser)
     parser.add_argument("--setup-timeout-multiplier", type=float, default=1.0)
     parser.add_argument("--build-timeout-multiplier", type=float, default=1.0)
     parser.add_argument(
@@ -1224,15 +1238,17 @@ def main(argv: list[str] | None = None) -> int:
             agent_env=tuple(args.agent_env or []),
             verifier_env=tuple(args.verifier_env or []),
             harbor_env=args.harbor_env,
+            force_build=args.force_build,
         )
         # Recorded from the ASSEMBLED config, not from `args`: the job config below is what the
         # adapter reads, so binding the manifest to the same object is what keeps the recorded
         # model and the executed model from ever drifting apart.
         augment_manifest(manifest, harbor_config)
-        cmd = harbor_command(harbor_config)
+        cmd, force_build_policy = harbor_invocation(harbor_config)
         harbor_version_value = harbor_version(args.harbor_bin)
         manifest["official_command"] = redacted_command(cmd)
         manifest["extra"]["harbor_version"] = harbor_version_value
+        manifest["extra"]["agent_environment_force_build"] = force_build_policy
         safe_cmd = shlex.join(redacted_command(cmd))
         (run_root / "harbor_command.txt").write_text(safe_cmd + "\n", encoding="utf-8")
         print(safe_cmd)
@@ -1271,6 +1287,7 @@ def main(argv: list[str] | None = None) -> int:
                     "harbor_bin": str(args.harbor_bin),
                     "harbor_version": harbor_version_value,
                     "harbor_env_effective": harbor_env_effective,
+                    "agent_environment_force_build": force_build_policy,
                     "harbor_returncode": int(completed.returncode),
                 },
             )

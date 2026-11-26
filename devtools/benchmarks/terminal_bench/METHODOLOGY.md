@@ -33,6 +33,25 @@ OWNER IMMEDIATELY.**
   concurrency, and the multiplier/gating flags actually used, so each run's
   leaderboard validity is auditable after the fact.
 
+## Task images
+
+Harbor's `environment.force_build` (default `false`) governs the agent's trial environment: when
+`false` and a task declares a published image, Harbor prefers it to a build; otherwise Harbor uses
+the task's own environment definition. Both launchers pass `--force-build`/`--no-force-build` only
+for an explicit choice, identically in a preview and an `--execute` run; otherwise Harbor's job
+configuration decides.
+
+`agent_environment_force_build` (`run_manifest.json` `extra`; for `run_tb.py` also
+`disclosure_ledger.json` `run`) records the configured value and its `source`: `cli`,
+`base_job_config` (`force_build: null` = not a literal boolean, left for Harbor to validate) or
+`harbor_default`. It is configuration only: it does not prove which image a task used, or
+whether that image was pulled or built.
+
+Without this field, read the saved command (`official_command`, `harbor_command.*`) if there is
+one. Earlier wrapper versions appended `--force-build` to every `--execute` argv and not to a
+preview. A record lacking the field is not dated by that alone (a run refused before argv
+assembly has no command either), and the flag does not show that any image was rebuilt.
+
 ## Dataset identity (v6.79.0 — matters for any non-TB2.1 Harbor dataset)
 
 `run_tb.py` is dataset-parametric, so the dataset identity is now threaded instead of

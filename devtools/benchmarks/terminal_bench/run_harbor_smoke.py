@@ -10,7 +10,7 @@ import pathlib
 import shlex
 import subprocess
 import sys
-from typing import Any
+from typing import Any, Mapping
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
@@ -34,6 +34,42 @@ from devtools.benchmarks.common.run_roots import (
 
 
 AGENT_IMPORT = "devtools.benchmarks.terminal_bench.harbor_installed_agent:OuroborosTerminalBenchAgent"
+
+
+def add_force_build_option(parser: argparse.ArgumentParser) -> None:
+    """Harbor's own image flag pair, shared by both launchers; independent of `--execute`."""
+    parser.add_argument(
+        "--force-build",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="pass Harbor's --force-build or --no-force-build; default: neither, so Harbor's "
+             "job configuration decides (its default prefers a task's published image)",
+    )
+
+
+def force_build_flag(force_build: bool | None) -> list[str]:
+    """Harbor's flag for an explicit choice; nothing when the choice is unset."""
+    if force_build is None:
+        return []
+    return ["--force-build" if force_build else "--no-force-build"]
+
+
+def agent_environment_force_build(
+    force_build: bool | None, job_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Configured `environment.force_build` and its source (CLI > job config > Harbor's false).
+
+    Only a literal boolean is resolved; any other job-config value is recorded as None and
+    left for Harbor to validate. A configured policy, not a record of what Harbor pulled or built."""
+    if force_build is not None:
+        return {"force_build": bool(force_build), "source": "cli"}
+    environment = (job_config or {}).get("environment", {})
+    if not isinstance(environment, Mapping):
+        return {"force_build": None, "source": "base_job_config"}
+    if "force_build" in environment:
+        value = environment["force_build"]
+        return {"force_build": value if isinstance(value, bool) else None, "source": "base_job_config"}
+    return {"force_build": False, "source": "harbor_default"}
 
 
 def harbor_command(
@@ -98,8 +134,7 @@ def harbor_command(
     )
     for task_name in task_names:
         cmd.extend(["--include-task-name", task_name])
-    if bool(opts.get("execute")):
-        cmd.append("--force-build")
+    cmd.extend(force_build_flag(opts.get("force_build")))
     return cmd
 
 
@@ -177,6 +212,7 @@ def main() -> int:
         help="record and proceed with an unclean/unidentifiable seed checkout instead of refusing",
     )
     parser.add_argument("--execute", action="store_true")
+    add_force_build_option(parser)
     args = parser.parse_args()
 
     repo_root = repo_root_from_devtools()
@@ -211,7 +247,7 @@ def main() -> int:
         agent_setup_timeout_multiplier=args.agent_setup_timeout_multiplier,
         environment_build_timeout_multiplier=args.environment_build_timeout_multiplier,
         light_model=actor_slots["OUROBOROS_MODEL_LIGHT"],
-        options={"execute": args.execute, "host_settings_path": str(settings_path)},
+        options={"force_build": args.force_build, "host_settings_path": str(settings_path)},
     )
     ledger_output = (
         assert_file_output_outside_repo(pathlib.Path(args.ledger_output), repo_root)
@@ -243,6 +279,7 @@ def main() -> int:
             "requested_n_tasks_arg": int(args.n_tasks),
             "n_concurrent": int(args.n_concurrent),
             "source_dirty_allowed": bool(args.allow_dirty_seed),
+            "agent_environment_force_build": agent_environment_force_build(args.force_build),
             "selection": {
                 "mode": "explicit_task_ids" if actual_include_filters else "deterministic_first_n",
                 "requested_slots": task_names,
