@@ -218,14 +218,16 @@ def test_a_packet_seat_gets_the_installed_domain_and_neighbours_never_a_working_
     (subject / "ouroboros" / "a.py").write_text('"""WORKTREE lead of a."""\n', encoding="utf-8")  # after staging
     system = _packet_brief(tmp_path, installed, subject)
     block = _module_block(system)
-    assert "- ouroboros/domains.toml (D06: Review stack, 3 files; manuals: docs/architecture/06-4.md)" in block
-    assert "- ouroboros/a.py (touched in this change)" in block
-    assert "- ouroboros/b.py — Lead of b." in system and "- ouroboros/c.py — Lead of c." in system
+    assert "- ouroboros/domains.toml — D06: Review stack; 3 files; manuals: docs/architecture/06-4.md" in block
+    assert "- ouroboros/a.py (D06; modified in this change)" in block  # the frozen subject's own Git status
+    assert "- ouroboros/b.py — D06: Lead of b." in system and "- ouroboros/c.py — D06: Lead of c." in system
     # No row carries a working-copy lead as the reviewed tree's (the touched file reaches the seat with the change).
     assert "WORKTREE" not in block and "STAGED" not in block and "STAGED lead of a." in system
 
 
-def test_a_new_and_a_deleted_module_are_named_from_the_installed_manifest(tmp_path):
+def test_an_added_and_a_deleted_module_are_labelled_by_their_git_change_on_both_gates(tmp_path):
+    """Labels come from the frozen subject's name status, never from presence in the installed listing: on a
+    separate installed tree and on the in-place gate, whose installed tree is the author's own checkout."""
     installed, subject = _installed_and_subject(tmp_path)
     (subject / "ouroboros" / "new.py").write_text('"""Proposed new module."""\n', encoding="utf-8")
     manifest = (subject / "ouroboros" / "domains.toml").read_text(encoding="utf-8")
@@ -233,17 +235,21 @@ def test_a_new_and_a_deleted_module_are_named_from_the_installed_manifest(tmp_pa
         manifest.replace('"ouroboros/b.py" = "D06"\n', "") + '"ouroboros/new.py" = "D06"\n', encoding="utf-8")
     (subject / "ouroboros" / "b.py").unlink()
     _git(subject, "add", "-A")
-    block = _module_block(_packet_brief(tmp_path, installed, subject))
-    assert "- ouroboros/new.py (new in this change; its domain assignment, if any, is in the change)" in block
-    assert "- ouroboros/b.py (touched in this change)" in block  # deleted: its installed domain still answers
-    assert "(D06: Review stack, 3 files;" in block and "Proposed new module." not in block
+    separate = _module_block(_packet_brief(tmp_path, installed, subject))
+    assert "- ouroboros/new.py (added in this change; the installed map has no owner for it)" in separate
+    assert "- ouroboros/b.py (D06; deleted in this change)" in separate  # its installed domain still answers
+    assert "D06: Review stack; 3 files;" in separate and "Proposed new module." not in separate
+    in_place = _module_block(_packet_brief(tmp_path, subject, subject))
+    assert "- ouroboros/new.py (D06; added in this change)" in in_place
+    assert "- ouroboros/b.py (deleted in this change; the installed map has no owner for it)" in in_place
+    assert "new in this change" not in in_place + separate
 
 
 def test_a_tight_window_and_a_missing_manifest_are_said_in_counted_words(tmp_path, monkeypatch):
     from ouroboros.tools import review as review_tool
     from ouroboros.tools.commit_gate import commit_review_contract_material
     from ouroboros.tools.governance_module_rows import (DOMAINS_NOT_DELIVERED, HEADING, NEIGHBOURS_NOT_DELIVERED,
-                                                        UNAVAILABLE)
+                                                        UNAVAILABLE, placeholders)
 
     def strings(value):
         if isinstance(value, str):
@@ -251,7 +257,12 @@ def test_a_tight_window_and_a_missing_manifest_are_said_in_counted_words(tmp_pat
         items = value.values() if isinstance(value, dict) else value if isinstance(value, (list, tuple)) else ()
         return [text for item in items for text in strings(item)]
 
-    contract = "\n".join(strings(commit_review_contract_material()))
+    from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
+
+    set_review_pool(monkeypatch, pool_roster(pool_seat("packet-seat", "openai/gpt-y", delivery="packet")))
+    contract = "\n".join(strings(commit_review_contract_material()))  # a pool with a packet seat counts the rows
+    set_review_pool(monkeypatch, pool_roster(pool_seat("native-seat", "openai/gpt-y", delivery="native")))
+    assert HEADING not in "\n".join(strings(commit_review_contract_material()))  # and only then
     installed, subject = _installed_and_subject(tmp_path / "roomy")
     (subject / "ouroboros" / "a.py").write_text('"""Changed."""\n', encoding="utf-8")
     _git(subject, "add", "-A")
@@ -259,10 +270,12 @@ def test_a_tight_window_and_a_missing_manifest_are_said_in_counted_words(tmp_pat
     monkeypatch.setattr(review_tool, "_triad_governance_usable_window", lambda *a, **k: 0)
     starved = _packet_brief(tmp_path / "roomy", installed, subject)
     assert HEADING not in starved and DOMAINS_NOT_DELIVERED in starved
-    assert DOMAINS_NOT_DELIVERED in contract and NEIGHBOURS_NOT_DELIVERED.format(count="⟨count⟩") in contract
+    assert DOMAINS_NOT_DELIVERED in contract and placeholders(NEIGHBOURS_NOT_DELIVERED) in contract
     monkeypatch.undo()
     bare, subject = _installed_and_subject(tmp_path / "bare", manifest=False)
     (subject / "ouroboros" / "a.py").write_text('"""Changed."""\n', encoding="utf-8")
     _git(subject, "add", "-A")
     unavailable = _packet_brief(tmp_path / "bare", bare, subject)
     assert UNAVAILABLE in unavailable and UNAVAILABLE in contract and "Errno" not in unavailable
+    (bare / "ouroboros" / "domains.toml").write_text("[graph]\nallowed = 7\n", encoding="utf-8")  # valid TOML, wrong type
+    assert UNAVAILABLE in _packet_brief(tmp_path / "bare", bare, subject)

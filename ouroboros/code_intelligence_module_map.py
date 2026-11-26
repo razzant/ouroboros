@@ -53,6 +53,7 @@ class ModuleMap:
     head: List[str] = field(default_factory=list)
     entries: List[Tuple[str, str, str]] = field(default_factory=list)
     limits: List[str] = field(default_factory=list)
+    tests_left_out: int = 0
 
 
 def python_lead(text: str) -> str:
@@ -148,6 +149,7 @@ def module_map(root: pathlib.Path, arg: str, manifest, *, list_prefix: ListPrefi
     refs = manifest.references
     domain = arg.strip().upper()
     limits: List[str] = []
+    tests: List[str] = []
     if domain in manifest.domains:
         paths = sorted(path for path, owner in manifest.modules.items() if owner == domain)
         head = [f"{domain} — {manifest.domains[domain]} ({len(paths)} modules) | manuals: "
@@ -190,4 +192,4 @@ def module_map(root: pathlib.Path, arg: str, manifest, *, list_prefix: ListPrefi
         entries.append((path, manifest.modules.get(path, ""), lead))
     if not paths and not limits:
         head.append("no files under this prefix (enumeration complete)")
-    return ModuleMap(head, entries, limits)
+    return ModuleMap(head, entries, limits, len(tests))

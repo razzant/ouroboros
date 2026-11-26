@@ -386,7 +386,8 @@ def navigation_material(layer: str, delivery: str) -> list:
             pointers.extend(design_navigation("", source="⟨source⟩", disclosure=note)
                             for note in _DESIGN_REVIEW_MAP.values())
             pointers.append(_INVARIANTS_UNAVAILABLE)
-            pointers.extend(gmr.contract_material())
+            if delivery == PACKET_DELIVERY:  # only a packet seat is handed module rows
+                pointers.extend(gmr.contract_material())
         return [*(text.format(required="⟨required⟩") for text in words.get(delivery, ())), *omissions,
                 *(pointers if layer == BODY_LAYER else ())]
     heading, with_rules, without_rules, subject_words = words["every"]
@@ -581,6 +582,7 @@ def governance_context(
     subject_root: Any = None,
     manifest_facts: Any = None,
     review_words: Any = None,
+    change_status: Optional[Mapping[str, str]] = None,
 ) -> GovernanceContext:
     """Tier the governance corpus for ONE reviewer of ONE change.
 
@@ -595,7 +597,8 @@ def governance_context(
     body) runs the three tiers; ``core`` (any other subject) runs
     :func:`_core_layer_context` over ``subject_root``; ``skill`` (a skill payload)
     runs :func:`_skill_layer_context` over ``manifest_facts`` (``type`` and the
-    manifest's ``declares``)."""
+    manifest's ``declares``). ``change_status`` (path -> Git name-status letter, when the seam has it) labels a
+    body packet's module rows."""
     from ouroboros.tools.review_helpers import load_checklist_section, load_governance_doc
 
     if layer not in GOVERNANCE_LAYERS:
@@ -801,17 +804,22 @@ def governance_context(
                              path, path, f"mentions {files} touched file(s), {mentions} time(s)"))
             chapter_text[path] = body
     # No module tree in the book: the installed domains of the touched paths before the sections naming them,
-    # their other modules after; what does not fit is said in the navigation.
-    modules = gmr.module_rows(root, touched) if packet and touched else gmr.ModuleRows()
+    # their other modules after, nearest first, the far end giving way; what does not fit is said in the navigation.
+    modules = gmr.module_rows(root, touched, status=change_status) if packet and touched else gmr.ModuleRows()
     if modules.problem:
         rows.append(_row(gmr.MODULE_ROWS_PATH, 3, "navigation", 0, modules.problem))
     domains = bool(modules.domains) and _admit(gmr.MODULE_ROWS_PATH, gmr.MODULE_ROWS_PATH, modules.domains, 3,
                                                "the installed domains of the touched paths")
     for order, path, title, reason in sorted(sections):
         _admit(path, title, chapter_text.get(path, ""), 3, reason)
-    neighbours = bool(modules.neighbours) and _admit(gmr.NEIGHBOUR_ROWS_PATH, gmr.NEIGHBOUR_ROWS_PATH,
-                                                     modules.neighbours, 3, "installed neighbour modules")
-    module_notice = gmr.notice(modules, domains_delivered=domains, neighbours_delivered=neighbours)
+    low, high = 0, len(modules.neighbours)  # the most neighbour rows the share still holds, nearest first
+    while low < high:
+        mid = (low + high + 1) // 2
+        fits = estimate_tokens(_render(gmr.NEIGHBOUR_ROWS_PATH, gmr.neighbour_text(modules.neighbours[:mid])))
+        low, high = (mid, high) if fits <= remaining else (low, mid - 1)
+    shown = low if low and _admit(gmr.NEIGHBOUR_ROWS_PATH, gmr.NEIGHBOUR_ROWS_PATH,
+                                  gmr.neighbour_text(modules.neighbours[:low]), 3, "installed neighbour modules") else 0
+    module_notice = gmr.notice(modules, domains_delivered=domains, neighbours_shown=shown)
 
     # --- navigation -------------------------------------------------------
     pointers = [_checklist_pointer(bool(checklist_text.strip()), shared_inline), invariants_pointer, module_notice]

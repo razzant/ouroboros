@@ -768,7 +768,8 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
     words_section = words.render(section_budget(_rv._triad_governance_usable_window([model], [slot])))
     governance = _rv._triad_governance_context(
         None, touched_paths, checklist_section, [model], [slot], governance_root=governance_root, layer=layer,
-        subject_root=review_root if layer != "body" else None, review_words=words)
+        subject_root=review_root if layer != "body" else None, review_words=words,
+        change_status={path: status for status, path in frozen_subject.name_status or ()})
     managed = frozen_subject.managed
     exclude_paths, exclusion_note = (set(), "") if managed is not None else triad_pack_exclusions(
         review_root, touched_paths, prefix_texts=dict(governance.inline_whole_documents))
