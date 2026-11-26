@@ -3,10 +3,15 @@
 // drawn into the hidden room, and only for what was written before that disconnect), and a review detail read that
 // answers while it is away is drawn on its return, never into the hidden room.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import vm from 'node:vm';
 import { createChatInstance } from '../modules/chat.js';
+import { createEarlyTextBubbles, createTextBubbles } from '../modules/chat_text_bubble.js';
 import { createRoomRetirement, createWindowReturn, roomSocket } from '../modules/room_retire.js';
+import { installDesktopShellLinkInterceptor } from '../modules/ui_helpers.js';
 import { installDom, PREVIEW_SCOPE, restoreDom, roomKey, walkCard } from './chat_dom_fixture.js';
+import { installCardDom } from './helpers/card_dom.js';
 
 const ME = 'session-me';
 const TS = '2026-11-04T09:40:00Z';
@@ -211,6 +216,79 @@ test('a room away draws no status when another room\'s send is written; back, it
 
 const speech = (chatId, n, content = 'old answer', extra = {}) => ({ role: 'assistant', chat_id: chatId,
     content, ts: TS, row_address: `row:${chatId}@${TS}#${String(n).padStart(12, '0')}`, ...extra });
+
+test('a delivered direct answer opens its ordinary link on return and keeps equal words during adoption', (t) => {
+    const { doc, win, restore } = installCardDom();
+    t.after(restore);
+    const prior = { marked: globalThis.marked, DOMPurify: globalThis.DOMPurify };
+    t.after(() => Object.assign(globalThis, prior));
+    const parser = {};
+    vm.runInNewContext(readFileSync(new URL('../marked.min.js', import.meta.url), 'utf8'), parser);
+    globalThis.marked = parser.marked;
+    // The home double records entry through the sanitizer, not the sanitizer's own behavior.
+    const sanitized = t.mock.fn(html => html);
+    globalThis.DOMPurify = { sanitize: sanitized };
+    const create = doc.createElement;
+    doc.createElement = (tag) => {
+        const node = create(tag);
+        if (tag === 'template') Object.defineProperty(node, 'innerHTML', {
+            get: () => node.content.innerHTML, set: value => { node.content.innerHTML = value; },
+        });
+        if (tag === 'a') for (const attr of ['target', 'rel']) Object.defineProperty(node, attr, {
+            set: value => node.setAttribute(attr, value),
+        });
+        return node;
+    };
+    const opened = [];
+    win.pywebview = { api: { async open_external_url(url) { opened.push(url); return { ok: true }; } } };
+    doc.addEventListener = (...args) => doc.body.addEventListener(...args);
+    installDesktopShellLinkInterceptor({ win, doc });
+
+    const feed = doc.createElement('main');
+    doc.body.append(feed);
+    const decorate = t.mock.fn();
+    const draw = createTextBubbles({ chatMedia: { attachCopyControl() {} }, replies: { decorate }, feed });
+    const early = createEarlyTextBubbles(feed, draw, node => feed.append(node), node => node.remove());
+    const target = 'https://docs.example.test/guide';
+    const frame = speech(1, 1, `Read **these words** in the [guide](${target}).`, { markdown: true, _is_direct_chat: true });
+    early.show([{ address: frame.row_address, text: frame.content, ts: frame.ts, markdown: frame.markdown }]);
+    const bubble = early.get(frame.row_address);
+    const body = bubble.querySelector('.message');
+    const link = body.querySelector('a[href]');
+    const selectedWord = body.querySelector('strong').firstChild;
+    assert.equal(link.getAttribute('href'), target);
+    assert.ok(sanitized.mock.calls.some(call => call.arguments[0].includes(target)));
+    assert.equal(link.click().defaultPrevented, true, 'the ordinary shell interceptor owns this link');
+    assert.deepEqual(opened, [target]);
+    assert.equal(body.hasAttribute('data-reply-body'), false);
+    assert.equal(bubble.dataset.historyId, undefined);
+    assert.equal(decorate.mock.callCount(), 0);
+
+    const saved = { ts: frame.ts, markdown: true, meta: {}, opts: { historyId: 'saved-direct', reply: frame,
+        evidenceRef: { href: '/api/tasks/test/evidence', label: 'Evidence' } } };
+    const adopted = draw(frame.content, 'assistant', { ...saved, existing: bubble }).bubble;
+    assert.equal(adopted.querySelector('.message'), body);
+    assert.equal(body.querySelector('a[href]'), link);
+    assert.equal(body.querySelector('strong').firstChild, selectedWord);
+    assert.equal(body.hasAttribute('data-reply-body'), true);
+    assert.equal(adopted.dataset.historyId, 'saved-direct');
+    assert.equal(decorate.mock.callCount(), 1);
+    assert.equal(link.click().defaultPrevented, true);
+    assert.deepEqual(opened, [target, target]);
+
+    // A second confirmed row corrects its early destination; a normal new bubble paints the same canonical route.
+    const next = { address: speech(1, 2).row_address, text: frame.content, ts: frame.ts, markdown: true };
+    early.delete(frame.row_address);
+    early.show([next]);
+    const canonical = frame.content.replace('/guide)', '/reference)');
+    const corrected = draw(canonical, 'assistant', { ...saved, existing: early.get(next.address) }).bubble;
+    const ordinary = draw(canonical, 'assistant', saved).bubble;
+    const canonicalHref = 'https://docs.example.test/reference';
+    for (const row of [corrected, ordinary]) {
+        assert.equal(row.querySelector('.message').querySelector('a[href]').getAttribute('href'), canonicalHref);
+    }
+    assert.ok(sanitized.mock.calls.some(call => call.arguments[0].includes(canonicalHref)));
+});
 
 for (const chatId of [1, 7]) test(`hidden follower ${chatId}: show words before HTTP, not a live conclusion or read`, async () => {
     const f = fixture({ chatId });

@@ -94,27 +94,34 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
         const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';
         // Preserve the card's source link in a standalone row.
+        const evidenceHtml = evidenceLinkHtml(opts.evidenceRef);
+        const footer = `${evidenceHtml}${pendingHtml}${timeHtml}`;
         const label = senderLabel(role, isProgress, systemType, meta);
-        const markup = `
-            <div class="sender">${escapeHtml(label)}</div>
-            <div class="message${richMarkdown ? ' ui-rich-content' : ''}"${authored ? ' data-reply-body' : ''}>${rendered}</div>
-            ${evidenceLinkHtml(opts.evidenceRef)}
-            ${pendingHtml}
-            ${timeHtml}
-        `;
         const body = existing?.querySelector('.message');
-        if (!body || body.innerHTML !== rendered || opts.evidenceRef || bubble.querySelector('.msg-time')?.title !== timeFmt?.full) {
-            bubble.innerHTML = markup;
+        if (!body) {
+            bubble.innerHTML = `
+                <div class="sender">${escapeHtml(label)}</div>
+                <div class="message${richMarkdown ? ' ui-rich-content' : ''}"${authored ? ' data-reply-body' : ''}>${rendered}</div>
+                ${footer}
+            `;
         } else {
+            // Adopt the saved presentation without detaching equal words (and their selection or focused link).
+            if (body.innerHTML !== rendered) body.innerHTML = rendered;
+            body.classList.toggle('ui-rich-content', richMarkdown);
             const sender = bubble.querySelector('.sender');
-            if (sender?.textContent !== label) sender.textContent = label;
+            if (sender && sender.textContent !== label) sender.textContent = label;
             if (authored) body.setAttribute('data-reply-body', '');
+            else body.removeAttribute('data-reply-body');
+            const time = bubble.querySelector('.msg-time');
+            if (evidenceHtml || pending || time?.getAttribute('title') !== timeFmt?.full) {
+                time?.remove();
+                const tail = document.createElement('div');
+                tail.innerHTML = footer;
+                bubble.append(...tail.children);
+            }
         }
         stampNodeTimestamp(bubble, ts);
-        if (opts.wordsOnly) {
-            for (const link of bubble.querySelectorAll('a[href]')) link.removeAttribute('href');
-            return { bubble, rich: false };
-        }
+        if (opts.wordsOnly) return { bubble, rich: false };
         if (notice?.details && opts.narration !== true) bubble.querySelector('.message')
             .after(rawDetails(document, notice.details, tr('chat.notice.details', 'Details')));
         decorateContactSource(bubble, opts.presenceContact);
