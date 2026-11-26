@@ -447,32 +447,34 @@ def test_subagents_and_the_update_resolver_never_get_a_candidate_of_their_own(bo
     assert body_candidate.authoring_seam(child, "write_file", {"path": "a.txt", "content": "a"}) is None
 
 
-@pytest.mark.parametrize("mode", ["acting_subagent", "local_readonly_subagent"])
-def test_a_child_in_cyber_pro_is_told_where_it_works_and_resume_stays_refused(body, monkeypatch, mode):
-    """The tool stays in a Cyber Pro child's catalog; an ordinary call is an OK fact, not a failed call."""
+def test_a_child_in_cyber_pro_is_told_where_it_works_and_resume_stays_refused(body, monkeypatch, tmp_path):
+    """Cyber Pro keeps the tool in an acting child's catalog; an ordinary call is an OK fact naming the very
+    folder its parent selected (not the serving tree, not another folder), and resume= stays refused. A
+    read-only child is not offered the tool and its call is refused at the registry, as before."""
     serving, data = body
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
-    constraint = {"mode": mode}
-    if mode == "acting_subagent":
-        constraint.update(surface="self_worktree", write_root=str(serving), base_sha="")
+    selected = tmp_path / "parent-selected-copy"
+    selected.mkdir()
     child = make_ctx(serving, data, "child-cyber", task_metadata={"root_task_id": "root-c", "delegation_role": "subagent"},
-                     task_constraint=constraint)
-    if mode == "local_readonly_subagent":  # not offered to a read-only child; its handler answers alike if reached
-        from ouroboros.tools.control_runtime import _prepare_self_change
-
-        assert _prepare_self_change(child).startswith("OK: no separate body candidate is prepared for a subagent")
-        assert "⚠️ CANDIDATE_NOT_APPLICABLE" in _prepare_self_change(child, resume="cand-of-another")
-        assert body_candidate.list_candidates() == []
-        return
-    registry = _registry(serving, data, child)  # Cyber Pro's acting child keeps the whole catalog (P0)
+                     task_constraint={"mode": "acting_subagent", "surface": "self_worktree",
+                                      "write_root": str(selected), "base_sha": ""},
+                     workspace_root=selected, workspace_mode="self_worktree")
+    registry = _registry(serving, data, child)
     assert "prepare_self_change" in {tool["function"]["name"] for tool in registry.schemas()}
     ordinary = registry.execute_result("prepare_self_change", {})
     assert (ordinary.status, ordinary.code) == ("ok", "OK"), ordinary.text
+    assert f"parent selected ({selected})" in ordinary.text and f"({serving})" not in ordinary.text
     assert "the parent owns candidate preparation and integration" in ordinary.text
     assert body_candidate.list_candidates() == [] and not body_candidate.is_bound(child)
-
     resumed = registry.execute_result("prepare_self_change", {"resume": "cand-of-another"})
     assert (resumed.status, resumed.code) == ("blocked", "CANDIDATE_NOT_APPLICABLE"), resumed.text
+
+    reader = make_ctx(serving, data, "child-reader", task_metadata={"root_task_id": "root-c", "delegation_role": "subagent"},
+                      task_constraint={"mode": "local_readonly_subagent"})
+    reader_registry = _registry(serving, data, reader)
+    assert "prepare_self_change" not in {tool["function"]["name"] for tool in reader_registry.schemas()}
+    assert reader_registry.execute_result("prepare_self_change", {}).status == "blocked"
+    assert body_candidate.list_candidates() == []
 
 
 # --------------------------------------------------------------------------- #
