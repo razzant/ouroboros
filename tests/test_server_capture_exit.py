@@ -15,7 +15,7 @@ import pytest
 
 from ouroboros import delegate_collection as body, delegate_custody as custody, delegate_custody_current as current
 from ouroboros import review_checking as rc
-from ouroboros.gateway.history_reader import PURPOSE as HISTORY_READER_PURPOSE
+from ouroboros.gateway.history_reader import HistoryReader, PURPOSE as HISTORY_READER_PURPOSE
 from ouroboros.process_containment import ProcessContainer
 from ouroboros.test_environment import isolated_environment, retain_tree
 from tests._usage_store_testing import ledger_rows
@@ -63,7 +63,10 @@ def test_capture_gate_publishes_only_complete_json(tmp_path, monkeypatch, existi
 def wait_for(predicate, proc, timeout=20):
     deadline = time.monotonic() + timeout
     while not predicate():
-        assert proc.poll() is None, f"server exited early: {proc.returncode}"
+        if (code := proc.poll()) is not None:
+            # The final atomic marker may have appeared before the exit we just observed.
+            assert predicate(), f"server exited early: {code}"
+            return
         assert time.monotonic() < deadline, "subprocess observation timed out"
         time.sleep(0.02)
 
@@ -143,7 +146,7 @@ def reader_exit_witness(ready, began, stopped):
     return {
         "pid": pid,
         "started": same_server and type(pid) is int and pid > 0 and pid != ready["pid"] and ready["code"] is None,
-        "live_before_stop": began["readers"] == [{"pid": pid, "code": None}],
+        "live_before_stop": began["readers"] == [{"pid": pid, "code": None, "ready": True}],
         "exited": type(code) is int,
         "returncode": code,
         "ledger_remains": reader_remains,
@@ -157,15 +160,19 @@ def assert_reader_exit(facts, unexpected):
     assert not unexpected, f"unproved or unrelated owned records: {unexpected}"
 
 
-def test_history_reader_exit_witness_rejects_unproved_processes():
-    from tests._server_capture_exit import observed_exit_code
+def test_history_reader_exit_witness_rejects_unproved_processes(tmp_path):
+    from tests._server_capture_exit import observed_exit_code, reader_at_stop
 
     def still_running(timeout):
         assert timeout == 2
         raise subprocess.TimeoutExpired("inert-reader", timeout)
 
     ready = {"pid": 1, "reader_pid": 2, "code": None}
-    began = {"pid": 1, "readers": [{"pid": 2, "code": None}]}
+    process = SimpleNamespace(pid=2, poll=lambda: None)
+    owner = HistoryReader()
+    owner._process = process
+    owner.ready.set()
+    began = {"pid": 1, "readers": [reader_at_stop(process, owner)]}
     ledger = {"pid": 2, "purpose": HISTORY_READER_PURPOSE, "scope": "session", "owner_task": "",
               "session_id": "generation-a", "fingerprint": {"start_time": "exact-birth"}}
     reader = {"pid": 2, "code": observed_exit_code(SimpleNamespace(wait=lambda timeout: 0)),
@@ -190,7 +197,33 @@ def test_history_reader_exit_witness_rejects_unproved_processes():
             assert_reader_exit(*reader_exit_witness(ready, began, {**stopped, "readers": wrong}))
     with pytest.raises(AssertionError, match="alive when shutdown begins"):
         assert_reader_exit(*reader_exit_witness(
-            ready, {**began, "readers": [{"pid": 2, "code": 1}]}, stopped))
+            ready, {**began, "readers": [{**began["readers"][0], "code": 1}]}, stopped))
+
+    def poll_during_reap():
+        owner.ready.clear()
+        return None
+
+    process.poll = poll_during_reap
+    with pytest.raises(AssertionError, match="alive when shutdown begins"):
+        assert_reader_exit(*reader_exit_witness(
+            ready, {**began, "readers": [reader_at_stop(process, owner)]}, stopped))
+    owner._process = SimpleNamespace(pid=process.pid)
+    owner.ready.set()
+    process.poll = lambda: None
+    with pytest.raises(AssertionError, match="alive when shutdown begins"):
+        assert_reader_exit(*reader_exit_witness(
+            ready, {**began, "readers": [reader_at_stop(process, owner)]}, stopped))
+
+    marker = tmp_path / "lifespan-finished.json"
+
+    def exit_after_marker():
+        marker.touch()
+        return 0
+
+    wait_for(marker.exists, SimpleNamespace(poll=exit_after_marker))
+    with pytest.raises(AssertionError, match="server exited early: 0"):
+        wait_for((tmp_path / "missing.json").exists, SimpleNamespace(poll=lambda: 0))
+
     for wrong in ([{**row, "host_pid": 5}], [{**row, "owner_task": "foreign"}], [{**row, "kind": "companion"}],
                   [{**row, "ledger_entry": {**ledger, "session_id": "generation-b"}}],
                   [{**row, "purpose": "unrelated"}], [row, row], [{**capture, "host_pid": 5}]):

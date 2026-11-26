@@ -87,6 +87,13 @@ def observed_exit_code(process):
         return None
 
 
+def reader_at_stop(process, owner):
+    code = process.poll()
+    # POSIX poll() can return None while another thread is reaping. The reader
+    # clears READY before reaping, so check it for this exact Popen after poll().
+    return {"pid": process.pid, "code": code, "ready": owner._process is process and owner.pid == process.pid}
+
+
 def main():
     scratch, generation = Path(sys.argv[1]), sys.argv[2]
     entrypoint = sys.argv[3] if len(sys.argv) > 3 else "script"
@@ -155,7 +162,7 @@ def main():
     begin, stop = owned_shutdown.begin_owned_stop, owned_shutdown.stop_owned_work
 
     def beginning(*args, **kwargs):
-        reader_before_stop = [{"pid": process.pid, "code": process.poll()} for process in readers]
+        reader_before_stop = [reader_at_stop(process, history_reader.reader) for process in readers]
         result = begin(*args, **kwargs)
         report("stop-began", readers=reader_before_stop, records=owned_shutdown.owned_records(root))
         return result
