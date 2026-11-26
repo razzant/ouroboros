@@ -1086,36 +1086,7 @@ export function partitionLocalEchoJournal(journal, serverClientMessageIds) {
     return { confirmed, unconfirmed };
 }
 
-/** Legacy delivery correlation; client ids are scoped to the room the owner wrote in. */
-export function buildMessageKey(role, text, timestamp, opts = {}) {
-    if (opts.clientMessageId) {
-        const room = role === 'user' && opts.ownerChatId !== opts.chatId ? `room:${opts.ownerChatId}|` : '';
-        return `${room}client|${opts.clientMessageId}`;
-    }
-    if (role !== 'user' && !opts.isProgress && opts.taskId) {
-        return [
-            'task',
-            role,
-            opts.systemType || '',
-            ...(opts.letterPartKey ? [opts.letterPartKey] : []),
-            opts.source || '',
-            opts.taskId,
-            text,
-        ].join('|');
-    }
-    if (!timestamp) return '';
-    return [
-        role,
-        opts.isProgress ? '1' : '0',
-        opts.systemType || '',
-        opts.source || '',
-        opts.senderLabel || '',
-        opts.senderSessionId || '',
-        opts.taskId || '',
-        timestamp,
-        text,
-    ].join('|');
-}
+export { buildMessageKey } from './chat_history_replay.js';
 
 // Only a reload onto changed code earns a feed notice; any other reload reason or reconnect is silent.
 export function restartNoticeText(reason = '') {

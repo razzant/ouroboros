@@ -116,6 +116,57 @@ export function messagePlacementKey(opts, legacyKey) {
     return address ? `row|${address}` : legacyKey;
 }
 
+/** Legacy delivery correlation; client ids are scoped to the room the owner wrote in. */
+export function buildMessageKey(role, text, timestamp, opts = {}) {
+    if (opts.clientMessageId) {
+        const room = role === 'user' && opts.ownerChatId !== opts.chatId ? `room:${opts.ownerChatId}|` : '';
+        return `${room}client|${opts.clientMessageId}`;
+    }
+    if (role !== 'user' && !opts.isProgress && opts.taskId) {
+        return [
+            'task',
+            role,
+            opts.systemType || '',
+            ...(opts.letterPartKey ? [opts.letterPartKey] : []),
+            opts.source || '',
+            opts.taskId,
+            text,
+        ].join('|');
+    }
+    if (!timestamp) return '';
+    return [
+        role,
+        opts.isProgress ? '1' : '0',
+        opts.systemType || '',
+        opts.source || '',
+        opts.senderLabel || '',
+        opts.senderSessionId || '',
+        opts.taskId || '',
+        timestamp,
+        text,
+    ].join('|');
+}
+
+/** The same stored fields label and identify a row. No node or read custody is acquired here. */
+export function messageIdentity(text, role, timestamp, isProgress, opts, chatId) {
+    const meta = Object.fromEntries([
+        'clientMessageId', 'senderLabel', 'senderSessionId', 'source', 'initiator',
+        'systemType', 'taskId', 'projectId', 'projectName', 'taskName', 'handoffId',
+        'originId', 'completionLimitation', 'deliveryId', 'letterPartKey',
+    ].map(key => [key, opts[key] || '']));
+    const ts = timestamp || new Date().toISOString();
+    meta.ownerChatId = ownerRowRoom(opts.reply, chatId);
+    const legacyKey = buildMessageKey(role, text, ts, { ...meta, isProgress, chatId });
+    return { meta, ts, legacyKey, messageKey: messagePlacementKey(opts, legacyKey),
+        deliveryKey: opts.deliveryId ? `delivery:${opts.deliveryId}` : '' };
+}
+
+export function priorHistoryBubble(bubbles, opts, keys, legacyKey, chatId) {
+    const mounted = !keys || keys.client.has(opts.clientMessageId)
+        || keys.origin.has(opts.originId) || keys.legacy.has(legacyKey);
+    return mounted ? bubbles().find(node => matchesHistoryBubble(node, opts, legacyKey, chatId)) : null;
+}
+
 /** Reuse a mounted node for its live echo without changing the attribution of a retained copy. */
 export function livePriorBubble(bubbles, opts, keys, legacyKey, chatId) {
     if (opts.originId) return (!keys || keys.origin.has(opts.originId))

@@ -24,6 +24,9 @@
  * saved: `hasPendingWork`, marked `data-pending-work`). Memory grows with the rooms visited, not with the rooms whose
  * work runs. app.js owns when; this owns what leaving and being away are. */
 
+import { documentScope } from './chat_preview.js';
+import { isWindowText } from './chat_row_placement.js';
+
 function keptRanges(page) {
     const selection = page.ownerDocument?.getSelection?.();
     const inside = (node) => Boolean(node && page.contains(node));
@@ -74,11 +77,12 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
         }
     };
     // A room leaving the screen: the selection in it is kept, then it leaves (chat.js), its socket view goes away.
-    const leave = (inst) => {
+    const leave = (inst, windowHidden = false) => {
         if (!inst) return;
+        if (!windowHidden) inst.forgetWindowReturn?.();  // also ends a window's suspension when the room itself leaves
         if (inst.ws?.paused) return;
         rememberSelection(inst);
-        inst.leave?.();
+        inst.leave?.(windowHidden);
         inst.ws?.pause?.();
     };
     // Main has the same lifetime as a retained Project, but the shell owns its visibility (also while covered).
@@ -185,7 +189,10 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
         // bounded list): a room kept for one has nothing to return to. Called with none, it lets go the rooms said
         // earlier whose exit or work has ended since. The only release before the page ends.
         forget(...pids) {
-            for (const pid of pids) forgotten.add(pid);
+            for (const pid of pids) {
+                forgotten.add(pid);
+                (instances.get(pid) || retiring.get(pid))?.forgetWindowReturn?.();
+            }
             release();
         },
     };
@@ -231,6 +238,55 @@ export function createCatchUp(changed, bound = 300) {
             if (active || read && failed) { active = false; changed(); }
         },
         cancel(requested = 0) { stop(); failed ||= Boolean(reading); active = false; reading = null; after = requested; },
+    };
+}
+
+const WINDOW_ROWS = 12, WINDOW_TEXT_BYTES = 64 * 1024;
+const rowRoom = /^row:(\d+)@[^#\s]+#[a-f0-9]{12}$/;
+
+/** The small exception to an away room's socket custody. A shown follower that the window hides may keep the words of
+ * its own ordinary assistant rows. No re-dispatch, snapshots, other appearances, or log subscription. One hiding, one
+ * positively scoped connection. On loss of proof or of the bound, the ordinary history read alone fills the gap. */
+export function createWindowReturn({ socket, doc, chatId, projectId, accepts, knownChild }) {
+    let lease = null;
+    function drop() {
+        const old = lease;
+        lease = null;
+        old?.off.forEach(dispose => dispose());
+    }
+    const connected = scope => Boolean(scope) && socket?.isConnected?.() === true && !socket.foreignProfile?.()
+        && socket.servingProfileScope?.() === scope && socket.ws;
+    return {
+        drop,
+        hold() {
+            drop();
+            const scope = documentScope(doc), connection = connected(scope);
+            if (!doc.hidden || !connection) return;
+            const rows = new Map();
+            const valid = () => connected(scope) === connection && documentScope(doc) === scope;
+            let used = 0;
+            function keep(msg) {
+                if (!isWindowText(msg, knownChild) || msg.chat_id !== chatId || msg.project_id && msg.project_id !== projectId
+                        || !accepts(msg)) return;
+                if (!doc.hidden || !valid()) return drop();
+                const address = msg.row_address;
+                if (typeof address !== 'string' || Number(rowRoom.exec(address)?.[1]) !== chatId
+                        || typeof msg.ts !== 'string' || !Number.isFinite(Date.parse(msg.ts)) || typeof msg.content !== 'string') return drop();
+                if (!msg.content || rows.has(address)) return;
+                // Retain only presentation fields and the physical address, never the producer's frame.
+                used += 2 * (msg.content.length + address.length + msg.ts.length);
+                if (rows.size >= WINDOW_ROWS || used > WINDOW_TEXT_BYTES) return drop();
+                rows.set(address, { address, text: msg.content, ts: msg.ts, markdown: msg.markdown === true,
+                    initiator: msg.initiator === 'consciousness' ? 'consciousness' : '' });
+            }
+            lease = { rows, valid, off: [socket.on('chat', keep), socket.on('close', drop),
+                socket.on('projects_changed', msg => { if (projectId && (!msg?.chat_id || Number(msg.chat_id) === chatId)) drop(); })] };
+        },
+        take() {
+            const rows = !doc.hidden && lease?.valid() ? [...lease.rows.values()] : [];
+            drop();
+            return rows;
+        },
     };
 }
 

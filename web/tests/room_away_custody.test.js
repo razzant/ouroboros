@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { createRoomRetirement, roomSocket } from '../modules/room_retire.js';
+import { createRoomRetirement, createWindowReturn, roomSocket } from '../modules/room_retire.js';
 import { installDom, PREVIEW_SCOPE, restoreDom, roomKey, walkCard } from './chat_dom_fixture.js';
 
 const ME = 'session-me';
@@ -15,12 +15,15 @@ const settle = async () => { for (let i = 0; i < 12; i += 1) await new Promise((
 // The page's one socket (ws.js), as a room's view of it sees it: subscriptions, connection and sends.
 function pageSocket() {
     const handlers = new Map();
-    let connected = true, coined = 0, status = 'sent';
+    let connected = true, coined = 0, status = 'sent', scope = PREVIEW_SCOPE;
     const sent = [];
     return {
         sent,
         set status(value) { status = value; },
         set connected(value) { connected = value; },
+        set scope(value) { scope = value; },
+        servingProfileScope: () => scope,
+        listening: (type) => handlers.get(type)?.size || 0,
         ws: { readyState: 1 },
         on(type, fn) {
             if (!handlers.has(type)) handlers.set(type, new Set());
@@ -37,13 +40,14 @@ function pageSocket() {
     };
 }
 
-function fixture({ detail = null } = {}) {
+function fixture({ detail = null, chatId = 7 } = {}) {
     const reads = [];
+    let history = { messages: [], window: { complete: true } };
     const env = installDom(async (url) => {
         const path = String(url);
         if (path.startsWith('/api/tasks/') && detail) return new Promise((resolve) => reads.push(resolve));
         return { ok: true, json: async () => (path.startsWith('/api/chat/history')
-            ? { profile_scope: PREVIEW_SCOPE, messages: [], window: { complete: true } }
+            ? { profile_scope: PREVIEW_SCOPE, ...await history }
             : { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true }) };
     });
     globalThis.sessionStorage.setItem('ouro_chat_session_id', ME);
@@ -52,7 +56,7 @@ function fixture({ detail = null } = {}) {
     const instance = createChatInstance({
         ws: roomSocket(socket),
         state: { activePage: 'chat', projectChatIds: new Set([7]), unreadCount: 0 },
-        updateUnreadBadge() {}, chatId: 7, projectId: 'p1', idPrefix: 'chat', mountEl: env.mount, asPanel: true,
+        updateUnreadBadge() {}, chatId, projectId: chatId === 1 ? '' : 'p1', idPrefix: 'chat', mountEl: env.mount, asPanel: chatId !== 1,
         stateSnapshots: { begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
             gate() { return Promise.resolve(this.begin()); }, isCurrent: () => true, apply() {}, fail() {}, latest: () => null },
     });
@@ -64,6 +68,13 @@ function fixture({ detail = null } = {}) {
         .flatMap((note) => note.children.filter((child) => child.tagName === 'BUTTON')).map((button) => button.textContent);
     return {
         instance, socket, rooms, messages, bubbleOf, actions, reads,
+        hide() { document.hidden = true; rooms.suspend(instance, true); },
+        show() { document.hidden = false; rooms.restore(instance); },
+        delayHistory() {
+            let deliver;
+            history = new Promise(resolve => { deliver = messages => resolve({ messages, window: { complete: true } }); });
+            return deliver;
+        },
         async send(text) {
             document.byId.get('chat-input').value = text;
             for (const fn of document.byId.get('chat-send').listeners.get('click')) fn();
@@ -195,5 +206,107 @@ test('a room away draws no status when another room\'s send is written; back, it
         assert.equal(status(), shown, 'nothing is drawn into the hidden room, least of all a false outage');
         await f.back();
         assert.equal(status(), shown);
+    } finally { f.close(); }
+});
+
+const speech = (chatId, n, content = 'old answer', extra = {}) => ({ role: 'assistant', chat_id: chatId,
+    content, ts: TS, row_address: `row:${chatId}@${TS}#${String(n).padStart(12, '0')}`, ...extra });
+
+for (const chatId of [1, 7]) test(`hidden follower ${chatId}: show words before HTTP, not a live conclusion or read`, async () => {
+    const f = fixture({ chatId });
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        const deliver = f.delayHistory();
+        const legacy = speech(chatId, 1);
+        const sameMs = speech(chatId, 2);  // different saved row, identical words and milliseconds
+        const root = speech(chatId, 3, 'root answer', { task_id: 'root', root_task_id: 'root',
+            task_phase: 'finalizing', task_terminal_status: 'completed', delivery_id: 'final:root' });
+        const live = speech(chatId, 4, 'live speech from work', { task_id: 'root', root_task_id: 'root', system_type: 'proactive_message' });
+        const child = speech(chatId, 5, 'child belongs to a card', { task_id: 'child', root_task_id: 'root' });
+        const ambiguous = speech(chatId, 6, 'task without proved lineage', { task_id: 'unproved' });
+        const other = speech(19, 1, 'another room', { also_rooms: [chatId] });
+        const nodes = text => f.messages.children.filter(node => node.innerHTML.includes(text));
+
+        f.hide();
+        for (const frame of [sameMs, legacy, root, live, child, ambiguous, other, legacy]) f.socket.fire('chat', frame);
+        assert.equal(nodes('old answer').length, 0, 'words never repaint the hidden feed');
+        f.show();
+        const early = nodes('old answer');
+        assert.equal(early.length, 2, 'different physical rows are not deduped by text or time');
+        assert.equal(nodes('root answer').length, 1);
+        assert.equal(nodes('live speech from work').length, 1);
+        assert.equal(nodes('child belongs to a card').length + nodes('another room').length, 0);
+        assert.equal(nodes('task without proved lineage').length, 0);
+        assert.equal(early[0].dataset.historyId, undefined);
+        assert.equal(early[0].dataset.rowAddress, undefined, 'no Reply target until the row is confirmed');
+        assert.equal(early[0].querySelector('[data-reply-body]'), null);
+        assert.ok(!walkCard(f.messages, 'root'), 'early rendering does not give finalizing authority');
+
+        const cmid = await f.send('a new question');
+        const sending = () => document.byId.get('chat-status').textContent;
+        assert.match(sending(), /Sending/);
+        f.socket.fire('chat', legacy);
+        assert.equal(nodes('old answer').length, 2);
+        assert.match(sending(), /Sending/, 'a delayed legacy repeat cannot settle a different send');
+
+        deliver([legacy, sameMs, root, live].map((frame, index) => ({ ...frame, text: frame.content,
+            history_id: `row-${index}`, history_position: { source: 'chat', offset: index } })));
+        await settle();
+        assert.deepEqual(nodes('old answer').map(node => node.dataset.rowAddress), [legacy.row_address, sameMs.row_address]);
+        assert.deepEqual(nodes('old answer').map(node => node.dataset.historyId), ['row-0', 'row-1']);
+        assert.equal(nodes('old answer')[0], early[1], 'the stamped saved row moves the same early node into its canonical slot');
+        f.socket.fire('chat', legacy);
+        assert.match(sending(), /Sending/, 'an exact late repeat after canonical adoption is also not a live conclusion');
+        assert.equal(nodes('old answer').length, 2);
+        assert.ok(f.bubbleOf(cmid));
+    } finally { f.close(); }
+});
+
+test('window return declines overflow and loses its lease on a scope change or socket close', () => {
+    const socket = pageSocket();
+    const doc = { hidden: true, querySelector: () => ({ content: PREVIEW_SCOPE }) };
+    const lease = createWindowReturn({ socket, doc, chatId: 7, projectId: 'p1', accepts: () => true, knownChild: () => false });
+    for (const invalidate of [
+        () => { for (let n = 0; n < 13; n++) socket.fire('chat', speech(7, n)); },
+        () => socket.fire('chat', speech(7, 7, 'x'.repeat(32768))),
+        () => { socket.scope = '1111111111111111'; },
+        () => socket.fire('close'),
+        () => socket.fire('projects_changed', {}),
+    ]) {
+        doc.hidden = true;
+        socket.scope = PREVIEW_SCOPE;
+        lease.hold();
+        socket.fire('chat', speech(7, 88));
+        assert.equal(socket.listening('log'), 0);
+        invalidate();
+        doc.hidden = false;
+        assert.deepEqual(lease.take(), []);
+        for (const event of ['chat', 'close', 'projects_changed']) assert.equal(socket.listening(event), 0, event);
+    }
+});
+
+test('window return leaves an older reading position alone and waits for canonical history', async () => {
+    const f = fixture();
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        const feed = f.messages;
+        feed.scrollHeight = 1200;
+        feed.scrollTop = 220;
+        for (const wheel of feed.listeners.get('wheel')) wheel({ type: 'wheel', target: feed, deltaY: -100, timeStamp: 1000 });
+        for (const scroll of feed.listeners.get('scroll')) scroll({ target: feed });
+        await settle();
+        const deliver = f.delayHistory();
+        const frame = speech(7, 1, 'new while reading earlier');
+        f.hide();
+        f.socket.fire('chat', frame);
+        f.show();
+        assert.equal(feed.scrollTop, 220);
+        assert.ok(feed.children.every(node => !node.innerHTML.includes(frame.content)));
+        deliver([{ ...frame, text: frame.content, history_id: 'reading-control-latest', history_position: { source: 'chat', offset: 1 } }]);
+        await settle();
+        assert.ok(feed.children.some(node => node.dataset.rowAddress === frame.row_address));
+        assert.equal(feed.scrollTop, 220, 'canonical arrival does not jump to the latest row');
     } finally { f.close(); }
 });

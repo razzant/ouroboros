@@ -61,13 +61,13 @@ export function bubbleWords(text, role, { markdown = false, systemType = '', sou
  */
 export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ownProjectId = '',
     onDomWrite = (write) => write() }) {
-    return function draw(text, role, { markdown = false, ts, isProgress = false, meta, legacyKey = '', opts = {} }) {
+    return function draw(text, role, { markdown = false, ts, isProgress = false, meta, legacyKey = '', opts = {}, existing = null }) {
         const pending = !!opts.pending;
         const ephemeral = !!opts.ephemeral;
         const { source, systemType, projectId } = meta;
         const attachments = role === 'user' ? attachmentViews(opts.attachments) : [];
-        const bubble = document.createElement('div');
-        bubble.className = `chat-bubble ${role}` + (isProgress ? ' progress' : '');
+        const bubble = existing || document.createElement('div');
+        if (!existing) bubble.className = `chat-bubble ${role}` + (isProgress ? ' progress' : '');
         if (pending) bubble.classList.add('pending');
         if (ephemeral) bubble.dataset.ephemeral = '1';
         for (const key of ['clientMessageId', 'systemType', 'senderSessionId', 'taskId', 'deliveryId', 'projectId']) {
@@ -89,18 +89,32 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
         if (skillReview) bubble.classList.add('chat-skill-review');
         // A passage's coordinates are the parsed words': an unparsed message offers none, nor lands a saved one.
         const authored = ['user', 'assistant'].includes(role) && !isProgress && opts.textPlaceholder !== true && Boolean(shown)
-            && !unparsed;
+            && !unparsed && !opts.wordsOnly;
         const timeFmt = formatMsgTime(ts);
         const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';
         // Preserve the card's source link in a standalone row.
-        bubble.innerHTML = `
-            <div class="sender">${escapeHtml(senderLabel(role, isProgress, systemType, meta))}</div>
+        const label = senderLabel(role, isProgress, systemType, meta);
+        const markup = `
+            <div class="sender">${escapeHtml(label)}</div>
             <div class="message${richMarkdown ? ' ui-rich-content' : ''}"${authored ? ' data-reply-body' : ''}>${rendered}</div>
             ${evidenceLinkHtml(opts.evidenceRef)}
             ${pendingHtml}
             ${timeHtml}
         `;
+        const body = existing?.querySelector('.message');
+        if (!body || body.innerHTML !== rendered || opts.evidenceRef || bubble.querySelector('.msg-time')?.title !== timeFmt?.full) {
+            bubble.innerHTML = markup;
+        } else {
+            const sender = bubble.querySelector('.sender');
+            if (sender?.textContent !== label) sender.textContent = label;
+            if (authored) body.setAttribute('data-reply-body', '');
+        }
+        stampNodeTimestamp(bubble, ts);
+        if (opts.wordsOnly) {
+            for (const link of bubble.querySelectorAll('a[href]')) link.removeAttribute('href');
+            return { bubble, rich: false };
+        }
         if (notice?.details && opts.narration !== true) bubble.querySelector('.message')
             .after(rawDetails(document, notice.details, tr('chat.notice.details', 'Details')));
         decorateContactSource(bubble, opts.presenceContact);
@@ -121,7 +135,38 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
             fold: projectRow && role === 'assistant', addedAt: ts });
         syncSavedProjectContext(bubble, opts.originProjected, opts.originId);
         if (skillReview) wireSkillReviewDisclosure(bubble, { onDomWrite, own: dispose => chatMedia.own(dispose, bubble) });
-        stampNodeTimestamp(bubble, ts);
         return { bubble, rich: richMarkdown };
+    };
+}
+
+/** Keep only the early nodes still awaiting the saved row that can adopt them. */
+export function createEarlyTextBubbles(feed, draw, insert, release) {
+    const nodes = new Map();
+    function clear(rows = null) {
+        if (!nodes.size) return false;
+        let changed = false;
+        for (const address of rows ? rows.map(row => row.row_address) : nodes.keys()) {
+            const node = nodes.get(address);
+            if (node) { nodes.delete(address); release(node); changed = true; }
+        }
+        return changed;
+    }
+    return {
+        get: address => nodes.get(address),
+        delete: address => nodes.delete(address),
+        show(rows) {
+            const removed = clear();
+            if (!rows.length) return removed;
+            const mounted = new Set([...feed.querySelectorAll('.chat-bubble.assistant[data-row-address]')]
+                .map(node => node.dataset.rowAddress));
+            for (const { address, text, markdown, ts, initiator } of rows) {
+                if (mounted.has(address)) continue;
+                const { bubble } = draw(text, 'assistant', { markdown, ts, meta: { initiator }, opts: { wordsOnly: true } });
+                nodes.set(address, bubble);
+                insert(bubble, { forceStick: true });
+            }
+            return removed || nodes.size > 0;
+        },
+        clear,
     };
 }

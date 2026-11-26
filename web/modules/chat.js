@@ -14,10 +14,10 @@ import { createTaskEpisodes } from './task_episodes.js';
 import { markSwarmLabel, syncSwarmReceipt } from './swarm_presentation.js';
 import { syncCostBreakdown } from './cost_breakdown_presentation.js';
 import { createChatMedia, showTaskIncidentToast } from './chat_media.js';
-import { createTextBubbles } from './chat_text_bubble.js';
+import { createEarlyTextBubbles, createTextBubbles } from './chat_text_bubble.js';
 import { endLetters, letterRow } from './peer_letter_card.js';
 import { noticeLine } from './host_notice_text.js';
-import { createCatchUp } from './room_retire.js';
+import { createCatchUp, createWindowReturn } from './room_retire.js';
 import { createChatPreview, createRoomProfileLifecycle } from './chat_preview.js';
 import { createUnconfirmedSends } from './chat_attachments.js';
 import { createChatDecision } from './chat_decision.js';
@@ -37,7 +37,7 @@ import { onRefit } from './text_fit.js';
 import { createChatHistoryPager, historyCoverage, historyIslandAtEdge } from './chat_history.js';
 import { createProjectReadReceipt, isAtNewestMessage, newestMessageOffset, readBand } from './project_read_state.js';
 import { createSharedReadTracker } from './read_ahead.js';
-import { adoptsRetainedCopy, createReplayKeys, livePriorBubble, matchesHistoryBubble, messagePlacementKey, ownerMessageBubble, ownerRowRoom, mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
+import { adoptsRetainedCopy, createReplayKeys, livePriorBubble, messageIdentity, priorHistoryBubble, ownerMessageBubble, ownerRowRoom, mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
 import { apiClient, apiFetch, fetchTaskDetailStrict, isStoreMigrating } from './api_client.js';
 import { readStateSnapshot } from './state_snapshots.js';
 import { syncHistoryRetentionItem } from './history_retention.js';
@@ -124,7 +124,6 @@ import {
     authoredLine,
     authoredTitle,
     buildTimelineItemHtml,
-    buildMessageKey,
     chatLogThreadAccepts,
     chatMediaMessageKey,
     chatThreadAccepts,
@@ -668,8 +667,7 @@ export function createChatInstance({
             return false;
         }
         return withStableViewport(() => {
-            // Scope to THIS instance's column: a global id lookup finds the first panel's typing node and misplaces
-            // project-thread messages. It is the feed's last child (rows go before it): no walk of the feed per row.
+            // Typing stays last in this room's own column.
             const last = messagesDiv.lastElementChild;
             const typing = last?.classList?.contains('typing-bubble') ? last : messagesDiv.querySelector('.typing-bubble');
             insertTimelineNode(messagesDiv, node, typing, replaySelection);
@@ -2008,29 +2006,12 @@ export function createChatInstance({
         return Boolean(changed || queued || subagentChanged);
     }
 
+    const earlyRows = createEarlyTextBubbles(messagesDiv, drawTextBubble, insertMessageNode, releaseMessageNode);
     function addMessage(text, role, markdown = false, timestamp = null, isProgress = false, opts = {}) {
-        // The same stored fields label and identify a row.
-        const meta = Object.fromEntries([
-            'clientMessageId', 'senderLabel', 'senderSessionId', 'source', 'initiator',
-            'systemType', 'taskId', 'projectId', 'projectName', 'taskName', 'handoffId',
-            'originId', 'completionLimitation', 'deliveryId', 'letterPartKey',
-        ].map(key => [key, opts[key] || '']));
-        const { clientMessageId } = meta;
-        const ts = timestamp || new Date().toISOString();
-        meta.ownerChatId = ownerRowRoom(opts.reply, chatId);
-        const legacyKey = buildMessageKey(role, text, ts, { ...meta, isProgress, chatId });
+        const { meta, ts, legacyKey, messageKey, deliveryKey } = messageIdentity(text, role, timestamp, isProgress, opts, chatId);
         const bubbles = () => [...messagesDiv.querySelectorAll('.chat-bubble')];
-        const messageKey = messagePlacementKey(opts, legacyKey);
-        const deliveryKey = opts.deliveryId ? `delivery:${opts.deliveryId}` : '';
-        // A delivery is one bubble while that bubble is mounted; a released page mounts it again.
-        const delivered = deliveryKey && seenMessageKeys.has(deliveryKey)
-            && bubbles().find(node => node.dataset.deliveryId === opts.deliveryId);
-        if (delivered) {
-            stampHistoryNode(delivered, opts.historyId, opts.historyPosition);
-            noteBubbleKeys(delivered);
-            rememberMessageKey(messageKey);
-            return false;
-        }
+        const delivered = deliveryKey && seenMessageKeys.has(deliveryKey) && bubbles().find(node => node.dataset.deliveryId === opts.deliveryId);
+        if (delivered) return recordBubble(delivered);
         const prior = opts.historyId
             ? (replayKeys && !replayKeys.history.has(opts.historyId) ? null
                 : historyNodes(opts.historyId).find(node => node.classList.contains('chat-bubble')))
@@ -2042,34 +2023,35 @@ export function createChatInstance({
             noteBubbleKeys(prior);
             return chatDecision.renderRoutingDecision(prior, opts.chatAnnotation) || originChanged || quoteChanged;
         }
-        // History may land first; a live copy adds no new facts.
         if (prior || (messageKey && seenMessageKeys.has(messageKey))) return false;
-        if (opts.historyId) {
-            const mounted = !replayKeys || (clientMessageId && replayKeys.client.has(clientMessageId))
-                || (opts.originId && replayKeys.origin.has(opts.originId)) || replayKeys.legacy.has(legacyKey);
-            const prior = mounted && bubbles().find(node => matchesHistoryBubble(node, opts, legacyKey, chatId));
-            if (prior) {
-                stampHistoryNode(prior, opts.historyId, opts.historyPosition);
-                noteBubbleKeys(prior);
-                rememberMessageKey(messageKey);
-                chatDecision.renderRoutingDecision(prior, opts.chatAnnotation);
-                // Exact origin gives this room's retained copy its Reply.
-                const adopted = adoptsRetainedCopy(prior, opts) && replies.adopt(opts.reply, prior);
-                const quoteChanged = replies.syncDerivedQuestion(prior, opts.reply, { authoritative: true });
-                const restored = syncSavedProjectContext(prior, opts.originProjected, opts.originId);
-                return restored || adopted || quoteChanged;
-            }
+        const matched = opts.historyId && priorHistoryBubble(bubbles, opts, replayKeys, legacyKey, chatId);
+        if (matched) {
+            recordBubble(matched);
+            chatDecision.renderRoutingDecision(matched, opts.chatAnnotation);
+            const adopted = adoptsRetainedCopy(matched, opts) && replies.adopt(opts.reply, matched);
+            const quoteChanged = replies.syncDerivedQuestion(matched, opts.reply, { authoritative: true });
+            const restored = syncSavedProjectContext(matched, opts.originProjected, opts.originId);
+            return restored || adopted || quoteChanged;
         }
-
-        const { bubble, rich } = drawTextBubble(text, role, { markdown, ts, isProgress, meta, legacyKey, opts });
-        insertMessageNode(bubble, { forceStick: !!opts.forceStick });
+        const address = role === 'assistant' && !opts.originProjected && opts.reply?.row_address;
+        const existing = opts.historyId && earlyRows.get(address);
+        if (existing) { earlyRows.delete(address); rememberMessageKey(`window|${address}`); }
+        const { bubble, rich } = drawTextBubble(text, role, { markdown, ts, isProgress, meta, legacyKey, opts, existing });
+        insertMessageNode(bubble, { forceStick: !!opts.forceStick, reorderExisting: Boolean(existing) });
         if (rich) enhanceMountedMarkdown(bubble);
         chatDecision.renderRoutingDecision(bubble, opts.chatAnnotation);
         if (isMain) reconcilePortalNotes(messagesDiv, bubble);
         rememberMessageKey(messageKey);
         if (deliveryKey) rememberMessageKey(deliveryKey);
-        if (opts.pending && clientMessageId) pendingUserBubbles.set(clientMessageId, bubble);
+        if (opts.pending && meta.clientMessageId) pendingUserBubbles.set(meta.clientMessageId, bubble);
         return bubble;
+
+        function recordBubble(node) {
+            stampHistoryNode(node, opts.historyId, opts.historyPosition);
+            noteBubbleKeys(node);
+            rememberMessageKey(messageKey);
+            return false;
+        }
     }
 
     const localOwnerRow = row => !row.origin_projected && ownerRowRoom(row, chatId) === chatId;
@@ -2121,9 +2103,9 @@ export function createChatInstance({
             pendingLiveEvictions.delete(id);
         }
     }
-    // `requestedAt`: when the read that carried these rows was asked for (api_client chatHistory), dating a question's records.
+    // `requestedAt` dates the question records in these rows.
     function applyHistoryMessages(messages, { fromReconnect = false, archived = false, direction = '', anchor = null,
-        requestedAt } = {}) {
+        requestedAt, newest = direction === 'recent' || direction === 'latest' } = {}) {
         // A returning room reads arrivals instead of receiving socket frames. Only newly drawn content marks ↓:
         // the first page, older pages and adopting a stored identity for already seen live words stay quiet.
         const reportActivity = historyLoaded && !archived;
@@ -2304,6 +2286,7 @@ export function createChatInstance({
                     });
                     if (msg.role === 'user') confirmOwnerRow(msg);
                 }
+                earlyRows.clear(newest && !catchUp.owed ? null : messages);
                 _historyRow = null;
                 for (const [tid, ending] of endings) {
                     if (!ending) continue;
@@ -2400,7 +2383,7 @@ export function createChatInstance({
                     && (returning || pagerBeforeRecent.away && (fromReconnect || recovering || pagerBeforeRecent.retryReturn)
                         || !pagerBeforeRecent.canNewer && [...oldRecentIds].some(id => !recentHistoryIds.has(id)));
                 const result = historyPager.acceptRecent(data, rechainRecent && { fromReconnect });
-                if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect, requestedAt: data.requestedAt });
+                if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect, newest: admitted, requestedAt: data.requestedAt });
                 withStableViewport(() => releaseHistoryIds(!admitted || rechainRecent || reader
                     || historyPager.getState().canNewer ? [] : oldRecentIds));
                 // Arrivals that landed meanwhile may lie past this page: read them again.
@@ -3105,10 +3088,21 @@ export function createChatInstance({
 
     const isMyThread = msg => chatThreadAccepts(msg, isMain, chatId, state.projectChatIds);
     const isMyLogThread = msg => chatLogThreadAccepts(msg, isMain, chatId, state.projectChatIds);
+    const windowReturn = createWindowReturn({ socket: ws.socket, doc: document, chatId, projectId,
+        accepts: isMyThread, knownChild: id => subagentChildParents.has(id) });
+    const windowFollower = () => !readingHistory() && !reading.returning && !archive?.active && !replies.revealing
+        && !page.hidden && messagesDiv.offsetParent !== null && !messagesDiv.closest('[inert]');
+    function forgetWindowReturn() {
+        windowReturn.drop();
+        if (!document.hidden) withStableViewport(earlyRows.clear);
+    }
 
     onWs('chat', (msg) => {
         if (foreignProfile()) return;  // live frames of another profile never render (#3294)
         if (!isMyThread(msg)) return;
+        const address = msg.role === 'assistant' && !msg.is_progress && msg.row_address;
+        // A redelivered window row cannot play its live effects against a later turn's Sending.
+        if (address && (earlyRows.get(address) || seenMessageKeys.has(`window|${address}`))) return;
         if (msg.system_type === 'initialization_notice') {
             unconfirmed.refused(msg);  // its typed cause decides a copy's word (chat_attachments.js)
             if (leaving) return;
@@ -3346,6 +3340,7 @@ export function createChatInstance({
     // A disconnect: written sends not yet saved say so and the room shows the outage; away, which sends it doubts is
     // decided now (custody) and both are drawn on its return (`stay`).
     onWs('close', () => {
+        forgetWindowReturn();
         closedSinceOpen = true;
         catchUp.cancel(recentRequest);
         if (leaving) { outageAway = [...outageAway || [], ...unconfirmed.written()]; return; }
@@ -3423,10 +3418,11 @@ export function createChatInstance({
         // Another place covers the room: a reader or file dialog its card opened closes, its place is kept; `pause`
         // (another place replaces it) also pauses what plays. Staged files stay.
         closeTransient: (pause) => { archive?.close(); roomWork?.leave(); keepPlace(); chatMedia.closeTransient(pause); },
-        // Room leaving screen (room_retire.js), on exit, while away: place kept, paint receipt and
-        // reads stopped, neither shown nor read (reader and playback `closeTransient`'s); `stay` returns.
-        leave: () => {
+        // Away keeps the place, pausing paint and reads (room_retire.js).
+        forgetWindowReturn,
+        leave: (windowHidden = false) => {
             if (leaving) return;
+            if (windowHidden && windowFollower() && presentHeld() && reading.nearBottom()) windowReturn.hold();
             roomProfile.left();  // copies shown on the core's word leave the feed, kept (chat_preview.js)
             catchUp.cancel(recentRequest);  // its return reads, and says so, anew
             // Left in an outage (down after the page's socket opened), it will not hear the reconnect that forgets a
@@ -3444,6 +3440,9 @@ export function createChatInstance({
             reviewHydrator.resume(); drawOwedTimelines();
             if (outageAway) { const doubted = outageAway; outageAway = null; showOutage(doubted); }
             roomProfile.stayed();  // an opening's saved text owed since paints at once (chat_preview.js)
+            const rows = windowReturn.take();
+            if (!document.hidden) withStableViewport(() => earlyRows.show(windowFollower()
+                && (isMain || state.projectChatIds.has(chatId)) ? rows : []));
         },
         // How the room was opened (app.js): pressed open by a pointer, its focus corners wait for a key.
         quietFocus: (quiet) => messagesDiv.classList.toggle('is-quiet-focus', Boolean(quiet)),
@@ -3451,6 +3450,7 @@ export function createChatInstance({
         // timers), then buffered collections, DOM last. Idempotent; late rAF/async continuations no-op on `destroyed`.
         destroy() {
             if (destroyed) return;
+            forgetWindowReturn();
             destroyed = true;
             catchUp.cancel();
             historyReadAbort?.abort();
