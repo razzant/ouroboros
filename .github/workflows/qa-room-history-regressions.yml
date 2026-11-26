@@ -1,0 +1,212 @@
+# Temporary hosted verification for #4326. Keep this commit out of the product PR.
+name: Focused room-history regressions (#4326)
+
+'on':
+  push:
+    branches:
+      - qa/4326-room-history-regressions
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    name: '#4326 exact cases (${{ matrix.os }})'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, interpreter: shipped}
+          - {os: windows-latest, interpreter: setup-python}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          profile: test
+          # Match the two post-merge legs: shipped/WAL on Linux, legacy/PERSIST on Windows.
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'
+      - name: Run and reconcile the named cases and reader exit witnesses
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import sqlite3
+          import subprocess
+          import sys
+          import tempfile
+          from xml.etree import ElementTree
+
+          WORKFLOW = '.github/workflows/qa-room-history-regressions.yml'
+          CAPTURE = 'tests/test_server_capture_exit.py::'
+          READERS = {
+              CAPTURE + 'test_closed_output_stream_cannot_hold_executable_capture[stdout]': 'closed-stdout',
+              CAPTURE + 'test_executable_quit_preserves_owed_capture_for_next_generation[cli-sigterm]': 'cli-sigterm',
+              CAPTURE + 'test_executable_quit_preserves_owed_capture_for_next_generation[console-sigint]': 'console-sigint',
+              CAPTURE + 'test_executable_quit_preserves_owed_capture_for_next_generation[script-pipe]': 'script-pipe',
+              CAPTURE + 'test_imported_main_leaves_exit_and_exceptions_to_caller[pipe]': 'imported-pipe',
+              CAPTURE + 'test_imported_main_leaves_exit_and_exceptions_to_caller[sigint]': 'imported-sigint',
+          }
+          ISSUE_CASES = (
+              'tests/test_git_ops_checkout_reset.py::test_checkout_and_reset_applies_explicit_update_intent',
+              'tests/test_git_ops_checkout_reset.py::test_checkout_and_reset_blocks_when_update_ahead_check_fails',
+              'tests/test_git_ops_checkout_reset.py::test_checkout_and_reset_cleans_untracked_after_managed_restart_rescue',
+              'tests/test_git_ops_checkout_reset.py::test_checkout_and_reset_does_not_rescue_for_only_managed_ahead_commits',
+              'tests/test_git_ops_checkout_reset.py::test_checkout_and_reset_preserves_ahead_head_before_update_intent',
+              'tests/test_git_ops_checkout_reset.py::test_checkout_and_reset_preserves_local_head_on_managed_restart',
+              'tests/test_git_ops_managed_update.py::test_checkout_and_reset_keeps_bundled_sha_on_first_managed_bootstrap',
+              'tests/test_restart_retention.py::test_a_graceful_shutdown_records_its_cause_and_panic_records_none',
+              'tests/test_shutdown_entry.py::test_a_planned_restart_keeps_its_own_record_before_its_teardown_entry',
+              'tests/test_stop_admission_pause.py::test_planned_restart_and_quit_teardown_pause_admission_first',
+              *READERS,
+          )
+          CONTROLS = (CAPTURE + 'test_history_reader_exit_witness_rejects_unproved_processes',)
+          CASES = ISSUE_CASES + CONTROLS
+          POSIX_MODES = {'cli-sigterm', 'console-sigint', 'imported-sigint'}
+          POSIX_REASON = 'Popen.send_signal requires POSIX signal delivery'
+          PASSED = [(phase, 'passed') for phase in ('setup', 'call', 'teardown')]
+          SKIPPED = [('setup', 'skipped'), ('teardown', 'passed')]
+
+          def require(ok, reason):
+              if not ok:
+                  raise SystemExit(reason)
+
+          def bind_product():
+              require(os.environ.get('GITHUB_ACTIONS') == 'true'
+                      and os.environ.get('GITHUB_EVENT_NAME') == 'push'
+                      and os.environ.get('GITHUB_REF') == 'refs/heads/qa/4326-room-history-regressions'
+                      and Path.cwd() == Path(os.environ['GITHUB_WORKSPACE']).resolve(),
+                      'Expected the isolated QA branch push in its hosted checkout')
+              head, *parents = subprocess.check_output(
+                  ['git', 'rev-list', '--parents', '-n', '1', 'HEAD'], text=True).split()
+              require(head == os.environ['GITHUB_SHA'] and len(parents) == 1,
+                      'Checkout must be the pushed SHA with one product parent')
+              product = parents[0]
+              diff = subprocess.check_output(['git', 'diff', '--name-status', '--no-renames', '-z', product, head])
+              require(diff == b'A\0' + WORKFLOW.encode('ascii') + b'\0',
+                      'QA commit must only add this workflow on top of the product')
+              return head, product
+
+          def junit_skips(path):
+              skips = {}
+              for row in ElementTree.parse(path).iter('testcase'):
+                  case = row.get('file', '').replace('\\', '/') + '::' + row.get('name', '')
+                  for skip in row.findall('skipped'):
+                      skips.setdefault(case, []).append((skip.get('type'), skip.get('message')))
+              return skips
+
+          def report_cases(facts, xml_skips, expected_skips, returncode, run_identity):
+              selected = facts.get('selected_nodeids', [])
+              exact = len(selected) == len(CASES) and set(selected) == set(CASES)
+              if not exact:
+                  for case in CASES:
+                      if selected.count(case) != 1:
+                          print(f'NOT SELECTED EXACTLY ONCE: {case}', flush=True)
+              require(exact and facts['tests_collected'] == len(CASES), 'Selected pytest node IDs differ from the allowlist')
+              require(facts['github'] == run_identity, 'Pytest results do not belong to this SHA/run/attempt')
+              phases = {case: [] for case in CASES}
+              bad = set()
+              for row in facts['reports']:
+                  case = row['nodeid']
+                  require(case in phases, 'Unexpected pytest execution record')
+                  if row.get('wasxfail') is not None or (row.get('is_subtest') and row['outcome'] != 'passed'):
+                      bad.add(case)
+                  if not row.get('is_subtest'):
+                      phases[case].append((row['phase'], row['outcome']))
+              for case in CASES:
+                  skipped = case in expected_skips
+                  valid = case not in bad and phases[case] == (SKIPPED if skipped else PASSED)
+                  if skipped:
+                      valid = valid and xml_skips.get(case) == [('pytest.skip', POSIX_REASON)]
+                  if not valid:
+                      bad.add(case)
+                  label = ('SKIP (POSIX signal not available)' if skipped else 'PASS (setup/call/teardown)') if valid else 'NOT PROVEN'
+                  print(f'{label}: {case}', flush=True)
+              require(not bad and set(xml_skips) == expected_skips
+                      and facts['format'] == 1 and facts['session_exit_code'] == returncode == 0
+                      and not facts['collection_failures'] and not facts['collection_skips'],
+                      'Incomplete or failing named pytest results')
+
+          def reader_fact(paths):
+              if len(paths) != 1:
+                  return None
+              try:
+                  fact = json.loads(paths[0].read_text(encoding='utf-8'))
+              except (OSError, ValueError):
+                  return None
+              reader = fact.get('reader') if isinstance(fact, dict) else None
+              valid = (isinstance(reader, dict)
+                       and type(reader.get('pid')) is int and reader['pid'] > 0
+                       and all(reader.get(flag) is True for flag in ('started', 'live_before_stop', 'exited'))
+                       and type(reader.get('returncode')) is int and type(reader.get('ledger_remains')) is bool)
+              return reader if valid else None
+
+          def report_exits(evidence, expected_skips):
+              problems = []
+              for case, mode in READERS.items():
+                  paths = list(evidence.glob(f'server-capture-exit-{mode}-*/held/exit.json'))
+                  if case in expected_skips and not paths:
+                      continue
+                  reader = None if case in expected_skips else reader_fact(paths)
+                  if reader is None:
+                      problems.append(mode)
+                      print(f'READER {mode}: NOT PROVEN', flush=True)
+                      continue
+                  print(f'READER {mode}: started=yes live_before_stop=yes exited=yes '
+                        f'returncode={reader["returncode"]} ledger_remains={str(reader["ledger_remains"]).lower()}',
+                        flush=True)
+              require(not problems, 'Incomplete or conflicting reader start/exit witnesses')
+
+          def main():
+              windows = sys.platform == 'win32'
+              host = 'Windows' if windows else 'Linux'
+              require(sys.platform in ('win32', 'linux') and host == os.environ.get('RUNNER_OS'),
+                      'Expected a hosted Linux or Windows interpreter')
+              head, product = bind_product()
+              require(Path(sys.prefix).resolve() == Path('.venv').resolve(), 'Expected the locked checkout venv')
+              if windows:
+                  require(sys.version_info[:2] == (3, 10), 'Expected the Windows post-merge Python 3.10')
+              else:
+                  require(Path(sys._base_executable).resolve()
+                          == Path(os.environ['OUROBOROS_CI_INTERPRETER']).resolve(), 'Expected the shipped Linux interpreter')
+              require(len(ISSUE_CASES) == 16 and len(set(CASES)) == len(CASES), 'Invalid case allowlist')
+              print(f'QA4326 parent={product} head={head} platform={host} '
+                    f'python={sys.version.split()[0]} sqlite={sqlite3.sqlite_version}', flush=True)
+              # No artifacts are published. Raw test streams, JUnit and fixture evidence stay on this disposable runner.
+              scratch = Path(tempfile.mkdtemp(prefix='q4326-', dir=os.environ['RUNNER_TEMP']))
+              evidence = scratch / 'witness'
+              evidence.mkdir()
+              result_dir = scratch / 'phases'
+              junit = scratch / 'local.xml'
+              env = os.environ.copy()
+              for key in ('OUROBOROS_ALLOW_LIVE_DATA_TESTS', 'PYTEST_ADDOPTS', 'PYTEST_PLUGINS'):
+                  env.pop(key, None)
+              if windows:
+                  env.update(TEMP=os.environ['RUNNER_TEMP'], TMP=os.environ['RUNNER_TEMP'])
+              env['OUROBOROS_TEST_EVIDENCE_ROOT'] = str(evidence)
+              args = [sys.executable, '-B', '-m', 'pytest', '-p', 'no:cacheprovider', '--timeout=180',
+                      f'--basetemp={scratch / "p"}', f'--ci-evidence-dir={result_dir}',
+                      f'--junitxml={junit}', '-o', 'junit_family=xunit1', *CASES]
+              with (scratch / 'local-pytest.log').open('wb') as log:
+                  status = subprocess.run(args, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
+              print(f'PYTEST exit={status}', flush=True)
+              require((result_dir / 'results.json').is_file() and junit.is_file(),
+                      'No terminal phase/JUnit evidence; no case certified')
+              facts = json.loads((result_dir / 'results.json').read_text(encoding='utf-8'))
+              skips = {case for case, mode in READERS.items() if windows and mode in POSIX_MODES}
+              run_id = {key: os.environ['GITHUB_' + key.upper()] for key in ('sha', 'run_id', 'run_attempt')}
+              report_cases(facts, junit_skips(junit), skips, status, run_id)
+              report_exits(evidence, skips)
+              print(f'QA4326_VERIFIED parent={product} issue_passed={len(ISSUE_CASES) - len(skips)} '
+                    f'issue_posix_skipped={len(skips)} controls_passed={len(CONTROLS)} '
+                    f'reader_exits={len(READERS) - len(skips)}', flush=True)
+
+          if __name__ == '__main__':
+              main()
