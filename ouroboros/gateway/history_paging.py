@@ -998,6 +998,11 @@ def _held_rows(page, messages, shown, reads):
             blocked.add(task)
         elif isinstance(position := row.get("history_position"), dict):  # else a carrier projected anew each read
             held.setdefault(task, [[], []])[_SOURCES.index(position["source"])].append(position["offset"])
+    lineage = page.get("lineage")  # the task facts the page anchors parents by (``RoomResolver.lineage``)
+    for task in (set(held) - set(carried) - blocked) if lineage else ():  # a child row may name no lineage (an earlier
+        facts = lineage(task)  # attempt's, a review): its facts do; none (no record, not readable now) is unknown
+        if not facts or facts.get("parent_task_id") or str(facts.get("delegation_role") or "").lower() == "subagent":
+            blocked |= {task, str(facts.get("parent_task_id") or "")}  # anchored by the newest page: neither is held
     for source, (entries, _lower, _gaps) in page["selections"].items():
         for entry in entries:
             if entry.get("type") in QUESTION_EVIDENCE_KINDS and (rows := held.get(str(entry.get("task_id") or ""))):

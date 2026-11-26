@@ -548,3 +548,24 @@ def test_a_repair_that_leaves_its_task_unshown_refuses_instead_of_repeating(tmp_
     cursor["held"]["runner"] = [[notice["history_position"]["offset"]], []]
     status, refused = _read(tmp_path, history_paging.encode_cursor(cursor, packed=True))
     assert (status, refused.get("detail")) == (409, "task_settled"), refused.get("repairs")
+
+
+def test_a_child_whose_row_names_no_lineage_and_its_parent_are_never_held(tmp_path):
+    """An earlier attempt's row of a child carries no lineage (it is injected only for the record's attempt), yet the
+    page still anchors its parent by the child's record: held, it would bring a parent's carrier along as an arrival."""
+    _task(tmp_path, "parent", "completed", 0)
+    _task(tmp_path, "child", "running", 1, task_attempt=2, delegation_role="subagent", parent_task_id="parent",
+          root_task_id="parent")
+    ds.append(tmp_path, "progress", {"ts": TS.format(0), "chat_id": 1, "task_id": "parent", "content": "parent step"})
+    ds.append(tmp_path, "progress", {"ts": TS.format(1), "chat_id": 1, "task_id": "child", "content": "first attempt",
+                                     "task_attempt": 1})
+    _asking(tmp_path, 2)
+    _, page = _read(tmp_path)
+    shown = [row for row in page["messages"] if row.get("task_id") == "child"]
+    assert shown and not any(row.get("parent_task_id") for row in shown)  # the row itself names no parent
+    cursor = _cursor(page["after_cursor"])
+    assert {"parent", "child"} <= set(cursor["tasks"]) and set(cursor["held"]) == {"asker"}
+    _task(tmp_path, "child", "completed", 1, task_attempt=2, delegation_role="subagent", parent_task_id="parent",
+          root_task_id="parent")
+    status, refused = _read(tmp_path, page["after_cursor"])
+    assert (status, refused["detail"]) == (409, "task_settled")

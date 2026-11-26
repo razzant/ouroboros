@@ -1491,6 +1491,7 @@ def _render_history_response(
 
     # Annotate only emitted rows; an absent summary must not strand a card.
     deferred_lineage: set = page.setdefault("stripped", set())  # a child row shown without its lineage
+    page["lineage"] = rooms.lineage  # the facts its parents are anchored by below: no held rows for a child or parent
     evidence_anchors = {}
     if recent or page["after"]:  # current work has no history position: its evidence lands at the page end
         from ouroboros.gateway.state import current_work_in_room
