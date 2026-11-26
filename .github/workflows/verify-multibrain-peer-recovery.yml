@@ -1,0 +1,64 @@
+name: Check recovery of a linked work on Windows
+on:
+  push:
+    branches: ['verify/multibrain-peer-win-49c39d1d5698']
+permissions:
+  contents: read
+jobs:
+  recovery:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Verify the product commit and the test-only delta
+        run: |
+          set -euo pipefail
+          p=49c39d1d56984b8ba7eb6d861f8626161991ebb8
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git show -s --format=%P HEAD)" = "$p"
+          test "$(git diff --name-status "$p" HEAD)" = "$(printf 'A\t.github/workflows/verify-multibrain-peer-recovery.yml')"
+          git checkout --quiet --detach "$p"
+          test "$(git rev-parse 'HEAD^{tree}')" = 335d6a8ba3d15a31d4a887bf5c679d0734c192f8
+          test "$(git show -s --format=%P HEAD)" = 9545e039b1db561d7f0377d453f359ca5078be7b
+          test "$(git diff --name-status HEAD^ HEAD)" = "$(printf 'M\ttests/test_peer_delegate.py')"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: setup-python
+          install-project: 'false'
+          profile: test
+      - name: Check one in-process peer recovery through two deferred writes
+        run: |
+          set -euo pipefail
+          python -I - <<'PY'
+          import os, pathlib, subprocess, sys, tempfile, xml.etree.ElementTree as ET
+          root = pathlib.Path.cwd()
+          assert sys.platform == 'win32' and sys.version_info[:2] == (3, 10)
+          tmp = pathlib.Path(tempfile.mkdtemp(prefix='peer-', dir=os.environ['RUNNER_TEMP']))
+          home, scratch, evidence = (tmp / n for n in ('h', 't', 'e'))
+          for d in (home, scratch, evidence): d.mkdir()
+          env = {k: os.environ[k] for k in ('SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATH', 'PATHEXT', 'PROCESSOR_ARCHITECTURE') if k in os.environ}
+          env.update(HOME=str(home), USERPROFILE=str(home), TEMP=str(tmp), TMP=str(tmp), PYTHONUTF8='1')
+          for k in ('APPDATA','LOCALAPPDATA'):
+              d = home / k; d.mkdir(); env[k] = str(d)
+          probe = 'import pathlib,sys; from ouroboros import store; p=pathlib.Path(sys.argv[1]); p.touch(); print(store._journal_mode(p,store.TIER_ENFORCED))'
+          mode = subprocess.check_output([sys.executable,'-c',probe,str(tmp / 'probe.sqlite')], env=env, text=True).strip()
+          assert mode == 'PERSIST', 'expected the Windows post-merge journal mode'
+          case = 'test_recovered_peer_run_observed_through_body_wait_hold_and_recovery_then_settles'
+          xml = tmp / 'result.xml'
+          with (tmp/'console.log').open('wb') as log:
+              rc = subprocess.run([sys.executable, '-I','-S','scripts/safe_test.py','--temp-parent',str(scratch),'--evidence-dir',str(evidence),'--timeout','150','--',sys.executable,'-m','pytest','-o','addopts=','-q','--junitxml',str(xml),'tests/test_peer_delegate.py::'+case], cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
+          cases = ET.parse(xml).findall('.//testcase') if xml.is_file() else []
+          outcomes = [(c.get('name'), next((s.tag for s in c if s.tag in ('failure','error','skipped')), 'passed')) for c in cases]
+          print('Windows/PERSIST, pytest exit', rc, 'case outcomes', outcomes)
+          assert rc == 0 and outcomes == [(case,'passed')]
+          print('ONE_WINDOWS_PEER_RECOVERY_PASSED')
+          PY
+          test -z "$(git status --porcelain --untracked-files=no)"
