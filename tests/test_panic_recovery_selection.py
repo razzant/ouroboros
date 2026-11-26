@@ -4,7 +4,6 @@ No supervisor lifespan, worker dispatch, process discovery or stop/kill call.
 """
 import copy
 import os
-import threading
 
 import pytest
 
@@ -12,7 +11,7 @@ from ouroboros.control_actor import mind_control, owner_door
 from ouroboros.task_results import write_task_result
 from ouroboros.work_stop import panic_hold_id
 from supervisor import events_budget as eb
-from tests._queue_state import gateway as _gateway, read_state
+from tests._queue_state import gateway as _gateway, make_queue_ready, read_state
 
 gateway = _gateway
 
@@ -41,15 +40,7 @@ def _resume(world, row, token=None, **extra):
 @pytest.fixture
 def recovered_gateway(gateway, monkeypatch):
     """The fixture's own queue is published after the task-readiness latch, without booting anything."""
-    from supervisor import queue
-
-    ready = threading.Event()
-    ready.set()
-    gateway.client.app.state.supervisor_ready_event = ready
-    monkeypatch.setattr(queue, "INITIALIZED", True)
-    monkeypatch.setattr(queue, "OWNER_PID", os.getpid())
-    monkeypatch.setattr(queue, "QUEUE_SNAPSHOT_PATH", gateway.root / "state" / "queue_snapshot.json")
-    return gateway
+    return make_queue_ready(gateway, monkeypatch)
 
 
 def test_owner_census_reads_other_rooms_and_members_before_filtering(recovered_gateway):
