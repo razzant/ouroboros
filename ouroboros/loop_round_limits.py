@@ -1554,7 +1554,7 @@ def pre_admission_size_refusal(
 
 def book_yield_due(ctx: Any) -> bool:
     """Whether an unread start carrying a required handbook still takes map yields (``_shorten_book_map``):
-    integrating starts take optional maps then Body Map/DEVELOPMENT; helpers take none in Max/Low and only optional maps in Nano."""
+    integrating starts take optional maps then Body Map; helpers take none in Max/Low and only optional maps in Nano."""
     from ouroboros import memory_floor
     from ouroboros.context_fit import _integrating
 
@@ -1579,12 +1579,12 @@ def _shorten_book_map(ctx: Any) -> bool:
     (``memory_floor.step_book_map``: optional maps, then in an integrating Low start its own map then ARCHITECTURE's;
     owner 23.11.2026, 1), one per refusal, so the sender prices each candidate before another refusal asks more.
     Memory, mode, schemas and reserves stay as chosen; a view a reply read keeps its forms."""
-    from ouroboros import memory_floor
+    from ouroboros import context_fit, memory_floor
 
     if not book_yield_due(ctx):  # A helper's Low view never reaches the map step.
         return False
     mode = str(getattr(ctx, "active_context_mode", "") or "")
-    if (stepped := memory_floor.step_book_map(ctx.context_fit_plan, mode)) is None:
+    if (stepped := memory_floor.step_book_map(ctx.context_fit_plan, mode, maps=context_fit._integrating(ctx.context_fit_plan.core, (ctx.context_fit_plan.projection(mode).memory_facts or {}).get("role")))) is None:
         return False
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = stepped
     ctx.messages[:] = stepped.reproject_transcript(ctx.messages, mode)

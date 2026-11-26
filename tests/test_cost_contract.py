@@ -494,6 +494,7 @@ def _build_work(measured: Dict[Any, Any], tag: str) -> Dict[int, Dict[str, int]]
         assert view["mode_switch"] in ({"from": "max", "to": "low"}, {"from": "max", "to": "nano"}), (
             f"{tag} k={k}: the build laws are about a live step-down from Max; this turn ran {view['mode']} "
             f"(window {view['window_tokens']}, switch {view['mode_switch']})")
+    assert len({v["mode_switch"]["to"] for v in views.values()}) == 1, views
     return {k: view["work"] for k, view in views.items()}
 
 

@@ -631,9 +631,10 @@ def telling_level(snapshot):
 
 
 def emergency_item_count(snapshot, level) -> int:
-    """Count addressed elements in ``level`` that fell past ``TELLING_STAGES`` (0 when authored tellings stay whole)."""
-    return sum(1 for step, idents in level.addressed for ident in idents
-               if stage_of(snapshot, step, ident) not in TELLING_STAGES)
+    """Count distinct per-source elements in ``level`` past ``TELLING_STAGES`` (excluding aggregate count flags)."""
+    return len({ident.removeprefix("bare:") for step, idents in level.addressed
+                if not step.endswith("a") for ident in idents
+                if stage_of(snapshot, step, ident) not in TELLING_STAGES})
 
 
 def owner_rows(snapshot: mv.MemoryViewSnapshot) -> Dict[str, Mapping[str, Any]]:

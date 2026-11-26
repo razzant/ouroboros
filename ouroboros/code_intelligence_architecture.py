@@ -91,18 +91,36 @@ def _read_carrier(repo_root: pathlib.Path, relpath: str) -> str:
         ) from exc
 
 
-def load_domain_manifest(repo_root: pathlib.Path) -> DomainManifest:
+def load_domain_manifest(
+    repo_root: pathlib.Path,
+    *,
+    read_bytes: Callable[[str], bytes] | None = None,
+) -> DomainManifest:
     try:  # Python 3.11+
         import tomllib
     except ImportError:  # pragma: no cover - 3.10 venvs ship tomli
         import tomli as tomllib
 
-    raw = _read_carrier(repo_root, DOMAIN_MANIFEST_RELPATH)
+    if read_bytes is not None:
+        try:
+            raw = read_bytes(DOMAIN_MANIFEST_RELPATH).decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ValueError(f"architecture carrier {DOMAIN_MANIFEST_RELPATH} is unreadable ({exc})") from exc
+    else:
+        raw = _read_carrier(repo_root, DOMAIN_MANIFEST_RELPATH)
     try:
         data = tomllib.loads(raw)
     except Exception as exc:
         raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} does not parse as TOML: {exc}") from exc
+    for section in ("domains", "modules", "references", "graph"):
+        val = data.get(section)
+        if val is not None and not isinstance(val, dict):
+            raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} section {section!r} must be a TOML table")
     graph = data.get("graph") or {}
+    for key in ("allowed", "lazy_only"):
+        val = graph.get(key)
+        if val is not None and not isinstance(val, list):
+            raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} graph.{key} must be a list")
     for path in data.get("modules") or {}:
         pure = pathlib.PurePosixPath(path)
         if pure.is_absolute() or ".." in pure.parts or "\\" in path:
@@ -743,7 +761,7 @@ def module_map_rows(
     """Live module map projected from ``domains.toml``, Python docstrings, and ``web/`` headers."""
     root = pathlib.Path(repo_root)
     resolved_root = root.resolve(strict=False)
-    manifest = load_domain_manifest(root)
+    manifest = load_domain_manifest(root, read_bytes=read_bytes)
     arg = str(target or "").strip().replace("\\", "/")
     if not arg:
         raise ValueError("module_map requires 'domains', a domain id (e.g. D06), or a path prefix (e.g. web/modules/)")

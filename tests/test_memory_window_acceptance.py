@@ -240,7 +240,8 @@ def _tipping_window(held):
 def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop, sent, tmp_path, monkeypatch,
                                                                        replies, window_of, start):
     """Audit item 23(a): a start succeeds when it holds the selected mode or records the reason the person then
-    reads. Under the unified resident Body Map, Max holds crowded memory by folding memory without losing the Body Map,
+    reads. Under the unified resident Body Map, Max holds crowded memory until authored tellings would drop past
+    their floor (then Nano standing schemas preserve tellings with full reply reserve and work room, cause ``memory``),
     while tool schemas that alone tip a start lower to Nano (standing schemas) and record cause ``request``."""
     from ouroboros.context import _capture_context_core
 
@@ -268,12 +269,21 @@ def test_owner_max_or_its_recorded_reason_reaches_what_the_person_sees(main_loop
     assert "## Body" in text  # unified resident Body Map present across Max and Nano
     tokens = cf.estimate_context_prompt_tokens(first["messages"], first["tools"], provider="openai")
     room = held.projection("max").memory_facts["max_room"]["levels"] * -(-window // 8)
+    # The prepared plan and wire tool schemas strictly hold full reply reserve + full work room in every mode
+    # (Max and Nano); the live wire send adds only `loop.py`'s runtime `[Context facts]` tail in `messages[1:]`.
+    plan_msgs = plan.messages_for(start[0])
+    assert plan.projection(start[0]).calibrated_tokens + plan.output_reserve_tokens + room <= window
+    assert cf.estimate_context_prompt_tokens(plan_msgs, first["tools"], provider="openai") + plan.output_reserve_tokens + room <= window
+    assert tokens + plan.output_reserve_tokens <= window
+    runtime_tail = max(
+        0,
+        cf.estimate_context_prompt_tokens(first["messages"][1:], [], provider="openai")
+        - cf.estimate_context_prompt_tokens(plan_msgs[1:], [], provider="openai"),
+    )
+    assert tokens - runtime_tail + plan.output_reserve_tokens + room <= window
     if start[0] == "max":
-        assert tokens + plan.output_reserve_tokens + room <= window
         fact = plan.projection("max").memory_facts["max_room"]
         assert fact["need"] - fact["reserve"] - fact["work"] <= tokens + -(-window // 100)
-    else:
-        assert tokens + plan.output_reserve_tokens <= window
     events = [f.events.get_nowait() for _ in range(f.events.qsize())]
     sends = [event["context_attempt"] for event in events if "context_attempt" in event]  # the census the capsule reads
     assert sends and {(send["preferred_at_send"], send["applied"], send["books"], send["cause"]) for send in sends} == {

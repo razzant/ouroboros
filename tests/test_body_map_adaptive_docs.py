@@ -730,24 +730,29 @@ def test_r2_nano_continuation_preserves_compact_body_map_and_telling_vs_schemas(
             tool_schemas=all_tools,
         )
 
-    # 1. Full rescue: Max fits only by dropping tellings; Nano fits with all 26/26 tellings intact.
-    full_win = max_fixed + MAIN_LOOP_MAX_TOKENS + 4_000
+    # 1. Full rescue: Max fits only by dropping tellings; Nano fits with all 26/26 tellings + full reserve + work room.
+    telling_toks = memory_floor.tokens_of(memory_floor.mv.story_chars(snap, memory_floor.telling_level(snap)))
+    full_win = int((nano_fixed + telling_toks + MAIN_LOOP_MAX_TOKENS + 1_500) / 0.875) + 500
     full_plan = _fit_at(full_win)
     assert spy_calls and spy_calls[-1] == 1
     assert full_plan.initial_mode == "nano"
     full_level = memory_floor.kept_level(snap, full_plan.projection("nano").memory_facts)
     assert memory_floor.emergency_item_count(snap, full_level) == 0
+    # Aggregate-only count flag (F5a) alone must not alter distinct per-source emergency count.
+    f5_pairs = tuple(("F5", r["id"]) for r in snap.story if r.get("kind") == "page")
+    tbl = memory_floor._elements(snap)
+    assert memory_floor.emergency_item_count(snap, tbl.level(f5_pairs)) == memory_floor.emergency_item_count(
+        snap, tbl.level((*f5_pairs, ("F5a", "story")))
+    )
     nano_sys = full_plan.projection("nano").system_content_json
     assert "would drop authored tellings here" in nano_sys
     assert full_plan.projection("nano").memory_facts["max_room"].get("telling_preserved") is True
     owner_line = context_view_facts.low_start_line(full_plan, "nano", "r2-6-full")
     assert "authored tellings" in owner_line and "shortest forms" not in owner_line
 
-    # 2. Partial rescue: even Nano must fold some leads, yet preserves strictly more leads than Max.
-    telling_toks = memory_floor.tokens_of(memory_floor.mv.story_chars(snap, memory_floor.telling_level(snap)))
-    # Use a tighter output cap (8,192) to put Nano in the middle band where 0 < nano_emerg < max_emerg.
+    # 2. Partial rescue: even Nano must fold some leads, yet preserves strictly more leads than Max within full reserve + work room.
     monkeypatch.setattr(context_fit, "main_output_reserve_tokens", lambda **_kw: 8_192)
-    partial_win = nano_fixed + 8_192 + int(telling_toks * 0.72)
+    partial_win = int((nano_fixed + 8_192 + int(telling_toks * 0.72)) / 0.875) + 500
     partial_plan = _fit_at(partial_win)
     assert partial_plan.initial_mode == "nano"
     partial_level = memory_floor.kept_level(snap, partial_plan.projection("nano").memory_facts)
@@ -756,7 +761,7 @@ def test_r2_nano_continuation_preserves_compact_body_map_and_telling_vs_schemas(
 
     # 3. Ample window: Max holds all tellings; rescue stays quiet.
     before_calls = len(spy_calls)
-    ample_plan = _fit_at(max_fixed + 8_192 + telling_toks + 40_000)
+    ample_plan = _fit_at(int((max_fixed + 8_192 + telling_toks + 40_000) / 0.875))
     assert ample_plan.initial_mode == "max" and len(spy_calls) == before_calls
 
 
@@ -786,42 +791,61 @@ def test_r2_corrupt_domains_manifest_preflight_and_staged_module_line_count(tmp_
     _git(repo, "add", "ouroboros/domains.toml")
     res2 = review_tools._preflight_check("add mod", "A  ouroboros/new_mod.py\nM  docs/ARCHITECTURE.md", str(repo))
     assert res2 is not None and "could not be parsed" in res2
+    # Malformed candidate domains.toml in governance_context surfaces cleanly (no AttributeError).
+    pkt_malformed = governance_context(
+        REPO, surface="commit", touched_paths=["ouroboros/review.py"],
+        usable_window_tokens=200_000, delivery=PACKET_DELIVERY, layer=BODY_LAYER,
+        module_map_root=repo, module_map_source="worktree",
+    )
+    assert any(r["path"] == "ouroboros/domains.toml#affected_domains" and "unavailable" in r["reason"] for r in pkt_malformed.manifest)
 
-    # Staged diff_pulse ignores unstaged worktree edits to code, domains.toml, and 10-key-invariants.md.
+    # Staged diff_pulse ignores unstaged worktree edits to code, domains.toml, ARCHITECTURE.md, untracked docs, and §10.
     repo2 = tmp_path / "staged_lines"
     (repo2 / "ouroboros").mkdir(parents=True)
     (repo2 / "docs/architecture").mkdir(parents=True)
+    (repo2 / "web/modules").mkdir(parents=True)
     (repo2 / "ouroboros/tiny.py").write_text('"""Staged purpose."""\nX = 1\n', encoding="utf-8", newline="\n")
+    (repo2 / "web/modules/plain.js").write_text('import x from "./y.js";\nexport const z = 1;\n', encoding="utf-8", newline="\n")
     (repo2 / "ouroboros/domains.toml").write_text(
         '[domains]\nD01 = "Alpha"\nD02 = "Beta"\n[modules]\n"ouroboros/tiny.py" = "D01"\n'
         '[references]\nD01 = ["docs/architecture/01-alpha.md"]\nD02 = ["docs/architecture/02-beta.md"]\n',
         encoding="utf-8",
     )
+    (repo2 / "docs/ARCHITECTURE.md").write_text("# Map\n\n## Chapters\n\n- [1. Alpha](architecture/01-alpha.md)\n", encoding="utf-8")
+    (repo2 / "docs/architecture/01-alpha.md").write_text("# 1. Alpha\n\nAlpha chapter.\n", encoding="utf-8")
     (repo2 / "docs/architecture/10-key-invariants.md").write_text("# 10\n\n1. `tiny.py` invariant.\n", encoding="utf-8")
     _git(repo2, "init", "-q")
     _git(repo2, "add", "-A")
     _git(repo2, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
     (repo2 / "ouroboros/tiny.py").write_text('"""Staged purpose."""\nX = 1\nY = 2\n', encoding="utf-8", newline="\n")
-    _git(repo2, "add", "ouroboros/tiny.py")
+    (repo2 / "web/modules/plain.js").write_text('import x from "./y.js";\nexport const z = 2;\n', encoding="utf-8", newline="\n")
+    _git(repo2, "add", "ouroboros/tiny.py", "web/modules/plain.js")
     (repo2 / "ouroboros/tiny.py").write_text('"""Unstaged dirty purpose."""\n' + "Z = 1\n" * 15, encoding="utf-8", newline="\n")
     (repo2 / "ouroboros/domains.toml").write_text(
-        '[domains]\nD01 = "Alpha"\nD02 = "Beta"\n[modules]\n"ouroboros/tiny.py" = "D02"\n'
+        '[domains]\nD01 = "Alpha"\nD02 = "Beta"\n[modules]\n"ouroboros/tiny.py" = "D02"\n"ouroboros/leak.py" = "D01"\n'
         '[references]\nD01 = ["docs/architecture/01-alpha.md"]\nD02 = ["docs/architecture/02-beta.md"]\n',
         encoding="utf-8",
     )
+    (repo2 / "docs/ARCHITECTURE.md").write_text(
+        "# Map\n\n## Chapters\n\n- [1. Alpha](architecture/01-alpha.md)\n- [99. Dirty](architecture/99-dirty.md)\n",
+        encoding="utf-8",
+    )
+    (repo2 / "docs/architecture/99-dirty.md").write_text("# 99. Dirty\n\nMentions `ouroboros/tiny.py`.\n", encoding="utf-8")
     (repo2 / "docs/architecture/10-key-invariants.md").write_text("# 10\n\n87. `tiny.py` dirty invariant.\n", encoding="utf-8")
     pulse = diff_pulse(repo2, ["ouroboros/tiny.py"], staged=True)
     assert "ouroboros/tiny.py 3 (+1/-0)" in pulse
-    assert "01-alpha.md" in pulse and "02-beta.md" not in pulse
+    assert "01-alpha.md" in pulse and "02-beta.md" not in pulse and "99-dirty.md" not in pulse
     assert "§10#1" in pulse and "§10#87" not in pulse
-    # Packet module_map with module_map_source="index" reads staged docstring, not dirty worktree.
+    # Packet module_map with module_map_source="index" reads staged membership, manuals, docstrings, and headerless web/.
     pkt_idx = governance_context(
-        REPO, surface="commit", touched_paths=["ouroboros/tiny.py"],
+        REPO, surface="commit", touched_paths=["ouroboros/tiny.py", "web/modules/plain.js"],
         usable_window_tokens=200_000, delivery=PACKET_DELIVERY, layer=BODY_LAYER,
         module_map_root=repo2, module_map_source="index",
     )
     dom_idx = next(t for title, t in pkt_idx.inline_sections if "Affected domain module map" in title)
-    assert "Staged purpose." in dom_idx and "Unstaged dirty purpose." not in dom_idx
+    assert "D01 — Alpha (1 modules) | manuals: docs/architecture/01-alpha.md" in dom_idx
+    assert "Staged purpose." in dom_idx and "Unstaged dirty purpose." not in dom_idx and "ouroboros/leak.py" not in dom_idx
+    assert "web/modules/plain.js" in dom_idx
 
     # R3 Astra R2-3 (web/-only packet leads) and R2-5 (non-UTF-8 10-key-invariants.md unavailable row).
     pkt_web = governance_context(

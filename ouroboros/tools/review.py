@@ -733,7 +733,7 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         ctx, touched_paths, checklist_section, api_models, api_slots,
         governance_root=governance_root, layer=layer, subject_root=subject_root, review_words=words,
         module_map_root=pathlib.Path(target_repo),
-        module_map_source="index" if (subject is None or getattr(subject, "is_system_index", False)) else "worktree")
+        module_map_source="index" if (frozen is None or (getattr(frozen, "is_system_index", False) and not getattr(frozen, "checkout", ""))) else "worktree")
 
     # Build touched-file pack for full current context (managed: the reviewed
     # resolution set; binary rows carry the M0 baseline identity). A plain

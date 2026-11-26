@@ -636,16 +636,19 @@ def _affected_domain_module_map(
                 f"(+{len(omitted_neighbor_doms)} more touched domain(s) omitted: {', '.join(omitted_neighbor_doms)})"
             )
         touched_web = sorted(p for p in touched if p.startswith("web/") and p.endswith((".js", ".mjs", ".ts")))
-        if touched_web:
-            web_rows = []
-            for rel in touched_web:
-                lead = _module_lead(map_root, rel, read_bytes=read_bytes)
-                if lead or (read_bytes is None and (map_root / rel).is_file()):
-                    web_rows.append(f"{rel} — {lead}" if lead else rel)
-            if web_rows:
-                dom_lines.append(f"web/ ({len(web_rows)} touched JS/TS module(s))")
-                dom_lines.extend(web_rows)
-                shown_domains.append("web/")
+        web_rows: list[str] = []
+        for rel in touched_web:
+            lead = _module_lead(map_root, rel, read_bytes=read_bytes)
+            if lead or (read_bytes is None and (map_root / rel).is_file()):
+                web_rows.append(f"{rel} — {lead}" if lead else rel)
+            elif read_bytes is not None:
+                try:
+                    read_bytes(rel); web_rows.append(rel)
+                except OSError:
+                    pass
+        if web_rows:
+            dom_lines.extend((f"web/ ({len(web_rows)} touched JS/TS module(s))", *web_rows))
+            shown_domains.append("web/")
     except work_domain.WorkDomainUnsettled:
         raise
     except (OSError, ValueError) as exc:

@@ -447,10 +447,11 @@ def body_ownership_pulse(
     dirty_wt: set[str] = set()
     if staged:
         wt_raw = _git_bytes(root, "--no-optional-locks", "diff", "--name-only", "-z")
-        if wt_raw is None:
+        untracked_raw = _git_bytes(root, "--no-optional-locks", "ls-files", "--others", "--exclude-standard", "-z", "--", "docs/architecture", "docs/development")
+        if wt_raw is None or untracked_raw is None:
             dirty_wt.add("*")
         else:
-            dirty_wt = {p.replace("\\", "/").removeprefix("./") for p in wt_raw.decode("utf-8", "replace").split("\0") if p}
+            dirty_wt = {p.replace("\\", "/").removeprefix("./") for raw in (wt_raw, untracked_raw) for p in raw.decode("utf-8", "replace").split("\0") if p}
     index_needed = changed_set | dirty_wt
 
     def _fast_staged_reader(rel: str) -> bytes:
@@ -460,7 +461,7 @@ def body_ownership_pulse(
         return (root / norm_rel).read_bytes()
 
     reader = _fast_staged_reader if (staged and ("*" in index_needed or any(
-        p == "ouroboros/domains.toml" or p.startswith(("docs/architecture/", "docs/development/"))
+        p in {"ouroboros/domains.toml", "docs/ARCHITECTURE.md", "docs/DEVELOPMENT.md"} or p.startswith(("docs/architecture/", "docs/development/"))
         for p in index_needed
     ))) else None
     refs = resolve_body_references(root, code_paths, read_bytes=reader, include_mentions=True)

@@ -906,19 +906,19 @@ def _numberless_smaller_mode(shown_mode, cands, measure, tools_for, sections, pr
         c, tools_for(c), section_views(sections[c], previous), story_before, room_before) < base), None)
 
 
-def _try_nano_telling(floor, snapshot, frame, view, measure, sections, get_receipts, fixed, window, reserve, ratio, owed, kept, held, start_saving, max_emergency):
-    """BIBLE P1: prefer Nano standing schemas when they keep strictly more authored tellings than Max."""
-    n_sent, n_fixed, n_res, n_win, n_bnd, n_allow = frame("nano")
-    if not (n_fixed < fixed and n_win - n_res >= window - reserve):
+def _try_nano_telling(floor, snapshot, frame, view, measure, sections, get_receipts, fixed, window, reserve, work_room, ratio, owed, kept, held, start_saving, max_emergency):
+    """BIBLE P1: prefer Nano standing schemas when they keep strictly more authored tellings within Max's reserve and work room."""
+    n_sent, n_fixed, _n_res, n_win, n_bnd, n_allow = frame("nano")
+    if not (n_fixed < fixed and n_win >= window):
         return None
     n_forms = section_views(sections["nano"], get_receipts())
-    n_shown = view("nano", n_sent, n_forms, n_win, n_bnd, saving=owed(n_fixed, n_win, n_res), fixed=n_fixed,
-                   kept=None if kept is None else held, start_saving=start_saving, telling_preserved=True)
+    n_shown = view("nano", n_sent, n_forms, n_win, n_bnd, saving=owed(n_fixed, n_win, reserve), fixed=n_fixed,
+                   kept=None if kept is None else held, start_saving=start_saving, telling_preserved=True, working_reserve_tokens=reserve)
     if (n_shown is floor.NO_VIEW or n_shown.level is None
             or floor.emergency_item_count(snapshot, n_shown.level) >= max_emergency
-            or math.ceil(measure("nano", n_sent, n_forms, n_shown.story_chars, n_shown.room_chars) * ratio) + n_res > n_win):
+            or math.ceil(measure("nano", n_sent, n_forms, n_shown.story_chars, n_shown.room_chars) * ratio) + reserve + work_room > n_win):
         return None
-    return "nano", n_sent, n_fixed, n_res, n_win, n_bnd, n_allow, n_shown
+    return "nano", n_sent, n_fixed, reserve, n_win, n_bnd, n_allow, n_shown
 
 
 def _mode_host_receipts(rows: Iterable[Mapping[str, Any]], low_maps: Iterable[Mapping[str, Any]]) -> list:
@@ -1021,14 +1021,14 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         return running_limit + credit(window, reserve) if running else None
 
     def view(selected, sent, addressed, window, boundary, fixed=None, **walk):  # one frame's memory beside host forms
-        fixed = measure(selected, sent, addressed) if fixed is None else fixed
+        fixed, work_res = (measure(selected, sent, addressed) if fixed is None else fixed), walk.pop("working_reserve_tokens", working_reserve_tokens)
         mr = floor.with_max_room({}, room_fact, selected).get("max_room")
         if walk.pop("telling_preserved", False):
             mr = {**(mr or {}), "telling_preserved": True}
         return floor.render_view_for_mode(snapshot, mode=selected, owner_mode=preferred, window_tokens=window, **walk,
             known_window=known_window, output_reserve=output_reserve, ratio=ratio, non_memory_tokens=fixed,
             lowered_from=preferred if selected != preferred else None, start_work=start_work, max_room=mr,
-            tool_names=None if tool_schemas is None else sent.chosen, working_reserve_tokens=working_reserve_tokens,
+            tool_names=None if tool_schemas is None else sent.chosen, working_reserve_tokens=work_res,
             stated_window_tokens=stated.get(selected),  # the note names the window as stated, never the admitted frame
             boundary_tokens=boundary, measure_text=lambda *memory: measure(selected, sent, addressed, *memory) - fixed,
             report_nano_miss=held_heads)
@@ -1182,7 +1182,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             and (max_emerg := floor.emergency_item_count(snapshot, shown.level)) > 0):
         saved_receipts = list(receipts)
         rescued = _try_nano_telling(floor, snapshot, lambda m: timed(f"fit.frame_{m}", frame, m), view, measure,
-                                    sections, lambda: receipts, fixed, window, reserve, ratio, owed, kept, held, start_saving, max_emerg)
+                                    sections, lambda: receipts, fixed, window, reserve, work(), ratio, owed, kept, held, start_saving, max_emerg)
         if rescued is not None:
             mode, sent, fixed, reserve, window, boundary, allowances, shown = rescued
             room_fact = {**room_fact, "telling_preserved": True} if room_fact else room_fact
