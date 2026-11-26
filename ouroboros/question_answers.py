@@ -10,7 +10,8 @@ repeated only at its own reader, letter id and store; once that reader ended,
 only a read settles it. Within the serving process, one short-scoped
 per-question in-flight owner guards ordinary delivery so concurrent callers do
 not double-stage or double-deliver; across restarts the canonical disk record
-remains authoritative.
+remains authoritative. An owner's closure of such a card is pinned by its winning close to the asker's one admitted
+immediate Continue reading then (``closure_route``): that task and store only, never a second address.
 """
 from __future__ import annotations
 
@@ -66,6 +67,19 @@ def reading_recipient(root, asker: str, live_reader) -> tuple[str, dict | None]:
             return current, task
         current = admitted_successor(root, current)
     return "", None
+
+
+def closure_route(root, asker: str, live_reader) -> dict:
+    """What an owner's winning close pins as the reader of its closure letter: the asker's ONE admitted immediate
+    Continue (never the asker, never a later one: ``reading_recipient`` walks on, a closure does not) when
+    ``live_reader`` finds it reading now, and the mail store it reads from; ``{}`` for anything else."""
+    from supervisor import queue as q
+
+    successor = admitted_successor(root, asker)
+    task, _reason = live_reader(successor) if successor else (None, "")
+    if task is None:
+        return {}
+    return {"recipient_task_id": successor, "recipient_drive": str(q._task_drive_for_task(task, successor))}
 
 
 def _update_delivery(root, asker, quiz_id, changes):
