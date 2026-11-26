@@ -659,6 +659,43 @@ def test_resume_decision_counts_explicit_root_once_even_past_discovery_horizon(d
                          "available_now_usd": pytest.approx(10.0), "source": "allowance", "window_limit_usd": 15.0}
 
 
+def test_resume_decision_honors_a_lawful_cap_raise(data_root, monkeypatch):
+    """The pause's saved root cap is the cap as it stood at pause time, not an independent limit:
+    after a lawful raise the wake's resume room follows the raised cap instead of freezing at the
+    saved number. An unreadable live cap still falls back to the pause's own saved fence."""
+    from ouroboros.consciousness_wake import wake_task_metadata
+    from ouroboros.task_results import write_task_result
+    from ouroboros.usage_admission import set_work_cap
+
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "20")
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+    meta = wake_task_metadata("act", "test", root_cost_ceiling_usd=7.0, root_cost_ceiling_source="allowance")
+    own_group = {"billing_group_id": "wake-raise", "billing_group_limit_usd": 10.0,
+                 "billing_group_limit_source": "initial_task_admission",
+                 "billing_group_limit_revision": "2026-01-01"}
+    write_task_result(data_root, "wake-raise", "running", root_task_id="wake-raise",
+                     metadata=meta, billing_group=own_group)
+    # Spend under the work's own published group, so the ledger carries the same binding the
+    # task record pins — the raise amends a binding the money reads agree on.
+    with ua.usage_scope(ua.UsageScope(drive_root=data_root, task_id="wake-raise", root_task_id="wake-raise",
+                                      source="test", **own_group)):
+        _wake(data_root, monkeypatch, T0 - HOUR, 10.0, task_id="wake-raise")  # the $10 cap is used up
+    task = {"id": "wake-raise", "root_task_id": "wake-raise", "metadata": meta}
+    pause = {"cost_ceiling": {"state": "active", "ceiling_usd": 7.0, "root_cap_usd": 10.0,
+                              "basis": "producer_allowance"}}
+    # The daily window still has $10 of $20; the exhausted cap is the work's own amendable cap.
+    assert allowance.allowance_resume_decision(data_root, task, pause, now=T0) == {
+        "error": "root_hard_cap_exhausted"}
+    raised = set_work_cap(data_root, task, "wake-raise", limit_usd=15.0,
+                          by={"actor": "ouroboros", "task_id": "main-a", "text": "let it finish"},
+                          basis={"kind": "owner_words", "source": {"ts": "2026-01-01T00:00:00Z"}})
+    assert raised["ok"], raised
+    decided = allowance.allowance_resume_decision(data_root, task, pause, now=T0)
+    assert decided == {"additional_usd": pytest.approx(5.0), "ceiling_usd": pytest.approx(15.0),
+                       "available_now_usd": pytest.approx(5.0), "source": "per_task_cap",
+                       "window_limit_usd": 20.0}
+
+
 def test_resume_decision_uses_billing_group_basis_coherently(data_root, monkeypatch):
     """When a wake shares a billing group, spent, hard room and cumulative ceiling share the
     billing-group basis that loop_budget enforces."""

@@ -319,7 +319,7 @@ def validate_row_fields(row: Dict[str, Any], sequence: int) -> None:
     _validate_candidate_facts(row, sequence)
     for numeric_field in (
         "cost_usd", "reservation_upper_bound_usd", "reservation_usd",
-        "max_budget_usd", "global_limit_usd", "root_limit_usd", "billing_group_limit_usd",
+        "max_budget_usd", "global_limit_usd", "root_limit_usd", "billing_group_limit_usd", "request_root_limit_usd",
     ):
         # Nonfinite money is not a torn row. Its distinct error is never
         # quarantined and never stored.

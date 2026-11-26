@@ -847,6 +847,16 @@ def test_an_unreadable_pause_leaves_the_cause_unknown(monkeypatch, tmp_path):
     assert view.held_wake_cause(tmp_path, "wake-x") == {"cause": "", "ceiling_usd": None}
 
 
+@pytest.mark.parametrize("error,room", [
+    ("independent_cap_exhausted", 0.0), ("work_cap_export_unverified", 0.0),
+    ("consciousness_allowance_unknown", None),
+])
+def test_resume_room_distinguishes_exhausted_hard_caps_from_unreadable_money(tmp_path, monkeypatch, error, room):
+    monkeypatch.setattr("ouroboros.consciousness_allowance.allowance_resume_decision",
+                        lambda *_a, **_k: {"error": error})
+    assert view._resume_room(tmp_path, "wake-x", {}, {}) == {"resume_additional_usd": room}
+
+
 @pytest.mark.parametrize("fence,cause", [
     ({"state": "requested"}, "owner"),
     ({"state": "paused"}, "owner"),

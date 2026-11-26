@@ -804,11 +804,9 @@ def _billing_group(q: Any, predecessor: str, result: Dict[str, Any]) -> Dict[str
 def _group_money_spent(q: Any, billing: Dict[str, Any]) -> bool:
     """Whether the whole work's known spend reached its cap. An author's stop is ended by no money rail, so its row
     cannot say; the offer stays a row read, and an unreadable ledger raises into the caller's billing refusal."""
-    from ouroboros.usage_accounting import usage_projection
+    from ouroboros.usage_admission import group_money_spent
 
-    limit = billing.get("billing_group_limit_usd")
-    return limit is not None and usage_projection(
-        q.DRIVE_ROOT, billing_group_id=billing["billing_group_id"])["settled_usd"] >= float(limit)
+    return group_money_spent(q.DRIVE_ROOT, billing)
 
 
 def _prepare_project_room(q: Any, predecessor: str, task: Dict[str, Any]) -> Dict[str, Any]:

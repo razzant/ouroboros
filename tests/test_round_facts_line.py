@@ -114,6 +114,30 @@ def test_the_round_notices_and_the_facts_line_share_one_money_observation(tmp_pa
     assert "{" not in line  # no resource JSON on the every-round carrier
 
 
+def test_a_raised_work_cap_decides_the_tree_crossing_not_the_start_cached_one(tmp_path, monkeypatch):
+    """#4267 area C: after set_task_cost_cap raised a $10 work to $15, the round's cost
+    note must measure against the observation's $15 — the start-cached $10 would cry
+    10%-remaining at $9 while the fence still admits against $15."""
+    monkeypatch.setattr(task_pacing, "shared_wallet_observation",
+                        lambda: {"status": "known", "remaining_usd": 90.0, "limit_usd": 100.0,
+                                 "observed_at": "2026-11-25T18:00:00Z"})
+    monkeypatch.setattr(loop, "_loop_tree_accounting",
+                        lambda **_kw: {"settled_usd": 9.0, "accounted_usd": 9.0,
+                                       "root_limit_usd": 15.0, "age_sec": 0.0})
+    checkpoints: list = []
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda _q, _id, _logs, payload: checkpoints.append(payload))
+    ceiling = task_pacing.CostCeiling(state="disabled", root_cap_usd=10.0, basis="no_default_cost_stop")
+    context = _facts_ctx(tmp_path, monkeypatch, _cost_ceiling=ceiling, task_contract={})
+    context.accumulated_usage["cost"] = 9.0
+    assert _inject_round_checkpoints(
+        round_idx=1, messages=context.messages, accumulated_usage=context.accumulated_usage,
+        tools=context.tools, event_queue=None, task_id="task", drive_logs=None,
+        budget_remaining_usd=90.0, cost_ceiling=ceiling) is True
+    assert [row.get("budget_axis") for row in checkpoints] == ["hard_tree_cap"]
+    note = context.messages[-1]["content"]
+    assert "of ~$15.00 hard tree cap" in note and "~$6.00" in note  # 40% remaining, not 10%
+
+
 def test_wallet_status_unknown_and_unlimited_are_named(tmp_path, monkeypatch):
     for observed, expected in (({"status": "unknown", "reason": "ledger integrity degraded"},
                                 "shared wallet unknown (ledger integrity degraded)"),

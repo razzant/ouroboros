@@ -504,25 +504,53 @@ def test_root_grant_refuses_a_cached_tree_snapshot_and_admits_a_fresh_read(tmp_p
     0-age cached snapshot beside a read that just failed refuses typed
     (``root_accounting_unavailable``); a working ledger admits, and spend at
     the actual root cap still refuses (``root_hard_cap_exhausted``)."""
-    from ouroboros import usage_accounting
+    from ouroboros import usage_accounting, usage_store
+    from ouroboros.task_store import patch_document
+    from ouroboros.usage_admission import task_money_snapshot
 
-    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    queue, state, _workers = _install_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+
+    def pin_cap(task_id: str, limit: float = 10.0):
+        binding = {"billing_group_id": task_id, "billing_group_limit_usd": limit,
+                   "billing_group_limit_source": "initial_task_admission", "billing_group_limit_revision": "r1"}
+        patch_document(tmp_path, task_id, lambda row: {**row, "billing_group": binding})
+        return usage_accounting.UsageScope(drive_root=tmp_path, task_id=task_id, root_task_id=task_id,
+                                           root_limit_usd=limit, source="test", **binding)
+
     task, _row = _parked(tmp_path, monkeypatch, task_id="strict-root", scope="root")
+    open_scope = pin_cap("strict-root", 10.0)
+    # #1487: a $25 unresolved bound beside $1 of known spend is exposure, not spending.
+    with usage_accounting.usage_scope(open_scope):
+        settled = usage_accounting.reserve_attempt(usage_accounting.AttemptRequest(
+            model="m", provider="openai", reservation_usd=1.0))
+        usage_accounting.mark_dispatched(settled)
+        usage_accounting.settle_attempt(settled, {"prompt_tokens": 1}, cost_usd=1.0, cost_final=True)
+        unresolved = usage_accounting.reserve_attempt(usage_accounting.AttemptRequest(
+            model="m", provider="openai", reservation_usd=25.0))
+        usage_accounting.mark_dispatched(unresolved)
+        usage_accounting.settle_attempt(unresolved, {}, cost_usd=None, cost_final=False)
     usage_accounting._stash_root_accounting("strict-root", {"settled_usd": 1.0, "accounted_usd": 1.0}, 10.0)
-    monkeypatch.setattr(usage_accounting, "usage_projection",
-                        lambda *_a, **_k: (_ for _ in ()).throw(OSError("ledger unavailable")))
-    refused = queue.resume_budget_paused_task("strict-root")
+    with monkeypatch.context() as fault:
+        fault.setattr(usage_store, "read", lambda *_a, **_k: (_ for _ in ()).throw(OSError("ledger unavailable")))
+        refused = queue.resume_budget_paused_task("strict-root")
     assert refused["error"] == "root_accounting_unavailable" and refused["action"] == "retry_or_cancel"
     assert "_budget_pause" in task and "_budget_pause_resume" not in task
-    monkeypatch.setattr(usage_accounting, "usage_projection",
-                        lambda *_a, **_k: {"settled_usd": 10.0, "accounted_usd": 10.0, "limit_usd": 10.0})
-    assert queue.resume_budget_paused_task("strict-root")["error"] == "root_hard_cap_exhausted"
-    # #1487: a $25 unresolved bound beside $1 of known spend is exposure, not spending:
-    # explicit Resume within the authorized $10 is granted.
-    monkeypatch.setattr(usage_accounting, "usage_projection",
-                        lambda *_a, **_k: {"settled_usd": 1.0, "accounted_usd": 26.0, "limit_usd": 10.0})
+
+    spent_task, _spent_row = _parked(tmp_path, monkeypatch, task_id="strict-root-spent", scope="root")
+    with usage_accounting.usage_scope(pin_cap("strict-root-spent", 10.0)):
+        at_cap = usage_accounting.reserve_attempt(usage_accounting.AttemptRequest(
+            model="m", provider="openai", reservation_usd=10.0))
+        usage_accounting.mark_dispatched(at_cap)
+        usage_accounting.settle_attempt(at_cap, {"prompt_tokens": 1}, cost_usd=10.0, cost_final=True)
+    assert queue.resume_budget_paused_task("strict-root-spent")["error"] == "root_hard_cap_exhausted"
+    assert "_budget_pause" in spent_task and "_budget_pause_resume" not in spent_task
+
+    snap = task_money_snapshot(tmp_path, task, "strict-root")
+    assert snap["settled_usd"] == pytest.approx(1.0) and snap["accounted_usd"] == pytest.approx(26.0)
     assert queue.resume_budget_paused_task("strict-root")["ok"] is True
+    assert "_budget_pause_resume" in task
 
 
 def test_grant_is_revoked_when_money_vanishes_before_dispatch(tmp_path, monkeypatch):
@@ -719,6 +747,50 @@ def test_graceful_rail_refreshes_planning_threshold_within_authorized_money(tmp_
                         lambda **_k: {"settled_usd": 10.0, "accounted_usd": 10.0, "age_sec": 0.0})
     spent = budget_pause._refresh_planning_threshold(ctx, budget_remaining_usd=100.0)
     assert spent["refreshed"] is False and spent["reason"] == "no_authorized_room"
+
+
+def test_resume_refresh_follows_a_mid_run_cap_raise_on_a_disabled_ceiling(tmp_path, monkeypatch):
+    """#4267 area C: Q10 keeps an ordinary work's ceiling disarmed on Resume, but the
+    hard cap it started under may since have moved — an amendment raises it, a late
+    billing correction lowers it; one fresh observation in either direction, the stop
+    itself never re-arms; an unknown ceiling keeps its gap (P1)."""
+    from ouroboros import budget_pause, loop_budget, task_pacing
+
+    ctx, _limit = _loop_ctx(tmp_path)
+    ctx._cost_ceiling = task_pacing.CostCeiling(state=task_pacing.COST_CEILING_DISABLED,
+                                                 root_cap_usd=10.0, basis="no_default_cost_stop")
+    monkeypatch.setattr(loop_budget, "_loop_tree_accounting",
+                        lambda **_k: {"settled_usd": 11.0, "accounted_usd": 11.0,
+                                      "root_limit_usd": 15.0, "age_sec": 0.0})
+    disclosure = budget_pause._refresh_planning_threshold(ctx, budget_remaining_usd=100.0)
+    assert disclosure == {"refreshed": False, "reason": "no_ceiling",
+                          "ceiling_state": task_pacing.COST_CEILING_DISABLED,
+                          "ceiling_basis": "no_default_cost_stop"}
+    assert ctx._cost_ceiling.state == task_pacing.COST_CEILING_DISABLED
+    assert ctx._cost_ceiling.root_cap_usd == 15.0 and ctx._cost_ceiling.ceiling_usd is None
+    # A cap first recorded after start is seen; an observation without a limit changes nothing.
+    ctx._cost_ceiling = task_pacing.CostCeiling(state=task_pacing.COST_CEILING_DISABLED,
+                                                 root_cap_usd=None, basis="no_finite_budget")
+    budget_pause._refresh_planning_threshold(ctx, budget_remaining_usd=100.0)
+    assert ctx._cost_ceiling.root_cap_usd == 15.0
+    monkeypatch.setattr(loop_budget, "_loop_tree_accounting",
+                        lambda **_k: {"settled_usd": 11.0, "accounted_usd": 11.0})
+    ctx._cost_ceiling = task_pacing.CostCeiling(state=task_pacing.COST_CEILING_DISABLED,
+                                                 root_cap_usd=10.0, basis="no_default_cost_stop")
+    budget_pause._refresh_planning_threshold(ctx, budget_remaining_usd=100.0)
+    assert ctx._cost_ceiling.root_cap_usd == 10.0
+    # A late billing correction lowers the effective cap: the fresh figure wins in either
+    # direction, the stop itself never re-arms (Q10, #4267 area C).
+    monkeypatch.setattr(loop_budget, "_loop_tree_accounting",
+                        lambda **_k: {"settled_usd": 11.0, "accounted_usd": 11.0,
+                                      "root_limit_usd": 8.0, "age_sec": 0.0})
+    budget_pause._refresh_planning_threshold(ctx, budget_remaining_usd=100.0)
+    assert ctx._cost_ceiling.root_cap_usd == 8.0 and ctx._cost_ceiling.ceiling_usd is None
+    # An unknown ceiling never takes a number from the observation: the gap stays a gap.
+    ctx._cost_ceiling = task_pacing.CostCeiling(state=task_pacing.COST_CEILING_UNKNOWN,
+                                                 root_cap_usd=None, basis="resolution_error")
+    budget_pause._refresh_planning_threshold(ctx, budget_remaining_usd=100.0)
+    assert ctx._cost_ceiling.root_cap_usd is None
 
 
 def test_threshold_refresh_refuses_every_unknown_or_stale_money_fact(tmp_path, monkeypatch):

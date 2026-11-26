@@ -476,12 +476,11 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Optional[Mappi
     admission = plan_wave_budget_gate(ctx, callable_slots, merged["slot_prompt_chars"], len(system_prompt))
     if admission is not None:
         fence, remedy = review_wave_binding_fence(admission)
-        estimate = admission.get("estimated_wave_usd")
-        raise PlanAskRefused("CAPABILITY_UNAVAILABLE",
-                             f"ERROR: PLAN_ASK_SKIPPED_BUDGET: the ask was declined before dispatch — known spend has reached "
-                             f"the {fence} (remaining ${admission.get('remaining_usd')}"
-                             + (f"; estimated API cost ~${estimate}" if estimate is not None else "")
-                             + f"). To continue, {remedy}. Nothing was written.")
+        auth = admission.get("reason") == "billing_authority_unavailable"
+        est = f"; estimated API cost ~${admission['estimated_wave_usd']}" if admission.get("estimated_wave_usd") is not None else ""
+        detail = fence if auth else f"known spend has reached the {fence} (remaining ${admission.get('remaining_usd')}{est})"
+        raise PlanAskRefused("CAPABILITY_UNAVAILABLE", f"ERROR: {'PLAN_ASK_BILLING_AUTHORITY_UNAVAILABLE' if auth else 'PLAN_ASK_SKIPPED_BUDGET'}: "
+                             f"the ask was declined before dispatch — {detail}. To continue, {remedy}. Nothing was written.")
     return PreparedAsk(
         ask_id=ask_id, retry_key=retry_key, participants=participants, callable=callable_slots, not_sendable=not_sendable,
         system_prompt=system_prompt, session_prompt=session_prompt, contents=contents, session_tasks=session_tasks,

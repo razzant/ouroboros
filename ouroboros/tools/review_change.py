@@ -95,7 +95,7 @@ _ROW_STATED_BLOCKS = frozenset({"", "critical_findings", "review_quorum", "coupl
 # dispatch refusal. Any other block — the host's own (``infra_failure``, ``fixed_overflow``, ``preflight``)
 # or one not named here — keeps its producer's words as the record's wave failure note (#2516).
 _RECORD_STATED_BLOCKS = frozenset({"critical_findings", "parse_failure", "review_quorum", "review_wave_budget_insufficient",
-                                   "no_counted_reviewers", *NOT_PERFORMED_PHRASES})
+                                   "review_wave_billing_authority_unavailable", "no_counted_reviewers", *NOT_PERFORMED_PHRASES})
 _GIT_PROBE_TIMEOUT_SEC = 30
 
 
@@ -649,8 +649,10 @@ def wave_facts(ctx: ToolContext, wave: _Wave, *, outcome: Dict[str, Any], forens
     structured = dict(forensic.get("structured") or {})
     triad_raw = list(forensic.get("triad_raw") or [])
     refusal = outcome.get("dispatch_refusal")
-    if refusal is None and forensic.get("block_reason") == "review_wave_budget_insufficient":
-        refusal = {"kind": "review_wave_budget_insufficient", "message": str(structured.get("wave_refusal") or "")}
+    if refusal is None and forensic.get("block_reason") in {
+        "review_wave_budget_insufficient", "review_wave_billing_authority_unavailable",
+    }:
+        refusal = {"kind": str(forensic["block_reason"]), "message": str(structured.get("wave_refusal") or "")}
     degraded = list(forensic.get("degraded_reasons") or [])
     if outcome.get("crash"):  # bounded, masked words: the hot index row carries this list
         degraded.append(f"review_change_wave_crashed: {_reported(outcome['crash'])}")

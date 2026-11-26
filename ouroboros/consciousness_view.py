@@ -537,7 +537,9 @@ def _resume_room(drive_root, task_id: str, metadata: dict, own: dict) -> dict:
         log.debug("The room a Resume would add to wake %s could not be read", task_id, exc_info=True)
         quote = {}
     error = quote.get("error")
-    if error in {"consciousness_allowance_exhausted", "root_hard_cap_exhausted"}:
+    if error in {"consciousness_allowance_exhausted", "root_hard_cap_exhausted",
+                 "independent_cap_exhausted", "work_cap_export_unverified",
+                 "work_cap_reconcile_pending"}:
         return {"resume_additional_usd": 0.0}
     if error == "budget_still_exhausted":
         return {"resume_additional_usd": None, "resume_available_usd": 0.0}

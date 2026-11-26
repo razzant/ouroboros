@@ -148,6 +148,31 @@ def lean_event(event: Mapping[str, Any], message_text: str) -> dict[str, Any]:
                         if key != "raw" and not (key == "text" and value == message_text)}}
 
 
+def checked_call_evidence(ctx, messages, binding):
+    """The corpus the Safety check reads and the call's physical target. A decision subject (a dict binding:
+    ``control_mind.prepare_task_cost_cap``) is its own target: the checked room and billing group, and for an own
+    judgment the addressed work's instructions, never mixed into the caller's owner sources. A cited owner row
+    stays in the ordinary caller corpus, marked once, also beside quoted input."""
+    from dataclasses import asdict, is_dataclass
+
+    from ouroboros import owner_words
+
+    target = asdict(binding) if is_dataclass(binding) else binding
+    cited = ((binding.get("basis") or {}).get("source") or {}).get("row_sha256") if isinstance(binding, dict) else ""
+    if isinstance(getattr(ctx, "_owner_directives", None), list):
+        return owner_words.safety_sources(ctx, cites=cited or ""), target
+    # User messages are quoted input when the caller has no retained host source; never certify them as owner words.
+    quoted = [m for m in (messages or []) if m.get("role") == "user"]
+    return quoted + [row for row in (owner_words.safety_sources(ctx, cites=cited) if cited else [])
+                     if row.get("cited_by_this_call")], target
+
+
+def call_subject(tool_name, arguments, binding):
+    """What this call's readings are kept by: its arguments, and for a cost cap also the work and decision its binding
+    step bound, so a reading of one decision never answers a call bound to another."""
+    return [arguments, binding] if tool_name == "set_task_cost_cap" and isinstance(binding, dict) else arguments
+
+
 def focus_event_source(row: Any, metadata: Mapping[str, Any], notes: list) -> Any:
     """A place event's host frame as its typed records when they reproduce that row exactly; any other row keeps its
     words, its images as facts.
@@ -258,6 +283,37 @@ def opening_card_mail_kind(submitted: Any) -> str:
             and isinstance(reply, Mapping) and reply.get("card_id")):
         return OPENING_CARD_INPUT
     return ""
+
+
+def verified_chat_mail_kind(row, source, submitted, *, opening=False) -> str:
+    """The existing mail kind for an already verified physical owner row, not a reconstructed corpus row."""
+    from ouroboros.owner_mailbox import KIND_CARD_INPUT, KIND_OWNER_TEXT
+
+    if source != "owner_mailbox" or row.get("_owner_corpus_rebuilt") or "corpus_answer" in row:
+        return ""
+    if opening_card_mail_kind(submitted):
+        return OPENING_CARD_INPUT if opening else KIND_CARD_INPUT
+    return KIND_OWNER_TEXT
+
+
+def held_owner_source(key, row, source_root, origin, *, carried, cited):
+    """A retained row in the ordinary Safety corpus; an exact checked citation can supply its physical input kind."""
+    from ouroboros.answer_facts import card_input, card_reference_view, row_source
+    from ouroboros.owner_relay import owner_row_identity, owner_text, quotable_owner_row
+    from ouroboros.owner_words import _item_time, _mapping, answered_card_reply, answered_card_source, reply_target
+    from ouroboros.project_dialogue import entry_matches_source_ref
+
+    item = card_input(row, source_root)
+    carried_reply = _mapping(_mapping(row.get("corpus_answer")).get("reply_to"))
+    replied = (item.get("reply_to") or card_reference_view(carried_reply)
+               or answered_card_reply(*answered_card_source(row, source_root))
+               or row.get("_owner_reply_target") or reply_target(source_root, row.get("reply_to")))
+    source = item.get("source") or row_source(row, "owner_mailbox", source_root)
+    kind = (verified_chat_mail_kind(row, source, item, opening=entry_matches_source_ref(row, [origin]))
+            if cited and quotable_owner_row(row, source_root) else "")
+    return {"source": source, "content": item["content"] if item else owner_text(row), "msg_id": str(key),
+            "row_sha256": owner_row_identity(row)["row_sha256"], **carried, **({"mail_kind": kind} if kind else {}),
+            **({"ts": when} if (when := _item_time(row)) else {}), **({"reply_to": replied} if replied else {})}
 
 
 def with_author(row: Any, metadata: Mapping[str, Any]) -> dict[str, Any]:

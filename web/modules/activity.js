@@ -304,7 +304,7 @@ export function scheduleRowHtml(s, expanded = false, viewerZone = viewerTimeZone
     const relation = String(s.relation || 'unknown');
     const hold = s.followup_hold || {};
     const work = s.billing_group || {};
-    const binding = work.billing_group_id ? ` · work ${esc(work.billing_group_id)} · cap ${work.billing_group_limit_usd == null ? 'unbounded' : '$' + esc(work.billing_group_limit_usd)}` : '';
+    const binding = work.billing_group_id ? ` · work ${esc(work.billing_group_id)} · original cap ${work.billing_group_limit_usd == null ? 'unbounded' : '$' + esc(work.billing_group_limit_usd)}` : '';
     const explanations = {
         origin_stopped: 'Original work stopped or restarted', relationship_unknown: 'Relationship needs a decision',
         origin_owner_paused: 'Original work is paused', owner_restart_in_progress: 'Restart in progress',
