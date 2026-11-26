@@ -60,6 +60,9 @@ class PhysicalAttemptContext:
     window_boundary_tokens: InitVar[Optional[int]] = None  # stated boundary, not admission's reserve-adjusted total
     window_record: InitVar[Optional[WindowRecord]] = None  # live capacity terms; not an extra ledger projection
     dispatch_account: InitVar[str] = ""  # private route witness, not part of the priced or delivered context view
+    # The native Ollama load this send's plan asked for (0: Auto), None for every other route. A record field, so the
+    # ledger row and a restored receipt carry it; last, so a positional caller of the fields above is unchanged.
+    requested_load_window: Optional[int] = None
 
     bible_source: InitVar[Optional[Tuple[str, str, int, str]]] = None
     assembly_witnesses: InitVar[tuple] = ()
@@ -148,7 +151,7 @@ class ContextAttemptObservation(TypedDict, total=False):
     applied: Literal["max", "low", "nano"]  # the mode the send is named in (``shown_mode``): Low for Low under Max
     books: Literal["body_map", "whole", "maps"]  # the books' form in this send
     profile: Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
-    cause: Literal["", "memory", "request", "route", "window", "after_start"]  # why lower; "" also when unknown
+    cause: Literal["", "memory", "request", "route", "window", "after_start"]  # why applied is lower than preferred_at_send; "" also when unknown
     target_missed: bool  # this send exceeded the owner's mode target (``context_target_miss``)
     no_memory_tokens: Optional[int]  # Low's missed target: the start's request with no memory at all, else None
     observed_at: str

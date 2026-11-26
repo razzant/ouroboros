@@ -874,7 +874,7 @@ def test_project_days_at_the_costs_endpoint_uses_root_room_and_the_recorded_mone
     view = combined["project_days"]
     assert {key: view[key] for key in ("since", "until", "timezone", "days")} == {
         "since": since, "until": until, "timezone": "UTC", "days": 7}
-    # The served fields are the published ones, field for field (their JSDoc twins: the shared browser-twin test).
+    # The served fields match the Python declarations, the source of the published shapes.
     day_fields = set(typing.get_type_hints(contracts.ProjectDayCost))
     assert set(view) == set(typing.get_type_hints(contracts.ProjectDaysView))
     assert view["integrity_degraded"] is False

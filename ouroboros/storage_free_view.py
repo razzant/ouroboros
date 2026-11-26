@@ -18,15 +18,18 @@ OUTCOME_ORDER = ("failed", "stuck", "kept", "not_started", "deleting", "removed"
 ADVANCED = "advanced_group"  # offered only as a whole saved-work group, with that group's own words
 
 
+# The whole folder goes, never selected paths.
 class StorageFreeManual(TypedDict):
     """What the owner's explicit discard of one finished copy would remove without proof it is saved. Not
     proven saved is not proven unique: the same bytes may exist elsewhere, nothing here has looked."""
 
+    # For a working copy: all such paths, including omissions; zero for a commits-only discard on a kept branch.
+    # Scratch and payload offers also report zero, not a commit claim: see ``loss``/``paths`` or ``files``/``retained``.
     not_proven_saved_count: int
     not_proven_saved_bytes: int  # lstat sizes, always whole: a path that cannot be read withholds the offer
     not_proven_saved: List[Dict[str, Any]]  # ``{path, bytes}`` relative to the copy, largest first, at most UNSAVED_LISTED
-    omitted_count: int  # paths the list leaves out; ``not_proven_saved_count`` includes them
-    keeps_commits: bool  # its branch or pin stays, with any commits it holds
+    omitted_count: int  # paths the list leaves out; ``not_proven_saved_count`` includes them; say so when above zero
+    keeps_commits: bool  # for a working copy: its branch or pin stays, with any commits it holds
     producer_retained: NotRequired[bool]  # a marked session-scratch handoff, removed by the custody trash remover
     loss: NotRequired[str]  # the producer marker's words and the owner-facing loss
     paths: NotRequired[List[str]]  # a marked handoff's scratch folders: what it holds and what its size counts
@@ -38,43 +41,57 @@ class StorageFreeManual(TypedDict):
     root_task_id: NotRequired[str]
 
 
+# `id` is opaque.
 class StorageFreeEntry(TypedDict):
     id: str  # exactly one filesystem object, inside this plan
-    group: str
+    group: str  # the id of its StorageFreeGroup.
     kind: Literal["work_folder", "working_copy", "environment", "scratch", "payload", "other"]
     name: str
     path: str
     task_id: Optional[str]
-    bytes: Optional[int]
+    bytes: Optional[int]  # observed size (the whole folder); null = unknown, never zero.
     bytes_complete: bool
-    eligible_after: Optional[str]
-    reason: Optional[str]
-    cause: NotRequired[str]  # exact retirer code; reason remains the compatible category
-    outcome: Optional[str]
+    eligible_after: Optional[str]  # null = never
+    reason: Optional[str]  # view=excluded and kept outcomes.
+    cause: NotRequired[str]  # exact retirer code, shown even when unknown; reason remains the compatible category
+    outcome: Optional[str]  # view=outcomes only: one of OUTCOME_ORDER
+    # how it can go: the pool, only a saved group, by hand (listed in view=excluded with its reason AND
+    # in view=manual), or not now. On view=outcomes it describes the preview, not the result: read
+    # `outcome`.
     availability: Literal["ordinary", "saved_group", "manual_discard", "none"]  # how the owner can remove it, whatever ``reason`` says
     manual: NotRequired[StorageFreeManual]  # ``view=manual`` only
 
 
+# A typed reason and how many items it holds, for what a pool leaves out and what a run kept.
 class StorageFreeKept(TypedDict):
     reason: str  # results_pending | in_use | busy | unreadable_record | capture_unproven | unproven_excluded_inputs
     # | owner_keep | changed | retained_evidence | undeclared_environment | advanced_group | payload_offer | restart | other
     # ``results_pending`` also carries raw_evidence_uncustodied and artifact_source_missing;
     # their exact causes remain in each outcome's ``cause`` field.
     count: int
+    # Present when above zero; never subtract the pool's global manual count from a row: each row says its own.
     manual_count: NotRequired[int]  # ``pool.excluded`` only: how many of ``count`` the owner can discard by hand (``view=manual``)
     causes: NotRequired[List[Dict[str, Any]]]  # run summary: exact codes and their counts
 
 
+# The ordinary pool of one plan: `null` at idle, may be present during `listing` with `bytes` still null
+# or partial, final at `ready`. `environment` is a whole temporary working environment, never installed
+# packages alone.
 class StorageFreePool(TypedDict):
     count: int
-    bytes: Optional[int]
+    bytes: Optional[int]  # null = unknown, never zero
     bytes_complete: bool
-    kinds: Dict[str, int]
-    excluded: List[StorageFreeKept]
+    kinds: Dict[str, int]  # count per entry kind: work_folder, working_copy or environment; a kind with none is absent
+    excluded: List[StorageFreeKept]  # same reason vocabulary as a run's kept items.
+    # The manual door shows when its `count` > 0; its `bytes` null = unknown, never zero.
     manual: Dict[str, Any]  # ``{count, bytes, bytes_complete, retained[, payloads]}`` of ``view=manual``: the owner's
     # explicit discard, never in ``count``; ``retained`` are marked session scratch, ``payloads`` proposed heavy files, the rest copies
 
 
+# `GET /api/storage/free/items?plan=&view=&cursor=&limit=&version=`: one page. The pool and the excluded
+# list are immutable once ready (their version is the plan id); outcomes settle and can reorder, so a
+# moved version answers 409 `view_changed` and the client restarts from `cursor=0`. Other 409s:
+# `preview_outdated`, `listing`; 400: `bad_view`.
 class StorageFreeItemsResponse(TypedDict):
     """``GET /api/storage/free/items``: one page; send ``version`` back with the next ``cursor``."""
 
@@ -82,7 +99,7 @@ class StorageFreeItemsResponse(TypedDict):
     view: Literal["pool", "excluded", "outcomes", "manual"]
     version: str
     total: int
-    counts: Dict[str, int]
+    counts: Dict[str, int]  # by reason or outcome.
     next_cursor: Optional[int]
     items: List[StorageFreeEntry]
 

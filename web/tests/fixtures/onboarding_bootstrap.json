@@ -313,6 +313,17 @@
         "settingKey": "OPENAI_COMPATIBLE_API_KEY",
         "settingsInputId": "s-compatible-key",
         "stateKey": "compatibleApiKey"
+      },
+      {
+        "group": "more",
+        "id": "openai-compatible-continue",
+        "inputType": "text",
+        "label": "Continue via the compatible API without confirmation that history is preserved",
+        "note": "The Base URL you let Ouroboros send to although that server names no program, saved as the address's id. Empty withdraws it; it never opens an address where Ollama was seen.",
+        "placeholder": "",
+        "settingKey": "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED",
+        "settingsInputId": "s-compatible-continue",
+        "stateKey": "compatibleContinueUnconfirmed"
       }
     ],
     "providerProfiles": {
@@ -493,6 +504,7 @@
     "cloudruKey": "",
     "compatibleApiKey": "",
     "compatibleBaseUrl": "",
+    "compatibleContinueUnconfirmed": "",
     "connections": [],
     "consciousnessModel": "",
     "deepseekKey": "",

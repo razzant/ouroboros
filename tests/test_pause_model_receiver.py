@@ -22,6 +22,7 @@ from ouroboros import model_wait, owner_pause
 from ouroboros import usage_accounting as ua
 from ouroboros._usage_wait import receiver_abandonable
 from ouroboros.task_results import load_task_result, write_task_result
+from tests._ollama import install_http as install_http
 from tests._usage_store_testing import attempt_rows_in_start_order
 from tests.test_llm_claudexor import setup as subscription_setup  # noqa: F401 - the imported fixture
 
@@ -503,6 +504,62 @@ def test_temporary_api_client_stays_with_its_abandoned_sender(tmp_path, scope, m
     manifest, payload, _ = read_call_payload(tmp_path, task_id="root", call_id=f"physical_{row['attempt_id']}_response")
     assert manifest["control_reason"] == "owner_pause_abandoned"
     assert payload["response"] == response.model_dump()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+def test_pause_leaves_native_client_to_settle_one_late_reply(tmp_path, scope, install_http, asynchronous, stream):
+    import httpx
+    import json
+    from ouroboros import llm_ollama
+    from ouroboros.observability import read_call_payload
+    from tests._ollama import TARGET, MESSAGES, OllamaHTTP, completed
+
+    entered, release = threading.Event(), threading.Event()
+    def frames():
+        yield json.dumps(completed()).encode() + b"\n"
+        raise httpx.ReadError("reset after done")
+
+    class Stream(httpx.SyncByteStream, httpx.AsyncByteStream):
+        def __iter__(self):
+            entered.set()
+            assert release.wait(30)
+            yield from frames()
+
+        async def __aiter__(self):
+            entered.set()
+            assert await asyncio.to_thread(release.wait, 30)
+            for chunk in frames():
+                yield chunk
+
+    server = install_http(OllamaHTTP(lambda _: httpx.Response(200, stream=Stream())))
+    kwargs = dict(target=dict(TARGET), messages=MESSAGES, tools=None, reasoning_effort="none",
+                  max_tokens=16, tool_choice="auto", no_proxy=True, stream=stream)
+    async def run():
+        with ua.usage_scope(scope), receiver_abandonable():
+            call = (llm_ollama.chat_ollama_async(**kwargs) if asynchronous
+                    else asyncio.to_thread(llm_ollama.chat_ollama, **kwargs))
+            receiver = asyncio.create_task(call)
+            try:
+                assert await asyncio.to_thread(entered.wait, 20)
+                owner_pause.install_fence(tmp_path, "root", request_id="pause")
+                with pytest.raises(model_wait.ModelWaitInterrupted) as caught:
+                    await asyncio.wait_for(receiver, 5)
+                assert attempt_rows_in_start_order(tmp_path)[0]["state"] == "dispatched"
+            finally:
+                release.set()
+            sender = caught.value.model_sender_future
+            await asyncio.wait_for(sender if asynchronous else asyncio.wrap_future(sender), 5)
+    asyncio.run(run())
+    (row,) = attempt_rows_in_start_order(tmp_path)
+    assert row["state"] == "settled" and len(server.posts) == 1
+    manifest, payload, _ = read_call_payload(tmp_path, task_id="root", call_id=f"physical_{row['attempt_id']}_response")
+    assert manifest["control_reason"] == "owner_pause_abandoned"
+    receipt = payload["response"]["_stream_receipt"]
+    assert receipt["complete"] and receipt["attempt_id"] == row["attempt_id"]
+    assert row["cost_evidence"]["stream_receipt"] == receipt["manifest_ref"]
+    usage = payload["response"]["usage"]
+    assert (usage["prompt_tokens"], usage["completion_tokens"], usage["ollama_context"]["loaded"]) == (25, 4, 80000)
 
 
 def _census_bench(tmp_path, monkeypatch, direct):

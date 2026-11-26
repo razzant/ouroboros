@@ -1,5 +1,6 @@
-"""Owner contracts of skills' service sign-ins (``ouroboros/gateway/sign_in.py``); JSDoc twin
-``web/modules/sign_in_contract_types.js``. No shape carries a token, a client secret or a PKCE verifier."""
+"""Owner contracts of skills' service sign-ins (``ouroboros/gateway/sign_in.py``).
+Public responses carry no OAuth tokens, client secrets or PKCE verifiers.
+A ``client_save`` request may supply ``client.client_secret``."""
 
 from __future__ import annotations
 
@@ -23,9 +24,9 @@ class SignInRequest(TypedDict, total=False):
     skill: str
     service: str
     account: str
-    client: Union[str, Dict[str, Any]]
+    client: Union[str, Dict[str, Any]]  # begin: a client id or label; client_save: {id?, label, client_id, client_secret?, return}.
     register_client: bool
-    attempt_id: str
+    attempt_id: str  # never the OAuth state
     optional_scopes: List[str]
     scope_words: List[str]  # begin: the exact literal set shown for the selected permissions
     registration: str  # begin, with a saved client: its registration as shown (SignInClientRow.registration)
@@ -37,10 +38,11 @@ class SignInRequest(TypedDict, total=False):
     error: str
     error_description: str
     returned_url: str
-    issuer: str
-    endpoints: Dict[str, str]
+    issuer: str  # the shown one is SignInServiceStatus.issuer
+    endpoints: Dict[str, str]  # omit for discovery; send the endpoint object for explicit mode. JSON null is invalid.
 
 
+# A refused step's `code` is SIGN_IN_REQUIRED or SIGN_IN_UNAVAILABLE, beside `reason` and `error`.
 class SignInResponse(TypedDict, total=False):
     """A refused step carries a code and reason. A completed return can file an account that still needs sign-in. A Revoke is final
     only with ``revoked: true`` (the account is forgotten); otherwise the account is kept and the step refused: ``revocation_not_confirmed``
@@ -120,7 +122,7 @@ class SignInServiceStatus(TypedDict, total=False):
     admission: str  # "", or why the skill's current bytes may not start a sign-in: not_reviewed, disabled, not_trusted
     notes: Dict[str, str]
     accounts: List[SignInAccountRow]
-    pending: Optional[Dict[str, Any]]
+    pending: Optional[Dict[str, Any]]  # {started, client, attempt_id}; the ID is not a credential.
     clients: List[SignInClientRow]
 
 

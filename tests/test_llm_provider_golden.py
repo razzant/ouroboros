@@ -33,6 +33,8 @@ import os
 import pathlib
 import sys
 import tempfile
+
+from tests._ollama import install_http as install_http
 import types
 from typing import Any, Dict, List, Optional
 from unittest import mock
@@ -56,6 +58,7 @@ _ROUTE_ENV_NAMES = (
     "OPENAI_BASE_URL",
     "OPENAI_COMPATIBLE_API_KEY",
     "OPENAI_COMPATIBLE_BASE_URL",
+    "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED",
     "ANTHROPIC_API_KEY",
     "MINIMAX_API_KEY",
     "MINIMAX_REGION",
@@ -835,7 +838,7 @@ def _carrying(key: str, base: list) -> list:
 
 
 @pytest.mark.parametrize("key", sorted(HOST_ONLY_MESSAGE_KEYS))
-def test_no_send_path_carries_a_host_only_field(key, monkeypatch):
+def test_no_send_path_carries_a_host_only_field(key, monkeypatch, install_http):
     from ouroboros import llm_claudexor
     from tests.test_openai_responses import MODEL, _body, _install, _message
 
@@ -860,6 +863,17 @@ def test_no_send_path_carries_a_host_only_field(key, monkeypatch):
     assert len(sent) == 1 and sent[0]["input"]  # the actual responses.create input, past the shared dispatch
     assert messages == original
     wires["openai.responses"] = json.dumps(sent[0]["input"], ensure_ascii=False)
+    from tests._ollama import OllamaHTTP, chat
+
+    for asynchronous in (False, True):
+        for stream in (False, True):
+            native = _carrying(key, [{"role": "user", "content": "Hi."}] + user_data)
+            before = copy.deepcopy(native)
+            server = install_http(OllamaHTTP())
+            chat(messages=native, asynchronous=asynchronous, stream=stream)
+            assert native == before
+            assert len(server.posts) == 1
+            wires[f"ollama/{asynchronous}/{stream}"] = json.dumps(server.posts)
     for path, wire in wires.items():
         assert "HOST-ONLY-MARK" not in wire, (key, path)
         assert key == "cache_control" or f'"{key}"' not in wire, (key, path)  # a cache mark is translated, not carried

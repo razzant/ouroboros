@@ -720,7 +720,7 @@ door): one `supervisor_failure` Main row, then the startup notice. `Online` mean
 ready and idle; known queued, active or finalizing work keeps its label.
 Acceptance proves neither task start nor model receipt.
 
-The Update indicator, a neutral capsule above the version, distinguishes an offer, the real stage, a needed restart and a stopped resolution (a neutral bell with no close). A failed or unconfirmed outcome stays till the owner closes it (this browser, that attempt; the record is untouched). Glyph and tone distinguish states: amber for local changes, error triple if failed, refused or rolled back, else neutral. Its words are its name, its detail a tooltip. A press or tap opens the Updates panel, which says it all, never a second apply flow. A confirmed success never wears the indicator (owner 1B): the panel retains it until the next admitted attempt, with actual saved-local-work references and accessible diagnostics, and it never masks a newer available version. A pre-admission refusal stays with the request. A busy-work refusal offers explicit retry, never a delayed automatic restart. Connection or version alone proves no successful update. The Update and Replace confirmations say in fixed words, before the engine and interpreter facts, what the restart does to this installation's tasks (what returns by itself, what stays paused or held, what is not continued); the engine's admission count is labelled engine work, never tasks. Above the description, in the panel for the update on offer and at the top of that confirmation, one host line counts what the range brings over a review FAIL or no verdict (`Went in over a review FAIL or no verdict: 2 merges, 3 commits Ouroboros made on this computer.`): merges whose receipt observed one and this install's own commits it recorded so, shown with or without a description and only from that range's check facts; the items are named in Details, a PASS on earlier code and a commit without a receipt are not counted, a range whose older receipts were not read says how many (`The review receipts of 41 older commits were not read.`), and when nothing is named there is no line (unknown, never clean). The Restart confirmation's Details name what that door does differently: sleeping tasks wait for Resume and the runs its tasks started in Claudexor end. After a start that restored queue rows, the startup notice says how many of them continue by themselves, wait for Resume or stay paused, read as the work projection reads them; when a row cannot be read it keeps the count alone.
+The Update indicator, a neutral capsule beside the version, distinguishes an offer, the real stage, a needed restart and a stopped resolution (a neutral bell with no close). A failed or unconfirmed outcome stays till the owner closes it (this browser, that attempt; the record is untouched). Glyph and tone distinguish states: amber for local changes, error triple if failed, refused or rolled back, else neutral. Its words are its name, its detail a tooltip. A press or tap opens the Updates panel, which says it all, never a second apply flow. A confirmed success never wears the indicator (owner 1B): the panel retains it until the next admitted attempt, with actual saved-local-work references and accessible diagnostics, and it never masks a newer available version. A pre-admission refusal stays with the request. A busy-work refusal offers explicit retry, never a delayed automatic restart. Connection or version alone proves no successful update. The Update and Replace confirmations say in fixed words, before the engine and interpreter facts, what the restart does to this installation's tasks (what returns by itself, what stays paused or held, what is not continued); the engine's admission count is labelled engine work, never tasks. Above the description, in the panel for the update on offer and at the top of that confirmation, one host line counts what the range brings over a review FAIL or no verdict (`Went in over a review FAIL or no verdict: 2 merges, 3 commits Ouroboros made on this computer.`): merges whose receipt observed one and this install's own commits it recorded so, shown with or without a description and only from that range's check facts; the items are named in Details, a PASS on earlier code and a commit without a receipt are not counted, a range whose older receipts were not read says how many (`The review receipts of 41 older commits were not read.`), and when nothing is named there is no line (unknown, never clean). The Restart confirmation's Details name what that door does differently: sleeping tasks wait for Resume and the runs its tasks started in Claudexor end. After a start that restored queue rows, the startup notice says how many of them continue by themselves, wait for Resume or stay paused, read as the work projection reads them; when a row cannot be read it keeps the count alone.
 
 Status, owner action, and urgent notification are separate product concepts:
 
@@ -2453,7 +2453,7 @@ a file restores equal-width Send; empty Enter never calls. The dictation mic hid
 during the call and returns with the draft intact. The glass keeps the composer's
 fixed corner as it becomes a card; End remains visible in phone and keyboard
 views. A model without vision hides Show and says, “This voice engine does not
-accept images.” A hidden room's mark names the room and reopens it.
+accept images.” A hidden room's mark names and reopens it; docked, it clears the version's touch targets.
 
 Calls (beta) settings default to Gemini, with calls off independently of keys.
 Engine, model and voice choices come from loaded catalogs; an unavailable choice
@@ -2943,7 +2943,7 @@ instead, and let the status text carry the claim.
 
 ## 7. Onboarding density
 
-Accounts is the common connection surface for subscriptions and API keys. An API key is a §6 row of its provider (the built-in Default, then keys added with Add key): name and status, a meta line naming its roles, Test, its on/off and Remove (on Default it clears the key); an OpenAI key's API strip (Chat Completions · Responses; new keys start on Responses) is what Test uses. A role names its key; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host, keeping the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
+Accounts is the common connection surface for subscriptions and API keys. An API key is a §6 row of its provider (the built-in Default, then keys added with Add key): name and status, a meta line naming its roles, Test, its on/off and Remove (on Default it clears the key); an OpenAI key's API strip (Chat Completions · Responses; new keys start on Responses) is what Test uses. A compatible key's consent is one `.ui-checkbox`, “Continue via the compatible API without confirmation that history is preserved”, on its page and in setup's rows alike, unticked until given (the unidentified-gateway fork the owner delegated to a multi-model council consensus, 18–19.11.2026). It is offered by the key's saved facts (a private server that named no program), by a Test refused for want of it, and while one stands — a withdrawal pending Save stays visible and reversible — to be withdrawn, with a note of what was read at its address and at the key's last check, then the risk and the admission in effect. An identified server keeps the note of its program and shows no box, a public address shows neither, and where Ollama was seen, or its version is too old, the note says so (with the version to update to) and that nothing is sent until the key's own server identifies itself: no consent is asked there. Box and note speak for the address shown: another typed clears the box and labels the note as not about it. Test checks the draft as shown, saves none of it and says in the server's words what it was refused for (a warning, as for a pass on a server that named no program). A consent the launch environment holds shows as given and withdraws from here. In setup, Back keeps the box as last shown and Start saves exactly that choice (untouched, what is stored), changing no other setting. A role names its key; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host, keeping the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
 Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role reads as a current choice (§7 "Settings") and opens one compact
 Source / Model / Account row to change it. In the wizard each role says once, under its name,
@@ -3489,14 +3489,16 @@ The column reads from the top: Ouroboros's card, which is Main (its picture, wit
 while Main or a Project in the list waits for the owner, the card's words for readers saying so, its name with a quiet `Main Chat`,
 Main's count and its room's mark in the Project rows' mark column, and under them what Main is doing now, nothing
 while it rests), in the Ouroboros voice and in the strong crimson while Main is where you are; then Find a project,
-with + (New project) at the end of its row; then the Projects, the column's only scroller, down to the bottom edge
+with + (New project) at the end of its row; then the Projects, the column's only scroller, down to the version
 (no heading, collapse or unread total). Outside the column, at its start, the rail (the room or the drawer's column
-gives its width): Circles, Files and Widgets at its top, Dashboard, Settings and the version at its foot, each a glyph
-whose word is its accessible name, chosen in the strong crimson. Where its controls do not fit, the rail scrolls with
-the sidebar so keyboard focus can reach its foot. Extensions opens through Settings › Extensions (the Connections
-group), Settings chosen meanwhile. The version is the update check (no Check button; its glyph turns as it checks), its
-answer a tick or a warning in that glyph's place under the whole number, a failure's reason its tooltip and description,
-on touch Updates' check. The Update indicator (§4) or an install with no check leaves it plain. A Project row is two
+gives its width): Circles, Files and Widgets at its top, Dashboard and Settings at its foot, each a glyph whose word
+is its accessible name, chosen in the strong crimson. The version is the column's one-line foot under the Projects
+in the meta ink: the number on the Project names' line, the check's glyph, its answer or the Update
+indicator (§4) beside it; a version too long for the column ellipsizes, the check's name whole. Where the rail's
+controls do not fit, the rail scrolls with the sidebar so keyboard focus can reach its foot. Extensions opens through
+Settings › Extensions (the Connections group), Settings chosen meanwhile. The version is the update check (no Check
+button; its glyph turns as it checks), its answer a tick or a warning in that glyph's place, a failure's reason its
+tooltip and description, on touch Updates' check. The Update indicator or an install with no check leaves it plain. A Project row is two
 lines: the name and its time, then one line with the row's mark (a name with no such line may take both): the
 opening words of the question that waits for the owner, or the sentence that says what waits where it has no words
 of its own (an action only the owner can take, an answer whose delivery is unknown), else what its work is doing;
@@ -3519,10 +3521,10 @@ all projects. A list that could not be read again says so, with the time of the 
 read answers, nothing is called missing. Neither reads a room's history or marks anything read. A browse keeps its
 rows, sorting on: off the top the first row in view that kept its place holds the reading place, focus its row; a
 find's rows stand while it has words. A Project outside the list opens by its own id; a missing or deleting one
-leaves the room on screen and says so. A short window first compacts rows (fine pointer only), then scrolls the whole
-column, Ouroboros's card at the top and the rail in view, or, too short to show a Project under the card, with the card
-at its top and the rail's foot at its end. One destination is chosen at a
-time, its fill alone with no stripe, rule or mark at its edge, and pressing it opens it, never closes it.
+leaves the room on screen and says so. A short window first compacts mouse rows, then scrolls the whole column down to
+the version and its indicator. Ouroboros's card stays in view if a Project fits below it; the rail stays if its own
+controls fit. One destination is chosen at a time, its fill alone with no stripe, rule or mark at its edge, and pressing
+it opens it, never closes it.
 
 ### A navigation row
 

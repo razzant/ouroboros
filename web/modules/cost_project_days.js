@@ -1,6 +1,6 @@
 // Dashboard › Costs, "By project and day": one room's spend on each day of a span (`GET /api/cost-breakdown?view=
 // project_days&project_days=<selector>&days=7|30`, that view alone, so a choice never reads the page's totals again;
-// shape: management_contract_types.js `CostProjectDaysResponse`). The rooms are the live catalog's projects
+// shape: `ouroboros/gateway/management_contracts.py::CostProjectDaysResponse`). The rooms are the live catalog's projects
 // (`GET /api/projects?all=1`, closed ones too), Main, and the records outside both (another room such as a place, or
 // none known), each a selector of its own (`project:<id>`, `main`, `unassigned`). A deleted project's records are no
 // other room's: they stay in the totals above, and its name never comes back here. The view covers [since, until), UTC,

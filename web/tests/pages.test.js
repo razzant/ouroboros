@@ -88,15 +88,21 @@ test('the Projects header is the New project button alone, with the shell\'s plu
     assert.match(section, / aria-label="Projects"/);
 });
 
-test('the rail is the registry\'s: the sections at its top, then the system rows over the version row', () => {
+test('the rail is the registry\'s: the sections at its top, the system rows at its foot; the version row is the column\'s foot', () => {
     const rail = renderNavRail();
     const ids = (html) => [...html.matchAll(/data-nav-page="([a-z]+)"/g)].map((m) => m[1]);
     const [sections, system] = rail.split('<div class="nav-rail-system">');
     assert.equal(sections, `<div class="nav-rail-sections">${['circles', 'files', 'widgets'].map((id) => renderNavRow(pageById(id))).join('')}</div>`);
     assert.deepEqual(ids(system), ['dashboard', 'settings']);
     assert.doesNotMatch(rail, /data-nav-page="skills"/, 'Extensions opens through Settings, not from the rail');
-    // The version row closes the rail's foot: utils.js writes #nav-version, update_status.js its check and capsule.
-    assert.match(system, /<\/button><div class="sidebar-foot-meta"><span id="nav-version"><\/span><\/div><\/div>$/);
+    // The rail's foot holds the system rows alone (owner 25.11): the version never wraps its glyphs.
+    assert.match(system, /<\/button><\/div>$/);
+    assert.doesNotMatch(rail, /nav-version/, 'the version row is not the rail\'s');
+    // The column's foot is one quiet line after the Projects (index.html): utils.js writes #nav-version, update_status.js
+    // its check and capsule.
+    const shell = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+    const foot = shell.indexOf('<div class="sidebar-foot-meta"><span id="nav-version"></span></div>');
+    assert.ok(foot > shell.indexOf('id="nav-projects-list"') && foot < shell.indexOf('</nav>'), 'the foot follows the Projects');
     // Names fit by layout alone: the rail draws glyphs, its words stay the rows' names (style.css).
     assert.doesNotMatch(readFileSync(new URL('../modules/pages.js', import.meta.url), 'utf8'), /measureNavTools|ResizeObserver|MutationObserver|createRange/);
 });
@@ -127,12 +133,14 @@ test('mountNavRail: rail and × lead in DOM order, retained HTML reuses its ×, 
     const freshClose = fresh.querySelector('[id="nav-drawer-close"]');
     mountNavRail(fresh);
     const rail = fresh.querySelector('.nav-rail');
-    assert.deepEqual(kids(fresh), ['nav-rail', 'sidebar-head', 'nav-section nav-projects'], 'the rail leads in DOM order');
+    assert.deepEqual(kids(fresh), ['nav-rail', 'sidebar-head', 'nav-section nav-projects', 'sidebar-foot-meta'],
+        'the rail leads in DOM order; the version row is the column\'s foot after the Projects (owner 25.11)');
     assert.deepEqual(kids(rail), ['shell-icon-control nav-drawer-close', 'nav-rail-sections', 'nav-rail-system'], 'the × caps the rail');
     assert.equal(rail.firstElementChild, freshClose, 'the fresh × node is kept in place');
     assert.deepEqual(rail.querySelectorAll('[data-nav-page]').map((row) => row.dataset.navPage), ['circles', 'files', 'widgets', 'dashboard', 'settings']);
     assert.equal(versions(fresh).length, 1);
-    assert.ok(rail.querySelector('.nav-rail-system > .sidebar-foot-meta > [id="nav-version"]'), 'the version row closes the rail\'s foot');
+    assert.ok(fresh.querySelector(':scope > .sidebar-foot-meta > [id="nav-version"]'),
+        'the version row is the sidebar\'s own last child, outside the rail');
     mountNavRail(fresh);
     assert.equal(rail.children.length, 3, 'composed once');
 
@@ -140,7 +148,7 @@ test('mountNavRail: rail and × lead in DOM order, retained HTML reuses its ×, 
     const trailing = railDocument('<div class="sidebar-head"></div><section class="nav-section nav-projects"></section>'
         + '<div class="nav-rail"><button id="nav-drawer-close" class="shell-icon-control nav-drawer-close"></button></div>');
     mountNavRail(trailing);
-    assert.deepEqual(kids(trailing), ['nav-rail', 'sidebar-head', 'nav-section nav-projects']);
+    assert.deepEqual(kids(trailing), ['nav-rail', 'sidebar-head', 'nav-section nav-projects', 'sidebar-foot-meta']);
 
     // v7.7.1 to v7.12: the drawer's head holds the ×, the foot follows the Projects; until v7.11 it holds the version row.
     const previous = railDocument('<div class="sidebar-head"><div class="drawer-head"><button id="nav-drawer-close" class="nav-drawer-close"></button></div></div>'
@@ -150,10 +158,12 @@ test('mountNavRail: rail and × lead in DOM order, retained HTML reuses its ×, 
     const keptClose = previous.querySelector('[id="nav-drawer-close"]');
     mountNavRail(previous);
     const adopted = previous.querySelector('.nav-rail');
-    assert.deepEqual(kids(previous), ['nav-rail', 'sidebar-head', 'nav-section nav-projects'], 'the rail leads in DOM order');
+    assert.deepEqual(kids(previous), ['nav-rail', 'sidebar-head', 'nav-section nav-projects', 'sidebar-foot-meta'],
+        'the rail leads in DOM order; the retained version row is adopted as the column\'s foot');
     assert.equal(previous.querySelector('.sidebar-foot'), null);
     assert.equal(versions(previous).length, 1, 'one #nav-version');
-    assert.equal(adopted.querySelector('.sidebar-foot-meta'), kept, 'the retained version row, adopted');
+    assert.equal(previous.querySelector(':scope > .sidebar-foot-meta'), kept, 'the retained version row, adopted');
+    assert.equal(previous.querySelector('.nav-rail .sidebar-foot-meta'), null, 'the rail holds no version row (owner 25.11)');
     assert.equal(adopted.firstElementChild, keptClose, 'the retained head\'s × node is reused, not recreated');
     assert.equal(previous.querySelectorAll('[id="nav-drawer-close"]').length, 1, 'one #nav-drawer-close');
     assert.equal(previous.querySelector('.drawer-head'), null, 'its emptied row leaves');
@@ -164,10 +174,11 @@ test('mountNavRail: rail and × lead in DOM order, retained HTML reuses its ×, 
         + '<button class="nav-row" data-nav-page="files"></button></div></div><span id="nav-version"></span>');
     const loose = oldest.querySelector('[id="nav-version"]');
     mountNavRail(oldest);
-    assert.deepEqual(kids(oldest), ['nav-rail', 'sidebar-scroll'], 'the rail leads ahead of the preserved wrapper');
+    assert.deepEqual(kids(oldest), ['nav-rail', 'sidebar-scroll', 'sidebar-foot-meta'],
+        'the rail leads ahead of the preserved wrapper; the fresh version row is the column\'s foot');
     assert.equal(oldest.querySelector('.nav-utilities'), null);
     assert.equal(versions(oldest).length, 1);
-    assert.equal(oldest.querySelector('.nav-rail .sidebar-foot-meta > [id="nav-version"]'), loose, 'the lone version, adopted');
+    assert.equal(oldest.querySelector(':scope > .sidebar-foot-meta > [id="nav-version"]'), loose, 'the lone version, adopted into the fresh foot row');
     const synthClose = oldest.querySelector('.nav-rail').firstElementChild;
     assert.equal(synthClose.tagName, 'BUTTON');
     assert.equal(synthClose.id, 'nav-drawer-close', 'v7.7.0 gets a synthesized explicit × first in the rail');

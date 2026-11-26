@@ -1143,8 +1143,8 @@ def envelope_from_task(
     """
     usage = usage or {}
     evidence = _execution_evidence_for_task(task, status)
-    # Unreadable custody log: zero counts are UNKNOWN — no substrate claim, no
-    # reduction amendment (docs/JSDoc contract; omission keeps the enum closed).
+    # Unreadable custody log: zero counts are UNKNOWN (delegate_evidence.py).
+    # Leave the substrate and reduction unclaimed; see ChatOutbound.execution_evidence.
     claimable = evidence is not None and not evidence.get("evidence_read_failed")
     substrate = actual_substrate(evidence) if claimable else ""
     capability_delta = task.get("capability_delta") if isinstance(task.get("capability_delta"), dict) else {}

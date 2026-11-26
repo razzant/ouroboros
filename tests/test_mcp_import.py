@@ -372,20 +372,7 @@ def test_preview_contract_twin_and_the_producer_agree():
     import typing
 
     from ouroboros.gateway import mcp_import_contracts as contracts
-    from tests.test_gateway_parity import _js_typedef_fields
 
-    twin = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "mcp_import_types.js").read_text(
-        encoding="utf-8")
-    for name in contracts.__all__:
-        cls = getattr(contracts, name)
-        hints = typing.get_type_hints(cls, include_extras=True)
-        assert _js_typedef_fields(twin, name) == set(hints), name
-        optional = {field for field, hint in hints.items() if typing.get_origin(hint) is contracts.NotRequired}
-        if not cls.__total__:
-            optional = set(hints)
-        declared = {line.split("}")[-1].split()[0] for line in twin.split(f"@typedef {{Object}} {name}\n")[1]
-                    .split("\n */")[0].splitlines() if "@property {" in line and "=}" in line}
-        assert declared == optional, name
     result = preview({"mcpServers": {"docs": {"url": "https://docs.example/mcp", "headers": {"X-A": "1"}},
                                      "files": {"command": "uvx"}, "bad": 7}}, DRAFT)
     entry_hints = typing.get_type_hints(contracts.MCPImportPreviewEntry, include_extras=True)
@@ -395,9 +382,6 @@ def test_preview_contract_twin_and_the_producer_agree():
     for entry in result["entries"]:
         assert required <= set(entry) <= entry_fields, sorted(set(entry) ^ entry_fields)
     assert set(result) <= set(typing.get_type_hints(contracts.MCPImportPreviewResponse))
-    api_types = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js").read_text(
-        encoding="utf-8")
-    assert "mcp_import_types.js" in api_types.splitlines()[0]
     from ouroboros.gateway.endpoint_index import HTTP_ENDPOINTS
     assert "POST /api/mcp/import/preview" in HTTP_ENDPOINTS
     # The gateway's derived ingress schema reads the twin like any contract TypedDict.

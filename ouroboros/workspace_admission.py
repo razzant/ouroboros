@@ -43,12 +43,34 @@ class WorkspaceRootError(ValueError):
     """A workspace_root that is missing, overlapping, or has invalid Git geometry."""
 
 
-def has_git_metadata(root: pathlib.Path) -> bool:
-    """Match Git's ancestor search, including an explicitly selected ceiling."""
-    ceilings = {pathlib.Path(p).resolve() for p in
-                os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep) if p}
+def has_git_metadata(root: pathlib.Path, *, mount_boundary: Optional[pathlib.Path] = None) -> bool:
+    """Match Git's ancestor search. ``GIT_CEILING_DIRECTORIES`` reads as Git's setup.c
+    (``canonicalize_ceiling_entry``) does: only absolute entries count; an entry before an empty
+    one is resolved (dropped if it cannot be), one after it is compared literally in Git's own
+    ``/`` spelling. A ceiling is excluded with its ancestors and only as a strict ancestor of
+    ``root``. A ``mount_boundary`` Git reported stops the search separately, at the strict ancestor
+    that is the same physical directory (``workspace_copies.same_directory``): Git names that folder
+    physically, so another spelling of it (a case alias) stops the search too."""
+    from ouroboros.workspace_copies import same_directory
+
+    resolved: set = set()
+    literal: set = set()
+    after_empty = False
+    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
+        if not entry:
+            after_empty = True
+        elif not os.path.isabs(entry):
+            continue
+        elif after_empty:  # Git drops one trailing slash and nothing else ("//", ".", ".." stay)
+            literal.add(entry[:-1] if len(entry) > 1 and entry.endswith("/") else entry)
+        else:
+            try:  # strict, as Git drops an entry it cannot resolve (a missing end names no ancestor)
+                resolved.add(pathlib.Path(entry).resolve(strict=True))
+            except (OSError, RuntimeError):
+                continue
     for parent in (root, *root.parents):
-        if parent != root and parent in ceilings:
+        if parent != root and (parent in resolved or parent.as_posix() in literal or (
+                mount_boundary is not None and same_directory(parent, mount_boundary))):
             break
         if (parent / ".git").exists() or (parent / ".git").is_symlink():
             return True

@@ -209,15 +209,15 @@ test('measurePinnedBars sets data-rail-crowd from natural rail groups, independe
         assert.equal(attrs.has('data-rail-crowd'), crowded, `${height}px around the 370px rail + 12px bottom padding edge`);
     }
 
-    // Update pill + close control grows .nav-rail-system from 152px -> 216px (natural height 434px vs 408px room).
+    // Taller rail controls grow the sections group from 140px -> 204px (434px vs 408px room).
     sidebar.clientHeight = 420;
     fire();
     assert.equal(attrs.has('data-rail-crowd'), false);
-    system.h = 216;
+    sections.h = 204;
     fire();
-    assert.equal(attrs.has('data-rail-crowd'), true, 'update notice growth tips the rail into crowd');
+    assert.equal(attrs.has('data-rail-crowd'), true, 'growth inside the rail tips it into crowd');
     assert.equal(attrs.has('data-bars-crowd'), false);
-    system.h = 152;
+    sections.h = 140;
     fire();
     assert.equal(attrs.has('data-rail-crowd'), false);
 

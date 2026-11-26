@@ -125,6 +125,21 @@ def stamp_display(msg: Dict[str, Any]) -> Dict[str, Any]:
     return msg
 
 
+def split_message_reasoning(message: Dict[str, Any]) -> None:
+    """Separate leading reasoning on compatible/native text replies using the local reader."""
+    if message.get("tool_calls"):
+        stamp_display(message)
+        return
+    if (not isinstance(message.get("content"), str)
+            or any(message.get(key) for key in ("reasoning_content", "reasoning", "reasoning_details"))):
+        return
+    answer, reasoning = _split_leading_reasoning(message["content"])
+    if answer != message["content"]:
+        message["content"] = answer
+        if reasoning:
+            message["reasoning"] = reasoning
+
+
 def _code_spans(text: str) -> List[Tuple[int, int]]:
     """``(start, end)`` of closed fenced blocks and one-line inline code spans, in order and in linear time.
 

@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import subprocess
 import threading
 import time
@@ -102,6 +103,86 @@ def serving_alias_root(ctx: Any, root: Any) -> Optional[pathlib.Path]:
 
 def _git(cwd: Any, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     return _wt._git(pathlib.Path(cwd), *args, check=check)
+
+
+# Git's own whole plain discovery miss (normal, or at a filesystem boundary), read in a
+# probe-local C locale so a localized build can neither hide the miss nor turn some
+# other failure into "no repository"; a diagnostic that merely starts like it is not it.
+# At a filesystem boundary Git names the first parent it did NOT search (setup.c shortens
+# to the parent and stops on its other device before checking its .git).
+_PROBE_NO_REPO = re.compile(  # die() ends its message with exactly one newline
+    r"fatal: not a git repository (?:\(or any of the parent directories\): \.git"
+    r"|\(or any parent up to mount point (?P<unsearched>[^\n]+)\)\n"
+    r"Stopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.)\n")
+_PROBE_LOCALE = {"LC_ALL": "C", "LANG": "C", "LANGUAGE": "C"}
+# Trace targets that config can also enable; "0" in the environment overrides config.
+_TRACE2_TARGETS = ("GIT_TRACE2", "GIT_TRACE2_PERF", "GIT_TRACE2_EVENT")
+# Git for Windows reroutes a child's whole stream per these (git(1) on Windows: a path, "off",
+# and "2>&1" on stderr), so a setting inherited from the owner's shell reads the miss off the
+# captured pipe, into stdout or a named file. Absent, as on every plain install, Git writes the
+# handles it was spawned with: this probe's normal capture environment.
+_REDIRECT_VARS = ("GIT_REDIRECT_STDOUT", "GIT_REDIRECT_STDERR")
+
+
+def _probe_env() -> Dict[str, str]:
+    """This one read's environment: C locale, Git tracing off and Git for Windows' stream
+    redirection off, as review capture does for its listing, so requested trace lines or
+    rerouted streams cannot hide the canonical miss. Every other Git command keeps the
+    owner's tracing and redirection."""
+    quiet = {key: "0" for key in (*os.environ, *_TRACE2_TARGETS) if key.startswith("GIT_TRACE")}
+    env = _wt._host_env(**_PROBE_LOCALE, **quiet)
+    for key in _REDIRECT_VARS:
+        env.pop(key, None)
+    return env
+
+
+def _serving_worktree(serving: Any) -> bool:
+    """Whether the serving checkout is the root of its own Git working tree, by one Git read.
+
+    False only for Git's whole plain discovery miss (nothing on stdout, the canonical stderr) with
+    no ``.git`` where Git searched (``workspace_admission.has_git_metadata``, bounded by a
+    filesystem boundary Git names and by ``GIT_CEILING_DIRECTORIES`` as Git reads it):
+    a wheel/image install, the disclosed in-place contract. Anything else refuses
+    ``CANDIDATE_UNAVAILABLE`` and never provisions (#4277): a folder inside another
+    repository's working tree (no packaging contract proves an in-place install there),
+    a directory Git answers is outside the working tree (``false``), a probe Git failed
+    (its redacted diagnostic; stdout when stderr is empty) or one that could not run (its
+    error class only, never the raw exception).
+    """
+    from ouroboros.workspace_admission import _git_root_probe_failure, has_git_metadata, kept_path
+
+    # Git on macOS reads its cwd as the spelling the volume keeps (getcwd) and compares a
+    # GIT_CEILING_DIRECTORIES entry against that spelling literally, so the confirmation
+    # walks in Git's own frame (``kept_path``): a case-respelled address cannot extend the
+    # metadata search past a configured ceiling, and an entry spelled in another case keeps
+    # not matching, exactly as Git treats it. Elsewhere kept_path is the resolved spelling,
+    # so this changes nothing off macOS.
+    checkout = kept_path(pathlib.Path(serving).resolve(strict=False))
+    refusal = f"no candidate can be prepared and nothing was edited in place: the serving body at {checkout}"
+    try:  # --show-prefix: empty at a working tree's root, the path below it when nested
+        probe = _wt._git(checkout, "rev-parse", "--is-inside-work-tree", "--show-prefix",
+                         check=False, env=_probe_env())
+    except (OSError, subprocess.SubprocessError) as exc:  # the raw exception may name paths
+        raise CandidateRefused("CANDIDATE_UNAVAILABLE", f"{refusal} could not be probed ({type(exc).__name__}).") from exc
+    answer = (probe.stdout or "").split("\n")  # Git's whole answer: its word, its prefix line, then nothing
+    if probe.returncode == 0 and len(answer) == 3 and answer[0] == "true" and answer[2] == "":
+        if not answer[1]:
+            return True
+        raise CandidateRefused(
+            "CANDIDATE_UNAVAILABLE",
+            f"{refusal} is a folder inside another repository's Git working tree, not its root, and "
+            f"no packaging contract proves an in-place install there.")
+    stderr = probe.stderr or ""
+    miss = _PROBE_NO_REPO.fullmatch(stderr) if probe.returncode == 128 and not probe.stdout else None
+    unsearched = pathlib.Path(miss["unsearched"]).resolve(strict=False) if miss and miss["unsearched"] else None
+    if miss and not has_git_metadata(checkout, mount_boundary=unsearched):
+        return False
+    if probe.returncode == 0 and answer[0] == "false":
+        raise CandidateRefused("CANDIDATE_UNAVAILABLE",
+                               f"{refusal} is outside the Git working tree, by Git's own answer.")
+    diagnostic = _git_root_probe_failure(subprocess.CompletedProcess(  # stdout stands in for empty stderr
+        probe.args, probe.returncode, probe.stdout, stderr or probe.stdout or ""))
+    raise CandidateRefused("CANDIDATE_UNAVAILABLE", f"{refusal} could not be confirmed a Git working tree ({diagnostic}).")
 
 
 def _rows(data_dir: Optional[Any] = None, *, op: str = "", strict: bool = False) -> List[Dict[str, Any]]:
@@ -231,7 +312,7 @@ def _event(data_dir: Optional[Any], kind: str, **fields: Any) -> None:
 def _provision(serving: pathlib.Path, owner: str, data_dir: Optional[Any]) -> Dict[str, Any]:
     """A new candidate at the serving HEAD commit: row first, then the admin dir."""
     serving = serving.resolve()
-    if _git(serving, "rev-parse", "--is-inside-work-tree", check=False).returncode != 0:
+    if not _serving_worktree(serving):
         raise CandidateRefused(
             "CANDIDATE_UNAVAILABLE",
             f"the serving body at {serving} is not a Git working tree, so no candidate can be prepared.")
@@ -815,7 +896,7 @@ def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> CandidateRefuse
     if not applies or _refusal_before_prepare(ctx) is not None:
         return None
     try:
-        if _git(serving_repo_dir_for(ctx), "rev-parse", "--is-inside-work-tree", check=False).returncode != 0:
+        if not _serving_worktree(serving_repo_dir_for(ctx)):
             return None  # no Git body (wheel/image install): the legacy in-place contract, disclosed in the map
         bound = prepare(ctx)
     except CandidateRefused as exc:

@@ -10,7 +10,9 @@ REPO = Path(__file__).resolve().parents[1]
 ANSWER = "Привет! Я на месте и отвечаю обычным сообщением."
 
 
-def _episode(tmp_path, monkeypatch, server):
+def _episode(tmp_path, monkeypatch, server, *, chat="first-contact", direct=False):
+    """``chat``: a further conversation of the same installation (one data folder and evidence store) when called
+    again on the same ``tmp_path``; ``direct``: an owner's Chat message, as ``agent`` marks it (``_is_direct_chat``)."""
     from ouroboros import config, context, context_health, usage_accounting as ua
     from ouroboros.memory import Memory
     from ouroboros.tools.registry import ToolRegistry
@@ -18,18 +20,20 @@ def _episode(tmp_path, monkeypatch, server):
     repo, drive = tmp_path / "repo", tmp_path / "data"
     for name in ("prompts/SYSTEM.md", "BIBLE.md", "docs/ARCHITECTURE.md", "docs/DEVELOPMENT.md"):
         (repo / name).parent.mkdir(parents=True, exist_ok=True)
-        if (REPO / name).exists():
+        if (REPO / name).exists() and not (repo / name).exists():
             shutil.copyfile(REPO / name, repo / name)
-    if (REPO / "docs/architecture").is_dir():
+    if (REPO / "docs/architecture").is_dir() and not (repo / "docs/architecture").exists():
         shutil.copytree(REPO / "docs/architecture", repo / "docs/architecture")
-    if (REPO / "docs/development").is_dir():
+    if (REPO / "docs/development").is_dir() and not (repo / "docs/development").exists():
         shutil.copytree(REPO / "docs/development", repo / "docs/development")
+    # The fake server shows no program (its /props answers 404): the owner's consent for its address lets Main send.
     cfg = keyless_settings(server, OUROBOROS_CONTEXT_MODE="max", OUROBOROS_REASONING_SUMMARY="off",
-                           OUROBOROS_CONSCIOUSNESS_SAFETY_MODE="off")
+                           OUROBOROS_CONSCIOUSNESS_SAFETY_MODE="off",
+                           OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED=server.base_url)
     for key, value in cfg.items():
         if isinstance(value, (str, int, float)):
             monkeypatch.setenv(key, str(value))
-    drive.mkdir(parents=True)
+    drive.mkdir(parents=True, exist_ok=True)
     (drive / "settings.json").write_text(json.dumps(cfg), encoding="utf-8")
     monkeypatch.setattr(config, "SETTINGS_PATH", drive / "settings.json")
     monkeypatch.setattr(config, "DATA_DIR", drive)
@@ -38,13 +42,13 @@ def _episode(tmp_path, monkeypatch, server):
     monkeypatch.setenv("OUROBOROS_REPO_DIR", str(repo))
     monkeypatch.setattr(ua, "estimate_cost_optional", lambda *_a, **_kw: 0.0)
     monkeypatch.setattr(context_health, "_stray_server_note", lambda *_: "")
-    (drive / "memory").mkdir(parents=True)
+    (drive / "memory").mkdir(parents=True, exist_ok=True)
     (drive / "memory/WORLD.md").write_text("A test machine.", encoding="utf-8")  # no operator profiler at ensure_files
     memory = Memory(drive_root=drive, repo_dir=repo)
     memory.ensure_files()
     registry = ToolRegistry(repo_dir=repo, drive_root=drive)
-    task = {"id": "first-contact", "type": "task", "text": "Привет! Ты на связи?", "model": MOCK_SLUG,
-            "budget_drive_root": str(drive)}
+    task = {"id": chat, "type": "task", "text": "Привет! Ты на связи?", "model": MOCK_SLUG,
+            "budget_drive_root": str(drive), **({"_is_direct_chat": True} if direct else {})}
     registry._ctx.task_id = task["id"]
     registry._ctx.task_metadata = task
     registry._ctx.budget_drive_root = drive

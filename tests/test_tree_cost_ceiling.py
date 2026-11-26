@@ -101,6 +101,24 @@ class TestCacheAwareReservation:
         warm = usage_accounting._reservation_cost(_request(task_id="t1"))
         assert warm is not None and warm < cold
 
+    @pytest.mark.parametrize("reported", [None, 0])
+    def test_next_reservation_loses_the_previous_warm_split(self, tmp_path, reported):
+        request = _request(task_id="next", root_task_id="next", drive_root=tmp_path)
+        cold = usage_accounting._reservation_cost(request)
+        key = {"provider": request.provider, "ttl_seconds": 300}
+        usage_accounting.stash_task_cache_split("next", request.model, 95000, **key)
+        assert usage_accounting._reservation_cost(request) < cold
+        scope = usage_accounting.UsageScope(task_id="next", root_task_id="next", drive_root=tmp_path)
+        with usage_accounting.usage_scope(scope):
+            reservation = usage_accounting.reserve_attempt(request)
+            usage_accounting.mark_dispatched(reservation)
+            usage = {"prompt_tokens": 100000, "completion_tokens": 1}
+            if reported is not None:
+                usage["cached_tokens"] = reported
+            usage_accounting.settle_attempt(reservation, usage)
+        assert usage_accounting.last_task_cache_split("next", request.model, provider=request.provider) == reported
+        assert usage_accounting._reservation_cost(request) == cold
+
     def test_applied_compaction_makes_the_next_reservation_cold(self, monkeypatch, tmp_path):
         from ouroboros import loop
 

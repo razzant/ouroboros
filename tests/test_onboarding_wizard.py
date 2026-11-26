@@ -331,6 +331,62 @@ def test_prepare_onboarding_settings_accepts_openai_compatible_setup():
     assert prepared["OUROBOROS_MODEL"] == "openai-compatible::llama3"
 
 
+def test_setup_saves_the_compatible_consent_as_the_id_of_the_address_it_names():
+    """The first-run screen's consent box rides the draft as ``OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED`` (the base URL
+    as typed). Completion saves it as the id of that address, as Settings does (``llm_ollama_guard.consent_token``),
+    withdraws it when the body sends it empty, keeps a saved one for a client that does not know the field, and never
+    takes it for access: an address nobody can send to is still no provider."""
+    from ouroboros.llm_ollama_guard import CONSENT_LABEL, consent_token
+
+    address = "http://gateway.lan:8080/v1"
+    key = "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED"
+    field = next(row for row in build_setup_contract("web")["providerFields"] if row["settingKey"] == key)
+    assert field["label"] == CONSENT_LABEL, "the contract, the box and the refusal's words name the consent alike"
+    payload = {**_base_payload(), "OPENAI_COMPATIBLE_BASE_URL": address, "OUROBOROS_MODEL": "openai-compatible::any",
+               "OUROBOROS_MODEL_LIGHT": "openai-compatible::any", "OUROBOROS_MODEL_FALLBACKS": ""}
+    prepared, error = prepare_onboarding_settings({**payload, key: address}, {})
+    assert error is None and prepared[key] == consent_token(address) != address, "saved as the id of the address, never the address"
+    # The id read back and posted again stays; the typed address of a saved one names the same id.
+    saved = {"OPENAI_COMPATIBLE_BASE_URL": address, key: prepared[key]}
+    assert prepare_onboarding_settings({**payload, key: prepared[key]}, saved)[0][key] == consent_token(address)
+    assert prepare_onboarding_settings({**payload, key: address}, saved)[0][key] == consent_token(address)
+    # An older client keeps what is saved; an empty value is the withdrawal.
+    assert prepare_onboarding_settings(payload, saved)[0][key] == consent_token(address)
+    assert prepare_onboarding_settings({**payload, key: ""}, saved)[0][key] == ""
+    # Another address was typed: the consent the box carries names that address, never the old one's.
+    other = "http://other.lan:8080/v1"
+    moved = prepare_onboarding_settings({**payload, "OPENAI_COMPATIBLE_BASE_URL": other, key: other}, saved)[0]
+    assert moved[key] == consent_token(other) and moved[key] != consent_token(address)
+    # A consent alone connects nothing.
+    alone, refused = prepare_onboarding_settings({**_base_payload(), key: address}, {})
+    assert alone == {} and refused == "Connect Codex, an API provider, or a local model before continuing."
+    # The setup state starts without one, so a client that maps the contract sends none.
+    state = build_setup_bootstrap({}, "web")["initialState"]
+    assert state["compatibleContinueUnconfirmed"] == ""
+    assert build_setup_bootstrap(saved, "web")["initialState"]["compatibleContinueUnconfirmed"] == consent_token(address)
+    # The box stands for the address shown: a saved consent that names another address is not mounted as given, on
+    # the built-in key or a row, so a token alone never ticks it and the owner can give one for the address they see.
+    rows = [{"kind": "openai-compatible", "name": name, "base_url": url, "continue_unconfirmed": consent_token(address)}
+            for name, url in (("stands", address), ("moved", other))]
+    stale = build_setup_bootstrap({**saved, "OPENAI_COMPATIBLE_BASE_URL": other, "OUROBOROS_CONNECTIONS": rows}, "web")
+    assert stale["initialState"]["compatibleContinueUnconfirmed"] == ""
+    assert [row.get("continue_unconfirmed", "") for row in stale["initialState"]["connections"]] == [consent_token(address), ""]
+    assert [row["continue_unconfirmed"] for row in rows] == [consent_token(address)] * 2, "the saved rows are not edited"
+
+
+def test_a_named_rows_consent_is_saved_as_the_id_of_its_address_and_never_with_the_default_keys():
+    """A key added in the first-run card keeps its own consent in its row (``continue_unconfirmed``), canonical like the
+    built-in one, and the built-in key's consent is another field."""
+    from ouroboros.llm_ollama_guard import consent_token
+
+    address = "http://gateway.lan:8080/v1"
+    row = {"kind": "openai-compatible", "name": "lab", "base_url": address, "continue_unconfirmed": address}
+    prepared, error = prepare_onboarding_settings({**_base_payload(), "OUROBOROS_CONNECTIONS": [row]}, {})
+    assert error is None
+    assert prepared["OUROBOROS_CONNECTIONS"] == [{**row, "continue_unconfirmed": consent_token(address)}]
+    assert prepared.get("OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED", "") == ""
+
+
 def test_prepare_onboarding_settings_accepts_empty_light():
     """Role-model (v6.39): only Main is required; empty Light falls back to Main, so
     the owner is not forced to fill every slot (mirrors the relaxed JS validateModelsStep
@@ -529,6 +585,7 @@ def test_setup_contract_groups_rarely_used_providers():
         "ANTHROPIC_API_KEY": "primary",
         "OPENAI_COMPATIBLE_BASE_URL": "more",
         "OPENAI_COMPATIBLE_API_KEY": "more",
+        "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED": "more",
     }
 
 

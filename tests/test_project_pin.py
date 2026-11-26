@@ -2,7 +2,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
 import pathlib
-import re
 import typing
 
 import pytest
@@ -10,11 +9,9 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from ouroboros.gateway.client_contracts import ProjectUpdateRequest
-from ouroboros.gateway.contracts import ProjectEntry
 from ouroboros.gateway.router import collect_routes
 from ouroboros.gateway.schema import validate_ingress
 from ouroboros import projects_registry as registry
-from tests.test_gateway_parity import _js_typedef_fields, _js_typedef_properties
 
 WEB_MODULES = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules"
 
@@ -129,8 +126,8 @@ def test_legacy_and_concurrent_partial_updates_keep_neighbour_fields(pin_client)
     assert [registry.get_project(root, pid)["name"] for pid in ("alpha", "beta")] == ["alpha", "beta"]
 
 
-def test_pin_contract_is_optional_partial_and_mirrored_in_jsdoc(pin_client):
-    """The served ABI, its ingress validator and both JSDoc twins agree: pinned is an optional
+def test_pin_contract_is_optional_and_update_is_partial(pin_client):
+    """The served ABI and its ingress validator agree: pinned is an optional
     strict boolean on the row, and an update names name and/or pinned (the handler requires one)."""
     client, _ = pin_client
     document = client.get("/api/contract").json()
@@ -151,11 +148,6 @@ def test_pin_contract_is_optional_partial_and_mirrored_in_jsdoc(pin_client):
         assert validate_ingress(body, ProjectUpdateRequest) == [], body
     for value in ("true", 1, 0, None, [], {}):
         assert validate_ingress({"pinned": value}, ProjectUpdateRequest) == ["pinned must be a JSON boolean"], value
-    rows = (WEB_MODULES / "api_types.js").read_text(encoding="utf-8")
-    assert _js_typedef_fields(rows, "ProjectEntry") == set(typing.get_type_hints(ProjectEntry))
-    assert re.search(r"@typedef \{Object\} ProjectEntry\b[^/]*?@property \{boolean=\} pinned\b", rows, re.S)
-    twin = (WEB_MODULES / "client_contract_types.js").read_text(encoding="utf-8")
-    assert _js_typedef_properties(twin, "ProjectUpdateRequest") == {("string=", "name"), ("boolean=", "pinned"), ("boolean=", "closed")}
     assert set(typing.get_type_hints(ProjectUpdateRequest)) == {"name", "pinned", "closed"}
     assert not ProjectUpdateRequest.__required_keys__
 

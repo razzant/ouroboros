@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ouroboros.config import runtime_setting
+from ouroboros.config import NETWORK_WAIT_BACKOFF_MAX_SEC, get_finalization_grace_sec, runtime_setting  # noqa: F401 - get_finalization_grace_sec: legacy monkeypatch seam
 
 import contextlib
 import hashlib
@@ -21,7 +21,6 @@ from ouroboros.llm_observability import (
     host_step, persist_observed_call, record_main_request, record_main_response, round_receipt,
 )
 from ouroboros.context_timing import timed
-from ouroboros.config import get_finalization_grace_sec, NETWORK_WAIT_BACKOFF_MAX_SEC  # noqa: F401 - legacy monkeypatch seam
 from ouroboros.deadline_utils import (
     owner_deadline_exhausted,
     main_transport_timeout_sec as _main_transport_timeout,
@@ -735,6 +734,7 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
     if isinstance(exc, ProcessingNotStarted):
         return LlmErrorClassification("provider_error", False, _exception_status_code(exc))
     if getattr(exc, "stream_rejected", False): return LlmErrorClassification("provider_error", False)  # complete wire judged unusable: a local verdict, never a same-model repeat
+    if str(getattr(exc, "code", "")).startswith("ollama_") and hasattr(exc, "retryable"): return LlmErrorClassification(exc.kind, exc.retryable, _exception_status_code(exc), exc.code)  # native Ollama verdicts (llm_ollama_wire) type their own repeat
     if getattr(exc, "code", "") == "model_outcome_unknown":
         return LlmErrorClassification("provider_outcome_unknown", False)
     if codex_content_policy_denial(exc):
@@ -891,12 +891,13 @@ def _record_llm_call_error(
             "route": dict(getattr(error, "route", {}) or {}), "outcome": "unknown",
             "request_ref": ctx.request_ref.get("manifest_ref") if ctx.request_ref else None,
             **({"processing_refusal_conflict": True} if tier_conflict else {}),
+            **({"retain_partial_reply": True} if getattr(error, "retain_partial_reply", False) else {}),
             **({"same_operation_recoverable": True} if getattr(error, "same_operation_recoverable", False) else {}),
         }
         # Only an explicit low-level repeat budget repeats here; each running turn's
         # new generation belongs to the round's recovery (its continuation and the configured routes).
         if (
-            not tier_conflict and is_retryable_transport_death(error)
+            not tier_conflict and not getattr(error, "retain_partial_reply", False) and is_retryable_transport_death(error)
             and repeats < ctx.transport_death_retries and ctx.attempt < ctx.transient_budget - 1
         ):
             backoff = _TRANSPORT_DEATH_BACKOFF_SEC[min(repeats + 1, len(_TRANSPORT_DEATH_BACKOFF_SEC)) - 1]
@@ -1149,6 +1150,9 @@ def _record_round_cache_facts(
     accumulated_usage["_last_round_cache_usage"] = {  # also this accepted call's own money, as its producer stated it
         "round": round_idx, "model": model, "provider": provider, "billing": (usage.get("cost_evidence") or {}).get("billing"),
         **{key: usage.get(key) for key in ("prompt_tokens", "cached_tokens", "cache_write_tokens", "cost", "cost_final")},
+        **({"capacity_input_tokens": usage["capacity_input_tokens"]} if usage.get("capacity_input_tokens") is not None else {}),
+        # The native load statement it was dispatched under, a pair (what it binds: context_anchor.record_input_anchor).
+        **({"ollama_load_statement": list(pair)} if isinstance(pair := usage.get("ollama_load_statement"), (list, tuple)) and len(pair) == 2 else {}),
         "finished_at": time.time(), **served_account_fields(usage, earlier, provider, model),  # wall clock: survives a restart
         REPORTED_TOKENS_KEY: reported}  # cache routing reads the billing-shaped counters above; route facts these
     settle_rewrite_reread(accumulated_usage)  # this answer measures the history change it carried
@@ -1223,6 +1227,8 @@ def _take_response_facts(usage: Dict[str, Any], msg: Dict[str, Any], accumulated
                   "_last_llm_provider_fields", "_last_llm_provider_answer", "_last_llm_provider_message_cut", "_last_llm_resource_refusal",
                   "_last_llm_output_exhausted", "_last_llm_attempt_custody", "_last_llm_size_refusal"):
         accumulated_usage.pop(stale, None)
+    from ouroboros.loop_transport import take_route_facts
+    take_route_facts(usage, accumulated_usage)
     receipts = pop_custom_validation_receipts(usage, msg["tool_calls"] if isinstance(msg.get("tool_calls"), list) else [])
     accumulated_usage.pop(CUSTOM_RECEIPTS_USAGE_KEY, None)
     if receipts:
@@ -1349,6 +1355,8 @@ def call_llm_with_retry(
     owner = current_model_wait()
     activity_attempt = task_attempt if task_attempt is not None or not owner or owner.task_id != task_id else owner.attempt
     response_cache_bypass_requested, send_messages = False, None
+    from ouroboros.loop_transport import note_route_caution
+    route_caution = (None, False, "")  # a failed send's caution, whether it was withheld and its route; noted when no answer came
     for attempt in range(transient_budget):
         letter = letter_send if attempt == 0 else None
         account = (letter.route.get("credential_profile_id") or model_account_override) if letter else model_account_override
@@ -1545,6 +1553,10 @@ def call_llm_with_retry(
             _emit_main_llm_call_state(event_queue, call_identity, "failed")
             raise  # Monetary/ledger rails are not provider failures.
         except Exception as e:
+            if getattr(e, "route_caution_used", None):  # an earlier send of the call went on that route
+                note_route_caution(accumulated_usage, e.route_caution_used[0], route=e.route_caution_used[1])
+            if getattr(e, "route_caution", None):
+                route_caution = (e.route_caution, bool(getattr(e, "route_withheld", False)), getattr(e, "route_caution_key", ""))
             if letter:
                 capture = _own_capture(physical_attempt_capture_from_exception(e), prior)
                 if letter.settle(capture) and not local_consideration:  # provably unsent: the plain request goes
@@ -1577,4 +1589,5 @@ def call_llm_with_retry(
                 call_identity,
             ):
                 break
+    note_route_caution(accumulated_usage, route_caution[0], withheld=route_caution[1], route=route_caution[2])
     return None, 0.0

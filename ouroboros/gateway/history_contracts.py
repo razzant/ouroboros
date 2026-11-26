@@ -3,8 +3,7 @@
 ``GET /api/chat/history`` projects the dialogue store's stored chat and progress rows
 (``state/dialog.sqlite``) plus a few synthesized ones (``gateway/history.py``); ``GET /api/chat/search``
 reads a room's saved messages for a word search (``gateway/chat_search.py``); ``GET /api/recall`` is the
-neighbour door over the words reader (``gateway/recall.py``; its JSDoc twins are
-``web/modules/recall_contract_types.js``). The JSDoc twin of the rest is ``web/modules/client_contract_types.js``.
+neighbour door over the words reader (``gateway/recall.py``).
 """
 
 from __future__ import annotations
@@ -134,6 +133,7 @@ class PlaceHistoryFacts(TypedDict, total=False):
     non_text: List[Dict[str, str]]  # the connector's {kind, description} beside the words (kind state_change: a change), never speech
 
 
+# `ts` is the publication time.
 class HistoricalTerminal(TypedDict, total=False):
     """Facts frozen on one published ending. Its publication time and observed end time are separate."""
 
@@ -204,16 +204,16 @@ class PeerLetterCardFact(TypedDict, total=False):
     state: Required[Literal["accepted_running", "needs_input", "waiting_owner", "done", "failed", "cancelled",
                             "refused", "not_sent", "unconfirmed", "unknown"]]
     text_chars: int
-    phase: str
-    refusal_code: str
+    phase: str  # queued and running distinguish what the receiver reported after acceptance
+    refusal_code: str  # typed refusal at the receiver or why the letter was not sent from here
     error: str
     error_chars: int
-    at: str
+    at: str  # ISO timestamp of the letter as recorded on its first fact
     question: PeerLetterPart
     answered: PeerLetterPart
     stop: Literal["requested", "refused", "unverified"]
     reply: Literal["given", "none", "held", "unknown"]
-    held: str
+    held: str  # the receiver's hold code when reply is held
     answer: Optional[str]
     answer_chars: int
 
@@ -242,7 +242,7 @@ class ChatHistoryMessage(HostNoticeField, AgentNoteFields, total=False):
     row_address: str
     reply_excerpt_disabled: bool
     reply_author_label: str  # whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
-    row_client_message_id: str  # a row's own saved name (outgoing rows; host-fact ingress such as a call's opening)
+    row_client_message_id: str  # a row's own saved name (outgoing rows; host-fact ingress such as a call's opening); on an outgoing row, the same as its client_message_id
     reply_to: ChatReplyReference
     relay: Dict[str, Any]
     reply_to_relay: str
@@ -258,12 +258,14 @@ class ChatHistoryMessage(HostNoticeField, AgentNoteFields, total=False):
     ingress_accepted: bool
     ingress_dispatched: bool
     ingress_pending: bool
+    # ChatAttachmentView on owner rows; QuizAnswerFile on project_question_pointer.
     attachments: List[Union[ChatAttachmentView, QuizAnswerFile]]
     text_placeholder: bool
     chat_annotation: Dict[str, Any]  # the routing outcome shown on an owner message
     origin_id: str
     source_row_address: str  # the physical original of a retained copy, even outside this store
     origin_projected: bool  # a Project's start message rebuilt from its binding's own copy
+    # retained card input, not bubble text.
     opening_input_kind: Literal["owner_press", "owner_card_input", "owner_quiz_answer", "owner_mailbox"]
     chat_id: int  # on that copy: the room its original was written in (its receipt's room)
     msg_type: Literal["document", "photo", "video", "links", "quiz", "card"]

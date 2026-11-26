@@ -132,8 +132,10 @@ def test_git_catalog_schema_bytes_and_handler_owners_are_stable():
     # resumes its paid gate; a predecessor's (or any with a different index) is read back without staging or
     # committing; author_disposition is the caller's own decision on the current bytes; continue_seats sends over
     # the original reviewed subject. That one property's text is the only change from f2341717….
+    # #4275: both aliases' tool and preflight_reviewer descriptions reserve a new panel's wave
+    # before buying an early look. Only those four strings changed from 263fd1d7….
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "263fd1d7deba9540d5165959eff4bf628e25c8a89e7a69c62f2fbbf05c36e587"
+        "a5f5cf9538c7dc4b3cc850964ba02ab086e46ba423e44b34b742ae2abf46580e"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

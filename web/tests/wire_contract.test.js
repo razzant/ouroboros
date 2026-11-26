@@ -88,30 +88,18 @@ test('every accounting field the costs page reads is a field the history endpoin
     assert.match(taskResults, /COST_OPENNESS_FIELDS/);
 });
 
-test('the update letter typedef promises exactly the fields the projection emits', () => {
-    const typedef = moduleFile('api_types.js');
-    const start = typedef.indexOf('@typedef {Object} UpdateLetter');
-    assert.notEqual(start, -1, 'UpdateLetter typedef not found — update this test');
-    const end = typedef.indexOf('*/', start);
-    assert.notEqual(end, -1, 'UpdateLetter typedef closer not found — update this test');
-    const promised = new Set(
-        [...typedef.slice(start, end).matchAll(/@property \{[^\n]*?\} ([a-z_]+)/g)].map((m) => m[1]),
-    );
-    // What the server emits: the keys of project_letter's return dict.
-    const py = repoFile('ouroboros/update_letter.py');
-    const fn = py.indexOf('def project_letter(');
-    assert.notEqual(fn, -1, 'project_letter not found — update this test');
-    const ret = py.indexOf('return {', fn);
-    const retEnd = py.indexOf('\n    }\n', ret);
-    assert.ok(ret > -1 && retEnd > -1, 'project_letter return dict not found — update this test');
-    const emitted = new Set([...py.slice(ret, retEnd).matchAll(/^\s+"([a-z_]+)":/gm)].map((m) => m[1]));
-    assert.ok(promised.size >= 8 && emitted.size >= 8, 'too few fields found — the regex or the source moved');
-    assert.deepEqual([...promised].sort(), [...emitted].sort());
-    // …and the panel reads nothing the typedef does not promise.
-    const read = new Set([...moduleFile('updates.js').matchAll(/\bletter\.([a-z_]+)/g)].map((m) => m[1]));
+test('the Updates panel reads only fields the published update letter shape declares', () => {
+    // The producer half — project_letter's returned keys against the published UpdateLetter — is
+    // checked by executing it in tests/test_gateway_client_contract.py
+    // (test_published_update_status_letter_matches_the_real_projection); this side keeps the
+    // distinct reader check: every field the panel reads must be declared on the public shape.
+    const promised = pythonClassFields(repoFile('ouroboros/gateway/management_contracts.py'), 'UpdateLetter');
+    assert.ok(promised.size >= 8, 'too few fields found — the regex or the source moved');
+    // Ordinary and optional-chained reads on the panel must both be in that shape.
+    const read = new Set([...moduleFile('updates.js').matchAll(/\bletter\??\.([a-z_]+)/g)].map((m) => m[1]));
     assert.ok(read.size >= 6, 'no letter reads found — the regex or the module moved');
     const unknown = [...read].filter((field) => !promised.has(field));
-    assert.deepEqual(unknown, [], `updates.js reads letter fields the typedef does not promise: ${unknown}`);
+    assert.deepEqual(unknown, [], `updates.js reads letter fields the public shape does not declare: ${unknown}`);
 });
 
 test('the live progress path forwards every progress field the endpoint emits and the chat UI consumes', () => {
@@ -301,7 +289,6 @@ test('delivered photo, video, and document rows keep their replay wire fields', 
 test('live structured delivery frames keep additive grouping and size fields', () => {
     const bus = repoFile('supervisor/message_bus.py');
     const contracts = repoFile('ouroboros/gateway/contracts.py');
-    const types = moduleFile('api_types.js');
 
     // Every structured delivery frame declares the shared stored-row identity, directly or through its family's base.
     const reference = pythonClassFields(repoFile('ouroboros/gateway/reference_contracts.py'), 'ChatReferenceFields');
@@ -310,7 +297,6 @@ test('live structured delivery frames keep additive grouping and size fields', (
         const fields = pythonClassFields(contracts, className, { ChatReferenceFields: reference });
         const missing = [...reference].filter((field) => !fields.has(field));
         assert.deepEqual(missing, [], `${className} no longer declares the shared row identity: ${missing}`);
-        assert.ok(types.includes(`@typedef {Object} ${className}`));
     }
     assert.match(bus, /"type": "photo",[\s\S]*?"task_id": str\(task_id or ""\)/);
     assert.match(bus, /"type": "video",[\s\S]*?"task_id": str\(task_id or ""\)/);
@@ -328,13 +314,8 @@ test('live structured delivery frames keep additive grouping and size fields', (
 });
 
 test('history typedef declares task outcome terminality fields', () => {
-    // The additive outcome fields now live in the replaceable-client mirror.
-    // Pin TaskOutcomeHistoryFields' own block: the same mirror carries a second,
-    // looser {string=} outcome_phase with its own {boolean=} outcome_final further
-    // down, so a file-wide match could pass even if this history typedef dropped
-    // either field. The enum values are the Python producer's own set
-    // (project_dialogue.outcome_phase: working/done/warn/error/cancelled), now
-    // spelled with single quotes.
+    // Pin the browser-only TaskOutcomeHistoryFields block rather than matching
+    // similar fields elsewhere. The phase values name project_dialogue.outcome_phase.
     const types = moduleFile('client_contract_types.js');
     const start = types.indexOf('@typedef {Object} TaskOutcomeHistoryFields');
     assert.notEqual(start, -1, 'TaskOutcomeHistoryFields typedef not found — the contract moved, update this test');

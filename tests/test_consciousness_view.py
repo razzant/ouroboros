@@ -86,19 +86,22 @@ def test_places_context_has_every_place_and_room_without_reading_history(monkeyp
     ([{"state": "active"}, {"state": "silent"}, {"state": "paused"}], "2 places are heard, not answered."),
     ([{"state": "silent"}, {"state": "paused"}], "1 place is heard, not answered."),
     ([{"state": "paused"}], "Nothing wakes it between your messages."),
-    (None, "Nothing wakes it between your messages."),
-    ("unread", "Its places are heard, not answered."),  # the place store could not be read: as Stop says
+    ([], "Nothing wakes it between your messages."),
+    (None, "Whether your Ouroboroses can start work here could not be read. Its places are heard, not answered."),
+    ("missing", "Whether your Ouroboroses can start work here could not be read. Its places are heard, not answered."),
 ])
 def test_off_says_its_position_and_how_many_places_are_heard_not_answered(brief, detail):
     """Owner 06.11: Off read «Background consciousness is off.» while 28 places went on reading «active». The host's
     one detail line (the chip's name, the Shade and the Dashboard headline) counts them from the brief it already has,
     beside the switch's position by meaning (owner 15.11, 5A)."""
-    snapshot = {} if brief is None else {"places_brief": None if brief == "unread" else brief}
+    snapshot = {} if brief == "missing" else {"places_brief": brief}
     described = view.describe_consciousness_state(snapshot, False)
-    assert (described["status"], described["detail"], described["position"]) == ("disabled", detail,
-                                                                                  view.position_words(False))
+    position = "Only when you write to it" if isinstance(brief, list) else "Background wakes are off"
+    assert (described["status"], described["detail"], described["position"], described["position_short"]) == (
+        "disabled", detail, position, position)
     on = view.describe_consciousness_state(snapshot, True)
-    assert "heard" not in on["detail"] and on["position"] == view.position_words(True), "a switch that is on claims nothing"
+    assert "heard" not in on["detail"] and on["position"] == (
+        "Also on its own" if brief == [] else "Also on its own and in places")
 
 
 def test_my_map_names_each_circle_once_with_its_whole_words_and_my_placements(monkeypatch, tmp_path):

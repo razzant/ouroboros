@@ -2366,14 +2366,12 @@ def test_blocked_harness_pin_projects_the_refused_route_from_cap_info_only():
 
 def test_the_executor_fact_survives_history_replay_and_the_frozen_contract():
     """End-to-end plumbing: the field is in the progress-meta allowlist (so a
-    reloaded bubble keeps its chip) and in BOTH contract mirrors."""
+    reloaded bubble keeps its chip) and on the contract."""
     from ouroboros.gateway.contracts import ChatOutbound
     from ouroboros.gateway.history import _PROGRESS_META_FIELDS
 
     assert "executor_route" in _PROGRESS_META_FIELDS
     assert "executor_route" in ChatOutbound.__annotations__
-    js = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js")
-    assert "executor_route" in js.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

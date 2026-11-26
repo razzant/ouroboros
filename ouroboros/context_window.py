@@ -51,6 +51,9 @@ class WindowRecord:
     contradicted_by: Optional[WindowLimit] = None
     retired_ack: dict = field(default_factory=dict)
     floor: Optional[int] = None  # the reply floor ``admitted`` charges an unproven total; None: the whole reserve
+    # The native Ollama load this record's scope is asked for (0: Auto); None for every other scope. A record made
+    # for another scope never inherits it, so only this scope's plan is read under its runner's current statement.
+    load: Optional[int] = None
 
     @property
     def usable(self) -> Optional[int]:
@@ -110,7 +113,8 @@ class WindowRecord:
 
 
 def record_observation(root, route_fp: str, *, accepted: int = 0, refused: int = 0,
-                       kind: str = "total", reserve: int = 0, transmitted: int = 0, basis: str = "") -> None:
+                       kind: str = "total", reserve: int = 0, transmitted: int = 0, basis: str = "",
+                       read_sequence: int | None = None) -> None:
     """``basis``: how a refused size was known (``WindowLimit.basis``), kept on its row; rows without one stay as written."""
     from ouroboros import capability_evidence as ce
 
@@ -120,6 +124,8 @@ def record_observation(root, route_fp: str, *, accepted: int = 0, refused: int =
         with ce._store_transaction(root):
             data = ce._load(root)
             record = data.setdefault("main_windows", {}).setdefault(route_fp, {})
+            if read_sequence is not None and read_sequence != window_read_sequence(record):
+                return  # A newer load has its own window; the raw refusal stays with its attempt.
             rows = record.setdefault("observations", [])
             prior = list(rows)
             if refused and rows and all(rows[-1].get(key, default) == value for key, value, default in (
@@ -200,8 +206,6 @@ def observation_scope(plan) -> str:
 
 def route_observation_scope(route, settings, *, target=None) -> str:
     """Main's account scope; capability acknowledgements and density keep their own keys."""
-    import hashlib
-    import json
     from ouroboros.capability_evidence import route_fingerprint
     from ouroboros.llm_attempt import ConnectionUnavailable
     from ouroboros.response_limits import dispatch_target
@@ -216,12 +220,26 @@ def route_observation_scope(route, settings, *, target=None) -> str:
             target = {**target, "keyless": True}
     except ConnectionUnavailable:
         return ""  # a refused connection sends nothing, so it has no observations to scope
+    return bound_target_scope(target, route["model"])
+
+
+def bound_target_scope(target, model) -> str:
+    """Account, resolved route and routing headers of the dispatch whose server answered."""
+    import hashlib
+    import json
+
     credentials = {key: target.get(key, "") for key in ("api_key", "user", "password", "scope")}
     if not any(credentials.values()) and not target.get("keyless"):
         return ""
     identity = target.get("capability_route") or {}
-    payload = {"provider": identity.get("provider", target["provider"]), "model": identity.get("model", route["model"]),
+    payload = {"provider": identity.get("provider", target["provider"]), "model": identity.get("model", model),
                "base_url": identity.get("dispatch_base_url", target.get("base_url", "")), "credentials": credentials}
+    if target.get("default_headers") and target["provider"] == "openai-compatible":
+        from ouroboros.capability_evidence import _canonical_headers
+        from ouroboros.server_window import private_host
+        routing_headers = _canonical_headers(target["default_headers"])
+        if routing_headers and private_host(payload["base_url"]):
+            payload["headers"] = routing_headers
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:24]
 
 
@@ -234,14 +252,15 @@ def _http_chat_target(target) -> bool:
     from ouroboros.provider_models import OPENAI_API_SURFACES
 
     return bool(target and target.get("provider") not in {None, "", "local", "claudexor", "gigachat"}
+                and (target.get("ollama_record") or {}).get("protocol") != "ollama"  # it sends /api/chat
                 and _wire_surface(target) == OPENAI_API_SURFACES["chat_completions"])
 
 
 def first_contact_scope(target, reply_cap: int, *, payload=None) -> str:
     """Comparable HTTP Chat sends share the exact credentialed route, raw measure and reply allowance.
 
-    A local server, a subscription harness and GigaChat may carry a Chat-shaped body, but their sizes are
-    not comparable with an HTTP credential's, so this hint scopes none of them. ``_wire_surface`` itself
+    A local server, a subscription harness, GigaChat and a native Ollama runner may carry a Chat-shaped body, but
+    their sizes are not comparable with an HTTP credential's, so this hint scopes none of them. ``_wire_surface`` itself
     keeps naming the wire for every transport: its other readers price and finalize a send by it.
     """
     from urllib.parse import urlsplit
@@ -575,6 +594,60 @@ def _window_age(stamp: str) -> float:
 _READ_ATTEMPTS: Dict[tuple, WindowLimit] = {}
 
 
+def window_read_sequence(record):
+    """Serving statement identity, including a retired frontier (not a refusal's sequence)."""
+    current = next(iter(record.get("reads", [])), None)
+    return current["sequence"] if current else -int(record.get("sequence", 0))
+
+
+def _frontier_statement(record) -> Optional[WindowLimit]:
+    """The serving statement a scope holds now; None once it was retired or has aged past the evidence TTL."""
+    from ouroboros import capability_evidence as ce
+
+    current = next(iter(record.get("reads", [])), None)
+    return WindowLimit(**current) if current and _window_age(current["observed_at"]) <= ce._CONFIRMED_TTL_SEC else None
+
+
+def load_order(plan, root=None) -> Optional[int]:
+    """The order of the statement a native load's plan is read under now (``window_read_sequence`` of its scope).
+
+    One owner from the runner's reading to a plan's use: ``llm_ollama_policy.record_window`` publishes a statement
+    under this order, an answer or a refusal carries the order it was dispatched under, and what it accepted or
+    refused counts only while that order is the scope's current one (``record_observation``, ``resolve_window``,
+    ``context_anchor``). None for every other plan (``WindowRecord.load``): nothing of its conversation is bound
+    to a load."""
+    from ouroboros import capability_evidence as ce
+
+    record = getattr(plan, "window_record", None)
+    if record is None or record.load is None or not record.route_fp or not getattr(plan, "window_witness_bound", True):
+        return None
+    stored = ce._read(root or ce.canonical_evidence_root()).get("main_windows", {}).get(record.route_fp) or {}
+    return window_read_sequence(stored)
+
+
+def _number_read(record, limit, fp):
+    from dataclasses import replace
+
+    current = next(iter(record.get("reads", [])), None)
+    if current and statement_key(WindowLimit(**current)) == statement_key(limit):
+        return replace(limit, sequence=current["sequence"], sequence_route=fp), True
+    return replace(limit, sequence=int(record.get("sequence", 0)) + 1, sequence_route=fp), False
+
+
+def _put_read(record, limit, fp):
+    from dataclasses import asdict
+    from ouroboros import capability_evidence as ce
+
+    result, same = _number_read(record, limit, fp)
+    current = next(iter(record.get("reads", [])), None)
+    expired = current and _window_age(current["observed_at"]) > ce._CONFIRMED_TTL_SEC >= _window_age(limit.observed_at)
+    if not same or expired:
+        record["sequence"] = max(int(record.get("sequence", 0)), result.sequence)
+        record["reads"] = [asdict(result)]
+        return result, True
+    return result, False
+
+
 def _publish_read(root, fp: str, limit: WindowLimit, *, publish=True) -> WindowLimit:
     from ouroboros import capability_evidence as ce
 
@@ -600,36 +673,23 @@ def _publish_read_once(root, fp: str, limit: WindowLimit, *, publish=True) -> Wi
     Publication is reserved for send/plan paths. Owner projections read the same
     frontier but only assign a hypothetical next number to an unpublished claim.
     """
-    from dataclasses import asdict, replace
+    from dataclasses import replace
     from ouroboros import capability_evidence as ce
 
     if not fp or limit.sequence_route == fp:
         return limit
 
-    def numbered(record):
-        current = next(iter(record.get("reads", [])), None)
-        if current and statement_key(WindowLimit(**current)) == statement_key(limit):
-            return replace(limit, sequence=current["sequence"], sequence_route=fp), True
-        return replace(limit, sequence=int(record.get("sequence", 0)) + 1, sequence_route=fp), False
-
     record = ce._read(root).get("main_windows", {}).get(fp, {})
-    result, same = numbered(record)
-    def expired(record):
-        current = next(iter(record.get("reads", [])), None)
-        return current and _window_age(current["observed_at"]) > ce._CONFIRMED_TTL_SEC >= _window_age(limit.observed_at)
-
-    if not publish or (same and not expired(record)):
+    result, changed = _put_read(dict(record), limit, fp)
+    if not publish or not changed:
         return result
     try:
         with ce._store_transaction(root):
             data = ce._load(root)
             record = data.setdefault("main_windows", {}).setdefault(fp, {})
-            result, same = numbered(record)
-            if not same or expired(record):
-                record["sequence"] = max(int(record.get("sequence", 0)), result.sequence)
-                record["reads"] = [asdict(result)]
-                if not ce._save(root, data):
-                    return replace(limit, sequence=0, sequence_route=fp)
+            result, changed = _put_read(record, limit, fp)
+            if changed and not ce._save(root, data):
+                return replace(limit, sequence=0, sequence_route=fp)
             return result
     except OSError:
         return replace(limit, sequence=0, sequence_route=fp)
@@ -697,38 +757,57 @@ def statement_key(limit):
 
 
 
-def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
-                   observation_fp=None, accepted_input_tokens: int = 0, publish: bool = True) -> WindowRecord:
+def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True, observation_fp=None,
+                   accepted_input_tokens: int = 0, publish: bool = True, load: Optional[int] = None) -> WindowRecord:
+    """``load``: the native Ollama load the route of a new Main plan requests (0: Auto), kept on its record
+    (``WindowRecord.load``). A plan resolved again reads its own record's."""
     from ouroboros import capability_evidence as ce
 
     root = root or ce.canonical_evidence_root()
     fp = observation_scope(evidence) if observation_fp is None else observation_fp
-    rows = ((ce._read(root or ce.canonical_evidence_root()).get("main_windows", {}).get(fp) or {})
-            .get("observations", [])) if bound and fp else []
-    accepted = max((row.get("accepted", 0) for row in rows), default=0)
-    accepted_at = next((row["ts"] for row in rows if accepted and row.get("accepted") == accepted), "")
-    accepted = max(accepted, int(accepted_input_tokens or 0))
+    stored = (ce._read(root).get("main_windows", {}).get(fp) or {}) if bound and fp else {}
+    rows = stored.get("observations", [])
     captured = getattr(evidence, "window_record", None)
+    if captured is not None:
+        load = captured.load if captured.route_fp == fp else None
     limits = ({limit.kind: limit for limit in captured.declared}
               if captured is not None and ce.is_known(evidence, require_fresh=True) else {})
     if captured is None and ce.is_known(evidence, require_fresh=True):
         kind = str(getattr(evidence, "window_kind", "total") or "total")
-        limits[kind] = WindowLimit(int(evidence.window_tokens), kind,
-                                  str(getattr(evidence, "source", None) or getattr(evidence, "evidence_source", "metadata")),
-                                  str(getattr(evidence, "ts", "")),
-                                  (getattr(evidence, "route_facts", {}) or {}).get("acceptance_can_raise",
-                                      not bool(getattr(evidence, "route_facts", {}))),
+        source = str(getattr(evidence, "source", None) or getattr(evidence, "evidence_source", "metadata"))
+        facts = getattr(evidence, "route_facts", {}) or {}
+        # On a native load the runner states its own buffer, so a role's window is that role's cap, not a claim
+        # about the server: no accepted input raises it, whatever the runner's own number is (the same one too).
+        raiseable = facts.get("acceptance_can_raise", not facts) and not (load is not None and source == ce.SOURCE_USER_SETTING)
+        limits[kind] = WindowLimit(int(evidence.window_tokens), kind, source, str(getattr(evidence, "ts", "")), raiseable,
                                   read_id=str(getattr(evidence, "window_read_id", "")),
                                   sequence=int(getattr(evidence, "window_sequence", 0)),
                                   sequence_route=str(getattr(evidence, "window_sequence_route", "")),
                                   instance_id=str(getattr(evidence, "window_instance_id", "")))
-    declared = tuple(limits.values())
     server = getattr(evidence, "server_window", {})
     contradiction = WindowLimit(**server) if server else captured.contradicted_by if captured else None
+
+    def serving(limit):
+        return physical_statement({"source": limit.source, "provider": getattr(evidence, "provider", "")})
+
+    if captured is not None and load is not None and bound and fp:
+        # A native load's plan lives across reloads. Its runner's statement is the one its scope holds now
+        # (``llm_ollama_policy.record_window``: what a send or a probe published last), or none once that was
+        # retired or aged out; never the one the plan was built under, and no fit asks the runner. The role's own
+        # declaration stays (it is not the runner's), and what an earlier statement accepted or refused is not
+        # evidence of this one.
+        contradiction = _frontier_statement(stored)
+        limits = {kind: limit for kind, limit in limits.items() if not serving(limit)}
+        if contradiction and not limits:
+            limits = {contradiction.kind: contradiction}
+        rows = [row for row in rows if contradiction and row.get("sequence", 0) > contradiction.sequence]
+    accepted = max((row.get("accepted", 0) for row in rows), default=0)
+    accepted_at = next((row["ts"] for row in rows if accepted and row.get("accepted") == accepted), "")
+    accepted = max(accepted, int(accepted_input_tokens or 0))
+    declared = tuple(limits.values())
     # A serving buffer is authority only on the custom OpenAI-compatible/local route. A cloud
     # catalog (even one using the same field name) cannot overrule an owner's choice.
-    physicals = [limit for limit in (*limits.values(), contradiction) if limit is not None and
-        physical_statement({"source": limit.source, "provider": getattr(evidence, "provider", "")})
+    physicals = [limit for limit in (*limits.values(), contradiction) if limit is not None and serving(limit)
         and _window_age(limit.observed_at) <= ce._CONFIRMED_TTL_SEC]
     if bound and fp:
         physicals = [_publish_read(root, fp, limit, publish=publish) for limit in physicals]
@@ -755,8 +834,7 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
     # Everything below is a projection of ordered events. Freshness is filtered
     # here; it never changes publication order in the pure reducer.
     # A serving statement reaches the timeline only as the fresh selected read: an expired one is unknown.
-    events = [limit for limit in declared if not physical_statement(
-        {"source": limit.source, "provider": getattr(evidence, "provider", "")})]
+    events = [limit for limit in declared if not serving(limit)]
     timeline = [physical] if physical else []
     for row in rows:
         if row.get("refused") and _window_age(row["ts"]) <= ce._CONFIRMED_TTL_SEC:
@@ -778,7 +856,7 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
                         else captured.output if captured else None,
                         floor=None if inside else min(int(reserve), max(NANO_MIN_HEADROOM_TOKENS, int(working))),
                         reserve=reserve, accepted=accepted, declared=declared, accepted_at=accepted_at,
-                        contradicted_by=contradiction,
+                        contradicted_by=contradiction, load=load,
                         retired_ack=getattr(evidence, "retired_ack", {}) or (captured.retired_ack if captured else {}))
 
 
@@ -813,6 +891,10 @@ def record_refusal(usage, plan, refused_input: int = 0, basis: str = "anchored_e
     refusal = _current_chat_refusal(usage, candidate, round_id) if chat else for_usage(usage)
     if refusal is None:
         return False
+    scope = observation_scope(plan)
+    # A native Ollama refusal teaches only the load statement it was dispatched under, on its own scope.
+    if refusal.ollama_scope and (refusal.ollama_scope != scope or refusal.ollama_read_sequence is None):
+        return False
     limit = refusal.token_window
     if not limit and refusal.retry_only:
         return False
@@ -823,16 +905,17 @@ def record_refusal(usage, plan, refused_input: int = 0, basis: str = "anchored_e
             total = record.total.tokens if record is not None and record.total else 0
             confirms = total - (record.reserve if record is not None else 0) < size <= total
             if confirms or not chat:
-                record_observation(ce.canonical_evidence_root(), observation_scope(plan), basis=basis,
-                                   refused=total if confirms else size, kind="total" if confirms else "input")
+                record_observation(ce.canonical_evidence_root(), scope, basis=basis,
+                                   refused=total if confirms else size, kind="total" if confirms else "input",
+                                   read_sequence=refusal.ollama_read_sequence)
                 return True
         return False
-    rows = (ce._read(ce.canonical_evidence_root()).get("main_windows", {}).get(observation_scope(plan)) or {})
+    rows = (ce._read(ce.canonical_evidence_root()).get("main_windows", {}).get(scope) or {})
     single_server = getattr(plan, "provider", "") in {"local", "openai-compatible"}
     if not single_server and limit < max((row.get("accepted", 0) for row in rows.get("observations", [])), default=0):
         return False
-    record_observation(ce.canonical_evidence_root(), observation_scope(plan), refused=limit,
-                       kind=refusal.store_kind, basis="provider_stated")
+    record_observation(ce.canonical_evidence_root(), scope, refused=limit,
+                       kind=refusal.store_kind, basis="provider_stated", read_sequence=refusal.ollama_read_sequence)
     return True
 
 
@@ -869,6 +952,18 @@ def observed_plan(plan, usage, candidate=None):
     record = getattr(plan, "window_record", None)
     return replace(plan, route_fp=fp, window_record=replace(record, route_fp=fp) if record else None,
                    model_route=dict(observed), window_witness_bound=True)
+
+
+def native_load_window_binding(plan):
+    """The optional continuation payload: only a scoped load intent and its role's owner cap."""
+    from ouroboros.capability_evidence import SOURCE_USER_SETTING
+
+    record = getattr(plan, "window_record", None)
+    load = getattr(plan, "requested_load_window", None)
+    if load is None or not getattr(record, "route_fp", ""):
+        return {}
+    cap = next((v.tokens for v in record.declared if v.source == SOURCE_USER_SETTING), 0)
+    return {"scope": record.route_fp, "role": plan.model_role, "load": load, "cap": cap}
 
 
 def route_window_kwargs(evidence: Any) -> Dict[str, Any]:

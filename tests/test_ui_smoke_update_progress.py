@@ -204,8 +204,31 @@ _NOTICE = """() => {
     const token = (name, property) => { const p = close.appendChild(document.createElement('i')); p.style[property] = `var(${name})`;
         const v = getComputedStyle(p)[property]; p.remove(); return v; };
     const c = getComputedStyle(close);
-    return { pill: box(pill), close: box(close), sidebar: { x: sidebar.x, r: sidebar.right },
-             clipped: pill.scrollWidth > pill.clientWidth + 1, overflow: document.documentElement.scrollWidth - innerWidth,
+    // A control's scroll size counts its touch reach: under a coarse pointer the shared hit area (ui.css .ui-hit-area,
+    // .btn::after) is an absolute pseudo-element out to 44 px, so a 28 px capsule reads scrollWidth 35 over clientWidth
+    // 26 in WebKit and Chromium alike with nothing drawn cut. What the capsule draws is read with that reach set aside;
+    // the reach itself is read where it can really be cut, against the clip of the column that scrolls around it.
+    const spills = (el) => el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1;
+    const haloed = spills(pill);
+    const bare = document.head.appendChild(document.createElement('style'));
+    bare.textContent = '#update-pill::after, .update-notice-close::after { content: none !important; }';
+    const clipped = spills(pill) || spills(close);
+    bare.remove();
+    const side = document.getElementById('primary-sidebar'), sr = side.getBoundingClientRect();
+    const scroller = { x: sr.left + side.clientLeft, r: sr.left + side.clientLeft + side.clientWidth,
+                       y: sr.top + side.clientTop, b: sr.top + side.clientTop + side.clientHeight };
+    const reach = (el) => { const r = el.getBoundingClientRect(), a = getComputedStyle(el, '::after');
+        const ring = getComputedStyle(el), out = parseFloat(ring.outlineOffset) + parseFloat(ring.outlineWidth);
+        const drawn = { x: r.left - out, r: r.right + out, y: r.top - out, b: r.bottom + out };
+        if (a.content === 'none' || a.content === 'normal') return drawn;
+        const x = r.left + el.clientLeft + parseFloat(a.left), y = r.top + el.clientTop + parseFloat(a.top);
+        const hit = { x, r: x + parseFloat(a.width), y, b: y + parseFloat(a.height) };
+        return { x: Math.min(drawn.x, hit.x), r: Math.max(drawn.r, hit.r), y: Math.min(drawn.y, hit.y), b: Math.max(drawn.b, hit.b) }; };
+    const within = (q) => q.x >= scroller.x - 0.5 && q.r <= scroller.r + 0.5 && q.y >= scroller.y - 0.5 && q.b <= scroller.b + 0.5;
+    const reaches = { pill: reach(pill), close: reach(close) };
+    return { pill: box(pill), close: box(close), sidebar: { x: sidebar.x, r: sidebar.right }, scroller, reaches, haloed,
+             reachInside: within(reaches.pill) && within(reaches.close),
+             clipped, overflow: document.documentElement.scrollWidth - innerWidth,
              active: document.activeElement?.id || String(document.activeElement?.className || ''),
              closeColor: c.color, pillColor: getComputedStyle(pill).color,
              // The close is the shared neutral capsule (ui.css .btn.btn-default), never a copy of its paint.
@@ -214,7 +237,7 @@ _NOTICE = """() => {
                           c.boxShadow === token('--elev-rest', 'boxShadow'), c.borderTopLeftRadius] };
 }"""
 
-# The capsule's glyph as the rail draws it (its words are its name, read but not drawn): which state it says, its
+# The footer's capsule glyph (its words are its name, read but not drawn): which state it says, its
 # geometry inside the capsule, its ink and its picture.
 _GLYPH = """() => { const pill = document.getElementById('update-pill'), g = pill.querySelector('.update-pill-glyph');
     const svg = g.querySelector('svg'), s = svg.getBoundingClientRect(), p = pill.getBoundingClientRect();
@@ -225,7 +248,7 @@ _GLYPH = """() => { const pill = document.getElementById('update-pill'), g = pil
              words: w.width * w.height }; }"""
 
 
-_GLYPH_SIDE = 16      # the glyph's square, in CSS px, as the rail designs it
+_GLYPH_SIDE = 16      # the footer capsule's glyph square in CSS px
 _GLYPH_SLACK = 0.05   # an engine's rectangle is float-rounded: Chromium reports 15.999998092651367 for 16
 
 
@@ -245,14 +268,18 @@ def _drawn(page, says):
     return glyph
 
 
-# Where the focus stands, read against the sidebar the page composed (pages.js renderNavRail; owner 24.11, «Рельс
-# снаружи»): the rail's destination beside the version row is Settings, and Main's card, which follows the rail in
-# document order, is what the retired "last [data-nav-page]" fallback picked.
-_FOCUS = """() => { const a = document.activeElement, row = document.querySelector('.nav-rail-system > .sidebar-foot-meta');
-    return { id: a?.id || '', page: a?.dataset?.navPage || '', inRail: Boolean(a?.closest?.('.nav-rail')),
-             beside: Boolean(row) && a === row.previousElementSibling,
-             last: a === [...document.querySelectorAll('#primary-sidebar [data-nav-page]')].pop() }; }"""
-_BESIDE = {"id": "", "page": "settings", "inRail": True, "beside": True, "last": False}
+# Where the focus stands, read against the sidebar the page composed (pages.js renderNavRail, index.html's foot; owner
+# 24.11 «Рельс снаружи», 25.11): the version row is the column's own foot under the Projects list, and Main's card,
+# which follows the rail, is what the retired "last [data-nav-page]" fallback picked.
+_FOCUS = """() => { const a = document.activeElement, row = document.querySelector('#primary-sidebar > .sidebar-foot-meta'),
+    rail = document.querySelector('#primary-sidebar .nav-rail');
+    const places = [...document.querySelectorAll('#primary-sidebar [data-nav-page]')];
+    return { id: a?.id || '', page: a?.dataset?.navPage || '', inFoot: Boolean(a?.closest?.('.sidebar-foot-meta')),
+             inRail: Boolean(a?.closest?.('.nav-rail')),
+             beside: Boolean(row) && a === [...rail.querySelectorAll('[data-nav-page]')].pop(),
+             last: a === places.pop() }; }"""
+# The fallback after a focused footer control disappears: the rail's Settings, never Main's card.
+_BESIDE = {"id": "", "page": "settings", "inFoot": False, "inRail": True, "beside": True, "last": False}
 
 
 def _rested(page, selector):
@@ -264,12 +291,12 @@ def _rested(page, selector):
                              new Promise((resolve) => setTimeout(resolve, 2000))]); }""", selector)
 
 
-# The close's focus ring against its capsule: the close stands under the capsule (the rail, owner 24.11), and the ring's
-# outer edge stays clear of the capsule above it.
+# The close's focus ring against its capsule: the close stands beside the capsule on the version's own line (the
+# column's foot, owner 25.11), and the ring's outer edge stays clear of the capsule it stands beside.
 _RING = """() => { const c = document.querySelector('.update-notice-close'), s = getComputedStyle(c);
     const p = document.getElementById('update-pill').getBoundingClientRect();
     const r = c.getBoundingClientRect(), out = parseFloat(s.outlineOffset) + parseFloat(s.outlineWidth);
-    return { offset: s.outlineOffset, style: s.outlineStyle, clear: r.top - out >= p.bottom - 0.5 }; }"""
+    return { offset: s.outlineOffset, style: s.outlineStyle, clear: r.left - out >= p.right - 0.5 }; }"""
 
 
 @pytest.mark.ui_browser
@@ -277,13 +304,13 @@ _RING = """() => { const c = document.querySelector('.update-notice-close'), s =
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_panel(direct_server, tmp_path, width, engine):
     """Owners 3A and 1B (#1818): a running stage and a failed or unconfirmed outcome stay on the existing capsule, the
-    last until the close under it hides it (this browser, this attempt); a confirmed success never wears it and never
+    last until the close beside it hides it (this browser, this attempt); a confirmed success never wears it and never
     masks a newer version, its record being the Dashboard panel's alone; a needed restart keeps its words and draws its
-    own glyph, never the stage's (the rail shows the capsule's glyph alone). A reviewed resolution at work is a stage;
+    own glyph, never the stage's (the foot shows the capsule's glyph alone). A reviewed resolution at work is a stage;
     stopped short (its gate blocked, its local work awaiting recovery) it draws the bell in the stage's neutral ink and
     opens a panel that names the recovery; its merge committed, it is the check's stage until its own check passed, then
     that same needed restart, which the panel offers.
-    None of them closes. A row control that goes away while it holds the focus hands it to Settings beside the version,
+    None of them closes. A row control that goes away while it holds the focus hands it to the rail's Settings,
     never to Main's card. Every press only navigates: nothing prepares, applies, checks or restarts."""
     from playwright.sync_api import expect, sync_playwright
 
@@ -343,7 +370,7 @@ def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_
             expect(close).to_be_hidden()
             stage = _drawn(page, "stage")
             page.locator("#primary-sidebar .sidebar-foot-meta").screenshot(path=str(evidence / f"update-foot-{engine}-{width}-stage.png"))
-            # A failure stays, with its own close under the capsule (the rail has no room beside it), in the capsule's ink.
+            # A failure stays, with its own close beside the capsule on the version's one line, in the capsule's ink.
             conclude(page)
             expect(pill).to_have_text("Update not applied")
             expect(pill).to_have_attribute("data-tone", "error")
@@ -352,21 +379,35 @@ def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_
             failure = _drawn(page, "outcome")
             assert failure["color"] == page.evaluate(_NOTICE)["pillColor"], ("the warning in the failure's ink", failure)
             notice = page.evaluate(_NOTICE)
-            centre = lambda box: (box["x"] + box["r"]) / 2
-            assert notice["close"]["y"] >= notice["pill"]["b"] - 0.5, ("the close stands under the capsule", notice)
-            assert abs(centre(notice["close"]) - centre(notice["pill"])) <= 0.5, ("centred on it", notice)
+            middle = lambda box: box["y"] + box["h"] / 2
+            assert notice["close"]["x"] >= notice["pill"]["r"] - 0.5, ("the close stands beside the capsule", notice)
+            assert abs(middle(notice["close"]) - middle(notice["pill"])) <= 0.5, ("on its line", notice)
             assert notice["close"]["w"] >= 24 and notice["close"]["h"] >= 24, ("a real pointer target", notice)
             assert notice["pill"]["r"] <= notice["sidebar"]["r"] and not notice["clipped"] and notice["overflow"] <= 0, notice
+            # Each one's touch reach and focus ring stay inside the column's clip: the scroller would cut them there.
+            assert notice["reachInside"], ("a finger's reach and the ring are never cut by the column", notice)
             assert notice["closeColor"] == notice["pillColor"], ("the close takes the capsule's ink", notice)
             assert notice["closePart"] and notice["closePaint"] == [True, True, "999px"], ("the shared capsule", notice)
             # Under a coarse pointer the drawn 24 px circle gains the shared 44 px hit area (`.ui-hit-area`).
             coarse = page.evaluate("matchMedia('(pointer: coarse)').matches")
             if coarse:
                 hit = page.evaluate("""() => { const c = document.querySelector('.update-notice-close'), s = getComputedStyle(c, '::after');
+                    const p = document.getElementById('update-pill'), ps = getComputedStyle(p, '::after');
                     return [parseFloat(s.width), parseFloat(s.height),
-                            c.getBoundingClientRect().top + parseFloat(s.top) - document.getElementById('update-pill').getBoundingClientRect().bottom]; }""")
+                            c.getBoundingClientRect().left + parseFloat(s.left)
+                            - (p.getBoundingClientRect().right - parseFloat(ps.right))]; }""")
                 assert hit[0] >= 44 and hit[1] >= 44, ("a touch target of at least 44 px", hit)
-                assert hit[2] >= -0.5, ("its reach stops short of the capsule above it", hit)
+                assert hit[2] >= -0.5, ("its reach stops short of the capsule's beside it", hit)
+                # The capsule's own scroll size counts that reach (the old reading); set aside, nothing it draws is cut.
+                assert notice["haloed"] and not notice["clipped"], notice
+                # A reach the column would cut is caught (falsified right here).
+                wide = page.add_style_tag(content=".update-notice-close::after { inset: -30px !important; }")
+                assert page.evaluate(_NOTICE)["reachInside"] is False, "a reach past the column's clip is caught"
+                wide.evaluate("el => el.remove()")
+            # A capsule narrower than its glyph is caught as cut (falsified right here).
+            narrow = page.add_style_tag(content=".update-notice > .update-pill { width: 12px !important; }")
+            assert page.evaluate(_NOTICE)["clipped"] is True, "a glyph cut by its capsule is caught"
+            narrow.evaluate("el => el.remove()")
             page.locator("#primary-sidebar .sidebar-foot-meta").screenshot(path=str(evidence / f"update-foot-{engine}-{width}-failure.png"))
             # The capsule still goes to the one panel; the panel keeps the saved result and has no remote hide.
             pill.click()
@@ -383,11 +424,11 @@ def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_
             pill.focus()
             page.keyboard.press(tab)
             assert "update-notice-close" in page.evaluate(_NOTICE)["active"].split(), "the close follows the capsule in tab order"
-            # The one focus ring (DESIGN §3 "Focus") around the close, clear of the capsule above it, which a ring drawn
+            # The one focus ring (DESIGN §3 "Focus") around the close, clear of the capsule beside it, which a ring drawn
             # farther out crosses (falsified right here).
             ring = page.evaluate(_RING)
             assert ring == {"offset": "2px", "style": "solid", "clear": True}, ring
-            outer = page.add_style_tag(content=".update-notice-close:focus-visible { outline-offset: 14px !important; }")
+            outer = page.add_style_tag(content=".update-notice-close:focus-visible { outline-offset: 30px !important; }")
             assert page.evaluate(_RING)["clear"] is False, "a ring farther out would cross the capsule"
             outer.evaluate("el => el.remove()")
             box = page.locator(".update-notice").bounding_box()
@@ -441,12 +482,10 @@ def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_
             page.screenshot(path=str(evidence / f"update-indicator-{engine}-{width}-success-silent.png"))
             _reload(page, width)
             expect(pill).to_be_hidden()
-            # The version is the check again, after Settings in tab order. Taken from the reader who holds it, it hands
-            # the focus to Settings beside the row, never to Main's card: hidden by an accepted channel save in that same
-            # task (the save's own read shows it again and the focus stays), and turned plain by an unmanaged install.
+            # An accepted channel save hides the focused check; its status read shows it again without stealing
+            # focus. An unmanaged install turns the check into plain text.
             expect(check).to_be_visible()
-            settings.focus()
-            page.keyboard.press(tab)
+            check.focus()
             assert page.evaluate(_FOCUS)["id"] == "nav-version-check", page.evaluate(_FOCUS)
             hidden = page.evaluate("""() => { window.dispatchEvent(new CustomEvent('ouro:settings-updated',
                 { detail: { reason: 'setting saved', source: 'settings-row', row: 'OUROBOROS_UPDATE_CHANNEL',
@@ -473,7 +512,7 @@ def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_
                      stage="stopping_services", blockers=["service:mcp"], work_stop="invoked")
             expect(pill).to_have_text("Restart needed")
             expect(close).to_be_hidden()
-            # In the rail the glyph is all a sighted reader sees: the owner's step never looks like the work going on.
+            # The capsule's glyph must distinguish a needed step from work still in progress.
             restart = _drawn(page, "restart")
             assert restart["picture"] != stage["picture"] and restart["color"] != stage["color"], (restart, stage)
             page.locator("#primary-sidebar .sidebar-foot-meta").screenshot(path=str(evidence / f"update-foot-{engine}-{width}-restart.png"))
@@ -508,10 +547,8 @@ def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_
             expect(close).to_be_hidden()
             expect(check).to_be_hidden()
             foot.screenshot(path=str(evidence / f"update-foot-{engine}-{width}-unresolved.png"))
-            # Keyboard: the capsule follows Settings (the hidden check is no stop); Enter opens the panel that names the
-            # recovery, with no Restart it cannot reach and no Apply.
-            settings.focus()
-            page.keyboard.press(tab)
+            # Enter on the focused capsule opens the recovery panel without offering Restart or Apply.
+            pill.focus()
             assert page.evaluate(_FOCUS)["id"] == "update-pill", page.evaluate(_FOCUS)
             page.keyboard.press("Enter")
             expect(page.locator("#updates-summary")).to_have_text("An update attempt stopped mid-flight and needs recovery.")
@@ -556,7 +593,7 @@ def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_
             expect(close).to_be_hidden()
 
             # A notice closed with nothing left in the row (an install that offers no check), and a capsule that held the
-            # focus and goes with no check to take it: the focus lands on Settings beside the row, never on Main.
+            # focus and goes with no check to take it: the focus lands on the rail's Settings, never on Main's card.
             show(page, event="update_status_ready", managed=False, update_tx={"active": False},
                  update_progress={**refusal, "operation_id": "attempt-u", "outcome_at": stamp(2)})
             expect(pill).to_have_text("Update not applied")
@@ -570,8 +607,7 @@ def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_
             show(page, update_progress={"operation_id": "attempt-s", "current_generation": True, "active": True,
                                         "stage": "applying", "started_at": stamp(3)})
             expect(pill).to_have_text("Applying update…")
-            settings.focus()
-            page.keyboard.press(tab)
+            pill.focus()
             assert page.evaluate(_FOCUS)["id"] == "update-pill", page.evaluate(_FOCUS)
             show(page, update_progress={"operation_id": "attempt-s", "current_generation": True, "active": False,
                                         "result": "applied", "outcome": "applied", "concluded_by": "boot",
