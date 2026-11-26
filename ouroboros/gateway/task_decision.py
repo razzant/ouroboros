@@ -412,6 +412,19 @@ def _quiz_decision_receipt(decision_id: str, outcome: dict, block: dict) -> Dict
     return payload
 
 
+def _continuation_route(root: pathlib.Path, asker: str) -> Dict[str, str]:
+    """What the owner's winning close of an ended asker's card pins as its letter's reader: its one admitted
+    immediate Continue that reads now, and that store (``question_answers.closure_route``). Nothing for an asker that
+    still holds mail (it keeps its own letter) and nothing when that cannot be read: a pin never refuses the close."""
+    from ouroboros.question_answers import closure_route
+
+    try:
+        return {} if _mail_holder(asker)[0] is not None else closure_route(root, asker, _live_root_task)
+    except Exception:
+        log.warning("Closure route unreadable for %s", asker, exc_info=True)
+        return {}
+
+
 async def _close_quiz_decision(root: pathlib.Path, task_id: str, quiz_id: str,
                                body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
     """Owner closure shares the canonical first-winner lock and closure recovery."""
@@ -442,7 +455,7 @@ async def _close_quiz_decision(root: pathlib.Path, task_id: str, quiz_id: str,
         if refusal == "not_a_root_task":
             return _refused("quiz closure addresses root tasks only", 409, reason_code=refusal)
         outcome = record_closed(root, task_id, quiz_id=quiz_id, reason=reason,
-                                actor="owner", request_id=request_id)
+                                actor="owner", request_id=request_id, mail_route=_continuation_route(root, task_id))
         block = outcome.get("block") or {}
         if outcome.get("ok"):
             try:
