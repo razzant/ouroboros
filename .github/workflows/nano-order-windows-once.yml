@@ -1,0 +1,164 @@
+name: Nano accounting order (one-off Windows)
+
+'on':
+  push:
+    branches: [qa/nano-order-8f5b65c1]
+    paths: [.github/workflows/nano-order-windows-once.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      PRODUCT: 8f5b65c186cc77bea0d552d2a38a846a9d8733ac
+      PRODUCT_PARENT: f07e6cd674c3501aade3a6a726618e29498f7292
+      TEST_BLOB_SHA256: b9f5b73a3906abaa11d5762ed5c854825bc49bf52376655956a7971aaa1bfbd6
+      PRODUCT_TREE: b568e4c57c42e24e899bf00d0b360cc24ed292d5
+      OURO_SIZE_RATCHET_BASE_REF: f07e6cd674c3501aade3a6a726618e29498f7292
+      BASE_TREE: f4030d9375ca5b79ea599c87b39b949da982415a
+      OURO_BOOK_GROWTH_MODE: block
+      PYTEST_ADDOPTS: ''
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 3 # workflow commit, exact product and exact comparison base
+          persist-credentials: false
+      - name: Bind the run to the product and its comparison base
+        env:
+          HOSTED: ${{ runner.environment }}
+        run: |
+          [[ "$RUNNER_OS" == Windows && "$HOSTED" == github-hosted ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git show -s --format=%P HEAD)" == "$PRODUCT" ]]
+          [[ "$(git diff --name-status --no-renames "$PRODUCT" HEAD)" == $'A\t.github/workflows/nano-order-windows-once.yml' ]]
+          [[ "$(git show -s --format=%P "$PRODUCT")" == "$PRODUCT_PARENT" ]]
+          git merge-base --is-ancestor "$OURO_SIZE_RATCHET_BASE_REF" "$PRODUCT"
+          [[ "$(git rev-parse "$PRODUCT^{tree}")" == "$PRODUCT_TREE" ]]
+          [[ "$(git rev-parse "$OURO_SIZE_RATCHET_BASE_REF^{tree}")" == "$BASE_TREE" ]]
+          printf 'OS=%s hosted=%s workflow=%s\nproduct=%s tree=%s\nbase=%s tree=%s\n' \
+            "$RUNNER_OS" "$HOSTED" "$GITHUB_SHA" "$PRODUCT" "$PRODUCT_TREE" \
+            "$OURO_SIZE_RATCHET_BASE_REF" "$BASE_TREE"
+          git checkout --detach "$PRODUCT"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: setup-python # matches the Windows post-merge leg (Python 3.10)
+          install-project: 'false'
+      - name: Require eleven unit passes and seven size passes
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$PRODUCT" ]]
+          git diff --exit-code HEAD --
+          python - <<'PY'
+          import hashlib
+          import os
+          import subprocess
+          import sys
+
+          assert sys.platform == 'win32' and sys.version_info[:2] == (3, 10), sys.version
+          path = 'tests/test_llm_ollama_physical_admission.py'
+          blob = subprocess.check_output(['git', 'show', f'HEAD:{path}'])
+          digest = hashlib.sha256(blob).hexdigest()
+          assert digest == os.environ['TEST_BLOB_SHA256'], digest
+          print(f'CPython {sys.version}\n{path} sha256={digest}', flush=True)
+          PY
+          run_lane() {
+            python - "$1" <<'PY'
+          import os
+          import socket
+          import sys
+          import tempfile
+          from collections import defaultdict
+          from pathlib import Path
+
+          import pytest
+          from tests._socket_seal import block_network_except_socketpair
+
+          scratch = Path(tempfile.mkdtemp(prefix='nano-order-', dir=os.environ['RUNNER_TEMP']))
+          for key in ('HOME', 'USERPROFILE', 'OUROBOROS_DATA_DIR', 'TMPDIR', 'TEMP', 'TMP',
+                      'XDG_CACHE_HOME', 'XDG_CONFIG_HOME'):
+              folder = scratch / key
+              folder.mkdir()
+              os.environ[key] = str(folder)
+          os.environ.pop('OUROBOROS_ALLOW_LIVE_DATA_TESTS', None)
+
+          unit = sys.argv[1] == 'unit'
+          node = ('tests/test_llm_ollama_physical_admission.py::'
+                  'test_prepared_verdict_follows_accounting_wait_order_with_equal_clock_ticks')
+          cancellation = ('tests/test_llm_ollama_physical_admission.py::'
+                          'test_cancelled_compatible_presend_read_keeps_exact_attempt_custody')
+          size = [
+              'tests/test_reference_book_budgets.py::test_a_change_does_not_grow_a_reference_book',
+              'tests/test_reference_book_budgets.py::test_a_change_does_not_grow_bible_or_the_prompts',
+              'tests/test_repo_health_smoke.py::test_checked_in_manifest_generator_check_is_exact',
+              'tests/test_smoke.py::test_no_oversized_modules',
+              'tests/test_smoke.py::test_size_ratchet_manifest_matches_live_tree',
+              'tests/test_smoke.py::test_size_ratchet_transition_against_explicit_base',
+              'tests/test_smoke.py::test_no_extremely_oversized_functions',
+          ]
+          if unit:
+              expected = {f'{node}[{n}-{a}]' for n in range(3) for a in (False, True)}
+              expected.update(f'{cancellation}[{case}]' for case in (
+                  'stale-read-None', 'queued-read-None', 'sender-None',
+                  'stale-read-unresolved', 'stale-read-settled'))
+              selection = [node, cancellation]
+          else:
+              # These two book checks intentionally skip non-ouroboros pushes.
+              # Evaluate the explicitly logged Git pair in local-comparison mode.
+              os.environ.pop('GITHUB_EVENT_NAME', None)
+              expected = set(size)
+              selection = ['-m', 'size_ratchet', *size]
+
+          def no_network(*args, **kwargs):
+              raise AssertionError('Unexpected socket connection or DNS lookup in the offline unit test')
+
+          class Receipt:
+              def __init__(self):
+                  self.phases = defaultdict(list)
+
+              @pytest.hookimpl(hookwrapper=True)
+              def pytest_runtest_call(self, item):
+                  if unit:
+                      # Python 3.10 on Windows may implement asyncio's socketpair using TCP.
+                      # Only socketpair's own numeric-loopback connect is admitted.
+                      with pytest.MonkeyPatch.context() as mp:
+                          block_network_except_socketpair(mp, no_network)
+                          mp.setattr(socket, 'create_connection', no_network)
+                          mp.setattr(socket, 'getaddrinfo', no_network)
+                          yield
+                  else:
+                      yield
+
+              def pytest_runtest_logreport(self, report):
+                  outcome = 'xfail/xpass' if hasattr(report, 'wasxfail') else report.outcome
+                  self.phases[report.nodeid].append((report.when, outcome))
+
+          receipt = Receipt()
+          result = pytest.main(['-o', 'addopts=', '-o', 'xfail_strict=true',
+                                '-o', f'cache_dir={scratch / "pytest-cache"}',
+                                '--basetemp', str(scratch / 'pytest'),
+                                '-v', *selection], plugins=[receipt])
+          for name, phases in sorted(receipt.phases.items()):
+              print(f'{name}: {phases}', flush=True)
+          if result != pytest.ExitCode.OK:
+              raise SystemExit(result)
+          passed = [(phase, 'passed') for phase in ('setup', 'call', 'teardown')]
+          if dict(receipt.phases) != dict.fromkeys(expected, passed):
+              raise SystemExit(f'{sys.argv[1]} requires exactly {len(expected)} complete PASS results; '
+                               f'missing={sorted(expected - receipt.phases.keys())}, '
+                               f'extra={sorted(receipt.phases.keys() - expected)}')
+          print(f'{sys.argv[1]}: {len(expected)}/{len(expected)} complete PASS results', flush=True)
+          PY
+          }
+          unit_rc=0
+          size_rc=0
+          run_lane unit || unit_rc=$?
+          run_lane size || size_rc=$?
+          printf 'unit exit=%s; size exit=%s\n' "$unit_rc" "$size_rc"
+          [[ "$unit_rc" == 0 && "$size_rc" == 0 ]]
