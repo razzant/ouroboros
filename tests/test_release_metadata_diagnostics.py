@@ -251,7 +251,9 @@ def test_free_tool_json_reports_cumulative_books_with_an_explicit_byte_source(ca
     assert result["source"] == source and result["book_balance"]["source"] == "worktree"
     note = result["book_balance"]["note"]
     assert "+18 B vs HEAD" in note and "+36 B vs refs/remotes/official-renamed/ouroboros" in note
-    assert "local commits are not blocked" in note
+    # A book's growth is a stated fact (a chapter is read on demand, under no size rule), so no rule is quoted;
+    # the rule's own words ride only a ruled text's growth (``tests/test_reference_book_balance.py``).
+    assert "under no size rule" in note and "local commits are not blocked" not in note
     assert _diagnose(ctx, source, paths=["change.py"])["book_balance"]["note"] == ""
 
 
@@ -631,7 +633,7 @@ def test_missing_required_readme_is_unavailable_while_optional_older_carriers_ar
 
 
 @pytest.mark.parametrize("path,content,expected", [
-    ("ouroboros/new.py", "value = 1\n", "Architecture book"),
+    ("ouroboros/new.py", "value = 1\n", "no module docstring"),
     ("tests/conftest.py", "def test_misplaced(): pass\n", "contains test functions"),
 ])
 def test_author_formatter_also_preserves_non_release_staged_checks(candidate, path, content, expected):

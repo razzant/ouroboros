@@ -1065,6 +1065,7 @@ def test_the_commit_gate_judges_a_bound_candidate_by_the_serving_handbook_and_re
     assert (checklist["layer"], checklist["body_fact"], checklist["how"]) == ("body", "true", "git_common_dir")
     texts = {brief["slot_id"]: _brief_text(brief) for brief in briefs}
     assert sorted(texts) == ["s1", "t1", "t2"]
+    seen_pulse = False
     for slot_id, text in texts.items():
         # The chapter as the governance tiers deliver it (under its `## <path>` heading) is
         # the serving body's; the candidate's rewrite reaches the seat as the change under
@@ -1072,9 +1073,14 @@ def test_the_commit_gate_judges_a_bound_candidate_by_the_serving_handbook_and_re
         _, heading, delivered = text.partition(f"\n## {PROTOCOL_CHAPTER}\n")
         assert heading and delivered.index(SERVING_DEV_RULE) < delivered.index(CANDIDATE_DEV_RULE), slot_id
         assert "-" + SERVING_DEV_RULE in text and "+" + CANDIDATE_DEV_RULE in text, slot_id
-        assert text.count(SERVING_DEV_RULE) == 2, slot_id  # the delivered rule and the diff's removed line
+        # The delivered rule and the diff's removed line; and, where the diff pulse rides, its count of the
+        # governed prose that left, which names that line as removed, never as a rule.
+        pulse = text.count("Removed governed prose: 1 line of the base is gone")
+        assert pulse <= 1 and text.count(SERVING_DEV_RULE) == 2 + pulse, slot_id
+        seen_pulse = seen_pulse or bool(pulse)
         if slot_id != "t1":  # the retrieving seats inline the serving constitution too
             assert SERVING_RULE in text, slot_id
+    assert seen_pulse, "the pulse states the removed handbook line to the seats it reaches"
     assert shared.git(serving, "status", "--porcelain") == ""
 
 

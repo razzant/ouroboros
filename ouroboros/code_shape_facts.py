@@ -502,6 +502,7 @@ def removed_prose_note(documents: Iterable[str], at_base: Mapping[str, Optional[
     shown = [f"- {path}: {line[:width]}" + (f" … (+{len(line) - width} characters)" if len(line) > width else "")
              for path, line in removed[:limit]]
     rest = (f"{len(removed) - limit} more removed lines are not shown here; " if len(removed) > limit else "")
-    return "\n".join([f"Removed governed prose: {len(removed)} lines of the base are gone from the changed documents:",
-                      *shown, f"({rest}all of them: `{locator}`)"])
+    gone = "1 line of the base is gone" if len(removed) == 1 else f"{len(removed)} lines of the base are gone"
+    return "\n".join([f"Removed governed prose: {gone} from the changed documents:", *shown,
+                      f"({rest}all of them: `{locator}`)"])
 
