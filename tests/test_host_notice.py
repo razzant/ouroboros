@@ -545,3 +545,23 @@ def test_manual_actions_are_typed_steps_and_an_objective_is_never_the_phrase(mon
     skill_review_runner._append_interrupted_review_progress(tmp_path, "alpha", {"job_id": "j1"}, ts="2026-11-22T10:00:00Z")
     [row] = rows
     assert row["notice"]["step"] == "review_again" and row["notice"]["values"] == {"skill": "alpha"}
+
+
+def test_a_call_that_could_not_start_names_its_step_and_the_mind_reads_its_numbers():
+    """A call refused for lack of room sends the owner to the Calls settings (a translated step), and the mind reads that
+    step and the refusal's Details beside the phrase on its next turn in the room."""
+    from ouroboros.contracts.realtime import RouteFacts
+    from ouroboros.realtime_setup import capacity_notice
+    from ouroboros.ui_translation import _core_catalogs
+
+    assert "open_calls" in host_notice.STEPS
+    assert _core_catalogs()["notice.step"][0]["open_calls"] == host_notice.STEPS["open_calls"]
+    facts = RouteFacts(85_000, None, 8_000, "estimator", "documented window", "2026-11-26")
+    said = capacity_notice("voice-test", facts, stage="session_candidate", need=90_123, measured=True,
+                           reserve=8_000, window=85_000)
+    row = {"role": "system", "text": said["text"], "notice": said["notice"]}
+    read = dialogue_text(row)
+    assert read.startswith(said["text"]) and f"[Step: {host_notice.STEPS['open_calls']}]" in read
+    for fact in ("85,000", "8,000", "77,000", "90,123", "characters / 4", "documented window", "2026-11-26"):
+        assert fact in read, fact
+    assert said["notice"]["values"] == {"engine": "voice-test", "need": "90,123", "takes": "77,000"}
