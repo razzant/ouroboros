@@ -235,7 +235,7 @@ def test_extension_cancellation_drains_the_call_and_preserves_the_primary_outcom
 
     turn.feature = {'handler': handler, 'configure': lambda: None}
     host = SimpleNamespace(check=check, watch_controls=watch_controls, finish=finish, warm=lambda: None,
-        trace={}, observe=lambda *_: None, executor=SimpleNamespace(shutdown=lambda **_: None),
+        trace={}, observe=lambda *_: None, _session_opened=True, executor=SimpleNamespace(shutdown=lambda **_: None),
         wire=SimpleNamespace(close=lambda: events.append('wire closed')))
     hub = SimpleNamespace(input_audio_evidence=dict)
     monkeypatch.setattr(live_conversation, 'ConversationHost', lambda *_: host)

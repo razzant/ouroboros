@@ -121,11 +121,11 @@ def write_root(root):
     usage_store.migrate_from_journal(root)
     memory = root / 'memory'
     memory.mkdir(exist_ok=True)
-    (memory / 'identity.md').write_text(text('Identity', PROTECTED['identity']))
-    (memory / 'scratchpad.md').write_text(text('Scratchpad', PROTECTED['scratchpad']))
+    (memory / 'identity.md').write_text(text('Identity', PROTECTED['identity']), encoding='utf-8')
+    (memory / 'scratchpad.md').write_text(text('Scratchpad', PROTECTED['scratchpad']), encoding='utf-8')
     knowledge = memory / 'knowledge'
     knowledge.mkdir(exist_ok=True)
-    (knowledge / 'overview.md').write_text('# Overview\n' + text('Overview', PROTECTED['shared_understanding']))
+    (knowledge / 'overview.md').write_text('# Overview\n' + text('Overview', PROTECTED['shared_understanding']), encoding='utf-8')
     store = ChronicleStore(root)
     store.ensure_activated()
     source = snapshot()
