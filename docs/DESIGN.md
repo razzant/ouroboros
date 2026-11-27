@@ -416,7 +416,8 @@ to recolour, so an outline outside it would be a second frame.
 Text, number, password, select and multiline fields use the same `.ui-control`
 family; `.ui-switch` acts at once, `.ui-checkbox` on its form's Save. `.ui-field` groups a
 label, control and optional `.ui-field-help`. A placeholder is an example,
-never the field's only name. Help and validation belong to that field without
+never the field's only name. A field shows a scroll bar only for the words it holds: an empty one
+draws none at any Interface size. Help and validation belong to that field without
 changing the alignment of neighboring controls and their actions.
 
 **Three choices, three controls.** Pick one is `.ui-radio`, tick any is
