@@ -154,3 +154,13 @@ def serve_chat_history(page, data_root, scope=""):
         route.fulfill(status=result.status_code, content_type="application/json", body=result.content)
 
     page.route("**/api/chat/history**", history)
+
+
+# Main's slot of a tab-kept value (chat_preview.js `roomStoreKey`): exactly `base:<scope>` when the served document
+# carries a proven profile scope (its core-stamped meta), the bare legacy `base` only when it carries none. Never
+# a key found by prefix: another profile's Main slot, a legacy key or a Project room's slot is not this slot.
+MAIN_SLOT_JS = """(base) => {
+    const scope = document.querySelector('meta[name="ouroboros-chat-preview-scope"]')?.content || '';
+    const raw = sessionStorage.getItem(/^[0-9a-f]{16}$/.test(scope) ? `${base}:${scope}` : base);
+    return raw === null ? null : JSON.parse(raw);
+}"""
