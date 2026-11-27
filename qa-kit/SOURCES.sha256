@@ -1,6 +1,6 @@
 # Unmodified copies. Upstream: https://github.com/razzant/ouroboros branch qualification/windows-update-bundled-git
 # commit e21fee6c99908dce046f9d3e5ea646851a605156 (run 45553072103), path devtools/qualification/windows_update/<file>.
-# explorer-qa copy: this project's explorer-qa/ExplorerCapture.cs. Verify with: python -I -B run.py preflight
+# ps/ExplorerCapture.cs is the adapted accept-leg copy of explorer-qa/ExplorerCapture.cs. Verify with: python -I -B run.py preflight
 3570a58da9839d8ac446d6a73b61d42a1c1c733df7bf13b8730475f93b16f5c7  vendor/windows_update_4220_e21fee6/chat_reply_witness.py
 5a36a8df470219b8377979b58b17343e35cce3833a4221e57738ce8a443b833f  vendor/windows_update_4220_e21fee6/fixture_model.py
 24c3e62983dc01699197de24cb5b652c55a4cd672ca18a6cb06fb2c8beebf321  vendor/windows_update_4220_e21fee6/git_traces.py
@@ -9,4 +9,4 @@
 14e45bd7dad0b17a08d91d36120c146d6b94e3383050fc81402c7f643ddfbb49  vendor/windows_update_4220_e21fee6/uia_reading.py
 726a7634247cc460f706f21cacaf971471c4bcc444656cde5f0beb95c84c51de  vendor/windows_update_4220_e21fee6/update_offer.py
 e981b35283055c812a24b8fd93bbe2b525f6e8fe8278be78156393ea692f1ca0  vendor/windows_update_4220_e21fee6/windows_host.py
-7eebc686201e49b7cf8ce75144e7ea77130fcfe85a546f45486335ff80c51ab3  ps/ExplorerCapture.cs
+583f5ec0a9511cc4681a7d0b79f72faa1012a923b0f834206b4f98c7c9bfa1e5  ps/ExplorerCapture.cs

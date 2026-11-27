@@ -2,7 +2,7 @@
 # Adapted from explorer-qa/capture-explorer.ps1 with the same capture rules (a NEW Explorer window of our own, the
 # Details view, an on-screen UI Automation row that must be unique, matched geometry across frames, no selection; the
 # PNG is that row only, drawn by the window itself, never cut from the screen). What changed: the frames come from a JSON spec instead of one downloaded release ZIP,
-# and one frame's failure no longer aborts the others. The shared C# helper is explorer-qa's ExplorerCapture.cs, byte for byte.
+# and one frame's failure no longer aborts the others. The local C# helper is adapted from explorer-qa/ExplorerCapture.cs.
 # If Explorer cannot deliver a row, an opted-in exact Shell item may supply just its native file icon. It is a distinct surface.
 # Nothing here runs the app, and nothing judges the artwork: a captured frame is "pending_visual_inspection".
 #
@@ -29,7 +29,7 @@ $specFrames = @($spec.frames)
 $report = [ordered]@{
     schema = 1; stage = [string]$spec.stage; host = [ordered]@{}; frames = [ordered]@{}; fatal = $null
     visual = 'pending_visual_inspection'; app_executed = $false
-    method = 'Windows Explorer Shell.Application + on-screen UI Automation row + PrintWindow of that window, cut to the target row'
+    method = 'Windows Explorer Shell.Application + on-screen UI Automation row + HWND-bound PrintWindow, cut to the target row'
 }
 $script:firstWindow = $null
 $win = $null
@@ -90,8 +90,9 @@ function Save-ShellItemIcon($f, $facts) {
         if (-not [BrandQa.Native]::HasInk($bitmap)) { return }
         $name = "shell_item_$label.png"
         $png = Join-Path $OutDir $name
-        $bitmap.Save($png, [Drawing.Imaging.ImageFormat]::Png)
-        $facts.png = [ordered]@{ file = $name; sha256 = (Get-FileHash -LiteralPath $png -Algorithm SHA256).Hash.ToLowerInvariant() }
+        $digest = [ExplorerQa.Native]::SaveCheckedPng($bitmap, $png)
+        $facts.png = [ordered]@{ file = $name; sha256 = $digest; bytes = (Get-Item -LiteralPath $png).Length
+            width = $bitmap.Width; height = $bitmap.Height; method = 'shell_item_icon' }
         $facts.status = 'icon_only'
     } finally { $bitmap.Dispose() }
 }
@@ -102,7 +103,7 @@ function Read-Frame($f) {
     $itemName = [string]$f.item
     $facts = [ordered]@{
         folder_label = [string]$f.folder_label; stage = 'navigate'; status = 'failed'
-        error = $null; shell = $null; row = $null; png = $null; window = $null
+        error = $null; capture_reason = $null; shell = $null; row = $null; png = $null; window = $null
     }
     $report.frames[$label] = $facts
     try {
@@ -178,23 +179,37 @@ function Read-Frame($f) {
             rect_in_window = @($rowPixels.X, $rowPixels.Y, $rowPixels.Width, $rowPixels.Height) }
         $facts.stage = 'capture'
         # Re-bind immediately before pixels: tab changes and temporary overlays are not the test.
-        if ((Get-ViewPath $win.Document) -ine $folder -or [int]$win.Document.CurrentViewMode -ne 4 -or
+        $facts.capture_reason = 'capture_explorer_view_changed_before_pixels'
+        if ($win.Busy -or (Get-ViewPath $win.Document) -ine $folder -or [int]$win.Document.CurrentViewMode -ne 4 -or
             [ExplorerQa.Native]::WindowBounds($hwnd) -ne $bounds -or
             [ExplorerQa.Native]::GetDpiForWindow($hwnd) -ne $dpi -or
             [int]$win.Document.SelectedItems().Count -ne 0) { throw 'Folder/view/geometry changed or selection is nonempty.' }
-        $bitmap = [ExplorerQa.Native]::Capture($hwnd, $bounds, $rowPixels)
+        $facts.capture_reason = 'capture_explorer_native_drawing_error'
+        [uint32]$flags = 0
+        $part = [Drawing.Rectangle]::new($bounds.X + $rowPixels.X, $bounds.Y + $rowPixels.Y, $rowPixels.Width, $rowPixels.Height)
+        $bitmap = [ExplorerQa.Native]::Capture($hwnd, $explorerProcess.Id, $bounds, $part, $false, [ref]$flags)
         try {
-            if ($win.Busy -or (Get-ViewPath $win.Document) -ine $folder -or
-                -not [ExplorerQa.Native]::HasRowInk($bitmap, [Drawing.Rectangle]::new(0, 0, $bitmap.Width, $bitmap.Height))) { throw 'Folder changed or the row is blank.' }
+            $facts.capture_reason = 'capture_explorer_view_changed_after_pixels'
+            if ($win.Busy -or (Get-ViewPath $win.Document) -ine $folder -or [int]$win.Document.CurrentViewMode -ne 4 -or
+                [ExplorerQa.Native]::GetDpiForWindow($hwnd) -ne $dpi -or
+                [int]$win.Document.SelectedItems().Count -ne 0 -or $row.Current.IsOffscreen -or $row.Current.BoundingRectangle -ne $r) {
+                throw 'Folder, DPI, selection or the target row changed during capture.'
+            }
             $name = "$label.png"
             $png = Join-Path $OutDir $name
-            $bitmap.Save($png, [Drawing.Imaging.ImageFormat]::Png)
-            $facts.png = [ordered]@{ file = $name; sha256 = (Get-FileHash -LiteralPath $png -Algorithm SHA256).Hash.ToLowerInvariant() }
+            $facts.capture_reason = 'capture_png_save_or_decode_failed'
+            $digest = [ExplorerQa.Native]::SaveCheckedPng($bitmap, $png)
+            $method = if ($flags -eq 2) { 'printwindow_composed' } else { 'printwindow_default' }
+            $facts.png = [ordered]@{ file = $name; sha256 = $digest; bytes = (Get-Item -LiteralPath $png).Length
+                width = $bitmap.Width; height = $bitmap.Height; method = $method }
         } finally { $bitmap.Dispose() }
         $facts.stage = 'captured_pending_visual_inspection'
         $facts.status = 'captured'
+        $facts.capture_reason = $null
     }
     catch {
+        $detail = $_.Exception.GetBaseException().Message
+        if ($detail -cmatch '^capture_[a-z0-9_]{1,51}$') { $facts.capture_reason = $detail }
         $facts.error = Scrub $_.Exception.Message
         try { Save-ShellItemIcon $f $facts } catch { $facts.icon_error = Scrub $_.Exception.Message }
     }

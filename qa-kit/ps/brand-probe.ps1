@@ -11,11 +11,12 @@
 param(
     [Parameter(Mandatory)][ValidateSet('self_test', 'window', 'shortcut')][string]$Mode,
     [Parameter(Mandatory)][string]$OutDir,
-    [string]$Label = 'state',
+    [ValidatePattern('^[a-z0-9_]{1,60}$')][string]$Label = 'state',
     [int]$ProcessId = 0,
     [string]$TitlePrefix = 'Ouroboros v',
     [long]$Hwnd = 0,
-    [string]$ShortcutPath = ''
+    [string]$ShortcutPath = '',
+    [switch]$FramesOnly
 )
 Set-StrictMode -Version 3
 $ErrorActionPreference = 'Stop'
@@ -29,7 +30,7 @@ if (Test-Path -LiteralPath $OutDir) { throw 'OutDir must be a fresh, nonexistent
 
 $FMT = '9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3'   # System.AppUserModel.* : ID=5 RelaunchCommand=2 RelaunchIconResource=3 RelaunchDisplayNameResource=4 PreventPinning=9
 $obs = [ordered]@{
-    schema = 1; mode = $Mode; label = $Label; errors = @(); window = $null; icons = $null; props = $null
+    schema = 1; mode = $Mode; label = $Label; errors = @(); frame_errors = [ordered]@{}; window = $null; icons = $null; props = $null
     taskbar = $null; shortcut = $null; frames = @(); host = $null; fatal = $null
 }
 $frames = New-Object System.Collections.ArrayList
@@ -41,17 +42,52 @@ function Add-Error([string]$where, [string]$text) {
     $script:obs.errors = @($script:obs.errors) + ($where + ': ' + $clean)
 }
 
-function Save-Frame($bmp, [string]$id, [string]$purpose, [int[]]$rect) {
-    if (-not [BrandQa.Native]::HasInk($bmp)) { Add-Error $id 'frame is uniform (blank): not kept'; return $false }
+function Frame-Error([string]$id, [string]$fallback, [Exception]$exception) {
+    $detail = $exception.GetBaseException().Message
+    $code = if ($detail -cmatch '^capture_[a-z0-9_]{1,51}$') { $detail } else { $fallback }
+    $obs.frame_errors[$id] = $code
+    Add-Error $id $detail  # raw paths/messages are never part of the public projection
+}
+
+function Save-Frame($bmp, [string]$id, [string]$purpose, [int[]]$rect, [string]$method) {
+    if (-not [BrandQa.Native]::HasInk($bmp)) { $obs.frame_errors[$id] = 'capture_uniform_bitmap'; return $false }
     $name = $id + '-' + $Label + '.png'
     $path = Join-Path $OutDir $name
-    $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+    $digest = [ExplorerQa.Native]::SaveCheckedPng($bmp, $path)
     [void]$frames.Add([ordered]@{
         id = $id; purpose = $purpose; file = $name
-        sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-        width = $bmp.Width; height = $bmp.Height; rect = $rect
+        sha256 = $digest; bytes = (Get-Item -LiteralPath $path).Length
+        width = $bmp.Width; height = $bmp.Height; rect = $rect; method = $method
     })
     return $true
+}
+
+function Capture-OwnWindow($w, [Drawing.Rectangle]$b, [int]$dpi) {
+    try {
+        if ($oldDpi -eq [IntPtr]::Zero -or $dpi -le 0) { throw 'capture_dpi_unavailable' }
+        if ($b.Width -lt 320 -or $b.Height -lt 240 -or $b.Width -gt 4096 -or $b.Height -gt 4096) {
+            throw 'capture_unusable_window_size'
+        }
+        [uint32]$flags = 0
+        $whole = [ExplorerQa.Native]::Capture([IntPtr]$w.Hwnd, $w.Pid, $b, $b, $true, [ref]$flags)
+    } catch {
+        Frame-Error 'window' 'capture_native_drawing_error' $_.Exception
+        $obs.frame_errors['caption'] = $obs.frame_errors['window']
+        return
+    }
+    try {
+        $method = if ($flags -eq 2) { 'printwindow_composed' } else { 'printwindow_default' }
+        try { [void](Save-Frame $whole 'window' 'the app window as it draws itself' @($b.X, $b.Y, $b.Width, $b.Height) $method) }
+        catch { Frame-Error 'window' 'capture_png_save_or_decode_failed' $_.Exception }
+        $capH = [int][Math]::Round(40 * ($dpi / 96.0))
+        $capW = [Math]::Min($b.Width, [int][Math]::Round(640 * ($dpi / 96.0)))
+        if ($capW -le 40 -or $capH -le 0 -or $capH -gt $b.Height) { $obs.frame_errors['caption'] = 'capture_caption_out_of_bounds'; return }
+        try {
+            $bmp = $whole.Clone([Drawing.Rectangle]::new(0, 0, $capW, $capH), [Drawing.Imaging.PixelFormat]::Format24bppRgb)
+            try { [void](Save-Frame $bmp 'caption' 'the title bar: icon and name' @($b.X, $b.Y, $capW, $capH) $method) }
+            finally { $bmp.Dispose() }
+        } catch { Frame-Error 'caption' 'capture_png_save_or_decode_failed' $_.Exception }
+    } finally { $whole.Dispose() }
 }
 
 function Read-TaskbarButtons([long]$trayHwnd) {
@@ -82,12 +118,10 @@ function Invoke-Taskbar {
 
 function Invoke-OwnWindow($w) {
     $hwnd = [IntPtr]$w.Hwnd
-    if ($true) {
+    if ([ExplorerQa.Native]::WindowProcess($hwnd) -eq $w.Pid) {
         $fg = ([ExplorerQa.Native]::GetForegroundWindow() -eq $hwnd)
         $b = [ExplorerQa.Native]::WindowBounds($hwnd)
         $dpi = [int][ExplorerQa.Native]::GetDpiForWindow($hwnd)
-        $scale = 1.0
-        if ($dpi -gt 0) { $scale = $dpi / 96.0 }
         $obs.window.title = [string]$w.Title
         $obs.window.class_name = [string]$w.ClassName
         $obs.window.pid = [int]$w.Pid
@@ -95,6 +129,8 @@ function Invoke-OwnWindow($w) {
         $obs.window.foreground = $fg
         $obs.window.dpi = $dpi
         $obs.window.rect = @($b.X, $b.Y, $b.Width, $b.Height)
+        Capture-OwnWindow $w $b $dpi
+        if ($FramesOnly) { return }  # transient Setup pages: do not block on Shell/branding reads before/after pixels
 
         # What the window itself supplies (WM_GETICON) and what Windows falls back to (class icons).
         $icons = [ordered]@{}
@@ -106,8 +142,9 @@ function Invoke-OwnWindow($w) {
             if ($answered -and $h -ne 0) {
                 try {
                     $bmp = [BrandQa.Native]::IconBitmap($h)
-                    try { $row.bitmap_kept = [bool](Save-Frame $bmp ('own-icon-' + $pair[0]) 'the icon bitmap the window itself supplies' @(0, 0, $bmp.Width, $bmp.Height)) } finally { $bmp.Dispose() }
-                } catch { Add-Error ('own_icon_' + $pair[0]) $_.Exception.Message }
+                    try { $row.bitmap_kept = [bool](Save-Frame $bmp ('own-icon-' + $pair[0]) 'the icon bitmap the window itself supplies' @(0, 0, $bmp.Width, $bmp.Height) 'window_icon') }
+                    finally { $bmp.Dispose() }
+                } catch { Frame-Error ('own-icon-' + $pair[0]) 'capture_icon_bitmap_error' $_.Exception }
             }
             $icons[$pair[0]] = $row
         }
@@ -125,21 +162,7 @@ function Invoke-OwnWindow($w) {
             try { $props[$pair[0]] = [BrandQa.Native]::WindowProp([int64]$w.Hwnd, $FMT, [uint32]$pair[1]) } catch { Add-Error ('prop_' + $pair[0]) $_.Exception.Message }
         }
         $obs.props = $props
-
-        # Frames drawn by this one window: nothing lying over it can enter them.
-        $capH = [int][Math]::Round(40 * $scale)
-        $capW = [Math]::Min($b.Width, [int][Math]::Round(640 * $scale))
-        if ($capW -gt 40 -and $b.Height -ge $capH) {
-            try {
-                $bmp = [ExplorerQa.Native]::CaptureWindowPart($hwnd, (New-Object System.Drawing.Rectangle($b.X, $b.Y, $capW, $capH)))
-                try { [void](Save-Frame $bmp 'caption' 'the title bar: icon and name' @($b.X, $b.Y, $capW, $capH)) } finally { $bmp.Dispose() }
-            } catch { Add-Error 'caption' $_.Exception.Message }
-        }
-        if ($b.Width -ge 320 -and $b.Height -ge 240 -and $b.Width -le 4096 -and $b.Height -le 4096) {
-            $bmp = [ExplorerQa.Native]::CaptureWindowPart($hwnd, $b)
-            try { [void](Save-Frame $bmp 'window' 'the app window as it draws itself' @($b.X, $b.Y, $b.Width, $b.Height)) } finally { $bmp.Dispose() }
-        } else { Add-Error 'window' 'not captured: out of bounds' }
-    }
+    } else { throw 'capture_window_identity_or_visibility_changed' }
 }
 
 function Invoke-WindowMode {
@@ -148,11 +171,17 @@ function Invoke-WindowMode {
         $wins = @([BrandQa.Native]::TopWindows($ProcessId) | Where-Object {
             $_.Title.StartsWith($TitlePrefix, [StringComparison]::OrdinalIgnoreCase) -and ($Hwnd -eq 0 -or $_.Hwnd -eq $Hwnd) })
     }
-    $obs.window = [ordered]@{ found = ($wins.Count -ge 1); candidates = $wins.Count }
-    if ($wins.Count -ge 1) {
-        try { Invoke-OwnWindow $wins[0] } catch { Add-Error 'window' $_.Exception.Message }
+    $obs.window = [ordered]@{ found = ($wins.Count -eq 1); candidates = $wins.Count }
+    if ($wins.Count -eq 1) {
+        try { Invoke-OwnWindow $wins[0] }
+        catch {
+            Frame-Error 'window' 'capture_window_probe_error' $_.Exception
+            $obs.frame_errors['caption'] = $obs.frame_errors['window']
+        }
     }
-    try { Invoke-Taskbar } catch { Add-Error 'taskbar' $_.Exception.Message }
+    if (-not $FramesOnly) {
+        try { Invoke-Taskbar } catch { Add-Error 'taskbar' $_.Exception.Message }
+    }
 }
 
 function Invoke-ShortcutMode {

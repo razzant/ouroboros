@@ -89,7 +89,31 @@ jobs:
           foreach ($p in 'Ouroboros.exe','_internal\python-standalone\python.exe','bin\fixture.txt') { Set-Content (Join-Path $app $p) 'inert compiler fixture, not executable' }
           .\scripts\pack_windows_setup.ps1 -PayloadRoot $app -OutputDir $out -Compiler "$dest\ISCC.exe"
           if (-not (Test-Path "$out\Ouroboros-Setup-1.2.3-windows-x64.exe" -PathType Leaf)) { throw 'Missing compiler output' }
-          Write-Host 'Compiled; this check neither installs nor uploads the output.'
+          Write-Host 'Compiled; the next step opens only the Ready page of this inert fixture.'
+      - name: Capture the test installer's Ready page, then cancel it without installing
+        shell: pwsh
+        run: |
+          $env:OUROBOROS_QA_DISPOSABLE = '1'
+          $kit = "$env:GITHUB_WORKSPACE\kit\qa-kit"
+          $out = "$env:RUNNER_TEMP\inert-setup-ready"
+          $setup = "$env:RUNNER_TEMP\compiler output\Ouroboros-Setup-1.2.3-windows-x64.exe"
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Sta -File "$kit\ps\capture-inert-setup.ps1" -Kit $kit -Setup $setup -OutDir $out
+          $rc = $LASTEXITCODE
+          if (Test-Path "$out\ready\observations.json") {
+            $o = Get-Content -LiteralPath "$out\ready\observations.json" -Raw | ConvertFrom-Json
+            $reason = [string]$o.frame_errors.window
+            if ($reason -cnotmatch '^capture_[a-z0-9_]{1,51}$') { $reason = 'no_typed_error' }
+            Write-Host "Capture facts: found=$([bool]$o.window.found) frames=$(@($o.frames).Count) reason=$reason"
+          }
+          if ($rc -ne 0) { throw 'Inert Ready capture or ordinary cancellation unconfirmed' }
+      - name: Retain the verified Ready frame only
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-inert-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/inert-setup-ready/ready/window-inert_ready.png
+          if-no-files-found: error
+          retention-days: 7
   accept:
     name: ${{ matrix.mode }} leg (own runner, own profile)
     if: ${{ !inputs.compiler_only && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/qualification/windows-packaging-acceptance' && github.sha == inputs.verified_ref_sha }}

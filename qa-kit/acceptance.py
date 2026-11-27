@@ -506,14 +506,47 @@ class AcceptanceRun(sc.QualificationRun):
         if unproven or no_frame:
             raise sc.Unconfirmed("gate", "required_observations_or_frames_unproven", unproven=unproven, frames_missing=no_frame)
 
-    def keep(self, fid: str, png: pathlib.Path, *, shell_icon: bool = False) -> bool:
-        """Records ``fid`` as waiting for a viewer only when the PNG is one the wrapper will publish."""
-        if png.stat().st_size > MAX_FRAME_BYTES:
+    def keep(self, fid: str, png: pathlib.Path, receipt: dict[str, Any], *, shell_icon: bool = False) -> bool:
+        """Keep only bytes that match the native probe's reopened, decoded PNG; read back the exact path used for publication."""
+        try:
+            with png.open("rb") as image:
+                data = image.read(MAX_FRAME_BYTES + 1)
+        except OSError:
+            self.lose(fid, "frame_file_missing_or_unreadable")
+            return False
+        if len(data) > MAX_FRAME_BYTES:
             self.lose(fid, "frame_over_the_publishing_limit")
             return False
+        if (len(data) < 45 or data[:16] != b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR" or
+                data[-12:] != b"\x00\x00\x00\x00IEND\xaeB`\x82"):
+            self.lose(fid, "frame_invalid_png")
+            return False
+        width, height = (int.from_bytes(data[i:i + 4], "big") for i in (16, 20))
+        digest = hashlib.sha256(data).hexdigest()
+        method = receipt.get("method")
+        accepted = ("shell_item_icon",) if shell_icon else ("window_icon",) if fid.startswith("own_icon_") else ("printwindow_composed", "printwindow_default")
+        if (receipt.get("file") != png.name or receipt.get("bytes") != len(data) or receipt.get("sha256") != digest or
+                (receipt.get("width"), receipt.get("height")) != (width, height) or
+                not 0 < width <= 8192 or not 0 < height <= 8192 or method not in accepted):
+            self.lose(fid, "frame_native_readback_mismatch")
+            return False
         target = self.frames_dir / f"{'shell_item_' if shell_icon else ''}{fid}.png"
-        shutil.copyfile(png, target)
-        self.frames[fid] = {"state": "pending_visual_inspection", "file": target.name, "sha256": wh.sha256_file(target)}
+        # Exclusive create protects a previous accepted file or an unexpected path. The folder belongs to this run.
+        made = False
+        try:
+            with target.open("xb") as output:
+                made = True
+                output.write(data)
+            with target.open("rb") as image:
+                if image.read(MAX_FRAME_BYTES + 1) != data:
+                    raise OSError("frame content changed")
+        except OSError:
+            if made:
+                target.unlink(missing_ok=True)
+            self.lose(fid, "frame_staging_readback_failed")
+            return False
+        self.frames[fid] = {"state": "pending_visual_inspection", "file": target.name, "sha256": digest,
+                            "bytes": len(data), "width": width, "height": height, "method": method}
         if shell_icon:
             self.frames[fid].update(surface="windows_shell_item_icon_not_explorer_row", explorer_row_state="unknown")
         return True
@@ -622,15 +655,23 @@ class AcceptanceRun(sc.QualificationRun):
             row, png = rows.get(fid) or {}, out / f"{fid}.png"
             status = row.get("status")
             icon = out / f"shell_item_{fid}.png"
-            if status == "captured" and png.is_file():
-                self.keep(fid, png)
-            elif status == "icon_only" and icon.is_file() and (fid != "explorer_start_shortcut" or shortcut_safe):
-                self.keep(fid, icon, shell_icon=True)
+            receipt = row.get("png") or {}
+            if status == "captured":
+                self.keep(fid, png, receipt)
+            elif status == "icon_only" and (fid != "explorer_start_shortcut" or shortcut_safe):
+                if self.keep(fid, icon, receipt, shell_icon=True) and self.capture_reason(row.get("capture_reason")):
+                    self.frames[fid]["explorer_row_reason"] = row["capture_reason"]
             else:
                 stopped = str(row.get("stage") or "")
-                self.lose(fid, f"explorer_stopped_at_{stopped}" if re.fullmatch(r"[a-z_]{1,30}", stopped) else f"explorer_script_exit_{code}")
+                self.lose(fid, self.capture_reason(row.get("capture_reason")) or (
+                    f"explorer_stopped_at_{stopped}" if re.fullmatch(r"[a-z_]{1,30}", stopped) else f"explorer_script_exit_{code}".lower()))
 
-    def probe_window(self, label: str, pid: int, prefix: str, hwnd: int = 0) -> tuple[dict[str, Any], pathlib.Path, str]:
+    @staticmethod
+    def capture_reason(value: Any) -> str:
+        """A fixed code from the probe, never PowerShell's message, title or path."""
+        return value if isinstance(value, str) and re.fullmatch(r"capture_[a-z0-9_]{1,51}", value) else ""
+
+    def probe_window(self, label: str, pid: int, prefix: str, hwnd: int = 0, *, frames_only: bool = False) -> tuple[dict[str, Any], pathlib.Path, str]:
         """brand-probe.ps1 on ONE window of ONE process (``hwnd`` pins the exact one): its title, the icons it supplies, its
         AppUserModel properties, frames drawn by that window itself. It reads and captures; it clicks nothing."""
         out = self.private / f"brand-{label}"
@@ -639,20 +680,26 @@ class AcceptanceRun(sc.QualificationRun):
                 break
             out = self.private / f"brand-{label}-{number}"
         code, _tail = hw.run_ps(BRAND_PS, ["-Mode", "window", "-OutDir", out, "-Label", label, "-ProcessId", pid, "-TitlePrefix", prefix,
-                                           "-Hwnd", hwnd], timeout=300)
-        return hw.read_json(out / "observations.json"), out, f"no_frame_probe_exit_{code}"
+                                           "-Hwnd", hwnd, *(["-FramesOnly"] if frames_only else [])], timeout=15 if frames_only else 60)
+        obs = hw.read_json(out / "observations.json")
+        why = ("capture_probe_timeout_or_unavailable" if code is None else f"capture_probe_exit_{code}" if code else
+               "capture_probe_receipt_missing" if not obs else "capture_target_not_unique_or_absent" if not (obs.get("window") or {}).get("found") else
+               "capture_no_png_receipt")
+        return obs, out, why
 
     def keep_probe_frames(self, o: dict[str, Any], out: pathlib.Path, label: str, why: str, kinds: tuple[str, ...]) -> bool:
         by_id = {str(f.get("id")): f for f in o.get("frames") or [] if isinstance(f, dict)}
         sources = {"window": "window", "caption": "caption", "own_icon": "own-icon-big"}
         got = False
         for kind in kinds:
-            png = out / str((by_id.get(sources[kind]) or {}).get("file") or "-")
-            if png.is_file():
-                kept = self.keep(f"{kind}_{label}", png)
+            source = sources[kind]
+            fid = f"{kind}_{label}"
+            receipt = by_id.get(source)
+            if receipt:
+                kept = self.keep(fid, out / f"{source}-{label}.png", receipt)
                 got = got or (kept and kind == "window")
             else:
-                self.lose(f"{kind}_{label}", why.lower())
+                self.lose(fid, self.capture_reason((o.get("frame_errors") or {}).get(source)) or why.lower())
         return got
 
     def brand(self, state: str, *, prefix: str = "Ouroboros v", judge: bool = True, hwnd: int = 0) -> None:
@@ -677,16 +724,16 @@ class AcceptanceRun(sc.QualificationRun):
     def capture_wizard(self, key: str, win: Any) -> bool:
         """Frames of the installer's wizard page ``key``: the exact window every time; its title bar and the icon it supplies on its
         first page. Drawn by our own installer's window; nothing is clicked."""
-        o, out, why = self.probe_window(f"wizard_{key}", win.pid, "Setup", win.hwnd)
-        return self.keep_probe_frames(o, out, f"wizard_{key}", why, ("window", "caption", "own_icon") if key == "ready" else ("window",))
+        o, out, why = self.probe_window(f"wizard_{key}", win.pid, "Setup - ", win.hwnd, frames_only=True)
+        return self.keep_probe_frames(o, out, f"wizard_{key}", why, ("window", "caption") if key == "ready" else ("window",))
 
     def reject_wizard(self, key: str) -> None:
         """A frame that does not show the page it is named after is removed, not published as that page."""
         for fid, frame in list(self.frames.items()):
-            if fid.endswith(f"_wizard_{key}"):
+            if fid.endswith(f"_wizard_{key}") and frame.get("state") == "pending_visual_inspection":
                 if frame.get("file"):
                     (self.frames_dir / frame["file"]).unlink(missing_ok=True)
-                self.lose(fid, "page_changed_or_nothing_captured")
+                self.lose(fid, "capture_wizard_frame_discarded_before_page_proven")
 
     # ---- the installer's wizard (the visible leg)
     def run_installer_wizard(self, proc: Any) -> dict[str, Any]:
