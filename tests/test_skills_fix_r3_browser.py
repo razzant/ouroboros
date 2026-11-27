@@ -98,7 +98,7 @@ def test_registry_rejected_release_from_host_listing_can_skip_review(
         assert read_install_record(drive, "demo") == previous
         toast = page.locator(".toast", has_text="ClawHub now offers different bytes")
         toast.wait_for()
-        toast.click()
+        toast.locator(".toast-dismiss").click()
         toast.wait_for(state="detached")
 
         registry["changed"] = False
@@ -207,7 +207,7 @@ def test_publication_visibility_survives_saved_sources_confirmation_and_task(ski
                 assert ("private repository" in payload[field]) == (expected == private)
             toast = page.locator(".toast", has_text=f"publication task publish-{target} started")
             toast.wait_for()
-            toast.click()
+            toast.locator(".toast-dismiss").click()
             toast.wait_for(state="detached")
             # A started publication hands the owner to chat, as app.js shows pages (#3921's harness); come back.
             assert page.evaluate("window.shownPage") == "chat"

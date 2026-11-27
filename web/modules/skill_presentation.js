@@ -196,12 +196,13 @@ export function externalLinkHtml(url, label) {
     return `<a class="skills-link" href="${escapeHtml(target)}" target="_blank" rel="noopener noreferrer" data-skill-external>${escapeHtml(label)} ↗</a>`;
 }
 
-/** Route a press on a `[data-skill-external]` link through the host while the gesture is live. */
+/** Route a press on a `[data-skill-external]` link through the host while the gesture is live; its answer stands where
+ * it was pressed. */
 export function routeExternalLink(event, openExternal = openExternalViaHostBridge) {
     const link = event?.target?.closest?.('a[data-skill-external]');
     if (!link) return false;
     event.preventDefault();
-    Promise.resolve(openExternal(link.getAttribute('href'))).catch(() => {});
+    Promise.resolve(openExternal(link.getAttribute('href'), { from: link })).catch(() => {});
     return true;
 }
 

@@ -1,10 +1,10 @@
 import { apiFetch } from './api_client.js';
 import { safeExternalUrl } from './utils.js';
 export { renderSafeField, collectSafeFieldValues, normalizeTone, setInlineStatus } from './ui_primitives.js';
-// Cycle note: toast.js imports normalizeTone from this module. Both edges only
-// call the imported function inside function bodies (never at module eval), so
-// the ES-module cycle is benign.
-import { showToast } from './toast.js';
+// Cycle note: toast.js imports from this module too. Both edges only call the
+// imported functions inside function bodies (never at module eval), so the
+// ES-module cycle is benign.
+import { modalNotice, showToast } from './toast.js';
 
 
 export function installedTime(item) {
@@ -54,18 +54,18 @@ export function revealNewRow(row, field) {
  * no-bridge-at-all path already uses. The refusal is rethrown only when even
  * copying fails, so the caller's own error toast still gets its turn.
  */
-async function bridgeRefusalFallback(url, error, browserUrl = '') {
+async function bridgeRefusalFallback(url, error, browserUrl = '', toast = showToast) {
     try {
         // Copy the canonical address when the caller carries both: the compat
         // form tracks the CURRENT file-browser root and may already dangle.
-        await copyShellLinkWithToast(absoluteShellUrl(browserUrl || url, window), window, document, showToast);
+        await copyShellLinkWithToast(absoluteShellUrl(browserUrl || url, window), window, document, toast);
     } catch {
         throw error;
     }
     return { ok: false, native: false, degraded: 'copy-link' };
 }
 
-export async function openViaHostBridge(url, filename = 'file', { browserUrl = '' } = {}) {
+export async function openViaHostBridge(url, filename = 'file', { browserUrl = '', toast = showToast } = {}) {
     // Resolved through the shared shell resolver: in the framed onboarding
     // wizard the bridge lives on the PARENT window, and reading only our own
     // window here would silently fall through to the dead window.open path.
@@ -73,7 +73,7 @@ export async function openViaHostBridge(url, filename = 'file', { browserUrl = '
     const openBridge = api?.open_file_with_default_app;
     if (openBridge) {
         const result = await openBridge(url, filename);
-        if (!result?.ok) return bridgeRefusalFallback(url, new Error(result?.error || 'open failed'), browserUrl);
+        if (!result?.ok) return bridgeRefusalFallback(url, new Error(result?.error || 'open failed'), browserUrl, toast);
         return { ...result, native: true };
     }
     // Version-skew fallback: the served frontend auto-updates via the managed
@@ -86,9 +86,12 @@ export async function openViaHostBridge(url, filename = 'file', { browserUrl = '
     const downloadBridge = api?.download_file_to_downloads;
     if (downloadBridge) {
         const result = await downloadBridge(url, filename, true);
-        if (!result?.ok) return bridgeRefusalFallback(url, new Error(result?.error || 'open failed'), browserUrl);
+        if (!result?.ok) return bridgeRefusalFallback(url, new Error(result?.error || 'open failed'), browserUrl, toast);
         return { ...result, native: true };
     }
+    // A desktop shell with neither file method (a launcher older than both): the shell's interceptor would copy the link
+    // for window.open, answering through the page. The same handoff here answers through the caller's own notice.
+    if (api) return bridgeRefusalFallback(url, new Error('Desktop file opening is unavailable'), browserUrl, toast);
     // True web / non-desktop: open in a new tab. This never navigates the app
     // itself; the browser previews (e.g. PDF) or downloads per its own handling.
     // A launcher-gate compat address is bridge-only — the browser gets the
@@ -97,18 +100,18 @@ export async function openViaHostBridge(url, filename = 'file', { browserUrl = '
     return { ok: true, native: false };
 }
 
-export async function downloadViaHostBridge(url, filename = 'download', { openExternal = false, fetchOptions = {}, browserUrl = '', streaming = false } = {}) {
+export async function downloadViaHostBridge(url, filename = 'download', { openExternal = false, fetchOptions = {}, browserUrl = '', streaming = false, toast = showToast } = {}) {
     const api = shellBridgeApi(window);
     const bridge = api?.download_file_to_downloads;
     if (bridge) {
         const result = await bridge(url, filename, Boolean(openExternal));
         if (!result?.ok) {
-            return bridgeRefusalFallback(url, new Error(result?.error || 'desktop download failed'), browserUrl);
+            return bridgeRefusalFallback(url, new Error(result?.error || 'desktop download failed'), browserUrl, toast);
         }
         return { ...result, native: true };
     }
     if (api) {
-        return bridgeRefusalFallback(url, new Error('Desktop file download is unavailable'), browserUrl);
+        return bridgeRefusalFallback(url, new Error('Desktop file download is unavailable'), browserUrl, toast);
     }
     // Browser fallback fetches the canonical address when the caller carries
     // both: the compat form depends on the CURRENT file-browser root and may
@@ -273,16 +276,31 @@ export async function downloadBlobViaHostBridge(source, filename = '', { win = w
     return { ok: true, native: false, filename: name };
 }
 
-// A modal dialog makes the rest of the page inert, so a field appended to <body> can be neither focused nor
-// selected there: `execCommand('copy')` then copies the dialog's own selection, or nothing. The field goes into
-// the open modal dialog instead. Focus lives only in the topmost modal; a click that moved none (a WebKit
-// button) names its dialog by the anchor, and the last modal in the document is the final guess.
-function isModalDialog(dialog) {
+// A modal dialog makes the rest of the page inert: nothing outside it takes focus, a press or a selection (a copy field
+// goes into the dialog).
+export function isModalDialog(dialog) {
     try { return dialog.matches(':modal'); } catch { return true; }
 }
 
+export function openModalDialogs(doc) {
+    return Array.from(doc?.querySelectorAll?.('dialog[open]') || []).filter(isModalDialog);
+}
+
+// What blocks the page under it: an open modal dialog and a portal that calls itself modal (`aria-modal`, the way
+// bindDialogFocus tells a nested dialog from its own: a confirmation's panel, the phone's Model sheet, the setup overlay).
+// A popup, a menu and the desktop's Model sheet are not modal and block nothing. toast.js holds the page's notices here.
+// (drawer_drag.js's BLOCKING_SELECTOR is another fact: what owns a finger, menus included.)
+export function modalSurfaces(doc) {
+    return Array.from(doc?.querySelectorAll?.('dialog[open], [aria-modal="true"]') || [])
+        .filter((el) => (el.localName === 'dialog' ? isModalDialog(el) : el.getClientRects().length > 0));
+}
+
+// A field appended to <body> can be neither focused nor selected under a modal: `execCommand('copy')` then copies the
+// dialog's own selection, or nothing. The field goes into the open modal dialog instead. Focus lives only in the topmost
+// modal; a click that moved none (a WebKit button) names its dialog by the anchor, and the last modal in the document is
+// the final guess.
 function copyFieldOwner(doc, anchor) {
-    const modals = Array.from(doc.querySelectorAll?.('dialog[open]') || []).filter(isModalDialog);
+    const modals = openModalDialogs(doc);
     const holds = (node) => modals.find((dialog) => dialog.contains?.(node));
     return holds(doc.activeElement) || holds(anchor) || modals.at(-1) || doc.body;
 }
@@ -366,10 +384,9 @@ export async function copyTextWithToast(text, {
     return true;
 }
 
-// With NO file-bridge method at all, openViaHostBridge/downloadViaHostBridge
-// fall back to window.open / anchor clicks — dead in the shell, and a re-entry
-// into the interceptor's own shim. routeShellUrl degrades that case to the
-// copy-link fallback instead of routing through the helpers.
+// With NO file-bridge method at all (a shell older than both), window.open and anchor clicks are dead in it, and
+// routing through the helpers would re-enter the interceptor's own shim. The helpers degrade that case to the copy-link
+// fallback themselves, answering through the caller's notice; routeShellUrl does the same without calling them.
 const fileBridgeReady = (api) => Boolean(api?.open_file_with_default_app || api?.download_file_to_downloads);
 
 function absoluteShellUrl(url, win) {
@@ -381,9 +398,10 @@ async function copyShellLinkWithToast(url, win, doc, toast) {
     toast('Link copied — open it in your browser.', 'info');
 }
 
-/** Open an external link through the active host while the user gesture is live. */
+/** Open an external link through the active host while the user gesture is live. `from` is the control that asked: its
+ * answer stands in the modal it was pressed in (toast.js `modalNotice`). */
 export async function openExternalViaHostBridge(url, {
-    win = window, doc = document, toast = showToast, api = shellBridgeApi(win),
+    win = window, doc = document, from = null, toast = modalNotice(from), api = shellBridgeApi(win),
 } = {}) {
     const target = safeExternalUrl(url);
     if (target === '#') throw new Error('Unsupported external link');
@@ -425,8 +443,8 @@ async function routeShellUrl(kind, url, deps) {
             const name = filename || bridgeFilenameFromUrl(url);
             // A refusal from inside these helpers already handed the owner a
             // copy-link toast; only a genuine throw reaches the catch below.
-            if (wantsDownload) await downloadFile(url, name);
-            else await openFile(url, name);
+            if (wantsDownload) await downloadFile(url, name, { toast });
+            else await openFile(url, name, { toast });
         } else if (kind === 'external') {
             await openExternalViaHostBridge(url, { api, win, doc, toast });
         } else if (kind === 'bytes') {
@@ -441,6 +459,15 @@ async function routeShellUrl(kind, url, deps) {
                 : 'open link';
         toast(`Could not ${verb}: ${error?.message || error}`, 'error');
     }
+}
+
+// The caller's notice for the synchronous window.open or download click it makes, which the shell's interceptor reads
+// in place of the page's. A browser ignores it.
+let askedNotice = null;
+export function openWithNotice(notice, open) {
+    const previous = askedNotice;
+    askedNotice = notice;
+    try { return open(); } finally { askedNotice = previous; }
 }
 
 /**
@@ -460,8 +487,9 @@ export function installDesktopShellLinkInterceptor({
         if (installed) return;
         installed = true;
         const nativeOpen = typeof win.open === 'function' ? win.open.bind(win) : () => null;
+        // Each call names who hears the answer: the caller's notice, else the modal a pressed link stands in, else the page.
         const deps = (extra) => ({
-            api: shellBridgeApi(win), win, doc, toast, openFile, downloadFile, ...extra,
+            api: shellBridgeApi(win), win, doc, openFile, downloadFile, ...extra,
         });
         doc.addEventListener('click', (event) => {
             const api = shellBridgeApi(win);
@@ -474,6 +502,7 @@ export function installDesktopShellLinkInterceptor({
             if (kind === 'default') return;
             event.preventDefault();
             void routeShellUrl(kind, url, deps({
+                toast: askedNotice || modalNotice(anchor, toast),
                 wantsDownload,
                 filename: String(anchor.getAttribute('download') || ''),
             }));
@@ -484,7 +513,7 @@ export function installDesktopShellLinkInterceptor({
                 ? classifyShellUrl(url, win.location?.href)
                 : { kind: 'default', url };
             if (kind === 'default') return nativeOpen(url, target, features);
-            void routeShellUrl(kind, routed, deps({}));
+            void routeShellUrl(kind, routed, deps({ toast: askedNotice || toast }));
             return null;
         };
     };

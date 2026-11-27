@@ -239,13 +239,49 @@ def _login_capable_harness_ids(rows: List[Dict[str, Any]]) -> "set | None":
     return capable if readable else None
 
 
+def _saved_subscription_profile(wrapper: Any) -> bool:
+    """Whether ONE roster row is a saved subscription account.
+
+    The engine records the account's credential kind; a subscription kind (the
+    core's include-list, ``gateway.onboarding._SUBSCRIPTION_CREDENTIAL_KINDS``)
+    names a sign-in family whatever its program's presence. An api_key-kind
+    profile is not one. This is a fact about the ROW, never about the harness:
+    a neighbour's subscription says nothing about this row's credential.
+    Pure for unit tests."""
+    from ouroboros.gateway.onboarding import _SUBSCRIPTION_CREDENTIAL_KINDS
+
+    if not isinstance(wrapper, dict):
+        return False
+    profile = wrapper.get("profile")
+    if not isinstance(profile, dict):
+        return False
+    return profile.get("credential_kind") in _SUBSCRIPTION_CREDENTIAL_KINDS
+
+
 def _account_row_visible(harness_id: str, capable) -> bool:
-    """Account-surface predicate: login capability (the catalog's ``setupLogin``,
-    or the manifests on an engine whose catalog is not current evidence).
-    Deliberately NOT "keep all unknown rows": that would resurrect raw-api,
-    which is the exact leak this filter closes. ``capable is None`` (no readable
-    evidence at all) fails open."""
+    """Account-surface predicate for a CATALOG row: login capability (the
+    catalog's ``setupLogin``, or the manifests on an engine whose catalog is not
+    current evidence). Deliberately NOT "keep all unknown rows": that would
+    resurrect raw-api, which is the exact leak this filter closes.
+    ``capable is None`` (no readable evidence at all) fails open."""
     return capable is None or harness_id in capable
+
+
+def _account_profile_visible(wrapper: Any, capable) -> bool:
+    """Whether ONE credential-profile row belongs on the account surface.
+
+    Two separate facts, never merged into one list: the HARNESS offers a
+    sign-in on this host (the catalog's ``setupLogin``, or the manifests when
+    the catalog is not current evidence), OR this very ROW is a saved
+    subscription account. The second is per row: a harness whose program is
+    missing keeps ITS subscription account in view, while an api_key profile of
+    the same harness gains nothing from that neighbour. ``capable is None``
+    (no readable evidence at all) fails open, as before."""
+    if capable is None:
+        return True
+    profile = wrapper.get("profile") if isinstance(wrapper, dict) else None
+    harness = str(profile.get("harness_id") or "") if isinstance(profile, dict) else ""
+    return harness in capable or _saved_subscription_profile(wrapper)
 
 
 # One status read per variant (with or without per-harness models) at a time: concurrent
@@ -630,17 +666,26 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
             # Full Accounts owns this login-eligibility presentation policy. The
             # passive roster remains raw; its browser merge carries this evidence
             # forward instead of deriving login support from catalog membership.
+            # The published list is the login CAPABILITY itself (the catalog's
+            # `setupLogin`, or the manifests when the catalog is not current
+            # evidence). A saved subscription account is a ROW-level fact and
+            # never enlarges this list: an api_key profile of the same harness
+            # must not inherit a sign-in it never had. Capability and roster are
+            # independent reads, so a refused roster still publishes the
+            # capability the catalog already answered.
             if profiles_outcome[0] == READ_OK or capable is not None:
                 profiles = {**profiles, "login_capable_harnesses": sorted(capable) if capable is not None else None}
             wrappers = profiles.get("profiles") if isinstance(profiles, dict) else None
             if capable is not None and isinstance(wrappers, list):
                 # Named credential-profile wrappers leak like catalog rows: an
                 # api_key-kind profile registered for a non-loginable harness
-                # would render a fake-loginable account row. An old client's
-                # `harnessAccounts` carrier rides through unread.
+                # would render a fake-loginable account row. A SAVED
+                # SUBSCRIPTION account of that harness keeps its own row (its
+                # program may be missing, so its catalog row offers no
+                # sign-in): the exception is per row, never per family. An old
+                # client's `harnessAccounts` carrier rides through unread.
                 profiles["profiles"] = [
-                    w for w in wrappers
-                    if str(w["profile"].get("harness_id") or "") in capable
+                    w for w in wrappers if _account_profile_visible(w, capable)
                 ]
             marks = marks_call.result()
             if profiles_outcome[0] == READ_OK and marks is not None:

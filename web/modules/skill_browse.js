@@ -13,6 +13,7 @@ import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { skillSourcesApi } from './api_client.js';
 import { installedSkillModel } from './skill_card_renderer.js';
 import { openSkillDetailSheet } from './skill_detail_sheet.js';
+import { modalNotice } from './toast.js';
 import {
     buttonHtml, catalogWhoHtml, chipHtml, connectsServices, connectsText, countsAsYoursText, factsText, nameMatch, officialMarkHtml, plural,
     relativeAge, skillIconHtml, skillNames, skillOfferChanged, skipReviewButtonHtml, statusHtml, trustSentence, versionText,
@@ -132,6 +133,21 @@ function resolveInstalled(item, listing) {
 /** An installed copy on a host that names origins, whose own origin it cannot name. */
 function originUnknown(row) {
     return hasSourceKey(row) && !row.source_key && !row.lifecycle_virtual && !row.identity_collision;
+}
+
+/** The installed payload shown by Compare, independent of recreated rows and lifecycle or catalog decoration. */
+function replacementTarget(row) {
+    if (!row?.name || !row.source || !row.payload_root || !row.content_hash
+        || row.lifecycle_virtual || row.identity_collision || row.collision_row_id) return null;
+    const { source, release, installed_at: landedAt } = row.install || {};
+    const legacy = !hasSourceKey(row);
+    // A manual external folder has no origin record; the host's removal fact distinguishes it from unavailable install facts.
+    const manualExternal = row.source_key === null && row.install === null && row.removal === 'delete';
+    if (legacy ? !source?.kind || !(source.id || (release?.digest && landedAt)) : !row.source_key && !manualExternal) return null;
+    // The modern key names the origin; a connected source id and catalog_id can move without a new landing.
+    return [row.name, row.source, row.payload_root, row.content_hash, row.source_key, release?.digest, landedAt,
+        row.registry_slug || row.provenance?.slug, legacy ? source.kind : '', legacy ? source.id : '',
+        legacy ? source.part : '', legacy ? row.provenance?.registry_url : ''];
 }
 
 export function offeredUpdate(item, installed) {
@@ -686,7 +702,9 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         board.querySelector('[data-browse-action="browse_retry"], .marketplace-card [data-browse-action="open"]')?.focus({ preventScroll: true });
     }
 
-    async function install(item, { replace = false } = {}) {
+    // `notice` is what answers this press (toast.js `modalNotice`), named when it was made: a press in the detail sheet is
+    // answered there, and a refusal of a name already taken is the one place the card says why.
+    async function install(item, { replace = false, notice = host.toast } = {}) {
         state.failures.delete(item.id);
         state.pending.set(item.id, { phase: 'installing', startedAt: Date.now() });
         repaintStates();
@@ -699,10 +717,10 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             });
             if (result?.already_installed) {
                 state.pending.delete(item.id);
-                host.toast(`${item.name} is already installed from ${item.source_name || 'this source'}.`, 'muted');
+                notice(`${item.name} is already installed from ${item.source_name || 'this source'}.`, 'muted');
             } else {
                 state.pending.set(item.id, { phase: result?.basis === 'review' ? 'reviewing' : 'installing', startedAt: Date.now() });
-                host.toast(result?.basis === 'review'
+                notice(result?.basis === 'review'
                     ? `${item.name} is installing. Ouroboros reviews it before it runs.`
                     : `${item.name} is installing. It turns on as soon as it is ready.`, 'ok');
             }
@@ -713,8 +731,8 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             const code = err?.body?.code || '';
             if (code === 'candidate_changed') {
                 if (state.sheet?.item === item) state.sheet.handle.rejectOffer();
-                host.toast('This offer changed. Refresh Browse and try again.', 'warn');
-            } else if (['name_taken', 'name_collision', 'update_instead'].includes(code)) host.toast(`${item.name}: ${err.message}`, 'warn');
+                notice('This offer changed. Refresh Browse and try again.', 'warn');
+            } else if (['name_taken', 'name_collision', 'update_instead'].includes(code)) notice(`${item.name}: ${err.message}`, 'warn');
             else state.failures.set(item.id, err?.message || String(err));
         }
         repaintStates();
@@ -756,6 +774,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
 
     // A sheet acts on the entry it shows (`shown`); a card on the entry it was drawn from.
     async function act(action, node, sheetOpener = null, shown = null) {
+        const notice = modalNotice(node, host.toast);  // before any await: the node may be repainted away by then
         const item = shown || drawnById.get(node?.dataset?.item || '');
         if (action === 'hide_shelf') { writeHiddenShelf('1'); render(); return; }
         if (action === 'browse_more') { await showMore(); return; }
@@ -780,14 +799,16 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             if (installed || other || sameFiles || tied) return;
             await host.confirmFirstStart?.(item.source_id, () => !stale());
             const now = resolve();
-            if (!stale() && !now.installed && !now.other && !now.sameFiles && !now.tied) await install(item);
+            if (!stale() && !now.installed && !now.other && !now.sameFiles && !now.tied) await install(item, { notice });
             return;
         }
         if (action === 'compare') {
             // Replace is one host operation: the other copy goes only when this one has landed.
-            if (other && await host.compare(item, other) === 'replace' && !stale() && resolve().other === other) {
-                await install(item, { replace: true });
-            }
+            if (!other) return;
+            const target = replacementTarget(other);
+            if (await host.compare(item, other) !== 'replace' || destroyed || stale() || !target) return;
+            const current = replacementTarget(resolve().other);
+            if (current && target.every((value, index) => value === current[index])) await install(item, { replace: true, notice });
             return;
         }
         if (action === 'installed' || action === 'widgets') {
@@ -804,7 +825,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         const map = { skip: 'attest_review', update: 'update', turn_on: 'turn_on' };
         if (map[action]) {
             if (action === 'update' && !offeredUpdate(item, installed)) return;
-            await host.runInstalledAction(installed.name, map[action], { browseItem: item });
+            await host.runInstalledAction(installed.name, map[action], { browseItem: item, notice });
             repaintStates();
         }
     }

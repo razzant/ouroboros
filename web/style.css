@@ -7671,27 +7671,33 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     pointer-events: none;
 }
 
+/* A notice floats over moving content: the float glass on the float shadow, with no edge (DESIGN principle 2: objects
+   rest, they are not outlined). Its tone is its words' ink, never an edge or a fill (a translucent status fill over the
+   page would cost the text its contrast); an info notice reads in the primary ink, a muted one in the neutral status
+   ink. toast.js lays out its words, then its one way on (an action), then its close at the top of the second column. */
 .toast {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    column-gap: var(--space-1);
     max-width: min(420px, calc(100vw - 112px));
-    padding: var(--space-3) var(--space-4);
+    /* The close's reach under a finger (8px past its 28px) stays inside the notice, so the column never clips it. */
+    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
     border-radius: var(--radius-object);
-    /* The shared float material (DESIGN principle 2): no rim, the float surface, the one glass, the float shadow. A
-       tone is its words' ink on that neutral body, never an edge. The transparent outline is the edge forced colours
-       paint, where the shadow is dropped. */
-    outline: 1px solid transparent;
-    outline-offset: -1px;
     background: var(--surface-float);
     color: var(--text-primary);
+    /* No rim: the transparent outline is only the edge forced colours paint, where the shadow is dropped. */
+    outline: 1px solid transparent;
+    outline-offset: -1px;
     box-shadow: var(--elev-float);
-    backdrop-filter: var(--glass);
     -webkit-backdrop-filter: var(--glass);
+    backdrop-filter: var(--glass);
     font-size: var(--type-body);
     line-height: 1.45;
     /* Error text can be a long unbroken token (a path, a URL, a serialized
        body); without this it overflows the toast instead of wrapping. */
     overflow-wrap: anywhere;
     pointer-events: auto;
-    cursor: pointer;
     animation: toast-in 160ms ease-out;
 }
 
@@ -7702,56 +7708,59 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 .toast-ok { color: var(--status-ok-fg); }
 .toast-danger { color: var(--status-error-word, var(--status-error-fg)); }
 .toast-warn { color: var(--status-warn-fg); }
-.toast-muted,
-.toast-info { color: var(--status-neutral-fg); }
-/* A notice's one way back (host_modules.js recovery) follows its words on the same line when they fit. */
-.toast .toast-action { display: inline-flex; flex-shrink: 0; margin-inline-start: var(--space-2); vertical-align: middle; }
-/* With a close, the words take the first row beside it and the action the row under them. One line of words is
-   centred on the close; several start level with it, so the close keeps the top-right corner. */
-.toast:has(> .toast-dismiss) { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-2); row-gap: var(--space-2); }
-.toast > .toast-words:has(~ .toast-dismiss) { min-width: 0; grid-column: 1; grid-row: 1; align-self: center; }
-.toast > .toast-action:has(~ .toast-dismiss) { grid-column: 1; grid-row: 2; margin-inline-start: 0; justify-self: start; }
-/* The close: a small plain × in the corner, no plate or shadow; its ink deepens on hover. Under a finger its reach is
-   the touch minimum (.ui-hit-area), wider than the glyph, and the columns part by that reach so it never lies over the
-   action's corner. A right-to-left interface mirrors the
-   page and its stack with it: the stack keeps the room's top corner at its inline end (top right in a left-to-right
-   interface) and the × the toast's. */
-.toast > .toast-dismiss {
-    grid-column: 2;
-    grid-row: 1;
-    align-self: start;
-    width: 20px;
-    height: 20px;
-    margin-inline-end: calc(-1 * var(--space-1));
-    padding: 0;
-    display: inline-flex;
+.toast-muted { color: var(--status-neutral-fg); }
+/* Room notices sit above the measured composer, away from header menus. */
+.toast-stack--room {
+    position: absolute;
+    inset: auto 14px var(--chat-input-reserve, 108px);
     align-items: center;
-    justify-content: center;
-    border: 0;
-    border-radius: 50%;
-    background: transparent;
-    color: var(--text-meta);
-    cursor: pointer;
-    transition: var(--motion-tone);
 }
-.toast > .toast-dismiss > svg { display: block; width: 14px; height: 14px; }
-@media (hover: hover) {
-    .toast > .toast-dismiss:hover { color: var(--text-primary); }
+.toast-stack--room .toast { max-width: min(520px, 100%); }
+/* Behind a blocking surface (a modal dialog, a portal that is aria-modal) the page is inert: its notices wait out of
+   sight, their time held (toast.js). */
+.toast-stack[data-held] { visibility: hidden; }
+/* A blocking surface's own notice (toast.js `modalNotice`: the reader, the file dialog, a skill's sheet, the phone's Model
+   sheet) stands at the foot, not above a composer: over their content; the file dialog is only as tall as its buttons,
+   so its notice stands at the screen's. The stack is bounded to half its surface and scrolls past that, so every close
+   stays reachable and the surface's own actions stay clear. A scrolling box clips what it holds: its padding is the
+   float shadow's room (as the page's column keeps it), and its inset takes the padding back. */
+:is(.document-reader, .chat-file-dialog, .model-sheet) > .toast-stack--room {
+    inset: auto calc(var(--space-4) - 44px) calc(var(--space-4) + var(--inset-bottom) - 62px);
+    box-sizing: border-box;
+    max-height: 50%;
+    padding: 0 44px 62px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
-.toast > .toast-dismiss:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.chat-file-dialog > .toast-stack--room { position: fixed; }
+/* The words are only words (owner 26.11, A): read and selected, a press on them does nothing. Their padding centres a
+   first line on the close. */
+.toast > .toast-words { grid-column: 1; min-width: 0; padding: var(--space-1) 0; -webkit-user-select: text; user-select: text; cursor: text; }
+/* A notice's one way on (a notification's Open, a recovery's Start it) stands under its words. */
+.toast > .toast-action { grid-column: 1; justify-self: start; margin: var(--space-1) 0; }
+/* Under a finger the close's reach runs 8px past its 28px each way (ui.css touch reach) and the engine snaps a tap near
+   a button onto it, so the gap is wider than both: a tap on the words' last glyph stays a press on the words. */
 @media (pointer: coarse) {
-    .toast:has(> .toast-dismiss) { column-gap: var(--space-3); }
+    .toast { column-gap: var(--space-5); }
+    /* The same engine snap runs from the action upward: its reach (8px past its 28px) and the words' last line must
+       not meet, so a tap on that line stays a press on the words. */
+    .toast > .toast-action { margin-top: var(--space-4); }
 }
+/* Its close is the quiet icon control (as a card's ⋮): no body, the meta ink, the primary ink on hover. */
+.toast > .toast-dismiss { --control-pad-x: 0; grid-column: 2; grid-row: 1 / span 2; width: var(--control-h); color: var(--text-meta); }
+.toast > .toast-dismiss:not(:disabled):hover { color: var(--text-primary); }
+.toast > .toast-dismiss > svg { width: 16px; height: 16px; }
 /* The page's stack ends 18 px above the screen's bottom, as it keeps from its right, and the notices it keeps scroll
    there as one column: every word and close button is reached by wheel, touch or keyboard (toast.js names it a region
-   once cut). A scrolling box clips what it holds, so its padding is the toasts' shadow room (0 18px 42px): left and
-   below them, and the 18 px to the room's corner that the stack keeps. */
+   once cut). A scrolling box clips what it holds, so its padding is the toasts' shadow room (the float shadow, 18px
+   down and 44px of blur): left and below them, and the 18 px to the right edge that `right` kept before. Room notices
+   keep their own place. */
 #toast-stack {
     inset-inline-end: 0;
     box-sizing: border-box;
     max-height: calc(var(--vvh) - var(--toast-top) - var(--inset-bottom) - 18px);
-    padding-block: 0 60px;
-    padding-inline: 42px 18px;
+    padding-block: 0 62px;
+    padding-inline: 44px 18px;
     overflow-y: auto;
     overscroll-behavior: contain;
 }
@@ -7775,8 +7784,6 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     -webkit-mask-position: 0 var(--toast-view-top, 0);
     mask-position: 0 var(--toast-view-top, 0);
 }
-/* A plain notice needs one mask box for all its wrapped lines, not an inline box per line. */
-#toast-stack .toast-words:only-child { display: block; }
 
 @keyframes toast-in {
     from { opacity: 0; transform: translateY(8px); }
@@ -10404,7 +10411,7 @@ html[data-layout="stack"] .project-panel {
 .settings-disclosure-caret { flex: none; transition: transform 0.18s ease; }
 .settings-disclosure[aria-expanded="true"] .settings-disclosure-caret { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) { .settings-disclosure-caret { transition: none; } }
-/* Who an unpinned run would take next: a quiet fact of the family head, not a second status. */
+/* A quiet fact of the family head, not a second status: who an unpinned run takes next, or that Connect waits for the program. */
 .agent-family-next { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 /* Accounts are grouped by FAMILY, one card each (owner: "все акки клод кода
    должны быть эквивалентны", "в каждой секции добавить кнопку"). The card
@@ -10510,8 +10517,8 @@ html[data-layout="stack"] .project-panel {
 .harness-maintenance-details dd { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 var(--space-1); color: var(--text-primary); }
 .harness-maintenance-details pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .harness-model-program { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); }
-/* A press's failure reason on the program line, in the chooser footer and on a setup family row alike (as the Accounts notice). */
-.harness-model-program [data-tone="warn"] { color: var(--status-warn-fg); }
+/* A press's failure reason on the program line, in the chooser footer, on a setup family row and its programs line alike. */
+:is(.harness-model-program, .agent-other-programs) [data-tone="warn"] { color: var(--status-warn-fg); }
 .harness-model-latest { white-space: nowrap; }
 .ui-model-options[data-model-popup] { display: flex; flex-direction: column; overflow: hidden; }
 .ui-model-options[data-model-popup] > [role="listbox"] { min-height: 0; overflow-y: auto; }

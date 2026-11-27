@@ -109,7 +109,7 @@
     --diagram-tertiary: #151617;
     --ui-modal-bg: rgba(var(--modal-rgb), 0.98);
     /* Status triples: fg/bg/border named together, never derived
-       (docs/DESIGN.md "Status and chips"). The fg tints are readable at 12px on the dark room, where a status body
+       (docs/DESIGN.md "Status and chips"); success has no border, as nothing paints its edge. The fg tints are readable at 12px on the dark room, where a status body
        is a neutral veil carrying the hue's ink (a dark tint of green, amber or red goes olive or brown); inside the
        dark Ouroboros voice the body is that voice's opaque capsule step and the red ink its readable word (the
        material, after the light block). The red ink is a step lighter than the crimson word; the saturated

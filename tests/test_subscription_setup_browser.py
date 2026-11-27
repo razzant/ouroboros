@@ -227,6 +227,8 @@ def subscription_ui():
                 # options, the Agents roster), in the gateway's owner transaction.
                 settings.update(payload.get("settings") or {})
                 body = {"ok": True}
+        elif path == "/api/claudexor/maintenance/harnesses":
+            body = {"harnesses": []}  # the running engine's answer with no program of its own; a test serves its rows
         elif path == "/api/claudexor/status":
             body = fixture["status"]
             if parse_qs(urlparse(request.url).query).get("view") == ["quota"]:

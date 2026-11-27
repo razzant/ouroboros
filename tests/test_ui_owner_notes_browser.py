@@ -109,7 +109,8 @@ def test_notes_reach_main_activity_and_the_live_banner(direct_server_with_data, 
             page.locator(f"#chat-messages {BUBBLE}").filter(has_text=LIVE).wait_for(state="visible", timeout=90_000)
             toast = page.locator("#toast-stack .toast").filter(has_text="Reminder from Ouroboros")
             toast.wait_for(state="visible", timeout=10_000)
-            assert toast.inner_text().strip().endswith(LIVE)
+            assert toast.locator(".toast-words").inner_text().strip().endswith(LIVE)
+            assert toast.get_by_role("button", name="Open").count() == 1
             assert page.locator("#toast-stack .toast").filter(has_text="Reminder").count() == 1
             page.screenshot(path=str(evidence / "main-live-banner.png"))
 

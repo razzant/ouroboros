@@ -71,7 +71,7 @@ warning | web/style.css | @container files (max-width: 700px) » .files-entry:is
 warning | web/style.css | .harness-account-meta .meta-fact[data-tone="warn"] | color
 warning | web/style.css | :root[data-theme="light"] .harness-account-row.harness-exhausted | background
 warning | web/style.css | .harness-maintenance-notice[data-tone="warn"] | color
-warning | web/style.css | .harness-model-program [data-tone="warn"] | color
+warning | web/style.css | :is(.harness-model-program, .agent-other-programs) [data-tone="warn"] | color
 warning | web/style.css | .message-share-status[data-tone="warn"] | color
 warning | web/style.css | .model-fallback | color
 warning | web/style.css | .msg-attachment-outcome | color

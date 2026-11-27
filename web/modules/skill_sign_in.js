@@ -655,7 +655,7 @@ export function mountSkillSignIn(container, skillName, { status = null, reload =
         Object.assign(state, { editor: { ...editor, account, kind: 'waiting', attemptId, url: link, client: result.client, clientReturn, result: null }, dirty: true });
         paint();
         group.querySelector('a[data-sign-in-link]')?.focus({ preventScroll: true });
-        void openExternalViaHostBridge(link).catch(() => {});  // best effort while the press is recent; the link works on every surface
+        void openExternalViaHostBridge(link, { from: group }).catch(() => {});  // best effort while the press is recent; the link works on every surface
         armReturn();
         void refresh();
     });
@@ -858,7 +858,7 @@ export function mountSkillSignIn(container, skillName, { status = null, reload =
 
     async function onClick(event) {
         const link = event.target.closest?.('a[data-sign-in-link]');
-        if (link) { event.preventDefault(); void openExternalViaHostBridge(link.getAttribute('href')).catch(() => {}); return; }
+        if (link) { event.preventDefault(); void openExternalViaHostBridge(link.getAttribute('href'), { from: link }).catch(() => {}); return; }
         const node = event.target.closest?.('[data-sign-in-act]');
         if (!node || node.disabled) return;
         const fromMenu = Boolean(menu?.popup.contains(node));

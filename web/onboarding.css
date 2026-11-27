@@ -767,6 +767,7 @@ textarea::placeholder {
    docked right, never wrapped under the text; no family is laid out differently for being first. The list's own
    width picks the columns: two equal ones where two rows fit side by side, else one (the card never fits three). */
 .agent-family-list {
+  container: agentlist / inline-size;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
   gap: 6px;
@@ -795,6 +796,14 @@ textarea::placeholder {
 .agent-family-row > .btn {
   flex: 0 0 auto;
   white-space: nowrap;
+}
+
+/* The explicit pick of an existing saved account (docs/DESIGN.md §7): the shared field control — a
+   `.ui-control`, its own text box and inner radius, not a capsule — beside the press that starts with
+   exactly the chosen account; capped so the names stay a picker, not the row's widest thing. */
+.agent-family-row > select.ui-control {
+  flex: 0 1 auto;
+  max-width: 9rem;
 }
 
 .agent-family-name {
@@ -827,8 +836,23 @@ textarea::placeholder {
   top: -1px;
 }
 
+/* The engine's other programs it lacks (no subscription family): one line under the rows, across both columns, each
+   program the same compact program line with its own Install. */
+.agent-other-programs {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-4);
+  padding: 2px 12px;
+  font-size: var(--type-meta);
+  line-height: var(--line-meta);
+  color: var(--text-meta);
+}
+
 /* A family's program line (docs/DESIGN.md §7): the model chooser's compact line under the row's status, shown only
    with something to act on. Its Update takes the in-row control size so the line stays compact. */
+.agent-other-programs .harness-model-program,
 .agent-family-identity .harness-model-program {
   --control-h: var(--control-h-sm);
   --control-pad-x: var(--space-3);
@@ -1433,6 +1457,61 @@ textarea::placeholder {
 
   .wizard-step-of {
     display: inline;
+  }
+}
+
+/* A narrow family list (docs/DESIGN.md §6): the list is the query container, so the row follows its own
+   width, never a viewport breakpoint (the Design System rule: content follows its container). The words get
+   the whole first line and the controls the one under them, so the name never breaks mid-word and the
+   select names accounts at a size that tells two apart; the press keeps the row's right edge. Wider than
+   that an ordinary row stays on one line, unchanged; the picker row below follows its own, narrower width. */
+@container agentlist (max-width: 420px) {
+  .agent-family-row {
+    flex-wrap: wrap;
+  }
+
+  .agent-family-identity {
+    flex: 1 1 100%;
+  }
+
+  .agent-family-row > select.ui-control {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .agent-family-row > .btn {
+    margin-left: auto;
+  }
+}
+
+/* A picker row holds three things side by side: the words, the account choice and the press. In a two-track
+   list its own column is about half the list — narrower than the three need — while the list's container
+   stays wide, so the rule directly above never sees it (the medium shape: the 352px track of an 820px
+   window's 710px list). The row is its own query container, so only a row holding the picker changes shape,
+   and it follows its own width, never a viewport breakpoint: below 30rem the words take the whole line and
+   the choice with its press the one under them; from 30rem up the row stays on one line (there the words
+   keep about 12rem beside the 9rem choice and the press). The choice gets a definite 7rem basis, so it
+   shares that second line with the press instead of claiming a line of its own, and grows into the free
+   width — an account name reads at a size that tells two apart; the press keeps the row's right edge. */
+.agent-family-row:has(> select.ui-control) {
+  flex-wrap: wrap;
+  container: agentrow / inline-size;
+}
+
+@container agentrow (max-width: 30rem) {
+  .agent-family-row > .agent-family-identity {
+    flex: 1 1 100%;
+  }
+
+  .agent-family-row > select.ui-control {
+    flex: 1 1 7rem;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .agent-family-row > .btn {
+    margin-left: auto;
   }
 }
 
