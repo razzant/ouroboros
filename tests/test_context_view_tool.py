@@ -2,6 +2,7 @@
 
 import copy
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -1081,6 +1082,40 @@ def test_an_overlong_page_names_a_next_page_only_when_there_is_one(tmp_path, mon
     for page in (first, later, past):
         assert "first unit alone" not in page["limitation"] and "only units" not in page["limitation"], page["limitation"]
         assert ("one unit" in page["limitation"]) is bool(page["units"]), page["limitation"]
+
+
+@pytest.mark.parametrize("limit", [15_000, 6_000])
+def test_page_one_names_what_overflowed_it_at_the_stock_and_a_reduced_limit(tmp_path, monkeypatch, limit):
+    """Both directions (Astra REV3 4.1): when page one runs over because of a field only it carries (a large schema
+    inventory), its limitation names that field with its size and gives what the fields every page carries and its
+    one unit take; at the shipped limit and at a reduced one. A page that fits carries no limitation, and a later
+    page, which carries none of those fields, keeps describing its own fields and unit."""
+    from ouroboros import tool_capabilities
+
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: limit)
+    schemas = [{"type": "function", "function": {"name": f"a_tool_with_a_long_descriptive_name_number_{n:04d}",
+                                                  "description": "Reads one thing.", "parameters": {"type": "object"}}}
+               for n in range(450)]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, [*_source()[:2], *(row for index in range(20) for row in _read(f"r{index}"))], schemas)
+    text = _compact_context(ctx, inspect=True)
+    first = json.loads(text)
+    told = first["limitation"]
+    names = len(json.dumps({"schema_names": first["schema_names"]}, ensure_ascii=False, separators=(",", ":"))) - 2
+    assert f"schema_names {names:,}" in told and "the fields only page one carries take" in told, told
+    once, rest = (int(n.replace(",", "")) for n in re.findall(r"takes? ([\d,]+)", told))
+    page = len(text) - len(json.dumps({"limitation": told}, ensure_ascii=False, separators=(",", ":"))) + 1
+    assert once + rest == page and rest < limit and once > page - limit  # the named fields are what overflowed
+    assert "Continue at next_offset" in told and "next_offset" in first
+    later = json.loads(_compact_context(ctx, inspect=True, offset=first["next_offset"]))
+    assert "limitation" not in later and later["units"]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, [*_source()[:2], *_read("r0")], schemas[:5])  # a page that fits names nothing
+    assert "limitation" not in json.loads(_compact_context(ctx, inspect=True))
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: 300)
+    record_context_view(ctx, [*_source()[:2], *(row for index in range(5) for row in _read(f"r{index}"))], schemas[:5])
+    small = json.loads(_compact_context(ctx, inspect=True, offset=1))
+    assert "only page one" not in small["limitation"] and "one unit" in small["limitation"]
 
 
 def test_an_inspection_page_stays_within_its_result_limit_or_says_what_it_could_not_show(tmp_path, monkeypatch):
