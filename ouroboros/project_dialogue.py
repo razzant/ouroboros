@@ -153,6 +153,10 @@ def project_question_pointer(row: Dict[str, Any], block: Any, project: Any,
         pointer["answered_index"] = int(block["answered_index"])
     if str(block.get("comment") or ""):
         pointer["comment"] = str(block["comment"])
+    if block.get("attachments"):  # a Telegram Reply's files, as every card states them: no stored id, path or link
+        from ouroboros.chat_uploads import answer_files
+
+        pointer["attachments"] = answer_files(block["attachments"])
     for key in (*CLOSURE_FIELDS, "materials"):
         if block.get(key):
             pointer[key] = block[key]
@@ -426,6 +430,13 @@ def matching_project_origin(entry: dict, refs: list) -> str:
     return next((project_origin_identity(ref) for ref in refs if _source_ref_identity(ref) in keys), "")
 
 
+def legacy_owner_source_chat_keys(chat_id: int) -> tuple[Optional[int], ...]:
+    """Indexed chat keys for an owner reference predating client ids (not a display rule)."""
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+
+    return (chat_id, None) if chat_id == WEB_UI_CHAT_ID else (chat_id,)
+
+
 def resolve_owner_message_source(drive_root: Any, ref: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Resolve the owner source by its stored identity, checking its original text hash."""
     found = owner_message_entry(drive_root, ref)
@@ -559,6 +570,9 @@ ROUTING_REFUSAL_CAUSES: Dict[str, str] = {
     "repair_promotion_failed": "the skill repair request could not be started",
     "task_acceptance_fence": "the task tree is closing after its author stopped it",
     "invalid_task_depth": "the task depth was invalid",
+    # Work a linked Ouroboros's letter began may not start separately billed work outside that
+    # letter's ceiling and billing group (peer_letters.separate_work_refusal); the owner starts it.
+    "letter_work_starts_no_separate_root": "a letter's work cannot start separate work",
     "promotion_persistence_failed": "the task record could not be saved",
     "routing_receipt_persist_failed": "the receipt could not be saved",
     "routing_annotation_persist_failed": "the receipt could not be saved",
@@ -575,6 +589,8 @@ ROUTING_REFUSAL_CAUSES: Dict[str, str] = {
     "target_finished": "that task has already finished",
     "acceptance_fence_sealed": "that task has already finished",
     "mailbox_write_failed": "the message could not be saved",
+    # An unverifiable mailbox write: the message may be saved or not, never a statement about the task's start.
+    "mailbox_write_unconfirmed": "the message may not have reached the task",
     "project_scope_conflict": "the task already belongs to another project",
     "missing_task_or_project": "no task or project was named",
     "project_unavailable": "the project is no longer available",
@@ -625,7 +641,7 @@ def routing_refusal_cause(action: str, status: str, reason: str, options: Any = 
     if status_text == "needs_manual_target" and isinstance(options, list) and options:
         return ""
     prefix = "Not confirmed" if status_text == "unconfirmed" else {
-        "steer_task": "Not delivered", "ensure_project_scope": "Not moved",
+        "steer_task": "Not delivered", "mailbox_delivery": "Not delivered", "ensure_project_scope": "Not moved",
     }.get(str(action or "").strip(), "Not started")
     reason_text = str(reason or "").strip()
     phrase = ROUTING_REFUSAL_CAUSES.get(reason_text, "")
@@ -1547,7 +1563,7 @@ def announce_project_started(
 __all__ = ["AGENT_RECEIPT_ID_PREFIX", "announce_project_started",
     "append_chat_annotation", "append_canonical_task_summary",
     "append_terminal_task_projection", "build_owner_message_ref", "chat_annotation_receipt",
-    "entry_matches_source_ref", "latest_chat_annotations", "scoped_chat_annotations",
+    "entry_matches_source_ref", "latest_chat_annotations", "legacy_owner_source_chat_keys", "scoped_chat_annotations",
     "enqueue_project_completion_summary", "project_completion_delivery_outcome",
     "completion_status_label", "outcome_phase", "owner_message_ref_is_valid",
     "project_origin_rows", "project_question_pointer",

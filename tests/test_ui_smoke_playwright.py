@@ -20,6 +20,7 @@ from tests.candidate_checkout import (
 )
 from ouroboros.test_environment import isolated_environment, owned_process_temp
 from ouroboros.test_evidence import diagnostic_directory, keep_startup_log
+from tests.settings_section_helpers import open_extensions
 from tests.fixtures_mock_llm import MockLLMServer
 from tests.ui_chat_viewport_smoke import (
     _CAPTURE_TEST_SOCKET, _OBSERVE_STATE_READS, _emit_ws_frame, _wait_socket_open_quiescent,
@@ -283,7 +284,7 @@ def _run_docker_ui_assertions(url: str) -> None:
 
 
 @pytest.fixture()
-def direct_server_with_data(tmp_path, ui_candidate_checkout):
+def direct_server_with_data(tmp_path, ui_candidate_checkout, request):
     # The session's copy (tests/conftest.py) in this case's custody; its sentinels prove each boot's origin.
     with case_checkout(pathlib.Path(REPO_ROOT), ui_candidate_checkout) as candidate, MockLLMServer() as llm:
         checkout = candidate.path
@@ -303,6 +304,8 @@ def direct_server_with_data(tmp_path, ui_candidate_checkout):
             OUROBOROS_STARTER_SKILLS='["builtin/telegram"]', OUROBOROS_STARTER_SKILLS_TURN_ON=False,
         )
         (data_dir / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+        if seed_before_boot := getattr(request, "param", None):
+            seed_before_boot(data_dir)  # e.g. a witnessed old install, before the first registry writer
         env = isolated_environment(tmp_path, checkout, process_temp=owned_process_temp())
         env.update({
             "OUROBOROS_SERVER_HOST": "127.0.0.1",
@@ -2849,8 +2852,7 @@ def test_ui_smoke_v639_skip_review_button(direct_server_with_data):
             try:
                 page = browser.new_page(viewport={"width": 1280, "height": 900})
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                page.click('[data-nav-page="skills"]')
-                page.wait_for_selector("#page-skills", timeout=30_000)
+                open_extensions(page, timeout=30_000)
                 page.wait_for_selector('.skills-card[data-skill="owntool"]', timeout=30_000)
                 listing = {row["name"]: row for row in page.request.get(f"{url}/api/extensions").json()["skills"]}
                 own = page.locator('.skills-card[data-skill="owntool"]').first
@@ -3236,8 +3238,8 @@ def test_ui_smoke_login_recovery_reconcile_detach_and_retry_are_explicit(direct_
                                 await new Promise((r) => setTimeout(r, 20));
                             }
                         };
-                        const p1 = m.startLogin('codex', 'race-a');
-                        const p2 = m.startLogin('codex', 'race-a');
+                        const p1 = m.startLogin('codex', 'race-a', { add: true });
+                        const p2 = m.startLogin('codex', 'race-a', { add: true });
                         await Promise.all([p1, p2]);
                         loginHost()?.querySelector('[data-login-dismiss]')?.click();
                         (await wait('[data-login-reconcile]'))?.click();
@@ -3288,7 +3290,7 @@ def test_ui_smoke_login_recovery_reconcile_detach_and_retry_are_explicit(direct_
                             document.querySelector('[data-family-login="codex"]')
                             || document.getElementById('harness-login-card');
                         const m = await import('/static/modules/harness_accounts.js');
-                        await m.startLogin('codex', 'race-a');
+                        await m.startLogin('codex', 'race-a', { add: true });
                         loginHost()?.querySelector('[data-login-reconcile]')?.click();
                         for (let i = 0; i < 100
                             && !loginHost()?.querySelector('[data-login-retry]'); i++)
@@ -3355,12 +3357,12 @@ def test_ui_smoke_dismiss_overlapping_start_cannot_drop_a_live_job(direct_server
                             || document.getElementById('harness-login-card');
                         if (!loginHost()) return { error: 'NO-HOST' };
                         const m = await import('/static/modules/harness_accounts.js');
-                        await m.startLogin('codex', 'ov-a');
+                        await m.startLogin('codex', 'ov-a', { add: true });
                         loginHost()?.querySelector('[data-login-dismiss]')?.click();
-                        await m.startLogin('codex', 'ov-b');
+                        await m.startLogin('codex', 'ov-b', { add: true });
                         await new Promise((r) => setTimeout(r, 600));
                         const cardAfterQueuedStart = (loginHost()?.innerHTML || '').length > 0;
-                        await m.startLogin('codex', 'ov-c');
+                        await m.startLogin('codex', 'ov-c', { add: true });
                         return {
                             cardAfterQueuedStart,
                             finalHasCard: (loginHost()?.innerHTML || '').length > 0,
@@ -3462,7 +3464,7 @@ def test_ui_smoke_stale_get_cannot_overwrite_login_terminal_faces(
                             document.querySelector('[data-family-login="codex"]')
                             || document.getElementById('harness-login-card');
                         const m = await import('/static/modules/harness_accounts.js');
-                        await m.startLogin('codex', 'stale-' + face);
+                        await m.startLogin('codex', 'stale-' + face, { add: true });
                         await new Promise((r) => setTimeout(r, 3200));
                         loginHost()?.querySelector('[data-login-dismiss]')?.click();
                         await new Promise((r) => setTimeout(r, 100));
@@ -3628,7 +3630,7 @@ def test_ui_smoke_dismiss_overlapping_settle_never_freezes_the_card(direct_serve
                             document.querySelector('[data-family-login="codex"]')
                             || document.getElementById('harness-login-card');
                         const m = await import('/static/modules/harness_accounts.js');
-                        await m.startLogin('codex', 'os-a');
+                        await m.startLogin('codex', 'os-a', { add: true });
                         loginHost()?.querySelector('[data-login-dismiss]')?.click();
                         await new Promise((r) => setTimeout(r, 5200));
                         const host = loginHost();

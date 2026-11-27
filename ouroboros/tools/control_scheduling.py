@@ -39,7 +39,7 @@ from ouroboros.subagent_runtime import (
     runtime_subagent_settings,
     select_subagent_snapshot,
 )
-from ouroboros.subagent_work_order import ORIGINAL_INPUTS_FACT, declared_words_fact
+from ouroboros.subagent_work_order import ORIGINAL_INPUTS_FACT, TYPED_STAMPS_FACT, declared_words_fact
 from ouroboros.subagents import build_subagent_envelope
 from ouroboros.task_results import STATUS_REQUESTED, write_task_result
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
@@ -289,6 +289,7 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
         f"{worker_note}{pool_note}{legacy_note}\n{render(build(_schedule_receipt_facts(emission, route_kind, selected_name)))}"
         f"{_effort_request_note(configured, str(emission.get('requested_effort') or ''), getattr(ctx, 'task_metadata', None))}"
         f"{emission.get('held_note') or ''}"
+        + "".join(f"\n{note}" for note in emission.get("knowledge_notes_feedback") or ())
     )
 
 
@@ -350,6 +351,8 @@ def _schedule_receipt_facts(emission: Dict[str, Any], route_kind: str, selected_
         facts["inputs_outside"] = 0 if folderless else len(selected or ())
         facts["inputs_note"] = ("Prompt-only paths are not prepared"
                                 + (". Selected input_files replace automatic folderless lineage copies" if selected and folderless else ""))
+    if emission.get("knowledge_notes") is not None:
+        facts["knowledge_notes"] = {"named": emission["knowledge_notes"], "session": session}
     facts["memory_view"] = {"view": emission.get("memory_view"), "role": "nanny" if session else "child",
                             "session_leaf": session}
     asked = [str(emission.get(key) or "") for key in ("objective", "expected_output", "context", "constraints")]
@@ -891,6 +894,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     workspace_root, workspace_mode, parent_workspace, folder_error = _child_workspace(ctx, metadata, params)
     if folder_error:
         return folder_error
+    tid = uuid.uuid4().hex[:8]
     parent_project_id = str(getattr(ctx, "project_id", "") or "").strip()
     requested_surface = str(params.get("write_surface") or "").strip().lower()
     # The explicit read-only alias selects the same authority as omission.
@@ -910,17 +914,10 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
                 "⚠️ PRESENCE_DELEGATION_BLOCKED: mutative delegation requires an exact "
                 "selected write root for this surface in the inherited capability ceiling."
             )
-    # FR2: a flat parent requesting external_workspace with no write_root builds
-    # cooperatively in ONE host-minted shared tree (helper extracted to keep this
-    # method under the size gate).
-    effective_write_root, caller_profile, coop_err = resolve_cooperative_write_root(
-        ctx, requested_surface, params.get("write_root", ""), workspace_root, metadata)
-    if coop_err:
-        return coop_err
-    task_constraint = _select_subagent_constraint(
-        requested_surface, effective_write_root, params.get("protected_paths_grant", False),
-        params.get("external_tool_grants"), workspace_root,
-        caller_readonly=(caller_profile == "local_readonly_subagent"), ctx=ctx)
+    resource_intent = _schedule_resource_intent(ctx, metadata, workspace_root)
+    named = (fields, (tid, status_drive_root, resource_intent), requested_executor == "harness")
+    effective_write_root, caller_profile, task_constraint = _child_constraint(
+        ctx, params, requested_surface, (workspace_root, workspace_mode), metadata, named)
     if isinstance(task_constraint, str):
         return task_constraint
     from ouroboros.tool_access import subagent_profile_satisfies
@@ -940,7 +937,6 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     )
     executor_ref = _resolve_executor_ref(ctx)
     # Dispatch resolves the exact actor later; scheduling records requested intent.
-    tid = uuid.uuid4().hex[:8]
     created_at = utc_now_iso()
     root_task_id = root_task_id_seed or tid
     child_drive, _drive_err = _prepare_child_drive(
@@ -948,8 +944,8 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     if _drive_err:
         return _publish_scheduling_refusal(ctx, "error", "TOOL_ERROR", _drive_err)
     child_attachment_authority, attachment_error = ({"attachment_manifest": []}, "")
-    resource_intent = _schedule_resource_intent(ctx, metadata, workspace_root)
-    input_error = _prepare_child_input_files(ctx, fields, tid, workspace_root, child_drive, resource_intent)
+    input_error = _prepare_child_input_files(ctx, fields, tid, workspace_root, child_drive, resource_intent,
+                                            parent_project_id)
     if not input_error and (fields.get("input_sources") != "declared" or fields.get("attachment_paths")):  # selected documents are declared material
         child_attachment_authority, attachment_error = _materialize_child_attachment_manifest(
             parent_contract, child_drive or status_drive_root, tid, owner_drive=Path(ctx.drive_root),
@@ -1000,12 +996,13 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "requested_effort": fields["requested_effort"],
         "configured_subagent": configured_subagent,
         "parent_cognitive_route": parent_cognitive_route,
-        **{key: fields[key] for key in ("directory_strategy", "scope_paths", "delegated_mode", "workspace", "attachment_paths",
-                                        "attachment_import", "document_import_intent", "prepared_input_files", "memory_view") if key in fields},
+        **{key: fields[key] for key in ("directory_strategy", "scope_paths", "delegated_mode", "workspace",
+                                        "attachment_paths", "attachment_import", "document_import_intent",
+                                        "prepared_input_files", "memory_view", "knowledge_notes") if key in fields},
         **({ORIGINAL_INPUTS_FACT: True} if fields.get("prepared_input_files") else {}),
         "resource_intent": resource_intent,
     }
-    owner_origin = {**governing_words_for_schedule(ctx, session=requested_executor == "harness"), **declared_words_fact(child_contract)}  # the owner's words, by value
+    owner_origin = {**governing_words_for_schedule(ctx, session=requested_executor == "harness"), **declared_words_fact(child_contract), TYPED_STAMPS_FACT: True}  # the owner's words, by value
     from ouroboros.held_notes import carried_situation  # my situation names, by value, where the install records claims
 
     held_origin, held_note = carried_situation(ctx, canonical_data_root(ctx), declared=bool(declared_words_fact(child_contract)))
@@ -1100,6 +1097,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "requested_access": params.get("access"),
         "requested_effort": fields["requested_effort"], "input_files": fields.get("prepared_input_files"), "held_note": held_note,
         "memory_view": fields.get("memory_view"), "owner_task": {**owner_origin, "task_contract": child_contract},
+        **{key: fields.get(key) for key in ("knowledge_notes", "knowledge_notes_feedback")},
         "delegated_mode": fields.get("delegated_mode"),
         **{"expected_output": expected_output, "context": context, "constraints": constraints},
         "write_root": (task_constraint.get("write_root") or "", "caller" if str(params.get("write_root") or "").strip()
@@ -1107,8 +1105,78 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     })
 
 
+def _child_constraint(ctx, params, requested_surface, workspace, metadata, named):
+    """The child's write root, the caller's profile and the child's constraint, or a refusal in its place, once the
+    child's named notes are checked where its folder exists now (``_prepare_child_named_notes``).
+
+    FR2: a flat parent requesting external_workspace with no write_root builds cooperatively in ONE host-minted
+    shared tree. The caller's own check of the notes comes first, so a refused choice creates no tree; the child's
+    check in a fresh tree comes before the tree is registered (``ensure_cooperative_shared_root``)."""
+    fields, child, session = named
+    workspace_root, workspace_mode = workspace
+    in_tree = {}  # the constraint a shared tree's own check settled, so it is not checked twice
+
+    def constraint(root, readonly=False):
+        return _select_subagent_constraint(
+            requested_surface, root, params.get("protected_paths_grant", False), params.get("external_tool_grants"),
+            workspace_root, caller_readonly=readonly, ctx=ctx)
+
+    def checked(selected):
+        return selected if isinstance(selected, str) else _prepare_child_named_notes(
+            ctx, fields, child, (workspace_root, workspace_mode, selected), session=session) or selected
+
+    def admit(root):  # under the shared tree's lock: "" asks before any tree exists, a root asks in it
+        if not root:
+            return _prepare_child_named_notes(ctx, fields, child, None, session=session)
+        in_tree["constraint"] = selected = checked(constraint(root))
+        return selected if isinstance(selected, str) else ""
+
+    root, profile, error = resolve_cooperative_write_root(
+        ctx, requested_surface, params.get("write_root", ""), workspace_root, metadata,
+        admit=admit if "named_note_selection" in fields else None)
+    if error or "constraint" in in_tree:
+        return root, profile, error or in_tree["constraint"]
+    return root, profile, checked(constraint(root, profile == "local_readonly_subagent"))
+
+
+def _prepare_child_named_notes(ctx, fields, child, geometry, *, session):
+    """Bind only addresses at scheduling; "" or the published refusal.
+
+    Checked here: the caller's read of each whole current note (for a session, its hand-on too) and, given
+    ``geometry`` (root, mode, constraint) of a folder that exists now, the child's. An isolated copy or a new
+    repository exists only at admission, which checks the child there
+    (``events_subagent_admission._named_notes_admission_refusal``); a session's start checks its worker again."""
+    from ouroboros.delegate_readonly_inputs import receiving_reader
+    from ouroboros.subagent_work_order import NamedNoteError, resolve_named_notes
+
+    if "named_note_selection" not in fields:
+        return ""
+    selection = fields["named_note_selection"]
+    child_task_id, status_drive_root, resource_intent = child
+    root, mode, constraint = geometry or ("", "", {})
+    try:
+        if constraint.get("surface") == "external_workspace":  # the shared folder it writes, resolved
+            root, mode = str(Path(constraint["write_root"]).expanduser()), "external_workspace"
+        recipient = receiving_reader(ctx, fields["resource_policy"], workspace_root=root, workspace_mode=mode,
+                                     task_constraint=constraint, child_task_id=child_task_id, resource_intent=resource_intent,
+                                     child_drive=task_state_dir(status_drive_root, child_task_id) / "data") if (
+            selection[0] and geometry and constraint.get("surface") not in {"self_worktree", "genesis"}) else None
+    except (OSError, ValueError, RuntimeError) as exc:
+        return _publish_scheduling_refusal(ctx, "error", "TOOL_ARG_ERROR", one_refusal([
+            f"knowledge_note_unresolved: the child's reader could not be bound ({type(exc).__name__}). The child was not queued"
+        ]), reason="knowledge_note_unresolved")
+    try:  # each check gets its own copy of the argument notes: a shared tree's two checks say a repeat once
+        fields["knowledge_notes"], fields["knowledge_notes_feedback"] = resolve_named_notes(
+            ctx, (selection[0], list(selection[1])), recipient=recipient, session=session)
+    except NamedNoteError as exc:
+        text = one_refusal([f"{exc.code}: {exc.detail}. The child was not queued"])
+        return _publish_scheduling_refusal(ctx, "error", "TOOL_ARG_ERROR", text, reason=exc.code)
+    return ""
+
+
 def _prepare_child_input_files(ctx: ToolContext, fields: Dict[str, Any], child_task_id: str,
-                               workspace_root: str, child_drive: Optional[Path], resource_intent: Dict[str, Any]) -> str:
+                               workspace_root: str, child_drive: Optional[Path], resource_intent: Dict[str, Any],
+                               project_id: str) -> str:
     """Check and retain the child's ``input_files`` before it is queued; "" or the published refusal.
 
     The caller's read authority and the child's read-only limits under its own resource
@@ -1123,7 +1191,7 @@ def _prepare_child_input_files(ctx: ToolContext, fields: Dict[str, Any], child_t
         fields["prepared_input_files"] = schedule_selected_inputs(
             ctx, fields["input_files"], child_task_id, fields.get("resource_policy"),
             workspace_root=workspace_root, child_drive=child_drive,
-            resource_intent=resource_intent) if fields["input_files"] else []
+            resource_intent=resource_intent, project_id=project_id) if fields["input_files"] else []
         return ""
     except InputSelectionError as exc:
         text, reason = (f"⚠️ {exc.code}: {exc.detail} The child was not queued. "

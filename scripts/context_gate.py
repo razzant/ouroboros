@@ -4,7 +4,7 @@
 ``context-gate.yml`` selects request/tool/prompt/book changes and their test owners.
 No model calls or provider secrets are needed. TESTS accepts modules and node IDs:
 provider refusals, serving windows, authority histories, whole-input and recovery
-contracts, helper/reviewer budgets, first contact, and generated inventories.
+contracts, helper/reviewer budgets, first contact, and inventory source checks.
 The CLI acquires ``safe_test`` before importing pytest; ``ci_retry`` owns retries and
 outcome evidence. CI uses ``--workers 2`` (xdist loadgroup) inside its 12-minute job;
 local callers may select 0–6 workers and a fresh ``--evidence-dir`` outside Git.
@@ -44,6 +44,20 @@ TESTS = (
     "tests/test_result_review_handback.py",
     "tests/test_llm_provider_routing.py",
     "tests/test_live_call_start_fit.py",
+    "tests/test_context_start_bound.py",
+    "tests/test_context_minimum_view_unfit.py",
+    "tests/test_context_view_tool.py",
+
+    "tests/test_local_tool_parsing.py",
+    "tests/test_llm_ollama.py",
+    "tests/test_llm_ollama_refusal.py",
+    "tests/test_llm_ollama_composition.py",
+    "tests/test_llm_ollama_wire.py",
+    "tests/test_llm_ollama_policy.py",
+    "tests/test_llm_ollama_gateway.py",
+    "tests/test_llm_ollama_physical_admission.py",
+    "tests/test_llm_fallback.py",
+    "tests/test_loop_llm_call.py",
     "tests/test_context_gate.py",
     "tests/test_image_refusal_retry.py",
     "tests/test_cross_model_reasoning_strip.py",

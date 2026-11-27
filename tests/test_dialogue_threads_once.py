@@ -338,7 +338,7 @@ _CONVERSATION_READERS = {
     "ouroboros/place_arrivals.py::_room_details": "stored row, scalar title/name only",
     "ouroboros/return_facts.py::_sort": "stored row, scalar full name/name/title only, for a place's label",
     "ouroboros/place_guard.py::_reply_touches": "validated reply_targets: literal conversation ids, never stored rows",
-    "ouroboros/presence_events.py::parse_presence_event": "the connector's request payload, every live door",
+    "ouroboros/presence_events.py::parse_event_wire": "the connector's request payload, every live door",
     "ouroboros/presence_events.py::reply_targets": "the connector's message.reply_targets: literal address ids",
     "ouroboros/presence_history.py::_event": "the history import's request payload",
     "ouroboros/presence_call.py::_event_from_task": "the task document's presence event",
@@ -356,6 +356,7 @@ _CONVERSATION_READERS = {
     "ouroboros/memory_view_conversations.py::_scalars": "tail facts or a row: the conversation's scalars only, for a label",
     "ouroboros/memory_view_events.py::receipt_situation": "the task document's route conversation: a string title/name/full name/username only, for a label",
     "ouroboros/tools/chronicle.py::publish_covered_page": "a page's own covers.conversation flag, never a row's conversation",
+    "ouroboros/memory_reading.py::_arrivals": "the task document's presence event: its thread snapshot's message ids only",
 }
 # Every function that decodes a stored dialogue body itself (``Row`` readers go through ``project_source``).
 _BODY_DECODERS = {
@@ -368,6 +369,8 @@ _BODY_DECODERS = {
     "ouroboros/place_arrivals.py::_room_details": "stored row, scalar title/name only",
     "ouroboros/place_arrivals.py::retain_focus_source": "stored row, its address only",
     "ouroboros/dialogue_word_index.py::_post_segment": "stored row, its typed word fields only (never the thread)",
+    "ouroboros/room_archive.py::_bodies": "stored row, plain words/notices/attachment names only (never the thread)",
+    "ouroboros/room_archive.py::_notice_rows": "selected notice metadata fields only (never transport)",
 }
 # Readers that hand a stored row on whole (a receipt, a comparison, a rebuilt source, the exports) expand it.
 _WHOLE_ROW_READERS = ("ouroboros/dialogue_store.py::append", "ouroboros/dialogue_store.py::_receipt",
@@ -510,8 +513,10 @@ def test_a_rows_recorded_context_is_read_by_its_address_exactly_as_its_copy_held
     assert document == copy and stored["row_sha256"] == address["row_sha256"]  # its thread whole, byte for byte
     assert chat_chain.recorded_context(tmp_path, chat_chain.format_address(address))[1] == copy
     from ouroboros.tools.chronicle import _source_texts
+    from ouroboros.tools.tool_context import ToolContext
 
-    assert any(text.startswith("message 7: ") for text in _source_texts(tmp_path, address))  # a mark's quote finds it
+    reader = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)  # a quote check reads as its actor
+    assert any(text.startswith("message 7: ") for text in _source_texts(reader, tmp_path, address))  # a mark's quote finds it
     with pytest.raises(chat_chain.RowAddressError):
         chat_chain.recorded_context(tmp_path, {**address, "row_sha256": "0" * 64})
 

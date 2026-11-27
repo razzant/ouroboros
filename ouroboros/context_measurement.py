@@ -1,27 +1,194 @@
 """Measurement of a sealed Main request in its route's units and working room.
 
-Captured-context projection remains in context_fit; this leaf owns the resulting
-round facts, deficits and reply allowance. The public context_fit names stay available.
+Captured-context projection stays in context_fit. This leaf owns the shared wire
+estimate and the resulting round facts, deficits and reply allowance. The public
+context_fit names stay available.
 """
 from __future__ import annotations
 
+import json
 import math
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
+from dataclasses import InitVar, dataclass, field
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
+
+from ouroboros.context_timing import counted
+from ouroboros.utils import estimate_tokens
 
 if TYPE_CHECKING:
     from ouroboros.context_anchor import InputAnchor
     from ouroboros.context_fit import ContextFitPlan
+    from ouroboros.context_window import WindowRecord
+    from ouroboros.physical_attempt_context import PhysicalAttemptContext
 
 ContextProfile = Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
 MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "refused_input", "cold_estimate"]
 #: A view receipt's estimator tokens of the start note a directly required handbook brings (``context_fit``).
 BOOK_NOTE_KEY = "required_book_note_tokens"
+FIRST_CONTACT_START = {True: "first_contact", "maps": "first_contact_maps"}  # not a physical mode cause
+
+
+def _compact_json(value: Any) -> str:
+    """The request estimator's one serialization (``estimate_context_prompt_tokens``): compact, keys sorted."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _custom_ladder(provider: str, reasoning_effort: str) -> bool:
+    """Whether a send on ``provider`` at ``reasoning_effort`` may take direct OpenAI reasoning's custom ladder."""
+    return (str(provider or "").strip().lower() == "openai"
+            and str(reasoning_effort or "").strip().lower() not in {"", "none"})
+
+
+def effort_lengthens_request(provider: str, before: str, after: str) -> bool:
+    """Whether a send's move from effort ``before`` to ``after`` can lengthen the request a fit priced: only opening
+    the custom ladder adds a shape beside the canonical one (``_request_shapes``); any other move keeps or drops it."""
+    return _custom_ladder(provider, after) and not _custom_ladder(provider, before)
+
+
+def _request_shapes(messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]], provider: str,
+                    reasoning_effort: str) -> Tuple[Tuple[Any, Any], ...]:
+    """Every ``(messages, tools)`` shape this route may send: direct OpenAI reasoning adds its custom ladder.
+    Other routes read canonical data without borrowing the public helper's owned deep copies."""
+    if _custom_ladder(provider, reasoning_effort):
+        from ouroboros.openai_chat_dispatch import direct_openai_context_projections
+
+        return direct_openai_context_projections(messages, tools, provider=provider, reasoning_effort=reasoning_effort)
+    return ((messages, [dict(item) for item in tools or []]),)
+
+
+def tool_schema_tokens(tools: Optional[List[Dict[str, Any]]], *, provider: str = "", reasoning_effort: str = "") -> int:
+    """chars/4 estimate of the TOOL-SCHEMA segment of a prompt: the ``tools`` member as the request estimator
+    serializes it, in its longest shape for this provider and effort (``_request_shapes``).
+
+    One seam for every consumer that has to account for the schemas: they are sent
+    on the wire beside ``messages``, so any measure built from the transcript alone
+    silently omits them (~148K chars / ~37K tokens on the submarine traces — enough
+    to make an emergency-compaction trigger fire a whole tool envelope late). The
+    density witness calibrates the compact count (``MAIN_DENSITY_BASIS``); separator
+    spaces priced the same schemas about 3% above it (15.11.2026).
+    """
+    if not tools:
+        return 0
+    return max(estimate_tokens(_compact_json(shape)) for _rows, shape in _request_shapes([], tools, provider, reasoning_effort))
+
+
+def payload_prompt_rows(prompt_payload: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """A physical request's input as estimator rows: Chat/Messages ``messages`` or Responses ``input`` items
+    (a bare string input is one user row), a top-level ``system``/``instructions`` leading; None without either."""
+    rows = prompt_payload.get("messages")
+    if not isinstance(rows, list):
+        rows = prompt_payload.get("input")
+        rows = [{"role": "user", "content": rows}] if isinstance(rows, str) else rows
+    if not isinstance(rows, list):
+        return None
+    system = prompt_payload.get("system") or prompt_payload.get("instructions")
+    return [{"role": "system", "content": system}, *rows] if isinstance(system, (str, list)) and system else list(rows)
+
+
+def bounded_prompt_tokens_for_payload(prompt_payload: Dict[str, Any], fallback_chars: int) -> int:
+    """The density witness's basis (``capability_evidence.MAIN_DENSITY_BASIS``): the
+    fit estimator's own token count for a request payload (``payload_prompt_rows``
+    + tools, images at the proxy, a top-level ``system`` — the Messages API's separate
+    field — counted as a leading system message), or ``fallback_chars // 4``
+    when there is no input list. Kept beside the estimator so the two can
+    never diverge; ``estimate_message_chars`` dropped tool_call objects and made
+    density ~1.4x high on the tool-heavy shape, and an uncounted ``system``
+    over-sized the direct-Anthropic reply by its whole length (measure_main_fit
+    and the send finalizer multiply THIS quantity)."""
+    try:
+        rows = payload_prompt_rows(prompt_payload)
+        if rows is not None:
+            return int(estimate_context_prompt_tokens(
+                rows, prompt_payload.get("tools") or prompt_payload.get("functions")))
+    except Exception:
+        pass
+    return max(0, int(fallback_chars) // 4)
+
+
+def messages_carry_native_images(messages: Any) -> bool:
+    """Whether a message carries an image part the proxy bounds instead of pricing."""
+    for message in messages or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list) and any(
+            isinstance(part, dict) and str(part.get("type") or "") in {"image", "image_url"}
+            for part in content
+        ):
+            return True
+    return False
+
+
+def estimate_context_prompt_tokens(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+    *,
+    provider: str = "",
+    reasoning_effort: str = "",
+    chars: bool = False,
+) -> int:
+    """Estimate the complete inspectable context shape with bounded images (``chars``: its JSON characters)."""
+    from ouroboros.anthropic_native_custody import (
+        context_custody_proxy,
+        custody_private_key,
+    )
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, IMAGE_BLOCK_CHAR_EQUIVALENT
+
+    def project(value: Any, *, part: bool = False, envelope: bool = False) -> Any:
+        if isinstance(value, list):
+            return [project(item, part=part, envelope=envelope) for item in value]
+        if not isinstance(value, dict):
+            return value
+        private = {key: item for key, item in value.items() if custody_private_key(key)}
+        if private:
+            value = {**{key: item for key, item in value.items() if key not in private},
+                     **context_custody_proxy(private)}
+        media = value.get("inlineData")
+        if part and (value.get("type") in ("image", "image_url", "input_image")
+                     or isinstance(media, dict) and str(media.get("mimeType") or "").startswith("image/")):
+            return {"type": value.get("type") or "image", "image_token_proxy": "#" * IMAGE_BLOCK_CHAR_EQUIVALENT}
+        # Descend through chat content and the two realtime event envelopes. Function arguments,
+        # tool schemas and other JSON are opaque even when their keys resemble an image block.
+        row = dict(value)
+        row.pop("_context_capsule", None)
+        # A provider's sealed setup may carry a Chat-shaped messages envelope
+        # rather than events. Only recognize that envelope at the input boundary.
+        if envelope and "role" not in row and isinstance(row.get("messages"), list):
+            row["messages"] = project(row["messages"])
+        if row.get("type") == "function_call_output" and isinstance(row.get("output"), list):
+            row["output"] = project(row["output"], part=True)
+        for key in ("content", "parts", "events", "item", "clientContent", "turns"):
+            child = row.get(key)
+            if isinstance(child, list) or key in ("item", "clientContent") and isinstance(child, dict):
+                row[key] = project(child, part=key in ("content", "parts"))
+        return row
+
+    from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
+    from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
+
+    from ouroboros.llm_messages import DISPLAY_KEY, HOST_ONLY_MESSAGE_KEYS, STABLE_PREFIX_BLOCKS_KEY
+
+    # These top-level host receipts remain canonical but are absent from sends (the leading system message's stable
+    # block count included: every send copy pops it, so the density witness never counted it).
+    # Do not strip same-named keys inside native payloads or user/tool arguments.
+    hidden = {HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY,
+              TOOL_RESULT_RECORD_KEY, STABLE_PREFIX_BLOCKS_KEY, DISPLAY_KEY}
+    messages = [{key: value for key, value in message.items() if key not in hidden} for message in messages]
+    messages = [{**message, "content": [
+        {key: value for key, value in block.items() if key not in HOST_ONLY_MESSAGE_KEYS}
+        if isinstance(block, dict) else block for block in message["content"]]}
+        if isinstance(message.get("content"), list) else message for message in messages]
+
+    def serialized(projected_messages: Any, projected_tools: Any) -> str:
+        text = _compact_json({"messages": project(projected_messages, envelope=True), "tools": projected_tools})
+        counted("request_serializations", key=hash(text))
+        return text
+
+    longest = max(len(serialized(*shape)) for shape in _request_shapes(messages, tools, provider, reasoning_effort))
+    return longest if chars else max(1, (longest + 3) // 4)
 
 
 def required_book_addition(plan: Any, mode: str) -> int:
     """What this task's directly required handbook adds to ``mode``'s view of ``plan``, its start note included
-    (estimator tokens; 0 without a captured core): the window charges it, and no automatic choice is sized by it."""
+    (estimator tokens; 0 without a captured core). The window charges it; no target, memory or transcript narrowing
+    is sized by it. A first request that cannot go out with it yields only maps for it (``ContextCore.required_book_tokens``)."""
     core = getattr(plan, "core", None)
     return 0 if core is None else core.required_book_tokens(mode) + int(
         (plan.projection(mode).memory_facts or {}).get(BOOK_NOTE_KEY) or 0)
@@ -70,6 +237,13 @@ class MainFitMeasurement:
     mode_cause: str = ""  # why ``rendered_mode`` is lower than it (``mode_cause``); "" when it is not
     # Low's missed target: the start's request with no memory at all, reply reserve included (``floor.no_memory_tokens``).
     no_memory_tokens: Optional[int] = None
+    window_boundary_tokens: Optional[int] = None
+    requested_load_window: Optional[int] = None
+    window_record: InitVar[Optional[WindowRecord]] = None  # carried only to the actual admission predicate
+
+    def __post_init__(self, window_record):
+        if window_record is not None:
+            object.__setattr__(self, "window_record", window_record)
 
     @property
     def probes_reply_reservation(self) -> bool:
@@ -161,7 +335,6 @@ def measure_main_fit(
     whole candidate; the reclaim goal, the reply and tool delivery are sized without a directly required
     handbook (``required_book_addition``), which only the capacity deficit charges, beside that reply.
     """
-    from ouroboros.context_fit import estimate_context_prompt_tokens
     from ouroboros.capability_evidence import canonical_evidence_root, is_known, resolve_main_token_density
     from ouroboros.context_budget import (
         OWNER_LOW_TARGET_TOKENS, OWNER_NANO_TARGET_TOKENS, context_mode_limits, reply_allowance_tokens,
@@ -199,20 +372,23 @@ def measure_main_fit(
     # A directly required handbook keeps the reply the same candidate without it gets (Nano's is the only elastic one):
     # a known window holds both or its deficit says so; nothing here shrinks for the book (owner 1.11.2026).
     reply = reply_allowance_tokens(caller_max_tokens=ceiling, nano=nano, owner_nano=profile == "owner_nano",
-                                   input_tokens=estimated_input - book, raw_input_tokens=raw_input - raw_book, window_tokens=capacity)
+        input_tokens=estimated_input - book, raw_input_tokens=raw_input - raw_book, window_tokens=capacity, window_record=current)
     target_deficit = max(0, total - target) if target is not None else None
-    capacity_deficit = max(0, total + (max(0, reply - reserve) if book else 0) - capacity) if capacity is not None else None
+    physical_input = current.input_room(reply if book else 0, under_way=True)
+    capacity_deficit = max(0, estimated_input - physical_input) if physical_input is not None else None
     economic_deficit = None if target_deficit is None else max(0, target_deficit - book)
+    ordinary_capacity_deficit = None if capacity is None else max(0, total - book - capacity)
     deficit = max(
-        [value for value in (economic_deficit, capacity_deficit) if value is not None]
+        [value for value in (economic_deficit, ordinary_capacity_deficit) if value is not None]
         or [0]
     )
-    margin = reclaim_low_water_margin(target, capacity) if deficit > 0 else 0
+    margin = reclaim_low_water_margin(target, current.boundary) if deficit > 0 else 0
     goal = deficit + margin
     from ouroboros.context_view_facts import window_projection
     measurement = MainFitMeasurement(
         window=window_projection(current, under_way=True),
         view_kind=plan.view_kind,
+        requested_load_window=getattr(plan, "requested_load_window", None),
         route_fp=str(plan.route_fp or ""),
         round_id=str(round_id or ""),
         profile=profile,
@@ -237,7 +413,7 @@ def measure_main_fit(
         window_witness_bound=plan.window_witness_bound,
         window_observation_fp=current.route_fp,
         required_book_tokens=book, preferred_mode=str(plan.preferred_mode or ""), mode_cause=mode_cause(plan, rendered_mode),
-        no_memory_tokens=_no_memory_tokens(plan, rendered_mode),
+        no_memory_tokens=_no_memory_tokens(plan, rendered_mode), window_boundary_tokens=current.boundary, window_record=current,
     )
     action: Literal["send", "send_target_miss"] = (
         "send_target_miss" if target_deficit and target_deficit > 0 else "send")
@@ -261,8 +437,9 @@ def _no_memory_tokens(plan: Any, rendered_mode: str) -> Optional[int]:
 def mode_cause(plan: Any, rendered_mode: str) -> str:
     """Why a candidate renders below the plan's owner mode, from the plan's own facts: ``""`` when it does not; the
     start's own mode carries the start's cause (``ContextFitPlan.start``, ``memory_floor.start_cause``: ``memory``,
-    ``request``, ``route`` or ``window``), which no reprojection or route rebind replaces; any other lower mode, or a start
-    lowered by no mode switch, is ``after_start`` (taken by the task after its start). A restored task whose start
+    ``request``, ``route`` or ``window``), which no reprojection or route rebind replaces. A first-send preference
+    or an unmeasured Max is not a physical reason. Any other lower mode, or a start lowered by no mode switch,
+    is ``after_start`` (taken by the task after its start). A restored task whose start
     was not carried (``context_fit.UNKNOWN_START``) names no cause: ``""`` beside a lower mode is unknown."""
     from ouroboros.memory_floor import start_cause
 
@@ -274,5 +451,42 @@ def mode_cause(plan: Any, rendered_mode: str) -> str:
     if not started:  # a plan no start fit built: its current selection and that projection's facts
         started = str(getattr(plan, "initial_mode", "") or "")
         cause = start_cause(plan.projection(started).memory_facts) if started else ""
-    cause = "" if cause == "unmeasured" else cause  # a Max start no window measured lowers nothing: never a ledger cause
+    if rendered_mode == started and cause in FIRST_CONTACT_START.values():
+        return ""
+    cause = "" if cause == "unmeasured" else cause
     return cause if rendered_mode == started and cause else "after_start"
+
+
+def _physical_context_for_fit(disposition: MainFitDisposition, plan: Any = None) -> PhysicalAttemptContext:
+    """Carry the measured candidate's facts to the physical attempt; dispatch still binds the actual scope."""
+    from ouroboros.usage_accounting import PhysicalAttemptContext
+
+    measurement = disposition.measurement
+    projection_for = getattr(plan, "projection", None)
+    projection = projection_for(measurement.rendered_mode) if callable(projection_for) else None
+    return PhysicalAttemptContext(
+        view_kind=measurement.view_kind,
+        profile=measurement.profile,
+        rendered_mode=measurement.rendered_mode,
+        measurement_basis=measurement.measurement_basis,
+        route_fp=measurement.route_fp,
+        round_id=measurement.round_id,
+        target_total_tokens=measurement.target_total_tokens,
+        capacity_total_tokens=measurement.capacity_total_tokens,
+        context_target_miss=disposition.action == "send_target_miss",
+        automatic_pass_used=disposition.automatic_pass_used,
+        measurement_density=measurement.measurement_density,
+        response_reserve_tokens=measurement.response_reserve_tokens,
+        window_witness_bound=getattr(measurement, "window_witness_bound", False),
+        window_observation_fp=measurement.window_observation_fp,
+        requested_load_window=getattr(measurement, "requested_load_window", None),
+        required_book_tokens=measurement.required_book_tokens, preferred_mode=measurement.preferred_mode,
+        mode_cause=measurement.mode_cause, no_memory_tokens=measurement.no_memory_tokens,
+        window_boundary_tokens=measurement.window_boundary_tokens,
+        window_record=getattr(measurement, "window_record", None),
+        base_prompt_source=getattr(getattr(plan, "core", None), "base_prompt_source", None),
+        bible_source=getattr(getattr(plan, "core", None), "bible_source", None),
+        assembly_witnesses=getattr(projection, "assembly_witnesses", ()),
+        first_contact_plan=((plan.first_contact, plan.first_contact_normal is not None)
+                            if getattr(plan, "first_contact", "") else None),
+    )

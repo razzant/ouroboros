@@ -196,6 +196,8 @@ def reply_target(rooms: Any, ref: Mapping[str, Any]) -> tuple:
     carry (a row in Main with its task: my notice or question, or its answer) is read again at its exact
     address: the target proven private Presence contact follows its work, as a Reply saved now does
     (owner choice, every such Reply); one unreadable is ``TARGET_UNKNOWN``; any other "none" stays none."""
+    if work_id := ref.get("work_task_id"):
+        return TARGET_WORK, work_id, _ref_chat(ref)
     home = ref.get("target_home")
     if home is None:
         return _saved_target(rooms, ref)
@@ -370,13 +372,14 @@ def binding_origin_allowed(entry_chat: int, row: Mapping[str, Any]) -> bool:
                 or row.get("type") in MAIN_PINNED_ROW_TYPES)
 
 
-def room_membership(chat_id: int, project_chat_ids: set, source_refs: list,
+def room_membership(chat_id: int, project_chat_ids: set, source_refs: list | Callable[[], list],
                     rooms: Callable[..., int]):
     """Canonical room membership shared by history, exact-row and evidence readers.
 
     ``gateway.history_paging.room_lens`` addresses the Project admissions in the dialogue
     store (its candidate superset); change both together. A Project also shows the owner
     message a binding names (its origin), kept by the room it was written in.
+    Bounded readers can defer the origin lookup until a row actually needs it.
     Presentation-only hiding and cross-room question pointers belong to the UI caller.
     """
     from ouroboros.project_dialogue import entry_matches_source_ref
@@ -385,7 +388,12 @@ def room_membership(chat_id: int, project_chat_ids: set, source_refs: list,
         row = entry if isinstance(entry, dict) else {}
         if chat_id in row_rooms(entry_chat, row, project_chat_ids, rooms):
             return True
-        return bool(chat_id in project_chat_ids and source_refs and binding_origin_allowed(entry_chat, row)
-                    and entry_matches_source_ref(row, source_refs))
+        if not (chat_id in project_chat_ids and source_refs and binding_origin_allowed(entry_chat, row)):
+            return False
+        if callable(source_refs):
+            from ouroboros.owner_relay import source_words
+
+            return source_words(row) is not None and entry_matches_source_ref(row, source_refs())
+        return entry_matches_source_ref(row, source_refs)
 
     return matches

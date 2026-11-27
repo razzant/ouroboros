@@ -268,7 +268,7 @@ def _readers(store, nested):
             store.room_records("r"), store.room_records("r", after_seq=8), store.room_records("s"),
             store.pages_of_room("r"), store.interpreted(kinds=("page",), author_kind="helper"), store.interpreted("r", kinds=("page",), author_kind="helper"), store.accounts(),
             store.folded_members(nested), store.sealed_row_refs("r"), store.sealed_row_refs("x"),
-            store.legacy_pointer_rows(), store.active_marks(None), store.active_marks("r"),
+            memory_inventory.legacy_pointer_rows(store), store.active_marks(None), store.active_marks("r"),
             store.active_marks("r", include_global=False), store.active_marks("x"), store.scan_state(),
             store.activation(), store.room_head("r"), store.room_head("s"), store.room_head("x"), store.journal_size(),
             store.room_records(None), store.room_records(None, kinds=("note",)),

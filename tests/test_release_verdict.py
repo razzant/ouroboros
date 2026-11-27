@@ -15,7 +15,7 @@ import sys
 import pytest
 import yaml
 
-from tests.test_release_proof import GREEN_GATES, REPO, _fixture_release, _gate_env, _verdict, release_proof
+from tests.test_release_proof import GREEN_GATES, REPO, _fixture_release, _gate_env, _git_pin, _verdict, release_proof
 
 RED = {"full-test": "failure", "system-e2e-mock": "cancelled", "ui-smoke": "failure"}
 
@@ -23,7 +23,8 @@ RED = {"full-test": "failure", "system-e2e-mock": "cancelled", "ui-smoke": "fail
 def _assemble_args(tmp_path, version, results, verdict):
     release_dir, version_file, readme = _fixture_release(tmp_path, version=version)
     return release_dir, argparse.Namespace(
-        directory=release_dir, version_file=version_file, readme=readme, repository="razzant/ouroboros",
+        directory=release_dir, version_file=version_file, readme=readme,
+        git_pin=_git_pin(tmp_path), repository="razzant/ouroboros",
         tag=f"v{version}", commit="a" * 40, run_url="https://example.test/run/7", previous_tag=None,
         generated_at=None, notes_output=tmp_path / "notes.md", android_build_result="skipped",
         android_attestation_result="not_run", windows_signer_thumbprint="", github_output=None,

@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 from ouroboros import delegate_custody as custody
-from ouroboros import subagents
+from ouroboros import delegate_registration_policy, subagents
 from ouroboros.config import CLAUDEXOR_MIN_VERSION, CLAUDEXOR_PROTOCOL_MAJOR
 from ouroboros.gateways import claudexor as cx
 from tests._delegated_transport_shared import (  # noqa: F401  (autouse fixture applies on import)
@@ -43,14 +43,17 @@ class _Engine:
             path = request.url.path
             if path == "/v2/handshake":
                 return httpx.Response(200, json={"protocolMajor": CLAUDEXOR_PROTOCOL_MAJOR, "compatible": True,
-                                                 "engine": {"version": CLAUDEXOR_MIN_VERSION}})
+                                                 "engine": {"version": CLAUDEXOR_MIN_VERSION, "sha": "1" * 40}})
             if path == "/v2/agent-capabilities":
                 return httpx.Response(200, json={"harnesses": [{"id": "some-route", "enabled": True,
                                                                 "status": "ok", "accessProfilesSupported": ["readonly"]}]})
             if path == "/v2/quota":
                 return httpx.Response(200, json={"snapshots": []})
             if path == "/v2/projects":
-                return httpx.Response(200, json={"projects": [{"id": "prj-existing", "root": str(tmp_path)}]})
+                project = {"id": "prj-existing", "root": str(tmp_path)}
+                assert request.method in ("GET", "POST")
+                return httpx.Response(200, json={"projects": [project]} if request.method == "GET" else
+                                      {**project, "created": False})
             if path == "/v2/operations":  # an engine before the accepted-start lookup (#3138): the replay rule decides
                 return httpx.Response(200, json={"operations": []})
             assert path == "/v2/runs", path
@@ -69,6 +72,8 @@ class _Engine:
         _select_transport_access(monkeypatch, "readonly")
         monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak-model:low")
         monkeypatch.setattr(cx, "ClaudexorGateway", connect)
+        # This stub answers ``created``; what the process learns from it must not reach the next test's engine.
+        monkeypatch.setattr(delegate_registration_policy, "_CREATED_REPORTED", {})
 
 
 def _lost_start(tmp_path, monkeypatch, *, configured=False):

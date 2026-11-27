@@ -152,18 +152,34 @@ def test_dialogue_reader_never_reopens_imported_files_for_a_task_tail(tmp_path, 
 
 
 def test_invalid_import_never_claims_all_matching_rows(tmp_path):
+    from ouroboros import dialogue_store
     from ouroboros.jsonl_tail import coverage_line
 
-    _write(tmp_path / "logs/progress.jsonl", [{"task_id": "task-a", "text": "readable"}])
+    before, after = ({"task_id": "task-a", "text": "readable before the break"},
+                     {"task_id": "task-a", "text": "readable after the break"})
+    _write(tmp_path / "logs/progress.jsonl", [before])
     with (tmp_path / "logs/progress.jsonl").open("a", encoding="utf-8") as handle:
-        handle.write("{invalid\n")
+        handle.write("{invalid\n" + json.dumps(after) + "\n")
     import_all(tmp_path)
     rows, coverage = Memory(drive_root=tmp_path).read_task_recent("progress.jsonl", "task-a", 50)
-    assert rows == [{"task_id": "task-a", "text": "readable"}]
+    # #4012: every readable row keeps its data and gains the store's own name for it (``dialogue_store.Row.history_id``,
+    # "<stream>:<seq>", the line's own coordinate); the broken line between them keeps its own, so the second row's
+    # coordinate is not the first's successor, and the invalid interval stays a gap the window still names while it
+    # holds exactly the two readable rows, in their own order and words.
+    stored = {entry.row["text"]: entry for entry in
+              dialogue_store.probe_rows(tmp_path, "progress", [("task_id", "task-a")], limit=5)}
+    assert rows == [{**before, "history_id": stored[before["text"]].history_id},
+                    {**after, "history_id": stored[after["text"]].history_id}], "both genuine pairs, in order"
+    first, second = stored[before["text"]].seq, stored[after["text"]].seq
+    assert first == 0 and first < second
+    assert dialogue_store.range_coverage(tmp_path, "progress", lower=first, upper=second)["gaps"] >= 1, (
+        "the broken line's interval stays between the two readable coordinates"
+    )
+    assert coverage["shown"] == coverage["matched"] == 2 and coverage["gaps"] == ["recorded invalid intervals"]
     assert "recorded invalid intervals" in coverage_line(coverage)
-    assert "all 1 matching rows" not in coverage_line(coverage)
+    assert "all 2 matching rows" not in coverage_line(coverage)
     clean = {**coverage, "gaps": []}
-    assert "all 1 matching rows" in coverage_line(clean)
+    assert "all 2 matching rows" in coverage_line(clean)
 
 
 def test_malformed_only_log_still_discloses_its_gap(tmp_path):

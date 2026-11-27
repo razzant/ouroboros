@@ -110,7 +110,7 @@ test('compact Chat removes internal write/status metadata while preserving execu
     }
     // The coordinator and its solve evidence are the details' rows, never the executor's compact facts.
     assert.doesNotMatch(record.metaEl.innerHTML, /coordinator-model/);
-    for (const fact of ['<dt>Coordinator</dt><dd>coordinator-model</dd>', '<dt>Last solve response</dt><dd>coordinator-model</dd>']) {
+    for (const fact of ['<dt>Coordinator</dt><dd>coordinator-model</dd>', '<dt>Last coordinator solve response</dt><dd>coordinator-model</dd>']) {
         assert.ok(factsEl.innerHTML.includes(fact), fact);
     }
     assert.equal(factsEl.hidden, false);

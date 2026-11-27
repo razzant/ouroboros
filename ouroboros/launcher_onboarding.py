@@ -11,6 +11,7 @@ import logging
 import sys
 from collections.abc import Callable
 
+from ouroboros import config as _config
 from ouroboros.config import (
     apply_settings_to_env as _apply_settings_to_env,
     load_settings,
@@ -18,6 +19,7 @@ from ouroboros.config import (
 from ouroboros.launcher_appearance import NativeAppearance
 from ouroboros.launcher_window_chrome import fit_to_work_area, paint_room
 from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startup_ready_provider
+from ouroboros.settings_integrity import skill_settings
 
 # The launcher's own logger: these lines belong in launcher.log next to the
 # startup sequence they are part of.
@@ -63,7 +65,8 @@ def prepare_first_run_settings() -> tuple[dict, bool]:
     launcher shows once it is healthy. The onboarding SURFACE is not rendered
     here: the live server serves it (``present_first_run_onboarding``).
     """
-    settings, _provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(load_settings())
+    settings, _provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(
+        skill_settings(load_settings))
     # The normalization is APPLIED, not persisted. Startup is a read, and a read that
     # rewrites the file it read is how a normalization becomes an owner decision: the
     # fresh-install case already had to be carved out of this save (it would create
@@ -73,7 +76,12 @@ def prepare_first_run_settings() -> tuple[dict, bool]:
     # normalization happens: every reader re-derives it (`/api/settings`, `/onboarding`,
     # the onboarding host, the plan-review script), and the completion save persists it.
     _apply_settings_to_env(settings)
-    return settings, not has_startup_ready_provider(settings)
+    from supervisor.state_initialization import reset_status
+
+    if has_startup_ready_provider(settings):
+        return settings, False
+    # Only where the wizard could be due: an interrupted Reset keeps recovery, not the replaced profile's setup.
+    return settings, reset_status(_config.DATA_DIR).get("status") != "interrupted"
 
 
 def present_first_run_onboarding(

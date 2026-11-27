@@ -54,7 +54,7 @@ def test_real_api_consumer_cancel_retains_response_capture_and_claim(data_root, 
     monkeypatch.setattr(ua, "settle_attempt", settle)
     monkeypatch.setattr(llm_observability, "retain_cancelled_response", retain)
     if terminal == "dispatched":
-        def refuse(*args):
+        def refuse(*args, **kwargs):
             raise ledger.UsageLockUnavailable("controlled unresolved refusal", reason="contention")
         monkeypatch.setattr(ua, "mark_unresolved", refuse)
 

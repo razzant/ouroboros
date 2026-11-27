@@ -30,11 +30,16 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from ouroboros import places, conversation_lease
-from ouroboros.tool_effects import (EFFECT_MESSAGE, EFFECT_READ, ToolEffect, argument_value, bound_declaration,
-                                    connector_of, effect_of, target_values, thread_pairs, touched_addresses)
+from ouroboros.tool_effects import (EFFECT_GESTURE, EFFECT_MESSAGE, EFFECT_READ, ToolEffect, argument_value,
+                                    bound_declaration, connector_of, effect_of, target_values, thread_pairs,
+                                    touched_addresses)
 
 _PREFIX = "⚠️ RESOURCE_CONSTRAINT_BLOCKED: "
 PLACE_BINDING_VERSION = 1
+# Built-ins whose ``place_id`` names the place their words land in: the automatic reply (also a letter root's answer
+# and question, ``peer_letters.admit_words``), a work letter (``delegate_to_ouroboros``), and a standalone message
+# (``message_ouroboros``) to my human's linked Ouroboros.
+_ADDRESSED_WORDS = frozenset({"place_reply", "delegate_to_ouroboros", "message_ouroboros"})
 _DELIVERY_TARGET_FIELDS = ("provider", "account_id", "conversation_id", "thread_id")
 
 
@@ -115,6 +120,11 @@ def _call_destinations(ctx: Any, name: str, args: Mapping[str, Any], ext_tool: A
     connector, root = connector_of(name, ext_tool), _drive_root(ctx)
     if call.problem or not connector or root is None:
         return call
+    from ouroboros.telegram_owner_bot import owner_bot_of
+    # Only telegram-bot's calls name the A/B fence (A while the bridge may run here); other connectors have no owner_bot
+    # place, so their lookups keep their earlier answers exactly.
+    owner = owner_bot_of(root, connector)
+    fence = {"owner_bot": owner} if owner else {}
     try:
         call.siblings = places.places_of_connector(root, connector)
     except places.PlaceError as exc:
@@ -141,14 +151,14 @@ def _call_destinations(ctx: Any, name: str, args: Mapping[str, Any], ext_tool: A
         # list is no thread, so no id is matched with another's thread.
         thread = "" if same and key != effect.conversation else effect.thread
         place, known = places.place_for_target(root, connector=connector, targets=destination,
-                                             conversation=effect.conversation, thread=thread)
+                                             conversation=effect.conversation, thread=thread, **fence)
         call.attributable = call.attributable and known
         if place is not None:
             account = _call_account(ctx, place, next(iter((destination if via == "account" else targets).get(
                 "account_id", [])), ""))
             call.reach(place, effect.effect, via, account, _conversation_keys(
                 place, effect, destination if effect.touches else targets, account_id=account))
-    _reach_addresses(call, root, connector, ctx)
+    _reach_addresses(call, root, connector, ctx, owner_bot=owner)
     return call
 
 
@@ -175,17 +185,21 @@ def _grouped_destinations(effect: ToolEffect, targets: Mapping[str, list[str]], 
 
 
 def _reach_addresses(call: _CallReach, root: Any, connector: str, ctx: Any, provider: str = "", *,
-                     as_routed: bool = False) -> None:
+                     as_routed: bool = False, owner_bot: str | None = None) -> None:
     """Each group address alone, by its group's ``match``: ``scope`` meets the destination matcher (inside an
     account's places an address none of them covers stays unknown, its account named or not; one outside every
     place's account is no place's), ``exact`` only a place naming it (none: a known absence). ``as_routed`` (an
-    automatic reply's addresses) keeps each address's account, its route's, blank included, never inferring one."""
+    automatic reply's addresses) keeps each address's account, its route's, blank included, never inferring one.
+    ``owner_bot``: the A/B fence the caller already read (``telegram_owner_bot.owner_bot_of``), else read here."""
+    from ouroboros.telegram_owner_bot import owner_bot_of
+    owner = owner_bot_of(root, connector) if owner_bot is None and call.touches else owner_bot or ""
+    fence = {"owner_bot": owner} if owner else {}
     for address in call.touches:
         target = {"conversation_id": [address.conversation], **({"account_id": [address.account]} if address.account
                                                                 else {}),
                   **({"thread_id": [address.thread]} if address.thread else {})}
         place, known = places.place_for_target(root, connector=connector, targets=target, conversation="conversation_id",
-                                             thread="thread_id", provider=provider, match=address.match)
+                                             thread="thread_id", provider=provider, match=address.match, **fence)
         if address.effect != EFFECT_READ:
             call.attributable = call.attributable and known
         if place is not None:
@@ -316,18 +330,27 @@ def dispatch_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
         if reach.effects - {EFFECT_READ} and place.state in (places.STATE_SILENT, places.STATE_PAUSED):
             return (_PREFIX + f"{place.label or place.place_id} is {place.state.title()}; {name!r} cannot write there. "
                     "Change its state in Circles or with configure_presence before writing there.")
-    blocked = [place for place in call.siblings if place.state in (places.STATE_SILENT, places.STATE_PAUSED)]
+    from ouroboros.telegram_owner_bot import is_owner_bot_place
+    # An exact owner_bot place (the owner's own bot) never blocks an unattributable call of the connector's separate
+    # bot: a new Silent group of A is not a hold on B's omitted-account writes. A reached owner_bot place still holds
+    # its own writes above.
+    blocked = [place for place in call.siblings
+               if place.state in (places.STATE_SILENT, places.STATE_PAUSED) and not is_owner_bot_place(place)]
     if not call.attributable and blocked:
         labels = ", ".join(place.label or place.place_id for place in blocked)
         return (_PREFIX + f"The destination of {name!r} cannot be attributed while {labels} is Silent or Paused. "
                 "Use a tool with declared, attributable targets or change the state in Circles "
                 "or with configure_presence.")
-    return _author_refusal(ctx, name, args, call) if effect.effect == EFFECT_MESSAGE else ""
+    if effect.effect == EFFECT_MESSAGE:
+        return _author_refusal(ctx, name, args, call)
+    if effect.effect == EFFECT_GESTURE:
+        _note_own_gesture(ctx, name, args, call, connector_of(name, ext_tool))
+    return ""
 
 
 def _author_refusal(ctx: Any, name: str, args: Mapping[str, Any], call: _CallReach) -> str:
     """One author per conversation for words: another live turn's conversation names its author; this run's own
-    sends there are noted (``_note_message_call``). Only where the words land holds an author: a group's write or
+    sends there are noted (``_note_response_call``). Only where the words land holds an author: a group's write or
     read beside them takes none."""
     keys = []
     for reach in call.reaches.values():
@@ -338,8 +361,24 @@ def _author_refusal(ctx: Any, name: str, args: Mapping[str, Any], call: _CallRea
                 return (_PREFIX + f"Task {author} is authoring this conversation in {place.label or place.place_id}. "
                         f"Hand the intent to it with tell_task(task_id={author!r}, note=...).")
             keys.append(key)
-    _note_message_call(ctx, name, args, keys, call.effect)
+    _note_response_call(ctx, name, args, keys, call.effect)
     return ""
+
+
+def _note_own_gesture(ctx: Any, name: str, args: Mapping[str, Any], call: _CallReach, connector: str) -> None:
+    """Remember possible response in this conversation without changing gesture admission."""
+    from ouroboros.place_reply import _gesture_on_waking_message
+
+    metadata = _metadata(ctx)
+    presence = metadata.get("presence")
+    event = presence.get("event") if isinstance(presence, Mapping) else None
+    if not isinstance(event, Mapping) or not connector or connector != presence.get("transport_skill"):
+        return
+    key = event.get("conversation_key")
+    effect = call.effect
+    if isinstance(key, str) and key and (any(key in reach.keys for reach in call.reaches.values())
+            or (not call.targets.get(effect.thread) and _gesture_on_waking_message(metadata, effect, args))):
+        _note_response_call(ctx, name, args, [key], effect)
 
 
 def authored_notes(records: Any, place: Any) -> list[dict[str, Any]]:
@@ -418,11 +457,11 @@ def with_destination_facts(ctx: Any, name: str, args: Mapping[str, Any], result:
                    producer_text=(result.producer_text if result.host_annotations or result.producer_text is not None else result.text))
 
 
-def _note_message_call(ctx: Any, name: str, args: Mapping[str, Any], keys: list[str], effect: ToolEffect) -> None:
-    """Keep on the context that this run dispatched a ``message`` call into these conversations (``_place_message_calls``):
-    the words proposed (its declared ``text`` argument, default ``text``, when it has one) and when. A dispatched call is not a delivery:
-    Safety may still refuse it and the handler may fail; the connector's receipt, when it comes, says what landed.
-    ``this_turn_sends`` reads it beside the receipts, so a finish seconds after a send is judged with the send in view."""
+def _note_response_call(ctx: Any, name: str, args: Mapping[str, Any], keys: list[str], effect: ToolEffect) -> None:
+    """Record a possible response in the existing resumable call list, not proof of delivery.
+
+    A gesture contributes to completion evidence, never to the message-call presentation.
+    """
     from ouroboros.utils import utc_now_iso
 
     if not keys:
@@ -434,8 +473,10 @@ def _note_message_call(ctx: Any, name: str, args: Mapping[str, Any], keys: list[
             ctx._place_message_calls = calls
         except AttributeError:  # a context that takes no attributes keeps no record
             return
-    words = argument_value(args, effect.text or "text")
+    gesture = effect.effect == EFFECT_GESTURE
+    words = None if gesture else argument_value(args, effect.text or "text")
     calls.append({"tool": name, "at": utc_now_iso(), "conversation_keys": list(dict.fromkeys(keys)),
+                  **({"gesture": True} if gesture else {}),
                   **({"text": words} if isinstance(words, str) else {})})
 
 
@@ -457,7 +498,8 @@ def this_turn_sends(ctx: Any, conversation_key: str) -> dict[str, Any]:
         record, confirmed = None, "unknown (receipts unreadable)"
     delivered = set(record["sent"]) if record else set()
     calls = [row for row in getattr(ctx, "_place_message_calls", None) or []
-             if isinstance(row, Mapping) and conversation_key in (row.get("conversation_keys") or ())]
+             if isinstance(row, Mapping) and not row.get("gesture")
+             and conversation_key in (row.get("conversation_keys") or ())]
     pending = [{key: row[key] for key in ("tool", "at", "text") if key in row}
                for row in calls if row.get("text") is None or row["text"] not in delivered]
     return {"confirmed": confirmed, "calls_without_receipt": pending}
@@ -466,21 +508,44 @@ def this_turn_sends(ctx: Any, conversation_key: str) -> dict[str, Any]:
 def place_evidence(ctx: Any, place: dict[str, Any], place_ids: set[str], tool: str,
                    args: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Each named place's guidance for the Safety bundle, read now from one snapshot (``authored_notes``); the bundle's
-    own place gets its current label and state. A ``configure_presence`` call naming a circle also carries that
-    circle's words and its places (``place["circle"]``): a circle change is judged with what it changes. Only
-    such a call reads the canonical store, so a check that names no place or circle needs no data root."""
+    own place gets its current label and state, and a named place that is my human's linked Ouroboros its facts
+    (``place["linked_ouroboros"]``: stored choices and what is in effect, ``peer_links.peer_facts_line``). The place
+    a focus was woken in joins them only where a linked Ouroboros stands at one end of the call (it lands in a
+    link's place, or the focus was woken in one): there words or work cross between installations, so the rules
+    standing now where the request came from are read beside the destination's, each entry under its own
+    ``place_id``. Between other places nothing joins: the frame keeps that place's notes as its event saw them
+    (``safety_evidence.focus_event_source``). A ``configure_presence`` call naming a circle also carries that
+    circle's words and its places (``place["circle"]``): a circle change is judged with what it changes. Only such
+    a call reads the canonical store, so a check that names no place or circle needs no data root. A store that
+    cannot be read raises (``places.PlaceError``) and the check holds its call (``safety._assess_call``): rules
+    that could not be read are never an empty list of them."""
     from ouroboros.tool_access import canonical_data_root
 
     circle_id = str(args.get("circle_id") or "") if tool == "configure_presence" else ""
     if not place_ids and not circle_id:
         return []
     records, notes = places.place_records(canonical_data_root(ctx)), []
+    from ouroboros.peer_letters import occasion_place
+    from ouroboros.peer_links import CONNECTOR, peer_facts_line, place_permissions
+
+    focus = _metadata(ctx).get("focus")
+    source = str(focus.get("place_id") or "") if isinstance(focus, Mapping) else ""
+    linked = {record.place_id for record in records.places.values() if record.connector == CONNECTOR}
+    if place_ids and source and (source in linked or place_ids & linked):
+        place_ids = {*place_ids, source}  # a link at one end: where the request came from is read beside it
+    stated = occasion_place(_metadata(ctx))  # the occasion states its own link's facts (``letter_evidence``)
     for record in records.places.values():
         if record.place_id not in place_ids:
             continue
         if record.place_id == place.get("place_id"):
             place.update(place_label=record.label, place_state=record.state)
         notes.extend(authored_notes(records, record))
+        if record.place_id in linked and record.place_id != stated:
+            # Words or work for my human's linked Ouroboros leave for another installation: its facts ride beside
+            # its notes, so "mine" is read as who it is, never as consent to what is sent there.
+            peer = records.peer(record.place_id)
+            place.setdefault("linked_ouroboros", {})[record.place_id] = peer_facts_line(
+                peer, place_permissions(canonical_data_root(ctx), record, peer))
     circle = records.circle(circle_id)
     if circle is not None:
         place["circle"] = {**{key: circle[key] for key in ("circle_id", "name", "text", "text_author")},
@@ -500,7 +565,8 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
     call acts with there, if known), "conversation_key", ...}]}``; ``{}`` when no place is involved. A call with group addresses also carries ``touches`` (each exact address with its effect,
     argument, ``match`` when exact, and the place it reached), and a grouped call's rows their ``effects`` and ``via``;
     its ``conversation_keys`` name only where the call's own effect lands. An automatic final's retained destination
-    owns its key and sending account; a blank account has no known sending identity. The place's scope and notes
+    owns its key and sending account; a blank account has no known sending identity; a letter to a linked Ouroboros
+    lands in its ``place_id``'s own conversation (``_ADDRESSED_WORDS``). The place's scope and notes
     remain its own. Calls without a destination keep the legacy scope inference. The automatic final's further addresses
     (its anchor's ``message.reply_targets``, carried in the reply's subject) are such ``write`` groups. A call whose
     addresses cannot be read carries ``problem`` and no place.
@@ -517,7 +583,7 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
                 "problem": call.problem}
     destination = args.get("destination") if name == "place_reply" else None
     routed_reply = isinstance(destination, Mapping)
-    if name == "place_reply":
+    if name in _ADDRESSED_WORDS:
         effect = ToolEffect(EFFECT_MESSAGE, targets=("account_id", "conversation_id"),
                             conversation="conversation_id", thread="thread_id", declared=True, source="builtin")
         # The reply's route is its retained destination (``place_reply.reply_carrier``), thread included.
@@ -579,7 +645,7 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
 
 def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[str, str], *,
                          binding: Mapping[str, Any] | None = None, require_place: bool = False,
-                         match: str = places.MATCH_SCOPE) -> dict[str, Any]:
+                         match: str = places.MATCH_SCOPE, contribution_id: str = "") -> dict[str, Any]:
     """Capture or recheck one connector's enqueue-time place binding, without writes.
 
     The snapshot records provenance, not a grant: delivery still checks current
@@ -589,13 +655,28 @@ def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[s
     places (``places.target_place``): ``scope``, or ``exact`` for an extra address
     constraint, which needs the conversation, has no opaque or unknown fallback and
     finds no place as a confirmed unbound one. The v1 snapshot never records it: the
-    caller keeps it beside the snapshot and checks with the same mode.
+    caller keeps it beside the snapshot and checks with the same mode. ``contribution_id="owner_bot"`` binds the
+    owner's own Telegram bot exactly (``telegram_owner_bot.owner_bot_binding``); that bot's account is never bound
+    through the connector's other places.
     """
+    from ouroboros.telegram_owner_bot import (
+        FEED_CONNECTOR,
+        OWNER_BOT_CONTRIBUTION,
+        owner_bot_binding,
+        owner_bridge_bot_id,
+    )
     if match not in places.MATCHES:
         raise ValueError(f"match is {' or '.join(places.MATCHES)}.")
     target = {key: destination.get(key, "") for key in _DELIVERY_TARGET_FIELDS}
     if any(not isinstance(value, str) for value in target.values()) or not target["provider"] or not target["account_id"]:
         raise ValueError("A canonical provider and account_id are required for an outbox binding.")
+    if contribution_id not in {"", OWNER_BOT_CONTRIBUTION}:
+        raise ValueError("contribution_id names no exact binding.")
+    if contribution_id:
+        return owner_bot_binding(drive_root, connector, target, binding, PLACE_BINDING_VERSION)
+    if connector == FEED_CONNECTOR and target["account_id"] == owner_bridge_bot_id(drive_root):
+        return {"allowed": False, "binding": dict(binding) if binding else None, "state": "unknown",
+                "code": "place_not_connected", "label": "", "place_id": ""}
     exact = match != places.MATCH_SCOPE  # ``exact`` or ``exact_casefold``
     if exact and not target["conversation_id"]:
         raise ValueError("An exact place binding needs its conversation_id.")

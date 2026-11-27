@@ -67,13 +67,14 @@ from ouroboros.gateway._helpers import request_drive_root
 from ouroboros.gateway.claudexor_passive import ACCOUNT_MODEL_UNSUPPORTED
 from ouroboros.gateway.onboarding_host import recorded_attempt
 from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startup_ready_provider
+from ouroboros.settings_integrity import skill_settings
 from ouroboros.skill_starter import after_onboarding, onboarding_skill_choices
 from ouroboros.settings_setup_contract import (
     ONBOARDING_COMPLETED_KEY, completion_facts,
     parse_completion_attempt, parse_subscription_intent,
 )
 from ouroboros.subscription_install_presets import (
-    PRESET_HARNESSES,
+    HARNESS_CODEX, PRESET_HARNESSES,
     PRESET_MARKER_KEY,
     REVIEWER_PRESET_HARNESSES,
     HarnessDiscovery,
@@ -339,6 +340,8 @@ def verified_harness_discoveries(
         )
     routable, refused = subscription_routable_harnesses(snapshot)
     rows = _discovery_rows(snapshot.get("harnesses"))
+    roster = snapshot.get("profiles") if isinstance(snapshot.get("profiles"), dict) else {}
+    profiles = _profile_index(roster.get("profiles"))
     wanted = [h for h in PRESET_HARNESSES if h in routable]
     if not wanted:
         detail = "; ".join(f"{harness}: {reason}" for harness, reason in sorted(refused.items()))
@@ -356,16 +359,16 @@ def verified_harness_discoveries(
                 "models_unavailable",
                 f"Model discovery for {harness} failed: {row.get('models_error')}",
             )
-        model_ids = tuple(
-            str(model.get("id") or "")
-            for model in (row.get("models") or [])
-            if isinstance(model, dict) and str(model.get("id") or "")
-        )
+        listed = [model for model in row.get("models") or [] if isinstance(model, dict) and str(model.get("id") or "")]
+        # Codex alone (others keep every id) takes a model its account lists by that seat's durable verdict, never
+        # quota; a flattened inventory names no account and stays a candidate (ARCHITECTURE §2 install-time presets).
+        verdicts = [(True, "") if harness != HARNESS_CODEX or not model.get("credential_profile_id")
+                    else _profile_seat_verdict(harness, str(model["credential_profile_id"]), profiles) for model in listed]
+        model_ids = tuple(str(model["id"]) for model, (ok, _why) in zip(listed, verdicts) if ok)
         if not model_ids and harness in required:
-            return (), PresetFailure(
-                "models_unavailable",
-                f"The engine listed no models for {harness}.",
-            )
+            why = "; ".join(dict.fromkeys(why for ok, why in verdicts if not ok))
+            return (), PresetFailure("models_unavailable", f"No {harness} subscription account lists a model: {why}."
+                                     if listed else f"The engine listed no models for {harness}.")
         discoveries.append(HarnessDiscovery(harness_id=harness, model_ids=model_ids))
     return tuple(discoveries), None
 
@@ -527,9 +530,8 @@ def _write_precondition(expect_preset: bool, expect_safety_light: bool, read_fin
     """Re-prove eligibility INSIDE the settings lock, against the state this
     write is about to overwrite.
 
-    The re-read is ``load_settings_lock_held``, the read for a holder of the
-    settings lock, which is not re-entrant: the lock-free ``load_settings()``
-    re-reads an undecodable document behind that lock, which this caller holds."""
+    Use the same settings view as preparation but with ``load_settings_lock_held``:
+    the ordinary loader re-reads an undecodable document behind this non-reentrant lock."""
     def _check() -> str:
         from ouroboros.config import SETTINGS_PATH, load_settings_lock_held
 
@@ -555,7 +557,7 @@ def _write_precondition(expect_preset: bool, expect_safety_light: bool, read_fin
         if expect_safety_light and SETTINGS_PATH.exists():
             return ("A settings file appeared while onboarding was being saved; "
                     "refusing to author the first-install safety default over it.")
-        if expect_preset and not preset_eligible(load_settings_lock_held()):
+        if expect_preset and not preset_eligible(skill_settings(load_settings_lock_held)):
             return ("This install is no longer in first-run onboarding; refusing "
                     "to apply install-time agent defaults over it.")
         return ""
@@ -570,13 +572,11 @@ def _write_precondition(expect_preset: bool, expect_safety_light: bool, read_fin
 
 def _prepared_settings(body: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], str]:
     """(old_settings, prepared_settings, error) through the SHARED validator."""
-    from ouroboros.config import load_settings
     from ouroboros.onboarding_wizard import prepare_onboarding_settings
 
-    # Preview and completion judge a draft against the settings the runtime resolves (#2969): an operator's
-    # environment key the wizard shows (a masked row, a built-in placeholder) is the key either sends. This lock-free
-    # read writes nothing; only completion persists the compatibility upgrades first (``migrate=True``).
-    old_settings = load_settings()
+    # Like bootstrap and the starter list, read the current document with operator env, not our old mirrors.
+    # This read writes nothing; only completion persists the compatibility upgrades first (``migrate=True``).
+    old_settings = skill_settings()
     error = roster_save_error(body.get(SUBAGENTS_SETTING), old_settings, body)  # twins: only a roster change is judged
     prepared, error = ({}, error) if error else prepare_onboarding_settings(body, old_settings)
     if error:
@@ -694,27 +694,20 @@ def review_rows_on_main(catalog: Mapping[str, Any], settings: Mapping[str, Any])
                                  for item in catalog.get("items") or []]}
 
 
-async def _draft_body(request: Request):
-    try:
-        return await request.json()
-    except Exception:
-        return None
-
-
 async def api_onboarding_model_catalog(request: Request) -> JSONResponse:
     """List models for draft access (keys, connections and local model) while Main is still unchosen."""
-    from ouroboros.config import load_settings
     from ouroboros.gateway.models import draft_catalog
+    from ouroboros.gateway.onboarding_host import read_onboarding_draft
     from ouroboros.provider_models import CONNECTIONS_KEY
     from ouroboros.settings_setup_contract import draft_access
 
-    body = await _draft_body(request)
-    if not isinstance(body, dict):
-        return unsaved_error("JSON body must be an object.", 400)
+    body = await read_onboarding_draft(request)
+    if isinstance(body, JSONResponse):
+        return body
     provider_id = request.query_params.get("provider_id")
     if provider_id is not None and not provider_id.strip():
         return unsaved_error("provider_id must name one connection.", 400)
-    saved = load_settings()
+    saved = skill_settings()
     connections, keys, typed, error = draft_access(body, saved)
     if error:
         return unsaved_error(error, 400, code="invalid_onboarding_settings")
@@ -725,9 +718,11 @@ async def api_onboarding_model_catalog(request: Request) -> JSONResponse:
 
 async def api_onboarding_subagents_preview(request: Request) -> JSONResponse:
     """Read-only canonical preview for the wizard; never persists or projects env."""
-    body = await _draft_body(request)
-    if not isinstance(body, dict):
-        return unsaved_error("JSON body must be an object.", 400)
+    from ouroboros.gateway.onboarding_host import read_onboarding_draft
+
+    body = await read_onboarding_draft(request)
+    if isinstance(body, JSONResponse):
+        return body
 
     owner_draft, draft_error = _configured_owner_draft(body, saved=True)
     if draft_error:
@@ -837,12 +832,15 @@ def _persist(request: Request, old_settings: Dict[str, Any], current: Dict[str, 
 async def api_onboarding_complete(request: Request) -> JSONResponse:
     """POST /api/onboarding/complete — finish onboarding in ONE transaction."""
     from ouroboros.config import get_runtime_mode, normalize_runtime_mode
+    from ouroboros.gateway.onboarding_host import read_onboarding_draft
     from supervisor.state_initialization import first_state_pending as first_state_due
 
-    body = await _draft_body(request)
+    body = await read_onboarding_draft(request)
+    if isinstance(body, JSONResponse):
+        return body
     attempt_id, attempt_error = parse_completion_attempt(body)
-    if not isinstance(body, dict) or attempt_error:
-        return unsaved_error(attempt_error or "JSON body must be an object.", 400)
+    if attempt_error:
+        return unsaved_error(attempt_error, 400)
     from ouroboros.gateway.settings import ALLOW_EMPTY_REVIEW_POOL, REVIEW_LANES_KEY, review_pool_save_judgement, _run_settings_writer
 
     allow_empty_pool = body.get(ALLOW_EMPTY_REVIEW_POOL) is True
@@ -948,6 +946,13 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
                 return post_commit_failure_response(exc, boundary)
             if isinstance(exc, SettingsDocumentUnreadable):
                 return unsaved_error(str(exc), 409, code="settings_unreadable")
+            from ouroboros.gateway.owner_settings import settings_write_refusal
+            from ouroboros.settings_integrity import SettingsPublicationRefused
+            if isinstance(exc, SettingsPublicationRefused):
+                # The physical publication boundary refused before any byte landed: reuse
+                # the owner writer's typed mapping (reset_interrupted / its own cause),
+                # never an untyped 500 and never a post-save step.
+                return settings_write_refusal(exc)
             if isinstance(exc, SettingsPreconditionFailed):
                 return unsaved_error(str(exc), 409, code="onboarding_state_changed")
             if isinstance(exc, SettingsLockUnavailable):

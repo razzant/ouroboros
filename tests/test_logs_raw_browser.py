@@ -6,6 +6,7 @@ including the large received-event worker, and inspect byte cursors, download by
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import threading
@@ -14,6 +15,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from PIL import Image, ImageChops
 
 pytestmark = [pytest.mark.ui_browser]
 
@@ -110,6 +112,38 @@ def _mount(browser, url, rows=()):
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_overflowing_raw_record_paints_its_focus_ring_and_keeps_its_fade(raw_server, engine):
+    from playwright.sync_api import sync_playwright
+
+    raw_server.payload = json.dumps({"rows": ["Event detail " + str(n) for n in range(200)]}, indent=2).encode()
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        try:
+            page, _ = _mount(browser, raw_server.url, [_entry(raw_server.payload)])
+            page.locator(".log-entry:not(.log-task-card) > summary").click()
+            record = page.get_by_role("region", name="Raw log record")
+            # Establish keyboard modality before programmatic focus (WebKit retains pointer modality
+            # from opening the fold). Re-center before the paired screenshots, without focus scroll.
+            page.keyboard.press("Tab")
+            page.evaluate("() => document.activeElement.blur()")
+            record.scroll_into_view_if_needed()
+            page.wait_for_function("el => el.hasAttribute('data-scroll-below')", arg=record.element_handle())
+            box = record.bounding_box()
+            clip = {"x": box["x"] + 12, "y": box["y"] - 5, "width": box["width"] - 24, "height": 5}
+            before = Image.open(io.BytesIO(page.screenshot(clip=clip, animations="disabled"))).convert("RGB")
+            record.evaluate("el => el.focus({preventScroll: true})")
+            assert record.evaluate("el => el.matches(':focus-visible') && el.hasAttribute('data-scroll-below')")
+            after = Image.open(io.BytesIO(page.screenshot(clip=clip, animations="disabled"))).convert("RGB")
+            path = Path(os.environ["OUROBOROS_UI_EVIDENCE_DIR"])
+            page.screenshot(path=str(path / f"raw-focus-{engine}.png"), animations="disabled")
+            assert sum(count for count, color in ImageChops.difference(before, after).getcolors() if max(color) > 15) > 32, \
+                "the focus ring does not paint outside the record"
+            assert "linear-gradient" in record.evaluate("el => getComputedStyle(el).maskImage")
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_raw_byte_pages_stay_bounded_and_full_download_keeps_exact_bytes(raw_server, engine):
     from playwright.sync_api import expect, sync_playwright
 
@@ -137,6 +171,22 @@ def test_raw_byte_pages_stay_bounded_and_full_download_keeps_exact_bytes(raw_ser
             page.locator(".log-entry:not(.log-task-card) > summary").click()
             status = page.locator(".log-raw-status")
             expect(status).to_contain_text("Source SHA-256")
+            page.wait_for_function("() => document.querySelector('.log-raw')?.hasAttribute('data-scroll-below')")
+            raw_box = page.locator(".log-raw").evaluate("""p => ({
+                fadeY: p.classList.contains('scroll-fade-y') && !p.classList.contains('scroll-fade-x'),
+                whiteSpace: getComputedStyle(p).whiteSpace,
+                overflowX: p.scrollWidth - p.clientWidth, overflowY: p.scrollHeight - p.clientHeight,
+                pageOverflowX: document.documentElement.scrollWidth - window.innerWidth,
+                role: p.getAttribute('role'), label: p.getAttribute('aria-label'), tab: p.getAttribute('tabindex'),
+                edges: [p.hasAttribute('data-scroll-above'), p.hasAttribute('data-scroll-below')],
+            })""")
+            assert raw_box["fadeY"] and raw_box["whiteSpace"] == "pre-wrap", raw_box
+            assert raw_box["overflowX"] <= 1 and raw_box["pageOverflowX"] <= 0 and raw_box["overflowY"] > 1, raw_box
+            assert (raw_box["role"], raw_box["label"], raw_box["tab"], raw_box["edges"]) == (
+                "region", "Raw log record", "0", [False, True]), raw_box
+            page.locator(".log-raw").evaluate("p => { p.scrollTop = p.scrollHeight; }")
+            page.wait_for_function("() => { const p = document.querySelector('.log-raw'); "
+                                   "return p.hasAttribute('data-scroll-above') && !p.hasAttribute('data-scroll-below'); }")
             page.screenshot(path=str(evidence / f"raw-page-{engine}.png"))
             for _ in range(48):
                 page.get_by_role("button", name="Next page", exact=True).click()

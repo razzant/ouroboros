@@ -24,7 +24,7 @@ def promotion_intent_notice(task_id: str, result: dict) -> str:
             "objective", "title", "expected_output", "project_id", "project_name", "workspace_root",
             "workspace", "source", "context_requires_self_body_docs", "context_requires_development", "reasoning_effort",
             "destination", "owner_quote", "owner_source",
-        ) if key in intent}
+        ) if key in intent} | ({"mine": True} if intent.get("own_declared") is True else {})  # the declaration too
         return (f"Task {task_id}: not_started. No admission began. An explicit retry is available: "
                 f"start_task({json.dumps(arguments, ensure_ascii=False)}). Nothing restarts automatically.")
     if result.get("status") != "requested" or status not in {"emitted", "unconfirmed"}:

@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 from typing import Any, Callable, List, Optional
+from ouroboros.git_selection import keep_reached_git
 from ouroboros.platform_peer import local_connection_peer  # noqa: F401 — platform facade
 from ouroboros.platform_process_target import (  # noqa: F401 — platform facade
     capture_process_stop_target, observe_child_exit, retained_child_group, job_members_running, release_job_members,
@@ -102,14 +103,14 @@ def is_container_env() -> bool:
 
 
 def bootstrap_process_path() -> list[str]:
-    """Add existing common user tool directories to this process PATH once, ahead of its entries."""
+    """Add existing common user tool directories to this process PATH once, ahead of it but not of a chosen Git."""
     global _PATH_BOOTSTRAPPED
     if _PATH_BOOTSTRAPPED:
         return []
     _PATH_BOOTSTRAPPED = True
     path = os.environ.get("PATH", "")
     if added := common_tool_directories(path):
-        os.environ["PATH"] = PATH_SEP.join([*added, *[part for part in path.split(PATH_SEP) if part]])
+        os.environ["PATH"] = PATH_SEP.join(keep_reached_git(added, [part for part in path.split(PATH_SEP) if part]))
     return added
 
 
@@ -128,25 +129,14 @@ def common_tool_directories(search_path: str) -> list[str]:
             home / ".npm-global" / "bin", home / "go" / "bin",
         ))
     if IS_WINDOWS:
-        def _env_path(name: str, default: str = "") -> pathlib.Path | None:
-            text = os.environ.get(name, default)
-            if not text:
-                return None
-            path = pathlib.Path(text)
-            return path if path.is_absolute() else None
-
-        program_files = _env_path("ProgramFiles", r"C:\Program Files")
-        local_app_data = _env_path("LOCALAPPDATA")
-        app_data = _env_path("APPDATA")
-        user_profile = _env_path("USERPROFILE")
-        if program_files:
-            candidates.extend([program_files / "Git" / "cmd", program_files / "nodejs"])
-        if local_app_data:
-            candidates.append(local_app_data / "Programs" / "Git" / "cmd")
-        if app_data:
-            candidates.append(app_data / "npm")
-        if user_profile:
-            candidates.append(user_profile / ".cargo" / "bin")
+        for name, default, *suffixes in (
+            ("ProgramFiles", r"C:\Program Files", ("Git", "cmd"), ("nodejs",)),
+            ("LOCALAPPDATA", "", ("Programs", "Git", "cmd")),
+            ("APPDATA", "", ("npm",)),
+            ("USERPROFILE", "", (".cargo", "bin")),
+        ):
+            if (text := os.environ.get(name, default)) and (base := pathlib.Path(text)).is_absolute():
+                candidates.extend(base.joinpath(*parts) for parts in suffixes)
 
     existing = [part for part in search_path.split(PATH_SEP) if part]
     existing_norm = {str(pathlib.Path(part)).lower() if IS_WINDOWS else str(pathlib.Path(part)) for part in existing}
@@ -296,12 +286,11 @@ def acquire_exclusive_file_lock(
     poll_sec: float = 0.05,
     owner_aware_stale: bool = False,
     refuse_name_tier_errnos: frozenset = frozenset(),
+    writable_stale_probe: bool = False,
     outcome: Optional[dict] = None,
 ) -> Optional[int]:
-    """Acquire a descriptor-owned lock; optional ``outcome`` records failure facts.
-
-    Only contention retries; owner-aware recovery cannot evict a live writer.
-    Name-tier refusal is caller policy; missing outcomes are unknown. See ARCHITECTURE §1 "Platform substrate"."""
+    """Acquire a descriptor-owned lock. Only contention retries. An absent outcome is unknown.
+    Owner-aware recovery protects live writers. Name-tier refusal is caller policy (ARCHITECTURE §1)."""
     def report(reason, error=None):
         if outcome is not None:
             outcome.update(reason=reason, errno=getattr(error, "errno", None))
@@ -314,13 +303,11 @@ def acquire_exclusive_file_lock(
         log.warning("Name-tier lock refused by caller policy at %s: no lock taken", lock_path)
         return None
     started = time.monotonic()
-    first_attempt = True
-    retry_after_stale = False
-    while first_attempt or retry_after_stale or (time.monotonic() - started) < timeout_sec:
-        first_attempt = False
-        retry_after_stale = False
+    try_now = True
+    while try_now or (time.monotonic() - started) < timeout_sec:
+        try_now = False
         try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0), 0o644)
             stamp = (metadata or f"pid={os.getpid()} ts={time.time()}\n").encode("utf-8")
             try:  # the owner pid goes in BEFORE the kernel lock, so an owner-aware
                 os.write(fd, stamp)
@@ -336,7 +323,6 @@ def acquire_exclusive_file_lock(
                     log.warning("Kernel lock refused at %s (errno %s): no lock taken", lock_path, exc.errno)
                     return None
             else:
-                # Only a readable fd/path identity proves the creator still owns this name.
                 won, named = _lock_identity(fd)[:2], _lock_identity(lock_path)[:2]
                 if won and won == named:
                     report("acquired")
@@ -357,7 +343,11 @@ def acquire_exclusive_file_lock(
             report("permission" if isinstance(creation_error, PermissionError) else "unknown", creation_error)
             stale = refused = probe = None
             try:
-                probe = os.open(str(lock_path), os.O_RDONLY)
+                if writable_stale_probe and enforced:
+                    with contextlib.suppress(PermissionError, IsADirectoryError):
+                        probe = os.open(str(lock_path), os.O_RDWR)  # NFS may require this for LOCK_EX.
+                if probe is None:
+                    probe = os.open(str(lock_path), os.O_RDONLY)
                 try:
                     judged = _lock_identity(probe)
                     if not judged:
@@ -380,7 +370,7 @@ def acquire_exclusive_file_lock(
                             if not IS_WINDOWS:  # Windows deletes no open file: it unlinks
                                 if _lock_identity(lock_path) == judged:  # below, after
                                     os.unlink(str(lock_path))  # under the held flock
-                                    retry_after_stale = True  # only our own eviction outlives the deadline
+                                    try_now = True  # only our own eviction outlives the deadline
                                 continue
                 finally:
                     if IS_WINDOWS:  # the probe's hold goes before its handle
@@ -388,7 +378,7 @@ def acquire_exclusive_file_lock(
                     os.close(probe)
                 if stale and _lock_identity(lock_path) == judged:
                     lock_path.unlink()
-                    retry_after_stale = True
+                    try_now = True
                     continue
             except Exception as exc:
                 if probe is None and isinstance(creation_error, FileExistsError) and isinstance(exc, FileNotFoundError):
@@ -1080,6 +1070,18 @@ def kill_process_on_port(port: int) -> None:
 
 # Embedded Python paths.
 
+def direct_python_command(command: List[str], *, windows: bool = IS_WINDOWS, executable: str = sys.executable,
+                          base: str = getattr(sys, "_base_executable", "") or sys.executable,
+                          ) -> tuple[list[str], dict[str, str]]:
+    """Start the interpreter itself when its PID owns the session. A Windows venv
+    redirector adds a child; launch the base with the venv marker as in CPython's
+    multiprocessing (bpo-35797), preserving the venv and the measured PID."""
+    if (windows and command and os.path.normcase(command[0]) == os.path.normcase(executable)
+            and os.path.normcase(base) != os.path.normcase(executable)):
+        return [base, *command[1:]], {"__PYVENV_LAUNCHER__": executable}
+    return list(command), {}
+
+
 def embedded_python_candidates(base_dir: pathlib.Path) -> List[pathlib.Path]:
     """Return candidate embedded python-build-standalone paths."""
     root = base_dir / "python-standalone"
@@ -1358,7 +1360,7 @@ if IS_WINDOWS:
         _JOB_OBJECT_LIMIT_BREAKAWAY_OK, _JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, _JOBOBJECTINFOCLASS_EXTENDED,
         _JOBOBJECTINFOCLASS_PROCESS_ID_LIST, _JOBOBJECT_BASIC_PROCESS_ID_LIST, _PROCESS_SET_QUOTA, _PROCESS_TERMINATE,
         _PROCESS_SUSPEND_RESUME, _CREATE_SUSPENDED, _JOBOBJECT_BASIC_LIMIT_INFORMATION, _IO_COUNTERS,
-        _ExtendedLimitInfo,
+        _ExtendedLimitInfo, _ntdll, restrict_to_owner,
     )
 
 
@@ -1560,10 +1562,6 @@ def resume_process(pid: int) -> bool:
     if not IS_WINDOWS:
         return False
     try:
-        _ntdll = ctypes.windll.ntdll  # type: ignore[attr-defined]
-        # Full-width HANDLE, as in the kernel32 declarations above.
-        _ntdll.NtResumeProcess.restype = ctypes.c_int32
-        _ntdll.NtResumeProcess.argtypes = (ctypes.wintypes.HANDLE,)
         handle = _kernel32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, pid)
         if not handle:
             log.warning("OpenProcess(%d) failed for resume", pid)

@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import itertools
 import json
 import logging
+import lzma
 import os
 import pathlib
 import threading
@@ -23,9 +25,10 @@ import uuid
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 from ouroboros._usage_money import LiteralFloat, amount, durable_literals
-from ouroboros._usage_rows import BINDING_KEYS, _BINDING_CAPS
+from ouroboros._usage_rows import BINDING_KEYS, _BINDING_CAPS, valid_work_cap
 from ouroboros.usage_ledger import (
-    LEDGER_REL, QUARANTINE_REL, UsageAccountingError, UsageLedgerCorrupt, _SHA256_RE, _number, is_one_shot_kind,
+    ARCHIVE_SEGMENT_DIR_REL, LEDGER_REL, QUARANTINE_REL, UsageAccountingError, UsageLedgerCorrupt,
+    _SHA256_RE, _number, is_one_shot_kind,
     late_receipt_eligible, valid_archive_rel, validate_row_fields, validate_transition,
 )
 from ouroboros.utils import append_jsonl, atomic_write_json, replace_atomic, utc_now_iso
@@ -33,6 +36,7 @@ from ouroboros.utils import append_jsonl, atomic_write_json, replace_atomic, utc
 log = logging.getLogger(__name__)
 
 IMPORT_REL = pathlib.Path("state/usage_import_watermark.json")  # legacy telemetry import watermark
+EXPORTED_WORK_CAPS = "exported_work_caps"
 
 
 def _append_bytes_fsync(path: pathlib.Path, payload: bytes) -> None:
@@ -288,11 +292,238 @@ def read_journal_records(root: pathlib.Path) -> Tuple[list, bytes]:
 # ---- pre-ledger telemetry (an install whose legacy import never completed) ----
 
 def completed_legacy_watermark(root: pathlib.Path) -> Optional[Dict[str, Any]]:
+    """Only a missing file is absent; a failed read must not re-import legacy spend or erase authority."""
     try:
         value = json.loads((root / IMPORT_REL).read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except FileNotFoundError:
         return None
-    return value if isinstance(value, dict) and value.get("completed") else None
+    except OSError as exc:
+        raise UsageAccountingError("cannot read the completed legacy usage watermark") from exc
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise UsageLedgerCorrupt("unreadable legacy usage watermark") from exc
+    if not isinstance(value, dict) or value.get("completed") is not True:
+        raise UsageLedgerCorrupt("invalid legacy usage watermark; expected a completed import")
+    return value
+
+
+def import_completion(watermark: Optional[dict]) -> Optional[dict]:
+    """The already validated pre-ledger import completion, not a previous export's decision set."""
+    return {key: value for key, value in watermark.items() if key != EXPORTED_WORK_CAPS} if watermark else None
+
+
+def _archived_export_prefix(root, header, *, size, digest) -> bool:
+    """Follow only the older writer's hash-bound predecessors; do not re-fold their money.
+
+    This is a cold import check, and only for a watermarked export whose live prefix changed.
+    """
+    while header and header.get("kind") == "usage_baseline":
+        _validate_baseline_header(header, 1)
+        path = root / header["archive_rel"]
+        if path.parent.resolve() != root.resolve() / ARCHIVE_SEGMENT_DIR_REL or path.is_symlink():
+            raise UsageLedgerCorrupt("export ancestry archive escapes its retained directory")
+        # The evidence packer can replace this exact segment with its .xz form.
+        # The compactor's own header is the size/digest authority for either placement.
+        packed = not path.is_file()
+        if packed:
+            path = path.with_name(path.name + ".xz")
+        if path.is_symlink() or not path.is_file():
+            raise UsageLedgerCorrupt("export ancestry archive is unavailable")
+        full, prefix, count = hashlib.sha256(), hashlib.sha256(), 0
+        with (lzma.open(path, "rb") if packed else path.open("rb")) as stream:
+            first = stream.readline(header["source_size_bytes"] + 1)
+            for part in itertools.chain((first,), iter(lambda: stream.read(1024 * 1024), b"")):
+                full.update(part)
+                if count < size:
+                    prefix.update(part[:size - count])
+                count += len(part)
+                if count > header["source_size_bytes"]:
+                    raise UsageLedgerCorrupt("export ancestry archive exceeds its recorded size")
+        if count != header["source_size_bytes"] or full.hexdigest() != header["source_sha256"]:
+            raise UsageLedgerCorrupt("export ancestry archive changed")
+        if (count == size or 0 < size < count) and prefix.hexdigest() == digest:
+            return True
+        predecessor = _decode_record(first)
+        if not predecessor or predecessor.get("kind") != "usage_baseline":
+            return False
+        _validate_baseline_header(predecessor, 1)
+        if predecessor["compaction_epoch"] >= header["compaction_epoch"]:
+            raise UsageLedgerCorrupt("export ancestry epochs do not decrease")
+        header = predecessor
+    return False
+
+
+def _valid_cap_map(entries: Any) -> bool:
+    return isinstance(entries, dict) and all(
+        isinstance(group, str) and group and valid_work_cap(cap) and cap.get("billing_group_id") == group
+        for group, cap in entries.items())
+
+
+def work_caps_stamp(stamp: Any) -> Tuple[int, str, dict, dict]:
+    """Validate the transmitted monetary decisions before restoring or replacing them."""
+    if isinstance(stamp, dict):
+        size, digest, caps = stamp.get("size"), stamp.get("sha256"), stamp.get("caps")
+        unverified = stamp.get("unverified_caps", {})
+        if (type(size) is int and size >= 0 and isinstance(digest, str) and _SHA256_RE.fullmatch(digest)
+                and _valid_cap_map(caps) and _valid_cap_map(unverified)
+                and (caps or unverified) and not (caps.keys() & unverified.keys())
+                and ("unverified_caps" not in stamp or bool(unverified))):
+            return size, digest, caps, unverified
+    raise UsageLedgerCorrupt("invalid exported work caps in legacy usage watermark")
+
+
+def split_work_caps(records: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Separate active work caps from carried unverified export records, failing closed on corruption."""
+    verified, unverified = {}, {}
+    for group, record in records.items():
+        if isinstance(record, dict) and set(record) == {"unverified_export"}:
+            unverified[group] = record["unverified_export"]
+        else:
+            verified[group] = record
+    if not (_valid_cap_map(verified) and _valid_cap_map(unverified)):
+        raise UsageLedgerCorrupt("invalid exported work caps in usage store")
+    return verified, unverified
+
+
+def work_caps_export_meta(watermark: Optional[dict], work_caps: dict, *,
+                          restored: int, unverified: int, preserved: int = 0) -> Optional[Dict[str, Any]]:
+    if not work_caps:
+        return None
+    stamp = watermark[EXPORTED_WORK_CAPS]
+    status = "verified" if not unverified else ("partial" if restored else "unverified")
+    return {"status": status, "size": stamp["size"], "sha256": stamp["sha256"],
+            "restored": restored, "unverified": unverified, "preserved": preserved}
+
+
+def plan_work_caps_export(root: pathlib.Path, provenance_legacy: Any, caps: Dict[str, Any], *,
+                          journal_id: Optional[Dict[str, Any]] = None,
+                          reconcile_pending: bool = False, had_export: bool = False) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Any]:
+    """Validate watermark and work-cap export prerequisites shared by preview and freeze."""
+    watermark = completed_legacy_watermark(root)
+    if reconcile_pending and watermark is None and had_export:
+        raise UsageLedgerCorrupt("the legacy usage watermark is missing after an export; keep the export and its watermark together")
+    legacy = import_completion(watermark) or provenance_legacy
+    if not legacy:
+        raise UsageAccountingError("usage export requires its completed legacy import watermark")
+    prior = (watermark or {}).get(EXPORTED_WORK_CAPS)
+    if EXPORTED_WORK_CAPS in (watermark or {}):
+        _, _, prior_caps, prior_unverified = work_caps_stamp(prior)
+        if not (prior_caps.keys() | prior_unverified.keys()) <= caps.keys():
+            raise UsageLedgerCorrupt("the prior usage export has decisions not held in the active store")
+    verified, unverified = split_work_caps(caps)
+    export_caps = None
+    if verified or unverified:
+        export_caps = {**(journal_id or {"size": 0, "sha256": "0" * 64, "rows": 0}), "caps": verified,
+                       **({"unverified_caps": unverified} if unverified else {})}
+        work_caps_stamp(export_caps)
+    return legacy, export_caps, prior
+
+
+def _kept_journal_export_prefix(
+    root: pathlib.Path, *, import_size: int, import_sha256: str, export_size: int, export_sha256: str,
+) -> bool:
+    """Verify the kept live journal's imported prefix matches ``meta.import.source`` and a nonempty export prefix."""
+    if not (0 < export_size <= import_size):
+        return False
+    path = root / LEDGER_REL
+    if path.is_symlink() or not path.is_file():
+        return False
+    imported, prefix, count = hashlib.sha256(), hashlib.sha256(), 0
+    with path.open("rb") as stream:
+        while count < import_size:
+            part = stream.read(min(1024 * 1024, import_size - count))
+            if not part:
+                return False
+            imported.update(part)
+            if count < export_size:
+                prefix.update(part[:export_size - count])
+            count += len(part)
+    return count == import_size and imported.hexdigest() == import_sha256 and prefix.hexdigest() == export_sha256
+
+
+def _resolve_work_caps(root: pathlib.Path, verified: dict, unverified: dict, *,
+                       proven: bool, header: Optional[dict], size: int, digest: str) -> dict:
+    """Apply proven verified caps; carry unproven or previously unverified amendments separately."""
+    if verified and not proven and header and size > 0:
+        try:
+            proven = _archived_export_prefix(root, header, size=size, digest=digest)
+        except (UsageLedgerCorrupt, OSError, ValueError, OverflowError, EOFError, lzma.LZMAError) as exc:
+            log.warning("Cannot verify the usage export's ancestry: %s", exc)
+    resolved = {group: cap if proven else {"unverified_export": cap} for group, cap in verified.items()}
+    resolved.update({group: {"unverified_export": cap} for group, cap in unverified.items()})
+    return resolved
+
+
+def imported_work_caps(root: pathlib.Path, watermark: Optional[dict], import_meta: Optional[dict]) -> dict:
+    """Resolve exported work caps against an already-completed store's recorded import provenance."""
+    if not watermark or EXPORTED_WORK_CAPS not in watermark:
+        return {}
+    size, digest, verified, unverified = work_caps_stamp(watermark[EXPORTED_WORK_CAPS])
+    provenance = import_meta if isinstance(import_meta, dict) else {}
+    source = provenance.get("source") if isinstance(provenance.get("source"), dict) else {}
+    header = provenance.get("header") if isinstance(provenance.get("header"), dict) else None
+    import_size, import_sha256 = source.get("size"), source.get("sha256")
+    valid_source = (source.get("present") is True and type(import_size) is int and import_size >= 0
+                    and isinstance(import_sha256, str) and bool(_SHA256_RE.fullmatch(import_sha256)))
+    proven = False
+    if valid_source and verified:
+        if import_size == size and import_sha256 == digest:
+            proven = True
+        elif 0 < size < import_size:
+            try:
+                proven = _kept_journal_export_prefix(
+                    root, import_size=import_size, import_sha256=import_sha256,
+                    export_size=size, export_sha256=digest)
+            except OSError as exc:
+                log.warning("Cannot read the kept usage journal to verify export lineage: %s", exc)
+    return _resolve_work_caps(root, verified, unverified, proven=proven,
+                              header=header if valid_source else None, size=size, digest=digest)
+
+
+def plan_work_caps_reconcile(
+    root: pathlib.Path, status: Dict[str, Any], *, had_export: bool,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Dict[str, Any]]:
+    """Read the legacy watermark and resolve exported work caps for an already-completed store.
+    Returns ``(pending_state, watermark, work_caps)``; malformed ``exported_work_caps`` raises."""
+    reason, watermark = "", None
+    try:
+        watermark = completed_legacy_watermark(root)
+    except UsageAccountingError as exc:
+        reason = "watermark_unreadable_after_export" if had_export else "watermark_unreadable"
+        log.warning("Skipping work-cap export reconciliation on completed store (%s): %s", reason, exc)
+    else:
+        if watermark is None and had_export:
+            reason = "watermark_missing_after_export"
+            log.warning("Completed usage store has a retired export without %s", IMPORT_REL)
+    pending = {"status": "pending", "reason": reason} if reason else None
+    work_caps = {} if pending or not watermark else imported_work_caps(root, watermark, status)
+    return pending, watermark, work_caps
+
+
+def exported_work_caps(root: pathlib.Path, watermark: Optional[dict], records: Sequence[dict],
+                       source: bytes, *, present: bool) -> dict:
+    """Restore proven amendments. Preserve unverified ones separately from effective authority."""
+    if not watermark or EXPORTED_WORK_CAPS not in watermark:
+        return {}
+    size, digest, verified, unverified = work_caps_stamp(watermark[EXPORTED_WORK_CAPS])
+    if not present:
+        raise UsageLedgerCorrupt("the live journal is missing beside the usage export watermark")
+    proven = bool(verified) and (size == len(source) or 0 < size < len(source)) and (
+        hashlib.sha256(memoryview(source)[:size]).hexdigest() == digest)
+    return _resolve_work_caps(root, verified, unverified, proven=proven,
+                              header=records[0] if records else None, size=size, digest=digest)
+
+
+def write_exported_work_caps(root: pathlib.Path, value: Optional[dict], *, fallback: Optional[dict] = None) -> None:
+    """Update only the export portion of the existing watermark, before retiring the store."""
+    current = completed_legacy_watermark(root) or fallback
+    if current is None:
+        raise UsageAccountingError("usage export requires its completed legacy import watermark")
+    current = dict(current)
+    if value is None:
+        current.pop(EXPORTED_WORK_CAPS, None)
+    else:
+        current[EXPORTED_WORK_CAPS] = value
+    atomic_write_json(root / IMPORT_REL, current, trailing_newline=True, fsync=True)
 
 
 def legacy_snapshot(root: pathlib.Path) -> Tuple[list, Dict[str, Any], Dict[str, str]]:
@@ -462,7 +693,7 @@ def legacy_candidates(snapshot: Tuple[list, Dict[str, Any], Dict[str, str]],
 _SETTLEMENT_FIELDS = frozenset({
     "settle_reason", "reason", "cost_usd", "cost_final", "prompt_tokens", "completion_tokens",
     "cached_tokens", "cache_write_tokens", "prompt_cache_ttl", "effort_resolution", "processing", "speed",
-    "service_tier", "cost_basis", "cost_evidence", "input_token_usage", "attempt_execution",
+    "service_tier", "cost_basis", "cost_evidence", "input_token_usage", "attempt_execution", "provider_token_receipt",
 })
 _DISPATCH_FIELDS = frozenset({
     "launch_state", "transport_outcome", "candidate_manifest_ref", "local_answer_owner_pid",
@@ -482,7 +713,8 @@ def export_rows(header: Optional[Dict[str, Any]], aggregates: list, attempts: li
     reserved, then dispatched for an attempt that was sent, then the current
     row; a one-shot stays one row. The first predecessor of each root carries
     that root's stored binding verbatim, so the older release derives the same
-    earliest binding. Sequence numbers are dense from 1."""
+    earliest binding. Sequence numbers are dense from 1. Work cap decisions
+    are carried in the export's watermark, never on physical rows."""
     out: list[Dict[str, Any]] = []
     if aggregates:
         if header is None:

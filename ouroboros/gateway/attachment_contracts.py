@@ -40,6 +40,7 @@ class AttachmentManifestEntry(TypedDict, total=False):
     size: int
     sha256: str
     rule: str
+    limit_bytes: int
 
 
 class ChatAttachmentView(TypedDict, total=False):
@@ -54,3 +55,20 @@ class ChatAttachmentView(TypedDict, total=False):
     size: Optional[int]
     available: bool
     url: str
+    unavailable: Literal["too_large", "download_failed"]
+    limit_bytes: int
+
+
+class QuizAnswerFile(TypedDict, total=False):
+    """One file of a recorded quiz answer as its card, receipt and search candidate state it
+    (``chat_uploads.answer_files``): name, kind, type, size and digest, or why it never arrived
+    (``unavailable`` — ``too_large``, ``download_failed`` or ``missing`` — and, for ``too_large``,
+    ``limit_bytes``). Display-only: carries no stored upload id, stat witness, path or download URL."""
+
+    name: str
+    kind: Literal["image", "video", "audio", "file"]
+    mime: str
+    size: int
+    sha256: str
+    unavailable: str
+    limit_bytes: int

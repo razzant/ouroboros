@@ -47,9 +47,20 @@ def index_entries(target: pathlib.Path, paths: List[str]) -> Dict[str, tuple]:
     """Each of PATHS the target's index holds: every stage as ``ls-files --stage`` prints it (and ``update-index
     --index-info`` takes back), then the flags Git keeps beside it, ``+assume-unchanged``, ``+skip-worktree``
     and ``+intent-to-add``. Raises when the index cannot be read: unknown is not untracked."""
-    wanted, entries, flags = set(paths), {}, {}
-    listed = work_domain.run(["git", "ls-files", "--stage", "-v", "-z"], cwd=str(target), capture_output=True, check=True)
-    for line in listed.stdout.split(b"\0"):
+    wanted, entries, flags, listed = set(paths), {}, {}, b""
+    # Only PATHS are listed, as literal pathspecs (the exact match below drops a directory's other entries),
+    # in argv batches well under Windows' command-line limit: never a whole-index inventory. Both argv lookups
+    # disable core.precomposeunicode so macOS Git matches decomposed (NFD) index names verbatim.
+    batch: List[str] = []
+    for path in [*sorted(wanted), None]:
+        if batch and (path is None or sum(len(item) + 1 for item in batch) + len(path) > 16000):
+            listed += work_domain.run(["git", "-c", "core.precomposeunicode=false", "--literal-pathspecs",
+                                       "ls-files", "--stage", "-v", "-z", "--", *batch],
+                                      cwd=str(target), capture_output=True, check=True).stdout
+            batch = []
+        if path is not None:
+            batch.append(path)
+    for line in listed.split(b"\0"):
         meta, _, raw = line.partition(b"\t")
         if (path := raw.decode("utf-8", errors="surrogateescape")) in wanted:
             tag, _, entry = meta.decode("ascii").partition(" ")
@@ -58,7 +69,8 @@ def index_entries(target: pathlib.Path, paths: List[str]) -> Dict[str, tuple]:
                 {"+assume-unchanged"} if tag.islower() else set(), {"+skip-worktree"} if tag.upper() == "S" else set())
     # Porcelain status alone tells intent-to-add (index mode 000000) from a staged empty file; it writes no index.
     if candidates := [path for path, rows in entries.items() if len(rows) == 1 and rows[0].split()[1] in _EMPTY_BLOBS]:
-        status = work_domain.run(["git", "--no-optional-locks", "--literal-pathspecs", "status", "--porcelain=v2", "-z",
+        status = work_domain.run(["git", "-c", "core.precomposeunicode=false", "--no-optional-locks",
+                                 "--literal-pathspecs", "status", "--porcelain=v2", "-z",
                                  "--untracked-files=no", "--ignore-submodules=all", "--no-renames", "--", *candidates],
                                 cwd=str(target), capture_output=True, check=True)
         for record in status.stdout.split(b"\0"):
@@ -76,6 +88,34 @@ def _mark_flags(target: pathlib.Path, flagged: Dict[str, tuple], prefix: str = "
         if group and (proc := _git_paths(target, ["update-index", "-z", f"--{prefix}{option}", "--stdin"], group)).returncode:
             return _git_failure(proc)
     return ""
+
+
+def staged_postimage(target: pathlib.Path, paths: List[str]) -> str:
+    """One digest of what an apply left, read under the caller's repo lock: the target folder's and its
+    ``.git``'s identity, HEAD (a commit, or a positively unborn branch of a new repository), each touched
+    path's raw file side and its index entries (stages and flags). ``""`` when any part is unknown: no
+    recovery proof, while the original apply's own outcome stands."""
+    import hashlib
+    import json
+
+    from ouroboros.workspace_file_outputs import _path, _side
+    from ouroboros.workspace_preflight import git_head_basis
+
+    try:
+        if not paths:
+            return ""
+        identity = [(s.st_dev, s.st_ino) for s in map(work_domain.lstat, (target, target / ".git"))]
+        head, basis = git_head_basis(target)
+        # The branch HEAD names, read here: an unborn branch has no commit to compare, so its ref is its identity.
+        symref = work_domain.run(["git", "symbolic-ref", "--quiet", "HEAD"], cwd=str(target), capture_output=True)
+        if basis not in {"known", "unborn"} or symref.returncode not in (0, 1) or (basis == "unborn" and symref.returncode):
+            return ""
+        ref = symref.stdout.decode("utf-8", errors="surrogateescape").strip() if symref.returncode == 0 else "(detached)"
+        files = {path: _side(_path(target, path)) for path in paths}
+        state = [identity, [basis, head, ref], files, index_entries(target, paths)]
+        return hashlib.sha256(json.dumps(state, sort_keys=True).encode("ascii")).hexdigest()
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        return ""
 
 
 def stage_applied(target: pathlib.Path, paths: List[str], indexed: Dict[str, tuple]) -> tuple[str, List[str]]:

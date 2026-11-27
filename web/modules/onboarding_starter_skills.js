@@ -4,8 +4,8 @@
 // starter list never ran). One categorized list, built-ins first, one row per skill (his 21.11 «слишком крупные
 // карточки»: rows, not boxes): its box, its human title and, muted on one line with it, what it gives and, in a few
 // words, what it lacks («· Gemini key»; the full sentence is the row's accessible text); the maintainer's recommended
-// ones are ticked. A group says its name only, and categories of one skill close the list together as «More». Where
-// the skills come from and how the hub's install is one small sentence under the list, its choices behind it. Inside a
+// ones are ticked; voice also needs a confirmed matching key. A group says its name only, and categories of one skill
+// close the list together as «More». One small sentence explains where hub skills come from, with choices behind it. Inside a
 // group what works at once leads and what needs a key comes last. The rows arrive in one short sequence on entering
 // the step, both columns at one pace, never on a repaint (DESIGN §7). A skill that declares a connection card (`connection`) stands first, as that card
 // (onboarding_connection_card.js). Nothing installs here: the one atomic Finish carries the ticked ids, the trust
@@ -53,8 +53,20 @@ export function needsText(item, keyLabels = {}) {
     return keys.length ? `Uses your ${keyLabels[keys[0]] || keyWords(keys[0])}${more ? ` and ${more} more setting${more === 1 ? '' : 's'}` : ''}` : '';
 }
 
-// How a hub row's skills are named in the sentence under the list and behind it (Settings › Skill sources names the
-// rows themselves): in the sentence the Official row also says where they come from.
+/** A new or cleared Accounts field overrides the saved voice default. An uneditable or masked field leaves it alone. */
+export function starterDraftHasKey(settingKey, state, providerFields, secretPlaceholder) {
+    const field = providerFields.find((entry) => entry.settingKey === settingKey);
+    const draft = field && state[field.stateKey];
+    if (draft == null) return undefined;
+    const value = String(draft).trim();
+    // Match the setup writer's markers: these keep the host's value, never supply a key.
+    if (value === secretPlaceholder || value === '***' || ([7, 11].includes(value.length) && value.endsWith('...'))) return undefined;
+    // The read-only legacy address determines which service owns the flat OpenAI key (provider_models.legacy_openai_base).
+    return Boolean(value) && !(settingKey === 'OPENAI_API_KEY' && state.legacyCompatibleBaseUrl?.trim());
+}
+
+// How a hub row's skills are named in the sentence under the list and behind it (Extensions › Sources lists the rows
+// themselves): in the sentence the Official row also says where they come from.
 const SOURCE_WORDS = { official: [(row) => `Official skills from the ${row.name} hub`, () => 'Official skills'],
     community: [() => 'skills from the community', () => 'Community skills'] };
 const sourceWords = (row, inLine) => SOURCE_WORDS[row.part]?.[inLine ? 0 : 1](row) || `${inLine ? 'skills from ' : ''}${row.name}`;
@@ -68,9 +80,12 @@ const dataAttr = (key) => `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.t
 /** The step and its Summary row. `offered`: the bootstrap's `stepOrder` has the step (else only Summary's row shows,
  * with where skills change and the hub's trust choices, and only those ride Finish); `open` returns to the step from
  * Summary. `read()` defaults to GET
- * /api/onboarding/starter-skills; `card` passes the connection card its check, randomness and encoder (tests). */
-export function createStarterSkillsStep({ offered = true, open = () => {}, keyLabels = {}, read = () => skillSourcesApi.starterSkills(), setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now, card = {} } = {}) {
+ * /api/onboarding/starter-skills; `draftHasKey` answers presence (undefined keeps the server's fact). `card` passes
+ * the connection card its check, randomness and encoder (tests). */
+export function createStarterSkillsStep({ offered = true, open = () => {}, keyLabels = {}, draftHasKey = () => undefined,
+    read = () => skillSourcesApi.starterSkills(), setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now, card = {} } = {}) {
     const state = { status: 'loading', groups: [], ticked: new Set(), trust: {}, rows: [], sources: [], more: 0, trustOpen: false, error: '', ticksChanged: false, untickNew: false };
+    const editedTicks = new Set();
     let host = null;
     let view = '';  // what the mounted node shows: the step's list, Summary's row, or nothing
     let painted = '';
@@ -84,6 +99,24 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
     const hubs = () => state.sources.filter((source) => source.kind === 'hub' || state.rows.some((row) => row.id === source.id));
     const reading = () => hubs().some((source) => source.state === 'reading');
     const useDefaults = () => !state.ticksChanged && hubs().some((source) => source.state !== 'ready');
+
+    function refreshVoiceDefaults() {
+        if (!offered || state.untickNew) return;
+        for (const item of items()) {
+            if (!item.default_with_keys || editedTicks.has(item.id)) continue;
+            const keys = Object.entries(item.default_with_keys);
+            if (keys.length && keys.every(([key, saved]) => draftHasKey(key) ?? saved)) {
+                state.ticked.add(item.id);
+            } else state.ticked.delete(item.id);
+        }
+    }
+
+    function chooseTick(id, checked) {
+        state.ticksChanged = true;
+        editedTicks.add(id);
+        if (checked) state.ticked.add(id);
+        else state.ticked.delete(id);
+    }
 
     async function refresh() {
         if (destroyed || (deadline !== null && now() > deadline)) return;
@@ -101,6 +134,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
                 groups.set(group.category, { ...group, items: [...merged.values()] });
             }
             state.groups = [...groups.values()];
+            refreshVoiceDefaults();
             state.rows = Array.isArray(data?.hub_rows) ? data.hub_rows.filter((row) => row?.id) : [];
             state.sources = Array.isArray(data?.sources) ? data.sources : [];
             state.more = Number.isInteger(data?.catalog_more) && data.catalog_more > 0 ? data.catalog_more : 0;
@@ -110,7 +144,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
             const declared = !connection && items().find((item) => normalizeConnection(item.connection));
             if (declared) {
                 connection = createConnectionCard(declared, normalizeConnection(declared.connection), { ...card, repaint: () => paint(), edited: () => { touched = true; },
-                    ticked: () => state.ticked.has(declared.id), tick: () => { state.ticksChanged = true; state.ticked.add(declared.id); } });
+                    ticked: () => state.ticked.has(declared.id), tick: () => chooseTick(declared.id, true) });
             }
         } catch (error) {
             if (destroyed) return;
@@ -285,9 +319,9 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         if (event.target.closest('[data-starter-trust-toggle]')) { state.trustOpen = !state.trustOpen; paint(); return; }
         const bulk = event.target.closest('[data-starter-all]');
         if (bulk) {
-            state.ticksChanged = true;
-            state.untickNew = bulk.dataset.starterAll === '0';
-            state.ticked = bulk.dataset.starterAll === '1' ? new Set(items().map((item) => item.id)) : new Set();
+            const checked = bulk.dataset.starterAll === '1';
+            state.untickNew = !checked;
+            for (const item of items()) chooseTick(item.id, checked);
             paint();
             return;
         }
@@ -299,9 +333,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         if (connection?.change(event.target)) return;
         const box = event.target.closest('[data-starter-item]');
         if (!box) return;
-        state.ticksChanged = true;
-        if (box.checked) state.ticked.add(box.dataset.starterItem);
-        else state.ticked.delete(box.dataset.starterItem);
+        chooseTick(box.dataset.starterItem, box.checked);
         const count = host.querySelector('.skills-starter-count');
         if (count) count.textContent = countText();
     }
@@ -335,6 +367,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
                 deadline = now() + 180_000;
                 if (state.status !== 'loading' && reading()) timer = setTimer(refresh, 3000);
             }
+            refreshVoiceDefaults();
             listen(host, true);
             paint();
         },

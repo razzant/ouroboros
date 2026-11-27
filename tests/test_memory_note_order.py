@@ -33,7 +33,7 @@ def test_note_page_follows_room_pages_folds_with_latest_and_has_no_false_later_r
     assert folded["ok"], folded
     assert store.get(folded["node_id"])["covers"]["stream_span"] == [1, 2]
     assert "Originals remain readable by address" in folded["effect"]
-    assert "next start" in folded["effect"] and "from the first changed retelling" in folded["effect"]
+    assert "this part folds 2 records" in folded["effect"] and "its 2 members' own words" in folded["effect"]
     assert store.get(pages[1])["text"] == "Page 2" and store.get(page["id"])["text"] == "The thought settled"
     later = chat(tmp_path, [{"chat_id": 1, "direction": "system", "ts": ts(4), "task_id": "writer01",
                             "type": "task_summary", "status": "failed", "text": "Later completion"}])[0]

@@ -34,6 +34,65 @@ from ouroboros._usage_rows import REVIEW_ATTRIBUTION_KEYS
 log = logging.getLogger(__name__)
 
 
+def _peer_observation_lost(entry, exc) -> bool:
+    """Whether a peer run lost observation because its link was revoked or is no longer usable."""
+    from ouroboros.execution_domain import is_peer_ref
+
+    if not is_peer_ref(getattr(entry, "engine_ref", None)):
+        return False
+    code = str(getattr(exc, "code", "") or "")
+    refusal = str(getattr(exc, "refusal_code", "") or "")
+    return refusal == "link_unknown" or code in ("link_unknown", "peer_link_unavailable")
+
+
+def peer_link_loss(exc, *, lost: str = "Observation stopped") -> dict:
+    """What such a loss (``_peer_observation_lost``) proves, one account for the run's recorded fault and for the
+    answers of ``delegate_wait`` and ``delegate_cancel`` (``lost``: the act that no longer reaches the receiving
+    Ouroboros): ``detail`` and the typed ``link_error`` and ``remote_work_state``, never that the remote work ended."""
+    code = str(getattr(exc, "refusal_code", "") or getattr(exc, "code", "") or "peer_link_unavailable")
+    return {"detail": f"{lost} because the peer link is unavailable ({code}: {exc}). This does NOT prove the remote "
+                      "work stopped or failed; it may still be running on the receiving Ouroboros and its outcome is "
+                      "unknown.",
+            "link_error": code, "remote_work_state": "unknown_may_still_be_running"}
+
+
+def peer_observation_lost_wake(ctx, runs) -> str:
+    """Wake reason when a selected held peer run stopped observation after its link became unusable here: once per
+    episode of that fault (``_fault_shown``), so a Pause that lasts costs one model round, not one per wait."""
+    selected = [str(rid) for rid in (runs or ())]
+    if not selected:
+        return ""
+    try:
+        from ouroboros import model_sleep
+        from ouroboros.store import acquisition_budget
+
+        with acquisition_budget(0):
+            owned = model_sleep._owned_runs(ctx, held_only=True)
+        for rid in selected:
+            run = owned.get(rid)
+            fault = run.containment_fault if run is not None else {}
+            if (run is not None and not run.settled and fault.get("reason") == "peer_observation_lost"
+                    and not _fault_shown(ctx, rid, fault)):
+                return f"run_observation_lost:{rid}"
+    except Exception:
+        log.debug("Peer observation-loss check unavailable for %s", getattr(ctx, "task_id", ""), exc_info=True)
+    return ""
+
+
+def _fault_shown(ctx, run_id: str, fault: dict) -> bool:
+    """Whether a wake of ``run_id`` was acknowledged after ``fault`` was recorded: that wake's read of the run
+    reported the lost observation (``tools.delegate._read_run``). Read only; unreadable is not shown, so it wakes."""
+    from ouroboros.deadline_utils import parse_deadline_ts
+    from ouroboros.delegate_supervision import _load_state
+
+    try:
+        acknowledged = (_load_state(ctx, run_id).get("last_acknowledged_wake") or {}).get("acknowledged_at")
+    except Exception:  # noqa: BLE001 - an unreadable record of wakes is not proof that one was shown
+        return False
+    at, since = parse_deadline_ts(acknowledged), parse_deadline_ts(fault.get("ts"))
+    return at is not None and since is not None and at >= since
+
+
 def _retain(root, entry, value, suffix):
     from ouroboros.artifacts import store_actor_source_bytes
     ref = store_actor_source_bytes(root, entry.task_id, category="tool_results",
@@ -45,6 +104,11 @@ def _retain(root, entry, value, suffix):
 def _read_source(root, entry, ref):
     from ouroboros.artifacts import read_actor_source_bytes
     return json.loads(read_actor_source_bytes(root, str(ref.get("task_id") or entry.task_id), ref))
+
+
+def _content_withheld(detail: Any) -> str:
+    """Non-empty reason ('paused' or 'stop') when a terminal detail came from state-only Stop read-back."""
+    return str(c.summary_of(detail).get("contentWithheld") or "") if isinstance(detail, dict) else ""
 
 
 def observe_run(root, entry, detail: dict) -> bool:
@@ -67,6 +131,8 @@ def observe_run(root, entry, detail: dict) -> bool:
     if state in c.TERMINAL_STATES:
         if fresh.terminal_state and fresh.terminal_state != state:
             return False
+        if fresh.terminal_source and summary.get("contentWithheld"):
+            return False  # Never downgrade an existing terminal observation to a state-only Stop stub.
         source = _retain(root, fresh, detail, "terminal")
         if source.get("sha256") == fresh.terminal_source.get("sha256"):
             return False  # Retained revisions are immutable; changed source earns new bytes.
@@ -106,13 +172,19 @@ def _collection_failure(entry, step, exc, failures) -> bool:
 
 def record_terminal_money(root, entry, detail: dict, *, failures=None) -> dict:
     """The old exact session accounting, without project retirement or output ACK."""
+    from ouroboros.execution_domain import is_peer_ref
+
     if c.names_another_run(detail, entry.run_id):
         raise ValueError("terminal money belongs to another run")
+    peer = is_peer_ref(entry.engine_ref)
     if entry.settled:
+        if peer:
+            return {"settled": True, "ledger_recorded": False, "peer_billed": True, "retried": False}
         return {"settled": True, "ledger_recorded": entry.ledger_recorded, "retried": False}
     from ouroboros.delegate_accepted import deferred_money
     if deferred := deferred_money(root, entry):  # an invocation's money lands once, on its one STARTED row
-        return {"settled": False, "ledger_recorded": False, "retried": False, **deferred}
+        return {"settled": False, "ledger_recorded": False, "retried": False,
+                **({"peer_billed": True} if peer else {}), **deferred}
     from ouroboros.delegate_output import engine_locator
     from ouroboros.gateways.claudexor import final_attempt_facts, run_failure_cause
     from ouroboros.usage_accounting import record_subscription_session
@@ -121,6 +193,35 @@ def record_terminal_money(root, entry, detail: dict, *, failures=None) -> dict:
     if not c.is_terminal(detail):
         raise ValueError("cannot record terminal money for a live execution")
     observed = final_attempt_facts(detail, entry.run_id)
+    if peer:
+        # Peer letters are paid and booked on the receiving Ouroboros, never on the sender's ledger or caps.
+        from ouroboros.gateways.peer import _normalized_peer_cost
+
+        raw_peer_cost = detail.get("peerCost")
+        if not isinstance(raw_peer_cost, dict):
+            final_summary = detail.get("finalSummary")
+            raw_peer_cost = final_summary.get("cost") if isinstance(final_summary, dict) else {}
+        peer_cost = _normalized_peer_cost(raw_peer_cost)
+        failure = summary.get("failure") if isinstance(summary.get("failure"), dict) else {}
+        facts = summary.get("outcomeFacts") if isinstance(summary.get("outcomeFacts"), dict) else {}
+        failed = {} if str(summary.get("state") or "") in c.SUCCEEDED_STATES else {
+            "requested_model": entry.model, "failure_code": str(failure.get("code") or summary.get("refusalCode") or ""),
+            "reported_cause": run_failure_cause(failure) or str(summary.get("error") or ""),
+            "outcome_reason": str(facts.get("reason") or "")}
+        entry.settled = c.emit(root, c.SETTLED, {
+            "run_id": entry.run_id, "task_id": entry.task_id, "root_task_id": entry.root_task_id,
+            "parent_task_id": entry.parent_task_id, "route": entry.route_id,
+            "source": entry.source, "category": entry.category, "model": observed.get("model", ""),
+            "observed_attempt": observed, "state": str(summary.get("state") or ""), **failed,
+            "preserve_containment": True, "billed_by": "peer", "peer_cost": peer_cost,
+            "cost_usd": None, "cost_final": True,
+            "spend_disclosed": False, "spend_estimated": False, "cost_partial": False,
+            "credential_profile_id": "", "access_profile": str(summary.get("effectiveAccess") or ""),
+            "engine_locator": engine_locator(detail)})
+        if entry.settled:
+            entry.ledger_recorded = True
+            entry.engine_locator = engine_locator(detail)
+        return {"settled": entry.settled, "ledger_recorded": False, "peer_billed": True, "retried": True}
     from ouroboros.delegate_custody_usage import disclosed_cost
     cash = disclosed_cost(summary, attempt_execution=detail.get("attemptExecution"))
     spend, estimated = cash["cost_usd"], cash["cost_estimated"]
@@ -216,9 +317,9 @@ def _retain_output(root, entry, detail, gateway, staging_task_id="", output_auth
     from ouroboros.tools.delegate_terminal_evidence import resolved_terminal_payload
 
     full = retained_payload(root, entry, require_complete=False)
-    if full is None:
-        # A legacy row has no captured grant. Its existing foreground owner
-        # supplies its known shape; body-only work keeps the recorded unknown.
+    if full is None or full.get("content_withheld") or _content_withheld(detail):
+        # A legacy row has no captured grant, and a content-withheld Stop stub must never be
+        # promoted to complete by reusing its empty primary_output.
         authority = _shape(entry) if entry.access or output_authority is None else output_authority
         full, complete, disclosure = resolved_terminal_payload(entry.run_id, detail, authority, entry, gateway)
     else:
@@ -244,6 +345,14 @@ def _retain_output(root, entry, detail, gateway, staging_task_id="", output_auth
         "total_chars": len(text), "staged": True, "full_content": complete})
     return {"artifact": artifact, "complete": complete, "published": published,
             "retry": retry if published else "transient"}
+
+
+def directory_discard_owed(entry) -> bool:
+    """An evidence-only engine directory copy whose discard receipt has not yet landed."""
+    from ouroboros.delegate_directory import is_directory_run
+    from ouroboros.delegate_registration_policy import evidence_only
+
+    return bool(entry is not None and capture_required(entry) and is_directory_run(entry) and evidence_only(entry))
 
 
 def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = None,
@@ -280,8 +389,7 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
     if fd is None:  # only contention is another collector; any other refusal keeps the platform's cause
         return ({"status": "pending", "reason": "collection_in_progress"} if held.get("reason") == "contention"
                 else {"status": "pending", "reason": "collection_lock_unavailable", "lock_outcome": dict(held)})
-    capture = None
-    transient = False
+    capture, accepted, transient = None, False, False
     retention = {}
     errors = []
     owned_gateway = None
@@ -291,16 +399,22 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
             return {"status": "unavailable", "reason": "custody_missing"}
         if entry.named_evidence:
             saved_named_evidence(root, entry)  # addressed validation; never called by tick
-        due = allow_review or collection_due(entry, generation=generation, recapture=recapture)
+        prepared = delegate_capture_job.ready_result_owed(entry)
+        discard_owed = directory_discard_owed(entry)
+        due = (allow_review or (output_retry and prepared)
+               or (discard_owed and entry.patch_captured
+                   and (gateway is not None or (output_retry and gateway_factory is not None)))
+               or collection_due(entry, generation=generation, recapture=recapture))
         if not due and not (output_retry and (output_owed(entry) or not entry.settled)):
             return {"status": "pending" if collection_pending(entry) else "collected",
-                    "workspace_capture": capture_projection(root, entry), "errors": []}
+                    "workspace_capture": capture_projection(root, entry, reader_task_id=staging_task_id), "errors": []}
         output_attempt = entry.collection_attempt.get("output") or {}
         retry_output = output_owed(entry) and (output_retry or recapture or not output_attempt
             or output_attempt.get("terminal_sha") != entry.terminal_source.get("sha256")
             or (output_attempt.get("retry") == "transient" and output_attempt.get("generation") != generation))
         if (gateway is None and gateway_factory is not None
-                and (retry_output or (not background and capture_required(entry)))):
+                and (retry_output or (due and discard_owed)
+                     or (not background and not prepared and capture_required(entry)))):
             try:  # the run's own engine (``execution_domain``), else the caller's discovery
                 owned_gateway = gateway = run_gateway(entry, gateway_factory)
             except Exception:
@@ -324,6 +438,16 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
                 record_attempt(root, entry, generation=generation, retry=failure_retry(exc),
                                errors=[f"terminal_source:{type(exc).__name__}"])
             return {"status": "pending", "reason": "terminal_source_unavailable"}
+        if retry_output and gateway is not None and _content_withheld(detail):
+            # A terminal-control Stop read-back withheld /result and prose; upgrade through an
+            # ordinary read when the link permits it, without ever faking an empty ordinary result.
+            from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC
+            try:
+                if observe_run(root, entry, gateway.get_run(run_id, timeout_sec=SHORT_POLL_TIMEOUT_SEC)):
+                    entry = current.run(root, run_id) or entry
+                    detail = _read_source(root, entry, entry.terminal_source)
+            except Exception as exc:
+                _collection_failure(entry, "observation", exc, failures)
         if retry_output:
             try:
                 retention = _retain_output(root, entry, detail, gateway, staging_task_id, output_authority)
@@ -339,15 +463,24 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
         transient |= output_attempt.get("retry") == "transient"
         entry = current.run(root, run_id)
         closing = stopped is not None and stopped()
-        money = ({"settled": entry.settled, "ledger_recorded": entry.ledger_recorded}
-                 if closing else record_terminal_money(root, entry, detail, failures=failures))
+        if closing:
+            from ouroboros.execution_domain import is_peer_ref
+
+            peer = is_peer_ref(entry.engine_ref)
+            money = {"settled": entry.settled, "ledger_recorded": False if peer else entry.ledger_recorded,
+                     **({"peer_billed": True} if peer else {})}
+        else:
+            money = record_terminal_money(root, entry, detail, failures=failures)
         entry = current.run(root, run_id)
         # This lock is shared with continue/apply. A possibly-started successor
         # owns the mutable snapshot, even before it has a bound run id.
         if (due and entry is not None and not (stopped is not None and stopped())
                 and not disposition_refusal(root, entry)):
             try:
-                if background and (entry.execution_root or entry.resource_ref.get("workspace_kind") == "directory") \
+                if discard_owed and entry.patch_captured and not prepared:
+                    capture = (capture_terminal_patch_for_drive(root, entry, gateway=gateway, retain_investigation=False)
+                               if gateway is not None else capture_projection(root, entry, reader_task_id=staging_task_id))
+                elif (background or prepared) and (entry.execution_root or entry.resource_ref.get("workspace_kind") == "directory") \
                         and not is_in_place_run(entry):  # an in-place run's capture is its fixed projection
                     capture = delegate_capture_job.request_or_result(root, entry, generation=generation, recapture=retry_capture)
                     if capture.get("status") != "pending":
@@ -361,7 +494,10 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
                 errors.append(f"capture:{type(exc).__name__}")
                 transient |= failure_retry(exc) == "transient" or (capture or {}).get("retry") == "transient"
                 _collection_failure(entry, "capture", exc, failures)
+                if capture and capture.get("status") in delegate_capture_job.READY:
+                    capture = capture_projection(root, current.run(root, run_id) or entry, reader_task_id=staging_task_id)
             else:
+                accepted = True
                 if failures is not None:
                     failures.pop("capture", None)
         entry = current.run(root, run_id)
@@ -369,10 +505,11 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
             closing = stopped is not None and stopped()
             # Named evidence and evidence-only cleanup come AFTER full output
             # retention. Mutating results remain the author's decision.
-            if not closing and capture and entry.output_complete and entry.output_source:
+            if not closing and accepted and capture and entry.output_complete and entry.output_source:
                 try:
                     capture = retain_run_evidence(root, entry, capture, gateway, recapture=retry_capture,
                                                   named=(capture.get("named_evidence") or {}) if background else None)
+                    transient |= isinstance(capture, dict) and capture.get("retry") == "transient"
                 except Exception as exc:
                     errors.append(f"named_evidence:{type(exc).__name__}")
                     transient |= failure_retry(exc) == "transient"
@@ -449,7 +586,9 @@ def capture_projection(root, entry, *, reader_task_id="") -> dict | None:
     A Git run's saved named-evidence summary rides along, so saved-result and
     retry-successor delivery keep its status and reader. A Git or skill run's recorded
     decision rides with its disposer; an engine directory keeps its own block."""
+    from ouroboros.delegate_capture_job import READY, manifest_recorded, ordinary_git
     from ouroboros.delegate_directory import in_place_block
+    from ouroboros.tools.delegate_integration import capture_receipt_unwritten
 
     if is_in_place_run(entry):
         return in_place_block(entry)
@@ -458,7 +597,8 @@ def capture_projection(root, entry, *, reader_task_id="") -> dict | None:
         return None
     cap_dir = c.delegated_capture_dir(root, entry.task_id, entry.run_id if directory else c.capture_key(entry))
     try:
-        manifest = json.loads((cap_dir / "workspace_patch.json").read_text(encoding="utf-8"))
+        raw = (cap_dir / "workspace_patch.json").read_bytes()
+        manifest = json.loads(raw.decode("utf-8"))
         if not isinstance(manifest, dict):  # well-formed JSON that is no manifest reads as unreadable
             raise ValueError("a capture manifest is a JSON object")
     except (OSError, ValueError) as exc:
@@ -473,22 +613,37 @@ def capture_projection(root, entry, *, reader_task_id="") -> dict | None:
         return {"status": "pending", "note": "Body capture is still owed; no patch was applied. integrate_delegated_patch "
                 "prepares a finished run's capture itself and returns it for inspection first.",
                 "patch_disposition": entry.patch_disposed or "pending"}
-    other_reader = bool(reader_task_id and reader_task_id != entry.task_id)
     if directory:
         from ouroboros.delegate_directory import directory_capture_block
         block = directory_capture_block(root, entry, manifest)
     else:
         from ouroboros.tools.delegate_integration import _capture_block
         block = _capture_block(entry, cap_dir, manifest)
-        summary, named = saved_named_evidence(root, entry)
-        if named:  # another task reads it by absolute artifact path, as the patch and manifest below
-            block["named_evidence"] = ({**named, "summary_read": {"root": "artifact_store", "path": str(summary)}}
-                                       if other_reader and named.get("summary_read") else named)
-    if other_reader:
-        for kind in ("patch", "manifest"):
-            if block.get(f"{kind}_read") and block.get(f"{kind}_artifact"):
-                block[f"{kind}_read"] = {"root": "artifact_store", "path": block[f"{kind}_artifact"]}
+        _summary, named = saved_named_evidence(root, entry)
+        if named:
+            block["named_evidence"] = named
+    if ordinary_git(entry) and block["status"] in READY and not manifest_recorded(entry, raw):
+        block = capture_receipt_unwritten(block)
+    block = capture_readers(block, entry, reader_task_id)
     return block if directory else _decided(entry, block)
+
+
+def capture_readers(block, entry, task_id):
+    """Another admitted reader (retry successor, orphan) gets the starter's exact capture files by absolute
+    artifact path, even before publication: the patch, the manifest and the named-evidence summary. Only a
+    summary the starter's own capture folder holds is addressed; the reader still validates every path."""
+    if not block or not task_id or task_id == entry.task_id:
+        return block
+    shown = {**block, **{f"{kind}_read": {"root": "artifact_store", "path": block[f"{kind}_artifact"]}
+                         for kind in ("patch", "manifest") if block.get(f"{kind}_read") and block.get(f"{kind}_artifact")}}
+    named, home = block.get("named_evidence"), pathlib.Path(str(block.get("manifest_artifact") or "")).parent
+    relative = pathlib.PurePosixPath(str(((named or {}).get("summary_read") or {}).get("path") or ""))
+    if (isinstance(named, dict) and block.get("manifest_artifact") and len(relative.parts) == 4
+            and relative.parts[:2] == ("delegated_runs", home.name) and relative.name == "summary.json"
+            and relative.parts[2].startswith("evidence")):
+        shown["named_evidence"] = {**named, "summary_read": {
+            "root": "artifact_store", "path": str(home / relative.parts[2] / "summary.json")}}
+    return shown
 
 
 _RUNTIMES: dict[str, "BodyRuntime"] = {}
@@ -629,6 +784,8 @@ class BodyRuntime:
                 return self._work.get(work)
             except ClaudexorUnavailable as exc:
                 self._remember(work, None, error=exc)
+                if _peer_observation_lost(work, exc):
+                    self._record_peer_observation_lost(work, exc)
                 raise
         with self.lock:
             gateway = self._observing
@@ -660,13 +817,39 @@ class BodyRuntime:
                 self._remember(entry, None, error=exc)
             raise
 
+    def _peer_link_signature(self, ref: dict):
+        from ouroboros import peer_links
+
+        place_id = str(ref.get("place_id") or "")
+        link_id = str(ref.get("link_id") or "")
+        try:
+            link = peer_links.outgoing_link(place_id, drive_root=self.root)
+        except Exception:
+            link = None
+        if link is None or link.link_id != link_id:
+            return ("unavailable", link_id)
+        return (link.link_id, str(link.peer_url or ""), str(getattr(link, "remote_unknown_at", "") or ""))
+
     def _observation_key(self, entry):
+        from ouroboros.execution_domain import is_peer_ref
         from ouroboros.gateways.claudexor_metadata import endpoint_generation
 
+        if is_peer_ref(entry.engine_ref):
+            return ("peer", entry.invocation_id, self._peer_link_signature(entry.engine_ref))
         gateway = self._work.held(entry) if entry.engine_ref else self._observing
         endpoint = getattr(gateway, "_endpoint", None)
         generation = endpoint_generation(endpoint) if endpoint is not None else id(gateway)
         return generation, entry.invocation_id, entry.daemon_store_id
+
+    def _record_peer_observation_lost(self, entry, exc) -> None:
+        """Stop polling a peer run whose link was revoked/unknown without equating lost observation to death. Its
+        fault is recorded once per episode and never over another one (an unverified Stop stays the run's incident),
+        whichever writer lands first: the row ``yields`` to a standing incident in the reducer."""
+        fresh = current.run(self.root, entry.run_id) or entry
+        if not fresh.containment_fault:
+            c.record_containment_fault(self.root, fresh, "peer_observation_lost", yields=True, **peer_link_loss(exc))
+        with self.lock:
+            self.observation_gaps[fresh.run_id] = self._observation_key(fresh)
 
     def _drop_observer_gateway(self, gateway=None):
         if self._work.drop(gateway) and gateway is not None:
@@ -704,9 +887,13 @@ class BodyRuntime:
 
     def _absorb_refusal(self, entry, gateway, exc) -> bool:
         """Record a refused read; True when the refusal settled the run (an owning store's absence,
-        or a terminal fact retention cannot erase), so the reader has nothing left to raise."""
+        or a terminal fact retention cannot erase), or when peer link revocation stopped observation."""
         self._remember(entry, None, error=exc)
         entry = current.run(self.root, entry.run_id) or entry
+        if _peer_observation_lost(entry, exc):
+            self._drop_observer_gateway(gateway)
+            self._record_peer_observation_lost(entry, exc)
+            return True  # Stop hammering the revoked link; custody stays open because remote work may still run.
         if c.daemon_says_absent(exc) and entry.terminal_source:
             return True  # Retention loss cannot erase a terminal fact, including an in-flight publication.
         if c.daemon_says_absent(exc, gateway=gateway, run=entry):
@@ -724,6 +911,8 @@ class BodyRuntime:
     def _absorb_detail(self, entry, gateway, detail):
         with self.lock:
             self.observation_gaps.pop(entry.run_id, None)
+        if c.summary_of(detail).get("contentWithheld"):
+            raise ValueError("execution observation withheld content")
         if getattr(entry, "resume_start_state", None) is not None:
             if c.names_another_run(detail, entry.run_id):
                 raise ValueError("execution observation belongs to another run")
@@ -739,9 +928,9 @@ class BodyRuntime:
         # A late valid source fact remains evidence; it grants no wait.
         observe_run(self.root, entry, detail)
         c.bind_daemon_store(self.root, gateway, entry)
-        if entry.containment_fault.get("reason") == "run_absence_identity_unproven":
+        if entry.containment_fault.get("reason") in ("run_absence_identity_unproven", "peer_observation_lost"):
             c.resolve_containment_fault(self.root, entry, "run_observed",
-                                        expected_reason="run_absence_identity_unproven")
+                                        expected_reason=entry.containment_fault["reason"])
         self._remember(entry, detail)
         self.feed.window(entry, gateway, detail)  # an engine without the run's journal keeps the window view
 
@@ -886,12 +1075,16 @@ class BodyRuntime:
         return collect_terminal(self.root, run_id, gateway_factory=self._gateway, stopped=lambda: not self.active,
                                 failures=failures, recapture=recapture, generation=self.runtime_id, background=True)
 
-    def _owing(self, stamp, entry) -> _Held:
-        from ouroboros.delegate_resume import ACTIVE, recovered_writer_changed
+    def _owing(self, stamp, entry, woken=None) -> _Held:
+        from ouroboros.delegate_resume import ACTIVE, recovered_writers_changed
 
         if getattr(entry, "resume_start_state", None) in ACTIVE:
-            # This row just changed (possibly in a worker), or the body restarted.
-            recovered_writer_changed(self.root, entry.root_task_id or entry.task_id)
+            # This row just changed (possibly in a worker), or the body restarted: its tree and each successor holding
+            # it, read with the rest of its listing (``woken``) or at once.
+            if woken is None:
+                recovered_writers_changed(self.root, [entry])
+            else:
+                woken.append(entry)
         return _Held(stamp, entry, not entry.review_owned and not entry.terminal_source
                      and (not entry.settled or bool(entry.terminal_state)),
                      collection_due(entry, generation=self.runtime_id), self.runtime_id)
@@ -901,24 +1094,29 @@ class BodyRuntime:
         by this body's clock, or at once after this process wrote custody (its own jobs' effects); another process's
         write is seen at the next period, as every tick saw it before. A row is decoded only when its stamp moved, and
         what it owes is judged again only then or in a new generation (a transient collection retries in one): a
-        settled run that keeps its patch costs a tick nothing while it stands."""
+        settled run that keeps its patch costs a tick nothing while it stands. The recovered starts one listing judges
+        again wake their trees and successors in one read."""
         from ouroboros.delegate_feed import _TICK_SEC
+        from ouroboros.delegate_resume import recovered_writers_changed
 
         now, writes, generation = time.monotonic(), current.local_writes(), self.runtime_id
         if self._listed is not None and now - self._listed[0] < _TICK_SEC and self._listed[1:] == (writes, generation):
             return dict(self._held_entries)
-        stamped = current.held_stamped(self.root)
+        stamped, woken = current.held_stamped(self.root), []
         if stamped is None:  # below the stamped schema: every row, every tick, as before
             self._listed = None
-            self._held_entries = {rid: self._owing(None, entry) for rid, entry in current.held_runs(self.root).items()}
-            return dict(self._held_entries)
-        kept, fresh = self._held_entries, {}
-        for rid, (stamp, facts) in stamped.items():
-            old = kept.get(rid) if rid in kept and kept[rid].stamp == stamp else None
-            fresh[rid] = (old if old.generation == generation else self._owing(stamp, old.entry)) if old is not None \
-                else self._owing(stamp, current._decode(facts))
-        self._held_entries, self._listed = fresh, (now, writes, generation)
-        return dict(fresh)
+            self._held_entries = {rid: self._owing(None, entry, woken)
+                                  for rid, entry in current.held_runs(self.root).items()}
+        else:
+            kept, fresh = self._held_entries, {}
+            for rid, (stamp, facts) in stamped.items():
+                old = kept.get(rid) if rid in kept and kept[rid].stamp == stamp else None
+                fresh[rid] = (old if old.generation == generation else self._owing(stamp, old.entry, woken)) \
+                    if old is not None else self._owing(stamp, current._decode(facts), woken)
+            self._held_entries, self._listed = fresh, (now, writes, generation)
+        if woken:
+            recovered_writers_changed(self.root, woken)
+        return dict(self._held_entries)
 
     def tick(self):
         if not self.active:

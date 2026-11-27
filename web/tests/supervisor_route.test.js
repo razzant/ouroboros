@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { executorIdentityMarkup, formatCoordinatorProvenance } from '../modules/harness_presentation.js';
-import { executorChip } from '../modules/log_events.js';
+import { executorChip } from '../modules/executor_card_facts.js';
 
 const snapshot = {
     schema: 2, model: 'claudexor::codex=cognitive-model', effort: 'high',
@@ -23,7 +23,7 @@ test('schema-2 scheduling snapshot feeds the existing coordinator card and chip'
         model: snapshot.model, parent_cognitive_route: snapshot, coordinator_billing: 'subscription' };
     const chip = executorChip(event);
     assert.equal(chip.coordinatorProvenance, 'chosen by the delegator (cognition)');
-    assert.match(chip.title, /this subagent itself runs on claudexor::codex=cognitive-model \(bills as subscription\)/);
+    assert.deepEqual(chip.coordinator, { route: 'codex=cognitive-model', billing: 'subscription' });
     assert.equal(formatCoordinatorProvenance(event), 'chosen by the delegator (cognition)');
     assert.doesNotMatch(chip.title, /saved-account|processing_preference/);
     assert.doesNotMatch(executorIdentityMarkup(chip, { model: event.model }), /Coordinator|delegator/);

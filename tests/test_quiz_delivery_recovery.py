@@ -114,6 +114,33 @@ def test_live_answer_mailbox_failure_then_terminal_recovers_through_accepted_ing
     assert chat_rows(runtime.root)[:len(original_history)] == original_history
 
 
+def test_a_file_alone_answer_whose_first_letter_failed_recovers_with_its_staged_copy(runtime, monkeypatch):
+    """The asker's first mailbox write failed: recovery replays the recorded winner (no words, its one file) and the
+    letter it writes names a copy that exists in the reader's store."""
+    from ouroboros import chat_uploads, owner_mailbox
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.gateway.task_decision import answer_decision
+
+    prepare(runtime)
+    ref = chat_uploads.store_upload(b"\x89PNG\r\n\x1a\nshot", "shot.png", data_dir=runtime.root)[1]
+    real_write = owner_mailbox.write_owner_message
+    monkeypatch.setattr(owner_mailbox, "write_owner_message", lambda *a, **kw: False)
+    status, reply = asyncio.run(answer_decision(runtime.root, {
+        "request_id": "tg:9:m:42:7", "decision_id": f"quiz:{runtime.task['id']}:q"}, attachments=[ref]))
+    assert status == 503 and reply["question_delivery"]["reason_code"] == "mailbox_write_failed"
+    monkeypatch.setattr(owner_mailbox, "write_owner_message", real_write)
+    due(runtime)
+
+    assert recover(runtime)["attempted"] == 1
+
+    [entry] = [e for e in owner_mailbox.drain_owner_entries(runtime.root, runtime.task["id"], set())
+               if e.get("kind") == "quiz_answer"]
+    assert "with an attachment and no words" in entry["text"] and "Verbatim:" not in entry["text"]
+    [staged] = [row for row in entry["attachment_manifest"] if row.get("status") == "staged"]
+    assert (task_artifact_dir_path(runtime.root, runtime.task["id"]) / staged["relpath"]).read_bytes() == b"\x89PNG\r\n\x1a\nshot"
+    assert block(runtime)["attachments"] == [ref], "the recorded winner is unchanged by its replay"
+
+
 def test_legacy_late_answer_keeps_owner_words_when_card_storage_is_unavailable(tmp_path, monkeypatch):
     from ouroboros import owner_quiz
 

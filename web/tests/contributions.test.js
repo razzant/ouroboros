@@ -3,7 +3,8 @@
 // verbs a placed control performs (none of which sends anything as the owner).
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createContributionsStore, draftPort, runContributionAction } from '../modules/contributions.js';
+import { createContributionsStore, draftPort, openSkillWidgets, runContributionAction, widgetCardOf } from '../modules/contributions.js';
+import { installCardDom } from './helpers/card_dom.js';
 
 const item = (key, extra = {}) => {
     const [skill, id] = key.split(':');
@@ -303,4 +304,25 @@ test('clear_draft clears only after a 2xx and only the words it sent; a failure 
         post: async () => { const error = new Error('skill is not running'); error.status = 409; throw error; } }), false);
     assert.equal(target.text, 'Buy bread and jam', 'a failure keeps the draft');
     assert.deepEqual(notices.at(-1), ['Add to list did not work: skill is not running', 'danger']);
+});
+
+test('opening Widgets finds the card of the tab it names; a skill alone, its first live card', () => {
+    const dom = installCardDom();
+    const sent = [];
+    dom.win.dispatchEvent = (event) => sent.push(event.detail);
+    try {
+        openSkillWidgets('quota', 'quota:history');
+        openSkillWidgets('quota');
+        assert.deepEqual(sent, [{ skill: 'quota', key: 'quota:history' }, { skill: 'quota', key: '' }]);
+        const page = document.createElement('section');
+        page.innerHTML = '<article data-widget-key="quota:main" data-widget-removed></article><article data-widget-key="quota:main"></article>'
+            + '<article data-widget-key="quota:history"></article><article data-widget-key="quotas:main"></article>';
+        const [retiring, main, history] = page.children;
+        assert.equal(widgetCardOf(page, sent[0]), history, 'the second tab of the skill, not its first card');
+        assert.equal(widgetCardOf(page, sent[1]), main, 'a skill alone: its first card that is not on its way out');
+        assert.notEqual(widgetCardOf(page, sent[1]), retiring);
+        assert.equal(widgetCardOf(page, { skill: 'quota', key: 'quota:gone' }), null, 'a named tab that is not drawn is no other card');
+    } finally {
+        dom.restore();
+    }
 });

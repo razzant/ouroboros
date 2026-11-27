@@ -17,12 +17,17 @@ import { createInlineFit, mountCardApp } from './card_frames.js';
 import { getHolds, HELD_LINES, settleAfterFrameLoad, START_SETTLE_MS } from './holds.js';
 import { errorWords } from './ui_primitives.js';
 import { escapeHtmlText as escapeHtml } from './utils.js';
+import { widgetCodeHoldKey } from './widget_card.js';
 import { widgetPublication } from './widget_list.js';
 import { frameHeight, mountModuleWidget, mountRouteIframeWidget } from './widget_module.js';
 import { mountDeclarativeWidget } from './widgets.js';
 
 export const MAX_LIVE_CARD_FRAMES = 3;
 const NEAR_MARGIN = '240px 0px';
+// Quiet animation frames before viewport-driven face ↔ frame switches apply after a scroll: changing a card's height
+// mid-scroll writes `scrollTop` (or clamps the feed at its edge), which cancels WebKit's animated scroll mid-flight.
+const SCROLL_REST_FRAMES = 4;
+const SCROLL_EVENTS = ['scroll', 'wheel', 'touchmove'];
 const MAKE_SKILL = (title) => `Turn the card «${title}» into a skill so I can keep it on Widgets.`;
 
 // Shared by every room on the page: a card's current body by id, an app's bytes by hash, the live widget list, and
@@ -130,7 +135,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
     const closeKey = (record) => `card:${record.id}`;
     const codeHold = (record) => (record.framedKind === 'app'
         ? { key: `app:${record.id}`, rev: String(record.data?.app?.sha256 || '') }
-        : { key: `widget:${record.tab?.skill}:${record.tab?.tab_id}`, rev: String(record.tab?.revision ?? '') });
+        : { key: widgetCodeHoldKey(record.tab), rev: String(record.tab?.revision ?? '') });
     const heldReason = (record) => {
         if (holds.reason(closeKey(record)) === 'owner') return 'owner';
         const code = codeHold(record);
@@ -141,10 +146,59 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
         unmount: (record) => { record.framed?.(); record.framed = null; showFace(record); write(() => paintActions(record)); },
         canStart: (record) => !heldReason(record),
     });
+    const pendingNear = new Map();
+    let scrollRoot = null;
+    let scrolling = false;
+    let lastScrollTop = 0;
+    let restFrames = 0;
+    let restRaf = 0;
+    const flushNear = () => {
+        const queued = [...pendingNear.entries()];
+        pendingNear.clear();
+        for (const [record, isNear] of queued) {
+            if (record.framedKind && records.get(record.id) === record) budget.near(record, isNear);
+        }
+        if (scrollRoot) lastScrollTop = scrollRoot.scrollTop || 0;
+    };
+    const restTick = () => {
+        restRaf = 0;
+        if (destroyed) return;
+        const top = scrollRoot?.scrollTop || 0;
+        if (top !== lastScrollTop) { lastScrollTop = top; restFrames = 0; }
+        else restFrames += 1;
+        if (restFrames < SCROLL_REST_FRAMES) { restRaf = requestAnimationFrame(restTick); return; }
+        scrolling = false;
+        if (pendingNear.size) flushNear();
+    };
+    const noteScroll = () => {
+        if (destroyed || typeof requestAnimationFrame !== 'function') return;
+        scrolling = true;
+        restFrames = 0;
+        if (scrollRoot) lastScrollTop = scrollRoot.scrollTop || 0;
+        if (!restRaf) restRaf = requestAnimationFrame(restTick);
+    };
+    const unbindScrollRoot = () => {
+        if (!scrollRoot) return;
+        for (const type of SCROLL_EVENTS) scrollRoot.removeEventListener(type, noteScroll);
+        scrollRoot = null;
+    };
+    const bindScrollRoot = (bubble) => {
+        const root = bubble?.parentElement;
+        if (!root || root === scrollRoot) return;
+        unbindScrollRoot();
+        scrollRoot = root;
+        lastScrollTop = root.scrollTop || 0;
+        for (const type of SCROLL_EVENTS) root.addEventListener(type, noteScroll, { passive: true });
+    };
+    const observeBubble = (bubble) => { if (!observer) return; bindScrollRoot(bubble); observer.observe(bubble); };
     const observer = typeof IntersectionObserver === 'function'
         ? new IntersectionObserver((entries) => entries.forEach((entry) => {
             const record = byBubble.get(entry.target);
-            if (record?.framedKind && records.get(record.id) === record) budget.near(record, entry.isIntersecting);
+            if (!record?.framedKind || records.get(record.id) !== record) return;
+            bindScrollRoot(record.bubble);
+            if (scrollRoot && (scrollRoot.scrollTop || 0) !== lastScrollTop) noteScroll();
+            if (scrolling) pendingNear.set(record, entry.isIntersecting);
+            else budget.near(record, entry.isIntersecting);
         }), { rootMargin: NEAR_MARGIN })
         : null;
 
@@ -173,6 +227,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
     // generation passed and mounts nothing, so overlapping draws never both mount and a later draw always wins.
     const disposeBody = (record) => {
         record.draw += 1;
+        pendingNear.delete(record);
         observer?.unobserve(record.bubble);
         record.mounted?.dispose?.();
         record.mounted = null;
@@ -252,6 +307,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
                 cardId: record.id, title: body.title, sha256: body.app.sha256, html, fit, fresh, onFault: fault,
                 onSubmit: (line) => insertLine(line),
                 onLeave: () => {
+                    pendingNear.delete(record);
                     budget.forget(record);
                     write(() => setStatus(record, 'The app tried to open a page and was stopped.', 'danger'));
                 },
@@ -297,8 +353,8 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
         record.tab = tab;
         record.widgetSignature = chatWidgetSignature(tab);
         if (tab.render?.kind === 'declarative') {
-            // Under the message's size policy like a frame: the content is measured, its box is capped, Expand
-            // lifts the cap. The declarative host paints its first frame synchronously: inside this write.
+            // Under the message's size policy like a frame: the content is measured, its box is capped (fading where it
+            // is cut), Expand lifts the cap. The declarative host paints its first frame synchronously: inside this write.
             const host = document.createElement('div');
             host.className = 'chat-card-widget';
             const content = document.createElement('div');
@@ -307,7 +363,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
             const mounting = write(() => {
                 record.body.replaceChildren(host);
                 setStatus(record, '');
-                inline = createInlineFit(host, record.toggle);
+                inline = createInlineFit(host, record.toggle, { fade: true, region: record.title ? `${record.title} content` : 'Card content' });
                 return mountDeclarativeWidget(content, { ...tab, key: `card:${record.id}` }, tab.render, { input: ref.input });
             });
             const resized = typeof ResizeObserver === 'function' ? new ResizeObserver(() => record.fit?.fit(content.offsetHeight)) : null;
@@ -325,7 +381,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
         if (!['module', 'iframe'].includes(tab.render?.kind)) { showFallback(record, 'This widget cannot be shown in a message.'); return; }
         record.framedKind = 'widget';
         showFace(record);
-        if (observer) observer.observe(record.bubble);
+        observeBubble(record.bubble);
     }
 
     function drawBody(record) {
@@ -345,7 +401,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
         } else if (body.kind === 'app' && body.app?.url) {
             record.framedKind = 'app';
             showFace(record);
-            if (observer) observer.observe(record.bubble);
+            observeBubble(record.bubble);
         } else {
             showFallback(record, 'This card cannot be shown here.');
         }
@@ -405,8 +461,12 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
             holds.release(closeKey(record));
             holds.release(codeHold(record).key);
             record.fresh = reason === 'start' || reason === 'all';
+            const wasNear = pendingNear.get(record) === true;
+            pendingNear.delete(record);
             budget.open(record);
+            if (wasNear) budget.near(record, true);
         } else if (target.hasAttribute('data-card-close')) {
+            pendingNear.delete(record);
             holds.stop(closeKey(record));
             budget.forget(record);
         } else if (target.hasAttribute('data-card-pin')) setPinned(record, true);
@@ -521,6 +581,10 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
         release,
         destroy() {
             if (destroyed) return;
+            if (restRaf && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(restRaf);
+            restRaf = 0;
+            pendingNear.clear();
+            unbindScrollRoot();
             for (const record of records.values()) disposeBody(record);
             records.clear();
             observer?.disconnect();

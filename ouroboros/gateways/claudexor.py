@@ -42,7 +42,13 @@ from ouroboros.effort_evidence import validated_effort_resolution, validated_pro
 from ouroboros.gateways import claudexor_metadata as metadata
 from ouroboros.gateways.claudexor_identity import validated_catalog_match
 from ouroboros.gateways.claudexor_maintenance import ClaudexorMaintenanceGateway
-from ouroboros.gateways.claudexor_observation import ClaudexorObservationGateway, tag_absent_run_read
+from ouroboros.gateways.claudexor_observation import (
+    ClaudexorObservationGateway,
+    note_problem_provenance,
+    pre_admission_continuation_snapshot,
+    tag_absent_run_read,
+    tag_pre_admission_continuation_rejection,
+)
 from ouroboros.gateways.claudexor_threads import ClaudexorThreadGateway
 from ouroboros.gateways.claudexor_uploads import ClaudexorUploadGateway
 from ouroboros.observability import timed_phase
@@ -574,6 +580,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
                 or ClaudexorUnavailable(code, message, status_code=response.status_code,
                                         required_actions=required_actions))
         error.problem = body if isinstance(body, dict) else {"code": code, "message": message}
+        note_problem_provenance(response, body, error)
         error.retry_after = response.headers.get("Retry-After", "")
         if method == "GET" and response.status_code == 503 and code in DAEMON_BUSY_CODES:
             error.observation_timeout, error.observation_reason, error.observation_answered = True, code, True
@@ -871,19 +878,8 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         return self.project_registration(root)[0]
 
     def project_registration(self, root: str) -> Tuple[str, Optional[bool]]:
-        """One keyed ``POST /v2/projects``: ``(project_id, created)``. ``created`` is the
-        engine's own answer whether THIS request registered the root, ``None`` when the
-        answer carries no such field (an engine that predates it): presence decides."""
-        body = self._request(
-            "POST", "/v2/projects",
-            json_body={"root": str(root)},
-            headers={"Idempotency-Key": uuid.uuid4().hex},
-        )
-        project_id = str((body or {}).get("id") or "") if isinstance(body, dict) else ""
-        if not project_id:
-            raise ClaudexorUnavailable("malformed_response", "project registration returned no id")
-        created = body.get("created")
-        return project_id, created if isinstance(created, bool) else None
+        answer = self.project_registration_receipt(root)
+        return answer["id"], answer["created"]
 
     def remove_project(self, project_id: str) -> Dict[str, Any]:
         """Retire a project registration. Non-destructive: artifacts are retained."""
@@ -956,13 +952,18 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
 
             return start_review_thread_turn(self, request["_thread_id"], request,
                                             idempotency_key=str(idempotency_key))
+        wire_key, sent_body = str(idempotency_key or "") or uuid.uuid4().hex, dict(request)
+        before_gen, before_store = pre_admission_continuation_snapshot(self, sent_body)
         try:
             body = self._request(
-                "POST", "/v2/runs",
-                json_body=dict(request),
-                headers={"Idempotency-Key": str(idempotency_key or "") or uuid.uuid4().hex, **metadata.STORE_IDENTITY},
+                "POST", "/v2/runs", json_body=sent_body,
+                headers={"Idempotency-Key": wire_key, **metadata.STORE_IDENTITY},
             )
         except ClaudexorUnavailable as error:  # a start refused on a limit asks the subscription census for a read
+            if before_gen is not None:
+                tag_pre_admission_continuation_rejection(
+                    self, error, request=sent_body, idempotency_key=wire_key,
+                    before_generation=before_gen, before_store=before_store)
             from ouroboros.subscription_census import note_limit_failure
             note_limit_failure(error.code, getattr(error, "problem", None))
             raise
@@ -1394,7 +1395,8 @@ def pending_interactions(detail: Dict[str, Any], *, strict: bool = False) -> Lis
                     or not row["questions"]):
                 raise ValueError("malformed pendingInteractions row")
             if any(row.get(key) is not None and not isinstance(row[key], str) for key in (
-                    "runId", "attemptId", "harnessId", "sourceTool", "requestedAt", "timeoutAt", "delivery")):
+                    "runId", "attemptId", "harnessId", "sourceTool", "requestedAt", "timeoutAt", "delivery",
+                    "deliveryState")):
                 raise ValueError("malformed pendingInteractions identity, timestamp or delivery")
             for question in row["questions"]:
                 if (not isinstance(question, dict) or not isinstance(question.get("id"), str)
@@ -1437,6 +1439,8 @@ def pending_interactions(detail: Dict[str, Any], *, strict: bool = False) -> Lis
             "requested_at": str(row.get("requestedAt") or ""),
             "timeout_at": str(row.get("timeoutAt") or "") or None,
             "delivery": "blocking" if row.get("delivery") is None else row["delivery"] if isinstance(row["delivery"], str) and row["delivery"] else "malformed",
+            **({"delivery_state": row["deliveryState"]}
+               if isinstance(row.get("deliveryState"), str) and row["deliveryState"] else {}),
             "questions": questions,
         })
     return out

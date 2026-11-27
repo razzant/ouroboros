@@ -549,12 +549,12 @@ def origin_documents(root: Any, origin: str) -> Tuple[Dict[str, Dict[str, Any]],
 DISPLAY_DROPPED: Tuple[str, ...] = (
     "trace_refs", "review_evidence", "artifacts", "result", "trace_summary",
     "governing_owner_words", "verification_ledger", "plan_review_state", "acceptance_debt",
-    "mutation_evidence", "configured_subagent", "context", "continuation_narrative", "origin_message_text",
+    "mutation_evidence", "context", "continuation_narrative", "origin_message_text",
     "owner_mailbox", "subagent_availability", "plan_record", "review_status", "schedule_admission",
-    "task_acceptance_review_accounting", "review_thread_releases", "delegated_result_taken", "payload_release",
+    "task_acceptance_review_accounting", "review_thread_releases", "delegated_result_taken", "payload_release", "read_spans",
     *(f"metadata.{key}" for key in (
         "task_contract", "main_routing_manifest", "governing_owner_words", "routing_contract",
-        "configured_subagent", "project_routing_manifest", "subagent_envelope", "owner_corpus",
+        "project_routing_manifest", "subagent_envelope", "owner_corpus",
         "origin_message_text", "wake_observation", "project_last_task_result", "current_chat",
         "workspace_preflight", "workspace_copy", "late_answer")),
 )
@@ -565,6 +565,11 @@ DISPLAY_KEPT: Dict[str, Tuple[str, ...]] = {
     # Who asked for a Continue (``initiator_meta``), without the continuation's evidence.
     "metadata.continuation": ("admission",), "metadata.continuation.admission": ("by",),
     "metadata.continuation.admission.by": ("actor",),
+    # The executor a child selected (``subagent_messages.requested_executor_route``): its route's kind and display
+    # target, never the row's account pin, local API connection name, or other snapshot facts. A parent key precedes
+    # its nested key (each reads the stored body).
+    "configured_subagent": ("route",), "configured_subagent.route": ("kind", "target_id"),
+    "metadata.configured_subagent": ("route",), "metadata.configured_subagent.route": ("kind", "target_id"),
 }
 _KEEP = "__keep__"  # a path no kept object holds: the no-op target of a conditional edit
 
@@ -601,6 +606,29 @@ def _card_sql(view: str) -> str:
     return f"CASE WHEN c.task_id IS NULL THEN {view} ELSE json_patch({view}, {patch}) END"
 
 
+def _project_display_configured_route(document: Dict[str, Any]) -> bool:
+    """Re-project kept ``configured_subagent.route`` through ``requested_executor_route`` in display views."""
+    from ouroboros.subagent_messages import requested_executor_route
+
+    changed = False
+    for container in (document, document.get("metadata")):
+        if not isinstance(container, dict):
+            continue
+        snapshot = container.get("configured_subagent")
+        route = snapshot.get("route") if isinstance(snapshot, dict) else None
+        if not isinstance(route, dict) or route.get("kind") != "api_model" or not isinstance(route.get("target_id"), str):
+            continue
+        projected = requested_executor_route(container)
+        if projected:
+            if projected != route:
+                snapshot["route"] = projected
+                changed = True
+        else:
+            route.pop("target_id", None)
+            changed = True
+    return changed
+
+
 def display_documents(root: Any, task_ids: Iterable[str],
                       versions: Optional[Dict[str, int]] = None) -> Dict[str, str]:
     """The display views (``DISPLAY_DROPPED``) of several documents as JSON text, row-backed
@@ -625,9 +653,21 @@ def display_documents(root: Any, task_ids: Iterable[str],
     found = views.tuples()
     if versions is not None:
         versions.update((task_id, int(seq or 0)) for task_id, _text, seq in found)
-    return {task_id: (text if task_id not in held else
-                      store.document_text(store.project_handoffs(json.loads(text), handoffs[task_id])))
-            for task_id, text, _seq in found}
+    projected: Dict[str, str] = {}
+    for task_id, text, _seq in found:
+        needs_route = '"configured_subagent"' in text and '"api_model"' in text and "@" in text and "::" in text
+        if task_id not in held and not needs_route:
+            projected[task_id] = text
+            continue
+        doc = json.loads(text)
+        changed = False
+        if task_id in held:
+            doc = store.project_handoffs(doc, handoffs[task_id])
+            changed = True
+        if needs_route and _project_display_configured_route(doc):
+            changed = True
+        projected[task_id] = store.document_text(doc) if changed else text
+    return projected
 
 
 def task_versions(root: Any, task_ids: Iterable[str]) -> Dict[str, Tuple[int, str, bool]]:

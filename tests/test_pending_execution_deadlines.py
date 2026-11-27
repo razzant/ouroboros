@@ -350,28 +350,47 @@ def test_expiry_uses_one_offloop_reaper_job_and_keeps_the_queue_responsive(
 
 
 def test_one_expiry_pass_does_not_rescan_pending_per_expired_row(host, clock, monkeypatch):  # noqa: F811
-    """The locked pass reserves the rows it just read; it does not rescan PENDING under
-    the queue lock once per expired row. The reaper keeps its own membership check."""
-    for index in range(4):
-        add_task(host, clock, task_id=f"pending-{index}")
-    clock.now[0] += 100
-    passes = []
+    """The expiry pass and its snapshot may walk PENDING; neither does so per expiry.
 
+    Count locked walks up to reservation, not the reaper's separate custody checks.
+    """
     class CountingPending(list):
+        passes = 0
+
         def __iter__(self):
-            passes.append(1)
+            if queue._queue_lock._is_owned():
+                self.passes += 1
             return super().__iter__()
 
-    counted = CountingPending(host.pending)
-    for module in (workers, queue):
-        monkeypatch.setattr(module, "PENDING", counted)
-    queue.enforce_task_timeouts()
-    assert clock.jobs.qsize() == 4
-    assert len(passes) < 4  # the pass and its snapshot, not one scan per expired row
-    for module in (workers, queue):
-        monkeypatch.setattr(module, "PENDING", host.pending)
-    clock.reap()
-    assert not host.pending and _done(clock) == ["failed"] * 4
+    walks = {}
+    for size in (4, 12):
+        task_ids = [f"pending-{size}-{index}" for index in range(size)]
+        for task_id in task_ids:
+            add_task(host, clock, task_id=task_id)
+        clock.now[0] += 100
+        counted = CountingPending(host.pending)
+        with monkeypatch.context() as probe:
+            for module in (workers, queue):
+                probe.setattr(module, "PENDING", counted)
+            queue.enforce_task_timeouts()
+        walks[size] = counted.passes
+        assert clock.jobs.qsize() == size
+
+        clock.reap()
+        assert not host.pending and not host.running and not host.attempts
+        frames = [(frame["type"], frame["task_id"]) for frame in clock.frames
+                  if frame.get("type") in {"send_message", "task_done"}]
+        assert len(frames) == 2 * size
+        assert {task_id for _, task_id in frames} == set(task_ids)
+        for task_id in task_ids:
+            assert [kind for kind, frame_task_id in frames if frame_task_id == task_id] == ["send_message", "task_done"]
+        assert _done(clock) == ["failed"] * size
+        for task_id in task_ids:
+            result = load_task_result(host.root, task_id)
+            assert (result["status"], result["reason_code"]) == ("failed", "deadline")
+        clock.frames.clear()
+
+    assert walks[4] == walks[12], f"locked PENDING passes by batch size: {walks}"
 
 
 def test_a_stale_deadline_job_cannot_settle_a_replaced_pending_row(host, clock):  # noqa: F811
@@ -646,3 +665,55 @@ def test_pending_deadline_salvage_reads_history_outside_the_supervisor_queue_loc
     assert responsive, "the deadline salvage read holds Q and blocks supervisor admission and control"
     stored = load_task_result(host.root, "pending")
     assert stored["status"] == "failed"  # the settlement itself still completes
+
+
+@pytest.mark.parametrize("shape", ["global_budget", "root_budget", "root_selection", "restored_app_stop"])
+def test_never_started_auto_expiry_hides_close_before_tick_and_reaps_at_deadline(
+    host, clock, monkeypatch, shape,  # noqa: F811
+):
+    """#4123/#939: never-started holds the reaper expires (money, a settled spending fence, a lead's selection,
+    an ordinary app_stop) show deadline_expired without Resume or Close before the timeout tick, and still
+    auto-expire through the queued reaper without worker dispatch: one decision, the reaper's."""
+    from ouroboros.gateway.state import _chat_activities_snapshot
+    from ouroboros.parked_deadline import deadline_offer, parked_binding
+    from ouroboros.work_stop import queue_control
+    from supervisor import expired_park_close as epc
+    from supervisor.events_budget import budget_hold_fact
+    from supervisor.queue_snapshot import saved_queue_unowned
+
+    if shape != "restored_app_stop":
+        task = _resource_hold(host, clock, monkeypatch, shape, deadline=True)
+    else:
+        add_task(host, clock, deadline=True)
+        assert queue.persist_queue_snapshot()
+        host.pending.clear()
+        assert queue.restore_pending_from_snapshot() == 1
+        [task] = host.pending
+        assert (budget_hold_fact(task) or {}).get("reason") == "saved_work_hold"
+
+    clock.now[0] += 100
+    assert not saved_queue_unowned()
+    control = queue_control(host.root, task, dict(queue.BUDGET_ROOT_FENCES))
+    binding = parked_binding(host.root, task, control["view"])
+    assert binding  # parked_binding itself stays unchanged; Close declines auto-expiring never-started rows
+    raw_token = deadline_offer(task, binding, clock.now[0])[1]["close_expired"]
+
+    facts = {}
+    activities = _chat_activities_snapshot(
+        host.root, {}, [], list(host.pending), dict(queue.BUDGET_ROOT_FENCES),
+        [], [], {}, [], False, work_facts=facts, park_clock=(clock.now[0], []),
+    )
+    if not shape.startswith("root_"):  # a helper is no row of the root census; its door is the same observe
+        [activity] = [row for row in activities if row["activity_id"] == "pending"]
+        assert activity["can_resume"] is False and "close_expired" not in activity
+        assert facts["pending"].get("deadline_expired") is True
+    assert epc.observe(queue, "pending", now=clock.now[0]) == {}
+    assert epc.request_close(queue, "pending", raw_token) == {"ok": False, "error": epc.CHANGED}
+
+    queue.enforce_task_timeouts()
+    clock.reap()
+    result = load_task_result(host.root, "pending")
+    assert [row["id"] for row in host.pending] == (["root"] if shape.startswith("root_") else [])
+    assert not host.running and not host.attempts
+    assert (result["status"], result["reason_code"]) == ("failed", "deadline")
+    assert _done(clock) == ["failed"]

@@ -200,7 +200,7 @@ def _audit_task_custody(drive_root: Any, mine: str, result: Dict[str, Any], *,
                 {"run_id": str(row.run_id), "state": str(row.terminal_state),
                  "model": str(row.model), "profile_id": str(row.profile_id),
                  "selected_subagent_id": str(row.selected_subagent_id),
-                 **({"held_heads": row.request_event["held_heads"]} if row.request_event.get("held_heads") else {}),
+                 **{key: row.request_event[key] for key in ("held_heads", "named_notes") if row.request_event.get(key)},
                  **_answer_locators(drive_root, row)}
                 for row in state.values()
                 if row.task_id == mine and not row.review_owned

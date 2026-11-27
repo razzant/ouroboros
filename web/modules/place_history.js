@@ -3,8 +3,8 @@ import { apiClient } from './api_client.js';
 import { previewsRefused } from './chat_preview.js';
 import { failureText } from './consciousness_api.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
-import { mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
-import { tr } from './i18n.js';
+import { bindRenderedMarkdown, mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
+import { fmt, tr } from './i18n.js';
 import { sendsAsHtml, signalLabels, heardFactWord, noKindChecked } from './consciousness_words.js';
 
 export const INDEX_NOTE = 'The list finds conversations with saved incoming Place events. Older records and conversations where it only wrote may not be listed.';
@@ -56,14 +56,19 @@ export function nonTextFacts(row) {
         && typeof item.description === 'string' && item.description.trim());
 }
 
+/** A heard arrival's words, one per reason a heard settlement records (`place_intake.HEARD_REASONS`). */
+export const HEARD_WORDS = { paused: 'Heard while Paused', off: 'Heard while consciousness was off',
+    no_wake_match: 'Heard; no wake matched', reaction_context_only: 'Heard as context', current_author: 'Passed to the current author', disconnected: 'Heard after disconnection',
+    own_account: 'Heard; written by the account it sends as', change_actor_unknown: 'Heard as background; who made this change is unknown',
+    conversation_work: 'Passed to work in this conversation', silent: 'Heard while Silent; no call opened',
+    advises: 'Heard while consciousness advises; no call opened', heard: 'Heard' };
+
 export function historyFactWords(row) {
     const facts = row.place_history || {};
     const attention = facts.attention;
-    const heard = { paused: 'Heard while Paused', off: 'Heard while consciousness was off',
-        no_wake_match: 'Heard; no wake matched', reaction_context_only: 'Heard as context', current_author: 'Passed to the current author', disconnected: 'Heard after disconnection',
-        own_account: 'Heard; written by the account it sends as', change_actor_unknown: 'Heard as background; who made this change is unknown' };
-    return [attention?.decision === 'focus_started' ? 'Focus started' : attention?.decision === 'heard'
-        ? (attention.reason === 'conversation_work' ? `Passed to work ${attention.recipient || 'in this conversation'}` : heard[attention.reason] || 'Heard') : '',
+    return [facts.actor_origin === 'machine' ? tr('places.history.actor_program', 'Program') : '',
+        attention?.decision === 'focus_started' ? 'Focus started' : attention?.decision === 'heard'
+        ? (attention.reason === 'conversation_work' && attention.recipient ? `Passed to work ${attention.recipient}` : HEARD_WORDS[attention.reason] || 'Heard') : '',
     { authored: 'Delivery not confirmed', accepted: 'Accepted by service; delivery not confirmed',
         delivered: 'Delivered', failed: 'Delivery failed', uncertain: 'Delivery outcome unknown' }[facts.delivery_state] || ''].filter(Boolean);
 }
@@ -112,9 +117,27 @@ function updateHeardLabels(host, place) {
     }
 }
 
+import { isReplayEvidenceRow } from './chat_activity.js';
+import { letterHeadHtml, letterStatusHtml } from './peer_letter_card.js';
+
+/** One nested letter of the opened work, before ordinary progress is filtered: its card's own facts, never a System line. */
+function letterArticle(row) {
+    const fact = row.peer_letter_card;
+    const article = document.createElement('article'); article.className = 'place-convo-row is-assistant peer-letter-card';
+    article.dataset.letterId = String(fact.letter_id || ''); article.dataset.letterPart = 'letter';
+    const words = fact.text === null ? tr('peer.letter.text.long', 'The letter is too long for this card; this work has it whole.') : fact.text;
+    article.innerHTML = `${letterHeadHtml(fact, { ts: row.ts })}<div class="chat-relay-excerpt"><p class="peer-letter-text" data-i18n-authored>${escapeHtml(words ?? '')}</p></div>${letterStatusHtml(fact)}`;
+    if (fact.state === 'done' && fact.reply === 'given') {
+        const answer = fact.answer === null ? tr('peer.letter.words.long', 'These words are too long for this card; this work has them whole.') : fact.answer;
+        article.insertAdjacentHTML('beforeend', `${letterHeadHtml(fact, { answer: true, ts: row.ts })}<div class="chat-relay-excerpt"><p class="peer-letter-text" data-i18n-authored>${escapeHtml(answer ?? '')}</p></div>`);
+    }
+    return article;
+}
+
 function messageNode(row, markdown, place) {
-    const voice = row.role === 'user' ? (row.place_history.owner_confirmed ? 'owner' : 'participant') : row.role;
-    const facts = row.place_history;
+    // A work's own row (its answer, its summary) carries no place facts: it is the work's, never the place's speech.
+    const facts = row.place_history || {};
+    const voice = row.role === 'user' ? (facts.owner_confirmed ? 'owner' : 'participant') : row.role;
     const heard = facts.attention?.decision === 'heard' ? (facts.facts || []).filter((fact) => heardFactWord(fact)).map((fact) =>
         `<span class="place-convo-fact" data-heard-fact="${escapeHtml(fact)}"></span>`).join('') : '';
     const sender = facts.sends_as && sendsAsHtml({ ...facts.sends_as, owner: facts.sends_as_owner });
@@ -130,7 +153,7 @@ function messageNode(row, markdown, place) {
     // A reaction, a change or content without words has no words of its own; words sent beside one stay speech.
     if (row.text || !(reaction || observed.length)) {
         const text = document.createElement('div'); text.className = 'chat-markdown place-convo-text'; text.dataset.i18nAuthored = '';
-        if (row.role === 'assistant' || row.markdown) { mountChatMarkdown(text, row.text, { softBreaks: true }); markdown.add(text); }
+        if (row.role === 'assistant' || row.markdown) { mountChatMarkdown(text, row.text, { softBreaks: true }); bindRenderedMarkdown(text); markdown.add(text); }
         else { text.classList.add('place-history-plain'); text.textContent = row.text; }
         article.append(text);
     }
@@ -150,7 +173,7 @@ function messageNode(row, markdown, place) {
         const label = document.createElement('p'); label.className = 'place-sheet-note';
         label.textContent = tr('places.history.held_unchecked', 'held, unchecked');
         const held = document.createElement('div'); held.className = 'chat-markdown place-convo-text'; held.dataset.i18nAuthored = '';
-        mountChatMarkdown(held, facts.held_text, { softBreaks: true }); markdown.add(held);
+        mountChatMarkdown(held, facts.held_text, { softBreaks: true }); bindRenderedMarkdown(held); markdown.add(held);
         article.append(label, held);
     }
     const attachments = Array.isArray(row.attachments) ? row.attachments : [];
@@ -169,6 +192,7 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
         <div class="place-sheet-actions"><button type="button" class="btn btn-default btn-sm" data-history-back>Back to Place</button></div>
         <p class="place-silent-card" role="note" data-history-state></p>
         <p class="place-sheet-note">${LOCAL_NOTE}</p>
+        <p class="place-sheet-note" data-history-work hidden></p>
         <div data-history-coverage></div>
         <p class="place-sheet-status ui-status" data-history-status role="status" data-i18n-authored></p>
         <div class="place-sheet-actions"><button type="button" class="btn btn-default btn-sm" data-history-retry hidden>Try again</button>
@@ -178,6 +202,16 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
         <p class="place-sheet-note">Reading sends nothing, marks nothing read and starts no work.</p>
     </section>`;
     const find = (selector) => host.querySelector(selector);
+    // A room opened for the work a letter started (`room.work`, from that work's acceptance record): its own rows are
+    // read beside the place's speech, and one line says whose work it is. No other room changes what it shows.
+    const work = room?.work?.taskId ? room.work : null;
+    const ownWork = (row) => Boolean(work) && row.task_id === work.taskId && !isReplayEvidenceRow(row) && row.system_type !== 'task_model_wait';
+    if (work) {
+        const line = find('[data-history-work]');
+        line.textContent = fmt('Work from {name}: {title}', { name: work.from || place?.label || 'Ouroboros', title: work.title || work.taskId });
+        line.dataset.i18nAuthored = '';
+        line.hidden = false;
+    }
     let closed = false, busy = false, generation = 0, controller = null, retry = null;
     const pages = [], markdown = new Set();
     const clear = () => { markdown.forEach(destroyChatMarkdown); markdown.clear(); find('[data-history-messages]').replaceChildren(); };
@@ -185,7 +219,14 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
         clear();
         const seen = new Set();
         for (const { page } of pages) for (const row of page.messages) {
-            if (!row.place_history || row.is_progress || !['user', 'assistant', 'system'].includes(row.role)) continue;
+            if (ownWork(row) && row.peer_letter_card) {  // the work's own letters, before ordinary progress is filtered
+                const id = row.row_address || row.history_id;
+                if (id && seen.has(id)) continue;
+                if (id) seen.add(id);
+                find('[data-history-messages]').append(letterArticle(row));
+                continue;
+            }
+            if (!(row.place_history || ownWork(row)) || row.is_progress || !['user', 'assistant', 'system'].includes(row.role)) continue;
             const id = row.row_address || row.history_id;
             if (id && seen.has(id)) continue;
             if (id) seen.add(id);
@@ -199,8 +240,8 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
         find('[data-history-status]').textContent = find('[data-history-messages]').childElementCount ? '' : 'No stored messages in these returned ranges.';
     };
     // `replacing`: a loaded range's index, or a newest page that replaces every range once it arrives:
-    // 'chain' (Refresh history) or 'changed' (the shown chain's view changed).
-    async function loadPage(askedCursor = null, replacing = null) {
+    // 'chain' (Refresh history) or 'changed' (the shown chain's view changed). `reason`: why, which the server counts.
+    async function loadPage(askedCursor = null, replacing = null, reason = 'navigate') {
         if (closed || busy) return;
         controller?.abort(); controller = new AbortController(); const version = ++generation;
         const focused = host.contains(document.activeElement) ? document.activeElement : null;
@@ -209,16 +250,18 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
         find('[data-history-status]').dataset.tone = 'muted';
         find('[data-history-older]').disabled = true; find('[data-history-refresh]').disabled = true;
         let cursor = askedCursor, target = replacing;
+        const mode = cursor === null ? 'newest' : target === null ? 'older' : 'page';
         try {
             let page;
             try {
-                page = await readHistory({ chatId: room.room_chat_id, cursor, signal: controller.signal });
+                page = await readHistory({ chatId: room.room_chat_id, cursor, signal: controller.signal, tags: { reason, mode } });
             } catch (error) {
                 // A changed view (such as the room's first imported history) refuses every cursor of the shown
                 // chain, so the newest page is read afresh; the shown ranges stay until it arrives.
                 if (cursor === null || error?.body?.reason_code !== 'history_view_changed' || closed || version !== generation) throw error;
                 cursor = null; target = 'changed';
-                page = await readHistory({ chatId: room.room_chat_id, cursor, signal: controller.signal });
+                page = await readHistory({ chatId: room.room_chat_id, cursor, signal: controller.signal,
+                    tags: { reason, mode: 'newest', decision: 'view_changed' } });
             }
             if (closed || version !== generation) return;
             if (!Array.isArray(page?.messages) || page.messages.some((row) => typeof row?.text !== 'string')
@@ -239,7 +282,7 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
             previewsRefused(error);  // a current refusal takes this browser's saved conversation text (chat_preview.js)
             find('[data-history-status]').textContent = failureText(error);
             find('[data-history-status]').dataset.tone = 'error';
-            retry = () => loadPage(cursor, target); find('[data-history-retry]').hidden = false;
+            retry = () => loadPage(cursor, target, 'retry'); find('[data-history-retry]').hidden = false;
         } finally {
             if (!closed && version === generation) {
                 busy = false; find('[data-history-older]').disabled = false; find('[data-history-refresh]').disabled = false;
@@ -257,9 +300,9 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
     const click = (event) => {
         if (event.target.closest('[data-history-back]')) { onBack(); return; }
         if (event.target.closest('[data-history-retry]')) { void retry?.(); return; }
-        if (event.target.closest('[data-history-refresh]')) { void loadPage(null, 'chain'); return; }
+        if (event.target.closest('[data-history-refresh]')) { void loadPage(null, 'chain', 'refresh'); return; }
         const range = event.target.closest('[data-history-range]');
-        if (range) { const index = Number(range.dataset.historyRange); void loadPage(pages[index].askedCursor, index); return; }
+        if (range) { const index = Number(range.dataset.historyRange); void loadPage(pages[index].askedCursor, index, 'retry'); return; }
         if (event.target.closest('[data-history-older]')) void loadPage(pages[0]?.page.next_cursor);
     };
     host.addEventListener('click', click);
@@ -269,7 +312,7 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
         updateHeardLabels(host, place);
     };
     updatePlace(place);
-    void loadPage();
+    void loadPage(null, null, 'open');
     return { updatePlace, close() {
         if (closed) return;
         closed = true; generation += 1; controller?.abort(); clear(); host.removeEventListener('click', click); host.replaceChildren();

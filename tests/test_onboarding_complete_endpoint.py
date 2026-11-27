@@ -1745,3 +1745,120 @@ def test_connected_subscriptions_keep_the_installs_own_catalog_and_generate_only
         assert after == shown
     else:
         assert shown == canonical(catalog) == after, (shown, after)
+
+
+# ---------------------------------------------------------------------------
+# Codex's eligible catalog (owner 2026-11-22): a model its account view lists counts when that account is a
+# subscription seat by the durable verdict routability uses; quota never decides. A flattened inventory names
+# no account and keeps every id, and other harnesses keep every listed id, as before.
+# ---------------------------------------------------------------------------
+
+_SPENT = {"code": "subscription_window_exhausted", "message": "Window is spent", "context": {}}
+
+
+def _account_view_snapshot(harness, accounts=(), *, flat=None, extra_profiles=()):
+    """A status snapshot whose ``harness`` row is what ``claudexor_accounts._harness_models`` makes of the engine's
+    account view (``accounts``: profile, its catalog availability, model ids; ``unavailable`` carries a spent window)
+    or, given ``flat`` ids, of an engine's flattened inventory. Its own ``<harness>-default`` seat routes it."""
+    from ouroboros.gateway.claudexor_accounts import _harness_models
+
+    class Engine:
+        def harness_model_catalog(self, harness_id, *, view):
+            return {"harnessId": harness_id, "partial": False, "accounts": [
+                {"credentialProfileId": profile, "availability": availability,
+                 "problem": _SPENT if availability == "unavailable" else None,
+                 "catalog": {"harnessId": harness_id, "credentialProfileId": profile, "source": "fixture",
+                             "models": [{"id": model} for model in ids]}}
+                for profile, availability, ids in accounts]}
+
+        def harness_models(self, harness_id):
+            return [{"id": model} for model in flat]
+
+    row = {"id": harness, "status": "ok", "enabled": True, **_harness_models(Engine(), harness, flat is None)}
+    return {"daemon": {"state": "running"}, "harnesses": [row],
+            "profiles": {"profiles": [_profile(harness, f"{harness}-default"), *extra_profiles],
+                         "harnessAccounts": [],
+                         "accountPools": [_pool(harness, {"kind": "profile", "profileId": f"{harness}-default"})]}}
+
+
+def _preview_and_finish(onboarding, snapshot, harness):
+    """The ``harness`` rows the real preview shows and Finish saves: (target, pin, Reviewer mark) each."""
+    onboarding.calls["snapshot_payload"] = snapshot
+    payload = {**WIZARD_PAYLOAD, "subscriptionsConnected": True}
+    preview = onboarding.client.post("/api/onboarding/subagents/preview", json=payload)
+    assert preview.status_code == 200, preview.text
+    assert not onboarding.settings_path.exists()
+    response = onboarding.client.post("/api/onboarding/complete", json=payload)
+    assert response.status_code == 200, response.text
+
+    def rows(items):
+        return [(row["route"]["target_id"], row["route"]["credential_profile_id"], row.get("review_eligible", False))
+                for row in items if row["route"]["target_id"].startswith(f"{harness}=")]
+
+    shown = rows(preview.json()["available_subagents"]["items"])
+    assert shown == rows(json.loads(onboarding.saved()[SUBAGENTS_SETTING])["items"])
+    return shown
+
+
+_API_KEY = _profile("codex", "codex-api", kind="api_key")
+_OFF = _profile("codex", "codex-off", enabled=False)
+_SIGNED_OUT = _profile("codex", "codex-out", availability="unavailable", verification="failed")
+_UNVERIFIED = _profile("codex", "codex-new", availability="unknown", verification="not_run")
+_SEAT_61 = ("codex-default", "available", ("gpt-6.1-sol", "gpt-5.5"))
+
+
+@pytest.mark.parametrize(("accounts", "extra", "flat", "chosen"), [
+    # A spent window is quota: the seat keeps its models, whichever account lists them.
+    ((_SEAT_61, ("codex-spent", "unavailable", ("gpt-6.2-sol",))), (_profile("codex", "codex-spent"),), None,
+     "gpt-6.2-sol"),
+    ((("codex-default", "unavailable", ("gpt-6.2-sol", "gpt-6.1-sol")),), (), None, "gpt-6.2-sol"),
+    # An API key, a disabled, signed-out or unverified account lists what no subscription row may run.
+    ((_SEAT_61, ("codex-api", "available", ("gpt-6.2-sol",))), (_API_KEY,), None, "gpt-6.1-sol"),
+    ((_SEAT_61, ("codex-off", "available", ("gpt-6.2-sol",))), (_OFF,), None, "gpt-6.1-sol"),
+    ((_SEAT_61, ("codex-out", "unknown", ("gpt-6.2-sol",))), (_SIGNED_OUT,), None, "gpt-6.1-sol"),
+    ((_SEAT_61, ("codex-new", "unknown", ("gpt-6.2-sol",))), (_UNVERIFIED,), None, "gpt-6.1-sol"),
+    ((_SEAT_61, ("codex-ghost", "available", ("gpt-6.2-sol",))), (), None, "gpt-6.1-sol"),
+    # An engine without the account view lists a flat inventory: every id stays a candidate, as before.
+    ((), (), ("gpt-6.2-sol", "gpt-6.1-sol"), "gpt-6.2-sol"),
+], ids=["spent-other-seat", "spent-own-seat", "api-key", "disabled", "signed-out", "unverified", "unlisted-account",
+        "flat-inventory"])
+def test_codex_takes_its_preference_from_what_its_subscription_seats_list(onboarding, accounts, extra, flat, chosen):
+    snapshot = _account_view_snapshot("codex", accounts, flat=flat, extra_profiles=extra)
+    assert _preview_and_finish(onboarding, snapshot, "codex") == [
+        (f"codex={chosen}", "", False), (f"codex={chosen}", "", True)]  # unpinned: the engine rotates
+
+
+@pytest.mark.parametrize(("accounts", "extra", "code", "detail"), [
+    ((("codex-default", "unknown", ()), ("codex-api", "available", ("gpt-6.2-sol",))), (_API_KEY,),
+     "models_unavailable",
+     "No codex subscription account lists a model: account 'codex-api' is an API credential (api_key), "
+     "not a subscription."),
+    ((("codex-default", "available", ("gpt-5.5",)), ("codex-api", "available", ("gpt-6.2-sol",))), (_API_KEY,),
+     "model_not_in_discovery", "codex's eligible catalog has none of gpt-6.2-sol, gpt-6.1-sol, gpt-5.6-sol"),
+], ids=["only-an-api-key-lists-models", "no-sol-on-a-seat"])
+def test_codex_never_answers_from_a_model_only_an_ineligible_account_lists(onboarding, accounts, extra, code, detail):
+    onboarding.calls["snapshot_payload"] = _account_view_snapshot("codex", accounts, extra_profiles=extra)
+    response = onboarding.client.post(
+        "/api/onboarding/complete", json={**WIZARD_PAYLOAD, "subscriptionsConnected": True})
+    assert response.status_code == 503, response.text
+    assert response.json()["code"] == code and detail in response.json()["detail"]
+    assert not onboarding.settings_path.exists()
+
+
+@pytest.mark.parametrize(("harness", "accounts", "extra", "expected"), [
+    ("claude", (("claude-default", "available", ("claude-sonnet-5",)),
+                ("claude-api", "available", ("claude-opus-5-5",))),
+     (_profile("claude", "claude-api", kind="api_key"),), "claude=claude-opus-5-5"),
+    ("agy", (("agy-default", "available", ("gemini-3.8-flash-high",)),
+             ("agy-old", "unavailable", ("gemini-4-hydrogen-high",))),
+     (_profile("agy", "agy-old", enabled=False),), "agy=gemini-4-hydrogen-high"),
+], ids=["claude", "agy"])
+def test_other_harnesses_keep_every_listed_model_whatever_its_account(onboarding, harness, accounts, extra, expected):
+    """Only Codex reads which account lists a model; another harness answers from every listed id as before."""
+    from ouroboros.gateway.onboarding import verified_harness_discoveries
+
+    snapshot = _account_view_snapshot(harness, accounts, extra_profiles=extra)
+    [discovery], failure = verified_harness_discoveries(snapshot)
+    assert failure is None
+    assert discovery.model_ids == tuple(model for _profile_id, _state, ids in accounts for model in ids)
+    assert {target for target, _pin, _mark in _preview_and_finish(onboarding, snapshot, harness)} == {expected}

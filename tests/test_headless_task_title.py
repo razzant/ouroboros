@@ -160,20 +160,8 @@ def test_task_admission_keeps_custom_metadata_but_not_internal_reply_context(adm
 
 
 def test_a_derived_name_is_not_reported_as_model_coined():
-    """Turn-into-project reuses the name slot; it must not claim authorship.
+    from ouroboros.project_naming import captured_project_title
 
-    `suggested_name` is filled by admission naming (a caller title, or the
-    request's first line), by the lazy turn namer of a working Main turn and
-    by the agent's own scope tools; the conversion
-    cannot tell them apart, so its naming reason names the SLOT it read rather
-    than a coiner that may not exist.
-    """
-    import pathlib
-
-    source = (pathlib.Path(__file__).resolve().parents[1] / "ouroboros/gateway/projects.py").read_text(
-        encoding="utf-8",
-    )
-    assert '"proactive_namer"' not in source
-    assert '"preset_suggested_name"' in source
-    # An explicit caller title still reports itself as exactly that.
-    assert '"explicit_task_title"' in source
+    assert captured_project_title([{"suggested_name": "Request opening"}]) == ("", "")
+    assert captured_project_title([{"suggested_name": "Replaced", "model_coined_name": "Former name"}]) == ("", "")
+    assert captured_project_title([{"title": "Explicit title"}]) == ("Explicit title", "explicit_task_title")

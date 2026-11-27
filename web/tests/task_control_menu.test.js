@@ -220,16 +220,12 @@ test('the hurry path never creates a chat bubble in either surface', () => {
 test('Chat and Activity both wire the shared dropdown', () => {
     // Chat cards and the room's Shade open it through work_status.js on their work's controls (a card
     // no work lists keeps the record-aware adapter). Activity still calls the same lower-level dropdown.
-    assert.match(chat, /openCardControls\(/);
-    assert.match(workSrc, /openTaskControlMenu\(/);
-    assert.match(workSrc, /openTaskControls\(/);
     // Exact adapter effects are exercised in test_room_work_review_browser.py;
-    // finding its own function names inside the adapter would prove nothing.
+    // work_portal.test.js presses the real card's commands after a state change, not just their trigger.
     assert.match(activity, /openTaskControlMenu\(/);
     assert.match(activity, /hurryTaskAction\(/);
     assert.match(activity, /requestStop\(/);
     // The trigger renders the shared label on both surfaces; Activity names a single offered action itself.
-    assert.match(chat, /TASK_CONTROL_TRIGGER_LABEL/);
     assert.match(activity, /taskControlTriggerLabel\(/);
     assert.equal(typeof TASK_CONTROL_TRIGGER_LABEL, 'string');
 });
@@ -444,7 +440,8 @@ test('isRootTaskRow mirrors the server lineage rule (task_results.resolve_task_l
 test('Activity marks root rows and hides Pause for a child; Chat cards stay root-only', () => {
     // A compact retry row can omit lineage; its own root-only census identity still counts.
     assert.match(activity, /phases\.has\(ownId\) \|\| isRootTaskRow\(t, ownId\)/);
-    assert.match(activity, /wholeTree: btn\.dataset\.root === '1'/);
+    assert.match(activity, /wholeTree: !hasHelperAttempt && btn\.dataset\.root === '1'/,
+        'a confirmed expired helper attempt has no tree to pause, exactly as the SPA census shows');
     // activity_work_truth.test.js checks the root and target on rendered census and tail-only buttons.
     // A chat card offers the menu only for a root (never a subagent card).
     assert.match(chat, /cancelRunEligibility\(\{\s*groupId: record\.groupId, isSubagent: record\.isSubagent/);
@@ -562,7 +559,7 @@ test('a Resume held only by calls of unknown outcome asks once, then resumes nam
         return { ok: true };
     };
     await resumeTaskAction('root-u', { resume, toast, askOwner: async (dialog) => { asked.push(dialog); return true; } });
-    assert.deepEqual(calls, [null, { accept_unknown: ['op-1'], reason: 'The owner resumed without these results.' }]);
+    assert.deepEqual(calls, [null, { accept_unknown: ['op-1'], reason: 'The owner resumed without this result.' }]);
     assert.equal(asked.length, 1);
     assert.match(asked[0].body, /^It is unknown whether the run_command call of task 96ac2f7c981b4f54 finished/);
     assert.match(asked[0].body, /this call is never run again/);
@@ -621,6 +618,86 @@ test('the same confirmation exposes every addressed task and invocation before a
             assert.match(calls[1].reason, /spending/);
         }
     }
+});
+
+test('a proven read-only earlier request is not said to change files, and its start stays unknown', async () => {
+    const start = { kind: 'delegated_run', task_id: 'helper-old', invocation_id: 'lost-old', run_id: '',
+        state: 'stop_unknown', stop_outcome: 'pending_invocation_unbound', read_only: true,
+        choice_id: 'delegate_start:old-root/helper-old/lost-old/successor/fence-id/' };
+    const bodies = [];
+    const cases = [[start], [start, { ...start, invocation_id: 'lost-2', read_only: undefined,
+        choice_id: 'delegate_start:old-root/helper-old/lost-2/successor/fence-id/' }]];
+    for (const [i, blockers] of cases.entries()) {
+        const resume = async (task, body) => {
+            if (!body) throw Object.assign(new Error('held'), { status: 409, body: {
+                error: 'predecessor_writers_unsettled', blockers, acceptable_unknown: blockers.map(b => b.choice_id) } });
+            return { ok: true };
+        };
+        await resumeTaskAction(`successor-${i}`, { resume, toast: () => {},
+            askOwner: async (dialog) => { bodies.push(dialog.body); return false; } });
+    }
+    assert.match(bodies[0], /earlier request was read-only, without permission to change files; its work may still be running or spending money/);
+    assert.doesNotMatch(bodies[0], /changing files|was started/);
+    assert.match(bodies[1], /still be running, changing files or spending money/, 'one unproven start keeps the warning');
+});
+
+test('the choice to resume past earlier requests is said in the singular for one and the plural for several, with the same warning', async () => {
+    const start = (i) => ({ kind: 'delegated_run', task_id: 'helper', invocation_id: `lost-${i}`, run_id: '',
+        state: 'stop_unknown', stop_outcome: 'pending_invocation_unbound', read_only: true,
+        choice_id: `delegate_start:old-root/helper/lost-${i}/successor///hold` });
+    const asked = [];
+    const sent = [];
+    for (const count of [1, 2]) {
+        const blockers = Array.from({ length: count }, (_, i) => start(i));
+        const resume = async (task, body) => {
+            if (!body) throw Object.assign(new Error('held'), { status: 409, body: {
+                error: 'predecessor_writers_unsettled', blockers, acceptable_unknown: blockers.map((b) => b.choice_id) } });
+            sent.push(body);
+            return { ok: true };
+        };
+        await resumeTaskAction(`counted-${count}`, { resume, toast: () => {},
+            askOwner: async (dialog) => { asked.push(dialog); return true; } });
+    }
+    const [one, many] = asked;
+    assert.equal(one.title, 'Resume without this result?');
+    assert.equal(many.title, 'Resume without these results?');
+    assert.equal(one.details.summary, 'Inspect the request');
+    assert.equal(many.details.summary, 'Inspect all 2 requests');
+    assert.match(one.body, /listed result\? The earlier request was read-only, without permission to change files; its work may still/);
+    assert.match(many.body, /listed results\? The earlier requests were read-only, without permission to change files; their work may still/);
+    assert.match(one.body, /will not send this request again/);
+    assert.match(many.body, /will not send these requests again/);
+    for (const dialog of asked) assert.match(dialog.body, /may still be running or spending money/);
+    assert.match(sent[0].reason, /the listed start may still be working or spending money\.$/);
+    assert.match(sent[1].reason, /the listed starts may still be working or spending money\.$/);
+});
+
+test('a Resume the owner cancels at that choice sends nothing; the next press asks again and Resume anyway sends the ids once', async () => {
+    const choice = 'delegate_start:pred/pred/lost/succ///hold';
+    const start = { kind: 'delegated_run', task_id: 'pred', invocation_id: 'lost', run_id: '', state: 'stop_unknown',
+        stop_outcome: 'pending_invocation_unbound', read_only: true, choice_id: choice };
+    const calls = [];
+    const resume = async (id, body) => {
+        calls.push(body ?? null);
+        if (!body) throw Object.assign(new Error('held'), { status: 409, body: {
+            error: 'predecessor_writers_unsettled', blockers: [start], acceptable_unknown: [choice] } });
+        return { ok: true };
+    };
+    const toasts = [];
+    const toast = (text, kind) => toasts.push([text, kind]);
+    const asked = [];
+    const answer = (confirmed) => async (dialog) => { asked.push(dialog.confirmLabel); return confirmed; };
+
+    await resumeTaskAction('succ-choice', { resume, toast, askOwner: answer(false) });
+    assert.deepEqual(calls, [null], 'Cancel sends nothing beyond the Resume that asked');
+    assert.deepEqual(toasts, [], 'and says nothing: the task stays held');
+    assert.equal(resumeEligible('succ-choice', () => true), true, 'the press ended with its answer: the next one is free');
+
+    await resumeTaskAction('succ-choice', { resume, toast, askOwner: answer(true) });
+    assert.deepEqual(calls.slice(1), [null, { accept_unknown: [choice],
+        reason: 'The owner accepted that the listed start may still be working or spending money.' }]);
+    assert.deepEqual(asked, ['Resume anyway', 'Resume anyway'], 'each press asked for itself');
+    assert.deepEqual(toasts, [['Resuming: the task returns to the queue.', 'info']]);
 });
 
 // The one registry of a task's pending controls (docs/DESIGN.md "Work status": a press is pending until its answer and its
@@ -879,12 +956,69 @@ test('an accepted Resume keeps its own words and names the gap its Pause did not
     assert.match(membershipGapWords({ count: 3, rows: [] }, 'continue'), /\(…\)/, 'a count without names still counts');
 });
 
+test('a Resume refusal is said in the sentence the server answered with, never its code or a client copy of the words', async () => {
+    const { resumeRefusalWords } = await import('../modules/task_control_menu.js');
+    const refused = (body) => Object.assign(new Error(body.error), { status: 409, body });
+    // The server owns the money refusals' words (`work_stop.resume_outcome`, tested there against the real 409).
+    const message = 'Resume refused: a sentence only the server owns.';
+    for (const error of ['consciousness_allowance_exhausted', 'consciousness_disabled', 'budget_still_exhausted', 'root_hard_cap_exhausted']) {
+        assert.equal(resumeRefusalWords(refused({ error, task_id: 'w', message })), message, error);
+    }
+    const toasts = [];
+    await resumeTaskAction('wake-held', { resume: async () => { throw refused({ error: 'consciousness_disabled', message }); },
+        toast: (...args) => toasts.push(args) });
+    assert.deepEqual(toasts, [[message, 'error']]);
+    // An answer with no sentence keeps the generic failure: the client holds no words of the server's.
+    assert.equal(resumeRefusalWords(refused({ error: 'consciousness_disabled' })), 'Resume refused: consciousness_disabled');
+});
+
+test('a consciousness wake resumed at its daily share says the room its Resume gave it, and only a number says one', async () => {
+    const { resumeAcceptedWords } = await import('../modules/task_control_menu.js');
+    const toasts = [];
+    await resumeTaskAction('wake-held', { resume: async () => ({ ok: true, consciousness_resume: { additional_usd: 4.5 } }),
+        toast: (...args) => toasts.push(args) });
+    assert.deepEqual(toasts, [['Resuming: the task returns to the queue. It may spend up to $4.50 more of the consciousness '
+        + 'allowance.', 'info']]);
+    assert.equal(resumeAcceptedWords({ ok: true, consciousness_resume: { additional_usd: 0 } }),
+        'Resuming: the task returns to the queue. The consciousness allowance gives it nothing more, so it may pause again.');
+    // The total budget is its own limit beside the allowance: what it leaves of the room now is said as an observation.
+    assert.equal(resumeAcceptedWords({ ok: true, consciousness_resume: { additional_usd: 4.5, available_now_usd: 1.25 } }),
+        'Resuming: the task returns to the queue. It may spend up to $4.50 more of the consciousness allowance; '
+        + '$1.25 of it is available now under the total budget.');
+    for (const now of [undefined, null, '1', -1, 4.5]) {  // an older receipt, an unreadable or no narrower value says nothing of it
+        assert.equal(resumeAcceptedWords({ ok: true, consciousness_resume: { additional_usd: 4.5, available_now_usd: now } }),
+            'Resuming: the task returns to the queue. It may spend up to $4.50 more of the consciousness allowance.', String(now));
+    }
+    for (const room of [undefined, null, '4.5', -1, Number.NaN, {}]) {
+        assert.equal(resumeAcceptedWords({ ok: true, consciousness_resume: { additional_usd: room } }),
+            'Resuming: the task returns to the queue.', `${String(room)}: no amount is guessed`);
+    }
+    assert.equal(resumeAcceptedWords({ ok: true }), 'Resuming: the task returns to the queue.');
+});
+
 test('a gap notice keeps all its words beside its close button; the page stack it cuts is a keyboard region', async (t) => {
     const { announceMembershipGap } = await import('../modules/task_control_menu.js');
     const { showToast } = await import('../modules/toast.js');
     const { installDomDouble } = await import('./dom_double.js');
     const env = installDomDouble();
-    t.after(() => env.restore());
+    const observer = globalThis.ResizeObserver;
+    const observers = [];
+    globalThis.ResizeObserver = class {
+        constructor(callback) {
+            this.callback = callback;
+            this.observed = new Set();
+            this.unobserved = [];
+            observers.push(this);
+        }
+        observe(target) { this.observed.add(target); }
+        unobserve(target) {
+            this.observed.delete(target);
+            this.unobserved.push(target);
+        }
+        disconnect() { this.observed.clear(); }
+        trigger() { this.callback(); }
+    };
+    t.after(() => { env.restore(); globalThis.ResizeObserver = observer; });
     const make = env.doc.createElement;
     let cut = true;  // the double has no layout: the stack's measured height is given (the browser lane measures it)
     env.doc.createElement = (tag) => Object.defineProperties(make(tag), {
@@ -894,30 +1028,91 @@ test('a gap notice keeps all its words beside its close button; the page stack i
     const words = announceMembershipGap({ rows, count: 23 }, 'resume');
     const stack = env.doc.getElementById('toast-stack');
     const toast = stack.querySelector('.toast-warn');
+    assert.equal(observers.length, 1, 'the page stack and its notices share one ResizeObserver');
+    assert.ok(observers[0].observed.has(stack) && observers[0].observed.has(toast));
     const [box, close] = toast.children;
-    assert.equal(box.className, 'toast-words');
+    assert.equal(box.className, 'toast-words scroll-fade-y');
     assert.equal(box.textContent, words, 'every name stays in the notice');
     assert.match(words, /\(00-f+, 01-f+, .*, 19-f+, …\); whether they belong here is unknown\.$/);
     assert.ok(!box.hasAttribute('tabindex'), 'the words never scroll on their own: the stack does');
     assert.deepEqual([stack.tabIndex, stack.getAttribute('role'), stack.getAttribute('aria-label')],
         [0, 'region', 'Scrollable notices']);
     assert.equal(close.getAttribute('aria-label'), 'Dismiss notice');
+    // The words a cut column's edge hides carry the shared edge and the column's window; padding the column scrolls
+    // into hides none. The double has no layout, so the places are given: a 40 px window over words 10-310 px down.
+    toast.offsetTop = 0;
+    toast.rect = { left: 0, right: 100, width: 100, top: 0, bottom: 330, height: 330 };
+    box.rect = { left: 0, right: 80, width: 80, top: 10, bottom: 310, height: 300 };
+    const edge = (at) => {
+        stack.scrollTop = at;
+        stack.emit('scroll');
+        return [box.hasAttribute('data-scroll-above'), box.hasAttribute('data-scroll-below'),
+            box.style.getPropertyValue('--toast-view-top'), box.style.getPropertyValue('--toast-view-height')];
+    };
+    assert.deepEqual(edge(0), [false, true, '-10px', '40px'], 'cut at the bottom: the window begins above the words');
+    assert.deepEqual(edge(100), [true, true, '90px', '40px'], 'cut at both edges');
+    assert.deepEqual(edge(290), [true, false, '280px', '40px'], 'cut at the top');
+    assert.deepEqual(edge(320), [false, false, '', ''], 'words wholly out of sight show no edge');
+    box.rect = { ...box.rect, bottom: 30, height: 20 };
+    assert.deepEqual(edge(0), [false, false, '', ''], 'words inside the window show none, though the column scrolls');
+    box.rect = { ...box.rect, bottom: 310, height: 300 };
+    assert.deepEqual(edge(0), [false, true, '-10px', '40px']);
+    // A notice above growing inside a capped column shifts this notice without resizing the stack; the shared
+    // ResizeObserver recomputes --toast-view-top for the shifted words.
+    toast.offsetTop = 20;
+    observers[0].trigger();
+    assert.deepEqual(
+        [box.hasAttribute('data-scroll-above'), box.hasAttribute('data-scroll-below'),
+            box.style.getPropertyValue('--toast-view-top'), box.style.getPropertyValue('--toast-view-height')],
+        [false, true, '-30px', '40px'], 'shifted within the window moves --toast-view-top to the real cut',
+    );
+    toast.offsetTop = 0;
+    observers[0].trigger();
+    assert.deepEqual(
+        [box.hasAttribute('data-scroll-above'), box.hasAttribute('data-scroll-below'),
+            box.style.getPropertyValue('--toast-view-top'), box.style.getPropertyValue('--toast-view-height')],
+        [false, true, '-10px', '40px'],
+    );
+    cut = false;  // released: the next measure clears the edge
+    stack.emit('scroll');
+    assert.deepEqual([box.hasAttribute('data-scroll-above'), box.hasAttribute('data-scroll-below'),
+        box.style.getPropertyValue('--toast-view-top')], [false, false, ''], 'a column that fits fades nothing');
+    cut = true;
+    assert.deepEqual(edge(0), [false, true, '-10px', '40px']);
+    toast.classList.add('is-hiding');  // a notice on its way out is left as it was
+    assert.deepEqual(edge(320), [false, true, '-10px', '40px']);
+    toast.classList.remove('is-hiding');
     cut = false;
     toast.dispose();
+    assert.ok(observers[0].observed.has(stack) && !observers[0].observed.has(toast),
+        'disposing a notice stops observing it while keeping the stack watched');
     assert.ok(!stack.hasAttribute('tabindex') && !stack.hasAttribute('role') && !stack.hasAttribute('aria-label'),
         'once everything fits again the stack is no keyboard stop');
-    const short = showToast('One short notice.', 'warn', { ttl: 0, dismissLabel: 'Dismiss notice' }).children[0];
-    assert.equal(short.className, 'toast-words');
+    const shortNotice = showToast('One short notice.', 'warn', { ttl: 0, dismissLabel: 'Dismiss notice' });
+    const short = shortNotice.children[0];
+    assert.equal(short.className, 'toast-words scroll-fade-y');
     assert.ok(!stack.hasAttribute('tabindex'), 'words that fit make no keyboard stop');
     const plain = showToast('Saved.', 'ok', { ttl: 0 });
     assert.equal(plain.querySelector('.toast-words')?.textContent, 'Saved.');
     assert.equal(plain.querySelector('.toast-dismiss')?.getAttribute('aria-label'), 'Dismiss notice',
         'a non-expiring toast always has a keyboard-reachable close');
+    assert.equal(observers.length, 1, 'additional global notices reuse the stack observer');
+    assert.ok(observers[0].observed.has(shortNotice) && observers[0].observed.has(plain));
+    shortNotice.dispose();
+    plain.dispose();
+    plain.dispose();
+    assert.deepEqual(observers[0].unobserved, [toast, shortNotice, plain],
+        'every observed global notice is unobserved once on dispose');
+    assert.deepEqual([...observers[0].observed], [stack], 'only the page stack remains observed');
     cut = true;  // a room's stack keeps its own place: never the page's scrolling region
     const host = env.doc.createElement('div');
     env.doc.body.append(host);
-    showToast('A room notice.', 'warn', { ttl: 0, dismissLabel: 'Dismiss notice', host });
+    const room = showToast('A room notice.', 'warn', { ttl: 0, dismissLabel: 'Dismiss notice', host });
     assert.ok(!host.querySelector('.toast-stack--room').hasAttribute('tabindex'));
+    assert.equal(observers.length, 1, 'room stacks create no ResizeObserver');
+    assert.ok(!observers[0].observed.has(room), 'room notices are not observed by the page stack observer');
+    room.dispose();
+    assert.deepEqual(observers[0].unobserved, [toast, shortNotice, plain]);
 });
 
 test('two unconfirmed effects are worded in the plural, as on the server', () => {

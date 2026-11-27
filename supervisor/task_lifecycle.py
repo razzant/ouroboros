@@ -17,12 +17,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from ouroboros.review_owner_custody import reconcile_confirmed_dead_review_owner as _reconcile_dead_review_owner
 from ouroboros.utils import utc_now_iso
 
-# Cancellation settlement PUBLICATION (typed outcome vocabulary, cancelled
-# result fields, owed-before-settle registration, stored-truth publication,
-# miss-lane delivery) lives in supervisor.cancel_publication — a module-size
-# code boundary exactly like supervisor.queue_transitions. Imported here so
-# this module keeps ONE public surface for callers, tests, and the
-# supervisor.queue re-exports.
+# Settlement PUBLICATION (outcome vocabulary, cancelled fields, owed-before-settle, stored truth, miss lane) lives in
+# supervisor.cancel_publication, a module-size boundary like queue_transitions, re-exported for one public surface.
 from supervisor.cancel_publication import (  # noqa: F401 -- intentional public re-exports
     CANCEL_ALREADY_SETTLED,
     CANCEL_CANCELLED,
@@ -432,7 +428,7 @@ def drive_cancel_intent_scope(task_id: str, *, deliver: bool = True) -> str:
             active_intent,
         )
 
-        intent = active_intent(q.DRIVE_ROOT, task_id, strict=True)
+        intent = active_intent(q.DRIVE_ROOT, task_id, strict=True, include_close=True)
     except Exception:
         log.error(
             "Cancellation scope authority is unreadable for %s",
@@ -442,6 +438,9 @@ def drive_cancel_intent_scope(task_id: str, *, deliver: bool = True) -> str:
         return CANCEL_FAILED
     if not isinstance(intent, dict):
         return CANCEL_ALREADY_SETTLED if _settled_status(q.DRIVE_ROOT, task_id) else CANCEL_NOT_FOUND
+    from supervisor.expired_park_close import conditional
+    if conditional(intent):
+        return q.cancel_task_custody(task_id, deliver=deliver)
     try:
         from supervisor.owner_stop import revoke_hardened_owner_stop_control
 
@@ -546,29 +545,23 @@ def cancel_task_custody(
     if not task_id:
         return CANCEL_NOT_FOUND
 
-    # A top-level timeout retry has a new physical id while the old id remains
-    # the stable logical/status handle. Resolve that handoff under the same
-    # queue lock as retry admission. If admission won the race, cancellation
-    # follows the host-written lineage; if it did not, ordinary custody below
-    # settles the old attempt and the reaper's final terminal check suppresses
-    # the clone.
-    try:
-        from supervisor.task_ownership import TaskOwnershipRead, prepare_retry_chain
+    from supervisor.expired_park_close import conditional, drive
 
-        reads = TaskOwnershipRead(q.DRIVE_ROOT)
-        prepare_retry_chain(q, task_id, reads.load)
-        with q._queue_lock:
-            retry_target, settled_retry_status = _live_retry_target_locked(q, task_id, results=reads)
-    except Exception as exc:
-        # A busy store or a changed chain row under the lock is UNKNOWN: nothing
-        # was claimed or touched, the intent stays open, the watchdog retries.
-        log.error(
-            "Cancellation retry-lineage authority is indeterminate for %s (%s)",
-            task_id,
-            exc,
-            exc_info=True,
-        )
+    # A parked Close never enters the retry, process, inline-turn or missing-row lanes.
+    if conditional(_active_intent(q, task_id, include_close=True)):
+        exact = _claim_intent(q, task_id)
+        if exact.get("claim_refused") or not exact:
+            return CANCEL_FAILED
+        if conditional(exact):
+            return drive(q, task_id, exact)
+        _release_intent_claim(q, task_id, error="An ordinary Stop joined Close", intent=exact)
         return CANCEL_FAILED
+
+    from supervisor.task_ownership import observe_cancel_retry
+    retry = observe_cancel_retry(q, task_id)
+    if retry is None:
+        return CANCEL_FAILED
+    reads, retry_target, settled_retry_status = retry
     if settled_retry_status:
         return _settle_retry_lineage_completion(
             q, task_id, retry_target, settled_retry_status,
@@ -603,6 +596,8 @@ def cancel_task_custody(
     intent = _claim_intent(q, task_id)
     if intent.get("claim_refused"):
         return CANCEL_FAILED
+    if conditional(intent):
+        return drive(q, task_id, intent)
     if not intent and not cascade_claim:
         # No durable request, no authority: typed from the stored result, nothing touched.
         return CANCEL_ALREADY_SETTLED if settled else CANCEL_NOT_FOUND
@@ -813,12 +808,12 @@ def _worker_possibly_alive(worker: Any) -> bool:
         return True
 
 
-def _active_intent(q: Any, task_id: str) -> Dict[str, Any]:
+def _active_intent(q: Any, task_id: str, *, include_close: bool = False) -> Dict[str, Any]:
     """The durable intent row for this task, or ``{}`` (fail-soft)."""
     try:
         from ouroboros.cancel_intents import active_intent
 
-        return active_intent(q.DRIVE_ROOT, task_id) or {}
+        return active_intent(q.DRIVE_ROOT, task_id, include_close=include_close) or {}
     except Exception:
         log.debug("cancel-intent read failed for %s", task_id, exc_info=True)
         return {}
@@ -967,6 +962,10 @@ def _cancel_live_retry_successor(
     if not intent:
         # A2: no durable request on the logical root mints none on its retry.
         return CANCEL_NOT_FOUND
+    from ouroboros.cancel_intents import conditional_park_close
+    if conditional_park_close(intent):
+        from supervisor.expired_park_close import drive
+        return drive(q, intent_task_id, intent)
     try:
         from ouroboros.cancel_intents import request_cancel
 
@@ -1077,7 +1076,7 @@ def _restore_custody(
     """
     q = _queue_module()
     with q._queue_lock:
-        if pending is not None and all(str(t.get("id")) != task_id for t in q.PENDING):
+        if pending is not None and task_id not in q.RUNNING and all(str(t.get("id")) != task_id for t in q.PENDING):
             q.PENDING.append(pending)
         if awaiting is not None:  # a captured awaiting lane row returns to RUNNING, never PENDING
             q.RUNNING.setdefault(task_id, awaiting)
@@ -1085,10 +1084,8 @@ def _restore_custody(
             worker.reaping = worker_reaping
 
 
-def _finish_captured_pending(
-    task_id: str, task: Dict[str, Any], *, intent: Optional[Dict[str, Any]] = None, awaiting: Any = None,
-    may_close: bool = True,
-) -> str:
+def _finish_captured_pending(task_id: str, task: Dict[str, Any], *, intent: Optional[Dict[str, Any]] = None,
+                             awaiting: Any = None, may_close: bool = True, exact_park: Any = None) -> str:
     """A queued task (or a lane turn ``awaiting`` its carrier) has no process: persist first, publish second. Under a
     cascade (``may_close`` False) a closure intent it joined is an ordinary cancel of the row."""
     q = _queue_module()
@@ -1096,7 +1093,7 @@ def _finish_captured_pending(
     from supervisor.ended_work_helpers import prepare_closure, stop_closed_runs
 
     cost_fields = _reconstructed_cost_fields(q, task_id, task)
-    closure = prepare_closure(q, task_id, task, intent, awaiting, cost_fields) if may_close else None
+    closure = prepare_closure(q, task_id, task, intent, awaiting, cost_fields, exact=exact_park) if may_close else None
     if isinstance(closure, str):
         return closure
     closing = closure or {}
@@ -1104,7 +1101,7 @@ def _finish_captured_pending(
         existing = load_task_result(q.DRIVE_ROOT, task_id) or {}
         stored = write_task_result(
             q.DRIVE_ROOT, task_id, STATUS_CANCELLED, _last_word=closing.get("last_word"), _cancel_observed=True,
-            **{**closing.get("lineage", {}), **_cancel_result_fields(
+            _publication=closing.get("commit_guard"), **{**closing.get("lineage", {}), **_cancel_result_fields(
                 task, existing=existing, result=closing.get("result") or "Task cancelled by user/agent request.",
                 **closing.get("cancel_fields", {}), **cost_fields, **_intent_outcome_fields(intent or {}),
             )},
@@ -1116,14 +1113,17 @@ def _finish_captured_pending(
         return CANCEL_FAILED
     if closing.get("refused"):  # the closure's own transaction saw the work's control change: the row returns
         return closing["withdraw"]()
+    announce = (exact_park or {}).get("announce") or (lambda _outcome: True)  # an exact Close's requester hears first
     if str((stored or {}).get("status") or "") != STATUS_CANCELLED:
-        # The writer's monotonic guard refused it: the task settled on its own
-        # between capture and write. Its outcome and event stand.
-        _settle_intent(q, task_id, outcome=SETTLED_ALREADY,
-                       detail=str((stored or {}).get("status") or ""), intent=intent)
+        # The writer's monotonic guard refused it: it settled on its own between capture and write; that stands.
+        if not announce(CANCEL_ALREADY_SETTLED):
+            return CANCEL_FAILED
+        _settle_intent(q, task_id, outcome=SETTLED_ALREADY, detail=str((stored or {}).get("status") or ""), intent=intent)
         return CANCEL_ALREADY_SETTLED
     if closing:  # the closure won its write; its helper's delegated runs stop only now, before the intent settles
         stop_closed_runs(q, task_id)
+    if not announce(CANCEL_CANCELLED):  # the written verdict stands; the replay delivers, then settles and publishes
+        return CANCEL_FAILED
     _settle_intent(q, task_id, outcome="cancelled", detail=closing.get("detail") or "cancelled while pending", intent=intent)
     q._emit_cancel_task_done(task, task_id, cost_fields=cost_fields)
     q.persist_queue_snapshot(reason="cancel_pending")
@@ -1404,7 +1404,7 @@ def sweep_cancel_intents(*, now: Optional[float] = None) -> Dict[str, str]:
     try:
         # GR5-6: the watchdog is THE enforcement read — a corrupt projection is
         # disclosed (typed forensic row) instead of reading as "no intents".
-        intents = active_intents(q.DRIVE_ROOT, disclose_corruption=True)
+        intents = active_intents(q.DRIVE_ROOT, disclose_corruption=True, include_close=True)
     except Exception:
         log.debug("cancel-intent sweep read failed", exc_info=True)
         return {}

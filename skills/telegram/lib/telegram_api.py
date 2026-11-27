@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextvars
 import html as html_lib
+import json
 import mimetypes
 import os
 import pathlib
@@ -34,6 +35,14 @@ _MAX_TELEGRAM_UPLOAD_BYTES = 50 * 1024 * 1024
 _NOT_MODIFIED_PREFIX = "bad request: message is not modified"
 # A failure before any request byte could reach Telegram: connecting, a proxy's refused tunnel, a pool wait.
 _UNSENT_FAILURES = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ProxyError)
+
+
+def _too_large(limit: int) -> str:
+    """This bridge's own cap keeps its words; another limit (the group relay's) names its size."""
+    if limit == _MAX_TELEGRAM_DOWNLOAD_BYTES:
+        return "Telegram file exceeds the 10 MiB download limit."
+    return f"Telegram file exceeds the {max(1, limit // (1024 * 1024))} MiB download limit."
+
 # The requests that create or change a message in the owner's chat. Inside an outbound operation
 # (lib/telegram_outbox.py, which sets OUTBOUND_JOURNAL around one mirrored event) each is one journaled part.
 JOURNALED_METHODS = frozenset({"sendMessage", "sendPhoto", "sendVideo", "sendDocument", "sendAudio", "editMessageText"})
@@ -105,6 +114,22 @@ class TelegramTransportError(RuntimeError):
         super().__init__(message)
         self.unsent = bool(unsent)
         self.cause = str(cause or "")  # the transport's own failure class, for status and logs
+
+
+class TelegramDownloadTooLarge(RuntimeError):
+    """A download stopped at this integration's inbound cap: the file is larger than it accepts."""
+
+
+class TelegramFileReadTimeout(RuntimeError):
+    """A read timeout of the HTTP GET for an already resolved file path."""
+
+
+class TelegramFileRefused(RuntimeError):
+    """The file server answered without the file (``status_code``, e.g. 404 once a getFile path expired)."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"Telegram file download returned HTTP {status_code}")
+        self.status_code = int(status_code)
 
 
 class TelegramTokenMissing(ValueError):
@@ -647,8 +672,11 @@ class TelegramClient:
                  on_message=None, reply_to_message_id: int = 0, strict_reply: bool = False,
                  reply_fallback_id: int = 0, on_reply_changed=None,
                  api_base_url: Optional[str] = None, files_dir: Optional[str] = None, binding=None,
-                 generation: Optional[int] = None, origin_label: str = "", binding_guard=None):
-        self._binding, self.generation, self.accepted, self._binding_guard = binding, 0, 0, binding_guard
+                 generation: Optional[int] = None, origin_label: str = ""):
+        # A client of the bridge's accepted token (lib/telegram_token.py) is one identity: the token and
+        # generation of ONE snapshot (the caller's, which also chose its bot-specific references, or taken
+        # here). A binding that moved on since makes it refuse its next request, never switch tokens.
+        self._binding, self.generation, self.accepted = binding, 0, 0
         if binding is not None:
             if generation is None:
                 token, generation = binding.snapshot()
@@ -668,17 +696,20 @@ class TelegramClient:
         self.on_reply_changed = on_reply_changed
         if not self.token:
             raise TelegramTokenMissing("TELEGRAM_BOT_TOKEN is missing")
+        # An explicit proxy replaces ambient proxies for these calls only. With the default
+        # base the target stays https://api.telegram.org, so TLS runs end to end through the
+        # tunnel: the proxy sees the host, never the token-bearing path, and redirects are
+        # never followed. A TELEGRAM_API_BASE origin serves the same Bot API from the owner's
+        # server with that origin's own transport security; files_dir is a --local store.
         self.proxy = _telegram_proxy(proxy)
         base = _telegram_api_base(api_base_url)
-        self.api_base_origin = base
         self.api_base = f"{base}/bot{self.token}"
         self.file_base = f"{base}/file/bot{self.token}"
         self.files_dir = _telegram_files_dir(files_dir)
 
     def check_binding(self) -> None:
-        """Before each request: after a token, owner, or API-base change this client asks Telegram nothing more."""
-        if ((self._binding is not None and not self._binding.current(self.generation))
-                or (self._binding_guard is not None and not self._binding_guard())):
+        """Before each request: after a token change this client asks Telegram nothing more."""
+        if self._binding is not None and not self._binding.current(self.generation):
             raise TelegramBindingChanged(self.accepted)
 
     def origin_prefix(self, parse_mode: str = "") -> str:
@@ -702,8 +733,7 @@ class TelegramClient:
         """What a failed request raises: its own failure while this client's token is in force. Once the binding
         moved on, any failure (a refusal, a broken transport, an unreadable answer) belongs to the replaced token,
         so it ends as the typed change with the parts Telegram accepted, never as a failure of the token now in force."""
-        if ((self._binding is not None and not self._binding.current(self.generation))
-                or (self._binding_guard is not None and not self._binding_guard())):
+        if self._binding is not None and not self._binding.current(self.generation):
             return TelegramBindingChanged(self.accepted, unsent=bool(getattr(failure, "unsent", False)))
         return failure
 
@@ -730,23 +760,7 @@ class TelegramClient:
         if self.reply_to_message_id and method_text in {"sendMessage", "sendPhoto", "sendVideo", "sendDocument", "sendAudio"}:
             data = {**(data or {}), "reply_to_message_id": self.reply_to_message_id,
                     "allow_sending_without_reply": not self.strict_reply}
-        try:
-            # trust_env trades ambient-proxy/SSL_CERT isolation for a proxy-routed install's
-            # only egress; decided once by the caller via net_transport.env_proxies_configured.
-            async with httpx.AsyncClient(
-                timeout=timeout, trust_env=self.trust_env, proxy=self.proxy, follow_redirects=False,
-            ) as client:
-                self.check_binding()  # entering the transport may yield: the request itself starts only here
-                response = await client.post(f"{self.api_base}/{method_text}", data=data, files=files)
-        except httpx.TimeoutException as exc:
-            raise self._failed(TelegramTransportError(f"Telegram API timed out during {safe_method}.",
-                                                      unsent=isinstance(exc, _UNSENT_FAILURES),
-                                                      cause=type(exc).__name__)) from None
-        except httpx.HTTPError as exc:
-            raise self._failed(TelegramTransportError(
-                f"Telegram API transport failed during {safe_method} ({type(exc).__name__}).",
-                unsent=isinstance(exc, _UNSENT_FAILURES), cause=type(exc).__name__,
-            )) from None
+        response = await self._post(method_text, safe_method, data, files, timeout)
         try:
             payload = response.json()
         except ValueError:
@@ -790,6 +804,42 @@ class TelegramClient:
         self._observe_message(data, payload.get("result"))
         return payload
 
+    async def _post(self, method_text: str, safe_method: str, data, files, timeout) -> httpx.Response:
+        """The one HTTP exchange of a Bot API request; a transport failure raises typed (``unsent`` only when no
+        byte could have reached Telegram), a failure after a token change as the change."""
+        try:
+            # trust_env trades ambient-proxy/SSL_CERT isolation for a proxy-routed install's
+            # only egress; decided once by the caller via net_transport.env_proxies_configured.
+            async with httpx.AsyncClient(
+                timeout=timeout, trust_env=self.trust_env, proxy=self.proxy, follow_redirects=False,
+            ) as client:
+                self.check_binding()  # entering the transport may yield: the request itself starts only here
+                return await client.post(f"{self.api_base}/{method_text}", data=data, files=files)
+        except httpx.TimeoutException as exc:
+            raise self._failed(TelegramTransportError(f"Telegram API timed out during {safe_method}.",
+                                                      unsent=isinstance(exc, _UNSENT_FAILURES),
+                                                      cause=type(exc).__name__)) from None
+        except httpx.HTTPError as exc:
+            raise self._failed(TelegramTransportError(
+                f"Telegram API transport failed during {safe_method} ({type(exc).__name__}).",
+                unsent=isinstance(exc, _UNSENT_FAILURES), cause=type(exc).__name__,
+            )) from None
+
+    async def raw_request(self, method: str, *, data: Optional[dict] = None, files: Optional[dict] = None,
+                          timeout: int = 30) -> tuple[int, Optional[Dict[str, Any]]]:
+        """One request as Telegram answered it: its HTTP status and JSON object (None when the body is none), for
+        the group relay (lib/telegram_group_feed.py), which passes provider answers on. No label, no anchor, no
+        journal; failures raise as in ``request``."""
+        self.check_binding()
+        method_text = str(method or "")
+        safe_method = method_text if re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", method_text) else "request"
+        response = await self._post(method_text, safe_method, data, files or None, timeout)
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        return response.status_code, payload if isinstance(payload, dict) else None
+
     def _observe_message(self, data, result) -> None:
         """Only a returned Message (or an unchanged edit) proves its Telegram id."""
         if self.on_message is None or not isinstance(result, dict):
@@ -799,7 +849,10 @@ class TelegramClient:
         if chat_id is not None and message_id:
             self.on_message(int(chat_id), int(message_id))
 
-    async def _download_bytes(self, file_path: str) -> bytes:
+    async def _download_bytes(self, file_path: str, limit: Optional[int] = None) -> bytes:
+        """A getFile path's bytes, at most ``limit`` (this bridge's own cap unless the group relay names the
+        connector's): over HTTP, else from a --local server's store."""
+        limit = _MAX_TELEGRAM_DOWNLOAD_BYTES if limit is None else int(limit)
         self.check_binding()
         try:
             async with httpx.AsyncClient(
@@ -807,19 +860,25 @@ class TelegramClient:
             ) as client:
                 self.check_binding()
                 async with client.stream("GET", f"{self.file_base}/{file_path}") as response:
-                    if response.status_code >= 400:
-                        raise RuntimeError(f"Telegram file download returned HTTP {response.status_code}")
+                    if response.status_code != 200:
+                        raise TelegramFileRefused(response.status_code)
                     try:
                         announced = int(response.headers.get("content-length", ""))
                     except (TypeError, ValueError):
-                        announced = 0
-                    if announced > _MAX_TELEGRAM_DOWNLOAD_BYTES:
-                        raise RuntimeError("Telegram file exceeds the 10 MiB download limit.")
+                        announced = None
+                    if announced is not None and announced > limit:
+                        raise TelegramDownloadTooLarge(_too_large(limit))
                     content = bytearray()
                     async for chunk in response.aiter_bytes():
-                        if len(content) + len(chunk) > _MAX_TELEGRAM_DOWNLOAD_BYTES:
-                            raise RuntimeError("Telegram file exceeds the 10 MiB download limit.")
+                        if len(content) + len(chunk) > limit:
+                            raise TelegramDownloadTooLarge(_too_large(limit))
                         content.extend(chunk)
+                    # HTTPX checks wire framing; this also checks the assembled identity body.
+                    if (announced is not None and response.headers.get("content-encoding", "identity").lower()
+                            == "identity" and len(content) != announced):
+                        raise RuntimeError("Telegram file download length does not match HTTP Content-Length.")
+        except httpx.ReadTimeout:
+            raise self._failed(TelegramFileReadTimeout("Telegram file download timed out.")) from None
         except httpx.TimeoutException:
             raise self._failed(RuntimeError("Telegram file download timed out.")) from None
         except httpx.HTTPError as exc:
@@ -835,11 +894,12 @@ class TelegramClient:
             if not self.files_dir:
                 raise
             # Off the shared event loop: the store may be a slow or network disk.
-            content = await asyncio.to_thread(self._read_file_from_disk, file_path, exc)
+            content = await asyncio.to_thread(self._read_file_from_disk, file_path, exc, limit)
         return bytes(content)
 
-    def _read_file_from_disk(self, file_path: str, cause: Exception) -> bytes:
-        """Read a file of a --local server from its store (tdlib/telegram-bot-api#26).
+    def _read_file_from_disk(self, file_path: str, cause: Exception, limit: Optional[int] = None) -> bytes:
+        """Read a file of a --local server from its store (tdlib/telegram-bot-api#26), at most ``limit`` bytes
+        (the owner's own files: this bridge's cap; a group's for the relay: the connector's).
 
         Absolute paths are taken as the server names them, others are joined under the
         store. Lexical confinement runs first, a pure comparison, so a UNC path is refused
@@ -857,6 +917,7 @@ class TelegramClient:
         resolved = candidate.resolve()
         if not resolved.is_relative_to(store):
             raise cause from None
+        limit = _MAX_TELEGRAM_DOWNLOAD_BYTES if limit is None else int(limit)
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
         try:
             handle = os.fdopen(os.open(resolved, flags), "rb")
@@ -865,14 +926,20 @@ class TelegramClient:
         with handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 raise cause from None
-            data = handle.read(_MAX_TELEGRAM_DOWNLOAD_BYTES + 1)
-        if len(data) > _MAX_TELEGRAM_DOWNLOAD_BYTES:
-            raise RuntimeError("Telegram file exceeds the 10 MiB download limit.") from cause
+            data = handle.read(limit + 1)
+        if len(data) > limit:
+            raise TelegramDownloadTooLarge(_too_large(limit)) from cause
         return data
 
-    async def get_updates(self, offset: int) -> list[dict]:
-        data = {"timeout": 20, "offset": offset, "allowed_updates": '["message","edited_message","callback_query","message_reaction","message_reaction_count","channel_post","edited_channel_post","my_chat_member"]'}
-        return list((await self.call("getUpdates", data=data, timeout=25)).get("result") or [])
+    async def get_updates(self, offset: int, allowed_updates: Optional[list[str]] = None, *,
+                          poll_timeout: int = 20) -> list[dict]:
+        """``allowed_updates`` replaces Telegram's remembered selection (only while groups are on,
+        lib/telegram_group_feed.py); None leaves it as it is."""
+        data: dict[str, Any] = {"timeout": poll_timeout, "offset": offset}
+        if allowed_updates is not None:
+            data["allowed_updates"] = json.dumps(list(allowed_updates))
+        payload = await self.call("getUpdates", data=data, timeout=25)
+        return list(payload.get("result") or [])
 
     async def send_message(self, chat_id: int, text: str, parse_mode: str = "HTML", *,
                            disable_notification: bool = False) -> int:
@@ -1010,21 +1077,29 @@ class TelegramClient:
         await self.call("answerCallbackQuery", data=data, timeout=10)
 
     async def download_photo(self, file_id: str) -> tuple[str, str]:
-        payload = await self.call("getFile", data={"file_id": file_id}, timeout=20)
-        file_path = str((payload.get("result") or {}).get("file_path") or "").strip()
-        if not file_path:
-            raise RuntimeError("Telegram file path is missing")
-        content = await self._download_bytes(file_path)
+        file_path, content = await self._get_file_bytes(file_id)
         mime = mimetypes.guess_type(file_path)[0] or "image/jpeg"
         return base64.b64encode(content).decode("ascii"), mime
 
     async def download_file(self, file_id: str) -> bytes:
         """Download an arbitrary file from Telegram servers and return its raw bytes."""
+        _, content = await self._get_file_bytes(file_id)
+        return content
+
+    async def _get_file_bytes(self, file_id: str) -> tuple[str, bytes]:
         payload = await self.call("getFile", data={"file_id": file_id}, timeout=20)
-        file_path = str((payload.get("result") or {}).get("file_path") or "").strip()
+        result = payload.get("result") or {}
+        file_path = str(result.get("file_path") or "").strip()
         if not file_path:
             raise RuntimeError("Telegram file path is missing")
-        return await self._download_bytes(file_path)
+        size = result.get("file_size")
+        known_size = type(size) is int and size >= 0
+        if known_size and size > _MAX_TELEGRAM_DOWNLOAD_BYTES:
+            raise TelegramDownloadTooLarge("Telegram file exceeds the 10 MiB download limit.")
+        content = await self._download_bytes(file_path)
+        if known_size and len(content) != size:
+            raise RuntimeError("Telegram file download length does not match getFile.")
+        return file_path, content
 
     async def edit_message_text_with_inline_keyboard(
         self, chat_id: int, message_id: int, text: str, keyboard: list[list[dict]], parse_mode: str = "HTML"
@@ -1081,16 +1156,16 @@ _MENU_TEXTS_EN = {
         "🤖 **Ouroboros Telegram Help**\n\n"
         "Available commands:\n"
         "• `/menu` — Show interactive control panel with active tabs\n"
-        "• `/mode` — Switch owner DM (`direct` / `presence`) and mirror mode\n"
-        "• `/main <text>` — Send one message straight to Main chat (shortcut `/m`)\n"
-        "• `/language` — Change interface language  |  `/help` — Show this guide\n"
-        "• `/status` — Request live system status  |  `/panic` — Emergency stop\n\n"
-        "Modes description (changed in Web UI → Settings → Extensions → Telegram):\n"
-        "• **strict** — allow only `/menu`, `/mode`, `/main`, `/help`, `/language` and owner `/panic`\n"
+        "• `/language` — Change the interface language of this installation\n"
+        "• `/status` — Request live system status (if allowed)\n"
+        "• `/panic` — Emergency stop for the bound owner, in every mode\n"
+        "• `/help` — Show this friendly usage guide\n\n"
+        "In Ouroboros, open the Telegram skill's settings to choose a command mode.\n"
+        "• **strict** — allow only `/menu`, `/help`, `/language` and owner `/panic`\n"
         "• **safe_commands** — allow status monitoring\n"
         "• **full_access** — allow status + background loop start/stop"
     ),
-    "slash_blocked_strict": "⛔ Slash commands are not allowed in strict mode. Use `/menu` to see available options, or change mode in Settings → Extensions → Telegram.",
+    "slash_blocked_strict": "⛔ Slash commands are not allowed in strict mode. Use `/menu` to see available options, or change the mode in the Telegram skill's settings.",
     "slash_blocked_mode": "⛔ This command is not allowed in the current mode. Use `/menu` to see available options.",
     "not_authorized": "Not authorized",
     "updating_status": "Updating status metrics...",
@@ -1098,7 +1173,7 @@ _MENU_TEXTS_EN = {
     "restricted_safe": "⛔ Restricted in safe mode",
     "unknown_command": "Unknown command",
     "use_miniapp": "Use the Mini App.",
-    "update_failed": "Could not deliver that Telegram update to Ouroboros.",
+    "update_failed": "Could not confirm that Ouroboros received that Telegram update.",
     "reply_not_linked": "Sent, but not linked to the earlier work: a message from before this bridge update can't be matched safely.",
     "metrics_budget_status": "• **Budget Status:**\n  Spent: `${spent_usd}`\n  Limit: `${total_budget}`\n  Remaining: `${rem}`\n\n• **System Environment:**\n  Branch: `{branch}`\n  BG Thoughts: `{bg_status}`",
     "file_too_large_notice": "{filename} is saved in Ouroboros. This file exceeds the Telegram upload limit and cannot be mirrored here.",

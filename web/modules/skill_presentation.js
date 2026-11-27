@@ -35,6 +35,13 @@ export function versionText(version) {
     return /^v\d/i.test(text) ? text : `v${text}`;
 }
 
+/** The current catalog reports a different offer. Omitted fields from older hosts are not contradictions. */
+export function skillOfferChanged(shown, current) {
+    const known = (value) => typeof value === 'string' && value !== '';
+    return current != null && ((known(shown.source_key) && Object.hasOwn(current, 'source_key') && shown.source_key !== current.source_key)
+        || ['id', 'version', 'digest'].some((key) => known(shown[key]) && known(current[key]) && shown[key] !== current[key]));
+}
+
 /** The host's update outcome, shared by the card and exact-release confirmation. */
 export function updateRejectionSentence(release) {
     const cause = {
@@ -189,12 +196,13 @@ export function externalLinkHtml(url, label) {
     return `<a class="skills-link" href="${escapeHtml(target)}" target="_blank" rel="noopener noreferrer" data-skill-external>${escapeHtml(label)} ↗</a>`;
 }
 
-/** Route a press on a `[data-skill-external]` link through the host while the gesture is live. */
+/** Route a press on a `[data-skill-external]` link through the host while the gesture is live; its answer stands where
+ * it was pressed. */
 export function routeExternalLink(event, openExternal = openExternalViaHostBridge) {
     const link = event?.target?.closest?.('a[data-skill-external]');
     if (!link) return false;
     event.preventDefault();
-    Promise.resolve(openExternal(link.getAttribute('href'))).catch(() => {});
+    Promise.resolve(openExternal(link.getAttribute('href'), { from: link })).catch(() => {});
     return true;
 }
 
@@ -276,13 +284,20 @@ export function popularityText(item = {}) {
     return signals.votes > 0 ? `▲ ${plural(signals.votes, 'vote')}` : 'No votes yet';
 }
 
-/** The facts line: only exceptions and the one popularity number (UX §2.1 ⑤). */
+/** The catalog's own words for what a skill needs; "" when it says none (`needs: ""`) or says nothing (absent, null). */
+export const catalogNeedsText = (item = {}) => (typeof item.needs === 'string' ? item.needs.trim() : '');
+
+/**
+ * The facts line: only exceptions and the one popularity number (UX §2.1 ⑤). `needs_keys` names what a skill reads,
+ * required or not (CLIENT_CONTRACT), so it is counted as fields, and only where the catalog says nothing of what the
+ * skill needs; where it speaks, its own words (`catalogNeedsText`) follow this line's.
+ */
 export function factsText(item = {}) {
     const parts = [];
     const popularity = popularityText(item);
     if (popularity) parts.push(popularity);
-    const keys = Array.isArray(item.needs_keys) ? item.needs_keys.length : 0;
-    if (keys) parts.push(keys === 1 ? 'needs a key' : `needs ${keys} keys`);
+    const keys = typeof item.needs !== 'string' && Array.isArray(item.needs_keys) ? item.needs_keys.length : 0;
+    if (keys) parts.push(plural(keys, 'key field'));
     return parts.join(' · ');
 }
 
@@ -359,5 +374,23 @@ export function countsAsYoursText(item) {
     return injects && !connectsServices(item).length ? 'Messages from here count as yours' : '';
 }
 
-/** A connector's contribution supplies its public label; ids remain canonical. */
-export const skillTitle = (skill) => skill.title || skill.contributes?.find((row) => row.provides === 'place' && row.label)?.label || skill.name;
+const placeLabel = (skill) => skill.contributes?.find((row) => row.provides === 'place' && row.label)?.label;
+/** The card's name: its own title, a connector's place label, the title of its entry in the source it came from
+ *  (`catalog_title`, an installed row's), else its id, which stays canonical. */
+export const skillTitle = (skill) => skill.title || placeLabel(skill) || skill.catalog_title || skill.name;
+/** Every name a skill is shown by, for search: those, the additional full names its listing already knows it
+ *  by (`search_names`), and the title its widget declares. */
+export const skillNames = (skill) => [skill?.title, placeLabel(skill), skill?.catalog_title, skill?.widget_title,
+    ...(Array.isArray(skill?.search_names) ? skill.search_names.map((name) => String(name || '').trim()) : []),
+    skill?.name, skill?.id, skill?.catalog_id,
+    skill?.registry_slug ?? (skill && !Object.hasOwn(skill, 'source_key') ? skill.provenance?.slug : undefined)].filter(Boolean);
+
+const nameForm = (text) => String(text || '').toLowerCase().replace(/[\s_-]+/g, ' ').trim();
+
+/** How `query` meets a skill's names, typed in order with space, `_` and `-` alike («Claudexor Quotas» is
+ *  `claudexor_quotas`): 0 one of them is it, 1 one starts with it, 2 one holds it, 3 none does. */
+export function nameMatch(query, names) {
+    const wanted = nameForm(query);
+    const forms = wanted ? names.map(nameForm) : [];
+    return forms.includes(wanted) ? 0 : forms.some((form) => form.startsWith(wanted)) ? 1 : forms.some((form) => form.includes(wanted)) ? 2 : 3;
+}

@@ -366,11 +366,13 @@ class _Call:
             handle = result
 
     async def consume(self, session):
+        previous = self.last_session
         self.session = self.last_session = session
         self.resume_tool_output = None
         self.expiry_announced = False
+        if not self.resume or self.declared_anew(previous, session):
+            self.delivered_catalog = None  # this connection's opening declared the catalog the engine holds now
         if not self.resume:
-            self.delivered_catalog = None
             self.conversation += 1  # calls an earlier conversation issued can no longer be answered natively
         self.connection_resumed = self.resume
         self.session_ended = asyncio.Event()
@@ -461,6 +463,14 @@ class _Call:
                 await joined(self.finalize())
 
     @staticmethod
+    def declared_anew(previous, session):
+        """A native resume whose fit selected other tools: its opening declares them (Gemini's resumed setup carries
+        its selected tools), so they replace the catalog the conversation was last delivered; an unchanged selection
+        keeps that record."""
+        before, now = (getattr(getattr(item, 'selected', None), 'tools_json', None) for item in (previous, session))
+        return before is not None and now is not None and before != now
+
+    @staticmethod
     def owed_calls(output):
         return {row.get('tool_call_id') for row in output.messages
                 if row.get('role') == 'tool' and row.get('tool_call_id') not in output.silent}
@@ -476,7 +486,7 @@ class _Call:
         result = await session.send(output)
         self.sent_unrecorded(session, output.messages)
         self.retire_calls(output.messages)  # answered natively
-        if self.conversation == current:  # a replacement records its own deliveries
+        if self.conversation == current and self.session is session:  # the replacement owns its own delivery record
             # Adapters may distinguish native response writes from pixels
             # and queue acceptance. Older sessions keep send-boundary order.
             if getattr(session, 'resume_after_tool_response', False) is not None:
@@ -576,25 +586,46 @@ class _Call:
         task = self.preparing
         if task is None or not task.done() or not task.cancelled() and task.exception() is None:
             return
-        self.preparing = None
         try:
             await task
         except RealtimeSetupError as exc:
-            if exc.code == 'prepared_stale':
-                return  # the existing sequential fallback can now take the quiet boundary
             if exc.code != 'context_capacity':
+                self.preparing = None
+                if exc.code == 'prepared_stale':
+                    return  # the existing sequential fallback can now take the quiet boundary
                 raise  # credentials, quota and policy keep their terminal contract
-            revision = getattr(exc, 'source_revision', None)
-        except (OSError, ConnectionClosed) as exc:
+            revision, rejected = getattr(exc, 'source_revision', None), getattr(exc, 'proposed_schemas', None)
+        except BaseException as exc:
             from ouroboros.realtime_session import transport_loss
-            if transport_loss(exc):
+            self.preparing = None
+            if isinstance(exc, (OSError, ConnectionClosed)) and transport_loss(exc):
                 return
             raise
+        # The failed preparation stays visible until the rollback is recorded: "no preparation" must not read as a
+        # ready successor and retire the serving socket meanwhile.
         self.failed_preparation_revision = revision if revision is not None else self.preparing_revision
         self.renewing = self.resume = False
         self.renewal_deadline = None
+        note, restore = None, getattr(self.host, 'restore_serving_catalog', None)
+        try:
+            if restore is not None and rejected is not None:
+                serving = self.serving_catalog()
+                note = await restore(rejected, serving, revision)
+        finally:
+            self.preparing = None
+        if note is not None:
+            self.failed_preparation_revision = getattr(self.host, '_history_version', None)
+            # The note rides the deferred enable_tools output that carried the refused tools, else it waits as a row.
+            for i in reversed(range(len(self.deferred_tool_outputs))):
+                output, offers = self.deferred_tool_outputs[i]
+                if output is not None and offers is not None and list(output.tools) == rejected:
+                    self.deferred_tool_outputs[i] = (
+                        ToolOutputs((*output.messages, note), serving, silent=output.silent), offers)
+                    break
+            else:
+                self.pending_context_rows.append(note)
         current = getattr(self.host, "_history_version", None)
-        if revision is not None and current is not None and revision != current:
+        if note is None and revision is not None and current is not None and revision != current:
             self.request_renewal()  # the changed view gets its fit before the old socket can refuse
             return
         self.host.state.pop('refit', None)
@@ -658,10 +689,19 @@ class _Call:
             await self.connected.wait()
             if self.owed_calls(output):
                 self.response_open = True
+            refit = False
             tools = output.tools if offers is None else self.serving_catalog()
+            if offers is None and self.connection_resumed and getattr(self.session, 'selected', None) is not None:
+                # The result survives a failed write, not a full catalog from before this opening's fit.
+                tools = tuple(self.host.schemas)
+                needs_renewal = getattr(self.session, 'tools_need_renewal', None)
+                if needs_renewal is not None and needs_renewal(tools):
+                    tools, refit = self.serving_catalog(), True
             await self.custody_write(self.send(ToolOutputs(rows, tools, silent=output.silent)))
             self.deferred_tool_outputs.pop(0)
             self.pending_offers[:] = [row for row in self.pending_offers if all(row is not offer for offer in offers or ())]
+            if refit:
+                self.request_renewal()  # a genuine new declaration follows the result at a quiet boundary
         rows = tuple(self.pending_context_rows)
         if rows and not self.tool_refit.is_set():
             try:

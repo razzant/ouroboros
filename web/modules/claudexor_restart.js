@@ -4,7 +4,7 @@
 // the header Restart leaves it alone and this action says, before anything stops, how many
 // runs it ends and whose. The flow is preview -> the shared in-app dialog -> restart:
 //
-//  * the PREVIEW (GET) is passive and typed (`ClaudexorRestartPreview`, ./claudexor_restart_types.js); a count the server
+//  * the PREVIEW (GET) is passive and typed (`management_contracts.py::ClaudexorRestartPreview`); a count the server
 //    could not read is said as unknown, never as zero;
 //  * the dialog's body is one sentence of fact plus the pin warning when there is one; the
 //    engine versions and the runs themselves open under its details;
@@ -34,7 +34,7 @@ export function restartOffered(payload) {
 }
 
 /** The one sentence of fact: how many runs a restart ends and whose they are.
- *  @param {import('./claudexor_restart_types.js').ClaudexorRestartPreview} preview */
+ *  @param {Object} preview — Python contract: `ouroboros/gateway/management_contracts.py::ClaudexorRestartPreview`. */
 export function restartFactSentence(preview) {
     const facts = preview?.runs || {};
     const total = count(facts.total);
@@ -73,7 +73,7 @@ function runRow(item) {
 }
 
 /** Everything the dialog shows for one preview. `changed`: the server refused the last one as stale.
- *  @param {import('./claudexor_restart_types.js').ClaudexorRestartPreview} preview */
+ *  @param {Object} preview — Python contract: `ouroboros/gateway/management_contracts.py::ClaudexorRestartPreview`. */
 export function restartConfirmCopy(preview, { changed = false } = {}) {
     const engine = preview?.engine || {};
     const facts = preview?.runs || {};
@@ -104,7 +104,7 @@ export function restartConfirmCopy(preview, { changed = false } = {}) {
 }
 
 /** What the panel says after the restart answered: the stop and the start are separate facts.
- *  @param {import('./claudexor_restart_types.js').ClaudexorRestartReceipt} receipt */
+ *  @param {Object} receipt — Python contract: `ouroboros/gateway/management_contracts.py::ClaudexorRestartReceipt`. */
 export function restartOutcomeNote(receipt) {
     const error = receipt?.error ? `: ${receipt.error}` : '';
     const ended = count(receipt?.runs?.total);

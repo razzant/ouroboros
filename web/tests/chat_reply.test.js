@@ -9,6 +9,7 @@ import { excerptBody } from '../modules/chat_reply_excerpt.js';
 import { createMessageActions } from '../modules/message_actions.js';
 import { createChatReadingPosition } from '../modules/chat_reading_position.js';
 import { installDomDouble } from './dom_double.js';
+import { applyPayload } from '../modules/i18n.js';
 
 function fixture({ actions = undefined } = {}) {
     const env = installDomDouble();
@@ -102,7 +103,7 @@ test('a quote landing clears the bar and its frosted edge; without an edge it cl
     assert.equal(await land('0px'), 600 - (80 + 12));
 });
 
-test('a drawn row is a destination app needs no read for; a portal or a row not drawn is not', t => {
+test('a drawn row is a destination app needs no read for; a portal or a row not drawn is not', async t => {
     const env = installDomDouble();
     t.after(() => env.restore());
     const feed = env.el('div'), input = env.el('textarea');
@@ -110,12 +111,18 @@ test('a drawn row is a destination app needs no read for; a portal or a row not 
     const card = env.el('div', { dataset: { rowAddress: 'task:c0ffee42' } });
     const portal = env.el('div', { dataset: { rowAddress: 'task:d3adb33f', portal: '1' } });
     const drawn = new Map([[card.dataset.rowAddress, card], [portal.dataset.rowAddress, portal]]);
-    const replies = createChatReplies({ feed, input, reading: () => ({}),
-        history: () => ({ exact: (address) => drawn.get(address) || null }) });
+    const pinned = [];
+    const replies = createChatReplies({ feed, input, reading: () => ({ cancel() {}, scroll() {}, remember() {}, stick: true }),
+        history: () => ({ exact: (address) => drawn.get(address) || null, pin: (address, node) => pinned.push([address, node]) }) });
     t.after(() => replies.destroy());
     assert.equal(replies.draws('task:c0ffee42'), true);
     assert.equal(replies.draws('task:d3adb33f'), false, 'its work lives in another room, which the read names');
     assert.equal(replies.draws('task:0badf00d'), false);
+    assert.deepEqual(pinned, [], 'draws() inspection never sets an explicit pin');
+    assert.deepEqual(await replies.reveal('task:c0ffee42', () => false), null);
+    assert.deepEqual(pinned, [], 'a superseded reveal never sets an explicit pin');
+    assert.deepEqual(await replies.reveal('task:c0ffee42'), { state: 'found', target: card });
+    assert.deepEqual(pinned, [['task:c0ffee42', card]], 'only a successful mounted fastpath landing notifies history.pin');
 });
 
 test('a reveal that moves nothing hands a following reader the live edge back; a gesture, newer reveal or exit decides instead', async t => {
@@ -215,6 +222,59 @@ test('a quote that cannot land says why; only a read that may answer differently
         'Could not load the quoted message. Try again.',
         'Could not load the quoted message. Try again.',
     ]);
+});
+
+test('a derived question quote that names another room is read at its address, never landed on the copy drawn under it', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const env = installDomDouble();
+    t.after(() => env.restore());
+    const feed = env.el('div'), input = env.el('textarea');
+    // Main draws a Project's question as a pointer copy under the card's own address.
+    const copy = env.el('div', { className: 'chat-bubble assistant project-question', dataset: { rowAddress: 'row:1@q#1' } });
+    env.doc.body.append(feed, input); feed.append(copy);
+    const reads = [], moves = [];
+    let answer = { state: 'moved', chat_id: 7 };
+    const replies = createChatReplies({ feed, input, reading: () => ({ cancel() {}, scroll() {}, remember() {}, stick: false }),
+        history: () => ({ exact: (address) => feed.children.find((node) => node.dataset.rowAddress === address) || null,
+            async reference(address) { reads.push(address); return answer; } }),
+        navigate: async (address, chatId) => { moves.push([address, chatId]); return { state: 'found' }; } });
+    t.after(() => replies.destroy());
+    const question = { address: 'row:1@q#1', role: 'assistant', kind: 'question', author_label: 'Ouroboros', snippet: 'Which format?',
+        ts: '2026-11-23T10:00:00Z' };
+    const bubbles = new Map(Object.entries({
+        away: { ...question, derived_question: true, room_label: 'Weekly report', ts: question.ts },
+        home: { ...question, derived_question: true },  // the host names no other room: the card is here
+        ordinary: { ...question },  // an owner's own Reply to what he saw, the copy included
+    }).map(([name, reply_to]) => {
+        const bubble = env.el('div', { className: 'chat-bubble user' }, env.el('div', { className: 'sender', text: 'You' }),
+            env.el('div', { className: 'message', text: name }));
+        feed.append(bubble);
+        replies.decorate(bubble, { role: 'user', row_address: `row:1@a#${name}`, reply_to });
+        return [name, bubble];
+    }));
+    const press = async (name) => {
+        bubbles.get(name).querySelector('.chat-quote-main').click();
+        await new Promise((resolve) => setImmediate(resolve));
+        return [reads.length, moves.length, env.doc.body.querySelectorAll('.toast').at(-1)?.textContent];
+    };
+    const ringed = () => feed.children.filter((node) => node.classList.contains('is-quote-target'));
+
+    // Another room is the card's home: the read of its address names it, the copy is neither ringed nor focused.
+    assert.deepEqual(await press('away'), [1, 1, undefined]);
+    assert.deepEqual([reads, moves], [['row:1@q#1'], [['row:1@q#1', 7]]]);
+    assert.deepEqual(ringed(), []);
+    assert.notEqual(env.doc.activeElement, copy);
+    // Its original cannot be found: the view stays and says so; the copy stands in for nothing.
+    answer = { state: 'absent' };
+    assert.deepEqual(await press('away'), [2, 1, 'The quoted message was not found in saved history.']);
+    assert.deepEqual(ringed(), []);
+    // The card is here, or the quote is the owner's own Reply: what is drawn under the address lands, with no read.
+    assert.deepEqual(await press('home'), [2, 1, 'The quoted message was not found in saved history.']);
+    assert.deepEqual(ringed(), [copy]);
+    assert.equal(env.doc.activeElement, copy);
+    copy.classList.remove('is-quote-target');
+    assert.deepEqual(await press('ordinary'), [2, 1, 'The quoted message was not found in saved history.']);
+    assert.deepEqual(ringed(), [copy]);
 });
 
 test('a saved row gets Reply beside Copy; a row without an address (an unsaved echo, an older host) stays as today', () => {
@@ -527,4 +587,245 @@ test('the registered message actions stand between Reply and Copy on the rows th
         actions.register({ key: 'late', label: 'Late', applies: () => true, run() {} });
         assert.deepEqual(row(mine), ['chat-message-reply', 'chat-message-copy'], 'a destroyed room draws nothing more');
     } finally { f.restore(); }
+});
+
+
+test('a quote to an earlier work reply lands visibly in the feed reading band, not just focused behind its clip', async () => {
+    const f = fixture();
+    try {
+        const target = f.bubble('user', 'Earlier task reply');
+        target.dataset.rowAddress = 'row:1@then#123456789abc';
+        // The work reply is the feed's own chronological bubble (owner 23.11), never a card's Details copy.
+        f.feed.append(target);
+        Object.assign(f.feed, { clientHeight: 400, scrollHeight: 1200, scrollTop: 0 });
+        f.feed.getBoundingClientRect = () => ({ top: 0, bottom: 400 });
+        target.getBoundingClientRect = () => ({ top: 520 - f.feed.scrollTop, bottom: 540 - f.feed.scrollTop });
+        const result = await f.replies.reveal(target.dataset.rowAddress);
+        assert.equal(result.target, target);
+        assert.equal(f.doc.activeElement, target);
+        const line = target.getBoundingClientRect();
+        assert.ok(line.top >= 72 && line.bottom <= 400,
+            'the target is visible in the room reading band, below the header and above the composer');
+    } finally { f.close(); }
+});
+
+test('System voice survives from the exact addressed timeline line to its staged and saved quote', () => {
+    const f = fixture();
+    try {
+        const address = 'row:1@then#123456789abc';
+        const systemRow = f.el('div', { className: 'chat-live-line', dataset: { workReplyRow: '1', rowAddress: address } },
+            f.el('span', { className: 'chat-live-line-title', text: 'Paused by the host' }));
+        f.feed.append(systemRow);
+        f.replies.start(f.replies.bubbleRef(systemRow));
+        assert.equal(f.strip().dataset.author, 'system');
+        assert.equal(f.strip().querySelector('.chat-quote-author').textContent, 'System');
+        const reloaded = f.bubble('user', 'Please leave it paused');
+        f.replies.decorate(reloaded, { reply_to: { address, kind: 'system', role: 'system', snippet: 'Paused by the host' } });
+        assert.equal(f.quote(reloaded).dataset.author, 'system');
+        assert.equal(f.quote(reloaded).querySelector('.chat-quote-author').textContent, 'System');
+    } finally { f.close(); }
+});
+
+test('child narration and expanded final report lines quote their own words and address, never the role label', () => {
+    const f = fixture();
+    try {
+        const child = f.el('div', { className: 'chat-live-card subagent', dataset: { taskId: 'child-7' } });
+        const narration = f.el('div', { className: 'chat-live-line', dataset: {
+            workReplyRow: 'assistant', rowAddress: 'row:1@2026-10-16T09:41:00Z#narr00000001',
+        } },
+            f.el('span', { className: 'chat-live-line-title', text: 'worker' }),
+            f.el('div', { className: 'chat-live-line-body', text: 'Inspecting the archive index.' }));
+        const report = f.el('div', { className: 'chat-live-line expandable', dataset: {
+            workReplyRow: 'assistant', rowAddress: 'row:1@2026-10-16T09:42:00Z#rprt00000002',
+            rowWords: 'All three shards matched the checksum.',
+        } },
+            f.el('span', { className: 'chat-live-line-title', text: 'worker' }),
+            f.el('div', { className: 'chat-live-line-body', text: 'Report to parent\nAll three shards matched the checksum.' }));
+        child.append(narration, report);
+        f.feed.append(child);
+
+        const narrRef = f.replies.bubbleRef(narration);
+        assert.deepEqual(
+            [narrRef.address, narrRef.role, narrRef.kind, narrRef.author_label, narrRef.snippet, narrRef.ts, narrRef.task_id],
+            ['row:1@2026-10-16T09:41:00Z#narr00000001', 'assistant', 'message', 'Ouroboros', 'Inspecting the archive index.', '2026-10-16T09:41:00Z', 'child-7'],
+        );
+        f.replies.start(narrRef);
+        assert.deepEqual(f.replies.frameField(), { reply_to: 'row:1@2026-10-16T09:41:00Z#narr00000001' });
+        assert.equal(f.strip().querySelector('.chat-quote-author').textContent, 'Ouroboros');
+        assert.equal(f.strip().querySelector('.chat-quote-text').textContent, 'Inspecting the archive index.');
+
+        const reportRef = f.replies.bubbleRef(report);
+        assert.deepEqual(
+            [reportRef.address, reportRef.snippet, reportRef.ts],
+            ['row:1@2026-10-16T09:42:00Z#rprt00000002', 'All three shards matched the checksum.', '2026-10-16T09:42:00Z'],
+        );
+        f.replies.start(reportRef);
+        assert.equal(f.strip().querySelector('.chat-quote-text').textContent, 'All three shards matched the checksum.');
+    } finally { f.close(); }
+});
+
+test('syncDerivedQuestion adds, updates, no-ops and removes only derived question quotes while keeping focus and explicit Reply', () => {
+    const f = fixture();
+    try {
+        const question = f.bubble('assistant', 'Which format should I ship?', { address: 'row:1@q#1' });
+        f.feed.append(question);
+        f.replies.decorate(question, { row_address: 'row:1@q#1', role: 'assistant' });
+
+        const answer = f.bubble('user', 'PDF, please');
+        f.feed.append(answer);
+        f.replies.decorate(answer, { row_address: 'row:1@a#1', role: 'user' });
+        assert.equal(f.quote(answer), null);
+
+        const qRef = {
+            address: 'row:1@q#1', role: 'assistant', kind: 'question', author_label: 'Ouroboros',
+            snippet: 'Which format should I ship?', room_label: 'Main', ts: '2026-11-23T10:00:00Z',
+            derived_question: true,
+        };
+        assert.equal(f.replies.syncDerivedQuestion(answer, { role: 'user', reply_to: qRef }, { authoritative: true }), true);
+        const firstQuote = f.quote(answer);
+        assert.ok(firstQuote);
+        assert.equal(firstQuote.dataset.derivedQuestion, '1');
+        assert.equal(firstQuote.hidden, false);
+        assert.equal(f.replies.syncDerivedQuotes(answer), false, 'user derived question quote is not auto-hidden under the question');
+        assert.equal(firstQuote.hidden, false);
+
+        // Unchanged history refresh is a strict no-op: exact same DOM node and focus remain intact.
+        const firstButton = firstQuote.querySelector('.chat-quote-main');
+        firstButton.focus();
+        assert.equal(f.doc.activeElement, firstButton);
+        assert.equal(f.replies.syncDerivedQuestion(answer, { role: 'user', reply_to: { ...qRef } }, { authoritative: true }), false);
+        assert.equal(f.quote(answer), firstQuote);
+        assert.equal(f.doc.activeElement, firstButton);
+
+        // Updated derived quote (e.g. room renamed) replaces the node and keeps focus on the quote button.
+        assert.equal(f.replies.syncDerivedQuestion(answer, { role: 'user', reply_to: { ...qRef, room_label: 'Renamed' } },
+            { authoritative: true }), true);
+        const updatedQuote = f.quote(answer);
+        assert.notEqual(updatedQuote, firstQuote);
+        assert.match(updatedQuote.querySelector('.chat-quote-room').textContent, /Renamed/);
+        assert.equal(f.doc.activeElement, updatedQuote.querySelector('.chat-quote-main'));
+
+        // Incomplete live frames (non-authoritative or shared also_rooms) never remove an already-shown derived quote.
+        assert.equal(f.replies.syncDerivedQuestion(answer, { role: 'user' }, { authoritative: false }), false);
+        assert.equal(f.replies.syncDerivedQuestion(answer, { role: 'user', also_rooms: [2] }, { authoritative: true }), false);
+        assert.equal(f.quote(answer), updatedQuote);
+
+        // Authoritative history without reply_to removes the stale derived quote and moves focus to the bubble.
+        assert.equal(f.replies.syncDerivedQuestion(answer, { role: 'user' }, { authoritative: true }), true);
+        assert.equal(f.quote(answer), null);
+        assert.equal(f.doc.activeElement, answer);
+        assert.equal(answer.tabIndex, -1);
+
+        // When focus is elsewhere (e.g. composer), adding/updating/removing never steals focus.
+        f.input.focus();
+        assert.equal(f.replies.syncDerivedQuestion(answer, { role: 'user', reply_to: qRef }, { authoritative: true }), true);
+        assert.equal(f.doc.activeElement, f.input);
+        assert.equal(f.replies.syncDerivedQuestion(answer, { role: 'user' }, { authoritative: true }), true);
+        assert.equal(f.doc.activeElement, f.input);
+
+        // An explicit owner Reply (without derived_question) is never overwritten or removed.
+        const explicit = f.bubble('user', 'Explicit answer');
+        f.feed.append(explicit);
+        f.replies.decorate(explicit, {
+            row_address: 'row:1@a#2', role: 'user',
+            reply_to: { address: 'row:1@q#1', role: 'assistant', snippet: 'Owner picked this' },
+        });
+        const explicitQuote = f.quote(explicit);
+        assert.ok(explicitQuote);
+        assert.equal(explicitQuote.dataset.derivedQuestion, undefined);
+        assert.equal(f.replies.syncDerivedQuestion(explicit, { role: 'user' }, { authoritative: true }), false);
+        assert.equal(f.replies.syncDerivedQuestion(explicit, { role: 'user', reply_to: qRef }, { authoritative: true }), false);
+        assert.equal(f.quote(explicit), explicitQuote);
+    } finally { f.close(); }
+});
+
+test('retranslateDerivedQuotes follows a dictionary change in place: chrome and aria re-render, data and focus stay', () => {
+    const EN = { language: '', english: true, revision: 0, entries: {} };
+    const f = fixture();
+    // The DOM double has no <html> element; i18n's payload application writes the document's language onto it.
+    Object.defineProperty(f.doc, 'documentElement', { value: f.el('html'), configurable: true });
+    // and no tree walker: the translator's restore pass needs one (it finds no text nodes here, which is the point).
+    f.doc.createTreeWalker = (root) => { const texts = []; (function collect(node) {
+        for (const child of node.childNodes || []) { if (child.nodeType === 3) texts.push(child); else collect(child); }
+    })(root); let at = 0; return { nextNode: () => (at < texts.length ? texts[at++] : null) }; };
+    try {
+        applyPayload(EN);
+        const answer = f.bubble('user', 'PDF, please');
+        f.feed.append(answer);
+        f.replies.decorate(answer, { row_address: 'row:1@a#1', role: 'user' });
+        const qRef = {
+            address: 'row:1@q#1', role: 'assistant', kind: 'question', author_label: 'Ouroboros',
+            snippet: 'Which format should I ship?', room_label_kind: 'project', ts: '2026-11-23T10:00:00Z',
+            derived_question: true,
+        };
+        assert.equal(f.replies.syncDerivedQuestion(answer, { role: 'user', reply_to: qRef }, { authoritative: true }), true);
+        const mounted = f.quote(answer);
+        assert.ok(mounted);
+        assert.equal(mounted.querySelector('.chat-quote-room').textContent, '\u00b7 Project');
+        assert.match(mounted.querySelector('.chat-quote-main').getAttribute('aria-label'), /^Reply to /);
+
+        // The dictionary changes without any reconnect: the mounted quote re-renders its chrome and aria in place.
+        applyPayload({ language: 'ru', english: false, revision: 2, entries: {
+            ['code:chat.reply.reply_to']: { text: '\u041e\u0442\u0432\u0435\u0442 \u043d\u0430' },
+            ['code:project.reference.generic']: { text: '\u041f\u0440\u043e\u0435\u043a\u0442' },
+        } });
+        assert.equal(f.replies.retranslateDerivedQuotes(), true);
+        const translated = f.quote(answer);
+        assert.notEqual(translated, mounted);
+        assert.equal(translated.querySelector('.chat-quote-room').textContent, '\u00b7 \u041f\u0440\u043e\u0435\u043a\u0442');
+        assert.match(translated.querySelector('.chat-quote-main').getAttribute('aria-label'), /^\u041e\u0442\u0432\u0435\u0442 \u043d\u0430 /);
+        // The host's data never translates: the author's label and the quoted words stay verbatim.
+        assert.equal(translated.querySelector('.chat-quote-author').textContent, 'Ouroboros');
+        assert.equal(translated.querySelector('.chat-quote-text').textContent, 'Which format should I ship?');
+
+        // Focus inside the quote survives the re-render onto the new jump control.
+        translated.querySelector('.chat-quote-main').focus();
+        assert.equal(f.doc.activeElement, translated.querySelector('.chat-quote-main'));
+        applyPayload({ language: 'ru', english: false, revision: 3, entries: {
+            ['code:chat.reply.reply_to']: { text: '\u041e\u0442\u0432\u0435\u0442 \u043d\u0430' },
+            ['code:project.reference.generic']: { text: '\u041f\u0440\u043e\u0435\u043a\u0442' },
+        } });
+        assert.equal(f.replies.retranslateDerivedQuotes(), true);
+        const refocused = f.quote(answer);
+        assert.notEqual(refocused, translated);
+        assert.equal(f.doc.activeElement, refocused.querySelector('.chat-quote-main'));
+
+        // An unchanged dictionary writes nothing: the same node and focus remain.
+        assert.equal(f.replies.retranslateDerivedQuotes(), false);
+        assert.equal(f.quote(answer), refocused);
+        assert.equal(f.doc.activeElement, refocused.querySelector('.chat-quote-main'));
+    } finally {
+        applyPayload(EN);
+        f.close();
+    }
+});
+
+test('adopt mounts a derived_question quote on an owner echo without disturbing explicit replies or removing derived quotes on sparse live frames', () => {
+    const f = fixture();
+    try {
+        const echo = f.bubble('user', 'Ship PDF');
+        echo.dataset.clientMessageId = 'cm-derived';
+        f.feed.append(echo);
+        f.replies.decorate(echo, null);
+        const derivedRef = {
+            address: 'row:1@q#9', role: 'assistant', kind: 'question', author_label: 'Ouroboros',
+            snippet: 'Which format?', ts: '2026-11-23T10:00:00Z', derived_question: true,
+        };
+        assert.equal(f.replies.adopt({
+            role: 'user', client_message_id: 'cm-derived', row_address: 'row:1@a#9', reply_to: derivedRef,
+        }), true);
+        const mounted = f.quote(echo);
+        assert.ok(mounted);
+        assert.equal(mounted.dataset.derivedQuestion, '1');
+
+        // A verified retained copy that already shows a derived quote does not lose it if adopt receives a sparse row.
+        const copy = f.bubble('user', 'Retained late answer');
+        copy.dataset.originProjected = '1';
+        f.feed.append(copy);
+        f.replies.decorate(copy, { role: 'user', origin_projected: true, reply_to: derivedRef });
+        const copyQuote = f.quote(copy);
+        assert.equal(copyQuote.dataset.derivedQuestion, '1');
+        assert.equal(f.replies.adopt({ role: 'user', row_address: 'row:1@a#10' }, copy), true);
+        assert.equal(f.quote(copy), copyQuote, 'adopt alone never removes a derived quote; only authoritative history sync does');
+    } finally { f.close(); }
 });

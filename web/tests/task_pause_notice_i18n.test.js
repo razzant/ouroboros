@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { buildTimelineItemHtml, cardRowSummary } from '../modules/chat_activity.js';
+import { buildTimelineItemHtml } from '../modules/chat_activity.js';
+import { cardRowSummary } from '../modules/chat_row_placement.js';
 import { applyPayload, tx } from '../modules/i18n.js';
-import { installDom, restoreDom } from './chat_dom_fixture.js';
-import { PREVIEW_KEY } from '../modules/chat_preview.js';
+import { installDom, PREVIEW_SCOPE, restoreDom } from './chat_dom_fixture.js';
+import { PREVIEW_FAMILY, PREVIEW_KEY } from '../modules/chat_preview.js';
 
 // The owner's own press (ouroboros/pause_notices.notice_text); rows an earlier body wrote keep their bytes.
 const ENGLISH = 'You paused this task. Its work is retained; Resume continues it.';
@@ -42,7 +43,7 @@ test('typed System pause card rows translate through the installed memory withou
 for (const history of [false, true]) test(`pause notice without a card translates ${history ? 'on history replay' : 'live'} but preserves model speech and stored English`, async () => {
     const source = { ...notice, history_id: 'chat:pause-one' }, original = JSON.stringify(source);
     const env = installDom(async url => ({ ok: true, json: async () => String(url).startsWith('/api/chat/history')
-        ? { messages: history ? [source] : [], page_cursor: 'page:pause', window: { complete: true } } : { active_direct_turns: [] } }));
+        ? { profile_scope: PREVIEW_SCOPE, messages: history ? [source] : [], page_cursor: 'page:pause', window: { complete: true } } : { active_direct_turns: [] } }));
     let instance;
     try {
         russian();
@@ -65,8 +66,9 @@ for (const history of [false, true]) test(`pause notice without a card translate
         assert.equal(feed.children.some(node => node.classList.contains('chat-live-card')), false);
         assert.equal(JSON.stringify(source), original, 'live and canonical input keep their English bytes');
         // The saved preview (chat_preview.js) holds the newest read's stored words, never a live frame or a translation.
-        const saved = JSON.parse(localStorage.getItem(PREVIEW_KEY));
-        const rows = saved.rooms.flatMap(room => room.rows);
+        const saved = [...localStorage.values].filter(([key]) => key.startsWith(PREVIEW_FAMILY) && key !== PREVIEW_KEY)
+            .map(([, value]) => JSON.parse(value));
+        const rows = saved.flatMap(room => room.rows);
         if (history) assert.equal(rows.find(row => row.id === source.history_id).text, ENGLISH);
         else assert.equal(rows.length, 0, 'a live-only notice does not enter the newest read\'s preview');
         assert.equal(JSON.stringify(saved).includes(TRANSLATED), false, 'the display translation never enters saved text');

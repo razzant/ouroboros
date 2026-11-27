@@ -244,7 +244,8 @@ def read_text_across_replace(path: pathlib.Path | str, *, encoding: str = "utf-8
             delay = min(delay * 2, _REPLACE_RETRY_MAX_DELAY_SEC)
 
 
-def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], None], *, publication=None) -> None:
+def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], None], *,
+                      publication=None, attest: bool = False) -> Optional[os.stat_result]:
     """Run ``write_temp`` against a sibling file, then atomically replace ``path``.
 
     A crash (SIGKILL / power loss) between the temp create and the replace leaves the
@@ -262,9 +263,7 @@ def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], N
     THROUGH a symlink could escape the caller's allowed root — so the write always lands
     inside ``path``'s directory rather than wherever a link points.
 
-    Being that SSOT is also why the pytest live-data guard sits here rather than on each
-    writer: every full-file overwrite in the tree replaces through this seam, so the next
-    writer added is guarded by construction instead of by remembering (RES-14b)."""
+    The pytest live-data guard here covers every caller (RES-14b)."""
     path = pathlib.Path(path)
     assert_test_data_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -279,7 +278,12 @@ def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], N
         if existing_mode is not None:
             with contextlib.suppress(OSError):
                 os.chmod(tmp, existing_mode)
+        staged = None
+        if attest:
+            with contextlib.suppress(OSError):
+                staged = tmp.lstat()
         replace_atomic(tmp, path, **({"publication": publication} if publication else {}))
+        return staged
     except Exception:
         with contextlib.suppress(OSError):
             tmp.unlink()
@@ -303,12 +307,14 @@ def _write_fd_fully(fd: int, data: bytes, target: pathlib.Path) -> None:
         view = view[written:]
 
 
-def write_bytes_atomic(path: pathlib.Path, content: bytes, *, fsync: bool = False) -> None:
+def write_bytes_atomic(path: pathlib.Path, content: bytes, *, fsync: bool = False,
+                       attest: bool = False) -> Optional[os.stat_result]:
     """Atomically overwrite ``path`` with exact bytes.
 
     A crash leaves the complete old or new file; ``fsync`` is opt-in, so power-loss
     durability is not promised, and appends are a separate non-atomic contract.
-    Byte-exact: no newline translation on any platform.
+    No newline translation. With `attest`, return the staging stat if available.
+    Device, inode, size and mtime survive publication; rename can change ctime.
     """
 
     def _write(tmp: pathlib.Path) -> None:
@@ -323,7 +329,39 @@ def write_bytes_atomic(path: pathlib.Path, content: bytes, *, fsync: bool = Fals
         finally:
             os.close(fd)
 
-    _atomic_overwrite(path, _write)
+    return _atomic_overwrite(path, _write, attest=attest)
+
+
+def write_owner_only_bytes(path: pathlib.Path, content: bytes, *, landing: str = "") -> None:
+    """Atomically and durably replace ``path`` with exact bytes only the current user may read or write.
+
+    The sibling temporary is created exclusively at 0600, and on Windows its DACL is protected to its
+    owner (``platform_layer.restrict_to_owner``), before any byte lands: no window shows the content
+    under a wider mode, and an existing file's mode is never carried over (unlike ``write_bytes_atomic``).
+    ``landing`` names that temporary ``.<name>.tmp.<landing>`` for a caller that must find exactly it after a
+    stop between its creation and the replace (``peer_links``); without it the name is unique per call."""
+    from ouroboros import platform_layer
+    path = pathlib.Path(path)
+    assert_test_data_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if landing and not all(ch.isalnum() or ch in "-_" for ch in landing):
+        raise ValueError("landing must be letters, digits, '-' or '_'")
+    tmp = path.with_name(f".{path.name}.tmp.{landing}" if landing else
+                         f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        try:
+            if platform_layer.IS_WINDOWS:
+                platform_layer.restrict_to_owner(str(tmp))
+            _write_fd_fully(fd, content, tmp)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        replace_atomic(tmp, path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 # What fsync of a folder's descriptor may answer where the filesystem cannot sync a folder at all (some
@@ -1395,6 +1433,7 @@ _SECRET_PATTERNS = _re.compile(
     r'|gsk_[A-Za-z0-9]{30,}'      # Groq API key
     r'|sk-[A-Za-z0-9]{40,}'       # OpenAI API key
     r'|(?:(?<=bot)|\b)[0-9]{8,}:[A-Za-z0-9_\-]{20,}\b'  # Telegram bot token (digits:secret; matches the /bot<id>:<secret>/ URL form — no \b exists between 'bot' and a digit)
+    r'|\bouroboros-invite:1:[A-Za-z0-9_\-]{16,}'  # a linked-Ouroboros invitation carries a one-time token
 )
 _SECRET_URL_CREDENTIAL_RE = _re.compile(
     r'(?i)\b(?:postgres|postgresql|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^/\s:@]+:[^/\s@]+@'
@@ -1424,6 +1463,8 @@ CREDENTIAL_HEADER_NAMES = frozenset({
     "anthropic-api-key",
     "openai-api-key",
     "cookie",
+    "x-ouroboros-link",  # a linked Ouroboros's key, ``<link_id>.<secret>`` (peer_links)
+    "x-ouroboros-invite",  # a one-time invitation token (peer_links)
 })
 
 

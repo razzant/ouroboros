@@ -251,14 +251,19 @@ def test_settings_form_no_longer_offers_a_bridge_language(plugin, tmp_path):
 
 
 def test_a_row_the_memory_lacks_is_reported_once_and_wakes_the_generator(plugin, tmp_path, monkeypatch):
-    """Missing translations stay strictly passive read-only: fallback to English with ZERO writes to shared install state."""
+    i18n = plugin.telegram_i18n
     monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
     _seed(tmp_path / "data", "ru", {"code:tg.menu.btn_back": {"text": "⬅️ Назад"}})
+    woken = []
+    monkeypatch.setattr(i18n, "_wake_generator", lambda r, tag: woken.append(tag))
+    monkeypatch.setattr(i18n, "_REPORTED", {})
     texts = plugin._LOCALIZED_TEXTS["ru"]
-    assert texts["btn_back"] == "⬅️ Назад"
+    assert texts["btn_back"] == "⬅️ Назад" and woken == []
     assert texts["btn_metrics"] == "📉 Status & Metrics"
     assert texts["btn_metrics"] == "📉 Status & Metrics"
-    assert dict(memory.take_pending(tmp_path / "data", "ru", 10)) == {}
+    assert woken == ["ru"], "one wake for the first miss, none for the repeat"
+    pending = dict(memory.take_pending(tmp_path / "data", "ru", 10))
+    assert pending["code:tg.menu.btn_metrics"]["context"] == {"source": "📉 Status & Metrics", "table": "tg.menu", "role": "telegram"}
 
 
 def test_format_falls_back_to_the_english_row_when_a_generated_template_does_not_fit(plugin, tmp_path, monkeypatch):

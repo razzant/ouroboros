@@ -1,8 +1,10 @@
 """Whole-file shards of every OS preserve both passes and cannot publish incomplete proof."""
 from collections import Counter
+import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -21,6 +23,8 @@ EXPRESSIONS = {name: f"{prefix}exclusive and {LANE_EXCLUSION_EXPR}"
                for name, prefix in (("parallel", "not "), ("serial", ""))}
 # The full-test matrix: runner image, `runner.os` (the artifacts' OS name) and its shard count.
 SHARDED = (("ubuntu-latest", "Linux", 4), ("macos-latest", "macOS", 4), ("windows-latest", "Windows", 8))
+LANES = {"parallel": "parallel", "serial": "exclusive"}  # evidence label -> `run_tests.py --lane-pass`
+PASS_FLAGS = {"parallel": PARALLEL_PASS_FLAGS, "serial": SERIAL_PASS_FLAGS}
 
 
 def test_file_assignment_keeps_modules_and_balances_independent_of_input_order():
@@ -183,7 +187,107 @@ def _jobs():
     return yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
 
 
-def test_every_os_runs_whole_file_shards_of_both_passes_and_its_checks_once(tmp_path):
+def _script(name):
+    spec = importlib.util.spec_from_file_location(f"{name}_script", ROOT / "scripts" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("label", ["parallel", "serial"])
+def test_ci_lane_and_legacy_flags_execute_the_same_retry_targets(tmp_path, label):
+    """Run the two passing recipes over one whole file and one exact retry case."""
+    suite = tmp_path / "suite"
+    (suite / "tests").mkdir(parents=True)
+    (suite / "tests/conftest.py").touch()
+    (suite / "conftest.py").write_text(
+        f"import sys\nsys.path.insert(0, {str(ROOT)!r})\npytest_plugins = ['tests.conftest']\n", encoding="utf-8")
+    (suite / "tests/test_whole.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.serial('fixture')\ndef test_parallel(): pass\n"
+        "@pytest.mark.serial('exclusive')\ndef test_serial(): pass\n"
+        "@pytest.mark.ui_browser\ndef test_opt_in(): raise AssertionError('wrong lane')\n", encoding="utf-8")
+    (suite / "tests/test_param.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('value', [1, 2], ids=['x@y::z', 'other'])\n"
+        "def test_parallel(value): assert value == 1\n"
+        "@pytest.mark.serial('exclusive')\n"
+        "@pytest.mark.parametrize('value', [1, 2], ids=['x@y::z', 'other'])\n"
+        "def test_serial(value): assert value == 1\n", encoding="utf-8")
+    entry = tmp_path / "entry.py"
+    entry.write_text(
+        "import os, runpy, sys\n"
+        f"from pathlib import Path\nos.chdir({str(suite)!r})\n"
+        f"os.environ[{NESTED_WORKERS_ENV!r}] = '1'\n"
+        f"main = runpy.run_path({str(ROOT / 'scripts/run_tests.py')!r})['main']\n"
+        "main.__globals__['REPO'] = Path.cwd()\nraise SystemExit(main(sys.argv[1:]))\n", encoding="utf-8")
+    whole, node = "tests/test_whole.py", f"tests/test_param.py::test_{label}[x@y::z]"
+    ci_retry = _script("ci_retry")
+    round_dir = tmp_path / "retry"
+    round_dir.mkdir()
+    argsfile = round_dir / "args file.txt"
+    direct = ci_retry.write_argsfile(argsfile, [whole, node])
+    command = [sys.executable, str(entry), "--lane-pass", LANES[label], whole, "tests/test_param.py",
+               "-q", "--tb=short", f"--ci-evidence-dir={tmp_path / 'original'}", "--default-suite-shard=1/2"]
+    retried = ci_retry.retry_command(command, argsfile=argsfile, direct=direct, round_dir=round_dir)
+    control = [sys.executable, str(entry), whole, node, "-m", EXPRESSIONS[label], *PASS_FLAGS[label],
+               "-q", "--tb=short", f"--ci-evidence-dir={tmp_path / 'legacy'}"]
+    for argv, proof in ((control, tmp_path / "legacy"), (retried, round_dir)):
+        result = subprocess.run(
+            [sys.executable, "-I", "-S", str(ROOT / "scripts/safe_test.py"),
+             "--temp-parent", str(tmp_path), "--evidence-dir", str(tmp_path / "raw"), "--", *argv],
+            capture_output=True, text=True, encoding="utf-8", timeout=45)
+        assert result.returncode == 0, result.stdout + result.stderr
+        reports = json.loads((proof / "results.json").read_text(encoding="utf-8"))["reports"]
+        assert {row["nodeid"] for row in reports if row["phase"] == "call" and row["outcome"] == "passed"} == {
+            f"{whole}::test_{label}", node}
+
+
+def _assert_the_runner_expands_each_pass(monkeypatch, tmp_path, steps, modules=("tests/",)):
+    """Each `tests_<label>` step's runner command, as `run_tests.main` starts it and as a scripts/ci_retry.py round
+    re-runs it: exactly the `-m "<expression>"` and flags the step spelled before `--lane-pass`, then its own
+    paths and options. A round keeps the lane, names its tests by the argument file and drops only the shard."""
+    run_tests, ci_retry = _script("run_tests"), _script("ci_retry")
+    monkeypatch.delenv("OUROBOROS_TEST_EVIDENCE_ROOT", raising=False)
+    started = []
+    monkeypatch.setattr(run_tests, "_run", lambda name, argv, cwd: started.append(argv) or 0)
+    rendered = {"${{ runner.temp }}": "RUNNER_TEMP", "${{ matrix.shard }}": "2", "${{ matrix.shards }}": "8",
+                '$(cat "$RUNNER_TEMP/journal_modules.txt")': " ".join(modules)}
+    for label, lane in LANES.items():
+        text = steps[f"tests_{label}"]["run"]
+        for expression, value in rendered.items():
+            text = text.replace(expression, value)
+        command = shlex.split(text)
+        runner = command[command.index("--") + 1:]
+        head = ["python", "scripts/run_tests.py", "--lane-pass", lane]
+        assert runner[:4 + len(modules)] == [*head, *modules], runner
+        own = runner[4 + len(modules):]
+        assert "-m" not in own and not set(own) & set(PARALLEL_PASS_FLAGS + SERIAL_PASS_FLAGS), own
+        expanded = [sys.executable, "-m", "pytest", "-m", EXPRESSIONS[label], *PASS_FLAGS[label]]
+        round_dir = tmp_path / label / "retry-1"
+        round_dir.mkdir(parents=True)
+        argsfile = round_dir / "argsfile.txt"
+        direct = ci_retry.write_argsfile(argsfile, ["tests/test_case.py::test_example[x@y::z]"])
+        retried = ci_retry.retry_command(runner, argsfile=argsfile, direct=direct, round_dir=round_dir)
+        assert retried[:5] == [*head, f"@{argsfile}"]  # the lane and its value survive the round
+        round_own = [f"--ci-evidence-dir={round_dir}" if arg.startswith("--ci-evidence-dir=") else arg
+                     for arg in own if not arg.startswith("--default-suite-shard")]
+        assert retried[5:] == round_own
+        for argv, after in ((runner, [*modules, *own]), (retried, [f"@{argsfile}", *round_own])):
+            started.clear()
+            assert run_tests.main(argv[2:]) == 0
+            assert started == [[*expanded, *after]], label
+
+
+@pytest.mark.parametrize("job, modules", [("quick-test", ("tests/",)),
+                                         ("journal-persist", ("tests/test_store.py", "tests/test_store_import.py"))])
+def test_the_other_wrapped_default_passes_hand_pytest_the_gates_expression_and_flags(monkeypatch, tmp_path, job, modules):
+    """quick-test's shards and journal-persist's selected modules run the same two lanes (full-test-runs: below)."""
+    steps = {step["id"]: step for step in _jobs()[job]["steps"] if "id" in step}
+    _assert_the_runner_expands_each_pass(monkeypatch, tmp_path, steps, modules)
+
+
+def test_every_os_runs_whole_file_shards_of_both_passes_and_its_checks_once(tmp_path, monkeypatch):
     job = _jobs()["full-test-runs"]
     # The legs come from the run's plan (tests/test_platform_ci_events.py runs that step per scope).
     assert job["needs"] == "shard-plan"
@@ -192,11 +296,12 @@ def test_every_os_runs_whole_file_shards_of_both_passes_and_its_checks_once(tmp_
     steps = {step["id"]: step for step in job["steps"] if "id" in step}
     for label in EXPRESSIONS:
         run, collect = steps[f"tests_{label}"], steps[f"manifest_{label}"]
-        assert f'-m "{EXPRESSIONS[label]}"' in run["run"] and f'-m "{EXPRESSIONS[label]}"' in collect["run"]
+        # The witness spells the expression (an independent oracle); the pass names its lane, never a `-m`.
+        assert f'-m "{EXPRESSIONS[label]}"' in collect["run"] and " -m " not in run["run"]
         # scripts/ci_retry.py wraps each pass; the shard option stays its last argument.
         assert run["run"].startswith(
             f'python scripts/ci_retry.py --evidence-dir "${{{{ runner.temp }}}}/ci-evidence/{label}" '
-            "--accepted tests/accepted_failures.json -- python scripts/run_tests.py tests/ ")
+            f"--accepted tests/accepted_failures.json -- python scripts/run_tests.py --lane-pass {LANES[label]} tests/ ")
         assert run["run"].endswith("--default-suite-shard=${{ matrix.shard }}/${{ matrix.shards }}")
         assert run["env"] == {"GH_TOKEN": "${{ github.token }}"}  # The accepted-failure check reads issues.
         assert "matrix.shard" not in run["if"]
@@ -206,10 +311,9 @@ def test_every_os_runs_whole_file_shards_of_both_passes_and_its_checks_once(tmp_
         assert "--collect-only -q --default-suite-manifest" in collect["run"]
         assert "continue-on-error" not in run and "continue-on-error" not in collect
         assert run["timeout-minutes"] == 90
-    assert " ".join(PARALLEL_PASS_FLAGS) in steps["tests_parallel"]["run"]
-    assert " ".join(SERIAL_PASS_FLAGS) in steps["tests_serial"]["run"]
-    assert all(flag not in steps["tests_serial"]["run"].split()
-               for flag in PARALLEL_PASS_FLAGS if flag not in SERIAL_PASS_FLAGS)
+    # What each pass and its retry round hand pytest: the expression and flags the step spelled before
+    # `--lane-pass` (tests/test_preflight_runner.py compares them with the gate's own passes).
+    _assert_the_runner_expands_each_pass(monkeypatch, tmp_path, steps)
     assert {"issues": "read"}.items() <= job["permissions"].items()
     for name in ("setup_node", "posix_tools", "select_posix_tools"):
         assert "matrix.shard" not in steps[name]["if"]  # Every runner needs the utilities and node.

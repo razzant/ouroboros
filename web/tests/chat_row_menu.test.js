@@ -4,15 +4,23 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatRowMenu } from '../modules/chat_row_menu.js';
+import { buildTimelineItemHtml } from '../modules/chat_activity.js';
 import { createMessageActions } from '../modules/message_actions.js';
-import { cardMenuActions, emptyWorkState } from '../modules/work_status.js';
+import { cardControls, emptyWorkState } from '../modules/work_status.js';
 import { installDomDouble } from './dom_double.js';
 
-function fixture({ actions = undefined, selectText } = {}) {
+const menuRows = (menu) => menu?.querySelector(':scope > .ui-popup-body')?.children || [];
+
+function fixture({ actions = undefined, selectText, phone = false } = {}) {
     const env = installDomDouble();
     const { doc, el } = env;
     const feed = el('div', { className: 'chat-messages' });
     doc.body.append(feed);
+    if (phone) {
+        window.ouroLayout = { layout: 'stack' };
+        window.matchMedia = () => ({ matches: true });
+        feed.rect = { left: 0, top: 50, right: 390, bottom: 670, width: 390, height: 620 };
+    }
     const started = [];
     const replies = {
         bubbleRef: (row) => (row.dataset.rowAddress ? { address: row.dataset.rowAddress } : null),
@@ -37,14 +45,16 @@ function fixture({ actions = undefined, selectText } = {}) {
     const activity = { phase: 'working' };
     const works = emptyWorkState();
     const cards = new Map();
+    const episode = { token: {} };
     // chat.js's own wiring: the card's Stop… items come from its work, else from the card's own task controls.
     const menu = createChatRowMenu({ feed, replies, cardOf: (id) => cards.get(id),
-        actionsOf: (record) => cardMenuActions(works, record, activity), actions });
+        readControls: (record) => ({ ...cardControls(works, record.groupId), activity, legacy: true,
+            episode: episode.token, resume: Boolean(record.resumeRunBtn) }), actions });
     const openMenu = () => doc.body.children.find((node) => node.classList.contains('chat-row-menu')) || null;
-    const items = () => (openMenu()?.children || []).map((node) => node.dataset.rowAction);
+    const items = () => menuRows(openMenu()).map((node) => node.dataset.rowAction);
     const touch = (node, type, extra = {}) => node.emit(type, { pointerType: 'touch', isPrimary: true, pointerId: 1,
         clientX: 30, clientY: 60, ...extra });
-    return { ...env, feed, cards, bubble, plain, copy, link, words, menu, started, copied, opened, activity, works, openMenu, items, touch,
+    return { ...env, feed, cards, bubble, plain, copy, link, words, menu, started, copied, opened, activity, works, episode, openMenu, items, touch,
         close() { menu.destroy(); env.restore(); } };
 }
 
@@ -86,17 +96,17 @@ test('a right-click on a bubble opens its menu at the pointer: Reply, Copy, Open
         const menu = f.openMenu();
         assert.equal(menu.getAttribute('role'), 'menu');
         assert.equal(menu.getAttribute('aria-label'), 'Message actions');
-        assert.equal(menu.children.every((item) => item.getAttribute('role') === 'menuitem'), true);
+        assert.equal(menuRows(menu).every((item) => item.getAttribute('role') === 'menuitem'), true);
         assert.equal(menu.css.get('--ui-popup-left'), '40px', 'placed at the pointer');
-        assert.equal(f.doc.activeElement, menu.children[0], 'keyboard focus enters the menu');
-        menu.children[0].click();
+        assert.equal(f.doc.activeElement, menuRows(menu)[0], 'keyboard focus enters the menu');
+        menuRows(menu)[0].click();
         assert.deepEqual(f.started, ['row:1@t#a'], 'Reply quotes this row');
         assert.equal(f.openMenu(), null, 'an item closes the menu');
         f.words.emit('contextmenu', { clientX: 1, clientY: 1 });
-        f.openMenu().children[1].click();
+        menuRows(f.openMenu())[1].click();
         assert.deepEqual(f.copied, ['bubble'], 'Copy is the bubble\'s own Copy');
         f.words.emit('contextmenu', { clientX: 1, clientY: 1 });
-        f.openMenu().children[2].click();
+        menuRows(f.openMenu())[2].click();
         assert.deepEqual(f.opened, ['project'], 'Open project presses the row\'s Project reference');
     } finally { f.close(); }
 });
@@ -111,7 +121,7 @@ test('a link, a field or selected words keep the browser menu; a row with nothin
         f.doc.selection = { isCollapsed: true, anchorNode: f.words };
         f.words.emit('contextmenu', { clientX: 1, clientY: 1 });
         assert.ok(f.openMenu(), 'a collapsed caret is no selection');
-        f.openMenu().children[0].click();
+        menuRows(f.openMenu())[0].click();
         // A right button selects the word under it (macOS) before contextmenu: that selection is the gesture's own.
         f.doc.selection = { isCollapsed: true, anchorNode: f.words };
         f.words.emit('pointerdown', { button: 2, pointerType: 'mouse', isPrimary: true, pointerId: 9 });
@@ -120,7 +130,7 @@ test('a link, a field or selected words keep the browser menu; a row with nothin
         assert.equal(f.words.emit('contextmenu', { clientX: 1, clientY: 1 }).defaultPrevented, true);
         assert.ok(f.openMenu(), 'the row menu opens over the word the right button selected');
         assert.equal(cleared, true, 'and that gesture-made selection goes');
-        f.openMenu().emit('keydown', { key: 'Escape', target: f.openMenu().children[0] });
+        f.openMenu().emit('keydown', { key: 'Escape', target: menuRows(f.openMenu())[0] });
         // The owner's own selection, there before the right button went down, keeps the browser's menu.
         f.words.emit('pointerdown', { button: 2, pointerType: 'mouse', isPrimary: true, pointerId: 10 });
         assert.equal(f.words.emit('contextmenu', { clientX: 1, clientY: 1 }).defaultPrevented, undefined);
@@ -140,13 +150,13 @@ test('Shift+F10 and the ContextMenu key open the focused row\'s menu; Esc closes
         assert.equal(key.defaultPrevented, true);
         const menu = f.openMenu();
         assert.ok(menu);
-        assert.equal(f.doc.activeElement, menu.children[0]);
-        menu.emit('keydown', { key: 'Escape', target: menu.children[0] });
+        assert.equal(f.doc.activeElement, menuRows(menu)[0]);
+        menu.emit('keydown', { key: 'Escape', target: menuRows(menu)[0] });
         assert.equal(f.openMenu(), null);
         assert.equal(f.doc.activeElement, f.copy, 'focus returns to where it was in the row');
         f.copy.emit('keydown', { key: 'ContextMenu' });
         assert.ok(f.openMenu(), 'the ContextMenu key too');
-        f.openMenu().emit('keydown', { key: 'Escape', target: f.openMenu().children[0] });
+        f.openMenu().emit('keydown', { key: 'Escape', target: menuRows(f.openMenu())[0] });
         assert.equal(f.copy.emit('keydown', { key: 'F10' }).defaultPrevented, undefined, 'F10 alone is not the menu key');
         assert.equal(f.openMenu(), null);
     } finally { f.close(); }
@@ -157,7 +167,7 @@ test('a pointer-opened menu returns focus to the row itself on Esc; an outside p
     try {
         f.words.emit('contextmenu', { clientX: 5, clientY: 5 });
         assert.equal(f.bubble.getAttribute('tabindex'), '-1', 'the bubble can hold focus to be returned to');
-        f.openMenu().emit('keydown', { key: 'Escape', target: f.openMenu().children[0] });
+        f.openMenu().emit('keydown', { key: 'Escape', target: menuRows(f.openMenu())[0] });
         assert.equal(f.doc.activeElement, f.bubble);
         f.words.emit('contextmenu', { clientX: 5, clientY: 5 });
         f.feed.parent.emit('pointerdown', { target: f.doc.body });
@@ -179,11 +189,11 @@ test('a long touch press opens the menu where the finger is; the tap that ends i
         assert.equal(f.words.emit('contextmenu', { clientX: 30, clientY: 60 }).defaultPrevented, true,
             'the contextmenu Android also fires for a long press is answered already');
         f.words.emit('pointerup', { pointerType: 'touch', pointerId: 1 });
-        const tap = menu.children[0].emit('click', { target: menu.children[0] });
+        const tap = menuRows(menu)[0].emit('click', { target: menuRows(menu)[0] });
         assert.equal(tap.defaultPrevented, true, 'the lifting finger does not press the item under it');
         assert.deepEqual(f.started, []);
         t.mock.timers.tick(1000);
-        menu.children[0].click();
+        menuRows(menu)[0].click();
         assert.deepEqual(f.started, ['row:1@t#a'], 'a deliberate tap afterwards works');
     } finally { f.close(); }
 });
@@ -196,7 +206,7 @@ test('Select text releases the touched body to native handles without staging a 
     try {
         hold();
         t.mock.timers.tick(500);
-        const item = f.openMenu().children.find(button => button.textContent === 'Select text');
+        const item = menuRows(f.openMenu()).find(button => button.textContent === 'Select text');
         f.words.emit('pointerup', { pointerType: 'touch', pointerId: 1 });
         item.emit('pointerdown', { pointerType: 'touch', isPrimary: true, pointerId: 2 });
         item.click();
@@ -228,7 +238,7 @@ test('feed scroll cancels a pending hold, but not the release guard of an open m
         assert.ok(menu);
         f.feed.emit('scroll'); // a reflow can scroll the feed beneath the lifted row without closing its menu
         f.touch(f.words, 'pointerup');
-        const reply = menu.children[0];
+        const reply = menuRows(menu)[0];
         const click = reply.emit('click', { isTrusted: true, detail: 1 });
         assert.deepEqual(f.started, [], 'reflow did not turn the original release into Reply');
         assert.equal(click.defaultPrevented, true);
@@ -247,7 +257,7 @@ test('an unrelated pointer end does not end a pending or fired hold', (t) => {
         assert.ok(menu, 'the waiting finger is still down');
         f.touch(f.words, 'pointercancel', { pointerId: 2 });
         f.touch(f.words, 'pointerup');
-        assert.equal(menu.children[0].emit('click', { isTrusted: true, detail: 1 }).defaultPrevented, true,
+        assert.equal(menuRows(menu)[0].emit('click', { isTrusted: true, detail: 1 }).defaultPrevented, true,
             'only the original pointer ends the fired hold');
         assert.deepEqual(f.started, []);
     } finally { f.close(); }
@@ -260,7 +270,7 @@ for (const end of ['pointerup', 'pointercancel']) {
         try {
             f.touch(f.words, 'pointerdown');
             t.mock.timers.tick(450);
-            const reply = f.openMenu().children[0];
+            const reply = menuRows(f.openMenu())[0];
             f.bubble.remove();
             f.touch(reply, end); // the portalled target is in the document, not in the chat feed
             assert.equal(reply.emit('click', { isTrusted: true, detail: 1 }).defaultPrevented, true);
@@ -289,7 +299,7 @@ test('a hold also swallows its compatibility mousedown, but not the next indepen
     try {
         f.touch(f.words, 'pointerdown');
         t.mock.timers.tick(450);
-        const [reply, copy] = f.openMenu().children;
+        const [reply, copy] = menuRows(f.openMenu());
         assert.equal(f.doc.activeElement, reply);
         f.touch(f.words, 'pointerup');
         const mouse = { isTrusted: true, detail: 1 };
@@ -316,7 +326,7 @@ test("Android's contextmenu before the long press's time opens the menu once, an
         t.mock.timers.tick(500);
         assert.equal(f.openMenu(), menu, 'the long press time opens no second menu');
         f.words.emit('pointerup', { pointerType: 'touch', pointerId: 1 });
-        assert.equal(menu.children[0].emit('click', { target: menu.children[0] }).defaultPrevented, true,
+        assert.equal(menuRows(menu)[0].emit('click', { target: menuRows(menu)[0] }).defaultPrevented, true,
             'the lifting finger does not press the item under it');
         assert.deepEqual(f.started, []);
     } finally { f.close(); }
@@ -340,15 +350,15 @@ test('a tap 250 ms after a long press presses the item it meets, once; the lift\
         assert.equal(f.doc.captures.get('click')?.size || 0, 0, 'nothing listens for clicks on the document before a press');
         const menu = hold(1);  // this host sends no click for the hold
         t.mock.timers.tick(250);
-        assert.equal(tap(menu.children[0], 2).defaultPrevented, undefined, 'the next finger presses Reply');
+        assert.equal(tap(menuRows(menu)[0], 2).defaultPrevented, undefined, 'the next finger presses Reply');
         assert.deepEqual(f.started, ['row:1@t#a'], 'once');
         assert.equal(f.openMenu(), null);
         // A host that does send the hold's click: that one presses nothing, the next finger's does.
         const again = hold(3);
-        assert.equal(again.children[1].emit('click', { target: again.children[1], detail: 1 }).defaultPrevented, true);
+        assert.equal(menuRows(again)[1].emit('click', { target: menuRows(again)[1], detail: 1 }).defaultPrevented, true);
         assert.deepEqual(f.copied, []);
         t.mock.timers.tick(250);
-        tap(again.children[1], 4);
+        tap(menuRows(again)[1], 4);
         assert.deepEqual(f.copied, ['bubble'], 'Copy, once');
         assert.equal(f.doc.captures.get('click')?.size || 0, 0, 'and nothing waits any more');
     } finally { f.close(); }
@@ -366,16 +376,16 @@ test('after the browser took the hold, or by the menu\'s keys, the next action a
         const menu = hold(1);
         f.words.emit('pointercancel', { pointerType: 'touch', pointerId: 1 });
         t.mock.timers.tick(250);
-        menu.children[0].emit('pointerdown', { pointerType: 'touch', isPrimary: true, pointerId: 2 });
-        assert.equal(menu.children[0].emit('click', { target: menu.children[0], detail: 1 }).defaultPrevented, undefined,
+        menuRows(menu)[0].emit('pointerdown', { pointerType: 'touch', isPrimary: true, pointerId: 2 });
+        assert.equal(menuRows(menu)[0].emit('click', { target: menuRows(menu)[0], detail: 1 }).defaultPrevented, undefined,
             'pointercancel, then a new finger');
         assert.deepEqual(f.started, ['row:1@t#a']);
         const keyed = hold(3);
         f.words.emit('pointerup', { pointerType: 'touch', pointerId: 3 });
-        assert.equal(f.doc.activeElement, keyed.children[0], 'the keyboard focus is in the menu the press opened');
-        keyed.children[1].focus();
-        keyed.children[1].emit('keydown', { key: 'Enter' });
-        keyed.children[1].emit('click', { target: keyed.children[1], detail: 0 });
+        assert.equal(f.doc.activeElement, menuRows(keyed)[0], 'the keyboard focus is in the menu the press opened');
+        menuRows(keyed)[1].focus();
+        menuRows(keyed)[1].emit('keydown', { key: 'Enter' });
+        menuRows(keyed)[1].emit('click', { target: menuRows(keyed)[1], detail: 0 });
         assert.deepEqual(f.copied, ['bubble'], 'Enter presses Copy at once');
         // The contextmenu Android may still fire for a lifted hold opens nothing; a right-click after it does.
         hold(5);
@@ -421,29 +431,28 @@ test('a work card offers Reply, Copy, Open project, Resume, Pause and Stop… ex
         summary.emit('contextmenu', { clientX: 1, clientY: 1 });
         assert.equal(f.openMenu().getAttribute('aria-label'), 'Work actions');
         assert.deepEqual(f.items(), ['reply', 'copy', 'project', 'resume', 'pause', 'stop']);
-        assert.equal(f.openMenu().children.at(-1).textContent, 'Stop…', 'the card\'s own words');
+        assert.equal(menuRows(f.openMenu()).at(-1).textContent, 'Stop…', 'the card\'s own words');
         const press = (kind) => {
             summary.emit('contextmenu', { clientX: 1, clientY: 1 });
-            f.openMenu().children.find((node) => node.dataset.rowAction === kind).click();
+            menuRows(f.openMenu()).find((node) => node.dataset.rowAction === kind).click();
         };
         press('reply'); press('project'); press('resume'); press('stop');
         assert.deepEqual(pressed.splice(0), ['project', 'resume', 'stop'], 'each item presses the card\'s own control');
         assert.deepEqual(f.started.splice(0), ['task:t-1'], 'Reply quotes the work by its task address');
-        // A nested child is part of its root's work: its press opens the root's menu, and its own reference is not the root's.
+        // A child without its own loaded record cannot borrow its parent's Reply or work controls.
         child.emit('contextmenu', { clientX: 1, clientY: 1 });
-        assert.deepEqual(f.items(), ['reply', 'copy', 'project', 'resume', 'pause', 'stop']);
-        f.openMenu().emit('keydown', { key: 'Escape', target: f.openMenu().children[0] });
+        assert.equal(f.openMenu(), null);
         // What the card does not offer, the menu does not offer.
         record.resumeRunBtn.remove();
         f.activity.phase = 'budget_paused';
         summary.emit('contextmenu', { clientX: 1, clientY: 1 });
         assert.deepEqual(f.items(), ['reply', 'copy', 'project', 'stop'], 'a paused work: no Pause, Resume only when shown');
-        f.openMenu().emit('keydown', { key: 'Escape', target: f.openMenu().children[0] });
+        f.openMenu().emit('keydown', { key: 'Escape', target: menuRows(f.openMenu())[0] });
         f.activity.phase = 'working';
         record.cancelPendingPolicy = 'finalize';
         summary.emit('contextmenu', { clientX: 1, clientY: 1 });
         assert.deepEqual(f.items(), ['reply', 'copy', 'project', 'stop'], 'a pending stop offers only its escalation');
-        f.openMenu().emit('keydown', { key: 'Escape', target: f.openMenu().children[0] });
+        f.openMenu().emit('keydown', { key: 'Escape', target: menuRows(f.openMenu())[0] });
         record.cancelRunBtn.remove();
         record.replyable = false;
         summary.emit('contextmenu', { clientX: 1, clientY: 1 });
@@ -461,11 +470,59 @@ test('a work card\'s Pause follows its work\'s controls, never the census phase'
         work([{ action: 'stop', target: 't-1' }]);
         summary.emit('contextmenu', { clientX: 1, clientY: 1 });
         assert.deepEqual(f.items(), ['reply', 'copy', 'project', 'stop'], 'the census says working; the work offers no Pause');
-        f.openMenu().emit('keydown', { key: 'Escape', target: f.openMenu().children[0] });
+        f.openMenu().emit('keydown', { key: 'Escape', target: menuRows(f.openMenu())[0] });
         work([{ action: 'pause', target: 't-1' }, { action: 'stop', target: 't-1' }]);
         f.activity.phase = 'budget_paused';
         summary.emit('contextmenu', { clientX: 1, clientY: 1 });
         assert.deepEqual(f.items(), ['reply', 'copy', 'project', 'pause', 'stop'], 'the work\'s Pause, whatever the census says');
+    } finally { f.close(); }
+});
+
+test('a row menu opened before control withdrawal cannot stop, pause or resume, but keeps its reading actions', async (t) => {
+    const f = fixture();
+    const posts = [];
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+        if (init?.method === 'POST') posts.push(String(url));
+        return { ok: true, json: async () => ({ ok: true, state: 'paused' }) };
+    });
+    const { card, record, pressed, summary } = workCard(f, { resume: true });
+    const open = () => { f.menu.open(card, { anchor: summary }); return f.openMenu(); };
+    const item = (menu, kind) => menu.querySelector(`[data-row-action="${kind}"]`);
+    const stop = record.cancelRunBtn;
+    try {
+        summary.focus();
+        const pause = item(open(), 'pause');
+        f.activity.phase = 'budget_paused';  // Pause withdrawn, Stop still exists.
+        pause.click();
+        assert.deepEqual(posts, []);
+        assert.equal(f.doc.activeElement, summary, 'a withdrawn press returns focus to its own row');
+
+        f.activity.phase = 'working';
+        const oldAttempt = item(open(), 'pause');
+        f.episode.token = {};
+        oldAttempt.click();
+        assert.deepEqual(posts, [], 'the same visible button does not authorize a different attempt');
+        const openedStop = item(open(), 'stop');
+        stop.remove(); record.cancelRunBtn = null;
+        assert.doesNotThrow(() => openedStop.click());
+        assert.equal(f.doc.activeElement, summary, 'no successor control took focus');
+
+        const openedResume = item(open(), 'resume');
+        record.resumeRunBtn.remove(); record.resumeRunBtn = null;
+        assert.doesNotThrow(() => openedResume.click());
+        assert.deepEqual(pressed, []);
+        assert.equal(f.doc.activeElement, summary);
+        const reading = open();
+        assert.deepEqual(f.items(), ['reply', 'copy', 'project']);
+        item(reading, 'reply').click();
+        assert.deepEqual(f.started, ['task:t-1']);
+        assert.ok(item(open(), 'copy'), 'Copy remains a door on the same row');
+        item(f.openMenu(), 'project').click();
+        card.append(stop); record.cancelRunBtn = stop;
+        item(open(), 'pause').click();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(posts, ['/api/tasks/t-1/pause'], 'a current Pause uses the shared request once');
+        assert.deepEqual(pressed, ['project']);
     } finally { f.close(); }
 });
 
@@ -510,14 +567,14 @@ test('a bubble\'s menu lists the registered actions after its own doors, in thei
     try {
         f.words.emit('contextmenu', { clientX: 1, clientY: 1 });
         assert.deepEqual(f.items(), ['reply', 'copy', 'project', 'read_aloud']);
-        assert.equal(f.openMenu().children[3].textContent, 'Read aloud');
-        f.openMenu().children[3].click();
+        assert.equal(menuRows(f.openMenu())[3].textContent, 'Read aloud');
+        menuRows(f.openMenu())[3].click();
         assert.deepEqual(ran, [['row:1@t#a', f.bubble]], 'the action runs on this row');
         assert.equal(f.openMenu(), null);
         speaking = true;
         f.words.emit('contextmenu', { clientX: 1, clientY: 1 });
-        assert.equal(f.openMenu().children[3].textContent, 'Stop', 'the words follow the action\'s own state');
-        f.openMenu().emit('keydown', { key: 'Escape', target: f.openMenu().children[0] });
+        assert.equal(menuRows(f.openMenu())[3].textContent, 'Stop', 'the words follow the action\'s own state');
+        f.openMenu().emit('keydown', { key: 'Escape', target: menuRows(f.openMenu())[0] });
         const { summary } = workCard(f);
         summary.emit('contextmenu', { clientX: 1, clientY: 1 });
         assert.equal(f.items().includes('read_aloud'), false, 'a work card is not a reply row');
@@ -566,4 +623,254 @@ test('on touch the row sinks while the finger holds, lifts with a haptic while i
         assert.equal(f.bubble.dataset.rowPress, undefined);
         assert.deepEqual(played, ['medium']);
     } finally { delete globalThis.window.Telegram; f.close(); }
+});
+
+
+test('a phone swipe and the actual row menu quote the same exact System row or child card, never the enclosing work', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const f = fixture({ phone: true });
+    try {
+        const { record, child, summary } = workCard(f);
+        const childTitle = f.el('div', { text: 'Read the other room' });
+        const systemTitle = f.el('span', { className: 'chat-live-line-title', text: 'Work paused' });
+        const systemRow = f.el('div', { className: 'chat-live-line', dataset: {
+            workReplyRow: '1', rowAddress: 'row:1@t#system',
+        } }, systemTitle);
+        child.append(childTitle, systemRow);
+        f.cards.set('child', { groupId: 'child', root: child, titleEl: childTitle, replyable: true });
+
+        for (const [target, row, address] of [[systemTitle, systemRow, 'row:1@t#system'],
+            [childTitle, child, 'task:child'], [summary, record.root, 'task:t-1']]) {
+            assert.equal(f.menu.open(row), true);
+            const action = menuRows(f.openMenu()).find(node => node.dataset.rowAction === 'reply');
+            action.emit('pointerdown', { pointerType: 'touch', isPrimary: true });
+            action.click();
+            assert.deepEqual(f.started.splice(0), [address]);
+            const fingers = (x) => [{ identifier: 1, clientX: x, clientY: 220 }];
+            target.emit('touchstart', { touches: fingers(300) });
+            for (const x of [280, 205]) target.emit('touchmove', { touches: fingers(x), cancelable: true });
+            assert.equal(row.dataset.rowSwipe, 'drag');
+            target.emit('touchend', { touches: [], changedTouches: fingers(205) });
+            assert.deepEqual(f.started.splice(0), [address]);
+            t.mock.timers.tick(500);
+        }
+    } finally { f.close(); }
+});
+
+test('child narration and final report quote their own addresses; unstamped timeline rows open their card\'s doors, never its Reply', () => {
+    const actions = createMessageActions();
+    actions.register({ key: 'any_bubble', label: 'Bubble action', applies: () => true, run() {} });
+    const f = fixture({ actions, phone: true });
+    f.doc.parseHtml = true;
+    try {
+        const { child } = workCard(f);
+        const childTitle = f.el('div', { className: 'chat-live-title', text: 'worker' });
+        const timeline = f.el('div', { className: 'chat-live-timeline', dataset: { liveTimeline: '' } });
+        child.append(childTitle, timeline);
+        f.cards.set('child', { groupId: 'child', root: child, titleEl: childTitle, replyable: true });
+
+        const items = [
+            { lineKey: 'narr-short', phase: 'working', headline: 'worker', body: 'Scanning logs.', fullBody: 'Scanning logs.',
+                replyAddress: 'row:1@t1#narr-short', replyRole: 'assistant', dedupeKey: 'history:progress:1' },
+            { lineKey: 'narr-long', phase: 'working', headline: 'worker', body: 'Long preview', fullBody: 'Long preview with full details',
+                replyAddress: 'row:1@t2#narr-long', replyRole: 'assistant', dedupeKey: 'history:progress:2' },
+            { lineKey: 'report', phase: 'done', headline: 'worker', body: 'Audit complete.',
+                fullBody: '## Report to parent\nAudit complete.\nExtra details.', outputPreview: 'Audit complete.',
+                replyAddress: 'row:1@t3#report', replyRole: 'assistant', dedupeKey: 'subagent-result:child' },
+            { lineKey: 'tool', phase: 'result', headline: '2 tool calls', body: '', fullBody: 'read_file · grep',
+                dedupeKey: 'tools|child' },
+            { lineKey: 'lifecycle', phase: 'start', headline: 'worker · Started', body: '', fullBody: '',
+                dedupeKey: 'subagent-lifecycle:child' },
+        ];
+        const record = { groupId: 'child', items, expandedLineKeys: new Set(['report']), timelineEl: timeline };
+        timeline.innerHTML = items.map((item) => buildTimelineItemHtml(item, record)).join('');
+
+        const line = (key) => timeline.querySelector(`[data-live-line-key="${key}"]`);
+        const narrShort = line('narr-short'), narrLong = line('narr-long'), report = line('report');
+        const tool = line('tool'), lifecycle = line('lifecycle');
+        const narrToggle = narrLong.querySelector('[data-live-line-toggle]');
+        const reportToggle = report.querySelector('[data-live-line-toggle]');
+        const toolToggle = tool.querySelector('[data-live-line-toggle]');
+
+        // Tab stops and DOM snippet bounds: 1 stop on short addressable row, toggle-only stop on expandable rows, 0 on unstamped non-expandable.
+        assert.equal(narrShort.getAttribute('tabindex'), '0');
+        assert.equal(narrShort.dataset.rowWords, undefined);
+        assert.equal(narrLong.getAttribute('tabindex'), null, 'expandable row adds no second stop on its wrapper');
+        assert.equal(narrToggle.getAttribute('tabindex'), '0');
+        assert.equal(narrLong.dataset.rowWords, undefined);
+        assert.equal(report.getAttribute('tabindex'), null);
+        assert.equal(reportToggle.getAttribute('tabindex'), '0');
+        assert.equal(report.dataset.rowWords, 'Audit complete.');
+        assert.equal(tool.getAttribute('tabindex'), null);
+        assert.equal(toolToggle.getAttribute('tabindex'), '0');
+        assert.equal(lifecycle.getAttribute('tabindex'), null);
+
+        // Right-click on narration and report quotes each exact address without leaking bubble-only actions.
+        for (const [target, address] of [[narrShort, 'row:1@t1#narr-short'], [report, 'row:1@t3#report']]) {
+            assert.equal(target.emit('contextmenu', { clientX: 12, clientY: 16 }).defaultPrevented, true);
+            assert.deepEqual(f.items(), ['reply'], 'timeline rows expose Reply without leaking bubble-only actions');
+            menuRows(f.openMenu())[0].click();
+            assert.deepEqual(f.started.splice(0), [address]);
+        }
+
+        // Shift+F10 and ContextMenu work from both a focused expandable toggle and a focused short row, restoring focus on Esc.
+        narrToggle.focus();
+        assert.equal(narrToggle.emit('keydown', { key: 'F10', shiftKey: true }).defaultPrevented, true);
+        assert.deepEqual(f.items(), ['reply']);
+        f.openMenu().emit('keydown', { key: 'Escape', target: menuRows(f.openMenu())[0] });
+        assert.equal(f.doc.activeElement, narrToggle, 'Esc returns focus to the focused toggle');
+        assert.equal(narrToggle.emit('keydown', { key: 'ContextMenu' }).defaultPrevented, true);
+        menuRows(f.openMenu())[0].click();
+        assert.deepEqual(f.started.splice(0), ['row:1@t2#narr-long']);
+
+        narrShort.focus();
+        assert.equal(narrShort.emit('keydown', { key: 'F10', shiftKey: true }).defaultPrevented, true);
+        menuRows(f.openMenu())[0].click();
+        assert.deepEqual(f.started.splice(0), ['row:1@t1#narr-short']);
+
+        // Unstamped UI-only lines never quote `task:child` on right-click, keyboard, or swipe: the child's own doors
+        // answer (its Copy, the only one this record has), and a finger swipe leaves the line alone.
+        for (const unstamped of [tool, toolToggle, lifecycle]) {
+            assert.equal(unstamped.emit('contextmenu', { clientX: 12, clientY: 16 }).defaultPrevented, true);
+            assert.equal(f.openMenu().getAttribute('aria-label'), 'Work actions');
+            assert.deepEqual(f.items(), ['copy'], 'the card\'s doors, without the card\'s Reply');
+            f.openMenu().emit('keydown', { key: 'Escape', target: menuRows(f.openMenu())[0] });
+        }
+        toolToggle.focus();
+        assert.equal(toolToggle.emit('keydown', { key: 'F10', shiftKey: true }).defaultPrevented, true);
+        assert.deepEqual(f.items(), ['copy']);
+        f.openMenu().emit('keydown', { key: 'Escape', target: menuRows(f.openMenu())[0] });
+        assert.equal(f.doc.activeElement, toolToggle, 'Esc returns focus to the disclosure the menu key was pressed on');
+        const fingers = (x) => [{ identifier: 1, clientX: x, clientY: 220 }];
+        lifecycle.emit('touchstart', { touches: fingers(300) });
+        for (const x of [280, 205]) lifecycle.emit('touchmove', { touches: fingers(x), cancelable: true });
+        lifecycle.emit('touchend', { touches: [], changedTouches: fingers(205) });
+        assert.deepEqual(f.started, [], 'swiping an unstamped line does not silently quote the card');
+        assert.equal(lifecycle.dataset.rowSwipe, undefined, 'nor does the line follow the finger');
+
+        // Pressing the child card's own header still quotes `task:child`.
+        childTitle.emit('contextmenu', { clientX: 12, clientY: 16 });
+        assert.ok(f.items().includes('reply'));
+        menuRows(f.openMenu())[0].click();
+        assert.deepEqual(f.started.splice(0), ['task:child']);
+    } finally { f.close(); }
+});
+
+// The timeline of a work card as the product builds it: an unstamped tool-evidence line and lifecycle line (no row
+// address, so nothing to quote) around one addressed narration line.
+function cardTimeline(f, card, record) {
+    f.doc.parseHtml = true;
+    const timeline = f.el('div', { className: 'chat-live-timeline', dataset: { liveTimeline: '' } });
+    const items = [
+        { lineKey: 'tool', phase: 'result', headline: '2 tool calls', body: '', fullBody: 'read_file · grep', dedupeKey: `tools|${record.groupId}` },
+        { lineKey: 'narr', phase: 'working', headline: 'worker', body: 'Scanning logs.', fullBody: 'Scanning logs.',
+            replyAddress: `row:1@t1#${record.groupId}-narr`, replyRole: 'assistant', dedupeKey: 'history:progress:1' },
+        { lineKey: 'life', phase: 'start', headline: 'worker · Started', body: '', fullBody: '', dedupeKey: `subagent-lifecycle:${record.groupId}` },
+    ];
+    timeline.innerHTML = items.map((item) => buildTimelineItemHtml(item, { groupId: record.groupId, items,
+        expandedLineKeys: new Set(), timelineEl: timeline })).join('');
+    card.insertBefore(timeline, card.children.at(-1));
+    const line = (key) => timeline.querySelector(`[data-live-line-key="${key}"]`);
+    return { timeline, tool: line('tool'), narr: line('narr'), life: line('life') };
+}
+
+test('a line with no address opens its card\'s doors without the card\'s Reply; the card, not the line, takes the press', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const f = fixture({ phone: true });
+    try {
+        const { card, record, pressed } = workCard(f, { resume: true });
+        const { tool, narr, life } = cardTimeline(f, card, record);
+        const open = (node) => node.emit('contextmenu', { clientX: 12, clientY: 16 });
+        const choose = (node, kind) => { open(node); menuRows(f.openMenu()).find((item) => item.dataset.rowAction === kind).click(); };
+
+        // Pointer: the card's own doors in the card's own order, Reply alone gone (its title is not this line).
+        assert.equal(open(tool).defaultPrevented, true);
+        assert.equal(f.openMenu().getAttribute('aria-label'), 'Work actions');
+        assert.deepEqual(f.items(), ['copy', 'project', 'resume', 'pause', 'stop']);
+        f.openMenu().emit('keydown', { key: 'Escape', target: menuRows(f.openMenu())[0] });
+        for (const kind of ['project', 'resume', 'stop']) choose(life, kind);
+        assert.deepEqual(pressed.splice(0), ['project', 'resume', 'stop'], 'each item presses the card\'s own control');
+        assert.deepEqual(f.started, [], 'no item quotes the card');
+
+        // The same offer the card itself makes: a paused work shows no Pause and the line follows it.
+        f.activity.phase = 'budget_paused';
+        open(tool);
+        assert.deepEqual(f.items(), ['copy', 'project', 'resume', 'stop']);
+        f.openMenu().emit('keydown', { key: 'Escape', target: menuRows(f.openMenu())[0] });
+        f.activity.phase = 'working';
+
+        // Touch: the card sinks while the finger holds and lifts while its menu is open; the line never does.
+        f.touch(life, 'pointerdown');
+        t.mock.timers.tick(150);
+        assert.equal(card.dataset.rowPress, 'hold');
+        assert.equal(life.dataset.rowPress, undefined);
+        t.mock.timers.tick(300);
+        assert.equal(card.dataset.rowPress, 'lift');
+        assert.equal(life.dataset.rowPress, undefined);
+        assert.deepEqual(f.items(), ['copy', 'project', 'resume', 'pause', 'stop']);
+        f.touch(life, 'pointerup');
+        f.feed.parent.emit('pointerdown', { target: f.doc.body });
+        assert.equal(card.dataset.rowPress, 'release', 'on its way back');
+        t.mock.timers.tick(260);
+        assert.equal(card.dataset.rowPress, undefined, 'at rest');
+
+        // A finger that moves on the line (a scroll) puts the sinking card back and opens nothing.
+        f.touch(tool, 'pointerdown');
+        t.mock.timers.tick(200);
+        assert.equal(card.dataset.rowPress, 'hold');
+        f.touch(tool, 'pointermove', { clientY: 80 });
+        assert.equal(card.dataset.rowPress, undefined);
+        t.mock.timers.tick(500);
+        assert.equal(f.openMenu(), null);
+
+        // A swipe on the line replies to nothing and moves nothing; on the addressed line beside it, it replies to that line.
+        const fingers = (x) => [{ identifier: 1, clientX: x, clientY: 220 }];
+        const swipe = (node) => {
+            node.emit('touchstart', { touches: fingers(300) });
+            for (const x of [280, 205]) node.emit('touchmove', { touches: fingers(x), cancelable: true });
+            const dragged = node.dataset.rowSwipe || card.dataset.rowSwipe || '';
+            node.emit('touchend', { touches: [], changedTouches: fingers(205) });
+            t.mock.timers.tick(500);
+            return dragged;
+        };
+        assert.equal(swipe(tool), '');
+        assert.equal(swipe(life), '');
+        assert.deepEqual(f.started, [], 'a swipe on an unaddressed line executes nothing of its card');
+        assert.equal(swipe(narr), 'drag');
+        assert.deepEqual(f.started.splice(0), [`row:1@t1#t-1-narr`], 'the addressed line replies as its own menu does');
+
+        // An addressed line takes its own press and offers its own Reply alone, never its card's doors.
+        f.touch(narr, 'pointerdown');
+        t.mock.timers.tick(150);
+        assert.equal(narr.dataset.rowPress, 'hold');
+        t.mock.timers.tick(300);
+        assert.equal(narr.dataset.rowPress, 'lift');
+        assert.equal(card.dataset.rowPress, undefined);
+        assert.deepEqual(f.items(), ['reply']);
+    } finally { f.close(); }
+});
+
+test('a child\'s unaddressed line offers that child\'s own doors, never its root\'s; a child with no record of its own offers none', () => {
+    const f = fixture();
+    try {
+        const { record, pressed, child } = workCard(f, { resume: true });
+        const title = f.el('div', { className: 'chat-live-title', text: 'worker' });
+        const stop = f.el('button', { className: 'btn btn-sm btn-default', text: 'Stop…' });
+        stop.addEventListener('click', () => pressed.push('child-stop'));
+        child.append(title, stop);
+        const own = { groupId: 'child', root: child, titleEl: title, replyable: true, cancelRunBtn: stop };
+        f.cards.set('child', own);
+        const { tool } = cardTimeline(f, child, own);
+        const open = () => tool.emit('contextmenu', { clientX: 12, clientY: 16 });
+
+        assert.equal(open().defaultPrevented, true);
+        assert.deepEqual(f.items(), ['copy', 'pause', 'stop'], 'the child\'s own: no Resume of the root, no Reply');
+        menuRows(f.openMenu()).find((item) => item.dataset.rowAction === 'stop').click();
+        assert.deepEqual(pressed.splice(0), ['child-stop'], 'the child\'s Stop, not the root\'s');
+        assert.equal(record.cancelRunBtn.isConnected, true);
+
+        f.cards.delete('child');  // no record of its own: it cannot borrow its root's Reply or controls
+        assert.equal(open().defaultPrevented, undefined);
+        assert.equal(f.openMenu(), null);
+    } finally { f.close(); }
 });

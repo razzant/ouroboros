@@ -23,7 +23,8 @@ PEOPLE = {"by_place": {"a": 129, "s": 84, "b": 34, "e": 3, "g": 7}, "total": 250
 
 
 def test_the_positions_are_named_by_meaning_and_unknown_is_never_off():
-    assert V.position_words(False) == "Only when you write to it"
+    assert V.position_words(False, []) == "Only when you write to it"
+    assert V.position_words(False) == "Background wakes are off"  # a known Off, without a read of places
     assert V.position_words(True) == "Also on its own and in places"
     assert V.position_words(None) == ""  # an unknown control says nothing, never Off
     # An install that holds no place is not told of places; an unread place store keeps the whole words.
@@ -31,14 +32,15 @@ def test_the_positions_are_named_by_meaning_and_unknown_is_never_off():
     assert V.position_words(True, [place("x", "X", "paused")]) == V.position_words(True)  # Paused is still a place
     assert V.describe_consciousness_state({"places_brief": []}, True)["position"] == "Also on its own"
     described = V.describe_consciousness_state({"places_brief": PLACES}, False)
-    assert described["position"] == V.position_words(False) and described["gloss"] == V.SWITCH_GLOSS
+    assert described["position"] == "Only when you write to it" and described["gloss"] == V.SWITCH_GLOSS
 
 
 def test_off_says_how_many_places_hear_and_a_paused_place_is_not_among_them():
     assert V.heard_sentence(PLACES) == "5 places are heard, not answered."
     assert V.heard_sentence([place("a", "A")]) == "1 place is heard, not answered."
     assert V.heard_sentence([place("x", "X", "paused")]) == V.heard_sentence([]) == "Nothing wakes it between your messages."
-    assert V.heard_sentence(None) == "Its places are heard, not answered."  # an unread store claims no count
+    assert V.heard_sentence(None) == (
+        "Whether your Ouroboroses can start work here could not be read. Its places are heard, not answered.")
     assert V.describe_consciousness_state({"places_brief": None}, False)["detail"] == V.heard_sentence(None)
 
 
@@ -150,7 +152,9 @@ def test_the_first_run_offer_carries_the_switch_words():
 
     words = consciousness_offer({}, enabled=False)["words"]
     assert words == V.FIRST_RUN and words["choice"] == V.position_words(True)
-    assert "places you connect are heard, not answered" in words["meaning"]
+    # Off says, inside its own choice, what it does while the owner is away (owner 2026-11-23, the side-by-side).
+    assert "Places you connect are heard, not answered." in words["offAway"]
+    assert words["offAway"] in words["meaning"] and words["onAway"] in words["meaning"]  # the whole, for older pages
 
 
 def test_recent_people_counts_each_person_once_across_places_and_skips_bots(tmp_path):
@@ -216,7 +220,7 @@ def test_places_that_could_not_be_read_are_not_no_places(tmp_path, monkeypatch):
 
     import ouroboros.places as places_module
 
-    def unreadable(_root):
+    def unreadable(_root, **_kw):
         raise OSError("places.json unreadable")
 
     monkeypatch.setattr(places_module, "place_records", unreadable)
@@ -289,7 +293,7 @@ def test_the_preview_counts_people_by_service(tmp_path, monkeypatch):
     stored = {"t": SimpleNamespace(place_id="t", label="Telegram · Lab", state="active", provider="telegram"),
               "g": SimpleNamespace(place_id="g", label="GitHub · repo", state="active", provider="github")}
     monkeypatch.setattr(places_module, "place_records",
-                        lambda _root: SimpleNamespace(places=stored, circle_context=lambda _pid: None))
+                        lambda _root, **_kw: SimpleNamespace(places=stored, circle_context=lambda _pid: None))
     seen = {}
 
     def people(_root, ids, *, days, now=None, services=None):
@@ -301,6 +305,23 @@ def test_the_preview_counts_people_by_service(tmp_path, monkeypatch):
     assert seen == {"ids": ["t", "g"], "days": 7, "services": {"t": "telegram", "g": "github"}}
     assert "2 people wrote there in the last 7 days." in preview["lines"]
 
+
+def test_the_switch_preview_never_materializes_the_legacy_wake_import(tmp_path, monkeypatch):
+    """The preview GET only reads: over an unimported legacy store it projects the imported row in memory and
+    leaves the old store exactly as it was — no places file is created by simply opening the preview (review r4:
+    ``persist_import`` on a read-only door)."""
+    import ouroboros.places as places_module
+    from tests._place_wake_import import legacy_wake_install
+
+    legacy_wake_install(tmp_path, monkeypatch)
+    path = places_module.places_path(tmp_path)
+    legacy = tmp_path / "state" / "presence_bindings.json"
+    source = legacy.read_bytes()
+    preview = V.read_switch_preview(tmp_path, "on")
+    assert not path.exists(), "opening the preview wrote no places store"
+    assert legacy.read_bytes() == source, "the legacy source stays intact"
+    assert len(preview["places"]) == 1 and preview["places"][0]["label"] == "slack", \
+        "the imported row is projected in memory and named by the preview"
 
 
 def test_the_turn_on_receipt_says_what_the_dialog_said_and_names_no_wake_at_zero():
@@ -374,6 +395,23 @@ def test_building_context_never_runs_the_place_import(tmp_path):
     assert _places_imported(tmp_path) is True
 
 
+def test_a_provisional_import_counts_as_imported_for_the_drive_state(tmp_path):
+    """Drive state recognizes a Places import that already materialized its rows and still
+    waits on its wake review: the marker ``import_recorded`` reads, the import never runs."""
+    import json
+
+    from ouroboros.context_sections import _places_imported
+
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "places.json").write_text(json.dumps(
+        {"schema_version": 1, "places": {},
+         "migration": {"presence_bindings_v1": False, "wake_import_open": True}}))
+    assert _places_imported(tmp_path) is True
+    (tmp_path / "state" / "places.json").write_text(json.dumps(
+        {"schema_version": 1, "places": {}, "migration": None}))
+    assert _places_imported(tmp_path) is False  # a damaged marker never counts as imported
+
+
 def test_a_saved_panic_stays_named_after_a_restart(tmp_path, monkeypatch):
     """A restarted process has no stop of its own: the status names the confirmed saved source (review r3)."""
     import supervisor.state as state_module
@@ -407,3 +445,18 @@ def test_the_endpoint_index_names_the_switch_query():
 
     assert HTTP_SHAPES["GET /api/consciousness"].query == "switch"
 
+
+
+def test_off_ends_declared_own_work_and_keeps_only_my_humans(monkeypatch):
+    """A root an owner turn declared its own (``mine``) is among what Off stops, never among what it keeps running on
+    my human's words; the same start without ``mine`` is theirs and Off leaves it alone. The words are unchanged."""
+    from ouroboros.consciousness_authority import declared_own_origin
+    from supervisor import consciousness_carriers as carriers
+    from supervisor import queue
+
+    turn = {"owner_ingress": True, "task_id": "turn-1"}
+    declared = {"id": "mine-1", "metadata": declared_own_origin(turn)}
+    theirs = {"id": "theirs-1", "metadata": {"work_kind": "owner"}}
+    monkeypatch.setattr(queue, "PENDING", [declared, theirs])
+    monkeypatch.setattr(queue, "RUNNING", {})
+    assert carriers.autonomous_tasks() == ["mine-1"] and carriers.cited_owner_roots() == []

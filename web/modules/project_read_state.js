@@ -22,7 +22,8 @@ const searched = (window) => window?.latest_message === null && Number.isSafeInt
 
 /**
  * @param {{
- *   read: (fresh: boolean, whole: boolean) => Promise<boolean>,  // true when the read succeeded; `whole`: the newest page
+ *   read: (fresh: boolean, whole: boolean, why: object|null) => Promise<boolean>,  // true when the read succeeded;
+ *       `whole`: the newest page; `why`: the read's tags its caller named (`refresh`), else the receipt's own
  *   isShown: () => boolean,
  *   isReadingLatest: (latest: undefined|null|object) => boolean,  // the reader is at `latest`
  *   onReadingLatest?: () => void,
@@ -139,10 +140,11 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
         // arrival must not inherit that navigation. Unknown/hidden content never lands.
         // A fresh read takes only what arrived since the newest read, except while the
         // newest message is unknown and unsearched: only the newest page can name it.
-        async refresh({ revision = 0 } = {}) {
+        // `why`: the action its caller names (app.js: a Project's opening, its Retry), told to `read`.
+        async refresh({ revision = 0, why = null } = {}) {
             const own = ++generation;
             const target = Math.max(0, Number(revision) || 0);
-            const readable = await read(target > coveredRevision, newest() === null && !searched(recentRead.window));
+            const readable = await read(target > coveredRevision, newest() === null && !searched(recentRead.window), why);
             const covered = readable && newest() !== null;
             if (covered && target > coveredRevision) coveredRevision = target;
             if (own !== generation) return { painted: false, revision: target };
@@ -198,9 +200,10 @@ export function readBand(viewport, header, composer) {
     if (header?.getClientRects?.().length) {
         // The edge in the page's own scale: a phone's drawer scales the room, and the edge with it.
         const box = header.getBoundingClientRect(), view = header.ownerDocument?.defaultView;
-        // The edge material's own box (style.css: `::before`, the bar's padding box plus the reach) resolves in every
-        // engine; the property itself resolves to px only with `@property` (WebKit 16.4+), else it is its tokens.
-        const drawn = parseFloat(view?.getComputedStyle?.(header, '::before')?.height) - header.clientHeight;
+        // The edge's own box (its tint, ROOM_EDGE_HTML in page_header.js: the bar's padding box plus the reach) resolves
+        // in every engine; the property itself resolves to px only with `@property` (WebKit 16.4+), else it is its tokens.
+        const tint = header.querySelector?.(':scope > .room-edge[data-edge="tint"]');
+        const drawn = tint ? parseFloat(view?.getComputedStyle?.(tint)?.height) - header.clientHeight : NaN;
         const edge = Number.isFinite(drawn) ? Math.max(0, drawn)
             : parseFloat(view?.getComputedStyle?.(header)?.getPropertyValue?.('--edge-reach')) || 0;
         top = Math.max(top, box.bottom + edge * (header.offsetHeight > 0 && box.height > 0 ? box.height / header.offsetHeight : 1));

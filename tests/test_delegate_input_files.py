@@ -628,6 +628,11 @@ def test_the_root_vocabulary_is_every_ordinary_file_root_and_the_schema_says_so(
         assert all(root in parameter["description"] for root in INPUT_FILE_ROOTS)
         assert "mandatory" in parameter["description"] and "skill_payload and others refuse" in parameter["description"]
     assert input_files_parameter("x")["input_files"]["description"].endswith(" x")
+    # knowledge_notes rides the same two schemas with one typed item, as knowledge_read's address takes it.
+    named = [next(tool.schema for tool in get_tools() if tool.name == "delegate_start")["parameters"]["properties"][
+        "knowledge_notes"], schedule_subagent_properties()["knowledge_notes"]]
+    assert named[0]["items"] == named[1]["items"] == {"type": "object", "required": ["topic"], "additionalProperties": False,
+                                                       "properties": {"topic": {"type": "string"}, "scope": {"type": "string"}}}
 
 
 def test_every_supported_root_prepares_through_the_real_start(subtests, tmp_path, monkeypatch):
@@ -700,6 +705,154 @@ def test_a_packed_handle_reads_back_before_it_is_retained(tmp_path, monkeypatch)
     result = _start(ctx, input_files=[{"root": "artifact_store", "path": "source_handles/context_checkpoints/handle.txt"}])
     assert result["status"] == "started" and restored, result
     assert pathlib.Path(result["input_files"][0]["local"]).read_bytes() == b"restored from the pack\n"
+
+
+@pytest.mark.parametrize("allowed", [False, True], ids=["receiver-denies", "both-admit"])
+def test_selected_retained_file_opens_only_after_both_readers_admit(tmp_path, monkeypatch, allowed):
+    from ouroboros import artifacts, delegate_readonly_inputs as inputs, evidence_packs
+
+    ctx, _, _ = _scheduler(tmp_path, monkeypatch)
+    canonical = ctx.drive_root
+    ctx.drive_root = tmp_path / "execution"
+    ctx.task_metadata["budget_drive_root"] = str(canonical)
+    neutral = b"A neutral selected document.\n"
+    rel = f"source_handles/context_checkpoints/neutral-{hashlib.sha256(neutral).hexdigest()}.txt"
+    source = artifacts.task_artifact_dir_path(canonical, ctx.task_id) / rel
+    events = []
+    admit, read, copy_file = (inputs.admit_selected_source, artifacts.read_actor_source_bytes,
+                              artifacts.copy_artifact_file)
+
+    def decide(reader, binding, **kwargs):
+        assert binding.target_path == source
+        events.append(reader.task_id)
+        if reader.task_id == "child" and not allowed:
+            raise PermissionError("receiver declines the synthetic selection")
+        return admit(reader, binding, **kwargs)
+
+    def restore(root, owner, relative):
+        assert (root, owner, relative) == (canonical, ctx.task_id, rel)
+        assert events == [ctx.task_id, "child"]
+        events.append("restore")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(neutral)
+        return source
+
+    def verify(*args, **kwargs):
+        assert events == [ctx.task_id, "child", "restore"]
+        events.append("verify")
+        return read(*args, **kwargs)
+
+    def transfer(*args, **kwargs):
+        assert events == [ctx.task_id, "child", "restore", "verify"]
+        assert kwargs["expected"] == {"sha256": hashlib.sha256(neutral).hexdigest(), "size": len(neutral)}
+        events.append("copy")
+        return copy_file(*args, **kwargs)
+
+    monkeypatch.setattr(evidence_packs, "_locate", lambda root, **key: (tmp_path / "pack", {})
+                        if (root, key) == (canonical, {"task_id": ctx.task_id, "rel_path": rel}) else None)
+    monkeypatch.setattr(evidence_packs, "materialize_handle", restore)
+    monkeypatch.setattr(inputs, "admit_selected_source", decide)
+    monkeypatch.setattr(artifacts, "read_actor_source_bytes", verify)
+    monkeypatch.setattr(artifacts, "copy_artifact_file", transfer)
+    selection = [{"root": "artifact_store", "path": rel}]
+    if not allowed:
+        with pytest.raises(inputs.InputSelectionError) as refusal:
+            inputs.schedule_selected_inputs(ctx, selection, "child")
+        assert "receiver declines" in refusal.value.results[0]["detail"]
+        assert events == [ctx.task_id, "child"] and not source.exists()
+        return
+    [row] = inputs.schedule_selected_inputs(ctx, selection, "child")
+    assert events == [ctx.task_id, "child", "restore", "verify", "copy"]
+    assert row["status"] == "prepared" and row["source"] == str(source)
+    assert pathlib.Path(row["local"]).read_bytes() == neutral
+    assert not pathlib.Path(row["local"]).samefile(source)
+
+
+def test_presence_reselects_its_issued_copy_with_both_permissions_and_its_original_identity(tmp_path, monkeypatch):
+    from ouroboros import artifacts, delegate_readonly_inputs as inputs
+    from ouroboros.tools import core_file_tools
+
+    ctx, _ = _ctx(tmp_path, monkeypatch)
+    _presence(ctx, ("task_drive", "."))
+    _drive(ctx).mkdir(parents=True)
+    neutral = b"A neutral selected note.\n"
+    (_drive(ctx) / "note.txt").write_bytes(neutral)
+    [issued] = inputs.prepare_readonly_inputs(ctx, "first-selection", [
+        {"root": "task_drive", "path": "note.txt"},
+    ]).selected
+    ctx.task_metadata["prepared_input_files"] = [issued]
+    expected = {"sha256": hashlib.sha256(neutral).hexdigest(), "size": len(neutral)}
+    source = pathlib.Path(issued["local"])
+    admit, stream_file, copy_file = (core_file_tools.read_admission, artifacts.stream_artifact_file,
+                                     artifacts.copy_artifact_file)
+    events = []
+
+    def decide(reader, *args, **kwargs):
+        result = admit(reader, *args, **kwargs)
+        assert result[2] is None and result[1].target_path == source
+        events.append(reader)
+        return result
+
+    def verify(path, *args, **kwargs):
+        if pathlib.Path(path) == source and events[-1:] != ["copy"]:
+            assert len(events) == 2 and events[0] is ctx and events[1] is not ctx
+            assert kwargs["expected"] == expected
+            events.append("verify")
+        return stream_file(path, *args, **kwargs)
+
+    def transfer(path, *args, **kwargs):
+        assert pathlib.Path(path) == source and len(events) == 3 and events[-1] == "verify"
+        assert kwargs["expected"] == expected
+        events.append("copy")
+        return copy_file(path, *args, **kwargs)
+
+    monkeypatch.setattr(core_file_tools, "read_admission", decide)
+    monkeypatch.setattr(artifacts, "stream_artifact_file", verify)
+    monkeypatch.setattr(artifacts, "copy_artifact_file", transfer)
+    [new] = inputs.prepare_readonly_inputs(ctx, "second-selection", [{"root": "", "path": str(source)}]).selected
+    assert events[2:] == ["verify", "copy"] and new["status"] == "prepared"
+    assert {key: new[key] for key in expected} == expected
+    copied = pathlib.Path(new["local"])
+    assert copied.read_bytes() == neutral and not copied.samefile(source)
+
+
+@pytest.mark.parametrize("work", [False, True], ids=["service", "work-domain"])
+def test_selected_copy_must_match_expected_size_before_publication(tmp_path, monkeypatch, work):
+    from ouroboros import artifacts, delegate_readonly_inputs as inputs, work_domain
+
+    source = tmp_path / "note.txt"
+    neutral = b"A neutral selected note.\n"
+    source.write_bytes(neutral)
+    if work:
+        monkeypatch.setattr(work_domain, "is_work", lambda path: path == str(source))
+        monkeypatch.setattr(work_domain, "measure", artifacts.stream_artifact_file)
+    root = tmp_path / "copies"
+    expected = {"sha256": hashlib.sha256(neutral).hexdigest(), "size": len(neutral) + 1}
+    with pytest.raises(inputs.InputSelectionError) as refusal:
+        inputs.copy_selection([{"root": "active_workspace", "path": source.name, "source": str(source),
+                                "_expected": expected}], root)
+    assert refusal.value.code == "input_files_unavailable"
+    assert [row["status"] for row in refusal.value.results] == ["changed"]
+    assert not any(path.is_file() for path in root.rglob("*"))
+
+
+def test_disagreeing_selected_identities_do_not_overwrite_each_other():
+    from ouroboros.delegate_readonly_inputs import _agreed_input_identity
+
+    neutral = b"A neutral selected note.\n"
+    digest = hashlib.sha256(neutral).hexdigest()
+    assert _agreed_input_identity({}) == {}
+    assert _agreed_input_identity({}, {"sha256": digest}) == {"sha256": digest}
+    assert _agreed_input_identity({"sha256": digest}, {"size": 0}) == {"sha256": digest, "size": 0}
+    for key in ("sha256", "size"):
+        for empty in (None, ""):
+            with pytest.raises(ValueError, match=f"empty selected input identity field: {key}"):
+                _agreed_input_identity({}, {key: empty})
+    assert _agreed_input_identity({"sha256": digest}, {"sha256": digest, "size": len(neutral)}) == {
+        "sha256": digest, "size": len(neutral),
+    }
+    with pytest.raises(ValueError, match="conflicting selected input identities"):
+        _agreed_input_identity({"size": len(neutral)}, {"sha256": digest, "size": len(neutral) + 1})
 
 
 # -- old calls are never gated ------------------------------------------------------------------------
@@ -1888,11 +2041,16 @@ def test_a_scheduled_reader_has_the_serving_body_its_worker_binds_beside_a_paren
     assert pathlib.Path(agreed["local"]).read_bytes() == b"serving\n"
 
     ctx.serving_repo_dir, ctx.repo_dir, ctx.system_repo_dir = serving, candidate, candidate
-    ctx.task_metadata["task_contract"] = {"objective": "parent", "resource_policy": {"allowed_origins": []}}
+    ctx.task_metadata["task_contract"] = {"objective": "parent", "resource_policy": {"allowed_origins": []},
+                                         "lineage": {"delegation_role": "root", "root_task_id": ctx.task_id}}
     policy, intent = {"allowed_origins": ["https://example.org"]}, {"kind": "explicit_resource", "root": str(candidate)}
     reader = receiving_reader(ctx, policy, workspace_root=str(candidate), child_task_id="c1", resource_intent=intent)
     assert system_repo_dir_for(reader) == pathlib.Path(reader.repo_dir) == serving and reader.serving_repo_dir is None
-    assert reader.task_contract == reader.task_metadata["task_contract"] == {"objective": "parent", "resource_policy": policy}
+    assert reader.task_id == "c1"
+    for carrier in (reader.task_contract, reader.task_metadata["task_contract"]):
+        assert carrier["objective"] == "parent" and carrier["resource_policy"] == policy
+        assert carrier["lineage"] == {"parent_task_id": ctx.task_id, "delegation_role": "subagent", "root_task_id": ctx.task_id}
+    assert reader.task_metadata["parent_task_id"] == ctx.task_id and reader.task_metadata["delegation_role"] == "subagent"
     assert reader.task_metadata["resource_intent"] == intent and ctx.task_contract == {}
     [handed] = schedule_selected_inputs(ctx, [{"root": "active_workspace", "path": "same.md"}], "candidate-folder",
                                         workspace_root=str(candidate), resource_intent=intent)

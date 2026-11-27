@@ -49,6 +49,7 @@ def test_api_all_fields_form_queues_without_changing_write_surface(registry, acc
         "required_capabilities": [], "deadline_at": "", "acceptance_claims": [], "effort": "auto",
         "input_files": [],  # an explicit none gates no surface
         "memory_view": {},  # an explicit none widens no view; the child's start, not the schedule, judges it
+        "knowledge_notes": [],  # an explicit none names no note, and says so
     }
     schema = registry.get_schema_by_name("schedule_subagent")["function"]["parameters"]
     # Session-only choices have no API-child default; omission preserves native execution.
@@ -66,6 +67,7 @@ def test_api_all_fields_form_queues_without_changing_write_surface(registry, acc
     assert f"access={access!r} ignored for subagent_id='openai/test-model' (api_model)" in result.text
     assert "api-scout" not in result.text
     assert "write_surface controls read/write authority" in result.text
+    assert "knowledge notes: none selected ([])" in result.text
     events = [row for row in registry._ctx.pending_events if row["type"] == "schedule_subagent"]
     assert len(events) == 1
     event = events[0]

@@ -17,6 +17,7 @@ import threading
 
 import pytest
 
+from tests._dialogue import healthy_main_fixture as healthy_main_fixture  # noqa: F401
 from tests.test_chat_attachments import PNG, _history, _inject, _rows, _send_web, _skill_client, _upload, _web_bridge
 from tests.test_chat_attachments import files_app as files_app  # noqa: F401 -- fixture re-export
 
@@ -49,7 +50,7 @@ def _facts(tmp_path, chat_id, cmid):
     return dialogue_store.dispatch_facts(tmp_path, chat_id, cmid)
 
 
-def test_a_landed_row_whose_handoff_was_lost_is_dispatched_once_by_the_first_retry(files_app, tmp_path, monkeypatch):
+def test_a_landed_row_whose_handoff_was_lost_is_dispatched_once_by_the_first_retry(files_app, tmp_path, monkeypatch, healthy_main):
     """The obligation outlives the process: the saved row reads ``ingress_pending`` in the next
     process too, the first same-id retry performs the one dispatch, later retries rejoin."""
     bridge, echoes = _web_bridge(tmp_path, monkeypatch)
@@ -115,7 +116,7 @@ def test_the_recovery_abandons_an_obligation_naming_a_dispatcher_this_body_lacks
     assert dialogue_store.pending_dispatches(tmp_path) == []
 
 
-def test_a_web_dispatch_that_was_entered_then_raised_is_unknown(tmp_path, monkeypatch):
+def test_a_web_dispatch_that_was_entered_then_raised_is_unknown(tmp_path, monkeypatch, healthy_main):
     """The row landed and the enqueue began: it may have queued, so the obligation is ``dispatched``
     and a retry, text-only or not, only rejoins."""
     bridge, echoes = _web_bridge(tmp_path, monkeypatch)
@@ -136,7 +137,7 @@ def test_a_web_dispatch_that_was_entered_then_raised_is_unknown(tmp_path, monkey
     assert [echo["client_message_id"] for echo in echoes] == ["cm-1"]
 
 
-def test_a_changed_message_under_an_owed_id_is_refused_and_the_obligation_waits(tmp_path, monkeypatch):
+def test_a_changed_message_under_an_owed_id_is_refused_and_the_obligation_waits(tmp_path, monkeypatch, healthy_main):
     bridge, echoes = _web_bridge(tmp_path, monkeypatch)
     restore = _land_then_fail(monkeypatch)
     with pytest.raises(RuntimeError):
@@ -223,7 +224,7 @@ def test_a_host_dispatch_that_was_entered_then_raised_is_never_replayed(tmp_path
     assert bridge._inbox.qsize() == 1 and len(_rows(tmp_path)) == 1
 
 
-def test_only_the_process_that_took_a_dispatch_says_it_was_entered(tmp_path, monkeypatch):
+def test_only_the_process_that_took_a_dispatch_says_it_was_entered(tmp_path, monkeypatch, healthy_main):
     """The live process's echo and history say ``ingress_dispatched`` for a row it took, rejoins
     included; once it ended neither does, and a retry adds no row and no queue item."""
     from ouroboros.process_custody import current_custody_session_id
@@ -271,7 +272,7 @@ def test_a_host_operation_from_before_a_crash_reads_lost_though_the_session_surv
     assert bridge._inbox.qsize() == 1 and len(_rows(tmp_path)) == 1
 
 
-def test_history_during_append_does_not_claim_dispatch(tmp_path, monkeypatch):
+def test_history_during_append_does_not_claim_dispatch(tmp_path, monkeypatch, healthy_main):
     """The durable row may be read before the acceptance returns to its enqueue caller: that read says
     the dispatch is still owed (``ingress_pending``), never dispatched and never the ended-process
     unknown a client would settle for good."""
@@ -312,7 +313,7 @@ def test_retention_callback_failure_leaves_the_dispatch_owed(tmp_path, monkeypat
     assert bridge._inbox.qsize() == 0
 
 
-def test_deferred_dispatch_echo_does_not_claim_future_call(tmp_path, monkeypatch):
+def test_deferred_dispatch_echo_does_not_claim_future_call(tmp_path, monkeypatch, healthy_main):
     """A caller's own dispatcher is entered after the echo: the echo says this process has not said
     yet (``ingress_pending``), the dispatcher sees its row entered, history says dispatched after."""
     from supervisor import message_ingress

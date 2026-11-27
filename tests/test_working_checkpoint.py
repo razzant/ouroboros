@@ -53,6 +53,27 @@ def test_each_boundary_replaces_one_attempt_file_with_the_one_serializer(tmp_pat
     assert not list(_file(tmp_path).parent.glob("working_checkpoint-a*"))
 
 
+def test_checkpoint_for_fallback_exhaustion_keeps_one_selected_frame(tmp_path):
+    ctx, limit = _loop_ctx(tmp_path)
+    ctx.route_wait_on_primary = True
+    ctx.route_choice = {'kind': 'following', 'source': 'main'}
+    limit.tool_schemas = [{'function': {'name': 'primary_only'}}]
+    rows = [{'role': 'system', 'content': 'nano'}, {'role': 'user', 'content': 'Reply was length limited.'}]
+    schemas = [{'function': {'name': 'nano_only'}}]
+    call = SimpleNamespace(messages=rows, tool_schemas=schemas, model_role='fallback:0', active_model='alternate',
+        active_use_local=False, active_context_mode='nano', fallback_is_primary=False,
+        fallback_entry_failure={'failure_code': 'quota_exhausted'})
+    with wc.model_call_scope(limit):
+        wc.save_model_call(model_call=call)
+    saved = wc.read_working(tmp_path, 'pause-task', 1)[1]
+    route = saved['route']
+    assert saved['messages'] == rows and saved['tool_schemas'] == schemas
+    assert saved['context_model_role'] == route['_lead_role'] == 'fallback:0'
+    assert route['active_context_mode'] == 'nano' and route['active_model'] == 'alternate'
+    assert not route['route_wait_on_primary'] and route['route_choice']['source'] == 'fallback'
+    assert ctx.route_wait_on_primary and limit.tool_schemas == [{'function': {'name': 'primary_only'}}]
+
+
 def test_a_failed_pre_effect_write_holds_visibly_and_only_the_task_controls_end_it(tmp_path, monkeypatch):
     _ctx, limit_ctx = _loop_ctx(tmp_path)
     monkeypatch.setattr(budget_pause, "_HOLD_POLL_SEC", 0.01)
@@ -86,6 +107,71 @@ def test_a_failed_pre_effect_write_holds_visibly_and_only_the_task_controls_end_
     with pytest.raises(ModelWaitInterrupted) as stopped:
         wc.save_before_effects(limit_ctx)
     assert stopped.value.control_reason == "cancelled", "Stop ends the hold; no tool of the batch ran"
+
+
+def test_a_disappeared_saved_root_holds_the_cut_batch_until_write_or_control(tmp_path, monkeypatch):
+    from ouroboros.loop_output_exhaustion import intermediate_reply
+    from ouroboros.model_wait import ModelWaitInterrupted
+
+    finish = {"finish_reason_present": True, "finish_reason": "length"}
+    reply = {"role": "assistant", "content": "Saving a note.", "tool_calls": [
+        {"id": "fixture-call", "function": {"name": "note_fixture", "arguments": "{}"}}]}
+    real_write = wc._write
+    for outcome in ("restored", "cancelled", "deadline"):
+        root = tmp_path / outcome
+        root.mkdir()
+        moved = tmp_path / f"{outcome}-away"
+        ctx, limit = _loop_ctx(root)
+        ctx._round_response_facts = finish
+        limit.messages = [{"role": "user", "content": "Save a note."}]
+        limit.llm_trace = {"reasoning_notes": []}
+        assert wc.save_round(limit, "ready")
+        controls, updates = [], []
+
+        def fail_then_disappear(ctx, limit, boundary):
+            if not controls:
+                root.rename(moved)
+                raise OSError("fixture write failed as the root disappeared")
+            return real_write(ctx, limit, boundary)
+
+        def control(_ctx):
+            assert not updates and not root.exists()
+            controls.append(True)
+            if len(controls) == 2:
+                if outcome != "restored":
+                    return outcome
+                moved.rename(root)
+            return ""
+
+        def progress(_text, **_meta):
+            updates.append(wc.read_working(root, ctx.task_id, 1)[1])
+
+        with monkeypatch.context() as held:
+            held.setattr(wc, "_write", fail_then_disappear)
+            held.setattr(budget_pause, "_HOLD_POLL_SEC", 0)
+            held.setattr(budget_pause, "_publish_hold", lambda *_: None)
+            held.setattr(budget_pause, "_hold_control_reason", control)
+            if outcome == "restored":
+                assert intermediate_reply(limit, reply, progress)
+                [state] = updates
+                assert state["working"]["boundary"] == "post_batch"
+                assert state["working"]["pending_tool_call_ids"] == []
+                assert state["messages"][-1]["content"].startswith("[HOST NOTICE] NOT STARTED:")
+            else:
+                with pytest.raises(ModelWaitInterrupted) as stopped:
+                    intermediate_reply(limit, reply, progress)
+                assert stopped.value.control_reason == outcome and not updates
+                assert wc.read_working(moved, ctx.task_id, 1)[1]["working"]["boundary"] == "ready"
+        assert len(controls) == 2
+
+    # A named task that never had a durable directory does not inherit this hold.
+    root = tmp_path / "never-provisioned"
+    ctx, limit = _loop_ctx(root)
+    ctx._round_response_facts = finish
+    limit.llm_trace = {"reasoning_notes": []}
+    emitted = []
+    assert intermediate_reply(limit, reply, lambda text, **_meta: emitted.append(text))
+    assert emitted == ["Saving a note."] and not root.exists()
 
 
 def test_content_mail_is_acknowledged_only_after_the_ready_state_that_holds_it(tmp_path):
@@ -238,6 +324,22 @@ def _registry(tmp_path, monkeypatch, task_id, attempt):
     return registry
 
 
+def _mail_sources(call):
+    """The send seam's own reading of this request's task-mail facts: each fact's source hash, beside the text of
+    the one prepared row it located ("" where it located none)."""
+    from ouroboros.context_assembly_trace import bind_contribution_input, verified_contributions
+    from ouroboros.llm_messages import project_wire_messages
+    from ouroboros.loop_messages import _extract_plain_text_from_content
+    from ouroboros.physical_attempt_context import PhysicalAttemptContext
+
+    fit = PhysicalAttemptContext("owner_max", "max", "cold_estimate", "", "", None, None, False, False)
+    wire = {"messages": project_wire_messages(call.messages)}
+    bound = bind_contribution_input(fit, wire, call.messages, call.tools._ctx)
+    rows = [_extract_plain_text_from_content(row.get("content")) for row in wire["messages"]]
+    return [(fact["source_id_sha256"], rows[int(fact["path"][11:-1])] if "path" in fact else "")
+            for fact in verified_contributions(wire, bound.contribution_input)["entries"] if fact["family"] == "task_mail"]
+
+
 def _saved_working_state(tmp_path, monkeypatch, task_id):
     """The dead attempt 1: a batch accepted, one call answered, one not."""
     from types import SimpleNamespace
@@ -300,23 +402,91 @@ def test_the_real_loop_continues_the_frozen_state_and_never_reruns_the_unknown_c
     assert not wc.checkpoint_path(tmp_path, "t-wait", 1).exists(), "the consumer retired the captured file"
 
 
-def test_an_unusable_frozen_source_starts_over_disclosed_never_silently(tmp_path, monkeypatch):
+@pytest.mark.parametrize("start", ["first", "restored", "unfrozen", "unusable"])
+def test_same_task_retry_rebuilds_acknowledged_ordinary_mail_without_redelivery(tmp_path, monkeypatch, start):
     from ouroboros import loop
+    from ouroboros.context_assembly_trace import digest
+    from ouroboros.owner_mailbox import _ack_path, PROVENANCE_INDEPENDENT_TASK, write_task_message
     from tests.test_loop_transport_wait import _loop_kwargs
 
-    monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("no provider call"))
-    handoff = _saved_working_state(tmp_path, monkeypatch, "t-wait")
-    registry = _registry(tmp_path, monkeypatch, "t-wait", 2)
-    registry._ctx.working_recovery = {**handoff, "from_attempt": 9}  # identity mismatch
-    seen = []
+    task_id = "t-wait"  # the existing loop fixture supplies this same admitted id
+    write_task_result(tmp_path, task_id, "running")
+    assert write_task_message(tmp_path, "exact ordinary note", task_id,
+                              source_task_id="parent-task", msg_id="ordinary")
+    assert write_task_message(tmp_path, "exact relayed note", task_id, source_task_id="parent-task",
+                              provenance="peer_via_ancestor", relayed_from_task_id="peer-task", msg_id="relayed")
+    assert write_task_message(tmp_path, "exact independent note", task_id, source_task_id="other-root",
+                              provenance=PROVENANCE_INDEPENDENT_TASK, msg_id="independent")
+    task = {"id": task_id}
+    ack_path = _ack_path(tmp_path, task_id)
+    if start != "first":
+        dead = _registry(tmp_path, monkeypatch, task_id, 1)
+        messages, ids = _loop_kwargs(tmp_path, dead, [])["messages"], set()
+        loop._drain_incoming_messages(messages, queue.Queue(), tmp_path, task_id, None, ids,
+                                      owner_ctx=dead._ctx, defer_content_ack=True)
+        wc.save_ready(SimpleNamespace(tools=dead, messages=messages, llm_trace={"tool_calls": []},
+                                     accumulated_usage={}, round_idx=1, tool_schemas=[], owner_msg_seen=ids,
+                                     budget_tail="no_tool"))
+        assert {json.loads(line)["msg_id"] for line in ack_path.read_bytes().splitlines()} == {
+            "ordinary", "relayed", "independent"}
+        if start == "unfrozen":
+            wc.checkpoint_path(tmp_path, task_id, 1).unlink()
+        assert wc.attach_recovery(tmp_path, task, source_task_id=task_id, from_attempt=1,
+                                  cause="worker_crash") is (start != "unfrozen")
+        if start == "unusable":
+            task["_working_recovery"]["from_attempt"] = 9  # identity mismatch
+    before = ack_path.read_bytes() if ack_path.exists() else b""
+    registry = _registry(tmp_path, monkeypatch, task_id, 1 if start == "first" else 2)
+    registry._ctx.working_recovery = task.get("_working_recovery")
+    seen, events, mail_sources = [], queue.Queue(), []
 
     def dispatch(call, disposition, *, candidate_predicate=None, **kwargs):
-        seen.extend(call.messages)
-        return {"role": "assistant", "content": "fresh", "tool_calls": []}, 0.0
+        seen.append("\n".join(loop._extract_plain_text_from_content(row.get("content"))
+                              for row in call.messages if row.get("role") == "user"))
+        mail_sources.append(_mail_sources(call))
+        call.tools._ctx._round_response_facts = {
+            "finish_reason_present": True, "finish_reason": "commentary" if len(seen) == 1 else "stop",
+        }
+        return {"role": "assistant", "content": "working" if len(seen) == 1 else "done"}, 0.0
 
+    monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("no provider call"))
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
-    loop.run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
-    assert any("could not be restored" in str(row.get("content")) for row in seen)
+    # The real emitter (OuroborosAgent._emit_progress) also takes narration=; the borrowed fixture's lambda takes incident= only.
+    shown = []
+    loop_kwargs = dict(_loop_kwargs(tmp_path, registry, []),
+                       emit_progress=lambda text, **meta: shown.append((text, meta.get("narration"))))
+    result, _usage, _trace = loop.run_llm_loop(**loop_kwargs, task_type="task", event_queue=events)
+    assert result == "done"
+    assert ("working", True) in shown, "the commentary round is shown as the model's own words"
+    ordinary = "[Message from ancestor task parent-task]\nexact ordinary note"
+    relayed = "[Message from task peer-task, relayed by ancestor parent-task]\nexact relayed note"
+    history = "[Previous-attempt mailbox history; not a new delivery]\n"
+    assert len(seen) == 2
+    for text in seen:
+        assert text.count(ordinary) == text.count(relayed) == 1
+        assert text.index(ordinary) < text.index(relayed)
+        assert text.count(history) == 2 * int(start in {"unfrozen", "unusable"})
+        if start in {"unfrozen", "unusable"}:
+            assert history + ordinary in text and history + relayed in text
+    independent = "[Message from independent task other-root]\nexact independent note"
+    assert [text.count(independent) for text in seen] == [int(start in {"first", "restored"})] * 2
+    # Each delivery this run made, live or recovered, is one producer fact on the exact row that carries the letter;
+    # the restored checkpoint's rows carry no receipt of the dead attempt's deliveries, so none is invented.
+    letters = {"ordinary": ordinary, "relayed": relayed, "independent": independent}
+    delivered = {"first": ("ordinary", "relayed", "independent"), "restored": ()}.get(start, ("ordinary", "relayed"))
+    for sources in mail_sources:
+        assert sorted(source for source, _row in sources) == sorted(digest(msg_id) for msg_id in delivered)
+        for msg_id in delivered:
+            (row,) = [row for source, row in sources if source == digest(msg_id)]
+            assert letters[msg_id] in row and row.startswith(history) is (start != "first")
+    assert ("could not be restored" in seen[0]) is (start == "unusable")
+    assert ("continued from its working checkpoint" in seen[0]) is (start == "restored")
+    injections = [row["source_task_id"] for row in events.queue if row.get("type") == "task_message_injected"]
+    if start == "first":
+        assert injections == ["parent-task", "parent-task", "other-root"]
+        assert len(ack_path.read_bytes().splitlines()) == 3
+    else:
+        assert injections == [] and ack_path.read_bytes() == before
 
 
 def test_representative_checkpoint_io_is_measured_not_promised(tmp_path):
@@ -331,6 +501,104 @@ def test_representative_checkpoint_io_is_measured_not_promised(tmp_path):
     assert stats["last_whole_bytes"] > 11_000_000, "the state is representative; its file is a skeleton over CAS parts"
     print(f"WORKING_CHECKPOINT_IO whole_bytes={stats['last_whole_bytes']} file_bytes={stats['last_bytes']} "
           f"parts={stats['parts_written']} encode_ms={stats['encode_ms']} write_ms={stats['write_ms']} total_s={elapsed:.3f}")
+
+
+@pytest.mark.parametrize("start", ["first", "restored", "emptied", "unfrozen", "unusable", "busy"])
+def test_a_retry_that_restores_nothing_starts_from_the_rows_its_own_record_holds(tmp_path, monkeypatch, start):
+    """#3555: attempt 2 that restores nothing builds its held rows and open relays from its own record before its first
+    send, so the checkpoint it saves parks them; a first start and a restore (an empty map too) read nothing. After
+    one unavailable read, the first saved checkpoint must still respect the record's closed address."""
+    from ouroboros import loop, owner_relay
+
+    task_id, kept, relay = "t-held", {"row:1@a": {"text": "Please keep the report short."}}, {"relay-1": {"note": "inert"}}
+    parked = ({"row:1@b": {"text": "Use the second draft."}}, {"relay-2": {"note": "inert too"}}) if start == "restored" else ({}, {})
+    write_task_result(tmp_path, task_id, "running")
+    previous = _registry(tmp_path, monkeypatch, task_id, 1)
+    previous._ctx._held_owner_messages, previous._ctx._open_relays = dict(kept), dict(relay)
+    if start == "busy":
+        previous._ctx._open_relays = {}  # attempt 1 closed the inherited relay's return address
+    owner_relay.persist_held_state(previous._ctx)  # the record keeps what attempt 1 retained
+    task = {"id": task_id}
+    if start not in {"first", "busy"}:
+        previous._ctx._held_owner_messages, previous._ctx._open_relays = map(dict, parked)  # its checkpoint parks another view
+        wc.save_ready(SimpleNamespace(tools=previous, messages=[{"role": "user", "content": "go"}], llm_trace={"tool_calls": []},
+                                     accumulated_usage={}, round_idx=1, tool_schemas=[], owner_msg_seen=set(), budget_tail="no_tool"))
+        if start == "unfrozen":
+            wc.checkpoint_path(tmp_path, task_id, 1).unlink()
+        assert wc.attach_recovery(tmp_path, task, source_task_id=task_id, from_attempt=1,
+                                  cause="worker_crash") is (start != "unfrozen")
+        if start == "unusable":
+            task["_working_recovery"]["from_attempt"] = 9  # identity mismatch
+    registry = _registry(tmp_path, monkeypatch, task_id, 1 if start == "first" else 2)
+    registry._ctx.working_recovery = task.get("_working_recovery")
+    inherited = {"row:1@b": {"text": "Use the second draft."}}
+    if start == "busy":
+        registry._ctx.task_metadata = dict(getattr(registry._ctx, "task_metadata", None) or {},
+                                           continuation={"owner_sources": {
+                                               "held_owner_messages": inherited, "open_relays": dict(relay)}})
+    reads, first = [], {}
+    own_state = owner_relay._own_held_state
+
+    def _read(ctx):
+        reads.append(1)
+        if start == "busy" and len(reads) == 1:
+            return None  # the first read is unavailable, not an empty record
+        return own_state(ctx)
+
+    monkeypatch.setattr(owner_relay, "_own_held_state", _read)
+    persists, real_persist = [], owner_relay.persist_held_state
+    monkeypatch.setattr(owner_relay, "persist_held_state",  # leave the writer real; witness its invocation
+                        lambda ctx: persists.append(ctx) or real_persist(ctx))
+    monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("no provider call"))
+
+    def dispatch(call, disposition, *, candidate_predicate=None, **kwargs):
+        ctx = call.tools._ctx  # raw attributes: asking the seeder would build the very state under test
+        if not first:
+            snap = lambda value: None if value is None else dict(value)
+            first.update(maps=(snap(getattr(ctx, "_held_owner_messages", None)), snap(getattr(ctx, "_open_relays", None))),
+                         reads=len(reads))
+            assert not persists, "restoring the maps must not invoke the held-map writer before the first send"
+            # The real loop's pre-send save already ran. Read exactly what it parked.
+            first["parked"] = tuple(map(wc.read_working(tmp_path, task_id, ctx.task_attempt)[1].get, ("held_owner_messages", "open_relays")))
+        ctx._round_response_facts = {"finish_reason_present": True, "finish_reason": "stop"}
+        return {"role": "assistant", "content": "done"}, 0.0
+
+    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    result, _usage, _trace = loop.run_llm_loop(
+        messages=[{"role": "user", "content": "go"}], tools=registry, llm=SimpleNamespace(default_model=lambda: "test-model"),
+        drive_logs=tmp_path, emit_progress=lambda text, **meta: None, incoming_messages=queue.Queue(), task_id=task_id,
+        drive_root=tmp_path, task_type="task", event_queue=queue.Queue())
+    assert result == "done"
+    held, relays = first["maps"]
+    if start in {"unfrozen", "unusable"}:
+        assert (held, relays) == first["parked"] == (kept, relay) and held is not kept and first["reads"]
+    elif start == "first":
+        assert held is None and relays is None and first["reads"] == 0  # a healthy first start builds and reads nothing
+    elif start == "busy":
+        assert (held, relays) == first["parked"] == ({**kept, **inherited}, {})
+        assert first["reads"] == 2  # the retry settled the inherited view against its own record
+    else:
+        assert (held, relays) == first["parked"] == parked and first["reads"] == 0  # the checkpoint's own maps, empty ones too
+
+
+def test_an_unreadable_record_keeps_a_retry_view_and_no_return_address(tmp_path, monkeypatch):
+    """The inherited view stays provisional until the task's own record can be read."""
+    from ouroboros import owner_relay, task_store
+    from ouroboros.store import StoreError
+
+    def unreadable(*args, **kwargs):
+        raise StoreError("reader convoy")
+
+    ctx = _registry(tmp_path, monkeypatch, "t-blind", 2)._ctx
+    ctx.task_metadata = {"continuation": {"owner_sources": {
+        "held_owner_messages": {"row:1@a": {"text": "the inherited row"}},
+        "open_relays": {"r1": {"relay_id": "r1", "source": {"chat_id": 1}}}}}}
+    monkeypatch.setattr(task_store, "read_document", unreadable)
+    held = owner_relay.held_owner_messages(ctx, defer_persist=True)
+    assert held == {"row:1@a": {"text": "the inherited row"}} and list(ctx._open_relays) == ["r1"]
+    assert ctx._held_state_seed == {"r1"} and ctx._held_state_dirty is True
+    assert owner_relay.select_return(ctx, "") == (
+        {}, "RELAY_RETURN_UNRESOLVED: this start's own record could not be read; no return address is confirmed")
 
 
 def test_a_held_question_wait_continues_through_its_own_reader_after_quit_and_resume(tmp_path, monkeypatch):

@@ -340,7 +340,7 @@ def test_startup_takes_the_roster_over_before_restore_reads_it():
     # The same one restore call, still bound to `restored_pending`, now timed as its own startup phase.
     restore = source.index('restored_pending = run_startup_phase(_loop_liveness, "startup:queue_restore", '
                            "lambda: restore_pending_from_snapshot(")
-    reset = source.index("kill_workers(preserve_pending=True)")
+    reset = source.index('"startup:old_workers_stop"')
     assert init < restore < reset
     # The three are phase bodies now, and a phase calls its body where the statement stands, so the order of
     # these statements is still the order the roster is taken, read and the pool reset.

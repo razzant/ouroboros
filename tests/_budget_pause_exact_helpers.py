@@ -148,6 +148,85 @@ def _quiet_external(monkeypatch, budget_pause):
     _mock_pause_observation(monkeypatch, budget_pause, [])
 
 
+def _daily_wake_pause(tmp_path, monkeypatch, *, scope="global", source="allowance", cap=20.0):
+    """An own wake parked at its $4 daily-allowance ceiling (``own-wake``): $11 spent by another wake, $1.25 by this one
+    and $2.75 by its helper beside one unpriced call, so $7 of the day's $22 are left and the tree has spent $4."""
+    from ouroboros import budget_pause, config, usage_accounting as ua
+    from ouroboros.consciousness import OWN_WAKE_STATE_KEY
+    from ouroboros.consciousness_wake import wake_task_metadata
+    from ouroboros.task_results import write_task_result
+
+    queue, state, _workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+    monkeypatch.setattr(state, "TOTAL_BUDGET_LIMIT", 100.0)
+    state.save_state({"owner_chat_id": 1, "bg_consciousness_enabled": True,
+                      OWN_WAKE_STATE_KEY: {"task_id": "own-wake", "wake_cause": "own_clock",
+                                           "initiator": "consciousness", "finished": False}})
+    monkeypatch.setattr(queue, "load_state", state.load_state)
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "22")
+    metadata = wake_task_metadata("act", "test", root_cost_ceiling_usd=4.0, root_cost_ceiling_source=source)
+    task, _ = _parked(tmp_path, monkeypatch, task_id="own-wake", scope=scope, extra={"metadata": metadata})
+    write_task_result(tmp_path, "own-wake", "scheduled", metadata=metadata)
+    row = budget_pause.budget_pause_row(tmp_path, "own-wake")
+    row.update(rail=budget_pause.RAIL_GRACEFUL_CEILING, cost_ceiling={
+        "state": "active", "ceiling_usd": 4.0, "root_cap_usd": cap, "basis": "producer_allowance"})
+    budget_pause.set_budget_pause(tmp_path, "own-wake", row)
+    task["_budget_pause"].update(rail=row["rail"])
+    # $11 by another wake + $1.25 by this wake + $2.75 by its child, plus one unpriced call.
+    for tid, rid, category, usd in (("other-wake", "other-wake", "consciousness", 11.0),
+                                    ("own-wake", "own-wake", "consciousness", 1.25),
+                                    ("wake-helper", "own-wake", "task", 2.75),
+                                    ("wake-helper", "own-wake", "task", None)):
+        attempt = ua.reserve_attempt(ua.AttemptRequest(model="test", provider="openai", drive_root=tmp_path,
+            task_id=tid, root_task_id=rid, category=category, source="test", allow_live_fetch=False,
+            reservation_usd=usd, force_unknown_reservation=usd is None, global_limit_usd=100.0))
+        ua.mark_dispatched(attempt)
+        ua.settle_attempt(attempt, {}, cost_usd=usd, cost_final=usd is not None)
+    return queue, task, metadata
+
+
+def _wake_http_app(tmp_path):
+    """The registered API and clock read the fixture's state; no supervisor ticks or worker processes."""
+    from starlette.applications import Starlette
+
+    from ouroboros.consciousness import BackgroundConsciousness
+    from ouroboros.consciousness_view import describe_consciousness
+    from ouroboros.gateway.router import collect_routes
+
+    clock = BackgroundConsciousness(tmp_path, tmp_path, lambda: 1)
+    app = Starlette(routes=collect_routes(data_dir=tmp_path))
+    app.state.drive_root = tmp_path
+    app.state.describe_consciousness = lambda: describe_consciousness(clock)
+    return app
+
+
+def _observe_allowance_reads(monkeypatch):
+    """Record ``(allow_stale, queue lock held)`` without changing an input or result of the real decision."""
+    from ouroboros import consciousness_allowance as allowance
+    from supervisor import queue as q
+
+    real, calls = allowance.allowance_resume_decision, []
+
+    def decision(*args, **kwargs):
+        calls.append((kwargs.get("allow_stale", False), q._queue_lock._is_owned()))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(allowance, "allowance_resume_decision", decision)
+    return calls
+
+
+def _charge_elsewhere(tmp_path, usd):
+    """An intervening charge by another wake in the real rolling ledger."""
+    from ouroboros import usage_accounting as ua
+
+    attempt = ua.reserve_attempt(ua.AttemptRequest(
+        model="test", provider="openai", drive_root=tmp_path, task_id="other-wake", root_task_id="other-wake",
+        category="consciousness", source="test", reservation_usd=usd, global_limit_usd=100.0, allow_live_fetch=False))
+    ua.mark_dispatched(attempt)
+    ua.settle_attempt(attempt, {}, cost_usd=usd, cost_final=True)
+
+
 def _supervisor_ctx(tmp_path, workers, queue, persisted, pushed):
     return SimpleNamespace(
         DRIVE_ROOT=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING, WORKERS=workers.WORKERS,

@@ -181,8 +181,11 @@ CONTROL_KEYS = (
     "evolution_mode_enabled", "evolution_owner_stopped", "evolution_stop_source",
     "post_task_autostop", "bg_consciousness_enabled", "bg_consciousness_stop_source",
     "owner_id", "owner_chat_id", "owner_external_id", "owner_external_chat_id",
+    # The last received Panic (``supervisor.panic_choice``): a backup's copy proves nothing until written again.
+    "panic_ingress_receipt",
 )
-OPTIONAL_CONTROL_KEYS = frozenset({"evolution_stop_source", "post_task_autostop", "bg_consciousness_stop_source"})
+OPTIONAL_CONTROL_KEYS = frozenset({"evolution_stop_source", "post_task_autostop", "bg_consciousness_stop_source",
+                                   "panic_ingress_receipt"})
 CURRENT_QUALITIES = frozenset({"current", "recovered"})
 
 
@@ -497,10 +500,14 @@ def update_state(mutator, *, confirm: Tuple[str, ...] = (), lock_timeout_sec: fl
 
 
 def _set_aside_copies_older_than_a_reset(witness: Any) -> None:
-    """An owner Reset's ``pending`` witness is the owner's explicit fresh start: a state
-    copy of another identity (a writer that raced the Reset's delete) is moved aside
-    under a new name — never adopted as current, never deleted. Caller holds STATE_LOCK.
+    """Require proven Reset cleanup before boot can set aside another identity's state copies.
+
+    An owner Reset's ``pending`` witness is the owner's explicit fresh start: a state copy of another
+    identity (a writer that raced a completed cleanup) is moved aside under a new name, never adopted
+    as current and never deleted. Unconfirmed cleanup leaves both copies untouched. Caller holds STATE_LOCK.
     Which copies is the witness module's decision, so setup's ``first_state_pending`` reads the same one."""
+    if witness.read_witness(DRIVE_ROOT)[0] == witness.RESETTING:
+        raise StateUnavailable("reset_cleanup_unconfirmed", "Only an explicit Reset can finish interrupted cleanup")
     identity, stamp = witness.pending_reset_identity(DRIVE_ROOT), time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     if identity is None:
         return

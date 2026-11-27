@@ -44,6 +44,41 @@ def test_plan_capability_refuses_before_any_start_row_but_ordinary_starts_surviv
     assert p.engine.calls[-1][0] == "/v2/runs"
 
 
+def test_plan_start_holds_thread_creation_during_an_unanswered_removal(plan_setup):
+    p = plan_setup
+    current.mark_removal(p.root, "existing-project", {}, "custody")
+    assert p.start(mode="plan")["reason"] == "registration_unconfirmed"
+    assert p.engine.calls == [] and not custody.pending_invocations(p.root)
+
+
+@pytest.mark.parametrize("phase", ["attachments", "processing"])
+def test_plan_preparation_refusal_precedes_thread_creation(plan_setup, monkeypatch, phase):
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.tools import delegate
+
+    p, steps = plan_setup, []
+
+    def registration(root):
+        steps.append("registration")
+        return "existing-project"
+
+    def prepare(name, original):
+        def step(*args, **kwargs):
+            steps.append(name)
+            if name == phase:
+                raise ClaudexorUnavailable("fixture_preparation_refused", name)
+            return original(*args, **kwargs)
+        return step
+
+    monkeypatch.setattr(p.engine, "find_project_id", registration)
+    monkeypatch.setattr(delegate, "attach_selected_documents", prepare("attachments", delegate.attach_selected_documents))
+    monkeypatch.setattr(delegate, "_processing_start_request", prepare("processing", delegate._processing_start_request))
+    refused = p.start(mode="plan")
+    assert refused["reason"] == "fixture_preparation_refused" and refused["definitely_unrun"] is True
+    assert steps == ["registration", "attachments"] + (["processing"] if phase == "processing" else [])
+    assert p.engine.calls == [] and not custody.pending_invocations(p.root)
+
+
 def test_plan_start_records_ceiling_and_readonly_thread_before_send(plan_setup):
     p = plan_setup
     first = p.start(mode="plan")
@@ -125,6 +160,53 @@ def test_answer_turn_and_clarification_stay_on_same_thread(plan_setup):
     clarified = p.start("Clarify the rollback step", continue_from=answer["run_id"])
     assert clarified["status"] == "started" and clarified["mode"] == "plan", clarified
     assert p.engine.calls[-1][0] == path and "answersPlanRunId" not in p.engine.calls[-1][1]
+
+
+def test_a_plan_threads_workspace_fact_survives_its_saved_record_retry_and_continue(plan_setup):
+    """A plan's turn body names no execution folder; its thread works in the private copy it was created on. That one
+    workspace fact rides the START row and the saved invocation, a retry of a lost answer claims with it again, and a
+    Continue on the same thread records the same folder; body, access and route are unchanged."""
+    p = plan_setup
+
+    def requested(invocation_id):
+        return [row for row in custody.custody_rows(p.root)
+                if row["type"] == custody.START_REQUESTED and row["invocation_id"] == invocation_id]
+
+    p.engine.fail_next = True  # the turn is accepted, its answer lost
+    lost = p.start(mode="plan")
+    token = lost["pending_invocation_id"]
+    [created] = [body for path, body, _key in p.engine.calls if path == "/v2/threads"]
+    folder = created["workspaceRoot"]
+    saved = custody.invocation_record(p.root, token)
+    assert folder and saved["registration_workspace"] == folder
+    assert "workspaceRoot" not in (saved["request"].get("execution") or {}) and saved["request"]["access"] == "readonly"
+    retried = p.start("", retry_of=token)
+    assert retried["status"] == "started", retried
+    assert [row["registration_workspace"] for row in requested(token)] == [folder, folder]
+    p.finish(retried["run_id"])
+    clarified = p.start("Clarify the rollback step", continue_from=retried["run_id"])
+    assert clarified["status"] == "started" and clarified["mode"] == "plan", clarified
+    [follow] = requested(current.run(p.root, clarified["run_id"]).invocation_id)
+    assert follow["registration_workspace"] == folder
+
+
+def test_plan_thread_clarification_carries_its_named_note_in_the_wire_turn_prompt(plan_setup):
+    from ouroboros.knowledge import resolve_knowledge_address
+
+    p = plan_setup
+    first = p.start(mode="plan")
+    p.finish(first["run_id"])
+    address = resolve_knowledge_address(p.root, "plan-evidence", "global")
+    address.path.parent.mkdir(parents=True, exist_ok=True)
+    text = "# Order notes\n\n## Scope\nSynthetic evidence for this turn.\n"
+    address.path.write_bytes(text.encode("utf-8"))
+    successor = p.start("", continue_from=first["run_id"], knowledge_notes=[{"topic": "plan-evidence"}])
+    assert successor["status"] == "started", successor
+    path, body, _key = p.engine.calls[-1]
+    assert path == f'/v2/threads/{first["thread_id"]}/turns'
+    assert body["prompt"].count(text) == 1 and "## Named knowledge notes" not in body["instructions"]
+    assert successor["named_notes"] == {"sent": [{"scope": "global", "topic": "plan-evidence",
+        "revision": hashlib.sha256(text.encode()).hexdigest(), "chars": len(text)}]}
 
 
 def test_wrong_starter_and_interaction_selector_cannot_answer_plan(plan_setup):

@@ -22,6 +22,115 @@ from tests.test_context_source_view import _prefix, _tool
 from tests.test_root_effort_ingress import _pool_ready
 
 
+@pytest.mark.parametrize(("place", "saved"), [("main", "unreadable"), ("main", "missing"), ("room", "unreadable"),
+                                              ("main", "healthy")])
+def test_a_restarted_helper_s_first_request_carries_its_held_owner_row_once(tmp_path, monkeypatch, place, saved):
+    """#3555: a native helper held my human's carried row on its record and ACKed it in a ready save, then died. The
+    same-ID retry runs the real startup, loop, dispatch and fitting; the fake stands at the provider client, so this
+    observes what the loop hands it, not a vendor's wire. With the selected checkpoint unreadable or none saved, the
+    first request shows the words once: quoted where its built input lacks them, as the addressed fact where its
+    composed room rows show them. A usable checkpoint restores its own copy; the held receipt is never restamped."""
+    import json
+    import queue
+    from ouroboros import dialogue_store, loop, owner_relay, usage_accounting as ua
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.llm_messages import project_wire_messages
+    from ouroboros.loop_messages import _extract_plain_text_from_content
+    from ouroboros.owner_mailbox import _ack_path
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    root = tmp_path / "data"
+    root.mkdir()
+    _q, _state, workers = _install_queue(root, monkeypatch)
+    _pool_ready(monkeypatch, workers)
+    for name, value in (("OUROBOROS_CONTEXT_MODE", "max"), ("OUROBOROS_SAFETY_MODE", "off"), ("MCP_ENABLED", "false"),
+                        ("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off"), ("OUROBOROS_TASK_REVIEW_MODE", "off"),
+                        ("OUROBOROS_MAX_ROUNDS", "12")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(OuroborosAgent, "_log_worker_boot_once", lambda self: None)
+    monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("No real provider call"))
+    monkeypatch.setattr("ouroboros.provider_models.model_has_credentials", lambda _model: True)
+    monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_args: False)
+    monkeypatch.setattr(context, "_context_fit_route", lambda task, **kw: (
+        {"model": "openai/test-model", "provider": "openai", "use_local": False},
+        SimpleNamespace(status="confirmed", stale=False, window_tokens=500_000, route_fp="test-route")))
+    chat, words, task_id = 1, "Please make the chart titles blue.", "helper-1"
+    # The tree's root row is the owner-Pause authority every lifecycle-bound member reads (``owner_pause.member_fence``);
+    # a scheduling root has it, open with no Pause, as ``tests/test_budget_pause_lineage.py`` seeds its root.
+    write_task_result(root, "root", "running", chat_id=0, root_task_id="root")
+    if place == "room":
+        chat = int(create_project(root, "quotas", name="Quotas")["chat_id"])
+        bind_task_to_project(root, "root", "quotas", chat, origin={"absent": "system"})
+    task = {"id": task_id, "type": "task", "text": "Write the quarterly summary.", "chat_id": chat,
+            "model": "openai/test-model", "delegation_role": "subagent", "root_task_id": "root",
+            "parent_task_id": "root", "drive_root": str(root), "budget_drive_root": str(root), "_attempt": 1}
+    write_task_result(root, task_id, "running", task_attempt=1, admitted_dispatch_attempt=1)
+
+    def boot(attempt_task):
+        agent = OuroborosAgent(Env(repo_dir=Path(__file__).resolve().parents[1], drive_root=root,
+                                  budget_drive_root=str(root)))
+        agent._task_started_ts, agent._pending_events = time.time(), []
+        ctx, messages, cap = agent._prepare_task_context(attempt_task)
+        assert ctx and not cap.get("authority_source_unavailable"), cap
+        return agent, ctx, messages
+
+    def visible(messages):  # the text a model reads: the wire projection, never host-only row metadata
+        return "\n".join(_extract_plain_text_from_content(row.get("content"))
+                         for row in project_wire_messages(messages) if row.get("role") != "assistant")
+
+    first_agent, first_ctx, messages = boot(task)
+    assert words not in visible(messages)  # the helper was born before my human spoke
+    row = {"chat_id": chat, "direction": "in", "ts": "2026-10-04T06:00:00+00:00", "text": words, "client_message_id": "msg-2"}
+    dialogue_store.append(root, "chat", row)
+    address = format_address(row_address(row))
+    entry, fresh = owner_relay.write_relay(
+        root, task_id, relay_id=f"carry:{address}", note="", chat_id=chat, teller_task_id="root",
+        quotes=[owner_relay.owner_quote(root, row, address=address)], canonical_root=root, host_carried={"went_to": ""})
+    assert fresh
+    messages.append({"role": "assistant", "content": "Working."})  # the carried row reaches a later round
+    ids = set()
+    loop._drain_incoming_messages(messages, queue.Queue(), root, task_id, None, ids, owner_ctx=first_ctx,
+                                  defer_content_ack=True)
+    assert visible(messages).count(words) == 1
+    wc.save_ready(SimpleNamespace(tools=first_agent.tools, messages=messages, llm_trace={"tool_calls": []}, accumulated_usage={},
+                                  round_idx=1, tool_schemas=[], owner_msg_seen=ids, budget_tail="no_tool"))
+    acks = [json.loads(line) for line in _ack_path(root, task_id).read_bytes().splitlines()]
+    assert [(ack["msg_id"], ack.get("attempt_key")) for ack in acks] == [(entry["msg_id"], "1")]
+    receipt = owner_relay._own_held_state(first_ctx)["held_owner_messages"][address]["carried"]
+    retry = {**task, "_attempt": 2}
+    if saved == "missing":
+        wc.checkpoint_path(root, task_id, 1).unlink()  # the worker died with no saved working state
+    assert wc.attach_recovery(root, retry, source_task_id=task_id, from_attempt=1, cause="worker_crash") is (saved != "missing")
+    if saved == "unreadable":  # the selected frozen source is damaged after selection; its locator stays as selected
+        frozen = task_artifact_dir_path(root, task_id, create=False) / retry["_working_recovery"]["source_ref"]["path"]
+        frozen.write_bytes(b"{}")
+    agent, ctx, composed = boot(retry)
+    assert visible(composed).count(words) == int(place == "room")  # the composer reads a room's row, never a Main row
+    sent = []
+
+    class Provider:  # the provider client's place: the loop's own dispatch, fitting and shaping run before it
+        def default_model(self):
+            return "openai/test-model"
+
+        def chat(self, **kwargs):
+            ua.adopt_physical_attempt_capture(None)  # no physical receipt is claimed for this fake send
+            sent.append(deepcopy(kwargs))
+            return {"content": "The summary is ready."}, {"prompt_tokens": 100, "completion_tokens": 10,
+                                                           "cost": 0.0, "provider": "openai"}
+
+    loop.run_llm_loop(messages=composed, tools=agent.tools, llm=Provider(), drive_logs=agent.env.drive_path("logs"),
+                      emit_progress=lambda text, **meta: None, incoming_messages=queue.Queue(), task_id=task_id,
+                      drive_root=root, task_type="task", event_queue=queue.Queue())
+    first = visible(sent[0]["messages"])
+    quoted = f"carried to this work by the host (reached this work); handle {address}]\n{words}"
+    told = f"[Host fact: the row {address} in your starting words was addressed to this work]"
+    assert first.count(words) == 1, "my human's words reach the first request to the provider client exactly once"
+    assert (first.count(quoted), first.count(told)) == ((0, 1) if place == "room" else (1, 0))
+    assert ("could not be restored" in first) is (saved == "unreadable")
+    assert ("continued from its working checkpoint" in first) is (saved == "healthy")
+    assert owner_relay._own_held_state(ctx)["held_owner_messages"][address]["carried"] == receipt  # kept, not restamped
+
+
 @pytest.fixture
 def restored(tmp_path, monkeypatch, request):
     root = tmp_path / "data"

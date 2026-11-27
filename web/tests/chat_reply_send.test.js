@@ -5,19 +5,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom } from './chat_dom_fixture.js';
+import { installDom, memoryStorage, PREVIEW_SCOPE, restoreDom, roomKey } from './chat_dom_fixture.js';
 
 const ME = 'session-me';
 const TS = '2026-10-16T09:40:00Z';
 const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setTimeout(resolve, 0)); };
 
-function fixture({ chatId = 1, history = () => [], savedReply, keptSends, onSend } = {}) {
+function fixture({ chatId = 1, history = () => [], savedReply, keptSends, onSend, local, session } = {}) {
     const env = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages: history(), window: { complete: true } }
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: history(), window: { complete: true } }
             : { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true } }));
+    if (local) globalThis.localStorage = local;
+    if (session) globalThis.sessionStorage = session;
     globalThis.sessionStorage.setItem('ouro_chat_session_id', ME);
-    if (savedReply) globalThis.sessionStorage.setItem('ouro_chat_reply', JSON.stringify(savedReply));
-    if (keptSends) globalThis.sessionStorage.setItem('ouro_chat_unconfirmed', JSON.stringify(keptSends));
+    if (savedReply) globalThis.sessionStorage.setItem(roomKey('ouro_chat_reply', chatId), JSON.stringify(savedReply));
+    if (keptSends) globalThis.sessionStorage.setItem(roomKey('ouro_chat_unconfirmed', chatId), JSON.stringify(keptSends));
     const handlers = new Map();
     const sent = [];
     let coined = 0;
@@ -45,9 +47,14 @@ function fixture({ chatId = 1, history = () => [], savedReply, keptSends, onSend
     const notes = (node) => node?.querySelectorAll('.msg-pending') || [];
     const actions = (node) => notes(node).flatMap((note) => note.children.filter((child) => child.tagName === 'BUTTON'))
         .map((button) => button.textContent);
+    const input = document.byId.get('chat-input');
     return {
-        instance, messages, sent, fire, bubbleOf, notes, actions,
+        instance, messages, sent, fire, bubbleOf, notes, actions, input,
         set status(value) { status = value; },
+        type(text) {
+            input.value = text;
+            for (const fn of input.listeners.get('input')) fn();
+        },
         async send(text) {
             document.byId.get('chat-input').value = text;
             for (const fn of document.byId.get('chat-send').listeners.get('click')) fn();
@@ -55,7 +62,7 @@ function fixture({ chatId = 1, history = () => [], savedReply, keptSends, onSend
         },
         echo: (cmid, content, extra = {}) => fire('chat', { type: 'chat', role: 'user', chat_id: 1, ts: TS, source: 'web', content,
             sender_session_id: ME, client_message_id: cmid, ingress_accepted: true, ingress_dispatched: true, ...extra }),
-        kept: () => JSON.parse(globalThis.sessionStorage.getItem('ouro_chat_unconfirmed') || '[]'),
+        kept: () => JSON.parse(globalThis.sessionStorage.getItem(roomKey('ouro_chat_unconfirmed', chatId)) || '[]'),
         close() { instance.destroy(); restoreDom(env.prior); },
     };
 }
@@ -106,7 +113,74 @@ test('a new reply staged as the socket sends belongs to the next message', async
         assert.equal(frame.reply_to, sent);
         assert.equal(echo.querySelector('.chat-quote-text').textContent, sent);
         assert.equal(f.kept().at(-1).reply.reply_to.address, sent);
-        assert.equal(JSON.parse(sessionStorage.getItem('ouro_chat_reply')).address, later);
+        assert.equal(JSON.parse(sessionStorage.getItem(roomKey('ouro_chat_reply'))).address, later);
+    } finally { f.close(); }
+});
+
+test('a Reply staged after borrowing cold text keeps its own words on reload without publishing them', async () => {
+    const local = memoryStorage(), author = memoryStorage(), reader = memoryStorage();
+    let f = fixture({ local, session: author });
+    try { f.type('first window words'); } finally { f.close(); }
+    const address = 'row:1@a#1';
+    f = fixture({ local, session: reader });
+    try {
+        assert.equal(f.input.value, 'first window words');
+        f.fire('chat', { role: 'assistant', chat_id: 1, ts: TS, content: 'quoted answer', row_address: address });
+        replyButton(f.bubbleOf(node => node.dataset.rowAddress === address)).click();
+        assert.equal(f.sent.length, 0);
+    } finally { f.close(); }
+    f = fixture({ local, session: author });
+    try { f.type('new window words'); } finally { f.close(); }
+    f = fixture({ local, session: reader });
+    try {
+        assert.equal(f.sent.length, 0, 'restoring does not send');
+        assert.equal(f.input.value, 'first window words', 'the staged quote must not borrow a newer draft');
+        await f.send(f.input.value);
+        assert.equal(f.sent[0].frame.reply_to, address);
+        assert.equal(f.sent[0].frame.content, 'first window words');
+    } finally { f.close(); }
+    f = fixture({ local });
+    try {
+        assert.equal(f.input.value, 'new window words', 'the accepted Reply consumed only its own composition');
+        assert.equal(f.sent.length, 0);
+    } finally { f.close(); }
+});
+
+test('staging a file keeps borrowed words in the tab without keeping the File on reload', () => {
+    const local = memoryStorage(), author = memoryStorage(), reader = memoryStorage();
+    let f = fixture({ local, session: author });
+    try { f.type('caption'); } finally { f.close(); }
+    f = fixture({ local, session: reader });
+    try {
+        assert.equal(f.input.value, 'caption');
+        const picker = document.byId.get('chat-file-input');
+        picker.files = [{ name: 'example.txt', type: 'text/plain' }];
+        for (const fn of picker.listeners.get('change')) fn();
+        assert.ok(document.byId.get('chat-attachment-preview').querySelector('.attach-badge'));
+    } finally { f.close(); }
+    f = fixture({ local, session: author });
+    try { f.type('other words'); } finally { f.close(); }
+    f = fixture({ local, session: reader });
+    try {
+        assert.equal(f.input.value, 'caption');
+        assert.equal(document.byId.get('chat-attachment-preview').querySelector('.attach-badge'), null);
+        assert.equal(f.sent.length, 0);
+    } finally { f.close(); }
+});
+
+test('reselecting an identical Reply in the Send handoff does not create a new draft', async () => {
+    let reply;
+    const f = fixture({ onSend: () => reply.click() });
+    try {
+        const address = 'row:1@a#1';
+        f.fire('chat', { role: 'assistant', chat_id: 1, ts: TS, content: 'quoted answer', row_address: address });
+        reply = replyButton(f.bubbleOf(node => node.dataset.rowAddress === address));
+        reply.click();
+        f.type('answer');
+        await f.send('answer');
+        assert.equal(f.sent[0].frame.reply_to, address);
+        assert.equal(f.input.value, '');
+        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_reply')), null);
     } finally { f.close(); }
 });
 
@@ -194,7 +268,7 @@ test('a selected reply keeps its delivery doubt and recovery through two reloads
                 bubble.querySelector('.message').textContent = 'Which gate?';
                 bubble.querySelector('[data-unconfirmed-action="send_as_new"]').click();
                 assert.equal(document.byId.get('chat-input').value, 'Which gate?');
-                assert.deepEqual(JSON.parse(sessionStorage.getItem('ouro_chat_reply')).excerpt, savedReply.excerpt);
+                assert.deepEqual(JSON.parse(sessionStorage.getItem(roomKey('ouro_chat_reply'))).excerpt, savedReply.excerpt);
                 f.echo(kept[0].frame.client_message_id, 'Which gate?');
                 assert.deepEqual(f.kept(), [], 'a confirmed dispatch settles the stored delivery doubt');
                 assert.deepEqual(f.actions(bubble), [], 'and Send as new leaves the bubble with its warning, not only the storage');
@@ -244,7 +318,7 @@ test('a reply stages the speaker projected by the host rather than its generic d
             row_address: 'row:1@mira#0123456789ab', reply_author_label: 'Mira' });
         const source = f.bubbleOf(node => node.dataset.rowAddress === 'row:1@mira#0123456789ab');
         replyButton(source).click();
-        assert.equal(JSON.parse(sessionStorage.getItem('ouro_chat_reply')).author_label, 'Mira');
+        assert.equal(JSON.parse(sessionStorage.getItem(roomKey('ouro_chat_reply'))).author_label, 'Mira');
     } finally { f.close(); }
 });
 
@@ -282,7 +356,7 @@ test('a refused selected Reply waits in its bubble with the complete selection; 
         assert.deepEqual(frame.reply_excerpt, excerpt);
         assert.equal(frame.reply_to, address);
         assert.equal(document.byId.get('chat-input').value, '', 'the field is free for the next message');
-        assert.equal(sessionStorage.getItem('ouro_chat_reply'), null);
+        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_reply')), null);
         const bubble = f.bubbleOf(node => node.dataset.clientMessageId === frame.client_message_id);
         assert.ok(bubble.children.some(child => child.dataset.excerpt === '1'));
         document.byId.get('chat-input').value = 'A newer draft.';
@@ -310,7 +384,7 @@ test('a late acceptance leaves the newer draft alone and the sent quote does not
         document.byId.get('chat-input').value = 'Another observation.';
         f.echo(frame.client_message_id, frame.content, { reply_to: savedReply });
         assert.equal(document.byId.get('chat-input').value, 'Another observation.');
-        assert.equal(sessionStorage.getItem('ouro_chat_reply'), null, 'the quote left with the message it was sent in');
+        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_reply')), null, 'the quote left with the message it was sent in');
         assert.deepEqual(f.kept(), []);
         await f.send('Another observation.');
         assert.equal(f.sent.at(-1).frame.reply_to, undefined, 'the next message answers nothing');

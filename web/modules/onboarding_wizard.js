@@ -7,25 +7,26 @@ import {
     completionAttemptId,
     completionFailureNotice,
     createAgentsStep,
-    familyLabels,
     onboardingSettingsDraft,
     postCompletion,
     readCompletionAttempt,
 } from './onboarding_agents_step.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { bindLanguageSettings, languageBlockHtml, saveLanguageChoice } from './settings_language.js';
+import { bindLanguageSettings, saveLanguageChoice } from './settings_language.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from './ui_helpers.js';
-import { createModelRolesEditor, inheritTargetOf, modelRolesHost, modelRoleMap, parseModelSource, usesLocalSuffix } from './model_roles.js';
-import { ALLOW_EMPTY_REVIEW_POOL, PACKET_ONLY_POOL_WARNING, availableSubagentsEditorHost, packetOnlyReviewPool, reviewPoolRows, reviewerTickCaption } from './subagents_settings.js';
-import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, processingIntentLabel,
-    configuredApiProviders, apiProviderLabel, compatibleEndpoint, connectionDefaults, spendGapsWords } from './route_editor_primitives.js';
+import { createModelRolesEditor, modelRolesHost, modelRoleMap, parseModelSource } from './model_roles.js';
+import { ALLOW_EMPTY_REVIEW_POOL, availableSubagentsEditorHost, reviewPoolRows, reviewerTickCaption } from './subagents_settings.js';
+import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY,
+    configuredApiProviders, apiProviderLabel, connectionDefaults, isLocalFilesystemSource, spendGapsWords } from './route_editor_primitives.js';
 import { mergeModelCatalog, catalogReadState, summarizeReadErrors } from './settings_catalog.js';
 import { bindCompatibleModelLoader, createOnboardingCatalog } from './onboarding_catalog.js';
 import { accountRows } from './claudexor_status_store.js';
 import { accountRowFacts } from './harness_accounts.js';
 import { sourcePresentation } from './harness_presentation.js';
-import { createStarterSkillsStep } from './onboarding_starter_skills.js';
+import { createStarterSkillsStep, starterDraftHasKey } from './onboarding_starter_skills.js';
 import { createConsciousnessStep } from './onboarding_consciousness.js';
+import { createSummaryStep } from './onboarding_summary.js';
 import { createConnectionsEditor } from './settings_connections.js';
 import { PROVIDER_CARDS, createFlatKeyChoices, providerSettingsCard } from './settings_provider_cards.js';
 import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
@@ -121,12 +122,21 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     const asked = (slot) => ours(slot.stateKey) && previewed[slot.stateKey] === state[slot.stateKey];
     let connectionsEditor = null;
     let footerObserver = null;
+    let disposeErrorFade = null;
     let compatibleCatalogs = {};
     const compatibleCard = PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible');
+    // The built-in compatible key's consent is a field of the draft beside its address (the setup contract's `providerFields`).
+    const consentState = PROVIDER_FIELDS.find((entry) => entry.settingKey === compatibleCard.consent?.settingKey)?.stateKey;
     const starterSkills = createStarterSkillsStep({ offered: STEP_ORDER.includes('skills'), open: () => navigateStep('skills', { restorePosition: true }),
-        keyLabels: Object.fromEntries(PROVIDER_FIELDS.map((field) => [field.settingKey, field.label])) }); // the Skills step and its Summary row keep their ticks across renders
+        keyLabels: Object.fromEntries(PROVIDER_FIELDS.map((field) => [field.settingKey, field.label])),
+        draftHasKey: (key) => starterDraftHasKey(key, state, PROVIDER_FIELDS, bootstrap.secretPlaceholder) });
     const QUICK = STEP_ORDER.filter((id) => ['consciousness', 'skills', 'summary'].includes(id));  // Review & start's own steps, in order
     const consciousness = createConsciousnessStep(bootstrap.consciousnessOffer); // its position rides the one completion request
+    const summary = createSummaryStep({ contract: SETUP_CONTRACT, state, consciousness, localSlot, accessLabel: runtimeModeLabel,
+        keyWords: (key) => keyChoices.words(key),
+        reads: () => ({ api: hasApiAccess(), subscription: hasModelSubscription(), local: hasLocalModel(), profile: activeProviderProfile(),
+            connected: modelSources, sources: sourceRead.model_sources || [], draft: draftSettings(), catalog: catalogDraft(),
+            agents: { snapshot: agentsStep?.snapshot, catalogKnown: Boolean(agentsStep?.catalogKnown) }, mainBinding: mainBinding() }) });
     const supportsScopes = () => SETUP_CONTRACT.scopedModelCatalogs === true;
     const discovery = createOnboardingCatalog({ draftSettings, providerFields: PROVIDER_FIELDS, supportsScopes,
         onSources(data) {
@@ -243,11 +253,6 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         return String(value || '').trim();
     }
 
-    function formatUsd(value) {
-        const num = Number(value);
-        return Number.isFinite(num) ? `$${num.toFixed(2)}` : '$0.00';
-    }
-
     function hasLocalModel() {
         return trim(state.localSource).length > 0;
     }
@@ -266,11 +271,6 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     function hasMoreProviderValue() {
         return moreProviderFields().some((field) => trim(state[field.stateKey]).length > 0);
     }
-
-        function isLocalFilesystemSource(value) {
-            const text = trim(value);
-            return text.startsWith('/') || text.startsWith('~');
-        }
 
         function optionByValue(items, value) {
             return (items || []).find((item) => item.value === value) || {};
@@ -291,16 +291,8 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         return profile;
     }
 
-        function profileLabel(profile) {
-            return PROVIDER_PROFILES[profile]?.label || PROVIDER_PROFILES.openrouter?.label || 'OpenRouter';
-        }
-
         function runtimeModeLabel(mode) {
             return optionByValue(RUNTIME_MODES, mode).label || 'Advanced';
-        }
-
-        function localRoutingLabel(mode) {
-            return optionByValue(LOCAL_ROUTING_MODES, mode).label || 'Cloud models only';
         }
 
     function nextButtonShouldBeDisabled() {
@@ -325,7 +317,11 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         const quick = document.getElementById('quick-start-btn');
         if (quick) quick.hidden = !hasModelSubscription();
         const error = root.querySelector('.wizard-error');
-        if (error) error.textContent = state.error || (['accounts', 'models'].includes(state.currentStep) ? validateCurrentStep() : '');
+        if (error) {
+            const text = state.error || (['accounts', 'models'].includes(state.currentStep) ? validateCurrentStep() : '');
+            if (error.firstElementChild.textContent !== text) error.firstElementChild.textContent = text;
+            error.toggleAttribute('data-empty', !text);
+        }
         const access = accessRowState({ connected: state.agentsConnected, sources: sourceRead.model_sources || [],
             read: catalogReadState(sourceRead), checking: discovery.pending, readErrors: summarizeReadErrors(sourceRead.errors),
             previewError: agentsStep?.previewError, configured: hasApiAccess() || hasLocalModel(), continueBlocked: Boolean(next?.disabled) });
@@ -592,66 +588,9 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         `;
     }
 
-    function summaryRows() {
-        const usesSubscription = MODEL_SLOTS.some(({ slot, stateKey }) => !localSlot(slot)
-            && trim(state[stateKey]).split(',').some(value => !usesLocalSuffix(slot, value) && parseModelSource(trim(value)).source.startsWith('subscription:')));
-        const rows = [
-            ['Connected access', hasModelSubscription() && !hasApiAccess()
-                ? modelSources.filter((source) => state.agentsConnected.includes(source.credentialHarness))
-                    // The same one visual answer as the model rows below: a record that states no label is named by
-                    // the program it is reached with, never by the raw id's spelling.
-                    .map((source) => sourcePresentation(source.id, modelSources).label).join(', ') + ' subscription · no API key'
-                : profileLabel(activeProviderProfile())],
-            ['Access level', runtimeModeLabel(state.runtimeMode)],
-            ...((hasApiAccess() || !hasModelSubscription()) ? [['Total API budget', formatUsd(state.totalBudget)],
-                ['Per-task API cap', formatUsd(state.perTaskCostUsd)]] : []),
-            ...(usesSubscription ? [['When quota runs out', trim(state.fallbackModel) ? 'Tries the Fallback, then waits for the reset' : 'Waits for the reset, then continues']] : []),
-            ...consciousness.summaryRows(),  // the step's choice; the model row below says what it is
-            ...MODEL_SLOTS.map((slot) => [slot.slot === 'consciousness' ? 'Consciousness model' : slot.label.replace(/ Model$/, ''), modelSummary(slot)]),
-        ];
-        const compatible = compatibleEndpoint(draftSettings());
-        const keys = [
-            ['anthropicKey', 'Anthropic'], ['zaiKey', 'Z.ai (GLM)', trim(state.zaiPlan) === 'coding' ? 'configured · coding plan' : ''],
-            ['deepseekKey', 'DeepSeek'], ['minimaxKey', 'MiniMax'], ['cloudruKey', 'Cloud.ru'],
-            ['openaiKey', 'OpenAI', compatible.legacy && compatible.baseUrl ? `configured · also used by the legacy address ${compatible.baseUrl}` : ''],
-            ['openrouterKey', 'OpenRouter'],
-        ].filter(([key]) => trim(state[key])).map(([key, label, value]) => [label, [value || 'configured', ...keyChoices.words(key)].join(' · ')]);
-        rows.splice(1, 0, ...(hasLocalModel() ? [
-            ['Local source', trim(state.localSource) + (trim(state.localFilename) ? ` / ${trim(state.localFilename)}` : '')],
-            ['Local routing', localRoutingLabel(state.localRoutingMode)],
-        ] : []), ...keys);
-        rows.push(['Agents', agentsSummaryValue()]);
-        rows.push(['Reviewers', reviewPoolRows(catalogDraft()).map(reviewerSummary).join(' · ')
-            || 'None — the main model reviews alone']);
-        if (trim(state.skillsRepoPath)) {
-            rows.push(['Skills repo', trim(state.skillsRepoPath)]);
-        }
-        return rows;
-    }
-
     function localSlot(slot) {
         const index = ['main', 'light', 'consciousness', 'fallback'].indexOf(slot);
         return hasLocalModel() && LOCAL_ROUTING_MODES.find((mode) => mode.value === state.localRoutingMode)?.flags?.[index] === true;
-    }
-
-    function modelSummary(slot) {
-        const values = trim(state[slot.stateKey]).split(',').map((value) => value.trim()).filter(Boolean);
-        const inherited = !values.length && slot.slot !== 'fallback';
-        const from = MODEL_SLOTS.find((entry) => entry.slot === inheritTargetOf(slot)) || { stateKey: 'mainModel', label: 'Main' };
-        if (inherited) values.push(trim(state[from.stateKey] || '') || trim(state.mainModel));  // Safety: Light, then Main
-        const local = localSlot(slot.slot) || (inherited && (localSlot(from.slot || 'main') || (!trim(state[from.stateKey]) && localSlot('main'))));
-        return values.map((value, index) => {
-            const { source, model } = parseModelSource(value);
-            const account = slot.slot === 'fallback' ? state.modelAccounts.fallback?.[index] : state.modelAccounts[slot.slot];
-            const context = slot.slot === 'fallback' ? state.modelContextWindows.fallback?.[index] : state.modelContextWindows[slot.slot];
-            const processing = slot.slot === 'fallback' ? state.modelProcessingPreferences?.fallback?.[index] : state.modelProcessingPreferences?.[slot.slot];
-            // The route's effective lane decides; the full descriptor read names a saved subscription whether or not
-            // it can serve this setup. The same distinction is used in the model and agent editors.
-            const assignment = (local || usesLocalSuffix(slot.slot, value)) ? `Local · ${model}`
-                : source.startsWith('subscription:') ? `${sourcePresentation(source.slice(13), sourceRead.model_sources || []).label} · ${model} · ${account ? `Account: ${account}` : 'Auto rotation'}`
-                : `${apiProviderLabel(source, PROVIDER_PROFILES)} · ${model}`;  // a source in words, never its id
-            return `${inherited ? `Uses ${from.label.replace(/ Model$/, '')} · ` : ''}${assignment} · Processing: ${processingIntentLabel(processing, state.processingPreference)}${Number(context) > 0 ? ` · ${Number(context).toLocaleString('en-US')} tokens, set by you` : ''}`;
-        }).join(' → ') || 'None';
     }
 
     function catalogDraft() { return agentsStep?.availableSubagents || state.availableSubagents; }
@@ -669,25 +608,6 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             ...starterSkills.payload(),
             ...consciousness.payload(),
         };
-    }
-
-    function reviewerSummary(row) {
-        const account = row.route?.credential_profile_id;
-        return [row.route?.target_id || row.subagent_id, account ? `Account: ${account}` : '',
-            `Effort: ${row.effort || 'Auto'}`,
-            `Processing: ${processingIntentLabel(row.processing_preference, state.processingPreference)}`].filter(Boolean).join(' · ');
-    }
-
-    function agentsSummaryValue() {
-        // Read family labels from the same snapshot the Agents step displays.
-        const labels = familyLabels(state.agentsConnected, agentsStep?.snapshot, {
-            catalogKnown: Boolean(agentsStep?.catalogKnown),
-        });
-        const actorCount = (catalogDraft()?.items || []).length;
-        const actors = `${actorCount} Available subagent${actorCount === 1 ? '' : 's'}`;
-        if (!labels.length) return `${actors} · API/local access only`;
-        if (state.skipSubscriptionPresets) return `${actors} · ${labels.join(', ')} connected · automatic subscription preset skipped`;
-        return `${actors} · ${labels.join(', ')} connected`;
     }
 
     function shouldOfferPresetSkip() {
@@ -971,35 +891,9 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             `;
         }
 
-    function summaryRowsHtml() {
-        return summaryRows().map(([label, value]) => `
-            <div class="summary-kv">
-                <strong>${escapeHtml(label)}</strong>
-                <span>${escapeHtml(value)}</span>
-            </div>
-        `).join('');
-    }
-
     function refreshSummary() {
-        const summary = root.querySelector('.summary-card-rows');
-        if (summary) summary.innerHTML = summaryRowsHtml();
+        summary.refresh(root);
         syncCurrentStepActionState();
-    }
-
-    function renderSummaryStep() {
-        return `
-            <div class="step-header">
-                <div>
-                    <h2 class="step-title">${escapeHtml(STEP_META.summary.title)}</h2>
-                    <p class="step-copy">${escapeHtml(STEP_META.summary.copy)}</p>
-                </div>
-            </div>
-            <div class="summary-card"><div data-starter-skills="row"></div><div class="summary-card-rows">${summaryRowsHtml()}</div></div>
-            ${packetOnlyReviewPool(catalogDraft())
-                ? `<div class="wizard-inline-note" data-tone="warn" data-review-pool-warning>${escapeHtml(PACKET_ONLY_POOL_WARNING)}</div>` : ''}
-            ${languageBlockHtml({ onboarding: true })}
-            ${state.recoveryPrepared ? `<div class="wizard-inline-note">Automatic subscription presets were skipped. ${state.recoveryMain === mainBinding() ? 'Reviewers were assigned to Main.' : 'Main changed; reviewers keep the assignments shown above. Use Main for reviewers again if you want to update them.'} Check the assignments, then Start Ouroboros to save this draft. Later changes in Settings are manual.</div>` : ''}
-        `;
     }
 
     function renderRestartRequiredScreen() {
@@ -1028,7 +922,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         if (state.currentStep === 'models') return renderModelsStep();
         if (state.currentStep === 'review_mode') return renderReviewModeStep();
         if (state.currentStep === 'budget') return renderBudgetStep();
-        return renderSummaryStep();
+        return summary.html();
     }
 
     function stepCards() {
@@ -1047,6 +941,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     }
 
     function render() {
+        disposeErrorFade?.();
         connectionsEditor?.destroy();
         connectionsEditor = null;
         resetSecretReveals(root);
@@ -1067,7 +962,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
                     ${renderStepContent()}
                     ${state.completedRestartMode ? '' : `
                     <div class="wizard-footer">
-                        <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
+                        <div class="wizard-error scroll-fade-y"${state.error ? '' : ' data-empty'}><div role="status">${escapeHtml(state.error)}</div></div>
                         <div class="footer-copy${saveUnknown ? ' footer-warning' : ''}">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
                         <div class="footer-actions">
                             <button class="btn btn-default" id="back-btn" type="button" ${index === 0 || state.saving || state.preparingRecovery ? 'disabled' : ''}>Back</button>
@@ -1086,6 +981,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             </div>
         `;
         bindEvents();
+        disposeErrorFade = bindScrollFade(root.querySelector('.wizard-error'), { region: 'Setup status' });
         starterSkills.mount(root.querySelector('[data-starter-skills]'));
         disposeLanguage?.();   // the Language block lives on the summary step only; its binder owns its listeners
         disposeLanguage = state.currentStep === 'summary' && !state.completedRestartMode ? bindLanguageSettings(root, { staged: state.languageChoice, stage: (value) => { state.languageChoice = value; } }) : null;
@@ -1150,6 +1046,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         const panel = root.querySelector('[data-settings-panel="providers"]');
         if (panel) {
             const mountedConnections = JSON.stringify(state.connections || []);
+            const mountedConsent = consentState ? state[consentState] || '' : '';
             const changed = () => {
                 const rows = connectionsEditor?.collect().OUROBOROS_CONNECTIONS;
                 // collect() is a mount-relative patch; undo must restore that baseline too.
@@ -1159,6 +1056,8 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
                     const stateKey = PROVIDER_FIELDS.find((entry) => entry.settingKey === field.settingKey)?.stateKey;
                     if (input && stateKey) state[stateKey] = input.value;
                 }
+                // A consent edit names the address shown; none leaves the draft as it was mounted (like the rows above).
+                if (consentState) state[consentState] = connectionsEditor?.consent(compatibleCard.kind) ?? mountedConsent;
                 compatibleCatalogs = {};
                 markStepEdited();
             };
@@ -1172,7 +1071,10 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             // The card's own fields first, as Settings does: load() binds each row it mounts.
             bindSecretInputs(panel);
             connectionsEditor.load({ ...draftSettings(), _meta: { policy_state: { deployment: bootstrap.deployment } } }, { modelSlots: MODEL_SLOTS });
-            // Back remounts the draft, not a saved document. Show and Test must still
+            // Back remounts the draft, not what is saved: a consent box SHOWS the draft, a Test adds only what differs from what is
+            // stored. The editor reads settings keys and INITIAL_STATE has state keys, so the saved state goes through the draft's projection.
+            connectionsEditor.rebaseConsent(onboardingSettingsDraft({ state: INITIAL_STATE, providerFields: PROVIDER_FIELDS, trim }));
+            // Show and Test must still
             // use edited values locally rather than look up an unsaved row's key.
             panel.querySelectorAll('[data-connection-row][data-uid]').forEach((row) => {
                 const saved = (INITIAL_STATE.connections || []).find((entry) => entry.kind === row.dataset.kind && entry.name === row.dataset.name);
@@ -1559,6 +1461,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         if (state.currentStep === 'review_mode') bindReviewModeStep();
         if (state.currentStep === 'consciousness') consciousness.bind(root);
         if (state.currentStep === 'budget') bindBudgetStep();
+        if (state.currentStep === 'summary') summary.bind(root);
         syncCurrentStepActionState();
     }
 
@@ -1574,6 +1477,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         discovery.dispose();
         modelRoles.destroy();
         connectionsEditor?.destroy();
+        disposeErrorFade?.();
         footerObserver?.disconnect();
         resetSecretReveals(root);
         starterSkills.destroy();

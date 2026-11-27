@@ -123,6 +123,7 @@ def test_provider_return_runs_real_page_after_navigation_and_owner_login(monkeyp
             assert any(method == "GET" and "provider-return.html" in path and site == b"cross-site" for method, path, site in seen)
             assert any(method == "POST" and path.endswith("/oauth/complete") and site == b"same-origin" for method, path, site in seen)
             assert page.locator("[data-return-home]").get_attribute("href") == origin + prefix + "/"
+            assert not page.locator("[data-return-again]").is_visible()  # a hidden control stays hidden although .btn sets its own display
             assert not page.evaluate("document.documentElement.scrollWidth > innerWidth")
             evidence = os.environ.get("OUROBOROS_UI_EVIDENCE_DIR")
             if evidence:
@@ -131,6 +132,7 @@ def test_provider_return_runs_real_page_after_navigation_and_owner_login(monkeyp
             page.goto(origin + prefix + "/onboarding/static/provider-return.html?" + urlencode({"error": "access_denied", "state": state}))
             page.locator('[data-return-status][data-tone="warn"]').wait_for()
             assert page.locator("[data-return-detail]").inner_text() == "Permission was not granted."
+            assert page.locator("[data-return-next]").inner_text() == "Return to Ouroboros and check the account before starting sign-in again."
             assert completed[-1]["error"] == "access_denied"
         finally:
             context.close()

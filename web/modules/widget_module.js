@@ -2,8 +2,8 @@
    (the shared sandbox / permissions set, the module document CSP, the parent side of the one
    streaming bridge — fetch relay, abort, skill WebSocket event forwarding — plus the resize
    bridge and source-load timeout).
-   widgets.js keeps the page host, the mountTab dispatcher, the card registry and the
-   declarative renderer; every mount here returns its disposer to that dispatcher. */
+   widgets.js keeps the page host, the one dispatcher by render kind (`mountTabInto`, the board's and Costs'), the card
+   registry and the declarative renderer; every mount here returns its disposer to that dispatcher. */
 
 import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePrefix } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
@@ -35,9 +35,11 @@ const faultText = (value, max) => (typeof value === 'string'
 export const WIDGET_FRAME_SANDBOX = 'allow-scripts allow-pointer-lock allow-downloads';
 export const WIDGET_FRAME_ALLOW = 'autoplay; fullscreen; clipboard-write';
 
-function createWidgetFrame() {
+// A frame is named by its card's title, the words the card's head shows (widgets.js, widget_card.js).
+function createWidgetFrame(tab) {
     const iframe = document.createElement('iframe');
     iframe.className = 'widgets-frame';
+    iframe.setAttribute('title', String(tab.title || tab.tab_id || tab.skill));
     iframe.setAttribute('sandbox', WIDGET_FRAME_SANDBOX);
     iframe.setAttribute('allow', WIDGET_FRAME_ALLOW);
     iframe.setAttribute('allowfullscreen', '');
@@ -147,14 +149,16 @@ async function openRouteLease(tab, mountSignal) {
     }
 }
 
-// `board` is a Widgets card's frame policy (absent for a frame in a message): `starting()` records the start in the
+// `board` is a Widgets card's frame policy (absent for a frame in a message), on the board or on the page its author
+// placed it (`where`: `costs`, which its fault reports name; `board` when absent): `starting()` records the start in the
 // ledger (holds.js) at the moment the frame gets its document, never during the downloads before it; `geometry()`
 // answers boardFrameGeometry for the card as it is now; `measured(natural, held, at)` hears each content height the
 // frame reports, whether its reporter stopped there (`held`, the extra its document keeps asking for) and the frame's
 // height when the report came (`at`); `held()` answers
 // that remembered extra for a new document; `attach(refit)` hands the board this mount's refit, which re-applies
 // `geometry()` after the owner changes the card's height or Show all (`refit({ fresh: true })` after Natural height
-// or Reset, so its reporter measures anew from the frame now applied) and returns the detach.
+// or Reset, so its reporter measures anew from the frame now applied; `refit({ shown: true })` when Widgets shows a
+// frame it kept running, its bounds sent again so that it measures anew) and returns the detach.
 export async function mountRouteIframeWidget(mount, tab, render, mountSignal = null, inline = null, messageHandlers = null,
     board = null) {
     const route = cleanExtensionRoute(render.route);
@@ -169,7 +173,7 @@ export async function mountRouteIframeWidget(mount, tab, render, mountSignal = n
     // property, never an attribute string.
     const lease = await openRouteLease(tab, mountSignal);
     if (mountSignal?.aborted) { revokeWidgetAssetLease(lease); return; }
-    const iframe = createWidgetFrame();
+    const iframe = createWidgetFrame(tab);
     iframe.referrerPolicy = 'no-referrer';
     mount.replaceChildren(iframe);
     setFrameHeight(iframe, board ? board.geometry().height : frameHeight(render));
@@ -267,7 +271,7 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
     // The document goes in through the `srcdoc` property (no attribute
     // escaping round-trip of a module-sized payload); the frame carries the
     // shared sandbox / permissions set — nothing that re-exposes the SPA origin.
-    const iframe = createWidgetFrame();
+    const iframe = createWidgetFrame(tab);
     if (assetBase) iframe.referrerPolicy = 'no-referrer';
     board?.starting();
     iframe.srcdoc = srcdoc;
@@ -304,7 +308,7 @@ function attachFrameBridge(iframe, mount, tab, {
     // so a report still on its way from the old window (an older number) is ignored rather than taken as the fit.
     let sentViewport = baked ? `${baked.floor}/${baked.ceiling}` : '';
     let freshFits = 0;
-    const refit = ({ fresh = false } = {}) => {
+    const refit = ({ fresh = false, shown = false } = {}) => {
         if (disposed || !board) return;
         const geometry = board.geometry();
         const content = Number(iframe.dataset.widgetContentHeight);
@@ -316,7 +320,7 @@ function attachFrameBridge(iframe, mount, tab, {
             setFrameHeight(iframe, appliedHeight);
         }
         const viewport = `${geometry.floor}/${geometry.ceiling}`;
-        if (autoHeight && port && (fresh || viewport !== sentViewport)) {
+        if (autoHeight && port && (fresh || shown || viewport !== sentViewport)) {
             sentViewport = viewport;
             if (fresh) freshFits += 1;
             post({ type: 'ouro-widget-viewport', floor: geometry.floor, ceiling: geometry.ceiling,
@@ -326,7 +330,7 @@ function attachFrameBridge(iframe, mount, tab, {
     // The fault a card shows also reaches the host's event log once per kind+message, under this mount's own
     // identity (captured now, never the frame's words). Best effort: no retry, and a failed report changes nothing.
     const faultIdentity = { skill: String(tab.skill || ''), tab_id: String(tab.tab_id || ''),
-        revision: String(tab.revision ?? ''), where: inline ? 'message' : 'board' };
+        revision: String(tab.revision ?? ''), where: inline ? 'message' : (board?.where || 'board') };
     const reportedFaults = new Set();
     const reportFault = (msg) => {
         const message = faultText(msg.message, 500);

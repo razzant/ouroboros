@@ -21,9 +21,11 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from contextlib import nullcontext
 from copy import deepcopy
 from json import dumps as json_dumps, loads as json_loads
 from dataclasses import fields
+from itertools import chain
 from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros import store
@@ -33,6 +35,10 @@ from ouroboros.utils import append_jsonl
 log = logging.getLogger(__name__)
 
 HELD, CLOSED = "held", "closed"
+# A registration a start created and no run row owns, owed its retirement once nothing uses it (the start never ran
+# while another use held it, or its removal was not confirmed). START_FAILED transfers the duty in the same
+# transaction. REGISTRATION_OWED can record it separately and PROJECT_RETIRED closes it on its engine.
+OWED = "custody_registrations"
 # Task-scoped rows on the marks row: patch verdicts kept whole, document imports folded by input (their owed
 # managed releases by key).
 MARK_TYPES = ("delegate_run_patch_verdict", *DOCUMENT_IMPORT_TYPES)
@@ -57,16 +63,16 @@ def _decode(raw):
 def collection_pending(entry, root=None) -> bool:
     """Collection debt, never retry eligibility. Only custody facts, even with a root."""
     from ouroboros.delegate_capture_attempt import capture_required, named_required
+    from ouroboros.delegate_registration_policy import evidence_only
 
     if entry is None or entry.review_owned:
         return False
-    if entry.terminal_source and (not entry.ledger_recorded or not entry.settled
+    return bool(entry.terminal_source and (not entry.ledger_recorded or not entry.settled
         or not entry.output_source or not entry.output_complete
         or entry.output_terminal_sha != entry.terminal_source.get("sha256")
-        or (capture_required(entry) and not entry.patch_captured)
-        or (named_required(entry) and entry.named_evidence.get("status") != "retained")):
-        return True
-    return False
+        or (capture_required(entry) and (not entry.patch_captured or entry.capture_job.get("state") == "ready"
+            or (entry.resource_ref.get("workspace_kind") == "directory" and evidence_only(entry))))
+        or (named_required(entry) and entry.named_evidence.get("status") != "retained")))
 
 
 def _held(entry) -> bool:
@@ -115,9 +121,9 @@ _TREE = "root_task_id=? OR (root_task_id='' AND task_id=?)"
 _LEGACY_TREE = "json_extract(facts, '$.root_task_id')=? OR (json_extract(facts, '$.root_task_id')='' AND task_id=?)"
 
 
-def runs(root, where: str = "", params: tuple = ()):
+def runs(root, where: str = "", params: tuple = (), *, transaction=None):
     """Custody selected by typed columns (all runs when unfiltered)."""
-    with store.open_store(root, write=False) as txn:
+    with (nullcontext(transaction) if transaction is not None else store.open_store(root, write=False)) as txn:
         raw = txn.custody_raw_rows(where, params)
     return _decode_all({rid: json_loads(text) for rid, text in raw.items()})
 
@@ -334,10 +340,6 @@ def marks(root, task_id: str) -> Dict[str, Any]:
         return txn.get_row("custody_marks", str(task_id or "")) or {}
 
 
-def _pending_rows(txn) -> List[Dict[str, Any]]:
-    return [facts["request"] for key, facts in txn.set_rows("custody_open").items() if key.startswith("invocation:")]
-
-
 def pending(root):
     from ouroboros.delegate_pending import current_rows
 
@@ -472,7 +474,7 @@ _MAYBE_UNFINISHED = ("CASE WHEN json_valid(facts) THEN NOT (COALESCE(json_extrac
                      "AND json_extract(facts, '$.terminal_state') IN (SELECT value FROM json_each(?))) ELSE 1 END")
 
 
-def tree_closure(root, root_task_id: str, task_id: str = "", *, wait_sec=store.STORE_WAIT_SEC):
+def tree_closure(root, root_task_id: str, task_id: str = "", *, wait_sec=store.STORE_WAIT_SEC, transaction=None):
     """ONE transaction's answer to "is this tree's delegated work over?": ``runs``, TASK_ID's own runs in the tree;
     ``unfinished``, the tree's runs that may not be settled with a terminal state (``_MAYBE_UNFINISHED``: the settled
     majority is neither fetched nor decoded); ``pending``, every pending invocation of the tree, as
@@ -482,7 +484,8 @@ def tree_closure(root, root_task_id: str, task_id: str = "", *, wait_sec=store.S
     from ouroboros.store_hot_facts import tree_requests
 
     mine = str(task_id or "")
-    with store.open_store(root, write=False, wait_sec=wait_sec) as txn:
+    with (nullcontext(transaction) if transaction is not None
+          else store.open_store(root, write=False, wait_sec=wait_sec)) as txn:
         where, params = _selected(txn, _TREE, _LEGACY_TREE, (root_task_id, root_task_id))
         own = txn.custody_raw_rows(f"({where}) AND task_id=?", (*params, mine)) if mine else {}
         maybe = txn.custody_raw_rows(f"({where}) AND {_MAYBE_UNFINISHED}",
@@ -492,6 +495,97 @@ def tree_closure(root, root_task_id: str, task_id: str = "", *, wait_sec=store.S
     return {"runs": {rid: entry for rid, entry in runs.items() if entry.task_id == mine},
             "unfinished": _decode_all({rid: json_loads(text) for rid, text in maybe.items()}),
             "pending": current_rows(root, requests)}
+
+
+def registration_snapshot(root, project_id, engine, *, include_runs=True):
+    """The run, pending request and exact retirement duty cannot cross a read gap at STARTED."""
+    with store.open_store(root, write=False) as txn:
+        named = runs(root, "project_id=?", (project_id,), transaction=txn) if include_runs else {}
+        candidates = txn.conn.execute(
+            "SELECT facts FROM obligations WHERE set_name='custody_open' AND CASE WHEN json_valid(facts) "
+            "THEN json_extract(facts, '$.request.project_id')=? ELSE 1 END", (project_id,))
+        requests = [row for candidate in candidates if (row := json_loads(candidate["facts"])["request"])
+                    and row.get("project_id") == project_id]
+        owed = txn.get_row(OWED, owed_key(project_id, engine))
+    return named, requests, owed
+
+
+_REMOVALS = "custody_registration_removals"
+# One row per START a claim linked to an owed duty (``<duty key>\n<invocation>``), so a new START adds a row and never
+# rewrites a duty's growing list; read and closed by the duty's key range, with the duty.
+_USES = "custody_registration_uses"
+REGISTRATION_SETS = (OWED, _REMOVALS, _USES)
+_REMOVAL_STAMP = "registration_removal_stamp"
+REMOVAL_EVENT = "delegate_run_registration_removal"
+
+
+def _use_range(key):
+    return key + "\n", key + "\x0b"  # every ``<key>\n…`` id: a JSON key never holds a raw newline
+
+
+def linked_uses(txn, key) -> List[Dict[str, Any]]:
+    """The uses an owed duty keeps: those its creation met, then each START linked to it, by its key's range."""
+    duty = txn.get_row(OWED, key) or {}
+    rows = txn.conn.execute("SELECT facts FROM obligations WHERE set_name=? AND id>=? AND id<? ORDER BY rowid",
+                            (_USES, *_use_range(key)))
+    return [*(duty.get("workspace_uses") or ()), *(json_loads(row["facts"]) for row in rows)]
+
+
+def _removal_group(project_id, engine):
+    from ouroboros.execution_domain import registration_engine
+
+    route, store_id = registration_engine(engine)
+    return json_dumps([project_id, route]), store_id
+
+
+def registration_revision(root):
+    """The last removal change, observed before the engine names the project."""
+    with store.open_store(root, write=False) as txn:
+        return txn.meta(_REMOVAL_STAMP) or ""
+
+
+def removal_status(root, project_id, engine):
+    from ouroboros.execution_domain import registration_engine
+
+    group, store_id = _removal_group(project_id, engine)
+    with store.open_store(root, write=False) as txn:
+        marks = txn.get_row(_REMOVALS, group) or {}
+        lane = marks.get(store_id, "")
+        if not lane and ("" in marks or (not store_id and marks)):
+            lane = "store_unproven"
+        if not lane and registration_engine(engine)[0] is None:
+            # Older installations recorded a historical DELETE only in the owned engine's walk.
+            row = txn.conn.execute(
+                "SELECT json_extract(value, '$.historical_walk.pending.store_id') FROM meta "
+                "WHERE key='job:runtime_retirement' AND json_extract(value, '$.historical_walk.pending.project_id')=? "
+                "AND json_extract(value, '$.historical_walk.pending.shared') IS NULL",
+                (project_id,)).fetchone()
+            if row and (not store_id or not row[0] or row[0] == store_id):
+                lane = "historical_walk" if store_id and row[0] else "store_unproven"
+        return lane, txn.meta(_REMOVAL_STAMP) or ""
+
+
+def mark_removal(root, project_id, engine, lane, *, creator=None):
+    from ouroboros import delegate_custody as custody
+
+    # An unsent creator has no run to carry its duty across a crash. Open the duty with the intent.
+    kind = custody.REGISTRATION_OWED if creator is not None else REMOVAL_EVENT
+    if not custody.emit(root, kind, {"project_id": project_id, **engine, **(creator or {}), "removal_lane": lane}):
+        raise OSError("registration removal could not be recorded")
+
+
+def _removal_change(marks, store_id, event):
+    if lane := event["removal_lane"]:
+        marks[store_id] = lane
+    else:
+        marks.pop(store_id, None)
+    return marks
+
+
+def owed_registrations(root) -> List[Dict[str, Any]]:
+    """Every owed registration retirement (``OWED``): a few rows, each removed by its registration's retirement."""
+    with store.open_store(root, write=False) as txn:
+        return list(txn.set_rows(OWED).values())
 
 
 def payload_snapshot(root):
@@ -557,6 +651,14 @@ def _reduce(txn, event: Dict[str, Any], state: Dict[str, Any], marks_by_task: Di
     txn.set_meta(inv.ORDINAL, ordinal)
     if event_id:
         txn.put_row(inv.EVENTS, event_id, {"ordinal": ordinal})
+    if "removal_lane" in event:
+        group, store_id = _removal_group(event["project_id"], event)
+        marks = _removal_change(txn.get_row(_REMOVALS, group) or {}, store_id, event)
+        if marks:
+            txn.put_row(_REMOVALS, group, marks)
+        else:
+            txn.delete_row(_REMOVALS, group)
+        txn.set_meta(_REMOVAL_STAMP, event_id)
     invocation_row = inv.reduce_event(txn, event, ordinal)
     kind, rid, iid = str(event.get("type") or ""), str(event.get("run_id") or ""), str(event.get("invocation_id") or "")
     tid = str(event.get("task_id") or "")
@@ -598,7 +700,16 @@ def _reduce(txn, event: Dict[str, Any], state: Dict[str, Any], marks_by_task: Di
                 txn.put_row("delegated_runs", entry.task_id, {**debt, "task_id": entry.task_id, "closed_runs": receipts})
             if run_id == late:
                 owed = entry.task_id
-    if iid and (kind == c.STARTED or (kind in (c.START_UNSENT, c.START_FAILED) and event.get("definite") is True)):
+    for name, key, value in _owed_updates(event, state, lambda key: txn.get_row(OWED, key)):
+        if value is not None:
+            txn.put_row(name, key, value)
+            continue
+        txn.delete_row(name, key)  # a closed duty takes the uses linked to it along
+        txn.conn.execute("DELETE FROM obligations WHERE set_name=? AND id>=? AND id<?", (_USES, *_use_range(key)))
+    closing = (kind == c.STARTED or (kind in (c.START_UNSENT, c.START_FAILED) and event.get("definite") is True
+               and not (kind == c.START_FAILED and event.get("pre_admission_rejected") is True
+                        and (invocation_row or {}).get("state") != "failed_definite")))
+    if iid and closing:
         request = txn.get_row("custody_open", f"invocation:{iid}")
         txn.delete_row("custody_open", f"invocation:{iid}")
         if kind == c.START_FAILED and request is None:
@@ -634,6 +745,43 @@ def _cost_targets(event, state, invocation_row):
     owner = entry.task_id if entry else str(request.get("task_id") or event.get("task_id") or "")
     tree = (entry.root_task_id if entry else str(request.get("root_task_id") or "")) or owner
     return {owner, tree} - {""}
+
+
+_OWED_FACTS = ("project_id", "engine_ref", "daemon_store_id", "task_id", "invocation_id", "reason", "ts",
+               "registration_root", "registration_store_id", "workspace_uses")
+
+
+def owed_key(project_id, engine) -> str:
+    """Keep the original key for identity-less owned engines and descriptor-bound work engines."""
+    from ouroboros.execution_domain import registration_engine
+
+    descriptor, store_id = registration_engine(engine)
+    return json_dumps([project_id] if descriptor is None and not store_id else [project_id, descriptor, store_id])
+
+
+def _owed_updates(event, state, read):
+    """``(set, key, value or None)`` per owed duty an event opens (the first wins) or closes, and per use it links: a
+    START adds its invocation, as its own row (``_USES``), to each duty its claim found alive (``registration_links``,
+    ``delegate_workspace_hold``); no duty's row is rewritten for it."""
+    from ouroboros import delegate_custody as c
+
+    kind, use = event.get("type"), {"invocation_id": str(event.get("invocation_id") or "")}
+    if kind == c.START_REQUESTED:
+        return [(_USES, f"{key}\n{use['invocation_id']}", use)
+                for key in map(str, event.get("registration_links") or ()) if use["invocation_id"] and read(key)]
+    if kind == c.START_FAILED:
+        if event.get("definite") is not True or not isinstance(event.get("registration_owed"), dict):
+            return []
+        event = {**{k: event[k] for k in ("project_id", "task_id", "invocation_id", "ts") if k in event},
+                 **event["registration_owed"], "type": c.REGISTRATION_OWED, "reason": event["project_retention_reason"]}
+    elif kind not in (c.REGISTRATION_OWED, c.PROJECT_RETIRED):
+        return []
+    rid = str(event.get("run_id") or "")
+    owner = state.get(rid) if rid else event
+    pid = str(event.get("project_id") or getattr(owner, "project_id", "") or "")
+    key = owed_key(pid, owner) if pid and owner is not None else None
+    duty = {k: deepcopy(event[k]) for k in _OWED_FACTS if k in event} if event["type"] == c.REGISTRATION_OWED else None
+    return [] if not key or (duty is not None and read(key) is not None) else [(OWED, key, duty)]
 
 
 def _mark(mark: Dict[str, Any], event: Dict[str, Any]) -> None:
@@ -684,24 +832,40 @@ def publish(root, event: Dict[str, Any], *, propagate_contention: bool = False) 
     A failed append keeps the outbox for the next flush, so the chain never leads the store.
     Transaction/append ordering: module docstring."""
     from ouroboros import delegate_invocation as inv
-    from ouroboros.delegate_resume import ACTIVE, can_reserve_cancel, hold_active_start, owe_risk_notice, publication_lock, still_pending
+    from ouroboros.delegate_resume import (ACTIVE, can_reserve_cancel, hold_active_start, owe_risk_notice, publication_lock,
+                                           settled_holders, still_pending)
 
-    owed = changed_tree = ""
-    from ouroboros.delegate_custody import (CANCEL_HANDOFF, CLOSED_ABSENT, SETTLED, START_REQUESTED,
-                                            START_RISK_ACCEPTED, START_STATE_OBSERVED, TERMINAL_STATES)
+    owed, changed = "", []
+    from ouroboros.delegate_custody import (CANCEL_HANDOFF, CLOSED_ABSENT, PROJECT_RETIRED, SETTLED, START_FAILED,
+                                            START_REQUESTED, START_RISK_ACCEPTED, START_STATE_OBSERVED, TERMINAL_STATES)
     from ouroboros.delegate_pending import pending_invocations
+    from ouroboros.execution_domain import registration_engine
     # Keep the canonical reference, never a replay-authorizing copy of its body.
     pending = pending_invocations(root, [event], materialize=False) if event.get("type") == START_REQUESTED else None
     try:
         while True:
-            with publication_lock(root, event), store.open_store(root, write=True) as txn:
+            pre_admission_binding = None
+            if event.get("type") == START_FAILED and event.get("pre_admission_rejected") is True:
+                from ouroboros.delegate_continuation import prepare_pre_admission_rejection_binding
+
+                pre_admission_binding = prepare_pre_admission_rejection_binding(root, event)
+            with publication_lock(root, event) as holders, store.open_store(root, write=True) as txn:
                 if int(txn.meta("schema_version") or 1) >= store.SCHEMA_VERSION:
                     if not event.get("event_id") or txn.get_row(inv.EVENTS, str(event["event_id"])) is None:
                         if event["type"] == START_RISK_ACCEPTED and not still_pending(txn, event):
                             return False
+                        if event["type"] == START_FAILED and event.get("pre_admission_rejected") is True:
+                            from ouroboros.delegate_continuation import can_settle_pre_admission_rejection
+
+                            if not can_settle_pre_admission_rejection(txn, event, verified=pre_admission_binding):
+                                return False
                         event = {**event, "custody_ordinal": int(txn.meta(inv.ORDINAL) or 0) + 1}
                         loaded = _loaded(txn, event)
                         entry = loaded.get(event.get("run_id"))
+                        if (event["type"] == PROJECT_RETIRED and event.get("project_id") and event.get("run_id")
+                                and (entry is None or entry.project_id != event["project_id"]
+                                     or registration_engine(entry) != registration_engine(event))):
+                            return False  # the run acquired a different binding during the engine call
                         if event["type"] == CANCEL_HANDOFF and (
                                 not entry or entry.task_id != event["task_id"] or entry.invocation_id != event["invocation_id"]
                                 or entry.settled or entry.terminal_state or entry.resume_start_state in TERMINAL_STATES
@@ -717,12 +881,12 @@ def publish(root, event: Dict[str, Any], *, propagate_contention: bool = False) 
                             if entry.settled or entry.terminal_state or entry.resume_start_state != "unknown":
                                 return True  # A previous observer won. Its committed observation is authoritative.
                         if (event["type"] in (SETTLED, CLOSED_ABSENT) and entry and entry.resume_start_state in ACTIVE):
-                            changed_tree = entry.root_task_id or entry.task_id
+                            changed = settled_holders(txn, entry)
                         owed = _reduce(txn, event, loaded, {}, pending)
                         if event["type"] == START_RISK_ACCEPTED:
                             owe_risk_notice(txn, event)
                         if event.get("resume_start_state") in ACTIVE:
-                            changed_tree = hold_active_start(txn, event)
+                            changed = hold_active_start(txn, event, holders)
                         txn.outbox_put(event)
                     break
             # Prepare an old child before reducing anything, like store.update_task.
@@ -737,9 +901,10 @@ def publish(root, event: Dict[str, Any], *, propagate_contention: bool = False) 
         return False
     with _HELD_LOCK:
         _LOCAL_WRITES[0] += 1
-    if changed_tree:
+    if changed:
         from ouroboros.delegate_resume import recovered_writer_changed
-        recovered_writer_changed(root, changed_tree)
+        for tree in changed:
+            recovered_writer_changed(root, tree)
     flush_outbox(root)
     if owed:
         _refresh_owed_receipt(root, owed)
@@ -880,10 +1045,21 @@ def fold(rows) -> Dict[str, Any]:
     pending_ids: List[str] = []
     refused: Dict[str, Dict[str, Any]] = {}
     marks_by_task: Dict[str, Dict[str, Any]] = {}
+    owed: Dict[str, Dict[str, Any]] = {}
+    linked: Dict[str, Dict[str, Dict[str, Any]]] = {}  # duty key -> its linked use rows (``_USES``)
+    closed_registrations = set()
+    removals, cleared_lanes, removal_stamp = {}, {}, ""
     invocations, operations, event_ordinals, cost_revisions = {}, {}, {}, {}
     ordinal = 0
     for row in c._unique_rows(rows):
         ordinal = max(ordinal + 1, int(row.get("custody_ordinal") or 0))
+        if "removal_lane" in row:
+            group, store_id = _removal_group(row["project_id"], row)
+            if not row["removal_lane"]:
+                cleared_lanes.setdefault(group, set()).add(store_id)
+            if not _removal_change(removals.setdefault(group, {}), store_id, row):
+                del removals[group]
+            removal_stamp = row["event_id"]
         if row.get("event_id"):
             event_ordinals[str(row["event_id"])] = {"ordinal": ordinal}
         kind, rid, iid = str(row.get("type") or ""), str(row.get("run_id") or ""), str(row.get("invocation_id") or "")
@@ -891,19 +1067,31 @@ def fold(rows) -> Dict[str, Any]:
         if kind == c.START_REQUESTED:
             key = inv.operation_key(str(row.get("operation_id") or ""), str(row.get("slot_id") or ""))
             operations.setdefault(key, {"invocation_id": iid, "request_ordinal": ordinal})
-        if iid and kind in (c.START_REQUESTED, c.STARTED, c.START_UNSENT, c.START_FAILED, c.START_RISK_ACCEPTED):
+        if iid and kind in (c.START_REQUESTED, c.STARTED, c.START_UNSENT, c.START_FAILED, c.START_RISK_ACCEPTED, c.START_HANDOFF):
             invocations[iid] = inv.advance(invocations.get(iid), row, ordinal)
         if kind == c.START_REQUESTED and iid and iid not in requests:
             requests[iid] = row
             pending_ids.append(iid)
         c._apply(state, row)
+        for name, key, value in _owed_updates(row, state, owed.get):
+            if name == _USES:
+                linked.setdefault(key.split("\n", 1)[0], {})[key] = value
+            elif value is None:
+                closed_registrations.add(key)
+                owed.pop(key, None)
+                linked.pop(key, None)
+            else:
+                owed[key] = value
         if kind == c.STARTED and rid in state:
             state[rid]._invocation_started_ordinal = ordinal
         if kind == c.STARTED and rid in state and iid in requests:
             state[rid].request_event = dict(requests[iid])
             group = requests[iid].get("billing_group")
             state[rid].billing_group = dict(group) if isinstance(group, dict) else {}
-        if iid and iid in requests and (kind == c.STARTED or (kind in (c.START_UNSENT, c.START_FAILED) and row.get("definite") is True)):
+        closing = (kind == c.STARTED or (kind in (c.START_UNSENT, c.START_FAILED) and row.get("definite") is True
+                   and not (kind == c.START_FAILED and row.get("pre_admission_rejected") is True
+                            and (invocations.get(iid) or {}).get("state") != "failed_definite")))
+        if iid and iid in requests and closing:
             if iid in pending_ids:
                 pending_ids.remove(iid)
                 if kind != c.STARTED:
@@ -925,7 +1113,11 @@ def fold(rows) -> Dict[str, Any]:
         "runs": {rid: (vars(entry), HELD if _held(entry) else CLOSED) for rid, entry in state.items()},
         "open": {f"invocation:{iid}": {"request": requests[iid], **inv.decision_facts(invocations[iid])}
                  for iid in pending_ids},
-        "refused": refused,
+        "refused": refused, "registrations": owed, "removals": removals, "removal_stamp": removal_stamp,
+        "registration_uses": {key: use for uses in linked.values() for key, use in uses.items()},
+        # Apply these before the surviving opens. Only addresses the history closed may retire imported rows.
+        "registration_closures": sorted(closed_registrations),
+        "lane_closures": {group: sorted(stores) for group, stores in cleared_lanes.items()},
         "marks": {tid: mark for tid, mark in marks_by_task.items() if set(mark) - {"task_id"}},
         "invocations": invocations, "operations": operations, "event_ordinals": event_ordinals,
         "ordinal": ordinal, "cost_revisions": {tid: rev for tid, rev in cost_revisions.items() if tid in open_owners},
@@ -933,7 +1125,7 @@ def fold(rows) -> Dict[str, Any]:
 
 
 def write_fold(txn, folded: Dict[str, Any], *, replace: bool) -> None:
-    """Write a fold's rows on an open transaction (the importer's build, the explicit rebuild)."""
+    """Replace from a complete history, or merge its addressed changes over previously held rows."""
     from ouroboros import delegate_invocation as inv
 
     if replace:
@@ -943,6 +1135,28 @@ def write_fold(txn, folded: Dict[str, Any], *, replace: bool) -> None:
     for name in ("refused", "marks"):
         for identity, facts in folded[name].items():
             txn.put_row(f"custody_{name}", identity, facts)
+    if replace:
+        txn.replace_set(_REMOVALS, folded["removals"])
+        txn.replace_set(OWED, folded["registrations"])
+        txn.replace_set(_USES, folded["registration_uses"])
+    else:
+        for identity in folded["registration_closures"]:
+            txn.delete_row(OWED, identity)
+            txn.conn.execute("DELETE FROM obligations WHERE set_name=? AND id>=? AND id<?", (_USES, *_use_range(identity)))
+        for name in (OWED, _USES):
+            for identity, facts in folded["registrations" if name == OWED else "registration_uses"].items():
+                txn.put_row(name, identity, facts)
+        for group in folded["removals"].keys() | folded["lane_closures"].keys():
+            lanes = txn.get_row(_REMOVALS, group) or {}
+            for store_id in folded["lane_closures"].get(group, ()):
+                lanes.pop(store_id, None)
+            lanes.update(folded["removals"].get(group, {}))
+            if lanes:
+                txn.put_row(_REMOVALS, group, lanes)
+            else:
+                txn.delete_row(_REMOVALS, group)
+    if replace or folded["removal_stamp"]:
+        txn.set_meta(_REMOVAL_STAMP, folded["removal_stamp"])
     for name, rows in ((inv.INVOCATIONS, folded["invocations"]), (inv.OPERATIONS, folded["operations"]),
                        (inv.EVENTS, folded["event_ordinals"])):
         if replace:
@@ -981,11 +1195,15 @@ def rebuild(root, *, replace=False) -> int:
     from ouroboros import delegate_custody as c
     from ouroboros.obligations import ObligationsUnavailable
 
+    # Offline repair: fold the chain and its committed tail once, before taking the writer lock.
+    parked = []
+    if store.probe(root)[0] == "present":
+        with store.open_store(root, write=False) as txn:
+            parked = [json_loads(row["event"]) for row in txn.conn.execute("SELECT event FROM custody_outbox ORDER BY rowid")]
     try:
-        rows = tuple(c._iter_rows(c.event_log_path(root), strict=True))
+        folded = fold(chain(c._iter_rows(c.event_log_path(root), strict=True), parked))
     except OSError as exc:
         raise ObligationsUnavailable(f"custody event chain is unreadable: {exc}") from exc
-    folded = fold(rows)
     with store.open_store(root, write=True) as txn:
         write_fold(txn, folded, replace=replace)
         debts = txn.set_rows("delegated_runs")

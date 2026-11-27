@@ -26,6 +26,7 @@ from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.place_arrivals import reading_key
 from ouroboros.presence_bindings import conversation_key
 from ouroboros.presence_runner import _stable_numeric_id, presence_turn_task_id
+from tests._place_wake_import import legacy_wake_install, wake_declaration
 from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
 
 KEY = conversation_key("chat", "a", "r", "")
@@ -142,6 +143,70 @@ def test_malformed_requests_record_nothing(room, change, field):
     assert response.json()["code"] == "presence_history_invalid" and response.json()["disposition"] == "rejected"
     assert response.json()["field"] == field and "results" not in response.json()
     assert not rows(room.root)
+
+
+def test_history_checks_the_room_before_any_import_or_history_write(tmp_path, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+
+    from ouroboros import presence_admission, presence_history
+    from ouroboros.gateway.host_service_places import _api_presence_history
+    from ouroboros.presence_bindings import PresenceEndpoint
+
+    ctx = Mock(data_dir=tmp_path)
+    request = Mock(headers={}, json=AsyncMock(return_value={**body(record(1)), "binding_id": "sample"}))
+    request.app.state.host_service_context = ctx
+    admit = Mock(return_value=SimpleNamespace(origin=PresenceEndpoint("chat", "a", "another-room", "")))
+    write = Mock()
+    monkeypatch.setattr(host_service, "_authenticated", AsyncMock(return_value=("bridge", {})))
+    monkeypatch.setattr(host_service, "_bounded_host_read", AsyncMock(side_effect=lambda ctx, read: read()))
+    monkeypatch.setattr(presence_admission, "admit_presence_turn", admit)
+    monkeypatch.setattr(presence_history, "record_history", write)
+
+    refused = asyncio.run(_api_presence_history(request))
+    assert (refused.status_code, json.loads(refused.body)["code"]) == (403, "presence_origin_mismatch")
+    admit.assert_called_once_with(drive_root=tmp_path, authenticated_transport_skill="bridge",
+                                  binding_id="sample", live_event=False, persist_import=False,
+                                  provider="chat", account_id="a", conversation_id="r", thread_id="")
+    write.assert_not_called()
+
+
+@pytest.mark.usefixtures("lone_host_world")
+def test_history_leaves_import_pending_and_retry_of_a_heard_dm_stays_silent(tmp_path, monkeypatch):
+
+    with monkeypatch.context() as installed:
+        legacy_wake_install(tmp_path, installed)
+        place, = p.load_places(tmp_path)
+    published = []
+    monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: published)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+
+    async def authenticated(*_args):
+        return place.connector, {}
+
+    focused = []
+
+    def run(**kwargs):
+        focused.append(kwargs["event"].source_event_id)
+        return SimpleNamespace(outcome="message", text="Unexpected focus", task_id="focus", work_ref="")
+
+    monkeypatch.setattr(host_service, "_authenticated", authenticated)
+    historical, early = record(1), record(2)
+    for row in (historical, early):
+        row["event"].update(provider=place.provider, account_id=place.account_id, conversation_id=place.conversation_id,
+                            conversation_key=conversation_key(place.provider, place.account_id, place.conversation_id))
+    live = {"binding_id": place.place_id, "event": {**early["event"], "facts": ["direct_message"]}}
+    with TestClient(host_service.create_host_service_app(tmp_path, presence_runner=run)) as client:
+        first = client.post("/presence/turn", json=live)
+        assert first.status_code == 200 and first.json()["outcome"] == "silent", first.text
+        before = p.places_path(tmp_path).read_bytes()
+        published.append(wake_declaration("direct_message"))
+        history = client.post("/presence/history", json={**body(historical), "binding_id": place.place_id})
+        assert history.status_code == 200, history.text
+        assert p.places_path(tmp_path).read_bytes() == before
+        retry = client.post("/presence/turn", json=live)
+        assert retry.status_code == 200 and retry.json()["outcome"] == "silent", retry.text
+        assert not focused and p.get_place(tmp_path, place.place_id).wakes[-1] == p.WakeItem("direct_message", "connector")
 
 
 def test_history_takes_the_actor_fact_a_live_event_takes(room):
@@ -578,10 +643,15 @@ def test_a_time_ordered_page_costs_its_own_rows_newest_and_deep(tmp_path, monkey
     import math
 
     from ouroboros.gateway import history
+    from ouroboros.project_registry_recovery import registry_path
+    from ouroboros.server_boot import reconcile_projects
+
     measured = {}
     for size in (2_000, 20_000):
         root = tmp_path / f"rows{size}" / "data"
         _bulk_room(root, size, shared=lambda _n: shared)
+        reconcile_projects(root)  # normal boot reconciles the registry after dialogue import
+        assert registry_path(root).is_file()
 
         def read(cursor=None, around=None):
             return json.loads(history._assemble_history_response(root, BULK_CHAT, 100, 60, cursor, around))
@@ -871,6 +941,7 @@ def test_real_pages_name_their_coverage_cuts_by_row_key(tmp_path):
     with pytest.raises(HistoryCursorError) as reset:
         _read(root, 20, arrived["after_cursor"])
     assert reset.value.reason == "history_delta_reset"
+    assert reset.value.fields == {"detail": "historical_import", "stream": "chat"}
 
 
 @pytest.mark.parametrize("own_day", ["2026-10-25", "2026-10-23"], ids=["own-newest", "own-older"])
@@ -966,6 +1037,7 @@ def test_main_keeps_its_own_newest_page_after_a_bulk_import_into_a_place_room(tm
 
     from ouroboros.gateway import history
     from ouroboros.place_arrivals import _dialogue_indexes
+    from tests._dialogue import confirm_first_use
     measured = {}
     for size, places in ((2_000, 0), (11_000, 0), (2_000, 5)):
         root = tmp_path / f"main{size}-{places}" / "data"
@@ -987,6 +1059,7 @@ def test_main_keeps_its_own_newest_page_after_a_bulk_import_into_a_place_room(tm
                       "client_message_id": f"elsewhere-{place}-{n}", "task_id": f"turn-{place}-{n}", "place_id": f"place-{place}",
                       "sender_session_id": "person"} for place in range(places) for n in range(8)]
         (root / "logs").mkdir(parents=True)
+        confirm_first_use(root)  # a booted installation: first use is confirmed before any history is saved
         (root / "logs" / "chat.jsonl").write_text("".join(json.dumps(row) + "\n" for row in elsewhere + main + imported))
         ds.ensure(root)
         _dialogue_indexes(root)  # as the import writer builds them before its rows land (``record_history``)

@@ -44,11 +44,11 @@ class WidgetTab(TypedDict):
     title: str
     icon: str
     ws_prefix: str
-    render: Dict[str, Any]
+    render: Dict[str, Any]  # carries the frame geometry
     span: int
     grid_span: int
     revision: str
-    generation: NotRequired[str]
+    generation: NotRequired[str]  # live publication identity; changes on same-content reload too.
     pinned_card: NotRequired[bool]
 
 
@@ -84,14 +84,14 @@ class WidgetAssetLeaseResponse(TypedDict):
 
 class WidgetFaultRequest(TypedDict):
     """``POST /api/widgets/fault``: one fault a mounted module widget's card shows. ``skill``, ``tab_id`` and
-    ``revision`` are the page's own mount, never the frame's words; ``where`` is the Widgets board or a living
-    card in a message; ``message``/``source``/``line`` are the frame's clipped report (``source``: the script
-    file, or the blocked URL of a ``csp`` refusal)."""
+    ``revision`` are the page's own mount, never the frame's words; ``where`` is the Widgets board, Costs (a card
+    its author placed there) or a living card in a message; ``message``/``source``/``line`` are the frame's clipped
+    report (``source``: the script file, or the blocked URL of a ``csp`` refusal)."""
 
     skill: str
     tab_id: str
     revision: str
-    where: Literal["board", "message"]
+    where: Literal["board", "costs", "message"]
     kind: Literal["error", "rejection", "csp"]
     message: str
     source: str
@@ -252,7 +252,7 @@ async def api_widget_fault_post(request: Request) -> JSONResponse:
         body = None
     record = None if validate_ingress(body, WidgetFaultRequest) else _fault_record(body)
     if record is None:
-        return json_error("expected skill, tab_id, revision, where (board|message), kind (error|rejection|csp), "
+        return json_error("expected skill, tab_id, revision, where (board|costs|message), kind (error|rejection|csp), "
                           f"message (<= {FAULT_MESSAGE_MAX}), source (<= {FAULT_SOURCE_MAX}) and a line number", 400)
     admitted, suppressed = _fault_admit(f"{record['skill']}:{record['tab_id']}", time.monotonic())
     if not admitted:

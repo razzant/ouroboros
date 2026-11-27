@@ -618,6 +618,34 @@ def test_mailbox_carrier_takes_owner_text_only(tmp_path):
     assert _texts(ow.task_owner_words(tmp_path, ROOT, task={"id": ROOT})[0]) == ["owner follow-up"]
 
 
+def test_mail_its_writer_left_without_a_kind_is_stamped_neutrally_and_its_bytes_are_unchanged(tmp_path):
+    """An older mailbox row has no writer's kind, so its stamp claims neither my human nor the host; a row whose writer
+    typed it as owner text keeps ``owner``. Both stamps read as the same rows (``stamped_refs``), the receipt is named
+    only in the stamp, and the row keeps the time as recorded (its identity and its quote's address)."""
+    from ouroboros.owner_mailbox import _mailbox_path
+    from ouroboros.owner_relay import _member_identity, stamped_refs
+    from ouroboros.safety_evidence import UNKINDED_STAMP
+
+    path = _mailbox_path(tmp_path, ROOT)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"msg_id": "mb-1", "text": "older follow-up", "ts": "2026-10-04T09:00:00+00:00"}) + "\n",
+                    encoding="utf-8")
+    write_owner_message(tmp_path, "typed follow-up", ROOT, msg_id="mb-2", kind=KIND_OWNER_TEXT)
+    rows, _absent = ow.task_owner_words(tmp_path, ROOT, task={"id": ROOT})
+    older, typed = rows
+    stamps = [ow.words_stamp(row) for row in rows]
+    moved = [(ow.words_stamp({**row, "carrier": carrier}), row is older)  # the same rows after a forward or a Continue
+             for row in rows for carrier in ("ctx", "owner_corpus")]
+
+    assert older["ts"] == "2026-10-04T09:00:00+00:00" and older["ref"] == "msg mb-1", "its bytes, as recorded"
+    assert stamps[0].startswith(f"[received {older['ts']} · {UNKINDED_STAMP} · ") and " · owner · " not in stamps[0]
+    assert " · owner · owner_mailbox of task " in stamps[1] and typed["mail_kind"] == KIND_OWNER_TEXT
+    assert all((UNKINDED_STAMP in stamp) is neutral and (" · owner · " in stamp) is not neutral for stamp, neutral in moved), \
+        "the old kindless row stays neutral under any carrier; the typed row stays owner"
+    assert stamped_refs("\n".join(stamps)) == {"msg mb-1", "msg mb-2"}
+    assert _member_identity(older) == _member_identity({**older, "mail_kind": KIND_OWNER_TEXT})
+
+
 def test_child_resolves_its_root_unless_it_carries_the_field(tmp_path):
     _bind(tmp_path, source_text="root's origin")
     child = {"id": "child01", "root_task_id": ROOT, "delegation_role": "subagent"}

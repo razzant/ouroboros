@@ -201,7 +201,16 @@ def post_commit_failure_response(exc: BaseException, boundary: CommitBoundary) -
 def settings_write_refusal(exc: Exception) -> JSONResponse | None:
     """The same typed pre-commit refusals on generic and dedicated owner writers."""
     from ouroboros.deployment_policy import DeploymentPolicyRefusal
+    from ouroboros.settings_integrity import SettingsPublicationRefused
 
+    if isinstance(exc, SettingsPublicationRefused):
+        # The physical publication boundary refused before any byte landed. A proven
+        # unfinished Reset keeps the exact typed refusal the boot witness already returns;
+        # every other cause reports its own non-save reason, never a pretended Reset.
+        if exc.cause == "reset_interrupted":
+            return unsaved_error(str(exc), 409, code="reset_interrupted", reason_code="reset_interrupted")
+        status = 503 if exc.cause == "state_lock_unavailable" else 409
+        return unsaved_error(str(exc), status, code="settings_publication_refused", reason_code=exc.cause)
     for error, status, code in (
         (DeploymentPolicyRefusal, 403, MANAGED_BY_DEPLOYMENT),
         (BindingRefused, 400, "main_binding_invalid"),
@@ -770,6 +779,7 @@ def _owner_write_settings(
     expected_digest: str = "",
     if_unchanged: Optional[dict] = None,
     unset: Sequence[str] = (),
+    drive_root: Optional[pathlib.Path] = None,
 ) -> Optional[Dict[str, Dict[str, Any]]]:
     """Write owner-controlled settings without applying the runtime-mode ratchet; returns the receipt.
 
@@ -796,6 +806,7 @@ def _owner_write_settings(
         precondition=precondition,
         boundary=boundary,
         whole_document=True, expected_digest=expected_digest, if_unchanged=if_unchanged, unset=unset,
+        drive_root=drive_root,
     )
 
 
@@ -819,6 +830,7 @@ def _owner_update_settings(
     unset: Sequence[str] = (),
     commit_if_current: Optional[Callable[[Callable[[], None]], bool]] = None,
     check_unchanged: Optional[Callable[[Dict[str, Any]], None]] = None,
+    drive_root: Optional[pathlib.Path] = None,
 ) -> Optional[Dict[str, Dict[str, Any]]]:
     """Read, change and persist ONE settings document inside ONE settings lock.
 
@@ -859,8 +871,12 @@ def _owner_update_settings(
     decision only after the file lands. A replay can return False without calling the commit.
 
     Returns the commit's receipt (``_committed_changes``), taken under the same lock after the bytes
-    land; empty when nothing was written or nothing changed."""
+    land; empty when nothing was written or nothing changed. A prior compatible route the write would bring
+    back into force is retired before the bytes land, or the write is refused (``_retire_revived_prior_routes``);
+    once the lock is released, a commit retires those its connections no longer serve
+    (``_retire_unserved_prior_routes``)."""
     from ouroboros import config as _config
+    from ouroboros.provider_connections import record_connection_revisions, settings_snapshot
 
     _config._guard_live_settings_write()
     _config.DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -870,13 +886,17 @@ def _owner_update_settings(
             f"Another process is holding the settings lock ({_config._settings_lock_path()}); "
             "nothing was saved. Retry in a moment."
         )
+    committed: Optional[Dict[str, Any]] = None
     try:
         if precondition is not None:
             refusal = str(precondition() or "")
             if refusal:
                 raise SettingsPreconditionFailed(refusal)
         document: Dict[str, Any] = {}
+        read_snapshot = settings_snapshot()
         current = _owner_read_settings_raw(document_out=document, strict=True)
+        if settings_snapshot() != read_snapshot:
+            read_snapshot = None  # the read may straddle another write: no connection revision is carried from it
         if expected_digest and settings_document_digest() != expected_digest:
             raise SettingsPreconditionFailed(STALE_SETTINGS_READ_REFUSAL)
         check_setting_tokens(document, if_unchanged)
@@ -908,9 +928,15 @@ def _owner_update_settings(
             raise SettingsDocumentUnreadable(UNREADABLE_SETTINGS_REFUSAL) from exc
         for key in unset:
             to_write.pop(key, None)
+        _retire_revived_prior_routes(document, to_write)
 
         def commit():
-            write_text_atomic(_config.SETTINGS_PATH, _config.serialize_settings(to_write))
+            nonlocal committed
+            with _config._settings_integrity.settings_publication_boundary(
+                drive_root if drive_root is not None else _config.DATA_DIR
+            ):
+                write_text_atomic(_config.SETTINGS_PATH, _config.serialize_settings(to_write))
+                committed = to_write
             if boundary is not None:
                 boundary.commit()
 
@@ -918,6 +944,7 @@ def _owner_update_settings(
             commit()
         elif not commit_if_current(commit):
             return {}  # a replay found this decision already saved
+        record_connection_revisions(read_snapshot, document, to_write)  # still under the lock; never raises
         try:
             changes = _committed_changes(document, shown, to_write, effective_before)
             if boundary is not None:
@@ -928,6 +955,45 @@ def _owner_update_settings(
             return None
     finally:
         _config._release_settings_lock(fd)
+        if committed is not None:
+            _retire_unserved_prior_routes(committed)
+
+
+PRIOR_ROUTE_REFUSAL = (
+    "This change brings back a compatible connection whose permission from before the server check could not be "
+    "withdrawn first, so saving it would have restored that permission; nothing was written. Try again."
+)
+
+
+def _retire_revived_prior_routes(saved: Dict[str, Any], written: Dict[str, Any]) -> None:
+    """Before a write lands, inside its lock: a prior ``/v1`` route (``llm_ollama_guard``) whose connection the saved
+    document no longer serves there is retired before this write can bring that connection back under its name at
+    that endpoint. So a connection made again never takes the route up, whatever an earlier retirement left undone
+    (``_retire_unserved_prior_routes`` and a start only try). Both documents are judged as the loader reads them. A
+    route that cannot be retired refuses this write alone (``SettingsPreconditionFailed``); a write that brings
+    none back asks nothing of the store."""
+    from ouroboros.llm_ollama_guard import retire_prior_routes
+    from ouroboros.provider_connections import served_compatible_addresses
+
+    try:
+        retire_prior_routes(lambda: served_compatible_addresses(saved if _settings_document_present() else None),
+                            reviving=lambda: served_compatible_addresses(written))
+    except Exception as exc:
+        raise SettingsPreconditionFailed(PRIOR_ROUTE_REFUSAL) from exc
+
+
+def _retire_unserved_prior_routes(written: Dict[str, Any]) -> None:
+    """A committed write may have removed, switched off or moved a compatible connection: the ``/v1`` route it
+    kept from before the unidentified-server check goes with it, for good (``llm_ollama_guard.retire_prior_routes``),
+    judged on what this write saved as the loader reads it in place of the values still mirrored in the
+    environment. Never fails the save; a route it could not retire is judged again at the next write or start."""
+    try:
+        from ouroboros.llm_ollama_guard import retire_prior_routes
+        from ouroboros.provider_connections import served_compatible_addresses
+
+        retire_prior_routes(lambda: served_compatible_addresses(written))
+    except Exception:
+        log.warning("Settings saved; a compatible connection's prior route could not be retired", exc_info=True)
 
 
 def _committed_changes(document: dict, shown: dict, written: dict, effective_before: dict | None = None) -> dict:

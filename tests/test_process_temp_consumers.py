@@ -83,7 +83,7 @@ def test_a_process_temp_gives_a_long_named_case_the_manager_its_own_root_cannot(
     assert all(Path(env[key]).is_relative_to(tmp_path.resolve()) for key in CASE_ROOTS)
     facts = _exchange(env)
     assert facts.get("exchanged") == "owned", facts
-    # Inside the owned temp: CPython 3.14 on macOS silently falls back to the shared /tmp at 64 bytes of TMPDIR.
+    # Inside the owned temp: CPython on macOS can silently fall back to another temp dir (such as /tmp) when TMPDIR exceeds its own check.
     assert Path(facts["address"]).is_relative_to(temp), facts
     print(f"PROCESS_TEMP_SOCKET {len(os.fsencode(facts['address']))} bytes: {facts['address']} ({facts['python']})")
     case_temp = tmp_path.resolve() / "tmp"

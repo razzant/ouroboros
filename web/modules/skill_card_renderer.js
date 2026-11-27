@@ -9,6 +9,7 @@ import { tr } from './i18n.js';
 import {
     boundedText,
     escapeHtmlAttr as escapeHtml,
+    grantBlocks,
     grantReady,
     preflightFailed,
     preflightFailedStale,
@@ -20,6 +21,7 @@ import {
 import { installedTime } from './ui_helpers.js';
 import { HELD_LINES } from './holds.js';
 import { hasSemanticVerdict, lifecycleMeta } from './review_presentation.js';
+import { signInMetaHtml, signInTray } from './skill_sign_in.js';
 import {
     buttonHtml, canUpdateWithoutReview, chipHtml, connectsServices, connectsText, countsAsYoursText, declaredPermissionWords, grantPhrases, officialMarkHtml,
     plural, relativeAge, shortDate, skillIconHtml, skipReviewButtonHtml, trayHtml, updateRejectionSentence, versionText,
@@ -87,7 +89,7 @@ function secretConfigTray(skill) {
     const keys = (state) => fields.filter((field) => field?.state === state).map((field) => String(field.key || ''));
     const missing = keys('missing');
     const unknown = keys('unknown');
-    if (!skill.enabled || !grantReady(skill) || (!missing.length && !unknown.length)) return { tray: '', needs: false };
+    if (!skill.enabled || grantBlocks(skill) || (!missing.length && !unknown.length)) return { tray: '', needs: false };
     const sentence = missing.length
         ? `${escapeHtml(missing.join(', '))} ${missing.length > 1 ? 'are' : 'is'} not set.`
         : `Saved settings can’t be read now, so whether ${escapeHtml(unknown.join(', '))} ${unknown.length > 1 ? 'are' : 'is'} set is unknown.`;
@@ -100,7 +102,7 @@ function secretConfigTray(skill) {
 }
 
 function missingGrantLoadError(skill) {
-    return !grantReady(skill) && String(skill.load_error || '').includes('missing owner grants');
+    return grantBlocks(skill) && String(skill.load_error || '').includes('missing owner grants');
 }
 
 // An ON skill whose packages are missing, failed or out of date: Enable installs them (it is
@@ -231,20 +233,20 @@ function problemCountText(skill) {
 
 const REQUIRED_LOCK = 'Required by your organization.';
 const REQUIRED_WAIT = {
-    hold: 'Ordinary work waits until it runs. Stop, Panic and Settings stay available.',
-    warn: 'Work goes on while it isn’t running.',
+    hold: 'Ordinary work waits until it’s ready. Stop, Panic and Settings stay available.',
+    warn: 'Ordinary work can continue.',
 };
 
 /** The organization's requirement that this package does not meet here, in its own words (no value, no secret). */
 function requiredTray(required) {
     return trayHtml({ tone: 'warn', attrs: 'data-required-unmet',
-        sentence: `Your organization requires it, and it isn’t running: ${escapeHtml(boundedText(required.detail || required.reason || '', 240))}`,
+        sentence: `Your organization requires it: ${escapeHtml(boundedText(required.detail || required.reason || '', 240))}`,
         note: escapeHtml(REQUIRED_WAIT[required.when_unmet] || '') });
 }
 
 /**
- * The organization's required extension skills (type extension; MCP servers are not under this policy) that are not running, above the list (``/api/extensions`` ``deployment``):
- * a missing package has no card, so its row is said here. '' when every requirement runs or nothing is required.
+ * Required extension skills that aren't ready, above the list (``/api/extensions`` ``deployment``; not MCP servers).
+ * A missing package has no card, so its row is said here. '' when all requirements are met or none are required.
  */
 export function renderRequirementNotice(deployment) {
     const rows = (deployment?.required || []).filter((row) => row?.state === 'unmet');
@@ -253,7 +255,7 @@ export function renderRequirementNotice(deployment) {
     const subject = rows.length === 1 ? 'an extension skill that isn’t' : `${rows.length} extension skills that aren’t`;
     const process = rows[0]?.process?.role ? `Seen by the ${escapeHtml(rows[0].process.role)} process; each worker checks its own before it starts work.` : '';
     return `<section class="skills-org-requirements" data-tone="warn" aria-label="Required by your organization" data-skills-org-requirements>
-        <p class="skills-org-requirements-lead">Your organization requires ${subject} running here.</p>
+        <p class="skills-org-requirements-lead">Your organization requires ${subject} ready here.</p>
         <ul class="skills-org-requirements-list">${items}</ul>
         <p class="skills-org-requirements-note">${escapeHtml(REQUIRED_WAIT[deployment.when_unmet] || '')} ${process}</p>
     </section>`;
@@ -268,7 +270,7 @@ const skipButton = (name, label = 'Skip review') => skipReviewButtonHtml(actionA
  * whether it needs the owner, whether an update waits, whether a review of these files runs (`reviewing`, the fact its
  * Reviewing… chip is drawn from) and why the switch is locked. Pure over the listing row.
  */
-export function installedSkillModel(skill, { reviewing = false, repairing = false, live = {}, pageModules = {} } = {}) {
+export function installedSkillModel(skill, { reviewing = false, repairing = false, live = {}, pageModules = {}, signIn = null } = {}) {
     const name = String(skill.name || '');
     const install = installFacts(skill);
     const modified = modifiedFacts(skill);
@@ -388,8 +390,9 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
             actions: `${resume}${smallButton('Review', name, skill.review_stale ? 'rereview' : 'review')}${ownerMayAttest(skill) ? skipButton(name) : ''}` }));
         lockReason = 'Can’t turn on until it is reviewed.';
     } else if (!grantReady(skill)) {
-        if (!skill.lifecycle_pending) chip = chipHtml('Needs access', 'warn');
-        needs = true;
+        // A pending key alone does not block; missing host permissions do.
+        if (!skill.lifecycle_pending && grantBlocks(skill)) chip = chipHtml('Needs access', 'warn');
+        needs = grantBlocks(skill);
         const grants = skill.grants || {};
         const keys = grants.missing_keys || grants.requested_keys || [];
         const permissions = grants.missing_permissions || grants.requested_permissions || [];
@@ -399,7 +402,9 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         // The same fact the readiness line carries: the grant exists, for an earlier version of the files.
         const earlier = new Set(grants.earlier_grant ? [...(grants.earlier_grant.keys || []), ...(grants.earlier_grant.permissions || [])] : []);
         const share = [...keys, ...permissions].every((item) => earlier.has(item)) ? 'this' : 'some of this';
-        const note = earlier.size ? `You granted ${share} to an earlier version of the skill; its files changed since.` : '';
+        const saved = (grants.pending_keys || []).filter((key) => keys.includes(key));
+        const note = [earlier.size ? `You granted ${share} to an earlier version of the skill; its files changed since.` : '',
+            saved.length ? `${escapeHtml(saved.join(', '))} ${saved.length === 1 ? 'is' : 'are'} saved in Settings but not granted to this skill.` : ''].filter(Boolean).join(' ');
         trays.push(trayHtml({ sentence: parts.join(' ') || 'Wants access you haven’t given yet.', note,
             actions: smallButton('Grant access', name, 'grant', `data-keys="${escapeHtml([...keys, ...permissions].join(','))}"`) }));
     }
@@ -410,11 +415,13 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     const secrets = secretConfigTray(skill);
     if (secrets.tray) trays.push(secrets.tray);
     if (secrets.needs) needs = true;
+    const signInNeed = skill.enabled ? signInTray(name, signIn) : '';  // a sign-in the owner owes an enabled skill
+    if (signInNeed) { trays.push(signInNeed); needs = true; }
 
     // Declared MCP servers: Connect is the owner's continuation once the skill itself is ready (DESIGN §4). A running
     // review or a pending update names the state above ahead of the current bytes' gate, access and start facts.
     const servers = Array.isArray(skill.mcp_servers) ? skill.mcp_servers : [];
-    const runnable = reviewReady(skill) && !preflightFailed(skill) && grantReady(skill) && !skill.load_error && !conflict;
+    const runnable = reviewReady(skill) && !preflightFailed(skill) && !grantBlocks(skill) && !skill.load_error && !conflict;
     if (skill.enabled && !needs && !skill.lifecycle_pending && !untrusted(skill) && runnable && servers.length) {
         const blocked = servers.find((server) => server.conflict);
         const failed = servers.find((server) => server.configured && server.error);
@@ -867,7 +874,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
     const safeRowKey = skill.collision_row_id || skill.lifecycle_name_level ? escapeHtml(installedSkillRowKey(skill)) : '';
     const reviewing = reviewingSkills.has(skill.name);
     const repairing = repairingSkills.has(skill.name);
-    const model = installedSkillModel(skill, { reviewing, repairing, live, pageModules: options.pageModules });
+    const model = installedSkillModel(skill, { reviewing, repairing, live, pageModules: options.pageModules, signIn: options.signIn });
     const description = skill.lifecycle_virtual && [skill.lifecycle_error, skill.load_error].includes(skill.description) ? '' : skill.description;
     const submit = submitHubReady(skill, options.githubTokenConfigured);
     const lockReason = model.lockReason;
@@ -925,7 +932,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
             <div class="skills-card-title">
                 <div class="skills-head-title">${connectsServices(skill).length ? `<span class="skills-card-icon" aria-hidden="true">${skillIconHtml(skill.icon, 18)}</span>` : ''}${headName}<span class="skills-card-marks">${marks}</span></div>
                 ${description ? `<p class="skills-card-purpose">${escapeHtml(description)}</p>` : ''}
-                <div class="skills-card-who">${installedWhoHtml(skill, model)}</div>
+                <div class="skills-card-who">${installedWhoHtml(skill, model)}${signInMetaHtml(skill.name, options.signIn)}</div>
                 ${countsAsYoursText(skill) ? `<p class="skills-card-facts">${escapeHtml(countsAsYoursText(skill))}</p>` : ''}
             </div>
             <div class="skills-card-toggle"><span class="skills-card-status">${model.chip}</span>${toggle}${skill.lifecycle_virtual ? '' : menuHtml(skill, { reviewing, repairing, submit, settings: model.settings })}</div>
@@ -965,6 +972,10 @@ export function patchInstalledSkillEnrichment(card, skill, reviewing, repairing,
         if (next.hasAttribute(name)) card.setAttribute(name, next.getAttribute(name));
         else card.removeAttribute(name);
     }
+    // A listing that learned a new title for the skill (its source's entry, a rename) corrects the heading in
+    // place: the element (and the focus in it) stays where the reader left it, only its words change.
+    const heading = card.querySelector('.skills-card-name'), nextHeading = next.querySelector('.skills-card-name');
+    if (heading && nextHeading && heading.innerHTML !== nextHeading.innerHTML) heading.innerHTML = nextHeading.innerHTML;
     for (const selector of ['.skills-card-status', '[data-skill-trays]', '[data-skill-errors]', '.skills-card-who', '.skills-card-marks', '.skills-card-purpose',
         '[data-skill-detail-review]', '[data-skill-detail-overflow]', '[data-skill-detail-contributions]', '[data-skill-detail-facts]', '[data-skill-detail-source-notes]']) {
         const target = card.querySelector(selector), source = next.querySelector(selector);

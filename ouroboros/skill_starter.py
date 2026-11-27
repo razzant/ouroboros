@@ -1,7 +1,9 @@
 """Starter skills: what a new install offers at first start, and the one-time installer.
 
 The starter list is ``OUROBOROS_STARTER_SKILLS`` (catalog ids; an enterprise build ships its own). Its
-default is every built-in (for this host) and Official hub skill the maintainer marked recommended.
+default is the maintainer's recommended built-ins (for this host) and Official hub skills. Onboarding
+defaults to off a voice provider without matching credentials and a release whose manifest no catalog read
+fetched (a pointer's); an explicit tick still installs it, and the headless default list is unchanged.
 Onboarding also offers configured ids from any source in their categories. An explicit [] selects none;
 only absent/blank means defaults. Completing it installs once in the background; the build's
 OUROBOROS_STARTER_SKILLS_TURN_ON (default true) decides first enablement. An install
@@ -56,8 +58,9 @@ write_marker = _write_marker  # the setup's connection cards keep their consent 
 
 
 def _offer(drive_root: pathlib.Path, rows: List[Dict[str, Any]], repo_dir: Optional[pathlib.Path],
-           configured: Optional[set[str]] = None) -> List[Dict[str, Any]]:
-    """Built-in/Official items and every configured starter, from available source data."""
+           configured: Optional[set[str]] = None, *,
+           snapshots: Optional[Dict[str, Optional[Dict[str, Any]]]] = None) -> List[Dict[str, Any]]:
+    """Built-in/Official items and configured starters, from these snapshots if already read."""
     from ouroboros.skill_source_catalog import items_for, snapshot_for
 
     out: List[Dict[str, Any]] = []
@@ -65,7 +68,7 @@ def _offer(drive_root: pathlib.Path, rows: List[Dict[str, Any]], repo_dir: Optio
     for row in rows:
         usual = row["kind"] == "builtin" or (row["kind"] == "hub" and row.get("part") == "official")
         if usual or any(item.startswith(row["id"] + "/") for item in configured):
-            snapshot, _status = snapshot_for(drive_root, row, repo_dir=repo_dir)
+            snapshot = snapshots.get(row["id"]) if snapshots is not None else snapshot_for(drive_root, row, repo_dir=repo_dir)[0]
             out.extend(item for item in items_for(row, snapshot)
                        if (usual and (row["kind"] == "builtin" or item["official"])) or item["id"] in configured)
     found = {item["id"] for item in out}
@@ -77,10 +80,13 @@ def _offer(drive_root: pathlib.Path, rows: List[Dict[str, Any]], repo_dir: Optio
 
 
 def default_starter_ids(drive_root: pathlib.Path, rows: Optional[List[Dict[str, Any]]] = None, *,
-                        repo_dir: Optional[pathlib.Path] = None) -> List[str]:
-    from ouroboros.skill_sources import load_sources
+                        repo_dir: Optional[pathlib.Path] = None,
+                        settings: Optional[Dict[str, Any]] = None) -> List[str]:
+    if rows is None:
+        from ouroboros.settings_integrity import skill_settings
+        from ouroboros.skill_sources import load_sources
 
-    rows = rows if rows is not None else load_sources()
+        rows = load_sources(skill_settings() if settings is None else settings)
     return [item["id"] for item in _offer(drive_root, rows, repo_dir) if item.get("recommended")]
 
 
@@ -88,9 +94,9 @@ def starter_ids(drive_root: pathlib.Path, settings: Optional[Dict[str, Any]] = N
                 rows: Optional[List[Dict[str, Any]]] = None, *, repo_dir: Optional[pathlib.Path] = None) -> List[str]:
     """Configured ids, including an empty list; only absent or blank selects the defaults."""
     if settings is None:
-        from ouroboros.config import load_settings
+        from ouroboros.settings_integrity import skill_settings
 
-        settings = load_settings()
+        settings = skill_settings()
     raw = settings.get(STARTER_SETTING, "")
     if raw != "":
         try:
@@ -101,7 +107,47 @@ def starter_ids(drive_root: pathlib.Path, settings: Optional[Dict[str, Any]] = N
             pass
         log.warning("%s is not a JSON list of catalog ids; no starter skills selected", STARTER_SETTING)
         return []
-    return default_starter_ids(drive_root, rows, repo_dir=repo_dir)
+    return default_starter_ids(drive_root, rows, repo_dir=repo_dir, settings=settings)
+
+
+def _voice_credential_sets(items: List[Dict[str, Any]], builtin_source_ids: set[str]) -> set[frozenset[str]]:
+    """Compare with complete bundled declarations, not their union. A catalog cannot extend what we read."""
+    return {frozenset(item["needs_keys"]) for item in items
+            if item["source_id"] in builtin_source_ids and "realtime_provider" in (item.get("permissions") or [])
+            and item.get("needs_keys")}
+
+
+def _voice_default_keys(item: Dict[str, Any], settings: Dict[str, Any],
+                        supported: set[frozenset[str]]) -> Optional[Dict[str, bool]]:
+    """None for a read non-voice manifest; {} where no default is confirmed (a voice declaration no bundled one
+    matches, or a manifest not read: ``permissions`` absent); otherwise matching presence only.
+
+    `needs_keys` lists readable settings, not necessarily installation requirements. An unconfirmed item has no
+    default, but never stops an explicit tick or supplies another setting to inspect.
+    """
+    permissions = item.get("permissions")
+    if permissions is None:
+        return {}
+    if "realtime_provider" not in permissions:
+        return None
+    keys = item.get("needs_keys") or []
+    if not keys or frozenset(keys) not in supported:
+        return {}
+    from ouroboros.provider_models import PROVIDER_KINDS, legacy_openai_base
+    from ouroboros.secret_masking import looks_masked_secret
+
+    openai_key = PROVIDER_KINDS["openai"].flat_key("api_key")  # the kind table names the built-in OpenAI key
+
+    def present(key: str) -> bool:
+        value = settings.get(key)
+        return (isinstance(value, str) and bool(value.strip()) and not looks_masked_secret(value)
+                and not (key == openai_key and legacy_openai_base(settings)))
+
+    return {key: present(key) for key in keys}
+
+
+def _voice_default_ticked(keys: Optional[Dict[str, bool]]) -> bool:
+    return keys is None or (bool(keys) and all(keys.values()))
 
 
 def starter_groups(drive_root: pathlib.Path, *, rows: Optional[List[Dict[str, Any]]] = None,
@@ -111,16 +157,23 @@ def starter_groups(drive_root: pathlib.Path, *, rows: Optional[List[Dict[str, An
     каталоге, после запуска»), counted from the source snapshots already read; ``None`` while none is read."""
     from ouroboros.skill_source_catalog import items_for, snapshot_for
     from ouroboros.skill_sources import load_sources
+    from ouroboros.settings_integrity import skill_settings
 
-    rows = rows if rows is not None else load_sources()
-    ticked = set(starter_ids(drive_root, rows=rows, repo_dir=repo_dir))
+    settings = skill_settings()
+    rows = rows if rows is not None else load_sources(settings)
+    builtin_source_ids = {row["id"] for row in rows if row["kind"] == "builtin"}
+    defaults = settings.get(STARTER_SETTING, "") == ""
+    configured = set() if defaults else set(starter_ids(drive_root, settings, rows, repo_dir=repo_dir))
+    voice_defaults = defaults and starter_choice_open(drive_root, settings)
     labels: Dict[str, str] = {}
     order: List[str] = []
     statuses = []
+    snapshots = {}
     catalog: List[Dict[str, Any]] = []  # every item of a read source beyond the built-ins
     read = False
     for row in rows:
         snapshot, status = snapshot_for(drive_root, row, repo_dir=repo_dir)
+        snapshots[row["id"]] = snapshot
         if row["kind"] != "builtin" and snapshot is not None:
             read = True
             catalog.extend(items_for(row, snapshot))
@@ -128,23 +181,28 @@ def starter_groups(drive_root: pathlib.Path, *, rows: Optional[List[Dict[str, An
             if category["id"] not in labels:
                 labels[category["id"]] = category["label"]
                 order.append(category["id"])
-        if row["kind"] in {"builtin", "hub"} or any(i.startswith(row["id"] + "/") for i in ticked):
+        if row["kind"] in {"builtin", "hub"} or any(i.startswith(row["id"] + "/") for i in configured):
             statuses.append({**row, **status})
     groups: Dict[str, List[Dict[str, Any]]] = {}
     from ouroboros.onboarding_connections import card_keys, starter_connection
 
-    for item in _offer(drive_root, rows, repo_dir, ticked):
+    offer = _offer(drive_root, rows, repo_dir, configured, snapshots=snapshots)
+    supported = _voice_credential_sets(offer, builtin_source_ids)
+    for item in offer:
         category = (item.get("category") or ["other"])[0]
-        builtin = item["source_id"] == "builtin"
+        builtin = item["source_id"] in builtin_source_ids
         card = starter_connection(item["name"]) if builtin else None  # a built-in skill's declared card, if any
         writes = set(card_keys(item["name"])[1:]) if card else set()  # the code the card writes is no prerequisite
+        ticked = bool(item.get("recommended")) if defaults else item["id"] in configured
+        default_keys = _voice_default_keys(item, settings, supported) if voice_defaults and ticked else None
         groups.setdefault(category, []).append({
             "id": item["id"], "name": item["name"], "title": item.get("title", ""), "pitch": item.get("pitch", ""),
             "needs": item.get("needs"), "mark": item.get("mark", ""), "description": item.get("description", ""),
             "icon": item.get("icon") or {},
             "official": bool(item.get("official")), "builtin": builtin,
-            "recommended": item["id"] in ticked,
+            "recommended": ticked and _voice_default_ticked(default_keys),
             "needs_keys": [key for key in item.get("needs_keys") or [] if key not in writes],
+            **({"default_with_keys": default_keys} if default_keys is not None else {}),
             **({"connection": card} if card else {}),
         })
     offered = {item["id"] for items in groups.values() for item in items}
@@ -218,26 +276,53 @@ def _install_one(drive_root: pathlib.Path, item_id: str, rows: List[Dict[str, An
     return {"status": "installed", "name": result.get("name", ""), "basis": result.get("basis", "")}
 
 
+def _onboarding_defaults(offer: List[Dict[str, Any]], settings: Dict[str, Any], supported: set[frozenset[str]],
+                         requested: set[str], skipped: set[str]) -> List[str]:
+    """Resolve only new choices; a previously unticked voice is not an unread Hub row."""
+    chosen = []
+    for item in offer:
+        item_id = item["id"]
+        if not item.get("recommended") or item_id in skipped:
+            continue
+        if item_id in requested or _voice_default_ticked(_voice_default_keys(item, settings, supported)):
+            chosen.append(item_id)
+        else:
+            skipped.add(item_id)
+    return chosen
+
+
 def run_starter(drive_root: pathlib.Path, ids: Optional[List[str]], *, origin: str,
                 repo_dir: Optional[pathlib.Path] = None) -> Dict[str, Any]:
     """Install ``ids`` once (blocking; callers run it in the background). Returns the marker.
 
-    ``None`` means the configured starter list, resolved after the git-hosted sources were read: while
-    a source cannot be read its recommended skills are unknown, so the run stays pending and a later
-    start resolves the list again (installed items are kept).
+    ``None`` uses the configured list or resolves defaults as sources are read. A missing source leaves
+    the run pending so a later start can add newly read defaults without revisiting settled voice choices.
     """
-    from ouroboros.config import load_settings
+    from ouroboros.settings_integrity import skill_settings
     from ouroboros.skill_source_catalog import read_snapshot, refresh_source
     from ouroboros.skill_sources import load_sources, source_by_id
 
     with _LOCK:
-        rows = load_sources()
-        settings = load_settings()
+        settings = skill_settings()
+        rows = load_sources(settings)
         defaults = ids is None and settings.get(STARTER_SETTING, "") == ""
         builtin_rows = [row for row in rows if row["kind"] == "builtin"]
-        chosen = list(ids) if ids is not None else starter_ids(drive_root, settings, builtin_rows, repo_dir=repo_dir)
-        marker = _write_marker(drive_root, state="running", origin=origin, requested=chosen,
-                               resolve_default=ids is None)
+        voice_defaults = defaults and origin == "onboarding"
+        if voice_defaults:
+            prior = read_marker(drive_root)
+            if (prior.get("origin") != origin or prior.get("state") not in {"running", "pending"}
+                    or not prior.get("resolve_default")):
+                prior = {}
+            retained = dict.fromkeys(prior.get("requested") or [])
+            skipped = set(prior.get("voice_defaults_skipped") or [])
+            offer = _offer(drive_root, builtin_rows, repo_dir)
+            supported = _voice_credential_sets(offer, {row["id"] for row in builtin_rows})
+            chosen = _onboarding_defaults(offer, settings, supported, set(retained), skipped)
+            chosen = list(dict.fromkeys(chosen) | retained)
+        else:
+            chosen = list(ids) if ids is not None else starter_ids(drive_root, settings, builtin_rows, repo_dir=repo_dir)
+        marker = _write_marker(drive_root, state="running", origin=origin, requested=chosen, resolve_default=defaults,
+                               **({"voice_defaults_skipped": sorted(skipped)} if voice_defaults else {}))
         _record_presented_defaults(drive_root, repo_dir)
         results = dict(marker.get("results") or {})
         def install(item_id: str) -> None:
@@ -248,15 +333,20 @@ def run_starter(drive_root: pathlib.Path, ids: Optional[List[str]], *, origin: s
         for item_id in chosen:
             if any(item_id.startswith(row["id"] + "/") for row in builtin_rows):
                 install(item_id)
-        fetched: Dict[str, bool] = {}
+        fetched = {}
         for row in rows:
             if row["kind"] in {"hub", "git"} and (defaults or any(i.startswith(row["id"] + "/") for i in chosen)):
                 refresh_source(drive_root, row)
-                fetched[row["id"]] = read_snapshot(drive_root, row) is not None
-        unread = [row["id"] for row in rows if fetched.get(row["id"]) is False]
-        if defaults:
+                fetched[row["id"]] = read_snapshot(drive_root, row)
+        unread = {row_id for row_id, snapshot in fetched.items() if snapshot is None}
+        if voice_defaults:
+            offer = _offer(drive_root, [row for row in rows if row["id"] in fetched], repo_dir, snapshots=fetched)
+            chosen += _onboarding_defaults(offer, settings, supported, set(chosen), skipped)
+            chosen = list(dict.fromkeys(chosen))
+        elif defaults:
             chosen = starter_ids(drive_root, settings, rows, repo_dir=repo_dir)
-        _write_marker(drive_root, requested=chosen)
+        _write_marker(drive_root, requested=chosen,
+                      **({"voice_defaults_skipped": sorted(skipped)} if voice_defaults else {}))
         for item_id in chosen:
             if (results.get(item_id) or {}).get("status") in {"installed", "skipped", "failed"}:
                 continue

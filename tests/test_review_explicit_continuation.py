@@ -238,34 +238,107 @@ def test_an_accepted_successor_whose_reply_was_lost_is_rejoined_with_the_same_ke
     assert a.engine.keys[replay_key] == "run-2" and len(_seat(a, record_id)["continuations"]) == 1
 
 
-@pytest.mark.parametrize("admitted,serving", [("store-a", "store-a"), ("store-a", "store-b"), ("", "store-b")])
+@pytest.mark.parametrize("admitted,serving,ephemeral", [
+    pytest.param("store-a", "store-a", True, id="store-a-store-a"),
+    pytest.param("store-a", "store-b", True, id="store-a-store-b"),
+    pytest.param("store-a", "store-b", False, id="store-a-store-b-registered"),
+    pytest.param("", "store-b", True, id="-store-b"),
+])
 def test_a_successor_is_sent_only_into_the_store_that_admitted_its_stopped_run(stopped_wave, monkeypatch,
-                                                                               admitted, serving):
-    """#2649: the successor's START names the store that admitted run-1 (its continueFrom target), and its first send
-    goes only there. A predecessor bound to no store keeps the earlier replay rule, explicitly."""
+                                                                               admitted, serving, ephemeral):
+    """Wrong store: no START or carried successor, even without registration. Return to A: same token, one POST.
+    A predecessor bound to no store keeps the earlier replay rule."""
+    from ouroboros import delegate_registration_policy
+
     a = stopped_wave
     a.engine.store = admitted
+    monkeypatch.setattr(delegate_registration_policy, "ephemeral_scope", lambda *_a, **_kw: ephemeral)
     monkeypatch.setattr(FakeGateway, "store_identity", admitted, raising=False)
+    looked_up = []
+
+    def lookup(self, _request, *, idempotency_key):
+        looked_up.append((self.store_identity, idempotency_key))
+        return {"status": "not_found", "storeId": self.store_identity}
+
+    monkeypatch.setattr(FakeGateway, "operations", lambda self: [{"method": "POST", "path": "/v2/runs/lookup"}],
+                        raising=False)
+    monkeypatch.setattr(FakeGateway, "lookup_run", lookup, raising=False)
     first = _wave(a)
     reference, record_id = first["review_reference"], first["record_id"]
     named = first["continuable_seats"][0]["operation_id"]
     assert delegate_custody.replay(a.data)["run-1"].daemon_store_id == admitted
+    assert bool(a.engine.posts[0][0]["scope"].get("ephemeral")) is ephemeral
     a.engine.store = serving  # the engine now serves another store, or the same one again
     monkeypatch.setattr(FakeGateway, "store_identity", serving, raising=False)
-    _call(a, review_reference=reference, continue_seats=[{"seat_id": "second", "operation_id": named}])
-    token = _seat(a, record_id)["continuations"][0]["invocation_id"]
-    assert delegate_custody.invocation_record(a.data, token)["daemon_store_id"] == admitted
-    sent = [key for body, key in a.engine.posts if "continueFrom" in body]
-    if admitted and admitted != serving:  # a store that never admitted run-1 is never sent its successor
-        assert sent == [] and delegate_custody.invocation_record(a.data, token)["state"] == "pending"
-        seat = _seat(a, record_id)
-        assert seat.get("failure_code") == "invocation_store_unproven", {k: seat.get(k) for k in (
-            "status", "operation_state", "failure_code", "reported_cause", "pending_invocation_id")}
-        return
-    assert sent == [token] and _seat(a, record_id)["status"] == "responded"
+    before = len(FakeGateway.instances)
+    choice = [{"seat_id": "second", "operation_id": named}]
+    result = _call(a, review_reference=reference, continue_seats=choice)
+    [decision] = _seat(a, record_id)["continuations"]
+    token = decision["invocation_id"]
+    if admitted and admitted != serving:
+        assert (result["status"], result["reason"]) == ("decided_unsent", "invocation_store_unproven"), result
+        assert not looked_up and not any(g.project_lookups or g.registrations or g.removals
+                                        for g in FakeGateway.instances[before:])
+        assert delegate_custody.invocation_record(a.data, token) is None
+        row = next(r for r in load_state(a.data).attempts[-1].triad_raw_results if r["slot_id"] == "second")
+        assert row["operation_id"] == named  # no carried START that custody could mistake for a possible send
+        assert len(a.engine.posts) == 1 and token not in a.engine.keys
+        a.engine.store = serving = admitted
+        monkeypatch.setattr(FakeGateway, "store_identity", serving)
+        result = _call(a, review_reference=reference, continue_seats=choice)
+        assert result["continuation"]["continued"][0]["rejoined"] is True, result
+    start = delegate_custody.invocation_record(a.data, token)
+    assert start["daemon_store_id"] == admitted and start["state"] == "started"
+    assert a.engine.posts[1:] == [(start["request"], token)] and start["request"]["continueFrom"] == "run-1"
+    assert looked_up == [(serving, token)]
+    seat = _seat(a, record_id)
+    assert seat["status"] == "responded" and seat["continuations"] == [decision]
+    assert _call(a, review_reference=reference, continue_seats=choice)["state"] == "settled"
+    assert len(a.engine.posts) == 2
     delegate_custody._CUSTODY.clear()
     successor = a.engine.keys[token]
     assert delegate_custody.replay(a.data)[successor].daemon_store_id == serving  # its own receipt's store
+
+
+def test_a_pause_before_the_first_post_holds_the_selected_start_and_resume_sends_that_key_once(stopped_wave, monkeypatch):
+    """Real transitions on one synthetic wave: the choice records its successor START never handed off, then the
+    deciding task enters a budget pause before the first POST. Nothing is sent and the START is held with its exact key
+    and bytes. After Resume and a process restart a collection sends that same START once; while it is being sent, a
+    competing reader already finds it handed off, so no pause could claim it unsent any more."""
+    from ouroboros import budget_pause, review_session_custody
+
+    a = stopped_wave
+    first = _wave(a)
+    reference, record_id = first["review_reference"], first["record_id"]
+    pausing, real = {"on": False}, review_session_custody.prepare_continuation_send
+
+    def pause_then_prepare(*args, **kwargs):  # the step every continuation POST takes after its START exists
+        pausing["on"] = True
+        return real(*args, **kwargs)
+    monkeypatch.setattr(review_session_custody, "prepare_continuation_send", pause_then_prepare)
+    monkeypatch.setattr(budget_pause, "dispatch_fenced", lambda task: pausing["on"] and task == a.ctx.task_id)
+    _call(a, review_reference=reference, continue_seats=[
+        {"seat_id": "second", "operation_id": first["continuable_seats"][0]["operation_id"]}])
+    decision = _seat(a, record_id)["continuations"][0]
+    token = decision["invocation_id"]
+    held = delegate_custody.invocation_record(a.data, token)
+    assert pausing["on"] and len(a.engine.posts) == 1, "nothing was POSTed under the pause"
+    assert (held["state"], held["handoff"]) == ("pending", "unsent") and held["request"]["continueFrom"] == "run-1"
+    assert _seat(a, record_id)["operation_state"] == "in_flight", "held for Resume, not lost"
+    pausing["on"] = False  # Resume
+    monkeypatch.setattr(review_session_custody, "prepare_continuation_send", real)
+    delegate_custody._CUSTODY.clear()  # and a restart
+    during, send = [], a.engine.start
+
+    def competing_reader_then_send(gateway, request, key):
+        during.append(delegate_custody.invocation_record(a.data, key).get("handoff"))
+        return send(gateway, request, key)
+    a.engine.start = competing_reader_then_send
+    collected = _call(a, review_reference=reference)
+    assert collected["state"] == "settled" and SESSION_ANSWER in json.dumps(_seat(a, record_id)), collected
+    assert [key for _body, key in a.engine.posts[1:]] == [token] and a.engine.posts[1][0] == held["request"]
+    assert during == ["entered"], "handed off before the transport call"
+    assert _seat(a, record_id)["continuations"] == [decision]
 
 
 def test_a_choice_recorded_before_a_crash_is_sent_only_by_an_explicit_collection(stopped_wave, monkeypatch):
@@ -404,19 +477,29 @@ def test_a_choice_at_a_reached_budget_fence_decides_and_sends_nothing_and_with_r
 
 
 def test_an_author_that_ended_never_sends_a_recorded_choice(stopped_wave, monkeypatch):
+    from ouroboros import review_pause
+    from ouroboros.late_review_marks import OWED_SET, replay_owed_late_reviews
+    from ouroboros.store import open_store
+    from ouroboros.task_results import write_task_result
+
     a = stopped_wave
     first = _wave(a)
     reference, record_id = first["review_reference"], first["record_id"]
+    retry_key = load_state(a.data).attempts[-1].review_retry_key
+    assert review_pause.owe_unwaited_review(a.ctx, surface="change", retry_key=retry_key, record_id=record_id)
     named = first["continuable_seats"][0]["operation_id"]
     monkeypatch.setattr(review_continuation, "_start_requested", lambda *a_, **k: (_ for _ in ()).throw(OSError("ended")))
     assert _call(a, review_reference=reference, continue_seats=[{"seat_id": "second", "operation_id": named}])[
         "status"] == "decided_unsent"
-    from ouroboros import review_pause
-    coordinates = {"record_id": record_id, "drive_root": str(a.data), "canonical_root": str(ledger_root(a.ctx)),
-                   "retry_key": load_state(a.data).attempts[-1].review_retry_key}
-    settled = review_pause._settle_left_record(coordinates, [], final=True)
+    write_task_result(a.data, a.ctx.task_id, "failed", chat_id=1)
+    with open_store(a.data, write=True) as txn:
+        for duty_id, row in txn.set_rows(OWED_SET).items():
+            txn.put_row(OWED_SET, duty_id, {**row, "controller": {"pid": 999999, "birth": "dead", "session": "dead"}})
+    assert replay_owed_late_reviews(a.data)["settled"] == 1
+    settled = load_record(ledger_root(a.ctx), record_id)
     seat = {row["seat_id"]: row for row in settled["rows"]}["second"]
     assert settled["state"] == "settled" and seat["operation_state"] == "not_dispatched"
+    assert load_state(a.data).attempts[-1].triad_raw_results[1]["operation_state"] == "not_dispatched"
     assert len(a.engine.posts) == 1
 
 
@@ -546,7 +629,7 @@ def test_a_commit_continuation_continues_the_old_frozen_subject_and_never_commit
     assert "no commit, tag or push occurred" in continued or "nothing was staged, committed" in continued, continued
     assert _git(a.repo, "rev-parse", "HEAD") == head
     if changed:
-        assert "read-only" in continued and "only the continuation you chose was sent" in continued, continued
+        assert "read-only" in continued and "frozen subject" in continued, continued
         assert _git(a.repo, "write-tree") == index, "the author's staged bytes are untouched"
 
 

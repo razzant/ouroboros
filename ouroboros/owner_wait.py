@@ -49,37 +49,43 @@ _RESULT_REVIEW_SHOWN = ("_result_review_shown", "_result_review_request_asked", 
 log = logging.getLogger(__name__)
 
 
-def classify_wake(entries: list[dict], quiz_id: str) -> str:
+def classify_wake(entries: list[dict], quiz_id: str, *, peer_question_id: str = "") -> str:
     """The typed cause of a wake; a wake is never an answer by default.
 
-    Closed vocabulary (TZ-2 B2): ``answer`` (this card), ``owner_text`` (the
-    owner's own words, or an answer to another card), ``hurry`` (the owner's
-    typed acceleration control: a request to finish sooner, never an answer),
-    ``mail:<task_id>`` (task mail, naming its sender; ``mail:unknown`` when it
-    names none), ``unknown`` (nothing observed); the callers add ``timeout``
-    and ``control:<reason>``.
-    Precedence: control, this card's answer, owner words, hurry, mail.
+    Closed vocabulary (TZ-2 B2): ``answer`` (this card, or the sender's answer
+    letter to this wait's peer question), ``owner_text`` (the owner's own words,
+    or an answer to another card), ``hurry`` (the owner's typed acceleration
+    control: a request to finish sooner, never an answer), ``mail:<task_id>``
+    (task mail, naming its sender; ``mail:unknown`` when it names none),
+    ``unknown`` (nothing observed); the callers add ``timeout`` and
+    ``control:<reason>``.
+    Precedence: control, this wait's answer, owner words, hurry, mail.
     """
     from ouroboros.owner_mailbox import (
         KIND_CARD_INPUT, KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER,
-        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, KIND_OWNER_MODEL, place_arrival_wake, tier_only,
+        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, KIND_OWNER_MODEL, passive_mail, place_arrival_wake, tier_only,
     )
+    from ouroboros.peer_letters import peer_question_id as _peer_qid, peer_reply_matches
 
-    entries = [row for row in entries if not tier_only(row)]  # a tier act is applied by the drain, never a wake
+    peer_qid = peer_question_id or _peer_qid(quiz_id)
+    entries = [row for row in entries if not (tier_only(row) or passive_mail(row))]
     kinds = [str(row.get("kind") or KIND_OWNER_TEXT) for row in entries]
     if KIND_FINALIZE_NOW in kinds:
         return "control:finalize_now"
     if KIND_OWNER_PAUSE in kinds:
         return "control:owner_pause"
-    # This card's answer: ``quiz_answer:{asker}:{quiz}``, or saved ``quiz_answer:{quiz}`` mail.
+    # This card's answer (``quiz_answer:{asker}:{quiz}`` / ``quiz_answer:{quiz}``) or this peer question's reply.
     answers = [str(row.get("msg_id") or "") for kind, row in zip(kinds, entries) if kind == KIND_QUIZ_ANSWER]
-    if quiz_id and any(msg_id.startswith("quiz_answer:") and msg_id.rsplit(":", 1)[-1] == quiz_id
-                       for msg_id in answers):
+    if quiz_id and not peer_qid and any(msg_id.startswith("quiz_answer:") and msg_id.rsplit(":", 1)[-1] == quiz_id
+                                        for msg_id in answers):
         return "answer"
-    if any(kind == KIND_QUIZ_CLOSED and row.get("msg_id") == f"quiz_closed:{quiz_id}"
-           for kind, row in zip(kinds, entries)):
+    if peer_reply_matches(entries, peer_qid):
+        return "answer"
+    if quiz_id and not peer_qid and any(kind == KIND_QUIZ_CLOSED and row.get("msg_id") == f"quiz_closed:{quiz_id}"
+                                        for kind, row in zip(kinds, entries)):
         return "question_closed"
-    if any(kind in {KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_CARD_INPUT} for kind in kinds):
+    if any(kind in {KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_CARD_INPUT} or row.get("work_reply") is True
+           for kind, row in zip(kinds, entries)):
         return "owner_text"
     if KIND_HURRY in kinds:
         return "hurry"
@@ -102,15 +108,19 @@ def _wait_entries(ctx: Any) -> list[dict]:
     )
 
 
-def _fresh_wake(ctx: Any, quiz_id: str, outcome: str) -> str:
+def _fresh_wake(ctx: Any, quiz_id: str, outcome: str, *, peer_question_id: str = "") -> str:
     """An owner answer can land while a pooled wait is awaiting capacity.
 
-    Owner authority (this card's answer, owner words, a control) replaces the
-    reason the resume was requested with; anything else replaces only
-    ``unknown``, so a bound that ended the wait keeps saying so.
+    Owner authority (this card's answer, owner words, a control) and the sender's
+    answer letter to this wait's peer question replace the reason the resume was
+    requested with; anything else replaces only ``unknown``, so a bound that ended
+    the wait keeps saying so. A peer question has no card that could close.
     """
+    from ouroboros.peer_letters import peer_question_id as _peer_qid
+
+    peer_qid = peer_question_id or _peer_qid(quiz_id)
     try:
-        observed = classify_wake(_wait_entries(ctx), quiz_id)
+        observed = classify_wake(_wait_entries(ctx), quiz_id, peer_question_id=peer_qid)
     except Exception:
         if outcome == "unknown":
             raise  # A failed refresh cannot establish a wake on its own.
@@ -118,7 +128,7 @@ def _fresh_wake(ctx: Any, quiz_id: str, outcome: str) -> str:
         return outcome
     if observed in {"answer", "owner_text", "control:finalize_now", "control:owner_pause"}:
         return observed
-    if _question_closed(ctx, {"quiz_id": quiz_id}):
+    if not peer_qid and _question_closed(ctx, {"quiz_id": quiz_id}):
         return "question_closed"
     return observed if outcome == "unknown" else outcome
 
@@ -183,6 +193,13 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
     trace, usage, route, delivery candidate, admission-seal and owner-source
     identities, owner directives — so a second serializer could only drift from this one.
     """
+    from ouroboros.context_window import native_load_window_binding
+    from ouroboros.model_slots import acting_model_role
+
+    role = acting_model_role(ctx)
+    plan = getattr(ctx, "context_fit_plan", None)
+    load_window = (native_load_window_binding(plan) if getattr(plan, "model", None) == getattr(ctx, "active_model", None)
+                   and getattr(plan, "model_role", None) == role else getattr(ctx, "_restored_native_load_window", None))
     if context_view is not None:
         # Pricing a forced call that never sent must not become the next ordinary call's view.
         # Keep current dialogue/tool results, projected from the pre-price plan's retained sources;
@@ -196,9 +213,10 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
     cost_ceiling = getattr(ctx, "_cost_ceiling", None)
     model_wait = getattr(ctx, "model_wait_context", None)
     model_state = model_wait.continuation_state() if model_wait is not None else {}
+    plan = getattr(ctx, "context_fit_plan", None)
+    from ouroboros.context_fit import UNKNOWN_START
     from ouroboros.held_notes import continuation_capture
     from ouroboros.settings_integrity import captured_cognition
-    from ouroboros.model_slots import acting_model_role
 
     return {
         "task_id": ctx.task_id, "task_attempt": int(getattr(ctx, "task_attempt", None) or 1),
@@ -207,7 +225,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         # an absent legacy dispatch mark can only belong to the original run.
         "retained_work_dispatch_protocol": 1,
         "messages": messages, "trace": trace,
-        **continuation_capture(getattr(ctx, "context_fit_plan", None), getattr(ctx, "active_context_mode", None)),
+        **continuation_capture(plan, getattr(ctx, "active_context_mode", None)),
         # Live timing cannot retain a monotonic origin across a reboot.
         "usage": without_finalization_timing(usage),
         "cost_ceiling": asdict(cost_ceiling) if cost_ceiling is not None else None,
@@ -216,9 +234,11 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "nanny_activity": {key: getattr(ctx, key, None) for key in (
             "_nanny_metered_progress", "_nanny_delegate_baseline",
         )},
-        "context_model_role": acting_model_role(ctx),
-        # The task's own start (mode, cause): a restore's new fit is not it (``context_fit.restored_start``).
-        "context_start": list(getattr(getattr(ctx, "context_fit_plan", None), "start", None) or ("", "")),
+        "context_model_role": role,
+        **({"load_window_binding": load_window} if load_window else {}),
+        # An armed hint has not gone out; its chosen form proves no start (``context_fit.restored_start``).
+        "context_start": list(UNKNOWN_START if getattr(plan, "first_contact_normal", None) is not None
+                              else getattr(plan, "start", None) or ("", "")),
         # Exposure facts gate automatic compaction; a resumed task keeps them, and the journal boundary of its first
         # memory capture, from which mark changes are read again after a new capture (``mark_anchors``).
         "context_observations": {key: getattr(ctx, key) for key in (
@@ -246,6 +266,11 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "held_state_seed": None if (seed := getattr(ctx, "_held_state_seed", None)) is None else sorted(seed),
         # Own routing acts still unconfirmed: a resumed turn reports their outcomes too.
         "unconfirmed_routing_acts": list(getattr(ctx, "unconfirmed_routing_acts", None) or []),
+        # Confirmed handoffs this owner turn may reply about (finish_task / send_user_message
+        # about_work). A start/tell confirmed at call time never enters unconfirmed_routing_acts,
+        # so the exact set rides the same-task continuation itself; restore guards the task identity
+        # and nothing is guessed from a fresher id.
+        "confirmed_reply_works": sorted(getattr(ctx, "_confirmed_reply_works", ()) or ()),
         "restart": {
             "request": dict(getattr(ctx, "pending_restart_request", None) or {}),
             "reason": getattr(ctx, "pending_restart_reason", None),
@@ -266,12 +291,14 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_delivery_evidence_revision", "_delivery_evidence_fingerprint",
             "_delivery_effective_criteria", "_delivery_material_tool_indices",
             "_acceptance_ack_source_sha256", "_completion_request", "_completion_conflict", "_completion_selected",
-            "_completion_observation", "_completion_held_sha256", "_presence_completion",
+            "_completion_observation", "_completion_held_sha256", "_completion_riding_send", "_presence_completion",
             "_presence_completion_owner_revision", "_acceptance_observation",
+            "_place_message_calls", "_records_only_noted", "_restored_send_unknown",
             "_presence_forced_declaration", "_presence_forced_pending", "_presence_completion_accepted",
             "_presence_selection_seq", "_presence_released", "_presence_delivered", "_presence_covered",
             "_swarm_handoff_attempt", "_task_acceptance_sealed_fence_token", "_task_acceptance_sealed_fence_generation",
-            "_owner_reply_revision", "_owner_message_sent", "_pre_delivery_noticed", "_red_check_noticed", "_subagent_handoff_shown",
+            "_owner_reply_revision", "_answered_reply_rows", "_owner_message_sent", "_pre_delivery_noticed",
+            "_red_check_noticed", "_subagent_handoff_shown",
         ) if getattr(ctx, key, None) is not None},
         # The block keeps its stored name; the task-acceptance flags it once carried are gone
         # (a pre-fold continuation still has them: ``restore_continuation_state`` ignores them).
@@ -324,9 +351,9 @@ def pause_resume_point(limit_ctx: Any, ctx: Any, *, delivery_candidate: bool = F
 def working_resume_point(state: dict) -> dict:
     """Derive the same pause program counter from an expanded working-checkpoint state."""
     working = state["working"]
-    return {**_resume_point(int(state.get("round_idx") or 0), list(working.get("pending_tool_call_ids") or []),
-                            selected=working.get("boundary") == "candidate",
-                            budget_tail=str(working.get("budget_tail") or "tool")),
+    round_idx = int(state.get("round_idx") or 0) + int(working.get("boundary") == "post_batch" and working.get("budget_tail") == "no_tool")
+    return {**_resume_point(round_idx, list(working.get("pending_tool_call_ids") or []),
+                            selected=working.get("boundary") == "candidate", budget_tail=str(working.get("budget_tail") or "tool")),
             "recovered_from_working": {"boundary": working.get("boundary"), "seq": working.get("seq")}}
 
 
@@ -337,19 +364,28 @@ def checkpoint_owner_wait(ctx: Any, messages: list, trace: dict, usage: dict,
 
     ``pause`` names the owner Pause a member parks WARM under (its fence id and
     generation, the critics it detached from): reason ``owner_pause``, woken by
-    that fence's release, never by ordinary mail.
+    that fence's release, never by ordinary mail. A letter root's ``ask_sender``
+    wait (``peer-question:<id>``) parks as ``owner`` with ``peer_question`` and no
+    card: its sender's answer letter is its answer.
     """
     wait_id = uuid.uuid4().hex
     sleep = getattr(ctx, "_model_sleep", None) if not (review_binding or pause) else None
-    reason = (REASON_OWNER_PAUSE_WARM if pause else "review" if review_binding
-              else ("sleep" if sleep else "owner"))
-    quiz_id = "" if (sleep or pause) else getattr(ctx, "_owner_wait_requested", "")
+    requested = "" if (sleep or pause or review_binding) else str(getattr(ctx, "_owner_wait_requested", "") or "")
+    peer_qid = requested.removeprefix("peer-question:") if requested.startswith("peer-question:") else ""
+    peer_raw = getattr(ctx, "_peer_question_wait", None) if peer_qid else None
+    peer_question = ({"question_id": peer_qid,
+                      "sender": str((peer_raw or {}).get("sender")
+                                    or ((getattr(ctx, "task_metadata", None) or {}).get("peer_letter") or {}).get("sender_label")
+                                    or "")} if peer_qid else None)
+    reason = REASON_OWNER_PAUSE_WARM if pause else "review" if review_binding else "sleep" if sleep else "owner"
+    quiz_id = "" if (sleep or pause or peer_question) else requested
     bound = {} if pause else _wait_bound_fields(ctx)
     state = {
         **continuation_state(ctx, messages, trace, usage, round_idx, tool_schemas, seen),
         "wait_id": wait_id, "quiz_id": quiz_id,
         **bound,
         "reason": reason, **({"sleep": dict(sleep)} if sleep else {}),
+        **({"peer_question": dict(peer_question)} if peer_question else {}),
         **({"owner_pause": dict(pause)} if pause else {}),
         "review_binding": review_binding,
     }
@@ -362,6 +398,7 @@ def checkpoint_owner_wait(ctx: Any, messages: list, trace: dict, usage: dict,
         "reason": reason, **({"sleep": dict(sleep),
                                 "sleep_started_at": float(getattr(ctx, "_model_sleep_started", 0) or time.time())}
                                if sleep else {}),
+        **({"peer_question": dict(peer_question)} if peer_question else {}),
         **({"owner_pause": dict(pause)} if pause else {}),
         "review_binding": review_binding,
         # Date this wait independently of task lifetime; the stamp survives restart.
@@ -549,8 +586,9 @@ def worker_owner_wait(wid: int, in_q: Any, out_q: Any, ctx: Any,
                 if phase == "parked":
                     parked = True
                 elif phase == "resume_granted":
+                    peer_qid = str(((checkpoint or {}).get("peer_question") or {}).get("question_id") or "")
                     if checkpoint.get("reason") != REASON_OWNER_PAUSE_WARM:  # the Pause's own wake cause stands
-                        outcome = _fresh_wake(ctx, str(checkpoint.get("quiz_id") or ""), outcome)
+                        outcome = _fresh_wake(ctx, str(checkpoint.get("quiz_id") or ""), outcome, peer_question_id=peer_qid)
                     root = pathlib.Path(ctx.budget_drive_root or ctx.drive_root)
                     wait = (load_task_result(root, ctx.task_id, strict=True) or {}).get("owner_wait") or {}
                     if wait.get("wait_id") == checkpoint["wait_id"] and wait.get("state") == "resumed":
@@ -580,7 +618,8 @@ def worker_owner_wait(wid: int, in_q: Any, out_q: Any, ctx: Any,
             elif peek.pending(
                     pathlib.Path(ctx.drive_root), ctx.task_id,
                     set(getattr(ctx, "_loop_mailbox_seen_ids", set())), ctx.task_attempt or 1):
-                outcome = classify_wake(_wait_entries(ctx), str(checkpoint.get("quiz_id") or ""))
+                peer_qid = str(((checkpoint or {}).get("peer_question") or {}).get("question_id") or "")
+                outcome = classify_wake(_wait_entries(ctx), str(checkpoint.get("quiz_id") or ""), peer_question_id=peer_qid)
                 out_q.put({**identity, "phase": "resume", "resume_reason": outcome})
                 resume_requested = True
             elif deadline is not None and utc_now() >= deadline:
@@ -601,7 +640,7 @@ def _question_closed(ctx: Any, checkpoint: dict) -> bool:
     record only when its store signature (``write_seq``, ``updated_at``) changed.
     """
     quiz_id = str((checkpoint or {}).get("quiz_id") or "")
-    if not quiz_id or checkpoint.get("review_binding") or checkpoint.get("sleep"):
+    if not quiz_id or quiz_id.startswith("peer-question:") or checkpoint.get("review_binding") or checkpoint.get("sleep"):
         return False
     from ouroboros.owner_quiz import quiz_states
     from ouroboros.store import StoreError
@@ -939,8 +978,9 @@ def direct_owner_wait(ctx: Any, checkpoint: dict) -> str:
         # control only joins it. Re-checking admission here could re-park a stack that
         # is already resuming and hide it from the update drain (#2191).
         control_reason = str(control.control_reason() or "")
+    peer_qid = str(((checkpoint or {}).get("peer_question") or {}).get("question_id") or "")
     outcome = (f"control:{control_reason}" if control_reason else outcome if warm_pause else
-               _fresh_wake(ctx, str(checkpoint.get("quiz_id") or ""), outcome))
+               _fresh_wake(ctx, str(checkpoint.get("quiz_id") or ""), outcome, peer_question_id=peer_qid))
     # The current same wait, in one write: a settle tick's facts recorded meanwhile stay (#1562).
     set_owner_wait(root, ctx.task_id, lambda current: {**current, "state": "resumed", "resume_reason": outcome},
                    wait["wait_id"])
@@ -953,8 +993,9 @@ def direct_owner_wait(ctx: Any, checkpoint: dict) -> str:
 def announce_wait_ended(root: Any, task_id: str, quiz_id: str, chat_id: int) -> None:
     """A bound closed and the turn resumed: the card's projection and the live card both
     stop saying "waiting" while the question stays answerable. The direct lane calls it
-    here; the pool's supervisor grant calls the same two seams (best effort, never raises)."""
-    if not quiz_id:
+    here; the pool's supervisor grant calls the same two seams (best effort, never raises).
+    A peer question has no card, so it has nothing to say here."""
+    if not quiz_id or quiz_id.startswith("peer-question:"):
         return
     try:
         from ouroboros.owner_quiz import mark_wait_ended, quiz_states
@@ -1050,6 +1091,15 @@ def append_wake_notice(ctx: Any, checkpoint: dict, outcome: Any, messages: list)
     if checkpoint.get("review_binding") and (outcome in {"helper_result", "review_result", "timeout"} or outcome.startswith("run_question:")):
         from ouroboros.review_waiting import append_helper_notice
         append_helper_notice(ctx, messages)
+    from ouroboros.peer_letters import peer_question_id, peer_wait_notice
+
+    if checkpoint.get("reason") == "peer" or peer_question_id(checkpoint):
+        root = pathlib.Path(ctx.budget_drive_root or ctx.drive_root)
+        entries = _wait_entries(ctx) if outcome not in {"answer", "timeout", ""} and not outcome.startswith("control:") else []
+        woke = "the wait window closing" if outcome == "timeout" else _wake_description(outcome, entries)
+        if outcome and (notice := peer_wait_notice(root, ctx.task_id, checkpoint, outcome, woke)):
+            messages.append(notice)
+        return
     if checkpoint.get("review_binding") or not (
             outcome in {"timeout", "hurry", "unknown", "question_closed"} or outcome.startswith("mail")):
         return
@@ -1091,8 +1141,7 @@ def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
     if isinstance(sleep, dict) and sleep.get("mode") == "cold" and not review_binding:
         # A cold sleep ends this process at the next round boundary
         # (``budget_pause.enter_cold_sleep``), not in a warm park here.
-        ctx._owner_wait_requested = ""
-        ctx._owner_wait_deadline_at = ""
+        ctx._owner_wait_requested, ctx._owner_wait_deadline_at, ctx._peer_question_wait = "", "", None
         return
     callback = getattr(ctx, "owner_wait_callback", None)
     # Presence validates its own review/private question at this narrow seam;
@@ -1126,6 +1175,7 @@ def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
         outcome = callback(ctx, checkpoint)
         append_wake_notice(ctx, checkpoint, outcome, messages)
     ctx._owner_wait_requested, ctx._owner_wait_deadline_at, ctx._owner_wait_max_minutes = "", "", 0
+    ctx._peer_question_wait = None
     if callable(callback):
         model_sleep.announce_resumed(ctx, outcome)  # the same attempt prepares again, with no new start
 
@@ -1194,6 +1244,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     NOT restored: they died with the previous process and stay invalidated."""
     from ouroboros.loop_delivery import FRESH_ANSWER_CONTROLS, DeliveryCandidate
     from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY  # a round's refusal record: this process's only
+    from ouroboros.context_view_facts import FRESH_FACTS_KEY  # so is a facts row's freshness: a cold return keeps the row
     from ouroboros.model_wait import adopt_handoff_clock, budget_paused_seconds
     from ouroboros.settings_integrity import restore_cognition
 
@@ -1213,7 +1264,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     if loaded is not None:
         loaded.update(state.get("actor_loaded_tool_names") or ())
     trace.update(state["trace"])
-    usage.update({key: value for key, value in state["usage"].items() if key != ROUND_REFUSALS_KEY})
+    usage.update({key: value for key, value in state["usage"].items() if key not in (ROUND_REFUSALS_KEY, FRESH_FACTS_KEY)})
     seen.update(state["seen"])
     ctx._loop_mailbox_seen_ids = seen
     ctx._sleep_interaction_seen = dict(state.get("sleep_interaction_seen") or {})
@@ -1236,6 +1287,12 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
         ctx._held_state_dirty = seed is not None or getattr(ctx, "_held_state_persisted", None) != (
             ctx._held_owner_messages, ctx._open_relays)  # written at the next persist unless the record has them
     ctx.unconfirmed_routing_acts = [dict(act) for act in state.get("unconfirmed_routing_acts") or [] if isinstance(act, dict)]
+    # The confirmed reply set survives only this same task's continuation: a successor (a different
+    # task id, e.g. working_checkpoint's idle retry) borrows no reply authority. An empty or legacy
+    # state leaves the attribute absent, exactly as a fresh turn that confirmed nothing.
+    if str(state.get("task_id") or "") == str(ctx.task_id):
+        if confirmed := {w for w in state.get("confirmed_reply_works") or () if isinstance(w, str) and w}:
+            ctx._confirmed_reply_works = confirmed
     restart = state.get("restart") or {}
     request = restart.get("request") or {}
     # Cold Pause/Resume keeps the requester's obligation without sending again.
@@ -1260,6 +1317,10 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
 
     restore_authoring_handover(ctx, state, trace, usage)
     schedule_report = schedule_report_ctx(ctx)
+    if not schedule_report:
+        from ouroboros.place_reply import restore_send_facts
+
+        restore_send_facts(ctx, trace, messages)
     if schedule_report:
         # Pre-upgrade rows had no wake_silent/quiet facts. The geometry is enough to keep the report a record.
         for name in ("_completion_request", "_completion_selected"):
@@ -1282,6 +1343,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     applied = restore_current(ctx, messages)
     # Only a newer durable owner act moves the saved actor; pending tool choices belong to the next ordinary call.
     ctx._restored_context_model_role = (ctx.active_role_override if applied else state.get("context_model_role")) or ""
+    ctx._restored_native_load_window = _saved_native_load_window(ctx, state)
     candidate = state.get("delivery_candidate")
     ctx._delivery_candidate = DeliveryCandidate(**{key: value for key, value in candidate.items()
         if key != "repair_attempted"}) if candidate else None
@@ -1312,6 +1374,11 @@ def _conversation_account(ctx: Any, messages: list, role: str, account: Any) -> 
     return send_account({"source": source, "resolved_model": native}, messages, {
         "model_role": role, "model_account_override": account, "cache_affinity": cache_key_for_model(model)},
         plan=getattr(ctx, "context_fit_plan", None))[1]
+
+
+def _saved_native_load_window(ctx: Any, state: dict):
+    binding = state.get("load_window_binding")
+    return binding if isinstance(binding, dict) and state.get("task_id") == getattr(ctx, "task_id", None) else None
 
 
 def _continuation_fit_route(ctx: Any, state: dict, messages: list, *, initial_effort: str | None = None) -> tuple:
@@ -1347,8 +1414,10 @@ def _continuation_fit_route(ctx: Any, state: dict, messages: list, *, initial_ef
         {"model_role": getattr(preview, "active_role_override", None) or state.get("context_model_role"),
          "task_metadata": preview.task_metadata}, context_fit_plan=getattr(preview, "context_fit_plan", None),
         overrides=preview.model_wait_context.overrides)
+    load_window = _saved_native_load_window(ctx, state)
     return {"model": preview.active_model, "use_local_model": preview.active_use_local,
             "model_role": role, "task_metadata": preview.task_metadata, "credential_profile_id": account,
+            **({"load_window_binding": load_window} if load_window else {}),
             "model_route": _conversation_account(preview, messages, role, account), "model_route_preferred": True}, effort
 
 
@@ -1364,6 +1433,23 @@ def context_start_route(ctx: Any, task: dict, state: dict, initial_effort: str, 
     return RouteQuestion(task, route_fields=route), effort
 
 
+def _restores_unsent_pause(state: dict) -> bool:
+    """True only when an exact live pause proved zero physical dispatches: missing answers or working checkpoints stay
+    unknown, never an unread start."""
+    pause = state.get("_pause_row")
+    if not isinstance(pause, dict) or type(pause.get("physical_calls")) is not int or pause["physical_calls"] != 0:
+        return False
+    point = pause.get("resume_point") or {}
+    observations = state.get("context_observations") or {}
+    usage = state.get("usage") or {}
+    return not (point.get("recovered_from_working") or point.get("abandoned_model_attempts")
+                or observations.get("_last_context_observation") or observations.get("_main_send_observations")
+                or usage.get("_pending_transport_outcome") or usage.get("_transport_deaths")
+                or usage.get("_prefix_answers")
+                or any(isinstance(row, dict) and row.get("role") == "assistant"
+                       for row in (state.get("messages") or ())))
+
+
 def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     """Rebind the restored route's context-fit plan; returns ``(plan, mode)``.
 
@@ -1373,14 +1459,20 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     to the engine; without one the route's own question is asked once, and the rebind after tool reconciliation reuses
     that answer. Dates are read anew; an account the conversation names without a usable record is asked about."""
     from ouroboros.loop import _rebind_context_fit_plan, get_context_mode
+    from ouroboros.loop_model_call import publish_rebound_view
     from ouroboros.held_notes import CAPTURE_KEY
     from ouroboros.memory_floor import MODES
-    from ouroboros.continuation_tools import reconcile_restored_tools
+    from functools import cache
+    from ouroboros.continuation_tools import frozen_tools_intact, reconcile_restored_tools, restore_omissions
+    from ouroboros.provider_models import tool_schema_limit
+    from ouroboros.window_learning import RouteSchemas
     from ouroboros.context_fit import restored_start
     from ouroboros.context_timing import timed
+    from ouroboros.loop_round_limits import COLD_RETURN_ATTR
 
     ctx = tools._ctx
     ctx.context_fit_plan = restored_start(ctx.context_fit_plan, state.get("context_start"))  # before every rebind
+    setattr(ctx, COLD_RETURN_ATTR, not _restores_unsent_pause(state))  # unread only on a pause proven never sent
     selected, effort = _continuation_fit_route(ctx, state, messages)
     owner, ran = get_context_mode(), getattr(ctx, "active_context_mode", None)
     restore_mode = ran if owner in MODES and ran in MODES[MODES.index(owner):] else None
@@ -1389,16 +1481,36 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
         use_local=selected["use_local_model"], preferred_mode=owner, reasoning_effort=effort,
         tool_schemas=state["tool_schemas"], restoring_held=restoring_held,
         model_role=selected["model_role"], model_route=selected["model_route"], credential_profile_id=selected["credential_profile_id"],
+        **({"load_window_binding": selected["load_window_binding"]} if "load_window_binding" in selected else {}),
         route_is_preference=True,
     )
-    plan, mode = _rebind_context_fit_plan(ctx.context_fit_plan, tools, messages, start_mode=restore_mode, **route)
-    before = len(messages)
-    schemas_changed = timed("restore.tools", reconcile_restored_tools, tools, state, messages, mode)
-    if schemas_changed or (restoring_held and len(messages) != before):
-        plan, mode = _rebind_context_fit_plan(plan, tools, messages, start_mode=restore_mode if restoring_held else mode,
-                                              **{**route, "model_route": getattr(plan, "model_route", {})})
-    if schemas_changed:
-        sanction_rewrite(ctx, "continuation_restored", scope="tools")
+    basis, frozen = ctx.context_fit_plan, state["tool_schemas"]
+    shown = messages[0] if messages else None
+    source = [*messages, *restore_omissions(tools)]
+    start = restore_mode or owner
+    held = RouteSchemas(frozen, [])
+    limit = tool_schema_limit(route["model"], use_local=route["use_local"])
+
+    @cache
+    def trial(mode):
+        return timed("restore.tools", reconcile_restored_tools, tools, state, source, mode,
+                     saved_mode=ran, model=route["model"], limit=limit)
+
+    preview = list(source)
+    plan, mode = _rebind_context_fit_plan(basis, tools, preview, start_mode=restore_mode, publish=False,
+        schema_trials=lambda mode: held if mode == start else trial(mode), **route)
+    if mode != ran or not frozen_tools_intact(tools, frozen, preview, mode, limit):
+        initial = trial(start)
+        if mode != start or initial.price() != held.price():
+            # Re-price from the source, never from a projection made solely to fit the frozen list.
+            preview = list(source)
+            plan, mode = _rebind_context_fit_plan(basis, tools, preview, start_mode=restore_mode, publish=False,
+                schema_trials=trial, **{**route, "tool_schemas": initial.fitted.schemas,
+                                        "model_route": getattr(plan, "model_route", {})})
+        trial(mode).adopt(tools, frozen, preview)
+    messages[:] = preview
+    if plan is not None:
+        publish_rebound_view(tools, plan, mode, messages, frozen, restore_mode, shown)
     # This process captured its context again: the restored system row names that, not a route change.
     sanction_rewrite(ctx, "continuation_restored", scope="system")
     return plan, mode

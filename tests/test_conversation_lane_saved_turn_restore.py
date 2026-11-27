@@ -524,10 +524,19 @@ def test_a_resumed_pre_body_turn_caught_by_a_quit_before_its_launch_waits_for_on
 
 @pytest.mark.parametrize("door", ["second_quit", "panic"])
 def test_a_resumed_pre_body_turn_keeps_its_proof_through_another_stop(tmp_path, monkeypatch, door):
+    from ouroboros.control_actor import owner_door
+    from ouroboros.work_stop import current_stop
+    from supervisor.task_admission import PRESTART_PROOF, prestart_returned_unsent
+
     system = _system(tmp_path, monkeypatch)
     turn, _event = _parked_before_its_body(system, tmp_path, monkeypatch)
     assert system.queue.resume_budget_paused_task(turn.id)["ok"]
     _boot_after_stop(system, monkeypatch, tmp_path)
+    [first_held] = system.workers.PENDING
+    first_hold = dict(budget_hold_fact(first_held))
+    first_stop = current_stop(first_held)
+    first_proof = prestart_returned_unsent(first_held)
+    assert first_proof["before_task_start"] is True and first_hold[PRESTART_PROOF] == first_proof
     if door == "second_quit":  # Resume, then another quit before the launch: the carried proof still holds
         assert system.queue.resume_budget_paused_task(turn.id)["ok"]
     else:
@@ -535,11 +544,25 @@ def test_a_resumed_pre_body_turn_keeps_its_proof_through_another_stop(tmp_path, 
     _boot_after_stop(system, monkeypatch, tmp_path)
     [held] = system.workers.PENDING
     assert budget_hold_fact(held) and not held.get("_project_admission_restore_hold")
+    if door == "panic":
+        after_hold = budget_hold_fact(held)
+        after_stop = current_stop(held)
+        assert after_hold["reason"] == first_hold["reason"] == "saved_work_hold"
+        assert after_hold.get("door") == first_hold.get("door")
+        assert after_hold["held_at"] == first_hold["held_at"]
+        assert after_hold[PRESTART_PROOF] == first_proof
+        assert prestart_returned_unsent(held) == first_proof
+        assert after_stop["cause"] == first_stop["cause"] == "app_stop"
+        assert after_stop["release"] == first_stop["release"]
     system.workers.assign_tasks()
     assert not _launched(system), "every stop still needs the owner's Resume"
     if door == "panic":
         (tmp_path / "state" / "panic_stop.flag").unlink()
-    assert [(row["id"], row["_attempt"]) for row in _resume_and_launch(system, turn.id)] == [(turn.id, 1)]
+        with owner_door("fixture"):
+            launched = _resume_and_launch(system, turn.id)
+    else:
+        launched = _resume_and_launch(system, turn.id)
+    assert [(row["id"], row["_attempt"]) for row in launched] == [(turn.id, 1)]
     system.workers.assign_tasks()
     assert not _launched(system)
 
@@ -579,6 +602,8 @@ def test_a_pre_body_return_proves_nothing_once_a_launch_or_body_may_have_followe
 ])
 def test_pre_body_readability_recovery_keeps_quit_authority_and_resumes_once(
         tmp_path, monkeypatch, resume_first, door, read_gap):
+    from ouroboros.control_actor import owner_door
+    from ouroboros.work_stop import current_stop
     from supervisor import task_admission
     from tests._store_shared import unreadable_result
 
@@ -603,7 +628,12 @@ def test_pre_body_readability_recovery_keeps_quit_authority_and_resumes_once(
         [held] = system.workers.PENDING
         assert held["_project_admission_restore_hold"]
         assert not _launched(system)
-        assert not system.queue.resume_budget_paused_task(turn.id)["ok"]
+        if door == "panic":
+            (tmp_path / "state" / "panic_stop.flag").unlink()
+            with owner_door("fixture"):
+                assert not system.queue.resume_budget_paused_task(turn.id)["ok"]
+        else:
+            assert not system.queue.resume_budget_paused_task(turn.id)["ok"]
     assert load_task_result(tmp_path, turn.id)["resource_limit"] == original
     if not resume_first:
         system.workers.assign_tasks()
@@ -611,7 +641,16 @@ def test_pre_body_readability_recovery_keeps_quit_authority_and_resumes_once(
         assert not held.get("_project_admission_restore_hold")
         assert budget_hold_fact(held), "read recovery cannot grant Resume after Quit"
         assert not _launched(system)
-    assert [(row["id"], row["_attempt"]) for row in _resume_and_launch(system, turn.id)] == [(turn.id, 1)]
+    if door == "panic":
+        assert current_stop(held)["door"] == "panic"
+        assert current_stop(held)["release"] == "owner"
+        assert system.queue.resume_budget_paused_task(turn.id)["error"] == "panic_requires_owner_resume"
+        assert held["_project_admission_restore_hold"]
+        with owner_door("fixture"):
+            launched = _resume_and_launch(system, turn.id)
+    else:
+        launched = _resume_and_launch(system, turn.id)
+    assert [(row["id"], row["_attempt"]) for row in launched] == [(turn.id, 1)]
     system.workers.assign_tasks()
     assert not _launched(system)
 
@@ -896,18 +935,28 @@ def test_an_owner_stop_of_a_main_turn_is_never_returned(tmp_path, monkeypatch, w
     assert load_task_result(tmp_path, turn.id)["status"] in {"cancelled", "interrupted"}
 
 
-def test_a_panic_holds_a_main_turn_for_an_explicit_resume(tmp_path, monkeypatch):
+@pytest.mark.parametrize("panic_flag", [False, True], ids=["process_latch", "panic_flag"])
+def test_a_panic_holds_a_main_turn_for_an_explicit_resume(tmp_path, monkeypatch, panic_flag):
+    from ouroboros.work_stop import current_stop
+
     system = _system(tmp_path, monkeypatch)
     turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
     _save_work(tmp_path, turn)
     assert system.control._quiesce_repo_writers("auto_merge") == []
     monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
     monkeypatch.setattr("ouroboros.server_control._restart_stop_requested", True)
+    if panic_flag:
+        (tmp_path / "state" / "panic_stop.flag").write_text("panic", encoding="utf-8")
     system.control._respawn_workers_after_failed_update()
     system.workers.assign_tasks()
     assert not _launched(system)
     [held] = system.workers.PENDING
     assert held["id"] == turn.id and budget_hold_fact(held)
+    if panic_flag:
+        stop = current_stop(held)
+        assert stop["door"] == "panic"
+        assert stop["cause"] == "panic"
+        assert stop["release"] == "owner"
 
 
 @pytest.mark.parametrize("failure", ["corrupt_source", "missing_source", "unreadable_result"])
@@ -1959,8 +2008,10 @@ def test_a_returned_turn_on_its_carrier_reads_my_humans_next_words_under_a_fresh
     intake = tmp_path / "memory" / "owner_mailbox" / f"{turn.id}.intake.json"
     assert json.loads(intake.read_text())["attempt"] == 1, "the dead attempt's fact, until a carrier takes the turn"
     carrier = worker_chat_lane.CarrierTurn(sent, tmp_path, stdqueue.Queue())
+    handoff = system.workers.RUNNING[turn.id]["phase_generation"]  # the put that handed this carrier the turn
+    assert handoff and sent["_phase_generation"] == handoff
     assert carrier.intake == "owner:1" and json.loads(intake.read_text()) == {
-        "accepting": True, "conversation_key": "owner:1", "pid": os.getpid(), "attempt": 2}
+        "accepting": True, "conversation_key": "owner:1", "pid": os.getpid(), "attempt": 2, "phase_generation": handoff}
     bridge, before = _Bridge(), set(system.workers.RUNNING)
     ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=system.workers.RUNNING, PENDING=system.workers.PENDING,
                           BUDGET_ROOT_FENCES={}, load_state=lambda: {"owner_id": 1, "owner_chat_id": 1},

@@ -1,13 +1,19 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-    executorChip,
     formatReviewProjection,
-    keepStickyExecutorChip,
+    modelExecutionView,
     summarizeChatLiveEvent,
     taskOutcomeSeverity,
 } from '../modules/log_events.js';
+import { apiRouteParts, displayApiModelTarget, compactModel, executorTitle, modelWords, recordedCoordinator, selectionLane } from '../modules/harness_presentation.js';
+import { admissionRefusalRow, cardExecutorChip, executorChip, executorModelText, keepStickyExecutorChip, requestedExecutor, requestedFact } from '../modules/executor_card_facts.js';
+import { terminalChildFrame } from '../modules/settled_card.js';
+import { routeConnectionId } from '../modules/connection_labels.js';
+import { composeModelSource, parseModelSource } from '../modules/route_editor_primitives.js';
+import { applyPayload, currentPayload, setMissTransport } from '../modules/i18n.js';
 
 test('shared task severity never paints degraded or best-effort outcomes green', () => {
     const clean = {
@@ -291,8 +297,9 @@ test('the chip is layered truth: decision before evidence, receipt only from evi
     assert.equal(dispatched.label, 'Claude Code');
     assert.match(dispatched.title, /Dispatched to Claude Code/);
     assert.match(dispatched.title, /run evidence arrives with the terminal receipt/);
-    assert.match(dispatched.title, /this subagent runs on its coordinator route \(bills as unknown\)/);
-    assert.doesNotMatch(dispatched.title, /itself runs on the API/);
+    // The coordinator is no part of the executor's sentence: the card's Coordinator row reads it from the chip.
+    assert.deepEqual(dispatched.coordinator, { route: '', billing: 'unknown' });
+    assert.doesNotMatch(dispatched.title, /runs on|bills as/);
     assert.doesNotMatch(dispatched.title, /Ran on your/);
 
     const dispatchedSub = executorChip({
@@ -301,10 +308,7 @@ test('the chip is layered truth: decision before evidence, receipt only from evi
         coordinator_billing: 'subscription',
         parent_cognitive_route: { model: 'claudexor::claude=sonnet-4-6', chosen_by: 'inherited' },
     });
-    assert.match(
-        dispatchedSub.title,
-        /this subagent itself runs on claudexor::claude=sonnet-4-6 \(bills as subscription\)/,
-    );
+    assert.deepEqual(dispatchedSub.coordinator, { route: 'claude=sonnet-4-6', billing: 'subscription' });
     assert.equal(dispatchedSub.coordinatorProvenance, 'inherited');
 
     const dispatchedMeasured = executorChip({
@@ -313,10 +317,7 @@ test('the chip is layered truth: decision before evidence, receipt only from evi
         cost_usd: 0.02,
         coordinator_billing: 'measured',
     });
-    assert.match(
-        dispatchedMeasured.title,
-        /this subagent itself runs on openai\/gpt-5\.6-sol \(bills as measured\)/,
-    );
+    assert.deepEqual(dispatchedMeasured.coordinator, { route: 'gpt-5.6-sol', billing: 'measured' });
 
     // EVIDENCE with settled runs: the completion-seam reconciliation proved the
     // delegation happened, so the chip may finally say so — with the count and
@@ -525,6 +526,495 @@ test('the chip rides both projections: an ordinary progress bubble and a subagen
         is_progress: true, content: 'plain child', delegation_role: 'subagent',
         subagent_task_id: 'child-2', subagent_event: 'running',
     }), false);
+});
+
+test('the selected executor and model read as a request from Queued on; evidence outranks it', () => {
+    const selection = { requested_executor_route: { kind: 'agent_session', target_id: 'codex=gpt-5.5' } };
+    const line = (frame) => executorModelText(executorChip(frame), requestedExecutor(frame));
+    // Queued: no dispatch route yet, so the chip names the SELECTED harness and the line its model, as a request. Nothing
+    // was sent, so nothing promises a receipt: the work may still end before dispatch.
+    const queued = { ...selection, subagent_event: 'scheduled', accepted: true };
+    assert.equal(executorChip(queued).label, 'Codex');
+    assert.equal(executorChip(queued).title, 'Selected Codex, model gpt-5.5 (requested)');
+    assert.equal(line(queued), 'requested gpt-5.5');
+    // Dispatched: the route's bare harness (a blocked or terminal route) keeps the selection's model.
+    const running = { ...selection, executor_route: 'codex', subagent_event: 'running' };
+    assert.match(executorChip(running).title, /^Dispatched to Codex, model gpt-5\.5 \(requested\)/);
+    assert.equal(line(running), 'requested gpt-5.5');
+    // An older frame: a full dispatch route still names its model (an `:effort` tail is no part of it); a bare one none.
+    assert.deepEqual(requestedExecutor({ executor_route: 'codex=gpt-5.5:high' }), { kind: 'agent_session', harness: 'codex', model: 'gpt-5.5' });
+    assert.equal(requestedExecutor({ executor_route: 'codex' }), null);
+    assert.equal(line({ executor_route: 'codex' }), '');
+    // A progress report without a model keeps its own harness's request, never another harness's.
+    const report = (harness_id, extra = {}) => ({ ...selection, executor_route: 'codex', subagent_task_id: 'c', executor_observation: {
+        task_id: 'c', task_attempt: '1', run_id: 'r', attempt_id: 'a', harness_id, phase: 'p', revision: 1, ...extra } });
+    assert.match(executorChip(report('codex')).title, /Codex, model gpt-5\.5 \(requested\), run r/);
+    assert.equal(line(report('codex')), 'requested gpt-5.5');
+    assert.match(executorChip(report('cursor')).title, /Cursor, model unconfirmed/);
+    assert.equal(line(report('cursor')), '');
+    assert.equal(requestedFact(requestedExecutor(report('cursor')), executorChip(report('cursor')), ''), 'Codex · gpt-5.5');
+    // Observed evidence takes the line; the request moves to Details only when it differs.
+    const observed = report('codex', { model: 'gpt-5.5-2026-11', model_source: 'observed' });
+    assert.equal(line(observed), 'gpt-5.5-2026-11');
+    assert.equal(requestedFact(requestedExecutor(observed), executorChip(observed), line(observed)), 'Codex · gpt-5.5');
+    assert.equal(requestedFact(requestedExecutor(queued), executorChip(queued), line(queued)), '');
+    const settled = { ...selection, executor_route: 'codex', status: 'completed', execution_evidence: {
+        delegated_runs_started: 1, delegated_runs_settled: 1, delegated_runs_failed: 0, harness_models: ['GPT-5.5 Codex'] } };
+    assert.equal(line(settled), 'GPT-5.5 Codex');
+    const vendorSelection = {kind: 'agent_session', harness: 'codex', model: 'vendor-a/sol'};
+    assert.equal(requestedFact(vendorSelection, {harness: 'codex', settledRunModel: 'vendor-a/sol'}, 'vendor-a/sol'), '');
+    assert.equal(requestedFact(vendorSelection, {harness: 'codex', settledRunModel: 'vendor-b/sol'}, 'vendor-b/sol'), 'Codex · vendor-a/sol');
+    // A child that ended before any dispatch (cancelled while queued, refused at admission, with or without a
+    // status) lost no run: its selection and request stay, with no missing-receipt warning and no promised receipt.
+    for (const ended of [{ status: 'cancelled', subagent_event: 'cancelled' },
+        { status: 'failed', subagent_event: 'rejected', accepted: false }, { subagent_event: 'rejected', accepted: false }]) {
+        const frame = { ...selection, ...ended };
+        assert.equal(executorChip(frame).label, 'Codex', JSON.stringify(ended));
+        assert.equal(executorChip(frame).title, 'Selected Codex, model gpt-5.5 (requested); no dispatch was recorded before it ended');
+        assert.equal(line(frame), 'requested gpt-5.5', JSON.stringify(ended));
+    }
+    // Only a dispatched route can have lost its receipt: there the warning stays.
+    const dispatchedEnd = executorChip({ ...selection, executor_route: 'codex', status: 'cancelled' });
+    assert.equal(dispatchedEnd.label, 'Codex · run outcome unknown');
+    assert.match(dispatchedEnd.title, /^The Codex route was assigned, model gpt-5\.5 \(requested\), but this terminal record has no delegated-run evidence/);
+    // An API-model selection runs on no harness: its target is never a chip, and the line requests its model.
+    const api = { requested_executor_route: { kind: 'api_model', target_id: 'openai::gpt-5.5' }, executor_route: 'openai::gpt-5.5' };
+    assert.equal(executorChip(api), null);
+    assert.equal(executorModelText(null, requestedExecutor(api)), 'requested gpt-5.5');
+    assert.equal(executorModelText(executorChip(running), requestedExecutor(api)), '', 'an API model never joins a harness');
+    // Nor does an older frame's API target: no harness id heads it.
+    for (const executor_route of ['openai::gpt-5.5', 'claudexor::codex=gpt-5', 'anthropic/claude-x']) {
+        assert.equal(executorChip({ executor_route }), null, executor_route);
+        assert.equal(requestedExecutor({ executor_route }), null, executor_route);
+    }
+    // Every frame that states a selection hands it to the card.
+    assert.deepEqual(summarizeChatLiveEvent({ ...queued, is_progress: true, content: 'Scheduled', delegation_role: 'subagent',
+        subagent_task_id: 'c', parent_task_id: 'p' }).requestedExecutor, { kind: 'agent_session', harness: 'codex', model: 'gpt-5.5' });
+});
+
+test('a local API selection is marked local once, queued and completed', () => {
+    // The row spells a local target `… (local)` (configured_subagents / subagent_runtime): compacting it never adds a
+    // second mark, while a bare local-named model keeps its single mark and a remote one gets none.
+    assert.deepEqual(['qwen.gguf (local)', 'openai::gpt-5 (local)', 'local-model', 'local-model (local)', 'openai::gpt-5'].map(compactModel),
+        ['qwen.gguf (local)', 'gpt-5 (local)', 'local-model (local)', 'local-model (local)', 'gpt-5']);
+    for (const [target, asked, ran] of [['qwen.gguf (local)', 'qwen.gguf (local)', 'qwen.gguf'], ['openai::gpt-5 (local)', 'gpt-5 (local)', 'openai::gpt-5']]) {
+        const selected = requestedExecutor({ requested_executor_route: { kind: 'api_model', target_id: target } });
+        // Queued: the API child's line requests it, marked once; Details repeat nothing the line says.
+        assert.equal(executorModelText(null, selected), `requested ${asked}`, target);
+        assert.equal(requestedFact(selected, null, `requested ${asked}`), '', target);
+        // Completed on that local model: its solve response names the bare model (the lane is `used_local`), which is
+        // the same request, so Details add no false `Requested` row; a different model still shows the request.
+        assert.equal(requestedFact(selected, null, compactModel(ran)), '', target);
+        assert.equal(requestedFact(selected, null, 'gpt-4.1'), asked, target);
+    }
+});
+
+test('local or remote follows the recorded lane, never a word in a provider, connection or model name', () => {
+    // A connection named `local-team` is no lane; a recorded lane alone decides, even over a model named `local-…`.
+    assert.equal(compactModel('openai@local-team::remote-a'), 'remote-a');
+    assert.equal(compactModel('local-model', false), 'local-model');
+    assert.equal(compactModel('qwen.gguf', true), 'qwen.gguf (local)');
+    assert.equal(compactModel('qwen.gguf (local)', true), 'qwen.gguf (local)', 'marked once');
+    const solve = (used_model, used_local, extra = {}) => ({ source: 'usable_solve_response', requested_model: used_model,
+        requested_use_local: used_local, used_model, used_local, provider: used_local ? 'local' : 'openai', llm_call_id: 'c', ...extra });
+    assert.equal(modelExecutionView(solve('openai@local-team::remote-a', false)).value, 'remote-a · openai');
+    assert.equal(modelExecutionView(solve('local-model', false)).value, 'local-model · openai');
+    assert.equal(modelExecutionView(solve('qwen.gguf', true)).value, 'qwen.gguf (local) · local');
+    assert.equal(modelExecutionView(solve('qwen.gguf', false, { requested_use_local: true, provider: 'openrouter' })).value,
+        'qwen.gguf (initial request: qwen.gguf (local)) · openrouter', 'an explicit lane switch stays visible');
+    // The selection behind that remote solve is the same model on the same lane: Details add no `Requested` row.
+    const selected = requestedExecutor({ requested_executor_route: { kind: 'api_model', target_id: 'openai@local-team::remote-a' } });
+    const fact = solve('openai@local-team::remote-a', false);
+    assert.equal(executorModelText(null, selected), 'requested remote-a');
+    assert.equal(requestedFact(selected, null, modelExecutionView(fact).model, fact), '');
+});
+
+test('one provider and model spelled two ways is one identity; another provider, vendor or lane keeps the request', () => {
+    const fact = (used_model, used_local = false) => ({ source: 'usable_solve_response', requested_model: used_model, requested_use_local: used_local,
+        used_model, used_local, provider: 'openrouter', llm_call_id: 'c' });
+    const details = (target, used, lane) => requestedFact(requestedExecutor({ requested_executor_route: { kind: 'api_model', target_id: target } }),
+        null, modelExecutionView(fact(used, lane)).model, fact(used, lane));
+    // A bare id is OpenRouter's (provider_models.parse_model_route), as is the built-in connection's.
+    for (const [target, used] of [['openrouter::anthropic/claude', 'anthropic/claude'], ['anthropic/claude', 'openrouter::anthropic/claude'],
+        ['openrouter@default::anthropic/claude', 'anthropic/claude']]) assert.equal(details(target, used), '', `${target} ran ${used}`);
+    assert.equal(details('openai::gpt-5', 'openai/gpt-5'), 'openai::gpt-5', 'OpenAI\'s own API is not OpenRouter');
+    assert.equal(details('vendor-a/sol', 'vendor-b/sol'), 'vendor-a/sol');
+    assert.equal(details('anthropic/claude (local)', 'anthropic/claude'), 'claude (local)', 'local asked, remote ran');
+    assert.equal(details('anthropic/claude', 'anthropic/claude', true), 'claude', 'remote asked, local ran');
+});
+
+test('an API child\'s own model names it: a harness it calls is its tool, never its chip', () => {
+    const api = { kind: 'api_model', target_id: 'openai::gpt-5.5-pro' };
+    const nested = { requested_executor_route: api, executor_route: 'openai::gpt-5.5-pro', subagent_task_id: 'api', executor_observation: {
+        task_id: 'api', task_attempt: '0', run_id: 'nested', attempt_id: 'n01', harness_id: 'codex', phase: 'harness.event', revision: 2,
+        model: 'gpt-5.5-codex', model_source: 'requested' } };
+    assert.equal(executorChip(nested), null);
+    // A frame that does not state the selection still reports a harness; the card that knows its selection keeps none.
+    const sparse = executorChip({ ...nested, requested_executor_route: undefined, executor_route: undefined });
+    assert.equal(sparse.label, 'Codex · last update');
+    assert.equal(cardExecutorChip({ executorChip: sparse, requestedExecutor: requestedExecutor({ requested_executor_route: api }) }, sparse), null);
+    assert.equal(cardExecutorChip({}, sparse), sparse, 'without a selection the report stays the executor fact');
+});
+
+test('a terminal record ends a progress pin: the line names the scheduled request, the report stays as history', () => {
+    const selection = { requested_executor_route: { kind: 'agent_session', target_id: 'codex=gpt-5.5' }, subagent_task_id: 'c' };
+    const selected = requestedExecutor(selection);
+    const report = { ...selection, executor_route: 'codex=gpt-5.5', ts: '2026-11-22T10:00:02Z', executor_observation: { task_id: 'c',
+        task_attempt: '0', run_id: 'r', attempt_id: 'a01', harness_id: 'codex', phase: 'harness.event', revision: 3,
+        model: 'gpt-5.5-2026-11', model_source: 'observed' } };
+    const progress = executorChip(report);
+    assert.equal(progress.label, 'Codex · last update');
+    assert.equal(executorModelText(progress, selected), 'gpt-5.5-2026-11', 'in flight, the run\'s own report names its model');
+    // A terminal frame carrying the run's last report speaks for the run's end, not its progress.
+    assert.equal(executorChip({ ...report, status: 'cancelled', subagent_event: 'cancelled' }).label, 'Codex · run outcome unknown');
+    // Stop without settlement: the terminal record outranks the pin and names the request; the report is history.
+    const stopped = executorChip({ ...selection, executor_route: 'codex=gpt-5.5', status: 'cancelled', ts: '2026-11-22T10:05:00Z' });
+    assert.equal(keepStickyExecutorChip(progress, stopped), false);
+    const card = cardExecutorChip({ executorChip: progress, requestedExecutor: selected }, stopped);
+    assert.equal(card.label, 'Codex · run outcome unknown');
+    assert.equal(executorModelText(card, selected), 'requested gpt-5.5');
+    assert.equal(card.title, 'The Codex route was assigned, model gpt-5.5 (requested), but this terminal record has no delegated-run '
+        + 'evidence; the run outcome is unknown. ' + progress.title);
+    // No later progress or dispatch frame reopens it; a newer terminal record replaces it and keeps that history.
+    assert.equal(keepStickyExecutorChip(card, executorChip({ ...report, ts: '' })), true);
+    assert.equal(keepStickyExecutorChip(card, executorChip({ ...selection, executor_route: 'codex' })), true);
+    const unrouted = executorChip({ ...selection, status: 'cancelled', subagent_event: 'cancelled' });
+    assert.equal(keepStickyExecutorChip(card, unrouted), false);
+    // That record found no dispatch, but this card saw a start: no false "no dispatch".
+    const again = cardExecutorChip({ executorChip: card, requestedExecutor: selected }, unrouted);
+    assert.equal(again.label, 'Codex · run outcome unknown');
+    assert.ok(again.title.endsWith(progress.title), again.title);
+    assert.equal(cardExecutorChip({ executorChip: progress, requestedExecutor: selected }, unrouted).label, 'Codex · run outcome unknown');
+    // A card that saw no start keeps the cancelled-before-dispatch wording; a receipt is never displaced by a pin.
+    assert.equal(cardExecutorChip({ executorChip: executorChip({ ...selection, subagent_event: 'scheduled' }), requestedExecutor: selected }, unrouted).title,
+        'Selected Codex, model gpt-5.5 (requested); no dispatch was recorded before it ended');
+    const receipt = executorChip({ ...selection, executor_route: 'codex', status: 'cancelled', execution_evidence: {
+        delegated_runs_started: 1, delegated_runs_settled: 0 } });
+    assert.equal(keepStickyExecutorChip(receipt, stopped), true);
+    assert.equal(keepStickyExecutorChip(card, receipt), false);
+});
+
+test('a receipt ends a typed update: its line stays the receipt\'s, its Details keep the run\'s last report', () => {
+    const selection = { requested_executor_route: { kind: 'agent_session', target_id: 'codex=gpt-5.5' }, subagent_task_id: 'c' };
+    const selected = requestedExecutor(selection);
+    const observation = { task_id: 'c', task_attempt: '0', run_id: 'r', attempt_id: 'a01', harness_id: 'codex', phase: 'harness.event',
+        revision: 3, model: 'gpt-5.5-2026-11', model_source: 'observed' };
+    const progress = executorChip({ ...selection, executor_route: 'codex=gpt-5.5', ts: '2026-11-22T10:00:02Z', executor_observation: observation });
+    // Stop with one started and no settled run: the receipt is terminal and outranks the pin.
+    const stop = { ...selection, executor_route: 'codex=gpt-5.5', status: 'cancelled', ts: '2026-11-22T10:05:00Z',
+        execution_evidence: { delegated_runs_started: 1, delegated_runs_settled: 0 } };
+    const receipt = executorChip(stop);
+    assert.equal(receipt.ended, true);
+    assert.equal(keepStickyExecutorChip(progress, receipt), false);
+    const card = cardExecutorChip({ executorChip: progress, requestedExecutor: selected }, receipt);
+    assert.equal(card.label, 'Codex · not settled', 'the receipt controls the compact line');
+    assert.equal(executorModelText(card, selected, true), 'requested gpt-5.5');
+    assert.equal(card.title, `Delegated to your Codex account — 1 run(s) started, none settled. ${progress.title}`);
+    assert.match(card.lastUpdate, /run r, attempt a01, revision 3\./);
+    // A settled receipt keeps the same history; its single successful run still owns the line.
+    const settled = executorChip({ ...stop, status: 'completed', execution_evidence: { delegated_runs_started: 1,
+        delegated_runs_settled: 1, delegated_runs_failed: 0, harness_models: ['gpt-5.5-codex'] } });
+    const done = cardExecutorChip({ executorChip: progress, requestedExecutor: selected }, settled);
+    assert.equal(executorModelText(done, selected, true), 'gpt-5.5-codex');
+    assert.ok(done.title.endsWith(`successful run model: gpt-5.5-codex. ${progress.title}`), done.title);
+    // A receipt whose own frame names the run's last report keeps that one, once.
+    const own = executorChip({ ...stop, executor_observation: { ...observation, revision: 4 } });
+    assert.match(own.lastUpdate, /revision 4\./);
+    assert.equal(cardExecutorChip({ executorChip: progress, requestedExecutor: selected }, own).title, own.title);
+    assert.equal(own.title.match(/Latest observed activity/g).length, 1);
+    // A later replay of the same receipt adds no second copy.
+    assert.equal(cardExecutorChip({ executorChip: card, requestedExecutor: selected }, receipt).title, card.title);
+});
+
+test('a run\'s last report stays with its own attempt: another known attempt, or a report unplaced across a retry, stays out', () => {
+    const selection = { requested_executor_route: { kind: 'agent_session', target_id: 'codex=gpt-5.5' }, subagent_task_id: 'c' };
+    const selected = requestedExecutor(selection);
+    const observation = (task_attempt) => ({ task_id: 'c', task_attempt, run_id: 'old-run', attempt_id: 'a01', harness_id: 'codex',
+        phase: 'harness.event', revision: 3 });
+    const progress = (task_attempt) => executorChip({ ...selection, executor_route: 'codex=gpt-5.5', ts: '2026-11-22T10:00:02Z', task_attempt,
+        executor_observation: observation(String(task_attempt)) });
+    const stop = (task_attempt, extra = {}) => executorChip({ ...selection, executor_route: 'codex=gpt-5.5', status: 'cancelled',
+        ts: '2026-11-22T10:05:00Z', task_attempt, execution_evidence: { delegated_runs_started: 1, delegated_runs_settled: 0 }, ...extra });
+    const card = (prior, next, marks = {}) => cardExecutorChip({ executorChip: prior, requestedExecutor: selected, ...marks }, next);
+    const ended = 'Delegated to your Codex account — 1 run(s) started, none settled';
+    // The review's control: attempt 1 reported, attempt 2 stopped. The old run is no history of attempt 2.
+    assert.equal(card(progress(1), stop(2)).title, ended);
+    assert.equal(card(progress(1), stop(2)).label, 'Codex · not settled');
+    // The same attempt keeps it, as does an end naming none on a card that crossed no attempt boundary.
+    assert.match(card(progress(1), stop(1)).title, /\. Latest observed activity: Codex, model gpt-5\.5 \(requested\), run old-run, attempt a01, revision 3\./);
+    assert.match(card(progress(1), stop(undefined)).title, /run old-run/);
+    // A terminal frame's own observation of another known attempt is not its report and proves no start of this attempt.
+    assert.equal(stop(2, { executor_observation: observation('1') }).title, ended);
+    assert.equal(stop(2, { executor_observation: observation('1') }).lastUpdate, undefined);
+    const bare = (task_attempt) => executorChip({ ...selection, status: 'cancelled', task_attempt, executor_observation: observation('1') });
+    assert.equal(bare(2).title, 'Selected Codex, model gpt-5.5 (requested); no dispatch was recorded before it ended');
+    // Its recorded request is worded at paint, so the Executor fact follows the reader's language; the record stays English.
+    assert.equal(executorTitle(bare(2)), bare(2).title);
+    setMissTransport(() => Promise.resolve(null));
+    const priorPayload = currentPayload();
+    try {
+        applyPayload({ language: 'ru', english: false, entries: { 'Selected {name}, model {model} (requested); no dispatch was recorded before it ended': {
+            text: 'Выбран {name}, модель {model} (запрошена); до конца запуск не записан' } } });
+        assert.equal(executorTitle(bare(2)), 'Выбран Codex, модель gpt-5.5 (запрошена); до конца запуск не записан');
+        assert.equal(bare(2).title, 'Selected Codex, model gpt-5.5 (requested); no dispatch was recorded before it ended');
+    } finally { applyPayload(priorPayload || { language: '', english: true, entries: {} }); }
+    assert.match(bare(1).title, /run outcome is unknown\. Latest observed activity: .*run old-run/);
+    // History carried forward keeps its attempt: a later attempt's receipt does not inherit it, the same attempt's does.
+    const first = card(progress(1), stop(1));
+    assert.equal(first.lastUpdateAttempt, 1);
+    assert.equal(card(first, stop(2)).title, ended);
+    assert.equal(card(first, stop(1)).title, first.title);
+    // An end naming no attempt dates to the card's latest attempt after a crossed boundary (task_phase_chip's marks), or to
+    // none when that attempt was interrupted; a report it cannot place after the boundary stays out.
+    assert.equal(card(progress(1), stop(undefined), { childRetried: true, childAttempt: 2 }).title, ended);
+    assert.match(card(progress(2), stop(undefined), { childRetried: true, childAttempt: 2 }).title, /run old-run/);
+    assert.equal(card(progress(1), stop(undefined), { childRetried: true, childAttempt: 1, interruptedAttempt: 1 }).title, ended);
+    assert.match(card(progress(2), stop(undefined), { childRetried: true, childAttempt: 1, interruptedAttempt: 1 }).title, /run old-run/);
+    // A newer numbered report the live line keeps past a lagging census (attempt 3 over 2) is no history of an end naming
+    // no attempt across the known retry; a terminal of that same numbered attempt takes it.
+    const ahead = { childRetried: true, childAttempt: 2 };
+    assert.equal(cardExecutorChip({ executorChip: progress(3), requestedExecutor: selected, ...ahead }, null).observation?.task_attempt, '3');
+    assert.equal(card(progress(3), stop(undefined), ahead).title, ended);
+    assert.equal(card(progress(3), stop(undefined), ahead).lastUpdate, undefined);
+    assert.match(card(progress(3), stop(3), ahead).title, /run old-run/);
+    const unplaced = executorChip({ ...selection, executor_route: 'codex=gpt-5.5', executor_observation: observation('') });
+    assert.equal(card(unplaced, stop(undefined), { childRetried: true, childAttempt: 2 }).title, ended);
+    assert.match(card(unplaced, stop(undefined)).title, /run old-run/);
+});
+
+test('a run\'s live report speaks for its own attempt: a crossed boundary returns the line to the frozen request', () => {
+    const selection = { requested_executor_route: { kind: 'agent_session', target_id: 'codex=gpt-5.5' }, subagent_task_id: 'c' };
+    const selected = requestedExecutor(selection);
+    const progress = (attempt, model) => executorChip({ ...selection, executor_route: 'codex=gpt-5.5', ts: '2026-11-22T10:00:02Z',
+        task_attempt: attempt, executor_observation: { task_id: 'c', task_attempt: String(attempt), run_id: `run-${attempt}`,
+            attempt_id: 'a01', harness_id: 'codex', phase: 'harness.event', revision: 3, model, model_source: 'observed' } });
+    const dispatch = (attempt) => executorChip({ ...selection, executor_route: 'codex=gpt-5.5', subagent_event: 'running',
+        ts: '2026-11-22T10:05:00Z', task_attempt: attempt });
+    // A later attempt's dispatch is not held to the earlier attempt's report; the same attempt's is, and an older
+    // attempt's report never replaces a newer one's.
+    assert.equal(keepStickyExecutorChip(progress(1, 'first'), dispatch(2)), false);
+    assert.equal(keepStickyExecutorChip(progress(1, 'first'), dispatch(1)), true);
+    assert.equal(keepStickyExecutorChip(progress(1, 'first'), dispatch(undefined)), true);
+    assert.equal(keepStickyExecutorChip(progress(2, 'second'), progress(1, 'first')), true);
+    assert.equal(keepStickyExecutorChip(progress(1, 'first'), progress(2, 'second')), false);
+    // On the card: a report it cannot place at its latest attempt is retired to history and the line names the request.
+    const card = { executorChip: progress(1, 'first'), requestedExecutor: selected, childRetried: true, childAttempt: 2 };
+    const placed = cardExecutorChip(card, null);
+    assert.equal(placed.observation, undefined);
+    assert.equal(placed.label, 'Codex');
+    assert.equal(executorModelText(placed, selected), 'requested gpt-5.5');
+    assert.equal(placed.lastUpdateAttempt, 1);
+    assert.match(placed.lastUpdate, /model first \(observed\), run run-1/);
+    // An interrupted attempt's report retires with it; the latest attempt's own report, and any report before a boundary, stay.
+    assert.equal(cardExecutorChip({ ...card, childAttempt: 1, interruptedAttempt: 1 }, null).observation, undefined);
+    const own = progress(2, 'second');
+    assert.equal(cardExecutorChip({ ...card, executorChip: own }, null), own);
+    const fresh = progress(1, 'first');
+    assert.equal(cardExecutorChip({ executorChip: fresh, requestedExecutor: selected, childAttempt: 1 }, null), fresh);
+    // Out of order: the first numbered census (attempt 2, no boundary seen yet) retires attempt 1's report; a newer numbered
+    // report outruns a lagging census and survives it catching up; the latest attempt's own report stays (control).
+    assert.equal(cardExecutorChip({ executorChip: fresh, requestedExecutor: selected, childAttempt: 2 }, null).observation, undefined);
+    const ahead = progress(3, 'third');
+    assert.equal(cardExecutorChip({ ...card, executorChip: ahead }, null), ahead);
+    assert.equal(cardExecutorChip({ ...card, executorChip: ahead, childAttempt: 3 }, null), ahead);
+    assert.equal(cardExecutorChip({ executorChip: own, requestedExecutor: selected, childAttempt: 2 }, null), own);
+    // A terminal of the new attempt after the retirement keeps none of the old run.
+    const stop = executorChip({ ...selection, executor_route: 'codex=gpt-5.5', status: 'cancelled', task_attempt: 2,
+        ts: '2026-11-22T10:06:00Z', execution_evidence: { delegated_runs_started: 1, delegated_runs_settled: 0 } });
+    assert.equal(cardExecutorChip({ ...card, executorChip: placed }, stop).title, 'Delegated to your Codex account — 1 run(s) started, none settled');
+});
+
+test('a line\'s requested qualifier is read in the reader\'s language; a refusal names its own request on its parent\'s row', () => {
+    assert.equal(modelWords({ model: 'gpt-5.5', requested: true }), 'requested gpt-5.5');
+    assert.equal(modelWords('gpt-5.5-2026-11'), 'gpt-5.5-2026-11');
+    assert.equal(modelWords(''), '');
+    // Only the typed request is translated: a model whose own identifier begins with `requested ` stays verbatim.
+    setMissTransport(() => Promise.resolve(null));
+    const prior = currentPayload();
+    try {
+        for (const [language, template] of [['de', 'angefordert {model}'], ['ru', 'запрошена {model}']]) {
+            applyPayload({ language, english: false, entries: { 'requested {model}': { text: template } } });
+            assert.equal(modelWords({ model: 'gpt-5.5', requested: true }), template.replace('{model}', 'gpt-5.5'), language);
+            assert.equal(modelWords({ model: 'requested gpt-5.5' }), 'requested gpt-5.5', language);
+            assert.equal(modelWords('requested gpt-5.5'), 'requested gpt-5.5', language);
+        }
+    } finally { applyPayload(prior || { language: '', english: true, entries: {} }); }
+    const refusal = { chat_id: 1, task_id: 'parent', ts: 'T', role: 'system', system_type: 'subagent_admission_notice', is_progress: true,
+        subagent_task_id: 'kid', parent_task_id: 'parent', delegation_role: 'subagent', subagent_event: 'rejected', status: 'failed',
+        content: '⚠️ Refused.', requested_executor_route: { kind: 'api_model', target_id: 'openai@team::gpt-6' },
+        parent_cognitive_route: { model: 'x' }, executor_route: 'codex' };
+    const row = admissionRefusalRow(refusal);
+    assert.equal(row.content, '⚠️ Refused. · requested openai::gpt-6');
+    assert.equal(row.task_id, 'parent');
+    for (const key of ['subagent_task_id', 'parent_task_id', 'delegation_role', 'subagent_event', 'status', 'requested_executor_route',
+        'parent_cognitive_route', 'executor_route']) assert.equal(row[key], undefined, key);
+    assert.equal(admissionRefusalRow({ ...refusal, requested_executor_route: undefined, executor_route: undefined }).content, '⚠️ Refused.');
+});
+
+test('two reported answers under the request\'s short name keep their own ids; the used route stays beside them', () => {
+    const solve = (reported) => modelExecutionView({ source: 'usable_solve_response', requested_model: 'vendor-a/sol', used_model: 'vendor-b/sol',
+        reported_model: reported, requested_use_local: false, used_local: false }, true);
+    const [c, d] = [solve('vendor-c/sol'), solve('vendor-d/sol')];
+    assert.equal(c.value, 'vendor-c/sol (initial request: openrouter::vendor-a/sol) · route: vendor-b/sol');
+    assert.equal(d.value, 'vendor-d/sol (initial request: openrouter::vendor-a/sol) · route: vendor-b/sol');
+    assert.equal(c.model, 'sol');
+    assert.equal(d.model, 'sol', 'the compact line keeps the short name');
+    // A helper's used route names no local connection; the provider's own report is shown as reported.
+    assert.equal(modelExecutionView({ source: 'usable_solve_response', requested_model: 'vendor-a/sol', used_model: 'openai@team::sol',
+        reported_model: 'vendor-c/sol' }, true).value, 'vendor-c/sol (initial request: openrouter::vendor-a/sol) · route: openai::sol');
+    // Without a report the used route answers, said once.
+    assert.equal(solve('').value, 'vendor-b/sol (initial request: openrouter::vendor-a/sol)');
+    // The request was the route used, but the provider reports another model under the same short name: the report
+    // answers by its own id, the used route beside it; an ordinary report on the route that served it stays short.
+    const served = (reported, used = 'vendor-a/sol') => modelExecutionView({ source: 'usable_solve_response', requested_model: 'vendor-a/sol',
+        used_model: used, reported_model: reported, requested_use_local: false, used_local: false }, true).value;
+    assert.equal(served('vendor-b/sol'), 'vendor-b/sol · route: vendor-a/sol');
+    assert.equal(served('vendor-c/sol'), 'vendor-c/sol · route: vendor-a/sol');
+    assert.equal(served('sol-2026-11'), 'sol-2026-11 · route: vendor-a/sol', 'another short name is no collision');
+    assert.equal(modelExecutionView({ source: 'usable_solve_response', requested_model: 'openai@team::sol', used_model: 'openai@team::sol',
+        reported_model: 'sol', provider: 'openai' }, true).value, 'sol · openai · route: openai::sol', 'its own id on the route that served it');
+});
+
+test('a frame that repeats no selection takes its card\'s; a recorded start or report proves the work was sent', () => {
+    const known = requestedExecutor({ requested_executor_route: { kind: 'agent_session', target_id: 'codex=gpt-5.5' } });
+    const card = (executorChip) => ({ executorChip, requestedExecutor: known });
+    // A sparse terminal record (a log or stored detail naming neither route nor selection) reads with the card's selection.
+    const sparse = executorChip({ status: 'cancelled', subagent_event: 'cancelled' }, known);
+    assert.equal(sparse.title, 'Selected Codex, model gpt-5.5 (requested); no dispatch was recorded before it ended');
+    assert.equal(executorChip({ status: 'cancelled' }), null, 'without a selection it names no executor');
+    // A running notice is a recorded start: the card that saw it is never told "no dispatch"; a queued one is.
+    const started = executorChip({ subagent_event: 'running' }, known);
+    assert.equal(started.title, 'Selected Codex, model gpt-5.5 (requested) — run evidence arrives with the terminal receipt');
+    assert.equal(cardExecutorChip(card(started), sparse).title, 'The Codex route was assigned, model gpt-5.5 (requested), but this '
+        + 'terminal record has no delegated-run evidence; the run outcome is unknown');
+    assert.equal(cardExecutorChip(card(executorChip({ subagent_event: 'scheduled' }, known)), sparse), sparse);
+    // A terminal record carrying its run's last report proves the start and keeps that report as history, once.
+    const last = executorChip({ subagent_task_id: 'c', status: 'cancelled', executor_observation: { task_id: 'c', task_attempt: '0',
+        run_id: 'r', attempt_id: 'a01', harness_id: 'codex', phase: 'p', revision: 4, model: 'gpt-5.5-2026-11', model_source: 'observed' } }, known);
+    assert.equal(last.label, 'Codex · run outcome unknown');
+    assert.match(last.lastUpdate, /^Latest observed activity: Codex, model gpt-5\.5-2026-11 \(observed\), run r, attempt a01, revision 4\./);
+    assert.ok(last.title.endsWith(`unknown. ${last.lastUpdate}`), last.title);
+    assert.equal(cardExecutorChip(card(executorChip({ subagent_event: 'running' }, known)), last).title, last.title);
+    assert.equal(executorModelText(last, known), 'requested gpt-5.5');
+});
+
+test('a settled card never answers with a progress report\'s observed model; known paths carry their recorded lane', () => {
+    const known = requestedExecutor({ requested_executor_route: { kind: 'agent_session', target_id: 'codex=gpt-5.5' } });
+    const observed = { harness: 'codex', observation: { model: 'gpt-5.5-2026-11', model_source: 'observed' } };
+    assert.equal(executorModelText(observed, known), 'gpt-5.5-2026-11', 'in flight, the run\'s own report');
+    assert.equal(executorModelText(observed, known, true), 'requested gpt-5.5', 'settled: the scheduled request');
+    assert.equal(executorModelText(observed, null, true), '', 'settled without a selection: no model rather than progress');
+    const asked = { harness: 'cursor', observation: { model: 'cursor-model', model_source: 'requested' } };
+    assert.equal(executorModelText(asked, null, true), 'requested cursor-model', 'an old record\'s explicit request stays a request');
+    // A harness reports no lane and an API selection spells its own: a name saying `local` adds no mark on these paths.
+    assert.equal(executorModelText({ harness: 'codex', observation: { model: 'local-coder', model_source: 'observed' } }), 'local-coder');
+    const remote = requestedExecutor({ requested_executor_route: { kind: 'api_model', target_id: 'local-model' } });
+    assert.equal(executorModelText(null, remote), 'requested local-model');
+    assert.equal(compactModel('local-model', selectionLane(remote, 'local-model')), 'local-model');
+    const local = requestedExecutor({ requested_executor_route: { kind: 'api_model', target_id: 'qwen.gguf (local)' } });
+    assert.equal(compactModel('qwen.gguf', selectionLane(local, 'qwen.gguf')), 'qwen.gguf (local)');
+    assert.equal(selectionLane(local, 'other-model'), false, 'another route (a fallback) records no lane: its words make none');
+    assert.equal(compactModel('local-model'), 'local-model (local)', 'the standalone legacy reading is unchanged');
+});
+
+test('a solve\'s route is its provider and model however it is spelled; a reported short label proves no other route', () => {
+    const fact = (requested_model, used_model, extra = {}) => ({ source: 'usable_solve_response', requested_model, used_model,
+        requested_use_local: false, used_local: false, provider: 'openrouter', llm_call_id: 'c', ...extra });
+    const details = (target, f) => requestedFact(requestedExecutor({ requested_executor_route: { kind: 'api_model', target_id: target } }),
+        null, modelExecutionView(f).model, f);
+    // A bare id is OpenRouter's: `openrouter::sol` and `sol` are one route; `openai::sol` is another provider's.
+    assert.equal(details('openrouter::sol', fact('openrouter::sol', 'sol')), '');
+    assert.equal(details('sol', fact('sol', 'openrouter::sol')), '');
+    assert.equal(details('openai::sol', fact('openai::sol', 'sol')), 'openai::sol');
+    // The provider's own short label names what answered; alone it claims no other route.
+    assert.equal(details('openrouter::sol', fact('openrouter::sol', 'sol', { reported_model: 'sol-2026-11' })), 'sol');
+    // Solve details: equivalent spellings on one lane are one request; another provider's is an initial request, said in
+    // full where the short names agree; a lane switch stays one.
+    assert.equal(modelExecutionView(fact('openrouter::sol', 'sol')).value, 'sol · openrouter');
+    assert.equal(modelExecutionView(fact('openai::sol', 'sol')).value, 'sol (initial request: openai::sol) · openrouter');
+    assert.equal(modelExecutionView(fact('sol', 'sol', { requested_use_local: true })).value, 'sol (initial request: sol (local)) · openrouter');
+    assert.equal(modelExecutionView(fact('sol', 'sol', { requested_use_local: undefined })).value, 'sol · openrouter', 'an unstated lane is no switch');
+    // A provider's own id is read in the provider that served it: an endpoint naming the selected model adds no request.
+    const qwen = 'openai-compatible::Qwen/Qwen3.5-9B';
+    const served = (used_model, reported_model) => fact(qwen, used_model, { provider: 'openai-compatible', reported_model });
+    assert.equal(details(qwen, served(qwen, 'Qwen/Qwen3.5-9B')), '');
+    // A genuine provider, model or lane change still keeps the request.
+    assert.equal(details(qwen, served('openrouter::Qwen/Qwen3.5-9B', 'Qwen/Qwen3.5-9B')), qwen);
+    assert.equal(details(qwen, served(qwen, 'Qwen/Qwen3.6-9B')), 'Qwen3.5-9B');
+    assert.equal(details(qwen, { ...served(qwen, 'Qwen/Qwen3.5-9B'), used_local: true }), 'Qwen3.5-9B', 'remote asked, local ran');
+    // The chosen route keeps the dispatch grammar even when its bytes equal the provider's reported id: a bare id is
+    // OpenRouter's, so a solve another provider served keeps the request, said in full where the short names agree.
+    assert.equal(requestedFact({ kind: 'api_model', model: 'Qwen/Qwen3.5-9B', harness: '' }, null, 'Qwen3.5-9B', { source: 'usable_solve_response',
+        requested_model: 'Qwen/Qwen3.5-9B', used_model: qwen, reported_model: 'Qwen/Qwen3.5-9B', used_local: false }), 'Qwen/Qwen3.5-9B');
+    assert.equal(details('Qwen/Qwen3.5-9B', served(qwen, 'Qwen/Qwen3.5-9B')), 'Qwen/Qwen3.5-9B');
+});
+
+test('a helper\'s solve names no local API connection; a root\'s keeps its route', () => {
+    const solve = (used_model) => ({ source: 'usable_solve_response', requested_model: used_model, requested_use_local: false, used_model,
+        reported_model: 'example-model-2026', used_local: false, provider: 'openai', llm_call_id: 'c' });
+    assert.equal(modelExecutionView(solve('openai@team::example-model'), true).value, 'example-model-2026 · openai · route: openai::example-model');
+    assert.equal(modelExecutionView(solve('openai@team::example-model')).value, 'example-model-2026 · openai · route: openai@team::example-model');
+    // A name the resolver refuses is never shown, and no model it did not select is invented.
+    assert.equal(modelExecutionView(solve('openai@Bad_Name::example-model'), true).value, 'example-model-2026 · openai');
+});
+
+test('a stored child detail uses the host selection, never a card reconstruction from raw snapshots', () => {
+    const route = { kind: 'agent_session', target_id: 'codex=gpt-5.5' };
+    const detail = (extra) => terminalChildFrame('kid', { parentId: 'root', role: 'reader' }, { status: 'cancelled', ...extra });
+    const snapshot = { route: { kind: 'api_model', target_id: 'openai@work::stale', credential_profile_id: 'work-account' } };
+    const stored = { configured_subagent: snapshot, metadata: { configured_subagent: snapshot } };
+    const projected = detail({ ...stored, requested_executor_route: { ...route, credential_profile_id: 'work-account' } });
+    assert.deepEqual(projected.requested_executor_route, route);
+    assert.equal(projected.executor_route, undefined);
+    assert.equal(projected.model, undefined);
+    assert.equal(detail(stored).requested_executor_route, undefined, 'a missing host projection must remain missing');
+    for (const bad of [{ kind: 'agent_session' }, { kind: 'shell', target_id: 'x' }, { kind: 'api_model', target_id: '  ' }, 'codex=gpt-5.5']) {
+        assert.equal(detail({ ...stored, requested_executor_route: bad }).requested_executor_route, undefined, JSON.stringify(bad));
+    }
+});
+
+test('a stored detail names a named API connection\'s model only: its carrier holds no local name and a refused name selects nothing', () => {
+    const detail = (extra) => terminalChildFrame('kid', { parentId: 'root', role: 'reader' }, { status: 'completed', ...extra });
+    // The table tests/test_subagent_card_facts.py reads too: one display semantics in Python and here.
+    const cases = JSON.parse(readFileSync(new URL('../../tests/fixtures/api_route_display.json', import.meta.url), 'utf8'));
+    for (const { raw, shown } of cases) {
+        // Check even a legacy field before presentation: the short line hides much of a route.
+        const frame = detail({ requested_executor_route: { kind: 'api_model', target_id: raw } });
+        assert.deepEqual(frame.requested_executor_route, shown === null ? undefined : { kind: 'api_model', target_id: shown }, raw);
+    }
+    // Every reader of the route grammar agrees on it (apiRouteParts): the card's display, the key's label and the Models
+    // editor's source, which keeps a refused name's spelling (it never rewrites a stored route) and says it is not valid.
+    for (const { raw, shown, connection, valid } of cases) {
+        const head = raw.replace(/ \(local\)$/, '');
+        assert.equal(displayApiModelTarget(raw), shown ?? '', raw);
+        assert.equal(routeConnectionId(raw), connection, raw);
+        assert.equal(apiRouteParts(head).valid, valid, raw);
+        const parsed = parseModelSource(head);
+        assert.equal(parsed.valid !== false, valid, raw);
+        // The editor writes the route back as it reads it: a refused head keeps its exact spelling, a built-in key's long
+        // spelling (`@default`) its canonical short one, and a head that names no model writes no route.
+        const written = !valid ? head : apiRouteParts(head).model ? head.replace('@default::', '::') : '';
+        assert.equal(composeModelSource(parsed.source, parsed.model), written, raw);
+        if (connection) assert.deepEqual(parsed, { source: connection, model: apiRouteParts(head).model }, raw);
+    }
+    assert.deepEqual(parseModelSource('openai@Bad_Name::m'), { source: 'openai@Bad_Name', model: 'm', valid: false });
+    for (const refused of ['openai@::m', 'claudexor@x::codex=m', 'openai@default@x::m']) {
+        const parsed = parseModelSource(refused);
+        assert.equal(parsed.valid, false, refused);
+        assert.equal(composeModelSource(parsed.source, parsed.model), refused, refused);
+    }
+});
+
+test('a frame records only the coordinator facts it states', () => {
+    // A sparse observation or receipt states none, so a card keeps what earlier frames recorded and invents no basis.
+    assert.equal(recordedCoordinator({ model: 'm', executor_route: 'codex' }), null);
+    assert.equal(recordedCoordinator({ executor_route: 'codex', execution_evidence: { delegated_runs_started: 1 } }), null);
+    // A scheduling notice records the parent's snapshot: its route and provenance, and no billing it did not give.
+    assert.deepEqual(recordedCoordinator({ parent_cognitive_route: { model: 'openai/gpt-6', chosen_by: 'inherited' } }),
+        { route: 'gpt-6', provenance: 'inherited' });
+    // A running or observation frame records the route and billing basis subagent_message_meta stamped.
+    assert.deepEqual(recordedCoordinator({ model: 'openai/gpt-6', coordinator_route: 'recorded (local)', coordinator_billing: 'measured',
+        use_local_model: true }), { route: 'recorded (local)', billing: 'measured' });
 });
 
 test('historical frames without the failed counter reconstruct it from succeeded', () => {

@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Iterable, Mapping, Optional
 
-CHROMIUM_VERSION = "158.0.8127.36"
+CHROMIUM_VERSION = "158.0.8127.88"
 SANDBOX_ENV = "OUROBOROS_CHROMIUM_SANDBOX"
 UNAVAILABLE = "BROWSER_CHROMIUM_UNAVAILABLE"
 PREPARING = "BROWSER_PREPARING"  # a browser engine is still being installed beside the calls
@@ -102,18 +102,18 @@ class ChromiumPin:
 
 
 PINS: Mapping[str, ChromiumPin] = MappingProxyType({
-    "linux-arm64": ChromiumPin("linux-arm64", 129938239,
-                               "176ee5c55486c22de43128871189061365ea28e881fc96016fd18e7cb59437c8"),
-    "linux64": ChromiumPin("linux64", 132087165,
-                           "2d3a23017323c54fd457a678e4351f895c4076d8050e39d5aa6247f93448b73a"),
-    "mac-arm64": ChromiumPin("mac-arm64", 105057133,
-                             "c24d40a3786322ff3a5e3ac6eed162226cbaf07ebe468715407827226b0f8897", (13, 0)),
-    "mac-x64": ChromiumPin("mac-x64", 112306247,
-                           "e0c5d07d8f5bcc5bdd5ef370e7daf3770856b585fcc9eecf441c7e3bb2e3d1cf", (13, 0)),
-    "win32": ChromiumPin("win32", 122509290,
-                         "c1fc009622363bccbc1e5f60be654b90fa7b70ad83e642875da1fcb147ae430d"),
-    "win64": ChromiumPin("win64", 127876264,
-                         "9655950dfeddf565561cd64cfe8ee716ccd6482fa3798503b632219efc65a71e"),
+    "linux-arm64": ChromiumPin("linux-arm64", 129942265,
+                               "9f89b7ef6574e4bbf6ddda9f17f1fab5626e93d6f7d852653232d0d3554df975"),
+    "linux64": ChromiumPin("linux64", 132091593,
+                           "63401333cc587645bfaeea7f0c90958b327d249251e23954a47f30112ca23d5b"),
+    "mac-arm64": ChromiumPin("mac-arm64", 105060087,
+                             "69320f6869c4defbbdac8b8fa83aef65dc63975e83bbd06899b75dbea5c464b3", (13, 0)),
+    "mac-x64": ChromiumPin("mac-x64", 112314759,
+                           "dc1ac31965cb2ec7794aed8c66127aceea304ae15353cd56fc4b8bde44091548", (13, 0)),
+    "win32": ChromiumPin("win32", 122509314,
+                         "936ad5e7f530bdd66b7261d0a2ceed76b057d429cf31b770a95fd903a7969856"),
+    "win64": ChromiumPin("win64", 127879225,
+                         "e935ea2d4633495b5e9ab7bc66bcd982806329c0ee9ecbafc1ac9596a3b34cdb"),
 })
 
 

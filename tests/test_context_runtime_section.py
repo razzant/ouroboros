@@ -1004,14 +1004,13 @@ def test_runtime_names_the_kept_services_custody_reads_now(tmp_path, monkeypatch
 
 # --- setup: how this install began and whether my human and I have met (context_first_hour.setup_fact) ---
 
-def _born(root, origin, **state):
-    """A data root whose first state ``origin`` minted (``first_boot`` or an owner Reset's pending identity)."""
+def _born(root, **state):
+    """A data root whose first state its first boot minted. An owner Reset's new state is read only after a Reset that
+    really ran: tests/test_settings_policy_browser.py
+    ``test_reset_from_about_shows_the_successors_completed_receipt_in_the_same_tab``."""
     from supervisor import state_initialization as witness
 
-    if origin == "owner_reset":
-        identity = witness.mark_pending(root, origin="owner_reset")
-    else:
-        identity = witness.initialization_decision(root)["initialization_id"]
+    identity = witness.initialization_decision(root)["initialization_id"]
     (root / "state" / "state.json").write_text(json.dumps({"initialization_id": identity, **state}), encoding="utf-8")
     assert witness.complete(root, identity, adopted=False)
 
@@ -1024,18 +1023,21 @@ def _said(root, *rows, chat_id=1, kind=None):
                                              "chat_id": chat_id, "text": direction, **({"type": kind} if kind else {})})
 
 
-@pytest.mark.parametrize("shape", ["first_boot", "owner_reset", "talked", "unread_binding"])
+@pytest.mark.parametrize("shape", ["first_boot", "talked", "unread_binding"])
 def test_setup_tells_a_fresh_install_from_a_reset_a_bound_one_that_talked_and_an_unreadable_binding(tmp_path, shape):
-    """Facts only, every line from its own source: a fresh first boot with an empty binding and no messages, a Reset's
-    new state (what a Reset deletes, never history), a bound install where my message followed my human's first
-    one, and a binding that cannot be read, kept apart from a known empty slot."""
+    """Facts only, every line from its own source: a fresh first boot with an empty binding and no messages, a bound
+    install where my message followed my human's first one, and a binding that cannot be read, kept apart from a known
+    empty slot; none of them says what a Reset deletes. A Reset's new state (what a Reset deletes, never history), with
+    nothing bound and no word of my human after the earlier profile's binding and words, is read after a Reset that
+    really ran: tests/test_settings_policy_browser.py
+    ``test_reset_from_about_shows_the_successors_completed_receipt_in_the_same_tab``."""
     from ouroboros.context_first_hour import setup_fact
 
     (tmp_path / "state").mkdir()
     (tmp_path / "settings.json").write_text(json.dumps({"OUROBOROS_ONBOARDING_COMPLETED_AT": "2026-11-21T09:58:12.000000+00:00"}),
                                             encoding="utf-8")
     bound = {"talked": 1, "unread_binding": 1}.get(shape)
-    _born(tmp_path, "owner_reset" if shape == "owner_reset" else "first_boot", owner_id=bound, owner_chat_id=bound,
+    _born(tmp_path, owner_id=bound, owner_chat_id=bound,
           bg_consciousness_enabled=shape != "talked",
           **({"_recovery": {"unconfirmed": ["owner_chat_id"]}} if shape == "unread_binding" else {}))
     if shape == "talked":
@@ -1044,9 +1046,8 @@ def test_setup_tells_a_fresh_install_from_a_reset_a_bound_one_that_talked_and_an
         _said(tmp_path, ("10:00", "in"))
     fact = setup_fact(tmp_path)
     assert fact["finished_at"] == "2026-11-21 09:58 UTC"
-    assert fact["state"].startswith("owner_reset: a new state born" if shape == "owner_reset"
-                                    else "first_boot: the first state of this data root, born")
-    assert ("a Reset deletes memory, chats" in fact["state"]) is (shape == "owner_reset")
+    assert fact["state"].startswith("first_boot: the first state of this data root, born")
+    assert "a Reset deletes memory, chats" not in fact["state"]
     assert fact["owner_chat"] == {"talked": "Main (chat 1)",
                                   "unread_binding": "unknown: the owner chat binding is not confirmed",
                                   }.get(shape, "none bound yet: no owner message has bound one")
@@ -1065,7 +1066,7 @@ def test_setup_names_what_setup_left_running_and_a_first_message_of_mine_before_
 
     (tmp_path / "state").mkdir()
     (tmp_path / "logs").mkdir()
-    _born(tmp_path, "first_boot", owner_id=None, owner_chat_id=None, bg_consciousness_enabled=True)
+    _born(tmp_path, owner_id=None, owner_chat_id=None, bg_consciousness_enabled=True)
     _said(tmp_path, ("10:05", "out"))
     (tmp_path / "state" / "skill_starter.json").write_text(json.dumps({"state": "pending", "requested": ["a", "b", "c"],
         "results": {"a": {"status": "installed"}, "b": {"status": "failed"}, "c": {"status": "pending"}}}), encoding="utf-8")
@@ -1204,13 +1205,14 @@ def test_a_no_and_the_history_s_import_are_read_in_one_snapshot(tmp_path, monkey
     assert opened == [False]
 
 
-@pytest.mark.parametrize("shape", ["pressed", "written", "no_press", "unknown_exchange", "no_witness"])
-def test_setup_carries_the_owners_first_meeting_words_only_after_a_press_while_i_know_i_have_not_written(
+@pytest.mark.parametrize("shape", ["pressed", "requested", "written", "no_press", "unknown_exchange", "no_witness"])
+def test_setup_carries_the_first_meeting_guidance_only_after_a_press_while_i_know_i_have_not_written(
         tmp_path, shape):
-    """``prompts/FIRST_MEETING.md`` waits for the owner's yes on its text: absent, nothing is carried; present, its
-    words ride the setup facts only while a press of Start is on record (the state's ``first_meeting`` record) and I
-    know I have not written to my human. No press (Colab, headless, a legacy-adopted root) or an exchange that cannot be
-    read carries none, and once I have written they leave. The same press in a state whose initialization record is
+    """``prompts/FIRST_MEETING.md`` rides by file existence: absent, nothing is carried; present, its guidance
+    rides the setup facts only while a press of Start is on record (the state's ``first_meeting`` record) and I
+    know I have not written to my human (whether or not they have written first: a request still carries it). No press
+    (Colab, headless, a legacy-adopted root) or an exchange that cannot be read carries none, and once I have written
+    they leave. The same press in a state whose initialization record is
     missing is unknown: none either (rv2 C5)."""
     from ouroboros import dialogue_store
     from ouroboros.context_first_hour import setup_fact
@@ -1218,8 +1220,10 @@ def test_setup_carries_the_owners_first_meeting_words_only_after_a_press_while_i
 
     data, repo = tmp_path / "data", tmp_path / "repo"
     (data / "state").mkdir(parents=True)
-    _born(data, "first_boot", **({} if shape == "no_press" else
-                                 {"first_meeting": {"state": "admitted", "pressed_at": "2026-11-21T10:00:00Z"}}))
+    _born(data, **({} if shape == "no_press" else
+                   {"first_meeting": {"state": "admitted", "pressed_at": "2026-11-21T10:00:00Z"}}))
+    if shape == "requested":
+        _said(data, ("10:00", "in"))  # my human asked first; I have not answered yet
     if shape == "written":
         _said(data, ("10:00", "out"))
     if shape == "no_witness":
@@ -1227,12 +1231,12 @@ def test_setup_carries_the_owners_first_meeting_words_only_after_a_press_while_i
         assert setup_fact(data)["state"] == "unknown: no initialization record"
     assert "first_meeting" not in setup_fact(data, repo)  # no file: nothing
     (repo / "prompts").mkdir(parents=True)
-    (repo / "prompts" / "FIRST_MEETING.md").write_text("Owner-approved words.\n", encoding="utf-8")
+    (repo / "prompts" / "FIRST_MEETING.md").write_text("First-meeting guidance.\n", encoding="utf-8")
     with pytest.MonkeyPatch.context() as patch:
         if shape == "unknown_exchange":
             patch.setattr(dialogue_store, "owner_exchange", lambda root: (_ for _ in ()).throw(StoreLost("torn page")))
         fact = setup_fact(data, repo)
-    assert fact.get("first_meeting") == ("Owner-approved words." if shape == "pressed" else None)
+    assert fact.get("first_meeting") == ("First-meeting guidance." if shape in ("pressed", "requested") else None)
     assert "first_meeting" not in setup_fact(data)  # a caller that names no repository carries none
 
 
@@ -1243,3 +1247,70 @@ def test_runtime_carries_setup_for_shared_inputs_and_not_for_declared_ones(tmp_p
     declared = json.loads(build_runtime_section(env, {"id": "task-2", "type": "task", "input_sources": "declared"})
                           .split("\n\n", 1)[1])
     assert "setup" not in declared
+
+
+def test_runtime_budget_block_shows_the_addressed_works_effective_cap(tmp_path, monkeypatch):
+    """#4267 area C: a newly started helper must be told the cap its tree is admitted
+    against — the addressed work's money snapshot, which an owner amendment may have
+    raised past the per-task default — not the default itself."""
+    from types import SimpleNamespace
+
+    from ouroboros import usage_admission
+    from ouroboros.context_runtime_facts import _runtime_budget_info
+
+    monkeypatch.setenv("OUROBOROS_PER_TASK_COST_USD", "10")
+    seen = {}
+
+    def snapshot(root, task, root_id, *, root_limit=None):
+        seen.update(root=root, task=task, root_id=root_id, root_limit=root_limit)
+        # A GROUP-basis snapshot: sibling roots' spend rides in the allowance, and the
+        # root has its own (here looser) limit — the runtime block must co-observe it.
+        return {"root_limit_usd": 15.0, "settled_usd": 9.0, "remaining_known_usd": 6.0,
+                "binding_axis": "group",
+                "root_axis": {"limit_usd": 20.0, "settled_usd": 2.0, "accounted_usd": 2.0,
+                              "source": "", "revision": None},
+                "group_axis": {"limit_usd": 15.0, "settled_usd": 9.0, "accounted_usd": 9.0,
+                               "source": "initial_task_admission", "revision": None}}
+
+    monkeypatch.setattr(usage_admission, "task_money_snapshot", snapshot)
+    env = SimpleNamespace(drive_root=tmp_path)
+    task = {"id": "t-helper", "root_task_id": "t-root", "budget_drive_root": str(tmp_path)}
+    info = _runtime_budget_info(env, task)
+    assert info["per_task_tree_cap_usd"] == 15.0  # group-basis allowance, sibling spend included
+    assert info["per_task_tree_cap_basis"] == "task_money_snapshot"
+    assert info["per_task_tree_group_spent_usd"] == 9.0  # the whole billing group's known spend
+    assert info["per_task_tree_room_usd"] == 6.0  # what THIS tree can still add on that basis
+    assert info["per_task_root_limit_usd"] == 20.0  # the root's own cap, labelled separately
+    assert "Effective hard cap for THIS task's WHOLE tree" in info["per_task_tree_cap_rule"]
+    assert "whole billing GROUP's KNOWN spend" in info["per_task_tree_cap_rule"]
+    assert "set_task_cost_cap" in info["per_task_tree_cap_rule"]
+    assert seen["root_id"] == "t-root" and seen["root_limit"] == 10.0  # the default is the fallback input
+
+
+def test_runtime_budget_block_labels_the_default_separately_when_the_work_cap_is_unknown(
+        tmp_path, monkeypatch):
+    """Unknown is never the default shown as measured (P1): when the work's own cap
+    cannot be read, the setting is named as the DEFAULT for new works and no number is
+    shown for this task; the two endings at the real cap keep their exact contract."""
+    from types import SimpleNamespace
+
+    from ouroboros import usage_admission
+    from ouroboros.context_runtime_facts import _runtime_budget_info
+
+    monkeypatch.setenv("OUROBOROS_PER_TASK_COST_USD", "10")
+    monkeypatch.setattr(usage_admission, "task_money_snapshot",
+                        lambda *a, **k: {"root_limit_usd": None})
+    env = SimpleNamespace(drive_root=tmp_path)
+    info = _runtime_budget_info(env, {"id": "t2", "root_task_id": "t2"})
+    assert "per_task_tree_cap_usd" not in info
+    assert info["per_task_tree_cap_default_usd"] == 10.0
+    rule = info["per_task_tree_cap_rule"]
+    assert "DEFAULT cap for new works" in rule and "could not be read" in rule
+    assert "pauses with its work saved" in rule and "budget_exhausted" in rule
+    assert "no paid recap" in rule and "the task pauses" not in rule
+    # A task with no id at all never reaches for the store.
+    calls = []
+    monkeypatch.setattr(usage_admission, "task_money_snapshot",
+                        lambda *a, **k: calls.append(1) or {"root_limit_usd": None})
+    info2 = _runtime_budget_info(env, {})
+    assert calls == [] and info2["per_task_tree_cap_default_usd"] == 10.0

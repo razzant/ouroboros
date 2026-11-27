@@ -1,21 +1,24 @@
 // Pure chat-activity helpers shared by chat.js and dependency-free node tests:
 // live-card presentation projections (moved verbatim from chat.js) plus the
 // census snapshot hydration. The room's status word is the server's (work_status.js).
-import { META_PART_SEPARATOR, executorIdentityMarkup, executorModelText, formatCoordinatorProvenance, harnessPresentation } from './harness_presentation.js';
+import { META_PART_SEPARATOR, compactModel, coordinatorLine, executorIdentityMarkup, executorTitle, harnessPresentation, modelWords, selectionLane } from './harness_presentation.js';
+import { cardCoordinator, executorModelFact, modelText, requestedFact } from './executor_card_facts.js';
 import { effortChipMarkup } from './effort_chip.js';
 import { resultFilesItemHtml } from './result_files.js';
 import { modelHandoverFact } from './model_handover.js';
 import { taskSourceDownloadUrl, taskReviewSourceUrl, readState } from './api_client.js';
-import { childLineCause, compactModel, formatLogDuration, modelExecutionView, serviceOutputLinksHtml } from './log_events.js';
+import { childLineCause, formatLogDuration, modelExecutionView, serviceOutputLinksHtml } from './log_events.js';
 import { connectionLabel, routeConnectionId } from './connection_labels.js';
 import { fitText, fullText } from './text_fit.js';
 import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from './delegated_activity.js';
 import { REUSABLE_TASK_IDS } from './task_control_menu.js';
-import { ownLiveDetail, paintLiveDetail } from './task_phase_chip.js';
+import { ownLiveDetail, paintLiveDetail, resetChildStart } from './task_phase_chip.js';
 import { fmt, tr } from './i18n.js';
 import { ownerMessageBubble } from './chat_history_replay.js';
 import { placeIngressNote } from './chat_attachments.js';
 import { hostRowDisplayText, hostSentenceText, noticeBody } from './host_notice_text.js';
+import { rawTimestampEpoch } from './chat_timeline_order.js';
+export { rawTimestampEpoch, stampNodeTimestamp } from './chat_timeline_order.js';
 export { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
 import {
     projectMarkdownLines, MARKDOWN_FENCED_CODE, accountedUpperBound,
@@ -62,6 +65,7 @@ export function senderLabel(role, isProgress = false, systemType = '', opts = {}
         return 'System';
     }
     if (isProgress) return 'Thought';
+    if (systemType === 'peer_letter' && opts.senderLabel) return opts.senderLabel;
     // A self-initiated turn (a consciousness wake-up) signs its final bubble
     // through the same sender line the user bubble uses for its source.
     if (opts.initiator === 'consciousness') return 'Ouroboros · Consciousness';
@@ -125,6 +129,9 @@ export function buildTimelineItemHtml(item, record) {
         ? item.fetchedCause : { ...item.fetchedCause, ...item.childCause });
     const fetched = facts ? [item.fetchedFull, childLineCause(facts).detail].filter(Boolean).join('\n\n') : item.fetchedFull;
     const displayBody = expanded ? (item.fullReadError || fetched || item.fullBody || item.body) : item.body;
+    const replyWords = item.replyAddress && item.outputPreview
+        && displayBody !== item.outputPreview && String(item.dedupeKey || '').startsWith('subagent-result:')
+        ? item.outputPreview.slice(0, 200) : '';
     const loadingFull = expanded && Boolean(item.truncated && item.fullRef && !item.fetchedFull && !item.fullReadError);
     // A late-review row offers its exact applied review record (`cardRowSummary`).
     const evidenceHtml = item.serviceStop ? serviceOutputLinksHtml(item.serviceStop.links) : evidenceLinkHtml(item.evidenceRef);
@@ -159,10 +166,11 @@ export function buildTimelineItemHtml(item, record) {
             ${item.historyId ? `data-history-id="${escapeHtmlAttr(item.historyId)}"`
         : item.sourceHistoryId ? `data-source-history-id="${escapeHtmlAttr(item.sourceHistoryId)}"` : ''}
             data-expanded="${expanded ? '1' : '0'}"
+            ${item.replyAddress ? `data-work-reply-row="${item.replyRole || 'system'}"${expandable ? '' : ' tabindex="0"'} data-row-address="${escapeHtmlAttr(item.replyAddress)}"${replyWords ? ` data-row-words="${escapeHtmlAttr(replyWords)}"` : ''}` : ''}
         >
             ${headHtml}
             ${delegated ? `<div class="chat-live-line-body chat-delegated-activity" id="${escapeHtmlAttr(bodyId)}">${delegatedActivityBodyHtml(delegated, { expanded })}</div>`
-        : displayBody || evidenceHtml ? `<div class="chat-live-line-body${showingFetched ? ' chat-live-line-body-full' : ''}"${plainBody ? ' data-body-format="text"' : ''} id="${escapeHtmlAttr(bodyId)}">${bodyHtml}${evidenceHtml}${loadingFull ? '<div class="chat-live-line-loading">Loading full output…</div>' : ''}</div>` : ''}
+        : displayBody || evidenceHtml ? `<div class="chat-live-line-body${showingFetched ? ' chat-live-line-body-full scroll-fade-y' : ''}"${plainBody ? ' data-body-format="text"' : ''} id="${escapeHtmlAttr(bodyId)}">${bodyHtml}${evidenceHtml}${loadingFull ? '<div class="chat-live-line-loading">Loading full output…</div>' : ''}</div>` : ''}
         </div>
     `;
 }
@@ -324,22 +332,6 @@ export function toolEvidenceView(fold = null) {
     };
 }
 
-// Sortable data-ts stamping for timeline nodes; anchor mode only ever moves a
-// node's effective timestamp earlier so replay cannot teleport it downward.
-export function stampNodeTimestamp(node, raw, { anchor = false } = {}) {
-    if (!node) return false;
-    const epoch = rawTimestampEpoch(raw);
-    if (!Number.isFinite(epoch)) return false;
-    if (anchor && node.dataset.ts) {
-        const current = Number(node.dataset.ts);
-        const next = Number.isFinite(current) ? Math.min(current, epoch) : epoch;
-        if (node.dataset.ts !== String(next)) node.dataset.ts = String(next);
-        return Number.isFinite(current) && next < current;
-    }
-    if (node.dataset.ts !== String(epoch)) node.dataset.ts = String(epoch);
-    return false;
-}
-
 export function durableChatMediaUrl(value) {
     const url = String(value || '');
     return /^\/api\/tasks\/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\/artifacts\/chat-media-[0-9a-f]{64}\.(png|jpg|gif|webp|mp4|webm)$/.test(url) ? url : '';
@@ -494,14 +486,6 @@ export function getOrCreateChatSessionId(storage, cryptoImpl, now = Date.now, ra
     }
 }
 
-export function projectIdFromTask(taskId = '', now = Date.now) {
-    const seed = String(taskId || '')
-        .toLowerCase()
-        .replace(/[^a-z0-9_.-]+/g, '-')
-        .replace(/^-+|-+$/g, '');
-    return (seed ? `task-${seed}` : `task-${now().toString(36)}`).slice(0, 64);
-}
-
 export function loadChatInputHistory(storage, key) {
     try {
         const raw = JSON.parse(storage.getItem(key) || '[]');
@@ -618,13 +602,6 @@ export function bindContentButton(el, onActivate, isActive = () => true) {
             if (!event.repeat) el.click();
         }
     });
-}
-
-/** Convert a raw source timestamp to sortable epoch milliseconds. */
-export function rawTimestampEpoch(raw) {
-    if (raw == null || raw === '') return NaN;
-    const epoch = typeof raw === 'number' ? raw : Date.parse(String(raw));
-    return Number.isFinite(epoch) ? epoch : NaN;
 }
 
 function optionalFiniteNumber(value) {
@@ -842,9 +819,8 @@ export function mergeStickyCostMeta(previous, next) {
 }
 
 /**
- * Reset the sticky presentation state (collapsed activity + cost projection)
- * introduced in v6.82 P1. Used by resetLiveCardRecord; pure over the record
- * shape so dependency-free node tests can exercise the recycle path.
+ * Initialize a card's attempt-local presentation, including activity and cost.
+ * When a reusable id starts over, its old card is disposed and a fresh record gets these defaults.
  */
 export function clearStickyCardState(record) {
     if (!record) return record;
@@ -852,9 +828,9 @@ export function clearStickyCardState(record) {
     record.collapsedActivityLead = '';
     record.causeHeld = false;  // an outcome's cause owns the line from then on; equal narration words never take it
     record.costMeta = null;
-    // The executor chip is cycle state like the cost projection: a recycled
-    // slot must not claim the previous cycle's delegated route as its own.
-    record.executorChip = null;
+    // The executor chip, its selection and recorded coordinator are cycle state like the cost projection:
+    // a recycled slot must not claim the previous cycle's delegated route, request or coordinator as its own.
+    record.executorChip = record.requestedExecutor = record.coordinator = null;
     // A recycled slot must not inherit the previous cycle's finalizing hold —
     // nor the outcome observed under it (#1110), which would otherwise paint the
     // new cycle's chip with the old cycle's Failed.
@@ -863,7 +839,7 @@ export function clearStickyCardState(record) {
     // otherwise open showing the previous cycle's "updated" time.
     record.latestActivityTs = '';
     record.latestActivityRaw = '';
-    record.startedAt = 0;
+    resetChildStart(record);
     if (record.activityEl) {
         fitText(record.activityEl, '', 0);  // also drops a portal line's word-cut fit
         record.activityEl.removeAttribute('title');
@@ -1089,36 +1065,6 @@ export function partitionLocalEchoJournal(journal, serverClientMessageIds) {
     return { confirmed, unconfirmed };
 }
 
-/** Legacy delivery correlation; client ids are scoped to the room the owner wrote in. */
-export function buildMessageKey(role, text, timestamp, opts = {}) {
-    if (opts.clientMessageId) {
-        const room = role === 'user' && opts.ownerChatId !== opts.chatId ? `room:${opts.ownerChatId}|` : '';
-        return `${room}client|${opts.clientMessageId}`;
-    }
-    if (role !== 'user' && !opts.isProgress && opts.taskId) {
-        return [
-            'task',
-            role,
-            opts.systemType || '',
-            opts.source || '',
-            opts.taskId,
-            text,
-        ].join('|');
-    }
-    if (!timestamp) return '';
-    return [
-        role,
-        opts.isProgress ? '1' : '0',
-        opts.systemType || '',
-        opts.source || '',
-        opts.senderLabel || '',
-        opts.senderSessionId || '',
-        opts.taskId || '',
-        timestamp,
-        text,
-    ].join('|');
-}
-
 // Only a reload onto changed code earns a feed notice; any other reload reason or reconnect is silent.
 export function restartNoticeText(reason = '') {
     return reason === 'sha-change' ? 'Restart complete' : '';
@@ -1259,7 +1205,7 @@ export function unconfirmedForegroundCardIds(cards, activeIds) {
 // provisional until dispatch is confirmed or the ended host's delivery becomes unknown.
 export function markIngressSaved(root, row, bubble = ownerMessageBubble(root, row, 1)) {
     const cmid = String(row?.client_message_id || ''), state = row?.ingress_pending === true ? 'pending' : '';
-    if (row?.role !== 'user' || row.ingress_accepted !== true || !cmid) return false;
+    if (row?.role !== 'user' || row.declared_author || row.ingress_accepted !== true || !cmid) return false;
     const prior = bubble?.querySelector('[data-ingress-saved]');
     const level = prior?.dataset.ingressSaved;  // `Input saved` and a kept send's delivery doubt are final: only a running host's own fact (dispatched, pending) ends that doubt
     const ended = level === 'unconfirmed' && (row.ingress_dispatched === true || state === 'pending');
@@ -1380,8 +1326,9 @@ export function costMetaKeys(src) {
 }
 
 const CARD_META_KEYS = [
-    ...COST_META_KEYS, 'executor_route', 'execution_evidence', 'actual_substrate',
-    'executor_observation', 'model_execution', 'tool_calls', 'model', 'ts', 'initiator', 'continue_requester', 'cancel_origin',
+    ...COST_META_KEYS, 'executor_route', 'requested_executor_route', 'execution_evidence', 'actual_substrate', 'parent_cognitive_route',
+    'coordinator_route', 'coordinator_billing', 'coordinator_provenance', 'use_local_model',
+    'executor_observation', 'model_execution', 'tool_calls', 'model', 'ts', 'task_attempt', 'initiator', 'continue_requester', 'cancel_origin',
     'delegated_activity', 'outcome_axes', 'delegated_runs_unreconciled', 'task_completion', 'effort_level', 'effort_requested', 'effort_source', 'reasoning', 'place_origin', 'notice',
 ];
 export function cardMetaKeys(src) {
@@ -1397,20 +1344,17 @@ function updatedTime(record) {
     return time?.short || record.latestActivityTs || '';
 }
 
-function updatedLabel(record) {
-    const text = updatedTime(record);
-    return text ? `updated ${text}` : '';
-}
-
-// An unfinished card always carries a time: its last narration's, else when the work started (the census
-// start, else the card's first row). A root card says it in its head beside the chip; a child and a Main
-// portal end their meta line with it.
+// An unfinished card always carries a time: its last narration's, else its current attempt's start while its chip is
+// not Queued (a portal's worker census row, a child's typed start: task_phase_chip.observeChildStart), else `since` its
+// first row. A root card says it in its head beside the chip; a child or a Main portal ends its meta line with it.
 function clockLabel(record) {
-    const updated = updatedLabel(record);
-    if (updated || record.finished) return updated;
-    const started = Number(record.startedAt) || Number(record.root?.dataset?.ts) || 0;
-    const time = started > 0 ? formatMsgTime(new Date(started).toISOString()) : null;
-    return time?.short ? `started ${time.short}` : '';
+    if (record.finished) return '';
+    const updated = updatedTime(record);
+    if (updated) return fmt('updated {time}', { time: updated });
+    const started = record.phaseEl?.dataset?.phase === 'queued' ? 0 : Number(record.startedAt) || 0;
+    const at = started || Number(record.root?.dataset?.ts) || 0;
+    const time = at > 0 ? formatMsgTime(new Date(at).toISOString())?.short : '';
+    return time ? fmt(started > 0 ? 'started {time}' : 'since {time}', { time }) : '';
 }
 
 // The meta line keeps its real ` · ` text separators (a copied line reads as it looks), but each
@@ -1459,29 +1403,31 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
     // cost · updated, plus the facts that change what the owner may trust. Executor, model and
     // effort details stay on the room's card.
     const portal = record.root?.dataset?.portal === '1';
-    const clock = record.finished ? '' : clockLabel(record);
+    const clock = clockLabel(record);
     // A root card's clock moves whole to its head; a portal and a child keep it last on this line.
     const headClock = ordinaryRoot(record);
     const text = (item) => `<span class="chat-live-meta-text">${escapeHtml(item)}</span>`;
     // The compact line says who ran the work, on what, how long and for how much (DESIGN §5 "A task card's
     // summary outranks its details"). A delegated child names its executor and only the executor's own model
-    // evidence; any other card the model a usable solve response observed, else its agent model, and an
-    // unobserved execution in its own words. Effort is the selected leaf's dispatch level, not the nanny's
-    // reasoning level or a provider echo (subagent_runtime.resolve_configured_actor_dispatch).
-    // Session counters belong to the supervising agent, never the foreign executor.
+    // evidence (a finished card's never its progress report's), else the model its delegation selected (`requested …`;
+    // the request stays in Details when the line says otherwise); any other card the model a usable solve response
+    // observed, else its agent model in the lane its selection records, and an unobserved execution in its own words.
+    // Effort is the selected leaf's dispatch level, not the nanny's reasoning level or a provider echo
+    // (subagent_runtime.resolve_configured_actor_dispatch). Session counters belong to the supervising agent, never the foreign executor.
     const chip = record.executorChip;
     const supervision = chip && harnessPresentation(chip.harness).kind === 'harness';
-    const execution = modelExecutionView(record.modelExecution);
-    const coordinator = compactModel(agentModel);
-    const provenance = chip ? formatCoordinatorProvenance(
-        record?.coordinatorProvenance || chip?.coordinatorProvenance || chip?.snapshot || '',
-    ) : '';
-    const model = chip ? executorModelText(chip, compactModel)
-        : execution && !execution.observed ? execution.value : execution?.model || coordinator;
+    // Only a session child has a coordinator (DESIGN §5); a root whose own run started one keeps its own model's words.
+    const session = Boolean(supervision && record.isSubagent);
+    const execution = modelExecutionView(record.modelExecution, record.isSubagent);
+    const coordinator = compactModel(agentModel, selectionLane(record.requestedExecutor, agentModel, record.coordinator?.route));
+    const fact = chip ? executorModelFact(chip, record.requestedExecutor, record.isSubagent && record.finished) : execution && !execution.observed
+        ? { model: execution.value } : execution?.model || coordinator ? { model: execution?.model || coordinator } : executorModelFact(null, record.requestedExecutor);
     // The compact line names the model a Claudexor route ran on, not the route's spelling `codex=…` (Details keep it).
-    const lineModel = String(model || '').replace(/(^|\s)[a-z][\w.-]*=(?=\S)/i, '$1');
-    // A key added under Accounts follows its model ("claude-opus-5.5 · Claude credits"); the built-in key adds nothing.
-    const keyRoute = chip || (execution && !execution.observed) ? '' : execution ? record.modelExecution?.used_model : agentModel;
+    const model = modelText(fact);
+    const lineModel = { ...fact, model: String(fact.model || '').replace(/(^|\s)[a-z][\w.-]*=(?=\S)/i, '$1') };
+    // A key added under Accounts follows its model ("claude-opus-5.5 · Claude credits"); the built-in key adds nothing, nor
+    // does a helper's: its card names no local API connection (its dispatch and billing records keep it).
+    const keyRoute = chip || record.isSubagent || (execution && !execution.observed) ? '' : execution ? record.modelExecution?.used_model : agentModel;
     const key = connectionLabel(routeConnectionId(keyRoute));
     const updated = record.finished ? updatedTime(record) : '';
     // The executor block is ONE part of this line, joined by the same text
@@ -1496,7 +1442,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         // final (with its own end time) arrives as a message.
         toolCalls, ...cost, clock,
     ].filter(Boolean).map(text)) : metaLineHtml([
-        chip ? executorIdentityMarkup(chip, { model }) : (lineModel && !record.lead ? text(key ? `${lineModel} · ${key}` : lineModel) : ''),
+        chip ? executorIdentityMarkup(chip, { model: fact }) : (lineModel.model && !record.lead ? text(key ? `${modelWords(lineModel)} · ${key}` : modelWords(lineModel)) : ''),
         effortChipMarkup(record.effort),
         ...[
             record.historicalUnavailable ? 'Outcome unavailable' : (record.historicalUnconfirmed ? 'Activity unconfirmed' : ''),
@@ -1515,12 +1461,15 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
     ]);
     const clockChanged = paintHeadClock(record, headClock ? clock : '');
     const factsChanged = paintLiveFacts(record, portal ? [] : [
-        ['Executor', chip?.title ? escapeHtml(chip.title) : ''],
-        // Provenance is a recorded fact of the schedule (chosen_by / coordinator_provenance), never inferred here.
-        [chip ? 'Coordinator' : 'Agent model', coordinator ? escapeHtml(provenance ? `${coordinator} (${provenance})` : coordinator) : ''],
-        // An unobserved execution of a card without an executor is its compact model fact already.
-        [execution?.label || 'Model execution', execution && (chip || execution.observed) ? escapeHtml(execution.value) : ''],
-        ...(record.handoverRows?.length ? [modelHandoverFact(record.handoverRows)] : []),
+        ['Executor', escapeHtml(executorTitle(chip))],
+        // Provenance and billing are recorded facts (chosen_by / coordinator_provenance / coordinator_billing), never
+        // inferred here; a session child's coordinator is named here only.
+        [session ? 'Coordinator' : 'Agent model', escapeHtml(coordinatorLine(cardCoordinator(record, chip, session, coordinator)))],
+        [tr('task.fact.requested', 'Requested'), escapeHtml(requestedFact(record.requestedExecutor, chip, model, record.modelExecution))],
+        // A session child's solve response belongs to its coordinator; never label it as the delegated result's model.
+        [session ? (execution?.observed ? tr('task.fact.coordinator_solve', 'Last coordinator solve response') : tr('task.fact.coordinator_execution',
+            'Coordinator model execution')) : execution?.label || 'Model execution', execution && (chip || execution.observed) ? escapeHtml(execution.value) : ''],
+        ...(record.handoverRows?.length ? [modelHandoverFact(record.handoverRows, record.isSubagent)] : []),
         ['Started by', record.scheduleName ? `${tr('task.fact.started_by.schedule', 'Schedule')} · <span data-i18n-authored>${escapeHtml(record.scheduleName)}</span>` : record.initiator === 'consciousness' ? 'Consciousness' : ''],
         ...(!record.isSubagent && record.originRows || []),  // the place that called it, what called it and who (task_origin.js)
         ['Continued by', { owner: 'You', ouroboros: 'Ouroboros', unknown: 'Not recorded' }[record.continueRequester] || ''],
@@ -1577,9 +1526,7 @@ export function ownLiveActionsEl(record) {
 }
 
 export function ensureLiveActionsEl(record) {
-    if (!record?.root
-        || record.root.dataset.projectCreated === '1'
-        || record.root.dataset.projectCreating === '1') return null;
+    if (!record?.root || record.root.dataset.projectCreated === '1') return null;
     let actions = ownLiveActionsEl(record);
     if (!actions) {
         actions = document.createElement('div');

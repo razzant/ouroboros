@@ -16,6 +16,7 @@
 
 import { apiFetch } from './api_client.js';
 import { fmtInto } from './i18n.js';
+import { disposeNotices, showToast } from './toast.js';
 import { bindDialogFocus } from './ui_interactions.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
@@ -539,7 +540,7 @@ const DIALOG_HTML = `
         <header class="document-reader-head has-lead">
             <div class="document-reader-lead">
                 <div class="document-reader-identity" data-i18n-authored>
-                    <h2 class="document-reader-title" tabindex="0"></h2>
+                    <h2 class="document-reader-title scroll-fade-y" tabindex="0"></h2>
                     <div class="document-reader-meta"></div>
                 </div>
                 <div class="document-reader-actions">
@@ -562,7 +563,9 @@ const DIALOG_HTML = `
             <button type="button" class="btn btn-default document-reader-close" data-reader-action="close" aria-label="Close document">Close</button>
         </header>
         <div class="document-reader-notice" role="note" hidden></div>
-        <div class="document-reader-body scroll-fade-y" tabindex="0" role="region" aria-label="Document text" aria-busy="true"></div>
+        <div class="document-reader-body-frame scroll-fade-focus-frame">
+            <div class="document-reader-body scroll-fade-y" tabindex="0" role="region" aria-label="Document text" aria-busy="true"></div>
+        </div>
     </div>`;
 
 /**
@@ -780,6 +783,12 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
             target.addEventListener(type, handler);
             current.disposers.push(() => target.removeEventListener(type, handler));
         };
+        // The page behind a modal is inert, so what an action answers is this dialog's own notice and leaves with it. An
+        // answer that outlives this opening (a native close included, its event still queued) is the page's, never a
+        // later reader's.
+        const notice = (message, tone) => showToast(message, tone,
+            session === current && dialog.open ? { host: dialog } : {});
+        current.disposers.push(() => disposeNotices(dialog));
         listen(doc.defaultView, 'resize', () => {
             if (current.kind !== 'image') return;
             current.viewport?.relayout();
@@ -799,7 +808,7 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
                 void load(current);
                 current.body.focus();
             }
-            else if (action === 'open' || action === 'download' || action === 'copy') void actions[action]?.(file);
+            else if (action === 'open' || action === 'download' || action === 'copy') void actions[action]?.(file, notice);
             else if (view && view !== current.view && current.loaded) {
                 current.view = view;
                 showContent(current);
@@ -825,7 +834,7 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
         listen(dialog, 'close', () => { if (session === current) close({ restoreFocus: false }); });
         doc.body.appendChild(dialog);
         session = current;
-        current.disposers.push(bindScrollFade(current.body));
+        current.disposers.push(bindScrollFade(current.title), bindScrollFade(current.body));
         // The engine refocuses what was focused at showModal when the dialog closes; WebKit does
         // not focus a pressed button, so the opener takes focus first, in place.
         if (returnFocus && returnFocus !== doc.activeElement) returnFocus.focus?.({ preventScroll: true });

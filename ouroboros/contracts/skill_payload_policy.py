@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 from typing import Optional
 from contextlib import suppress
 
+from ouroboros.contracts.skill_manifest import canonical_skill_name
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint
 from ouroboros.utils import safe_relpath
 
@@ -78,6 +79,25 @@ SKILL_OWNER_STATE_FILENAMES = frozenset({
     # so a forged copy would carry acceptance past the same gate.
     "update_backup.json",
 })
+
+SKILL_GRANT_RECEIPTS_FILENAME = "skill_grant_receipts.json"
+
+
+def skill_state_dir_path(data_root: Path, name: str) -> Path:
+    """Canonical per-skill state address; constructing it never creates directories."""
+    return Path(data_root) / "state" / "skills" / canonical_skill_name(name)
+
+
+def skill_grant_receipts_path(data_root: Path) -> Path:
+    """Host-only grant continuity ledger outside the state handed to any one skill."""
+    return Path(data_root) / "state" / SKILL_GRANT_RECEIPTS_FILENAME
+
+
+def _is_grant_receipts_filename(name: str) -> bool:
+    name = name.lower()
+    return name in {SKILL_GRANT_RECEIPTS_FILENAME, SKILL_GRANT_RECEIPTS_FILENAME + ".lock"} or name.startswith(
+        f".{SKILL_GRANT_RECEIPTS_FILENAME}.tmp.")
+
 
 SKILL_OWNER_STATE_STEMS = (
     "grants",
@@ -327,16 +347,33 @@ def is_skill_payload_control_filename(path_text: str) -> bool:
 
 
 def is_skill_owner_state_target(target: Path, data_root: Path) -> bool:
-    """Return True for skill owner/review state files under data/state/skills."""
+    """Return True for the host receipt store, sign-in state and protected per-skill state files."""
     target_path = Path(target)
-    if target_path.name.lower() not in SKILL_OWNER_STATE_FILENAMES:
-        return False
-    root = Path(data_root).resolve(strict=False)
-    for candidate in (target_path, target_path.resolve(strict=False)):
+    raw_root = Path(data_root)
+    root = raw_root.resolve(strict=False)
+    resolved_target = target_path.resolve(strict=False)
+    sign_in_pairs = [(target_path, raw_root), (target_path, root), (resolved_target, root)]
+    if target_path.name not in ("", ".", ".."):
+        sign_in_pairs.append((target_path.parent.resolve(strict=False) / target_path.name, root))
+    for candidate, base in sign_in_pairs:
+        with suppress(OSError, ValueError):
+            parts = candidate.relative_to(base).parts
+            if ".." not in parts and len(parts) >= 2 and parts[0].lower() == "state" and parts[1].lower() == "sign_in":
+                return True
+    for candidate in (target_path, resolved_target):
+        if _is_grant_receipts_filename(candidate.name):
+            with suppress(OSError):
+                if candidate.parent.resolve(strict=False) == skill_grant_receipts_path(root).parent.resolve(strict=False):
+                    return True
         with suppress(OSError, ValueError):
             parts = candidate.relative_to(root).parts
-            if len(parts) == 4 and parts[0].lower() == "state" and parts[1].lower() == "skills":
+            if len(parts) == 2 and parts[0].lower() == "state" and _is_grant_receipts_filename(parts[1]):
                 return True
+            if (len(parts) == 4 and parts[0].lower() == "state" and parts[1].lower() == "skills"
+                    and parts[-1].lower() in SKILL_OWNER_STATE_FILENAMES):
+                return True
+    if target_path.name.lower() not in SKILL_OWNER_STATE_FILENAMES:
+        return False
     skills_state_root = root / "state" / "skills"
     if not skills_state_root.is_dir():
         return False
@@ -349,12 +386,22 @@ def is_skill_owner_state_target(target: Path, data_root: Path) -> bool:
     return False
 
 
+def _is_skill_grant_receipts_alias(target: Path, root: Path) -> bool:
+    with suppress(OSError):
+        return target.samefile(skill_grant_receipts_path(root))
+    return False
+
+
 def is_skill_owner_state_alias(target: Path, data_root: Path) -> bool:
     """Return True for hardlinks/aliases to owner state files."""
     target_path = Path(target)
     root = Path(data_root).resolve(strict=False)
+    if not target_path.exists():
+        return False
+    if _is_skill_grant_receipts_alias(target_path, root):
+        return True
     skills_state_root = root / "state" / "skills"
-    if not target_path.exists() or not skills_state_root.is_dir():
+    if not skills_state_root.is_dir():
         return False
     for owner_state_file in skills_state_root.glob("*/*"):
         try:
@@ -369,7 +416,7 @@ def is_skill_control_plane_path(target: Path, data_root: Path) -> bool:
     """Return True for skill owner/provenance files blocked from generic writes."""
     target_path = Path(target)
     root = Path(data_root).resolve(strict=False)
-    if is_skill_owner_state_target(target_path, root):
+    if is_skill_owner_state_target(target_path, root) or _is_skill_grant_receipts_alias(target_path, root):
         return True
 
     payload_candidates = [target_path]
@@ -591,6 +638,9 @@ __all__ = [
     "SKILL_PAYLOAD_CONTROL_FILENAMES",
     "SKILL_PAYLOAD_CONTROL_DIRNAMES",
     "SKILL_OWNER_STATE_FILENAMES",
+    "SKILL_GRANT_RECEIPTS_FILENAME",
+    "skill_state_dir_path",
+    "skill_grant_receipts_path",
     "SKILL_OWNER_STATE_STEMS",
     "PRESENCE_PROFILE_STATE_FILENAME",
     "PRESENCE_PROFILE_STATE_STEM",

@@ -11,7 +11,7 @@ import time
 import uuid
 # Before any import resolves a path: the executing checkout is the implicit repository and the data root is
 # settled; an explicit value wins, and APP_ROOT alone never silently leaves historical memory (#1239).
-from ouroboros.launch_roots import enter_direct, same_location  # noqa: E402 — standard library only
+from ouroboros.launch_roots import enter_direct  # noqa: E402 — standard library only
 os.environ.update(enter_direct(os.path.dirname(os.path.abspath(__file__))))
 # Protect Python import diagnostics too. Only the forkserver's preload stays thread-free (it forks
 # every pool child); a spawned child, the event-bus manager's included, relays from here.
@@ -33,9 +33,9 @@ from ouroboros.server_auth import (
     get_network_auth_startup_warning,
     validate_network_auth_configuration,
 )
-from ouroboros.server_entrypoint import (ServerAdmissionRefused, admit_data_root, bound_service_socket,
+from ouroboros.server_entrypoint import (ResetLaunch, ServerAdmissionRefused, admit_data_root, bound_service_socket,
                                          find_free_port, parse_server_args, raise_gc_threshold, reserved_service_ports,
-                                         shorten_switch_interval, write_port_file)
+                                         shorten_switch_interval, unisolated_test_root, write_port_file)
 from ouroboros.launcher_bootstrap import automatic_launch_allowed
 from ouroboros import body_adoption, consciousness_clock, host_notice, places, process_scope, server_boot, store_switch
 from ouroboros.server_web import TEXT_COMPRESSION, ServedUI
@@ -127,11 +127,7 @@ if isinstance(sys.executable, str) and sys.executable:  # this host's interprete
 # Logging is configured in main(), not at import: a spawn/forkserver worker re-imports
 # this module as ``__mp_main__`` and configures itself in ``worker_main``
 # (ouroboros/process_logging.py), so importing the server never attaches handlers.
-_pytest_default_real_data_dir = (
-    "pytest" in sys.modules
-    and not os.environ.get("OUROBOROS_DATA_DIR")
-    and same_location(DATA_DIR, pathlib.Path.home() / "Ouroboros" / "data")
-)
+_pytest_default_real_data_dir = unisolated_test_root(DATA_DIR)
 
 RESTART_EXIT_CODE = 42
 PANIC_EXIT_CODE = 99
@@ -175,16 +171,16 @@ from ouroboros.config import (
     SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     SETTINGS_DEFAULTS,
     SettingsIntegrityError,
-    load_settings, save_settings, verify_settings_integrity,
-    apply_settings_to_env as _apply_settings_to_env,
+    load_settings, save_settings, verify_settings_integrity, apply_settings_to_env as _apply_settings_to_env,
 )
 from ouroboros.server_runtime import (
     apply_runtime_provider_defaults,
     has_startup_ready_provider,
     needs_local_model_autostart,
     setup_remote_if_configured,
-    ws_heartbeat_loop,
+    start_ws_heartbeat,
 )
+from ouroboros.settings_integrity import skill_settings
 
 _supervisor_ready = threading.Event()  # a live generation finished init: the API's `supervisor_ready`
 # Init reached ready or `_supervisor_error`. Stop before init is deliberately no outcome:
@@ -287,7 +283,8 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any, *, timeout: float = 1
 
 def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: list) -> int:
     from supervisor.message_bus import coerce_chat_identity, record_inbound_message
-    from ouroboros.chat_uploads import attachment_placeholder
+    from ouroboros.chat_uploads import attachment_placeholder, local_message_words
+    from ouroboros.dialogue_provenance import declared_author
 
     for upd in updates:
         cursor[0] += 1
@@ -313,7 +310,8 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         image_caption = str(msg.get("image_caption") or "")
         task_constraint = msg.get("task_constraint") if isinstance(msg.get("task_constraint"), dict) else None
         image_data = (image_base64, image_mime, image_caption) if image_base64 else None
-        log_text = text.strip() or image_caption.strip() or attachment_placeholder(image_base64, msg.get("task_metadata"))
+        declared = declared_author(msg.get("accepted_source_row"))
+        log_text = text if declared else local_message_words(source, text, image_caption) or attachment_placeholder(image_base64, msg.get("task_metadata"))
         now_iso = utc_now_iso()
         if not client_message_id:
             # Some owner transports have no client-generated id.  Give the
@@ -337,15 +335,15 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             )
             client_message_id = f"host-{uuid.uuid5(uuid.NAMESPACE_URL, identity).hex}"
 
-        lowered = "" if (msg.get("task_metadata") or {}).get("literal_text") else text.strip().lower()
+        # An agent's note (its accepted row's recorded author) is literal text: no command, Panic, stamp or binding.
+        lowered = "" if declared else text.strip().lower()
         is_slash_command = lowered.startswith("/")
         is_external_transport = source != "web"
         external_identity_present = (not is_external_transport) or (chat_id > 0 and user_id > 0)
         # Emergency Stop Invariant (#1307): the local door stops before any state read,
         # chat record, state update or reply; an external transport needs a POSITIVELY
         # bound owner (one lock-free read) and never registers a stranger from an unknown slot.
-        from ouroboros.server_control import external_owner_binding, is_exact_panic_command
-        panic = is_exact_panic_command(lowered)
+        panic = lowered.startswith("/panic")
         if panic and not is_external_transport:
             _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
             return offset  # Never drain another already-queued message after Panic.
@@ -354,6 +352,8 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         st = ctx.load_state()
         if getattr(bridge, "panic", None) is not None:
             bridge.panic.observe_owner(st)
+        from ouroboros.server_control import external_owner_binding
+
         ext_known, owner_ext_id, bound_pair = external_owner_binding(st)
         bound_owner = external_identity_present and ext_known and owner_ext_id is not None and bound_pair == (user_id, chat_id)
         if panic and bound_owner:
@@ -385,7 +385,8 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             consciousness_clock.note_owner_zone(live, task_metadata, own=not is_external_transport or bound_external_owner, message=origin_message_ref, at=now_iso, accepted=msg.get("accepted_source_row"))
 
         try:
-            ctx.update_state(_stamp_owner_activity)
+            if not declared:
+                ctx.update_state(_stamp_owner_activity)
         except StateUnavailable as exc:
             log.warning("Owner activity not stamped: %s", exc)  # the message itself still proceeds
 
@@ -459,7 +460,6 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             action = parts[1] if len(parts) > 1 else "status"
             if action in ("start", "on", "1", "stop", "off", "0"):
                 from ouroboros.consciousness import OWNER_STOP
-
                 on = action in ("start", "on", "1")  # the owner's door: the app, Telegram and a custom setup page send /bg
                 result = ctx.consciousness.start() if on else ctx.consciousness.stop(source=OWNER_STOP)
                 reply(f"🧠 {result}")
@@ -489,7 +489,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                     "accepted_source_row": msg.get("accepted_source_row") if reply_source else None,
                     "origin_message_snapshot": msg.get("_origin_snapshot"), "origin_unkept": msg.get("_origin_unkept") is True,
                     "source": source, "received_at": str(msg.get("received_at") or ""),
-                    "bound_external_owner": bound_external_owner,
+                    "bound_external_owner": bound_external_owner, "declared_author": declared,
                 },
             )
     return offset
@@ -698,7 +698,7 @@ def _run_supervisor(settings: dict) -> None:
         interrupted_running: list = []
         restored_pending = run_startup_phase(_loop_liveness, "startup:queue_restore", lambda: restore_pending_from_snapshot(terminalized=interrupted_running))
         _start_preparation_generation(stop=stop_requested)
-        run_startup_phase(_loop_liveness, "startup:old_workers_stop", lambda: kill_workers(preserve_pending=True))
+        run_startup_phase(_loop_liveness, "startup:old_workers_stop", lambda: kill_workers(preserve_pending=True, startup=True))
         run_startup_phase(_loop_liveness, "startup:worker_spawn", spawn_workers)
         from ouroboros.server_process import record_applied_restart_settings
         record_applied_restart_settings({"OUROBOROS_SKILLS_REPO_PATH": settings.get("OUROBOROS_SKILLS_REPO_PATH", "")})
@@ -747,7 +747,8 @@ def _run_supervisor(settings: dict) -> None:
         _consciousness = BackgroundConsciousness(  # wakes speak in the bound chat, or Main while it is known empty
             drive_root=DATA_DIR, repo_dir=REPO_DIR, owner_chat_id_fn=lambda: owner_chat_of(load_state()),
             routing_metadata_fn=lambda cid: main_lane_routing_metadata(_event_ctx, cid))  # _event_ctx is built below
-
+        from supervisor.panic_choice import bind_launcher_start
+        bind_launcher_start(lambda: _consciousness if _supervisor_ready.is_set() else None)
         # A boot grant needs a KNOWN True and no unconsumed Panic flag (#1307).
         from ouroboros.installation_stop import installation_panic
         if control_is(load_state(), "bg_consciousness_enabled", True) and not installation_panic(DATA_DIR):
@@ -934,8 +935,9 @@ def _boot_managed_update_tasks() -> None:
         from supervisor.update_merge import active_update_tx, boot_outcome_notice, finalize_managed_update_on_boot
 
         ready = _wait_for_supervisor_update_finalize()
-        # Observation only: the finalizer's result and every decision below stay its own.
-        result = observe_boot(finalize_managed_update_on_boot, ready=ready, bootstrap_ok=_bootstrap_ok is True)
+        # Keep any exact store transfer with this boot's restart decision.
+        with store_switch.capture_history_handoff() as handoff:
+            result = observe_boot(finalize_managed_update_on_boot, ready=ready, bootstrap_ok=_bootstrap_ok is True)
         # A failed bootstrap (dependency sync or the import test of this tree) is not a
         # ready generation even when the supervisor thread survived it: the adoption
         # of a tree that does not import is returned, not finalized.
@@ -962,6 +964,8 @@ def _boot_managed_update_tasks() -> None:
             close_repo_writer_admission("managed_update:rollback_restart")
             _request_restart_exit()
             return
+        if result.get("rolled_back") is True and not result.get("rollback_deferred"):
+            handoff.resume_inline()  # completed restore, no restart follows
         advance_recovery_point(ready and _bootstrap_ok is True and result.get("rolled_back") is not True)
         update_status = compute_managed_update_status(fetch=True)
         try:
@@ -1094,47 +1098,45 @@ async def lifespan(app):
     _supervisor_ready.clear()  # readiness is this generation's: its recovery or its supervisor proves it
     _dialogue_bridge = None
     lifespan_drive_root = pathlib.Path(getattr(getattr(app, "state", None), "drive_root", DATA_DIR))
-    default_real_data_dir = pathlib.Path.home() / "Ouroboros" / "data"
-    pytest_default_real_data_dir = (
-        (bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules)
-        and same_location(lifespan_drive_root, default_real_data_dir)
-        and not os.environ.get("OUROBOROS_DATA_DIR")
-    )
-    if not pytest_default_real_data_dir:  # an imported ASGI app is admitted here; main() already was
+    pytest_default_real_data_dir = unisolated_test_root(lifespan_drive_root)
+    live = not pytest_default_real_data_dir  # a bare pytest run must not initialize the real data root
+    if live:  # an imported ASGI app is admitted here; main() already was
         admit_data_root(lifespan_drive_root)
         process_scope.initialize_installation_scope(lifespan_drive_root)  # idempotent after main(); first for an imported app
-    _event_loop = asyncio.get_running_loop()
-    _set_ws_event_loop(_event_loop)
-    ws_heartbeat_task = asyncio.create_task(
-        ws_heartbeat_loop(_has_ws_clients, broadcast_ws),
-        name="ws-heartbeat",
-    )
-
-    # Boot APPLIES the provider normalization in-process and persists none of it
-    # (mirror of launcher_onboarding.prepare_first_run_settings); its read does
-    # persist the two compatibility upgrades (``migrate=True``). Two
-    # normalizations, two re-derivations: the VOCABULARY one is the read seam
-    # every reader applies (config.normalize_settings_raw); the PROVIDER one is
-    # re-derived by every consumer that needs the route — the task-start
-    # projection, the settings GET and onboarding reads, the context-fit route
-    # resolver — so writing it at start would only make boot a second author.
-    settings, _provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(load_settings(migrate=True))
+    held_reset = live and server_boot.hold_interrupted_reset(lifespan_drive_root, BOOT)
+    if held_reset:
+        settings, _, _ = apply_runtime_provider_defaults(load_settings())
+    else:
+        _event_loop = asyncio.get_running_loop()
+        ws_heartbeat_task = start_ws_heartbeat(_event_loop, _set_ws_event_loop, _has_ws_clients, broadcast_ws)
+        # Only an ordinary settings read persists the two compatibility upgrades. Boot
+        # applies the provider defaults in-process, as launcher_onboarding.prepare_first_run_settings does.
+        # The two normalizations are read-side: every reader applies the vocabulary
+        # through config.normalize_settings_raw; readers that need a route re-derive
+        # the provider defaults (task-start projection, Settings GET, onboarding and
+        # the context-fit route resolver). Boot must not be a second author of those defaults.
+        # Like the wizard, readiness takes operator input, not a previous projection.
+        settings, _, _ = apply_runtime_provider_defaults(
+            skill_settings(lambda: load_settings(migrate=True)))
     _apply_settings_to_env(settings)
-    served_ui.apply(app, settings)  # this generation's main interface, before any request is served
+    served_ui.apply(app, settings)  # the saved UI choice and process-local restart facts, before serving
     # Pin boot-time runtime-mode after env apply; save_settings compares to this owner baseline.
     from ouroboros.config import initialize_runtime_mode_baseline
     initialize_runtime_mode_baseline()
+    if held_reset:
+        yield  # keep the owner controls available, with no store, old queue, supervisor or first-run setup
+        return
     has_local = needs_local_model_autostart(settings)
 
-    if not pytest_default_real_data_dir:
+    from ouroboros.gateway.history_reader import begin_generation
+    history_reader = begin_generation(lifespan_drive_root) if live else None
+    if live:
         store_switch.start(lifespan_drive_root, repo_dir=REPO_DIR, request_restart=_request_restart_exit)  # a pending switch, then the import owner off the ready path (P1)
-
     if not _exit_signalled.is_set():
-        _supervisor_stop.clear()  # a fresh lifespan owns a fresh generation (symmetric with the teardown set)
-    body_stop = threading.Event()  # lifespan ownership survives a cognitive supervisor revival; the boot coordinator's stop
-    start_body = (lambda: None) if pytest_default_real_data_dir else bind_body_lifespan(
-        lifespan_drive_root, body_stop, collection_ready=_supervisor_ready.is_set)
-    # A provider-ready boot starts the supervisor once the store published and the extensions registered.
+        _supervisor_stop.clear()  # symmetric with teardown
+    body_stop = threading.Event()  # lifespan-owned, survives supervisor revival
+    start_body = bind_body_lifespan(
+        lifespan_drive_root, body_stop, collection_ready=_supervisor_ready.is_set) if live else (lambda: None)
     startup_provider_ready = has_startup_ready_provider(settings)
     if not startup_provider_ready:  # readiness follows the store's publication (store_switch.when_ready below)
         _supervisor_init_done.set()
@@ -1143,41 +1145,41 @@ async def lifespan(app):
     boot = SimpleNamespace(host_service_task=None, host_service_server=None, host_service_listener=ExitStack(),
                            extension_reconcile_task=None)
 
-    # --- at the store's publication (on the import thread): the dialogue first, repairs after ---
     def _dialogue() -> None:
-        """Owner messages are accepted durably from here on (T2: a new chat before old repairs). A
-        providerless generation has no executor for them: its dialogue opens with the supervisor a
-        later settings save starts."""
-        if startup_provider_ready and not body_stop.is_set() and not pytest_default_real_data_dir:
+        """Import callback: cut over surviving dialogue before repairs (T2), even providerless.
+        Open the owner bridge once provider-ready: here, or when settings start the supervisor."""
+        from ouroboros import dialogue_store
+
+        has_dialogue = dialogue_store.present(lifespan_drive_root) or dialogue_store.holds_dialogue_files(lifespan_drive_root)
+        if (startup_provider_ready or has_dialogue) and not body_stop.is_set() and live:
             _dialogue_cutover(lifespan_drive_root)
+        if startup_provider_ready and not body_stop.is_set() and live:
             _open_dialogue(settings, stop_requested=lambda: any(
                 e.is_set() for e in (body_stop, _supervisor_stop, _restart_requested, _exit_signalled)))
 
-    recovery = None
-    if not startup_provider_ready:  # after the store's publication: the recovery writes, then readiness (P1)
-        recovery = lambda: not body_stop.is_set() and _run_startup_task_recovery(  # noqa: E731
-            lifespan_drive_root, REPO_DIR, skip_live_data=pytest_default_real_data_dir,
-            prior_worker_pids=None if pytest_default_real_data_dir else _startup_worker_pids(lifespan_drive_root),
-        )
-
     def _after_extensions() -> None:
-        """The body runtime and the supervisor (or the providerless recovery and readiness), only
-        once the extensions registered their bus subscribers: the first tick may consume an
-        overdue note, and a subscriber attached later never sees it."""
+        """Ready stores and subscribers, before any worker consumes their events (even providerless)."""
         if body_stop.is_set() or not _await_extensions_ready(body_stop):
             return
+        if history_reader is not None:
+            history_reader.start(lifespan_drive_root, REPO_DIR, check_checkout=True)
         start_body()
-        if recovery is not None:
-            recovery()
-            _supervisor_ready.set()
+        if not startup_provider_ready:  # after the store's publication: recovery writes, then readiness (P1)
+            if not body_stop.is_set():
+                _run_startup_task_recovery(
+                    lifespan_drive_root, REPO_DIR, skip_live_data=pytest_default_real_data_dir,
+                    prior_worker_pids=_startup_worker_pids(lifespan_drive_root) if live else None,
+                )
+            if not body_stop.is_set():
+                if live:
+                    server_boot.recover_dialogue(lifespan_drive_root, REPO_DIR)
+                _supervisor_ready.set()
         else:
             _start_supervisor_if_needed(settings)
 
     store_switch.when_ready(lifespan_drive_root, _dialogue, _after_extensions)  # never on this thread: it starts the coordinator next
 
     # --- the boot coordinator's steps, in the order the lifespan ran them before it served ---
-    live = not pytest_default_real_data_dir  # the real data root: every step; a bare pytest run: none that touches it
-
     def _usage_store() -> None:  # the one journal import, on every door (providerless included)
         if not live:
             return
@@ -1249,11 +1251,10 @@ async def lifespan(app):
         maintenance_child.stop()
         begin_owned_stop(lifespan_drive_root, cause=server_stop_cause())  # the grace starts here; cause and pending stops are recorded before any wait
         log.info("Server shutting down...")
-        # Let the loop leave its current tick BEFORE workers are killed and the
-        # bridge/Manager go down: a tick still running would otherwise respawn
-        # a killed worker or meet BrokenPipe/EOF. Bounded well inside the
-        # launcher's force-exit budget; the stop flag already suppresses the
-        # crash counter if the join times out.
+        if history_reader is not None:
+            history_reader.stop()
+        # Let the tick leave before killing workers or closing their bridge, or it can respawn
+        # a killed worker or meet EOF. Bounded inside the force-exit budget; stop suppresses crash counting.
         supervisor_thread = _supervisor_thread
         if supervisor_thread is not None and supervisor_thread.is_alive():
             supervisor_thread.join(timeout=2)
@@ -1373,7 +1374,7 @@ def _emergency_process_cleanup() -> dict:
     """Kill child processes, workers and companions; the kill census. The main and
     Host Service listeners close with this process: no port is swept."""
     from ouroboros.startup_historical_audit import live_background_children, stop_background_children
-    background = stop_background_children()  # the maintenance child, the Storage count and Free
+    background = stop_background_children()
     with suppress(Exception):  # a teardown cut short may not have stopped the local model: ask the loaded one, if any
         if (model := sys.modules["ouroboros.local_model"].get_manager(create=False)) is not None:  # no import: it waits
             model.panic_stop(request_only=True)  # its server, an install and a stop still waiting: no lock, no wait
@@ -1383,9 +1384,7 @@ def _emergency_process_cleanup() -> dict:
         from supervisor.workers import kill_workers, last_worker_exit_census
         cleanup_kwargs = _restart_cleanup_kwargs()
         if _restart_requested.is_set():
-            # A restart that hung past the uvicorn shutdown timeout still reaches
-            # here; finalize running tasks as an honest interrupted-by-restart,
-            # not a worker death.
+            # Even after a Uvicorn timeout, finalize tasks as interrupted by restart, not worker death.
             cleanup_status, cleanup_reason = _shutdown_task_cleanup_args(True)
             cleanup_kwargs.update(terminal_status=cleanup_status, result_reason=cleanup_reason,
                                   stop_source="server_shutdown")
@@ -1412,7 +1411,9 @@ def _emergency_process_cleanup() -> dict:
             child.join(timeout=2)
         except Exception:
             pass
-    if _restart_requested.is_set():  # only the restart that carried an adoption can arm it; never a wait
+    if _restart_requested.is_set() and not panic_termination_requested():
+        from ouroboros.gateway.history_reader import reader
+        reader.wait_stopped()  # unfinished history still appears in the census below
         body_adoption.arm(DATA_DIR, worker_exits=worker_exits,
                           live_children=multiprocessing.active_children() + live_background_children(background),
                           owned_stop=owned_stop, owner_restart=_owner_restart_requested.is_set())
@@ -1432,10 +1433,10 @@ def main() -> int:
         configure_process_logging(drive_logs=None)
         log.critical("The previous server generation exited by Panic; its restart successor stops")
         return PANIC_EXIT_CODE
-    # Admission before any write: one server per actual data root (server_entrypoint).
+    reset_launch = ResetLaunch(REPO_DIR, _LAUNCHER_MANAGED) if not _pytest_default_real_data_dir else None
     if not _pytest_default_real_data_dir:
         try:
-            admit_data_root(DATA_DIR)
+            admit_data_root(DATA_DIR, reset_launch=reset_launch)
         except ServerAdmissionRefused as refusal:
             configure_process_logging(drive_logs=None)
             log.error("Server not started: %s", refusal)
@@ -1461,7 +1462,7 @@ def main() -> int:
     except Exception:
         saved_host = ""
     env_host = os.environ.get("OUROBOROS_SERVER_HOST", "").strip()
-    default_host = env_host or saved_host or DEFAULT_HOST
+    default_host = (reset_launch and reset_launch.boot_host) or env_host or saved_host or DEFAULT_HOST
     args = parse_server_args(default_host, DEFAULT_PORT)
     host_source = "cli" if args.host_explicit else (
         ("launcher" if _LAUNCHER_MANAGED else "environment") if env_host else "settings")
@@ -1521,8 +1522,12 @@ def main() -> int:
                         force_exit_timeout_sec)
         try:
             # Our listeners close on exit/exec; port sweeps add no ownership proof.
-            store_switch.switch_at_restart(DATA_DIR, REPO_DIR, _emergency_process_cleanup())  # the seam: after every reader is dead, before the exit
+            cleanup = _emergency_process_cleanup()
+            restart_drained = _uvicorn_exited.is_set() and not _exit_signalled.is_set() and not panic_termination_requested()
+            outcome = store_switch.switch_at_restart(DATA_DIR, REPO_DIR, cleanup, restart_drained=restart_drained)
             if not _LAUNCHER_MANAGED:
+                if reset_launch is not None:
+                    reset_launch.select_reset_reexec(outcome)
                 if _planned_delegate_restart_transaction_id:
                     from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV
 
@@ -1535,11 +1540,14 @@ def main() -> int:
 
     restart_thread = threading.Thread(target=_check_restart, daemon=True)
     restart_thread.start()
+    app.app.state.restart_consumer = restart_thread  # type: ignore[attr-defined]  # actual Reset consumer
 
     try:
         with bound_service_socket(DATA_DIR, "main", args.host, actual_port,
                                   server_host_source=host_source) as listener:
-            actual_port = listener.getsockname()[1]
+            bound_host, actual_port = listener.getsockname()[:2]
+            if reset_launch is not None:
+                app.app.state.reset_launch_protection = lambda root: reset_launch.approve(bound_host, root)
             write_port_file(PORT_FILE, actual_port)
             bind_fault_exit(args.host, actual_port, launcher_managed=_LAUNCHER_MANAGED, repo_dir=REPO_DIR, cleanup=_emergency_process_cleanup, restart=_restart_current_process_impl)  # the fault door: main's return and its backstop
             log.info("Starting Ouroboros server on %s:%d", args.host, actual_port)

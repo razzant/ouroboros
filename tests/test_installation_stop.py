@@ -13,6 +13,7 @@ from tests._source_scan import parse
 
 
 def test_received_panic_survives_failed_unlink_and_a_new_panic_is_new(tmp_path, monkeypatch):
+    from ouroboros.control_actor import owner_door
     from supervisor import worker_chat_lane
     from ouroboros.launcher_bootstrap import automatic_launch_allowed
     from tests.test_model_sleep import _cold_park
@@ -42,7 +43,10 @@ def test_received_panic_survives_failed_unlink_and_a_new_panic_is_new(tmp_path, 
     assert state.load_state()[PANIC_RECEIPT] == first and flag.exists()
     assert not installation_panic(tmp_path)
     assert automatic_launch_allowed("automatic", tmp_path, SimpleNamespace(info=lambda *a: None))
-    assert q.resume_budget_paused_task("sleeper")["ok"]
+    assert q.resume_budget_paused_task("sleeper")["error"] == "panic_requires_owner_resume"
+    assert current_stop(workers.PENDING[0])["release"] == "owner"
+    with owner_door("fixture"):
+        assert q.resume_budget_paused_task("sleeper")["ok"]
     state.update_state(lambda live: live.update(bg_consciousness_enabled=True))
     assert q.persist_queue_snapshot(reason="resumed")
     workers.PENDING.clear()
@@ -230,6 +234,17 @@ def test_owner_update_keeps_sleep_readiness_and_returns_saved_work_after_ack(tmp
     assert not in_progress
 
 
+def _kept_once(source, name, literal):
+    """Whether ``literal`` occurs once in ``source``, as a direct item of its one module-level tuple ``name``."""
+    import ast
+
+    tree = parse(source)
+    [kept] = [node.value for node in tree.body if isinstance(node, ast.Assign)
+              and [target.id for target in node.targets if isinstance(target, ast.Name)] == [name]]
+    uses = [node for node in ast.walk(tree) if isinstance(node, ast.Constant) and node.value == literal]
+    return isinstance(kept, ast.Tuple) and len(uses) == 1 and uses[0] in kept.elts
+
+
 def test_restart_flag_names_exist_only_in_the_boot_compatibility_reader():
     import subprocess
 
@@ -245,7 +260,11 @@ def test_restart_flag_names_exist_only_in_the_boot_compatibility_reader():
                 continue
             source = path.read_text(encoding="utf-8")
             assert "owner_restart_no_resume" not in source, path
-            if path.name not in {"installation_stop.py", "server_control.py"}:
+            if path.relative_to(root).as_posix() == "supervisor/state_initialization.py":
+                # Owner Reset keeps Panic's flag by name: its ``state/`` clearing skips ``_STATE_KEPT``, the one tuple
+                # that holds the literal, once, and nothing else in the module names it.
+                assert _kept_once(source, "_STATE_KEPT", "panic_stop.flag"), path
+            elif path.name not in {"installation_stop.py", "server_control.py"}:
                 assert '"panic_stop.flag"' not in source, path
     assert "owner_restart_no_resume" not in (root / "server.py").read_text(encoding="utf-8")
 
@@ -289,8 +308,8 @@ def test_unreadable_panic_content_retains_the_existing_installation_veto(tmp_pat
     assert evolution_lifecycle.evolution_stop_reason({}) == "panic_flag_unknown"
 
 
-def test_boot_panic_keeps_sleep_owner_only_and_saved_work_resumable_by_mind(tmp_path, monkeypatch):
-    from ouroboros.control_actor import mind_control
+def test_boot_panic_keeps_sleep_and_saved_work_owner_only(tmp_path, monkeypatch):
+    from ouroboros.control_actor import mind_control, owner_door
     from supervisor import worker_chat_lane
     from tests.test_model_sleep import _cold_park
     from tests.test_restart_saved_work import _working_run
@@ -308,13 +327,22 @@ def test_boot_panic_keeps_sleep_owner_only_and_saved_work_resumable_by_mind(tmp_
     assert q.restore_pending_from_snapshot() == 2
     rows = {task["id"]: task for task in workers.PENDING}
     assert current_stop(rows["sleeper"])["release"] == "owner"
-    assert current_stop(rows["working"])["release"] == "resume"
+    assert current_stop(rows["working"])["release"] == "owner"
+    assert current_stop(rows["working"])["cause"] == "panic"
     assert current_stop(rows["working"])["door"] == "panic"
     worker_chat_lane.auto_resume_after_restart()
     with mind_control("mind", "continue saved work"):
         assert q.resume_budget_paused_task("sleeper")["error"] == "panic_requires_owner_resume"
+        assert q.resume_budget_paused_task("working")["error"] == "panic_requires_owner_resume"
+    assert q.resume_budget_paused_task("sleeper")["error"] == "panic_requires_owner_resume"
+    assert q.resume_budget_paused_task("working")["error"] == "panic_requires_owner_resume"
+    assert current_stop(rows["sleeper"])["release"] == "owner"
+    assert current_stop(rows["working"])["release"] == "owner"
+    with owner_door("fixture"):
+        assert q.resume_budget_paused_task("sleeper")["ok"]
         assert q.resume_budget_paused_task("working")["ok"]
-    assert q.resume_budget_paused_task("sleeper")["ok"]
+    assert not current_stop(rows["sleeper"])
+    assert not current_stop(rows["working"])
 
 
 def test_android_reader_cli_recognizes_the_receipt_without_product_import(tmp_path):

@@ -107,8 +107,8 @@ def test_readers_that_could_not_be_discovered_are_recorded_unknown_and_the_save_
     [mail] = _answers(env)
     [row] = [row for row in _dialogue.chat_rows(env.root) if row.get("type") == "quiz_answer"]
     for text in (mail["text"], row["text"]):  # the model's frame and the history row
-        assert "No installed skill reads" not in text
-        assert "Which installed skills read these keys could not be read" in text
+        assert "No installed skill requests" not in text
+        assert "Which installed skills request these keys could not be read" in text
     from ouroboros.question_answers import MAILBOX_ROUTE_FACT
     assert MAILBOX_ROUTE_FACT not in mail["text"]  # a secret outcome carries no owner words to route
     _assert_absent(env, CANARY, texts=[response.text])
@@ -174,7 +174,7 @@ def test_an_unlistable_skills_directory_after_the_commit_is_unknown_readers_and_
     [mail] = _answers(env)
     [row] = [row for row in _dialogue.chat_rows(env.root) if row.get("type") == "quiz_answer"]
     for text in (mail["text"], row["text"]):
-        assert "No installed skill reads" not in text and "could not be read" in text
+        assert "No installed skill requests" not in text and "could not be read" in text
     _assert_absent(env, CANARY, texts=[response.text])
 
 
@@ -215,11 +215,11 @@ def test_no_readers_and_an_unreadable_grant_stay_distinct_known_facts(env, monke
     [mail] = _answers(env)
     assert "consumers_unknown" not in outcome
     if readers == "none":
-        assert outcome["consumers"] == [] and "No installed skill reads these keys." in mail["text"]
+        assert outcome["consumers"] == [] and "No installed skill requests these keys." in mail["text"]
     else:
         assert outcome["consumers"] == [{"name": "fakeplug", "enabled": False, "reads": ["FAKEPLUG_TOKEN"],
                                          "grant_unknown": True}]
-        assert "fakeplug (disabled; its grant could not be read)" in mail["text"]
+        assert "fakeplug (disabled; requests FAKEPLUG_TOKEN; its grant could not be read)" in mail["text"]
 
 
 # ------------------------------------------------------- unconfirmed attempts never replay

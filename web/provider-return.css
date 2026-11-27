@@ -40,4 +40,9 @@
     color: var(--text-secondary);
     font-size: var(--type-body);
 }
+.provider-return-detail[data-return-next] {
+    color: var(--text-meta);
+}
 .provider-return-card a { text-decoration: none; }
+/* `.btn` sets its own display, which beats the browser's rule for hidden: a hidden control needs its own word. */
+.provider-return-card [hidden] { display: none; }

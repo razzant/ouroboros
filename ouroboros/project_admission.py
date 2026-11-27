@@ -8,12 +8,15 @@ occupancy never invalidates admission; each pass parses registry and bindings on
 from __future__ import annotations
 
 import copy
-import json
 from contextlib import contextmanager
 from typing import Any, Optional
 
 from ouroboros.contracts.chat_id_policy import project_chat_id
 from ouroboros.project_facts import sanitize_project_id
+from ouroboros.project_registry_recovery import (
+    PROJECT_ACTIVE, could_be_first_registry, read_document, registry_path, routing_row as _routing_row,
+    validated_registry,
+)
 
 
 class ProjectAdmissionError(RuntimeError):
@@ -122,102 +125,78 @@ def project_hold_fact(task: dict) -> dict:
             if isinstance(hold, dict) and hold else {})
 
 
-def _registry_snapshot(drive_root: Any, *, allow_missing: bool = False) -> tuple[dict, bool]:
-    """Read one whole revision. Source failure is never an authoritative empty set."""
-    from ouroboros.projects_registry import _registry_path
+def _registry_snapshot(drive_root: Any, *, allow_missing: bool = False,
+                       require_known_absence: bool = False) -> tuple[dict, bool]:
+    """Read one revision. An absence-sensitive reader admits ENOENT only as first use.
 
-    def unique_object(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"Duplicate registry member: {key}")
-            result[key] = value
-        return result
-
+    Only a confirmed profile generation reads or proves the registry: a Reset still cleaning up, and an
+    initialization witness that cannot be read or parsed, leave every room's authority unconfirmed -- a
+    readable, valid primary cannot re-establish which profile owns it."""
+    from ouroboros.launch_roots import RESETTING, read_witness
+    path = registry_path(drive_root)
+    status = read_witness(drive_root)[0]
+    if status == RESETTING:
+        raise FileNotFoundError(f"Reset cleanup is unconfirmed for {path}")
+    if status not in ("missing", "ok"):
+        raise FileNotFoundError(f"Profile initialization is unconfirmed for {path}")
     try:
-        with _registry_path(drive_root).open(encoding="utf-8") as source:
-            data = json.load(source, object_pairs_hook=unique_object)
+        with path.open(encoding="utf-8") as source:
+            return read_document(source), True
     except FileNotFoundError:
-        if allow_missing:
-            return {"projects": []}, False
-        raise
-    if not isinstance(data, dict) or not isinstance(data.get("projects"), list):
-        raise ValueError("Project registry must contain a projects array")
-    return data, True
-
-
-def _routing_row(raw: Any, *, identity_only: bool = False) -> dict:
-    from ouroboros.projects_registry import PROJECT_ACTIVE, PROJECT_LIFECYCLES
-
-    if not isinstance(raw, dict):
-        raise ValueError("Project registry contains a non-object row")
-    pid = raw.get("id")
-    if not isinstance(pid, str) or not pid or sanitize_project_id(pid) != pid:
-        raise ValueError("Project registry contains an invalid id")
-    row = {"lifecycle": PROJECT_ACTIVE, "routing_generation": 0,
-           "chat_id": project_chat_id(pid), "working_dir": "", **raw}
-    if type(row["chat_id"]) is not int or row["chat_id"] <= 0 or not identity_only and (
-            not isinstance(row["lifecycle"], str) or row["lifecycle"] not in PROJECT_LIFECYCLES
-            or type(row["routing_generation"]) is not int or row["routing_generation"] < 0
-            or not isinstance(row["working_dir"], str)
-            or any(key in row and (not isinstance(row[key], str) or not row[key])
-                   for key in ("routing_incarnation", "created_at"))):
-        raise ValueError(f"Project {pid!r} has malformed routing authority")
-    return row
+        if not allow_missing:
+            raise
+        if require_known_absence and not could_be_first_registry(drive_root):
+            raise FileNotFoundError(str(path)) from None
+        return {"projects": []}, False
 
 
 def _strict_admission_snapshot(drive_root: Any, *, allow_missing: bool = False,
                                identity_only: bool = False, preserve_raw: bool = False) -> tuple[dict, bool]:
     """Lockless committed authority. Only absent legacy fields receive defaults.
 
-    ``allow_missing`` admits absence only while no commit witness exists: beside
-    it a missing registry is unavailable, so no strict reader or registry writer
-    mistakes that loss for zero rooms. A registry lost before its first witness
-    stamp landed (never committed, or a failed stamp not yet retried) still reads
-    as a first boot. ``identity_only`` checks every row's object, unique id and
+    A missing registry is available as empty only without surviving evidence of
+    an earlier registry or Project store. ``identity_only`` checks every row's object, unique id and
     chat reservation, leaving routing fields to the reader that selects a room
     (``_routing_row``): a malformed unrelated room never blocks a healthy one.
     Writers preserve raw neighbours and validate the selected row; the derived
     folder census needs every room's routing. Raw rows are never normalized.
     """
-    if allow_missing:
-        from ouroboros.projects_registry import _registry_witness_path
-
-        allow_missing = not _registry_witness_path(drive_root).exists()
-    data, present = _registry_snapshot(drive_root, allow_missing=allow_missing)
-    rows, seen, chats = [], set(), set()
-    for raw in data["projects"]:
-        row = _routing_row(raw, identity_only=identity_only)
-        if row["id"] in seen or row["chat_id"] in chats:
-            raise ValueError("Project registry contains a duplicate id or chat reservation")
-        seen.add(row["id"])
-        chats.add(row["chat_id"])
-        rows.append(raw if preserve_raw else row)
-    return {**data, "projects": rows}, present
+    data, present = _registry_snapshot(drive_root, allow_missing=allow_missing, require_known_absence=True)
+    return validated_registry(data, identity_only=identity_only, preserve_raw=preserve_raw), present
 
 
-def reserved_project_for_chat(drive_root: Any, chat_id: int) -> dict:
-    """Strict execution chat routing: every row's identity, then the matched room's routing.
+def reserved_rooms(drive_root: Any) -> list:
+    """Every reservation with its identity checked, read once: what one read lends its strict room checks
+    (``reserved_project_for_chat``'s ``rows``, ``RoomResolver``'s ``reserved``) instead of a parse each."""
+    return _strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)[0]["projects"]
 
-    Absence is positive only without a commit witness; beside it a missing
-    registry is unavailable, never no rooms.
+
+def reserved_project_for_chat(drive_root: Any, chat_id: int, *, rows: Optional[list] = None) -> dict:
+    """Strict execution chat routing: every row's identity, then the matched room's routing; ``rows`` is a
+    ``reserved_rooms`` read the caller already holds.
+
+    Only a root with no surviving registry or Project store can attest to absence.
     """
-    rows = _strict_admission_snapshot(drive_root, allow_missing=True, identity_only=True)[0]["projects"]
+    rows = reserved_rooms(drive_root) if rows is None else rows
     return next((_routing_row(row) for row in rows if row["chat_id"] == chat_id), {})
 
 
-def display_registry_snapshot(drive_root: Any, *, require_readable: bool = False, sidebar: bool = False) -> dict:
+def display_registry_snapshot(drive_root: Any, *, require_readable: bool = False, sidebar: bool = False,
+                              require_known_absence: bool = False, prove_absence: bool = False) -> dict:
     """Identity/history projection, never execution authority or a repair writer.
 
     Healthy rows survive an invalid neighbor. Retain identifiable chat reservations
     even when their routing fields are invalid; never turn invalid lifecycle active.
     The sidebar selects active and deleting rooms and carries ``sidebar_complete``
-    for this read. Known tombstones are exclusions, not gaps. Only ``require_readable``
-    checks the commit witness for absent files and refuses unproved emptiness.
+    for this read; tombstones are exclusions, not gaps. ``require_readable`` rejects a
+    missing file with a commit witness. ``require_known_absence`` requires first-use evidence;
+    ``prove_absence`` asks that evidence of the sidebar's completeness alone: the same rows, and
+    a missing file complete only on first use (a lost or unconfirmed registry proves no absence).
     """
     from ouroboros.projects_registry import PROJECT_ACTIVE, PROJECT_DELETING, PROJECT_TOMBSTONED, _registry_witness_path
 
-    data, present = _registry_snapshot(drive_root, allow_missing=True)
+    data, present = _registry_snapshot(
+        drive_root, allow_missing=True, require_known_absence=require_known_absence)
     if require_readable and not present and _registry_witness_path(drive_root).exists():
         raise FileNotFoundError("Project registry is missing beside its commit witness")
     rows, tombstones, invalid_lifecycle = [], 0, False
@@ -254,6 +233,11 @@ def display_registry_snapshot(drive_root: Any, *, require_readable: bool = False
         if tombstones:
             raise ValueError("Project registry contains unreadable sidebar rows")
         raise ValueError("Project registry contains no readable room")
+    if prove_absence and complete and not present:
+        try:
+            complete = could_be_first_registry(drive_root)
+        except OSError:  # a history still importing or a trace that cannot be examined: first use is unconfirmed
+            complete = False
     return {**data, "projects": rows, **({"sidebar_complete": complete} if sidebar else {})}
 
 
@@ -333,7 +317,7 @@ def project_admission_basis(project_id: str, project: Optional[dict], *, frozen:
     Frozen resources (explicit, inherited or already admitted) keep their folder;
     only room-default preparation depends on the room's generation and folder.
     Legacy rows have no incarnation: their existing created_at stays part of the
-    basis. Reconstruction always mints an incarnation, so it cannot recreate ABA.
+    basis. An exact restore carries those original fields across the loss.
     """
     return {"project_id": project_id, "project": None if project is None else {
         key: project.get(key) for key in (
@@ -373,8 +357,6 @@ def _folder_owners(rows: Any, canonical: str) -> list:
     certify a path that an external rename or symlink swap has since redirected.
     """
     from ouroboros.project_facts import _normalized_workspace
-    from ouroboros.projects_registry import PROJECT_ACTIVE
-
     return [[row["id"], row["routing_generation"], row.get("routing_incarnation"), row.get("created_at")]
             for row in rows if row["lifecycle"] == PROJECT_ACTIVE and row["working_dir"]
             and _normalized_workspace(row["working_dir"]) == canonical]
@@ -422,8 +404,6 @@ def project_admission_guard(drive_root: Any, view: dict, *, snapshot: Optional[t
     This removes lock waits, not the O(registry size) read/parse cost under Q,
     nor a derived census's filesystem resolution of each active folder.
     """
-    from ouroboros.projects_registry import PROJECT_ACTIVE
-
     validate_project_admission(view)
     pid, prior = view["project_id"], view["project"]
     if snapshot is None:

@@ -39,17 +39,13 @@ effect. Publication needs fresh critic authority or a later actual independent-r
 outcome acknowledged through qualified author finish (see Publishing). The
 agent cannot self-attest (the marker is owner-state).
 
-**Accepted without a review.** A skill installed unchanged from a source the owner
-trusts runs on its install record's basis for exactly that
-release; an edit by the selected-skill task the owner's own request started is
-recorded as an owner edit and keeps running as Modified. Any other edit makes the
-skill "Not reviewed yet". For an owner-requested edit in an ordinary task,
-Ouroboros can carry out Skip through `skill_owner_action(action="attest")`, with
-the current `expected_content_hash` and `owner_source` recording the owner's
-words; its deterministic preflight and exact-byte owner
-attestation keep that edited copy running. This is the owner's authority, not
-an agent's claim that its own edit passed review. Blocker findings in a skill from a source that reviews
-each skill keep it off until the owner skips the review.
+**Accepted without a review.** A trusted source's install record admits exactly
+its unchanged release. In an owner-started Repair, a confirmed text edit can
+admit the exact resulting files as Modified, not grant access. An observation
+alone admits nothing (see "Repair task path scheme and edit tools"). For an owner-requested edit in an ordinary
+task, `skill_owner_action(action="attest")` can carry the owner's Skip for the
+exact revision (`expected_content_hash`, `owner_source`); preflight still runs.
+For blockers and other acceptance bases see the [Skill Review Checklist](CHECKLISTS.md#severity-rules-1).
 
 There are three skill types:
 
@@ -158,6 +154,17 @@ Empty, unsupported or unavailable runtimes fail at execution. Instructions never
 execute. Python extensions may omit `runtime`: the loader imports `entry`, which
 must export `register(api)`. Companions still require their own runtime and command
 (see "Declaring a companion process").
+
+The host reads script stdout and stderr as UTF-8 and starts Python scripts with
+`PYTHONIOENCODING=utf-8:backslashreplace`; other runtimes, standalone runs and
+older hosts need their own UTF-8 stdio, and file I/O still needs explicit encodings.
+
+That value is the host's own, not a skill setting: a `PYTHONIOENCODING` saved in Settings and
+granted through `env_from_settings` does not change it for a script run ("Grants for protected
+keys and host permissions"). The policy covers the streams only — the codec `open()` uses
+without an explicit `encoding` stays the interpreter's own default — and a Python child that
+inherits the setting writes UTF-8 too, so read that child's pipe with `encoding="utf-8"`.
+A companion process is configured by its own declaration ("Declaring a companion process").
 
 Go scripts are compiled into a private temporary executable and then run with
 the caller's arguments unchanged, including arguments ending in `.go`. The
@@ -449,14 +456,13 @@ flowchart LR
   through import, handler waits and cleanup. The async form polls
   cooperatively, so it never blocks the ASGI loop; nested scopes and
   unwrapped child work remain unsupported rather than inheriting a lease.
-- **Enable** flips `enabled.json` after current executable-review authority + grants, installing
+- **Enable** flips `enabled.json` after the files are admitted and [blocking grants](#grants-for-protected-keys-and-host-permissions) are in place, installing
   the declared packages itself when they are missing, failed or stale (idempotent: Enable on an
   enabled skill repairs it; a refusal is typed, `code` + one sentence + `detail`). The
   Skills UI surfaces a toggle; agents can also call `toggle_skill`.
   An ordinary top-level task enables a skill whose review gate admits its
   bytes; a selected-skill (repair) task needs an owner message, answered quiz
-  or mailbox entry for that skill. Declared keys and host permissions follow
-  `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` or an owner grant.
+  or mailbox entry for that skill. Enable does not grant access.
 - **Execute**: `skill_exec` runs `type: script` skills as
   subprocess. `type: extension` skills without isolated deps normally run
   through the in-process loader; extensions with reviewed isolated deps are
@@ -564,7 +570,8 @@ crashes surface as tool errors, HTTP 502 responses, or WebSocket log messages;
 the server and WebSocket stay alive. Opaque native files shipped directly in the
 payload are still review-sensitive; if such a marker exists, the runtime also
 uses child dispatch defensively, but this guide does not make native payload
-binaries broadly acceptable.
+binaries broadly acceptable. At out-of-process registration, structured settings have only public rows where
+available; other lists and objects are omitted. This is separate from the runtime grant for a setting.
 Out-of-process extensions have near full PluginAPI parity. They proxy tools, HTTP
 routes, WS handlers, UI tabs, and settings sections; `on_unload` runs at child
 teardown; `send_ws_message` relays to the browser through the Host Service
@@ -578,10 +585,8 @@ call `POST /ui/ws-message` and connect to `WS /events`. A skill can read
 `get_runtime_info()["execution_mode"]` and `["capabilities"]` to adapt instead of
 calling an unavailable capability and aborting registration.
 
-Out-of-process caveats: (1) `register()` and `on_unload` run for **each per-call
-child** (every tool/route/WS dispatch and catalog), so `on_unload` fires per call,
-not once per disable — keep it cheap and idempotent and put durable/once-per-session
-teardown in a `companion_process` shutdown. (2) `send_ws_message` relays through the
+Out-of-process caveats: (1) `register()` and `on_unload` run per child (tool/route/WS and catalog),
+not once per enable/disable. Keep them cheap and idempotent; give once-per-session teardown to the companion. (2) `send_ws_message` relays through the
 loopback Host Service and is best-effort: the relay lane holds a 60-message burst
 reserve per skill that refills one message per second, the excess is refused (a 429
 with `retry_after_sec`; the host records each refused burst once with its dropped
@@ -720,7 +725,7 @@ Both lists use the same fields. Unknown keys or an ID repeated anywhere reject t
 - `task_session` and `browser_policy` control call lifetime (DEVELOPMENT §12).
   `browser_policy` requires `task_session: true`.
 
-When the skill is accepted for its current bytes, enabled, granted and its packages
+When the skill is accepted for its current bytes, enabled, has its blocking grants and its packages are
 ready, its card offers **Connect tools**. The owner confirms the listed servers and
 any others that turning MCP on would start. Connect sets `MCP_ENABLED` and writes
 one row per declaration (`id`, `name`, `enabled`, `transport: stdio`, `skill`, both flags).
@@ -729,11 +734,12 @@ For `skill_owner_action(action="connect_mcp")`, use `preview: true` first, then 
 owner's answer as `owner_source` with the preview's `settings_digest`.
 
 The row stores no command. Listing, Test and calls derive binary, entry, cwd and flags from the installed
-skill. Moving it or the runtime needs no reconnect. Servers receive scripts' granted
-settings and state folder. Managed domains stage verified Node scripts in containers
-and refuse extension servers. An off, missing or unaccepted skill, missing grants or
-packages, an absent declaration or a domain refusal leaves that row saved and inert
-(`MCP_SKILL_UNAVAILABLE`). An accepted update or changed granted value triggers a new
+skill. Moving it or the runtime needs no reconnect. The skill supplies granted settings
+and its state folder; it does not supply pending keys. An owner's selections on the
+MCP server's Settings row are independent. Managed domains stage verified Node
+scripts in containers and refuse extension servers. An off, missing or unaccepted skill,
+missing blocking grants or packages, an absent declaration or a domain refusal leaves
+the row saved and inert (`MCP_SKILL_UNAVAILABLE`). A new accepted version or changed granted value triggers a new
 listing and retires old task sessions. A disabled row stays off. Document any external
 steps such as a browser extension or sign-in in the skill.
 
@@ -790,8 +796,11 @@ tool capabilities. Payload-relative paths address the selected installation:
 The task retains ordinary shell, browser, search, delegation and execution tools.
 The installed payload is usually a normal directory; an isolated Git copy through
 delegation is optional. Selected payload operations check the known revision;
-after an opaque shell command the task records the observed revision without
-claiming every concurrent change as its own.
+a matching predicted and observed transition from `edit_text` (single or
+`edits`) or `edit_batch` of existing payload text, excluding manifests and
+install metadata, can record Modified. Other writes (including `write_file`,
+`apply_patch`, shell and delegated imports) only record observation; use the
+ordinary review for those bytes.
 
 Test the repaired installation through its real script, extension tool, HTTP
 route, widget or companion after the normal review, dependencies and permissions
@@ -887,7 +896,7 @@ calls and runtime behaviours:
 | `supervised_task` | The skill may register an in-process host-supervised async task. It runs on the shared host extension loop, not the HTTP loop. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
 | `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound` or `skill.lifecycle`. An async subscriber runs on the shared host extension loop; a synchronous subscriber runs on the publisher's thread. Chat topics require owner permission grants; `skill.lifecycle` does not. |
-| `inject_chat` | With the owner's `inject_chat` grant, `POST /chat/inject` accepts text, an inline image or `attachments` (`[{path, name?, mime?}]`: up to 25 regular files confined to the skill's state root, copied without the former 50 MiB cap to `data/uploads` and staged for the task; file-only messages need no text). Optional `reply_to` names a row or `task:<task_id>` as a reference (routing only for the bundled [Telegram bridge](../skills/telegram/SKILL.md)'s Project Reply). For one authored row, sibling `reply_excerpt: {text, start_utf16}` is the sender’s rendered citation (CLIENT_CONTRACT §5). Optional `ui_control` (`{name}`) marks text one of the skill's controls composed (an inline button's command): the press is the owner's and the words are not, so the host writes no owner message for it (it takes no `client_message_id`; `owner_text`, malformed or combined: `400`). The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract); only the bundled Telegram bridge may add `surface` (`{kind: "telegram", conversation_id, bot_id}`) to retain the reply address of a late answer (other skills: 400; malformed: ignored). A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message — matching words, ordered attachments (bytes and names), Reply address, and excerpt text and UTF-16 offset — rejoins it instead of enqueueing again (a different message under a reused id is refused with 409; a `reply_excerpt` with no readable authored source with 400, named or not); `503` with `code: "not_accepted"` allows the same delivery to retry, not a delivery with unknown outcome; an inline image and the attachments also appear in the owner's chat bubble from the host's stored copy, while the image still reaches the model as before (inline bytes that are not a proven image are kept as an ordinary file and never sent as an image; base64 over 50 MiB decoded is refused with 413); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer (a host notice's is its phrase, with its `notice`: code, step, raw details and line), a terminal task status, or `lost` after a host restart or when the host's own acceptance write failed); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
+| `inject_chat` | With the owner's `inject_chat` grant, `POST /chat/inject` accepts text, an inline image or `attachments` (`[{path, name?, mime?}]`: up to 25 regular files confined to the skill's state root, copied without the former 50 MiB cap to `data/uploads` and staged for the task; file-only messages need no text). The bundled Telegram owner bridge may send a failed download as `{name, mime?, size?, unavailable, limit_bytes?}` instead of a file (`unavailable` is `too_large` or `download_failed`), without a path or bytes and with an optional caption. Optional `reply_to` names a row or `task:<task_id>` as a reference (routing only for the bundled [Telegram bridge](../skills/telegram/SKILL.md)'s Project Reply). For one authored row, sibling `reply_excerpt: {text, start_utf16}` is the sender’s rendered citation (CLIENT_CONTRACT §5). Optional `ui_control` (`{name}`) marks text one of the skill's controls composed (an inline button's command): the press is the owner's and the words are not, so the host writes no owner message for it (it takes no `client_message_id`; `owner_text`, malformed or combined: `400`). The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract); only the bundled Telegram bridge may add `surface` (`{kind: "telegram", conversation_id, bot_id}`) to retain the reply address of a late answer (other skills: 400; malformed: ignored), and `attachments` (one `/chat/inject` item: its parked file or failed-download fact) so a Reply answers with its file and verbatim caption, or the file alone (other skills: 400). The host stores it like any owner upload and records it only with that request's own winner: a replayed request or a losing one keeps no copy, and the answer reaches the asking work with the file staged or the reason it never arrived. The bridge's `{request_id, decision_id, rejoin: true}` reads, writing and delivering nothing, whether that very request is the recorded answer (200 with the receipt a replay returns, else 404 `request_not_recorded`; 503 when unreadable): the first lookup of an ordinary Reply to a question is the read that decides receiving, and only an authoritative `request_not_recorded` for an open question lets the bridge receive the file — an unreadable or unreachable read downloads and submits nothing, sends one notice that the receipt could not be confirmed and never replays that question by itself, while ordinary polling goes on; a redelivered update rejoins its answer without receiving it again, a known answered or closed card is final before any download, and an unknown outcome is settled by request, never by equal words or bytes. A message that carries a `client_message_id` becomes an addressable operation: the host answers with its `operation_ref` (`<chat_id>:<client_message_id>`) on 202, 200 and 504; a repeated delivery of the same message — matching words, ordered attachments (byte identity or delivery failure facts), Reply address, and excerpt text and UTF-16 offset — rejoins it instead of enqueueing again (a different message under a reused id is refused with 409; a `reply_excerpt` with no readable authored source with 400, named or not); `503` with `code: "not_accepted"` allows the same delivery to retry, not a delivery with unknown outcome; an inline image and the attachments also appear in the owner's chat bubble from the host's stored copy, while the image still reaches the model as before (inline bytes that are not a proven image are kept as an ordinary file and never sent as an image; base64 over 50 MiB decoded is refused with 413); `GET /chat/operations/{operation_ref}` reports the skill's own accepted message (`pending`, `running` with its task or turn, the durable answer (a host notice's is its phrase, with its `notice`: code, step, raw details and line), a terminal task status, or `lost` after a host restart or when the host's own acceptance write failed); and `POST /chat/cancel` (`{operation_ref, reason?}`) runs the existing cancellation owner on work that message started, answering `cancelled`, `already_terminal`, `unresolved` or `cancel_unsupported` — never a cancellation that did not happen. |
 | `presence` | A reviewed transport skill may submit authenticated non-owner conversation events to the Host Service Presence boundary and poll only their correlated late work. Requires an explicit content-hash-bound owner grant. |
 | `notify_owner` | The skill may tell the owner one thing through `POST /notify` after an explicit owner permission grant (see "Telling the owner something" below): one bounded plain sentence the host shows in the owner's chat as a System row signed with the skill's name. It wakes no model; narrower than `inject_chat`. |
 
@@ -929,11 +938,14 @@ never enters a tool result, the chat, history, logs or an event. The form stays 
 later save is recorded in the chat and resumes no work. A request saves only while the skill still maps its fields
 to the same keys.
 
-Saving is not a connection and grants nothing. The outcome names what each skill that reads the key can read now:
-a newly saved key needs the owner's grant in Skills. Replacing a key while a skill that reads it is enabled is
+A plain Save is not a connection and grants nothing. The result records each requesting skill's grant coverage and
+switch at the time. `Save and allow <skill>` binds the named keys to the displayed files and installation alone (a
+reinstall reads none), not other readers. Unadmitted files wait for a passing review or explicit acceptance of the
+exact files; the press does not approve them. Turn-on is separate and never overrides Off. Replacing a key while a skill that reads it is enabled is
 allowed; the skill may read the new value on its next call, while code that copied the value at start (a poller,
 a companion's environment) keeps the old one until it restarts. A skill can apply saves itself with PluginAPI 2.4:
-`get_settings_state(keys)` tells `ok` values and missing keys from an `unknown` (unreadable) document, and
+`get_settings_state(keys)` tells `ok` values and missing keys (a value the host withholds is missing) from an
+`unknown` (unreadable) document, and
 `refresh_companion_process(name, expected)`, off the event loop, respawns that companion only when its
 `env_from_settings` values changed; `expected` holds the values you read (empty for missing). It answers
 `unchanged` or `not_running` (nothing to do; a crash's absence is the crash monitor's), `restarted` or `started`
@@ -1009,27 +1021,38 @@ Some settings keys are protected: the provider, GitHub and network keys of `FORB
 forwarded to a skill by default, even when listed in
 `env_from_settings`. Custom secret keys stored in Settings → Accounts and keys
 are treated the same way; such a key joins a skill's request once it is saved, so a newly saved key is missing
-until the owner grants it, while the skill keeps its other approvals for the same release. A granted key is read as currently saved: each
+until the owner grants it, while the skill keeps its other approvals for the same bytes. If the current files are
+accepted, a custom key the last grant decision did not cover is not passed and does not block by itself. Readiness
+names it in `notes`, shown in Installed Skills and `list_skills` without the value. A key the
+decision covered and did not grant still stops it, and so does a new key of a version awaiting its check (a built-in
+re-seed, an update before its review or Skip). A granted key is read as currently saved: each
 `api.get_settings` call, script run, out-of-process call and companion start sees a
 value the owner saved, rotated or deleted during a running task, while that task keeps
 its own model, account and review settings; a value your code already copied or cached,
 a running companion's environment included, is not refreshed for you ("Asking the owner for a secret"). Host permissions such as `inject_chat`, `presence`,
-`notify_owner` and chat event subscriptions also require explicit, content-hash-bound owner
-consent. The desktop launcher's owner-grant bridge records these grants.
+`notify_owner` and chat event subscriptions also require explicit owner consent for the accepted version. The
+desktop launcher's owner-grant bridge records these grants.
 
-The Skills UI surfaces missing grants on the skill card. The agent
-can also call `toggle_skill enabled=true` only after grants are
-approved (the tool returns `SKILL_TOGGLE_ERROR` with `code: "grants"` and the sentence
-`Grant it the keys and permissions it asks for first.`). Self-authored markers alone
-do not authorize grants or enablement. Automatic grants and first enablement
-follow the setting below; an explicitly authorized task toggle remains separate.
+Grants bind to exact bytes. A Repair started from Skills for the same local or Hub installation can keep
+explicitly granted, still-requested keys after a verified text edit and a clean or warnings review of those files.
+Revoked keys, host permissions, reinstalls and catalog updates do not inherit grants this way. Off stays Off.
+An extension's `notify_owner` granted to the earlier files is only held: the extension loads with its keys, and
+`POST /notify` refuses until it is granted for the repaired files. A script's missing permission still refuses its run.
+Old grants still cover their unchanged files. Without a proven link, use **Grant access** after review if auto-grants
+are off; no value needs re-entering. That explicit grant can follow the next verified Repair.
 
-`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Permissions and checks
-(native confirmation on desktop, owner endpoint on web). It grants only declared keys/permissions for the accepted
-release digest. Executability follows the skill gate and current author/reviewer authority, not the verdict
-label alone; see the Skill Review Checklist. Editing the payload invalidates grants; readiness, the execution and toggle refusals and the skill card then also say
-that the grant belongs to an earlier version of the files (`grant_status_for_skill` `earlier_grant`); the saved Settings
-values are untouched.
+One grant never becomes the operative value: `PYTHONIOENCODING` is replaced by the host's own
+UTF-8 stdio setting where the host starts the process itself — a Python script run and an
+extension's own Python process ("Manifest schema", script stdio).
+
+Missing host permissions, protected core keys and keys covered by the last grant decision block enablement
+(`toggle_skill` returns `SKILL_TOGGLE_ERROR`, `code: "grants"`). Pending fields and a held `notify_owner` do not. The
+Skills card offers **Grant access**; granting, enabling and recording who wrote the files are separate.
+
+`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on (Settings → Permissions and checks). Executable review,
+qualified author finish, owner Skip or accepted install/update can issue grants for that exact digest under this
+policy; a recorded Repair edit alone cannot. When `grant_status_for_skill` reports `earlier_grant`, the skill
+card and readiness/refusals name that it does not cover the current files.
 
 Every review, grant and acceptance is bound to the skill's release digest: its
 payload files plus its declared dependencies, without per-install notes, so the
@@ -1088,8 +1111,8 @@ tools:
 contributes:
   - id: place
     provides: place
-    label: Slack
-    destination: vendor:Slack
+    label: Slack               # display name; may change
+    destination: vendor:Slack  # stable provider identity (case-insensitive) for existing places, not display copy
     scope: account             # account | conversation
     wakes: [direct_message, group_dm, mention, my_thread, reply_to_me]   # suggestions; the owner edits the list
     source: {route: status, refresh_s: 15}                               # optional status and Connect choices
@@ -1157,10 +1180,12 @@ contributes:
 - `provides: place` requires `type: extension` and the `presence` permission. The Browse "Connectors" filter and
   "Connects <Service>" are derived from it; no tag or suffix is needed.
 - The connector carries the service name in its place `label`; the technical skill id stays in details.
-  Skills cards prefer the optional top-level, one-line `title`, then the place contribution's `label`, then `name`.
-  Catalog entries may carry `title`; it is display text, never a new skill identity. Place, instance, account and
-  signal labels are authored content, outside the host's translation overlay; a host sentence that composes one
-  keeps it exactly as written, case included.
+  Skills cards prefer the optional top-level, one-line `title`, then the place contribution's `label`, then the title
+  of the skill's entry in its own source, then `name`. Catalog entries may carry `title`; it is display text, never a
+  new skill identity. Search finds the skill by each of these, by its `ui_tab.title` and by the headers its live
+  widget tabs register from its installed folder; actions still take `name`.
+  Place, instance, account and signal labels are authored content, outside the host's translation overlay; a host
+  sentence that composes one keeps it exactly as written, case included.
 
 The optional `settings` member names the connector's registered Settings section (for example
 `api.register_settings_section("connection", ...)`); it is a section id, not an embedded form or a new
@@ -1204,12 +1229,14 @@ Status `labels` can name core kinds in the connector's own words; they are safe 
 The sheet merges status labels over manifest labels. A runtime `/identity` check cannot negotiate a
 static manifest.
 
-Negotiate support through `/identity`: `presence_wake_signals: 1` advertises this seam. Older hosts may reject
-the `facts` manifest key, so do not publish signal declarations to a host without support. Intake accepts a
-signal only if the authenticated connector's current live place declaration lists it; another connector's
-declaration, a discovered-but-unloaded declaration, or arbitrary text cannot authorize it. Ordinary core fact
-intake remains compatible. New owner/tool signal choices likewise require that live declaration; existing
-choices remain readable and removable when the connector is off.
+Check `/identity` for `presence_wake_signals: 1` before declaring signals. Older hosts may reject `facts`.
+Intake uses live provider signals; new choices use the place's live declarations. Saved wakes stay removable offline.
+A resend of a settled event with the same payload (negotiated versions and staged file paths aside) gets its saved
+answer, including negotiated `attention`, even after a release stops declaring a signal it carried; a new event with
+that signal is refused. On HTTP 503 `places_unreadable`, resend the same event.
+An eligible unpublished signal retries before capture at any connected place. A proven pending import can
+also defer a core-only wake decision after capture. Retry the same event on HTTP 429 `wake_import_declarations_pending`.
+`/presence/turn` sends `disposition: retry` and `retry_after: 60` seconds. `/call/open` uses its call error envelope.
 
 Signal logic and its parameters belong to the connector's own settings. The host performs the existing fact
 membership matching, stores no new Place field, and does not match message text. A signal does not manufacture
@@ -1307,12 +1334,17 @@ Use the connector's ordinary content-hash-bound skill token for:
   advertises canonical output identities and separate producer/child references in
   work polls. `presence_wake_facts` lists accepted provider facts.
   `presence_explicit_completion: 1` advertises that a new completion's outcome comes from
-  its explicit answer, silence or handoff, never from a delivery receipt. Where the event's own
+  its explicit answer, silence or handoff, never from a delivery receipt; an absent key means an older
+  host without this promise: any confirmed tool receipt may suppress its final. Where the event's own
   connector declares an `effect: message` tool whose targets lie within one conversation (account,
-  its conversation argument, its thread argument), a focus's finish is its record and people hear
-  only what it sends through that tool: the outcome is `silent` and the text stays on the card. A
-  connector without such a tool (a peer URL, mail recipients) keeps the final as its reply. An absent
-  key means an older host without this promise: any confirmed tool receipt may suppress its final.
+  its conversation argument, its thread argument), the finish of every root bound to the place (the
+  focus, a root it handed off, a schedule's run) is its record and people hear only what it sends
+  through that tool: the outcome is `silent` and the text stays on the card. A connector without such a
+  tool (a peer URL) keeps the final as its reply. A connector with one therefore has no final to follow:
+  its custody of an event can close at the admission receipt; a release that stops polling work for finals
+  declares PluginAPI 2.7, so an older host, whose handed-off roots still answer by their final, refuses it
+  before import.
+  `presence_attention_version: 1` advertises the neutral `attention` fact below.
   `presence_history_import_version: 1` advertises `POST /presence/history` ("Importing
   earlier history" below); `presence_source_order_version: 1` advertises
   `event.message.source_order` on live and history events alike: an integer from 0 to
@@ -1323,7 +1355,8 @@ Use the connector's ordinary content-hash-bound skill token for:
   gap, not permission to inject owner messages or invent output identities. A
   historical record can still lack `output_ref` on a capable host.
 - `POST /presence/turn`: `event`, optional legacy `binding_id`, `staged_files`,
-  `delivery_reporting_version` and `continuation_version`. The event still carries
+  `delivery_reporting_version`, `continuation_version` and `attention_version` (the heard
+  passage below). The event still carries
   `source_event_id`, `provider`, `account_id`, `conversation_id`, `thread_id`,
   `conversation_key`, `actor`, `conversation`, `message` and `text`. The host derives
   its own canonical conversation key from `provider`, `account_id`, `conversation_id`
@@ -1396,6 +1429,10 @@ Use the connector's ordinary content-hash-bound skill token for:
   (history, the Safety occasion). Whom words address and whether they ask for work is the mind's reading: an order
   exists only where the mind cites their exact words (`owner_words` of `start_task`, `schedule_followup`,
   `manage_schedules` update) and the host verifies the bytes inside a message of theirs that reached that run.
+  An `actor` the connector marks `origin: "machine"` (a program it authenticated, such as a named A2A peer) is never
+  my human's, even from an account they confirmed, at the turn and on every later read: the fact can only lower
+  authority. The room and focus show the recorded program as such, and people counts and owner-account suggestions
+  do not count that arrival as a person. Without the field the existing confirmation rules apply; an older host ignores it.
 - Optional `event.message.reaction` (object with `schema_version: 1`; `text` and files empty; an object
   without that key is not this fact): `change` `add`/`remove`/`replace`/`count`; `old`/`new` lists hold provider
   `{type, value}`; `count` instead has only `counts` entries `{type, value, count}` (non-negative integer),
@@ -1430,6 +1467,39 @@ Use the connector's ordinary content-hash-bound skill token for:
   fallback, and finds no naming place as confirmed unbound (`place_not_connected` under `require_place=true`). The
   v1 snapshot never records the mode: keep it beside the snapshot and check with the same one.
   Missing/invalid snapshots are not inferred from `origin.kind`; ordinary queries and legacy rows keep their old lookup.
+- The owner's own Telegram bot in groups (`/identity.telegram_group_feed: 1`). Only an unchanged Official
+  `telegram-bot` release of the stock OuroborosHub (its install record, and the bytes its token was issued for)
+  passes the identity, updates, call, upload and file doors below and submits that bot's events and history; any
+  other copy gets `connector_mismatch` (`blocked` at `/presence/turn` and `/presence/history`).
+  The bundled `telegram` bridge reads that bot and keeps its token, which no settings read hands any connector
+  version: the connector never polls it. One bot has one local reader per process, kept until restart. With
+  `/identity.telegram_group_poll_claim: 1`, right before its deleteWebhook and getUpdates with its own bot B any
+  admitted `telegram-bot` posts `POST /telegram/feed/poller {bot_id}` (B's id as its saved, granted token names
+  it): `{ok, owned: false}` means the bridge reads B here, so it contacts Telegram with B not;
+  `409 account_changed`, `503 settings_unknown`. Its other reads claim nothing. An older connector (no
+  `owner_bot_status`) is given its bot by its token read and never handed one the bridge holds.
+  `GET /telegram/feed/identity?bot_id=<B>` answers `same_as_owner_bridge` from Settings (the bridge's saved,
+  admitted token; `null` unknown), `connector_token_held` (`true`: the connector's saved token names that bot,
+  so it reads as unsaved; `null` unknown) and the bridge's bot (`account_id`, `identity.sends_as`, `invite_url`,
+  `owner_bound`, `enabled`); only `groups=1` adds `group_ids`, the groups and supergroups that bot is in this
+  consent period (`[]` none, or no consent or bound owner; `null` unknown).
+  `GET /telegram/feed/updates?account_id&offset&timeout` is getUpdates over the bridge's spool
+  (`{feed_id, update, place:{place_id,connected_revision,thread_id}}` or `{feed_id, sighting}`; `offset` confirms
+  below it under the consent the poll began with; Off, a new consent or another bot confirms nothing). Its places
+  are the projected `owner_bot` declaration: exact account and group only, never blank, wildcard or account-wide.
+  Submit its events with that `binding_id` and `connected_revision` (`/presence/turn`). A fresh arrival held by an
+  unavailable bridge returns `503 telegram_group_feed_unavailable` with `disposition: retry`, before capture;
+  matching settled answers stay readable. Bind sends with `operation=bind|check&contribution_id=owner_bot` (no fallback).
+  Every provider call goes through `POST /telegram/feed/call|upload` with the binding's `place_id`,
+  `connected_revision` and `thread_id` (a topic send names its topic; an edit, deletion or reaction acts in its
+  message's own topic, the bot's replies included; a restriction or ban needs a chat-wide place), files by path
+  inside the connector's own state folder with `size` and `sha256`, and `GET /telegram/feed/file` for the opaque
+  `file_path` a relayed getFile answered (query `connected_revision` in plain decimal). File offers last for the
+  connection, not the queue offset; opaque paths need their original consent through delivery. A read timeout of its bytes
+  alone returns `504 {relay_outcome: file_read_timeout}`. Telegram's answer otherwise comes
+  back with its status; a relay refusal is a Telegram-shaped 403 with `relay_refusal` (nothing sent);
+  `503 {relay_outcome: not_sent}`; `502 {relay_outcome: unknown}` has no `ok` and is never resent. Methods and
+  arguments are listed in `skills/telegram/lib/telegram_group_feed.py`.
 - `GET /presence/work/{work_ref}?binding_id=...`: reads correlated late work,
   including after a place is Paused or disconnected. The binding query is optional;
   the authenticated connector must still own the stored work.
@@ -1445,8 +1515,17 @@ an external request already accepted by the provider.
 Paused, consciousness Off/Panic, or no matching wake returns `silent` (heard).
 That final decision stays on the accepted room record: a retry stays silent after On,
 without creating a task document or retained context-source blob for the heard event.
+A connector that saw `GET /identity.presence_attention_version: 1` sends `attention_version: 1`
+on `POST /presence/turn` or as a query parameter on `GET /presence/work/{work_ref}`. A successful
+view adds `attention: {decision}`: `heard` (saved), `handed_off` (accepted by running work, not
+proof of reading), `focus_started` (a start record, not a completion), `completed_silent`
+(the model ended and selected silence), or `unknown` (no sufficient evidence). Apply `status`
+and `outcome` separately; a held reply is not chosen silence. The reason and recipient stay in
+the local history. No version means no added field. A connector reports neutral public states;
+keep local retry and transport diagnostics within its own installation.
 An exhausted or unknown allowance returns `consciousness_allowance_exhausted`,
-`disposition: retry` and `retry_after` seconds. Physical capacity keeps the existing
+`disposition: retry` and `retry_after` seconds: the event was kept but not answered, so
+offer it again after that time; it is never a heard answer. Physical capacity keeps the existing
 `presence_capacity_full` retry response. A matching event focuses consciousness in
 that room under the owner's autonomy level and allowance, independently of its own
 clock. Before allowance, rate or capacity is consulted, the conversation's current author, else its
@@ -1484,11 +1563,13 @@ its close is acknowledged in its transcript, never read by its model, and starts
 
 A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including
 `silent=true`; receipts never choose its outcome. Where the connector speaks by an in-conversation
-message tool (above) a focus's finish, a `finish_task` answer or a tool-less final alike, is its record: a send
-may ride in the same response, a finish with words that sent nothing there returns once with the facts, the
-next is accepted (a Main message pending from the owner is owed first, as for a silent finish); a Silent or
-Paused place and Advises keep the held draft. Elsewhere, and for a promoted root, an answer after
-any send, file or reaction is new speech; started work stays `deferred` (empty after silence).
+message tool (above) the finish of the focus and of every root promoted or scheduled from it, a `finish_task`
+answer or a tool-less final alike, is its record: a send may ride in the same response, a finish with words that
+sent nothing there returns once with the facts, the next is accepted (the focus owes a Main message pending from
+the owner first, as for a silent finish); a Silent or Paused place and Advises keep the held draft. Where it has
+none, an answer after any send, file or reaction is new speech for the work the connector follows (the turn, and
+work the turn names); another root is told that its final speaks only if a connector follows it; started work
+stays `deferred` (empty after silence).
 Automatic speech passes the `place_reply` Safety check, which sees the turn's own sends in that conversation
 (receipts and receipt-less calls); a flag returns to the mind with the destination, those sends and silence as a valid finish.
 Silent/Paused/disconnected destinations and Advises autonomy hold the reply
@@ -1580,15 +1661,18 @@ event identity). An author parked on a review it left for an addressed message (
 review) yields the conversation and answers early: `status: "continuing"` with `continuation_ref` (equal to `turn_ref`) and an
 initial `outcome`/`text`/`output_ref`. `deferred` with empty text means a result may follow; an
 author-selected early output (`pending_review=finish`) is speech to send once under its
-`output_ref`; `silent`/`tool_delivered` send nothing. A promoted child keeps its own `work_ref`; poll
-both independently. `status: "completed"` (with `continuation_ref: ""`) means the author ended
+`output_ref`; `silent`/`tool_delivered` send nothing. A promoted child keeps its own `work_ref`; a connector
+that follows work for speech or status polls both independently (whether a final is speech at all: the
+`presence_explicit_completion` paragraph above; a door connector's finals are records).
+`status: "completed"` (with `continuation_ref: ""`) means the author ended
 within the request. A retry of the same event returns the identical stored envelope, never a rerun;
 `continuing` releases text to you and is not proof of provider delivery.
 
 Poll `GET /presence/work/{continuation_ref}?binding_id=...` like other late work. Ordinary pending
 and terminal continuation views carry producer `task_id`, `work_ref` and `continuation_ref` naming the author, plus
-`child_work_ref` for its promoted independent work (empty if none). Discover and retain the child
-before handling author status; poll it independently. A child promoted after the first yield
+`child_work_ref` for its promoted independent work (empty if none). A connector that follows work
+for speech or status discovers and retains the child before handling author status and polls it
+independently. A child promoted after the first yield
 appears at the next park even if the immutable initial envelope has an empty `work_ref`.
 While the author lives it answers HTTP 202 `pending` with `outputs`: the ordered
 `{output_ref, outcome, text}` the author released so far. Its terminal answers 200 with
@@ -1877,6 +1961,36 @@ permission grant. Skills that perform multi-step external work should still
 print a concise success/failure marker or write structured state under
 `OUROBOROS_SKILL_STATE_DIR` so the agent can decide whether to fix or report.
 
+## Returning a later answer (`POST /late_result`)
+
+A connector with the existing `presence` grant may opt in on the manifest's reviewed message-tool row:
+`late_result: true` means that tool sends a request expecting an answer. Other tools get no reference. A supported
+host advertises `late_result_version: 1` from `/identity`. After normal tool admission it can supply `ctx.call_ref`
+for that call in a proven local Main or Project. Keep it private, never in the peer request, tool output, or UI.
+A Place without a local-only route, unknown address, or older host supplies no usable reference: keep the answer
+in the skill's letter history, readable by its letter id, without claiming a room woke.
+
+On a later answer, use the current local skill token and `POST /late_result` with exactly `call_ref`, `report_id`
+(the letter's message id, 1–256 characters from letters, digits, `_`, `.`, `:`, `@`, `+`, `-`), `label`, and
+`text` (up to 8,000 characters). Send no room, authority or task fields. The opted-in tool result carries
+`late_answer: null` when no answer arrived by its return, or `late_answer: {report_id,label,text}` for an answer
+it already includes. A completed no-answer receipt remains valid under a preview; a present answer requires
+the whole saved tool result. `200 {ok: true, report_ref, delivery}` means `tool_result` (matching letter id, label
+and literal text in that saved result; no extra room row) or `handed_off` (queued to a live reader or admitted
+as a local turn; not model inclusion). An exact repeat rejoins; a conflicting report or
+permanent refusal leaves the local letter readable. On `429 retry_after_s`, a lost connection or an unavailable
+host, retry only that same report, not the outgoing letter. The named inbound row carries the accepted text,
+the non-owner author and letter id, not the call reference. It can reach the still-reading source root or a fresh
+local consideration in that room after normal completion. A live reader's ordinary request may proceed without
+the letter. Only one candidate on the bound route may carry it; no secret-derived identity is kept. The local turn
+keeps the original wallet and deadline, shares finite execution time, and answers only in that local room while
+leaving any connector binding there untouched. Unknown authority leaves the room copy, not a new send. An interrupted
+consideration has no ordinary Continue; new owner input starts normally.
+
+The old A2A-only `/chat/allocate-internal` plus `/chat/inject` with `wait_for_response` remains supported in 7.x.
+Use a connector's `/presence/turn` and correlated `/presence/work` for new A2A receipt integrations. The old A2A
+allocator/wait variant is scheduled for removal in 8.0; ordinary owner-bound chat injection is not part of that removal.
+
 ## Telling the owner something (`POST /notify`)
 
 A skill that must reach the owner with a finished sentence (a calendar's
@@ -1939,14 +2053,15 @@ The frozen ABI is documented in
 This section shows the practical shape.
 
 Extensions declare the PluginAPI generation they bind against in the manifest
-(PluginAPI 2.6; a payload declaring any 2.x minimum negotiates the host's 2.6, methods included; a tool row
-with `touches` needs "2.5" and a payload relying on `get_stop_state` "2.6", which an older host refuses before import):
+(PluginAPI 2.7; a payload declaring any 2.x minimum negotiates the host's 2.7, methods included; a tool row
+with `touches` needs "2.5", a payload relying on `get_stop_state` "2.6" and a connector that stops following work for
+finals "2.7", which an older host refuses before import):
 
 ```yaml
-plugin_api: "2.6"            # major strict; minor = required minimum
+plugin_api: "2.7"            # major strict; minor = required minimum
 # or, with required capabilities (closed set, validated per execution mode):
 # plugin_api:
-#   version: "2.6"
+#   version: "2.7"
 #   capabilities: [register_tool, subscribe_event]
 ```
 
@@ -2125,6 +2240,128 @@ def register(api):
     keys = api.get_settings(["OPENROUTER_API_KEY"])
 ```
 
+### Signing in to a service
+
+On a core whose Host Service `GET /identity` answers `sign_in_version: 1`, the core holds a skill's sign-ins to the
+services it declares: the owner signs in on the skill's card (choosing one of the issuer's clients first: personal and
+IT-approved clients sit side by side), and the skill asks the Host Service for its own tokens. The same `/identity` response advertises
+`sign_in_handover_version`: absent or `1` means the original handover contract; `2` adds unknown client returns,
+per-grant verified identity, exact handover receipts and consent-bound token requests. Use those additions only when that response advertises `2` or later.
+Declare each service in a top-level `sign_in` list of the manifest (never inside `contributes`; an older core keeps the key unused):
+
+```yaml
+sign_in:
+  - id: google                      # [a-z0-9_]{1,40}, unique within the skill
+    label: Google                    # shown as "Signed in to Google"
+    issuer: https://accounts.google.com   # HTTPS; metadata by RFC 8414, then OpenID discovery
+    # endpoints: {authorization: …, token: …, revocation: …, identity: …}   # only without published metadata
+    # identity: {subject: sub, label: email}                                 # only these two keys: the identity endpoint's field names
+    scopes: [openid, email, "https://www.googleapis.com/auth/calendar.events"]   # required, 1–64
+    scope_labels: {"https://www.googleapis.com/auth/calendar.events": "events"}
+    # Other spellings the provider may return for one declared scope (never requested, never a broader right):
+    scope_spellings: {email: ["https://www.googleapis.com/auth/userinfo.email"]}
+    optional_scopes: [{scope: "https://mail.google.com/", label: "Permanent deletion", default: false}]
+    authorize_params: {access_type: offline, prompt: consent}   # never response_type, client_id, redirect_uri,
+                                                                # state, code_challenge*, scope, login_hint, resource
+    accounts: many                  # one | many
+    optional: true                  # the skill works without it: no tray while nothing is signed in
+    notes: {client: "…", refused: "…", refresh_rejected: "…"}    # your words, shown verbatim (≤ 600 chars each)
+```
+
+A declaration carries no credentials (`client_id`/`client_secret` are refused): clients belong to each installation.
+`scope_spellings` lists alternate response words for one declared permission. The card shows each literal before
+consent; only primary words are requested. This is not permission to widen an earlier grant. `skill_preflight`
+reports invalid entries (`sign_in_schema`). Each skill and account has its own grant. A new sign-in and its return need the skill's current bytes admitted as the Host Service admits them (executable review in any mode, enabled); leaving one never does.
+The Host Service routes take the skill from `x-skill-token`, never from the body:
+
+- `GET /sign-in/accounts` → `{ok, services: [{id, label, accounts: [{key, label, subject, verified, state, reason?,
+  scope, client_label, via, consent, legacy_generation?, connection_id?}]}]}`. A store that cannot be read answers `SIGN_IN_UNAVAILABLE` (503), never an empty list; `legacy_generation` comes from the saved grant. A confirmed account's opaque `connection_id` stays through refreshes and its subject's later consent (any client); a sign-in after Disconnect gets another. A missing one proves nothing.
+- `POST /sign-in/token` `{service, account?, rejected?, required_scope?, min_valid?, connection_id?, consent?}` (account may be omitted when one is
+  signed in; `rejected`: the access token the provider just refused, refreshed once; `min_valid`: 0–300 seconds the
+  token must stay valid; `required_scope`: what a call lacked, within your declaration; `connection_id`: the one a write
+  expects, any other or none being `409 connection_changed`; `consent`: below) → `200 {ok, access_token,
+  token_type, expires_at (epoch seconds), scope, account: {key, label}, connection_id?, consent?}`; `409 {ok: false, code: "SIGN_IN_REQUIRED",
+  reason, service, account, note, hint}` (hand `hint` to the mind; `note` is your `refresh_rejected` text when that is
+  the reason); `503 SIGN_IN_UNAVAILABLE` (the provider did not answer; the grant is kept); `404 {ok: false, error, reason, hint}`
+  with no account to use (`unknown_service`, `unknown_account`, `account_required`, `not_signed_in`, `no_usable_account`; hand `hint` to the mind); `403` the token floor. Cache the token until `expires_at`; never log it.
+- `consent` is an opaque account-row reference: a refresh keeps it, a new sign-in or transfer replaces it, and it is never a pass. To bind a new write, take `key`, `connection_id` and `consent` from one current `GET /sign-in/accounts` row, send them as `account`, `connection_id` and `consent` to `/sign-in/token`, and accept the bearer only when the answer repeats that `consent`: a host without the v2 field ignores it and repeats nothing. A replaced consent returns `409 consent_changed` without a token or a provider request. A receipt records what happened to the transfer. It does not authorize an earlier write to continue under a new consent; do not replace that write's expected value.
+- `POST /sign-in/handover` `{service, recover?, clients: [{client_id, client_secret?, label_hint, return_hint: "loopback" |
+  "exact:<address>" | "unknown"}], grants: [{legacy_key, legacy_generation?, previous_legacy_generation?, label, subject?, client_id,
+  connection_id?, require_verified?: boolean, tokens: {refresh_token, access_token?, expires_at?, scope?}}]}` moves saved grants. Use
+  `unknown` when the registered return address was not kept: the client can maintain the moved grant, but a new sign-in chooses
+  only among clients with a known return address. Omission still means `loopback`. `require_verified: true` files a grant only with a provider-confirmed
+  subject and confirmed connection; send the same flag on recovery. A host with only the original handover contract
+  rejects `unknown` and ignores `require_verified`. Supply the old token's exact known scope, not today's requested scope. The host cannot import an unknown scope.
+  If the skill still holds a working grant that it has not offered, its ordinary renewal may supply the missing scope.
+
+  For a later handover after local consent changes, send its non-secret generation, the last generation the host
+  acknowledged (`null` for an untagged predecessor) and that transfer's `connection_id` if you have it. The host
+  replaces only a verified handover for the same subject on the recorded, still-current connection. A different
+  connection returns `connection_changed`; card consent and withdrawal take precedence.
+
+  A successful grant answer names the legacy key and result; without an exact verified generation, a repeat says
+  `already_present` only while the account holds that transfer's own grant under its handover consent, else `kept_newer`.
+  For a tagged, confirmed transfer it echoes the generation and recorded `connection_id`. A confirmed account can also
+  list its `legacy_generation`; `state` and `via`, if present, describe the account now. Never refresh a grant the host holds.
+
+  A `refused` grant adds `exchange`, which reports what the host knows about the offered refresh token:
+
+  - `none`: the request was refused before exchange, or its own refresh request never left. This includes a failed
+    identity check on a fresh bearer. There must be no other attempt, prior transfer of that generation or token,
+    or withdrawal of the service, recorded or still finishing; a subject the skill supplies cannot rule one out.
+    Only on the skill's own first fresh submission, and after its own withdrawal check, may it keep serving its
+    local copy. `none` alone proves neither that the copy works nor that it may be used.
+  - `resubmit`: nothing was exchanged, as for `none`, but a withdrawal of the service rules `none` out: only an unreachable
+    provider stopped a strict offer that carried no still-fresh bearer, its registration usable. Keep the local copy unused;
+    after its own withdrawal check, send the same offer again as an ordinary submission. The host files it only for the
+    account the provider names.
+  - `saved`: the provider became unreachable, but the matching attempt retains a renewal answer or, for
+    `require_verified`, the exact still-fresh bearer of an interrupted offer. That bearer is recorded as the attempt
+    of a tagged first transfer cut off before one when a withdrawal rules out `none`, if its expiry is known and its
+    registration usable: one sent in the same request is saved even while the provider cannot be reached, a changed
+    secret answers `registration_changed`. Send the same body with `recover: true`; recovery only checks its identity.
+  - `unknown`: do not repeat the exchange. Use the skill's sign-in card. An explicit rejection of a strict offer's
+    refresh is final for that offer (`refresh_rejected`, `exchange: unknown`); the host never refreshes it again.
+
+  `recover: true` imports no client and starts no transfer. The host returns a known outcome for the matching grant
+  without contacting the provider for that grant. Other entries in the batch can need the provider. Matching a
+  confirmed receipt for recovery or `require_verified` requires the same legacy key, generation and refresh token.
+  A strict offer must also match the recorded `client_id` when present. Recovery can file a retained renewal answer
+  or check the identity of the exact still-fresh bearer without refreshing it. With nothing to recover it returns
+  `handover_not_started` and `unknown`. A different token cannot displace an exchange that left or received an
+  answer (`handover_unconfirmed`).
+
+  Only a rate-limit `429` returned before reading the body carries `handover_started: false`. That fact is about
+  this request only. A submission whose answers need storage that cannot be read or written, or a lock it cannot
+  obtain, returns `503 SIGN_IN_UNAVAILABLE` (`sign_in_storage_unavailable`, `sign_in_busy`) and no receipts.
+- With v2, `POST /sign-in/handover {service, receipt: {legacy_key, legacy_generation}}` reads one strict offer's
+  outcome without contacting the provider. Keep a nonempty, immutable generation for each local offer. Send no
+  clients, grants or tokens. `200 {ok: true, receipt}` means the read succeeded. To confirm a transfer, match the
+  key and generation and check `receipt.result`; `ok` or a listed account alone does not confirm it.
+
+  `imported` identifies the grant that transfer installed and includes its original `consent` and `connection_id`,
+  including on exact recovery. `kept_newer` identifies a retained connection and supplies no `consent`. Older
+  confirmed records may say `already_present` without either classifying the original result or naming its consent.
+  None of these answers grants a later command access.
+
+  A saved pre-exchange refusal for this generation repeats its original `reason` with `result: refused` and
+  `exchange: none` only while there is no newer attempt, transfer, withdrawn earlier target or potentially related
+  withdrawal; a recorded `resubmit` repeats without that last condition. Otherwise infer neither. A missing or unconfirmed outcome returns `handover_unconfirmed` with
+  `exchange: unknown`. A recorded strict refresh rejection returns `refresh_rejected` with `unknown`; an incompatible
+  provider declaration returns `provider_approval_required` with `unknown`. `saved` occurs on submission or
+  recovery, never on this receipt read. If storage cannot be read or its lock cannot be obtained (`sign_in_busy`),
+  the read returns `503 SIGN_IN_UNAVAILABLE`, not a receipt. Retry the read, not the exchange.
+- Disconnect ends access locally. Revoke ends local access only after the provider confirms revocation for every
+  token. Once withdrawal proceeds, the host stops serving the old grant, records the withdrawal for the skill,
+  then removes the account file. Interrupted cleanup cannot make the old consent usable. A later explicit
+  sign-in finishes recording any outstanding withdrawal before it creates a new connection.
+
+  Each withdrawal adds one non-secret row to `sign_in_withdrawn.json` in the skill's state folder:
+  `{v: 1, accounts: [{service, account, subject?, legacy_key?, legacy_generation?, connection_id?, via, at}]}`.
+  The host does not replace an unreadable withdrawal record. Before serving a local grant on any core, check
+  this file; an unreadable file is unknown, never empty. A rolled-back skill that does not check withdrawals
+  cannot rely on this protection.
+
 ### Provider sign-in return
 
 Redirect to `<public base>/onboarding/static/provider-return.html`. This builtin page survives custom/disabled main UI
@@ -2139,9 +2376,11 @@ in your state directory. Register POST `oauth/complete`; the page forwards `{sta
 provider sent one. The skill validates its issued state, compares a present `iss` with the issuer it asked (RFC 9207;
 a provider that advertises `authorization_response_iss_parameter_supported` must send it), handles denial, exchanges
 credentials and stores tokens. The page neither validates grants nor owns tokens. A state `{v:1,mcp:<server>,nonce}` is
-the core's own remote MCP sign-in (`ouroboros/mcp_oauth.py`), posted to `/api/mcp/sign-in`.
+the core's own remote MCP sign-in (`ouroboros/mcp_oauth.py`), posted to `/api/mcp/sign-in`; `{v:1,sign_in:<skill>,
+svc:<service>,nonce}` is a declared service's sign-in, posted to `/api/sign-in`. A skill's own `oauth/complete` flow
+remains the path on cores without `sign_in_version`.
 Reply `{ok:true,email}` (or a human-readable `label`) only on confirmed connection; failures use `{ok:false,code,error}`.
-The page shows unconfirmed outcomes without automatic replay and clears its query from history when supported.
+The page shows unconfirmed outcomes without automatic replay and clears its query from history when supported; after a declared service's `answer_saved` (the provider's answer is kept, only the account read waits) or a remote MCP server's `not_sent` (stopped here before anything changed at the provider) it offers Finish sign-in, which sends the same return again from the page's memory on the owner's press.
 Use separate local disconnect and provider-wide revoke semantics; shared client configuration does not imply independent grants.
 
 ### Reading memory
@@ -2304,11 +2543,11 @@ For auto-height module CSS, prefer one owner of padding and box geometry between
 `overflow-y: auto` and feed scrollbar width back into wrapping; such CSS stays
 supported. For auto-height modules, the host bootstrap suppresses only
 document-viewport `overflow-y` below the ceiling and releases it at the ceiling;
-horizontal overflow stays the author's. The bootstrap re-measures in the next
-animation frame after a `ResizeObserver` notice, never inside its delivery,
-where a layout write can leave a change undelivered and the loop error would
-reach the fault channel as a widget script error (WebKit: `Script error.`); an
-author observer that writes layout in its own callback can raise the same error.
+horizontal overflow stays the author's. The bootstrap re-measures after a
+`ResizeObserver` notice, never inside its delivery, where a layout write can
+leave a change undelivered and the loop error would reach the fault channel as
+a widget script error (WebKit: `Script error.`); an author observer that writes
+layout in its own callback can raise the same error.
 
 #### The in-frame bridge (`window.OuroborosWidget`)
 
@@ -2570,8 +2809,9 @@ Rules every module author follows:
   Windows shell (WebView2) and ordinary Chromium browsers pause animation
   frames while hidden. No tick rate is promised. Keep work that must progress
   off `requestAnimationFrame`.
-- **Install and enable never start browser code.** The first visit to Widgets
-  does; nothing runs at app load.
+- **A visible placement starts the card.** Installation and enabling do not execute
+  browser code themselves. Showing Widgets, showing Costs for a card placed there,
+  or adding a card to either page while it is open can start it under its launch policy.
 
 What the host does today: all three policies are honoured — an `auto` card
 mounts when Widgets is shown and stops when the owner leaves, a `manual` card
@@ -2808,6 +3048,16 @@ together) into the card as its `src`, and refuses a card whose image,
 audio or video has no such source instead of showing it without one
 (media shown on a `condition_key` or aimed at a `target` is left to the
 renderer).
+
+### Your widget on Costs
+
+A widget about spending or subscription quotas may add `page: costs` to its
+`render` (any kind; the value is closed). Dashboard › Costs then runs the same
+live tab in a card of its own; Widgets stays its home, where the owner arranges
+it and sets its launch policy. Its frame runs only while Costs is shown, starts
+by itself only on the policy Costs has just read and keeps the owner's Stop made
+there; a new revision stops the old frame, then that policy decides. A core that
+predates the field passes it through unused, so the widget stays on Widgets alone.
 
 ### Async job error contract
 

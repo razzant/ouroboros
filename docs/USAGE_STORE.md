@@ -49,7 +49,7 @@ owner succeeds; no failure authorizes unsafe WAL continuation.
 |---|---|
 | `attempts` | one row per attempt id, UPDATEd on every transition; `revision` counts its transitions (the old `expected_seq` role). Typed columns for ids, state, attribution, timestamps (`ts_reserved`, `ts_dispatched`, `ts_final`, `ts_last`), money as canonical decimal text, tokens (NULL = not reported), caps, review/route attribution, local-answer owner; `weight` (1, or the folded attempt count of an imported aggregate); every other field verbatim in `extra`, so a row decodes to exactly what was written. Indexes: root, `(root, ts_last)`, group, task, the open set (partial: reserved/dispatched/unresolved and abandoned settlements), `(category, ts_last)`, review wave, route. |
 | `summaries` | `(scope, key)` → the full bucket the readers render: the cash 5-tuple as decimal text, state counts, unknown/priced/open/non-final counters, sessions and windows, processing summary, token sums with presence counts, physical calls, cache TTLs and the cap multiset; `accounted_num` (REAL) orders the costliest tasks and is never read as an amount. |
-| `bindings` | the earliest root/group cap binding (`BindingIndex` semantics: carried, `legacy_live`, `legacy_default`, explicit unlimited `None`). |
+| `bindings` | the earliest root/group cap binding (`BindingIndex` semantics: carried, `legacy_live`, `legacy_default`, explicit unlimited `None`); scope `root_cap` materializes each root task's earliest confirmed sourced root cap (finite or proven unlimited `None`) — or an ambiguous older root-cap record — apart from group-only first rows; scope `work_cap` is the one row a later write replaces: a started work's whole cap, by its group (§3). |
 | `dirty_owners` | task/root projection debt, indexed by its dirty revision; one entry per owner, removed with acknowledged debt. |
 | `one_shots` | the identity of single-row kinds (external dispatch, subscription session, legacy rows). |
 | `meta` | `schema_version`, `lock_tier`, the import provenance and the publication marker. |
@@ -96,8 +96,13 @@ network-bound runs inside it.
   that attempt or replace an already final price. This exception leaves the
   open-set/continuation ownership predicate unchanged.
 - `mark_dispatched` re-checks known spend against the global, root and group
-  limits and the owner Pause/admission fences in the same transaction. A
-  reached global limit refuses there, as at the reservation, only paid
+  limits and the owner Pause/admission fences in the same transaction. Reserve
+  records a request's independent root maximum apart from the original root
+  binding; both phases apply the minimum of that maximum and the then-current
+  root cap, when both exist. New reservations distinguish no request maximum
+  (`request_root_limit_usd: null`) from an older row with no such field;
+  dispatch does not widen an older row's ambiguous recorded root maximum.
+  A reached global limit refuses only paid
   admission (`usage_accounting.paid_admission`): the evidence that a
   subscription route bills is its own `model` summary's settled cash, read in
   that transaction only when it could decide.
@@ -110,6 +115,29 @@ network-bound runs inside it.
   or abandoned non-Claudexor row, and no abandoned row whose terminal/gone outcome is
   recorded; such a row stays at unknown price and is not polled, while its ONE late
   receipt stays open to an explicit writer.
+- `Txn.set_work_cap` writes one absolute whole-work cap from the checked conversational tool.
+  The owner can fix the amount, optionally naming a larger finite `delegated_max_usd` for
+  later Cyber Pro choices. With `choose_limit`, Cyber Pro chooses the current amount within
+  the cited owner's finite maximum. The effective amount and rationale are the integrator's
+  decision; `owner_decision` keeps the cited authority without an owner-chosen amount.
+  A newer confirmation of the same amount can replace the owner decision; replay returns the actual basis without a write.
+  The conversational binding checks both the addressed work's room and its canonical payer's
+  room before reading their owner directions. Main may address both; a Project may address
+  only its own room. Active and retained mail use the same routing normalization: legacy
+  mail without a recorded kind stays visible with unknown authorship, never as authorization.
+  If applicable directions are new to the deciding mind, the call returns them without a write,
+  even with Safety Off. The mind reads them and can cite `instructions_sha256` with its next
+  decision. That digest identifies the read, not authority; exact directions already held
+  need no added turn and the owner need not confirm again. The writer rechecks the rooms
+  and instructions and compares the same group inside its money transaction. Before the first attempt it can use the
+  frozen task or accepted pooled receipt, but a schedule occurrence awaiting dispatch can
+  still be republished and is not a target. Its published dispatch binding survives later
+  changes to the template. The cap adds no attempt, changes no original binding and resumes nothing.
+  Admission and money readings apply it on eligible configured root and group axes in one
+  transaction. Read-side decisions retain unrounded cap and remaining room. An ordinary tie
+  can point to work-cap control; a reached independent fence (including a request maximum)
+  keeps its remedy even if another observed margin is smaller. An exhausted original cap with
+  an unverified exported decision calls for verifying that record, not another raise.
 - `Txn.record_evidence` merges only physical-failure and opaque provider-binding
   evidence under a revision check. These additive `extra` fields require no
   column/index migration on an existing database. The original physical failure,
@@ -158,6 +186,12 @@ unavailable reads keep debt. An absent optional carrier alone emits nothing.
 Missing/nonterminal owners await their terminal write without repeated projection
 attempts. Fold/import/rebuild derive debt only for still-open monetary custody,
 never a burst over closed history; no new poller or monetary backfill.
+
+Continue checks the effective group ceiling and its known spend in one money
+read. Review wave admission prices seats outside the store lock, then compares
+global, root and group in one read, disclosing holds separately; `binding_source`
+and `billing_group_id` identify the effective fence. A wave admission does not
+reserve money or substitute for the per-seat send checks.
 Money-only passes select dirty revisions newer than the saved marker plus present
 owners. A successful/equal projection calls `ack_dirty_owner(owner_id, revision)`;
 newer receipts, failures, missing results and live ownership keep debt. One batched
@@ -311,6 +345,17 @@ A completed store is never imported again; later starts compare only the
 journal's size with the imported one (no hashing) and report a journal an
 older release appended to after a rollback as `changed_after_import`: those
 rows are not merged (the export below keeps money exact across a downgrade).
+An already-completed store created by an intermediate SQLite release without
+`meta.import.work_caps_export` reconciles any exported work caps once during
+`migrate_from_journal` (§7), leaving spending and newer decisions intact and
+adding nothing to ordinary reads.
+An existing completed store without `meta.import.root_caps` runs a once-only
+`root_cap` backfill during `migrate_from_journal` under the store write lock
+(preserving original root/group bindings, spend, unknowns and one-request
+maxima, preventing preemption by later writes, and recording ambiguous older
+root-cap records rather than widening them); before that upgrade completes,
+ordinary reads never scan `attempts` and hold only a root whose `root` binding
+lacks a root cap while its summary records a finite root cap.
 An unpublished build is discarded and redone. Timing and counts go to
 `logs/supervisor.jsonl` (`usage_store_migration`). The journal and
 `archive/usage_ledger/` stay as evidence; nothing ordinary reads them, and
@@ -330,15 +375,60 @@ journal the import kept is set aside as `usage_attempts.jsonl.pre-export-<UTC>`;
 a journal that changed after the import (its sha256 is neither the imported nor
 the exported one), or one without a store, is never overwritten: move it aside
 by hand to export (the rows an older release added after the import are not in
-the store).
+the store). Keep `state/usage_import_watermark.json` with the journal: its
+`exported_work_caps` carries amended group ceilings even without attempts (and
+keeps pending `unverified_caps` separate from active `caps`). The watermark
+binds the exact export prefix (a bare 0-byte export matches only a present empty
+journal or an intermediate store's corresponding recorded import of an empty
+journal, never an arbitrary nonempty changed journal or an archived empty
+predecessor, since validated baseline headers require a nonempty source); a cold
+re-import can also prove a nonempty prefix through earlier whole journals named
+by validated baseline headers (plain or packed `.xz`, checked by original byte
+size and hash). Fold the live monetary rows once, then restore the decisions
+separately.
+If an intermediate SQLite release already imported that journal without
+applying `exported_work_caps`, the first updated `migrate_from_journal` boot
+reconciles it once (skipping an exporting store) from `meta.import`: an exact
+`source` match (`present`, `size`, `sha256`), the kept journal's verified
+imported prefix matching `meta.import.source` and a nonempty export prefix, or
+the recorded `meta.import.header` baseline archive chain (plain or `.xz`). It
+inserts only missing `work_cap` bindings, preserves later spend and any newer
+real SQLite `work_cap` decision, and stamps `meta.import.work_caps_export`
+(including `null` when no exported caps exist) so later starts are no-ops
+without re-reading the watermark or journal. On an already-complete store, a
+legacy watermark read failure or a missing watermark after export does not break
+established money: `migrate_from_journal` records `meta.import.work_caps_export`
+as pending, discloses `work_caps_reconcile`, and leaves regular usage under
+proved original limits without scanning files. While reconciliation is pending
+(or has not run on an intermediate import), read-only target checks and work-cap
+writers never trigger recovery or read export files and refuse new amendments
+that would overwrite an unpopulated group binding (`work_cap_reconcile_pending`),
+and export refuses a missing post-export watermark; `migrate_from_journal` is
+the only recovery owner and reconciles the store and clears the pending marker
+once the watermark is readable again.
+If a valid journal or imported store cannot prove its relation to a readable
+export watermark, its money stays available. Missing listed groups retain the
+unverified amendment (`unverified_export`), and may spend only under a verified
+finite cap no wider than their original; otherwise admission for that group
+reports `work_cap_original_unavailable`. A subsequent export carries those
+pending `unverified_export` records separately (`unverified_caps`), preserving
+their original payload and inactive state across export, import and boot without
+upgrading them merely because the new journal digest matches (a newer real
+SQLite decision still wins). Losing `state/usage_import_watermark.json` before
+the updated boot, or an intermediate release re-exporting a mutated store into a
+journal that no longer shares the export prefix, is unsupported (the latter
+degrades conservatively to `unverified_export`). `export_refusal` (switch
+preflight) and `export_journal` enforce the same watermark and work-cap
+prerequisites before freezing, with a transaction-time recheck under the write
+lock.
 
 The export is one plan committed before any file moves. Under the write lock it
 computes the journal bytes and commits an export mark (`meta.export`: the
 journal's size, sha256 and row count, the names it will retire and set aside,
-the `state.json` marker it replaces) in the store itself. While that mark
+the `state.json` marker it replaces, and any watermark change) in the store itself. While that mark
 stands every write hold is refused typed (`UsageExportInProgress`; reads still
 serve), so a late writer cannot land a row the journal does not carry. Only then does it set the
-kept journal aside, write the new one, align the marker and rename the store.
+kept journal aside, write the new one, persist the watermark, align the marker and rename the store.
 An interrupted export is resumed from the mark (the journal bytes are
 recomputed and must match the recorded digest; a partial own journal is told
 from a foreign one by the mark's set-aside record, never by size; a retired

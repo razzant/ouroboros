@@ -311,6 +311,9 @@ def prepare_terminal_send_event(
         )
     usage["delegate_terminal_reconciliation"] = custody_audit
     origin = str(usage.get("terminal_origin") or "")
+    if (not presence and task.get("_is_direct_chat") and origin == TERMINAL_ORIGIN_MODEL_FINAL
+            and (work := usage.get("about_work_task_id"))):
+        send_event.setdefault("progress_meta", {})["about_work_task_id"] = work
     notice = str(usage.get("terminal_provider_notice") or "")
     # One voice: the host disclosure stays a typed field OF THE RESULT (CLI
     # stderr, --jsonl, parent handoff, reviewers, synthesis, the child-result
@@ -375,16 +378,22 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
     origin = str(usage.get("terminal_origin") or "")
     if origin in _STAMPED_TERMINAL_ORIGINS:
         fields["terminal_origin"] = origin
+    if isinstance(stamp := usage.get("peer_reply"), dict):  # what a letter root's final gives its sender (peer_letters)
+        fields["peer_reply"] = dict(stamp) if origin == TERMINAL_ORIGIN_MODEL_FINAL else {}
     path = str(usage.get("terminal_salvage_path") or "")
     if path:
         fields["terminal_salvage_path"] = path
     if usage.get("wake_silent") is True:
         fields["wake_silent"] = True
+    if usage.get("presence_explicit_silence") is True:
+        fields["presence_explicit_silence"] = True  # a conscious accepted silence with no delivered answer
     if usage.get("wake_summary"):
         fields["wake_summary"] = str(usage["wake_summary"])  # a self-started run's name, never over a title
         if summary_names_run(metadata, task_contract) and not str(title or prior.get("title") or "").strip():
             fields["suggested_name"] = first_sentence(fields["wake_summary"])
         fields.update({"fold_read": True} if usage.get("fold_read") is True else {})  # it stands for what was read
+    from ouroboros.memory_reading import finish_stamp  # what this work was shown whole or read; empty: nothing
+    fields["read_spans"] = finish_stamp(usage)
     if usage.get("owner_message_sent") is True:
         fields["owner_message_sent"] = True
     if usage.get("terminal_plan_review_open") is True:
@@ -440,9 +449,9 @@ def deliver_final_message_live(
     tid = str(task_id or "")
     final = fallback = None
     for event in pending_events:
-        # A mid-task reply or Main notice is never the answer, even with no final after it.
+        # A mid-task reply, relay return or Main notice is never the answer, even with no final after it.
         if (isinstance(event, dict) and event.get("type") == "send_message"
-                and event.get("system_type") not in ("proactive_message", "main_notice")):
+                and event.get("system_type") not in ("proactive_message", "main_notice", "relay_reply")):
             fallback = event
             if str(event.get("task_id") or "") == tid:
                 final = event
@@ -660,6 +669,15 @@ def completion_source_projection(
     return {**payload, **({"reason": reason} if reason else {})}
 
 
+# The store's own class marker for a retained focus answer (``source_handles/
+# context_checkpoints/focus_source_<reader>-<sha256>.md``): it only names WHICH
+# retained category a ref addresses — no right, reader or project is ever
+# derived from a name. One definition: the projection's glob and the admission
+# helper (``recent_tasks.retained_focus_source_refusal``) both read it.
+FOCUS_SOURCE_CATEGORY_DIR = "source_handles/context_checkpoints"
+FOCUS_SOURCE_NAME_PREFIX = "focus_source_"
+
+
 def focus_source_projection(
     drive_root: Any, task_id: str, result: Dict[str, Any], start_char: Any = None, end_char: Any = None,
     sha256: str = "",
@@ -684,14 +702,15 @@ def focus_source_projection(
         from fnmatch import fnmatch
         from ouroboros.evidence_packs import handle_info, packed_handle_names
         try:  # loose handles and this task's packed ones answer the same selector
-            store = task_artifact_dir_path(drive_root, str(task_id), create=False) / "source_handles" / "context_checkpoints"
-            matches = {p.name for p in store.glob(f"focus_source_*-{wanted}.md") if not p.is_symlink()}
-            matches.update(n for n in packed_handle_names(drive_root, str(task_id)) if fnmatch(n, f"focus_source_*-{wanted}.md"))
+            store = task_artifact_dir_path(drive_root, str(task_id), create=False) / FOCUS_SOURCE_CATEGORY_DIR
+            name_prefix = FOCUS_SOURCE_NAME_PREFIX
+            matches = {p.name for p in store.glob(f"{name_prefix}*-{wanted}.md") if not p.is_symlink()}
+            matches.update(n for n in packed_handle_names(drive_root, str(task_id)) if fnmatch(n, f"{name_prefix}*-{wanted}.md"))
         except (OSError, ValueError):
             matches = set()
         if len(matches) != 1:
             return {**unavailable, "reason": "source_unavailable", "requested_sha256": wanted}
-        selected_handle_path = f"source_handles/context_checkpoints/{matches.pop()}"
+        selected_handle_path = f"{FOCUS_SOURCE_CATEGORY_DIR}/{matches.pop()}"
         try:
             info = handle_info(drive_root, str(task_id), selected_handle_path) or {}
         except ValueError:
@@ -810,8 +829,9 @@ def build_sealed_final_package(result_row: Any, final_text: str) -> Dict[str, An
         "completion_observations": row.get("completion_observations") or {"status": "unavailable"},
         **({"terminal_host_notice": terminal_host_notice_text(row)} if terminal_host_notice_text(row) else {}),
     }
-    if row.get("wake_silent") is True:  # no model words were submitted; the retained ones are not speech
-        package.update(final_result_text="", wake_silent=True, internal_terminal_text=str(row.get("result") or ""))
+    if row.get("wake_silent") is True:  # the finish submitted no words; the retained ones are not speech
+        package.update(final_result_text="", wake_silent=True, internal_terminal_text=str(row.get("result") or ""),
+                       **({"owner_message_sent": True} if row.get("owner_message_sent") is True else {}))
     if is_presence_task(row):
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         # Remember the event-time body, not today's replay policy: a historical
@@ -863,7 +883,10 @@ def sealed_final_prompt_section(sealed_final: Dict[str, Any] | None) -> str:
     heading, presence_facts, internal_text = "Final result text (submitted for delivery):\n", "", ""
     presence = sealed_final.get("presence_delivery")
     if sealed_final.get("wake_silent") is True:
-        heading, final_text = "Final result text:\n", "(none: the run finished silently; no model words were submitted)"
+        heading, final_text = "Final result text:\n", (
+            "(none from the finish: this run sent its own messages earlier; its silent finish sent none)"
+            if sealed_final.get("owner_message_sent") is True else
+            "(none: the run finished silently; no model words were submitted)")
         if raw := str(sealed_final.get("internal_terminal_text") or ""):
             internal_text = "Internal run result (retained, never sent to the owner):\n" + truncate_review_artifact(
                 raw, limit=_SEALED_FINAL_TEXT_PROMPT_CHARS) + "\n"

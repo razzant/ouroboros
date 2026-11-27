@@ -1,7 +1,7 @@
 """One-shot facts at the finish door and the answer they returned (leaf of ``loop_delivery``).
 
 The pre-delivery notice, a red check, children's results and a non-blocking result review's outcome each return an
-answer once. Like the routeless note they leave the next answer fresh: prose after them is delivered as written,
+answer once. Like an owner follow-up they leave the next answer fresh: prose after them is delivered as written,
 without a selection only ``finish_task`` could make (on the stand Qwen3.5-9B repeated its report instead, and its
 turn never ended). Three rules keep that honest for every model:
 
@@ -9,8 +9,8 @@ turn never ended). Three rules keep that honest for every model:
   answer) replaces the answer the facts returned, that answer is shown as an interim message first, unless the new
   answer is it or contains it whole, and the task's result keeps it apart from the final's bytes for its readers
   outside the room (``DISPLACED_ANSWER_KEY``);
-* a silent selection stays silent: prose after the facts inherits it, and only an explicit ``finish_task`` without
-  ``silent`` speaks;
+* a silent selection stays silent: prose after the facts inherits it, except that it may be sent when its human
+  awaits a reply (a run with no place binding), and an explicit ``finish_task`` without ``silent`` speaks;
 * work after the facts (evidence changed) leaves the next prose a fresh answer bound to the new evidence; a selection
   by ``answer_sha256`` names the old answer with its old evidence, so changed evidence returns once and a repeated
   selection then delivers until new work.
@@ -23,8 +23,9 @@ from typing import Any, Dict
 
 FACTS_NOTED_CONTROL = "delivery_facts_noted"
 FACTS_NOTED_LINE = "Your next answer is delivered as written, so make it the whole answer."
-# After a silent selection: the next prose inherits that silence, so the model is told before it writes (review 8).
-FACTS_NOTED_QUIET = " You chose silence, so it stays unspoken; only finish_task without silent speaks."
+# After a silent selection: the next prose inherits that silence (owed replies aside); told first (review 8).
+FACTS_NOTED_QUIET = (" You chose silence, so it stays unspoken, except that prose may be sent if your human awaits a "
+                     "reply; finish_task without silent speaks.")
 # Trace key of the answers later finals displaced, in order and without repeats: the result keeps each apart from the
 # final's bytes, for consumers outside the room (``task_finalization.build_completion_observations``,
 # ``displaced_answer_note``).
@@ -37,13 +38,15 @@ def _loop():
     return loop
 
 
-def note_delivery_facts(tools: Any, limit_ctx: Any, llm_trace: Dict[str, Any]) -> None:
-    """Leave the next answer fresh after one-shot facts; inside an existing control episode arm control as before."""
+def note_delivery_facts(tools: Any, limit_ctx: Any, llm_trace: Dict[str, Any], *, line: str = FACTS_NOTED_LINE) -> None:
+    """Leave the next answer fresh after one-shot facts; inside an existing control episode arm control as before.
+    ``line`` tells the mind so; a facts row that already says what the next answer becomes (the record note) needs
+    none."""
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
     if candidate is None or candidate.control_episode_seen:
         return _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
-    _loop()._append_or_merge_user_message(limit_ctx.messages,
-                                          FACTS_NOTED_LINE + (FACTS_NOTED_QUIET if candidate.quiet else ""))
+    if line:
+        _loop()._append_or_merge_user_message(limit_ctx.messages, line + (FACTS_NOTED_QUIET if candidate.quiet else ""))
     candidate.finalization_control, tools._ctx._delivery_control_required = FACTS_NOTED_CONTROL, False
     tools._ctx._completion_pair_appended = tools._ctx._completion_pair_private = True  # no hold notice follows
     _loop()._publish_delivery_candidate(tools, candidate, llm_trace)

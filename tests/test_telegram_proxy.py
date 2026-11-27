@@ -108,7 +108,8 @@ def test_without_a_proxy_both_transports_stay_direct_and_never_follow_redirects(
     assert client.proxy is None
     with pytest.raises(telegram_api.TelegramTransportError, match="invalid JSON during getMe"):
         asyncio.run(client.call("getMe"))
-    assert asyncio.run(client._download_bytes("documents/file_1.pdf")) == b""
+    with pytest.raises(RuntimeError, match="Telegram file download returned HTTP 302"):
+        asyncio.run(client._download_bytes("documents/file_1.pdf"))
 
     assert [(kw["proxy"], kw["follow_redirects"], kw["trust_env"]) for kw in seen] == [(None, False, False)] * 2
     # Each 302 stayed an answer from Telegram; the redirect target was never requested.
@@ -217,7 +218,7 @@ class _RecordingClient:
         return caption
 
     async def call(self, _method, **_kwargs):
-        return {"ok": True, "result": {"id": int(_TOKEN.split(":")[0]), "is_bot": True, "username": "test_bot"}}
+        return {"ok": True, "result": {}}
 
     def __getattr__(self, _name):
         async def sent(*_args, **_kwargs):
@@ -269,7 +270,6 @@ def test_every_bridge_client_carries_exactly_the_local_proxy(tmp_path, monkeypat
         if index in {1, 2, 3, 4, 5, 6}:  # mirrored rows, excluding lifecycle and quiz-state edits and typing
             assert callable(options.pop("on_message"))
             assert options.pop("reply_to_message_id") == 0
-        assert callable(options.pop("binding_guard"))
         assert options.pop("binding") is plugin.binding_for(api)  # one accepted token for every path
         assert options.pop("generation") == plugin.binding_for(api).snapshot()[1]
         assert options == {"trust_env": False, "proxy": local_proxy,

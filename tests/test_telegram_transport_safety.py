@@ -481,7 +481,6 @@ def test_plugin_honours_env_proxies_only_in_a_proxy_routed_server_process(
     assert options.pop("origin_label") == ""  # an event without the host's label stays unlabelled
     assert options.pop("binding") is plugin.binding_for(api)  # the accepted token, checked before each request
     assert options.pop("generation") == plugin.binding_for(api).snapshot()[1]  # one snapshot per client
-    assert callable(options.pop("binding_guard"))  # live owner/api_base guard checked before each request
     assert options == {"trust_env": expected, "proxy": None,
                        "api_base_url": "https://api.telegram.org",
                        "files_dir": None}

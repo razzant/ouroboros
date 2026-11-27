@@ -1,4 +1,5 @@
 import { isTerminalTaskDetail, taskPresentation, taskTerminalSummary } from './log_events.js';
+import { cardExecutorChip } from './executor_card_facts.js';
 import { fmt, tr, tx } from './i18n.js';
 import { waitFacts } from './question_presentation.js';
 import { strokeIcon } from './page_icons.js';
@@ -15,6 +16,26 @@ export function liveCardCountBits(notes, children) {
     if (notes >= 2) bits.push(fmt('{n} notes', { n: notes }));
     if (children) bits.push(fmt(children === 1 ? '{n} child' : '{n} children', { n: children }));
     return bits;
+}
+
+// The count beside Details says those bits for the card's own notes and its direct child cards (a nested card
+// counts its own), written only on change.
+function directSubagentCount(record) {
+    return record?.subagentsEl?.querySelectorAll(':scope > .chat-live-card.subagent').length || 0;
+}
+
+export function updateLiveCardCount(record) {
+    if (!record?.countEl) return;
+    const children = directSubagentCount(record);
+    // Children keep the card's opened facts and notes short (style.css), so they stay in reach below them.
+    const flagged = 'children' in record.root.dataset;
+    if (children > 0 && !flagged) record.root.dataset.children = '1';
+    else if (!children && flagged) delete record.root.dataset.children;
+    const bits = liveCardCountBits(record.items.length, children);
+    const hidden = bits.length === 0;
+    const text = bits.join(' · ');
+    if (record.countEl.hidden !== hidden) record.countEl.hidden = hidden;
+    if (record.countEl.textContent !== text) record.countEl.textContent = text;
 }
 const CHIP = {
     finalizing: () => tr('task.chip.finalizing', 'Finalizing…'),
@@ -235,6 +256,8 @@ export function censusTaskPhase(activity, detail = null, connected = true, { wai
 function recordPhase(record = {}, terminalPhase = 'done') {
     const finishingChild = record.isSubagent && record.finalizingHold;
     const view = finishingChild && !record.workView?.finalizing ? null : record.workView;
+    if (!record.finished && record.root?.dataset?.portal === '1' && record.parkedPhase === 'unknown'
+        && !record.finalizingHold && record.observedOutcome && !record.cancelPendingPolicy) return outcomeView(record.observedOutcome);
     const phase = record.isSubagent ? view?.phase || record.censusPhase || '' : record.censusPhase || 'working';
     // The card's one parked word also represents an optional question gap;
     // its observed census phase distinguishes that from unknown activity.
@@ -262,6 +285,10 @@ function recordPhase(record = {}, terminalPhase = 'done') {
 // The private chat record is an adapter, never the shared task-fact contract.
 export function desiredLiveCardPhase(record = {}, terminalPhase = 'done') {
     const view = recordPhase(record, terminalPhase);
+    if (record.expiredPark && !record.finished && record.parkedPhase === 'budget_paused' && !record.cancelPendingPolicy && !record.workView) {
+        return { phase: view.phase, text: tr('task.status.deadline_expired', 'Deadline expired'),
+            className: view.className, ...chipLook(view), ...(view.secondary ? { secondary: view.secondary } : {}) };
+    }
     // A detached work (FINAL_DESIGN D4) that is plainly running says so beside the chip: a fact the
     // chip's own words do not carry. Every other state keeps the chip's established wording.
     const secondary = view.secondary || (record.detached && !record.finished && view.text === CHIP.working()
@@ -279,11 +306,11 @@ function chipLook(view) {
 /**
  * Keep an unfinished card's chip on its task's census phase (`/api/state`
  * `active_chat_activities`): paused/pausing/unknown park it until a positive
- * phase releases it. true when the chip changed.
+ * phase releases it. true when the chip changed or a crossed attempt moved its line.
  */
-export function syncParkedPhase(record, phase = '', activity = {}) {
+export function syncParkedPhase(record, phase = '', activity = {}, observedFacts = null) {
     if (!record || record.finished) return false;
-    const facts = censusTaskFacts({ ...activity, phase: activity.phase || phase });
+    const facts = observedFacts || censusTaskFacts({ ...activity, phase: activity.phase || phase });
     if (facts.outcome) record.observedOutcome = facts.outcome;
     if (facts.finalizing) record.finalizingHold = true;
     if (activity._activityUnconfirmed) phase = 'unknown';
@@ -293,6 +320,8 @@ export function syncParkedPhase(record, phase = '', activity = {}) {
     const parked = ['budget_paused', 'budget_pausing', 'unknown', 'queued', 'owner_wait'].includes(observed) ? observed : '';
     const cause = ['budget_paused', 'budget_pausing'].includes(parked) ? String(activity.pause_cause || '') : '';
     record.parkedPhase = parked;
+    record.expiredPark = Boolean(activity.close_expired || activity.deadline_expired === true
+        || activity.attention_reason === 'deadline_expired');
     record.pauseCause = cause;
     record.pauseReason = cause ? activity.pause_reason || '' : '';
     record.censusPhase = phase;
@@ -300,8 +329,11 @@ export function syncParkedPhase(record, phase = '', activity = {}) {
     record.modelActivity = activity.model_activity || null;
     record.finishingReviews = parked === 'budget_paused' && Boolean(activity.finishing_reviews);
     record.detached = activity.detached === true;  // a detached work's census row (CONTRACTS K7/K8), in any room
+    const moved = Boolean(record.isSubagent && advanceChildAttempt(record, validAttempt(activity.task_attempt)).changed);
     const desired = desiredLiveCardPhase(record);
-    return setLiveCardPhase(record, desired.phase, desired.text, desired.className, desired.secondary);
+    const changed = setLiveCardPhase(record, desired.phase, desired.text, desired.className, desired.secondary);
+    if (moved) record.paintMeta?.();  // its line's clock and executor model moved with the attempt
+    return changed || moved;
 }
 
 // A fresh frame can settle a gap. An exact member projection still owns its published word and reason. true when the
@@ -314,6 +346,85 @@ export function observeChildPhase(record, phase) {
         syncParkedPhase(record, phase);
     }
     return true;
+}
+
+const validAttempt = (n) => (Number.isSafeInteger(n) && n >= 0 ? n : null);
+
+export function resetChildStart(record) {
+    if (!record) return;
+    record.startedAt = record.interruptedAt = 0;
+    record.startedAttempt = record.childAttempt = record.interruptedAttempt = null;
+    record.childRetried = false;
+}
+
+function validChildStart(record, attempt, at) {
+    if (!(at > 0) || at <= (record.interruptedAt || 0)) return false;
+    if (attempt === null) return !record.childRetried && (record.childAttempt === null || record.childAttempt <= 1);
+    return (record.childAttempt === null || attempt === record.childAttempt)
+        && (record.interruptedAttempt === null || attempt > record.interruptedAttempt);
+}
+
+function clearInvalidChildStart(record) {
+    if (!record?.startedAt || validChildStart(record, record.startedAttempt, record.startedAt)) return false;
+    record.startedAt = 0;
+    record.startedAttempt = null;
+    return true;
+}
+
+// A crossed boundary retires the start clock and the previous attempt's live executor report together
+// (executor_card_facts.cardExecutorChip): the line shows the frozen request until the new attempt reports.
+function retireExecutorReport(record) {
+    const placed = cardExecutorChip(record, null);
+    if (!record.executorChip || placed === record.executorChip) return false;
+    record.executorChip = placed;
+    return true;
+}
+
+function advanceChildAttempt(record, attempt) {
+    if (!record) return { ok: true, changed: false };
+    if (attempt === null) return { ok: true, changed: retireExecutorReport(record) };
+    const prior = record.childAttempt;
+    if (prior !== null && attempt < prior) return { ok: false, changed: false };
+    if (prior !== null && attempt > prior) record.childRetried = true;
+    record.childAttempt = attempt;
+    const cleared = clearInvalidChildStart(record);
+    return { ok: true, changed: retireExecutorReport(record) || cleared };
+}
+
+// Reconcile a child's start clock with its census member view (`queue_attempt`, 0 valid). Returns true when a held
+// start was retired, so `applyCardWorkViews` repaints the meta line even when the chip stayed `Working` across retries.
+export function observeChildMember(record, view) {
+    if (!record || record.isSubagent === false || !view) return false;
+    const attempt = validAttempt(view.queue_attempt);
+    let { changed } = advanceChildAttempt(record, attempt);
+    if (attempt === null && view.phase === 'queued'
+            && record.workView && !['queued', 'unknown'].includes(record.workView.phase)) {
+        record.childRetried = true;
+        const cleared = clearInvalidChildStart(record);
+        changed = retireExecutorReport(record) || cleared || changed;
+    }
+    return changed;
+}
+
+// The running agent's own typed note (agent.py `subagent_started`, with its host time and `task_attempt` when known) is
+// the one start a child's current attempt has. When an attempt boundary was crossed and a frame's attempt is older or
+// missing (ambiguous), neutral `since` wins over claiming a retry start.
+export function observeChildStart(record, frame) {
+    if (!record) return;
+    const attempt = validAttempt(frame?.task_attempt), at = Date.parse(String(frame?.ts || ''));
+    if (String(frame?.subagent_event || '').toLowerCase() === 'interrupted') {
+        record.childRetried = true;
+        if (attempt !== null) record.interruptedAttempt = Math.max(record.interruptedAttempt ?? -1, attempt);
+        else if (at > 0) record.interruptedAt = Math.max(record.interruptedAt || 0, at);
+        else { record.startedAt = 0; record.startedAttempt = null; }
+        advanceChildAttempt(record, attempt);
+        clearInvalidChildStart(record);
+        return;
+    }
+    if (!advanceChildAttempt(record, attempt).ok) return;
+    if (frame?.system_type !== 'subagent_started' || !validChildStart(record, attempt, at)) return;
+    record.startedAt = record.startedAttempt === attempt ? Math.max(Number(record.startedAt) || 0, at) : at;
+    record.startedAttempt = attempt;
 }
 
 // A live admission can fill a child's unknown phase, never override its later state. A leaf's

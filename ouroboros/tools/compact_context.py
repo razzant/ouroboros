@@ -81,27 +81,58 @@ def _handed_over(row) -> bool:
                                                                                    LATE_ANSWER_NOTES_NAME}
 
 
+def _mark_changes_row(row) -> bool:
+    """A journal-backed mark-change row: the host states each changed mark's latest change in one typed row. It is an
+    arrival (not an owner row and not a first-request host row), so an ordinary fold may take it."""
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
+    from ouroboros.mark_anchors import MARK_CHANGES_KIND
+
+    return row.get(HOST_CONTEXT_KIND_KEY) == MARK_CHANGES_KIND
+
+
 def standing_rows(messages: list) -> dict:
     """Positions that stand through an ordinary fold (default selectors), each with the position of the note whose
     own rows they are (None for the start). One walk; no content is hashed or validated and no call is parsed (it
     runs whenever a round's facts row is written).
 
     The start: every row between the assignment and the model's first answer (or a host source view, whichever comes
-    first), typed or not, except capsules and the accounts handed over for the mind to fold (``_handed_over``), which
-    an ordinary fold takes as before. Then, in order: a note (a capsule that is not a host source view) is
-    remembered by its unit id; a start row, owner words or a row that is no unit continue the walk; a lone
-    ``compact_context`` call with its result is a note's own call when the host's receipt row in its range (up to the
-    next assistant row or capsule) names that note as the one its request wrote (``receipt_note``): the call, its
-    result and the rest of that range (the input of the request sent after that fold) stand, owned by that note,
-    unless something the host will fold later arrived in that round (a handed-over account or a roster note); then
-    that fold leaves nothing that stands. A refused or no-op call, a transfer that reused a note, a fold made before
-    receipts named their note, a fold that left something foldable between its note and its call or shared its row
-    with another call, and a reviewer session's fold (its notice is not the host's receipt row) leave nothing that
-    stands. Anything else a full fold takes (a tool unit, prose, a host source view, a handed-over account) ends the
-    walk."""
+    first), typed or not, except capsules and the accounts handed over for the mind to fold (``_handed_over``); a
+    journal-backed mark-change row (``_mark_changes_row``) ends that block: it is an arrival, not one of that
+    request's own rows, and the mark and its tail there neither stand nor are replayed: the recurring rows after
+    it in that first block (the facts, the clock) may be rewritten, and a capability change the dispatch adds
+    once is checkpointed on a fold, not regenerated. Then, in order: a note (a capsule that is
+    not a host source view) is remembered by its unit id; a
+    start row, owner words or a row that is no unit continue the walk; a lone ``compact_context`` call with its result
+    is a note's own call when the host's receipt row in its range (up to the next assistant row or capsule) names that
+    note as the one its request wrote (``receipt_note``): the call, its result and the rest of that range (the input
+    of the request sent after that fold) stand, owned by that note, up to a mark-change arrival in that range: that
+    arrival ends what stands there, and the round's own tail after it neither stands nor is replayed (recurring
+    facts and clock may be rewritten, a one-time capability notice checkpointed on a fold, not regenerated); unless
+    something the host will fold later arrived in that round (a handed-over account or a roster note); then that fold
+    leaves nothing that stands. A refused or no-op call, a transfer that reused a note, a fold made before receipts
+    named their note, a fold that left something foldable between its note and its call or shared its row with another
+    call, and a reviewer session's fold (its notice is not the host's receipt row) leave nothing that stands.
+    Anything else a full fold takes (a tool unit, prose, a host source view, a handed-over account) ends the walk.
+
+    A mark-change arrival is not one of those: it ends what stands at its own position (the first block above, a
+    fold's own range below) and never stands itself. Before the first answer only the recurring rows after it pass
+    (the facts, the clock, a one-time capability change): they neither stand nor end the walk, so a later clean fold
+    is still found, while any other typed row, a barrier or a row of the mind's own (its reply, its evidence) still
+    ends it. A later arrival keeps its former fold-range handling. The host states an arrival of the fold's own
+    round after that fold's receipt, so an
+    arrival before a fold's call belongs to an earlier round: that fold's round brought nothing foldable and its
+    call, result and receipt stand."""
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_ROW_KINDS
+    from ouroboros.capability_breakage import CHANGE_KIND
     from ouroboros.context_compaction import _is_dialogue_prose_row
+    from ouroboros.loop_messages import CONTEXT_FACTS_NAME
     from ouroboros.peer_roster import ROSTER_SNAPSHOT_NAME, ROSTER_UPDATE_NAME
+    from ouroboros.send_clock import CLOCK_ROW_NAME
+
+    # Only these rows may be rewritten: the facts and the clock on every send, and a capability change once by the
+    # dispatch that owns the round, checkpointed on a fold, not regenerated. Any other typed host row is content,
+    # not a repeating tail, and stays a barrier.
+    recurring_tail = {CONTEXT_FACTS_NAME, CLOCK_ROW_NAME, CHANGE_KIND}
 
     first = next((i for i, row in enumerate(messages) if row.get("role") == "user"), None)
     if first is None:
@@ -109,7 +140,11 @@ def standing_rows(messages: list) -> dict:
     end = next((i for i in range(first + 1, len(messages)) if (_note_meta(messages[i]) or {}).get("retention")
                 == "source_view" or messages[i].get("role") == "assistant" and _note_meta(messages[i]) is None),
                len(messages))
-    standing = {i: None for i in range(first + 1, end)
+    # A mark-change arrival ends the first request's block: it is not one of that request's own rows, and it and
+    # the recurring rows after it in the same block (that round's tail) neither stand nor are replayed: those facts
+    # and clock may be rewritten, the one-time capability notice checkpointed on a fold, not regenerated.
+    start_end = next((i for i in range(first + 1, end) if _mark_changes_row(messages[i])), end)
+    standing = {i: None for i in range(first + 1, start_end)
                 if _note_meta(messages[i]) is None and not _handed_over(messages[i])}
     notes, i = {}, first + 1
     while i < len(messages):
@@ -121,16 +156,36 @@ def standing_rows(messages: list) -> dict:
                 notes[meta["unit_id"]] = i
         elif not (i in standing or row.get(HOST_CONTEXT_KIND_KEY) in OWNER_ROW_KINDS):
             calls = row.get("role") == "assistant" and bool(row.get("tool_calls"))
-            if _handed_over(row) or calls or _is_dialogue_prose_row(row):
+            # A mark-change arrival ends what stands at its own position (the first block above, a fold's own range
+            # below); it is not prose and not a barrier, so the walk continues and a later clean fold is still found.
+            if _mark_changes_row(row):
+                # The host rows after it (its round's own tail) neither stand nor are replayed: they do not end the
+                # walk. Before the first answer that tail is narrowed to the recurring rows (the facts, the clock) and
+                # a one-time capability notice, checkpointed on a fold, not regenerated; a later arrival keeps the
+                # wider tail. A barrier or a row that is not a host row (the mind's own reply, its evidence) still ends it.
+                tail = i + 1
+                while (tail < len(messages) and messages[tail].get(HOST_CONTEXT_KIND_KEY)
+                       and (i >= end or messages[tail].get(HOST_CONTEXT_KIND_KEY) in recurring_tail)
+                       and not _handed_over(messages[tail])
+                       and messages[tail].get(HOST_CONTEXT_KIND_KEY) not in {ROSTER_SNAPSHOT_NAME, ROSTER_UPDATE_NAME}):
+                    tail += 1
+                # The walk resumes after that tail; the row it lands on (a barrier, the mind's own reply, a note) is
+                # handled by the ordinary rules and ends the walk only where it ends it elsewhere.
+                i = tail - 1
+            elif _handed_over(row) or calls or _is_dialogue_prose_row(row):
                 lone = calls and notes and _lone_compact_call(messages, i)
                 stop = next((j for j in range(i + 2, len(messages)) if messages[j].get("role") == "assistant"
                              or _note_meta(messages[j]) is not None), len(messages)) if lone else i
                 span = messages[i + 2:stop]
-                owner = next((notes.get(receipt_note(later)) for later in span if receipt_note(later)), None)
+                # A mark-change arrival in that range ends what stands there: the round's own tail after it (its
+                # facts and the clock of that send) neither stands nor is replayed (those facts and clock may be
+                # rewritten), so it leaves with the arrival instead of standing for ever.
+                mark_at = next((j for j in range(i + 2, stop) if _mark_changes_row(messages[j])), stop)
+                owner = next((notes.get(receipt_note(later)) for later in messages[i + 2:mark_at] if receipt_note(later)), None)
                 if owner is None or any(_handed_over(later) or later.get(HOST_CONTEXT_KIND_KEY) in {
                         ROSTER_SNAPSHOT_NAME, ROSTER_UPDATE_NAME} for later in span):
                     break  # what a full fold takes: no later rows stand
-                standing.update(dict.fromkeys(range(i, stop), owner))
+                standing.update({index: owner for index in range(i, mark_at)})
                 i = stop
                 continue
         i += 1
@@ -418,7 +473,7 @@ def _ordinary_memory(ctx, observed, *, continuation_page):
         return unavailable("metadata_source_unavailable")
 
 
-def _inspect(ctx, observed: dict, *, offset: int) -> str:
+def _inspect(ctx, observed: dict, *, offset: int, not_applied=()) -> str:
     """A bounded inventory of the observed view: counts and sizes by kind, then one page of
     units from ``offset`` within the tool's producer page size (``tool_result_limit``), naming
     ``next_offset`` while units remain. The reader rebuilds a restore reference from the one
@@ -427,7 +482,8 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
     its units, the paging, the view revision, the ``restore_checkpoint`` of the observation it lists (a newer
     observation has its own, so a listed unit always restores from its page) and the retained ordinary-memory
     map (``_ordinary_memory``'s continuation read). A page holds at least one unit, so paging always advances:
-    only page one's shared fields can leave no room for it."""
+    only page one's shared fields can leave no room for it, and then page one says so first (``limitation``).
+    ``not_applied`` names the note and selectors this call carried: inspection lists the view and applies none."""
     from ouroboros.context_compaction import (_capsule_metadata, _first_line, context_units, note_written,
                                               owner_protected_unit_ids, unit_kind)
     from ouroboros.review_history_view import attachment_transfer_options, review_note_options
@@ -530,8 +586,12 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
                  "and newer owner/tool messages stay whole."),
     }
 
-    def render(page: list, next_offset) -> str:
-        return json.dumps({**body, "offset": start, "total": len(rows), "units": page,
+    told = {"not_applied": ", ".join(not_applied) + ": inspection lists the view and applies nothing; send them again "
+            "with inspect=false."} if not_applied else {}
+
+    def render(page: list, next_offset, over="") -> str:
+        return json.dumps({**({"limitation": over} if over else {}), **told, **body, "offset": start,
+                           "total": len(rows), "units": page,
                            **({"next_offset": next_offset} if next_offset is not None else {})},
                           ensure_ascii=False, separators=(",", ":"))
 
@@ -542,7 +602,15 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
             break
         page = candidate
     end = start + len(page)
-    return render(page, end if end < len(rows) else None)
+    following = end if end < len(rows) else None
+    whole = render(page, following)
+    if len(whole) <= limit:
+        return whole
+    # A page over the limit holds one unit (none past the end): the fields every page carries and that unit.
+    why = "the fields every page carries and its one unit" if page else "the fields every page carries"
+    return render(page, following, f"This page runs over this tool's {limit:,}-character page ({len(whole):,}): {why} "
+                  "are longer than a page." + (" Continue at next_offset." if following is not None else
+                                               " It holds every remaining unit; there is no next page."))
 
 
 def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = False, offset: int = 0,
@@ -575,7 +643,12 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_REPORTED_FAILURE",
                 text="Context view unavailable: this actor has no recorded model-send observation yet."))
         ctx._inspected_context_view = observed
-        return _inspect(ctx, observed, offset=offset)
+        carried = (("working_note", working_note), ("keep_last_n", keep_last_n), ("keep_unit_ids", keep_unit_ids),
+                   ("replace_note_ids", replace_note_ids), ("restore_unit_refs", restore_unit_refs),
+                   ("schema_names", schema_names), ("review_transfers", review_transfers),
+                   ("review_notes", review_notes), ("view_address", view_address), ("fold_last_n", fold_last_n),
+                   ("expected_view_revision", expected_view_revision or None))  # it lists the producing send's view
+        return _inspect(ctx, observed, offset=offset, not_applied=[name for name, value in carried if value is not None])
     if working_note is None and restore_unit_refs:
         if (any(value is not None for value in (keep_last_n, keep_unit_ids, replace_note_ids, schema_names, fold_last_n))
                 or review_transfers or review_notes):
@@ -693,53 +766,51 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "compact_context",
                 "description": (
-                    "Fold context under your working_note; no helper summarizes for you. Only view_address or "
-                    "restore_unit_refs may be used without a note. Core, assignment, owner words, typed owner-directed "
-                    "dialogue and newer tail stay whole. Each older tool call and contiguous results is atomic; exact "
-                    "bytes are checkpointed with CAS provenance before replacement, so raw evidence remains retrievable. "
-                    "Notes stay unless replace_note_ids names them; restored sources and emergency records follow "
-                    "the keep selection; replacement occupies the first replaced unit. "
-                    "Batch usefully, shorter than sources: rewriting loses signed reasoning from the earliest change. "
-                    "How much is re-read after a fold depends on the nearest cache boundary before its first change. "
-                    "Round facts report the measured re-read. Through folds stand the first request's host rows "
-                    "and each full fold's own call, result and receipt when nothing foldable arrived in its round; "
-                    "a non-empty keep_unit_ids list is literal "
-                    "and takes what it omits; replacing a fold's note releases its rows. Native review ignores "
-                    "schema_names, review_notes and review_transfers, and its folds keep no rows of their own; "
-                    "its inspection reports "
-                    "window evidence, serialized characters and previous input, never current free tokens."
+                    "Fold context under your working_note; no helper summarizes for you. Inspect needs no note; "
+                    "native restoration takes an empty one. Core, assignment, owner words, typed "
+                    "owner-directed dialogue and newer tail stay whole. Each older call is atomic with its result; "
+                    "exact bytes are checkpointed with CAS provenance before replacement, so raw evidence remains "
+                    "retrievable. Notes stay unless replace_note_ids names them; restored sources and emergency "
+                    "records follow keep selection. A rewrite loses signed reasoning from the earliest change. "
+                    "Through folds on Main stand first-request host rows and each clean fold's call, "
+                    "result, receipt, facts and clock, unless a "
+                    "handed-over account or roster note arrived; a typed mark-change arrival ends what stands "
+                    "where it lands; later clean folds can still stand. Replacing a note releases its rows. "
+                    "Native review keeps no fold rows of its own and ignores schema_names, review_notes and "
+                    "review_transfers; it reports window evidence, serialized chars and previous input, "
+                    "never free tokens."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "view_address": {"type": "array", "items": {"type": "string"}, "description": "Exact inspected memory forms; restore_view_address restores a note whole. Applied at the next tool boundary from the same snapshot, preserving other choices and arrivals; receipt measures the complete result and prefix re-reading."},
-                        "inspect": {"type": "boolean", "description": "Pin view_revision; return counts/tokens by kind, one transcript-ordered page of unit IDs/eligibility, restore_checkpoint and schema names; no mutation."},
-                        "offset": {"type": "integer", "minimum": 0, "description": "Inspection page's zero-based start; next_offset names remaining units."},
-                        "expected_view_revision": {"type": "string", "description": "Exact inspected revision; omitted binds the model-send view producing this call, so inspection is optional."},
-                        "working_note": {"type": "string", "description": "For a future reader without sources: keep situation/purpose, who decided what, their status within those sources, scope, changes, corrections and unresolved work; label inference and gaps, invent no detail. Later grants/cancellations supersede only their scope, not unaffected branches; proposals are not approvals, and superseded restrictions do not survive scoped approval. Concise, no fixed template; required for folds."},
-                        "keep_unit_ids": {"type": "array", "items": {"type": "string"}, "description": "Exact complete units to keep raw, overriding keep_last_n; empty keeps only rows that stand, omitting all selectors selects all."},
-                        "replace_note_ids": {"type": "array", "items": {"type": "string"}, "description": "Capsule IDs this working_note replaces. The new note keeps their source addresses, the receipt names their first lines; an ID also in keep_unit_ids is refused."},
+                        "view_address": {"type": "array", "items": {"type": "string"}, "description": "Exact inspected memory forms; restore_view_address: whole note; next boundary. Main: no note with selectors except fold_last_n/untold owner duties. Native-review bars view_address: ToolContext lacks memory fit snapshot. Receipt estimates reread; later uncached input."},
+                        "inspect": {"type": "boolean", "description": "Pin view_revision; counts/tokens by kind, one page of unit IDs/eligibility, restore_checkpoint, schema names; no mutation."},
+                        "offset": {"type": "integer", "minimum": 0, "description": "Inspection page's zero-based start; next_offset names the rest."},
+                        "expected_view_revision": {"type": "string", "description": "Exact inspected revision; omitted binds this call's send."},
+                        "working_note": {"type": "string", "description": "For a future reader without sources: keep situation/purpose, who decided what and its status within those sources, scope, changes, corrections, open work; label inference and gaps, invent no detail. Later grants/cancellations supersede only their scope, not unaffected branches; proposals are not approvals; superseded restrictions do not survive scoped approval."},
+                        "keep_unit_ids": {"type": "array", "items": {"type": "string"}, "description": "Exact raw units override keep_last_n; nonempty is literal; empty folds eligible exposed units outside standing rows; no selector keeps all."},
+                        "replace_note_ids": {"type": "array", "items": {"type": "string"}, "description": "Capsule IDs this working_note replaces; the new note keeps their source addresses, the receipt names their first lines; an ID in keep_unit_ids is refused."},
                         "restore_unit_refs": {"type": "array", "items": {"type": "object", "properties": {
                             "checkpoint_ref": {"type": "object"}, "unit_id": {"type": "string"}, "raw_sha256": {"type": "string"}},
                             "required": ["checkpoint_ref", "unit_id", "raw_sha256"]},
-                            "description": "Restore sources, never protocol replay; checkpoint_ref is restore_checkpoint (emergency records list members separately). Main allows this alone; native review requires working_note, possibly empty; combining selectors requires a note."},
-                        "schema_names": {"type": "array", "items": {"type": "string"}, "description": "Nano schema residency, never permissions; Low/Max keep the full permitted envelope."},
+                            "description": "Restore sources, no protocol replay; checkpoint_ref is restore_checkpoint (emergency records list members). Main: no note alone; native: explicit working_note (empty ok); selectors need note."},
+                        "schema_names": {"type": "array", "items": {"type": "string"}, "description": "Nano schema residency, not permissions; Low/Max keep the full envelope."},
                         "review_notes": {"type": "array", "items": {"type": "object", "properties": {
                             "bound_decision": {"anyOf": [{"type": "object"}, {"type": "string"}]},
                             "bound_decisions": {"type": "array", "items": {"anyOf": [{"type": "object"}, {"type": "string"}]}},
                             "remark": {"type": "string"}, "reason": {"type": "string"}},
                             "required": ["remark", "reason"], "additionalProperties": False},
-                            "description": "With working_note, exact observed bindings/decision_ref (not positional IDs) annotate one decision or group closed history, preserving verdicts, current contracts, open/deferred/pending facts and gaps; stale/missing bindings stay full with reasons."},
+                            "description": "With working_note, exact observed bindings/decision_ref (not positional IDs) annotate a decision or closed history, keeping verdicts, contracts, open facts and gaps; stale bindings stay whole."},
                         "review_transfers": {"type": "array", "items": {"type": "object", "properties": {
                             "source": {"type": "object"}, "operative_spec_sha256": {"type": "string"},
                             "decision_ids": {"type": "array", "items": {"type": "string"}}},
                             "required": ["source", "operative_spec_sha256", "decision_ids"]},
-                            "description": "With working_note, declare attachment decisions/reasons transferred to named current plan decisions using inspected source/spec identities; no completeness is inferred, and absent/stale transfer keeps the attachment whole."},
+                            "description": "With working_note, declare attachment decisions/reasons transferred to named current plan decisions by inspected source/spec identity; completeness is not inferred; a stale transfer stays whole."},
                         "keep_last_n": {
                             "type": "integer",
-                            "description": "With working_note and no keep_unit_ids: recent completed tool units to keep raw (2-20); earlier notes stay.",
+                            "description": "With working_note and no keep_unit_ids: recent completed tool units to keep raw (2-20).",
                         },
-                        "fold_last_n": {"type": "integer", "minimum": 1, "description": "With working_note, alone: fold the newest N completed tool units and everything after the first of them."},
+                        "fold_last_n": {"type": "integer", "minimum": 1, "description": "With nonblank working_note, alone: fold the newest N completed tool units and everything after the first."},
                     },
                     "required": [],
                 },

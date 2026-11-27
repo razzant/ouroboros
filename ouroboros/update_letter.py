@@ -205,7 +205,9 @@ def collect_range_material(
     if rc != 0:
         raise MaterialUnavailable(f"git rev-list --first-parent {spec} failed (rc={rc}): {str(err)[:200]}")
     by_sha = {c["sha"]: c for c in commits}
-    material["first_parent_commits"] = [by_sha[sha] for sha in out.split() if sha in by_sha]
+    first_parents = out.split()
+    material["first_parent_commits"] = [by_sha[sha] for sha in first_parents if sha in by_sha]
+    material["first_parent_complete"] = len(material["first_parent_commits"]) == len(first_parents)
     material["local_commits"], material["omitted_local_chunks"] = _commit_subjects(
         capture, f"{target_sha}..{base_sha}")
     bodies: Dict[str, str] = {}
@@ -410,7 +412,8 @@ def record_path(drive_root: Optional[pathlib.Path] = None) -> pathlib.Path:
 
 
 def read_record(drive_root: Optional[pathlib.Path] = None, *, strict: bool = False) -> Optional[Dict[str, Any]]:
-    """Writers require a readable record or an observed absence, including on the locked reread."""
+    """Writers require a readable record or an observed absence, including on the locked reread.
+    Saved post-merge coverage without a measured base is dropped on reading (``discard_legacy_coverage``)."""
     try:
         record = json.loads(record_path(drive_root).read_text(encoding="utf-8"))
         key = record.get("key") if isinstance(record, dict) else None
@@ -421,6 +424,9 @@ def read_record(drive_root: Optional[pathlib.Path] = None, *, strict: bool = Fal
         request = record.get("request")
         if request is not None and (not _request_task_id(record) or not _range_key(request.get("key"))):
             raise ValueError("invalid description request")
+        from ouroboros.update_qualification import discard_legacy_coverage
+
+        discard_legacy_coverage(record)  # query_data's kind=update_letter reads it the same way
         return record
     except FileNotFoundError:
         return None

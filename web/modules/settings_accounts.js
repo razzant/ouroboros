@@ -1,7 +1,8 @@
 /** Settings › Accounts and keys (docs/DESIGN.md "Settings"): what Ouroboros signs in with. This module only composes:
  * the page family `accounts` out of three sources that stay in their own modules.
  *
- * - `accounts`: the subscriptions as one head per provider (harness_accounts.js says the facts), the API keys as one
+ * - `accounts`: the subscriptions as one head per provider (harness_accounts.js says the facts), each program the engine
+ *   reads as not installed with the one press that installs it (and signs in, for a provider), the API keys as one
  *   head per key (settings_connections.js), then the other stored keys as rows (settings_secrets.js, the row helper).
  * - `accounts/<harness>`: one provider's page. harness_accounts.js draws and runs it inside the frame drawn here: the
  *   program's row above the accounts, then the accounts, the ones that need sign-in first.
@@ -11,18 +12,23 @@
  * What starts a read: showing a provider's page is the owner's act that reads the accounts and the program, and may
  * start an idle agent daemon, as opening the Accounts tab was. The home and the list never do: the list draws the
  * shared accounts store as it stands (its subscriber is never a visible surface, so it arms no poll), says "Not
- * checked" for what nobody read, and offers one Check, which only reads. */
+ * checked" for what nobody read, and offers one Check, which only reads. Shown, the list asks the engine's program
+ * inventory once as it stands (never fresh; that read never starts the engine), so a program it lacks can be found. */
 
 import { RESTART_LABEL } from './claudexor_restart.js';
-import { FACET_ACCOUNTS, FACET_QUOTA, READ_OK, accountRows, claudexorStatus, familyLabel } from './claudexor_status_store.js';
-import { accountGroups, destroyHarnessAccounts, initHarnessAccounts, needsSignIn, quotaSummary, renderAgentsServiceBanner,
-    serviceBannerLine } from './harness_accounts.js';
-import { knownProgram, maintenanceLatestLine } from './harness_maintenance.js';
+import { FACET_ACCOUNTS, FACET_CATALOG, FACET_QUOTA, READ_OK, accountRows, claudexorStatus, familyLabel } from './claudexor_status_store.js';
+import { accountGroups, daemonAnswered, destroyHarnessAccounts, familyAction, initHarnessAccounts, needsSignIn, quotaSummary,
+    renderAgentsServiceBanner, serviceBannerLine } from './harness_accounts.js';
+import { createHarnessMaintenanceController, currentMissing, knownProgram, maintenanceLatestLine, maintenanceOperationLine,
+    maintenanceOperationPending, maintenanceProblemText, maintenanceVersionLine, missingProgram, programsUnknownHtml,
+    wakeWords } from './harness_maintenance.js';
 import { harnessPresentation } from './harness_presentation.js';
 import { strokeIcon } from './page_icons.js';
 import { apiConnections } from './route_editor_primitives.js';
+import { restoreFocusWithoutReveal } from './scroll_fade.js';
 import { editorLine, keyHeads, keyPath, keyTitle, mountKeyPage, parseKeyPath, referencesLine, setKeyEnabled } from './settings_connections.js';
 import { bindSettingRows, doorSign, settingsRow } from './settings_controls.js';
+import { refreshMaintenanceCatalogs } from './settings_catalog.js';
 import { readSkills } from './settings_extension_forms.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { PROVIDER_SECRET_KEYS, providerIconHtml } from './settings_provider_cards.js';
@@ -40,6 +46,11 @@ const chipHtml = (chip) => (chip ? `<span class="ui-chip settings-chip" data-ton
 const switchHtml = (attrs, on) => `<label class="ui-switch"><input type="checkbox" role="switch" aria-checked="${on}" ${attrs}${on ? ' checked' : ''}>`
     + '<span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span></label>';
 const landed = (outcome) => outcome?.state === 'saved' || outcome?.state === 'saved_then_failed';
+/** Whether this surface may treat the engine as answering: it answered its own status, and the store carries no live
+ *  read error behind that row. A `running` an earlier visit left, kept under a refusal, is no proof it still serves
+ *  (harness_accounts.js expires a wake's error on this same pair), so the press that follows an error is the labelled
+ *  start of Accounts rather than a read that silently waits for a daemon nobody confirmed. */
+const engineAnswers = (store, payload) => !store.error && daemonAnswered(payload);
 // The key of the home's row for this page (settings_home.js), for a key whose provider has no mark of its own.
 const KEY_GLYPH = strokeIcon('<path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/>', 16);
 
@@ -51,21 +62,68 @@ function providerMarkHtml(harness) {
 
 /**
  * What a provider's head says in the list, from what the shared accounts store already holds (`group`: one of
- * `accountGroups`): how many of its accounts take turns, and, as a chip, whether any needs the owner. `asked`: the
- * store was read at least once, or is being read; `program`: what this session already read about the provider's
- * program, of which the head says a waiting update. Nothing here reads.
+ * `accountGroups`, or `{ programOnly }` for another program the engine lists): how many of its accounts take turns,
+ * and, as a chip, whether any needs the owner. `asked`: the store was read at least once, or is being read; `program`:
+ * what this session already read about the provider's program, of which the head says a waiting update or its
+ * absence. `pending`: the owner's own press of that program that has not resolved — a local request the engine has not
+ * confirmed, or an operation it accepted and has not settled — said where the newest read no longer stands as a fact
+ * about that program, and in place of the absence it still stands on; with `lastKnown`, the head speaks what was read,
+ * in the past tense, instead of a state that refused or shortened reading cannot support.
+ * An absent program the engine can install brings the head's one `action`: `Install & connect` for a
+ * provider with no account yet (Connect installs the program first), `Install` otherwise. Nothing here reads.
  */
-export function providerRowFacts(group, { accountsRead = READ_OK, asked = true, program = null } = {}) {
-    const update = program?.updateAvailable === 'yes' ? `program update: ${maintenanceLatestLine(program)}` : '';
-    const say = (words, chip = null) => ({ meta: [words, update].filter(Boolean).join(' · '), chip });
-    if (!asked) return say('Not checked');
+export function providerRowFacts(group, { accountsRead = READ_OK, asked = true, program = null, missing = missingProgram(program),
+    pending = null, lastKnown = false } = {}) {
     const total = group.rows.length;
-    if (!total) return say(group.status.label);
+    // The absence is the head's words for a provider with no account or a program alone, a fact beside accounts; where
+    // the engine cannot install the program here, its own reason says why (and whether it runs here at all).
+    const reason = missing && !missing.installable ? String(program?.actions?.install?.reason || '') : '';
+    const absence = !missing ? '' : !missing.installable ? ['Not installed', reason].filter(Boolean).join(' · ')
+        : `Not installed where Claudexor runs${missing.failed ? ' · the last install failed' : ''}`;
+    // Install & connect only for a provider read without an account: an unread list may hold one a first sign-in would
+    // duplicate, and a listed one signs in from its own row; the program alone is installed otherwise.
+    const empty = !group.programOnly && !total && accountsRead === READ_OK;
+    // The owner's own press that has not resolved is the program's state now: it stands where the newest read would
+    // speak of the program, and no new install is offered over it — the head opens the same provider, where that
+    // request is rejoined or retried rather than sent again.
+    const press = typeof pending === 'string' ? pending : String(pending?.words || '');
+    const action = !press && missing?.installable
+        ? (empty ? { label: 'Install & connect', connect: true } : { label: 'Install', connect: false }) : null;
+    const update = program?.updateAvailable === 'yes' ? `program update: ${maintenanceLatestLine(program)}` : '';
+    const say = (words, chip = null) => ({ meta: [words, update].filter(Boolean).join(' · '), chip, action });
     const known = accountsRead === READ_OK;
     const waiting = group.rows.filter((row) => needsSignIn(row, known)).length;
     const turns = group.rows.filter((row) => row.enabled !== false && !needsSignIn(row, known)).length;
-    return say(`${turns} of ${total} in rotation${known ? '' : ' · last known'}`,
-        waiting ? { text: `${waiting} ${waiting === 1 ? 'needs' : 'need'} sign-in`, tone: 'warn' } : null);
+    const familyLine = () => `${turns} of ${total} in rotation${known ? '' : ' · last known'}`;
+    const signInChip = () => (waiting ? { text: `${waiting} ${waiting === 1 ? 'needs' : 'need'} sign-in`, tone: 'warn' } : null);
+    // The press speaks first. A family with accounts keeps its own line and the press rides beside it; a program alone,
+    // or a family without accounts, says the press itself.
+    if (press) return say(total && !group.programOnly && asked ? `${familyLine()} · ${press}` : press,
+        total && !group.programOnly && asked ? signInChip() : null);
+    if (absence && !total) return say(absence);
+    // Installed here, the program is found again by its version; where that reading no longer stands, the head
+    // speaks what was read, in the past tense, instead of a state that refused or shortened reading cannot support.
+    if (group.programOnly) return say(maintenanceVersionLine(program, { inspectionError: lastKnown }));
+    if (!asked) return say('Not checked');
+    if (!total) return say(group.status.label);
+    return say(`${familyLine()}${missing ? ' · program not installed' : ''}`, signInChip());
+}
+
+/**
+ * What a provider's head says while the owner's own press of that program has not resolved: a local request the
+ * engine has not confirmed, or an operation it accepted and has not settled. A newer press outranks any historical
+ * receipt — the receipt of an earlier operation says nothing about the press now open — and a request that is on its
+ * way is not proof that an installer runs. `null` where nothing of the owner's own is open.
+ */
+export function providerPending(row) {
+    if (!row) return null;
+    if (row.request) {
+        const verb = String(row.request.verb || (row.entry?.selection?.path ? 'Update' : 'Install'));
+        return { words: row.busy ? `${verb} requested` : `${verb} request unconfirmed` };
+    }
+    const operation = row.operation || row.entry?.operation;
+    if (!maintenanceOperationPending(operation)) return null;
+    return { words: maintenanceOperationLine(operation, { missing: !row.entry?.selection?.path }) };
 }
 
 /** The share of an account's window that is left (0 to 1), by the runtime's own bar: fresh readings of exactly this
@@ -118,15 +176,21 @@ function accountMarkHtml({ row, badge }, payload) {
 /* ---- The list ------------------------------------------------------------------------------------------------------ */
 
 let list = null;  // the mounted list: a key's page says there what it added or removed
+// A head's press, held only while the page it opens is mounted (that page does it once); nothing outlives the opening,
+// so no later visit or repaint installs or signs in again.
+let pressed = null;
 
 function providerHeadHtml(group, facts) {
+    // The press names its program for a reader who meets the button alone; its page does the work (familyAction).
+    const act = facts.action ? `<button type="button" class="btn btn-default btn-sm" data-program-install="${escapeHtml(group.harness)}"${facts.action.connect ? ' data-connect' : ''}
+            aria-label="${escapeHtml(`${facts.action.label} ${group.label}`)}">${escapeHtml(facts.action.label)}</button>` : '';
     return `<div class="ui-row settings-head" data-entry-id="${escapeHtml(group.harness)}" data-open-path="accounts/${encodeURIComponent(group.harness)}">
         <span class="settings-head-glyph" aria-hidden="true">${providerMarkHtml(group.harness)}</span>
         <button type="button" class="settings-head-open ui-hit-area" data-entry-open>
             <span class="ui-row-title">${escapeHtml(group.label)}${chipHtml(facts.chip)}</span>
             <span class="ui-row-meta">${escapeHtml(facts.meta)}</span>
         </button>
-        <div class="ui-row-actions">${CHEVRON}</div>
+        <div class="ui-row-actions">${act}${CHEVRON}</div>
     </div>`;
 }
 
@@ -174,6 +238,7 @@ function mountList(container, { ctx = {} }) {
             <h3 class="settings-card-title">Subscriptions</h3>
             <p class="settings-card-lead">Several accounts of one kind take turns, so a spent quota does not stop the work.</p>
             <div class="settings-rows" data-provider-rows></div>
+            <p class="settings-card-note harness-model-program" data-programs-unknown hidden></p>
             <p class="settings-card-note accounts-engine"><span class="ui-status" data-accounts-engine></span>
                 <button type="button" class="btn btn-ghost btn-sm" data-accounts-check hidden>Check</button></p>
         </section>
@@ -194,7 +259,7 @@ function mountList(container, { ctx = {} }) {
         </section>`;
     const find = (selector) => container.querySelector(selector);
     const [providersEl, keysEl, moreEl, otherEl, fold] = ['[data-provider-rows]', '[data-key-rows]', '[data-more-rows]', '[data-other-rows]', '[data-settings-fold]'].map(find);
-    const drawn = { providers: '', keys: '', more: '', other: '' };
+    const drawn = { providers: '', unknown: '', keys: '', more: '', other: '' };
     const busy = new Set();   // keys whose switch is in flight
     let settings = null;
     let skills = [];
@@ -203,20 +268,127 @@ function mountList(container, { ctx = {} }) {
     let gone = false;
     // A list is drawn again only when its words changed, so a head that holds focus is not replaced under it.
     const put = (name, host, html) => { if (drawn[name] !== html) host.innerHTML = drawn[name] = html; };
+    // The provider heads are written whole — a program the inventory adds changes every head's words — so the
+    // control that held focus takes it back by its own provider and action, without scrolling to it. A control
+    // no longer drawn takes nothing: a rebuild never moves the reader into the navigation or the first row.
+    const putHeads = (html) => {
+        if (drawn.providers === html) return;
+        const active = (container.ownerDocument || globalThis.document)?.activeElement;
+        const row = active && providersEl.contains(active) ? active.closest?.('[data-entry-id]') : null;
+        const held = row && active.hasAttribute?.('data-program-install') ? '[data-program-install]'
+            : row && active.hasAttribute?.('data-entry-open') ? '[data-entry-open]' : '';
+        providersEl.innerHTML = drawn.providers = html;
+        if (held) restoreFocusWithoutReveal([...providersEl.children]
+            .find((node) => node.dataset.entryId === row.dataset.entryId)?.querySelector(held));
+    };
+    // The engine's programs, as any surface of this session last read them; this list asks once when shown and never
+    // polls (a page that installs one reads it and says so here). An absence is said only from a read that answered
+    // since this list was shown and that no later read refused (`currentMissing`): an earlier row is no current fact.
+    const programs = createHarnessMaintenanceController({ onChange: () => paintProviders(), visible: () => false,
+        onSettled: refreshMaintenanceCatalogs });  // an install left running on a provider's page settles here: catalogs read again
+    let programsRead = false, programsTried = false, programsFailed = false;
+    // A refusal of the engine's inventory — the whole read's, or one program row still live — stands in the shared
+    // controller and outlives this list's own last answer: a cached success never hides why a program is missing, and
+    // the refusal's own words keep beside them the press that reads the programs again. A row the newest answered list
+    // left out is no live row, so the refusal an older read left on it says nothing about this list now.
+    const standingInventoryError = () => {
+        const whole = programs.inventoryError();
+        if (whole) return whole;
+        for (const harness of programs.harnesses) {
+            const row = programs.view(harness);
+            if (row.listed === false) continue;
+            const error = row.inspectionError;
+            if (error) return error;
+        }
+        return '';
+    };
+    // What this section repeats of that refusal. The engine's typed observation that a reported executable is gone is
+    // explained once, below, on the engine's own line; its raw sentence beside that would be the same fact twice.
+    const sectionReason = (error) => {
+        const words = maintenanceProblemText(programs.inspectionProblem);
+        return error && !(words && String(error).includes(words)) ? error : '';
+    };
+    const missingOf = (harness) => (programsRead ? currentMissing(programs.view(harness)) : null);
+    // A refused inventory says nothing about the engine's own readiness, and the row an older visit left may
+    // promise a daemon that has since stopped. One passive status read — a plain GET that never starts it —
+    // makes the words below current; the list keeps its own read either way, and only the owner's own press asks
+    // for a fresh one — an answered cache proves nothing current (U106).
+    const readPrograms = ({ fresh = false } = {}) => programs.refresh({ fresh }).then((inventory) => {
+        if (gone) return;
+        programsRead = Boolean(inventory); programsTried = true; programsFailed = !inventory;
+        paintProviders();
+        if (programsFailed) void Promise.resolve(store.refresh()).catch(() => {}).then(() => { if (!gone) paintProviders(); });
+    });
+    // The programs are listed by the owner's press: an engine this client sees answering, with no live read error on
+    // the store behind it, is only read again, fresh, and wakes nothing; one it cannot prove answers is started first,
+    // as Accounts' wake does, with the same fresh read behind it. Either way one press is one fresh read.
+    let finding = false, waking = false, findError = '';
+    async function findPrograms() {
+        if (finding) return;
+        finding = true; findError = '';
+        waking = !engineAnswers(store, store.snapshot || {});
+        paintProviders();
+        if (waking) {
+            const woke = await store.wake();
+            if (gone) return;
+            waking = false;
+            if (!woke?.ok) {
+                findError = `Could not start the agent daemon: ${woke?.error || 'request failed'}`;
+                finding = false; paintProviders();
+                return;
+            }
+        }
+        await readPrograms({ fresh: true });
+        if (gone) return;
+        finding = false; waking = false; paintProviders();
+    }
 
     function paintProviders(view = { reads: store.reads, snapshot: store.snapshot }) {
         const payload = view.snapshot || store.snapshot || {};
         const accountsRead = store.facet(FACET_ACCOUNTS);
         const asked = Boolean(store.everSettled || store.loading);
         const groups = accountGroups(payload, { accountsRead, catalogKnown: store.catalogKnown, accountsUnsupported: Boolean(store.accountsUnsupported) });
-        put('providers', providersEl, groups.map((group) => providerHeadHtml(group,
-            providerRowFacts(group, { accountsRead, asked, program: knownProgram(group.harness) }))).join(''));
+        // Every other program the engine lists follows the providers, in its order: one it lacks with its press, one
+        // installed (here or elsewhere) with its version, so a program installed from this list stays on it.
+        for (const harness of programs.harnesses) {
+            if (groups.some((group) => group.harness === harness)) continue;
+            const row = programs.view(harness);
+            const standing = programsRead && !row.inspectionError && !row.inventoryError && row.listed !== false;
+            // An owner's press that has not resolved keeps its head whatever the newest read did: the head is the route
+            // back to the row that rejoins or keeps going with the same request. Its words are the press itself, and no
+            // new Install is offered over it.
+            const pending = providerPending(row);
+            if (!standing && !pending) continue;
+            groups.push({ harness, lastKnown: !standing,
+                label: familyLabel(harness, payload, { catalogKnown: store.catalogKnown }), rows: [], programOnly: true });
+        }
+        putHeads(groups.map((group) => providerHeadHtml(group, providerRowFacts(group, { accountsRead, asked,
+            program: knownProgram(group.harness), missing: missingOf(group.harness),
+            pending: providerPending(programs.view(group.harness)),
+            lastKnown: Boolean(group.lastKnown) }))).join(''));
+        const unknown = find('[data-programs-unknown]');
+        // A refused inventory stands though this list's own last answer was a cached success: the refusal's words and
+        // the press that reads the programs again stay, so a cache never hides why a program is missing.
+        const refused = standingInventoryError();
+        unknown.hidden = (!programsTried || programsRead) && !refused;
+        // An engine this client's own current read sees serving (`daemonAnswered`) keeps its refusal's own words and
+        // the press that only reads the programs again; a retained 'running' row behind a request that died promises
+        // nothing, so the press that says it starts the daemon stands wherever the store does not answer that it serves.
+        put('unknown', unknown, unknown.hidden ? '' : programsUnknownHtml({
+            starts: engineAnswers(store, payload) ? 'reads the programs again' : wakeWords(payload),
+            busy: waking, error: findError, reason: sectionReason(refused),
+            // While a press that starts nothing is reading the programs, say what it is doing instead of a start.
+        }) + (finding && !waking ? '<span role="status">Checking programs…</span>' : ''));
         // The engine in one line, as the store last heard it; a store nobody read says so, and Check reads it once.
-        const line = asked ? serviceBannerLine(store) : { tone: 'muted', text: 'Accounts were not checked yet.' };
+        // The engine's typed missing-executable observation is explained here, once, and not repeated above.
+        const line = asked ? serviceBannerLine(store, { programProblem: programs.inspectionProblem })
+            : { tone: 'muted', text: 'Accounts were not checked yet.' };
         const engine = find('[data-accounts-engine]');
         if (engine.textContent !== line.text) engine.textContent = line.text;
         engine.dataset.tone = line.tone === 'error' ? 'danger' : line.tone;
-        find('[data-accounts-check]').hidden = accountsRead === READ_OK || Boolean(store.loading);
+        // The programs' own refusal keeps the list's one read: Check reads the engine and the programs again, fresh,
+        // and it never hides while the programs are unread or refused — a cached success is no proof they are current.
+        find('[data-accounts-check]').hidden = (accountsRead === READ_OK && !programsFailed && !refused) || Boolean(store.loading);
     }
 
     function paintKeys() {
@@ -300,13 +472,27 @@ function mountList(container, { ctx = {} }) {
 
     const onClick = (event) => {
         const hit = (selector) => event.target?.closest?.(selector);
-        if (hit('[data-accounts-check]')) { void store.refresh(); paintProviders(); return; }
+        if (hit('[data-accounts-check]')) { void store.refresh(); void readPrograms({ fresh: true }); paintProviders(); return; }
+        if (hit('[data-program-action="find"]')) { void findPrograms(); return; }
+        const install = hit('[data-program-install]');
+        if (install && container.contains(install)) {
+            const harness = install.dataset.programInstall;
+            pressed = { harness, action: install.hasAttribute('data-connect') ? 'connect' : 'install' };
+            ctx.openSettings?.(`accounts/${encodeURIComponent(harness)}`);
+            if (pressed) familyAction(harness, pressed.action);  // the page stood open: shown again, not mounted anew
+            pressed = null;
+            return;
+        }
         if (hit('.ui-switch')) return;
         const door = hit('[data-open-path]');
         if (door && container.contains(door)) ctx.openSettings?.(door.dataset.openPath);
     };
     const onChange = (event) => { if (event.target?.matches?.('[data-entry-switch]')) void switchKey(event.target); };
-    const onShown = (event) => { if (event.detail?.path === 'accounts') void read({ withSkills: true }); };
+    const onShown = (event) => {
+        if (event.detail?.path !== 'accounts') return;
+        void read({ withSkills: true });
+        void readPrograms();
+    };
     // One of the keys here was written (a row of this page, a key's page): the document is read again, and a stored
     // key whose write landed puts its field away.
     const onSaved = (event) => {
@@ -335,6 +521,7 @@ function mountList(container, { ctx = {} }) {
         gone = true;
         if (list === mine) list = null;
         offStore();
+        programs.dispose();
         otherRows.forEach(({ handle, secrets }) => { handle.dispose(); secrets.dispose(); });
         container.removeEventListener('click', onClick);
         container.removeEventListener('change', onChange);
@@ -368,7 +555,8 @@ function mountProvider(container, { path }) {
     let bars = '';
     const paintOverview = (payload, { accountsUnsupported, ...reads }) => {
         const rows = accountsUnsupported ? [] : accountRows(payload).filter((row) => row.harness === harness);
-        const known = reads.accountsRead === READ_OK;
+        // A program installed alone (no account family) has no account to speak of here.
+        const known = reads.accountsRead === READ_OK && accountGroups(payload, { accountsUnsupported }).some((group) => group.harness === harness);
         const lead = !known ? '' : rows.length > 1 ? `${rows.length} accounts take turns, so a spent quota does not stop the work.`
             : rows.length ? 'One account. Add a second one and they take turns.' : 'No account yet.';
         if (find('[data-provider-lead]').textContent !== lead) find('[data-provider-lead]').textContent = lead;
@@ -382,6 +570,7 @@ function mountProvider(container, { path }) {
     };
     const mine = providerMounts += 1;
     void initHarnessAccounts({ family: harness, path, paintOverview, mark: (facts) => accountMarkHtml(facts, store.snapshot || {}) });
+    if (pressed?.harness === harness && familyAction(harness, pressed.action)) pressed = null;
     return { unmount() {
         if (mine === providerMounts) destroyHarnessAccounts();
     } };

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import pathlib
 import time
 import uuid
@@ -18,11 +20,18 @@ def _has_resume_choices(blockers, *, allow_starts):
     return bool(acceptable_unknown(blockers) or (allow_starts and any(b.get("ordinary_start") for b in blockers)))
 
 
+def _choice_refusal(q, task, root, tree):
+    """What a recorded choice's grant would meet now: a restart or update, or money. Read off the queue lock."""
+    from supervisor.budget_resume import _global_money_refusal, _restart_or_update_refusal, _root_money_refusal
+    from supervisor.state import budget_remaining
+
+    return (_restart_or_update_refusal(q, task, root, task["id"]) or _global_money_refusal(q, budget_remaining, [task])
+            or _root_money_refusal(root, task, tree))
+
+
 def observe_admitted_retry(q, observation, *, gaps):
     """Observe custody and, for a selectable outcome, ordinary Resume authority off the queue lock."""
-    from supervisor.budget_resume import _global_money_refusal, _restart_or_update_refusal, _root_money_refusal
     from supervisor.continuation_admission import action_writers
-    from supervisor.state import budget_remaining
 
     authority = observation["authority"]
     task = authority["task"]
@@ -37,11 +46,46 @@ def observe_admitted_retry(q, observation, *, gaps):
     observation["owner_pause_blockers"] = blockers
     safe = observation["safe"]
     if (safe or "_working_recovery" in task) and _has_resume_choices(blockers, allow_starts=safe):
-        observation["choice_resume_refusal"] = (
-            _restart_or_update_refusal(q, task, root, task_id)
-            or _global_money_refusal(q, budget_remaining, [task])
-            or _root_money_refusal(root, task, tree)
-        )
+        observation["choice_resume_refusal"] = _choice_refusal(q, task, root, tree)
+
+
+def observe_predecessor_starts(q, task, predecessor, blockers):
+    """For the addressed Resume of a never-started Continue only, off the queue lock: the starts it may name, each with
+    its tree (``delegate_resume.predecessor_starts``: the census is solely proven read-only unbound starts, its
+    predecessor's own or carried by that predecessor's own choice), and what its grant would meet now. ``{}`` offers
+    nothing and leaves the predecessor refusal as it was."""
+    from ouroboros.delegate_resume import predecessor_starts, selects
+    from supervisor.queue_transitions import queued_admitted_dispatch
+
+    task_id = str(task.get("id") or "")
+    if (not predecessor or not selects(task_id) or "_working_recovery" in task or queued_admitted_dispatch(task)
+            or str(task.get("root_task_id") or task_id) != task_id):
+        return {}
+    root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
+    proven = predecessor_starts(root, predecessor, task_id, blockers)
+    return {"predecessor_starts": proven, "choice_resume_refusal": _choice_refusal(q, task, root, task_id)} \
+        if proven else {}
+
+
+def accept_predecessor_starts(task, observation, writers, root, *, fence_id):
+    """The owner's choice for a never-started Continue (owner, 24 Nov): Resume it past the exact unbound read-only
+    starts its predecessor left or carried, never sent again, after the restart, money and clock refusals its grant
+    would meet. ``decide`` offers or records the choice for this task and its current stop: ``fence_id`` (its closed
+    fence, or "" when none is closed) and the queue hold this release also ends (its own records,
+    ``control_identity``), so a retry after a failed release reuses it and a newer hold asks again. Queue lock held.
+    ``None``: all accepted."""
+    from ouroboros.delegate_resume import decide
+    from ouroboros.work_stop import control_identity, selection_record
+
+    if refusal := observation.get("choice_resume_refusal") or _retry_clock_refusal(task):
+        return refusal
+    task_id = str(task.get("id") or "")
+    hold = control_identity({}, selection_record(task))
+    hold_id = "hold:" + hashlib.sha256(json.dumps(hold, sort_keys=True, default=str).encode()).hexdigest()[:24] \
+        if hold else ""
+    return decide(root, task_id, task_id, writers, fence_id=fence_id, tree_actor=True,
+                  proven=observation["predecessor_starts"], hold_id=hold_id, error="predecessor_writers_unsettled",
+                  action="")
 
 
 def _retry_clock_refusal(task):
@@ -72,7 +116,9 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
     latch would fail every launch. The latch names the LOGICAL root; task may
     be its current retry (#1730). A Continue whose earlier attempt's writers
     all still run leaves the Pause for its own writer hold, which starts it
-    once they settle (owner, 1 Nov); an unknown outcome still refuses. If the
+    once they settle (owner, 1 Nov); an unknown outcome still refuses, unless
+    it is only proven read-only starts this never-started Continue names
+    (``accept_predecessor_starts``, owner 24 Nov). If the
     replay check refused an admitted root, persist that typed refusal and its
     observed basis with the fence release, lending nothing, so the root's own
     Resume addresses it next instead of children hidden behind it. A named local
@@ -97,10 +143,17 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
     refused = error if not safe and "_working_recovery" in task else ""
     evidence = {"refusal_basis": observation["refusal_basis"]} if refused and observation.get("refusal_basis") else {}
     if refusal := release_refusal(current_stop(task, {
-            "owner": observation["authority"]["owner_fence"], "budget": q.BUDGET_ROOT_FENCES}), control_actor()):
+            "owner": observation["authority"]["owner_fence"], "budget": q.BUDGET_ROOT_FENCES}), resume_author()):
         return refusal
     writers = list(observation.get("blockers") or ())
-    if writers:
+    root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
+    carried = bool(writers and not admitted and observation.get("predecessor_starts"))
+    if carried:  # its own choice over its predecessor's proven read-only starts, bound to this closed fence
+        owner_fence = str(observation["authority"]["owner_fence"].get("fence_id") or "")
+        if refusal := accept_predecessor_starts(task, observation, writers, root, fence_id=owner_fence):
+            return refusal
+        writers = []
+    elif writers:
         from supervisor.continuation_admission import only_running_writers, writers_unsettled_refusal
 
         if not only_running_writers(writers):
@@ -108,11 +161,10 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
             if admitted and "_working_recovery" in task:
                 refusal["selection_scope_mismatch"] = True  # this saved episode cannot accept a predecessor's choice
             return refusal
-    root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
     blockers = observation.get("owner_pause_blockers") or []
     from ouroboros.delegate_resume import decide, decisions_in_use, names_start
     own_episode = admitted and (not predecessor or "_working_recovery" in task)
-    if names_start() and not (own_episode and safe):
+    if names_start() and not (own_episode and safe or carried):
         return {"ok": False, "error": "selection_authority_changed"}
     has_choices = _has_resume_choices(blockers, allow_starts=safe)
     if own_episode and (safe or (refused and has_choices)):

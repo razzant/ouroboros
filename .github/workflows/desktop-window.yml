@@ -9,20 +9,27 @@
 # and it runs only the fit's resize: a minimum larger than the screen (WinForms
 # itself limits it on a one-screen runner), the move of a form that hangs over an
 # edge and a form Windows opened maximized are covered by the stand-in test alone.
+# A separate job shows the shipped page in a real EdgeChromium window, served by a
+# fixture server with no optional skill installed, and presses Dashboard > Logs
+# "Open recent requests" beside the populated rail and Clear, measuring the band
+# before and after. In the separate Beautiful Context window over an invented
+# local archive it checks the selected project's requests, comparison,
+# token receipt wording and clearing of the comparison on a room switch. Its
+# screenshots and JUnit describe that run, not the installed app or a live provider.
 #
 # WHY ITS OWN WORKFLOW. The test lanes of ci.yml install no desktop packages (the
 # `test` profile of .github/actions/setup-python-env has no `desktop` extra), so the
 # home test's native case skips there on every OS. Installing pywebview into every
-# test job to run one case would change what all of them import. This job installs
-# the `build` profile, which carries the `desktop` extra, and runs that one case; a
-# skip is a failure here, since a skipped case proves nothing.
+# test job would change what all of them import. Each job here installs the
+# `build` profile, which carries the `desktop` extra, and runs one named case;
+# a skip is a failure here, since a skipped case proves nothing.
 #
 # WHEN. On request and on every `v*` release tag, as the owner chose for cloud tests
 # (2026-10-16, the header of ci.yml): never on a branch push or a pull request. A tag
 # is where a changed pywebview or pythonnet pin is measured again; whoever changes
 # them between tags runs this by hand (`gh workflow run desktop-window.yml --ref
-# <branch>` once the default branch carries the file). It reads the repository and
-# writes nothing.
+# <branch>` once the default branch carries the file). Only synthetic local data
+# and test evidence are written, on the runner.
 name: Desktop window (Windows)
 
 on:
@@ -74,3 +81,50 @@ jobs:
             exit 1
           }
           "### A real window on Windows, left/top/right/bottom`n`n``````json`n$($measured.value)`n``````" >> $env:GITHUB_STEP_SUMMARY
+
+  native-context-report:
+    name: Beautiful Context offline window (Windows WebView2)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          profile: build
+          interpreter: shipped
+      - name: Compare two requests and switch rooms in the native viewer
+        shell: pwsh
+        env:
+          PYTHONUTF8: '1'
+          OUROBOROS_WINDOWS_DESKTOP_QA: '1'
+          OUROBOROS_CONTEXT_REPORT_QA_ARTIFACT_DIR: ${{ runner.temp }}/native-context-report
+        run: |
+          $evidence = $env:OUROBOROS_CONTEXT_REPORT_QA_ARTIFACT_DIR
+          New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+          $xml = Join-Path $evidence 'native-context-report.xml'
+          python -m pytest -o addopts="" -o junit_family=xunit1 -q -rs -s -p no:randomly "--junitxml=$xml" `
+            'tests/test_context_report_native_window.py::test_native_beautiful_context_switches_to_single_request_project'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [xml]$report = Get-Content -Raw -Encoding UTF8 $xml
+          $suite = $report.SelectSingleNode('//testsuite')
+          $measured = $report.SelectSingleNode('//testcase/properties/property[@name="native_context_report"]')
+          if ([int]$suite.tests -ne 1 -or [int]$suite.skipped -ne 0 -or -not $measured) {
+            Write-Host "::error::the native viewer case did not run: tests=$($suite.tests) skipped=$($suite.skipped)"
+            exit 1
+          }
+          foreach ($name in @('logs-entry.png', 'logs-entry-answered.png', 'a-compared.png', 'b-after-switch.png')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $evidence $name) -PathType Leaf)) {
+              Write-Host "::error::missing native screenshot: $name"
+              exit 1
+            }
+          }
+          "### Beautiful Context on Windows WebView2`n`n``````json`n$($measured.value)`n``````" >> $env:GITHUB_STEP_SUMMARY
+      - name: Keep native screenshots and JUnit
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-context-report-windows
+          path: ${{ runner.temp }}/native-context-report/
+          if-no-files-found: error

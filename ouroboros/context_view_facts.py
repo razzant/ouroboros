@@ -1,20 +1,28 @@
 """Names and sizes of the selected context, read from its captured sources.
 
 A window's source and date, reserve, disagreement and retired history are shared by facts rows, Settings and size
-failures (``window_projection``); a size failure names its round's own refused request (``remember_size_refusal``)."""
+failures (``window_projection``); a size failure names its round's own refused request (``remember_size_refusal``).
+An integrating start's facts row also names the gate's shortest telling by kind (``start_facts``), its draw kept on
+the captured core."""
 from __future__ import annotations
 
 import pathlib
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ouroboros import memory_floor as floor, memory_view as mv
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
-from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, REQUIRED_BOOK_CHOICES, REQUIRED_BOOK_UNFIT_KEY
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, REQUIRED_BOOK_CHOICES, REQUIRED_BOOK_UNFIT_KEY, bound_host_row, host_row_intact
 from ouroboros.memory_waiting import text as waiting_text
 from ouroboros.utils import update_json_locked, utc_now_iso
 
 CONTEXT_FACTS_NAME = "ouroboros_context_facts"
 LOW_START_EPISODE = "low_start_episode.json"  # under state/: the open Main-line periods of Low starts, by cause
 SIZE_REFUSAL_KEY = "_context_size_refusal"  # in a task's usage: its round's latest size refusal, whole
+#: In a task's usage: the refused sends no request has told yet, each its own two counts (``size_refusal.counts``),
+#: queued as their calls end (``llm_observability.SendRefusals``) and told once by the next facts row.
+REFUSED_SENDS_KEY = "_refused_sends"
+_REFUSED_SEND_KIND = "ouroboros_refused_send"
+FRESH_FACTS_KEY = "_context_facts_fresh"  # in a task's usage: its newest facts row's digest until a call may carry it out
 _REFUSAL_BASES = {"provider_stated": "provider stated",
                   "exact_local_count": "derived from an exact local count before sending",
                   "anchored_estimate": "derived from a refusal that stated no number"}
@@ -66,7 +74,8 @@ def memory_facts(plan, mode, messages=()):
     my memory: the story with its pages no part or account holds yet (how many, their tokens, the rooms holding
     most of them) and the rooms' lines; what this view shows only by address and, beside it, the held note heads
     that stand whole where the window took that from memory (``held_heads_fact``); marks and waiting classes
-    with their count, oldest date, list reader and closure act.
+    with their count, oldest date, list reader and closure act. Where the gate priced a shortest telling, what it is
+    made of by kind (``start_facts``) rides the measure.
     Counted from the captured snapshot and its receipt; measures only, no advice and no
     threshold. Without a Max room fact (the owner's Low or Nano, an unknown window) it names the memory alone."""
     snapshot = memory_snapshot(plan)
@@ -74,11 +83,12 @@ def memory_facts(plan, mode, messages=()):
         return ""
     receipt = plan.projection(mode).memory_facts or {}
     room, blocks, pages = receipt.get("max_room"), receipt.get("blocks") or {}, floor.unfolded_pages(snapshot)
+    composition = start_facts(plan, snapshot, receipt)
     if not room:
         line = (f"memory: story {blocks.get('story_tokens', 0):,} ({floor.pages_text(pages)}) + rooms "
                 f"{blocks.get('room_tokens', 0):,}")
     else:
-        line = "Max room in this captured build: " + floor.measure_text(room, parts=True, pages=pages)
+        line = "Max room in this captured build: " + floor.measure_text(room, parts=True, pages=pages, composition=composition)
         if room.get("cause") == "held":
             line += "; Max held" + (f" by cuts {', '.join(room['cuts'])}" if room.get("cuts") else "")
         elif room.get("cause") in ("crowded", "route"):  # any other value is a measure without a settled cause
@@ -89,6 +99,9 @@ def memory_facts(plan, mode, messages=()):
             line += f"; {ran}, cause {cause}" + (
                 ", a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here"
                 if cause == "route" else "")
+    if preference := receipt.get("first_contact_preference"):
+        form = "chapter maps" if preference == "maps" else "a smaller memory view"
+        line += f"; first send chose {form} after a refusal on its planned connection; that refusal stated no window"
     shown = floor.addressed_text((receipt.get("floor") or {}).get("steps") or {})
     line += ((f"; shown only by address: {shown}" if shown else "") + held_heads_fact(plan, receipt)
              + f"; marks in view {len(snapshot.marks)}" + waiting_text(snapshot.waiting))
@@ -104,7 +117,8 @@ def held_heads_fact(plan, receipt):
     from ouroboros.held_notes import HeldNoteSection
 
     fact = receipt.get("floor") or {}
-    if sum((fact.get("steps") or {}).values()) <= int(fact.get("by_budget") or 0):
+    steps = fact.get("steps") if "preference" not in fact else fact["preference"]  # exclude advisory cuts
+    if sum((steps or {}).values()) <= int(fact.get("by_budget") or 0):
         return ""
     stepped = {row["section_id"] for row in receipt.get("host_sections_addressed", ()) if row.get("held_note_form")}
     tokens = sum(floor.view_tokens(part.full_text) for part in plan.core.dynamic_sections
@@ -121,14 +135,20 @@ def mode_words(plan, mode):
     (a cold restore's capture may have lowered for another), its shortfall on that cause's basis
     (``memory_floor.lowered_need``); Max says Max is not measured where the row's own window text knows no window
     (``row_window``), whatever its start, a rebind or restore onto an unknown window too, and a window learned later
-    (a rebind, a refusal) is a measured Max."""
+    (a rebind, a refusal) is a measured Max. First-send maps are a preference, not temporary Low due to the window."""
     preferred = str(getattr(plan, "preferred_mode", "") or "")
     if mode == "low" and preferred == "max":
+        from ouroboros.context_fit import FIRST_CONTACT_START
         from ouroboros.context_measurement import mode_cause
 
+        facts = (plan.projection(mode).memory_facts or {}) if hasattr(plan, "projection") else {}
+        room = facts.get("max_room")
+        room = room if isinstance(room, dict) else {}
+        saved_maps = getattr(plan, "start", None) == ("low", FIRST_CONTACT_START["maps"])
+        if facts.get("first_contact_preference") == "maps" or (saved_maps and room.get("cause") not in ("crowded", "route")):
+            return "low (first-send chapter maps; my human's mode: max)"
         cause = mode_cause(plan, mode)
-        room = (plan.projection(mode).memory_facts or {}).get("max_room") if cause in floor.LOWERED_CAUSES else None
-        same = isinstance(room, dict) and room.get("cause") in ("crowded", "route") and floor.lowered_cause(room) == cause
+        same = cause in floor.LOWERED_CAUSES and room.get("cause") in ("crowded", "route") and floor.lowered_cause(room) == cause
         short = floor.lowered_need(room)[1] - room["window"] if same else 0
         return (f"{floor.TEMPORARY_LOW.lower()} (my human's mode: max)" + (f"; cause {cause}" if cause else "")
                 + (f"; short {short:,}{_SHORT_BASIS.get(cause, '')}" if short > 0 else ""))
@@ -267,6 +287,46 @@ def size_refusal(usage, round_idx):
     """The latest size refusal of round ``round_idx`` (``remember_size_refusal``); None after its round."""
     slot = usage.get(SIZE_REFUSAL_KEY)
     return slot if isinstance(slot, dict) and round_idx is not None and slot.get("round") == round_idx else None
+
+
+def _pending_refused_sends(usage):
+    return [row for row in usage.get(REFUSED_SENDS_KEY) or ()
+            if isinstance(row, dict) and row.get("physical_attempt_id") and row.get("text")]
+
+
+def _refusal_notices(usage):
+    return {f"[CONTEXT_FACTS] {row['text']}": row["physical_attempt_id"] for row in _pending_refused_sends(usage)}
+
+
+def _carried_notices(notices, messages) -> set:
+    # A quotation, even another host row's quotation, is no delivery of this fact.
+    return {row["content"] for row in messages if row.get(HOST_CONTEXT_KIND_KEY) == _REFUSED_SEND_KIND
+            and isinstance(row.get("content"), str) and row["content"] in notices and host_row_intact(row)} if notices else set()
+
+
+def refused_sends_in_messages(usage, messages) -> set:
+    """Pending physical identities this prepared send carries in their own intact host rows."""
+    notices = _refusal_notices(usage)
+    return {notices[text] for text in _carried_notices(notices, messages)}
+
+
+def consume_refused_sends(usage, sent: set) -> list:
+    """Take only this dispatch's pairs; their physical sender can return them on a proven-unsent release."""
+    rows = _pending_refused_sends(usage)
+    if kept := [row for row in rows if row["physical_attempt_id"] not in sent]:
+        usage[REFUSED_SENDS_KEY] = kept
+    else:
+        usage.pop(REFUSED_SENDS_KEY, None)
+    return [row for row in rows if row["physical_attempt_id"] in sent]
+
+
+def append_refused_sends(usage, messages) -> bool:
+    """Prepare an intact host row for each untold pair. Never rewrite history; an unsent row consumes nothing."""
+    notices = _refusal_notices(usage)
+    carried = _carried_notices(notices, messages)
+    missing = [bound_host_row(_REFUSED_SEND_KIND, text) for text in notices if text not in carried]
+    messages.extend(missing)
+    return bool(missing)
 
 
 def _refused_request_text(slot):
@@ -415,3 +475,165 @@ def window_fact(plan, reserve):
     if plan is None:
         return ""
     return window_projection(row_window(plan, reserve), under_way=True)["text"]
+
+
+# --- the gate's shortest telling by kind ---------------------------------------------------------
+
+_STORY = {"account": "accounts", "teller": "accounts", "told_records": "accounts", "story_status": "story headings",
+          "account_status": "story headings", "framing": "story headings", "unavailable": "story headings"}
+_ROOM = {"work": "finished works standing as lines", "task_gist": "task gist lines", "task_facts": "task fact lines",
+         "project_words": "my human's words in this room", "origin": "my human's words that started this work",
+         "note": "my notes", "notes": "my notes", "room_record": "this room's records", "told_records": "this room's records",
+         "room_rows": "this room's rows by count", "conversation_gist": "far works' gists"}
+_PIECES = {"owner_words": "my human's words for this work", "late_reviews": "late reviews", "marks": "marks"}
+
+
+def telling_parts(snapshot: mv.MemoryViewSnapshot, telling: int,
+                  chars: Optional[Tuple[Dict[str, int], Dict[str, int]]] = None) -> List[List[Any]]:
+    """The gate's shortest telling (``memory_floor.telling_level``) by kind, its ``telling`` tokens split per block by
+    cumulative characters (``kind_chars``, or ``chars`` already read from it): the story block's ``tokens_of`` over its
+    kinds, the room block's over its kinds, and what the gate's figure adds beyond them (its floor note) named as such.
+    The kinds sum to ``telling``. [] where the parts do not cover the drawn text or the memory is not active."""
+    if chars is None and snapshot.active and telling:
+        chars = kind_chars(snapshot)
+    if chars is None or not snapshot.active or not telling:
+        return []
+    story, room = chars
+    story_tokens, room_tokens = floor.tokens_of(sum(story.values())), floor.tokens_of(sum(room.values()))
+    total: Dict[str, int] = {}
+    for kinds, tokens in ((story, story_tokens), (room, room_tokens),
+                          ({"the floor note": 1}, telling - story_tokens - room_tokens)):
+        for kind, share in _split(kinds, tokens):
+            total[kind] = total.get(kind, 0) + share
+    return [[kind, tokens] for kind, tokens in sorted(total.items(), key=lambda item: (-item[1], item[0])) if tokens]
+
+
+def kind_chars(snapshot: mv.MemoryViewSnapshot, key: Any = None) -> Optional[Tuple[Dict[str, int], Dict[str, int]]]:
+    """``(story, room)``: each block's JSON characters at the telling level by kind, read from the renderer's own exact
+    parts (one draw of that level); each part is named once, a joining blank line goes with the part it follows, and
+    each block's kinds sum to that block's characters. None where the parts do not cover the drawn text."""
+    from ouroboros.context_timing import counted
+    from ouroboros.memory_form_facts import memory_composition
+
+    level = floor.telling_level(snapshot)
+    counted("view_compositions", key=(key, level.addressed))  # the start's one draw, beside view_renders
+    try:
+        blocks = memory_composition(snapshot, level)["blocks"]
+    except ValueError:  # the parts do not cover the renderer's text: no itemized measure, never a guessed one
+        return None
+    story: Dict[str, int] = {}
+    for row in blocks["story"]["parts"]:
+        kind = _story_kind(row)
+        story[kind] = story.get(kind, 0) + row["json_chars"]
+    room: Dict[str, int] = {}
+    pieces, last = blocks["room"]["pieces"], "this room's headings and facts"
+    for row in blocks["room"]["parts"]:
+        if row["kind"] != "separator":
+            last = _room_kind(row, pieces[row["piece"]])
+        room[last] = room.get(last, 0) + row["json_chars"]
+    return story, room
+
+
+def _story_kind(row: Mapping[str, Any]) -> str:
+    if row["kind"] in _STORY:
+        return _STORY[row["kind"]]
+    if row["kind"] in ("story_record", "story_records", "story_quotes"):
+        if any(source.get("kind") == "part" for source in row["sources"]):
+            return "parts"
+        return {"lead": "pages standing as leads", "whole": "pages whole"}.get(row["form"], "pages by opening, address or count")
+    return "old story"  # the helper's retelling and transfers, whole or as a room's line
+
+
+def _room_kind(row: Mapping[str, Any], key: Any) -> str:
+    head = key[0] if isinstance(key, list) and key else key
+    if head in _PIECES:
+        return _PIECES[head]
+    sources = [source for source in row["sources"] if isinstance(source, dict)]
+    if head == "room":
+        if row["kind"] == "room_row":  # a reaction is the renderer's place fact: no words of its own
+            return ("my replies" if any(s.get("kind") == "ouroboros" for s in sources) else
+                    "my human's words in this room" if any(s.get("owner_side") for s in sources) else
+                    "reactions in this room" if sources and all(s.get("kind") == "place_fact" for s in sources)
+                    else "words here not recorded as mine or my human's")
+        if row["kind"] == "task_fact":  # a work's line whole: its telling stands here, no reply of it in this room
+            return "works with a gist but no reply here" if row["form"] == "whole" and any(
+                s.get("gist_source") for s in sources) else "task fact lines"
+        return _ROOM.get(row["kind"], "this room's headings and facts")
+    if row["kind"] in _ROOM:
+        return _ROOM[row["kind"]]
+    return "my human's words elsewhere" if any(s.get("owner_side") for s in sources) else "far conversations as lines"
+
+
+def _split(chars: Mapping[str, int], tokens: int) -> List[Tuple[str, int]]:
+    """``tokens`` over ``chars``'s kinds by cumulative share: the parts sum to ``tokens`` exactly."""
+    total, through, used, out = sum(chars.values()), 0, 0, []
+    for kind, size in chars.items():
+        through += size
+        share = tokens * through // total if total else 0
+        out.append((kind, share - used))
+        used = share
+    return out
+
+
+# --- once per start ------------------------------------------------------------------------------
+
+def start_facts(plan: Any, snapshot: mv.MemoryViewSnapshot, receipt: Mapping[str, Any]) -> str:
+    """The composition of the gate's shortest telling by kind where this projection's Max room fact priced a telling,
+    else "". The telling level's characters by kind (one draw) depend on the captured view alone and are kept on the
+    plan's captured core, so a plan rebound over that core reuses them and another core never sees them; the telling's
+    tokens are read from this projection's fact every time. A failure drops the composition, never the facts row."""
+    core = plan.core
+    held = vars(core).setdefault("_start_facts", {}) if hasattr(core, "__dict__") else {}  # beside the core's fields
+    fact = receipt.get("max_room") if isinstance(receipt.get("max_room"), Mapping) else {}
+    try:
+        if not fact.get("telling") or not snapshot.active:
+            return ""
+        if "chars" not in held:
+            held["chars"] = None  # a draw that fails is remembered for this core, not retried at every facts row
+            held["chars"] = kind_chars(snapshot, hash(core.memory_view_json))
+        return ", ".join(f"{kind} {int(tokens):,}" for kind, tokens in
+                         telling_parts(snapshot, int(fact["telling"]), held["chars"])) if held["chars"] else ""
+    except Exception:  # the composition is a segment of the facts row: its failure drops it alone
+        return ""
+
+
+# The names a refused request's parts carry (``context_start_bound`` and ``context_fit``'s refusals).
+_SECTION_NAMES = {"shared_understanding": "overview"}
+_GOVERNANCE_NAMES = {"system": "system prompt", "bible": "constitution"}
+_ANONYMOUS_PREFIXES = {"stable", "dynamic", "head", "governance"}  # ``section_floor.capture_sections``' positional ids
+
+
+def _largest_first(parts: Iterable[Tuple[str, int]]) -> Tuple[Tuple[str, int], ...]:
+    return tuple(sorted(((name, size) for name, size in parts if size), key=lambda part: (-part[1], part[0])))
+
+
+def refusal_parts(core: Any, sections: Iterable[Any], receipts: Iterable[Mapping[str, Any]], schemas: Iterable[Any],
+                  shown: Any, user_content_json: str, *, mode: str, provider: str,
+                  reasoning_effort: str) -> Tuple[Tuple[str, int], ...]:
+    """Named sizes, in estimator tokens and largest first, of what a request the fitter refused holds.
+
+    Host sections by their producer's name (governance as ``system prompt`` and ``constitution``, a report by its
+    family, positional sections summed as ``other host sections``) in the forms the walk chose; the connections text,
+    the assignment and the tool schemas; the story and the room only when memory was rendered (``shown``).
+    """
+    from ouroboros.context_measurement import tool_schema_tokens
+    from ouroboros.section_floor import section_views
+
+    sections = tuple(sections)
+    views = section_views(sections, receipts)
+    sizes: Dict[str, int] = {}
+    for part in sections:
+        family, (prefix, _sep, index) = getattr(part, "report_family", ""), part.section_id.rpartition("_")
+        name = (_GOVERNANCE_NAMES.get(family, family) if family else "other host sections"
+                if prefix in _ANONYMOUS_PREFIXES and index.isdigit() else _SECTION_NAMES.get(part.section_id, part.section_id))
+        sizes[name] = sizes.get(name, 0) + mv.json_chars(views.get(part.section_id, part.full_text)) // 4
+    for parts, text in ((core.semi_stable_sections, core.semi_stable_text), (core.dynamic_sections, core.dynamic_text),
+                        (core.dynamic_head_sections, core.dynamic_head_text)):
+        if not parts and text:  # a core captured as plain text: its sections are drawn from it whole
+            sizes["other host sections"] = sizes.get("other host sections", 0) + mv.json_chars(text) // 4
+    sizes["connections"] = mv.json_chars(core.connections[mode == "nano"]) // 4
+    sizes["assignment"] = len(user_content_json) // 4
+    sizes["tool schemas"] = tool_schema_tokens(list(schemas), provider=provider, reasoning_effort=reasoning_effort)
+    if shown is not floor.NO_VIEW:
+        sizes["story"], sizes["room"] = floor.tokens_of(shown.story_chars), floor.tokens_of(shown.room_chars)
+    return _largest_first(sizes.items())

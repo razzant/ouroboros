@@ -49,6 +49,26 @@ def test_legacy_forged_stamp_is_not_a_host_fact(q):
     assert _task_from_schedule(record)["metadata"]["work_kind"] == "consciousness"
 
 
+def test_a_template_cannot_declare_own_work_only_the_writer_can(q):
+    """``own_declared`` (the mark the scheduler holds while own time is off) comes from the host writer's origin:
+    a template that carries it is not authority, and a declared writer's origin reaches the fired task."""
+    from ouroboros.consciousness_authority import declared_own_origin
+    from supervisor.queue_schedules import _task_from_schedule
+
+    forged = row()
+    forged["task"]["metadata"]["own_declared"] = True
+    record = q.queue.upsert_scheduled_task(forged, drive_root=q.root, writer_kind="owner", actor="owner:gateway")
+    record["task"]["metadata"]["own_declared"] = True  # as a hand-edited table row would carry it
+    assert "own_declared" not in _task_from_schedule(record)["metadata"]
+    legacy = {k: v for k, v in record.items() if k not in ("writer_kind", "writer_origin")}  # an origin-less row
+    legacy["task"]["metadata"].update(initiator="consciousness", own_declared=True)
+    assert "own_declared" not in _task_from_schedule(legacy)["metadata"]
+    declared = declared_own_origin({"owner_ingress": True, "task_id": "turn-1"})
+    record = q.queue.upsert_scheduled_task(row(), drive_root=q.root, writer_kind="consciousness", actor="agent",
+                                           writer_metadata=declared, declare=True)
+    assert _task_from_schedule(record)["metadata"]["own_declared"] is True
+
+
 def test_schedule_lifecycle_edit_changes_writer(q):
     q.queue.upsert_scheduled_task(row(), drive_root=q.root, writer_kind="owner", actor="owner:gateway")
     outcome = q.queue.mutate_scheduled_task("disable", "schedule", reason="later", actor="agent", drive_root=q.root,
@@ -150,6 +170,39 @@ def test_autonomous_independent_schedule_is_started_work(q, wake):
         assert record["writer_origin"]["consciousness_cause"] == fired["consciousness_cause"] == expected
         assert fired["work_kind"] == "consciousness" and fired["origin_wake_task_id"] == "focus-author"
         assert "wake_cause" not in fired
+
+
+LETTER = {"peer_letter": {"place_id": "place-b", "link_id": "link-0001", "letter_id": "l-1", "sender_label": "Laptop"},
+          "letter_author": {"label": "Laptop", "basis": "link_key", "key_id": "link-0001"}}
+
+
+@pytest.mark.parametrize("door", ["writer", "followup"])
+def test_a_template_cannot_carry_a_letters_origin_only_the_writer_can(q, door):
+    """The link and agent author of a linked Ouroboros's letter (``peer_letters.CARRIED``) reach a fired task from
+    the host writer's origin alone. A template naming them (the Schedules door, a saved or hand-edited row) gives
+    its run none and mints no other kind of writer; a later step of that letter's work keeps them, on its origin."""
+    from ouroboros.gateway.tasks import _RESERVED_METADATA_KEYS
+    from ouroboros.peer_letters import CARRIED
+    from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS
+    from supervisor.queue_schedules import _task_from_schedule
+
+    carried = set(CARRIED)
+    assert carried <= RESERVED_TEMPLATE_FIELDS and carried <= _RESERVED_METADATA_KEYS
+    forged = row()
+    forged["task"]["metadata"].update(deepcopy(LETTER))
+    record = q.queue.upsert_scheduled_task(forged, drive_root=q.root, writer_kind="owner", actor="owner:gateway")
+    assert not carried & set(record["task"]["metadata"]) and not carried & set(record["writer_origin"])
+    record["task"]["metadata"].update(deepcopy(LETTER))  # as a saved or hand-edited table row would carry it
+    fired = _task_from_schedule(record)["metadata"]
+    assert not carried & set(fired) and fired["work_kind"] == "owner"
+    legacy = {k: v for k, v in record.items() if k not in ("writer_kind", "writer_origin")}  # an origin-less row
+    fired = _task_from_schedule(legacy)["metadata"]
+    assert not carried & set(fired) and fired["work_kind"] == "owner", "its recorded source, never a new kind"
+    written = _register_origin(q, {"work_kind": "owner", "task_id": "focus-author", **deepcopy(LETTER)}, "related",
+                               door=door)
+    assert not carried & set(written["task"]["metadata"]), "the template is not its carrier"
+    assert {key: written["writer_origin"][key] for key in CARRIED} == LETTER
+    assert {key: _task_from_schedule(written)["metadata"][key] for key in CARRIED} == LETTER
 
 
 @pytest.mark.parametrize("door", ["writer", "followup"])

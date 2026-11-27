@@ -4,12 +4,27 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from ouroboros.gateway.router import collect_routes
+from ouroboros.gateway.schema import json_schema_for, validate_ingress
+from ouroboros.gateway.skill_source_contracts import (
+    SkillCatalogInstallResponse,
+    SkillCatalogItem,
+    SkillCatalogItemDetailResponse,
+    SkillCatalogResponse,
+    SkillCatalogSearchResponse,
+    SkillSourceProbeResponse,
+    SkillSourceRow,
+    SkillSourceSuggestion,
+    SkillSourcesResponse,
+    StarterSkillItem,
+    StarterSkillsResponse,
+)
 from ouroboros.skill_install_record import read_install_record
 from tests._skill_source_fixtures import HubFixture, builtin_repo, join_source_refreshes, write_skill
 from tests.test_client_contract_bindings import assert_bound
@@ -145,6 +160,55 @@ def test_catalog_search_and_detail(env):
     assert missing.status_code == 404
 
 
+# The words a card prints for an entry unrelated to its id (a hub title before and after a rename, a manifest titled
+# otherwise or not at all), the title its widget declares, its id spelled with spaces, and neighbouring searches that
+# must keep finding only what they named.
+@pytest.mark.parametrize(("title", "manifest_title"), [("Account limits", ""), ("Claudexor Quotas", ""),
+                                                       ("Account limits", "Quota board")])
+def test_search_finds_an_entry_by_its_card_title_widget_title_or_spelled_id_and_the_detail_names_it_alike(
+        env, title, manifest_title):
+    from ouroboros.skill_source_catalog import refresh_source
+
+    client, drive, hub, _tmp = env
+    extra = (f"title: {manifest_title}\n" if manifest_title else "") + "ui_tab:\n  tab_id: quotas\n  title: Claudexor Quotas\n"
+    hub.add_hosted("claudexor_quotas", "0.13.2", official=True, extra=extra)
+    hub.entries["claudexor_quotas"].update(title=title, description="Shows what is left of each subscription.")
+    # Three names that share no word: the id, the hub's title and the title its widget declares.
+    hub.add_hosted("relay_post", extra="ui_tab:\n  tab_id: desk\n  title: Courier Desk\n")
+    hub.entries["relay_post"].update(title="Messages for others", description="Hands notes on.")
+    hub.commit("titled entries")
+    assert not refresh_source(drive, hub.rows()[1]).get("error")
+    listed = {item["name"]: item for item in client.get("/api/skill-catalog").json()["items"]}
+    assert (listed["claudexor_quotas"]["title"], listed["claudexor_quotas"]["widget_title"]) == (title, "Claudexor Quotas")
+    assert (listed["relay_post"]["title"], listed["relay_post"]["widget_title"]) == ("Messages for others", "Courier Desk")
+    assert listed["weather"]["widget_title"] == "", "a skill without a widget declares no widget title"
+    assert listed["claudexor_quotas"].get("search_names") == ([manifest_title] if manifest_title else None), \
+        "the manifest's own title, which the card no longer prints, still names it"
+
+    def found(query):
+        answer = client.get("/api/skill-catalog/search", params={"q": query})
+        assert assert_bound("GET /api/skill-catalog/search", answer)
+        return [item["id"] for item in answer.json()["items"]]
+
+    for query in (title, title.upper(), f"  {title.lower()}  ", "claudexor_quotas", "Claudexor Quotas",
+                  "claudexor-quotas", "Claudexor - Quotas", "quotas claudexor", "subscription",
+                  *([manifest_title] if manifest_title else [])):
+        assert found(query) == ["ouroboros/claudexor_quotas"], query
+    for query in ("Messages for others", "Courier Desk", "courier_desk", "relay post", "relay-post", "relay_post"):
+        assert found(query) == ["ouroboros-community/relay_post"], query
+    assert found("weather") == ["ouroboros/weather"] and found("limits weather") == [] and found("courier weather") == []
+    assert found("notes card") == ["ouroboros-community/notes"], "words still match across name and description"
+    assert found("-") == [], "a lone dash means itself: nothing here holds one, and it never finds everything"
+    detail = client.get("/api/skill-catalog/item/ouroboros/claudexor_quotas")
+    assert assert_bound("GET /api/skill-catalog/item/{source_id}/{name}", detail)
+    shown = detail.json()["item"]
+    assert shown["title"] == title, "the detail names the entry as its card does, not as its manifest does"
+    keys = ("id", "name", "title", "widget_title", "search_names", "digest", "version", "official", "trust", "connects",
+            "icon")
+    assert {key: shown.get(key) for key in keys} == {key: listed["claudexor_quotas"].get(key) for key in keys}
+    assert (shown["type"], shown["permissions"]) == ("instruction", []), "the release manifest's facts still join"
+
+
 def _with_clawhub(hub, monkeypatch):
     rows = [*hub.rows(), {"id": "clawhub", "name": "ClawHub", "kind": "registry", "trust": "review", "confirmed": True}]
     monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps(rows))
@@ -260,6 +324,7 @@ def test_listing_rows_carry_install_facts_without_network(env, monkeypatch):
     row = next(r for r in listing.json()["skills"] if r["name"] == "notes")
     assert row["install"]["source"]["id"] == "ouroboros-community" and row["install"]["basis"] == "review"
     assert row["install"]["modified"] is False and row["category"] == ["writing"]
+    assert row["catalog_id"] == "ouroboros-community/notes", "the detail sheet's address, as resolved for this row"
 
 
 def test_starter_skills_for_onboarding(env):
@@ -398,3 +463,87 @@ def test_probe_and_add_carry_a_revision_and_folder_and_the_list_offers_suggestio
     assert assert_bound("GET /api/skill-sources", listed) == "SkillSourcesResponse"
     assert [(s["name"], s["connected"]) for s in listed.json()["suggestions"]] == [("Team", True), ("Team next", False)]
     assert (tmp_path / "settings.json").read_text(encoding="utf-8") == before, "a suggestion connects nothing"
+
+
+# --- The Skills page's browser fixtures, held to the published Python shapes ------------------
+#
+# The fixtures in web/tests/fixtures/skills_v4/ feed the Skills page's Node and Playwright
+# tests (skills_page, skill_browse, skill_sources_view, onboarding_starter_skills and the
+# Skills browser suites). They stand for real responses; this keeps them answering the shapes
+# gateway/skill_source_contracts.py publishes, so a renamed or new required field cannot leave
+# the fixtures stale while those UI tests stay green.
+
+FIXTURES = Path(__file__).resolve().parents[1] / "web" / "tests" / "fixtures" / "skills_v4"
+
+
+def _fixture(name):
+    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def _assert_published(value, shape, where):
+    """One browser fixture answers the published shape: declared types and required keys
+    (``validate_ingress`` recurses into nested rows) and no key the shape does not declare."""
+    errors = validate_ingress(value, shape)
+    assert not errors, f"{where}: {errors}"
+    declared = set(json_schema_for(shape)["properties"])
+    assert set(value) <= declared, f"{where}: {sorted(set(value) - declared)} are not {shape.__name__} fields"
+
+
+def test_browser_fixtures_answer_the_published_skill_source_shapes():
+    sources = _fixture("skill_sources.json")
+    _assert_published(sources, SkillSourcesResponse, "skill_sources.json")
+    for row in sources["sources"]:
+        _assert_published(row, SkillSourceRow, f"source {row['id']}")
+    for suggestion in sources["suggestions"]:
+        _assert_published(suggestion, SkillSourceSuggestion, f"suggestion {suggestion['name']}")
+
+    for key, probe in _fixture("skill_source_probe.json").items():
+        _assert_published(probe, SkillSourceProbeResponse, f"probe {key}")
+
+    catalog = _fixture("skill_catalog.json")
+    _assert_published(catalog, SkillCatalogResponse, "skill_catalog.json")
+    for item in catalog["items"]:
+        _assert_published(item, SkillCatalogItem, f"catalog item {item['id']}")
+    for row in catalog["sources"]:
+        _assert_published(row, SkillSourceRow, f"catalog source {row['id']}")
+
+    search = _fixture("skill_catalog_search.json")
+    _assert_published(search, SkillCatalogSearchResponse, "skill_catalog_search.json")
+    for item in search["items"]:
+        _assert_published(item, SkillCatalogItem, f"search item {item['id']}")
+    assert any(item.get("registry_slug") for item in search["items"]), "the search fixture lost its registry hits"
+    for item in search["items"]:
+        if item.get("registry_slug"):
+            assert item["installed"] is None, (
+                f"the search joined registry hit {item['registry_slug']} with an install")
+
+    detail = _fixture("skill_catalog_item.json")
+    _assert_published(detail, SkillCatalogItemDetailResponse, "skill_catalog_item.json")
+    _assert_published(detail["item"], SkillCatalogItem, "detail item")
+
+    for key, answer in _fixture("skill_install.json").items():
+        _assert_published(answer, SkillCatalogInstallResponse, f"install {key}")
+
+    starter = _fixture("onboarding_starter_skills.json")
+    # The starter fixture models an OLDER core: ``catalog_more`` is documented "absent from
+    # older cores" on the contract, so exactly that one required key is missing from the
+    # fixture and nothing else. Current cores keep requiring it — this build's own live route
+    # is closed-checked against the same shape in test_starter_skills_for_onboarding above.
+    assert validate_ingress(starter, StarterSkillsResponse) == ["catalog_more is required"]
+    _assert_published({**starter, "catalog_more": None}, StarterSkillsResponse, "onboarding_starter_skills.json")
+    for group in starter["groups"]:
+        for item in group["items"]:
+            _assert_published(item, StarterSkillItem, f"starter item {item['id']}")
+    for row in starter["sources"]:
+        _assert_published(row, SkillSourceRow, f"starter source {row['id']}")
+
+
+def test_the_shape_check_refuses_an_unknown_and_a_missing_required_fixture_field():
+    """The fixture check fails on both drift directions it exists to catch: a field the shape
+    does not declare, and a required field the fixture lost."""
+    row = _fixture("skill_sources.json")["sources"][0]
+
+    with pytest.raises(AssertionError, match="are not SkillSourceRow fields"):
+        _assert_published({**row, "managed_by": "x"}, SkillSourceRow, "row")
+    with pytest.raises(AssertionError, match="trust is required"):
+        _assert_published({key: value for key, value in row.items() if key != "trust"}, SkillSourceRow, "row")

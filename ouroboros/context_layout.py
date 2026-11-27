@@ -16,7 +16,8 @@ SYSTEM, BIBLE and the common identity/narrative core remain caller-owned.
 from __future__ import annotations
 
 import pathlib
-from typing import Any, List, Mapping
+import re
+from typing import Any, List, Mapping, Optional
 
 from ouroboros.reference_books import ReferenceBook, compose_book, load_reference_book, overview_book
 
@@ -59,8 +60,26 @@ def generate_doc_nav_map(text: str, *, title: str, rel_path: str, instructions: 
     ranges intentionally overlap. This is a lossless index
     (P1: no silent truncation) — the single canonical file on disk is unchanged.
     """
+    entries = _nav_entries(text)
+    out = [f"## {title} (navigation map)", ""]
+    if instructions:
+        out += [
+            f"Full text is NOT inlined to keep the working context window fit. Read any "
+            f"section on demand with `read_file(root=\"system_repo\", path=\"{rel_path}\", "
+            f"start_line=A, max_lines=N)` (untruncated). Ranges are inclusive; a "
+            f"parent includes its complete descendant group, and `max_lines=B-A+1` "
+            f"for `lines A-B`. Sections:",
+            "",
+        ]
+    if not entries:
+        out.append("- (no `##`/`###`/`####` headings; "
+                   + (f"read `{rel_path}` directly)" if instructions else f"source: `{rel_path}`)"))
+    return "\n".join([*out, *_nav_lines(entries)])
+
+
+def _nav_entries(text: str) -> List[tuple[int, str, int, int]]:
+    """Each ``##``-``####`` heading outside code fences: ``(level, title, first line, last line)``, 1-based."""
     lines = text.splitlines()
-    total = len(lines)
     headings: List[tuple[int, str, int]] = []  # (level, title, 1-based line)
     in_fence = False
     for i, line in enumerate(lines, start=1):
@@ -75,42 +94,86 @@ def generate_doc_nav_map(text: str, *, title: str, rel_path: str, instructions: 
             headings.append((3, line[4:].strip(), i))
         elif line.startswith("#### "):
             headings.append((4, line[5:].strip(), i))
-
-    out = [f"## {title} (navigation map)", ""]
-    if instructions:
-        out += [
-            f"Full text is NOT inlined to keep the working context window fit. Read any "
-            f"section on demand with `read_file(root=\"system_repo\", path=\"{rel_path}\", "
-            f"start_line=A, max_lines=N)` (untruncated). Ranges are inclusive; a "
-            f"parent includes its complete descendant group, and `max_lines=B-A+1` "
-            f"for `lines A-B`. Sections:",
-            "",
-        ]
-    if not headings:
-        out.append("- (no `##`/`###`/`####` headings; "
-                   + (f"read `{rel_path}` directly)" if instructions else f"source: `{rel_path}`)"))
-    for idx, (level, htitle, lineno) in enumerate(headings):
-        end = total
-        for later_level, _later_title, later_lineno in headings[idx + 1:]:
-            if later_level <= level:
-                end = later_lineno - 1
-                break
-        indent = "  " * (level - 2)
-        out.append(f"{indent}- {htitle} — lines {lineno}-{end}")
-    return "\n".join(out)
+    return [(level, title, lineno, next((later - 1 for later_level, _title, later in headings[idx + 1:]
+                                         if later_level <= level), len(lines)))
+            for idx, (level, title, lineno) in enumerate(headings)]
 
 
-def design_navigation(text: str | None, *, source: str) -> str:
-    """Index canonical DESIGN bytes, without representing headings as rules read."""
+def _nav_lines(entries: List[tuple[int, str, int, int]]) -> List[str]:
+    return [f"{'  ' * (level - 2)}- {title} — lines {first}-{last}" for level, title, first, last in entries]
+
+
+def _design_bible(text: str) -> Optional[tuple[str, int, int]]:
+    """DESIGN's ``## Design bible`` section verbatim with its 1-based inclusive lines, or ``None``: from the heading
+    titled exactly so (a subtitle only after ``: ``) to the next level-1 or level-2 heading outside a code fence
+    (fences read as ``generate_doc_nav_map`` reads them). Every reader sees its lines with ``\\n`` endings, however
+    the file was written; a digest still names the file's own bytes."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines(keepends=True)
+    first, in_fence = None, False
+    for number, line in enumerate(lines, start=1):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        elif in_fence:
+            continue
+        elif first is None and re.fullmatch(r"## Design bible(?:: .*)?", line.rstrip()):
+            first = number
+        elif first is not None and line.startswith(("# ", "## ")):
+            return "".join(lines[first - 1:number - 1]).strip(), first, number - 1
+    return None if first is None else ("".join(lines[first - 1:]).strip(), first, len(lines))
+
+
+def design_bible_section(text: str) -> Optional[str]:
+    """The one DESIGN slice an author, a session and a reviewer of an interface change each carry whole: the
+    design bible section, its principles, seed table and recipes; ``None`` when the book has none."""
+    found = _design_bible(text)
+    return found[0] if found else None
+
+
+# The first line of an installed book read for work whose own tree is not established as the body (Fable F3, RVD1 N2).
+INSTALLED_DESIGN = ("These are the interface rules of Ouroboros itself, from its installed body; this work's own tree is "
+                    "not established as that body.")
+
+
+def design_bible_view(text: Optional[str], *, source: str, installed: bool = False) -> str:
+    """An author's DESIGN: its design bible whole, the rest of the book by headings and ranges, the exact source.
+
+    Only the file's bytes and its path shape it (no time, counter or service state), so the block it rides keeps its
+    bytes through a return. A source that cannot be read, or a book without the section, keeps the navigation's own
+    honest form (``design_navigation``). ``installed``: the book is the installed body's for work whose own tree is
+    not established as that body (``author_design_source``), and its first line says whose interface it governs
+    (``INSTALLED_DESIGN``), in every form."""
+    whose = [INSTALLED_DESIGN, ""] if installed else []
+    found = None if text is None else _design_bible(text)
+    if found is None:
+        navigation = design_navigation(text, source=source)
+        return "\n".join([*whose, navigation if text is None else navigation
+                          + " This source has no `## Design bible` section."])
+    section, first, last = found
+    rest = [(level, f"{title} (whole above)", first, last) if line == first else (level, title, line, end)
+            for level, title, line, end in _nav_entries(text) if not first < line <= last]
+    return "\n".join([*whose, section, "", "## DESIGN.md (navigation map)", "", *_nav_lines(rest), "",
+                      f"Source: {source}. Use this exact source path when reading; relative paths may address a "
+                      f"candidate. Ranges are inclusive. Inlined above: its design bible whole (lines {first}-{last}); "
+                      "every other section by its heading and range only. Availability is not evidence of reading or "
+                      "application. Select relevant original sections; a participant without source-reading tools "
+                      "needs those excerpts in its packet."])
+
+
+def design_navigation(text: str | None, *, source: str, disclosure: str = "") -> str:
+    """Index DESIGN headings; a review supplies its actual inline coverage and its own reader guidance."""
     locator = f"Source: {source}."
     if text is None:
         return f"## DESIGN.md source unavailable\n\n{locator} No DESIGN content or navigation delivered."
+    if disclosure:
+        locator += f" Ranges are inclusive. {disclosure} Availability is not evidence of reading or application."
+    else:
+        locator += (" Use this exact source path when reading; relative paths may address a candidate. "
+                    "Ranges are inclusive. Navigation only: DESIGN content is not inlined; "
+                    "availability is not evidence of reading or application. Select relevant original sections; "
+                    "a participant without source-reading tools needs those excerpts in its packet.")
     return (
         generate_doc_nav_map(text, title="DESIGN.md", rel_path="docs/DESIGN.md", instructions=False)
-        + f"\n\n{locator} Use this exact source path when reading; relative paths may address a candidate. "
-        "Ranges are inclusive. Navigation only: DESIGN content is not inlined; "
-        "availability is not evidence of reading or application. Select relevant original sections; "
-        "a participant without source-reading tools needs those excerpts in its packet."
+        + f"\n\n{locator}"
     )
 
 
@@ -121,6 +184,11 @@ def task_design_source(ctx: Any, task: Mapping[str, Any]) -> pathlib.Path | None
     explicit true flag never turns a known foreign workspace into Ouroboros.
     Folderless self-body work can address system_repo without reclassifying scratch.
     """
+    return _design_source(ctx, task)[0]
+
+
+def _design_source(ctx: Any, task: Mapping[str, Any]) -> tuple[pathlib.Path | None, str]:
+    """``task_design_source`` and the active root's body fact it read (``review_body_fact.BODY_*``)."""
     from ouroboros import body_candidate
     from ouroboros.context_input_selection import _explicit_self_body_docs_flag
     from ouroboros.review_body_fact import BODY_FALSE, BODY_TRUE, body_fact
@@ -132,40 +200,85 @@ def task_design_source(ctx: Any, task: Mapping[str, Any]) -> pathlib.Path | None
     binding = copy_binding(task) or copy_binding(ctx)
     if binding and binding.get("source_is_system_repo") is not False and any(
             same_directory(parent, binding.get("execution_root")) for parent in (active, *active.parents)):
-        return pathlib.Path(binding["execution_root"])
+        return pathlib.Path(binding["execution_root"]), BODY_TRUE
     # A false copy flag means a separate Git directory, not necessarily a foreign
     # project: body_fact also recognizes the configured upstream/fork chain.
     if body_candidate.is_bound(ctx) and folderless_scratch_dir(ctx) is not None:
         # Explicit preparation/restoration selects the body while scratch stays
         # the default cwd. A foreign workspace/room still follows its own identity.
-        return pathlib.Path(body_candidate.descriptor(ctx)["path"])
+        return pathlib.Path(body_candidate.descriptor(ctx)["path"]), BODY_TRUE
     fact = body_fact(active, system_repo=system,
                      data_dir=getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None))
     if fact.body == BODY_TRUE:
         if fact.how == "dir":
-            return system
+            return system, BODY_TRUE
         # Read-only investigators may start below a body's Git worktree root.
         # Identity is already established; Git metadata locates its document.
         return next((parent for parent in (active, *active.parents)
-                     if (parent / ".git").exists()), active)
+                     if (parent / ".git").exists()), active), BODY_TRUE
     if fact.body == BODY_FALSE:
-        return None
+        return None, BODY_FALSE
     if _explicit_self_body_docs_flag(dict(task)) is True and folderless_scratch_dir(ctx) is not None:
-        return system
-    return None
+        return system, fact.body
+    return None, fact.body
+
+
+def author_design_source(ctx: Any, task: Mapping[str, Any]) -> tuple[pathlib.Path | None, bool]:
+    """Whose DESIGN an author's own context carries, and whether it is the installed body's for a tree not
+    established as that body (the owner's item 97 of 21.11.2026; council C13, R2).
+
+    The recognized body's book first (``task_design_source``). Otherwise the installed one, never an unadopted
+    candidate the context is bound to (``body_candidate.serving_repo_dir_for``): for work the task itself declares
+    Ouroboros's (``context_requires_self_body_docs`` true, from a foreign folder too), and for work whose body is
+    unknown yet not proven foreign (a project room without a folder), as the handbook stays resident there
+    (``context_input_selection.development_resident``: missing facts never narrow it). A false or absent declaration
+    narrows nothing: the contract writes false for silence. Proven-foreign work without the declaration gets none;
+    children, nannies and background work of the body keep it (no on-demand surface narrows it).
+    """
+    from ouroboros.body_candidate import serving_repo_dir_for
+    from ouroboros.context_input_selection import _explicit_self_body_docs_flag
+    from ouroboros.review_body_fact import BODY_FALSE, BODY_TRUE
+
+    root, body = _design_source(ctx, task)
+    if body == BODY_TRUE:
+        return root, False
+    if body != BODY_FALSE or _explicit_self_body_docs_flag(dict(task)) is True:
+        return serving_repo_dir_for(ctx), True
+    return None, False
+
+
+def read_design_source(path: pathlib.Path) -> tuple[bytes, str] | None:
+    """One scoped read supplies both the UTF-8 view and the original bytes a session binds by digest."""
+    from subprocess import TimeoutExpired
+
+    from ouroboros import work_domain
+    from ouroboros.workspace_executor_paths import ManagedPathRefused
+
+    try:
+        raw = work_domain.read_bytes(path)
+        return raw, raw.decode("utf-8")
+    except (OSError, UnicodeError, work_domain.WorkDomainRefused, ManagedPathRefused, TimeoutExpired):
+        return None
 
 
 def task_design_navigation(ctx: Any, task: Mapping[str, Any]) -> str:
-    """Capture once before context fitting; the task-specific root stays out of A'."""
-    root = task_design_source(ctx, task)
+    """Capture once before context fitting; the task-specific root stays out of A'.
+
+    The author's view is a host section whose operative form is the book's navigation. Its whole excerpt stays
+    while the physical request can hold it beside my shortest tellings, in every mode."""
+    root, installed = author_design_source(ctx, task)
     if root is None:
         return ""
     path = root / "docs/DESIGN.md"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        text = None
-    return design_navigation(text, source=f"`{path}`")
+    _, text = read_design_source(path) or (None, None)
+    source = f"`{path}`"
+    view = design_bible_view(text, source=source, installed=installed)
+    if text is None or design_bible_section(text) is None:
+        return view  # no section, nothing shorter to yield to
+    from ouroboros.section_floor import HostSection  # section_floor reads TIER0_ALWAYS_FULL from here
+
+    navigation = "\n\n".join([*([INSTALLED_DESIGN] if installed else []), design_navigation(text, source=source)])
+    return HostSection("design_bible", view, navigation)
 
 
 def book_navigation(book: ReferenceBook, *, instructions: bool = True) -> str:
@@ -252,12 +365,16 @@ def architecture_context_section(
         return generate_doc_nav_map(
             text, title="ARCHITECTURE.md", rel_path="docs/ARCHITECTURE.md"
         )
-    return "## ARCHITECTURE.md\n\n" + text
+    from ouroboros.section_floor import report_text
+
+    return report_text("## ARCHITECTURE.md\n\n" + text, "architecture")
 
 
 def whole_development_book(text: str) -> str:
     """The composed handbook as its own context block: entrypoint and every chapter."""
-    return "## DEVELOPMENT.md\n\n" + text
+    from ouroboros.section_floor import report_text
+
+    return report_text("## DEVELOPMENT.md\n\n" + text, "development")
 
 
 def reference_doc_sections(

@@ -15,6 +15,7 @@ import { sourceMark } from './model_source_mark.js';
 import { SHELL_ICONS } from './page_icons.js';
 import { escapeHtmlAttr as esc } from './ui_primitives.js';
 import { describeRoute, routeKey, sameRoute, searchModels, typedRoute } from './chat_model_routes.js';
+import { bindScrollFade, revealPastFade } from './scroll_fade.js';
 
 // How many suggestions one list shows; the rest wait for another letter.
 const LIST_ROWS = 60;
@@ -66,6 +67,7 @@ export function createModelList({ el, input, id, store, main, current, recents, 
     const search = { query: '', only: '', sources: false, active: -1, key: '', cell: 0, nav: false, rows: [],
         picks: new Map(), html: '', shown: '' };
     const describe = (route, options = {}) => describeRoute(store.index(), route, { tier: tierOf(route, options) });
+    let disposeRowsFade = null;  // the rows box is rebuilt when its words change; the cue follows the live one
     el.setAttribute('role', 'grid');
     el.setAttribute('aria-label', 'Models');
     el.id ||= `${id}-list`;
@@ -183,7 +185,7 @@ export function createModelList({ el, input, id, store, main, current, recents, 
         }
         if (!status.failed && !search.only) for (const problem of index.problems || []) note(problem);
         // A state read that changes nothing here writes nothing: the list keeps its scroll and its active row.
-        const html = `<div class="chat-model-rows" role="rowgroup">${parts.join('')}</div>`;
+        const html = `<div class="chat-model-rows scroll-fade-y" role="rowgroup">${parts.join('')}</div>`;
         search.picks = picks;
         if (html !== search.html) {
             const scrolled = el.querySelector('.chat-model-rows')?.scrollTop || 0;
@@ -191,6 +193,8 @@ export function createModelList({ el, input, id, store, main, current, recents, 
             el.innerHTML = html;
             const rows = el.querySelector('.chat-model-rows');
             if (rows && scrolled) rows.scrollTop = scrolled;
+            disposeRowsFade?.();
+            disposeRowsFade = rows ? bindScrollFade(rows) : null;
             search.rows = [...el.querySelectorAll('.chat-model-row')];
             search.rows.forEach((made, at) => {
                 made.querySelectorAll('.chat-model-gridcell').forEach((cell, column) => { cell.id = `${id}-r${at}c${column}`; });
@@ -219,7 +223,13 @@ export function createModelList({ el, input, id, store, main, current, recents, 
         else input.removeAttribute('aria-activedescendant');
         // Only a change of row or cell scrolls: a repaint never snaps a list the owner scrolled back to it.
         const shown = row ? `${search.key}|${search.cell}` : '';
-        if (shown !== search.shown) { search.shown = shown; row?.scrollIntoView?.({ block: 'nearest' }); }
+        if (shown !== search.shown) {
+            search.shown = shown;
+            row?.scrollIntoView?.({ block: 'nearest' });
+            // Then clear of the edge cue: a row the keyboard chose lands where the fade does not cover it.
+            const scroller = el.querySelector('.chat-model-rows');
+            if (row && scroller) revealPastFade(scroller, row);
+        }
     }
     function pin(row) {
         const act = search.picks.get(row?.dataset?.row);
@@ -292,6 +302,8 @@ export function createModelList({ el, input, id, store, main, current, recents, 
     return {
         paint,
         destroy() {
+            disposeRowsFade?.();
+            disposeRowsFade = null;
             input.removeEventListener('input', onQuery);
             input.removeEventListener('keydown', onKey);
             el.removeEventListener('mousedown', keepFocus);

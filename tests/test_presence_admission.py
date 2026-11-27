@@ -154,9 +154,9 @@ def test_admission_carries_circle_model_from_the_same_snapshot(tmp_path, monkeyp
     places.edit_place(tmp_path, place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
     reads = []
     read_records = presence_admission.place_records
-    def read(root):
+    def read(root, **options):  # the same read, whatever import persistence its caller chooses
         reads.append(root)
-        return read_records(root)
+        return read_records(root, **options)
     monkeypatch.setattr(presence_admission, "place_records", read)
     admitted = admit_presence_turn(drive_root=tmp_path, authenticated_transport_skill="bridge",
                                    provider="chat", account_id="account")

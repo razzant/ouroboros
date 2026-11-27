@@ -53,6 +53,7 @@ def test_terminal_result_fields_carry_open_plan_review_for_model_final():
     }) == {
         "terminal_origin": "model_final",
         "terminal_plan_review_open": True,
+        "read_spans": {"room": None, "spans": [], "events": [], "messages": []},  # nothing recorded counts nothing
     }
 
 

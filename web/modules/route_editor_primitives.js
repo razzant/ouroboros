@@ -5,7 +5,7 @@
 
 import { accountRows, accountName, accountModelUnsupported } from './claudexor_status_store.js';
 import { formatRelativeAge } from './ui_helpers.js';
-import { API_PROVIDER_LABELS, META_PART_SEPARATOR, harnessPresentation, sourcePresentation } from './harness_presentation.js';
+import { API_PROVIDER_LABELS, META_PART_SEPARATOR, apiRouteParts, harnessPresentation, sourcePresentation } from './harness_presentation.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { fmt, tr, translateString, tx } from './i18n.js';
 import { modelChooserHtml, updateModelChooserOptions } from './model_chooser.js';
@@ -75,19 +75,17 @@ export function parseModelSource(value) {
         return { source: `subscription:${split < 0 ? target : target.slice(0, split)}`,
             model: split < 0 ? '' : target.slice(split + 1) };
     }
-    const split = raw.indexOf('::');
-    if (split < 0) return { source: DEFAULT_API_PROVIDER, model: raw };
     // A source is a provider kind, or `kind@name` for a key added under Accounts; `kind@default`
     // is the built-in key's long spelling (provider_models.parse_model_route canonicalizes it too).
-    const head = raw.slice(0, split);
-    const at = head.indexOf('@');
-    const kind = at < 0 ? head : head.slice(0, at);
     // A head that names no known kind is NOT a connection: the runtime reads the whole spelling as one opaque
-    // OpenRouter id (provider_models.parse_model_route), so `vendor::family/model` is OpenRouter's model and
-    // never a `vendor` key. A known kind stays its own lane.
-    if (!API_PROVIDER_ORDER.includes(kind)) return { source: DEFAULT_API_PROVIDER, model: raw };
-    const name = at < 0 ? '' : head.slice(at + 1);
-    return { source: !name || name === 'default' ? kind : `${kind}@${name}`, model: raw.slice(split + 2) };
+    // OpenRouter id (the shared grammar apiRouteParts), so `vendor::family/model` is OpenRouter's model and
+    // never a `vendor` key. A known kind stays its own lane; a head the resolver refuses (a malformed name, a
+    // `claudexor@` head) says `valid: false` and keeps its exact spelling through composeModelSource, so the editor never
+    // rewrites a stored route.
+    const { kind, connection: name, named, model, valid, opaque } = apiRouteParts(raw);
+    const refused = valid ? {} : { valid: false };
+    if (opaque || kind === 'claudexor') return { source: DEFAULT_API_PROVIDER, model: raw, ...refused };
+    return { source: named && !(valid && name === 'default') ? `${kind}@${name}` : kind, model, ...refused };
 }
 
 /**
@@ -114,6 +112,9 @@ export function composeModelSource(source, model) {
     if (source.startsWith('subscription:')) return `claudexor::${source.slice(13)}=${value}`;
     return source === 'openrouter' ? value : `${source}::${value}`;
 }
+
+/** Explicit file paths in a local-model draft, independent of the browser's OS (the host checks existence). */
+export const isLocalFilesystemSource = (value) => /^(?:[/~]|\\|[a-z]:[/\\]|\.\.?[/\\])/i.test(String(value || '').trim());
 
 // Owner-facing order of the direct API providers. OpenRouter first because an
 // unprefixed model id routes through it; the rest follow the settings order.

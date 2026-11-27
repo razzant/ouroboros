@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from tests import _dialogue as dialogue_test
 
+import contextlib
 import hashlib
 import json
 import os
@@ -53,6 +54,8 @@ if str(REPO_ROOT) not in sys.path:
 from devtools.benchmarks.common.server_runner import (  # noqa: E402
     IsolatedServer,
     _PROVIDER_ENV_KEYS,
+    _api,
+    _api_status,
     _is_secret_env_key,
     alarm_deferred,
     supervisor_state_is_ready,  # noqa: F401 (re-export: THE readiness contract)
@@ -154,6 +157,9 @@ SCENARIOS = {
     "S43": ("the production-shaped stand, real half (tests/_stand.py; its counted half: tests/test_stand_counts.py): a root restored with paused trees, pending rows, held runs, schedules, markers, rooms and a story; real tasks, owner turns and a Presence burst held at the model; no server stack runs cognition (E1), the door and the controls answer and Panic ends the whole tree under load (E5, E9), the owner is answered with no pool: a worker storm, a refused spawn, a marker window (E7), Stop finalizes then kills a carrier (E9); WAL and PERSIST (E10)", LANE_MOCK),
     # #3396 in real processes: the launcher stops reading a running server's pipe.
     "S44": ("a server in the launcher's shape whose output pipe, once it is ready, is full and unread: a task still completes through its worker and Quit over the stop pipe exits 0 inside the launcher's grace; the base tree stalls on the same pipe", LANE_MOCK),
+    # The first «Multibrain» step on the two-install stand (two_isolated_servers).
+    "S45": ("two installations of one owner: introduction at both owner doors, a letter refused until the six digits are confirmed on each side, A's delegate_to_ouroboros letter becomes one link-key-authored root on B under its ceiling, B's ask_sender question wakes A asleep in delegate_wait and delegate_answer's answer wakes the same root, B's result returns into A's work; B never starts work on A, B's pause refuses A's next letter before any work and B's revocation makes A's key link_unknown", LANE_MOCK),
+    "S46": ("two installations of one owner exchange standalone messages: B, which may not start work on A, writes A a note; with A's consciousness Off the note is saved in the link's room as heard, with no model call and no task there; with it On the next note starts one focus turn whose reply returns to B once, never as the owner's words, and each sender's room shows its words delivered only from the receiver's typed answer", LANE_MOCK),
 }
 
 MOCK_SLUG = "openai-compatible::mock-model"
@@ -609,6 +615,10 @@ class LoopbackModelServer:
                         {"id": model_id, "max_model_len": outer.window_tokens}
                         for model_id in outer._model_ids()
                     ]})
+                if self.path == "/props":
+                    # Names its program, as llama.cpp's own document does (``server_window.PROGRAM_DOCUMENTS``): a
+                    # private compatible server that names none sends only with its connection's consent.
+                    return self._send({"default_generation_settings": {"n_ctx": outer.window_tokens}, "total_slots": 1})
                 self.send_error(404)
 
             def do_POST(self):  # noqa: N802 - stdlib callback name
@@ -1247,6 +1257,11 @@ def keyless_review_rows(*, distinct_models: bool = False) -> list:
     return items
 
 
+# The stub's own connection: its address, its placeholder key, and the consent a scenario gives for a server that
+# names no program (``ouroboros/llm_ollama_guard.py``). None of them is a provider credential.
+STUB_CONNECTION_KEYS = frozenset(flat for _field, flat, _secret in PROVIDER_KINDS["openai-compatible"].fields)
+
+
 def keyless_settings(stub: ScriptedStubModel, **overrides) -> dict:
     """The isolated settings.json for a keyless scenario server.
 
@@ -1261,8 +1276,7 @@ def keyless_settings(stub: ScriptedStubModel, **overrides) -> dict:
     route. Overrides carrying a real provider credential are a scenario bug and are
     refused loudly.
     """
-    stub_pair = {"OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL"}
-    forbidden = (set(ALL_PROVIDER_CREDENTIAL_KEYS) - stub_pair) & set(overrides)
+    forbidden = (set(ALL_PROVIDER_CREDENTIAL_KEYS) - STUB_CONNECTION_KEYS) & set(overrides)
     if forbidden:
         raise ValueError(
             f"keyless lane: overrides must not carry provider credentials: {sorted(forbidden)}"
@@ -1294,10 +1308,9 @@ def keyless_settings(stub: ScriptedStubModel, **overrides) -> dict:
 
 def assert_settings_keyless(settings: dict) -> None:
     """Fail loudly if a scenario's settings smuggle a provider credential."""
-    stub_pair = {"OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL"}
     offending = sorted(
         key for key in settings
-        if key in ALL_PROVIDER_CREDENTIAL_KEYS and key not in stub_pair and str(settings[key] or "").strip()
+        if key in ALL_PROVIDER_CREDENTIAL_KEYS and key not in STUB_CONNECTION_KEYS and str(settings[key] or "").strip()
     )
     assert not offending, f"keyless settings carry provider credentials: {offending}"
     base = str(settings.get("OPENAI_COMPATIBLE_BASE_URL") or "")
@@ -1353,6 +1366,81 @@ def start_server(clone, root, settings: dict, *, ready_timeout: float = 300) -> 
     server = KeylessIsolatedServer(clone, data_root, settings_path)
     server.start(ready_timeout=ready_timeout)
     return server
+
+
+# ---------------------------------------------------------------------------
+# Two-install stand: A and B of one checkout, running at the same time.
+# The seam the cross-install scenarios (the first «Multibrain» step: two installs
+# of one owner meet and exchange work) build on. Each install is a full keyless
+# stack of its own — data dir, ports, loopback stub — so nothing is shared but the
+# clone they boot from.
+# ---------------------------------------------------------------------------
+
+class IsolatedInstall:
+    """One install of the two-install stand: its server, its stub, and the names a
+    cross-install scenario reads.
+
+    ``base_url`` and ``data_dir`` are the install's OWN HTTP root and data root;
+    ``api`` / ``api_status`` call that root over the same owner HTTP surface the UI
+    drives (``server_runner._api`` / ``_api_status``), and ``submit`` posts a task
+    to it and waits until the supervisor runs it. The wrapped ``server`` keeps the
+    harness's stop / attestation / pid facts a scenario asserts after teardown, and
+    ``stub`` is the install's own model-call ledger.
+    """
+
+    def __init__(self, server: KeylessIsolatedServer, stub: ScriptedStubModel) -> None:
+        self.server = server
+        self.stub = stub
+
+    @property
+    def base_url(self) -> str:
+        return self.server.base_url
+
+    @property
+    def data_dir(self) -> pathlib.Path:
+        return self.server.data_root
+
+    def api(self, method: str, path: str, payload: dict | None = None, *, timeout: float = 60) -> dict:
+        return _api(self.base_url, method, path, payload, timeout=timeout)
+
+    def api_status(self, method: str, path: str, payload: dict | None = None, *, timeout: float = 60) -> dict:
+        return _api_status(self.base_url, method, path, payload, timeout=timeout)
+
+    def submit(self, description: str, **kwargs) -> str:
+        return submit_running(self.server, description, **kwargs)
+
+
+@contextlib.contextmanager
+def two_isolated_servers(clone, root, *, ready_timeout: float = 300):
+    """Two keyless installs (A, B) of one checkout, up AT THE SAME TIME; yields ``(a, b)``.
+
+    Each install owns its data dir (``root/a``, ``root/b``), its free ports —
+    ``IsolatedServer`` picks a fresh ``free_port()`` per server, never a shared or
+    fixed one, so the two cannot race for a port — and its own loopback stub, so
+    model calls and durable artifacts stay separate. Any engine dir a scenario
+    installs lands under that install's own ``data_dir``. BOTH servers are stopped
+    on exit, in ``finally``: when the second start fails the first is already up,
+    and a half-built stand must never orphan the install that did start.
+    """
+    root = pathlib.Path(root)
+    servers: list = []
+    stubs: list = []
+    try:
+        installs = []
+        for name in ("a", "b"):
+            stub = ScriptedStubModel()
+            stub.__enter__()
+            stubs.append(stub)
+            server = start_server(clone, root / name, keyless_settings(stub),
+                                  ready_timeout=ready_timeout)
+            servers.append(server)
+            installs.append(IsolatedInstall(server, stub))
+        yield installs[0], installs[1]
+    finally:
+        for server in reversed(servers):
+            server.stop()
+        for stub in reversed(stubs):
+            stub.__exit__(None, None, None)
 
 
 # ---------------------------------------------------------------------------

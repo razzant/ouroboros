@@ -14,11 +14,18 @@
   var REPO = body.getAttribute('data-repo') || '';
   var SOURCE = body.getAttribute('data-source') || '';
   var CANON = body.getAttribute('data-canonical') || '';
+  var ARCHIVE = body.getAttribute('data-edition');
+  var ARCHIVE_CARDS = JSON.parse(body.getAttribute('data-archive-cards') || '{}');
   var ICON = body.getAttribute('data-icon') || 'assets/icon.png';
   var LANG_KEY = 'ouroboros-rating-lang', THEME_KEY = 'ouroboros-rating-theme';
   // the table opens on my ranking: the models in my order and the letters of the main columns
   var state = { lang: 'en', E: EMBED, group: 'rating', open: null, notice: null };
   var M = {}, W = {}, G = {}, CELL = {}, CASE = {}, RATED = [], MAIN = [];
+  // method 4 (2026.12 on): letters by column only, the models' own votes, reviewers and the comparison with the previous edition
+  function v4(E) { return (E || state.E).method_version >= 4; }
+  // method 5 (2026.12.1 on): the order by the quality of the work, a role tag beside the name, cells that may have no
+  // letter, three views of a model, readers' questions; a revision carries the votes of the edition it revises
+  function v5(E) { return (E || state.E).method_version >= 5; }
   var live = null;
 
   // ---------- small helpers
@@ -57,13 +64,13 @@
     if (k >= 2 && k <= 4 && !(h >= 12 && h <= 14)) return forms[1];
     return forms[forms.length - 1];
   }
-  function fmt(s, v) {
+  function fmt(s, v, plain) {
     var out = '', i = 0, n = s.length, j, key, parts, x;
     while (i < n) {
       var ch = s.charAt(i);
       if (ch === '{') {
         j = s.indexOf('}', i);
-        if (j > i) { key = s.slice(i + 1, j); x = v[key]; out += x == null ? '' : (typeof x === 'number' ? num(x) : esc(x)); i = j + 1; continue; }
+        if (j > i) { key = s.slice(i + 1, j); x = v[key]; out += x == null ? '' : (typeof x === 'number' ? num(x) : plain ? String(x) : esc(x)); i = j + 1; continue; }
       }
       if (ch === '[') {
         j = s.indexOf(']', i);
@@ -181,28 +188,61 @@
       '<button class="icon-btn" type="button" data-theme-toggle aria-label="' + esc(t('theme_label')) + '" title="' + esc(t('theme_label')) + '">' + ICON_SUN + ICON_MOON + '</button></div>' +
       '</header>';
   }
+  function editionPage(id) {
+    var page = archivePage(id) || 'index.html?edition=' + encodeURIComponent(id);
+    return withLang(window.location.protocol === 'file:' ? CANON + page : page);
+  }
+  function archivePage(id) { return validEdition(id) && ARCHIVE_CARDS[id] ? id + '.html' : null; }
+  function editionDoc(E, name) {
+    // An archived edition keeps the method and the schema it was published with, at its own tag, not the current ones on main.
+    return (E && ARCHIVE_CARDS[E.edition] ? REPO + '/blob/llm-rating-' + E.edition + '/docs/llm-rating' : SOURCE) + '/' + name;
+  }
+  function methodLink(E) { return editionDoc(E, 'METHOD.md'); }
   function foot(E) {
     var built = E ? '<p>' + t('foot_built', { id: E.edition, date: dateLong(E.built) }) + '</p>' : '';
     return '<footer class="foot"><div>' + built +
       '<p><a href="' + esc(REPO) + '">' + esc(t('foot_by')) + '</a></p></div>' +
       '<nav aria-label="' + esc(t('title')) + '">' +
       '<a href="' + esc(withLang(PAGE === 'editions' ? 'index.html' : 'editions.html')) + '">' + esc(PAGE === 'editions' ? t('back_to_rating') : t('all_editions')) + '</a>' +
-      '<a href="' + esc(SOURCE) + '/METHOD.md">' + esc(t('foot_method')) + '</a>' +
+      '<a href="' + esc(methodLink(E)) + '">' + esc(t('foot_method')) + '</a>' +
       '<a href="' + esc(SOURCE) + '/CHANGELOG.md">' + esc(t('foot_changelog')) + '</a>' +
-      '<a href="' + esc(SOURCE) + '/SCHEMA.md">' + esc(t('foot_schema')) + '</a>' +
-      '<a href="data/latest.json">' + esc(t('foot_data')) + '</a>' +
+      '<a href="' + esc(editionDoc(E, 'SCHEMA.md')) + '">' + esc(t('foot_schema')) + '</a>' +
+      '<a href="' + (E ? 'data/editions/' + encodeURIComponent(E.edition) + '/edition.json' : 'data/latest.json') + '">' + esc(t('foot_data')) + '</a>' +
       '<a href="' + esc(SITE) + '">' + esc(t('foot_site')) + '</a>' +
       '</nav></footer>';
   }
-  function setHead(title) {
+  function setHead(title, description, counts, E) {
+    var archive = E && archivePage(E.edition);
+    var digest, alt, img;
+    var og = doc.querySelector('meta[property="og:image"]'), tw = doc.querySelector('meta[name="twitter:image"]');
+    if (archive) {
+      var totals = E.totals;
+      var countsText = t(v4(E) ? 'og_models_v4' : 'og_models', { rated: totals.models.rated, works: totals.work_types, columns: totals.columns });
+      title = fmt(raw('archive_title'), { title: title, id: E.edition }, true);
+      description = fmt(raw('archive_description'), { id: E.edition, counts: countsText, description: description }, true);
+      alt = title + ': ' + countsText;
+      img = CANON + 'card/editions/' + E.edition + '-en.png?v=' + ARCHIVE_CARDS[E.edition];
+      doc.querySelector('link[rel="canonical"]').setAttribute('href', CANON + archive);
+      doc.querySelector('meta[property="og:url"]').setAttribute('content', CANON + archive);
+      doc.querySelector('meta[property="og:image:width"]').setAttribute('content', '1600');
+      doc.querySelector('meta[property="og:image:height"]').setAttribute('content', '900');
+      doc.querySelectorAll('link[rel="alternate"][hreflang]').forEach(function (link) {
+        link.setAttribute('href', CANON + archive + (link.hreflang === 'ru' ? '?lang=ru' : ''));
+      });
+    } else {
+      digest = og && og.getAttribute('data-v-' + state.lang);
+      img = CANON + 'card/og-' + state.lang + '.png' + (digest ? '?v=' + digest : '');
+      alt = t('title') + (counts ? ': ' + fmt(raw(v4(counts) ? 'og_models_v4' : 'og_models'), counts, true) : '');
+    }
     root.setAttribute('lang', state.lang);
     doc.title = title;
-    var d = doc.querySelector('meta[name="description"]');
-    if (d) d.setAttribute('content', t('description'));
-    var og = doc.querySelector('meta[property="og:image"]'), tw = doc.querySelector('meta[name="twitter:image"]');
-    var img = CANON + 'card/og-' + state.lang + '.png';
+    doc.querySelectorAll('meta[property="og:title"], meta[name="twitter:title"]').forEach(function (d) { d.setAttribute('content', title); });
+    doc.querySelectorAll('meta[name="description"], meta[property="og:description"], meta[name="twitter:description"]').forEach(function (d) {
+      d.setAttribute('content', description);
+    });
     if (og) og.setAttribute('content', img);
     if (tw) tw.setAttribute('content', img);
+    doc.querySelectorAll('meta[property="og:image:alt"], meta[name="twitter:image:alt"]').forEach(function (a) { a.setAttribute('content', alt); });
   }
 
   // ---------- rating page
@@ -214,16 +254,26 @@
     E.cells.forEach(function (c) { CELL[c.model + '|' + c.work] = c; });
     E.cases.forEach(function (c) { CASE[c.id] = c; });
   }
+  // what a draft still waits for: the second reading of its cases, the count of the votes, or the last notes before it is locked
+  function draftSub(E) {
+    if (!v4(E)) return 'status_sub_draft';
+    var unverified = E.notes && E.notes.unverified, votes = E.votes && !E.votes.complete;
+    if (votes) return unverified ? 'status_sub_draft_v4_cases' : 'status_sub_draft_v4';
+    return unverified ? 'status_sub_draft' : 'status_sub_draft_v4_notes';
+  }
   // a short head: the title, one sentence that says whose opinion this is, and the edition. The table comes next
   function hero(E) {
     var draft = E.status !== 'final';
-    return '<section class="head"><div class="head-main">' +
-      '<p class="eyebrow">' + t('eyebrow', { id: E.edition }) + '</p>' +
-      '<h1>' + esc(t('title')) + '</h1><p class="lead">' + esc(t('lead')) + '</p></div>' +
+    var vote = v4(E) ? openingVote(E) : '';
+    return '<section class="head' + (vote ? ' head-with-vote' : '') + '"><div class="head-main">' +
+      '<p class="eyebrow' + (E.revision_of ? ' revision' : '') + '"><span>' + t('eyebrow', { id: E.edition }) + '</span>' + (E.revision_of ? ' <span class="pill early">' + esc(t('revision_pill', { id: E.revision_of })) + '</span>' :
+        E.early ? ' <span class="pill early">' + esc(t('early_pill')) + '</span>' : '') + '</p>' +
+      '<h1>' + esc(t('title')) + '</h1><p class="lead">' + esc(t(v5(E) ? 'lead_v5' : 'lead')) + '</p></div>' +
       '<div class="head-side"><div class="status' + (draft ? ' draft' : '') + '">' + t(draft ? 'status_draft' : 'status_final', { id: E.edition }) + '</div>' +
       '<div class="sub">' + nb(t('as_of', { date: dateLong(asOf(E)) })) + '</div>' +
-      (draft ? '<div class="sub">' + esc(t('status_sub_draft')) + '</div>' : '') +
-      '<div class="sub"><a href="' + esc(withLang('editions.html')) + '">' + esc(t('all_editions')) + '</a></div></div></section>' +
+      (draft ? '<div class="sub">' + esc(t(draftSub(E))) + '</div>' : '') +
+      (v4(E) && E.previous_edition ? '<div class="sub"><a href="' + esc(editionPage(E.previous_edition)) + '">' + esc(t(window.location.protocol === 'file:' ? 'prev_edition_link_online' : 'prev_edition_link', { id: E.previous_edition })) + '</a></div>' : '') +
+      '<div class="sub"><a href="' + esc(withLang('editions.html')) + '">' + esc(t('all_editions')) + '</a></div>' + vote + '</div></section>' +
       (state.notice ? '<p class="notice" role="status">' + esc(t(state.notice.key, state.notice.args)) + '</p>' : '');
   }
   function tile(tone, big, unit, label, sub) {
@@ -234,7 +284,25 @@
     return n === tok.read && tok.read_display ? L(tok.read_display) : compactText(n) + (n === tok.read && tok.lower_bound ? '+' : '');
   }
   // the tiles sit under the table and count what stands behind it; nothing in them is a rate of success
+  function tilesV4(E) {
+    var T = E.totals, V = E.volume, P = V.tokens, out = [], apart = 0, k;
+    for (k in T.models) if (k !== 'rated') apart += T.models[k];
+    out.push(tile('t-blue', String(T.models.rated), '', forms('tile_models', T.models.rated), t('tile_models_sub_v4', { apart: apart })));
+    out.push(tile('t-green', String(V.versions_with_work), '', forms('tile_versions', V.versions_with_work), t('tile_versions_sub', { finished: V.versions_with_finished_work, led: V.versions_leading_only })));
+    out.push(tile('t-violet', num(V.finished_works), '', forms('tile_finished', V.finished_works), t('tile_finished_sub', { period: nb(dateRange(E.period.from, E.period.to, false)) })));
+    var read = splitUnit(L(P.read_display));
+    out.push(tile('quiet', read[0], read[1] + (P.lower_bound ? '+' : ''), t('tile_tokens_period'),
+      t('tile_tokens_period_sub', { cache: Math.floor(100 * P.cache_share) + '%', written: L(P.written_display) })));
+    return '<section class="stats" aria-label="' + esc(t('title')) + '">' + out.join('') + '</section>';
+  }
+  // "396.9B" or "396,9 млрд": the number and its unit, as written in the data (cut, never rounded up)
+  function splitUnit(s) {
+    var text = String(s), i = 0;
+    while (i < text.length && '0123456789.,'.indexOf(text.charAt(i)) >= 0) i++;
+    return [text.slice(0, i), text.slice(i).replace(/^\s+/, '')];
+  }
   function tiles(E) {
+    if (v4(E)) return tilesV4(E);
     var T = E.totals, tok = T.tokens || {}, out = [], c, sub;
     out.push(tile('t-blue', String(T.models.rated), '', forms('tile_models', T.models.rated), t('tile_models_sub', { apart: T.models.earlier + T.models.trial + T.models.untried })));
     out.push(tile('t-green', String(T.work_types), '', forms('tile_works', T.work_types), t('tile_works_sub', { columns: T.columns })));
@@ -255,9 +323,12 @@
   function chip(g, cls) { return '<span class="t t-' + (g || 'N') + (cls ? ' ' + cls : '') + '">' + (g || '–') + '</span>'; }
   function chipWords(g) { return g ? g + ', ' + t('tier_' + g) : t('unrated_short'); }
   function legend() {
+    // method 5: a dash is a cell with no work that has an outcome; a ring marks a preliminary letter
+    var extra = v5() ? '<li title="' + esc(t('nodata_long')) + '">' + chip(null) + esc(t('legend_nodata')) + '</li>' +
+      '<li title="' + esc(t('ground_open')) + '"><span class="t t-N g-open" aria-hidden="true"></span>' + esc(t('legend_open')) + '</li>' : '';
     return '<ul class="legend">' + state.E.scale.map(function (s) {
       return '<li title="' + esc(L(s.name)) + '">' + chip(s.id) + esc(t('card_tier_' + s.id)) + '</li>';
-    }).join('') + '</ul>';
+    }).join('') + extra + '</ul>';
   }
   // who holds the top letter in each column of the main table
   function picks(E) {
@@ -266,13 +337,52 @@
     });
     return items.length ? '<div class="picks"><h3>' + chip(top) + esc(t('picks_title')) + '</h3><ul>' + items.join('') + '</ul></div>' : '';
   }
-  function cellBtn(kind, key, r, k, g, who, what) {
-    var words = chipWords(g);
-    return '<button class="t t-' + (g || 'N') + '" type="button" data-' + kind + '="' + esc(key) + '" data-r="' + r + '" data-k="' + k + '" aria-expanded="false" aria-label="' +
-      esc(who + ', ' + what + ': ' + words) + '" title="' + esc(what + ': ' + words) + '">' + (g || '–') + '</button>';
+  function gradeDisplay(g, x) {
+    var open = x && (x.ground === 'open' || x.ground === 'role');
+    var words = x && !g ? t('nodata_short') : chipWords(g);
+    return { cls: 't t-' + (g || 'N') + (open ? ' g-open' : ''), glyph: g || '–', words: words + (open ? '; ' + t('legend_open') : ''), preliminary: !!open };
+  }
+  function cellBtn(kind, key, r, k, g, who, what, compared, x) {
+    var d = gradeDisplay(g, x);
+    return '<button class="' + d.cls + '" type="button" data-' + kind + '="' + esc(key) + '" data-r="' + r + '" data-k="' + k + '" aria-expanded="false" aria-label="' +
+      esc(who + ', ' + what + ': ' + d.words + (compared ? '; ' + t('letter_compared') : '')) + '" title="' + esc(what + ': ' + d.words) + '">' + d.glyph + '</button>';
+  }
+  function comparedColumns(E) {
+    var columns = {};
+    ((E.votes && E.votes.pairs) || []).forEach(function (p) {
+      if (!p.column || !p.letters || !G[p.column]) return;
+      var ids = columns[p.column] || (columns[p.column] = new Set());
+      p.models.forEach(function (id) { if (M[id] && M[id].status === 'rated') ids.add(id); });
+    });
+    return columns;
+  }
+  function openingVote(E) {
+    var pairs = E.votes && E.votes.pairs;
+    if (!pairs || !pairs.length) return '';
+    var disputes = pairs.filter(function (p) { return p.verdict === 'disagree'; });
+    var p = disputes[0], detail = '';
+    if (p && G[p.column] && p.letters && (p.winner === 0 || p.winner === 1)) {
+      var names = pairNames(p), tally = [p.counts.first, p.counts.second], w = p.winner, other = 1 - w;
+      detail = ' <span>' + t('opening_vote_example', { column: L(G[p.column].name), winner: names[w], other: names[other],
+        won: num(tally[w]), lost: num(tally[other]), win_letter: p.letters[w], other_letter: p.letters[other] }) + '</span>';
+    }
+    return '<p class="opening-vote"><b>' + esc(t('opening_vote_counts', { n: pairs.length, disagree: disputes.length })) + '</b>' +
+      detail + ' <a href="#votes">' + esc(t('letters_compared_link')) + '</a></p>';
+  }
+  function boardVoteLink(columns) {
+    var count = 0, groups = [], join = new Intl.ListFormat(state.lang, { style: 'long', type: 'conjunction' });
+    MAIN.forEach(function (g) {
+      var ids = columns[g.id];
+      if (!ids || !ids.size) return;
+      count += ids.size;
+      var names = RATED.filter(function (m) { return ids.has(m.id); }).map(function (m) { return m.short; });
+      groups.push(fmt(raw('letters_compared_column'), { names: join.format(names), column: L(g.name) }, true));
+    });
+    return count ? '<p class="board-votes">' + t('letters_compared', { n: count, groups: groups.join('; ') }) +
+      ' <a href="#votes">' + esc(t('letters_compared_link')) + '</a></p>' : '';
   }
   // three views of one table: my ranking with the letters of the main columns, every kind of work, or one group opened
-  function matrix(E) {
+  function matrix(E, compared) {
     var mode = state.group, rating = mode === 'rating';
     var groups = rating ? MAIN : mode === 'all' ? E.groups : E.groups.filter(function (g) { return g.id === mode; });
     var tpl = 'var(--namew)', cols = [], sp = '<i class="sp" aria-hidden="true"></i>', h = [];
@@ -289,7 +399,7 @@
       });
     }
     var corner = '<div class="corner" role="columnheader"><span class="rk" aria-hidden="true">#</span><span>' + esc(t('corner')) + '</span></div>';
-    h.push('<div class="mx" data-group="' + esc(mode) + '" style="--tpl:' + tpl + '" role="table" aria-label="' + esc(t('table_label')) + '">');
+    h.push('<div class="mx' + (v5(E) ? ' v5' : '') + '" data-group="' + esc(mode) + '" style="--tpl:' + tpl + '" role="table" aria-label="' + esc(t(v4(E) ? 'table_label_v4' : 'table_label')) + '">');
     if (rating) {
       h.push('<div class="hr hr2" role="row">' + corner);
     } else {
@@ -302,7 +412,9 @@
     }
     cols.forEach(function (c) {
       if (c.gap) h.push(sp);
-      if (c.g) {
+      if (c.g && v4(E)) {
+        h.push('<div class="wh" role="columnheader"><span class="column-label"><span class="wl">' + esc(L(c.g.name)) + '</span></span></div>');
+      } else if (c.g) {
         h.push('<div class="wh" role="columnheader"><button class="wbtn" type="button" data-g="' + esc(c.g.id) + '" title="' + esc(t('open_group_title') + ': ' + L(c.g.name)) +
           '"><span class="wl">' + esc(L(c.g.name)) + '</span></button></div>');
       } else {
@@ -313,10 +425,11 @@
     h.push('</div>');
     RATED.forEach(function (m, r) {
       h.push('<div class="r" role="row"><div class="m" role="rowheader"><button class="mbtn" type="button" data-m="' + esc(m.id) + '" aria-expanded="false" title="' +
-        esc(m.name) + '" aria-label="' + esc(t('rank_label', { n: m.rank }) + ': ' + m.name) + '"><span class="rk">' + m.rank + '</span><span class="nm">' + esc(m.short) + '</span></button></div>');
+        esc(m.name + (m.role ? ' · ' + L(m.role) : '')) + '" aria-label="' + esc(t('rank_label', { n: m.rank }) + ': ' + m.name + (m.role ? ' · ' + t('role_label') + ': ' + L(m.role) : '')) + '"><span class="rk">' + m.rank + '</span><span class="nm">' + esc(m.short) + '</span></button></div>');
       cols.forEach(function (c, k) {
         if (c.gap) h.push(sp);
-        var inner = c.g ? cellBtn('gc', m.id + '|' + c.g.id, r, k, m.groups[c.g.id].grade, m.short, L(c.g.name))
+        var groupVotes = c.g && compared && compared[c.g.id];
+        var inner = c.g ? cellBtn('gc', m.id + '|' + c.g.id, r, k, m.groups[c.g.id].grade, m.short, L(c.g.name), groupVotes && groupVotes.has(m.id), v5(E) ? m.groups[c.g.id] : null)
           : cellBtn('c', m.id + '|' + c.w.id, r, k, CELL[m.id + '|' + c.w.id].grade, m.short, L(c.w.name));
         h.push('<div class="c" role="cell">' + inner + '</div>');
       });
@@ -329,6 +442,13 @@
     return '<button class="chip" type="button" data-g="' + esc(id) + '" aria-pressed="' + (state.group === id) + '">' + esc(name) + '<small>' + n + '</small></button>';
   }
   function board(E) {
+    if (v4(E)) {
+      var compared = comparedColumns(E);
+      return '<section class="board" aria-labelledby="board-h"><h2 id="board-h" class="sr">' + esc(t('board_title')) + '</h2>' +
+        '<div class="board-head">' + legend() + '<p class="note">' + esc(t('board_hint_v4')) + '</p></div>' +
+        '<p class="hint">' + esc(t('scroll_hint_v4')) + '</p><div class="mxwrap">' + matrix(E, compared) + '</div>' + picks(E) + '</section>' + boardVoteLink(compared) +
+        (v5(E) && E.notes.place_rule ? '<p class="board-votes board-rule">' + esc(L(E.notes.place_rule)) + '</p>' : '');
+    }
     var chips = chipBtn('rating', t('view_rating'), MAIN.length) + chipBtn('all', t('all_works'), E.works.length);
     E.groups.forEach(function (g) { chips += chipBtn(g.id, L(g.name), g.works.length); });
     return '<section class="board" aria-labelledby="board-h"><h2 id="board-h" class="sr">' + esc(t('board_title')) + '</h2>' +
@@ -337,9 +457,10 @@
       '<p class="hint">' + esc(t('scroll_hint')) + '</p><div class="mxwrap">' + matrix(E) + '</div>' + picks(E) + '</section>';
   }
   function setGroup(id) {
+    if (v4(state.E)) return;
     closeDetail(false);
     state.group = id;
-    var chips = app.querySelectorAll('.chip'), wrap = app.querySelector('.mxwrap'), on = null;
+    var chips = app.querySelectorAll('.chips .chip[data-g]'), wrap = app.querySelector('.mxwrap'), on = null;
     for (var i = 0; i < chips.length; i++) {
       var pressed = chips[i].getAttribute('data-g') === id;
       chips[i].setAttribute('aria-pressed', String(pressed));
@@ -459,8 +580,45 @@
       '<div class="dcol"><h4>' + esc(t('letters_title')) + '</h4>' + workLetters(w.id) +
       (c.cases ? '<h4 class="in">' + esc(t('cases_title')) + '</h4>' + casesList(c.cases) : '') + '</div></div>';
   }
+  function groundLine(E, x) {
+    if (!x.ground) return '';
+    var key = 'ground_' + x.ground;
+    if (v5(E) && STR[key + '_v5']) key += '_v5';
+    // a carried letter names the edition it comes from, which a revision keeps from the edition it revises
+    return '<p class="why use"><b>' + esc(t('basis_label')) + '</b> ' + esc(t(key, { prev: E.carried_from || E.previous_edition || '' })) + '</p>';
+  }
+  function pairNames(p) {
+    return p.models.map(function (id, i) { return id && M[id] ? M[id].short : p.labels[i]; });
+  }
+  function pairAnchor(i) { return 'vote-pair-' + (i + 1); }
+  function columnVotes(E, m, gid) {
+    var V = E.votes, out = '';
+    if (!V) return '';
+    V.pairs.forEach(function (p, i) {
+      if (p.column !== gid || p.models.indexOf(m.id) < 0) return;
+      var names = pairNames(p), c = p.counts;
+      var desc = L(p.description);
+      out += '<li><b>' + esc(desc + ('.!?…'.indexOf(desc.slice(-1)) >= 0 ? '' : '.')) + '</b> ' + esc(names[0]) + ' ' + num(c.first) + ', ' + esc(names[1]) + ' ' + num(c.second) +
+        ', ' + esc(t('votes_tie')) + ' ' + num(c.tie) + ', ' + esc(t('votes_abstain')) + ' ' + num(c.abstain) + '. ' + esc(t('vd_' + p.verdict)) +
+        '. <a class="link" data-pair-link href="#' + pairAnchor(i) + '">' + esc(t('col_votes_open')) + '</a></li>';
+    });
+    return out ? '<h4 class="in">' + esc(t('col_votes_title')) + '</h4><ul class="facts tight">' + out + '</ul>' : '';
+  }
+  function groupCellV4(E, m, g, x) {
+    var covers = g.works.map(function (w) { return '<li>' + esc(L(W[w].name)) + '</li>'; }).join('');
+    var d = gradeDisplay(x.grade, v5(E) ? x : null);
+    var badge = '<span class="' + d.cls + '" role="img" aria-label="' + esc(d.words) + '">' + d.glyph + '</span>';
+    var description = x.grade ? t('tier_long_' + x.grade) : t('nodata_long');
+    if (d.preliminary) description += ' · ' + t('legend_open');
+    return dhead(badge, esc(m.short) + ' · ' + esc(L(g.name)), esc(description) + '.') +
+      '<div class="dg"><div class="dcol">' + why(x.reason) + (x.grade ? groundLine(E, x) : '') + columnVotes(E, m, g.id) +
+      '<h4 class="in">' + esc(t('covers_title')) + '</h4><ul class="covers">' + covers + '</ul></div>' +
+      '<div class="dcol"><h4>' + esc(t('letters_title')) + '</h4>' + groupLetters(g.id) +
+      (x.cases ? '<h4 class="in">' + esc(t('cases_title')) + '</h4>' + casesList(x.cases) : '') + '</div></div>';
+  }
   function groupCellHtml(E, key) {
     var i = key.indexOf('|'), m = M[key.slice(0, i)], g = G[key.slice(i + 1)], x = m.groups[g.id];
+    if (v4(E)) return groupCellV4(E, m, g, x);
     // the kinds of work inside the column; where my advice differs from the column, its note stands right there
     var told = {}, inside = g.works.map(function (w) {
       var c = CELL[m.id + '|' + w], text = c.note && c.grade !== x.grade ? L(c.note) : '';
@@ -475,10 +633,14 @@
       '<div class="dcol"><h4>' + esc(t('letters_title')) + '</h4>' + groupLetters(g.id) +
       (x.cases ? '<h4 class="in">' + esc(t('cases_title')) + '</h4>' + casesList(x.cases) : '') + '</div></div>';
   }
-  function groupPills(m) {
+  function groupPills(E, m) {
     var out = '';
-    MAIN.forEach(function (g) { out += '<span class="gp">' + chip(m.groups[g.id].grade) + esc(L(g.name)) + '</span>'; });
-    return out ? '<div class="gps">' + out + '</div>' : '';
+    MAIN.forEach(function (g) {
+      var x = m.groups[g.id], name = L(g.name), d = gradeDisplay(x.grade, v5(E) ? x : null);
+      out += '<span class="gp" data-grade-group="' + esc(g.id) + '" title="' + esc(name + ': ' + d.words) + '"><span class="' + d.cls +
+        '" role="img" aria-label="' + esc(d.words) + '">' + d.glyph + '</span>' + esc(name) + '</span>';
+    });
+    return out ? '<div class="gps" data-grade-model="' + esc(m.id) + '">' + out + '</div>' : '';
   }
   function trustCheck(m) {
     return '<p class="tc"><b>' + esc(t('trust_label')) + '</b> ' + esc(L(m.trust)) + '</p><p class="tc"><b>' + esc(t('check_label')) + '</b> ' + esc(L(m.check)) + '</p>';
@@ -488,11 +650,28 @@
     return '<p class="tc"><b>' + esc(t('picks_for')) + '</b> ' + esc(m.picks.map(function (id) { return lower(L(G[id].name)); }).join(', ')) + '</p>';
   }
   function noteBox(m) { return m.note ? '<p class="why note"><b>' + esc(t('note_label')) + '</b> ' + esc(L(m.note)) + '</p>' : ''; }
+  function sinceText(E, m) {
+    if (!v4(E) || !E.previous_edition || m.status !== 'rated') return '';
+    var w = m.was, prev = E.previous_edition, what;
+    if (w && w.rank) what = w.rank === m.rank ? t('since_same', { rank: m.rank }) : t('since_moved', { from: w.rank, to: m.rank });
+    else if (w && w.status) what = t('since_new_status', { id: prev, status: t('ch_was_' + w.status) });
+    else what = t('since_new');
+    return t('since_label', { id: prev }) + ' ' + what;
+  }
+  function flagPill(m) { return m.flag ? '<span class="pill flag">' + esc(L(m.flag)) + '</span>' : ''; }
+  // method 5: the role in my team today, a tag beside the name; what changed since the previous edition; the version beside its predecessor
+  function roleTag(m) { return m.role ? '<span class="pill role" title="' + esc(t('role_label')) + '">' + esc(L(m.role)) + '</span>' : ''; }
+  function deltaBox(m) {
+    return (m.delta ? '<p class="tc delta"><b>' + esc(t('delta_label')) + '</b> ' + esc(L(m.delta)) + '</p>' : '') +
+      (m.generations ? '<p class="tc delta"><b>' + esc(t('generations_label')) + '</b> ' + esc(L(m.generations)) + '</p>' : '');
+  }
   function rankBadge(m) { return '<span class="t rkb" aria-label="' + esc(t('rank_label', { n: m.rank })) + '">' + m.rank + '</span>'; }
   function modelHtml(E, id) {
     var m = M[id];
-    return dhead(rankBadge(m), esc(m.name), esc(m.maker) + '. ' + esc(L(m.one_liner))) +
-      '<div class="dg"><div class="dcol"><p class="dlong">' + esc(L(m.verdict)) + '</p>' + groupPills(m) + trustCheck(m) + pickLine(m) + noteBox(m) + factsList(modelFacts(E, m)) + '</div>' +
+    var since = sinceText(E, m);
+    return dhead(rankBadge(m), esc(m.name) + flagPill(m), esc(m.maker) + '. ' + esc(L(m.one_liner))) +
+      '<div class="dg"><div class="dcol">' + (m.role ? '<p class="rolerow">' + roleTag(m) + '</p>' : '') + '<p class="dlong">' + esc(L(m.verdict)) + '</p>' + deltaBox(m) + groupPills(E, m) + trustCheck(m) + pickLine(m) + noteBox(m) +
+      (since ? '<p class="tc since">' + esc(since) + '</p>' : '') + factsList(modelFacts(E, m)) + '</div>' +
       '<div class="dcol"><h4>' + esc(t('cases_title')) + '</h4>' + casesList(m.cases) + '</div></div>';
   }
   function workHtml(E, id) {
@@ -505,12 +684,15 @@
   // the models in the order of the ranking, each with its portrait
   function modelsList(E) {
     var rows = RATED.map(function (m) {
-      return '<li class="vrow"><div class="who"><h3><span class="rk">' + m.rank + '</span>' + esc(m.name) + '</h3><div class="mk">' + esc(m.maker) + '</div>' + groupPills(m) + '</div>' +
-        '<div class="say"><p class="liner">' + esc(L(m.one_liner)) + '</p><p class="long">' + esc(L(m.verdict)) + '</p>' + trustCheck(m) +
+      var since = sinceText(E, m);
+      return '<li class="vrow"><div class="who"><h3><span class="rk">' + m.rank + '</span>' + esc(m.name) + '</h3><div class="mk">' + esc(m.maker) + '</div>' +
+        (m.role ? '<div class="mk rolerow">' + roleTag(m) + '</div>' : '') +
+        (since || m.flag ? '<div class="mk since">' + esc(since) + (m.flag ? (since ? ' ' : '') + flagPill(m) : '') + '</div>' : '') + groupPills(E, m) + '</div>' +
+        '<div class="say"><p class="liner">' + esc(L(m.one_liner)) + '</p><p class="long">' + esc(L(m.verdict)) + '</p>' + deltaBox(m) + trustCheck(m) +
         '<details><summary>' + esc(t('numbers_and_cases')) + '</summary>' + noteBox(m) + factsList(modelFacts(E, m)) + '<h4>' + esc(t('cases_title')) + '</h4>' + casesList(m.cases) + '</details></div></li>';
     });
     var ps = E.notes && E.notes.postscript ? '<p class="ps"><span>' + esc(L(E.notes.postscript)) + '</span></p>' : '';
-    return '<section class="sec" aria-labelledby="models-h"><h2 id="models-h">' + esc(t('models_title')) + '</h2><p class="note">' + esc(t('models_note')) + '</p><ol class="vlist">' + rows.join('') + '</ol>' + ps + '</section>';
+    return '<section class="sec" id="models" aria-labelledby="models-h"><h2 id="models-h">' + esc(t('models_title')) + '</h2><p class="note">' + esc(t(v5(E) ? 'models_note_v5' : 'models_note')) + '</p><ol class="vlist">' + rows.join('') + '</ol>' + ps + '</section>';
   }
   // earlier versions and newcomers stand apart: a note each, no letters
   function apartList(E, status) {
@@ -522,7 +704,16 @@
     });
     return out;
   }
+  function outsideV4(E) {
+    var out = '';
+    ['candidate', 'newcomer', 'first_look', 'earlier'].forEach(function (st) {
+      var items = apartList(E, st);
+      if (items) out += '<h3 class="subh">' + esc(t(st + '_title')) + '</h3><p class="note">' + esc(t(st + '_note')) + '</p><ul class="plain">' + items + '</ul>';
+    });
+    return '<section class="sec pad" id="outside" aria-labelledby="outside-h"><h2 id="outside-h">' + esc(t('outside_title')) + '</h2>' + out + '</section>';
+  }
   function outside(E) {
+    if (v4(E)) return outsideV4(E);
     var earlier = apartList(E, 'earlier'), trial = apartList(E, 'trial'), never = [];
     E.models.forEach(function (m) { if (m.status === 'untried') never.push(m.name); });
     if (never.length) trial += '<li><b>' + esc(t('never_tried')) + '</b> ' + esc(never.join(', ')) + '.</li>';
@@ -530,7 +721,43 @@
       (earlier ? '<h3 class="subh">' + esc(t('earlier_title')) + '</h3><p class="note">' + esc(t('earlier_note')) + '</p><ul class="plain">' + earlier + '</ul>' : '') +
       (trial ? '<h3 class="subh">' + esc(t('trial_title')) + '</h3><p class="note">' + esc(t('trial_note')) + '</p><ul class="plain">' + trial + '</ul>' : '') + '</section>';
   }
+  function howV4(E) {
+    var tok = E.totals.tokens, V = E.volume, P = V.tokens, prev = E.previous_edition || '', items = [], rev = E.revision_of;
+    items.push(t('how_frame'));
+    if (v5(E)) {
+      items.push(t('how_order_v5'));
+      if (E.notes.place_rule) items.push(t('how_place') + ' ' + esc(L(E.notes.place_rule)));
+      items.push(t('how_grade'));
+      items.push(t('how_columns_v5', { columns: E.totals.columns }));
+      items.push(t('how_new_columns'));
+      items.push(t('how_nodata'));
+      items.push(t('how_grounds_v5', { prev: E.carried_from || prev }));
+      items.push(rev ? t('how_votes_rev', { id: rev }) : t('how_votes'));
+      items.push(t('how_reviewers'));
+      items.push(t('how_cases_v5', { n: E.totals.cases }));
+    } else {
+      items.push(t('how_order'));
+      items.push(t('how_grade'));
+      items.push(t('how_columns_v4', { prev: prev }));
+      items.push(t('how_grounds', { prev: prev }));
+      items.push(t('how_votes'));
+      items.push(t('how_reviewers'));
+      items.push(t('how_cases_v4', { n: E.totals.cases }));
+    }
+    items.push(t('how_volume', { from: dateDay(E.period.from), to: dateLong(E.period.to), versions: V.versions_with_work, finished: V.versions_with_finished_work,
+      led: V.versions_leading_only, works: V.finished_works }));
+    items.push(t('how_tokens_v4', { read: L(P.read_display), cache: Math.floor(100 * P.cache_share) + '%', written: L(P.written_display),
+      since: dateLong(tok.since), life: L(tok.read_display).replace('+', ''), life_written: L(tok.written_display), definition: L(tok.definition) }));
+    if (E.notes.lead_note) items.push(t('how_lead') + ' ' + esc(L(E.notes.lead_note)));
+    items.push(t('how_left_out_v4'));
+    if (v5(E) && rev) items.push(t(E.status === 'final' ? 'how_made_final_rev' : E.notes && E.notes.unverified ? 'how_made_draft_rev_cases' : 'how_made_draft_rev', { id: rev }));
+    else items.push(E.status === 'final' ? t('how_made_final_v4') : t(E.notes && E.notes.unverified ? 'how_made_draft_v4_cases' : 'how_made_draft_v4'));
+    return '<section class="sec pad" id="how" aria-labelledby="how-h"><h2 id="how-h">' + esc(t('how_title')) + '</h2><ul class="plain">' +
+      items.map(function (x) { return '<li>' + x + '</li>'; }).join('') +
+      '<li><a href="' + esc(methodLink(E)) + '">' + esc(t('full_method')) + '</a></li></ul></section>';
+  }
   function how(E) {
+    if (v4(E)) return howV4(E);
     var tok = E.totals.tokens || {}, items = [], line, span = caseSpan(E), extra = [], seat = null;
     E.groups.forEach(function (g) { if (!g.main) extra.push(L(g.name)); });
     E.works.forEach(function (w) { if (w.unrated && !seat) seat = w; });
@@ -552,15 +779,218 @@
     items.push(E.status === 'final' ? t('how_made_final') : t('how_made_draft'));
     return '<section class="sec pad" id="how" aria-labelledby="how-h"><h2 id="how-h">' + esc(t('how_title')) + '</h2><ul class="plain">' +
       items.map(function (x) { return '<li>' + x + '</li>'; }).join('') +
-      '<li><a href="' + esc(SOURCE) + '/METHOD.md">' + esc(t('full_method')) + '</a></li></ul></section>';
+      '<li><a href="' + esc(methodLink(E)) + '">' + esc(t('full_method')) + '</a></li></ul></section>';
+  }
+  // ---------- method 4: sections under the ranking
+  function secNav(E) {
+    var items = [['changes', 'sec_changes'], ['votes', 'sec_votes'], ['reviewers', 'sec_reviewers'], ['models', 'sec_models'], ['outside', 'sec_outside'], ['how', 'sec_how']];
+    if (E.views) items.unshift(['views', 'sec_views']);
+    if (E.faq) items.splice(items.length - 2, 0, ['faq', 'sec_faq']);
+    return '<nav class="secnav" aria-label="' + esc(t('nav_sections')) + '">' + items.map(function (x) {
+      return '<a class="chip" href="#' + x[0] + '">' + esc(t(x[1])) + '</a>';
+    }).join('') + '</nav>';
+  }
+  function miniChips(letters) {
+    var out = '';
+    for (var i = 0; i < letters.length; i++) out += chip(letters.charAt(i), 'mini');
+    return '<span class="minis">' + out + '</span>';
+  }
+  function cmpCell(rank, letters, before, was) {
+    var out = '', i, ch;
+    for (i = 0; i < letters.length; i++) {
+      ch = letters.charAt(i);
+      out += chip(ch, 'mini' + (before && before.charAt(i) !== ch ? ' moved' : ''));
+    }
+    // on a phone the column of the previous edition keeps only its place: the letters of now stay whole
+    return '<span class="crk">' + rank + '</span><span class="minis' + (was ? ' was-minis' : '') + '">' + out + '</span>';
+  }
+  function changesSec(E) {
+    var C = E.compare;
+    if (!C) return '';
+    var prev = C['with'], rows = '', left = '';
+    var head = '<tr><th scope="col">' + esc(t('ch_col_model')) + '</th><th scope="col">' + esc(t('ch_col_was', { id: prev })) + '</th><th scope="col">' + esc(t('ch_col_now')) + '</th>' +
+      '<th scope="col" class="mv-col">' + esc(t('ch_col_moved')) + '</th></tr>';
+    C.rows.forEach(function (r) {
+      var m = M[r.model], w = r.was, was, moved = [];
+      var inline = [];
+      if (w && w.rank) {
+        was = cmpCell(w.rank, w.letters, null, true);
+        moved.push(w.rank === r.rank ? t('ch_place_same') : t('ch_place_moved', { from: w.rank, to: r.rank }));
+        var diff = [];
+        // the letters of a row cover the columns both editions have: all of them, unless the edition added columns
+        (C.columns ? C.columns.map(function (id) { return G[id]; }) : MAIN).forEach(function (g, i) {
+          if (w.letters.charAt(i) !== r.letters.charAt(i)) diff.push(t('ch_letters_changed', { column: L(g.name), from: w.letters.charAt(i), to: r.letters.charAt(i) }));
+        });
+        moved.push(diff.length ? diff.join('; ') : t('ch_letters_same'));
+      } else {
+        was = '<span class="cnew">' + esc(w && w.status ? t('ch_was_' + w.status) : t('ch_new')) + '</span><span class="cdash" aria-hidden="true">–</span>';
+        moved.push(t('ch_entered', { rank: r.rank }));
+        inline.push(w && w.status ? t('ch_was_' + w.status) : t('ch_new'));
+      }
+      var now = cmpCell(r.rank, r.letters, w && w.letters ? w.letters : null, false);
+      var text = moved.join(', ');
+      rows += '<tr' + (!w || !w.rank ? ' class="isnew"' : '') + '><th scope="row">' + esc(m.short) + '<small class="mv-inline">' + inline.concat(moved).join(', ') + '</small></th><td>' + was + '</td><td>' + now + '</td>' +
+        '<td class="mv-col">' + text + '</td></tr>';
+    });
+    C.left.forEach(function (x) {
+      left += '<li>' + t('ch_left_line', { name: M[x.model] ? M[x.model].name : x.name, rank: x.was.rank, id: prev, successor: x.successor && M[x.successor] ? M[x.successor].short : '' }) + '</li>';
+    });
+    var bullets = (C.bullets || []).map(function (b) { return '<li>' + esc(L(b)) + '</li>'; }).join('');
+    return '<section class="sec pad" id="changes" aria-labelledby="changes-h"><h2 id="changes-h">' + esc(C.title ? L(C.title) : t('changes_title', { id: prev })) + '</h2>' +
+      '<p class="note">' + esc(C.note ? L(C.note) : t('changes_note', { id: prev })) + '</p>' +
+      '<ul class="plain bul cols">' + bullets + '</ul>' +
+      '<div class="cmpwrap"><table class="cmp"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>' +
+      (left ? '<h3 class="subh">' + esc(t('ch_left_title')) + '</h3><ul class="plain">' + left + '</ul>' : '') +
+      '<p class="more"><a class="link" href="' + esc(editionPage(prev)) + '">' + esc(t('changes_open', { id: prev })) + '</a></p></section>';
+  }
+  var NOT_COUNTED = ['excluded', 'format_invalid', 'evidence_unavailable', 'model_mismatch', 'duplicate_response'];
+  function ballotClass(st) {
+    if (st === 'counted' || st === 'partially_counted') return 'ok';
+    return NOT_COUNTED.indexOf(st) >= 0 ? 'warn' : 'none';
+  }
+  function pairCard(p, i) {
+    var names = pairNames(p), c = p.counts, total = c.first + c.second + c.tie + c.abstain || 1, letters = '', verdict;
+    var seg = function (cls, n) { return n ? '<i class="vb ' + cls + '" style="flex:' + n + ' 0 0"></i>' : ''; };
+    if (p.letters && p.column && G[p.column]) {
+      letters = '<p class="mine"><span class="lbl">' + t('votes_my_letters', { column: L(G[p.column].name) }) + '</span>' +
+        '<span class="pm">' + chip(p.letters[0]) + esc(names[0]) + '</span><span class="pm">' + chip(p.letters[1]) + esc(names[1]) + '</span></p>';
+    }
+    verdict = '<p class="verdict vd-' + p.verdict + '">' + esc(t('vd_' + p.verdict)) + '</p>';
+    var extra = [];
+    if (p.unverified_counted) extra.push(t('votes_unverified', { n: p.unverified_counted }));
+    if (p.weighted_differs) extra.push(t('votes_weighted'));
+    var explain = p.explain ? '<p class="why mine">' + esc(L(p.explain)) + '</p>' : (p.verdict === 'disagree' ? '<p class="why note">' + esc(t('votes_explain_pending')) + '</p>' : '');
+    return '<li class="pair" tabindex="-1" id="' + pairAnchor(i) + '"><h3>' + esc(L(p.description)) + '</h3><p class="quiet">' + esc(t('votes_assigned', { n: p.assigned })) + '</p>' +
+      '<div class="vbar" role="img" aria-label="' + esc(names[0] + ' ' + c.first + ', ' + names[1] + ' ' + c.second + ', ' + t('votes_tie') + ' ' + c.tie + ', ' + t('votes_abstain') + ' ' + c.abstain) + '">' +
+      seg('a', c.first) + seg('tie', c.tie) + seg('b', c.second) + seg('ab', c.abstain) + (total ? '' : '') + '</div>' +
+      '<ul class="vkeys"><li class="a"><b>' + esc(names[0]) + '</b> ' + num(c.first) + '</li><li class="b"><b>' + esc(names[1]) + '</b> ' + num(c.second) + '</li>' +
+      '<li class="tie">' + esc(t('votes_tie')) + ' ' + num(c.tie) + '</li><li class="ab">' + esc(t('votes_abstain')) + ' ' + num(c.abstain) + '</li></ul>' +
+      letters + verdict + (extra.length ? '<p class="quiet">' + esc(extra.join(' ')) + '</p>' : '') + explain + '</li>';
+  }
+  function votesSec(E) {
+    var V = E.votes;
+    if (!V) return '';
+    // Only name a prior table when the carried ballot metadata binds it to this revision.
+    var prev = E.carried && E.carried.votes_prior_table, counted = 0, notCounted = 0, none = 0, seen = 0, rows = '';
+    var priorLabel = prev ? t('votes_col_prior', { id: prev }) : t('votes_col_prior_unnamed');
+    V.voters.forEach(function (v) {
+      var cls = ballotClass(v.status), m = M[v.model];
+      if (cls === 'ok') counted++; else if (cls === 'warn') notCounted++; else none++;
+      if (v.prior_table === 'seen') seen++;
+      var c = v.counts, items = c ? t('votes_items', { p: c.pairwise_counted, pa: c.pairwise_assigned, a: c.annotations_counted, aa: c.annotations_assigned }) : '–';
+      var identity = v.identity ? '<small class="vote-identity" data-identity="' + esc(v.identity) + '">' +
+        esc(v.requested_label ? t('vote_identity_requested_snapshot', { model: v.requested_label }) : t('vote_identity_' + v.identity)) + '</small>' : '';
+      rows += '<tr><th scope="row">' + esc(m ? m.short : v.model) + identity + '</th><td data-label="' + esc(t('votes_col_ballot')) + '"><span class="bs ' + cls + '">' + esc(t('vs_' + v.status)) + '</span></td>' +
+        '<td data-label="' + esc(t('votes_col_counted')) + '">' + esc(items) + '</td><td data-label="' + esc(priorLabel) + '">' + esc(t('prior_' + v.prior_table)) + '</td></tr>';
+    });
+    var head = '<tr><th scope="col">' + esc(t('votes_col_version')) + '</th><th scope="col">' + esc(t('votes_col_ballot')) + '</th><th scope="col">' + esc(t('votes_col_counted')) + '</th><th scope="col">' + esc(priorLabel) + '</th></tr>';
+    var anns = V.annotations.map(function (a) {
+      var c = a.counts;
+      return '<li><span>' + esc(L(a.description)) + '</span>' +
+        (a.claim ? '<p class="ann-claim"><b>' + esc(t('ann_claim_label')) + '</b> ' + esc(L(a.claim)) + '</p>' : '') +
+        '<small>' + esc(t('ann_counted', { n: c.supported + c.contradicted + c.insufficient })) + ': ' + esc(t('ann_supported')) + ' ' + num(c.supported) + ', ' +
+        esc(t('ann_contradicted')) + ' ' + num(c.contradicted) + ', ' + esc(t('ann_insufficient')) + ' ' + num(c.insufficient) + '</small>' +
+        (a.unverified_counted ? '<small>' + esc(t('ann_unverified', { n: a.unverified_counted })) + '</small>' : '') +
+        (a.established ? '<p class="established">' + esc(L(a.established)) + '</p>' : '') + '</li>';
+    }).join('');
+    return '<section class="sec pad" id="votes" aria-labelledby="votes-h"><h2 id="votes-h">' + esc(t('votes_title')) + '</h2>' + carriedNote(E) +
+      '<p class="note">' + esc(E.carried ? t('votes_note_rev', { id: E.carried.from }) : t('votes_note')) + '</p>' +
+      '<p class="vsum">' + esc(t('votes_summary', { asked: V.voters.length, counted: counted, not_counted: notCounted, none: none })) + (prev && seen ? ' ' + esc(t('votes_prior', { seen: seen, id: prev })) : '') + '</p>' +
+      '<h3 class="subh">' + esc(t('votes_pairs_title')) + '</h3><ol class="pairs">' + V.pairs.map(pairCard).join('') + '</ol>' +
+      '<p class="why note">' + esc(t('votes_boundary')) + '</p>' +
+      (anns ? '<h3 class="subh">' + esc(t('votes_checks_title')) + '</h3><p class="note">' + esc(t('votes_checks_note')) + '</p><ul class="anns">' + anns + '</ul>' : '') +
+      (V.counting_note ? '<p class="note vote-counting">' + esc(L(V.counting_note)) + '</p>' : '') +
+      '<details class="roster"><summary>' + esc(t('votes_roster_title')) + ' · ' + V.voters.length + '</summary><div class="rtwrap"><table class="rt vt"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div></details>' +
+      '</section>';
+  }
+  function reviewersSec(E) {
+    var R = E.reviewers;
+    if (!R) return '';
+    var C = R.recheck || {};
+    function nm(id) { return M[id] ? M[id].short : id; }
+    function bar(a, b) { return '<i class="mini-bar" aria-hidden="true"><i style="width:' + (b ? Math.round(100 * a / b) : 0) + '%"></i></i>'; }
+    function cell(key, html, cls) { return '<td' + (cls ? ' class="' + cls + '"' : '') + ' data-label="' + esc(t(key)) + '"><span class="v">' + html + '</span></td>'; }
+    // one row per version: how its remarks held up when two other families read the source, then the seven problems
+    // confirmed first, compared only on the same working copy; who answered goes under the table
+    var rows = '', answered = [], noseat = [];
+    R.rows.forEach(function (r) {
+      var m = M[r.model], name = esc(nm(r.model)) + (m && m.status === 'earlier' ? '<small>' + esc(t('rev_earlier')) + '</small>' : '');
+      var seven;
+      if (r.chances) {
+        seven = cell('rev_col_named', '<span class="frac">' + esc(t('rev_of', { a: r.named, b: r.chances })) + '</span>' + bar(r.named, r.chances), 'sep') +
+          cell('rev_col_alone', num(r.alone));
+      } else {
+        seven = '<td class="sep noseat" colspan="2" data-label="' + esc(t('rev_grp_seven', { n: R.properties })) + '">' + esc(t('rev_no_seat_short')) + '</td>';
+        noseat.push('<b>' + esc(nm(r.model)) + '.</b> ' + esc(t('rev_no_seat')));
+      }
+      rows += '<tr><th scope="row">' + name + '</th>' + cell('rev_col_checked', num(r.checked)) +
+        cell('rev_col_confirmed', '<span class="frac n">' + num(r.confirmed) + '</span>' + bar(r.confirmed, r.checked)) +
+        cell('rev_col_open', num(r.open)) + cell('rev_col_refuted', num(r.refuted)) + seven + '</tr>';
+      // The outer sentence escapes the joined list; keep each item plain until then.
+      answered.push(fmt(raw('rev_answered_item'), { model: nm(r.model), a: r.answered, b: r.invited }, true) +
+        (r.no_answer ? ' (' + fmt(raw('rev_noshow_delivery'), { n: r.no_answer }, true) + ')' : ''));
+    });
+    var head = '<tr class="grp"><th scope="col" rowspan="2">' + esc(t('rev_col_reviewer')) + '</th><th scope="colgroup" colspan="4">' + esc(t('rev_grp_recheck')) +
+      '</th><th scope="colgroup" colspan="2" class="sep">' + esc(t('rev_grp_seven', { n: R.properties })) + '</th></tr><tr><th scope="col">' + esc(t('rev_col_checked')) + '</th><th scope="col">' +
+      esc(t('rev_col_confirmed')) + '</th><th scope="col">' + esc(t('rev_col_open')) + '</th><th scope="col">' + esc(t('rev_col_refuted')) + '</th><th scope="col" class="sep">' +
+      esc(t('rev_col_named')) + '</th><th scope="col">' + esc(t('rev_col_alone')) + '</th></tr>';
+    var readers = (C.readers || []).map(function (id) { return M[id] ? M[id].name : id; });
+    var foot = (R.modes_note ? esc(L(R.modes_note)) : '') + (noseat.length ? (R.modes_note ? ' ' : '') + noseat.join(' ') : '');
+    var ub = R.unbound && R.unbound.answers ? ' ' + t('rev_unbound', { n: R.unbound.answers, model: nm(R.unbound.requested), raised: R.unbound.raised, confirmed: R.unbound.confirmed }) : '';
+    var advice = R.advice.map(function (a) {
+      return '<li><span class="who">' + a.who.map(function (id) { return '<b>' + esc(nm(id)) + '</b>'; }).join('') + '</span><span>' + esc(L(a.text)) + '</span></li>';
+    }).join('');
+    var examples = R.examples.map(function (x) { return '<li><h4>' + esc(L(x.title)) + '</h4><p>' + esc(L(x.text)) + '</p></li>'; }).join('');
+    return '<section class="sec pad" id="reviewers" aria-labelledby="reviewers-h"><h2 id="reviewers-h">' + esc(t('rev_title')) + '</h2>' + carriedNote(E) +
+      '<p class="note">' + t('rev_note', { r1: readers[0], r2: readers[1] }) + '</p>' +
+      '<div class="rtwrap"><table class="rt rv"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>' +
+      (foot ? '<p class="quiet">' + foot + '</p>' : '') +
+      '<p class="rvkey">' + t('rev_legend', { refuted: C.refuted }) + '</p>' +
+      '<p class="quiet">' + esc(t('rev_totals', { reviews: C.reviews, remarks: C.remarks, confirmed: C.confirmed, open: C.open, refuted: C.refuted,
+        properties: R.properties, works: R.works_with_properties, pairs: R.pairs })) + '</p>' +
+      '<p class="quiet">' + t('rev_answered', { assessed: R.assessed, list: answered.join('; ') }) + ub + '</p>' +
+      '<div class="revgrid"><div><h3 class="subh">' + esc(t('rev_advice_title')) + '</h3><ol class="advice">' + advice + '</ol></div>' +
+      '<p class="why note">' + esc(t('rev_boundary', { remarks: C.remarks, reviews: C.reviews, open: C.open })) + '</p></div>' +
+      '<h3 class="subh">' + esc(t('rev_examples_title')) + '</h3><ul class="examples">' + examples + '</ul></section>';
+  }
+  // a revision keeps the votes and the reviewers of the edition it revises, and says so above both
+  function carriedNote(E) { return E.carried ? '<p class="why note carried">' + esc(L(E.carried.note)) + '</p>' : ''; }
+  // method 5: the same models from three sides, and what to pick for each kind of work on a limited budget
+  function viewsSec(E) {
+    var V = E.views;
+    if (!V) return '';
+    var head = '<div class="vwr vwh" role="row"><span role="columnheader">' + esc(t('ch_col_model')) + '</span>' +
+      V.columns.map(function (c) { return '<span role="columnheader">' + esc(L(c.name)) + '</span>'; }).join('') + '</div>';
+    var rows = V.rows.map(function (r) {
+      var m = M[r.model];
+      return '<div class="vwr" role="row"><b role="rowheader"><span class="rk">' + m.rank + '</span>' + esc(m.short) + '</b>' +
+        V.columns.map(function (c) { return '<span role="cell" data-label="' + esc(L(c.name)) + '">' + esc(L(r[c.id])) + '</span>'; }).join('') + '</div>';
+    }).join('');
+    var B = V.budget, budget = B.rows.map(function (r) { return '<div><dt>' + esc(L(G[r.group].name)) + '</dt><dd>' + esc(L(r.text)) + '</dd></div>'; }).join('');
+    return '<section class="sec pad" id="views" aria-labelledby="views-h"><h2 id="views-h">' + esc(L(V.title)) + '</h2><p class="note">' + esc(L(V.lead)) + '</p>' +
+      '<div class="vw" role="table" aria-labelledby="views-h">' + head + rows + '</div>' +
+      '<h3 class="subh" id="budget">' + esc(L(B.title)) + '</h3><p class="note">' + esc(L(B.principle)) + '</p><dl class="bud">' + budget + '</dl></section>';
+  }
+  function faqSec(E) {
+    var F = E.faq;
+    if (!F) return '';
+    return '<section class="sec pad" id="faq" aria-labelledby="faq-h"><h2 id="faq-h">' + esc(L(F.title)) + '</h2><p class="note">' + esc(L(F.lead)) + '</p><dl class="qa">' +
+      F.items.map(function (x) { return '<div><dt>' + esc(L(x.q)) + '</dt><dd>' + esc(L(x.a)) + '</dd></div>'; }).join('') + '</dl></section>';
   }
   function renderRating() {
     var E = state.E;
     if (state.group !== 'rating' && state.group !== 'all' && !E.groups.some(function (g) { return g.id === state.group; })) state.group = 'rating';
     index(E);
-    setHead(t('title'));
-    app.innerHTML = bar() + '<main class="shell page">' + hero(E) + board(E) + tiles(E) + modelsList(E) +
-      '<div class="two">' + outside(E) + how(E) + '</div>' + foot(E) + '</main>';
+    var T = E.totals, counts = { method_version: E.method_version, rated: T.models.rated, columns: T.columns, works: T.work_types };
+    setHead(t('title'), v4(E) ? t('description_v4', counts) : t('description'), counts, E);
+    if (v4(E)) {
+      state.group = 'rating';
+      app.innerHTML = bar() + '<main class="shell page' + (v5(E) ? ' v5' : '') + '">' + hero(E) + board(E) + tiles(E) + secNav(E) + viewsSec(E) + changesSec(E) + votesSec(E) + reviewersSec(E) + modelsList(E) +
+        faqSec(E) + '<div class="two">' + outside(E) + how(E) + '</div>' + foot(E) + '</main>';
+    } else {
+      app.innerHTML = bar() + '<main class="shell page">' + hero(E) + board(E) + tiles(E) + modelsList(E) +
+        '<div class="two">' + outside(E) + how(E) + '</div>' + foot(E) + '</main>';
+    }
     fit();
     var wrap = app.querySelector('.mxwrap');
     if (wrap && window.ResizeObserver) { if (live) live.disconnect(); live = new window.ResizeObserver(fit); live.observe(wrap); }
@@ -571,7 +1001,8 @@
     var mx = app.querySelector('.mx'), wrap = app.querySelector('.mxwrap');
     if (!mx || !wrap) return;
     var cols = mx.querySelectorAll('.wh').length, side = mx.querySelector('.corner').offsetWidth;
-    mx.classList.toggle('hz', state.group !== 'all' && cols > 0 && (wrap.clientWidth - side) / cols >= 84);
+    // method 5 has a one-word name that needs a wider column to lie flat («Исследование»)
+    mx.classList.toggle('hz', state.group !== 'all' && cols > 0 && (wrap.clientWidth - side) / cols >= (mx.classList.contains('v5') ? 104 : 84));
     var hint = app.querySelector('.hint');
     if (hint) hint.hidden = wrap.scrollWidth <= wrap.clientWidth + 1;
   }
@@ -621,6 +1052,18 @@
     current = { el: el, btn: btn, kind: kind, id: id, scrim: scrim, inline: inline };
     state.open = { kind: kind, id: id };
     el.addEventListener('click', function (e) {
+      var pair = e.target.closest('[data-pair-link]');
+      if (pair && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        var fragment = pair.getAttribute('href'), target = doc.getElementById(fragment.slice(1));
+        if (target) {
+          e.preventDefault();
+          closeDetail(false);
+          window.location.hash = fragment;
+          target.focus({ preventScroll: true });
+          target.scrollIntoView({ block: 'start' });
+          return;
+        }
+      }
       var gb = e.target.closest('[data-g]');
       if (gb) { e.stopPropagation(); setGroup(gb.getAttribute('data-g')); return; }
       if (e.target.closest('[data-close]')) closeDetail(true);
@@ -646,23 +1089,26 @@
 
   // ---------- editions page
   function renderEditions() {
-    setHead(t('editions_title') + ' · ' + t('title'));
     var list = (EDS && EDS.editions) || [], latest = EDS && EDS.latest, items = '';
+    var newest = list.find(function (e) { return e.edition === latest; });
+    var counts = newest && { method_version: newest.method_version, rated: newest.models_rated, columns: newest.columns, works: newest.work_types };
+    setHead(t('editions_title') + ' · ' + t('title'), newest && v4(newest) ? t('description_v4', counts) : t('description'), counts);
     list.forEach(function (e) {
       var isLatest = e.edition === latest, draft = e.status !== 'final';
       var card = isLatest ? 'card/latest-' + state.lang + '-' + theme() + '.png' : e.card;
-      var page = isLatest ? 'index.html' : 'index.html?edition=' + encodeURIComponent(e.edition);
+      var page = isLatest ? withLang('index.html') : editionPage(e.edition);
+      var pageLabel = t(!isLatest && window.location.protocol === 'file:' ? 'ed_page_online' : 'ed_page');
       items += '<li class="ed"><div><h2>' + esc(e.edition) + (isLatest ? '<span class="pill">' + esc(t('ed_latest')) + '</span>' : '') +
         (draft ? '<span class="pill draft">' + esc(t('ed_draft')) + '</span>' : '') + '</h2>' +
-        '<dl><dt>' + esc(t('ed_graded')) + '</dt><dd>' + t('ed_graded_value', { models: e.models_rated, works: e.work_types }) + '</dd>' +
+        '<dl><dt>' + esc(t('ed_graded')) + '</dt><dd>' + (e.method_version >= 4 ? t('ed_graded_value_v4', { models: e.models_rated, columns: e.columns }) : t('ed_graded_value', { models: e.models_rated, works: e.work_types })) + '</dd>' +
         (e.top && e.top.length ? '<dt>' + esc(t('ed_top')) + '</dt><dd>' + esc(e.top.join(', ')) + '</dd>' : '') +
         '<dt>' + esc(t('ed_published')) + '</dt><dd>' + esc(e.published ? dateLong(e.published) : t('ed_not_published')) + '</dd>' +
         '<dt>' + esc(t('ed_period')) + '</dt><dd>' + esc(dateRange(e.period.from, e.period.to, true)) + '</dd>' +
         '<dt>' + esc(t('ed_method')) + '</dt><dd>v' + esc(e.method_version) + '</dd></dl>' +
         '<p class="moved"><b>' + esc(t('ed_moved')) + '.</b> ' + esc(L(e.changelog)) + '</p>' +
-        '<div class="links"><a href="' + esc(withLang(page)) + '">' + esc(t('ed_page')) + '</a><a href="' + esc(e.data) + '">' + esc(t('ed_data')) + '</a>' +
+        '<div class="links"><a href="' + esc(page) + '">' + esc(pageLabel) + '</a><a href="' + esc(e.data) + '">' + esc(t('ed_data')) + '</a>' +
         (card ? '<a href="' + esc(card) + '">' + esc(t('ed_card')) + '</a>' : '') + '</div></div>' +
-        (card ? '<figure><a href="' + esc(withLang(page)) + '"><img src="' + esc(card) + '" alt="' + esc(t('title') + ', ' + e.edition) + '" width="1600" height="900" loading="lazy"></a></figure>' : '') + '</li>';
+        (card ? '<figure><a href="' + esc(page) + '"><img src="' + esc(card) + '" alt="' + esc(t('title') + ', ' + e.edition) + '" width="1600" height="900" loading="lazy"></a></figure>' : '') + '</li>';
     });
     app.innerHTML = bar() + '<main class="shell page"><section class="head"><div class="head-main"><p class="eyebrow">' + esc(t('eyebrow_editions')) + '</p>' +
       '<h1>' + esc(t('editions_title')) + '</h1><p class="lead">' + esc(t('editions_lead')) + ' ' + esc(t('ed_method_note')) + '</p></div></section>' +
@@ -739,6 +1185,24 @@
   }
   state.lang = pickLang();
   if (PAGE === 'editions') { render(); return; }
+  if (archivePage(ARCHIVE)) {
+    var fallback = function () {
+      root.setAttribute('lang', state.lang);
+      var data = 'data/editions/' + ARCHIVE + '/edition.json', card = 'card/editions/' + ARCHIVE + '-en.png';
+      app.innerHTML = '<main class="shell page"><section class="head"><div class="head-main"><h1>' + esc(t('title')) + '</h1>' +
+        '<p class="notice">' + esc(t('archive_unavailable', { id: ARCHIVE })) + ' ' + esc(t('archive_requires_http')) +
+        ' <a href="' + esc(withLang(CANON + archivePage(ARCHIVE))) + '">' + esc(t('archive_online')) + '</a></p>' +
+        '<p><a href="' + esc(data) + '">' + esc(t('ed_data')) + '</a> · <a href="' + esc(card) + '">' + esc(t('ed_card')) +
+        '</a></p></div></section></main>';
+    };
+    if (window.location.protocol === 'file:') fallback();
+    else load('data/editions/' + ARCHIVE + '/edition.json', function (d) {
+      if (!d || d.edition !== ARCHIVE) { fallback(); return; }
+      state.E = d;
+      render();
+    }, fallback);
+    return;
+  }
   if (!EMBED) { app.textContent = 'The edition data did not load.'; return; }
   var want = query('edition'), local = window.location.protocol === 'file:';
   if (want && !validEdition(want)) want = null;

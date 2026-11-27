@@ -21,6 +21,10 @@ from ouroboros import (
     llm_messages,
     llm_openai_compatible,
     llm_pricing,
+    llm_ollama,
+    llm_ollama_guard,
+    llm_ollama_policy,
+    llm_ollama_wire,
     llm_probe,
     llm_routing,
     llm_stream,
@@ -45,6 +49,10 @@ _LEAVES = (
     llm_local,
     llm_openai_compatible,
     llm_pricing,
+    llm_ollama,
+    llm_ollama_guard,
+    llm_ollama_policy,
+    llm_ollama_wire,
     # Not a mixin and not an extraction: the probe transport arrived whole from
     # upstream. It is an llm_* leaf all the same, so the leaf rules bind it —
     # never import the parent and never form cycles.
@@ -279,3 +287,20 @@ def test_llm_leaf_import_graph_is_acyclic_and_shallow():
     for name in sorted(edges):
         walk(name, ())
     assert seen == set(edges)
+
+
+def test_native_ollama_imports_do_not_cycle_back_to_the_router():
+    edges = {}
+    for module in _LEAVES:
+        name = module.__name__.split(".")[-1]
+        tree = ast.parse(pathlib.Path(module.__file__).read_text())
+        edges[name] = {n.module.split(".")[-1] for n in ast.walk(tree)
+                       if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("ouroboros.llm_")}
+    def walk(node, stack):
+        if node in stack:
+            cycle = stack[stack.index(node):]
+            assert not any(n.startswith("llm_ollama") for n in cycle), cycle
+            return  # pre-existing non-Ollama cycles remain covered by the full graph test
+        for child in edges.get(node, ()):
+            walk(child, stack + (node,))
+    walk("llm_routing", ())

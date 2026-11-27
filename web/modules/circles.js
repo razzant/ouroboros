@@ -15,15 +15,17 @@ import { bindPageHeader, renderPageHeader } from './page_header.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { tr, fmt } from './i18n.js';
 import { chipHtml, relativeAge, skillIconHtml } from './skill_presentation.js';
-import { PLACES_CHANGED_EVENT, createCircle, deleteCircle, failureText, readPlaceConnector, readPlaces, updateCircle } from './consciousness_api.js';
+import { PLACES_CHANGED_EVENT, connectorKey, createCircle, deleteCircle, failureText, isOwnerBotPair, readPlaceConnector, readPlaces, updateCircle } from './consciousness_api.js';
 import { noKindChecked, placeInstance, placeModelWord, placeService, placeStateWord, placeTitle, sameWords, writtenByWord } from './consciousness_words.js';
 import { getContributions } from './contributions.js';
 import { bindModelChoosers, modelChooserHtml, updateModelChooser } from './model_chooser.js';
 import { modelCatalog } from './model_catalog_store.js';
-import { modelSuggestions, openPlaceSheet, statusLine } from './place_sheet.js';
+import { modelSuggestions, openPlaceSheet, ownerBotGroupsOff, statusLine } from './place_sheet.js';
 import { catalogPrograms } from './model_program.js';
 import { openConnectPlace, ownerWordsFieldHtml } from './place_connect.js';
 import { openConfirmDialog } from './confirm_dialog.js';
+import { circlePlaces, createOwnOuroboroses, ownFocusKey, wroteRoom } from './own_ouroboroses.js';
+import { openCodeCheck, openIntroduction } from './peer_intro.js';
 
 const SEP = ' · ';
 const UNASSIGNED = 'none';
@@ -45,15 +47,16 @@ export const lastEventText = (place) => (place.lastActivityAt
 
 /** One place row for every list of places: a door to its sheet (DESIGN "Doors and containers"). `source` is the row's
  *  quiet service label (the service, with the instance when two rows of the list would read the same). */
-export function placeRowHtml(place, { title = '', source = '' } = {}) {
-    const readiness = place.readiness && place.readiness.tone !== 'ok'
-        ? tr(`places.readiness.${place.readiness.text}`, place.readiness.text) : '';
+export function placeRowHtml(place, { title = '', source = '', status = null } = {}) {
+    const groupOff = ownerBotGroupsOff(place, status);
+    const readiness = groupOff?.text || (place.readiness && place.readiness.tone !== 'ok'
+        ? tr(`places.readiness.${place.readiness.text}`, place.readiness.text) : '');
     const word = tr(`places.state.${place.state}`, placeStateWord(place.state));
     // Why it is quiet, in the host's words (owner 15.11, 5A: the Panic, the switch, the allowance, the level), in place
     // of a stored word it does not do now; the stored choice stays the sheet's. A place no cause keeps quiet, not
     // Paused, with no kind checked says that setting beside its state, promising neither a wake nor silence: the kinds
     // themselves stay in the sheet's "What calls it here".
-    const unchecked = !place.quiet && place.state !== 'paused' && noKindChecked(place);
+    const unchecked = place.connector !== 'ouroboros' && !place.quiet && place.state !== 'paused' && noKindChecked(place);
     const state = place.quiet ? tr(place.quiet.word, place.quiet.word)
         : unchecked ? `${word}${SEP}${tr('places.unchecked', 'no wake kinds checked')}` : word;
     const when = lastEventText(place);
@@ -62,32 +65,48 @@ export function placeRowHtml(place, { title = '', source = '' } = {}) {
     const service = source || placeService(place);
     const where = sameWords(name, service) ? '' : service;
     const description = place.description?.text || '';
-    const tone = place.quiet || unchecked ? 'muted' : STATE_TONE[place.state] || 'muted';
+    // A personal Telegram group whose bridge is unavailable keeps its saved Active word, without a green dot.
+    const ownerBotNotReady = isOwnerBotPair(place) && readiness;
+    const tone = place.quiet || unchecked || ownerBotNotReady ? 'muted' : STATE_TONE[place.state] || 'muted';
     // Its model is a fact of the row only when the place overrides: an inheriting place says nothing.
     const own = overrides(place) ? place.model || place.modelRoute.value : '';
     // The state and why it is quiet own the status slot; the last event rides the quiet service label, so a cause never
     // reads as «since then» (Panic · yesterday).
     const facts = `<span class="ui-status" data-tone="${tone}">${escapeHtml(state)}</span>${readiness
-        ? `${SEP}<span data-tone="${escapeHtml(place.readiness.tone)}">${escapeHtml(readiness)}</span>` : ''}${own
+        ? `${SEP}<span data-tone="${escapeHtml(groupOff?.tone || place.readiness.tone)}">${escapeHtml(readiness)}</span>` : ''}${own
         ? `${SEP}${modelFactHtml(own)}` : ''}`;
     const label = fmt(where ? 'Open {place} ({where}): {facts}' : 'Open {place}: {facts}', { place: name, where,
         facts: [state, readiness, fmt('last event {when}', { when }), own ? fmt('model {model}', { model: placeModelWord(own) }) : '']
             .filter(Boolean).join('; ') });
-    return `<li><button type="button" class="place-row" data-place-open="${escapeHtml(place.id)}" data-state="${escapeHtml(place.state || '')}" aria-label="${escapeHtml(label)}">
+    return `<li><button type="button" class="place-row"${place.connector === 'ouroboros' ? ' data-i18n-skip' : ''} data-place-open="${escapeHtml(place.id)}" data-state="${escapeHtml(place.state || '')}" aria-label="${escapeHtml(label)}">
         <span class="place-row-main"><span class="place-glyph" aria-hidden="true">${skillIconHtml(place.icon, 18)}</span><span class="consciousness-place-name" data-i18n-authored>${escapeHtml(name)}</span><span class="place-row-source">${where
             ? `<span data-i18n-authored>${escapeHtml(where)}</span>${SEP}` : ''}${escapeHtml(when)}</span><span class="consciousness-place-facts">${facts}</span></span>
         ${description ? `<span class="place-row-meta" data-i18n-authored>${escapeHtml(description)}</span>` : ''}
     </button></li>`;
 }
 
+function placeConnectorStatus(place, statuses = {}) {
+    if (!statuses || typeof statuses !== 'object') return null;
+    const keyed = statuses[connectorKey(place)];
+    const siblingKey = Object.keys(statuses).find((k) => k.startsWith(`${place.connector}:`) && k !== 'telegram-bot:owner_bot');
+    const raw = keyed !== undefined ? keyed
+        : isOwnerBotPair(place) ? null
+            : statuses[place.connector] ?? statuses[`${place.connector}:place`] ?? (siblingKey ? statuses[siblingKey] : null);
+    if (isOwnerBotPair(place) && (!raw || (place.accountId && raw.account_id !== place.accountId && !ownerBotGroupsOff(place, raw)))) return null;
+    return raw;
+}
+
 /** The rows of one list: titles without the circle's name, the instance on the source label where two would read the same. */
 export function placeRowsHtml(places, { circle = null, statuses = {} } = {}) {
-    const titled = places.map((place) => ({ place, title: placeTitle(place, { circle, status: statuses[place.connector] }) }));
+    const titled = places.map((place) => {
+        const status = placeConnectorStatus(place, statuses);
+        return { place, status, title: placeTitle(place, { circle, status }) };
+    });
     const counts = new Map();
     for (const { title } of titled) counts.set(title, (counts.get(title) || 0) + 1);
-    return titled.map(({ place, title }) => {
+    return titled.map(({ place, title, status }) => {
         const instance = counts.get(title) > 1 ? placeInstance(place) : '';
-        return placeRowHtml(place, { title, source: instance ? `${placeService(place)}${SEP}${instance}` : placeService(place) });
+        return placeRowHtml(place, { title, status, source: instance ? `${placeService(place)}${SEP}${instance}` : placeService(place) });
     }).join('');
 }
 
@@ -233,7 +252,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
     page.id = 'page-circles';
     page.className = 'page app-page-glass';
     page.innerHTML = `
-        ${renderPageHeader({ page: 'circles', actionsHtml: actButton('new', tr('circles.new', 'New circle')) })}
+        ${renderPageHeader({ page: 'circles', named: false, actionsHtml: actButton('new', tr('circles.new', 'New circle')) })}
         <div class="dashboard-shell">
             <div class="dashboard-body scroll-fade-y circles-body" data-circles-body></div>
         </div>
@@ -241,6 +260,20 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
     document.getElementById('content').appendChild(page);
     const disposeBar = bindPageHeader(page.querySelector('.app-page-header'));
     const body = page.querySelector('[data-circles-body]');
+    // The owner's own Ouroboroses: a block of their own above the circles (own_ouroboroses.js); their places are its.
+    // Its conversation opens where every place's does, in the place sheet, at its room when it has one: the one its
+    // arrivals list, else the one the host names as where this side wrote first (`peerRoom`; a message sent is no arrival).
+    const introduced = (placeId) => { own.reveal(placeId); void refresh(); };
+    const own = createOwnOuroboroses(body, { places: () => view?.places || [], paint, refresh,
+        openIntro: ({ returnFocus, again }) => openIntroduction({ returnFocus, name: again?.label || '', onChanged: introduced }),
+        openCodeCheck: (place, options) => openCodeCheck(place, { ...options, onChanged: introduced }),
+        openConversation: (place, options) => openSheet(place, { ...options, circles: view?.circles || null,
+            openRoomChatId: place.rooms?.[0]?.chatId ?? null,
+            openRoom: wroteRoom(place) ? { room_chat_id: wroteRoom(place).roomChatId } : null }),
+        // The work a letter started here opens in the room its acceptance record names (its arrival index may list
+        // none: a letter is no arrival), read as that work's own rows.
+        openWork: (place, options) => openSheet(place, { ...options, circles: view?.circles || null,
+            openRoom: { room_chat_id: place.peerWork.roomChatId, work: { ...place.peerWork } } }) });
     // One circle open at a time; the first one opens on the first visit.
     const ui = { open: '', opened: false, editing: '', drafts: {}, creating: false, status: {}, busy: false, models: null, modelsFailed: false };
     let view = null, readError = '', generation = 0, behind = false;
@@ -262,9 +295,9 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         if (view) {
             const { groups, unassigned } = groupPlaces(view.circles, view.places);
             const answered = statuses();
-            directory = `<section class="ui-card circles-directory" aria-label="${escapeHtml(tr('circles.title', 'Circles'))}">`
+            directory = own.html(view.places) + `<section class="ui-card circles-directory" aria-label="${escapeHtml(tr('circles.title', 'Circles'))}">`
                 + groups.map(({ circle, places }) => circleFoldHtml(circle, places, ui, answered)).join('')
-                + unassignedFoldHtml(unassigned, ui, answered, { alone: !groups.length }) + '</section>';
+                + unassignedFoldHtml(circlePlaces(unassigned), ui, answered, { alone: !groups.length }) + '</section>';
         }
         return `<p class="ui-status consciousness-read-status" role="status"${top?.tone ? ` data-tone="${escapeHtml(top.tone)}"` : ''}>${escapeHtml(top?.text || '')}</p>${moved}`
             + (ui.creating ? newCircleCardHtml(ui) : '') + directory;
@@ -281,10 +314,10 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         disposeChoosers = bindModelChoosers(body);
         for (const fold of body.querySelectorAll('.circle-fold')) if (fold.hasAttribute('open')) paintedOpen.add(fold);
         body.scrollTop = scroll;
-        if (!key) return;
-        const node = body.querySelector(key);
+        const node = key ? body.querySelector(key) : null;
         node?.focus({ preventScroll: true });
         if (selection && node?.setSelectionRange) node.setSelectionRange(...selection);
+        own.painted();  // the block's results, and focus where its finished sheet or write sends it
     }
 
     // Settings broadcasts every catalog read, a failed one too: that one leaves the suggestions as they are.
@@ -338,7 +371,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
     // again. A shown page repaints with the answer; a hidden one is behind, and reads again when it is shown.
     function readStatuses() {
         const declared = new Map((view?.connectors || []).filter((connector) => connector.source?.url)
-            .map((connector) => [connector.connector, connector]));
+            .map((connector) => [connectorKey(connector), connector]));
         for (const [name, read] of statusReads) if (declared.get(name)?.source.url !== read.url) statusReads.delete(name);
         for (const [name, connector] of declared) {
             if (statusReads.has(name)) continue;
@@ -360,9 +393,16 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         return node?.getClientRects().length ? node : node?.closest('.circle-fold')?.querySelector('summary') || null;
     };
 
-    function addPlace(circle) {
-        openConnect({ returnFocus: current(`[data-circles-act="add-place"][data-circle="${CSS.escape(circle?.id || UNASSIGNED)}"]`),
-            openSettings, circle: circle ? { id: circle.id, name: circle.name } : null });
+    // One draft lives in this page only while its owner is doing Telegram setup elsewhere in the app.
+    let telegramSetup = null;
+    function addPlace(circle, resumeTelegram = null) {
+        const saved = circle ? { id: circle.id, name: circle.name } : null;
+        openConnect({ returnFocus: current(`[data-circles-act="add-place"][data-circle="${CSS.escape(saved?.id || UNASSIGNED)}"]`),
+            openSettings, circle: saved, resumeTelegram,
+            onTelegramSetup: (draft, nextCircle) => {
+                const target = nextCircle === undefined ? saved : nextCircle ? { id: nextCircle.id, name: nextCircle.name } : null;
+                telegramSetup = { circle: target, draft };
+            } });
     }
 
     // The fields stay open while a write is out: `onConflict` hears the circle as it stands now, the facts a resave uses.
@@ -424,7 +464,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         if (row && body.contains(row)) {
             const place = (view?.places || []).find((entry) => entry.id === row.dataset.placeOpen);
             if (place) openSheet(place, { returnFocus: current(`[data-place-open="${CSS.escape(place.id)}"]`), circles: view.circles,
-                connectorStatus: statusReads.get(place.connector)?.data || null });
+                connectorStatus: placeConnectorStatus(place, statuses()) });
             return;
         }
         const button = event.target.closest?.('[data-circles-act]');
@@ -460,7 +500,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
             }
             return;
         }
-        if (act === 'add-place') { addPlace(circle); return; }
+        if (act === 'add-place') { telegramSetup = null; addPlace(circle); return; }
         if (!circle) return;
         if (act === 'edit') {
             ui.open = circle.id; ui.editing = circle.id; ui.status = {}; ui.modelsFailed = false; paint();
@@ -520,8 +560,22 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         if (!(`${id}:revision` in ui.drafts) && circleById(id)) ui.drafts[`${id}:revision`] = circleById(id).revision;
         ui.drafts[key] = field.value;
     };
-    const onShown = (event) => { if (event?.detail?.page === 'circles') void refresh(); };
-    const onChanged = () => { if (shown()) void refresh(); else behind = true; };
+    let shownSeq = 0;
+    const onShown = async (event) => {
+        if (event?.detail?.page !== 'circles') return;
+        const visit = ++shownSeq;
+        const setup = telegramSetup;
+        statusReads.delete('telegram-bot:owner_bot');
+        await refresh();
+        if (!setup || destroyed || visit !== shownSeq || telegramSetup !== setup || state?.activePage !== 'circles') return;
+        telegramSetup = null;
+        // Keep the original ID if the latest read cannot confirm it; the server rejects a vanished circle.
+        addPlace((setup.circle && circleById(setup.circle.id)) || setup.circle, setup.draft);
+    };
+    const onChanged = (event) => {
+        if (event?.detail?.telegramGroupFeed) statusReads.delete('telegram-bot:owner_bot');
+        if (shown()) void refresh(); else behind = true;
+    };
     const onVisibility = () => { if (behind && shown()) void refresh(); };
     // Another surface asks for this page ({}), or one circle ({circle}) in its edit state ({edit}): the place sheet's
     // "Edit in circle ›". That circle opens (the open one closes) and the page scrolls to it.
@@ -561,6 +615,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
             generation += 1;
             destroyed = true;
             disposeChoosers();
+            own.dispose();
             statusReads.clear();  // a late status answer finds no read of this page
             offLifecycle();
             disposeBar();
@@ -586,5 +641,5 @@ function focusKeyOf(node) {
     const row = node.closest?.('[data-place-open]');
     if (row) return `[data-place-open="${CSS.escape(row.dataset.placeOpen)}"]`;
     const head = node.closest?.('.circle-fold > summary');
-    return head ? `[data-circle="${CSS.escape(head.parentElement.dataset.circle)}"] > summary` : '';
+    return head ? `[data-circle="${CSS.escape(head.parentElement.dataset.circle)}"] > summary` : ownFocusKey(node);
 }

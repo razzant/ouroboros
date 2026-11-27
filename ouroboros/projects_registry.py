@@ -1,7 +1,6 @@
 """Project registry (data/state/projects.json): id/name/memory/positive chat id, optional folder.
 Mind/owner closure is reversible; only owners delete. Tombstones preserve history/data and prevent
-rediscovery, never age pruning. Store-marker recovery creates fresh incarnations, not lost folders/tombstones
-(PERSISTENCE); rooms share one identity (BIBLE P1)."""
+rediscovery, never age pruning. A missing registry can return from a certified complete copy."""
 
 from __future__ import annotations
 
@@ -12,28 +11,28 @@ import time
 import uuid
 import pathlib
 import threading
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from typing import Any, Dict, Iterator, List, Optional
 
 from ouroboros.contracts.chat_id_policy import project_chat_id
-from ouroboros.composer_cognition import (ensure_project_cognition, main_cognition, project_cognition, project_model_choice,
-                                          project_processing_choice, new_room_cognition)
+from ouroboros.composer_cognition import (_seed_rows as _seed_cognition_rows, ensure_project_cognition, main_cognition,
+                                          new_room_cognition, project_cognition, project_model_choice, project_processing_choice)
 from ouroboros.contracts.schema_versions import with_schema_version
-from ouroboros.project_facts import project_display_name, sanitize_project_id
+from ouroboros.project_facts import can_be_workspace_shelf, project_display_name, sanitize_project_id
 from ouroboros.project_closure import apply_closed, select_projects
 from ouroboros.project_sources import apply_folder, require_durable_folder
 from ouroboros.store import StoreBusy, StoreMigrating, open_store
 from ouroboros.store_capture import capture
 from ouroboros.store_hot_facts import CHAT_VERSION
-from ouroboros import utils
+from ouroboros import project_registry_recovery as recovery, utils
+from ouroboros.project_registry_recovery import (
+    PROJECT_ACTIVE, PROJECT_DELETING, PROJECT_LIFECYCLES as PROJECT_LIFECYCLES, PROJECT_TOMBSTONED,
+    registry_path as _registry_path, routing_row as _routing_row, witness_path as _registry_witness_path,
+)
 from ouroboros.utils import atomic_write_json, json_snapshot, read_json_dict, utc_now_iso, strip_markdown
 
 log = logging.getLogger(__name__)
 
-_REGISTRY_NAME = "projects.json"
-# Empty witness touched after each registry save: beside it, a missing registry
-# is lost authority, not a fresh install that never had a Project room.
-_REGISTRY_WITNESS_NAME = "projects.json.committed"
 _BINDINGS_NAME = "project_task_bindings.json"
 # Additive schema: unstamped rows are version 0; reconstructed rows may lack
 # optional provenance fields, whose defaults must remain compatible.
@@ -44,49 +43,29 @@ _BINDINGS_SCHEMA_VERSION = 1
 _LOCK = threading.RLock()
 
 PROJECT_NAME_MAX = 80
-PROJECT_ACTIVE = "active"
-PROJECT_DELETING = "deleting"
-PROJECT_TOMBSTONED = "tombstoned"
-PROJECT_LIFECYCLES = frozenset({PROJECT_ACTIVE, PROJECT_DELETING, PROJECT_TOMBSTONED})
 
 
 @contextmanager
 def _file_write_lock(target_path: pathlib.Path, *, timeout_sec: float = 4.0) -> Iterator[None]:
     """Server create/bind and worker journal share a sidecar flock for load→modify→atomic-write;
     nested _LOCK serializes threads. A process-local lock alone permits lost updates."""
-    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
-
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = target_path.with_name(target_path.name + ".lock")
-    fd = acquire_exclusive_file_lock(lock_path, timeout_sec=timeout_sec)
-    if fd is None:
-        raise TimeoutError(f"projects_registry: could not lock {lock_path} in time")
-    try:
+    utils.assert_test_data_path(target_path)
+    with ExitStack() as locks:
+        if target_path.name == "projects.json":
+            locks.enter_context(recovery.writer_lock(target_path, timeout_sec))
+        else:
+            from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+            lock_path = target_path.with_name(target_path.name + ".lock")
+            fd = acquire_exclusive_file_lock(lock_path, timeout_sec=timeout_sec)
+            if fd is None:
+                raise TimeoutError(f"projects_registry: could not lock {lock_path} in time")
+            locks.callback(release_exclusive_file_lock, lock_path, fd)
         if not _LOCK.acquire(timeout=timeout_sec):
             raise TimeoutError("projects_registry: thread lock busy")
         try:
             yield
         finally:
             _LOCK.release()
-    finally:
-        release_exclusive_file_lock(lock_path, fd)
-
-
-def _registry_path(drive_root: Any) -> pathlib.Path:
-    return pathlib.Path(drive_root) / "state" / _REGISTRY_NAME
-
-
-def _registry_witness_path(drive_root: Any) -> pathlib.Path:
-    return pathlib.Path(drive_root) / "state" / _REGISTRY_WITNESS_NAME
-
-
-def _mark_registry_committed(drive_root: Any) -> None:
-    """Touch the witness after a commit; a failure only defers it to the next save/reconcile,
-    and a registry lost inside that window reads as never committed (disclosed gap)."""
-    try:
-        _registry_witness_path(drive_root).touch()
-    except OSError:
-        log.warning("Project registry commit witness was not written", exc_info=True)
 
 
 def _bindings_path(drive_root: Any) -> pathlib.Path:
@@ -94,7 +73,6 @@ def _bindings_path(drive_root: Any) -> pathlib.Path:
 
 
 # Keep the registry facade stable; execution reads have their own strict contract.
-from ouroboros.project_admission import _routing_row  # noqa: E402
 from ouroboros.project_admission import (  # noqa: E402, F401
     ProjectAdmissionError, _strict_admission_snapshot, display_registry_snapshot,
     project_admission_basis, project_admission_guard, project_admission_view,
@@ -102,13 +80,14 @@ from ouroboros.project_admission import (  # noqa: E402, F401
 )
 
 
-def _load(drive_root: Any, *, strict: bool = False,
-          project_id: Optional[str] = None, require_readable: bool = False, sidebar: bool = False) -> Dict[str, Any]:
+def _load(drive_root: Any, *, strict: bool = False, project_id: Optional[str] = None, require_readable: bool = False,
+          sidebar: bool = False, prove_absence: bool = False) -> Dict[str, Any]:
     # A writer validates global identity and its target, preserving every other
     # raw row. None means a full strict reader; "" selects no row (append/census).
     data = (_strict_admission_snapshot(drive_root, allow_missing=True,
             identity_only=project_id is not None, preserve_raw=project_id is not None)[0] if strict
-            else display_registry_snapshot(drive_root, require_readable=require_readable, sidebar=sidebar))
+            else display_registry_snapshot(drive_root, require_readable=require_readable, sidebar=sidebar,
+                                           prove_absence=prove_absence))
     for index, row in enumerate(data["projects"]):
         if strict and project_id is not None:
             if row["id"] != project_id:
@@ -131,12 +110,7 @@ def _validated_name(value: Any, fallback: str = "") -> str:
 
 
 def _save(drive_root: Any, data: Dict[str, Any]) -> None:
-    path = _registry_path(drive_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Stamp the current schema version on every write (idempotent; old files that
-    # never had it are treated as version 0 by read_schema_version).
-    atomic_write_json(path, with_schema_version(dict(data), _REGISTRY_SCHEMA_VERSION))
-    _mark_registry_committed(drive_root)  # after the commit it attests
+    recovery.save(drive_root, with_schema_version(data, recovery.SCHEMA_VERSION))
 
 
 _NO_BINDINGS: Dict[str, Any] = {"bindings": {}}  # what a reader of an absent or unreadable store shares
@@ -156,7 +130,6 @@ def _load_bindings(drive_root: Any, *, strict: bool = False, fresh: bool = False
 
 def _save_bindings(drive_root: Any, data: Dict[str, Any]) -> None:
     path = _bindings_path(drive_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     # v6.73.0: bindings carry an opt-in _schema_version (legacy files read as 0).
     atomic_write_json(path, with_schema_version(dict(data), _BINDINGS_SCHEMA_VERSION))
 
@@ -176,7 +149,7 @@ ORIGIN_ABSENT_REASONS = frozenset({
     "producer_missing_ref",
 })
 
-_ORIGIN_REF_KEYS = ("chat_id", "client_message_id", "ts", "text_sha256")
+_ORIGIN_REF_KEYS = ("chat_id", "client_message_id", "ts", "text_sha256", "row_sha256")
 
 
 def _validated_origin(origin: Any, resolved_chat: int) -> Dict[str, Any]:
@@ -198,9 +171,7 @@ def _validated_origin(origin: Any, resolved_chat: int) -> Dict[str, Any]:
     from ouroboros.project_dialogue import _text_sha256, owner_message_ref_is_valid
     if not owner_message_ref_is_valid(ref):
         raise ValueError("origin['ref'] requires a room, client id (possibly empty), non-empty timestamp and SHA-256")
-    clean_ref = {key: ref.get(key) for key in _ORIGIN_REF_KEYS}
-    if "row_sha256" in ref:
-        clean_ref["row_sha256"] = ref["row_sha256"]
+    clean_ref = {key: ref[key] for key in _ORIGIN_REF_KEYS if key in ref}
     try:
         cross_thread = int(clean_ref.get("chat_id") or 0) != int(resolved_chat or 0)
     except (TypeError, ValueError):
@@ -255,6 +226,7 @@ def bind_task_to_project(
     origin: Dict[str, Any],
     admission_basis: Optional[dict] = None,
     execution_readmission: bool = False,
+    reopen_closed: bool = True,
 ) -> Dict[str, Any]:
     """Durably bind an existing task/live card to a project thread.
 
@@ -271,7 +243,7 @@ def bind_task_to_project(
         raise ValueError("task_id is required")
     if not pid:
         raise ValueError(f"unusable project id: {project_id!r}")
-    if admission_basis is None and get_reserved_project(drive_root, pid) is None:
+    if reopen_closed and admission_basis is None and get_reserved_project(drive_root, pid) is None:
         _validated_origin(origin, int(chat_id) if chat_id is not None else project_chat_id(pid))
         create_project(drive_root, pid)
     media = _origin_media(drive_root, origin)  # a chat read: never under the registry's cross-process lock
@@ -283,6 +255,8 @@ def bind_task_to_project(
         if not isinstance(project, dict) or project.get("lifecycle") != PROJECT_ACTIVE:
             lifecycle = project.get("lifecycle") if isinstance(project, dict) else "missing"
             raise ValueError(f"project {pid!r} is {lifecycle}; it cannot accept bindings")
+        if not reopen_closed and ("closed" in project or project.get("chat_id") != chat_id):
+            raise ValueError("the local Project return address no longer accepts bindings")
         try:
             resolved_chat = int(chat_id if chat_id is not None else project.get("chat_id"))
         except (TypeError, ValueError):
@@ -320,7 +294,7 @@ def bind_task_to_project(
             start = bindings_identity(drive_root)  # under the lock: this save's own step of the file
             _save_bindings(drive_root, data)
             end = bindings_identity(drive_root)
-            if not enriching and "closed" in project:
+            if reopen_closed and not enriching and "closed" in project:
                 apply_closed(project, None)
                 _save(drive_root, registry_data)
     if not enriching:
@@ -349,8 +323,11 @@ def all_task_project_bindings(drive_root: Any, *, strict: bool = False) -> Dict[
     """Map task_id -> {project_id, chat_id} for ALL post-hoc 'Turn into project'
     bindings. Richer than all_task_bindings (chat-id only): the UI uses project_id
     to turn a bound main-chat card into a pointer that opens the project panel
-    (F4), not merely to suppress the stray convert button (P2). Strict snapshot
-    readers propagate source failures so absence never impersonates completeness."""
+    (F4), not merely to suppress the stray convert button (P2). Only a positive
+    binding places a card: an exact Project id and an exact positive chat, as its
+    writer stores them; any other value is no placement, never coerced into one.
+    Strict snapshot readers propagate source failures so absence never
+    impersonates completeness."""
     out: Dict[str, Dict[str, Any]] = {}
     try:
         names = {row["id"]: row.get("name") or row["id"] for row in _load(drive_root)["projects"]}
@@ -358,8 +335,9 @@ def all_task_project_bindings(drive_root: Any, *, strict: bool = False) -> Dict[
         for tid, row in bindings.items():
             if not isinstance(row, dict):
                 continue
-            pid, cid = str(row.get("project_id") or "").strip(), _binding_chat(row)
-            if pid and cid:
+            pid, cid = row.get("project_id"), row.get("project_chat_id")
+            if (isinstance(pid, str) and pid and sanitize_project_id(pid) == pid
+                    and type(cid) is int and cid > 0):
                 out[str(tid)] = {"project_id": pid, "chat_id": cid, "project_name": str(names.get(pid) or pid)}
     except Exception:
         if strict:
@@ -373,10 +351,9 @@ _PROCESS_STAMP = uuid.uuid4().hex[:8]  # this process's code shapes the map it a
 
 def bindings_revision(drive_root: Any) -> str:
     """An opaque stamp of the files ``all_task_project_bindings`` reads in this process: the identities of the
-    bindings and of the registry naming their projects, and whether the registry's commit witness exists (it tells
-    a lost registry from one never written, so it decides ``project_chat_ids``; reconcile touches it each tick, so
-    its times are no part of the stamp). ``""`` when no stamp can prove the bytes unchanged:
-    unreadable, or changed within a clock tick (``utils._RACY_NS``). It keys the state publication (a touched
+    bindings and the registry naming their projects, and whether its commit witness exists (one indication of loss;
+    reconcile touches it each tick, so its times are no part of the stamp). ``""`` when the files are unreadable
+    or changed within a clock tick (``utils._RACY_NS``). It keys the state publication (a touched
     registry is a new production); the revision a reader holds the map by is the map's own digest
     (``gateway.state_publication.map_revision``)."""
     started, stamps = time.time_ns(), [_PROCESS_STAMP]
@@ -777,9 +754,11 @@ def project_chat_for_task_tree(
 
 
 def _registry_projects_snapshot(drive_root: Any, *, strict: bool = False, require_readable: bool = False,
-                                sidebar: bool = False) -> tuple[List[Dict[str, Any]], bool]:
+                                sidebar: bool = False,
+                                prove_absence: bool = False) -> tuple[List[Dict[str, Any]], bool]:
     with _LOCK:
-        snapshot = _load(drive_root, strict=strict, require_readable=require_readable, sidebar=sidebar)
+        snapshot = _load(drive_root, strict=strict, require_readable=require_readable, sidebar=sidebar,
+                         prove_absence=prove_absence)
     projects = sorted(
         snapshot["projects"],
         key=lambda p: str(p.get("last_active_at") or p.get("updated_at") or p.get("created_at") or ""),
@@ -808,10 +787,12 @@ def list_projects(drive_root: Any, *, strict: bool = False,
                            closed=closed, oldest_first=oldest_first)
 
 
-def list_sidebar_projects(drive_root: Any, *, require_readable: bool = False,
-                          with_coverage: bool = False) -> List[Dict[str, Any]] | tuple[List[Dict[str, Any]], bool]:
-    """Active and quiescing rooms; optionally pair rows with completeness. Strict about unproved emptiness on request."""
-    snapshot = _registry_projects_snapshot(drive_root, require_readable=require_readable, sidebar=True)
+def list_sidebar_projects(drive_root: Any, *, require_readable: bool = False, with_coverage: bool = False,
+                          prove_absence: bool = False) -> List[Dict[str, Any]] | tuple[List[Dict[str, Any]], bool]:
+    """Active and quiescing rooms; optionally pair rows with completeness. Strict about unproved emptiness on request.
+    ``prove_absence``: the completeness a client may erase by, where a missing registry counts only on first use."""
+    snapshot = _registry_projects_snapshot(drive_root, require_readable=require_readable, sidebar=True,
+                                           prove_absence=prove_absence)
     return snapshot if with_coverage else snapshot[0]
 
 
@@ -840,7 +821,7 @@ _UNREADABLE_SAID: set = set()  # the causes of an unknown room set this process 
 
 def readable_rooms(drive_root: Any) -> Optional[set]:
     """The chat ids the registry's readable rows reserve (a healthy row survives an invalid neighbour). ``None``
-    when the registry names no room it can vouch for: it cannot be read, is lost beside its commit witness, or
+    when the registry names no room it can vouch for: it cannot be read, is missing with surviving evidence, or
     holds rows none of which is readable. That is an unknown set, never "no Projects"."""
     try:
         return {project["chat_id"] for project in list_reserved_projects(drive_root, require_readable=True)}
@@ -868,7 +849,7 @@ def _project_thread_lens(drive_root: Any) -> tuple[frozenset, dict, dict]:
     try:
         stamp = utils.file_identity(path.stat())
     except FileNotFoundError:
-        if _registry_witness_path(drive_root).exists():
+        if not recovery.could_be_first_registry(drive_root):
             raise
         return frozenset(), {}, {}
     key = str(path)
@@ -1074,8 +1055,19 @@ def create_project(
         raise ValueError(f"unusable project id: {project_id!r}")
     cognition = main_cognition()
     ensure_project_cognition(drive_root, baseline=cognition)
-    with _file_write_lock(_registry_path(drive_root)), \
-            project_admission_guard(drive_root, admission_basis) if admission_basis is not None else nullcontext():
+    path = _registry_path(drive_root)
+    with _file_write_lock(path), ExitStack() as admission:
+        if not path.exists():
+            if admission_basis is not None:
+                basis = validate_project_admission(admission_basis)
+                if (basis.get("registry_present", True) or basis["project"] is not None
+                        or basis.get("workspace_claims", {}).get("owners")):
+                    raise FileNotFoundError(str(path))
+            require_durable_folder(working_dir, drive_root=drive_root)
+            _validated_name(name, pid)
+            recovery.require_primary(drive_root, path)
+        if admission_basis is not None:
+            admission.enter_context(project_admission_guard(drive_root, admission_basis))
         data = _load(drive_root, strict=True, project_id=pid)
         for existing in data["projects"]:
             if existing.get("id") == pid:
@@ -1086,10 +1078,13 @@ def create_project(
                     )
                 return {**existing, "created": False}
         require_durable_folder(working_dir, drive_root=drive_root)  # a new row only, before _save
+        chat_id = project_chat_id(pid)
+        if any(_routing_row(row, identity_only=True)["chat_id"] == chat_id for row in data["projects"]):
+            raise ValueError(f"Project {pid!r} cannot use chat {chat_id}: already reserved")
         entry = {
             "id": pid,
             "name": _validated_name(name, pid),
-            "chat_id": project_chat_id(pid),
+            "chat_id": chat_id,
             "working_dir": str(working_dir or "").strip(),
             "cognition": new_room_cognition(cognition),
             "origin": str(origin or "owner"),
@@ -1216,10 +1211,8 @@ def complete_project_deletion(drive_root: Any, project_id: str) -> Optional[Dict
             entry["delete_error"] = ""
             _save(drive_root, data)
             try:
-                # The store's `.project.json` is REGISTRY-AUTHORED recovery metadata,
-                # not the owner's memory: leaving it would let a later loss of
-                # projects.json (rows AND tombstones live in that one file) resurrect
-                # the deleted room as active through marker recovery.
+                # Older bodies can discover a room through this marker. Retire it
+                # with its row while preserving the owner's store.
                 (pathlib.Path(drive_root) / "projects" / pid / _PROJECT_MARKER_NAME).unlink(
                     missing_ok=True)
             except OSError:
@@ -1257,144 +1250,135 @@ _PROJECT_MARKER_NAME = ".project.json"
 
 
 def _read_store_marker(store_dir: pathlib.Path) -> Dict[str, Any]:
-    """Registry-authored provenance echo inside a project store ({} when absent or
-    malformed). Never authoritative over a live registry row — it exists so reconcile
-    can tell a REAL room's store from a workspace-task facts store in the one scenario
-    the registry row itself is what was lost (the two are byte-shape identical on disk,
-    and a non-ASCII display name hashes to the same ``proj_<hash>`` id namespace)."""
+    """Read the store's historical provenance echo. A missing or malformed marker supplies no facts."""
     marker = read_json_dict(store_dir / _PROJECT_MARKER_NAME)
-    if not isinstance(marker, dict) or not isinstance(marker.get("id"), str):
-        return {}
-    return marker
+    return marker if isinstance(marker, dict) and isinstance(marker.get("id"), str) else {}
+
+
+def _maintain_store_marker(store: pathlib.Path, row: dict) -> None:
+    marker = store / _PROJECT_MARKER_NAME
+    utils.assert_test_data_path(marker)
+    try:
+        if row["lifecycle"] == PROJECT_TOMBSTONED:
+            marker.unlink(missing_ok=True)
+        elif row["lifecycle"] == PROJECT_ACTIVE and row.get("origin") != "reconcile" and store.is_dir():
+            echo = {key: row.get(key) for key in ("id", "name", "origin", "created_at", "cognition")}
+            if _read_store_marker(store) != echo:
+                atomic_write_json(marker, echo)
+    except OSError:
+        log.warning("Project store marker unavailable for %s", row["id"], exc_info=True)
+
+
+def unregistered_project_stores(drive_root, rows):
+    """Yield shelves a legacy reconciler would register, without changing the shelves or registry."""
+    stores = pathlib.Path(drive_root) / "projects"
+    known = {row["id"] for row in rows}
+    try:
+        shelves = sorted(stores.iterdir())
+    except FileNotFoundError:
+        from ouroboros.installation_stop import confirm_absent
+        confirm_absent(stores)
+        return
+    except NotADirectoryError:
+        return
+    bound = {
+        sanitize_project_id(row["project_id"])
+        for row in _load_bindings(drive_root)["bindings"].values()
+        if isinstance(row, dict) and isinstance(row.get("project_id"), str)
+    }
+    for store in shelves:
+        if store.name.startswith(".") or not store.is_dir():
+            continue
+        pid = sanitize_project_id(store.name)
+        if not pid or pid in known:
+            continue
+        marker = _read_store_marker(store)
+        name, origin, created = pid, "reconcile", ""
+        if can_be_workspace_shelf(pid) and pid not in bound:
+            if marker.get("id") != pid:
+                continue  # an unbound bare workspace also has a facts shelf
+            name = str(marker.get("name") or pid)[:PROJECT_NAME_MAX]
+            origin = str(marker.get("origin") or "reconcile")
+            created = str(marker.get("created_at") or "")
+        yield pid, marker, name, origin, created
+        known.add(pid)
+
+
+def _register_legacy_stores(drive_root, data, rows, cognition) -> int:
+    """Import eligible pre-registry stores alongside a fully readable registry. Every lifecycle reserves its ids."""
+    from ouroboros.launch_roots import read_witness
+    status, initialization = read_witness(drive_root)
+    if status not in {"missing", "ok"} or initialization.get("origin") == "owner_reset":
+        return 0
+    chats = {row["chat_id"] for row in rows}
+    for pid, marker, name, origin, created in unregistered_project_stores(drive_root, rows):
+        chat_id = project_chat_id(pid)
+        if chat_id in chats:
+            continue
+        now = utc_now_iso()
+        data["projects"].append({
+            "id": pid, "name": name, "chat_id": chat_id, "working_dir": "",
+            "cognition": project_cognition(marker, cognition), "origin": origin,
+            "created_at": created or now, "last_active_at": now, "lifecycle": PROJECT_ACTIVE,
+            "routing_generation": 0, "routing_incarnation": uuid.uuid4().hex,
+            "visible_revision": 0, "delete_error": "",
+        })
+        chats.add(chat_id)
+    return len(data["projects"]) - len(rows)
 
 
 def reconcile_projects(drive_root: Any) -> int:
-    """Register projects whose memory store exists but whose registry row is
-    missing (e.g. created before the registry shipped). Runs at boot AND on the
-    periodic supervisor reconcile tick. A workspace-derived ``proj_<hash>``
-    store registers only when a durable task binding OR the store's own
-    registry-authored ``.project.json`` marker proves a real room. NEVER
-    prunes — durable project dirs outlive any registry accident.
-    """
-    added = 0
+    """Restore a certified loss or maintain a healthy registry and its eligible legacy stores.
+
+    Only a confirmed profile generation restores or maintains (``history_generation``): a pending Reset
+    must not read its predecessor, and an unreadable or invalid initialization witness proves no
+    generation -- a valid registry certificate alone cannot establish which profile owns it."""
+    if recovery.history_generation(drive_root) != "current":
+        return 0
+    path = _registry_path(drive_root)
     try:
-        ensure_project_cognition(drive_root)
-        cognition = main_cognition()
-        if _registry_path(drive_root).is_file():
-            _mark_registry_committed(drive_root)  # a registry saved before its witness existed
-        projects_root = pathlib.Path(drive_root) / "projects"
-        if projects_root.is_dir():
-            with _file_write_lock(_registry_path(drive_root)):
+        if not path.is_file():
+            if not recovery.witness_path(drive_root).exists():
+                # A busy dialogue store or unfinished import may have deferred first
+                # use at boot. The ordinary maintenance pass retries the same decision.
+                recovery.initialize_new_root(drive_root)
+            else:
+                recovery.reconcile(drive_root)
+            return 0
+        cognition = main_cognition()  # settings writers take their lock before the registry's
+        with _file_write_lock(path):
+            snapshot = recovery.read_primary(path)
+            data = recovery.read_bytes(snapshot[1])
+            recovery.validated_registry(data, identity_only=True, preserve_raw=True)
+            rows, editable = [], []
+            for raw in data["projects"]:
                 try:
-                    data = _load(drive_root, strict=True, project_id="")
-                except FileNotFoundError:
-                    # Reconstruction owns absence, unlike admission. Recovered
-                    # rooms receive NEW incarnations and never authorize old work.
-                    data = {"projects": []}
-                known = {p.get("id") for p in data["projects"]}
-                # Keep the store-side marker current for every ACTIVE owner-originated
-                # row whose store already exists. Maintained HERE — by the same organ
-                # that consumes it — so there is no second producer seam and no mkdir:
-                # a file-less room gets its marker on the first tick after its store
-                # materializes, and reconcile-originated rows are deliberately
-                # excluded so a pre-guard ghost row can never mint recovery evidence
-                # for itself.
-                for raw in data["projects"]:
-                    try:
-                        row = _routing_row(raw)
-                    except ValueError:
-                        continue  # retain unknown routing; do not maintain its marker
-                    store = projects_root / str(row.get("id") or "")
-                    if row.get("lifecycle") == PROJECT_TOMBSTONED:
-                        # Convergence for deletion: a marker whose unlink failed at
-                        # tombstone time (or predates this line) is retried every
-                        # tick, so a stale marker can never outlive its tombstone
-                        # into a later registry-loss recovery.
-                        try:
-                            (store / _PROJECT_MARKER_NAME).unlink(missing_ok=True)
-                        except OSError:
-                            log.warning("stale marker removal failed for %s", row.get("id"))
-                        continue
-                    if row.get("lifecycle") != PROJECT_ACTIVE or row.get("origin") == "reconcile":
-                        continue
-                    if not store.is_dir():
-                        continue
-                    marker = _read_store_marker(store)
-                    if any(marker.get(key) != row.get(key) for key in ("id", "name", "cognition")):
-                        try:
-                            atomic_write_json(store / _PROJECT_MARKER_NAME, {
-                                "id": row.get("id"),
-                                "name": row.get("name"),
-                                "origin": row.get("origin"),
-                                "created_at": row.get("created_at"),
-                                "cognition": row.get("cognition"),
-                            })
-                        except OSError:
-                            # One unwritable store must not abort the whole reconcile:
-                            # the marker retries next tick, registrations still run.
-                            log.warning("project marker write failed for %s", row.get("id"),
-                                        exc_info=True)
-                # A workspace-derived ``proj_<hash>`` store is minted by
-                # project_facts for ANY task carrying a workspace path; the
-                # directory alone is not evidence that the owner ever created a
-                # project room. A durable task binding proves it, and so does the
-                # marker above (written only for rows that once really existed).
-                # Read the bindings through the shared parse ONCE here — this
-                # function also runs on the 300s supervisor reconcile tick, not
-                # just at boot. An unreadable bindings file fail-closes to an
-                # empty set (every unbound proj_ dir is skipped this pass,
-                # idempotently retried on the next tick), and a malformed legacy
-                # row — including a non-string ``project_id``, whose str() form
-                # could otherwise sanitize into a valid-looking id — is skipped
-                # per row rather than coerced or aborting the whole reconcile.
-                bound = {
-                    sanitize_project_id(row["project_id"])
-                    for row in _load_bindings(drive_root)["bindings"].values()
-                    if isinstance(row, dict) and isinstance(row.get("project_id"), str)
-                }
-                for entry in sorted(projects_root.iterdir()):
-                    if not entry.is_dir() or entry.name.startswith("."):
-                        continue
-                    pid = sanitize_project_id(entry.name)
-                    if not pid or pid in known:
-                        continue
-                    # Named stores register as before. A legitimately created
-                    # proj_*-named project passed through create_project and is
-                    # already in ``known``, so it never reaches this guard.
-                    row_name, row_origin, row_created = pid, "reconcile", ""
-                    marker = _read_store_marker(entry)
-                    if pid.startswith("proj_") and pid not in bound:
-                        if marker.get("id") != pid:
-                            continue  # unbound, unmarked: a workspace facts store
-                        # Recovery with the room's REAL identity: the pre-guard
-                        # behavior resurrected it under the machine name; the
-                        # marker restores display name, origin and created_at.
-                        row_name = str(marker.get("name") or pid)[:80] or pid
-                        row_origin = str(marker.get("origin") or "reconcile") or "reconcile"
-                        row_created = str(marker.get("created_at") or "")
-                    data["projects"].append({
-                        "id": pid,
-                        "name": row_name,
-                        "chat_id": project_chat_id(pid),
-                        "working_dir": "",
-                        "cognition": project_cognition(marker, cognition),
-                        "origin": row_origin,
-                        "created_at": row_created or utc_now_iso(),
-                        "last_active_at": utc_now_iso(),
-                        "lifecycle": PROJECT_ACTIVE,
-                        "routing_generation": 0,
-                        "routing_incarnation": uuid.uuid4().hex,
-                        "visible_revision": 0,
-                        "delete_error": "",
-                    })
-                    known.add(pid)
-                    added += 1
-                if added:
-                    _save(drive_root, data)
-                    log.info("Project registry reconcile: %d store(s) registered", added)
+                    rows.append(_routing_row(raw))
+                except ValueError:
+                    continue
+                editable.append(raw)
+            complete = len(rows) == len(data["projects"])
+            if complete and recovery.reconcile(drive_root, snapshot=snapshot):
+                return 0
+            original = utils.file_identity(snapshot[0])
+            if original != utils.file_identity(path.lstat()):
+                return 0
+            # Valid neighbours keep their own maintenance. Only a fully readable
+            # registry authorizes importing another store or certifying recovery.
+            seeded = _seed_cognition_rows({"projects": editable}, cognition)
+            stores = pathlib.Path(drive_root) / "projects"
+            for row, raw in zip(rows, editable):
+                row["cognition"] = raw["cognition"]
+                _maintain_store_marker(stores / row["id"], row)
+            added = _register_legacy_stores(drive_root, data, rows, cognition) if complete else 0
+            if added or seeded:
+                if original != utils.file_identity(path.lstat()):
+                    return 0
+                _save(drive_root, data)
+            return added
     except Exception:
         log.warning("Project registry reconcile failed", exc_info=True)
-    return added
+    return 0
 
 
 def ensure_project_workspace(drive_root: Any, project_id: str, repo_dir: Any,

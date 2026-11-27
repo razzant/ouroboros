@@ -95,7 +95,7 @@ class _LoopbackBot:
                 action = path.rsplit("/", 1)[-1]
                 result = {"message_id": 555}
                 if action == "getMe":
-                    result = {"id": int(_TOKEN.split(":")[0]), "is_bot": True, "username": "loopback_bot"}
+                    result = {"id": 1, "is_bot": True, "username": "loopback_bot"}
                 elif action == "getChat":
                     result = {"id": 42, "type": "private"}
                 elif action == "getUpdates":

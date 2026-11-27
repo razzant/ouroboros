@@ -550,10 +550,11 @@ def _reset_commit_review_state(ctx):
     ctx._current_review_attempt_number = None
     ctx._collect_commit_source = ctx._review_collected_peer = None  # the reference or exact peer this call collects
     ctx._author_commit_source = ctx._author_commit_scope = None  # the reference's reviewed subject (``author_scope``)
+    ctx._author_commit_source_root = None
     ctx._author_commit_decision = None
     ctx._author_commit_record = None
     ctx._commit_review_status = "unknown"
-    ctx._commit_preflight = None
+    ctx._commit_preflight, ctx._commit_panel_buys_wave = None, False
     ctx._commit_review_panel = None
     ctx._preflight_execution, ctx._review_since, ctx._commit_attribution = None, "", None
     ctx._review_dispute_input = None  # this call's own prepared input (``review_history.prepare_history``)
@@ -739,6 +740,8 @@ def _reviewed_stage_cycle(
         ctx._preflight_execution = pending_commit_review_evidence(ctx, "preflight_execution") or {"status": "unobserved"}
     preflight_gate_outcome = None
     if not resumes_open:
+        # A new panel wave is owed: the named look leaves it its wave of their one allowance (``run_commit_preflight``).
+        ctx._commit_panel_buys_wave = advisory_replay is None and not getattr(ctx, "_review_reconcile_only", False)
         preflight_gate_outcome = _git()._preflight_and_tests_gate(
             ctx, commit_message, commit_start,
             classification_paths=classification_paths,

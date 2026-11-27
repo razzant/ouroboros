@@ -292,7 +292,8 @@ def test_main_resume_uses_same_paused_project_task_without_opening_project(wait_
                     refused_body = refused.value.json()
                     receipt["refused_resume"] = {"status": refused.value.status, "body": refused_body}
                     assert refused.value.status == 409 and refused_body["error"] == "budget_still_exhausted", refused_body
-                    page.get_by_text("Resume refused: budget_still_exhausted", exact=True).wait_for()
+                    assert "budget_still_exhausted" not in refused_body["message"], refused_body  # a sentence, not the bare code
+                    page.get_by_text(refused_body["message"], exact=True).wait_for()
                     assert oracle.task_result(task_id)["budget_pause"]["state"] == "paused"
                     assert len(stub.kinds()) == calls_at_pause
                     _controls_capture(page, destination, "main-resume-refused-budget-unchanged")

@@ -77,6 +77,15 @@ _STABLE_READY_RESET_SEC = 300.0
 _VERIFY_GRACE_SEC = 120.0
 _VERIFY_PROBE_INTERVAL_SEC = 2.0
 _VERIFY_CONFIRMED_BAD = 3
+_CONFIRMED_BAD_REASONS = {
+    PublicProbeOutcome.UNHEALTHY_RESPONSE: "public_marker_unhealthy",
+    PublicProbeOutcome.HOST_ABSENT: "public_host_absent",
+}
+_PUBLIC_PROBE_MESSAGES = {
+    "public_marker_unhealthy": "The public endpoint responded without the exact Mini App marker.",
+    "public_host_absent": "Public DNS reports no such hostname. Checking the link again.",
+    "public_observer_unavailable": "This machine cannot currently observe the public tunnel. Checking again.",
+}
 _CORE_HEALTH_INTERVAL_SEC = 30.0
 _PUBLIC_HEALTH_INTERVAL_SEC = 45.0
 _MENU_HEALTH_INTERVAL_SEC = 300.0
@@ -461,9 +470,9 @@ def _retry_delay(failure_count: int) -> float:
 
 def _exposure_drift(settings_observer: TelegramSettingsObserver, owner: int) -> _GenerationResult | None:
     """What ends a generation's wait: Off, another owner, or exposure no longer safe or readable."""
-    if not miniapp_enabled(settings_observer.state_dir):
-        return _GenerationResult.DISABLED
     try:
+        if not miniapp_enabled(settings_observer.state_dir):
+            return _GenerationResult.DISABLED
         if settings_observer.owner_chat_id() != owner:
             return _GenerationResult.OWNER_CHANGED
         if not settings_observer.safe_for_exposure(owner):
@@ -516,7 +525,7 @@ async def _wait_without_token(state_dir: Path, status: RuntimeStatus, stop_event
             status.transition("disabled", "Telegram Mini App is off; the text bridge remains active.",
                               reason_code="miniapp_disabled")
         else:
-            status.transition("waiting_token", "Waiting for a bot token in Settings → Secrets (TELEGRAM_BOT_TOKEN).",
+            status.transition("waiting_token", "Waiting for a bot token in Settings → Accounts and keys (TELEGRAM_BOT_TOKEN).",
                               reason_code="token_missing")
         await _wait_or_stop(5.0, stop_event)
 
@@ -553,7 +562,7 @@ async def _wait_for_owner(
         if owner <= 0:
             status.transition(
                 "waiting_owner",
-                "Set Owner Chat ID in Settings → Extensions → Telegram (or confirm pairing from Ouroboros).",
+                "Open the private Telegram bot chat once to pin its owner.",
                 reason_code="waiting_private_owner",
             )
             await _wait_or_stop(5.0, stop_event)
@@ -681,6 +690,17 @@ async def _wait_for_cloudflared(
             await _wait_or_stop(delay, stop_event, server_task=server_task)
 
 
+def _begin_public_reconnect(status: RuntimeStatus, reason: str, confirmed_bad: int) -> bool:
+    """Publish the decision at the threshold, before waiting for the old tunnel to stop."""
+    if confirmed_bad < _VERIFY_CONFIRMED_BAD:
+        return False
+    status.transition(
+        "reconnecting", "Reconnecting the Mini App after repeated public link checks failed.",
+        reason_code=reason, attempt=confirmed_bad,
+    )
+    return True
+
+
 async def _wait_for_public_verification(
     public_url: str,
     tunnel: QuickTunnel,
@@ -689,9 +709,10 @@ async def _wait_for_public_verification(
     status: RuntimeStatus,
     stop_event: asyncio.Event,
     server_task: asyncio.Task[None],
+    *, grace_until: float | None = None,
 ) -> _GenerationResult | None:
-    # One deadline on the event loop's clock (time.monotonic), set as the URL arrives and never by a probe.
-    grace_until = time.monotonic() + _VERIFY_GRACE_SEC
+    if grace_until is None:
+        grace_until = time.monotonic() + _VERIFY_GRACE_SEC
     confirmed_bad = 0
     while True:
         if (drift := _exposure_drift(settings_observer, owner)) is not None:
@@ -704,31 +725,26 @@ async def _wait_for_public_verification(
         if not miniapp_enabled(settings_observer.state_dir):
             return _GenerationResult.DISABLED
         if outcome is PublicProbeOutcome.READY:
-            return None
+            return _exposure_drift(settings_observer, owner)  # a probe can span an owner change
         if outcome is PublicProbeOutcome.TUNNEL_EXITED:
             return _GenerationResult.RECONNECT
-        if outcome is PublicProbeOutcome.UNHEALTHY_RESPONSE and time.monotonic() < grace_until:
-            # The edge takes a while to route a brand-new connector: registration lag, not a broken tunnel.
+        reason = _CONFIRMED_BAD_REASONS.get(outcome)
+        if reason and time.monotonic() < grace_until:
             if status.reason_code != "public_marker_pending":
                 status.transition(
                     "verifying",
                     "The new public endpoint is still registering with the Cloudflare edge.",
                     reason_code="public_marker_pending",
                 )
-        elif outcome is PublicProbeOutcome.UNHEALTHY_RESPONSE:
+        elif reason:
             confirmed_bad += 1
-            status.transition(
-                "verifying",
-                "The public endpoint responded without the exact Mini App marker.",
-                reason_code="public_marker_unhealthy",
-                attempt=confirmed_bad,
-            )
-            if confirmed_bad >= _VERIFY_CONFIRMED_BAD:
+            if _begin_public_reconnect(status, reason, confirmed_bad):
                 return _GenerationResult.RECONNECT
+            status.transition("verifying", _PUBLIC_PROBE_MESSAGES[reason], reason_code=reason, attempt=confirmed_bad)
         else:
             status.transition(
                 "degraded",
-                "This machine cannot currently observe the public tunnel; it will not rotate blindly.",
+                _PUBLIC_PROBE_MESSAGES["public_observer_unavailable"],
                 reason_code="public_observer_unavailable",
             )
         await _wait_or_stop(_VERIFY_PROBE_INTERVAL_SEC, stop_event, server_task=server_task)
@@ -738,6 +754,7 @@ async def _sync_menu_until_confirmed(
     public_url: str,
     tunnel: QuickTunnel,
     context: _GenerationContext,
+    *, grace_until: float = 0.0,
 ) -> _GenerationResult | None:
     menu = context.menu
     settings_observer = context.settings_observer
@@ -772,6 +789,14 @@ async def _sync_menu_until_confirmed(
             )
             await _wait_or_stop(delay, stop_event, server_task=server_task)
             continue
+        if failures:  # Telegram or settings backoff can outlive the replacement's verified link.
+            result = await _wait_for_public_verification(public_url, tunnel, settings_observer, owner,
+                status, stop_event, server_task, grace_until=grace_until)
+            if result is not None:
+                return result
+            if status.state != "syncing_menu":
+                status.transition("syncing_menu", "Synchronizing the private Telegram Mini App button.",
+                                  reason_code="syncing_menu")
         try:
             await _run_startup_operation(
                 menu.install(public_url, button_text),
@@ -857,21 +882,12 @@ async def _monitor_generation(
                     ) from exc
                 raise SidecarStoppedError("Authentication sidecar stopped unexpectedly.")
             if tunnel_wait in done:
-                return _GenerationResult.RECONNECT, loop.time() - ready_since >= _STABLE_READY_RESET_SEC
+                break
             now = loop.time()
             if now >= next_owner:
                 next_owner = now + _OWNER_HEALTH_INTERVAL_SEC
-                try:
-                    if not miniapp_enabled(settings_observer.state_dir):
-                        return _GenerationResult.DISABLED, False
-                    if settings_observer.owner_chat_id() != owner:
-                        return _GenerationResult.OWNER_CHANGED, False
-                    if not settings_observer.safe_for_exposure(owner):
-                        return _GenerationResult.SETTINGS_BLOCKED, False
-                except TelegramSettingsError:
-                    return _GenerationResult.SETTINGS_BLOCKED, False
-                else:
-                    degraded_reasons.discard("owner_or_settings_unobservable")
+                if (drift := _exposure_drift(settings_observer, owner)) is not None:
+                    return drift, False
             if now >= next_core:
                 next_core = now + _CORE_HEALTH_INTERVAL_SEC
                 if await probe_core(core_port):
@@ -886,25 +902,16 @@ async def _monitor_generation(
                     stop_event=stop_event,
                 )
                 if outcome is PublicProbeOutcome.TUNNEL_EXITED:
-                    return (
-                        _GenerationResult.RECONNECT,
-                        loop.time() - ready_since >= _STABLE_READY_RESET_SEC,
-                    )
+                    break
+                degraded_reasons.difference_update(_PUBLIC_PROBE_MESSAGES)
                 if outcome is PublicProbeOutcome.READY:
                     confirmed_bad = 0
-                    degraded_reasons.discard("public_observer_unavailable")
-                    degraded_reasons.discard("public_marker_unhealthy")
-                elif outcome is PublicProbeOutcome.UNHEALTHY_RESPONSE:
+                elif reason := _CONFIRMED_BAD_REASONS.get(outcome):
                     confirmed_bad += 1
-                    degraded_reasons.discard("public_observer_unavailable")
-                    degraded_reasons.add("public_marker_unhealthy")
-                    if confirmed_bad >= _VERIFY_CONFIRMED_BAD:
-                        return (
-                            _GenerationResult.RECONNECT,
-                            loop.time() - ready_since >= _STABLE_READY_RESET_SEC,
-                        )
+                    if _begin_public_reconnect(status, reason, confirmed_bad):
+                        break
+                    degraded_reasons.add(reason)
                 else:
-                    degraded_reasons.discard("public_marker_unhealthy")
                     degraded_reasons.add("public_observer_unavailable")
             if now >= next_menu:
                 next_menu = now + _MENU_HEALTH_INTERVAL_SEC
@@ -928,7 +935,7 @@ async def _monitor_generation(
                 if status.state != "degraded" or status.reason_code != reason:
                     status.transition(
                         "degraded",
-                        "Mini App remains exposed through the last verified URL while a health signal recovers.",
+                        _PUBLIC_PROBE_MESSAGES.get(reason, "A health check failed; the verified link stays in use."),
                         reason_code=reason,
                     )
             elif status.state != "ready":
@@ -938,6 +945,7 @@ async def _monitor_generation(
                     reason_code="healthy",
                     public_url=public_url,
                 )
+        return _GenerationResult.RECONNECT, loop.time() - ready_since >= _STABLE_READY_RESET_SEC
     finally:
         stop_wait.cancel()
         if not tunnel_wait.done():
@@ -1106,6 +1114,7 @@ async def _run_tunnel_generations(
             except asyncio.TimeoutError as exc:
                 raise CloudflaredError("Tunnel startup operation timed out.") from exc
             context.pacing.url_allocated()
+            grace_until = time.monotonic() + _VERIFY_GRACE_SEC
             sidecar.set_public_url(public_url)
             status.transition(
                 "verifying",
@@ -1120,6 +1129,7 @@ async def _run_tunnel_generations(
                 status,
                 stop_event,
                 server_task,
+                grace_until=grace_until,
             )
             if verification_result is not None:
                 result = verification_result
@@ -1133,6 +1143,7 @@ async def _run_tunnel_generations(
                     public_url,
                     tunnel,
                     context,
+                    grace_until=grace_until,
                 )
                 if sync_result is not None:
                     result = sync_result

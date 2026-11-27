@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import pathlib
+import re
 import threading
 import time
 import urllib.error
@@ -94,8 +95,16 @@ def test_enable_installs_for_every_admitting_gate_reason_and_refuses_before_any_
     make_skill(drive)
     skill = find_skill(drive, "demo", repo_path="")
     admits = reason in ADMITTING
-    monkeypatch.setattr(skill.review, "gate_for", lambda _hash: {
-        "executable_review": admits, "blocking_reason": reason, "review_enforcement": "advisory", "summary": ""})
+    original_gate_for = skill.review.gate_for
+
+    def gate_for(current_hash, *, ordinary_only=False):
+        if ordinary_only:
+            return original_gate_for(current_hash, ordinary_only=True)
+        return {
+            "executable_review": admits, "blocking_reason": reason, "review_enforcement": "advisory", "summary": "",
+        }
+
+    monkeypatch.setattr(skill.review, "gate_for", gate_for)
     monkeypatch.setattr(skill.review, "is_stale_for", lambda _hash: False)
 
     result = enable(drive, skill)
@@ -211,7 +220,7 @@ def test_an_accepted_install_turns_on_only_after_its_packages_succeeded(drive, m
     assert accept_and_turn_on(drive, "demo", repo_path="")["turn_on"] == "enabled" and turn_ons == [1]
 
 
-# ── the startup pass (owner decision D2 = A) ──
+# ── the startup pass ──
 
 def test_the_startup_pass_readies_every_skill_that_should_be_on_and_leaves_the_rest_alone(drive, installs):
     from ouroboros import skill_builtin
@@ -472,16 +481,25 @@ def test_liveness_and_the_loader_show_the_dependency_sentence_and_keep_the_code(
 
 
 def test_agent_facing_texts_send_packages_to_the_enable_owner_never_to_a_paid_review(drive):
-    from ouroboros.skill_readiness import _DEPENDENCY_ACTION, skill_readiness_for_execution
+    from ouroboros.skill_readiness import skill_readiness_for_execution
     from ouroboros.tools.skill_exec import _TOGGLE_SCHEMA, _skill_deps_exec_block
 
     make_skill(drive)
     skill = reviewed(drive)
     readiness = skill_readiness_for_execution(drive, skill, require_enabled=False, skills=[skill])
     assert "deps_not_ready:pending" in readiness.blockers
-    assert [action for action in readiness.next_actions if action["phase"] == "dependencies"] == [_DEPENDENCY_ACTION]
-    assert _DEPENDENCY_ACTION["tool"] == "toggle_skill" and "skill_review" not in _DEPENDENCY_ACTION["reason"]
+    [action] = [item for item in readiness.next_actions if item["phase"] == "dependencies"]
+    assert action["tool"] == _TOGGLE_SCHEMA["name"] == "toggle_skill"
+    assert _TOGGLE_SCHEMA["parameters"]["properties"]["enabled"]["type"] == "boolean"
+    description = " ".join(re.sub(r"[`*]|(?<!\w)_+|_+(?!\w)", "", _TOGGLE_SCHEMA["description"]).casefold().split())
+    assert "review_gate" in description and "dependencies" in description
+    assert re.search(
+        r"\b(?:enable|enabling)(?: itself)? installs(?: or refreshes)? "
+        r"(?:(?:the|its|any|missing|declared|isolated|required) )*(?:packages|dependencies)\b",
+        description,
+    )
     block = _skill_deps_exec_block(drive, skill)
-    assert "toggle_skill enabled=true installs them" in block and "skill_review" not in block
-    assert "enabling installs or refreshes the declared isolated dependencies" in _TOGGLE_SCHEMA["description"]
-    assert "accepted without a review" not in _TOGGLE_SCHEMA["description"]
+    assert "SKILL_EXEC_BLOCKED" in block
+    for guidance in (action["reason"], block, description):
+        assert "skill_review" not in guidance and "review_skill" not in guidance
+    assert all("toggle_skill enabled=true" in guidance for guidance in (action["reason"], block))

@@ -6,7 +6,7 @@ import { continueTask, APP_SETTINGS_ORIGIN } from '../modules/api_client.js';
 import { cardMetaKeys } from '../modules/chat_activity.js';
 import { CANCEL_SOURCE_PHRASES, CANCEL_SOURCE_LABELS } from '../modules/cancel_presentation.js';
 import { taskReasonDetail } from '../modules/log_events.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const originalQuery = ElementStub.prototype.querySelector;
 ElementStub.prototype.querySelector = function (selector) {
@@ -20,7 +20,7 @@ const TS = '2026-11-10T09:00:00Z';
 function fixture(history = []) {
     const env = installDom(async (url) => ({ ok: true, json: async () =>
         String(url).startsWith('/api/chat/history')
-            ? { messages: history, window: { complete: true } } : { active_direct_turns: [] } }));
+            ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } } : { active_direct_turns: [] } }));
     const handlers = new Map();
     let generation = 0;
     const instance = createChatInstance({
@@ -93,9 +93,13 @@ test('the app declares its own press and only its own', async () => {
 
 test('the closed helper names why, once', () => {
     assert.equal(CANCEL_SOURCE_PHRASES.work_finished, 'Closed with the work it helped');
+    assert.equal(CANCEL_SOURCE_PHRASES.peer_letter_cancel, 'Stopped by the Ouroboros that sent this letter');
     const detail = taskReasonDetail({ status: 'cancelled', cancel_origin: { source: 'work_finished', reason: CANCEL_SOURCE_LABELS.work_finished } });
     assert.match(detail, /Closed with the work it helped/);
     assert.doesNotMatch(detail, /has ended/);
+    const peerStop = taskReasonDetail({ status: 'cancelled', cancel_origin: { source: 'peer_letter_cancel' } });
+    assert.match(peerStop, /Stopped by the Ouroboros that sent this letter/);
+    assert.doesNotMatch(peerStop, /peer_letter_cancel/);
 });
 
 test('a history page whose only row is the task summary still names who asked', async () => {

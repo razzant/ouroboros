@@ -1,11 +1,58 @@
 """The bridge's outbound journal: what is mirrored to the owner's Telegram chat arrives once, or says why not.
 
-Each subscribed event is one operation run by its handler; every Bot API request in
-``telegram_api.JOURNALED_METHODS`` is persisted as ``sending`` under ``<state>/outbox/`` before
-bytes leave the machine. Unsent transport errors and HTTP 429 retry with backoff; ambiguous
-answers (timeouts, 5xx, process interruption) become ``unknown`` and are never re-sent.
-Owner binding and bot token changes immediately stop remaining parts and retries.
-Finished unconfirmed events retain only-copy payloads until explicitly cleared via Settings.
+One subscribed event (``chat.outbound``, a photo, video, document, link list, quiz card or quiz lifecycle fact) is
+one operation, run by its unchanged handler. Every request that handler makes to create or edit a message
+(``telegram_api.JOURNALED_METHODS``) is the operation's next part, numbered in the order the handler asks for it.
+Nothing is sent before its event, queue position and part's ``sending`` state are saved under ``<state>/outbox/``.
+One operation runs at a time. An event its handler's first filters send nowhere (``routed``: a target chat or a
+quiz card; what it carries, ``copies.carries``) is dropped before anything is saved, counted or refused. A waiting
+event's filters then run without sending (``_Probe``), an outbound's before it is saved, other content's after (saved
+before its handler can wait, e.g. on a quiz's card lock), and the queue's head never runs while its own decision
+does: what they hold back as published was never accepted. A free outbound saves at its first request or pre-call
+failure.
+Count and byte reservations include writers until custody or cleanup finishes, even when publication is cancelled.
+Saved operations run in arrival order while the supervised ``outbox`` task runs; if it has ended, a new
+event runs ahead of what waits, still saved first.
+
+A part whose request provably never left (``TelegramTransportError.unsent``: a refused connection or tunnel, a
+connect or pool timeout) or that Telegram's flood control refused (429, waiting its ``retry_after``) waits
+(``retry_wait``). The ``outbox`` task runs the operation again when it is due, paced by the bridge's shared backoff
+(``next_telegram_retry_delay``); a handler never sleeps. That run repeats the handler on the saved event: an
+answered part is not sent again, its recorded answer stands in for the request, and a part whose request differs
+from the saved one stops the operation instead. An answer that may follow delivery (a read or write timeout, a
+connection closed after the request, a 5xx, an unreadable body) makes its part ``unknown``: never sent again, and
+the handler goes on as for a message whose id it does not know; an edit counts as made, so no plain-text edit or
+fresh message follows it. A part still ``sending`` when the process stopped is ``unknown`` at the next start.
+Telegram's other refusals are ``refused``. An explicit handler fallback links its parts to the refused
+request it replaces; the aggregate excludes that refusal, preserving every replacement or unrelated failure.
+
+The journal fails closed: a part is never sent unless its ``sending`` state is on disk. An event that cannot be
+saved is not sent (counted for the Connection form, which says the journal is failing); a saved operation whose
+next state cannot be written waits for its retry instead of sending.
+
+States: an operation is ``pending`` (saved, waiting for its turn or a token), ``sending``, ``retry_wait``, or
+finished. A finished one is ``confirmed`` (its handler finished and every part it asked for was delivered; its
+files are removed),
+``unknown``, ``refused``, ``failed`` (stopped: expired after ``MAX_AGE_SEC``, changed before its retry, the token
+changed after a delivered part, the queue full, its handler failing) or ``superseded`` (accepted, its handler later
+asked no more of Telegram: a mirror setting changed while it waited). Telemetry, or an event whose handler asks
+nothing as it is published, is removed without a trace.
+
+What was not confirmed is told, and its content is not lost. ``MAX_AGE_SEC`` bounds safe retries, never keeping. A
+finished operation that was not confirmed keeps its metadata (subject, room, parts, outcome) for the Connection
+form, the newest ``MAX_FINISHED`` of them; that bound takes a record only once its end is decided (``finished_at``),
+and an end a stop interrupted is decided at the next start. Its saved event is kept too (``held``) when it is
+content that no verified home holds (lib/telegram_copies.py), or a file the outbox failed to remove: through expiry,
+reloads and that bound, never sent again, until the owner deletes exactly the copies the form showed (``clear``:
+bytes first, so a removal that fails leaves the copy kept). Typed telemetry is never kept; a home is read again
+before the event's copy goes. A document whose captured file verifies is saved without its inline duplicate (if
+that file goes, its message and reference stay); photos and videos keep their bytes until that end. Kept copies
+have no bound of their own, since one would drop an only copy or refuse new messages: the form shows the bytes they
+take, and only waiting events count toward ``MAX_ACTIVE`` and ``MAX_ACTIVE_BYTES``. They can fill the disk, and an
+event a full disk cannot save is not sent (fails closed). A refusal of content keeps its metadata as far as the
+disk takes it. An event file without its record, or a record that cannot be read (a record id is only ``_ID``),
+stays as found and is shown by its exact name and a handle, never sent.
+An event published while the skill is not loaded never reaches it (the host's event bus keeps nothing).
 """
 from __future__ import annotations
 
@@ -31,24 +78,8 @@ from .telegram_api import (
     TelegramTransportError,
     next_telegram_retry_delay,
 )
-from urllib.parse import urlsplit
-from .telegram_owner_auth import live_owner_chat_id, owner_matches_live
-from .telegram_secret_guard import mark_secret_uncertain
 from .telegram_state import _data_dir
 from .telegram_token import binding_for
-from ..scripts.telegram_settings import TelegramSettingsError, telegram_api_base
-
-
-def _same_api_authority(state_dir, recorded_base: str) -> bool:
-    if not recorded_base:
-        return True
-    try:
-        a, b = urlsplit(recorded_base.strip()), urlsplit(telegram_api_base(pathlib.Path(state_dir)).strip())
-        pa = a.port if a.port is not None else (443 if a.scheme.lower() == "https" else 80 if a.scheme.lower() == "http" else 0)
-        pb = b.port if b.port is not None else (443 if b.scheme.lower() == "https" else 80 if b.scheme.lower() == "http" else 0)
-    except (TelegramSettingsError, ValueError, OSError):
-        return False
-    return (a.scheme.lower(), (a.hostname or "").lower(), pa) == (b.scheme.lower(), (b.hostname or "").lower(), pb)
 
 SCHEMA = 1
 MAX_AGE_SEC = 24 * 3600  # still waiting after a day: stopped, never delivered that late
@@ -224,39 +255,33 @@ class _Operation:
         raise TelegramTransportError(f"Telegram API delivery of part {part['n'] + 1} is {state}.")
 
     async def _send(self, client, part: dict, method: str, data, files, timeout) -> Dict[str, Any]:
-        record, target_chat = self.record, _chat(data)
-        state_dir = self.outbox.api.get_state_dir()
-        rec_chat = int(record.get("chat_id") or 0)
-        rec_base = str(record.get("api_base") or "")
-        if (rec_chat and rec_chat != target_chat) or (
-            target_chat > 0 and not owner_matches_live(state_dir, target_chat)
-        ) or (rec_base and not _same_api_authority(state_dir, rec_base)):
-            await self.outbox._stop(self, "changed")
+        record = self.record
         strict = bool(getattr(client, "strict_reply", False))
         if strict:  # an exact Reply's turn: the anchor of its first attempt holds for every part and retry
             if "native_reply_id" not in record:
                 record.update(native_reply_id=int(client.reply_to_message_id or 0),
                               reply_fallback_id=int(client.reply_fallback_id or 0))
+            if record.get("chat_id") and record["chat_id"] != _chat(data):
+                await self.outbox._stop(self, "changed")
             client.reply_to_message_id = record["native_reply_id"]
             if client.on_reply_changed is not None:
                 client.on_reply_changed(record["native_reply_id"])
         before = part["state"]
         part.update(state="sending", attempts=int(part.get("attempts") or 0) + 1)
+        # The bot of its first delivered part owns the operation; until then, the one in force sends it.
         record.update(state="sending", bot=record.get("bot") if _delivered(record) else client.bot_id)
-        record["chat_id"] = record.get("chat_id") or target_chat
+        record["chat_id"] = record.get("chat_id") or _chat(data)
         if not await self.outbox._save(self):  # nothing leaves unless its sending state is on disk
             part["state"] = before
             await self.outbox._unsaved(self)
         try:
             payload = await client.request(method, data=data, files=files, timeout=timeout)
         except TelegramBindingChanged as exc:
-            same_owner = target_chat <= 0 or owner_matches_live(self.outbox.api.get_state_dir(), target_chat)
-            if exc.unsent and not _delivered(record) and same_owner:
-                part["state"] = "pending"
+            if exc.unsent and not _delivered(record):
+                part["state"] = "pending"  # nothing went out with the old bot: the token in force sends it
                 await self.outbox._defer(self, 0, "token_changed")
-            reason = "token_changed" if same_owner else "changed"
-            part.update(state="failed" if exc.unsent else "unknown", reason=reason)
-            await self.outbox._stop(self, reason, raise_=False)
+            part.update(state="failed" if exc.unsent else "unknown", reason="token_changed")
+            await self.outbox._stop(self, "token_changed", raise_=False)
             raise
         except TelegramTransportError as exc:
             if exc.unsent:
@@ -293,8 +318,6 @@ class _Operation:
 
     async def _unknown(self, part: dict, exc: BaseException) -> Dict[str, Any]:
         part.update(state="unknown", reason=_cause(exc))
-        if self.topic in {"quiz", "chat.quiz"} and (isinstance(self.event.get("secret_request"), dict) or (self.record or {}).get("secret")):
-            mark_secret_uncertain(self.outbox.api, str((self.record or {}).get("bot") or ""), int((self.record or {}).get("chat_id") or 0), api_base=str((self.record or {}).get("api_base") or ""), reason=_cause(exc))
         await self.outbox._save(self)
         self.outbox._log("warning", f"Telegram {self.topic} part {part['n'] + 1}: delivery unknown ({_cause(exc)}); "
                                     "nothing is sent again for it.")
@@ -514,8 +537,6 @@ class Outbox:
     async def _custody(self, topic: str, event: dict, seq: int) -> Optional[dict]:
         """Save an event that must wait, before it waits; None when the journal cannot hold it (not sent)."""
         record = self._new_record(topic, event, seq, "pending")
-        if topic in {"quiz", "chat.quiz"} and isinstance(event.get("secret_request"), dict):
-            record["secret"] = True
         kind, home, saved = await asyncio.to_thread(copies.classify, _data_dir(self.api), topic, event)
         record.update(copy=kind, **({"home": home} if home else {}))
         payload = await self._payload(record, saved)
@@ -595,19 +616,7 @@ class Outbox:
                 record["next_at"] = now + TOKEN_WAIT_SEC  # no token: a quiet wait, as for every send
                 self._refresh()
                 return
-            state_dir = self.api.get_state_dir()
-            rec_chat = int(record.get("chat_id") or 0)
-            rec_base = str(record.get("api_base") or "")
-            topic_name = str(record.get("topic") or "")
-            if ((rec_chat > 0 and not owner_matches_live(state_dir, rec_chat))
-                    or (rec_chat <= 0 and topic_name != "quiz_state")
-                    or (rec_base and not _same_api_authority(state_dir, rec_base))):
-                for part in record["parts"]:
-                    if part.get("state") in _ACTIVE: part.update(state="failed", reason="changed")
-                record.update(state="failed", reason="changed")
-                await self._finish(record)
-                return
-            body = self._bodies.get(topic_name)
+            body = self._bodies.get(str(record.get("topic") or ""))
             try:
                 event = json.loads(await asyncio.to_thread(self._payload_path(record).read_bytes))
             except (OSError, ValueError) as exc:
@@ -650,17 +659,10 @@ class Outbox:
     # --- the journal ---
 
     def _new_record(self, topic: str, event: dict, seq: int, state: str) -> dict:
-        state_dir = pathlib.Path(self.api.get_state_dir())
-        chat_id = live_owner_chat_id(state_dir)
-        try:
-            api_base = telegram_api_base(state_dir)
-        except (TelegramSettingsError, ValueError, OSError):
-            api_base = ""
         return {"schema": SCHEMA, "id": f"{seq:012d}-{uuid.uuid4().hex[:8]}", "seq": seq, "topic": topic,
-                "created_at": self.clock(), "state": state, "parts": [], "bot": "", "chat_id": chat_id,
-                "api_base": api_base, "next_at": 0.0, "retry_delay": TELEGRAM_RETRY_INITIAL_SEC, "reason": "",
-                "source": _source(event), "subject": copies.subject_of(topic, event),
-                **({"secret": True} if topic in {"quiz", "chat.quiz"} and isinstance(event.get("secret_request"), dict) else {})}
+                "created_at": self.clock(), "state": state, "parts": [], "bot": "", "chat_id": 0, "next_at": 0.0,
+                "retry_delay": TELEGRAM_RETRY_INITIAL_SEC, "reason": "", "source": _source(event),
+                "subject": copies.subject_of(topic, event)}
 
     async def _payload(self, record: dict, event: dict) -> Optional[bytes]:
         """The event as UTF-8 JSON, if the waiting bounds take it (kept copies never count there); refused (and not
@@ -884,8 +886,6 @@ class Outbox:
             if record.get("state") == "sending":
                 record["state"] = "pending"
             if interrupted:
-                if record.get("secret"):
-                    mark_secret_uncertain(self.api, str(record.get("bot") or ""), int(record.get("chat_id") or 0), api_base=str(record.get("api_base") or ""), reason="interrupted")
                 self._log("warning", f"Telegram {record.get('topic')}: a part was in flight at the last stop; "
                                      "its delivery is unknown and it is not sent again.")
                 try:

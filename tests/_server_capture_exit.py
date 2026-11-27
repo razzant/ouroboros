@@ -79,6 +79,21 @@ def capture_child_main(gates, args):
     return maintenance.main(args)
 
 
+def observed_exit_code(process):
+    """Read the launcher's own Popen exit status; a timeout proves no exit."""
+    try:
+        return process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def reader_at_stop(process, owner):
+    code = process.poll()
+    # POSIX poll() can return None while another thread is reaping. The reader
+    # clears READY before reaping, so check it for this exact Popen after poll().
+    return {"pid": process.pid, "code": code, "ready": owner._process is process and owner.pid == process.pid}
+
+
 def main():
     scratch, generation = Path(sys.argv[1]), sys.argv[2]
     entrypoint = sys.argv[3] if len(sys.argv) > 3 else "script"
@@ -88,6 +103,7 @@ def main():
     from ouroboros import claudexor_daemon, maintenance, owned_shutdown, process_custody
     from ouroboros import review_checking, server_boot, server_entrypoint, server_process, server_restart
     from ouroboros import server_maintenance
+    from ouroboros.gateway import history_reader
     from tests.test_recovered_capture import Engine
 
     report = functools.partial(record, gates)
@@ -98,7 +114,7 @@ def main():
     server_boot.start_background_services = lambda *a, **kw: None
 
     review_checking._git_delta = gate(gates, "review", review_checking._git_delta)
-    spawn, captures = process_custody.spawn_supervised, []
+    spawn, captures, readers = process_custody.spawn_supervised, [], []
     def instrumented_spawn(argv, **kwargs):
         capture = argv[1:3] == ["-m", "ouroboros.maintenance"]
         if capture:
@@ -106,14 +122,24 @@ def main():
         process = spawn(argv, **kwargs)
         if capture:
             captures.append(process)
+        if kwargs.get("purpose") == history_reader.PURPOSE:
+            readers.append(process)
         return process
     process_custody.spawn_supervised = instrumented_spawn
 
     def drive_maintenance():
         # Providerless boot has no supervisor; drive its existing child owner explicitly.
+        reader_reported = False
         while not maintenance.child.ordinary._stopped.is_set():
             if maintenance.child.owed():
                 maintenance.child.tick(root, REPO)
+            if not reader_reported and len(readers) == 1:
+                process, owner = readers[0], history_reader.reader
+                # The production READY frame already checked the child's self-reported PID
+                # against this same Popen. On Windows that is the native reader, not a venv redirector.
+                if owner._process is process and owner.pid == process.pid:
+                    report("reader-ready", reader_pid=process.pid, code=process.poll())
+                    reader_reported = True
             time.sleep(.02)
 
     children = []
@@ -136,22 +162,27 @@ def main():
     begin, stop = owned_shutdown.begin_owned_stop, owned_shutdown.stop_owned_work
 
     def beginning(*args, **kwargs):
+        reader_before_stop = [reader_at_stop(process, history_reader.reader) for process in readers]
         result = begin(*args, **kwargs)
-        report("stop-began", records=owned_shutdown.owned_records(root))
+        report("stop-began", readers=reader_before_stop, records=owned_shutdown.owned_records(root))
         return result
 
     def stopped(*args, **kwargs):
         result = stop(*args, **kwargs)
-        capture_exits = []
-        for child in captures:
-            try:
-                code = child.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                code = None
-            capture_exits.append({"pid": child.pid, "code": code})
+        capture_exits = [{"pid": child.pid, "code": observed_exit_code(child)} for child in captures]
+        reader_exits = []
+        launched_readers = tuple(readers)
+        for process in launched_readers:
+            ledger = {key: value for key, value in process._ouroboros_custody.items() if key != "ts"}
+            reader_exits.append({
+                "pid": process.pid,
+                "code": observed_exit_code(process) if len(launched_readers) == 1 else process.poll(),
+                "record_id": process_custody.custody_record_id(ledger),
+                "ledger_entry": ledger,
+            })
         report("owned-stop", outcome=result,
                children=[{"pid": child.pid, "code": child.wait(timeout=2)} for child in children],
-               maintenance=capture_exits, records=owned_shutdown.owned_records(root))
+               maintenance=capture_exits, readers=reader_exits, records=owned_shutdown.owned_records(root))
         return result
 
     owned_shutdown.begin_owned_stop, owned_shutdown.stop_owned_work = beginning, stopped

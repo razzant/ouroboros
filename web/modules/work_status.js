@@ -1,6 +1,6 @@
 /**
  * One work, one status in the browser (DESIGN "Room work status"): readers over the `/api/state` work projection
- * (ouroboros/gateway/work_status.py; shapes in work_types.js). The server groups every live member into works, rolls
+ * (ouroboros/gateway/work_status.py; shapes in ouroboros/gateway/work_contracts.py). The server groups live members into works, rolls
  * works into rooms, decides each work's controls with their exact targets and names each work's and room's mark
  * (`mark`: moving | still | pause | ring | none); this module says those facts in the product's short words (a work's
  * word, and beside it its line: the episode's own reason, then what still runs beside it), keeps what an incomplete
@@ -15,10 +15,14 @@ import { paintCardModel } from './card_model.js';
 import { fmt, tr, tx } from './i18n.js';
 import { isTerminalTaskDetail, taskPresentation, taskTerminalPhase } from './log_events.js';
 import { startingStatus } from './host_starting_status.js';
-import { chipWord, desiredLiveCardPhase, observeChildPhase, setLiveCardPhase } from './task_phase_chip.js';
+import { activeModelWaits } from './model_wait.js';
+import {
+    activityWaitPhase, CENSUS_MARKS, chipWord, desiredLiveCardPhase, observeChildMember, observeChildPhase, setLiveCardPhase,
+} from './task_phase_chip.js';
 import {
     ACTION_FINALIZE, ACTION_HURRY, ACTION_PAUSE, ACTION_RESUME, ACTION_STOP_EARLIER, ACTION_STOP_NOW, REUSABLE_TASK_IDS,
-    hurryTaskAction, openTaskControlMenu, openTaskControls, requestStop, requestStopAll, resumePending, resumeTaskAction,
+    TASK_CONTROL_TRIGGER_LABEL, createTaskResumeButton, createTaskCloseButton, closeExpiredOffer, deadlineExpiredWord,
+    hurryTaskAction, isRootTaskRow, openTaskControlMenu, openTaskControls, requestStop, requestStopAll, resumePending, resumeTaskAction,
     taskControlActions, taskControlBusy,
 } from './task_control_menu.js';
 
@@ -39,7 +43,7 @@ function displayedMember(member) {
     if (!member) return null;
     if (member.confirmed === true && Object.hasOwn(MEMBER_MARKS, member.activity)) return member;
     return { ...UNKNOWN_MEMBER, confirmed: false, tails: list(member.tails),
-        ...(Number.isSafeInteger(member.queue_attempt) ? { queue_attempt: member.queue_attempt } : {}) };
+        ...(Number.isSafeInteger(member.queue_attempt) && member.queue_attempt >= 0 ? { queue_attempt: member.queue_attempt } : {}) };
 }
 
 /** Whether one member state independently evidences the member's own current activity: its own phase is
@@ -84,8 +88,16 @@ const unconfirmedWork = (work) => ({ ...work, activity: 'unknown', transition: '
  */
 export function reconcileWorkState(prior, data, chatId, connected = true, requestedAt = Infinity) {
     const before = prior || emptyWorkState();
-    if (!Array.isArray(data?.works)) return before.memberStates
-        ? { ...before, memberStates: new Map(), memberReadAt: requestedAt, memberReadFailed: true } : before;
+    const current = connected && data?.supervisor_ready !== false;
+    const rows = list(data?.active_chat_activities).filter((row) => row?.activity_id);
+    const attempts = new Map();
+    if (current) for (const row of rows) {
+        if (Number.isInteger(row.task_attempt)) attempts.set(String(row.activity_id), row.task_attempt);
+    }
+    if (!Array.isArray(data?.works)) {
+        const seen = attempts.size || before.attempts.size ? { ...before, attempts } : before;
+        return before.memberStates ? { ...seen, memberStates: new Map(), memberReadAt: requestedAt, memberReadFailed: true } : seen;
+    }
     const complete = Boolean(connected) && data.works_complete === true && data.supervisor_ready === true;
     const chat = String(chatId);
     const all = data.works.filter((work) => work && typeof work === 'object' && work.work_id);
@@ -109,11 +121,11 @@ export function reconcileWorkState(prior, data, chatId, connected = true, reques
         if (!states || typeof states !== 'object' || Array.isArray(states)) continue;
         for (const [id, member] of Object.entries(states)) {
             members.add(id);
-            if (connected && data.supervisor_ready !== false) memberStates.set(id, member);
+            if (!current) continue;
+            memberStates.set(id, member);
+            if (!attempts.has(id) && Number.isInteger(member?.queue_attempt)) attempts.set(id, member.queue_attempt);
         }
     }
-    const rows = list(data.active_chat_activities).filter((row) => row?.activity_id);
-    const attempts = new Map(rows.map((row) => [String(row.activity_id), row.task_attempt ?? null]));
     const leads = new Map(rows.filter((row) => row.lead && typeof row.lead === 'object')
         .map((row) => [String(row.activity_id), row.lead]));
     const processings = new Map(rows.filter((row) => row.processing && typeof row.processing === 'object')
@@ -131,8 +143,61 @@ export function reconcileWorkState(prior, data, chatId, connected = true, reques
         memberReadFailed: false, attempts, complete, main, tiers, leads, processings, questions };
 }
 
+/** Whether the server says a parked state's hard deadline has passed: its own boolean or reason, never a clock here.
+ *  The word is the status; Close is a separate offer (`workCloseOffer`), so a state may say this and offer no action. */
+export function deadlineExpiredState(state) {
+    return state?.deadline_expired === true || list(state?.because).some((reason) => reason?.code === 'deadline_expired');
+}
+
+/** Index every task id whose hard deadline one accepted `/api/state` body marks as passed, once per census
+ *  (never per row) and separately from Close tokens: activity/attention flags, each confirmed displayed member
+ *  state, and each confirmed live episode's work state. Never a clock here, and never inferred from Close or Stop. */
+export function indexDeadlineExpired(census) {
+    const expired = new Set();
+    if (!census || typeof census !== 'object') return expired;
+    const noteRow = (row) => {
+        const id = String(row?.activity_id || row?.task_id || '');
+        if (id && (row.deadline_expired === true || row.attention_reason === 'deadline_expired')) expired.add(id);
+    };
+    for (const row of list(census.active_chat_activities)) noteRow(row);
+    for (const row of list(census.main_attention)) noteRow(row);
+    const seenEpisodes = new Set();
+    const seenMembers = new Set();
+    for (const work of list(census.works)) {
+        if (!work || typeof work !== 'object') continue;
+        if (work.confirmed !== false && work.episode?.live) {
+            const epId = String(work.episode.task_id || '');
+            if (epId && !seenEpisodes.has(epId)) {
+                seenEpisodes.add(epId);
+                if (deadlineExpiredState(work)) expired.add(epId);
+            }
+        }
+        const states = work.members?.states;
+        if (!states || typeof states !== 'object' || Array.isArray(states)) continue;
+        for (const [id, member] of Object.entries(states)) {
+            if (!member || seenMembers.has(id)) continue;
+            seenMembers.add(id);
+            if (deadlineExpiredState(displayedMember(member))) expired.add(id);
+        }
+    }
+    return expired;
+}
+
+/** Whether one `/api/state` body names a task's hard deadline as passed, by the task's own exact identity: its census
+ *  activity, its owner-action card, its member state or its confirmed work, each saying the server's `deadline_expired`
+ *  boolean or reason. Never a clock here, and never read from the presence or absence of a Close offer or a Stop. */
+export function deadlineExpiredIn(data, taskId) {
+    const id = String(taskId || '');
+    if (!id || !data || typeof data !== 'object') return false;
+    const marked = (row) => String(row?.activity_id || row?.task_id || '') === id
+        && (row.deadline_expired === true || row.attention_reason === 'deadline_expired');
+    return list(data.active_chat_activities).some(marked) || list(data.main_attention).some(marked)
+        || deadlineExpiredState(memberState(data, id)) || deadlineExpiredState(workOfEpisode(data, id));
+}
+
 /** A work's or a room's one short word, from its activity, transition and exact call (the cards' chip words). */
 export function activityWord(state = {}) {
+    if (deadlineExpiredState(state)) return deadlineExpiredWord();
     switch (state.activity) {
     case 'working':
         if (state.transition === 'finalizing') return chipWord('finalizing');
@@ -280,8 +345,14 @@ export function resumeAttemptWords(attempt) {
  * it, one sentence per tail, then its latest refused Resume with its time, joined " · ". The line never repeats
  * `word`: an answer wait's own words are compared by their code, in any language.
  */
+// What a Pause says of itself once its deadline has passed: who or what stopped it, dated. The instruction to wait
+// for a Resume (or a held word) is no longer true there, so it is not carried beside `Deadline expired`.
+const PAUSE_ATTRIBUTION = new Set(['paused_by_owner', 'paused_by_mind', 'paused_unattributed', 'saved_on_stop',
+    'after_restart', 'after_panic', 'spending_limit', 'technical_pause']);
+
 export function workLine(work = {}, word = activityWord(work)) {
-    const first = list(work.because)[0];
+    const reasons = list(work.because).filter((reason) => reason?.code !== 'deadline_expired');
+    const first = deadlineExpiredState(work) ? reasons.find((reason) => PAUSE_ATTRIBUTION.has(reason?.code)) : reasons[0];
     const said = first?.code === 'owner_answer' && word === chipWord('ownerWait') ? '' : reasonText(first);
     const sentence = said === word ? '' : said;
     const pressed = sentence && first.code === 'paused_by_owner' ? clock(first.since) : '';
@@ -426,19 +497,20 @@ export function workQuestion(work) {
  * What the card of a work's current episode says (one work, one status): the work's word alone in the chip, and its
  * line as the chip's quieter second fact (the episode's reason, then what still runs beside it: reviews a Pause lets
  * finish, helpers, external runs; then its latest refused Resume, dated, whose words are the details' `note`).
- * Plain running work with nothing to say beside it, finalizing work (its outcome
- * beside Finalizing…) and unconfirmed work keep the card's own words; so does a card whose episode is not live. The
- * word is the live one only while the work plainly runs; its mark is the work's own (applyCardWorkViews keeps it).
+ * Plain running work with nothing to say beside it defers to its census row if present. Unconfirmed work and ordinary
+ * cards in finalization keep their own words. A portal's current finalizing projection can also supply the quiet line
+ * when its room has no census row. The card's known outcome is separate (task_phase_chip.js).
  */
-export function cardWorkView(work) {
-    if (!work || !work.confirmed || !work.episode?.live || work.activity === 'unknown' || work.transition === 'finalizing') return null;
-    return projectedCardView(work, false);
+export function cardWorkView(work, { census = true, finalizing = false } = {}) {
+    if (!work || !work.confirmed || !work.episode?.live || work.activity === 'unknown'
+            || (!finalizing && work.transition === 'finalizing')) return null;
+    return projectedCardView(work, false, census);
 }
 
-function projectedCardView(work, member) {
+function projectedCardView(work, member, census = true) {
     const word = activityWord(work);
     const line = workLine(work, word);
-    if (!member && work.activity === 'working' && work.transition === 'none' && !line) return null;
+    if (!member && census && work.activity === 'working' && work.transition === 'none' && !line) return null;
     const running = work.activity === 'working';
     const finalizing = work.transition === 'finalizing';
     const waiting = !running || (work.transition !== 'none' && !finalizing);
@@ -451,38 +523,54 @@ function projectedCardView(work, member) {
         phase: running ? 'working' : work.activity, text: word, secondary: line, classes,
         tone: waiting ? 'neutral' : 'live', waiting, ...(finalizing ? { finalizing } : {}),
         ...(note ? { note } : {}),
+        ...(member && Number.isSafeInteger(work.queue_attempt) && work.queue_attempt >= 0 ? { queue_attempt: work.queue_attempt } : {}),
     };
 }
 
+// What waits in the work, said as the room says it: the chip's name names that, never only "something".
+function applyCardWorkLook(record, subject, view) {
+    const note = amberNote(turnAmber(subject?.turn));
+    const mark = subject?.mark || (record.isSubagent && subject ? (subject.live ? 'moving' : MEMBER_MARKS[subject.activity]) : 'none');
+    const look = subject ? { mark, owner: list(subject.turn).length > 0, ...(note ? { note } : {}) } : null;
+    const changed = JSON.stringify([view, look]) !== JSON.stringify([record.workView || null, record.workLook || null]);
+    record.workView = view;
+    record.workLook = look;
+    return changed;
+}
+
+// A portal's caller has already matched this episode to its bound room in the latest state body.
+export function applyPortalWorkView(record, work, census) {
+    if (record.cardModel) paintCardModel(record, null);
+    return applyCardWorkLook(record, work, cardWorkView(work, { census, finalizing: true }));
+}
+
 /**
- * Every card's work view from one state; true when a card's view changed (its chip repaints with its next write).
- * Apart from the optional word, a work's live current episode keeps the work's look: its mark and whether something
- * in it waits for the owner (the server takes the turn from every member, a helper's included). A turn the body lists
- * is a fact even when another member could not be confirmed; a work an incomplete body omitted keeps no look.
- * The card's model fact is painted from the same state (card_model.js): the work's published `lead`, or its
- * activity row's for a direct turn; a Main portal, the collapsed form of a work shown in its own room, has none.
- * A nested card says its own member's state. A read can predate a child it never listed: a live frame the card agreed
- * with since that read began (`livePhaseAt`, task_phase_chip.observeChildPhase) outranks only the read's silence. An
- * explicit member state, a recorded hold included, and a failed read always apply.
+ * Each room card's view from one state: the current episode speaks its status and turn, and its `lead` is painted
+ * from the episode or the activity row. A portal's cross-room phase is applied separately, with no model fact.
+ * A nested card speaks for its own member. A live frame accepted since a read began (`livePhaseAt`) outranks the
+ * read's silence, not an explicit member state, a recorded hold or a failed read.
  */
 export function applyCardWorkViews(records, state) {
     let changed = false;
     for (const record of records?.values?.() || []) {
         const id = String(record.groupId || '');
         const child = record.isSubagent;
+        if (record.root?.dataset?.portal === '1') {
+            if (record.cardModel) paintCardModel(record, null);
+            continue;  // its cross-room phase is read by work_portal.js
+        }
         if (child && record.cardModel) paintCardModel(record, null);
         const silent = state?.memberStates && !state.memberReadFailed && !state.memberStates.has(id);
         if (child && (record.finished || (silent && record.livePhaseAt >= state.memberReadAt))) continue;
         const work = child ? null : state?.episodes?.get(id);
-        const portal = record.root?.dataset?.portal === '1';
-        const lead = portal || child ? null : work?.lead || state?.leads?.get(id) || null;
+        const lead = child ? null : work?.lead || state?.leads?.get(id) || null;
         // An unconfirmed work offers nothing (cardControls): its fact stays, as plain text. So does the fact of a work
         // an incomplete body did not list again: only a complete body proves it gone.
         if (lead) {
             paintCardModel(record, { lead, target: work && work.confirmed !== false ? workControls(work).model : '',
                 main: state.main, queued: work?.activity === 'queued', since: clock(lead.since),
                 processing: work?.processing || state?.processings?.get(id) || null, tiers: state.tiers || null });
-        } else if (record.cardModel && !portal && !state?.complete) paintCardModel(record, { ...record.cardModel.view, target: '' });
+        } else if (record.cardModel && !state?.complete) paintCardModel(record, { ...record.cardModel.view, target: '' });
         else if (!child) paintCardModel(record, null);
         let subject = work?.episode?.live ? work : null;
         if (child && state?.memberStates) {
@@ -491,17 +579,15 @@ export function applyCardWorkViews(records, state) {
             record.livePhaseAt = 0;  // the member's state now speaks for the card
         }
         const view = child && subject ? projectedCardView(subject, true) : cardWorkView(work);
-        // What waits in the work, said as the room says it: the chip's name names that, never only "something".
-        const note = amberNote(turnAmber(subject?.turn));
-        const mark = subject?.mark || (child && subject ? (subject.live ? 'moving' : MEMBER_MARKS[subject.activity]) : 'none');
-        const look = subject ? { mark, owner: list(subject.turn).length > 0,
-            ...(note ? { note } : {}) } : null;
-        if (JSON.stringify([view, look]) !== JSON.stringify([record.workView || null, record.workLook || null])) changed = true;
-        record.workView = view;
-        record.workLook = look;
+        // Before the look stores this view: a requeue is read against the view it replaces (task_phase_chip.js).
+        const startChanged = child && observeChildMember(record, view);
+        changed = applyCardWorkLook(record, subject, view) || changed;
         if (child) {
             const desired = desiredLiveCardPhase(record);
-            changed = setLiveCardPhase(record, desired.phase, desired.text, desired.className, desired.secondary) || changed;
+            if (setLiveCardPhase(record, desired.phase, desired.text, desired.className, desired.secondary) || startChanged) {
+                changed = true;
+                record.paintMeta?.();  // its line's clock reads the chip and attempt it moved (chat_activity.js clockLabel)
+            }
         }
     }
     return changed;
@@ -537,6 +623,10 @@ export function workControls(work) {
     return out;
 }
 
+export function workCloseOffer(work, taskId) {
+    return list(work?.controls).map(offer => closeExpiredOffer(offer, taskId)).find(Boolean) || '';
+}
+
 /** The confirmed work whose live current episode is `taskId` in one body, else null. */
 export function workOfEpisode(data, taskId) {
     const id = String(taskId || '');
@@ -544,12 +634,26 @@ export function workOfEpisode(data, taskId) {
         && String(work.episode.task_id || '') === id) || null;
 }
 
-/** Whether the confirmed work holding `taskId` as a member, in any room, has it paused (its own server state): what
- *  such a task is sent waits for its Resume. */
+/** Whether the confirmed work holding `taskId` as a member, in any room, has it paused and not past its own hard
+ *  deadline (its own server state): what such a task is sent waits for its Resume. */
 export function memberPaused(state, taskId) {
     const id = String(taskId || '');
-    return [...(state?.episodes?.values?.() || [])].some((work) => work?.confirmed !== false
-        && work.members?.states?.[id]?.activity === 'paused');
+    if (!id || state?.memberReadFailed || (state?.memberStates instanceof Map && !state.memberStates.has(id))) return false;
+    return [...(state?.episodes?.values?.() || [])].some((work) => {
+        const member = work?.confirmed !== false ? work.members?.states?.[id] : null;
+        return member?.confirmed !== false && member?.activity === 'paused' && !deadlineExpiredState(member);
+    });
+}
+
+/** Whether the current reconciled per-member state positively confirms `taskId`'s hard deadline expired.
+ *  Reads only the authoritative current `memberStates` entry and its own `confirmed === true` flag, so an
+ *  unrelated unknown sibling making the aggregate work unconfirmed never erases a confirmed member's expiry,
+ *  and a failed, disconnected or partial read never carries a stale expiry forward. */
+export function memberDeadlineExpired(state, taskId) {
+    const id = String(taskId || '');
+    if (!id || state?.memberReadFailed || !(state?.memberStates instanceof Map)) return false;
+    const member = state.memberStates.get(id);
+    return member?.confirmed === true && deadlineExpiredState(member);
 }
 
 /** The server's state for an individual member, without interpreting queue carriers in the browser. */
@@ -560,12 +664,103 @@ export function memberState(data, taskId) {
     return displayedMember(row?.members.states[id]);
 }
 
+function isExplicitChildQueueRow(q, ownId) {
+    const id = String(ownId || '').trim();
+    const t = q?.task;
+    if (!id || REUSABLE_TASK_IDS.has(id) || !t || typeof t !== 'object' || t._presence_run) return false;
+    const rowId = String(q.id ?? '').trim();
+    const taskId = String(t.id ?? '').trim();
+    if ((rowId || taskId) !== id || (rowId && rowId !== id) || (taskId && taskId !== id)) return false;
+    if (isRootTaskRow(t, id)) return false;
+    const field = (key) => String(t[key] ?? t.metadata?.[key] ?? '').trim();
+    const parentId = field('parent_task_id');
+    const rootId = field('root_task_id');
+    const role = field('delegation_role').toLowerCase();
+    if (rootId && rootId === id) return false;
+    return (Boolean(parentId) && parentId !== id) || (role === 'subagent' && Boolean(rootId) && rootId !== id);
+}
+
+/** Matched safe-integer attempt when an explicit child queue row joins its own confirmed paused member in `/api/state`
+ *  (outside root-only census; real producers `queue_publication._capture`, `gateway/state._raw_work_facts`), else null. */
+export function confirmedPausedHelperAttempt(q, census, ownId) {
+    const id = String(ownId || '').trim();
+    if (!id || !census || census.supervisor_ready === false || !isExplicitChildQueueRow(q, id)) return null;
+    if (list(census.active_chat_activities).some((entry) => String(entry?.activity_id || '') === id)) return null;
+    if (workOfEpisode(census, id)) return null;
+    const member = list(census.works).find((entry) => entry?.members?.states && Object.hasOwn(entry.members.states, id))
+        ?.members.states[id];
+    if (member?.confirmed !== true || member.activity !== 'paused') return null;
+    const qAttempt = q.attempt;
+    const mAttempt = member.queue_attempt;
+    return Number.isSafeInteger(qAttempt) && qAttempt >= 0
+        && Number.isSafeInteger(mAttempt) && mAttempt >= 0
+        && qAttempt === mAttempt ? qAttempt : null;
+}
+
+/** Recheck the latest accepted queue + census for one exact confirmed paused helper row and return its attempt, or null. */
+export function confirmedHelperAttemptInQueue(queue, census, taskId) {
+    const id = String(taskId || '').trim();
+    if (!id || !Array.isArray(queue?.running) || !Array.isArray(queue?.pending)) return null;
+    const rows = [...queue.running.filter((q) => !q?.task?._presence_run), ...queue.pending]
+        .filter((q) => String(q?.id || q?.task?.id || '').trim() === id);
+    return rows.length === 1 ? confirmedPausedHelperAttempt(rows[0], census, id) : null;
+}
+
 /** Every task a confirmed work's Resume control names in one body: where Activity may offer Resume. */
 export function resumeTargets(data) {
     return new Set(list(data?.works).filter((work) => work?.confirmed !== false)
         .flatMap((work) => list(work.controls).filter((control) => control.action === 'resume')
             .map((control) => String(control.target || '').trim()))
         .filter((target) => target && !REUSABLE_TASK_IDS.has(target)));
+}
+
+/** Index every exact Close offer in one accepted census by target task id, once per census (never per row).
+ *  Precedence: confirmed live episode controls, confirmed member close_expired, census activity close_expired,
+ *  then any remaining confirmed work Close control. */
+export function indexCloseOffers(census) {
+    const offers = new Map();
+    if (!census || typeof census !== 'object') return offers;
+    const put = (offer, target) => {
+        const id = String(target || '').trim();
+        if (!id || offers.has(id)) return;
+        const token = closeExpiredOffer(offer, id);
+        if (token) offers.set(id, token);
+    };
+    const works = list(census.works);
+    const seenEpisodes = new Set();
+    const fallbackControls = [];
+    for (const work of works) {
+        if (!work || work.confirmed === false) continue;
+        const epId = work.episode?.live ? String(work.episode.task_id || '') : '';
+        const firstEp = Boolean(epId) && !seenEpisodes.has(epId);
+        if (firstEp) seenEpisodes.add(epId);
+        const controls = work.controls;
+        if (!Array.isArray(controls)) continue;
+        for (const control of controls) {
+            if (control?.action !== 'close') continue;
+            if (firstEp && control.target === epId) put(control, epId);
+            else fallbackControls.push(control);
+        }
+    }
+    const seenMembers = new Set();
+    for (const work of works) {
+        const states = work?.members?.states;
+        if (!states || typeof states !== 'object' || Array.isArray(states)) continue;
+        for (const [id, member] of Object.entries(states)) {
+            if (!member || seenMembers.has(id)) continue;
+            seenMembers.add(id);
+            if (member.confirmed === true && Object.hasOwn(MEMBER_MARKS, member.activity)) put(member.close_expired, id);
+        }
+    }
+    const seenActivities = new Set();
+    for (const row of list(census.active_chat_activities)) {
+        const id = String(row?.activity_id || '');
+        if (!id || seenActivities.has(id)) continue;
+        seenActivities.add(id);
+        put(row?.close_expired, id);
+    }
+    for (const control of fallbackControls) put(control, control.target);
+    return offers;
 }
 
 /** The shared menu's items for a work's controls. Resume is its own button wherever one stands beside the menu;
@@ -582,15 +777,17 @@ export function workMenuActions(grouped, { cancelPending = false, resume = false
  * the work offers anything else, and `work` when the card is a confirmed work's current episode that is live or
  * offers something. The server's controls decide, live episode or not: a parent that finished while its helper
  * works keeps its tree's Stop. A finished card's Stop… is that offer, never its own pending Stop, so every sync of
- * the card keeps it usable (chat.js syncCancelRunButtonMutation); its own request says a refusal itself.
+ * the card keeps it usable; its own request says a refusal itself.
  */
-export function cardControls(state, taskId) {
-    const id = String(taskId || '');
-    const work = state?.episodes?.get(id);
-    const grouped = work && work.confirmed !== false ? workControls(work) : null;
-    const resume = Boolean(grouped && grouped.resume === id);
+export function cardControls(state, taskId, work = state?.episodes?.get(String(taskId || '')), roomMatched = false) {
+    // A positively addressed portal can use the current projection's explicit offers despite a result gap, like
+    // the room's work sheet. An omitted row has no offers, and its gap grants no phase or legacy authority.
+    const grouped = work && (roomMatched || work.confirmed !== false) ? workControls(work) : null;
+    const resume = Boolean(grouped && grouped.resume === String(taskId || ''));
     const menu = Boolean(grouped && workMenuActions(grouped).length);
-    return { work: grouped && (work.episode?.live || resume || menu) ? work : null, resume, menu };
+    const close = grouped ? workCloseOffer(work, taskId) : '';
+    return { work: grouped && (work.episode?.live || resume || menu || close) ? work : null, resume, menu,
+        ...(close ? { close } : {}) };
 }
 
 /**
@@ -598,17 +795,84 @@ export function cardControls(state, taskId) {
  * Resume are re-synced: a finished card whose work has left the body drops the Stop… an earlier body gave it.
  */
 export function changedOffers(records, before, after) {
-    const offer = (state, id) => { const controls = cardControls(state, id); return `${controls.menu}|${controls.resume}`; };
     return [...(records?.values?.() || [])].filter((record) => record?.root
-        && offer(before, record.groupId) !== offer(after, record.groupId));
+        && (cardControls(before, record.groupId).work !== cardControls(after, record.groupId).work
+            || before.attempts?.get(record.groupId) !== after.attempts?.get(record.groupId)
+            || memberState(before, record.groupId)?.close_expired !== memberState(after, record.groupId)?.close_expired));
+}
+
+// An ordinal from the state body owns projection and menu continuity, never the
+// physical attempt that owns the card's outcome, words and counters.
+export function noteControlQueue(record, ordinal) {
+    const previous = record.controlQueueAttempt;
+    if (!Number.isSafeInteger(ordinal) || (previous != null && ordinal <= previous)) return;
+    if (previous != null) record.controlEpisode = {};
+    record.controlQueueAttempt = ordinal;
 }
 
 /** The items a card's Stop… menu offers now: its work's controls, else the card's own task controls. */
-export function cardMenuActions(state, record, activity = null) {
-    const { work } = cardControls(state, record?.groupId);
-    const cancelPending = Boolean(record?.cancelPendingPolicy);
-    return work ? workMenuActions(workControls(work), { cancelPending })
-        : taskControlActions({ cancelPending, budgetPaused: activity?.phase === 'budget_paused' });
+export function cardMenuActions(state, record, activity = null, work = cardControls(state, record?.groupId).work, stopOnly = false) {
+    const cancelPending = Boolean(record?.cancelPendingPolicy || stopOnly);
+    if (work) return workMenuActions(workControls(work), { cancelPending });
+    const phase = activity?.phase;
+    const actions = taskControlActions({ cancelPending, budgetPaused: phase === 'budget_paused' });
+    if (record?.root?.dataset?.portal !== '1') return actions;
+    // A legacy portal has just the addressed census row. Use its own phase and explicit Presence capability;
+    // no projected Resume, no inferred work or helper membership (gateway/work_status.py controls_for).
+    const presence = activity?.kind === 'presence';
+    const active = CENSUS_MARKS[phase] === 'moving' && phase !== 'budget_pausing';
+    const running = active && !activityWaitPhase(activity) && !activity.project_admission_hold && !presence
+        && !activeModelWaits(activity.model_waits, false, activity.task_attempt || 1).length;
+    const pausable = (active || phase === 'queued' || phase === 'budget_pausing') && (!presence || activity.presence_pause === true);
+    return actions.filter(action => action === ACTION_STOP_NOW || (action === ACTION_PAUSE ? pausable : running));
+}
+
+const actionTarget = (group, action) => ({ [ACTION_FINALIZE]: group.wrapUp, [ACTION_HURRY]: group.hurry,
+    [ACTION_PAUSE]: group.pause, [ACTION_RESUME]: group.resume,
+    [ACTION_STOP_EARLIER]: group.stopEarlier, [ACTION_STOP_NOW]: group.stop })[action];
+
+const targetKey = (target) => JSON.stringify(Array.isArray(target) ? [...target].sort() : [target]);
+
+/** The offered actions and their exact targets. Stop compares sets, but still sends in the opened order. */
+export function workMenuTargets(grouped, options) {
+    return new Map(grouped ? workMenuActions(grouped, options)
+        .map(action => [action, targetKey(actionTarget(grouped, action))]) : []);
+}
+
+/** Recheck each opened item against the latest addressed controls; a change withdraws that item only. */
+export function workMenuTargetGuard(grouped, options) {
+    const opened = workMenuTargets(grouped, options);
+    return (action, current, currentOptions = options) => {
+        const next = workMenuTargets(current, currentOptions);
+        for (const [name, target] of opened) if (next.get(name) !== target) opened.delete(name);
+        return opened.has(action);
+    };
+}
+
+// Opening a menu takes no authority from a later attempt or placement. The same target still offered by a new body
+// works without reopening. The shared menu checks this even for Pause, which dispatches outside its onAction hook.
+export function cardControlGuard(record, read, opened = read(record)) {
+    const targetOf = (offer, action) => {
+        if (action === ACTION_RESUME) return offer.resume ? record.groupId : '';
+        if ((!offer.menu && (offer.work || !offer.legacy)) || !cardMenuActions(null, record, offer.activity, offer.work, offer.stopOnly).includes(action)) return '';
+        return offer.work ? actionTarget(workControls(offer.work), action) : record.groupId;
+    };
+    const targets = new Map([ACTION_RESUME, ACTION_FINALIZE, ACTION_HURRY, ACTION_PAUSE, ACTION_STOP_EARLIER, ACTION_STOP_NOW]
+        .map(action => [action, targetOf(opened, action)]).filter(([, target]) => target));
+    // Only the still-open offer owns its targets. A disappeared item cannot
+    // regain authority on this menu, but a continuous Stop stays available.
+    const observe = next => {
+        if (opened.episode !== next.episode || opened.scope !== next.scope) targets.clear();
+        for (const [action, target] of targets) {
+            if (targetKey(target) !== targetKey(targetOf(next, action))) targets.delete(action);
+        }
+    };
+    record.observeControlMenu = observe;
+    return (action) => {
+        if (record.observeControlMenu !== observe || record.root?.isConnected === false || record.root?.dataset?.episodeOf) return '';
+        observe(read(record));
+        return targets.get(action) || '';
+    };
 }
 
 /**
@@ -616,12 +880,79 @@ export function cardMenuActions(state, record, activity = null) {
  * its card path, `stop`, while the card still runs; a finished card's tree stops through the door itself), else the
  * card's own task controls, which never offer Resume.
  */
-export function openCardControls(anchor, record, work, { activity = null, stop, afterAction = null } = {}) {
+function openCardControls(anchor, record, read, { stop, afterAction }) {
+    const opened = read(record);
+    const { work, activity, legacy, stopOnly } = opened;
     const cancelPending = Boolean(record?.cancelPendingPolicy);
-    if (!work) return openTaskControls(anchor, record?.groupId, { activity, cancelPending, stop });
-    const own = (target) => target === String(record?.groupId || '') && !record?.finished;
-    return openWorkControls(anchor, work, { cancelPending, afterAction,
-        stopOne: (target, action) => (own(target) ? stop(action) : requestStop(target, action)) });
+    const targetNow = cardControlGuard(record, read, opened);
+    const canAct = (action) => anchor.isConnected && !anchor.disabled && Boolean(targetNow(action));
+    // The same cascade Stop can outlive its author's card. Choose its dispatcher at the press, not at opening.
+    const stopOne = (target, action) => target === record.groupId && !record.finished ? stop(action) : requestStop(target, action);
+    if (!work) return legacy ? openTaskControls(anchor, record.groupId, { canAct, afterAction,
+        stop: action => stopOne(record.groupId, action), actions: cardMenuActions(null, record, activity, work, stopOnly) }) : null;
+    return openWorkControls(anchor, work, { cancelPending, canAct, afterAction, stopOne });
+}
+
+let cardNameSeq = 0;
+
+/** Reconcile a card's Resume and Stop… doors in place from the same current offer each press will read. */
+export function syncCardControls(record, { read, actionsOf, stop, afterAction }) {
+    if (!record?.root) return false;
+    const canResume = () => read(record).resume;
+    const offer = read(record);
+    record.observeControlMenu?.(offer);
+    const { resume, menu, legacy, close } = offer;
+    let changed = false;
+    if (record.closeRunBtn && record.closeRunBtn.offer !== close) {
+        record.closeRunBtn.remove(); record.closeRunBtn = null; changed = true;
+    }
+    if (close && !record.closeRunBtn) {
+        const actions = actionsOf(record);
+        if (actions) {
+            const titleEl = record.titleEl || record.root.querySelector?.('[data-live-title]') || null;
+            const nameId = titleEl ? (titleEl.id ||= `chat-card-name-${cardNameSeq += 1}`) : '';
+            record.closeRunBtn = createTaskCloseButton(record.groupId, {
+                tokenNow: () => read(record).close === close ? close : '', onSettled: afterAction, nameId,
+            });
+            record.closeRunBtn.offer = close;
+            actions.insertBefore(record.closeRunBtn, actions.querySelector('[data-cancel-run]'));
+            changed = true;
+        }
+    }
+    if (resume && !record.resumeRunBtn) {
+        record.resumeRunBtn = createTaskResumeButton(record.groupId, { canResume, onSettled: afterAction });
+        const actions = actionsOf(record);
+        actions?.insertBefore(record.resumeRunBtn, actions.querySelector('[data-cancel-run]'));
+        changed = true;
+    } else if (!resume && record.resumeRunBtn) {
+        record.resumeRunBtn.remove(); record.resumeRunBtn = null; changed = true;
+    }
+    const existing = record.root.querySelector('[data-cancel-run]');
+    if (!menu && (offer.work || !legacy)) {
+        if (!existing) return changed;
+        existing.remove(); record.cancelRunBtn = null;
+        return true;
+    }
+    if (existing) {
+        record.cancelRunBtn = existing;
+        if (record.finished) existing.disabled = false;
+        return changed;
+    }
+    const actions = actionsOf(record);
+    if (!actions) return changed;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-sm btn-default ui-hit-area';  // Resume or Continue stays the one primary.
+    btn.dataset.cancelRun = '1';
+    btn.textContent = TASK_CONTROL_TRIGGER_LABEL;
+    btn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (btn.isConnected && !btn.disabled) openCardControls(btn, record, read,
+            { stop: (action) => stop(record, action), afterAction });
+    });
+    actions.appendChild(btn);
+    record.cancelRunBtn = btn;
+    return true;
 }
 
 /**
@@ -643,9 +974,11 @@ export function openWorkControls(anchor, work, { cancelPending = false, canAct =
     return openTaskControlMenu(anchor, {
         actions, pauseTarget: grouped.pause, busy: taskControlBusy(grouped.pause || work?.episode?.task_id), canAct,
         afterAction: afterAction && ((action) => (action === ACTION_RESUME ? undefined : afterAction(action))),
-        onAction: (action) => (action === ACTION_HURRY ? hurryTaskAction(grouped.hurry)
-            : action === ACTION_RESUME ? resumeTaskAction(grouped.resume, { settle: reconcile })
-                : action === ACTION_FINALIZE ? stopAll([grouped.wrapUp], ACTION_FINALIZE)
-                    : stopAll(action === ACTION_STOP_EARLIER ? grouped.stopEarlier : grouped.stop, ACTION_STOP_NOW)),
+        onAction: (action) => {
+            const target = actionTarget(grouped, action);
+            if (action === ACTION_HURRY) return hurryTaskAction(target);
+            if (action === ACTION_RESUME) return resumeTaskAction(target, { settle: reconcile });
+            return action === ACTION_FINALIZE ? stopAll([target], action) : stopAll(target, ACTION_STOP_NOW);
+        },
     });
 }

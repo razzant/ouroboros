@@ -20,6 +20,8 @@ function detailId(ref) {
 import { apiFetch } from './api_client.js';
 import { escapeHtmlAttr, renderMarkdown } from './utils.js';
 import { hostNoticeDisplayText } from './host_notice_text.js';
+import { bindScrollFade } from './scroll_fade.js';
+import { tr } from './i18n.js';
 
 const writeDirectly = (mutate) => mutate();
 
@@ -60,7 +62,7 @@ export function renderSkillReviewDisclosure(text, ref = null, deps = {}) {
                     <span class="skill-review-toggle-label">Show review</span>
                 </span>
             </button>
-            <div class="skill-review-full" data-skill-review-full data-chat-markdown-enhanced="1" hidden>${jobRef ? '' : render(hostNoticeDisplayText(text, 'skill_review'))}</div>
+            <div class="skill-review-full scroll-fade-y" data-skill-review-full data-chat-markdown-enhanced="1" hidden>${jobRef ? '' : render(hostNoticeDisplayText(text, 'skill_review'))}</div>
         </div>
     `;
 }
@@ -189,22 +191,30 @@ export async function loadSkillReviewDetail(full, ref, deps = {}) {
  * chat bubble element containing a `renderSkillReviewDisclosure` result.
  */
 export function wireSkillReviewDisclosure(bubble, deps = {}) {
-    const onDomWrite = deps.onDomWrite || writeDirectly;
     const toggle = bubble.querySelector('[data-skill-review-toggle]');
     if (!toggle) return false;
     const disclosure = bubble.querySelector('[data-skill-review-disclosure]');
     const full = bubble.querySelector('[data-skill-review-full]');
+    let disposeFullFade = null;
+    const bindFullFade = () => bindScrollFade(full, { region: tr('skills.review.text_region', 'Skill review text') });
+    let retired = false;
+    const write = deps.onDomWrite || writeDirectly;
+    const onDomWrite = mutate => !retired && write(mutate);
     const reviewRef = disclosure?.dataset.skillReviewSkill && disclosure?.dataset.skillReviewJob
         ? { skill: disclosure.dataset.skillReviewSkill, jobId: disclosure.dataset.skillReviewJob,
             ...(disclosure.dataset.skillReviewRecord ? { recordId: disclosure.dataset.skillReviewRecord } : {}) }
         : null;
-    toggle.addEventListener('click', () => {
+    const onToggle = () => {
         const label = bubble.querySelector('.skill-review-toggle-label');
         const expanded = disclosure?.dataset.expanded === '1';
         if (!disclosure || !full) return;
         onDomWrite(() => {
             disclosure.dataset.expanded = expanded ? '0' : '1';
             full.hidden = expanded;
+            // The full review scrolls inside its own bounded box while open (style.css .skill-review-full); the cue
+            // follows it then, and releases when it folds so a folded card carries no live decoration.
+            if (expanded) { disposeFullFade?.(); disposeFullFade = null; }
+            else disposeFullFade = bindFullFade();
             toggle.setAttribute('aria-expanded', expanded ? 'false' : 'true');
             if (label) label.textContent = expanded ? 'Show review' : 'Hide review';
             return true;
@@ -212,15 +222,22 @@ export function wireSkillReviewDisclosure(bubble, deps = {}) {
         // Reference rows fetch the rendered review once on first expand;
         // collapse/re-expand keeps whatever state the container reached.
         if (!expanded && reviewRef && !full.dataset.state) {
-            void loadSkillReviewDetail(full, reviewRef, deps);
+            void loadSkillReviewDetail(full, reviewRef, { ...deps, onDomWrite });
         }
+    };
+    const onRetry = (event) => {
+        if (!event.target?.closest?.('[data-skill-review-retry]')) return;
+        full.dataset.state = '';
+        void loadSkillReviewDetail(full, reviewRef, { ...deps, onDomWrite, retry: true });
+    };
+    toggle.addEventListener('click', onToggle);
+    if (reviewRef) full?.addEventListener('click', onRetry);
+    if (full && !full.hidden) disposeFullFade = bindFullFade();
+    deps.own?.(() => {
+        retired = true;
+        toggle.removeEventListener('click', onToggle);
+        full?.removeEventListener('click', onRetry);
+        disposeFullFade?.();
     });
-    if (reviewRef && full) {
-        full.addEventListener('click', (ev) => {
-            if (!ev.target?.closest?.('[data-skill-review-retry]')) return;
-            full.dataset.state = '';
-            void loadSkillReviewDetail(full, reviewRef, { ...deps, retry: true });
-        });
-    }
     return true;
 }

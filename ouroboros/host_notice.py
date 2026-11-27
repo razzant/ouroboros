@@ -5,7 +5,7 @@ writes the row's ``text`` as one phrase in owner words, what happened, with no p
 one typed ``notice`` beside it in the row's ``progress_meta`` (``fields``):
 
 * ``code`` — the notice's stable code;
-* ``step`` — the owner's next step, a key of ``STEPS``: a control or a Settings place (a host that has scheduled the
+* ``step`` — the owner's next step, a key of ``STEPS``: a control or a place in the interface (a host that has scheduled the
   retry itself says so instead); absent when there is none;
 * ``details`` — the raw facts, behind Details for the owner and beside the phrase for the mind;
 * ``instruction`` — one line the owner acts on, as written: the exact command a step sends him to (a Git command);
@@ -33,12 +33,12 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 log = logging.getLogger(__name__)
 
 # The owner's next steps, one sentence each, said after the phrase. The translation generator fills them by code
-# (``ui_translation`` catalog ``notice.step``); a step names a control or a Settings place by its shown name. A row
+# (``ui_translation`` catalog ``notice.step``); a step uses the displayed name of a control or destination. A row
 # whose host has scheduled its own retry gets a ``retry_self`` step with the first producer that schedules one.
 STEPS: Dict[str, str] = {
     "restart": "Restart Ouroboros to recover.",
     "send_after_restart": "Send it again after Restart.",
-    "raise_total_budget": "Raise Total budget in Settings → Costs.",
+    "raise_total_budget": "Raise Total budget in Dashboard → Costs.",
     "choose_reviewer": "Run /review with a row this install can pay: any enabled row in Settings → Agents, or the Main model.",
     "evolution_start": "/evolve start resumes it.",
     "press_again": "You can press it again.",
@@ -47,6 +47,8 @@ STEPS: Dict[str, str] = {
     "reply_to_revert": "Reply if you want it reverted.",
     "reopen_project": "A message from you in this room or a new task reopens it.",
     "inspect_task": "Open the task's details before you start another run.",
+    "open_calls": ("Calls (beta) in Extensions › Skills shows the selected model's window and lets you choose another "
+                   "voice engine."),
     "restore_kept_changes": "Put your local changes back with the Git command that comes with this message.",
     "inspect_then_restore_kept_changes": ("The automatic restore was interrupted: check the current files first, then put "
                                           "your local changes back with the Git command that comes with this message."),
@@ -138,7 +140,13 @@ def mind_text(row: Mapping[str, Any]) -> str:
 
 def notice_line(row: Mapping[str, Any], lang: Optional[str] = None, *, drive_root: Optional[pathlib.Path] = None,
                 record_misses: bool = False) -> str:
-    """Telegram's and Copy's one line of a host row in the install's language: its phrase, then its step, each part
+    """Telegram's and Copy's one line of a host row in the install's language (``line_parts`` joined)."""
+    return " ".join(part for part in line_parts(row, lang, drive_root=drive_root, record_misses=record_misses) if part)
+
+
+def line_parts(row: Mapping[str, Any], lang: Optional[str] = None, *, drive_root: Optional[pathlib.Path] = None,
+               record_misses: bool = False) -> Tuple[str, str]:
+    """``(phrase, step)`` of a host row's one line in the install's language: its phrase, then its step, each part
     translated before they are joined, on one language: while the phrase has no translation the step stays English.
     The phrase is a host sentence, translated by its exact text for a notice row and for the technical pause notice
     (the one row Telegram translated so before notices), or by its template with the values put back as written;
@@ -167,9 +175,9 @@ def notice_line(row: Mapping[str, Any], lang: Optional[str] = None, *, drive_roo
             said = True
     step = str(notice.get("step") or "")
     if step not in STEPS:
-        return text
+        return text, ""
     words = STEPS[step] if english or not said else memory.tr(_STEP_CODE + step, tag, STEPS[step], drive_root=drive_root)
-    return f"{text} {words}" if text else str(words)
+    return text, str(words)
 
 
 def with_instruction(row: Mapping[str, Any], line: str) -> str:
@@ -180,18 +188,21 @@ def with_instruction(row: Mapping[str, Any], line: str) -> str:
     return f"{line}\n\n{instruction}" if line and instruction else line
 
 
-def view(row: Mapping[str, Any], *, drive_root: Optional[pathlib.Path] = None, record_misses: bool = False) -> Dict[str, Any]:
+def view(row: Mapping[str, Any], *, drive_root: Optional[pathlib.Path] = None, record_misses: bool = False,
+         lang: Optional[str] = None) -> Dict[str, Any]:
     """The notice a reader is sent with a row (its live frame, a history read): the stored fields plus ``line``, the
-    assembled phrase and step in the install's language. ``{}`` for a row without a notice. Only the send passes
-    ``record_misses``; a read (history, search, an operation) neither writes nor wakes the generator."""
+    assembled phrase and step in the install's language, and ``phrase``, that line's phrase alone (a reader that sets
+    the step under the phrase). ``{}`` for a row without a notice. Only the send passes ``record_misses``; a read
+    (history, search, an operation) neither writes nor wakes the generator."""
     notice = notice_of(row)
     if not notice:
         return {}
     try:
-        notice["line"] = notice_line(row, drive_root=drive_root, record_misses=record_misses)
+        parts = line_parts(row, lang, drive_root=drive_root, record_misses=record_misses)
     except Exception:  # a translation fault never holds the row: the English it was written in stays its line
         log.debug("host notice line not assembled; the stored words stand", exc_info=True)
-        notice["line"] = notice_line(row, "")
+        parts = line_parts(row, "")
+    notice["line"], notice["phrase"] = " ".join(part for part in parts if part), parts[0]
     return {"notice": notice}
 
 

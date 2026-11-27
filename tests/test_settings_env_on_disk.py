@@ -313,3 +313,90 @@ def test_an_earlier_projections_catalog_retires_and_an_operators_stays(isolated_
     for saved in (raw, json.dumps({"enabled": True, "items": []}), _catalog("Off.", 2, enabled=False)):
         isolated_settings.write_text(json.dumps({"OUROBOROS_SUBAGENTS": saved}), encoding="utf-8")
         assert cfg.load_settings()["OUROBOROS_SUBAGENTS"] == saved
+
+
+def _bare_environ(monkeypatch) -> dict:
+    """This test's own process environment: no settings keys and no projection records of this tree."""
+    from ouroboros import config as cfg
+    from ouroboros.settings_integrity import PROJECTED_PROPOSALS_ENV, PROJECTED_SETTINGS_ENV
+
+    env = {key: value for key, value in os.environ.items()
+           if key not in cfg.SETTINGS_DEFAULTS and key not in (PROJECTED_PROPOSALS_ENV, PROJECTED_SETTINGS_ENV)}
+    monkeypatch.setattr(os, "environ", env)
+    return env
+
+
+def test_the_loader_reports_the_choices_it_took_from_the_environment(isolated_settings):
+    """``settings_of_document`` reports each valid choice it took from the environment it binds, as it read it: the
+    default spelled the operator's way is their choice, normalized; a key the document sets is not taken. The
+    projection's record decides ownership from this report (``settings_integrity.note_proposal_projection``)."""
+    from ouroboros import config as cfg
+    from ouroboros.settings_integrity import settings_read_environ
+
+    environ = {"OUROBOROS_PRESENCE_MAX_ACTIVE": "02", "OUROBOROS_EFFORT_TASK": "High",
+               "OUROBOROS_MODEL": "vendor/model-fixture", "OUROBOROS_TOOL_TIMEOUT_SEC": "450"}
+    sources: dict = {}
+    with settings_read_environ(environ):
+        settings = cfg.settings_of_document({"OUROBOROS_TOOL_TIMEOUT_SEC": 300}, sources_out=sources)
+    assert sources == {"OUROBOROS_PRESENCE_MAX_ACTIVE": 2, "OUROBOROS_EFFORT_TASK": "high",
+                       "OUROBOROS_MODEL": "vendor/model-fixture"}
+    assert settings["OUROBOROS_TOOL_TIMEOUT_SEC"] == 300
+
+
+def test_an_operator_re_spelling_our_earlier_default_keeps_the_new_value_theirs(isolated_settings, monkeypatch):
+    """An earlier projection recorded the default 2 as ours; the operator has since set ``02`` on purpose. The record
+    describes the variable this projection found, not the text it writes: the 2 written now is the operator's."""
+    from ouroboros import config as cfg
+    from ouroboros.settings_integrity import PROJECTED_SETTINGS_ENV, _value_digest, projected_settings, skill_settings
+
+    key = "OUROBOROS_PRESENCE_MAX_ACTIVE"
+    env = _bare_environ(monkeypatch)
+    env.update({key: "02", PROJECTED_SETTINGS_ENV: json.dumps({key: _value_digest("2")})})
+    cfg.apply_settings_to_env(skill_settings(cfg.load_settings))
+    assert env[key] == "2" and key not in projected_settings(env)
+
+
+@pytest.mark.parametrize(("key", "spelled", "projected", "read"), [
+    ("OUROBOROS_PRESENCE_MAX_ACTIVE", "03", "3", 3),
+    ("OUROBOROS_PRESENCE_MAX_ACTIVE", "02", "2", 2),  # the default, spelled the operator's way
+    ("OUROBOROS_FALLBACK_COOLDOWN_ENABLED", "off", "False", False),
+    ("OUROBOROS_FALLBACK_COOLDOWN_ENABLED", "true", "True", True),  # the default
+    ("OUROBOROS_MODEL_CONTEXT_WINDOWS", '{ "main" : 131072, "fallback" : [ 0, 65536 ] }',
+     '{"fallback":[0,65536],"main":131072}', '{"fallback":[0,65536],"main":131072}'),
+    ("OUROBOROS_EFFORT_TASK", "High", "high", "high"),
+    ("OUROBOROS_MAX_ROUNDS", "inf", "unlimited", "unlimited"),  # its default until a document makes it finite
+], ids=["number", "default-number", "boolean", "default-boolean", "json-map", "effort-tier", "unlimited-bound"])
+def test_an_operator_variable_the_projection_respells_keeps_its_meaning(isolated_settings, monkeypatch, key, spelled,
+                                                                        projected, read):
+    """A deployment's own variable means the same through the launcher's projection, the server's after it and the
+    setup reads, which never take this tree's mirrors (``skill_settings``): the projection writes it as the loader
+    reads it and introduces nothing of ours, the key's default spelled the operator's way included."""
+    from ouroboros import config as cfg
+    from ouroboros.settings_integrity import projected_settings, skill_settings
+
+    env = _bare_environ(monkeypatch)
+    env[key] = spelled
+    for _process in ("launcher", "server"):
+        cfg.apply_settings_to_env(skill_settings(cfg.load_settings))
+        assert env[key] == projected and key not in projected_settings(env)
+    isolated_settings.write_text("{}", encoding="utf-8")  # Finish has saved a document
+    assert skill_settings(cfg.load_settings)[key] == read
+
+
+@pytest.mark.parametrize("case", ["unset", "document", "earlier-record"])
+def test_values_the_projection_supplies_stay_ours(isolated_settings, monkeypatch, case):
+    """What this tree supplies never passes for an operator's variable: the default of a key no variable sets, the
+    document's own value over an operator's spelling of the same, and a value an earlier projection recorded."""
+    from ouroboros import config as cfg
+    from ouroboros.settings_integrity import PROJECTED_SETTINGS_ENV, _value_digest, projected_settings, skill_settings
+
+    key = "OUROBOROS_PRESENCE_MAX_ACTIVE"
+    env = _bare_environ(monkeypatch)
+    if case != "unset":
+        env[key] = "03"
+    if case == "document":
+        isolated_settings.write_text(json.dumps({key: 3}), encoding="utf-8")
+    if case == "earlier-record":
+        env[PROJECTED_SETTINGS_ENV] = json.dumps({key: _value_digest("03")})
+    cfg.apply_settings_to_env(skill_settings(cfg.load_settings))
+    assert env[key] == ("3" if case == "document" else "2") and key in projected_settings(env)

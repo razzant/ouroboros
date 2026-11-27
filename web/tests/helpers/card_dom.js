@@ -101,6 +101,16 @@ export class Element {
     }
     appendChild(node) { return this.insertBefore(node, null); }
     append(...nodes) { nodes.forEach((node) => this.insertBefore(typeof node === 'string' ? new TextNode(node, this.ownerDocument) : node, null)); }
+    prepend(...nodes) { const first = this.childNodes[0] || null; nodes.forEach((node) => this.insertBefore(node, first)); }
+    after(...nodes) { const next = this.nextSibling; nodes.forEach((node) => this.parentNode?.insertBefore(node, next)); }
+    // In the document while its topmost ancestor is the document's body or root element; a test may still say so itself.
+    get isConnected() {
+        if (this.connectedOverride !== undefined) return this.connectedOverride;
+        let at = this;
+        while (at.parentNode) at = at.parentNode;
+        return at === this.ownerDocument.body || at === this.ownerDocument.documentElement;
+    }
+    set isConnected(value) { this.connectedOverride = value; }
     insertBefore(node, ref) {
         if (node.tagName === '#FRAGMENT') { [...node.childNodes].forEach((child) => this.insertBefore(child, ref)); return node; }
         node.parentNode?.removeChild(node);

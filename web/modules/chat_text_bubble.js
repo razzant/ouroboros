@@ -61,13 +61,14 @@ export function bubbleWords(text, role, { markdown = false, systemType = '', sou
  */
 export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ownProjectId = '',
     onDomWrite = (write) => write() }) {
-    return function draw(text, role, { markdown = false, ts, isProgress = false, meta, legacyKey = '', opts = {} }) {
+    const earlyPresentation = new WeakMap();
+    return function draw(text, role, { markdown = false, ts, isProgress = false, meta, legacyKey = '', opts = {}, existing = null }) {
         const pending = !!opts.pending;
         const ephemeral = !!opts.ephemeral;
         const { source, systemType, projectId } = meta;
         const attachments = role === 'user' ? attachmentViews(opts.attachments) : [];
-        const bubble = document.createElement('div');
-        bubble.className = `chat-bubble ${role}` + (isProgress ? ' progress' : '');
+        const bubble = existing || document.createElement('div');
+        if (!existing) bubble.className = `chat-bubble ${role}` + (isProgress ? ' progress' : '');
         if (pending) bubble.classList.add('pending');
         if (ephemeral) bubble.dataset.ephemeral = '1';
         for (const key of ['clientMessageId', 'systemType', 'senderSessionId', 'taskId', 'deliveryId', 'projectId']) {
@@ -84,23 +85,53 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
         stampHistoryNode(bubble, opts.historyId, opts.historyPosition);
 
         const notice = role === 'system' ? opts.reply?.notice : null;
+        // A notice's phrase alone, for a reader that sets its step under it (the call card); the bubble says the line.
+        if (typeof notice?.phrase === 'string' && notice.phrase && opts.narration !== true) bubble.dataset.noticePhrase = notice.phrase;
+        else delete bubble.dataset.noticePhrase;
         const { rendered, rich: richMarkdown, shown, skillReview, unparsed } = bubbleWords(text, role, { markdown, systemType, source,
             attachments, narration: opts.narration, textPlaceholder: opts.textPlaceholder, skillReview: opts.skillReview, notice });
         if (skillReview) bubble.classList.add('chat-skill-review');
         // A passage's coordinates are the parsed words': an unparsed message offers none, nor lands a saved one.
         const authored = ['user', 'assistant'].includes(role) && !isProgress && opts.textPlaceholder !== true && Boolean(shown)
-            && !unparsed;
+            && !unparsed && !opts.wordsOnly;
         const timeFmt = formatMsgTime(ts);
         const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';
         // Preserve the card's source link in a standalone row.
-        bubble.innerHTML = `
-            <div class="sender">${escapeHtml(senderLabel(role, isProgress, systemType, meta))}</div>
-            <div class="message${richMarkdown ? ' ui-rich-content' : ''}"${authored ? ' data-reply-body' : ''}>${rendered}</div>
-            ${evidenceLinkHtml(opts.evidenceRef)}
-            ${pendingHtml}
-            ${timeHtml}
-        `;
+        const evidenceHtml = evidenceLinkHtml(opts.evidenceRef);
+        const footer = `${evidenceHtml}${pendingHtml}${timeHtml}`;
+        const label = senderLabel(role, isProgress, systemType, meta);
+        const body = existing?.querySelector('.message');
+        if (!body) {
+            bubble.innerHTML = `
+                <div class="sender">${escapeHtml(label)}</div>
+                <div class="message${richMarkdown ? ' ui-rich-content' : ''}"${authored ? ' data-reply-body' : ''}>${rendered}</div>
+                ${footer}
+            `;
+        } else {
+            // Overflow can decorate mounted markup. Compare the serializer's two outputs, not its output with live DOM.
+            if (earlyPresentation.get(bubble) !== rendered) body.innerHTML = rendered;
+            earlyPresentation.delete(bubble);
+            body.classList.toggle('ui-rich-content', richMarkdown);
+            const sender = bubble.querySelector('.sender');
+            if (sender && sender.textContent !== label) sender.textContent = label;
+            if (authored) body.setAttribute('data-reply-body', '');
+            else body.removeAttribute('data-reply-body');
+            const time = bubble.querySelector('.msg-time');
+            if (evidenceHtml || pending || time?.getAttribute('title') !== timeFmt?.full) {
+                time?.remove();
+                const tail = document.createElement('div');
+                tail.innerHTML = footer;
+                bubble.append(...tail.children);
+            }
+        }
+        stampNodeTimestamp(bubble, ts);
+        if (opts.wordsOnly) {
+            earlyPresentation.set(bubble, rendered);
+            bubble.dataset.windowWords = '';
+            return { bubble, rich: false };
+        }
+        delete bubble.dataset.windowWords;
         if (notice?.details && opts.narration !== true) bubble.querySelector('.message')
             .after(rawDetails(document, notice.details, tr('chat.notice.details', 'Details')));
         decorateContactSource(bubble, opts.presenceContact);
@@ -108,7 +139,7 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
         if (!isProgress && shown) {
             chatMedia.attachCopyControl(bubble, String(shown));
             // What Share passes on: Ouroboros's own message, Copy's exact words (a note between works is not one).
-            if (role === 'assistant' && systemType !== 'relay_entry' && opts.textPlaceholder !== true) {
+            if (role === 'assistant' && systemType !== 'relay_entry' && !String(systemType).startsWith('peer_letter') && opts.textPlaceholder !== true) {
                 recordAnswerWords(bubble, String(shown), (close) => chatMedia.holdTransient(bubble, close));
             }
         }
@@ -120,8 +151,84 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
             : role === 'assistant' && projectId !== ownProjectId) decorateProjectRow(bubble, { ...meta, ...opts, role,
             fold: projectRow && role === 'assistant', addedAt: ts });
         syncSavedProjectContext(bubble, opts.originProjected, opts.originId);
-        wireSkillReviewDisclosure(bubble, { onDomWrite });
-        stampNodeTimestamp(bubble, ts);
+        if (skillReview) wireSkillReviewDisclosure(bubble, { onDomWrite, own: dispose => chatMedia.own(dispose, bubble) });
         return { bubble, rich: richMarkdown };
+    };
+}
+
+/** Reconcile early words against saved history without tearing away an interaction outside a bounded page. */
+export function createEarlyTextBubbles(feed, draw, insert, release, write = fn => fn(), shown = () => {},
+    kept = () => [], retired = () => {}) {
+    const doc = feed.ownerDocument;
+    const nodes = new Map();
+    const omitted = new Set();
+    let invalidated = false;
+    function remove(address, node) {
+        nodes.delete(address); omitted.delete(address);
+        release(node); retired(address);
+    }
+    function held(node) {
+        if (node.contains(doc.activeElement)) return true;
+        const selection = doc.getSelection?.();
+        const ranges = !selection?.isCollapsed ? Array.from({ length: selection?.rangeCount || 0 }, (_, i) => selection.getRangeAt(i)) : [];
+        if (ranges.some(range => range.intersectsNode?.(node))) return true;
+        return (kept() || []).some(([start, from, end, to]) => {
+            if (!start.isConnected || !end.isConnected) return false;
+            try {
+                const range = doc.createRange();
+                range.setStart(start, from); range.setEnd(end, to); return range.intersectsNode(node);
+            }
+            catch { return false; }
+        });
+    }
+    function clear(rows = null, scope = '') {
+        if (!nodes.size) return false;
+        let changed = false;
+        const named = new Set(rows?.map(row => row.row_address));
+        for (const [address, node] of nodes) {
+            if (!rows || scope === 'complete' || named.has(address)) { remove(address, node); changed = true; }
+            else if (scope) omitted.add(address);
+        }
+        return releaseOmitted() || changed;
+    }
+    function releaseOmitted() {
+        if (doc.hidden) return false;
+        const due = [...omitted].filter(address => !held(nodes.get(address)));
+        for (const address of due) remove(address, nodes.get(address));
+        return due.length > 0;
+    }
+    const forget = () => { invalidated = doc.hidden; if (!invalidated && nodes.size) write(clear); };
+    const onRelease = () => { if (omitted.size && !doc.hidden) write(releaseOmitted); };
+    const onBlur = () => { if (omitted.size) queueMicrotask(onRelease); };  // focus is still moving
+    const events = ['selectionchange', 'ouro:retained-selection-released'];
+    for (const event of events) doc.addEventListener(event, onRelease);
+    feed.addEventListener('focusout', onBlur);
+    return {
+        get: address => nodes.get(address),
+        delete(address) { nodes.delete(address); omitted.delete(address); retired(address); },
+        show(rows) {
+            if (invalidated) forget();
+            if (rows === null) return forget();
+            onRelease();
+            if (doc.hidden || !rows.length) return;
+            const mounted = new Set([...feed.querySelectorAll('.chat-bubble.assistant[data-row-address]')]
+                .map(node => node.dataset.rowAddress));
+            const pending = rows.filter(({ address }) => !mounted.has(address) && !nodes.has(address));
+            if (pending.length) write(() => {
+                for (const { address, text, markdown, ts, initiator } of pending) {
+                    const { bubble } = draw(text, 'assistant', { markdown, ts, meta: { initiator }, opts: { wordsOnly: true } });
+                    nodes.set(address, bubble);
+                    if (insert(bubble, { forceStick: true })) shown(address);
+                }
+                return true;
+            });
+        },
+        clear,
+        forget,
+        destroy() {
+            for (const event of events) doc.removeEventListener(event, onRelease);
+            feed.removeEventListener('focusout', onBlur);
+            nodes.clear(); omitted.clear();
+        },
     };
 }

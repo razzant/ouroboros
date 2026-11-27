@@ -29,6 +29,7 @@ from pathlib import Path
 import platform
 import sys
 import threading
+import uuid
 from time import monotonic
 
 if str(Path(__file__).resolve().parents[1]) not in sys.path:
@@ -36,8 +37,9 @@ if str(Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.ci_verdicts import (  # noqa: E402 -- stdlib only, as everything above `import pytest` below
-    DURATIONS_ENV, PHASES as _PHASES, ROUND_DIR as _ROUND_DIR, SECTIONS as _SECTIONS, TEST_DURATIONS_ENV,
-    attempt_text as _attempt, cell as _cell, durations_command, error_text as _error,
+    DURATIONS_ENV, PHASES as _PHASES, ROUND_DIR as _ROUND_DIR, SECTIONS as _SECTIONS, SESSION_UNAVAILABLE,
+    TEST_DURATIONS_ENV,
+    attempt_text as _attempt, case_key, cell as _cell, durations_command, error_text as _error,
     expected_failures as _expected_failures, final as _final, journal_projection as _journal_projection,
     journal_rows as _journal_rows, record_session_durations, run_verdict_command, system_of as _system,
     valid as _valid, verdict_counts as _verdict_counts, verdict_file as _verdict_file,
@@ -47,7 +49,7 @@ from tests.ci_verdicts import (  # noqa: E402 -- stdlib only, as everything abov
 
 def output_dir(config) -> Path | None:
     value = getattr(getattr(config, "option", None), "ci_evidence_dir", None)
-    return Path(value).resolve() if value else None
+    return Path(value).absolute() if value else None
 
 
 def _case_outcomes(reports: list[dict]) -> dict[str, str]:
@@ -685,6 +687,9 @@ def pytest_configure(config):
         config.pluginmanager.register(_Results(config), "ci_safe_results")
     elif getattr(config.option, "ci_listed", None):
         raise pytest.UsageError("--ci-listed needs --ci-evidence-dir: the ids it finds no test for are exported there")
+    # The original controller owns the key and destination, not any pytest it starts.
+    os.environ.pop("OUROBOROS_PRECOMMIT_SESSION_DIR", None)
+    os.environ.pop("OUROBOROS_PRECOMMIT_CASE_SALT", None)
 
 
 @pytest.hookimpl(optionalhook=True)
@@ -759,8 +764,18 @@ class _Results:
         self.durations = os.environ.get(TEST_DURATIONS_ENV, "")  # the owner's table; the env is dropped at collection
         self.secrets = tuple(os.environ[key] for key in MASKED_SECRET_SETTING_KEYS if os.environ.get(key))
         self.safe_text = {}
+        directory = os.environ.get("OUROBOROS_PRECOMMIT_SESSION_DIR")
+        # Only the exact outer pytest pass may emit local attempt facts, not nested pytest or CI.
+        self.case_salt = b""
+        if directory and output_dir(config) == Path(directory):
+            raw_salt = os.environ.get("OUROBOROS_PRECOMMIT_CASE_SALT", "")
+            try:
+                self.case_salt = bytes.fromhex(raw_salt) if len(raw_salt) == 32 else b""
+            except ValueError:
+                pass  # Incomplete local evidence cannot fail pytest.
         self.started_at = monotonic()
         self.journal = None
+        self.started_workers, self.finished_workers = set(), set()
         self.lanes = {}  # Lane blocks an xdist worker handed over at collection.
         self.listed, self.unmatched = None, None  # `--ci-listed`: the ids, then those no collected test matched
         self.unsettled = []  # with `--ci-listed`: the collectors that did not collect, as the projection spells them
@@ -772,13 +787,46 @@ class _Results:
             except (OSError, UnicodeError) as error:
                 raise pytest.UsageError(f"--ci-listed is unreadable ({type(error).__name__})") from None
         if not hasattr(config, "workerinput"):  # xdist re-emits worker events on the controller.
-            try:
-                path = output_dir(config) / "events.jsonl"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                # Unbuffered: each row reaches the OS before a kill can lose it.
-                self.journal = path.open("wb", buffering=0)
-            except Exception as error:
-                self._journal_off(error)
+            config._ci_evidence_session = uuid.uuid4().hex
+            self._start_journal()
+
+    def _start_journal(self):
+        """Retain both outputs on sequential reuse; only the canonical names describe the current session."""
+        directory = output_dir(self.config)
+        result, journal = paths = (directory / "results.json", directory / "events.jsonl")
+        unavailable = directory / SESSION_UNAVAILABLE
+        self._can_export = False
+        try:
+            previous = [path for path in paths if path.is_file()]
+            self._can_export = result not in previous
+            if previous:
+                # A lock (or an interruption during the two moves) can leave an old file at a current name.
+                unavailable.touch()
+                suffix = ".previous"
+                while any(os.path.lexists(path.with_stem(path.stem + suffix)) for path in paths):
+                    suffix = f".previous-{uuid.uuid4().hex}"
+                for path in previous:
+                    archived = path.with_stem(path.stem + suffix)
+                    try:
+                        os.replace(path, archived)
+                    except OSError as error:
+                        if path == journal:
+                            raise  # Never truncate an earlier journal that could not be retained.
+                        from ouroboros.test_evidence import diagnostics_incomplete
+                        diagnostics_incomplete(type(error).__name__)
+                        print(f"CI_DIAGNOSTICS_INCOMPLETE: the earlier results.json was not set aside ({type(error).__name__})")
+                    else:
+                        if path == result:
+                            self._can_export = True
+                        print(f"CI_EVIDENCE: the earlier session's {path.name} is kept as {archived.name}")
+            directory.mkdir(parents=True, exist_ok=True)
+            # Unbuffered: each row reaches the OS before a kill can lose it.
+            self.journal = journal.open("wb", buffering=0)
+            header = {"event": "session", "session": self.config._ci_evidence_session}
+            self._write_journal(header)
+            unavailable.unlink(missing_ok=True)  # Now a surviving export must match the new header.
+        except Exception as error:
+            self._journal_off(error)
 
     def _journal_off(self, error=None):
         journal, self.journal = self.journal, None
@@ -798,6 +846,11 @@ class _Results:
             self.safe_text[text] = _redact(text, self.secrets)
         return self.safe_text[text]
 
+    def _write_journal(self, row):
+        line = (json.dumps(row) + "\n").encode("ascii")
+        if self.journal.write(line) != len(line):
+            raise OSError("incomplete journal row")
+
     def _event(self, event, nodeid, **facts):
         if self.journal is None:
             return
@@ -805,10 +858,12 @@ class _Results:
             # A parametrized nodeid can carry a secret: every value is redacted before its first write.
             row = {"event": event, "nodeid": nodeid,
                    "elapsed_seconds": monotonic() - self.started_at, **facts}
+            if self.case_salt and event in ("report", "start", "finish"):
+                row["case_key"] = case_key(nodeid, self.case_salt)
             for key, value in row.items():
                 if isinstance(value, str):  # Only approved numeric timing facts bypass redaction.
                     row[key] = self._public(value)
-            self.journal.write((json.dumps(row) + "\n").encode("ascii"))
+            self._write_journal(row)
         except Exception as error:
             self._journal_off(error)
 
@@ -886,7 +941,7 @@ class _Results:
                 row = {"event": "lane", "nodeid": "", "elapsed_seconds": monotonic() - self.started_at,
                        "block": block, "lane": lane, "github": _identity(),
                        "environment": {"platform": platform.system()}}
-                self.journal.write((json.dumps(_redact(row, self.secrets)) + "\n").encode("ascii"))
+                self._write_journal(_redact(row, self.secrets))
             except Exception as error:
                 self._journal_off(error)
 
@@ -895,6 +950,27 @@ class _Results:
 
     def pytest_runtest_logfinish(self, nodeid):
         self._event("finish", nodeid)
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_configure_node(self, node):
+        if self.case_salt:
+            self.started_workers.add(node.gateway.id)
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_testnodedown(self, node, error):
+        worker_status = (getattr(node, "workeroutput", None) or {}).get("exitstatus")
+        if self.case_salt and error is None and worker_status in (0, 1, 5):
+            self.finished_workers.add(node.gateway.id)
+
+    def _close_start_coverage(self, session):
+        # xdist forwards starts/finishes to this controller. A clean controller's
+        # EOF does not cover a worker that never delivered its own terminal event.
+        if (self.case_salt and self.journal is not None and session.exitstatus in (0, 1, 5)
+                and self.started_workers == self.finished_workers):
+            try:
+                self._write_journal({"event": "starts_complete", "session": self.config._ci_evidence_session})
+            except Exception as error:
+                self._journal_off(error)
 
     @pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_makereport(self, item, call):
@@ -978,6 +1054,8 @@ class _Results:
             if reporter is not None:  # For readers, on its own line after xdist's "F"; this row is the record.
                 reporter.write_line(f"\n[{report.node.gateway.id}] pytest-timeout callback invoked ({seconds:g}s) "
                                     f"while running {report.nodeid!r}; worker subsequently lost")
+        if self.case_salt:
+            row["case_key"] = case_key(report.nodeid, self.case_salt)
         self.reports.append(row)
         self._event("report", row["nodeid"], phase=row["phase"], outcome=row["outcome"],
                     error_type=row["error_type"], duration_seconds=row["duration_seconds"],
@@ -1004,6 +1082,8 @@ class _Results:
     def pytest_collectreport(self, report):
         if report.failed:
             self.collection_failures.append({"nodeid": report.nodeid, "outcome": "failed"})
+            if self.case_salt:
+                self._event("collection_error", report.nodeid)
         elif report.skipped:
             self.collection_skips.append(report.nodeid)
         if not report.passed and self.listed is not None:  # reported before the items reach modifyitems
@@ -1015,8 +1095,11 @@ class _Results:
         if hasattr(self.config, "workerinput"):
             return  # xdist's controller receives the worker reports.
         try:
+            self._close_start_coverage(session)
+            if not self._can_export:
+                return  # Do not replace a previous export we could not retain.
             facts = {
-                "format": 1, "session_exit_code": int(session.exitstatus),
+                "format": 1, "session": self.config._ci_evidence_session, "session_exit_code": int(session.exitstatus),
                 "tests_collected": session.testscollected, "reports": self.reports,
                 "collection_failures": self.collection_failures,
                 "collection_skips": self.collection_skips,
@@ -1031,6 +1114,9 @@ class _Results:
             facts.update({**self.lanes, **_lanes(self.config)})
             if self.selected_nodeids is not None:  # an xdist controller collects nothing: its selection stays unknown
                 facts["selected_nodeids"] = self.selected_nodeids
+                if self.case_salt:
+                    facts["precommit_assignment"] = [
+                        [case_key(node, self.case_salt), node] for node in self.selected_nodeids]
             if self.unmatched is not None:  # this process collected (never an xdist controller)
                 facts["listed"] = {"unmatched": self.unmatched}
             crash = getattr(self.config, "_ouroboros_worker_crash", None)

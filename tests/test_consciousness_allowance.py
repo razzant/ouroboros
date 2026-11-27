@@ -549,3 +549,201 @@ def test_open_rows_are_counted_apart_from_unpriced_ones(data_root, monkeypatch):
     # The call in flight can still settle (open, its bound known); the session ended without a price (unknown, closed).
     assert window["accounting_open_rows"] == 1 and window["unknown_unmetered"] == 1 and window["non_final_rows"] == 2
     assert window["settled_usd"] == pytest.approx(1.0)
+
+
+# --- resume decision: single coherent snapshot & explicit root ---------------------------------
+
+
+def test_resume_decision_reads_one_coherent_snapshot_and_separates_live_wallet(data_root, monkeypatch):
+    """Tree/group spend, hard caps, global wallet and the 24 h window come from ONE usage-store read.
+    A positive narrower global wallet narrows ``available_now_usd`` without freezing the durable allowance."""
+    from ouroboros.consciousness_wake import wake_task_metadata
+    from ouroboros.task_results import write_task_result
+
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "12")
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+    meta = wake_task_metadata("act", "test", root_cost_ceiling_usd=3.5, root_cost_ceiling_source="allowance")
+    own_group = {"billing_group_id": "wake-1", "billing_group_limit_usd": 20.0,
+                 "billing_group_limit_source": "initial_task_admission"}
+    write_task_result(data_root, "wake-1", "running", root_task_id="wake-1", metadata=meta, billing_group=own_group)
+    write_task_result(data_root, "wake-2", "running", root_task_id="wake-2")
+    _wake(data_root, monkeypatch, T0 - 3 * HOUR, 2.0, task_id="wake-1")
+    _at(monkeypatch, T0 - 2 * HOUR)
+    _settle(data_root, cost=1.5, cost_final=True, task_id="wake-1-helper", root_task_id="wake-1", category="subagent")
+    _wake(data_root, monkeypatch, T0 - 1 * HOUR, 4.0, task_id="wake-2")
+
+    task = {"id": "wake-1", "root_task_id": "wake-1", "metadata": meta}
+    pause = {"cost_ceiling": {"state": "active", "ceiling_usd": 3.5, "root_cap_usd": 20.0,
+                              "basis": "producer_allowance"}}
+
+    read_flags: list[bool] = []
+    hold_calls = 0
+    real_read = usage_store.read
+    real_hold = usage_store.hold
+
+    def spy_read(root, *, allow_stale=False):
+        read_flags.append(bool(allow_stale))
+        return real_read(root, allow_stale=allow_stale)
+
+    def spy_hold(*args, **kwargs):
+        nonlocal hold_calls
+        hold_calls += 1
+        return real_hold(*args, **kwargs)
+
+    monkeypatch.setattr(usage_store, "read", spy_read)
+    monkeypatch.setattr(usage_store, "hold", spy_hold)
+
+    strict = allowance.allowance_resume_decision(data_root, task, pause, now=T0)
+    assert strict == {"additional_usd": pytest.approx(4.5), "ceiling_usd": pytest.approx(8.0),
+                      "available_now_usd": pytest.approx(4.5), "source": "allowance", "window_limit_usd": 12.0}
+    assert read_flags == [False] and hold_calls == 1
+
+    # Display consumer uses the same coherent snapshot with allow_stale=True and no external window.
+    display = allowance.allowance_resume_decision(data_root, task, pause, now=T0, allow_stale=True)
+    assert display == strict
+    assert read_flags == [False, True] and hold_calls == 2
+
+    # Positive narrower global wallet narrows available_now_usd without freezing durable allowance/ceiling.
+    monkeypatch.setenv("TOTAL_BUDGET", "10")
+    narrowed = allowance.allowance_resume_decision(data_root, task, pause, now=T0)
+    assert narrowed == {"additional_usd": pytest.approx(4.5), "ceiling_usd": pytest.approx(8.0),
+                        "available_now_usd": pytest.approx(2.5), "source": "allowance", "window_limit_usd": 12.0}
+    # Topping up the live wallet restores available_now_usd without re-issuing the durable ceiling.
+    monkeypatch.setenv("TOTAL_BUDGET", "50")
+    assert allowance.allowance_resume_decision(data_root, task, pause, now=T0) == strict
+    # Zero global wallet still refuses budget_still_exhausted; unreadable store refuses unknown.
+    monkeypatch.setenv("TOTAL_BUDGET", "7.5")
+    assert allowance.allowance_resume_decision(data_root, task, pause, now=T0) == {"error": "budget_still_exhausted"}
+    monkeypatch.setattr(usage_store, "read", lambda *_a, **_k: (_ for _ in ()).throw(OSError("temporarily unreadable")))
+    assert allowance.allowance_resume_decision(data_root, task, pause, now=T0) == {
+        "error": "consciousness_allowance_unknown",
+    }
+
+
+def test_resume_decision_counts_explicit_root_once_even_past_discovery_horizon(data_root, monkeypatch):
+    """Through ``allowance_resume_decision``, a long wake past 48 h still counts its fresh 24 h helper
+    spend once, and a fresh wake already within 48 h is never double-counted."""
+    from ouroboros.consciousness_wake import wake_task_metadata
+    from ouroboros.task_results import write_task_result
+
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "15")
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+    meta_long = wake_task_metadata("act", "test", root_cost_ceiling_usd=7.0, root_cost_ceiling_source="allowance")
+    meta_fresh = wake_task_metadata("act", "test", root_cost_ceiling_usd=5.0, root_cost_ceiling_source="allowance")
+    write_task_result(data_root, "wake-long", "running", root_task_id="wake-long", metadata=meta_long)
+    write_task_result(data_root, "wake-fresh", "running", root_task_id="wake-fresh", metadata=meta_fresh)
+
+    # Own consciousness row aged past ROOT_HORIZON_SEC (48 h) and WINDOW_SEC (24 h).
+    _wake(data_root, monkeypatch, T0 - 60 * HOUR, 1.0, task_id="wake-long")
+    # Fresh helper row within 24 h under non-consciousness category.
+    _at(monkeypatch, T0 - 2 * HOUR)
+    _settle(data_root, cost=6.0, cost_final=True, task_id="wake-long-helper", root_task_id="wake-long",
+            category="subagent")
+    # Another wake within 48 h (discovered normally).
+    _wake(data_root, monkeypatch, T0 - 1 * HOUR, 5.0, task_id="wake-fresh")
+
+    # Resume for the aged wake: tree spent = $7 ($1 old + $6 helper), 24 h window = $11 -> room = $4.
+    pause_long = {"cost_ceiling": {"state": "active", "ceiling_usd": 7.0, "root_cap_usd": 30.0,
+                                   "basis": "producer_allowance"}}
+    dec_long = allowance.allowance_resume_decision(
+        data_root, {"id": "wake-long", "root_task_id": "wake-long", "metadata": meta_long}, pause_long, now=T0)
+    assert dec_long == {"additional_usd": pytest.approx(4.0), "ceiling_usd": pytest.approx(11.0),
+                        "available_now_usd": pytest.approx(4.0), "source": "allowance", "window_limit_usd": 15.0}
+
+    # Resume for the fresh wake: already discovered within 48 h, counted once (window = $5, room = $10).
+    pause_fresh = {"cost_ceiling": {"state": "active", "ceiling_usd": 5.0, "root_cap_usd": 30.0,
+                                    "basis": "producer_allowance"}}
+    dec_fresh = allowance.allowance_resume_decision(
+        data_root, {"id": "wake-fresh", "root_task_id": "wake-fresh", "metadata": meta_fresh}, pause_fresh, now=T0)
+    assert dec_fresh == {"additional_usd": pytest.approx(10.0), "ceiling_usd": pytest.approx(15.0),
+                         "available_now_usd": pytest.approx(10.0), "source": "allowance", "window_limit_usd": 15.0}
+
+
+def test_resume_decision_honors_a_lawful_cap_raise(data_root, monkeypatch):
+    """The pause's saved root cap is the cap as it stood at pause time, not an independent limit:
+    after a lawful raise the wake's resume room follows the raised cap instead of freezing at the
+    saved number. An unreadable live cap still falls back to the pause's own saved fence."""
+    from ouroboros.consciousness_wake import wake_task_metadata
+    from ouroboros.task_results import write_task_result
+    from ouroboros.usage_admission import set_work_cap
+
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "20")
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+    meta = wake_task_metadata("act", "test", root_cost_ceiling_usd=7.0, root_cost_ceiling_source="allowance")
+    own_group = {"billing_group_id": "wake-raise", "billing_group_limit_usd": 10.0,
+                 "billing_group_limit_source": "initial_task_admission",
+                 "billing_group_limit_revision": "2026-01-01"}
+    write_task_result(data_root, "wake-raise", "running", root_task_id="wake-raise",
+                     metadata=meta, billing_group=own_group)
+    # Spend under the work's own published group, so the ledger carries the same binding the
+    # task record pins — the raise amends a binding the money reads agree on.
+    with ua.usage_scope(ua.UsageScope(drive_root=data_root, task_id="wake-raise", root_task_id="wake-raise",
+                                      source="test", **own_group)):
+        _wake(data_root, monkeypatch, T0 - HOUR, 10.0, task_id="wake-raise")  # the $10 cap is used up
+    task = {"id": "wake-raise", "root_task_id": "wake-raise", "metadata": meta}
+    pause = {"cost_ceiling": {"state": "active", "ceiling_usd": 7.0, "root_cap_usd": 10.0,
+                              "basis": "producer_allowance"}}
+    # The daily window still has $10 of $20; the exhausted cap is the work's own amendable cap.
+    assert allowance.allowance_resume_decision(data_root, task, pause, now=T0) == {
+        "error": "root_hard_cap_exhausted"}
+    raised = set_work_cap(data_root, task, "wake-raise", limit_usd=15.0,
+                          by={"actor": "ouroboros", "task_id": "main-a", "text": "let it finish"},
+                          basis={"kind": "owner_words", "source": {"ts": "2026-01-01T00:00:00Z"}})
+    assert raised["ok"], raised
+    decided = allowance.allowance_resume_decision(data_root, task, pause, now=T0)
+    assert decided == {"additional_usd": pytest.approx(5.0), "ceiling_usd": pytest.approx(15.0),
+                       "available_now_usd": pytest.approx(5.0), "source": "per_task_cap",
+                       "window_limit_usd": 20.0}
+
+
+def test_resume_decision_uses_billing_group_basis_coherently(data_root, monkeypatch):
+    """When a wake shares a billing group, spent, hard room and cumulative ceiling share the
+    billing-group basis that loop_budget enforces."""
+    from ouroboros.consciousness_wake import wake_task_metadata
+    from ouroboros.task_results import write_task_result
+
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "20")
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+    group = {"billing_group_id": "group-origin", "billing_group_limit_usd": 12.0,
+             "billing_group_limit_source": "initial_task_admission"}
+    meta = wake_task_metadata("act", "test", root_cost_ceiling_usd=7.0, root_cost_ceiling_source="allowance")
+    write_task_result(data_root, "group-origin", "completed", root_task_id="group-origin", billing_group=group)
+    write_task_result(data_root, "wake-grp", "running", root_task_id="wake-grp", metadata=meta, billing_group=group)
+
+    _at(monkeypatch, T0 - 3 * HOUR)
+    with ua.usage_scope(ua.UsageScope(
+        drive_root=data_root, task_id="group-origin", root_task_id="group-origin",
+        billing_group_id="group-origin", billing_group_limit_usd=12.0,
+        billing_group_limit_source="initial_task_admission",
+    )):
+        _settle(data_root, cost=5.0, cost_final=True, task_id="group-origin", root_task_id="group-origin",
+                category="task")
+    _at(monkeypatch, T0 - 1 * HOUR)
+    with ua.usage_scope(ua.UsageScope(
+        drive_root=data_root, task_id="wake-grp", root_task_id="wake-grp",
+        billing_group_id="group-origin", billing_group_limit_usd=12.0,
+        billing_group_limit_source="initial_task_admission",
+    )):
+        _settle(data_root, cost=2.0, cost_final=True, task_id="wake-grp", root_task_id="wake-grp",
+                category="consciousness")
+
+    pause = {"cost_ceiling": {"state": "active", "ceiling_usd": 7.0, "root_cap_usd": 12.0,
+                              "basis": "producer_allowance"}}
+    dec = allowance.allowance_resume_decision(
+        data_root, {"id": "wake-grp", "root_task_id": "wake-grp", "metadata": meta}, pause, now=T0)
+    # Group spent = $7 ($5 origin + $2 wake), group cap = $12 -> hard room = $5, ceiling = $12.
+    assert dec == {"additional_usd": pytest.approx(5.0), "ceiling_usd": pytest.approx(12.0),
+                   "available_now_usd": pytest.approx(5.0), "source": "per_task_cap", "window_limit_usd": 20.0}
+
+    # Matching daily room ($5) and hard room ($5) stays source="both" even under a tighter live wallet ($2).
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "7")
+    monkeypatch.setenv("TOTAL_BUDGET", "9")
+    both = allowance.allowance_resume_decision(
+        data_root, {"id": "wake-grp", "root_task_id": "wake-grp", "metadata": meta}, pause, now=T0)
+    assert both == {"additional_usd": pytest.approx(5.0), "ceiling_usd": pytest.approx(12.0),
+                    "available_now_usd": pytest.approx(2.0), "source": "both", "window_limit_usd": 7.0}
+
+    monkeypatch.setattr(usage_store, "integrity_degraded", lambda _root: True)
+    assert allowance.allowance_resume_decision(
+        data_root, {"id": "wake-grp", "root_task_id": "wake-grp", "metadata": meta}, pause, now=T0,
+    ) == {"error": "consciousness_allowance_unknown"}

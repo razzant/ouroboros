@@ -33,32 +33,33 @@ class _Origin:
     ``close`` (read the request, answer nothing), ``hang``, ``429:<seconds>`` or an HTTP status to refuse with.
     ``close_after`` stops listening after that many answered message requests."""
 
-    def __init__(self, script=(), *, close_after=None, port: int | str = 0):
-        self.script, self.close_after, self.requests = list(script), close_after, []
-        self.answered, self.next_id = 0, 500
-        self.port = int(urllib.parse.urlsplit(port).port or 0) if isinstance(port, str) else int(port or 0)
-        self.hanging, self._server, self._handlers = asyncio.Event(), None, set()
+    def __init__(self, script=(), *, close_after=None):
+        self.script, self.close_after = list(script), close_after
+        self.requests: list[tuple[str, str, dict, bytes]] = []  # (method, path, form, body)
+        self.answered, self.next_id, self.port = 0, 500, 0
+        self.hanging = asyncio.Event()
+        self._server, self._handlers = None, set()
 
     @property
-    def base(self) -> str: return f"http://127.0.0.1:{self.port}"
-    def sent(self, method="sendMessage") -> list[dict]: return [form for name, _p, form, _b in self.requests if name == method]
-    def methods(self) -> list[str]: return [name for name, *_rest in self.requests]
+    def base(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def sent(self, method="sendMessage") -> list[dict]:
+        return [form for name, _path, form, _body in self.requests if name == method]
+
+    def methods(self) -> list[str]:
+        return [name for name, *_rest in self.requests]
 
     async def __aenter__(self):
-        self._server = await asyncio.start_server(self._serve, "127.0.0.1", self.port, reuse_address=True)
+        self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0)
         self.port = self._server.sockets[0].getsockname()[1]
         return self
 
-    async def pause(self) -> None:
-        if self._server is not None: self._server.close()
-        for handler in list(self._handlers): handler.cancel()
+    async def __aexit__(self, *_exc):
+        self._server.close()
+        for handler in list(self._handlers):  # a hung request ends with its origin
+            handler.cancel()
         await asyncio.gather(*self._handlers, return_exceptions=True)
-        if self._server is not None:
-            await self._server.wait_closed()
-            self._server = None
-
-    async def resume(self) -> None: self._server = await asyncio.start_server(self._serve, "127.0.0.1", self.port, reuse_address=True)
-    async def __aexit__(self, *_exc): await self.pause()
 
     async def _serve(self, reader, writer):
         self._handlers.add(asyncio.current_task())
@@ -221,8 +222,7 @@ def _run(scenario):
 
 def test_a_reply_that_never_left_waits_and_arrives_once_when_telegram_answers(tmp_path):
     async def scenario():
-        closed = _closed_base()
-        bridge = _Bridge(tmp_path / "state", closed)
+        bridge = _Bridge(tmp_path / "state", _closed_base())
         await bridge.publish("chat.outbound", {"text": "nothing mirrored", "is_progress": True, "transport": {}})
         assert bridge.files() == []  # a message the bridge does not send is never journaled
         await bridge.publish("chat.outbound", {"text": "The answer.", "transport": {}, "row_address": "row:a"})
@@ -233,7 +233,8 @@ def test_a_reply_that_never_left_waits_and_arrives_once_when_telegram_answers(tm
         assert _not_delivered(bridge) == "No recent delivery issues."  # what waits is no issue, nor arrived yet
         assert "The answer" not in json.dumps({key: value for key, value in fields.items() if key != "bridge"})
         assert any("Telegram delivery waits (ConnectError)" in message for _level, message in bridge.api.logs)
-        async with _Origin(port=closed) as origin:
+        async with _Origin() as origin:
+            bridge.serve(origin.base)
             await bridge.drain()
         assert [form["text"] for form in origin.sent()] == ["The answer."]
         assert bridge.records() == [] and bridge.files() == []  # delivered: nothing is kept
@@ -285,12 +286,12 @@ def test_flood_control_waits_exactly_its_retry_after(tmp_path):
 
 def test_a_long_reply_resumes_at_its_first_unsent_part(tmp_path):
     async def scenario():
-        async with _Origin(close_after=1) as first:
+        async with _Origin(close_after=1) as first, _Origin() as second:
             bridge = _Bridge(tmp_path / "state", first.base)
             await bridge.publish("chat.outbound", {"text": _LONG, "transport": {}})
             [record] = bridge.records()
             assert [part["state"] for part in record["parts"]] == ["confirmed", "retry_wait"]
-        async with _Origin(port=first.port) as second:
+            bridge.serve(second.base)
             await bridge.drain()
         chunks = bridge.telegram_api.message_chunks(_LONG, "HTML")
         assert len(chunks) == 3
@@ -305,8 +306,7 @@ def test_media_links_and_a_quiz_card_wait_in_order_and_arrive_once(tmp_path):
             "options": [{"label": "sqlite"}, {"label": "postgres"}]}
 
     async def scenario():
-        closed = _closed_base()
-        bridge = _Bridge(tmp_path / "state", closed)
+        bridge = _Bridge(tmp_path / "state", _closed_base())
         await bridge.publish("chat.photo", {"image_base64": base64.b64encode(b"PNG-BYTES").decode(),
                                             "caption": "chart", "transport": {}})
         await bridge.publish("chat.document", {"file_base64": base64.b64encode(b"DOC-BYTES").decode(),
@@ -319,7 +319,8 @@ def test_media_links_and_a_quiz_card_wait_in_order_and_arrive_once(tmp_path):
         await bridge.publish("chat.quiz_state", {"quiz_id": "q1", "task_id": "task-1", "state": "answered",
                                                  "answered_index": 1})
         assert [record["state"] for record in bridge.records()] == ["retry_wait", "pending", "pending", "pending"]
-        async with _Origin(port=closed) as origin:
+        async with _Origin() as origin:
+            bridge.serve(origin.base)
             await bridge.drain()
         assert origin.methods() == ["sendPhoto", "sendDocument", "sendMessage", "sendMessage", "editMessageText"]
         assert b"PNG-BYTES" in origin.requests[0][3] and b"DOC-BYTES" in origin.requests[1][3]
@@ -372,8 +373,7 @@ def test_a_settled_edit_that_waits_is_retried_when_its_card_is_created_again(tmp
 
 def test_a_waiting_reply_keeps_its_native_reply_source_and_label(tmp_path):
     async def scenario():
-        closed = _closed_base()
-        bridge = _Bridge(tmp_path / "state", closed)
+        bridge = _Bridge(tmp_path / "state", _closed_base())
         state = bridge.module("telegram_state")
         for owner_message in (10, 11):  # the owner's earlier and latest messages in this chat
             state._remember_message(bridge.api, _BOT, 42, owner_message, {
@@ -388,7 +388,8 @@ def test_a_waiting_reply_keeps_its_native_reply_source_and_label(tmp_path):
         saved = json.loads((bridge.state / "outbox" / f"{first['id']}.event.json").read_text(encoding="utf-8"))
         assert saved == answer  # the event as published, its label and reply facts included
         assert first["source"] == {"task_id": "task-a", "row_address": "row:answer", "reply_to": "row:owner-10"}
-        async with _Origin(port=closed) as origin:
+        async with _Origin() as origin:
+            bridge.serve(origin.base)
             await bridge.drain()
         sent_answer, sent_note = origin.sent()
         assert sent_answer["reply_to_message_id"] == "10" and "reply_to_message_id" not in sent_note
@@ -402,10 +403,10 @@ def test_a_waiting_reply_keeps_its_native_reply_source_and_label(tmp_path):
 
 def test_a_later_message_never_overtakes_one_that_waits(tmp_path):
     async def scenario():
-        closed = _closed_base()
-        bridge = _Bridge(tmp_path / "state", closed)
+        bridge = _Bridge(tmp_path / "state", _closed_base())
         await bridge.publish("chat.outbound", {"text": "first", "transport": {}})
-        async with _Origin(port=closed) as origin:
+        async with _Origin() as origin:
+            bridge.serve(origin.base)  # Telegram is back, but the first message is not due yet
             await bridge.publish("chat.outbound", {"text": "second", "transport": {}})
             assert origin.requests == [] and [record["state"] for record in bridge.records()] == ["retry_wait", "pending"]
             await bridge.drain()
@@ -416,14 +417,14 @@ def test_a_later_message_never_overtakes_one_that_waits(tmp_path):
 
 def test_an_ended_sender_never_holds_later_messages_behind_what_waits(tmp_path):
     async def scenario():
-        closed = _closed_base()
-        bridge = _Bridge(tmp_path / "state", closed)
+        bridge = _Bridge(tmp_path / "state", _closed_base())
         await bridge.publish("chat.outbound", {"text": "first", "transport": {}})
         bridge.start()
         await asyncio.sleep(0.1)  # the sender runs and sleeps until the first message is due
         await bridge.stop()  # its restarts spent: nothing runs what waits until the next load
         assert bridge.outbox._sender_down
-        async with _Origin(port=closed) as origin:
+        async with _Origin() as origin:
+            bridge.serve(origin.base)
             await bridge.publish("chat.outbound", {"text": "second", "transport": {}})
         assert [form["text"] for form in origin.sent()] == ["second"]
         assert [record["state"] for record in bridge.records()] == ["retry_wait"]  # kept for the next load
@@ -447,10 +448,9 @@ def test_a_stop_that_lands_with_a_wake_ends_the_sender(tmp_path):
 
 def test_a_new_load_delivers_what_waited_at_the_last_stop(tmp_path):
     async def scenario():
-        closed = _closed_base()
-        before = _Bridge(tmp_path / "state", closed)
+        before = _Bridge(tmp_path / "state", _closed_base())
         await before.publish("chat.outbound", {"text": "Survives the restart.", "transport": {}})
-        async with _Origin(port=closed) as origin:
+        async with _Origin() as origin:
             after = _Bridge(tmp_path / "state", origin.base)  # new modules, PluginAPI and journal on the same state
             await after.drain()
         assert [form["text"] for form in origin.sent()] == ["Survives the restart."]
@@ -588,11 +588,11 @@ def test_a_message_the_outbox_cannot_save_is_not_sent_and_the_status_says_so(tmp
 
 def test_a_saved_message_never_goes_out_while_its_sending_state_cannot_be_saved(tmp_path):
     async def scenario():
-        closed = _closed_base()
-        bridge = _Bridge(tmp_path / "state", closed)
+        bridge = _Bridge(tmp_path / "state", _closed_base())
         await bridge.publish("chat.outbound", {"text": "Saved once.", "transport": {}})
         assert [record["state"] for record in bridge.records()] == ["retry_wait"]
-        async with _Origin(port=closed) as origin:
+        async with _Origin() as origin:
+            bridge.serve(origin.base)
             _failing_journal(bridge, cleanup=False)  # and nothing written before can be removed
             bridge.start()
             bridge.now += 5
@@ -652,21 +652,21 @@ def test_refused_expired_and_changed_operations_are_never_sent(tmp_path):
             assert [(record["state"], record["parts"][0]["status"]) for record in refused.records()] == [("refused", 403)]
             assert ("error", "Telegram outbound error: Telegram API sendMessage returned HTTP 403.") in refused.api.logs
 
-        closed_exp = _closed_base()
-        expired = _Bridge(tmp_path / "expired", closed_exp)
+        expired = _Bridge(tmp_path / "expired", _closed_base())
         await expired.publish("chat.outbound", {"text": "Too late.", "transport": {}})
         expired.now += 24 * 3600 + 1
-        async with _Origin(port=closed_exp) as late:
+        async with _Origin() as late:
+            expired.serve(late.base)
             await expired.drain()
         assert late.requests == [] and [record["reason"] for record in expired.records()] == ["expired"]
 
-        async with _Origin(close_after=1) as first:
+        async with _Origin(close_after=1) as first, _Origin() as second:
             changed = _Bridge(tmp_path / "changed", first.base)
             await changed.publish("chat.outbound", {"text": _LONG, "transport": {}})
             [record] = changed.records()
             saved = changed.state / "outbox" / f"{record['id']}.event.json"
             saved.write_text(json.dumps({"text": "other words " + _LONG, "transport": {}}), encoding="utf-8")
-        async with _Origin(port=first.port) as second:
+            changed.serve(second.base)
             await changed.drain()
         assert second.requests == []  # the saved part no longer matches: nothing else is sent
         assert [(record["state"], record["reason"]) for record in changed.records()] == [("failed", "changed")]
@@ -677,17 +677,17 @@ def test_refused_expired_and_changed_operations_are_never_sent(tmp_path):
 
 def test_what_no_bot_took_yet_goes_out_whole_through_the_token_in_force(tmp_path):
     async def scenario():
-        closed = _closed_base()
-        bridge = _Bridge(tmp_path / "state", closed)
+        bridge = _Bridge(tmp_path / "state", _closed_base())
         await bridge.publish("chat.outbound", {"text": _LONG, "transport": {}})
         bridge.api.granted["TELEGRAM_BOT_TOKEN"] = "654321:OTHER-BOT-TOKEN"
         assert bridge.plugin.binding_for(bridge.api).read_now(bridge.api)
-        async with _Origin(close_after=1, port=closed) as first:
+        async with _Origin(close_after=1) as first, _Origin() as second:
+            bridge.serve(first.base)  # the new bot's first part arrives, then its connection fails again
             bridge.start()
             bridge.now += 5
             bridge.outbox.wake()
             await _until(lambda: len(first.sent()) == 1 and bridge.waiting() and not bridge.outbox._fifo().locked())
-        async with _Origin(port=closed) as second:
+            bridge.serve(second.base)
             await bridge.drain()
         chunks = bridge.telegram_api.message_chunks(_LONG, "HTML")
         assert [form["text"] for form in first.sent() + second.sent()] == chunks
@@ -707,7 +707,7 @@ def _exact(card_message_id=0):
 
 def test_an_exact_replys_parts_keep_their_first_anchor_and_a_delivered_part_is_never_resent(tmp_path):
     async def scenario():
-        async with _Origin(close_after=1) as first:
+        async with _Origin(close_after=1) as first, _Origin() as second:
             bridge = _Bridge(tmp_path / "state", first.base)
             state = bridge.module("telegram_state")
             state._set_subagent_msg(bridge.api, _BOT, 42, "helper", 77)  # the helper's card as the answer leaves
@@ -716,7 +716,7 @@ def test_an_exact_replys_parts_keep_their_first_anchor_and_a_delivered_part_is_n
             assert [part["state"] for part in record["parts"]] == ["confirmed", "retry_wait"]
             assert (record["native_reply_id"], record["reply_fallback_id"]) == (77, 10)
             state._set_subagent_msg(bridge.api, _BOT, 42, "helper", 99)  # the card moved while the rest waited
-        async with _Origin(port=first.port) as second:
+            bridge.serve(second.base)
             await bridge.drain()
         sent = first.sent() + second.sent()
         assert len(first.sent()) == 1 and len(sent) == 3, "the delivered part is never resent"
@@ -778,7 +778,7 @@ def test_a_message_whose_handler_ends_before_its_next_part_is_never_confirmed_wh
         assert saved["parts"][0]["state"] == "confirmed"
         saved.update(state="sending", parts=saved["parts"][:1])  # as written just before the next part's request
         path.write_text(json.dumps(saved), encoding="utf-8")
-        async with _Origin(port=origin.port) as later:
+        async with _Origin() as later:
             again = _Bridge(tmp_path / "state", later.base, token="654321:OTHER-BOT-TOKEN")
             await again.drain()
         [ended] = again.records()
@@ -792,12 +792,12 @@ def test_a_message_whose_handler_ends_before_its_next_part_is_never_confirmed_wh
 
 def test_a_replaced_bot_never_continues_what_the_old_one_started(tmp_path):
     async def scenario():
-        async with _Origin(close_after=1) as first:
+        async with _Origin(close_after=1) as first, _Origin() as second:
             bridge = _Bridge(tmp_path / "state", first.base)
             await bridge.publish("chat.outbound", {"text": _LONG, "transport": {}})
             bridge.api.granted["TELEGRAM_BOT_TOKEN"] = "654321:OTHER-BOT-TOKEN"
             assert bridge.plugin.binding_for(bridge.api).read_now(bridge.api)  # the new token is accepted
-        async with _Origin(port=first.port) as second:
+            bridge.serve(second.base)
             await bridge.drain()
         assert len(first.sent()) == 1 and second.requests == []
         [record] = bridge.records()

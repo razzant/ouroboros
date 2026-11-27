@@ -649,15 +649,21 @@ def test_the_retained_corpus_fallback_keeps_identity_provenance_and_dedup(tmp_pa
     Continue whose terminal row retained an owner corpus. Now each branch obeys ONE
     identity rule: a msg_id names one text (a duplicate is skipped, a rival text is a
     gap), the run's first text never becomes a "later" owner message, a task's words
-    are context, and a row of unknown provenance is never promoted to owner text."""
-    from ouroboros.owner_continue import owner_sources
+    are context, and a row of unknown provenance is never promoted to owner text.
+    The exact mailbox row keeps the bytes and identity it always had, its entry's time in
+    ``ts`` named beside it as the mailbox's receipt; what its delivered copy verified (the
+    chat row's room, client id, digest and time) is shown beside it, never adopted."""
+    import json
+
+    from ouroboros.owner_continue import owner_sources, row_identity, work_order_text
     from ouroboros.task_results import load_task_result
 
     _install_queue(tmp_path, monkeypatch)
+    delivered = {"chat_id": "7", "client_message_id": "cm-2", "row_sha256": "c" * 64, "ts": "2026-10-01T09:00:00+00:00"}
     _settled_with_corpus(
         tmp_path,
         {"source": "initial_user", "content": "Write the Friday report"},  # the original's projection
-        {"source": "owner_mailbox", "content": "Also add the charts", "msg_id": "owner-2"},  # captured twin
+        {"source": "owner_mailbox", "content": "Also add the charts", "msg_id": "owner-2", **delivered},  # captured twin
         {"source": "direct_incoming", "content": "And a summary slide", "msg_id": "cm-9"},  # only here
         {"source": "direct_incoming", "content": "And a summary slide"},  # same words, no id
         {"source": "principal_task_message", "content": "parent: numbers attached", "msg_id": "t-1",
@@ -670,9 +676,76 @@ def test_the_retained_corpus_fallback_keeps_identity_provenance_and_dedup(tmp_pa
     assert [(row["source"], row["content"]) for row in sources["later"]] == [
         ("owner_mailbox", "Also add the charts"), ("owner_mailbox", "Use last week's numbers"),
         ("direct_incoming", "And a summary slide")]
-    assert sources["later"][0]["exact_row"], "the exact mailbox row outranks its corpus projection"
+    charts, numbers = sources["later"][:2]
+    assert charts["exact_row"], "the exact mailbox row outranks its corpus projection"
+    for row, msg_id in ((charts, "owner-2"), (numbers, "owner-3")):
+        mailed = json.loads(row["exact_row"])["ts"]
+        assert {key: value for key, value in row.items() if key not in ("received", "delivered")} == {
+            "source": "owner_mailbox", "content": row["content"], "msg_id": msg_id, "ts": mailed,
+            "exact_row": row["exact_row"], "mail_kind": "owner_text"}, "the bytes the row always carried"
+        assert row_identity(row) == msg_id and row["received"] == mailed, "its identity, and its receipt named"
+    assert charts["delivered"] == delivered and "delivered" not in numbers, "the verified chat row, beside it"
+    order = work_order_text("pred-1", "cancelled", sources)
+    assert f"- {delivered['ts']} (received {charts['received']}) Also add the charts" in order
+    assert f"- received {numbers['received']} Use last week's numbers" in order
     assert [(row["source_task_id"], row["text"]) for row in sources["peer_context"]] == [
         ("", "peer says hi"), ("parent-x", "parent: numbers attached")]
+
+
+def test_a_delivered_copy_is_shown_only_beside_a_listed_row_whose_coordinates_agree(tmp_path, monkeypatch):
+    """A verified chat row joins a listed row of the same message (one delivery id) only beside it, and only when that
+    row names no other room or client id: a start corpus row carried under another client id keeps its own
+    coordinates and identity, and nothing is shown beside it."""
+    from ouroboros.owner_continue import owner_sources, row_identity
+    from ouroboros.task_results import load_task_result
+
+    _install_queue(tmp_path, monkeypatch)
+    _settled_with_corpus(tmp_path, {"source": "owner_mailbox", "content": "Also add the charts", "msg_id": "owner-2",
+                                    "chat_id": "7", "client_message_id": "cm-2", "row_sha256": "c" * 64,
+                                    "ts": "2026-10-01T09:00:00+00:00"})
+    result = load_task_result(tmp_path, "pred-1")
+    listed = {"source": "owner_mailbox", "content": "Also add the charts", "msg_id": "owner-2", "chat_id": "7",
+              "client_message_id": "cm-other"}
+    sources = owner_sources(tmp_path, {**result, "metadata": {**(result.get("metadata") or {}), "owner_corpus": [listed]}},
+                            "pred-1")
+
+    [charts] = [row for row in sources["later"] if row["msg_id"] == "owner-2"]
+    assert sources["gaps"] == [] and row_identity(charts) == "owner-2" and "delivered" not in charts
+    assert (charts["chat_id"], charts["client_message_id"]) == ("7", "cm-other") and "row_sha256" not in charts
+
+
+def test_a_successor_sees_where_and_when_a_delivered_reply_was_sent_beside_its_own_receipt(tmp_path, monkeypatch):
+    """The whole path to what the Safety check is shown (``owner_sources`` → ``owner_corpus_rows`` →
+    ``_initialize_owner_directives`` → ``safety._build_check_prompt``, whose ``occasion.sources`` it reads; no model is
+    called). A reply whose delivered copy verified its chat row (room 7, the time that room accepted it) shows that room
+    and time in ``delivered``, apart from its own id and the later time the mailbox received it, though the successor works
+    in another room (42); a reply with no verified copy shows none, and nothing is filled in."""
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros import safety
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources
+    from ouroboros.task_results import load_task_result
+
+    _install_queue(tmp_path, monkeypatch)
+    delivered = {"chat_id": "7", "client_message_id": "cm-2", "row_sha256": "c" * 64, "ts": "2026-10-01T09:00:00+00:00"}
+    _settled_with_corpus(tmp_path, {"source": "initial_user", "content": "Write the Friday report"},
+                         {"source": "owner_mailbox", "content": "Also add the charts", "msg_id": "owner-2", **delivered})
+    sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
+    successor = SimpleNamespace(task_id="pred-1-c1", drive_root=tmp_path, current_chat_id=42, _owner_directives=[],
+                                task_metadata={"objective_author": {"kind": "continuation"},
+                                               "owner_corpus": owner_corpus_rows(sources)})
+    _initialize_owner_directives(successor, [])
+    prompt = safety._build_check_prompt("run_command", {"cmd": ["echo", "hello"]}, None, ctx=successor)
+    shown = {row["content"]: row for row in json.loads(
+        prompt.split("Host evidence (provenance is not consent):\n", 1)[1].split("\nProposed tool call:", 1)[0]
+    )["occasion"]["sources"]}
+
+    charts, numbers = shown["Also add the charts"], shown["Use last week's numbers"]
+    assert charts["msg_id"] == "owner-2" and charts["ts"] == charts["received"] != delivered["ts"], "its own id and receipt"
+    assert charts["delivered"] == {"chat_id": "7", "ts": delivered["ts"]}, "the room and time that room accepted it"
+    assert "delivered" not in numbers and "row_sha256" not in charts and "client_message_id" not in charts
 
 
 def test_continue_carries_my_humans_confirmed_place_words_citable_without_promoting_them(tmp_path, monkeypatch):
@@ -722,7 +795,8 @@ def test_continue_carries_my_humans_confirmed_place_words_citable_without_promot
         assert cited_owner_basis(ctx, other)[0] is None, other
     from ouroboros import own_sends
     from ouroboros.loop_messages import _record_owner_directive
-    from ouroboros.owner_words import PLACE_CONFIRMED, place_row_facts
+    from ouroboros.owner_words import PLACE_CONFIRMED
+    from ouroboros.presence_message_facts import place_row_facts
     seeded = next(row for row in ctx._owner_directives if row.get("source") == PLACE_CONFIRMED)
     assert (seeded["conversation_id"], seeded["message_id"]) == ("C7", "1793991999.000001"), "a next Continue reads it"
     receipt = f'MsgID,Channel,Text\n1793991999.000001,C7,"{words}"\n'
@@ -953,24 +1027,30 @@ def test_history_replays_the_offer_so_a_collapsed_card_needs_no_opening(tmp_path
     import json
     from types import SimpleNamespace
 
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
     from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.project_registry_recovery import initialize_new_root
     from ouroboros.task_results import write_task_result
     from supervisor.continuation_admission import admit_continuation
 
     _install_queue(tmp_path, monkeypatch)
-    _interrupted(tmp_path, "pred-1")
-    _interrupted(tmp_path, "pred-2")
-    write_task_result(tmp_path, "done-1", "completed", chat_id=7, root_task_id="done-1", result="done")
+    # A healthy Main already has its empty Project registry before the history is written.
+    initialize_new_root(tmp_path)
+    _interrupted(tmp_path, "pred-1", chat_id=WEB_UI_CHAT_ID)
+    _interrupted(tmp_path, "pred-2", chat_id=WEB_UI_CHAT_ID)
+    write_task_result(tmp_path, "done-1", "completed", chat_id=WEB_UI_CHAT_ID, root_task_id="done-1", result="done")
     (tmp_path / "logs").mkdir(exist_ok=True)
     (tmp_path / "logs" / "chat.jsonl").write_text("".join(json.dumps({
         "ts": f"2026-09-27T00:00:0{i}Z", "direction": "system", "type": "task_summary", "task_id": task_id,
-        "chat_id": 7, "text": "summary"}) + "\n" for i, task_id in enumerate(("pred-1", "pred-2", "done-1"))),
+        "chat_id": WEB_UI_CHAT_ID, "text": "summary"}) + "\n" for i, task_id in enumerate(("pred-1", "pred-2", "done-1"))),
         encoding="utf-8")
     (tmp_path / "logs" / "progress.jsonl").write_text("", encoding="utf-8")
     successor = admit_continuation("pred-2", action_nonce=NONCE)["successor_task_id"]
 
     endpoint = make_chat_history_endpoint(tmp_path)
-    payload = json.loads(asyncio.run(endpoint(SimpleNamespace(query_params={"limit": "20"}))).body)["messages"]
+    response = asyncio.run(endpoint(SimpleNamespace(query_params={"limit": "20"})))
+    assert response.status_code == 200, response.body
+    payload = json.loads(response.body)["messages"]
     offers = {row["task_id"]: row.get("continuation_offer") for row in payload if row.get("task_id")}
     assert offers["pred-1"] == {"eligible": True, "cause": "snapshot_restore", "refusal": ""}
     assert offers["pred-2"]["successor_task_id"] == successor and offers["pred-2"]["eligible"] is False
@@ -1059,15 +1139,18 @@ def test_equal_unidentified_owner_and_peer_words_keep_both_sources(tmp_path, mon
     assert continuation["peer_context"][0]["text"] == "same words"
 
 
-def test_a_predecessor_that_heard_my_human_mid_turn_continues_while_its_mailbox_is_kept(tmp_path, monkeypatch):
+@pytest.mark.parametrize("sent_at", [None, "2025-12-01T08:30:00+00:00"], ids=["source_time_absent", "source_time_present"])
+def test_a_predecessor_that_heard_my_human_mid_turn_continues_while_its_mailbox_is_kept(tmp_path, monkeypatch, sent_at):
     """#2811: the drain records my human's mid-turn place words under the opening's id, never under their context
     mailbox row's id. One id is one text and one owner-ness, so Continue admits the predecessor while its mailbox is
-    still kept, and the successor carries their words."""
+    still kept, and the successor carries their words: with the provider identity of the message and the time the
+    work captured it (``received``), through completion's record and the Continue, beside the provider's send time
+    (``message.sent_at``) as ``ts`` when the connector recorded one, and no invented time when it did not."""
     import json
     from types import SimpleNamespace
 
-    from ouroboros.owner_continue import owner_sources
-    from ouroboros.owner_mailbox import write_task_message
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources
+    from ouroboros.owner_mailbox import _mailbox_path, write_task_message
     from ouroboros.review_evidence_sections import _accept_owner_directives
     from ouroboros.task_results import load_task_result, write_task_result
     from supervisor.continuation_admission import admit_continuation
@@ -1075,11 +1158,14 @@ def test_a_predecessor_that_heard_my_human_mid_turn_continues_while_its_mailbox_
 
     _install_queue(tmp_path, monkeypatch)
     _interrupted(tmp_path, root_phase_checkpoint={}, child_ref_promotion={})
-    words = "Send the status to the leads"
+    words, provider = "Send the status to the leads", {"conversation_id": "C7", "message_id": "1793991999.000001"}
     assert write_task_message(tmp_path, json.dumps({"event": words}), "pred-1", source_task_id="presence-x",
                               provenance="place_event", msg_id="place-event:ident-1",
                               sender_origin={"place_id": "p1", "conversation_key": "chat:a:r"},
-                              place_arrival={"source_event_id": "e1", "message": {}, "wake": True, "owner_words": words})
+                              place_arrival={"source_event_id": "e1", "conversation_id": provider["conversation_id"],
+                                             "message": {"message_id": provider["message_id"],
+                                                         **({"sent_at": sent_at} if sent_at else {})},
+                                             "wake": True, "owner_words": words})
     reader = SimpleNamespace(task_id="pred-1", task_attempt=1, task_metadata={}, _loop_mailbox_seen_ids=set(),
                              _owner_directives=[{"source": "initial_user", "content": "Write the Friday report"}])
     _delivered(tmp_path, reader)
@@ -1089,6 +1175,15 @@ def test_a_predecessor_that_heard_my_human_mid_turn_continues_while_its_mailbox_
     # A confirmed account's later place message is provenance the run may cite, never an owner directive of its own;
     # the Continue packet's owner rows therefore do not carry it (its words stay in the kept mailbox).
     assert sources["gaps"] == [] and sources["later"] == []
+    [arrival] = [json.loads(line) for line in _mailbox_path(tmp_path, "pred-1").read_text(encoding="utf-8").splitlines()]
+    [heard] = sources["confirmed_place"]
+    assert (heard["content"], {key: heard[key] for key in provider}) == (words, provider)
+    assert heard["received"] == arrival["ts"]  # when the work captured it
+    if sent_at:  # the provider's send time, beside the capture, never standing for it
+        assert heard["ts"] == sent_at != heard["received"]
+    else:  # the connector recorded none: no time stands in for it
+        assert "ts" not in heard
+    assert [row for row in owner_corpus_rows(sources) if row["source"] == "place_confirmed"] == [heard]
     assert admit_continuation("pred-1", action_nonce=NONCE)["ok"] is True
 
 
@@ -1623,7 +1718,7 @@ def test_continue_retypes_the_previous_releases_later_quiz_answers(tmp_path, mon
     from types import SimpleNamespace
 
     from ouroboros.loop_messages import _initialize_owner_directives
-    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.owner_mailbox import acknowledge_transcript_entry, write_owner_message
     from ouroboros.owner_words import cited_owner_basis, owner_words_contain
     from ouroboros.task_results import load_task_result
     from supervisor.continuation_admission import admit_continuation
@@ -1640,6 +1735,8 @@ def test_continue_retypes_the_previous_releases_later_quiz_answers(tmp_path, mon
         assert write_owner_message(tmp_path, typed or "2. " + label, asker, kind="quiz_answer",
                                    msg_id=f"quiz_answer:{asker}:{quiz_id}", quiz_delivery={
                                        "task_id": asker, "quiz_id": quiz_id, "answer_snapshot": card})
+        # The work read each answer: only a read answer rides into its Continue (no asker record holds these cards).
+        assert acknowledge_transcript_entry(tmp_path, asker, {"msg_id": f"quiz_answer:{asker}:{quiz_id}"})
 
     # The previous Continue wrote both accepted cards and their corpus copies under owner_quiz_answer.
     with monkeypatch.context() as previous:
@@ -1704,3 +1801,310 @@ def test_continue_and_snapshot_gc_still_see_the_original_pending_writer(tmp_path
     assert release_settled_continuations("pred-1") == []
     assert len(_rows(tmp_path, custody.START_RISK_ACCEPTED)) == 1
     assert "retained-copy" in custody.open_snapshot_ids(tmp_path)
+
+
+def test_continue_and_owner_corpus_preserve_host_typed_closure_and_ignore_bad_mail_kind(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources, row_identity
+    from ouroboros.owner_mailbox import KIND_QUIZ_CLOSED, _mailbox_path, write_owner_message
+    from ouroboros.owner_words import safety_sources
+    from ouroboros.review_evidence_sections import _accept_owner_directives
+    from ouroboros.safety_evidence import with_author
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    closure_text = (
+        "[Owner question closed without answer] quiz q-ink — closed 2026-11-20T10:00:00+00:00. "
+        "Reason: Wait until Tuesday\n"
+        "This closes the question; no option was chosen and no approval was given."
+    )
+    _interrupted(
+        tmp_path, task_id="ink-desk",
+        metadata={
+            "owner_corpus": [{"source": "owner_mailbox", "content": closure_text, "msg_id": "quiz_closed:q-ink"}],
+            "continuation": {"predecessor_task_id": "ink-0", "owner_sources": {
+                "original": {"source": "origin_message", "content": "Write the Friday report",
+                             "origin_message_ref": {"chat_id": 7, "client_message_id": "m-1"}},
+                "later": [
+                    {"source": "owner_mailbox", "content": "Check the wax seal", "msg_id": "chained-bad",
+                     "mail_kind": {"unexpected": True}},
+                    {"source": "owner_mailbox", "content": "Trim the parchment", "msg_id": "chained-unknown",
+                     "mail_kind": "invented"},
+                ],
+            }},
+        },
+        review_evidence={"task_inputs": {"owner_requirements_and_decisions": [
+            {"source": "owner_mailbox", "content": "Fold the inserts", "msg_id": "corpus-bad", "mail_kind": 123},
+        ]}},
+    )
+    assert write_owner_message(tmp_path, closure_text, "ink-desk", msg_id="quiz_closed:q-ink", kind=KIND_QUIZ_CLOSED)
+    with _mailbox_path(tmp_path, "ink-desk").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"msg_id": "legacy-ink-1", "text": "Keep the cream envelopes",
+                                 "ts": "2026-11-20T10:01:00+00:00"}) + "\n")
+
+    first = admit_continuation("ink-desk", action_nonce=NONCE)
+    assert first["ok"], first
+    [succ] = workers.PENDING
+    by_id = {row.get("msg_id"): row for row in succ["metadata"]["owner_corpus"]}
+    assert by_id["quiz_closed:q-ink"]["mail_kind"] == "quiz_closed"
+    assert row_identity(by_id["quiz_closed:q-ink"]) == row_identity(
+        {k: v for k, v in by_id["quiz_closed:q-ink"].items() if k != "mail_kind"})
+    for mid in ("legacy-ink-1", "chained-bad", "chained-unknown", "corpus-bad"):
+        assert by_id[mid]["source"] == "owner_mailbox" and "mail_kind" not in by_id[mid]
+    # The successor's work order keeps the closure the host's record and a legacy row of no recorded kind neither my
+    # human's words nor the host's; the mailbox's time is named a receipt, and the row keeps the ``ts`` it always had.
+    assert "Host record: " + closure_text in succ["text"] and "(verbatim): " + closure_text not in succ["text"]
+    assert ("- received 2026-11-20T10:01:00+00:00 Mail of an unrecorded kind (my human's words or the host's record of "
+            "an act of theirs): Keep the cream envelopes") in succ["text"]
+    assert "(verbatim): Keep the cream envelopes" not in succ["text"]
+    assert by_id["legacy-ink-1"]["received"] == by_id["legacy-ink-1"]["ts"] == "2026-11-20T10:01:00+00:00"
+
+    ctx = SimpleNamespace(task_id=succ["id"], task_metadata=succ["metadata"], drive_root=tmp_path)
+    _initialize_owner_directives(ctx, [{"role": "user", "content": succ["text"]}])
+    rendered = {row.get("msg_id"): with_author(row, succ["metadata"]) for row in safety_sources(ctx)}
+    assert rendered["quiz_closed:q-ink"]["author"] == (
+        "the host's notice that the owner closed the question it names without an answer: no option was "
+        "chosen and nothing was approved. The notice's words are the host's; the reason it quotes is the "
+        "owner's own words or the host's standard sentence"
+    )
+    assert rendered["legacy-ink-1"]["author"] == (
+        "a record of owner input carried into this run; any host framing is not the owner's wording"
+    )
+    assert "without a retained kind" in with_author(
+        {k: v for k, v in rendered["legacy-ink-1"].items() if k != "carried"}, {})["author"]
+
+    # Retained review evidence and a chained Continue pass keep the typed closure without adding gaps.
+    accepted = _accept_owner_directives(ctx, tmp_path, succ["id"])
+    chained_record = {**load_task_result(tmp_path, succ["id"]), "owner_mailbox": {"read_complete": True, "rows": []},
+                      "review_evidence": {"task_inputs": {"owner_requirements_and_decisions": accepted}}}
+    hop2 = owner_sources(tmp_path, chained_record, succ["id"])
+    assert not hop2["gaps"]
+    by_id_2 = {row.get("msg_id"): row for row in owner_corpus_rows(hop2)}
+    assert by_id_2["quiz_closed:q-ink"]["mail_kind"] == "quiz_closed"
+    assert all("mail_kind" not in by_id_2[mid] for mid in ("legacy-ink-1", "chained-bad", "chained-unknown", "corpus-bad"))
+
+
+@pytest.mark.parametrize("settled", [False, True], ids=["live_mailbox", "settled_unread_mailbox"])
+def test_unread_committed_work_reply_keeps_return_address_on_continue(tmp_path, monkeypatch, settled):
+    """A normal work that really received a direct Reply and crashed before reading it keeps that return address
+    on Continue (whether the mailbox is still live or already settled into ``unread_mailbox``), and answers once
+    under the existing idempotent relay path."""
+    import queue as stdqueue
+
+    from ouroboros import dialogue_store
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.loop_messages import owner_reply_owed
+    from ouroboros.owner_relay import held_owner_messages, owner_quote, write_relay
+    from ouroboros.task_custody import settle_task_mailbox
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.tools.control_runtime import _send_user_message, open_work_reply_ids
+    from ouroboros.tools.registry import ToolRegistry
+    from supervisor import terminal_delivery
+    from supervisor.continuation_admission import admit_continuation
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    owner_row = {"chat_id": 1, "direction": "in", "source": "web", "ts": "2026-11-24T10:00:00Z",
+                 "text": "Switch to the smaller cohort.", "client_message_id": "reply-crash-1", "attachments": []}
+    dialogue_store.append(tmp_path, "chat", owner_row)
+    address = format_address(row_address(owner_row))
+    rid = f"work-reply:{row_address(owner_row)['row_sha256']}"
+    did = f"relay-return:{rid}"
+
+    _running_predecessor(tmp_path, "pred-1", chat_id=7)
+    write_task_result(tmp_path, "pred-1", "running", open_relays={})  # persisted before the Reply arrived
+    entry, fresh = write_relay(tmp_path, "pred-1", relay_id=rid, note="",
+                               quotes=[owner_quote(tmp_path, owner_row, address=address)],
+                               chat_id=1, teller_task_id="", canonical_root=tmp_path, work_reply=True)
+    assert fresh and entry["work_reply"] is True
+    # Predecessor crashes before draining the mailbox.
+    write_task_result(tmp_path, "pred-1", "failed", reason_code="worker_crash_signal", result="crashed")
+    if settled:
+        assert settle_task_mailbox(tmp_path, "pred-1", tmp_path)
+
+    admitted = admit_continuation("pred-1", action_nonce=NONCE)
+    assert admitted["ok"] is True, admitted
+    successor_id = admitted["successor_task_id"]
+    [succ] = [row for row in workers.PENDING if row["id"] == successor_id]
+    owner_sources_meta = succ["metadata"]["continuation"]["owner_sources"]
+    assert list(owner_sources_meta["open_relays"]) == [rid]
+    carried = owner_sources_meta["open_relays"][rid]
+    assert carried["work_reply"] is True and carried["source"]["chat_id"] == 1 and carried["source"]["address"] == address
+    assert address in owner_sources_meta["held_owner_messages"]
+
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx = registry._ctx
+    ctx.task_id, ctx.current_chat_id, ctx.event_queue = successor_id, 7, stdqueue.Queue()
+    ctx.task_metadata = succ["metadata"]
+    ctx.pending_events = []
+    ctx.drive_logs = lambda: tmp_path / "logs"
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    write_task_result(tmp_path, successor_id, "running", chat_id=7, root_task_id=successor_id)
+    held_owner_messages(ctx)
+    assert open_work_reply_ids(registry) == (rid,) and owner_reply_owed(ctx)
+
+    receipt = _send_user_message(ctx, "Switched to the smaller cohort.", reply_to_relay=rid)
+    assert receipt.startswith(f"OK: answer to relay {rid} owed to Main (delivery {did});")
+    [event] = list(ctx.event_queue.queue)
+    assert (event["chat_id"], event["system_type"], event["delivery_id"],
+            event["progress_meta"]["reply_to"]["address"], event["progress_meta"]["reply_to_relay"]) == (
+        1, "relay_reply", did, address, rid)
+    assert not ctx._open_relays and (load_task_result(tmp_path, successor_id) or {}).get("open_relays") == {}
+
+    # A stale second attempt holding the same relay meets the first committed wording via the idempotent path.
+    ctx._open_relays = {rid: dict(carried)}
+    second = _send_user_message(ctx, "Different second wording.", reply_to_relay=rid)
+    assert "already has its first answer" in second and "these words were not sent" in second
+    assert ctx.event_queue.qsize() == 1 and not ctx._open_relays
+    owed = {item["delivery_id"]: item for item in terminal_delivery.pending_deliveries(tmp_path)}
+    assert owed[did]["text"] == "Switched to the smaller cohort."
+
+
+@pytest.mark.parametrize("settled", [False, True], ids=["live_mailbox", "settled_unread_mailbox"])
+def test_continue_does_not_reopen_acknowledged_handled_passive_teller_or_unverified_relays(tmp_path, monkeypatch, settled):
+    """Only an unread, host-verified active ``work_reply`` re-enters ``open_relays`` on Continue; acknowledged,
+    handled-fallback, passive-context, ordinary teller and unverified entries stay closed."""
+    from ouroboros import dialogue_store
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.owner_mailbox import _mailbox_path, acknowledge_transcript_entry
+    from ouroboros.owner_relay import ROUTED_BY_HEAD, owner_quote, write_relay
+    from ouroboros.task_custody import settle_task_mailbox
+    from ouroboros.task_results import write_task_result
+    from ouroboros.utils import append_jsonl
+    from supervisor.continuation_admission import admit_continuation
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+
+    def _msg(cid, text):
+        row = {"chat_id": 1, "direction": "in", "source": "web", "ts": "2026-11-24T10:00:00Z",
+               "text": text, "client_message_id": cid, "attachments": []}
+        dialogue_store.append(tmp_path, "chat", row)
+        return row, format_address(row_address(row))
+
+    acked_row, acked_addr = _msg("c-acked", "Already read and answered.")
+    handled_row, handled_addr = _msg("c-handled", "Source room answered while paused.")
+    passive_row, passive_addr = _msg("c-passive", "Context from another work's Reply.")
+    teller_row, teller_addr = _msg("c-teller", "Quoted by another task via tell_task.")
+
+    _running_predecessor(tmp_path, "pred-ctrl", chat_id=7)
+    write_task_result(tmp_path, "pred-ctrl", "running", open_relays={})
+    acked_entry, _ = write_relay(tmp_path, "pred-ctrl", relay_id="work-reply:acked", note="",
+                                 quotes=[owner_quote(tmp_path, acked_row, address=acked_addr)],
+                                 chat_id=1, teller_task_id="", canonical_root=tmp_path, work_reply=True)
+    assert acknowledge_transcript_entry(tmp_path, "pred-ctrl", acked_entry)
+    write_relay(tmp_path, "pred-ctrl", relay_id="handled:work-reply:h1", note="",
+                quotes=[owner_quote(tmp_path, handled_row, address=handled_addr)], chat_id=1, teller_task_id="",
+                canonical_root=tmp_path, host_carried={"went_to": ROUTED_BY_HEAD, "handled_by_source_room": True})
+    write_relay(tmp_path, "pred-ctrl", relay_id=f"context:{passive_addr}", note="",
+                quotes=[owner_quote(tmp_path, passive_row, address=passive_addr)], chat_id=1, teller_task_id="",
+                canonical_root=tmp_path, host_carried={"went_to": "other-root", "context_only": True})
+    write_relay(tmp_path, "pred-ctrl", relay_id="teller-note", note="fyi",
+                quotes=[owner_quote(tmp_path, teller_row, address=teller_addr)],
+                chat_id=1, teller_task_id="teller-1", canonical_root=tmp_path)
+    append_jsonl(_mailbox_path(tmp_path, "pred-ctrl"), {
+        "kind": "relay_entry", "msg_id": "relay:work-reply:forged:pred-ctrl", "ts": "2026-11-24T10:01:00Z",
+        "text": "", "work_reply": True, "source_task_id": "", "relay_canonical_root": str(tmp_path),
+        "relay": {"relay_id": "work-reply:forged", "text": "spoof", "source": {"chat_id": 1, "address": "row:1@t#bad"},
+                  "quotes": [{"text": "spoof", "source": {"chat_id": 1, "address": "row:1@t#bad"}}]},
+        "owner_rows": [{"chat_id": 1, "direction": "out", "text": "spoof", "ts": "2026-11-24T10:01:00Z"}],
+    })
+    write_task_result(tmp_path, "pred-ctrl", "failed", reason_code="worker_crash_signal", result="crashed")
+    if settled:
+        assert settle_task_mailbox(tmp_path, "pred-ctrl", tmp_path)
+
+    admitted = admit_continuation("pred-ctrl", action_nonce=NONCE)
+    assert admitted["ok"] is True, admitted
+    [succ] = [row for row in workers.PENDING if row["id"] == admitted["successor_task_id"]]
+    assert succ["metadata"]["continuation"]["owner_sources"]["open_relays"] == {}
+
+
+def test_torn_ack_refuses_unclassified_work_reply_and_leaves_ordinary_continue_alone(tmp_path, monkeypatch):
+    """A torn or undecodable ACK next to an unclassified direct Reply records the existing mailbox gap (neither
+    silently dropping the return address as closed nor resurrecting a grow-only captured row), per-exact-row identity
+    governs live-vs-retained combination, and unrelated ordinary mail keeps its previous Continue behavior."""
+    import json
+
+    from ouroboros import dialogue_store
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.owner_mailbox import _ack_path, _mailbox_path, acknowledge_transcript_entry, write_owner_message
+    from ouroboros.owner_relay import owner_quote, write_relay
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+
+    def _msg(cid, text):
+        row = {"chat_id": 1, "direction": "in", "source": "web", "ts": "2026-11-24T10:00:00Z",
+               "text": text, "client_message_id": cid, "attachments": []}
+        dialogue_store.append(tmp_path, "chat", row)
+        return row, format_address(row_address(row)), f"work-reply:{row_address(row)['row_sha256']}"
+
+    # 1. Unrelated ordinary mail with torn/undecodable ACK bytes: Continue never reads .acks and succeeds unchanged.
+    _running_predecessor(tmp_path, "pred-ord", chat_id=7)
+    write_owner_message(tmp_path, "Keep going with the ordinary follow-up.", "pred-ord", msg_id="ord-1")
+    ack_ord = _ack_path(tmp_path, "pred-ord")
+    ack_ord.parent.mkdir(parents=True, exist_ok=True)
+    ack_ord.write_bytes(b'\xff{"type":"task_message_acknowledged","msg_id":"torn')
+    write_task_result(tmp_path, "pred-ord", "failed", reason_code="worker_crash_signal", result="crashed")
+    ord_ok = admit_continuation("pred-ord", action_nonce=NONCE)
+    assert ord_ok["ok"] is True, ord_ok
+    [ord_succ] = [row for row in workers.PENDING if row["id"] == ord_ok["successor_task_id"]]
+    assert [r["content"] for r in ord_succ["metadata"]["continuation"]["owner_sources"]["later"]] == [
+        "Keep going with the ordinary follow-up."]
+    assert ord_succ["metadata"]["continuation"]["owner_sources"]["open_relays"] == {}
+
+    # 2. Direct Reply (live-only, no captured unread_mailbox) + torn ACK: cannot be treated as definitively closed.
+    row1, addr1, rid1 = _msg("torn-live-1", "Check the live return.")
+    _running_predecessor(tmp_path, "pred-torn-live", chat_id=7)
+    write_task_result(tmp_path, "pred-torn-live", "failed", reason_code="worker_crash_signal", open_relays={})
+    write_relay(tmp_path, "pred-torn-live", relay_id=rid1, note="",
+                quotes=[owner_quote(tmp_path, row1, address=addr1)], chat_id=1, teller_task_id="",
+                canonical_root=tmp_path, work_reply=True)
+    _ack_path(tmp_path, "pred-torn-live").write_text('{"msg_id":"relay:work-reply:torn', encoding="utf-8")
+    live_src = owner_sources(tmp_path, load_task_result(tmp_path, "pred-torn-live"), "pred-torn-live")
+    assert live_src["gaps"] == ["owner_mailbox_unreadable"] and live_src["open_relays"] == {}
+    live_refused = admit_continuation("pred-torn-live", action_nonce=NONCE)
+    assert live_refused == {"ok": False, "error": "owner_source_missing", "gaps": ["owner_mailbox_unreadable"]}
+
+    # 3. Direct Reply in BOTH grow-only unread_mailbox and live mailbox + undecodable ACK: cannot resurrect captured row.
+    row2, addr2, rid2 = _msg("torn-cap-1", "Check the captured return.")
+    _running_predecessor(tmp_path, "pred-torn-cap", chat_id=7)
+    write_task_result(tmp_path, "pred-torn-cap", "running", open_relays={})
+    write_relay(tmp_path, "pred-torn-cap", relay_id=rid2, note="",
+                quotes=[owner_quote(tmp_path, row2, address=addr2)], chat_id=1, teller_task_id="",
+                canonical_root=tmp_path, work_reply=True)
+    write_task_result(tmp_path, "pred-torn-cap", "failed", reason_code="worker_crash_signal", result="crashed")
+    assert load_task_result(tmp_path, "pred-torn-cap")["unread_mailbox"]["read_complete"] is True
+    _ack_path(tmp_path, "pred-torn-cap").write_bytes(b'\xff{"msg_id":"torn')
+    cap_src = owner_sources(tmp_path, load_task_result(tmp_path, "pred-torn-cap"), "pred-torn-cap")
+    assert cap_src["gaps"] == ["owner_mailbox_unreadable"] and cap_src["open_relays"] == {}
+    cap_refused = admit_continuation("pred-torn-cap", action_nonce=NONCE)
+    assert cap_refused == {"ok": False, "error": "owner_source_missing", "gaps": ["owner_mailbox_unreadable"]}
+
+    # 4. Per-exact-row identity: an intact live ACK closes exact row A even when grow-only unread_mailbox kept it,
+    #    without suppressing a distinct retained exact row B that reused the same msg_id.
+    row_a, addr_a, rid_a = _msg("exact-a", "Already read row A.")
+    row_b, addr_b, rid_b = _msg("exact-b", "Still unread row B.")
+    _running_predecessor(tmp_path, "pred-exact", chat_id=7)
+    write_task_result(tmp_path, "pred-exact", "running", open_relays={})
+    entry_a, _ = write_relay(tmp_path, "pred-exact", relay_id=rid_a, note="",
+                             quotes=[owner_quote(tmp_path, row_a, address=addr_a)], chat_id=1, teller_task_id="",
+                             canonical_root=tmp_path, work_reply=True)
+    quote_b = owner_quote(tmp_path, row_b, address=addr_b)
+    entry_b = {**entry_a, "ts": "2026-11-24T10:05:00Z", "owner_rows": [quote_b["owner_row"]],
+               "relay": {**{k: v for k, v in quote_b.items() if k != "owner_row"},
+                         "relay_id": rid_b, "quotes": [{k: v for k, v in quote_b.items() if k != "owner_row"}]}}
+    entry_a_line = _mailbox_path(tmp_path, "pred-exact").read_text(encoding="utf-8").strip()
+    write_task_result(tmp_path, "pred-exact", "failed", reason_code="worker_crash_signal",
+                      unread_mailbox={"schema": 1, "total": 2, "read_complete": True,
+                                      "captured_at": "2026-11-24T10:06:00Z",
+                                      "rows": [entry_a_line, json.dumps(entry_b, ensure_ascii=False)]})
+    assert acknowledge_transcript_entry(tmp_path, "pred-exact", entry_a)
+    exact_ok = admit_continuation("pred-exact", action_nonce=NONCE)
+    assert exact_ok["ok"] is True, exact_ok
+    [exact_succ] = [row for row in workers.PENDING if row["id"] == exact_ok["successor_task_id"]]
+    assert list(exact_succ["metadata"]["continuation"]["owner_sources"]["open_relays"]) == [rid_b]

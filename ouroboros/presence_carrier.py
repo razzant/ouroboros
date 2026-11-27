@@ -166,6 +166,8 @@ def presence_seed_task(*, admission: PresenceAdmission, event: PresenceTurnEvent
             "continuation_version": int(event.continuation_version or 0),
             "allowance": dict(admission.allowance) if isinstance(admission.allowance, Mapping) else None,
             "gate_wait": bool(gate_wait), "request_waits": True,  # a Host request waits on this turn's result
+            **({"connected_revision": admission.connected_revision}
+               if admission.connected_revision is not None else {}),  # an owner_bot event's connection, rechecked
         },
     }
 
@@ -255,8 +257,10 @@ def carry_presence_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_r
     carrier_owner = task.get("_execution_owner") if isinstance(task.get("_execution_owner"), dict) else None
     physical_id, result, error = turn_id, None, None
     try:
+        revision = facts.get("connected_revision")
         admission = admit_presence_turn(drive_root=root, authenticated_transport_skill=str(facts.get("skill_name") or ""),
                                         binding_id=str(facts.get("binding_id") or ""),
+                                        connected_revision=revision if type(revision) is int else None,
                                         **presence_event_origin(facts.get("event")))
         if facts.get("allowance") is not None:
             admission = replace(admission, allowance=dict(facts["allowance"]))
@@ -399,6 +403,10 @@ def handle_presence_turn_settled(evt: dict[str, Any], ctx: Any) -> None:
             queue.persist_queue_snapshot(reason="presence_turn_settled")
         except Exception:
             log.debug("presence settlement snapshot failed for %s", turn_id, exc_info=True)
+    if root := getattr(ctx, "DRIVE_ROOT", None) or queue.DRIVE_ROOT:
+        from ouroboros.peer_replies import deliver_owed  # a linked Ouroboros's reply leaves at its end
+
+        deliver_owed(Path(root), turn_id)
 
 
 def _same_process(slot: Any, pid: Any) -> bool:
@@ -874,17 +882,19 @@ class _SavedCarrier:
 
     def reentered(self, ctx: Any, messages: list) -> None:
         """The conversation's facts since the park, appended once its saved state is restored."""
-        from ouroboros.presence_continuation import conversation_lost, reentry_note
+        from ouroboros.presence_continuation import conversation_lost, record_reentry_contribution, reentry_note
 
         if self.restored_wait or not self.lease.held() or conversation_lost(ctx):
             return
-        note = reentry_note(self.binding, ctx, parked_by=self.parked_by)
+        observation = {}
+        note = reentry_note(self.binding, ctx, parked_by=self.parked_by, observation=observation)
         lift = (getattr(ctx, "task_metadata", None) or {}).get("producer_allowance_lifted")
         if isinstance(lift, Mapping):  # said, not implied (#2566)
             note += (f"\nThe owner's own Resume moved this turn off its ${float(lift.get('ceiling_usd') or 0):.2f} "
                      "producer allowance: it runs on the ordinary project budget now. Its tree cap, the shared Total "
                      "budget and its deadline still bind, and the spend so far still counts.")
         messages.append({"role": "user", "content": note})
+        record_reentry_contribution(ctx, messages[-1], observation)
         self.binding.restored = False
 
     def leave(self) -> None:

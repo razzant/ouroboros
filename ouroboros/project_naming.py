@@ -1,10 +1,9 @@
 """SSOT for project naming (Cluster B, v6.40).
 
-An LLM-first short human title for a project card, with a deterministic heuristic
-fallback. Shared by every path that names a project so the UI conversion and the
-agent never drift:
-  - ``gateway/projects.py`` turn-into-project conversion (reuses an admission name,
-    or names inline as a race fallback);
+An LLM-first short title for a project card. Display consumers may use a lexical
+fallback; automatic room creation asks for a model-only result:
+  - ``gateway/projects.py`` turn-into-project conversion (reuses a proven name,
+    or names inline from the accepted input);
   - ``ensure_project_scope`` (the agent self-creates + names a project);
   - ``admission_names`` (headless runs and chat promotion, no model call), also for the
     head a late answer or card press starts (``late_input_names``: by what it answers);
@@ -15,8 +14,8 @@ Doctrine:
   - P5 LLM-first: the model COINS the name; post-processing is purely lexical
     (first line, strip quotes, cap length) — never a keyword/regex semantic gate.
   - #4 self-DoS: the provider call goes through the per-model concurrency slot.
-  - Fail-soft: any failure (no creds / provider error / timeout / empty output)
-    returns the heuristic fallback. Never raises.
+  - Fail-soft: the model call returns no title on failure. The card publisher may
+    still use a display-only fallback; conversion never does.
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ def _light_use_local(explicit: Optional[bool]) -> bool:
 
     return bool(explicit) if explicit is not None else following_route("light")[1]
 
-# Mirror gateway ``_MAX_DERIVED_NAME`` so heuristic and LLM names share one cap.
+# Card display and automatic titles share this cap.
 MAX_PROJECT_NAME = 60
 
 _NAMING_PROMPT = (
@@ -85,6 +84,33 @@ def clean_model_title(text: object, max_len: int = MAX_PROJECT_NAME) -> str:
     if len(line) > max_len:
         line = line[: max_len - 1].rstrip() + "…"
     return line
+
+
+def visible_model_title(msg: Any, usage: Any) -> str:
+    """The title a model reply visibly carries, or "" when the reply is no usable answer.
+
+    Reads the provider's own terminal facts (``reply_usability``: a refusal, filter or failed reply; a cut at the
+    output limit) and only the reply's visible words: the round's one visible-text rule (``loop_messages``: no
+    thinking, reasoning or Gemini ``thought`` part, whose marker may sit on an untyped part), and on a Responses reply
+    that marks its phases only the ``final_answer`` text, never commentary. Lexical cleanup stays
+    ``clean_model_title``'s."""
+    from ouroboros._usage_response import (
+        CONTENT_REFUSAL_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS, response_finish_reason, usage_reply_unfinished,
+        usage_reply_usability,
+    )
+    from ouroboros.loop_messages import _visible_round_text
+    from ouroboros.openai_responses_custody import final_answer_text
+
+    if (not isinstance(msg, dict) or msg.get("refusal")
+            or usage_reply_usability(usage, msg) != "usable" or usage_reply_unfinished(usage)):
+        return ""
+    if str(response_finish_reason(usage, msg)[1] or "").strip().lower() in OUTPUT_LIMIT_FINISH_REASONS | CONTENT_REFUSAL_FINISH_REASONS:
+        return ""
+    final = final_answer_text(msg)
+    content = msg.get("content") if final is None else final
+    if isinstance(content, list):
+        content = [block for block in content if isinstance(block, dict) and not block.get("thought")]
+    return clean_model_title(_visible_round_text(content))
 
 
 def _light_naming_model() -> str:
@@ -168,15 +194,14 @@ def _project_naming_usage_scope(drive_root: Optional[Any], task_id: str):
 def llm_project_name(
     owner_text: object,
     *,
-    fallback_candidates: Sequence[object] = (),
     use_local: Optional[bool] = None,
     llm_client: Optional[Any] = None,
     drive_root: Optional[Any] = None,
     task_id: str = "",
     caller_deadline_ts: Optional[float] = None,
+    single_attempt: bool = False,
 ) -> str:
-    """SYNC bounded LLM-first project title. On ANY failure returns the heuristic
-    fallback over ``fallback_candidates`` then ``owner_text``. Never raises.
+    """Bounded Light title, or no title on failure.
 
     ``use_local=None`` (the default) takes the Light slot's lane (``route_choice.following_route``) so a
     local-only / local-light deployment names with its configured local model instead of a
@@ -187,12 +212,11 @@ def llm_project_name(
     runs through ``chat_observed`` for its forensic trace. The physical send is bound to a
     ``project_naming`` usage scope, which is the sole monetary authority for the attempt.
     """
-    fb = fallback_project_name(*list(fallback_candidates), owner_text)
-    text = " ".join(str(owner_text or "").split())
-    if not text:
-        return fb
-    use_local = _light_use_local(use_local)
+    text = str(owner_text or "")
+    if not text.strip():
+        return ""
     try:
+        use_local = _light_use_local(use_local)
         deadline_ts = time.time() + _naming_timeout_sec()
         if caller_deadline_ts is not None:
             deadline_ts = min(deadline_ts, caller_deadline_ts)
@@ -201,10 +225,8 @@ def llm_project_name(
 
         client = llm_client or LLMClient()
         model = _light_naming_model()
-        # A title only needs the head of the request; bound the prompt input but mark the cut
-        # explicitly (P1 — no SILENT truncation) rather than dropping the tail invisibly. The
-        # full request is unaffected (this is only the naming prompt's view).
-        naming_input = text if len(text) <= 4000 else text[:4000] + " …[request truncated for naming]"
+        # Conversion uses the full input or refuses; the optional card namer still discloses its head view.
+        naming_input = text if single_attempt or len(text) <= 4000 else text[:4000] + " …[request truncated for naming]"
         chat_kwargs = dict(
             messages=[{"role": "user", "content": _NAMING_PROMPT.format(request=naming_input)}],
             model=model,
@@ -216,10 +238,15 @@ def llm_project_name(
             timeout=max(0.0, deadline_ts - time.time()),
             caller_deadline_ts=deadline_ts,
         )
-        from ouroboros.usage_accounting import usage_scope
+        from contextlib import nullcontext
 
+        from ouroboros.usage_accounting import physical_attempt_limit, usage_scope
+
+        if single_attempt:
+            chat_kwargs["wait_for_resources"] = False
+        limit = physical_attempt_limit(1) if single_attempt else nullcontext()
         with model_concurrency.model_call_scope(model, use_local, deadline_ts=deadline_ts):
-            with usage_scope(_project_naming_usage_scope(drive_root, task_id)):
+            with usage_scope(_project_naming_usage_scope(drive_root, task_id)), limit:
                 if drive_root is not None:
                     from ouroboros.llm_observability import chat_observed
 
@@ -232,34 +259,30 @@ def llm_project_name(
                     )
                 else:
                     msg, _usage = client.chat(**chat_kwargs)
-        name = clean_model_title((msg or {}).get("content", ""))
-        return name or fb
+        return visible_model_title(msg, _usage)
     except Exception:
-        log.debug("llm_project_name failed; using heuristic fallback", exc_info=True)
-        return fb
+        log.debug("Light could not supply a project title", exc_info=True)
+        return ""
 
 
 async def llm_project_name_async(
     owner_text: object,
     *,
-    fallback_candidates: Sequence[object] = (),
     timeout_sec: Optional[float] = None,
     use_local: Optional[bool] = None,
     llm_client: Optional[Any] = None,
     drive_root: Optional[Any] = None,
     task_id: str = "",
 ) -> str:
-    """ASYNC variant for the gateway (Starlette) path: runs the bounded sync call off
-    the event loop with a HARD timeout. ``timeout_sec=None`` (default) uses the config SSOT
-    ``OUROBOROS_PROJECT_NAMING_ASYNC_TIMEOUT_SEC``. On timeout/failure returns the heuristic
-    fallback. ``use_local=None`` defers to the Light slot's lane inside the sync helper.
-    Never raises."""
+    """Name a conversion off the event loop: at most one Light send, full input, no fallback.
+
+    The configured async timeout is further narrowed by the naming deadline; normal refusal,
+    timeout and provider failure leave the title empty. Coroutine cancellation still propagates.
+    """
     import asyncio
 
-    fb = fallback_project_name(*list(fallback_candidates), owner_text)
-    text = " ".join(str(owner_text or "").split())
-    if not text:
-        return fb
+    if not str(owner_text or "").strip():
+        return ""
     eff_timeout = _naming_async_timeout_sec() if timeout_sec is None else float(timeout_sec)
     # Capture both ceilings before scheduling: a delayed worker gets only what remains.
     deadline_ts = time.time() + min(eff_timeout, _naming_timeout_sec())
@@ -268,18 +291,18 @@ async def llm_project_name_async(
             asyncio.to_thread(
                 llm_project_name,
                 owner_text,
-                fallback_candidates=fallback_candidates,
                 use_local=use_local,
                 llm_client=llm_client,
                 drive_root=drive_root,
                 task_id=task_id,
                 caller_deadline_ts=deadline_ts,
+                single_attempt=True,
             ),
             timeout=max(0.0, deadline_ts - time.time()),
         )
     except Exception:
-        log.debug("llm_project_name_async timed out/failed; using heuristic", exc_info=True)
-        return fb
+        log.debug("Inline project naming did not return a title", exc_info=True)
+        return ""
 
 
 def _refresh_root_cost_after_naming(drive_root: Any, task_id: str) -> None:
@@ -305,9 +328,8 @@ def spawn_turn_namer(
 ) -> None:
     """Coin an LLM title for a direct turn that started working, in a DAEMON thread.
 
-    ``fallback_candidates`` are ``llm_project_name``'s: a turn admitted with its own name
-    passes that name, so a failed or unavailable Light call leaves it standing (it is
-    never rewritten as its fallback) instead of naming the turn from ``text``.
+    A non-empty ``fallback_candidates`` entry means an admission display name
+    already stands. A failed Light call leaves it alone, without model proof.
 
     Called once per Main turn from the first non-addressing tool-call frame (the
     seam that already stamps that frame as work: ``supervisor/log_addressing.py``),
@@ -355,7 +377,7 @@ def spawn_turn_namer(
             def _call() -> None:
                 try:
                     _result.append(llm_project_name(
-                        body, fallback_candidates=fallback_candidates, drive_root=drive_root, task_id=task_id,
+                        body, drive_root=drive_root, task_id=task_id,
                         caller_deadline_ts=deadline_ts,
                     ))
                 except Exception:
@@ -381,12 +403,13 @@ def spawn_turn_namer(
             if not _result:
                 log.debug("turn namer exceeded its wall-clock bound for %s; skipped", task_id)
                 return
-            name = _result[0]
+            coined = _result[0]
+            if not coined and any(fallback_candidates):
+                _refresh_root_cost_after_naming(drive_root, task_id)
+                return  # the admission display name already stands
+            name = coined or fallback_project_name(body)
             if not name:
                 return
-            if any(fallback_candidates) and name == fallback_project_name(*fallback_candidates, body):
-                _refresh_root_cost_after_naming(drive_root, task_id)  # the call settled; nothing coined
-                return  # the name it would fall back to already stands
             from ouroboros.task_results import (
                 STATUS_RUNNING,
                 load_task_result,
@@ -409,7 +432,8 @@ def spawn_turn_namer(
                 written["kept"] = not work_name_adopted(existing)
                 return fields if written["kept"] else None
 
-            write_task_result(drive_root, task_id, status, suggested_name=name, _field_projector=_unless_adopted)
+            write_task_result(drive_root, task_id, status, suggested_name=name, model_coined_name=coined or None,
+                              _field_projector=_unless_adopted)
             # A cosmetic namer may settle concurrently with or after the ordinary
             # post-task worker.  The shared refresh/checkpoint critical section
             # linearizes both cases without marking an unfinished phase complete.
@@ -466,6 +490,57 @@ def admission_names(body: Dict[str, Any], description: str) -> tuple:
     if explicit:
         return explicit, explicit
     return "", clean_model_title(strip_markdown(description), max_len=PROJECT_NAME_MAX)
+
+
+def captured_project_title(sources: Sequence[Dict[str, Any]]) -> tuple[str, str]:
+    """An authored title or its producer's matched Light result; never a card preview. ``sources`` are the work's first
+    verified episode's (``verified_work_episodes``), which a Continue's ``Continue: `` wrapper never is."""
+    from ouroboros.projects_registry import PROJECT_NAME_MAX
+
+    for row in sources:
+        title = row.get("title")
+        if isinstance(title, str) and title.strip() and len(title.strip()) <= PROJECT_NAME_MAX:
+            return title.strip(), "explicit_task_title"
+    for row in sources:
+        title = row.get("model_coined_name")
+        if (isinstance(title, str) and title.strip() and len(title) <= MAX_PROJECT_NAME
+                and title == row.get("suggested_name")):
+            return title, "stored_model_name"
+    return "", ""
+
+
+def captured_project_request(root, task_id: str, sources: Sequence[dict], origin: dict) -> str:
+    """Name from the accepted opening only. Conversion never reads attachment contents or the episode brief."""
+    import json
+
+    from ouroboros.chat_uploads import stored_refs
+    from ouroboros.api_continuation import API_REQUEST_FIELDS, accepted_api_opening
+    from ouroboros.owner_continue import restore_original_opening
+
+    for row in sources:
+        if row.get("task_id") != task_id or row.get("parent_task_id") or "api_admission" not in row:
+            continue
+        api = accepted_api_opening(row, row.get("metadata") or {}, task_id, [])
+        return json.dumps({key: api[key] for key in API_REQUEST_FIELDS if key in api}, ensure_ascii=False) if api else ""
+    ref, text = origin.get("ref"), origin.get("text")
+    if not ref or not text:
+        return ""
+    snapshot = origin.get("snapshot") or {}
+    original = {"origin_message_ref": ref, "content": text}
+    if not restore_original_opening(root, original, snapshot, None)[0]:
+        return ""
+    if original.get("placeholder_text"):
+        files = [item["name"] for item in stored_refs(original.get("attachments"))
+                 if item.get("name") and (item.get("upload") or item.get("sha256")) and not item.get("unavailable")]
+        return f"{text}\nAttached filenames: {json.dumps(files, ensure_ascii=False)}" if files else ""
+    for row in sources:
+        meta = row.get("metadata") or {}
+        if (meta.get("late_answer") is not None or meta.get("card_press") is not None
+                ) and (row.get("origin_message_ref") or meta.get("origin_message_ref")) == ref:
+            # Only the admitted top-level title can suppress a naming call.
+            naming = late_input_names(root, {key: meta[key] for key in ("late_answer", "card_press") if key in meta}, text)
+            return naming[1] if naming is not None else ""
+    return text
 
 
 def derived_run_name(task: Dict[str, Any]) -> str:
@@ -568,13 +643,21 @@ def adopt_continued_work_name(txn: Any, work_id: str, name: str) -> tuple:
     return name, ""
 
 
-def late_input_names(metadata: Dict[str, Any], answered: str, owner_words: str) -> tuple:
+def late_input_names(root: Any, metadata: Dict[str, Any], owner_words: str) -> Optional[tuple]:
     """``(suggested_name, naming input)`` of the head a late answer or a press on a finished author's card
     starts, never its host frame: ``answered`` is what it answers (``owner_quiz.late_answer_name``,
-    ``card_decision.card_press_name``), the owner's words when that is empty. Derived as ``admission_names``
+    ``card_store.card_press_name``), the owner's words when that is empty. Derived as ``admission_names``
     derives: an authored ``metadata.title`` wins and needs no namer (naming input ``""``). Otherwise the one
     Main namer at first work (``spawn_turn_namer``) reads the answered text and the owner's words, with the
     admission name as its fallback; an input that later joins the head never renames it.
+    None means no typed late-input provenance; a missing question does not discard accepted words.
     """
+    from ouroboros.card_store import card_press_name
+    from ouroboros.owner_quiz import late_answer_name
+
+    answered = (late_answer_name(metadata["late_answer"]) if metadata.get("late_answer") is not None
+                else card_press_name(root, metadata.get("card_press")))
+    if answered is None:
+        return None
     title, name = admission_names(metadata, answered or owner_words)
     return name, "" if title else "\n".join(part for part in (answered, owner_words) if part)

@@ -182,6 +182,7 @@ def test_hand_edited_welcome_is_read_without_disturbing_other_keys(tmp_path):
             path.write_text(json.dumps({"sidebar_width": 300, "welcome": invalid}), encoding="utf-8")
             prefs = client.get("/api/ui/preferences").json()
             assert prefs["welcome"] == {"mode": "default", "text": ""} and prefs["sidebar_width"] == 300
+            assert "unreadable" not in prefs, "the file was read: the other keys are the owner's"
         response = client.post("/api/ui/preferences", json={"nested_subagents_expanded": True})
         assert response.status_code == 200 and response.json()["sidebar_width"] == 300
         stored = json.loads(path.read_text(encoding="utf-8"))
@@ -397,24 +398,79 @@ def test_ui_preferences_widget_size_merges_by_card_and_clamps(tmp_path):
         assert list(newest)[-1] == "late:card" and "skill:0" not in newest
 
 
-def test_corrupt_stored_preferences_read_as_defaults(tmp_path):
+def test_corrupt_stored_preferences_read_as_defaults(tmp_path, monkeypatch):
     """The preferences file is shared (project read cursors, panel widths, the
     empty-Main welcome); a corrupt one reads as defaults instead of failing the
-    whole surface, and the next write replaces it."""
+    whole surface, and the next write replaces it. Only an absent file is new
+    (no file, its folder not created yet: exactly the defaults): a saved one the
+    read cannot use, or one a failed lookup cannot rule out, says so
+    (``unreadable``), so no client takes those defaults for the owner's choices
+    (Costs then starts no widget by itself), and the read leaves its bytes as
+    they are."""
+    import errno
+    import os
+    import pathlib
+
     from starlette.testclient import TestClient
+
+    from ouroboros.gateway.ui_preferences import DEFAULT_UI_PREFERENCES
 
     app = Starlette(routes=collect_routes(data_dir=tmp_path))
     app.state.drive_root = tmp_path
     path = tmp_path / "state" / "ui_preferences.json"
-    path.parent.mkdir(parents=True)
-    path.write_bytes(b'{"widget_size":')
+    defaults = json.loads(json.dumps(DEFAULT_UI_PREFERENCES))
+
+    def windows_not_found(real):
+        def call(target, *args, **kwargs):
+            try:
+                return real(target, *args, **kwargs)
+            except NotADirectoryError as exc:
+                if os.path.isdir(os.path.dirname(os.fspath(target))):
+                    raise  # the target itself is a file: Windows raises ENOTDIR too
+                raise FileNotFoundError(errno.ENOENT, "[WinError 3] path not found", os.fspath(target)) from exc
+        return call
+
+    def permission_denied_for(target_path, real):
+        def call(target, *args, **kwargs):
+            if isinstance(target, (str, os.PathLike)) and pathlib.Path(target) == target_path:
+                raise PermissionError(errno.EACCES, "Permission denied", str(target))
+            return real(target, *args, **kwargs)
+        return call
+
     with TestClient(app) as client:
-        read = client.get("/api/ui/preferences")
-        assert read.status_code == 200
-        assert read.json()["widget_size"] == {} and read.json()["sidebar_width"] == 0
+        assert client.get("/api/ui/preferences").json() == defaults, "a new installation: its folder not created yet"
+        # A file where the folder belongs is no proof of absence: POSIX raises ENOTDIR on lstat,
+        # while Windows reports ERROR_PATH_NOT_FOUND (FileNotFoundError), the same as a missing parent.
+        path.parent.write_text("not a folder", encoding="utf-8")
+        assert client.get("/api/ui/preferences").json() == {**defaults, "unreadable": True}
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "lstat", windows_not_found(os.lstat))
+            patch.setattr(pathlib.Path, "lstat", windows_not_found(pathlib.Path.lstat))
+            assert client.get("/api/ui/preferences").json() == {**defaults, "unreadable": True}
+        assert path.parent.read_bytes() == b"not a folder"
+        path.parent.unlink()
+        path.parent.mkdir()
+        assert client.get("/api/ui/preferences").json() == defaults, "the folder, no file yet: still new"
+        # Nor is a lookup that fails on the path or on an ancestor (Python 3.14's is_file() says False for it).
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "lstat", permission_denied_for(path, os.lstat))
+            patch.setattr(pathlib.Path, "lstat", permission_denied_for(path, pathlib.Path.lstat))
+            assert client.get("/api/ui/preferences").json() == {**defaults, "unreadable": True}
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "stat", permission_denied_for(path.parent, os.stat))
+            assert client.get("/api/ui/preferences").json() == {**defaults, "unreadable": True}
+        # Another shape, a value this release refuses (a hand edit, a newer release's), cut off mid-write by hand.
+        for saved in (b'[]', b'{"widget_start_mode": {"game:main": "always"}}', b'{"widget_size":'):
+            path.write_bytes(saved)
+            read = client.get("/api/ui/preferences")
+            assert read.status_code == 200
+            assert read.json() == {**defaults, "unreadable": True}, saved
+            assert path.read_bytes() == saved
         written = client.post("/api/ui/preferences", json={"widget_size": {"game:main": {"w": 6, "h": 0}}})
         assert written.status_code == 200
+        assert "unreadable" not in written.json()
         assert json.loads(path.read_text(encoding="utf-8"))["widget_size"] == {"game:main": {"w": 6, "h": 0}}
+        assert "unreadable" not in client.get("/api/ui/preferences").json()
 
 
 def test_widget_board_bounds_have_one_value_in_python_and_the_browser():

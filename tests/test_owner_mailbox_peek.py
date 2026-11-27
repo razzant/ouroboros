@@ -264,3 +264,166 @@ def test_a_torn_row_keeps_its_bytes_and_the_next_rows_stay_whole_and_reach_the_d
     assert [entry["msg_id"] for entry in drained] == ["place-event:first", "place-event:second", "owner-1"]
     assert status["complete"] is False, "a skipped row is said: the read covered less than the whole file"
     assert mailbox.mailbox_holds(tmp_path, "worker", "place-event:second")
+
+
+# --- The row lookup decodes lazily and reads exactly as every mailbox reader does -------------------------------------
+
+
+def spy_on_decodes(monkeypatch):
+    """The mailbox lines the module hands to its decoder, in order: the module's own ``json.loads``, traced."""
+    lines, real = [], json.loads
+
+    def traced(text, *args, **kwargs):
+        lines.append(text)
+        return real(text, *args, **kwargs)
+
+    monkeypatch.setattr(mailbox, "json", SimpleNamespace(**{**vars(json), "loads": traced}))
+    return lines
+
+
+def write_rows(root, rows, *, eol=None):
+    path = mailbox._mailbox_path(root, "worker")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(row, ensure_ascii=False) for row in rows]
+    if eol is None:
+        path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    else:
+        path.write_bytes(b"".join(line.encode("utf-8") + eol for line in lines))
+    return path, lines
+
+
+@pytest.mark.parametrize("eol", [None, b"\r\n"], ids=["native", "crlf"])
+def test_the_row_lookup_decodes_only_up_to_the_first_whole_row_of_the_id(tmp_path, monkeypatch, eol):
+    path, lines = write_rows(
+        tmp_path,
+        [{"msg_id": f"m{i}", "kind": "task_message", "text": f"row {i}\rkeep"} for i in range(40)],
+        eol=eol,
+    )
+    decoded = spy_on_decodes(monkeypatch)
+    assert mailbox._holds(path, "m0") and decoded == lines[:1], "the first row is the one: one decode, not forty"
+    decoded.clear()
+    assert mailbox._holds(path, "m7") and decoded == lines[:8], "no row after the match is decoded"
+    decoded.clear()
+    assert mailbox.mailbox_holds(tmp_path, "worker", "m3") and decoded == lines[:4], "the public lookup shares the one reader"
+    decoded.clear()
+    assert not mailbox._holds(path, "absent") and decoded == lines, "a miss reads every row, as it always did"
+    decoded.clear()
+    assert mailbox.mail_records(path) == [json.loads(line) for line in lines] and decoded == lines
+
+
+def test_a_place_event_retry_is_found_without_decoding_the_mailbox_behind_it(tmp_path, monkeypatch):
+    def place(msg_id):
+        return mailbox.write_task_message(tmp_path, "arrived", "worker", source_task_id="s", provenance="place_event",
+                                          msg_id=msg_id, place_arrival={"source_event_id": msg_id, "message": {}, "wake": True})
+
+    ids = [f"place-event:{i}" for i in range(25)]
+    assert all(place(msg_id) for msg_id in ids)
+    path = mailbox._mailbox_path(tmp_path, "worker")
+    kept = path.read_bytes()
+    lines = {line for line in kept.decode("utf-8").split("\n") if line}
+    decoded = spy_on_decodes(monkeypatch)
+    assert place(ids[0]) is True, "the retry of the first row is deduplicated under the mail lock"
+    assert [json.loads(line)["msg_id"] for line in decoded if line in lines] == [ids[0]], "one decode: the row it found"
+    assert path.read_bytes() == kept, "nothing was appended"
+    assert mailbox.place_event_retained(tmp_path, "worker", ids[-1]) and not mailbox.place_event_retained(tmp_path, "worker", "gone")
+
+
+@pytest.mark.parametrize("unreadable", [b'{"msg_id": "torn", "kind": "task_message", "text": "\xd0', b"not json at all",
+                                        b"[1, 2, 3]", b"  \t "], ids=["torn-character", "foreign-bytes", "no-row", "blank"])
+def test_the_lookup_skips_what_it_cannot_parse_exactly_as_every_mailbox_reader_does(tmp_path, monkeypatch, unreadable):
+    """An unreadable line costs only itself: the rows around it, one holding a literal U+2028 inside its words and
+    one in Cyrillic, are found whole by the lookup, the list reader and the public answer alike."""
+    whole = [{"msg_id": "first", "text": "a b"}, {"msg_id": "second", "text": "тест"}, {"msg_id": "third"}]
+    path = mailbox._mailbox_path(tmp_path, "worker")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(unreadable + b"\n" + b"".join(json.dumps(row, ensure_ascii=False).encode("utf-8") + b"\n" for row in whole))
+    assert mailbox.mail_records(path) == whole == list(mailbox.iter_mail_records(path))
+    for row in whole:
+        assert mailbox._holds(path, row["msg_id"]) and mailbox.mailbox_holds(tmp_path, "worker", row["msg_id"])
+    assert not mailbox._holds(path, "torn") and not mailbox.mailbox_holds(tmp_path, "worker", "torn")
+    decoded = spy_on_decodes(monkeypatch)
+    assert mailbox._holds(path, "second")
+    assert decoded[-1] == json.dumps(whole[1], ensure_ascii=False) and json.dumps(whole[2], ensure_ascii=False) not in decoded
+
+
+def test_an_absent_or_unreadable_mailbox_answers_as_it_did(tmp_path, monkeypatch):
+    absent = mailbox._mailbox_path(tmp_path, "worker")
+    assert mailbox.mail_records(absent) == [] and list(mailbox.iter_mail_records(absent)) == []
+    assert not mailbox._holds(absent, "m") and not mailbox.mailbox_holds(tmp_path, "worker", "m")
+    assert not mailbox.mailbox_holds(tmp_path, "../not-a-task", "m"), "a name that is no task names no mailbox"
+    path, _lines = write_rows(tmp_path, [{"msg_id": "m"}])
+    real_open = Path.open
+
+    def denied(p, *args, **kwargs):
+        if p == path:
+            raise PermissionError("mailbox unreadable")
+        return real_open(p, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", denied)
+    assert mailbox.mailbox_holds(tmp_path, "worker", "m") is False, "the public answer stays no, never an error"
+    with pytest.raises(PermissionError):
+        mailbox._holds(path, "m")  # the lock holder's lookup proves nothing it could not read
+
+
+def test_first_match_lookup_and_relay_idempotence_stop_before_eof(tmp_path, monkeypatch):
+    from ouroboros.owner_relay import write_relay
+
+    quote = {"text": "keep", "attachments": [],
+             "source": {"chat_id": 1, "label": "Main", "ts": "2026-11-23T00:00:00Z",
+                        "address": "row:1@2026-11-23T00:00:00Z#a", "client_message_id": ""},
+             "owner_row": {"text": "keep", "chat_id": 1, "ts": "2026-11-23T00:00:00Z"}}
+    first, fresh = write_relay(tmp_path, "worker", relay_id="r0", note="", quotes=[quote],
+                               chat_id=1, teller_task_id="", work_reply=True)
+    assert fresh is True
+    path = mailbox._mailbox_path(tmp_path, "worker")
+    with path.open("ab") as handle:
+        pad = "x" * 1024
+        handle.writelines((json.dumps({"msg_id": f"m{i}", "kind": "task_message", "text": pad}) + "\n").encode("utf-8")
+                          for i in range(1, 150))
+    file_size = path.stat().st_size
+    assert file_size > 120_000
+
+    positions, real_open = [], Path.open
+
+    class PositionSpy:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __enter__(self):
+            return self._inner.__enter__()
+
+        def __exit__(self, *exc):
+            positions.append(self._inner.raw.tell() if hasattr(self._inner, "raw") else self._inner.tell())
+            return self._inner.__exit__(*exc)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(Path, "open", lambda p, mode="r", *a, **kw:
+                        PositionSpy(real_open(p, mode, *a, **kw)) if p == path else real_open(p, mode, *a, **kw))
+
+    assert mailbox._holds(path, first["msg_id"]) is True
+    assert len(positions) == 1 and 0 < positions[0] < file_size // 4
+
+    positions.clear()
+    prior, fresh_again = write_relay(tmp_path, "worker", relay_id="r0", note="", quotes=[quote],
+                                     chat_id=1, teller_task_id="", work_reply=True)
+    assert fresh_again is False and prior["msg_id"] == first["msg_id"]
+    assert len(positions) == 1 and 0 < positions[0] < file_size // 4
+    assert path.stat().st_size == file_size
+
+    positions.clear()
+    assert len(mailbox.mail_records(path)) == 150 and positions == [file_size]
+
+
+def test_literal_cr_inside_line_does_not_split_under_crlf(tmp_path):
+    path = mailbox._mailbox_path(tmp_path, "worker")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    kept = {"msg_id": "m-keep", "kind": "owner_text", "text": "a\rb\u2028c"}
+    path.write_bytes(
+        b'garbage\r{"msg_id": "hidden-by-cr"}\r\n'
+        + json.dumps(kept, ensure_ascii=False).encode("utf-8") + b"\r\n"
+    )
+    assert mailbox.mail_records(path) == [kept]
+    assert not mailbox._holds(path, "hidden-by-cr")
+    assert mailbox._holds(path, "m-keep")

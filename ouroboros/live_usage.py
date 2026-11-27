@@ -268,18 +268,14 @@ def check_live_budget(*, engine: str, model: str, task_id: str, drive_root) -> N
     closing tail, never calls this guard; the running host's control loop does.
     """
     from ouroboros import usage_store
-    from ouroboros.usage_admission import raise_group_refusal
+    from ouroboros.usage_admission import raise_work_refusal
 
     request, scope = accounting._merge_scope(accounting.AttemptRequest(
         model=model, provider=engine, task_id=task_id, drive_root=drive_root))
     with usage_store.read(drive_root) as view:
         if view.exceeds_limit(accounting._global_limit(request)):
             raise accounting.BudgetExceeded("global model budget exhausted")
-        if (scope.root_task_id and scope.root_limit_usd is not None
-                and view.exceeds_limit(scope.root_limit_usd, root_task_id=scope.root_task_id)):
-            raise accounting.BudgetExceeded("root model budget exhausted", limit_scope="root",
-                                            root_task_id=scope.root_task_id)
-        raise_group_refusal(view, scope)
+        raise_work_refusal(view, scope, stash=False)  # the root and the whole work, its cap included
 
 
 def reserve_live_response(*, engine: str, model: str, call_id: str, response_key: str,
@@ -313,6 +309,7 @@ def _settlement(quote, evidence, usage, raw_usage, status):
     normalized = {**dict(usage), "cost_evidence": evidence, "cost_basis": "litellm_modalities",
                   "cost_coverage": "complete" if cost is not None else "partial",
                   "price_source": f"litellm@{quote['fetched_at']}" if quote else "unknown"}
+    normalized.pop("_reported_token_usage", None)  # Engine usage is not the HTTP parser's receipt.
     # Compatibility counters contain text only; all modalities and their cache
     # split remain in evidence, so old readers never see audio as prompt text.
     for source, target in (("text_input_tokens", "prompt_tokens"), ("text_output_tokens", "completion_tokens")):

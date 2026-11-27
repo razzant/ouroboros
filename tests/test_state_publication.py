@@ -29,7 +29,7 @@ STATE_FIELDS = {
     "active_chat_activities_complete", "current_questions", "current_questions_complete", "current_questions_gaps",
     "main_attention", "main_attention_complete", "main_attention_gaps", "works", "rooms", "work_summary",
     "works_complete", "works_gaps", "served_ui",
-} | {"main_route"} | {"processing_tiers"}  # Main chat writes Main itself; its tiers beside it
+} | {"main_route", "processing_tiers", "panic_recovery", "panic_recovery_complete"}
 
 
 @pytest.fixture
@@ -104,6 +104,60 @@ def test_the_answer_keeps_the_client_shape_and_names_its_generation(serving):
     assert float(response.headers[publication.AGE_HEADER]) >= 0.0
     assert isinstance(payload["task_bindings"], dict) and payload["task_bindings_unchanged"] is False
     assert payload["boot"]["phase"] in {"starting", "serving", "ready", "failed"}
+
+
+@pytest.mark.parametrize("starts_ready", [False, True], ids=["becomes-ready", "readiness-clears"])
+def test_panic_recovery_completeness_matches_census_and_response_readiness(serving, monkeypatch, starts_ready):
+    ready = threading.Event()
+    if starts_ready:
+        ready.set()
+    serving.app.state.supervisor_ready_event = ready
+    snapshot = gateway_state._state_snapshot
+
+    def changes_readiness(request, direct=None):
+        payload = snapshot(request, direct=direct)
+        if starts_ready:
+            ready.clear()
+        else:
+            ready.set()
+        return payload
+
+    monkeypatch.setattr(gateway_state, "_state_snapshot", changes_readiness)
+    first = _get(serving.app)
+    payload = _payload(first)
+    assert payload["boot"]["tasks_ready"] is not starts_ready
+    assert payload["active_chat_activities_complete"] is True
+    assert payload["panic_recovery"] == [] and payload["panic_recovery_complete"] is False
+    if starts_ready:
+        return
+    after = _get(serving.app)
+    assert after.headers[publication.GENERATION_HEADER] != first.headers[publication.GENERATION_HEADER]
+    assert _payload(after)["panic_recovery_complete"] is True
+    assert _get(serving.app).headers[publication.GENERATION_HEADER] == after.headers[publication.GENERATION_HEADER]
+
+
+@pytest.mark.parametrize("unowned", ["not-initialized", "saved-queue"],
+                         ids=["providerless-boot", "saved-queue-not-restored"])
+def test_ready_boot_does_not_claim_an_unowned_queue_is_empty(serving, monkeypatch, unowned):
+    from ouroboros import server_liveness
+
+    boot = server_liveness.BootDocument()
+    monkeypatch.setattr(server_liveness, "BOOT", boot)
+    boot.serving()
+    boot.steps_done()
+    ready = threading.Event()
+    ready.set()
+    serving.app.state.supervisor_ready_event = serving.app.state.supervisor_init_done_event = ready
+    if unowned == "not-initialized":
+        monkeypatch.setattr(serving.queue, "INITIALIZED", False)
+    else:
+        serving.queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps({
+            "pending": [{"id": "saved", "task": {"id": "saved", "chat_id": 1}}], "running": []}), encoding="utf-8")
+
+    payload = _payload(_get(serving.app))
+    assert payload["boot"]["phase"] == "ready" and payload["boot"]["tasks_ready"] is True
+    assert payload["active_chat_activities_complete"] is True
+    assert payload["panic_recovery"] == [] and payload["panic_recovery_complete"] is False
 
 
 def test_state_keeps_the_sidebar_feed_capped_and_reports_the_full_listable_count(serving, monkeypatch):
@@ -227,6 +281,59 @@ def test_an_unchanged_revision_serves_the_held_publication_without_reading_a_tas
         _task(txn, "working-task", chat_id=1, status="running", focus="moved")
     third = _get(serving.app)
     assert len(productions) == 1 and third.headers[publication.GENERATION_HEADER] == "2"
+
+
+@pytest.mark.parametrize("subject", ["root", "helper"])
+def test_a_confirmed_park_crosses_the_hard_deadline_in_the_published_state(serving, monkeypatch, subject):
+    """No Resume attempt, queue write, or supervisor tick is needed to retire the now-dead offer."""
+    import time
+    from datetime import datetime, timezone
+
+    from ouroboros.task_results import load_task_result, write_task_result
+    from tests._budget_pause_exact_helpers import _parked
+
+    now = [time.time()]
+    edge = round(now[0]) + 60
+    end = datetime.fromtimestamp(edge, timezone.utc).isoformat()
+    tree = "park-tree"
+    target = tree if subject == "root" else "expired-helper"
+    for task_id, deadline in ((target, {"deadline_at": end}), ("unexpired-park", {"execution_timeout_sec": 1})):
+        is_helper = task_id == "expired-helper"
+        lineage = {"parent_task_id": tree, "delegation_role": "subagent"} if is_helper else {"delegation_role": "root"}
+        root_id = tree if is_helper else task_id
+        _parked(serving.root, monkeypatch, task_id=task_id, root_task_id=root_id,
+                extra={"chat_id": 1, **lineage, **deadline})
+        write_task_result(serving.root, task_id, "scheduled", chat_id=1, root_task_id=root_id, **lineage, **deadline)
+    if subject == "helper":
+        write_task_result(serving.root, tree, "running", chat_id=1, root_task_id=tree, delegation_role="root")
+        serving.workers.RUNNING[tree] = {"task": {"id": tree, "chat_id": 1, "root_task_id": tree},
+                                         "attempt": 1, "started_at": now[0]}
+    monkeypatch.setattr(time, "time", lambda: now[0])
+
+    def read():
+        response = _get(serving.app)
+        body = _payload(response)
+        work = next(row for row in body["works"] if row["work_id"] == tree)
+        neighbor = next(row for row in body["works"] if row["work_id"] == "unexpired-park")
+        assert {row["action"] for row in neighbor["controls"]} >= {"resume"}
+        return (response.headers[publication.GENERATION_HEADER], work["members"]["states"][target],
+                [row for row in work["controls"] if row["target"] == target])
+
+    now[0] = edge - 0.001
+    before, member, controls = read()
+    assert member["activity"] == "paused" and member["release"] == "mind"
+    assert "close" not in {row["action"] for row in controls}
+    assert read()[0] == before, "quiet state should reuse its publication before the deadline"
+
+    now[0] = edge
+    after, member, controls = read()
+    assert after != before, "crossing the deadline alone must invalidate the old publication"
+    assert member["because"][0]["code"] == "deadline_expired"
+    assert "close" in {row["action"] for row in controls}
+    assert "resume" not in {row["action"] for row in controls}
+    assert load_task_result(serving.root, target)["status"] == "scheduled", "reading is not a Close press"
+    now[0] += 5
+    assert read()[0] == after, "an elapsed deadline is not a recurring publication trigger"
 
 
 def test_a_cached_member_tail_expires_without_a_queue_or_custody_write(serving, monkeypatch):

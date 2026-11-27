@@ -29,7 +29,28 @@ test('Files keeps location and actions in the band, with the filter first in its
     assert.match(css, /@container files \(max-width: 700px\) \{[^@]+?\.files-preview \{ border-left: 0; \}/,
         'a file shown alone has no column divider');
     assert.doesNotMatch(sidebar, /background:/, 'the column does not paint its own sheet');
-    assert.match(css, /\.files-sidebar\[data-scroll-above\] \{ --scroll-fade-top-clear: var\(--files-band-h\); --scroll-fade-top: calc\(var\(--files-band-h\) \+ var\(--scroll-fade-edge\)\); \}/);
+    const ui = readFileSync(new URL('../ui.css', import.meta.url), 'utf8');
+    assert.match(css, /\.files-layout\s+\.files-sidebar\s*\{\s*--scroll-fade-top-clear:\s*var\(--files-band-h,\s*0px\);\s*\}/,
+        'Files supplies only its measured band height to the shared mask');
+    const top = ui.match(/:where\(\.scroll-fade-y\[data-scroll-above\]\)\s*\{([^}]+)\}/)[1];
+    assert.match(top, /--scroll-fade-inset:\s*min\(100%,\s*var\(--scroll-fade-top-clear\)\);/,
+        'only a scrolled list clears the band, at most its own height');
+    assert.match(top, /--scroll-fade-top:\s*var\(--scroll-fade-y-depth\);/,
+        'the top fade runs one actual fade depth below the band');
+    const vertical = ui.match(/:where\(\.scroll-fade-y,\s*\[data-fold-clipped\]\)\s*\{([^}]+)\}/)[1];
+    assert.match(vertical, /--scroll-fade-y-depth:\s*min\(var\(--scroll-fade-edge\),\s*max\(0px,\s*\(100%\s*-\s*var\(--scroll-fade-inset\)\)\s*\*\s*var\(--scroll-fade-limit\)\)\);/,
+        'the fade cannot take more than its share of the space left below the band');
+    // The stops of the top end, whitespace collapsed: transparent through the band, then the curve (its values pinned in
+    // scroll_fade.test.js) laid from the band's edge over one fade depth, opaque at its end.
+    const image = vertical.match(/--scroll-fade-y-image:\s*linear-gradient\(([\s\S]+)\);/)[1].replace(/\s+/g, ' ');
+    const stops = image.split(/,(?![^(]*\))/).map((stop) => stop.trim());
+    assert.equal(stops[0], 'to bottom');
+    assert.equal(stops[1], 'transparent var(--scroll-fade-inset)', 'the list is transparent through the band');
+    const opaque = stops.indexOf('#000 calc(var(--scroll-fade-inset) + var(--scroll-fade-top))');
+    assert.ok(opaque > 2, 'and opaque one fade depth below it');
+    const ramp = stops.slice(2, opaque).map((stop) => stop.match(/calc\(var\(--scroll-fade-inset\) \+ var\(--scroll-fade-top\) \* ([\d.]+)\)$/));
+    assert.ok(ramp.every(Boolean), 'every stop between lies on the band\'s edge plus a share of the depth');
+    assert.ok(ramp.every((m, i) => i === 0 || Number(m[1]) > Number(ramp[i - 1][1])), 'in rising order: it fades in right below the band');
     // The band's location row takes the band's inset alone (a phone showed it 28px in, the rows 12px).
     assert.match(css, /\.files-band > \.files-browser-header \{ padding-inline: 0; \}/);
     assert.match(css, /\.app-page-tabs \{[^}]*padding: 0 var\(--page-header-padding-x\)/, 'the band itself keeps the page\'s inset');

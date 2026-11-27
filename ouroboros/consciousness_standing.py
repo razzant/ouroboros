@@ -168,13 +168,15 @@ def ended_without_success(row: Any) -> bool:
     its finalization was cut reads Done everywhere, owner 15.11); not stopped by my human (an
     ``owner_continue.OWNER_STOP_SOURCES`` origin, Panic included, read here: a stopped root's retained budget cause can
     answer ``hard_limit_reached`` before the offer reads the stop) nor wrapped up at their word
-    (``owner_requested_finalization``); not cancelled by a focus's tool; not a wake (work a wake started is not one);
+    (``owner_requested_finalization``); not cancelled by a focus's tool or by the linked Ouroboros whose letter it
+    was; not a wake (work a wake started is not one);
     no successor: a Continue past ``bound``, a supersession or a retry under another id. A Continue bound and not yet
     admitted keeps it (its line names the successor). Presence's own rows are not judged here: ``fallen_works`` skips
     them by their typed column."""
     from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION, recorded_cause
     from ouroboros.owner_continue import OWNER_STOP_SOURCES
     from ouroboros.project_dialogue import outcome_phase
+    from supervisor.cancel_publication import PEER_CANCEL_SOURCE  # the letter's own sender cancelled it: its choice
 
     if not isinstance(row, dict) or str(row.get("status") or "") not in FALLEN_STATUSES:
         return False
@@ -184,7 +186,7 @@ def ended_without_success(row: Any) -> bool:
     if str(row.get("parent_task_id") or "") or row.get("delegation_role") == "subagent":
         return False  # a child's work is its root's (``store.ROOT_RESULT_WHERE``)
     origin = row.get("cancel_origin") if isinstance(row.get("cancel_origin"), dict) else {}
-    if str(origin.get("source") or "") in OWNER_STOP_SOURCES | {AGENT_TOOL_SOURCE}:
+    if str(origin.get("source") or "") in OWNER_STOP_SOURCES | {AGENT_TOOL_SOURCE, PEER_CANCEL_SOURCE}:
         return False
     if recorded_cause(row) == REASON_OWNER_REQUESTED_FINALIZATION:
         return False

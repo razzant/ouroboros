@@ -156,16 +156,26 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
             assert page.locator(feed).get_by_text('LIVE_REPLY_AT_PRESENT', exact=True).count() == 1
             assert abs(target.evaluate(offset) - placed) <= 8
             reads = page.evaluate("() => window.__historyReads.length")
+            # Read the first row that reaches the visible passage, not a row under the floating bar.
+            # The feed itself can move on resize; the reader's row should keep its screen position.
             resize_anchor = page.locator(feed).evaluate("""root => {
-                const top = root.getBoundingClientRect().top;
-                const node = [...root.querySelectorAll('.chat-bubble[data-history-id]')].find(n => n.getBoundingClientRect().bottom > top);
-                return {id: node.dataset.historyId, offset: node.getBoundingClientRect().top - top};
+                const feedBox = root.getBoundingClientRect();
+                const bar = root.closest('.project-panel').querySelector('.project-panel-bar');
+                const tint = bar.querySelector(':scope > .room-edge[data-edge="tint"]'), edge = tint ? tint.getBoundingClientRect().bottom - bar.getBoundingClientRect().bottom : 0;
+                const top = Math.max(feedBox.top, bar.getBoundingClientRect().bottom + (Math.max(0, edge) || 0));
+                const node = [...root.querySelectorAll('.chat-bubble[data-history-id]')].find(n => {
+                    const box = n.getBoundingClientRect();
+                    return box.height > 0 && box.bottom > top && box.top < feedBox.bottom;
+                });
+                return node && {id: node.dataset.historyId, top: node.getBoundingClientRect().top};
             }""")
+            assert resize_anchor, "an older row is visible below the project bar before resize"
             page.set_viewport_size({"width": 760, "height": 850})
             page.evaluate(_FRAMES)
             assert page.evaluate("() => window.__historyReads.length") == reads, "layout starts no archive read"
-            narrow = page.locator(f'{feed} [data-history-id="{resize_anchor["id"]}"]').evaluate(offset)
-            assert abs(narrow - resize_anchor["offset"]) <= 8, (resize_anchor, narrow)
+            narrow = page.locator(f'{feed} [data-history-id="{resize_anchor["id"]}"]').evaluate(
+                "node => node.getBoundingClientRect().top")
+            assert abs(narrow - resize_anchor["top"]) <= 8, (resize_anchor, narrow)
             _screenshot(page, tmp_path, f"continuity-live-narrow-{browser_engine}")
             (tmp_path / f"continuity-reads-{browser_engine}.json").write_text(json.dumps(
                 page.evaluate("() => window.__historyReads"), indent=2), encoding="utf-8")

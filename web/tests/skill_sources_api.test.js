@@ -1,8 +1,7 @@
-// The Skills page's requests and the shapes it reads, held to the host contract:
-// every skill-source call sends exactly what `gateway/skill_sources.py` takes, a
-// typed refusal reaches the caller with its code, and every fixture the page's
-// tests render is a field-for-field instance of the JSDoc twin of
-// `ouroboros/gateway/skill_source_contracts.py` (skill_source_contract_types.js).
+// The Skills page's requests, held to the host contract: every skill-source
+// call sends exactly what `gateway/skill_sources.py` takes, and a typed refusal
+// reaches the caller with its code. The wire shapes are defined in
+// `gateway/skill_source_contracts.py`.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -10,66 +9,6 @@ import test from 'node:test';
 import { skillSourcesApi } from '../modules/api_client.js';
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/skills_v4/${name}`, import.meta.url), 'utf8'));
-const TYPES = readFileSync(new URL('../modules/skill_source_contract_types.js', import.meta.url), 'utf8');
-
-/** {name: {required: Set, optional: Set}} from the twin's `@typedef {Object}` blocks. */
-function typedefs(text) {
-    const out = {};
-    for (const block of text.matchAll(/@typedef \{Object\} (\w+)([\s\S]*?)\*\//g)) {
-        const shape = { required: new Set(), optional: new Set() };
-        for (const prop of block[2].matchAll(/@property \{([^}]*)\} (\w+)/g)) {
-            (prop[1].trim().endsWith('=') ? shape.optional : shape.required).add(prop[2]);
-        }
-        out[block[1]] = shape;
-    }
-    return out;
-}
-const SHAPES = typedefs(TYPES);
-
-function assertShape(value, name, where) {
-    const shape = SHAPES[name];
-    assert.ok(shape, `the twin defines ${name}`);
-    const keys = new Set(Object.keys(value));
-    for (const key of shape.required) assert.ok(keys.has(key), `${where}: ${name} requires ${key}`);
-    for (const key of keys) assert.ok(shape.required.has(key) || shape.optional.has(key), `${where}: ${key} is not a ${name} field`);
-}
-
-test('every fixture is an instance of the host contract it stands for', () => {
-    const sources = fixture('skill_sources.json');
-    assertShape(sources, 'SkillSourcesResponse', 'skill_sources.json');
-    sources.sources.forEach((row) => assertShape(row, 'SkillSourceRow', `source ${row.id}`));
-
-    for (const [key, probe] of Object.entries(fixture('skill_source_probe.json'))) assertShape(probe, 'SkillSourceProbeResponse', `probe ${key}`);
-
-    const catalog = fixture('skill_catalog.json');
-    assertShape(catalog, 'SkillCatalogResponse', 'skill_catalog.json');
-    catalog.items.forEach((item) => assertShape(item, 'SkillCatalogItem', item.id));
-    catalog.sources.forEach((row) => assertShape(row, 'SkillSourceRow', `catalog source ${row.id}`));
-
-    const search = fixture('skill_catalog_search.json');
-    assertShape(search, 'SkillCatalogSearchResponse', 'skill_catalog_search.json');
-    search.items.forEach((item) => assertShape(item, 'SkillCatalogItem', `search ${item.id}`));
-    assert.ok(search.items.filter((item) => item.registry_slug).every((item) => item.installed === null),
-        'the search never joins registry hits with installs');
-
-    const detail = fixture('skill_catalog_item.json');
-    assertShape(detail, 'SkillCatalogItemDetailResponse', 'skill_catalog_item.json');
-    assertShape(detail.item, 'SkillCatalogItem', 'detail item');
-
-    for (const [key, answer] of Object.entries(fixture('skill_install.json'))) assertShape(answer, 'SkillCatalogInstallResponse', `install ${key}`);
-
-    const starter = fixture('onboarding_starter_skills.json');
-    assertShape(starter, 'StarterSkillsResponse', 'onboarding_starter_skills.json');
-    starter.sources.forEach((row) => assertShape(row, 'SkillSourceRow', `starter source ${row.id}`));
-    starter.groups.flatMap((group) => group.items).forEach((item) => assertShape(item, 'StarterSkillItem', `starter ${item.id}`));
-});
-
-test('the shape check refuses a field the contract does not have, and a missing required one', () => {
-    const row = fixture('skill_sources.json').sources[0];
-    assert.throws(() => assertShape({ ...row, managed_by: 'x' }, 'SkillSourceRow', 'row'), /managed_by is not a SkillSourceRow field/);
-    const { trust: _trust, ...partial } = row;
-    assert.throws(() => assertShape(partial, 'SkillSourceRow', 'row'), /requires trust/);
-});
 
 test('digests are 64 lowercase hex, the release identity the host compares', () => {
     const digests = [
@@ -106,6 +45,8 @@ test('each call sends exactly what the host takes', async () => {
         await skillSourcesApi.item('ouroboros-community', 'scholion');
         await skillSourcesApi.install('ouroboros/weather');
         await skillSourcesApi.install('clawhub/steipete/weather', { replace: true });
+        await skillSourcesApi.install('ouroboros/weather', { expectedSourceKey: 'git-view', expectedDigest: 'a'.repeat(64) });
+        await skillSourcesApi.install('clawhub/steipete/weather', { expectedSourceKey: 'registry-view', version: '1.0.0', replace: true });
         await skillSourcesApi.updateSkill('anime_studio', 'merge', 'a'.repeat(64), 'b'.repeat(64));
         await skillSourcesApi.updateSkill('weather', 'replace', 'c'.repeat(64));
         await skillSourcesApi.uninstallSkill('weather');
@@ -124,6 +65,8 @@ test('each call sends exactly what the host takes', async () => {
             { url: '/api/skill-catalog/item/ouroboros-community/scholion', method: 'GET', body: undefined },
             { url: '/api/skill-catalog/install', method: 'POST', body: { id: 'ouroboros/weather', turn_on_when_ready: true } },
             { url: '/api/skill-catalog/install', method: 'POST', body: { id: 'clawhub/steipete/weather', turn_on_when_ready: true, replace: true } },
+            { url: '/api/skill-catalog/install', method: 'POST', body: { id: 'ouroboros/weather', turn_on_when_ready: true, expected_source_key: 'git-view', expected_digest: 'a'.repeat(64) } },
+            { url: '/api/skill-catalog/install', method: 'POST', body: { id: 'clawhub/steipete/weather', turn_on_when_ready: true, replace: true, expected_source_key: 'registry-view', version: '1.0.0' } },
             { url: '/api/skills/anime_studio/update', method: 'POST', body: { mode: 'merge', digest: 'a'.repeat(64), local_digest: 'b'.repeat(64) } },
             { url: '/api/skills/weather/update', method: 'POST', body: { mode: 'replace', digest: 'c'.repeat(64) } },
             { url: '/api/skills/weather/uninstall', method: 'POST', body: {} },

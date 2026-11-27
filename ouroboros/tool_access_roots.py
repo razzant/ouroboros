@@ -114,6 +114,40 @@ def freeze_tool_profile(task: dict) -> str:
     return task["tool_profile"]
 
 
+def scoped_read_actor(ctx: Any) -> str:
+    """Host identity for project-journal and cross-focus reads, not a tool grant.
+
+    A narrower recipient profile or child lineage wins over any enclosing root
+    or Place facts. A Place marker without a binding proves no room-wide access.
+    """
+    from ouroboros.dialogue_provenance import is_presence_task, presence_caller_binding
+
+    metadata, contract = (value if isinstance(value, dict) else {} for value in (
+        getattr(ctx, "task_metadata", None), getattr(ctx, "task_contract", None)))
+    carriers = [metadata, contract, metadata.get("task_contract")]
+    carriers += [row.get("lineage") for row in carriers if isinstance(row, dict)]
+    facts = [row for row in carriers if isinstance(row, dict)]
+
+    def any_fact(key: str, value: str = "") -> bool:
+        values = [str(row.get(key) or "").strip() for row in facts]
+        return value in values if value else any(values)
+
+    if (any_fact("parent_task_id") or any_fact("delegation_role", "subagent")
+            or active_tool_profile(ctx) in {"local_readonly_subagent", "acting_subagent"}):
+        return "child"
+    binding = presence_caller_binding(ctx)
+    if binding:
+        return "place"
+    if (binding is not None or is_presence_task({"metadata": metadata,
+            "_presence_turn": metadata.get("_presence_turn") or getattr(ctx, "_presence_turn", False),
+            "_presence_origin": getattr(ctx, "_presence_origin", None)})
+            or any("capability_ceiling" in row for row in facts)):
+        return "unverified_place"
+    if getattr(ctx, "is_direct_chat", False) or any_fact("delegation_role", "root") or any_fact("root_task_id"):
+        return "root"
+    return "scoped"
+
+
 def predicted_subagent_profile(*, write_surface: str = "") -> ToolProfile:
     """The tool profile a scheduled subagent will resolve to, from schedule-time
     inputs only (v6.57.0, 1.6). A valid write_surface → acting_subagent; otherwise
@@ -149,7 +183,7 @@ def project_room_lens_dir(ctx: Any) -> Optional[pathlib.Path]:
     return pathlib.Path(raw).resolve(strict=False)
 
 
-def folderless_scratch_dir(ctx: Any) -> Optional[pathlib.Path]:
+def folderless_scratch_dir(ctx: Any, *, create: bool = True) -> Optional[pathlib.Path]:
     """Project work WITHOUT a folder: the task's OWN scratch is its default cwd (#1315).
 
     Project-scoped work with no workspace and no room folder (or an explicit
@@ -157,7 +191,8 @@ def folderless_scratch_dir(ctx: Any) -> Optional[pathlib.Path]:
     default location only — never a workspace: no external-workspace or delegated
     write authority, no change to what the profile may reach (the system repo stays
     one explicit ``root``/``cwd`` away). Main self-work, Presence and an explicit
-    ``system_repo`` intent keep today's default."""
+    ``system_repo`` intent keep today's default. Admission can inspect the prospective
+    path without making the directory (``create=False``)."""
     if getattr(ctx, "workspace_root", None):
         return None
     meta = getattr(ctx, "task_metadata", None)
@@ -173,15 +208,22 @@ def folderless_scratch_dir(ctx: Any) -> Optional[pathlib.Path]:
     if presence_metadata_binding(meta) is not None:
         return None
     scratch = resource_root_path(ctx, "task_drive")
-    scratch.mkdir(parents=True, exist_ok=True)
+    if create:
+        scratch.mkdir(parents=True, exist_ok=True)
     return scratch
 
 
 def load_bound_skill(binding: ResolvedResourceBinding) -> Any:
-    """Load the frozen payload target while preserving lifecycle provenance."""
-    from ouroboros.skill_loader import _classify_skill_source, load_skill
+    """Load the frozen payload target while preserving lifecycle provenance; its physical location is the
+    inventory's for the selected folder, as ordinary discovery gives it (the selected folder wins a collision)."""
+    from ouroboros.config import get_skills_repo_path
+    from ouroboros.skill_loader import _classify_skill_source, _skill_location_inventory, load_skill
     loaded = load_skill(binding.base_path, binding.state_drive_root)
     if loaded is not None:
+        selected = pathlib.Path(binding.base_path).resolve()
+        loaded.location = next((item.location for item in _skill_location_inventory(
+            binding.state_drive_root, repo_path=get_skills_repo_path() or None) if item.skill_dir == selected),
+            binding.source)
         loaded.source = _classify_skill_source(
             binding.base_path,
             location=binding.source,

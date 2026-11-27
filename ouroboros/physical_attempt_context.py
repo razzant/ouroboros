@@ -8,8 +8,11 @@ import contextlib
 import contextvars
 import datetime
 import logging
-from dataclasses import InitVar, dataclass, field
-from typing import Any, Callable, Iterator, Literal, Optional, Tuple, TypedDict
+from dataclasses import InitVar, dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Optional, Tuple, TypedDict
+
+if TYPE_CHECKING:
+    from ouroboros.context_window import WindowRecord
 
 log = logging.getLogger(__name__)
 
@@ -49,12 +52,78 @@ class PhysicalAttemptContext:
     # it against the leading system content (``model_send_seal``). Carried beside the record, never in it: it is no
     # field, so no ``asdict`` of a ledger row, receipt, capture or checkpoint holds it; ``replace`` keeps it.
     base_prompt_source: InitVar[Optional[Tuple[str, str, int, str]]] = None
+    first_contact_scope: InitVar[str] = ""  # private until a comparable outcome reaches the evidence store
+    first_contact_dispatch: InitVar[Optional[Tuple[int, str]]] = None
+    # A fresh direct chat's plan (``ContextFitPlan.first_contact``): the scope its fit read and whether a start hint
+    # shaped the view; the send seam signs ``first_contact_scope`` from the target it actually resolves.
+    first_contact_plan: InitVar[Optional[Tuple[str, bool]]] = None
+    window_boundary_tokens: InitVar[Optional[int]] = None  # stated boundary, not admission's reserve-adjusted total
+    window_record: InitVar[Optional[WindowRecord]] = None  # live capacity terms; not an extra ledger projection
+    dispatch_account: InitVar[str] = ""  # private route witness, not part of the priced or delivered context view
+    # The native Ollama load this send's plan asked for (0: Auto), None for every other route. A record field, so the
+    # ledger row and a restored receipt carry it; last, so a positional caller of the fields above is unchanged.
+    requested_load_window: Optional[int] = None
 
-    def __post_init__(self, base_prompt_source: Optional[Tuple[str, str, int, str]]) -> None:
+    bible_source: InitVar[Optional[Tuple[str, str, int, str]]] = None
+    assembly_witnesses: InitVar[tuple] = ()
+    contribution_input: InitVar[Optional[tuple]] = None
+
+    def __post_init__(self, base_prompt_source: Optional[Tuple[str, str, int, str]], first_contact_scope: str,
+                      first_contact_dispatch: Optional[Tuple[int, str]],
+                      first_contact_plan: Optional[Tuple[str, bool]], window_boundary_tokens: Optional[int],
+                      window_record: Optional[WindowRecord], dispatch_account: str,
+                      bible_source: Optional[Tuple[str, str, int, str]],
+                      assembly_witnesses: tuple, contribution_input: Optional[tuple]) -> None:
         # Only a witness is kept on the instance: without one, ``vars`` holds just the record's fields, and ``replace``
         # reads the class's None back (it reads every InitVar with ``getattr``).
         if base_prompt_source is not None:
             object.__setattr__(self, "base_prompt_source", tuple(base_prompt_source))
+        if first_contact_scope:
+            object.__setattr__(self, "first_contact_scope", first_contact_scope)
+            object.__setattr__(self, "first_contact_dispatch", first_contact_dispatch)
+        if first_contact_plan:
+            object.__setattr__(self, "first_contact_plan", tuple(first_contact_plan))
+        if window_boundary_tokens is not None:
+            object.__setattr__(self, "window_boundary_tokens", window_boundary_tokens)
+        if window_record is not None:
+            object.__setattr__(self, "window_record", window_record)
+        if dispatch_account:
+            object.__setattr__(self, "dispatch_account", dispatch_account)
+        if bible_source is not None:
+            object.__setattr__(self, "bible_source", tuple(bible_source))
+        if assembly_witnesses:
+            object.__setattr__(self, "assembly_witnesses", assembly_witnesses)
+        if contribution_input is not None:
+            object.__setattr__(self, "contribution_input", contribution_input)
+
+
+def with_dispatch_account(context: Optional[PhysicalAttemptContext], account: str) -> Optional[PhysicalAttemptContext]:
+    return replace(context, dispatch_account=account) if context is not None and account else context
+
+
+_WIRE_ADMISSION = contextvars.ContextVar("physical_wire_admission", default=None)
+
+
+@contextlib.contextmanager
+def with_wire_admission(check):
+    """One logical caller's extra admission over its final wire copy; never priced or serialized."""
+    token = _WIRE_ADMISSION.set(check)
+    try:
+        yield
+    finally:
+        _WIRE_ADMISSION.reset(token)
+
+
+def check_wire_admission(request, candidate, reservation) -> None:
+    if check := _WIRE_ADMISSION.get():
+        check(request, candidate, reservation)
+
+
+def with_dispatch_stamp(request: Any, stamp: Tuple[int, str]) -> Any:
+    """Bind the exact ledger dispatch order to a candidate prepared for the start preference."""
+    context = request.physical_context
+    return (replace(request, physical_context=replace(context, first_contact_dispatch=stamp))
+            if context is not None and context.first_contact_scope else request)
 
 
 OBSERVED = frozenset({"dispatched", "settled", "unresolved"})  # a send the ledger records as made
@@ -83,7 +152,7 @@ class ContextAttemptObservation(TypedDict, total=False):
     applied: Literal["max", "low", "nano"]  # the mode the send is named in (``shown_mode``): Low for Low under Max
     books: Literal["whole", "maps"]  # the books' form in this send
     profile: Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
-    cause: Literal["", "memory", "request", "route", "window", "after_start"]  # why lower; "" also when unknown
+    cause: Literal["", "memory", "request", "route", "window", "after_start"]  # why applied is lower than preferred_at_send; "" also when unknown
     target_missed: bool  # this send exceeded the owner's mode target (``context_target_miss``)
     no_memory_tokens: Optional[int]  # Low's missed target: the start's request with no memory at all, else None
     observed_at: str
@@ -182,14 +251,15 @@ def attempt_view(entries: list) -> ContextAttemptFact:
     return view
 
 
-_DISPATCH_OBSERVER: contextvars.ContextVar[Optional[Callable[[Any], None]]] = contextvars.ContextVar(
-    "physical_dispatch_observer", default=None)
+_DISPATCH_OBSERVER: contextvars.ContextVar[Tuple[Callable[[Any], None], ...]] = contextvars.ContextVar(
+    "physical_dispatch_observer", default=())
 
 
 @contextlib.contextmanager
 def observe_dispatch(observer: Optional[Callable[[Any], None]]) -> Iterator[None]:
-    """Bind who hears this context's physical dispatches and identity-bound releases, including in-call repairs."""
-    token = _DISPATCH_OBSERVER.set(observer)
+    """Add who hears this context's physical dispatches and identity-bound releases, including in-call repairs. An
+    outer listener keeps hearing them beside an inner one (a round's start-hint seam beside each attempt's own)."""
+    token = _DISPATCH_OBSERVER.set(_DISPATCH_OBSERVER.get() + ((observer,) if observer is not None else ()))
     try:
         yield
     finally:
@@ -198,10 +268,9 @@ def observe_dispatch(observer: Optional[Callable[[Any], None]]) -> Iterator[None
 
 def dispatched(capture: Any) -> None:
     """The ledger publishes dispatch before send, then a release if disproven, even before its own retry.
-    The bound observer hears that capture. Its failure is logged, never raised: the observation cannot change
+    Every bound observer hears that capture. A failure is logged, never raised: the observation cannot change
     the send, its accounting or whether it may be retried."""
-    observer = _DISPATCH_OBSERVER.get()
-    if observer is not None:
+    for observer in _DISPATCH_OBSERVER.get():
         try:
             observer(capture)
         except Exception:

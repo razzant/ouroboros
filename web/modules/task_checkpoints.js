@@ -168,6 +168,12 @@ export function taskCheckpointLabel(evt = {}) {
     if (kind === 'context_reclaim_emergency' && evt.cause === 'output_exhaustion') {
         return 'Source-address recovery after empty length-limited replies (no model)';
     }
+    if (kind === 'context_fit_low_retry' && evt.book_map) {  // written while the retry is prepared, before any send
+        const shortened = { development_map: 'Development map shortened to its chapter list',
+            architecture_map: 'Architecture map shortened to its chapter list',
+            design_bible: 'Design bible shortened to its map' }[evt.book_map] || 'A map shortened';
+        return `Preparing a smaller request: ${shortened}`;
+    }
     if (kind === 'context_fit_physical_mode') {  // the start's recorded reason, in the Context capsule's words
         // A row of 17-22 Nov named Low under the owner's Max as Max with chapter maps: it reads as Low (`asSent`).
         const { applied } = asSent({ applied: evt.effective_mode, books: evt.books });
@@ -235,6 +241,7 @@ export function serviceOutputLinksHtml(links = []) {
 export function taskCheckpointIdentity(evt = {}) {
     if (Object.hasOwn(WAIT_LABELS, evt.checkpoint_kind)) return `${evt.episode_id || evt.ts || ''}:${evt.phase}`;
     if (evt.milestone || evt.budget_axis) return `${evt.budget_axis || ''}:${evt.milestone || ''}`;
+    if (evt.book_map) return `${evt.round || ''}:${evt.book_map}`;  // two maps of one round stay two rows
     return evt.checkpoint_number || evt.round || '';
 }
 

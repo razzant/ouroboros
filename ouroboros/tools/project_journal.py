@@ -48,6 +48,7 @@ _JOURNAL_KINDS = ("start", "checkpoint", "blocked", "done", "note")
 # rows (historical automatic reflections and host rows, otherwise unreachable: generic
 # file tools refuse the project store).
 _READ_SOURCES = {"journal": project_journal_path, "reflections": project_reflections_path}
+_JOURNAL_LEAVES = frozenset(reader("x").name.casefold() for reader in _READ_SOURCES.values())
 _MAX_TEXT_CHARS = 4000
 
 
@@ -112,7 +113,7 @@ def may_publish_focus(ctx: ToolContext) -> bool:
     return _scope_authority(ctx)[0] == "root" or _bound_continue_root(ctx)
 
 
-def _project_scope(ctx: ToolContext, explicit: Any, *, write: bool = False) -> tuple[str, str, str]:
+def _project_scope(ctx: ToolContext, explicit: Any, *, write: bool = False, journal: bool = True) -> tuple[str, str, str]:
     """``(project id, refusal, its code)``: the project this actor may read (``write``: write), or the refusal and
     the code it is published with (``TOOL_ARG_ERROR`` for a malformed scope, ``ACCESS_BLOCKED`` for a project
     this actor may not use), so a caller never re-reads the kind from the text."""
@@ -128,14 +129,17 @@ def _project_scope(ctx: ToolContext, explicit: Any, *, write: bool = False) -> t
     if requested_raw and not explicit_project_id_ok(requested_raw):
         return "", malformed[1] + "project_id is malformed", malformed[0]
     requested = sanitize_project_id(requested_raw) if requested_raw else ""
-    authority, _metadata = _scope_authority(ctx)
     if requested_raw and not requested:
         return "", malformed[1] + "project_id is malformed", malformed[0]
     if own_raw and not own:
         return "", malformed[1] + "current project scope is malformed", malformed[0]
-    # A root reads every project; so does a place turn (owner 06.11, 4=A: it may read project journals and tell
-    # the task that leads its thread), read-only. A child reads only its own; writes stay with the current project.
-    reads_any = authority == "root" or (authority == "presence" and not write)
+    if journal and not write:
+        from ouroboros.tool_access_roots import scoped_read_actor
+
+        reads_any = scoped_read_actor(ctx) in {"root", "place"}
+    else:  # The workpad and project writes keep their existing authority.
+        authority, _metadata = _scope_authority(ctx)
+        reads_any = authority == "root" or (authority == "presence" and not write)
     if own and requested and requested != own:
         if write:
             return "", "⚠️ TOOL_FORBIDDEN: foreign project writes are refused; write only the current project", "ACCESS_BLOCKED"
@@ -147,15 +151,57 @@ def _project_scope(ctx: ToolContext, explicit: Any, *, write: bool = False) -> t
     return own or requested, "", ""
 
 
-def _resolve_project_id(ctx: ToolContext, explicit: Any, *, write: bool = False) -> tuple[str, str]:
+def _resolve_project_id(ctx: ToolContext, explicit: Any, *, write: bool = False, journal: bool = True) -> tuple[str, str]:
     """``(project id, refusal text)``: ``_project_scope`` without the refusal's code."""
-    pid, refusal, _code = _project_scope(ctx, explicit, write=write)
+    pid, refusal, _code = _project_scope(ctx, explicit, write=write, journal=journal)
     return pid, refusal
 
 
 def _authorized_project_id(ctx: ToolContext, explicit: Any) -> str:
     """Compatibility resolver for the current scope (read semantics)."""
     return _resolve_project_id(ctx, explicit, write=False)[0]
+
+
+def journal_resource_read_refusal(ctx: ToolContext, target: pathlib.Path, *, data_roots=None) -> str:
+    """Apply the typed reader's decision to either journal at its resolved store address.
+
+    The store address is derived exactly as the producer writes it (one source for the
+    prefix and leaf names), and the comparison with the addressed object uses one
+    filesystem-identity rule, so a parent folder spelled differently (an alias, a
+    case difference) still locates the same journal, while a physically separate
+    copy outside the store never matches. An identity that cannot be observed is
+    neither a match nor a confirmed difference: the remaining candidates are still
+    compared, and only when no candidate matched while at least one comparison
+    stayed unobservable does the guard refuse rather than decide. Bounded to the
+    one addressed object; no tree walks."""
+    if target.name.casefold() not in _JOURNAL_LEAVES:
+        return ""
+    from ouroboros.config import DATA_DIR
+    from ouroboros.confined_files import same_store_object
+    from ouroboros.project_facts import addressed_store_project_candidates
+    from ouroboros.tools.core_secret_paths import runtime_data_roots
+
+    roots = runtime_data_roots(ctx) if data_roots is None else data_roots
+    unobservable = False
+    for project in addressed_store_project_candidates(target):
+        for data_root in roots:
+            for reader in _READ_SOURCES.values():
+                source = data_root / reader(project).relative_to(DATA_DIR)
+                try:
+                    same = same_store_object(target, source, strict=True)
+                except OSError:  # an unobservable comparison is not a mismatch; a later candidate may still match
+                    unobservable = True
+                    continue
+                if not same:
+                    continue
+                try:
+                    return _project_scope(ctx, project, write=False)[1]
+                except (OSError, ValueError, RuntimeError):
+                    return "⚠️ TOOL_FORBIDDEN: this actor's project scope could not be resolved"
+    if unobservable:
+        return ("⚠️ TOOL_FORBIDDEN: this journal-shaped object's store identity could not be "
+                "observed, so this actor's project scope cannot be applied to it")
+    return ""
 
 
 def _journal_write(ctx: ToolContext, kind: str, text: str, project_id: str = "") -> str:
@@ -544,8 +590,8 @@ def _journal_read(
 
 def _workpad_page(ctx: ToolContext, project_id: Any = "") -> Tuple[str, Optional[bytes], str]:
     """``(project id, the page's exact bytes or None when it has none, refusal)``: one byte capture of the page,
-    under the read scope (``_resolve_project_id(write=False)``), never translated or stripped."""
-    pid, scope_error = _resolve_project_id(ctx, project_id, write=False)
+    under its workpad scope, never translated or stripped."""
+    pid, scope_error = _resolve_project_id(ctx, project_id, journal=False)
     if scope_error:
         return "", None, scope_error + " (workpad_read)"
     if not pid:
@@ -693,12 +739,17 @@ def _retain_focus_source(canonical: pathlib.Path, task_id: str, source: Dict[str
     The handle is the native ``task_source`` ref minus its ``read`` block: peers
     resolve it through ``get_task_result(include_focus_source=True)`` against the
     same canonical root the durable task result lives on, not through the
-    author's own (possibly forked) ``artifact_store``.
+    author's own (possibly forked) ``artifact_store``. The catalogue directory and
+    the name prefix are the reader's own canonical definitions
+    (``task_finalization``), so this writer and the cross-focus reader admit the
+    same placement and cannot drift apart.
     """
     from ouroboros.artifacts import store_actor_source_bytes
+    from ouroboros.task_finalization import FOCUS_SOURCE_CATEGORY_DIR, FOCUS_SOURCE_NAME_PREFIX
 
-    ref = store_actor_source_bytes(canonical, task_id, category="context_checkpoints",
-                                   source_id=f"focus_source_{source.get('reader')}",
+    ref = store_actor_source_bytes(canonical, task_id,
+                                   category=pathlib.PurePosixPath(FOCUS_SOURCE_CATEGORY_DIR).name,
+                                   source_id=f"{FOCUS_SOURCE_NAME_PREFIX}{source.get('reader')}",
                                    data=body.encode("utf-8"), extension="md")
     return {key: ref[key] for key in ("kind", "root", "path", "size", "sha256")}
 

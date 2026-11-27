@@ -160,6 +160,7 @@ class Node extends Events {
     appendChild(node) { return this.insertBefore(node, null); }
     prepend(...nodes) { const first = this.children[0] || null; for (const node of nodes) this.insertBefore(node, first); }
     insertBefore(node, before) {
+        if (node === before) return node;  // as the DOM: a node inserted before itself stays where it is
         node.parent?.removeChild(node);
         const index = before ? this.children.indexOf(before) : -1;
         if (index >= 0) this.children.splice(index, 0, node); else this.children.push(node);
@@ -178,6 +179,7 @@ class Node extends Events {
     replaceChildren(...nodes) { for (const child of [...this.children]) this.removeChild(child); this._text = ''; this.append(...nodes); }
     get previousElementSibling() { const list = this.parent?.children || []; return list[list.indexOf(this) - 1] || null; }
     get nextElementSibling() { const list = this.parent?.children || []; return list[list.indexOf(this) + 1] || null; }
+    get childNodes() { return this.children; }
     get firstElementChild() { return this.children[0] || null; }
     getClientRects() { return this.isConnected && !this.closest('[hidden]') && !this.hidden ? [this.rect] : []; }
     getBoundingClientRect() { return this.rect; }

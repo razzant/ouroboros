@@ -1,19 +1,15 @@
-"""The model-route previews have a browser twin: every TypedDict in
-ouroboros/gateway/model_route_contracts.py has a JSDoc typedef with the same fields in
-web/modules/model_route_types.js (the twin pair beside gateway/contracts.py + api_types.js),
-and the real producers emit exactly the declared fields."""
+"""The model-route previews are a Python contract with real producers.
+
+The browser has no JSDoc twin of ``ouroboros/gateway/model_route_contracts.py``.
+These tests check that the real producers emit exactly the declared fields.
+"""
 from __future__ import annotations
 
 import json
-import pathlib
 import typing
 from dataclasses import asdict
 
 from ouroboros.gateway import model_route_contracts as contracts
-from tests.test_gateway_parity import _js_typedef_fields
-
-REPO = pathlib.Path(__file__).resolve().parents[1]
-TWIN = REPO / "web" / "modules" / "model_route_types.js"
 
 
 def _py_fields(cls) -> set[str]:
@@ -24,20 +20,6 @@ def _required(cls) -> set[str]:
     # Postponed annotations hide NotRequired from ``__required_keys__``; the resolved hints keep it.
     hints = typing.get_type_hints(cls, include_extras=True)
     return {name for name, hint in hints.items() if typing.get_origin(hint) is not contracts.NotRequired}
-
-
-def test_every_model_route_envelope_has_a_field_identical_browser_twin():
-    text = TWIN.read_text(encoding="utf-8")
-    assert contracts.__all__, "the twin pair lost its envelopes"
-    for name in contracts.__all__:
-        assert f"@typedef {{Object}} {name}\n" in text, f"model_route_types.js lacks {name}"
-        assert _js_typedef_fields(text, name) == _py_fields(getattr(contracts, name)), name
-    # The main mirror points at the twin, and the client types resolve against it.
-    api_types = (REPO / "web" / "modules" / "api_types.js").read_text(encoding="utf-8")
-    assert "model_route_types.js" in api_types.splitlines()[0]
-    client = (REPO / "web" / "modules" / "api_client.js").read_text(encoding="utf-8")
-    for name in ("WebSearchRoute", "ResponseLimitPreview", "ResponseLimitAckResponse"):
-        assert f"import('./model_route_types.js').{name}" in client, name
 
 
 def test_the_real_producers_emit_exactly_the_declared_fields(tmp_path, monkeypatch):

@@ -379,10 +379,9 @@ class TestCaptureAndIntegrate:
 
     def test_unwritten_disposition_keeps_the_snapshot_and_forbids_retry(self, tmp_path, monkeypatch):
         # F1: releasing the snapshot on an UNWRITTEN disposition row loses the only
-        # durable record that the patch was handled — after a restart (no
-        # in-process flag) the same patch could be applied a second time.
-        # (CR1-3: only the DISPOSITION write fails here — a log broken before the
-        # apply now refuses to mutate at the apply-intent row instead.)
+        # durable record that the patch was handled, and a second apply would land
+        # the same changes twice. (CR1-3: only the DISPOSITION write fails here — a
+        # log broken before the apply refuses to mutate at the apply-intent row.)
         from ouroboros.tools.delegate import _capture_terminal_patch
         from ouroboros.tools.subagent_integration import _integrate_delegated_patch
 
@@ -396,11 +395,20 @@ class TestCaptureAndIntegrate:
             lambda drive, kind, payload: (
                 False if kind == custody.PATCH_DISPOSED else real_emit(drive, kind, payload)))
         out = _integrate_delegated_patch(ctx, "run-1", "apply", "")
-        assert "INTEGRATE_DISPOSITION_UNWRITTEN" in out, out
-        assert "Do NOT call integrate_delegated_patch again" in out
+        assert "INTEGRATE_DISPOSITION_UNWRITTEN" in out and "Git staging completed" in out, out
+        assert "records this apply without changing a file" in out
         # The apply DID happen and is not denied; the record and its pins survive for it.
         assert (target / "newfile.py").exists()
         assert find_execution_snapshot("snapX")["result_sha"] and not pathlib.Path(handle.path).exists()
+        # The forbidden retry is a second apply: a later call only records the proven earlier one.
+        monkeypatch.setattr(custody, "emit", real_emit)
+        staged = _git(target, "ls-files", "--stage").stdout
+        again = _integrate_delegated_patch(ctx, "run-1", "apply", "")
+        assert "earlier Git apply is recorded" in again, again
+        assert (target / "newfile.py").read_text(encoding="utf-8") == "x = 1\n"
+        assert _git(target, "ls-files", "--stage").stdout == staged
+        assert [row["disposition"] for row in custody.custody_rows(custody.custody_root(ctx))
+                if row["type"] == custody.PATCH_DISPOSED] == ["applied"]
         custody._CUSTODY.clear()
 
     def test_unwritten_disposition_on_reject_changes_nothing(self, tmp_path, monkeypatch):
@@ -410,13 +418,18 @@ class TestCaptureAndIntegrate:
         target, ctx, handle = self._provisioned(tmp_path, monkeypatch)
         (pathlib.Path(handle.path) / "junk.py").write_text("bad\n", encoding="utf-8")
         entry = _isolated_entry(ctx, target, handle)
+        drive = custody.custody_root(ctx)
+        assert custody.record_started(drive, entry)
+        assert custody.emit(drive, custody.SETTLED, {"run_id": entry.run_id, "task_id": entry.task_id})
         _capture_terminal_patch(ctx, entry)
-        monkeypatch.setattr(custody, "emit", lambda *a, **k: False)
-        out = _integrate_delegated_patch(ctx, "run-1", "reject", "no")
+        with monkeypatch.context() as failing:
+            failing.setattr(custody, "emit", lambda *a, **k: False)
+            out = _integrate_delegated_patch(ctx, "run-1", "reject", "no")
         assert "INTEGRATE_DISPOSITION_UNWRITTEN" in out, out
-        assert "only after a restart" in out
+        assert "read back the durable disposition" in out and "restart" not in out
         assert not (target / "junk.py").exists()
         assert find_execution_snapshot("snapX") is not None
+        assert "🚫 Rejected" in _integrate_delegated_patch(ctx, "run-1", "reject", "no")
         custody._CUSTODY.clear()
 
 
@@ -1159,7 +1172,7 @@ class TestCaptureHonesty:
             tmp_path, monkeypatch, snapshot_id="snapBelt", run_id="run-belt")
         cap_dir = custody.delegated_capture_dir(drive, "t-nanny", "snapBelt")
         _failed_manifest_capture(handle.path, cap_dir)
-        monkeypatch.setattr(si, "_capture_at_disposition", lambda *a, **k: "")
+        monkeypatch.setattr(si, "_capture_at_disposition", lambda *a, **k: {})
         out = si._integrate_delegated_patch(ctx, "run-belt", "reject", "")
         assert "INTEGRATE_DELEGATED_CAPTURE_FAILED" in out, out
         custody._CUSTODY.clear()
@@ -1371,21 +1384,25 @@ class TestApplyIntentAmbiguity:
         custody._CUSTODY.clear()
         return target, ctx, handle, drive
 
-    def test_crash_between_apply_and_disposition_refuses_false_rejection(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("proof", [True, False])
+    def test_crash_between_apply_and_disposition_refuses_false_rejection(self, tmp_path, monkeypatch, proof):
         # The EXACT reproduced sequence: apply succeeds, the disposition row
         # fails to land, the process dies. After a restart the run reads as
         # undisposed — a reject then claimed "not applied", recorded
         # `rejected` and deleted the snapshot while the tree stayed modified
-        # and staged. Now: typed ambiguity refusal, nothing disposed.
+        # and staged. Now a reject is always the typed ambiguity refusal; an
+        # apply records the earlier one only from that attempt's own staging
+        # proof (its verdict row), and without it refuses the same way.
         from ouroboros.tools.subagent_integration import _integrate_delegated_patch
 
         target, ctx, handle, drive = self._settled_run(
             tmp_path, monkeypatch, snapshot_id="snapAmb", run_id="run-amb")
         real_emit = custody.emit
+        lost = {custody.PATCH_DISPOSED, *(() if proof else ("delegate_run_patch_verdict",))}
         monkeypatch.setattr(
             custody, "emit",
             lambda d, kind, payload: (
-                False if kind == custody.PATCH_DISPOSED else real_emit(d, kind, payload)))
+                False if kind in lost else real_emit(d, kind, payload)))
         out = _integrate_delegated_patch(ctx, "run-amb", "apply", "")
         assert "INTEGRATE_DISPOSITION_UNWRITTEN" in out, out
         assert (target / "tracked.txt").read_text(encoding="utf-8").endswith("CHILD-EDIT\n")
@@ -1397,10 +1414,13 @@ class TestApplyIntentAmbiguity:
         assert replayed.patch_disposed == ""
         for decision in ("reject", "apply"):
             out2 = _integrate_delegated_patch(ctx, "run-amb", decision, "discard it")
-            assert "INTEGRATE_DELEGATED_APPLY_AMBIGUOUS" in out2, (decision, out2)
+            if decision == "apply" and proof:
+                assert "earlier Git apply is recorded" in out2, out2
+            else:
+                assert "INTEGRATE_DELEGATED_APPLY_AMBIGUOUS" in out2, (decision, out2)
             custody._CUSTODY.clear()
         # No false rejection was recorded; material persists (record, pins, saved patch).
-        assert custody.replay(drive)["run-amb"].patch_disposed == ""
+        assert custody.replay(drive)["run-amb"].patch_disposed == ("applied" if proof else "")
         assert find_execution_snapshot("snapAmb")["result_sha"] and not pathlib.Path(handle.path).exists()
         # The tree honestly still carries the applied, staged patch.
         assert "CHILD-EDIT" in (target / "tracked.txt").read_text(encoding="utf-8")

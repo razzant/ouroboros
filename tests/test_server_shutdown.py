@@ -314,8 +314,8 @@ def test_supervisor_startup_restores_queue_before_worker_reset():
 
     source = inspect.getsource(server._run_supervisor)
     restore = source.index("restore_pending_from_snapshot(terminalized=")
-    reset = source.index("kill_workers(preserve_pending=True)")
-    spawn = source.index('"startup:worker_spawn", spawn_workers)')  # the same one-worker call, now timed
+    reset = source.index('"startup:old_workers_stop"')
+    spawn = source.index('"startup:worker_spawn"')
     assert restore < reset < spawn
 
 
@@ -509,12 +509,13 @@ def test_main_graceful_restart_cleanup_avoids_port_sweep(monkeypatch, tmp_path, 
     monkeypatch.setattr(server, "_emergency_process_cleanup", lambda **kw: cleanup_calls.append(kw) or census)
     seam_calls = []  # the authority switch seam runs on the cleanup's census, before the exit
     monkeypatch.setattr(server.store_switch, "switch_at_restart",
-                        lambda root, repo_dir, cleanup: seam_calls.append((root, repo_dir, cleanup)) or {"status": "no_intent"})
+                        lambda root, repo_dir, cleanup, *, restart_drained: seam_calls.append(
+                            (root, repo_dir, cleanup, restart_drained)) or {"status": "no_intent"})
     transfers = []
 
     def transfer(host, port):
         assert cleanup_calls == [{}]
-        assert seam_calls == [(tmp_path, server.REPO_DIR, census)]
+        assert seam_calls == [(tmp_path, server.REPO_DIR, census, True)]
         transfers.append((host, port))
 
     monkeypatch.setattr(server, "_restart_current_process", transfer)
@@ -529,7 +530,7 @@ def test_main_graceful_restart_cleanup_avoids_port_sweep(monkeypatch, tmp_path, 
         _stop_restart_watcher(server)
 
     assert cleanup_calls == [{}]
-    assert seam_calls == [(tmp_path, server.REPO_DIR, census)]
+    assert seam_calls == [(tmp_path, server.REPO_DIR, census, True)]
     assert transfers == ([] if launcher_managed else [("127.0.0.1", bound[0])])  # the port it bound
     assert exits == [server.RESTART_EXIT_CODE]
 

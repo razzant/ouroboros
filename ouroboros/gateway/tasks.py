@@ -42,7 +42,7 @@ from ouroboros.gateway.task_pause import api_task_pause, owner_tree_control_rout
 from ouroboros.gateway.task_decision import api_decision_answer  # noqa: F401
 from ouroboros.gateway.task_archive import (
     chat_media_identity, directory_archives, download_refusal, plain_segments, serve_directory_archive, serve_task_file,
-    task_artifact_location, recorded_identity, serve_task_source, serve_wrap_up_document,
+    task_artifact_location, recorded_identity, serve_letter_words, serve_task_source, serve_wrap_up_document,
 )
 from ouroboros.confined_files import root_spellings
 from ouroboros.task_custody import task_artifact_stores
@@ -66,7 +66,8 @@ from ouroboros.contracts.task_contract import (
 )
 from ouroboros.outcomes import public_task_result
 from ouroboros import artifacts as artifact_store
-from ouroboros.artifacts import render_attachment_lines as _render_attachment_lines
+from ouroboros.artifacts import render_attachment_lines as _render_attachment_lines  # noqa: F401 - the chat lanes read it here
+from ouroboros.workspace_admission import compose_task_text as _compose_task_text
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.task_results import (
     STATUS_FAILED,
@@ -106,6 +107,7 @@ _RESERVED_METADATA_KEYS = frozenset({
     "budget_drive_root",
     "task_constraint",
     "task_contract",
+    "requested_executor_route",  # a helper's frozen selection (subagent_messages), never a root caller's claim
     "input_sources",
     "allowed_resources",
     "deadline_at",
@@ -116,8 +118,10 @@ _RESERVED_METADATA_KEYS = frozenset({
     "origin_message_ref", "origin_message_snapshot", "reply_reference",
     "origin_suppressed", "origin_message_absent", "presence_binding_relation",
     # Who wrote the text, the words a tree carries and a control press: host attestations, never a caller's.
-    "objective_author", "context_author", "owner_corpus", "ui_control",
+    "objective_author", "context_author", "owner_corpus", "ui_control", "declared_author", "admission_author",
     "governing_owner_words", "governing_owner_words_absent", "governing_schedule_text",
+    # A linked Ouroboros's letter and its agent author: stamped by the letter door alone (gateway/peer_letters_api).
+    "peer_letter", "letter_author",
 })
 
 
@@ -496,8 +500,9 @@ def _api_executor_metadata(body: dict, raw_metadata: dict, workspace_root: Optio
     }}
 
 
-def _create_task_from_body(request: Request, body: Any) -> JSONResponse:
-    """Settle the existing reservation, staging and durable admission as one unit."""
+def _create_task_from_body(request: Request, body: Any, *, host_facts: Optional[dict] = None) -> JSONResponse:
+    """Settle the existing reservation, staging and durable admission as one unit. ``host_facts`` (the letter
+    door's: its room ``chat_id`` and reserved ``metadata``) are facts no request body can carry."""
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
     if schema_errors := validate_ingress(body, TaskCreateRequest):  # executable gateway ABI (ABI-3, Q7=A): derived-schema ingress gate
@@ -561,8 +566,8 @@ def _create_task_from_body(request: Request, body: Any) -> JSONResponse:
     if workspace_root and task_type != "task":
         return json_error("external workspace tasks must use type='task'", 400)
     try:
-        chat_id = ingress_chat_id(body.get("chat_id"), drive_root, _task_project_id,
-                                  source=body.get("source"), project_basis=project_basis)
+        chat_id = host_facts["chat_id"] if host_facts else ingress_chat_id(
+            body.get("chat_id"), drive_root, _task_project_id, source=body.get("source"), project_basis=project_basis)
         depth = parse_task_depth(body.get("depth"), default=0)
     except ProjectThreadConflict as exc:
         return json_error(str(exc), 400)
@@ -593,6 +598,7 @@ def _create_task_from_body(request: Request, body: Any) -> JSONResponse:
     except ValueError as exc:
         return json_error(str(exc), 400)
     metadata = {str(k): v for k, v in raw_metadata.items() if str(k) not in _RESERVED_METADATA_KEYS}
+    metadata.update((host_facts or {}).get("metadata") or {})
     allowed_resources, resource_policy, disabled_tools, acceptance_claims, policy_error = (
         _fold_contract_policies(body, raw_metadata, metadata)
     )
@@ -921,7 +927,17 @@ def _task_get_response(request: Request) -> JSONResponse:
     payload["question_rooms"] = question_display_rooms(drive_root, task_id, payload.get("owner_quiz"))
     from ouroboros.owner_continue import continuation_offer  # Batch4: a Continue, or its accepted successor
     payload["continuation_offer"] = continuation_offer(data, task_id)
-    from ouroboros.subagent_messages import place_origin  # the place that called it, as its census and frames say it
+    from ouroboros.subagent_messages import place_origin, requested_executor_route
+    from ouroboros.task_results import resolve_task_lineage
+
+    # The missed terminal frame and history name the same frozen selection of a child, not a cached display copy, its
+    # lineage read top-level first, then legacy ``metadata``; a root selected no helper executor, whatever its row carries.
+    lineage = resolve_task_lineage(task_id, metadata=data.get("metadata"), **{key: data.get(key) for key in (
+        "root_task_id", "parent_task_id", "delegation_role", "original_task_id", "timeout_retry_from")})
+    if lineage["delegation_role"] == "subagent" and not lineage["is_root_task"] and (selected := requested_executor_route(data)):
+        payload["requested_executor_route"] = selected
+    else:
+        payload.pop("requested_executor_route", None)
     if origin := place_origin(data["metadata"] if isinstance(data.get("metadata"), dict) else {}):
         payload["place_origin"] = origin
     objections = _plan_objections_view(drive_root, task_id, data)  # the host's fold; the browser never re-derives it
@@ -944,7 +960,8 @@ def api_task_artifact(request: Request):
     name selects only a top-level file (several nested matches: 409 ``artifact_name_ambiguous`` naming
     their ``relpaths``), ``?relpath=a/b/{name}`` is exact, ``?archive=<dir>`` with ``{name}`` =
     ``<basename>.zip`` streams a recorded directory, ``?wrap_up=<Stop request>`` writes the detail's
-    ``wrap_up_document`` on read; a file's bytes leave only through ``serve_task_file``."""
+    ``wrap_up_document`` on read, ``?letter=<letter id>`` a letter's whole words (``serve_letter_words``); a file's
+    bytes leave only through ``serve_task_file``."""
     try:
         task_id = validate_task_id(request.path_params.get("task_id"))
     except ValueError as exc:
@@ -959,8 +976,11 @@ def api_task_artifact(request: Request):
         return json_error("relpath must be store-relative plain segments ending in the name, without source",
                           400, reason_code="artifact_relpath_invalid", task_id=task_id, artifact=name)
     drive_root = request_drive_root(request)
-    # One selector per request: ``archive`` and ``wrap_up`` refuse each other and relpath/source.
-    archive, stop = request.query_params.get("archive"), request.query_params.get("wrap_up")
+    # One selector per request: ``archive``, ``wrap_up`` and ``letter`` refuse each other and relpath/source.
+    archive, stop, letter = (request.query_params.get(key) for key in ("archive", "wrap_up", "letter"))
+    if letter is not None:
+        return serve_letter_words(drive_root, task_id, name, letter, other_selectors=any(
+            selector is not None for selector in (source, relpath, archive, stop)))
     if archive is not None:
         return serve_directory_archive(drive_root, task_id, name, archive, other_selectors=(
             source is not None or relpath is not None or stop is not None))
@@ -1109,8 +1129,10 @@ def _run_cascade_cancel(task_id: str) -> bool:
         return False
 
 
-def _record_stop(task_id: str, *, cascade: bool, stop_action_id: str) -> Optional[Dict[str, Any]]:
-    """Record a hard Stop's durable intent before anything is torn down.
+def _record_stop(task_id: str, *, cascade: bool, stop_action_id: str, source: str = "",
+                 request_origin: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Record a hard Stop's durable intent before anything is torn down. ``source`` and ``request_origin`` name an
+    ingress that is not the app's Stop (a linked Ouroboros cancelling its letter); absent, it is the app's.
 
     No liveness probe precedes it: a live, queued, or persisted but never
     admitted target gets its intent first, so an admission racing the click is
@@ -1147,11 +1169,11 @@ def _record_stop(task_id: str, *, cascade: bool, stop_action_id: str) -> Optiona
                 return None
         elif not row and not still_owned():
             return None
-    source = "http_cascade" if cascade else "http_single"
+    source = source or ("http_cascade" if cascade else "http_single")
     record = functools.partial(
         request_cancel, DRIVE_ROOT, task_id, source=source, stop_action_id=stop_action_id,
         observation=observe_cancellation_target(
-            DRIVE_ROOT, task_id, request_origin={"kind": "http_client", "source": source}),
+            DRIVE_ROOT, task_id, request_origin=request_origin or {"kind": "http_client", "source": source}),
         # §13.1: an omitted/empty-body or explicit-immediate request IS the
         # immediate policy — it monotonically HARDENS a pending graceful
         # intent (Stop-now during the wait) and mints a legacy row otherwise.
@@ -1324,9 +1346,9 @@ async def api_task_cancel(request: Request) -> JSONResponse:
     if raw_policy is not None and not isinstance(raw_policy, str):
         return json_error("stop_policy must be a string", 400, task_id=task_id)
     stop_policy_value = str(raw_policy or "").strip()
-    if stop_policy_value not in {"", "immediate", "finalize_then_cancel"}:
+    if stop_policy_value not in {"", "immediate", "finalize_then_cancel", "close_expired"}:
         return json_error(
-            "stop_policy must be 'immediate' or 'finalize_then_cancel'",
+            "stop_policy must be 'immediate', 'finalize_then_cancel', or 'close_expired'",
             400, task_id=task_id,
         )
     action_id = body.get("stop_action_id", "")
@@ -1334,6 +1356,14 @@ async def api_task_cancel(request: Request) -> JSONResponse:
         return json_error("stop_action_id must be a string of at most 200 characters", 400, task_id=task_id)
     if migrating := await run_sync_to_completion(migrating_error, request_drive_root(request)):
         return migrating  # P1: Cancel writes the result's custody; 503 while the boot import owns the store
+    if stop_policy_value == "close_expired":
+        # The mandatory policy discriminator is rejected by older bodies, never an ordinary Stop.
+        if set(body) != {"stop_policy", "close_expired"}:
+            return json_error("Close takes only the exact expired park offer", 400, task_id=task_id)
+        from ouroboros.gateway.task_close import close_expired_response
+        return await asyncio.to_thread(close_expired_response, task_id, body["close_expired"])
+    if "close_expired" in body:
+        return json_error("Close needs stop_policy='close_expired'", 400, task_id=task_id)
     if stop_policy_value == "finalize_then_cancel":
         # Graceful ingress: immediate typed pending acknowledgement; the hard
         # Stop below records its intent first and answers once it was driven.
@@ -1402,10 +1432,15 @@ async def api_task_resume(request: Request) -> JSONResponse:
         return json_error(str(exc), 400)
     body = await request_json_or(request, {})
     named = body.get("accept_unknown", []) if isinstance(body, dict) else None
-    if (not isinstance(named, list) or set(body) - {"accept_unknown", "reason"}
+    expected_panic = body.get("expected_panic_hold_id") if isinstance(body, dict) else None
+    if (not isinstance(named, list) or set(body) - {"accept_unknown", "reason", "expected_panic_hold_id"}
             or not all(isinstance(value, str) for value in named)):
-        return json_error('resume accepts only {"accept_unknown", "reason"}', 400, task_id=task_id,
+        return json_error("Unexpected Resume fields or invalid accept_unknown.", 400, task_id=task_id,
                           reason_code="unexpected_fields")
+    if "expected_panic_hold_id" in body and (set(body) != {"expected_panic_hold_id"}
+                                             or not isinstance(expected_panic, str) or not expected_panic.strip()):
+        return json_error("A Panic selection requires only its current hold ID.", 400, task_id=task_id,
+                          reason_code="invalid_panic_selection")
     if any(value.startswith("delegate_start:") for value in named) and not (
             isinstance(body.get("reason"), str) and body["reason"].strip()):
         return json_error("Give a reason for accepting the delegated start risk.", 400, task_id=task_id,
@@ -1416,7 +1451,8 @@ async def api_task_resume(request: Request) -> JSONResponse:
 
         # Bound on the worker thread itself: the grant decisions read these where the call runs.
         with owner_door("api_task_resume"), accepting_unknown(named, str(body.get("reason") or "")):
-            return resume_budget_paused_task(task_id)
+            return (resume_budget_paused_task(task_id, expected_panic_hold_id=expected_panic) if expected_panic
+                    else resume_budget_paused_task(task_id))
 
     try:
         result = await asyncio.to_thread(resume)  # its writes wait on Q and the disk, never on the web loop
@@ -1480,39 +1516,6 @@ def _normalize_attachments(value: Any) -> List[Dict[str, str]]:
         # ``stage_task_attachments`` owns the typed rejection reason.
         out.append({"path": path, "label": label})
     return out
-
-
-def _compose_task_text(
-    description: str,
-    *,
-    workspace_root: Optional[pathlib.Path],
-    workspace_mode: str,
-    memory_mode: str,
-    workspace_preflight: Dict[str, Any],
-    attachments: Any,
-) -> str:
-    parts = [description]
-    if workspace_root is not None:
-        from ouroboros.workspace_admission import compose_workspace_block
-
-        # SSOT block (v6.58.0): the same [HEADLESS_WORKSPACE] guidance the promote
-        # path embeds, so the two admission surfaces render identical context.
-        workspace_lines = compose_workspace_block(
-            workspace_root=workspace_root,
-            workspace_mode=workspace_mode,
-            memory_mode=memory_mode,
-            workspace_preflight=workspace_preflight,
-        )
-        if "[HEADLESS_WORKSPACE]" in description and "[END_HEADLESS_WORKSPACE]" in description:
-            marker = "[END_HEADLESS_WORKSPACE]"
-            idx = description.rfind(marker)
-            parts = [description[:idx].rstrip(), "\n", workspace_lines, description[idx:]]
-        else:
-            parts.append(f"\n\n[HEADLESS_WORKSPACE]\n{workspace_lines}[END_HEADLESS_WORKSPACE]")
-    rendered = _render_attachment_lines(attachments)
-    if rendered:
-        parts.append(f"\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]")
-    return "".join(parts)
 
 
 def _queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:

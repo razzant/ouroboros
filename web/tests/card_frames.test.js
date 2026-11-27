@@ -100,6 +100,87 @@ test('Expand shows only while the frame would cut its content and switches the h
     }
 });
 
+test('a host that draws its own content fades where its box cuts it; a frame host never does', () => {
+    const dom = installCardDom({ innerHeight: 800 });
+    try {
+        const host = document.createElement('div');
+        const toggle = document.createElement('button');
+        const fit = createInlineFit(host, toggle, { fade: true });
+        const faded = () => host.hasAttribute('data-fold-clipped');
+        fit.fit(300);
+        assert.equal(faded(), false, 'the content fits: nothing is cut');
+        fit.fit(1500);
+        assert.equal(faded(), true, 'the 70 % cap cuts it: the shared fade says more waits');
+        assert.equal(toggle.hidden, false);
+        toggle.click();
+        assert.equal(faded(), false, 'Expand lifts the cap: nothing is cut');
+        toggle.click();
+        assert.equal(faded(), true, 'Collapse cuts it again');
+        fit.fit(560);
+        assert.equal(faded(), false, 'the content shrank to the cap: it fits again');
+        fit.fit(WIDGET_FRAME_MAX_HEIGHT + 400);
+        toggle.click();
+        assert.equal(toggle.textContent, 'Collapse');
+        assert.equal(faded(), false, 'past the ceiling the static fold gives way to a real scrollport');
+        assert.equal(host.hasAttribute('data-fold-scroll'), true, 'the expanded overflow is a scrollport, not a cut');
+        assert.equal(host.classList.contains('scroll-fade-y'), true, 'the live shared fade names its edges');
+        toggle.click();
+        assert.equal(faded(), true, 'Collapse cuts it again');
+        assert.equal(host.hasAttribute('data-fold-scroll'), false, 'a collapsed box is no scrollport');
+        assert.equal(host.classList.contains('scroll-fade-y'), false);
+        fit.dispose();
+        assert.equal(host.hasAttribute('data-fold-scroll'), false, 'dispose leaves no scrollport behind');
+        const frame = document.createElement('div');
+        const frameFit = createInlineFit(frame, document.createElement('button'));
+        frameFit.fit(1500);
+        assert.equal(frame.hasAttribute('data-fold-clipped'), false, 'an app or module frame is no body of ours: untouched');
+        frameFit.fit(WIDGET_FRAME_MAX_HEIGHT + 400);
+        frameFit.dispose();
+        assert.equal(frame.hasAttribute('data-fold-scroll'), false, 'a frame host never becomes our scrollport');
+    } finally {
+        dom.restore();
+    }
+});
+
+test('a folded declarative host holds only its fully hidden stops out of Tab order; Expand and dispose give them back', () => {
+    const dom = installCardDom({ innerHeight: 800 });
+    try {
+        const host = document.createElement('div');
+        const near = document.createElement('button');
+        const far = document.createElement('button');
+        host.append(near, far);
+        host.scrollTop = 0;
+        // The double has no layout: give these boxes the rects a 560 px collapsed cap shows, shifted by host.scrollTop.
+        host.getBoundingClientRect = () => ({ top: 0, bottom: 560 });
+        near.getBoundingClientRect = () => ({ top: 10 - host.scrollTop, bottom: 50 - host.scrollTop });
+        far.getBoundingClientRect = () => ({ top: 700 - host.scrollTop, bottom: 740 - host.scrollTop });
+        const toggle = document.createElement('button');
+        const fit = createInlineFit(host, toggle, { fade: true, region: 'Cache health content' });
+        const stopped = (el) => el.hasAttribute('data-fold-stop');
+        fit.fit(1500);
+        assert.equal(stopped(near), false, 'a stop the cap still shows keeps its place in Tab order');
+        assert.equal(near.hasAttribute('tabindex'), false, 'its authored order is untouched');
+        assert.equal(stopped(far), true, 'a stop wholly under the fold leaves sequential Tab order');
+        assert.equal(far.getAttribute('tabindex'), '-1');
+        toggle.click();
+        assert.equal(stopped(far), false, 'Expand lifts the cap: the stop comes back');
+        assert.equal(far.hasAttribute('tabindex'), false, 'in its original order, no authored tabindex invented');
+        fit.fit(WIDGET_FRAME_MAX_HEIGHT + 400);
+        assert.equal(host.hasAttribute('data-fold-scroll'), true, 'past the ceiling it scrolls instead of folding');
+        assert.equal(stopped(far), false, 'a scrollport reaches every stop: none held');
+        host.scrollTop = 650;
+        toggle.click();
+        assert.equal(host.scrollTop, 0, 'Collapse returns a scrolled box to its top before folding');
+        assert.equal(stopped(far), true, 'Collapse folds it away again');
+        assert.equal(stopped(near), false);
+        fit.dispose();
+        assert.equal(stopped(far), false, 'dispose releases every held stop');
+        assert.equal(far.hasAttribute('tabindex'), false);
+    } finally {
+        dom.restore();
+    }
+});
+
 test('a mounted app: an opaque frame, its state kept per card and app, its submit a draft line, never a send', () => {
     const dom = installCardDom();
     try {
@@ -199,7 +280,7 @@ test('an app reads the material its frame lies on: the connected host at mount a
         assert.equal(window.listeners('ouro:theme-changed'), 0);
         // Without a material the packet is the document root's, as before.
         assert.deepEqual(packetValues(cardThemeTokens().css), { '--ouro-text': '#efeff2', '--ouro-tray': 'rgba(255, 255, 255, 0.045)', '--ouro-error': '#fe9498' });
-        // The same palette as values, for a frame that applies them itself (Beautiful Context, context_report_host.js).
+        // The same palette as values, for a frame that applies them itself.
         assert.deepEqual(cardThemeValues(), { name: 'dark', tokens: { '--ouro-text': '#efeff2', '--ouro-tray': 'rgba(255, 255, 255, 0.045)', '--ouro-error': '#fe9498' } });
     } finally {
         if (prior) Object.defineProperty(globalThis, 'ouroTheme', prior); else delete globalThis.ouroTheme;

@@ -12,31 +12,33 @@ frontier (``<stream>_importing``) and older pages also leave it false.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import pathlib
 from functools import cache
 from typing import Any, Callable, Dict, Optional
 
-from starlette.requests import Request
-from starlette.responses import Response
-
 from ouroboros import dialogue_store as ds
 from ouroboros.checkpoint_waits import wait_episode
+from ouroboros.chat_annotations import HistoryPageReceipts
 from ouroboros.chat_uploads import attachment_views
-from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
+from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_a2a_chat_id
+from ouroboros.dialogue_provenance import agent_note_text, declared_author
+from ouroboros.project_registry_recovery import recovery_notice
+from ouroboros.room_archive import registry_reservations
 from ouroboros.gateway._helpers import coerce_int
 from ouroboros.gateway.cost_breakdown import make_cost_breakdown_endpoint  # noqa: F401 — historical import path (router)
 from ouroboros.gateway.history_paging import (
-    HistoryCursorError, deferred_before, delivered_history_gaps, history_page_coverage, history_page_tokens, progress_quota_predicate,
+    HistoryCursorError, RegistryUnavailable, deferred_before, delivered_history_gaps, history_page_coverage, history_page_tokens, progress_quota_predicate,
     replay_evidence_rows, room_lens, room_view_fingerprint, select_history_page,
-    latest_arrival, notes_stamp, parse_around,
+    latest_arrival, notes_stamp, parse_around, QUESTION_EVIDENCE_KINDS, QUESTION_HISTORY_KINDS,
     chat_quota_predicate, IMPORTING, PROJECTION_FAILED, _PROBE_ROWS, _RECENT_WINDOW_BYTES, _RECENT_WINDOW_ROWS,
 )
 from ouroboros.gateway.history_deliveries import delivery_fields
+from ouroboros.gateway.history_live import LIVE
+from ouroboros.gateway.history_response import make_history_endpoint
 from ouroboros.cost_projection import carry_cost_meta, live_root_cost_projection
-from ouroboros.host_notice import phrase, view as notice_view
+from ouroboros.host_notice import phrase, view as _notice_view
 from ouroboros.gateway.completion_gist import short_gist
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 from ouroboros.project_completion_facts import (
@@ -46,11 +48,16 @@ from ouroboros.project_completion_facts import (
 from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES, ROUTING_RECEIPT_FIELDS
 from ouroboros.room_appearances import frame_project, room_project
 from ouroboros.store import StoreError, StoreMigrating
-from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS, delegated_activity_meta, executor_observation_meta, subagent_message_meta
+from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS, delegated_activity_meta, executor_observation_meta, show_requested_executor_route, subagent_message_meta
 from ouroboros.task_results import TASK_COST_META_FIELDS as _TASK_COST_META_FIELDS
 from ouroboros.utils import json_dumps_utf8, strip_markdown, utc_now_iso
 
 log = logging.getLogger(__name__)
+
+
+def notice_view(row):
+    live = LIVE.get()
+    return _notice_view(row) if live is None else _notice_view(row, lang=live["language"])
 
 # Hard cap on binding-backed origin rows synthesized per /api/chat/history
 # response (realistically 1-3 per project; the cap keeps the endpoint's
@@ -94,6 +101,7 @@ _PROGRESS_META_FIELDS = (
     "outcome_axes",
     "reason_code",
     "delegated_runs_unreconciled",  # the current custody debt, an explicit [] included (a stamped code is not live debt)
+    "peer_letter_card",  # a letter's card in the room of the work that wrote it (place_projection.letter_card_fact)
     "review_projection",
     "worker_saturation_warning",
     "model_execution",
@@ -104,6 +112,7 @@ _PROGRESS_META_FIELDS = (
     # Phase 6: the resolved delegated route (a harness id), so a replayed
     # bubble keeps its executor chip instead of losing it on reload.
     "executor_route",
+    "requested_executor_route",  # the executor the delegation selected, so a queued card keeps it on reload
     # Recorded coordinator facts only; missing facts stay absent without result enrichment.
     "parent_cognitive_route", "coordinator_route", "use_local_model",
     "coordinator_billing", "coordinator_provenance",
@@ -139,9 +148,19 @@ _SKILL_REVIEW_INT_FIELDS = ("review_round", "snapshot_attempt")
 _SKILL_REVIEW_BOOL_FIELDS = ("snapshot_revised",)
 
 
+def _skill_review_fields(source: Dict[str, Any], *, present_only: bool = False) -> Dict[str, Any]:
+    from ouroboros.review_execution_projection import normalize_review_executions
+
+    specs = ((_SKILL_REVIEW_STRING_FIELDS, lambda v: str(v or "")),
+             (_SKILL_REVIEW_INT_FIELDS, lambda v: coerce_int(v, 0)), (_SKILL_REVIEW_BOOL_FIELDS, bool))
+    fields = {key: cast(source.get(key)) for keys, cast in specs for key in keys if not present_only or key in source}
+    fields["executions"] = normalize_review_executions(source.get("executions"))
+    return fields
+
+
 def _stored_chat_id(value: Any, default: int = 1) -> int:
     """Coerce a stored route while preserving explicit panel chat zero."""
-    return coerce_int(value, default)
+    return coerce_int(value, int(default))
 
 
 def _project_history_context(
@@ -155,15 +174,18 @@ def _project_history_context(
     once per request; no per-row registry reads, no extra event-loop thread hops.
     ``strict`` (an exact row's destination) raises unreadable authority as StoreError.
     """
-    from ouroboros.projects_registry import reserved_project_chat_ids, readable_rooms, RoomResolver, all_task_bindings
+    from ouroboros.projects_registry import readable_rooms, RoomResolver, all_task_bindings
 
-    try:
-        project_chat_ids, classified = reserved_project_chat_ids(data_dir, strict=True), True
-    except Exception:  # the rooms its readable rows name are still Projects; any other is unknown
-        # One lenient read decides: unread or lost, Main's rows are unknown; the rooms it named stay Projects.
-        if strict or ((project_chat_ids := readable_rooms(data_dir)) is None and thread_id == 1):
-            raise StoreError("Project registry unavailable") from None
-        project_chat_ids, classified = project_chat_ids or set(), False
+    # The archive's own readiness answer: importing raises StoreMigrating, an unconfirmed profile StoreError.
+    reserved = registry_reservations(data_dir)
+    classified = reserved is not None
+    # Unclassified, the rooms its readable rows name are still Projects; any other is unknown.
+    project_chat_ids = reserved if classified else readable_rooms(data_dir) or set()  # logs a lost registry once
+    if not classified:
+        if thread_id == WEB_UI_CHAT_ID:  # Main needs the full set of reservations
+            raise RegistryUnavailable("Project registry unavailable")
+        if strict:
+            raise StoreError("Project registry unavailable")
     try:
         rooms = RoomResolver(data_dir, strict=strict)
     except ValueError:
@@ -194,8 +216,8 @@ def _user_annotation(
     return {key: annotation[key] for key in (*ROUTING_RECEIPT_FIELDS, "detail") if key in annotation}
 
 
-def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotations=None) -> list:
-    """Render missing bound origins by source ref, with their files, receipt and any coverage gaps."""
+def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, receipts=None, quotes=None) -> list:
+    """Render missing bound origins by source ref, with their files, receipt, question quote and any coverage gaps."""
     from ouroboros.project_dialogue import opening_words, project_origin_rows
     from ouroboros.chat_references import origin_projection
 
@@ -203,6 +225,11 @@ def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotation
     origin_rows = project_origin_rows(data_dir, thread_id, gaps=gaps)
     emitted_origins = {m.get("origin_id") for m in human_tail if m.get("origin_id")}
     synthesized: list = []
+    omission = {
+        "role": "system", "ts": "", "is_progress": False, "system_type": "origin_omission",
+        "markdown": False, "source": "", "sender_label": "", "sender_session_id": "",
+        "client_message_id": "", "task_id": "",
+    }
     for index, row in enumerate(origin_rows):
         ref = row.get("ref") or {}
         cmid = str(ref.get("client_message_id") or "")
@@ -211,9 +238,12 @@ def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotation
         # A retained copy can wear its exact receipt even if the physical row is gone.
         original_chat = ref.get("chat_id") if type(ref.get("chat_id")) is int else None
         from ouroboros.chat_chain import format_address
-        projection = origin_projection(data_dir, ref)
+        projection = origin_projection(data_dir, ref, thread_id, quotes, typed=row.get("source_input"))
         address = format_address(ref) if ref.get("row_sha256") else projection.get("row_address", "")
-        annotation = _user_annotation("user", cmid, annotations or {}, original_chat, address) if address else None
+        annotation = None
+        if address and receipts is not None:
+            receipts.include_origin(cmid, origin_rows, index)
+            annotation = _user_annotation("user", cmid, receipts.rows, original_chat, address)
         synthesized.append({
             **({"chat_id": original_chat} if original_chat is not None else {}),
             "text": str(row.get("text") or ""),
@@ -241,17 +271,10 @@ def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotation
                 text, said = phrase("origin_omission", "{n} more archived Project start message(s) are not shown here; their "
                                     "full copies are kept.", details="state/project_task_bindings.json (source_text)", n=omitted)
                 synthesized.append({  # where they are kept is its notice's detail (DESIGN principle 7)
-                    "text": text, **notice_view({"text": text, **said}),
-                    "role": "system", "ts": str(ref.get("ts") or ""),
-                    "is_progress": False, "system_type": "origin_omission",
-                    "markdown": False, "source": "", "sender_label": "",
-                    "sender_session_id": "", "client_message_id": "",
-                    "task_id": "",
+                    "text": text, **notice_view({"text": text, **said}), **omission, "ts": str(ref.get("ts") or ""),
                 })
             break
-    synthesized.extend({"text": gap, "role": "system", "ts": "", "is_progress": False,
-                        "system_type": "origin_omission", "markdown": False, "source": "", "sender_label": "",
-                        "sender_session_id": "", "client_message_id": "", "task_id": ""} for gap in sorted(gaps))
+    synthesized.extend({"text": gap, **omission} for gap in sorted(gaps))
     return synthesized
 
 
@@ -312,6 +335,7 @@ def _annotate_terminal_task_truth(
     evidence_anchors: Optional[dict] = None,
     evidence_scope: Optional[Callable[[str], bool]] = None,
     ending_rows: Optional[dict] = None,
+    exact_row: str = "",  # the history id of the row an exact ``around`` read lands on
 ) -> None:
     """Project task truth AFTER quotas, paying only for represented/current tasks.
 
@@ -335,6 +359,7 @@ def _annotate_terminal_task_truth(
         # conversation. A user's row keeps its authorship and physical identity.
         represented, tool_counts = {}, {}
         latest_progress_by_task, summaries, plain_finals = {}, {}, {}
+        letter_only_tasks = set()  # tasks whose only progress rows in this page are letter cards (never carriers)
         for message in combined:
             task_id = str(message.get("task_id") or "")
             if not task_id or message.get("system_type") in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
@@ -343,6 +368,9 @@ def _annotate_terminal_task_truth(
             # notice and lifecycle rows); tool evidence follows the task's own route.
             if evidence_scope is None or evidence_scope(task_id):
                 represented.setdefault(task_id, str(message.get("ts") or ""))
+            if message.get("system_type") == "subagent_admission_notice":
+                # A parent-addressed refusal carries its own request, not the result of a task with that child id.
+                continue
             if type(message.get("tool_calls")) is int:
                 tool_counts[task_id] = max(tool_counts.get(task_id, 0), message["tool_calls"])
             progress, summary = bool(message.get("is_progress")), message.get("system_type") == "task_summary"
@@ -355,6 +383,9 @@ def _annotate_terminal_task_truth(
             if summary:
                 ending_rows.setdefault(task_id, []).append(message)
                 latest = summaries
+            elif progress and message.get("peer_letter_card"):  # a letter's card: its own row, never the task's carrier
+                letter_only_tasks.add(task_id)
+                continue
             elif progress:
                 latest = latest_progress_by_task
             elif message.get("role") == "assistant" and not message.get("system_type") and not message.get("msg_type"):
@@ -384,7 +415,8 @@ def _annotate_terminal_task_truth(
             # do. A parent anchored by its child's row is always carried (zero tools included): never a bare shell (A5).
             incomplete = (coverage.get("gaps") or max(known_calls, coverage.get("matched", 0)) > coverage.get("shown", 0))
             if task_id not in carriers and (evidence.get("observations") or evidence.get("legacy", {}).get("calls")
-                                            or incomplete or (evidence_anchors or {}).get(task_id)):
+                                            or incomplete or (evidence_anchors or {}).get(task_id)
+                                            or task_id in letter_only_tasks):
                 carrier = {"task_id": task_id, "ts": represented[task_id], "role": "system",
                            "system_type": "task_evidence", "text": "", "is_progress": False, "narration": False}
                 # This new row presents the current result; it is not a stamp on a physical history row.
@@ -404,6 +436,11 @@ def _annotate_terminal_task_truth(
                         count = (known_calls or None) if current is None else result.get("tool_calls")
                         if type(count) is int and count >= 0:
                             carrier["tool_calls"] = count
+        # On letter-only pages, use the evidence carrier for the task's own replay facts (cost, review, receipt).
+        for task_id in letter_only_tasks:
+            carrier = carriers.get(task_id)
+            if carrier is not None and task_id not in latest_progress_by_task:
+                latest_progress_by_task[task_id] = carrier
         terminal_status_by_task: Dict[str, str] = {}
         terminal_truth_by_task: Dict[str, Dict[str, Any]] = {}
         terminal_receipt_by_task: Dict[str, Dict[str, Any]] = {}
@@ -423,8 +460,7 @@ def _annotate_terminal_task_truth(
                 unread_tasks.add(task_id)
             if carriers.get(task_id, {}).get("system_type") == "task_evidence":
                 carriers[task_id]["_is_direct_chat"] = bool(result.get("_is_direct_chat"))
-            child_meta = subagent_message_meta(result, task_id=task_id)
-            if child_meta:
+            if child_meta := subagent_message_meta(result, task_id=task_id):
                 legacy_child_meta_by_task[task_id] = child_meta
             status = str(result.get("status") or "")
             checkpoint = result.get("root_phase_checkpoint")
@@ -494,26 +530,17 @@ def _annotate_terminal_task_truth(
         anchored = anchored_children or set()
         # Keep the root's summary as its truth anchor; a child's card can settle from a later progress row.
         summary_anchors.difference_update(anchored, legacy_child_meta_by_task, child_row_task_ids)
+        from ouroboros.merge_receipts import project_history_rows  # one receipt row of the page shows current truth
+        project_history_rows(data_dir, combined, lambda task_id: cache.get(task_id, {}).get("merge_receipts"),
+                             exact_row)
         for message in combined:
             task_id = str(message.get("task_id") or "")
-            if not task_id or message.get("system_type") in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
-                continue
+            if not task_id or message.get("peer_letter_card") or message.get("system_type") in (
+                    "subagent_admission_notice", "project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
+                continue  # a letter's card carries only its own facts (place_projection), no task replay stamp
             if message.get("system_type") in {"project_started", "project_handoff"} and not message.get("task_name"):
                 message["task_name"] = task_presentation_name(  # a legacy row reuses this request's result read;
                     cache.get(task_id), fallback=message.get("project_name") or "Task")  # nameless: its Project
-            # Selected receipt events keep their physical identity, but show current task-result truth.
-            row_id = str(message.get("card_row_id") or "")
-            if message.get("card_row") == "reviews" and row_id.startswith("merge-receipt:"):
-                from ouroboros.merge_receipts import card_row_projection
-                try:
-                    receipt = next(r for r in cache.get(task_id, {}).get("merge_receipts", [])
-                                   if isinstance(r, dict) and row_id == f"merge-receipt:{r.get('receipt_id')}")
-                    revision = receipt.get("revision", 0)
-                    if type(revision) is not int or revision < int(message.get("card_row_revision") or 0):
-                        raise ValueError("canonical receipt revision unavailable")
-                    message.update(**card_row_projection(data_dir, receipt), card_row_revision=revision)
-                except (StopIteration, KeyError, TypeError, ValueError, AttributeError):
-                    message["text"] += "\nCurrent merge receipt unavailable; showing recorded event."
             if cache.get(task_id, {}).get("_history_result_absent"):
                 historical = (historical_terminals or {}).get(task_id)
                 if historical and matches_history_attempt(message, historical.get("task_attempt")):
@@ -553,6 +580,7 @@ def _annotate_terminal_task_truth(
                 message["task_phase"] = "unfinished"
                 if same_attempt and latest_progress_by_task.get(task_id) is message and task_id in running_gate_by_task:
                     message["review_overrides"] = running_gate_by_task[task_id]  # the card's line on a reload
+            is_latest = latest_progress_by_task.get(task_id) is message
             plain_final = task_id not in carriers and plain_finals.get(task_id) is message
             # #496: an anchored child whose progress rows fell out of the read tail keeps its executor receipt (its harness
             # chip needs no "Load older") on one answer row: its selected summary of this attempt, else its selected plain words.
@@ -562,14 +590,11 @@ def _annotate_terminal_task_truth(
             if (same_attempt and task_id in terminal_status_by_task
                     and (message.get("is_progress") or is_summary or plain_final or message.get("system_type") == "task_evidence")):
                 message["task_terminal_status"] = terminal_status_by_task[task_id]
-                if latest_progress_by_task.get(task_id) is message or answer:
+                if is_latest or answer:
                     message.update(terminal_receipt_by_task.get(task_id) or {})
-            elif same_attempt and latest_progress_by_task.get(task_id) is message:
-                message.update(live_cost_by_task.get(task_id) or {})
-            elif same_attempt and answer:
-                message.update(terminal_receipt_by_task.get(task_id) or {})
+            elif same_attempt and (is_latest or answer):
+                message.update((live_cost_by_task if is_latest else terminal_receipt_by_task).get(task_id) or {})
             system_type = str(message.get("system_type") or "")
-            is_latest = latest_progress_by_task.get(task_id) is message
             final_row = not message.get("is_progress") and message.get("task_terminal_status")
             if same_attempt and (system_type == "task_summary" or final_row or (is_latest and task_id not in summary_anchors)):
                 message.update(truth)
@@ -632,7 +657,7 @@ def _make_thread_filter(
         return belongs(entry_chat, entry)
 
     def _question_project_chat(entry):
-        if thread_id != 1 or not isinstance(entry, dict) or entry.get("type") not in {"quiz", "quiz_answer", "quiz_closed"}:
+        if thread_id != 1 or not isinstance(entry, dict) or entry.get("type") not in QUESTION_HISTORY_KINDS:
             return 0
         quiz = entry.get("quiz")
         if not isinstance(quiz, dict):
@@ -644,6 +669,7 @@ def _make_thread_filter(
         return chat if chat in project_chat_ids else 0
 
     _row_matches_thread.chat_id = thread_id
+    _row_matches_thread.quotes = {}  # the read's shown quotes: one strict room read, each question looked up once
     _row_matches_thread.question_project_chat = _question_project_chat
     _row_matches_thread.evidence_matches = belongs
     _row_matches_thread.origin_identity = lambda entry: matching_project_origin(entry, project_source_refs)
@@ -669,13 +695,13 @@ def _collect_chat_rows(
     request's ``TaskReads``, which reads every asking task's questions in one batch."""
     from supervisor.message_ingress import delivery_facts
 
+    from ouroboros.secret_requests import quiz_history_view
     from ouroboros.task_reads import TaskReads
     reads = reads if reads is not None else TaskReads(chat_path.parent.parent)
-    from ouroboros.chat_references import projected_reply_fields
-    visibility = {}
+    from ouroboros.chat_references import question_key, saved_decisions, shown_reply_fields
     def identity(entry):
-        return projected_reply_fields(chat_path.parent.parent, getattr(row_matches_thread, "chat_id", 1),
-                                      entry, _history_identity(entry), visibility=visibility)
+        return shown_reply_fields(chat_path.parent.parent, getattr(row_matches_thread, "chat_id", 1), entry,
+                                  _history_identity(entry), visibility=getattr(row_matches_thread, "quotes", {}))
 
     question_keys = set()
 
@@ -686,6 +712,9 @@ def _collect_chat_rows(
             "quizzes": data.get("owner_quiz") if isinstance(data.get("owner_quiz"), dict) else {},
             "wait": data.get("owner_wait") if isinstance(data.get("owner_wait"), dict) else {},
         }
+
+    current_quiz, quiz_answer_evidence = quiz_history_view(chat_path.parent.parent, _quiz_source)
+
     combined: list = []
     chat_quota_rows = 0
     stream_gaps: set[str] = set()
@@ -704,26 +733,29 @@ def _collect_chat_rows(
                     for row in rows if row.get("type") in {"quiz_answer", "quiz_closed"} and isinstance(row.get("quiz"), dict)}
         selected_answers = quiz_facts(projection_entries or [])
         answered = {**selected_answers, **quiz_facts(_chat_entries)}  # page and live facts still govern lifecycle
+        # A card whose block has gone, its answer on no page read, settles by the decision record saved for it.
+        unsettled = {key for row in _chat_entries if (key := question_key(row)) and key not in answered and key[1] not in _quiz_source(key[0])["quizzes"]}
+        answered = {**saved_decisions(chat_path.parent.parent, unsettled), **answered}
+        def saved(card):  # a saved card (a published question, a decision's snapshot) without the delivery it froze
+            return {key: value for key, value in card.items() if key not in ("delivery", "question_delivery")}
+        def _replay_row(entry, fields, tail=None):
+            replay_evidence.append({"text": "", "role": "system", "is_progress": False, **fields,
+                                    "task_id": str(entry.get("task_id") or ""), "ts": str(entry.get("ts") or ""),
+                                    **(tail or {}), **identity(entry)})
         for entry in _chat_entries:
-            if entry.get("type") in {"quiz_answer", "quiz_closed"}:
+            if entry.get("type") in QUESTION_EVIDENCE_KINDS:  # evidence, never a bubble
                 if (replay_evidence is not None and isinstance(entry.get("quiz"), dict)
-                        and row_matches_thread(_stored_chat_id(entry.get("chat_id"), 1), entry)):
-                    from ouroboros.owner_quiz import question_delivery_now  # as recorded; its delivery as it is now
-                    quiz, live = dict(entry["quiz"]), _quiz_source(str(entry.get("task_id") or ""))["quizzes"]
-                    quiz.update(question_delivery_now(live.get(str(quiz.get("quiz_id") or ""))))
-                    replay_evidence.append({"text": "", "role": "system", "is_progress": False,
-                                            "system_type": entry["type"], "quiz": quiz,
-                                            "task_id": str(entry.get("task_id") or ""),
-                                            "ts": str(entry.get("ts") or ""), **identity(entry)})
+                        and row_matches_thread(_stored_chat_id(entry.get("chat_id"), 1), entry)
+                        and (quiz := quiz_answer_evidence(entry)) is not None):
+                    from ouroboros.chat_uploads import public_quiz_block
+                    _replay_row(entry, {"system_type": "quiz_closed" if entry["type"] == "quiz_closed" else "quiz_answer",
+                                        "quiz": public_quiz_block(quiz)})
                 continue
             # Keep the typed receipt before the Main conversation filter hides the synthetic row.
             if entry.get("type") == "task_summary" and historical_terminals is not None and (receipt := remember_terminal(historical_terminals, entry)):
                 belongs = getattr(row_matches_thread, "evidence_matches", row_matches_thread)
                 if replay_evidence is not None and belongs(_stored_chat_id(entry.get("chat_id"), 1), entry):
-                    replay_evidence.append({"text": "", "role": "system", "is_progress": False,
-                                            "system_type": "task_summary", "summary_kind": entry["summary_kind"],
-                                            "task_id": str(entry["task_id"]), "ts": str(entry.get("ts") or ""),
-                                            **receipt, **identity(entry)})
+                    _replay_row(entry, {"system_type": "task_summary", "summary_kind": entry["summary_kind"]}, receipt)
             # Skip A2A virtual chat_ids so A2A task traffic does not appear in human chat history.
             if is_a2a_chat_id(entry.get("chat_id", 1)):
                 continue
@@ -735,9 +767,8 @@ def _collect_chat_rows(
                 from ouroboros.project_dialogue import project_question_pointer
 
                 tid, qid = str(entry.get("task_id") or ""), str(entry["quiz"].get("quiz_id") or "")
-                source = _quiz_source(tid)
-                pointer = project_question_pointer(entry, source["quizzes"].get(qid) or answered.get((tid, qid), {}).get("quiz"),
-                                                   room_project(chat_path.parent.parent, pointer_chat, strict=True), source["wait"])
+                pointer = project_question_pointer(entry, current_quiz(entry, answered.get((tid, qid))),
+                                                   room_project(chat_path.parent.parent, pointer_chat, strict=True), _quiz_source(tid)["wait"])
                 if pointer and (tid, qid) not in question_keys:
                     question_keys.add((tid, qid))
                     pointer.update(identity(entry))
@@ -761,12 +792,23 @@ def _collect_chat_rows(
                 "task_id": str(entry.get("task_id", "")),
                 **identity(entry),
             }
-            if role == "user" and entry.get("subagents_mode") == "swarm":
+            author = declared_author(entry)
+            if role == "user" and not author and entry.get("subagents_mode") == "swarm":
                 rec["subagents_mode"] = "swarm"
-            if role == "user" and entry.get("ingress_accepted") is True:
+            if author:  # an agent's note: program data (literal body + author), never the stored receipt fact
+                rec["role"] = "user"
+                rec["text"] = agent_note_text(entry)
+                rec["declared_author"] = author
+                if entry.get("kind") == "room_echo":
+                    rec["kind"] = "room_echo"
+                if entry.get("late_report_id"):
+                    rec["late_report_id"] = entry["late_report_id"]
+            if rec["role"] == "user" and entry.get("ingress_accepted") is True:
                 rec["ingress_accepted"] = True
                 # Proven undispatched, entered, or this live process's and pending; an ended process's: nothing.
-                rec.update(delivery_facts(entry, entry_chat))
+                live = LIVE.get()
+                rec.update(delivery_facts(entry, entry_chat) if live is None else
+                           delivery_facts(entry, entry_chat, bus_root=live["message_bus_root"]))
             if isinstance(entry.get("presence_contact"), dict):
                 rec["presence_contact"] = dict(entry["presence_contact"])
             if role == "user" and entry.get("attachments"):  # the same views the live echo carried
@@ -786,7 +828,7 @@ def _collect_chat_rows(
                     if key in entry:
                         rec[key] = str(entry.get(key) or "")
             rec.update(frame_project(chat_path.parent.parent, entry))
-            annotation = _user_annotation(role, rec["client_message_id"], chat_annotations, entry_chat, rec.get("row_address", ""))
+            annotation = None if author else _user_annotation(role, rec["client_message_id"], chat_annotations, entry_chat, rec.get("row_address", ""))
             if origin := getattr(row_matches_thread, "origin_identity", lambda entry: "")(entry):
                 rec["origin_id"] = origin
             if annotation is not None:
@@ -796,15 +838,7 @@ def _collect_chat_rows(
             # card can lazily fetch the full rendered review. Rows without a
             # job_id (legacy full-text rows) keep today's behavior.
             if rec["system_type"] == "skill_review":
-                for key in _SKILL_REVIEW_STRING_FIELDS:
-                    rec[key] = str(entry.get(key, "") or "")
-                for key in _SKILL_REVIEW_INT_FIELDS:
-                    rec[key] = coerce_int(entry.get(key), 0)
-                for key in _SKILL_REVIEW_BOOL_FIELDS:
-                    rec[key] = bool(entry.get(key))
-                from ouroboros.review_execution_projection import normalize_review_executions
-
-                rec["executions"] = normalize_review_executions(entry.get("executions"))
+                rec.update(_skill_review_fields(entry))
             if entry.get("type") == "routing_options":
                 # LLM-context grounding row (#198, decision 4=A): the web
                 # surface renders the richer picker card from the annotation,
@@ -814,25 +848,36 @@ def _collect_chat_rows(
             if delivery := delivery_fields(entry):
                 rec.update(delivery)
             elif entry.get("type") == "quiz" and isinstance(entry.get("quiz"), dict):
-                quiz = dict(entry["quiz"])
+                from ouroboros.chat_uploads import answer_files, public_quiz_block
+                quiz = saved(public_quiz_block(entry["quiz"]))  # as published: whatever delivery it then owed, only its block says now
                 _qtid = str(entry.get("task_id") or "")
                 if _qtid:
                     _qid = str(quiz.get("quiz_id") or "")
-                    _live = _quiz_source(_qtid)["quizzes"].get(_qid) or answered.get((_qtid, _qid), {}).get("quiz")
+                    _live = current_quiz(entry, answered.get((_qtid, _qid)))
                     if isinstance(_live, dict):
-                        from ouroboros.owner_quiz import CLOSURE_FIELDS, SECRET_FIELDS, question_delivery_projection
-                        if delivery := question_delivery_projection(_live):
-                            quiz["question_delivery"] = delivery
+                        from ouroboros.owner_quiz import CLOSURE_FIELDS, SECRET_FIELDS, question_delivery_now
+                        quiz.update(question_delivery_now(_live))
                         quiz["state"] = str(_live.get("state") or quiz.get("state") or "open")
                         for key in ("answered_index", "comment", "wait_ended_at", *CLOSURE_FIELDS, "materials", *SECRET_FIELDS):
                             if key in _live:
                                 quiz[key] = _live[key]
+                        if _files := answer_files(_live.get("attachments")):  # a Reply's files, as its card states them
+                            quiz["attachments"] = _files
                         selected = selected_answers.get((_qtid, _qid))
                         answer = selected or answered.get((_qtid, _qid)) or (_live.get("delivery") or {}).get("answer_row") or {}
                         if quiz["state"] == "answered" and answer.get("type") == "quiz_answer":  # DESIGN "Replies"
                             quiz["answer_row_address"] = _history_identity(answer)["row_address"]  # its row, else its copy
-                            if selected:
-                                quiz.update(answered_index=selected["quiz"].get("answered_index"), comment=selected["quiz"].get("comment", ""))
+                            if selected and isinstance(selected.get("quiz"), dict):
+                                sel = public_quiz_block(selected["quiz"])
+                                sel_index = sel.get("answered_index")
+                                quiz.pop("answered_index", None)
+                                if isinstance(sel_index, int) and not isinstance(sel_index, bool):
+                                    quiz["answered_index"] = sel_index
+                                quiz["comment"] = sel.get("comment", "")
+                                if sel.get("attachments"):
+                                    quiz["attachments"] = sel["attachments"]
+                                else:
+                                    quiz.pop("attachments", None)
                         if _live.get("host_facts") and not quiz.get("host_facts"):
                             quiz["host_facts"] = str(_live["host_facts"])  # the ask-time sentence the block holds
                         if "wait_for_answer" not in _live:
@@ -960,8 +1005,6 @@ def _fold_task_bound_skill_reviews(combined: list[Dict[str, Any]]) -> list[Dict[
     replays Skill history and never claims an authoritative total beyond the
     references present in this Chat window.
     """
-    from ouroboros.review_execution_projection import normalize_review_executions
-
     groups: Dict[tuple[str, str, str], list[tuple[int, Dict[str, Any]]]] = {}
     for index, row in enumerate(combined):
         if row.get("is_progress") or str(row.get("system_type") or "") != "skill_review":
@@ -999,51 +1042,27 @@ def _fold_task_bound_skill_reviews(combined: list[Dict[str, Any]]) -> list[Dict[
         ]
         attempts: list[Dict[str, Any]] = []
         for position, (_index, row) in enumerate(surviving_rows):
-            attempt = {
+            attempts.append({
                 "ts": str(row.get("ts") or ""),
                 "task_id": str(row.get("task_id") or ""),
                 # Legacy jobless rows have no exact-detail ref. Their compact
                 # terminal text is therefore the only useful attempt body.
                 "text": str(row.get("text") or ""),
                 "superseded": position < len(surviving_rows) - 1,
-                "executions": normalize_review_executions(row.get("executions")),
                 **_history_identity(row),
-            }
-            for key in _SKILL_REVIEW_STRING_FIELDS:
-                if key in row:
-                    attempt[key] = str(row.get(key) or "")
-            for key in _SKILL_REVIEW_INT_FIELDS:
-                if key in row:
-                    attempt[key] = coerce_int(row.get(key), 0)
-            for key in _SKILL_REVIEW_BOOL_FIELDS:
-                if key in row:
-                    attempt[key] = bool(row.get(key))
-            attempt.update(
-                skill=skill,
-                group_id=group_id,
-                presentation_owner_task_id=owner,
-            )
-            attempts.append(attempt)
+                **_skill_review_fields(row, present_only=True),
+                "skill": skill, "group_id": group_id, "presentation_owner_task_id": owner,
+            })
         latest_index, latest_source = surviving_rows[-1]
-        latest = dict(latest_source)
-        latest["group_id"] = group_id
-        latest["presentation_owner_task_id"] = owner
-        latest["review_group"] = {
-            "surface": "skill",
-            "id": group_id,
-            "skill": skill,
-            "presentation_owner_task_id": owner,
-            "projected_attempt_count": len(attempts),
-            "count_is_authoritative": False,
-            "attempts": attempts,
+        replacements[latest_index] = {
+            **latest_source, "group_id": group_id, "presentation_owner_task_id": owner,
+            "review_group": {
+                "surface": "skill", "id": group_id, "skill": skill, "presentation_owner_task_id": owner,
+                "projected_attempt_count": len(attempts), "count_is_authoritative": False, "attempts": attempts,
+            },
         }
-        replacements[latest_index] = latest
         removed.update(index for index, _row in indexed_rows if index != latest_index)
-    return [
-        replacements.get(index, row)
-        for index, row in enumerate(combined)
-        if index not in removed
-    ]
+    return [replacements.get(index, row) for index, row in enumerate(combined) if index not in removed]
 
 
 def _active_lifecycle_row(row_matches_thread) -> Optional[Dict[str, Any]]:
@@ -1052,7 +1071,8 @@ def _active_lifecycle_row(row_matches_thread) -> Optional[Dict[str, Any]]:
     try:
         from ouroboros.skill_lifecycle_queue import queue_snapshot
 
-        active = queue_snapshot().get("active")
+        live = LIVE.get()
+        active = queue_snapshot().get("active") if live is None else live["skill"]
         if isinstance(active, dict) and active.get("status") == "running":
             label = "stale" if active.get("stale") else "running"
             said = "" if active.get("error") else str(active.get("message") or "")  # a raw error: its notice's detail
@@ -1069,7 +1089,7 @@ def _active_lifecycle_row(row_matches_thread) -> Optional[Dict[str, Any]]:
             row = {
                 "text": text,
                 "role": "system", "system_type": "skill_lifecycle",
-                "ts": utc_now_iso(),
+                "ts": utc_now_iso() if live is None else live["observed_at"],
                 "is_progress": True,
                 "markdown": False,
                 "task_id": str(active.get("chat_task_id") or ""),
@@ -1112,7 +1132,8 @@ def _apply_window_quotas(
     n_progress: int,
     result_cache: Optional[Dict[str, Dict[str, Any]]] = None,
     order: Optional[Callable[[dict], str]] = None,
-    chat_annotations=None,
+    receipts=None,
+    quotes=None,
 ) -> tuple[list, Dict[str, Dict[str, Any]], bool, bool, bool, str, set]:
     """Quota slicing, origin fallback, and the lineage floor/cap (perf2 P3). ``order``: the rows'
     sort key, ``ts`` unless the room reads by its reading key (``_reading_order``).
@@ -1125,7 +1146,9 @@ def _apply_window_quotas(
     from ouroboros.gateway.task_model_wait import history_wait_overlay
 
     order = order or (lambda m: m.get("ts", ""))
-    combined, model_wait_rows, model_wait_truncated = history_wait_overlay(combined, n_progress)
+    live = LIVE.get()
+    combined, model_wait_rows, model_wait_truncated = history_wait_overlay(
+        combined, n_progress, roles=None if live is None else live["managed_roles"])
     # Separate quotas protect conversation from telemetry bursts; recent child
     # lineage survives on top so the client can rebuild its cards. Older lineage
     # survives only under represented/live topology (#496), preventing orphaned
@@ -1188,7 +1211,7 @@ def _apply_window_quotas(
     # post-quota, identity-deduped, capped with disclosed omissions.
     if thread_id in project_chat_ids and n_human > 0:
         try:
-            synthesized = _origin_fallback_rows(data_dir, thread_id, human_tail, chat_annotations)
+            synthesized = _origin_fallback_rows(data_dir, thread_id, human_tail, receipts, quotes)
             if synthesized:
                 human_tail = sorted(
                     human_tail + synthesized, key=order
@@ -1373,7 +1396,20 @@ def _assemble_history_response(
     thread_id: int,
     n_human: int,
     n_progress: int,
-    cursor: Optional[str] = None, around: Optional[str] = None,
+    cursor: Optional[str] = None, around: Optional[str] = None, profile_scope: str = "",
+    *, live: dict | None = None,
+) -> bytes:
+    """Select from the stores with this request's serving facts (or local observations)."""
+    token = LIVE.set(live)
+    try:
+        return _render_history_response(data_dir, thread_id, n_human, n_progress, cursor, around, profile_scope, live)
+    finally:
+        LIVE.reset(token)
+
+
+def _render_history_response(
+    data_dir: pathlib.Path, thread_id: int, n_human: int, n_progress: int,
+    cursor: Optional[str], around: Optional[str], profile_scope: str, live: dict | None,
 ) -> bytes:
     """Select and project recent/archive history in the endpoint's one worker.
 
@@ -1389,20 +1425,15 @@ def _assemble_history_response(
     project_chat_ids, project_source_refs, bindings_by_task, rooms, classified = (
         _project_history_context(data_dir, thread_id, strict=exact)
     )
-    try:  # each owner message's latest routing annotation: a journal history's rows read, a word search never
-        from ouroboros.chat_annotations import addressed_chat_annotations
-
-        chat_annotations = addressed_chat_annotations(data_dir)
-    except Exception:
-        chat_annotations = {}
     row_target = None
     if exact:
         from ouroboros.chat_references import history_row_anchor
         anchor, row_target = history_row_anchor(data_dir, around, thread_id, project_chat_ids, project_source_refs, rooms)
         anchor["row_address"] = around
-        if anchor["state"] != "found":
+        if anchor["state"] != "found":  # a successful page too: it carries the serving scope like the payload
             return json.dumps({"messages": [], "anchor": anchor, "has_more": False, "next_cursor": None,
-                               "page_cursor": None, "window": {"complete": False, "truncated_by": []}}).encode()
+                               "page_cursor": None, "window": {"complete": False, "truncated_by": []},
+                               **({"profile_scope": profile_scope} if profile_scope else {})}).encode()
         from ouroboros.projects_registry import RoomResolver
         rooms = RoomResolver(data_dir)  # strict authority chose the room; its page reads rows as every page does
     row_matches_thread = _make_thread_filter(
@@ -1422,13 +1453,14 @@ def _assemble_history_response(
     selections, before, recent = page["selections"], page["before"], page["recent"]
     order = _reading_order(selections["chat"][0])
     n_human, n_progress = page["quotas"]["human"], page["quotas"]["progress"]
+    receipts = HistoryPageReceipts(data_dir, selections["chat"][0], project_source_refs if recent and n_human > 0 else ())
     historical_terminals: Dict[str, dict] = {}
     replay_evidence: list = []
     from ouroboros.task_reads import TaskReads
 
-    result_cache: Dict[Any, Any] = {_READS: TaskReads(data_dir)}  # every task result is read once, in batches
+    result_cache: Dict[Any, Any] = {_READS: TaskReads(data_dir, history_live=live)}  # each result read once, in batches
     combined, chat_quota_rows, chat_gaps = _collect_chat_rows(
-        chat_path, archive_dir, n_human, row_matches_thread, chat_annotations,
+        chat_path, archive_dir, n_human, row_matches_thread, receipts.rows,
         include_gaps=True, historical_terminals=historical_terminals,
         selected_entries=selections["chat"][0], entry_gaps=selections["chat"][2],
         projection_entries=page.get("projection_entries"),
@@ -1450,14 +1482,14 @@ def _assemble_history_response(
         if row.get("historical_terminal"):
             ending_rows.setdefault(row["task_id"], []).append(row)
     result_cache[_READS].prefetch([*ending_rows, *(row.get("task_id") for row in combined)])
-    named = thread_id in project_chat_ids or (thread_id == 1 and classified)  # beside an invalid row Main reads on
+    named = thread_id in project_chat_ids or thread_id == WEB_UI_CHAT_ID  # an unclassifiable Main has already refused
     arrival = latest_arrival(combined, page, data_dir, row_matches_thread, _stored_chat_id, chat_gaps, lambda task_id: (
         _load_terminal_result(data_dir, task_id, result_cache))) if named else (
-        {} if classified or thread_id == 1 else {"latest_message": None})  # an unclassified room may be a Project
+        {} if classified else {"latest_message": None})  # an unclassified room may be a Project
     if recent:  # arrival is named above, before the tail and the annotation
-        (messages, result_cache, human_rows_dropped, lineage_truncated, review_overlays_truncated, floor,
-         anchored_children) = _apply_window_quotas(
-            data_dir, thread_id, project_chat_ids, combined, n_human, n_progress, result_cache, order, chat_annotations)
+        (messages, result_cache, human_rows_dropped, lineage_truncated, review_overlays_truncated, floor, anchored_children) = _apply_window_quotas(
+            data_dir, thread_id, project_chat_ids, combined, n_human, n_progress, result_cache, order, receipts,
+            quotes=row_matches_thread.quotes)
         for source in ("chat", "progress"):
             before[source] = deferred_before(source, selections[source][0], candidates, messages, before[source])
     else:
@@ -1474,7 +1506,8 @@ def _assemble_history_response(
     if recent or page["after"]:  # current work has no history position: its evidence lands at the page end
         from ouroboros.gateway.state import current_work_in_room
         evidence_anchors = dict.fromkeys(current_work_in_room(
-            data_dir, bindings_by_task, row_matches_thread.evidence_matches), "")
+            data_dir, bindings_by_task, row_matches_thread.evidence_matches,
+            **({"copied": live["activities"]} if live is not None else {})), "")
     represented = {str(row.get("task_id") or "") for row in messages} | evidence_anchors.keys()
     # A notice names its target, never a speaker (no parent); a legacy child row's parent is in the facts index.
     parents = ["" if row.get("system_type") in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES) else str(
@@ -1497,6 +1530,7 @@ def _assemble_history_response(
         evidence_anchors=evidence_anchors,
         evidence_scope=lambda task_id: row_matches_thread.evidence_matches(
             rooms(task_id) or thread_id, {"task_id": task_id}),
+        exact_row=(page.get("anchor") or {}).get("history_id", "") if exact else "",  # the exact target, not its room
     )
     for source in ("chat", "progress"):
         before[source] = max([before[source], *(entry["_history_end"] for entry in selections[source][0] or ()
@@ -1512,10 +1546,14 @@ def _assemble_history_response(
     # that kind on the wire: it supplies replay evidence, not a bubble, quota row or fresh verdict.
     for message in messages:
         message.pop("summary_kind", None)
+        show_requested_executor_route(message)
     messages.extend(replay_evidence_rows(messages, replay_evidence))
     tokens = history_page_tokens(page, messages, result_cache[_READS])
     stream_gaps = delivered_history_gaps(data_dir, page, {
         "chat": chat_gaps | selections["chat"][2], "progress": progress_gaps | selections["progress"][2]})
+    if not classified and not named:  # direct-address reads can miss rows a Project would inherit
+        for gaps in stream_gaps.values():
+            gaps.add("room_unclassified")
     if result_cache[_READS].failed or PROJECTION_FAILED in (stream_gaps["chat"] | stream_gaps["progress"]):
         tokens.pop("after_cursor", None)  # a read that failed part-way is read whole again, never continued
     window = _window_metadata(
@@ -1534,50 +1572,16 @@ def _assemble_history_response(
         "messages": [short_gist(message) for message in messages],
         "window": {**window, **arrival},
         "coverage": history_page_coverage(page, stream_gaps),
-        **tokens,
+        **tokens, **({"profile_scope": profile_scope} if profile_scope else {}),  # the generation's frozen scope (#3294)
     }
+    if thread_id == WEB_UI_CHAT_ID and not (cursor or around) and recovery_notice(data_dir):
+        payload["project_registry"] = "restored"
     # Encode the whole structured page off the loop, keeping local filename bytes as JSON escapes.
     return json_dumps_utf8(
         payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
     ).encode("utf-8")
 
 
-def make_chat_history_endpoint(data_dir: pathlib.Path):
-    async def api_chat_history(request: Request) -> Response:
-        """Return recent chat, system, and progress messages merged chronologically."""
-        def _int_param(name: str, default: int, cap: int) -> int:
-            try:
-                return max(0, min(int(request.query_params.get(name, default)), cap))
-            except (ValueError, TypeError):
-                return default
-
-        # Separate per-type quotas so a burst of progress/telemetry can never evict
-        # the user's real conversation from a single combined tail. Defaults are
-        # the module-level window constants — the web client's default request
-        # sends no quota params. The legacy `limit` parameter (shipped CLIs sent
-        # it while the server ignored it) is honored as the n_human default, so
-        # an old client that asks for N human rows finally gets N, within cap; a
-        # garbled or non-positive `limit` means "absent"; an explicit n_human wins.
-        n_human = _int_param("n_human", _int_param("limit", 0, _MAX_N_HUMAN) or _DEFAULT_N_HUMAN, _MAX_N_HUMAN)
-        n_progress = _int_param("n_progress", _DEFAULT_N_PROGRESS, _MAX_N_PROGRESS)
-        # Main is 1; each other room reads its own history. Place conversation
-        # ids exceed 32 bits but remain exactly representable by the web client.
-        thread_id = _int_param("chat_id", 1, 2**53 - 1) or 1
-        # ONE thread hop for the whole assembly (perf2 P3): reads, transforms,
-        # slicing, annotation, and the JSON encode all run off the event loop.
-        cursor, around = (request.query_params.get(name) for name in ("cursor", "around"))
-        try:
-            body = await asyncio.to_thread(_assemble_history_response, data_dir, thread_id, n_human, n_progress,
-                                           cursor, around)
-        except (HistoryCursorError, OSError, StoreError) as exc:
-            reason = (exc.reason if isinstance(exc, HistoryCursorError) else
-                      "migrating" if isinstance(exc, StoreMigrating) else "history_source_unavailable")
-            return Response(content=json.dumps({"messages": [], "error": reason, "reason_code": reason,
-                                                **({"detail": str(exc)} if type(exc) is StoreError else {}),
-                                                "next_cursor": cursor, "has_more": True,
-                                                "window": {"complete": False, "truncated_by": [reason]}}),
-                            status_code=exc.status if isinstance(exc, HistoryCursorError) else 503,
-                            media_type="application/json")
-        return Response(content=body, media_type="application/json")
-
-    return api_chat_history
+def make_chat_history_endpoint(data_dir):
+    return make_history_endpoint(data_dir, lambda *args, **kwargs: _assemble_history_response(*args, **kwargs),
+                                 (_DEFAULT_N_HUMAN, _MAX_N_HUMAN), (_DEFAULT_N_PROGRESS, _MAX_N_PROGRESS))

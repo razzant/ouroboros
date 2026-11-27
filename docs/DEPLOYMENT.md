@@ -414,13 +414,16 @@ rebinding) is not told apart either.
 
 Ouroboros verifies its own provider calls (OpenRouter, OpenAI-compatible endpoints,
 Anthropic, GigaChat, model catalogs and Provider Test) against the `certifi`
-bundle, never the operating-system store. A deployment behind a TLS-inspecting
-proxy, or one that talks to an endpoint signed by a CA `certifi` lacks (for
-example the Russian Trusted Root CA behind GigaChat), sets
+bundle, and its remote MCP servers against what httpx trusts by default (`certifi`,
+or the file or directory `SSL_CERT_FILE` or `SSL_CERT_DIR` names), never the
+operating-system store. A deployment behind a TLS-inspecting
+proxy, or one that talks to an endpoint signed by a CA these lack (for
+example the Russian Trusted Root CA behind GigaChat or a bank's MCP server), sets
 `OUROBOROS_EXTRA_CA_BUNDLE` to a PEM file holding the missing CA certificates.
 The file is added on top of the defaults, so every other provider keeps working;
-a path that cannot be read fails the call loudly instead of silently falling
-back to the defaults. In Docker, mount the file and pass the setting:
+an unreadable file or one without certificates (for example, a revocation list
+alone) fails the call instead of silently falling back to the defaults. In Docker,
+mount the file and pass the setting:
 
 ```bash
 docker run --rm -p 127.0.0.1:8765:8765 \
@@ -430,10 +433,28 @@ docker run --rm -p 127.0.0.1:8765:8765 \
 ```
 
 On a desktop install the same key lives in Settings → This computer → Advanced. It covers the
-provider calls: model requests, model catalogs, Provider Test, pricing and
-capability probes. Everything else keeps its own trust store: `git`, `uv`,
-`pip`, the Claudexor engine and its runtime downloads, the Telegram skill, MCP
-servers, the web-search scraper and the browsers.
+provider calls (model requests, model catalogs, Provider Test, pricing and
+capability probes) and remote MCP servers at `https` addresses: their listing, calls and Test, and
+their sign-in (discovery, registration, code exchange, refresh and revocation). Certificate
+and hostname checks stay on. Behind a TLS-inspecting proxy the file verifies the server as the
+proxy presents it; the hop to a proxy reached over `https` keeps httpcore's certifi check, so
+the file can help with the server's certificate, not with the proxy's own. A server at an `http` address never reads the
+file, nor does its sign-in, even with an `https` authorization server. A saved path serves at once
+the listing, Test and sign-in steps of the Settings page and of the browser's return page, and
+new tasks; a task already running keeps the value it started with, and a path written into the
+settings file by hand takes effect after a restart. Changing only the TLS path relists the enabled `https` servers. An enabled local
+(stdio) server given the setting through `env_from_settings` receives the literal value;
+a change to that value relists all enabled servers, including `http` and `stdio`. A skill
+that uses the setting updates its catalog as for any change to its settings. Replacing the
+file's contents under an unchanged path takes effect at the next connection, so press
+Refresh on a server whose listing already failed. An unusable file, or a certificate refused
+while connecting, stops a sign-in step before anything changes at the provider: its words give
+the next step, the path, host and OpenSSL's text wait under Details, and the page the browser
+came back to offers Finish sign-in for that same return once it is fixed; sign-out still forgets
+the local tokens. Everything else keeps its own
+trust store: `git`, `uv`, `pip`, the Claudexor engine and its runtime downloads, the Telegram
+skill, local (stdio) MCP servers, skills' own service sign-ins, the web-search scraper and
+the browsers.
 
 ## Deployment Policy File
 
@@ -515,8 +536,8 @@ Supervisor route checks.
   required makes an extension run; it does not make it more trusted than its review and grants,
   and it does not isolate it. With `execution` it must also be trusted (Execution domain).
 - `extensions.when_unmet` is required with any row. `hold` (the sample): queued work stays queued
-  while the server's own copy does not run a requirement, and each process that starts work (a
-  pool worker or the server) checks the extensions it has loaded itself; a turn it cannot serve
+  while the server's copy of a required extension isn't ready, including any fixed setting
+  it hasn't been granted. Each process that starts work checks its own copy; a turn it cannot serve
   ends before any model call with a typed notice (`deployment_requirement_unmet`); Stop, Panic,
   Settings and Extensions stay. `warn`: work goes on and the gap is shown. Either way each
   process logs a change of its gap once (`deployment_requirement_unmet`, `deployment_requirement_met`

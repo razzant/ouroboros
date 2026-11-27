@@ -78,6 +78,8 @@ retain their rails.
 
 Documentation checked on 2026-10-09; implementation checks use fixtures, not live
 accounts. These anchors describe published interfaces, not tested account access.
+Re-check each exact route before changing a contract: a stale positive gets
+requests refused, a stale negative hides a capability.
 
 | Source | Operation | Wire shape | Result |
 | --- | --- | --- | --- |

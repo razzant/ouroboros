@@ -347,6 +347,10 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     objective = str(evt.get("objective") or "")
     if not objective.strip():
         return {"status": "needs_manual_target", "reason": "empty_objective", "task_id": tid}
+    from ouroboros.peer_letters import separate_work_refusal
+
+    if refusal := separate_work_refusal(evt, "a promoted root"):  # the record seam: no root, project or workspace yet
+        return {"status": "rejected", "reason": "letter_work_starts_no_separate_root", "detail": refusal, "task_id": tid}
     if detail := _promotion_origin_error(evt):
         return {"status": "needs_manual_target", "reason": "project_binding_failed", "detail": detail, "task_id": tid}
     # Reject before project/source/workspace side effects. enqueue_task repeats
@@ -440,8 +444,8 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
             record_repair_admission(
                 _pool().DRIVE_ROOT, str(repair_constraint.get("skill_name") or ""),
                 task_id=tid, base_content_hash=_base_content_hash,
-                # The owner door's stamp (dialogue_provenance.run_origin): its
-                # revisions become owner edits of the selected skill.
+                # The owner door's stamp permits recording this Repair's direct file edits,
+                # not issuing grants or accepting opaque observations.
                 owner_request=bool((isinstance(evt.get("source_ref"), dict) and evt.get("source_ref"))
                                    or evt.get("origin_suppressed") is True))
         except Exception:

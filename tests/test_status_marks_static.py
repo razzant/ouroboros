@@ -24,7 +24,8 @@ from typing import Iterator
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 WEB = REPO_ROOT / "web"
 SHEETS = ("web/ui.css", "web/style.css", "web/settings.css", "web/model_roles.css", "web/model_wait.css",
-          "web/room_work.css", "web/onboarding.css", "web/cards.css", "web/consciousness.css", "web/provider-return.css")
+          "web/room_work.css", "web/onboarding.css", "web/cards.css", "web/consciousness.css", "web/peer_links.css",
+          "web/provider-return.css")
 CATEGORIES = ("owner", "warning", "system", "data", "palette")
 
 # category | sheet | [at-rule context » ]selector | properties
@@ -38,6 +39,7 @@ owner | web/style.css | .chat-budget-pill[data-attention="1"] .chat-budget-text 
 owner | web/style.css | .costs-spend-bar[data-reached="1"] > i | background
 owner | web/style.css | .chat-live-phase[data-chip-tone="owner"] | background, color
 owner | web/style.css | .chat-question-nav | background, color
+owner | web/peer_links.css | .peer-letter-word[data-tone="owner"] | color
 owner | web/style.css | .skills-trust-value.is-suggested | color
 owner | web/style.css | .update-pill:is(.has-local, [data-tone="warn"]):not(:disabled) | background, color
 owner | web/style.css | @media (hover: hover) » .update-pill:is(.has-local, [data-tone="warn"]):not(:disabled):hover | background
@@ -69,13 +71,13 @@ warning | web/style.css | @container files (max-width: 700px) » .files-entry:is
 warning | web/style.css | .harness-account-meta .meta-fact[data-tone="warn"] | color
 warning | web/style.css | :root[data-theme="light"] .harness-account-row.harness-exhausted | background
 warning | web/style.css | .harness-maintenance-notice[data-tone="warn"] | color
-warning | web/style.css | .harness-model-program [data-tone="warn"] | color
+warning | web/style.css | :is(.harness-model-program, .agent-other-programs) [data-tone="warn"] | color
 warning | web/style.css | .message-share-status[data-tone="warn"] | color
 warning | web/style.css | .model-fallback | color
 warning | web/style.css | .msg-attachment-outcome | color
 warning | web/style.css | .new-project-trust-note | background, color
 warning | web/style.css | .skills-skip-glyph | color
-warning | web/style.css | .toast-warn | border-color, color
+warning | web/style.css | .toast-warn | color
 warning | web/style.css | .widget-callout[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-metric[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-table-status[data-tone="warn"] | color
@@ -133,8 +135,9 @@ palette | web/ui.css | :root[data-theme="light"] | --tone-amber-hover
 """
 
 # How many amber references each first-party script may hold, all data categories: the fourth default chart series
-# (theme_palette.js, which host charts draw from).
-SCRIPT_AMBER = {"web/modules/theme_palette.js": 1}
+# (theme_palette.js, which host charts draw from) and the free palette's ochre face of another Ouroboros of the owner's
+# (ouroboros_face.js: a face's colour, never a status).
+SCRIPT_AMBER = {"web/modules/theme_palette.js": 1, "web/modules/ouroboros_face.js": 1}
 
 
 def _decommented(css: str) -> str:

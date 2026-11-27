@@ -561,6 +561,24 @@
     cursor: default;
 }
 
+/* A call that is one notice line reads it as a System line: the phrase in body weight, its next step under it. */
+.call-card[data-call-card="silent"] .call-card-title {
+    font-weight: inherit;
+}
+
+.call-card-step {
+    flex-basis: 100%;
+    color: var(--text-secondary);
+}
+
+.call-card-details {
+    padding: 0 var(--space-4) var(--space-3);
+}
+
+.call-card-details:empty {
+    display: none;
+}
+
 .call-card-head {
     flex-wrap: wrap;
 }
@@ -716,13 +734,19 @@
     background: var(--tone-red-hover);
 }
 
-/* Where the navigation column is on screen, the mark sits at its foot, over no page's header:
+/* Where the navigation column is on screen, the mark sits above its version row, clear of its touch reach,
+   inside the sidebar's shared column bounds (style.css: clear of the external rail and never into the room):
    "In call" and the time on one line, the room below it. */
+:root {
+    --call-mark-bottom: var(--sidebar-foot-clearance,
+        calc(var(--inset-bottom, env(safe-area-inset-bottom, 0px)) + var(--space-5) + var(--space-3)));
+}
 :where(html[data-layout="docked"]) .call-mark {
     top: auto;
-    bottom: calc(env(safe-area-inset-bottom, 0px) + var(--space-5) + var(--space-3));
-    left: var(--space-3);
-    width: calc(var(--sidebar-width) - 2 * var(--space-3));
+    bottom: var(--call-mark-bottom);
+    left: auto;
+    inset-inline-start: var(--sidebar-column-start, var(--space-3));
+    width: var(--sidebar-column-width, var(--sidebar-min-width));
     padding: var(--space-1);
     border-radius: var(--radius-object);
     transform: none;
@@ -754,6 +778,17 @@
 
 :where(html[data-layout="docked"]) .call-mark-room::before {
     content: none;
+}
+
+/* call_mark.js measures the shown mark. The shell's scroller reveals the last Project above that band; the
+   Projects zone already ends before the footer, so reserve only the part of the band not provided by the shell. */
+:where(html[data-layout="docked"]) #primary-sidebar {
+    --call-mark-clearance: calc(var(--call-mark-height) + var(--call-mark-bottom) + var(--space-2));
+    scroll-padding-bottom: var(--call-mark-clearance, 0px);
+}
+
+:where(html[data-layout="docked"]) #primary-sidebar .nav-projects {
+    padding-bottom: max(0px, calc(var(--call-mark-clearance, 0px) - var(--sidebar-foot-clearance, 0px)));
 }
 
 

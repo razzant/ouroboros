@@ -21,21 +21,15 @@ before the cursor named its bot keeps its offset: which bot it came from is unkn
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from pathlib import Path
-from typing import Any
 
-from ..scripts.telegram_settings import (
-    TelegramSettingsError,
-    telegram_api_base,
-    telegram_files_dir,
-    validate_telegram_api_base,
-)
+from ..scripts.telegram_settings import telegram_api_base, telegram_files_dir, validate_telegram_api_base
 
 CLOUD_BASE = validate_telegram_api_base("")
 _RECENT_SERVERS = 4
 _PARK_CHECK_SEC = 5.0
+_MAX_GROUP_WRITES = 4  # bound group disk waits before the next Bot API poll
 
 
 class InjectNotAccepted(RuntimeError):
@@ -110,39 +104,7 @@ def update_key(update: dict) -> str:
         return f"cb:{callback['id']}"
     message = update.get("message") or {}
     chat_id = (message.get("chat") or {}).get("id")
-    if chat_id and message.get("message_id"):
-        return f"m:{chat_id}:{message['message_id']}"
-    for field, prefix in (("edited_message", "em"), ("channel_post", "cp"), ("edited_channel_post", "ecp")):
-        item = update.get(field) or {}
-        cid, mid = (item.get("chat") or {}).get("id"), item.get("message_id")
-        if cid and mid:
-            if field.startswith("edited_"):
-                digest = hashlib.sha256(
-                    json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "surrogatepass")
-                ).hexdigest()[:16]
-                return f"{prefix}:{cid}:{mid}:{digest}"
-            return f"{prefix}:{cid}:{mid}"
-    reaction = update.get("message_reaction") or {}
-    if (reaction.get("chat") or {}).get("id") and reaction.get("message_id"):
-        actor = (reaction.get("user") or reaction.get("actor_chat") or {}).get("id") or ""
-        digest = hashlib.sha256(
-            json.dumps(reaction, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "surrogatepass")
-        ).hexdigest()[:16]
-        return f"mr:{reaction['chat']['id']}:{reaction['message_id']}:{reaction.get('date') or 0}:{actor}:{digest}"
-    rcount = update.get("message_reaction_count") or {}
-    if (rcount.get("chat") or {}).get("id") and rcount.get("message_id"):
-        digest = hashlib.sha256(
-            json.dumps(rcount, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "surrogatepass")
-        ).hexdigest()[:16]
-        return f"mrc:{rcount['chat']['id']}:{rcount['message_id']}:{rcount.get('date') or 0}:{digest}"
-    member = update.get("my_chat_member") or {}
-    if (member.get("chat") or {}).get("id"):
-        status = (member.get("new_chat_member") or {}).get("status") or ""
-        digest = hashlib.sha256(
-            json.dumps(member, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "surrogatepass")
-        ).hexdigest()[:16]
-        return f"mcm:{member['chat']['id']}:{member.get('date') or 0}:{status}:{digest}"
-    return ""
+    return f"m:{chat_id}:{message['message_id']}" if chat_id and message.get("message_id") else ""
 
 
 class PollCursor:
@@ -151,6 +113,7 @@ class PollCursor:
         self._handled: dict[str, list[str]] = {}
         self._early: dict[str, dict[str, int]] = {}
         self._held: dict[str, dict] = {}
+        self._group_periods: dict[str, dict[str, dict | None]] = {}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             self.offset = int(data.get("offset") or 0)
@@ -163,6 +126,10 @@ class PollCursor:
                            for base, items in dict(data.get("early") or {}).items()}
             self._held = {base: item for base, item in dict(data.get("held") or {}).items()
                           if isinstance(item.get("target"), dict)}
+            self._group_periods = {base: {uid: period for uid, period in items.items()
+                                          if uid.isdecimal() and (period is None or isinstance(period, dict))}
+                                   for base, items in dict(data.get("group_periods") or {}).items()
+                                   if isinstance(items, dict)}
         except Exception:
             pass
         self.follow(base, bot)
@@ -171,7 +138,7 @@ class PollCursor:
         """Bind to ``base`` and ``bot``; a different server or bot starts from its own oldest update."""
         if bot and self.bot and bot != self.bot:
             self.base, self.offset, self._handled = base, 0, {}
-            self._early, self._held = {}, {}
+            self._early, self._held, self._group_periods = {}, {}, {}
         elif base != self.base:
             self.base, self.offset = base, 0
         self.bot = bot or self.bot
@@ -196,6 +163,19 @@ class PollCursor:
         if key:
             self._held = {base: held for base, held in self._held.items() if held.get("key") != key}
 
+    def defer_group(self, update: dict, period: dict | None) -> bool:
+        """Keep the original observation with an unconfirmed update, including None (no consent)."""
+        uid = update.get("update_id")
+        if type(uid) is int and uid > 0:
+            pending = self._group_periods.setdefault(self.base, {})
+            if str(uid) not in pending:
+                pending[str(uid)] = period
+                return True
+        return False
+
+    def group_period(self, update: dict, current: dict | None) -> dict | None:
+        return self._group_periods.get(self.base, {}).get(str(update.get("update_id")), current)
+
     def save(self, offset: int, handled: list[str]) -> None:
         self.offset = offset
         self._handled.pop(self.base, None)
@@ -207,214 +187,143 @@ class PollCursor:
         if self._held.get(self.base, {}).get("update_id", offset) < offset:
             self._held.pop(self.base, None)
         self._held = {base: item for base, item in self._held.items() if base in self._handled}
+        if self.base in self._group_periods:
+            self._group_periods[self.base] = {uid: period for uid, period in self._group_periods[self.base].items()
+                                              if int(uid) >= offset}
+        self._group_periods = {base: items for base, items in self._group_periods.items()
+                               if items and base in self._handled}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"offset": offset, "base": self.base, "bot": self.bot, "handled": self._handled,
                                    **({"early": self._early} if self._early else {}),
-                                   **({"held": self._held} if self._held else {})}), encoding="utf-8")
+                                   **({"held": self._held} if self._held else {}),
+                                   **({"group_periods": self._group_periods} if self._group_periods else {})}),
+                       encoding="utf-8")
         tmp.replace(self.path)
 
 
+async def _owner_panic_behind_groups(api, client, updates, cursor, pinned_chat, lang, *, authorize, is_panic,
+                                     on_group) -> bool:
+    """Whether a private Panic of the bound owner, not handled before, waits in this batch behind a group update.
+    The owner authorizer decides who sent it; with a bound owner it only compares ids (no binding, no reply), and
+    without one no group consent can exist, so group work delays nothing."""
+    from .telegram_group_feed import group_chat
+
+    if on_group is None or not pinned_chat:
+        return False
+    behind_group = False
+    for update in updates:
+        if group_chat(update) is not None:
+            behind_group = True
+        elif behind_group and is_panic(update) and not cursor.is_replay(update) and await authorize(
+                api, client, update, pinned_chat, lang):
+            return True
+    return False
+
+
 async def handle_poll_batch(api, client, updates, cursor, binding, generation, pinned_chat, max_updates, command_mode,
-                            lang, *, authorize, is_panic, on_message, on_callback, on_non_owner=None) -> tuple[bool, str]:
-    """Confirm updates in order. An already received owner Panic runs without waiting behind earlier slow updates."""
+                            lang, *, authorize, is_panic, on_message, on_callback, on_group=None,
+                            group_period=None) -> tuple[bool, str]:
+    """Confirm updates in order. An already received Panic alone may pass a limit or an acceptance gap.
+
+    ``on_group`` takes a group or supergroup update (lib/telegram_group_feed.py) before the owner authorizer, which
+    never sees it: it is never an owner control, Panic included, and in the early phase it waits like any other.
+
+    An owner's private Panic not handled before never waits behind group disk work in its batch: every group update
+    of that batch is left for its next delivery and the offset stops at the first one, so no later offset confirms
+    it; private updates keep their order and, once past that point, are remembered as early replays
+    (``remember_early``). The next delivery then gives the groups their turn and repeats no control: the handled
+    Panic is a replay there, which never holds a batch again. Groups held by the write limit, the ordinary limit or
+    that priority keep their first observed period in the normal cursor save, with no write ahead of Panic."""
     from .telegram_api import TelegramBindingChanged, _LOCALIZED_TEXTS
+    from .telegram_group_feed import group_chat
 
     offset, handled, deferred = cursor.offset, [], False
-    panic_slots = (
-        [i for i, u in enumerate(updates) if i > 0 and is_panic(u) and not cursor.is_replay(u)]
-        if pinned_chat else []
-    )
-    panic_results: dict[int, tuple[str, Any]] = {}
-
-    async def _run_early_panics() -> None:
-        for idx in panic_slots:
-            if not binding.current(generation):
-                panic_results[idx] = ("binding_changed", None)
-                break
-            upd = updates[idx]
-            uid = int(upd.get("update_id") or 0)
-            try:
-                auth_chat = await authorize(api, client, upd, pinned_chat, lang)
-                if not auth_chat:
-                    panic_results[idx] = ("unauthorized", None)
-                    continue
-                await on_message(api, client, upd, uid, command_mode, lang, reply_target=lambda read: read())
-                panic_results[idx] = ("ok", auth_chat)
-            except TelegramBindingChanged as exc:
-                panic_results[idx] = ("binding_changed", exc)
-                break
-            except InjectNotAccepted as exc:
-                panic_results[idx] = ("not_accepted", exc)
-            except TelegramSettingsError as exc:
-                panic_results[idx] = ("settings_error", exc)
-                break
-            except Exception as exc:
-                panic_results[idx] = ("error", exc)
-
-    panic_task = asyncio.create_task(_run_early_panics()) if panic_slots else None
-    panic_consumed: set[int] = set()
-    owner_deferred = False
-    owner_handled = 0
-    unwinding_cancel = False
-    try:
-        for index, update in enumerate(updates):
-            if not binding.current(generation):
-                break
-            early = deferred or index >= max_updates
-            replay = cursor.is_replay(update)
-            key = update_key(update)
-            presence_only_defer = bool(pinned_chat) and deferred and not owner_deferred
-            if early and not (bool(pinned_chat) and (is_panic(update) or (presence_only_defer and owner_handled < max_updates))):
-                if replay:
-                    handled.append(key)
-                continue
-            if panic_task is not None and index in panic_slots:
-                await panic_task
-                status, detail = panic_results.get(index, ("unauthorized", None))
-                if status != "unauthorized":
-                    panic_consumed.add(index)
-                    update_id = int(update.get("update_id") or 0)
-                    if status == "binding_changed":
-                        api.log("info", "Telegram bot token changed while an update was handled; it stays unconfirmed.")
-                        break
-                    if status == "not_accepted":
-                        deferred = owner_deferred = True
-                        api.log("info", "The host did not record a Telegram update; it will be delivered again.")
-                        continue
-                    if status == "settings_error":
-                        raise detail
-                    if update_id > 0 and not early:
-                        offset = update_id + 1
-                    handled.append(key)
-                    if status == "error":
-                        api.log("warning", f"Telegram update processing failed ({type(detail).__name__}).")
-                    cursor.retire_target(key)
-                    if early:
-                        cursor.remember_early(update)
-                    continue
-            authorized_chat, confirmed, target = None, (offset, len(handled)), cursor.held_target(update)
-
-            def confirm():
-                nonlocal confirmed
-                confirmed = None  # a local or host effect already happened
-                if early:
-                    cursor.remember_early(update)
-
-            def resolve_target(read):
-                nonlocal target
-                if target is None:
-                    target = read()
-                return target
-
-            try:
-                update_id = int(update.get("update_id") or 0)
-                if update_id > 0 and not early:
-                    offset = update_id + 1  # retain the existing recovery for a restarted server's numbering
+    groups_wait = await _owner_panic_behind_groups(api, client, updates, cursor, pinned_chat, lang,
+                                                   authorize=authorize, is_panic=is_panic, on_group=on_group)
+    frozen = False  # a group update of this batch was left: no later item may confirm past it
+    group_writes, group_deferred = 0, False
+    for index, update in enumerate(updates):
+        if not binding.current(generation):
+            break
+        group = on_group is not None and group_chat(update) is not None
+        replay = cursor.is_replay(update)
+        key = update_key(update)
+        if group and (groups_wait or group_writes >= _MAX_GROUP_WRITES):
+            group_deferred |= cursor.defer_group(update, group_period)
+            frozen = True
+            continue
+        held = deferred or index >= max_updates  # the existing early phase: only a received Panic passes it
+        early = held or frozen
+        if held and (group or not is_panic(update)):
+            if group:
+                group_deferred |= cursor.defer_group(update, group_period)
+            if replay:
                 handled.append(key)
-                if replay:
-                    cursor.retire_target(key)
-                    continue
-                authorized_chat = await authorize(api, client, update, pinned_chat, lang)
-                if not authorized_chat:
-                    if early:
-                        handled = handled[:confirmed[1]]
-                        continue
-                    if on_non_owner is not None:
-                        await on_non_owner(api, client, update, pinned_chat)
-                    cursor.retire_target(key)
-                    continue
-                pinned_chat = authorized_chat
-                if update.get("callback_query"):
-                    lang = await on_callback(api, client, update, pinned_chat, command_mode, lang, confirm)
-                else:
-                    await on_message(api, client, update, update_id, command_mode, lang, reply_target=resolve_target)
-            except TelegramBindingChanged:
-                if confirmed is not None:
-                    offset, handled = confirmed[0], handled[:confirmed[1]]
-                    api.log("info", "Telegram bot token changed while an update was handled; it stays unconfirmed.")
-                else:
-                    cursor.retire_target(key)
-                    api.log("info", "Telegram bot token changed after an update was applied; its reply was not sent.")
-                break
-            except InjectNotAccepted:
-                if confirmed is not None:
-                    offset, handled = confirmed[0], handled[:confirmed[1]]
-                    deferred = True
-                    if authorized_chat:
-                        owner_deferred = True
-                    if (not early or presence_only_defer) and target is not None and update_id > 0:
-                        cursor.hold_target(update, target)
-                    api.log("info", "The host did not record a Telegram update; it will be delivered again.")
-                    continue
-                api.log("warning", "Telegram update was not accepted after its local effect; it is not retried.")
-            except TelegramSettingsError:
-                if confirmed is not None:
-                    offset, handled = confirmed[0], handled[:confirmed[1]]
-                else:
-                    cursor.retire_target(key)
-                raise
-            except Exception as exc:
-                api.log("warning", f"Telegram update processing failed ({type(exc).__name__}).")
-                if authorized_chat:
-                    try:
-                        await client.send_message(int(authorized_chat), _LOCALIZED_TEXTS[lang]["update_failed"])
-                    except Exception:
-                        api.log("warning", "Telegram update failure notice could not be delivered.")
-            except BaseException:
-                if confirmed is not None:
-                    offset, handled = confirmed[0], handled[:confirmed[1]]
-                else:
-                    cursor.retire_target(key)
-                raise
-            if authorized_chat and not is_panic(update):
-                owner_handled += 1
-            cursor.retire_target(key)
-            if early:
-                cursor.remember_early(update)
-    except asyncio.CancelledError:
-        unwinding_cancel = True
-        raise
-    finally:
-        cancelled_exc: BaseException | None = None
-        if panic_task is not None:
-            if not panic_task.done():
-                if unwinding_cancel:
-                    panic_task.cancel()
-                    try:
-                        await asyncio.gather(panic_task, return_exceptions=True)
-                    except BaseException:
-                        pass
-                else:
-                    try:
-                        await asyncio.gather(panic_task, return_exceptions=True)
-                    except asyncio.CancelledError as exc:
-                        cancelled_exc = exc
-                        if not panic_task.done():
-                            panic_task.cancel()
-                            try:
-                                await asyncio.gather(panic_task, return_exceptions=True)
-                            except BaseException:
-                                pass
-            for idx, (status, _detail) in list(panic_results.items()):
-                if idx not in panic_consumed and status in {"ok", "error"}:
-                    panic_consumed.add(idx)
-                    upd = updates[idx]
-                    k = update_key(upd)
-                    if k:
-                        handled.append(k)
-                    cursor.remember_early(upd)
-        if updates and (handled or deferred or offset != cursor.offset):
-            if unwinding_cancel or cancelled_exc is not None:
-                try:
-                    cursor.save(offset, handled)
-                except Exception as exc:
-                    try:
-                        api.log("warning", f"Telegram cursor save failed during cancellation ({type(exc).__name__}).")
-                    except Exception:
-                        pass
+            continue
+        authorized_chat, confirmed, target = None, (offset, len(handled)), cursor.held_target(update)
+
+        def confirm():
+            nonlocal confirmed
+            confirmed = None  # a local or host effect already happened
+
+        def resolve_target(read):
+            nonlocal target
+            if target is None:
+                target = read()
+            return target
+
+        try:
+            update_id = int(update.get("update_id") or 0)
+            if update_id > 0 and not early:
+                offset = update_id + 1  # retain the existing recovery for a restarted server's numbering
+            handled.append(key)
+            if replay:
+                cursor.retire_target(key)
+                continue
+            if group:
+                group_writes += cursor.group_period(update, group_period) is not None
+                await on_group(update)  # kept or a counted gap: confirmed either way, the owner never waits
+                cursor.retire_target(key)
+                continue
+            authorized_chat = await authorize(api, client, update, pinned_chat, lang)
+            if not authorized_chat:
+                cursor.retire_target(key)
+                if early:
+                    cursor.remember_early(update)  # its refusal is not answered again at the next delivery
+                continue
+            pinned_chat = authorized_chat
+            if update.get("callback_query"):
+                lang = await on_callback(api, client, update, pinned_chat, command_mode, lang, confirm)
             else:
-                cursor.save(offset, handled)
-        if cancelled_exc is not None:
-            raise cancelled_exc
+                await on_message(api, client, update, update_id, command_mode, lang, reply_target=resolve_target)
+        except TelegramBindingChanged:
+            if confirmed is not None:
+                offset, handled = confirmed[0], handled[:confirmed[1]]
+                api.log("info", "Telegram bot token changed while an update was handled; it stays unconfirmed.")
+            else:
+                cursor.retire_target(key)
+                api.log("info", "Telegram bot token changed after an update was applied; its reply was not sent.")
+            break
+        except InjectNotAccepted:
+            if confirmed is not None:
+                offset, handled = confirmed[0], handled[:confirmed[1]]
+                deferred = True
+                if not held and target is not None and update_id > 0:  # a reply's found card, past a frozen group too
+                    cursor.hold_target(update, target)
+                api.log("info", "The host did not record a Telegram update; it will be delivered again.")
+                continue
+            api.log("warning", "Telegram update was not accepted after its local effect; it is not retried.")
+        except Exception as exc:
+            api.log("warning", f"Telegram update processing failed ({type(exc).__name__}).")
+            if authorized_chat:
+                try:
+                    await client.send_message(int(authorized_chat), _LOCALIZED_TEXTS[lang]["update_failed"])
+                except Exception:
+                    api.log("warning", "Telegram update failure notice could not be delivered.")
+        cursor.retire_target(key)
+        if early:
+            cursor.remember_early(update)
+    if updates and (handled or deferred or offset != cursor.offset or group_deferred):
+        cursor.save(offset, handled)
     return deferred, lang

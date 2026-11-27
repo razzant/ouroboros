@@ -63,6 +63,23 @@ class ToolSchemaProvider(Protocol):
         ...
 
 
+def _local_finish_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Project the existing completion tool onto the local return's dispatch contract."""
+    projected = deepcopy(schema)
+    function = projected["function"]
+    parameters = function["parameters"]
+    properties = parameters["properties"]
+    function["description"] = ("Finish considering this letter in its room. Give the local answer, or choose "
+                               "silent=true to keep any answer internal (no answer needed). This does not send "
+                               "anything back through the connector.")
+    function["parameters"] = {**parameters, "additionalProperties": False, "properties": {
+        "action": {**properties["action"], "enum": ["finish"]},
+        "answer": {**properties["answer"], "description": "The complete local answer."},
+        "silent": {**properties["silent"], "description": "Finish without posting a message, if no owner reply is owed."},
+    }}
+    return projected
+
+
 def _schema_names(names: Iterable[str] | None) -> tuple[str, ...]:
     if names is None:
         return ()
@@ -81,9 +98,9 @@ def _schema_names(names: Iterable[str] | None) -> tuple[str, ...]:
 def select_tool_schemas(
     canonical_schemas: Sequence[Dict[str, Any]], *, context_mode: str = "max",
     schema_names: Iterable[str] | None = None,
-    unavailable_reasons: Mapping[str, str] | None = None, standing: bool = True,
+    unavailable_reasons: Mapping[str, str] | None = None, standing: bool = True, observation_slot: Any = None,
 ) -> ToolSchemaSelection:
-    """Pure selection from one permitted snapshot, retaining its canonical order.
+    """Select from one permitted snapshot in canonical order, optionally carrying host witnesses off wire.
 
     ``standing=False`` keeps only the selectors (a live call's own base: its feature names its tools)."""
     available = {schema["function"]["name"] for schema in canonical_schemas}
@@ -92,8 +109,13 @@ def select_tool_schemas(
         for name in _schema_names(schema_names)
     )
     selected = set(requested) | (NANO_RESIDENT_SCHEMA_NAMES if standing else NANO_SCHEMA_META_NAMES)
-    schemas = tuple(deepcopy(schema) for schema in canonical_schemas
-                    if context_mode != "nano" or schema["function"]["name"] in selected)
+    originals = tuple(schema for schema in canonical_schemas
+                      if context_mode != "nano" or schema["function"]["name"] in selected)
+    schemas = tuple(deepcopy(schema) for schema in originals)
+    if observation_slot is not None:
+        from ouroboros.context_assembly_trace import carry_schema_origins
+
+        carry_schema_origins(observation_slot, originals, schemas)
     reasons = unavailable_reasons or {}
     absent = tuple(name for name in requested if name not in available)
     return ToolSchemaSelection(
@@ -119,10 +141,17 @@ def initial_tool_schemas(
     In every mode the tools of an unpinned MCP server start without schemas
     (``on_demand_schema_names``) unless named in ``schema_names``.
     """
+    ctx = getattr(registry, "_ctx", None)
+    if getattr(ctx, "_late_report_ref", ""):
+        if not ctx.task_metadata.get("_late_result_can_finish"):
+            return []
+        return [_local_finish_schema(schema) for schema in registry.schemas()
+                if schema["function"]["name"] == "finish_task"]
     on_demand = getattr(registry, "on_demand_schema_names", frozenset)()
     requested = set(_schema_names(schema_names))
     return [schema for schema in select_tool_schemas(registry.schemas(), context_mode=context_mode,
-                                                     schema_names=schema_names, standing=standing).schemas
+                                                     schema_names=schema_names, standing=standing,
+                                                     observation_slot=getattr(registry, '_ctx', None)).schemas
             if schema["function"]["name"] not in on_demand or schema["function"]["name"] in requested]
 
 
@@ -384,6 +413,17 @@ def name_miss_guidance(
 
 
 CAPABILITY_OMISSION_HEADER = "[CAPABILITY_OMISSION_MANIFEST]"
+# Context-specific built-in gates that withhold a tool on ordinary unlinked turns (not a broken capability).
+INAPPLICABLE_TOOL_REASONS = frozenset({"not_a_letter_root", "no_linked_ouroboros"})
+
+
+def routine_capability_omissions(omissions: Any) -> List[Dict[str, Any]]:
+    """The omissions a start notice, a continuation notice and the callable catalog show. A tool that is simply
+    not this work's (a letter root's question to its sender, a letter with no confirmed link) is no withheld
+    capability: it stays out of all three, and asking for it by name still answers why
+    (``ToolRegistry.policy_hidden_reason``)."""
+    return [dict(item) for item in (omissions or [])
+            if isinstance(item, dict) and item.get("reason") not in INAPPLICABLE_TOOL_REASONS]
 
 
 def format_capability_omissions(

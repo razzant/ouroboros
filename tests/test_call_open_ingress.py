@@ -3,7 +3,7 @@
 import pytest
 
 import supervisor.message_bus as message_bus
-from tests._dialogue import chat_rows
+from tests._dialogue import chat_rows, healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 from tests.test_message_bus import _make_bridge, _readable_by_the_chain_reader
 
 
@@ -45,7 +45,7 @@ def test_call_open_is_a_host_fact_with_the_same_owner_admission(monkeypatch, tmp
 
 
 @pytest.mark.parametrize(("call_open", "view"), [(False, "history"), (True, "memory")])
-def test_call_open_rendering_never_attributes_host_text_to_the_owner(monkeypatch, tmp_path, view, call_open):
+def test_call_open_rendering_never_attributes_host_text_to_the_owner(monkeypatch, tmp_path, view, call_open, healthy_main):
     import asyncio
     import json
     from types import SimpleNamespace

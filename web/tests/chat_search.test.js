@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { bindChatSearchKeys, createChatSearch } from '../modules/chat_search.js';
-import { findIn, foldText, searchKey, snippetOf, wordStream } from '../modules/chat_search_words.js';
+import { candidateBox, findIn, foldText, searchKey, snippetOf, wordStream } from '../modules/chat_search_words.js';
 import { CASE_FOLDING, CASE_FOLDING_ENTRIES, UNICODE_VERSION } from '../modules/unicode_case_folding.js';
 import { installDomDouble } from './dom_double.js';
 
@@ -604,4 +604,42 @@ test('a read after a failed landing says what it read, never the old landing\'s 
     assert.equal(f.landed().at(-1), twenty[19].row_address);
     assert.match(f.parts().note.textContent, /Some saved history could not be read, so it was not searched\./);
     assert.doesNotMatch(f.parts().note.textContent, /no longer in saved history/);
+});
+
+test('a settled question search candidate draws recorded answer files separately from owner words so filenames and failure wording are searchable', (t) => {
+    const env = installDomDouble();
+    t.after(() => env.restore());
+    const both = candidateBox({
+        history_id: 'chat:1', row_address: 'row:1@t1#000000000001', role: 'assistant', ts: '',
+        msg_type: 'quiz', task_id: 't-1', text: 'Which build?',
+        quiz: {
+            quiz_id: 'q-both', options: [{ label: 'Alpha' }], comment: 'use this build',
+            attachments: [
+                { name: 'shot.png', kind: 'image', size: 12, sha256: 'a'.repeat(64) },
+                { name: 'huge.zip', kind: 'file', unavailable: 'too_large', limit_bytes: 10485760 },
+            ],
+        },
+    }, env.doc);
+    assert.equal(both.querySelector('.chat-quiz-answer')?.textContent, "Owner's answer: use this build");
+    assert.equal(both.querySelector('.chat-quiz-answer-files')?.textContent,
+        '📎 shot.png\n📎 huge.zip: not received, too large');
+
+    const filesOnly = candidateBox({
+        history_id: 'chat:2', row_address: 'row:1@t2#000000000002', role: 'assistant', ts: '',
+        msg_type: 'quiz', task_id: 't-2', text: 'Attach logs',
+        quiz: {
+            quiz_id: 'q-only', options: [{ label: 'Skip' }],
+            attachments: [
+                { name: 'diag.log', kind: 'file', unavailable: 'download_failed' },
+                { name: 'gone.pdf', kind: 'file', unavailable: 'missing' },
+            ],
+        },
+    }, env.doc);
+    assert.equal(filesOnly.querySelector('.chat-quiz-answer'), null, 'file-only candidate has no Owner\'s answer block');
+    const shownFiles = filesOnly.querySelector('.chat-quiz-answer-files')?.textContent || '';
+    assert.equal(shownFiles, '📎 diag.log: not received, the download failed\n📎 gone.pdf: not received, unavailable');
+    const stream = wordStream([[{ n: 'files' }, shownFiles]]);
+    assert.equal(findIn(stream, searchKey('diag.log')).length, 1);
+    assert.equal(findIn(stream, searchKey('download failed')).length, 1);
+    assert.equal(findIn(stream, searchKey('gone.pdf')).length, 1);
 });

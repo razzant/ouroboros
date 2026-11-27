@@ -4,7 +4,11 @@ Doctrine: strict about completeness, tolerant about form. Terminal framing, a
 finish reason on every choice and structurally complete tool calls are the only
 hard requirements; identity, index and shape irregularities are forgiven
 first-wins/skip, and every forgiven fact is disclosed in the stream receipt as
-``anomalies``. ``tools/search.py`` (the Responses SSE consumer behind
+``anomalies``; a choice's output-limit finish stated after its kept first one also
+stays there as a typed fact (``later_output_limits``), for call admission alone.
+A Chat call-name fragment equal to the name so far is not appended (``a,a`` reads
+``a``), a different one is, each disclosed; other deltas stay intact.
+``tools/search.py`` (the Responses SSE consumer behind
 ``web_search``) is the house precedent: it ignores unknown events, settles only
 on ``response.completed`` and never retries on form. Form forgiveness is the Chat
 assembler's doctrine; the native Messages assembler forgives only post-terminal
@@ -27,7 +31,8 @@ import re
 from typing import Any, Callable
 
 from ouroboros._usage_response import (
-    merge_usage_reports, provider_cost_value, reported_price, update_snapshot as _snapshot,
+    OUTPUT_LIMIT_FINISH_REASONS, ChatUsageReceipt, merge_usage_reports, provider_cost_value, reported_price,
+    update_snapshot as _snapshot,
 )
 
 
@@ -96,6 +101,11 @@ class ProviderStreamError(IncompleteProviderStream):
         # Keep producer facts in body/private evidence. Text-only pre-routing
         # classifiers must not turn an HTTP-200 SSE failure into a free rejection.
         super().__init__("Provider reported an SSE error after stream dispatch")
+
+
+# The usage key under which the Chat adapter states its selected choice's label from the receipt's
+# ``later_output_limits``: a plain string, host-owned like ``response_finish_reason``, which it never replaces.
+LATER_OUTPUT_LIMIT_USAGE_KEY = "_chat_later_output_limit"
 
 
 class AssembledResponse:
@@ -286,7 +296,7 @@ class _Accumulator:
 
 
 class ChatAccumulator(_Accumulator):
-    def __init__(self, expected_choices: int = 1, on_generation_id: Callable | None = None):
+    def __init__(self, expected_choices: int = 1, on_generation_id: Callable | None = None, *, attempt_id: str = ""):
         super().__init__()
         self.body: dict = {"object": "chat.completion"}
         self.choices: dict[int, dict] = {}
@@ -294,6 +304,8 @@ class ChatAccumulator(_Accumulator):
         self.on_generation_id = on_generation_id
         self.usage_reports: list[dict] = []
         self.terminal_usage_start: int | None = None
+        self.later_output_limits: dict[int, str] = {}  # choice index -> an output limit stated after its kept finish
+        self.token_receipt = ChatUsageReceipt(attempt_id)
 
     def accept(self, event: str, data: str) -> None:
         if self.done:
@@ -312,6 +324,7 @@ class ChatAccumulator(_Accumulator):
             return
         if self.on_generation_id is not None:
             self.on_generation_id(chunk.get("id"))
+        self.token_receipt.observe_frame(chunk)
         if isinstance(chunk.get("error"), dict):
             # The exception carries this frame's total verbatim. Keep the preceding envelope as a fallback.
             _snapshot(self.body, {key: value for key, value in chunk.items()
@@ -386,6 +399,9 @@ class ChatAccumulator(_Accumulator):
                                           usage=self.body.get("usage"), prior_usage=self.usage_reports)
             elif choice.get("finish_reason") not in (None, finish):
                 self._note(f"choice {index}: finish_reason {choice['finish_reason']!r} then {finish!r}; kept first")
+                if (finish.strip().lower() in OUTPUT_LIMIT_FINISH_REASONS
+                        and choice["finish_reason"].strip().lower() not in OUTPUT_LIMIT_FINISH_REASONS):
+                    self.later_output_limits.setdefault(index, finish)  # beside the kept finish, never instead of it
             else:
                 choice["finish_reason"] = finish
         _snapshot(choice, {key: value for key, value in update.items()
@@ -465,13 +481,14 @@ class ChatAccumulator(_Accumulator):
 
 
 class AnthropicAccumulator(_Accumulator):
-    def __init__(self):
+    def __init__(self, *, attempt_id: str = ""):
         super().__init__()
         self.body: dict = {}
         self.blocks: dict[int, dict] = {}
         self.open_blocks: set[int] = set()
-        self.usage_final = False  # message_delta folded its final counters into body["usage"]
+        self.usage_final = False  # message_delta closes the usage phase, even if no usage was reported
         self.inputs: dict[int, str] = {}
+        self.token_receipt = ChatUsageReceipt(attempt_id)
 
     def accept(self, event: str, data: str) -> None:
         if self.done:
@@ -486,6 +503,11 @@ class AnthropicAccumulator(_Accumulator):
         kind = chunk.get("type")
         if event and event != kind:
             raise IncompleteProviderStream("Native SSE event differs from payload type")
+        if kind in {"error", "message_start", "message_delta"}:
+            # The receipt keeps each usage object the wire actually sent, in wire order, before its frame can raise:
+            # a lower-bound start and an error frame's own included. Money is settled apart from it: an envelope
+            # price is no usage object, and unfinished counters price nothing.
+            self.token_receipt.observe_frame(chunk.get("message") if kind == "message_start" else chunk)
         if kind == "error":
             # message_start's usage is a lower-bound snapshot (final output tokens
             # arrive in message_delta): an aborted native stream keeps its
@@ -539,7 +561,8 @@ class AnthropicAccumulator(_Accumulator):
             if not self.body or self.open_blocks:
                 raise IncompleteProviderStream("Native message delta before blocks finished")
             _snapshot(self.body, chunk.get("delta") or {})
-            self.body["usage"] = merge_usage_reports(self.body.get("usage"), chunk.get("usage"))
+            if isinstance(delta_usage := chunk.get("usage"), dict):
+                self.body["usage"] = merge_usage_reports(self.body.get("usage"), delta_usage)
             self.usage_final = True
         elif kind == "message_stop":
             self.done = True
@@ -693,8 +716,10 @@ class _StreamAssembly:
         self.conflicting_generation_id = ""
         self.generation_binding_error = ""
         self.generation_bound = False
-        self.accumulator = (AnthropicAccumulator() if native else ResponsesAccumulator() if responses else
-                            ChatAccumulator(expected_choices, self.observe_generation))
+        attempt_id = self.reservation.attempt_id if self.reservation else ""
+        self.accumulator = (AnthropicAccumulator(attempt_id=attempt_id) if native else
+                            ResponsesAccumulator() if responses else
+                            ChatAccumulator(expected_choices, self.observe_generation, attempt_id=attempt_id))
         self.frames = _SSEFrames()
         self.raw: list[bytes] = []
         headers = getattr(response, "headers", {})
@@ -731,8 +756,14 @@ class _StreamAssembly:
             # Evidence retention must not turn a usable answer into a retry.
             self.generation_binding_error = type(exc).__name__
 
+    def attach_token_receipt(self, carrier: Any) -> None:
+        """The attempt's observed counters ride its error or its reply, apart from any price (Chat, native Messages)."""
+        if (receipt := getattr(self.accumulator, "token_receipt", None)) is not None:
+            carrier._chat_usage_receipt = receipt
+
     def preserve_failure_usage(self, error: BaseException) -> None:
         """Money survives read/close/cancel errors independently of reply completeness."""
+        self.attach_token_receipt(error)
         usage = self.accumulator.body.get("usage")
         usage = usage if isinstance(usage, dict) else {}
         complete_usage = (self.accumulator.usage_final if isinstance(self.accumulator, AnthropicAccumulator)
@@ -796,16 +827,15 @@ class _StreamAssembly:
     def retain(self, *, complete: bool, error: BaseException | None = None) -> dict:
         if error is not None:
             self.preserve_failure_usage(error)
-        from ouroboros import config
-        from ouroboros.observability import persist_call, write_blob
-        from ouroboros.usage_accounting import current_usage_scope, last_physical_attempt_capture, current_physical_attempt_drive_root
+        from ouroboros.usage_accounting import last_physical_attempt_capture
 
         capture = last_physical_attempt_capture()
-        scope = current_usage_scope()
         attempt_id = str(getattr(capture, "attempt_id", "") or "")
         facts = {"attempt_id": attempt_id, "complete": complete,
                  "generation_id": self.generation_id or self.accumulator.body.get("id", ""),
                  "anomalies": self.accumulator.anomaly_facts()}
+        if limits := getattr(self.accumulator, "later_output_limits", None):  # Chat: per choice of this attempt
+            facts["later_output_limits"] = {str(index): label for index, label in limits.items()}
         if error is not None:  # a failed reply's typed shape, never its text
             facts["model_output_received"] = self.accumulator.output_received()
             if isinstance(self.accumulator, ChatAccumulator) and getattr(error, "stream_prior_usage", None) is not None:
@@ -820,32 +850,50 @@ class _StreamAssembly:
             facts["generation_bound"] = True
         if self.generation_binding_error:
             facts["generation_binding_error"] = self.generation_binding_error
-        evidence = {"wire_base64": base64.b64encode(b"".join(self.raw)).decode("ascii"),
-                    "partial_assembly": self.accumulator.partial(), **facts}
-        try:
-            if not attempt_id:
-                raise RuntimeError("stream has no physical attempt identity")
-            root = current_physical_attempt_drive_root() or (scope.drive_root if scope is not None else config.DATA_DIR)
-            # Raw frames can contain private native signatures. Only the blob
-            # reference and structural facts enter the ordinary public projection.
-            raw_ref = write_blob(root, evidence, kind="json")
-            retained = persist_call(root, task_id=str(getattr(scope, "task_id", "") or "llm"),
-                                    call_id=f"physical_{attempt_id}_stream", call_type="physical_stream",
-                                    payload={**facts, "private_wire_ref": raw_ref}, manifest=facts)
-            facts["manifest_ref"] = retained["manifest_ref"]
-        except Exception as retention_error:
-            facts["retention_error"] = type(retention_error).__name__
-            if error is not None:
-                error.stream_evidence = evidence
-        if error is not None:
-            error.stream_receipt = facts
-            error.stream_incomplete = True
-        return facts
+        return retain_stream(self.raw, self.accumulator.partial(), facts, error)
 
     def result(self) -> dict:
         for event, data in self.frames.feed(b"", final=True):
             self.accumulator.accept(event, data)
         return self.accumulator.result()
+
+    def completed_response(self, body: dict) -> AssembledResponse:
+        body["_stream_receipt"] = self.retain(complete=True)  # this assembly's own, over any wire field of that name
+        response = AssembledResponse(body)
+        self.attach_token_receipt(response)
+        return response
+
+
+def retain_stream(raw, partial, facts, error=None):
+    """Keep exact wire and partial assembly private under this attempt."""
+    from ouroboros import config
+    from ouroboros.observability import persist_call, write_blob
+    from ouroboros.usage_accounting import current_usage_scope, current_physical_attempt_drive_root
+
+    scope = current_usage_scope()
+    attempt_id = facts["attempt_id"]
+    wire = raw if isinstance(raw, (bytes, bytearray)) else b"".join(raw)
+    evidence = {"wire_base64": base64.b64encode(wire).decode("ascii"),
+                "partial_assembly": partial, **facts}
+    try:
+        if not attempt_id:
+            raise RuntimeError("stream has no physical attempt identity")
+        root = current_physical_attempt_drive_root() or (scope.drive_root if scope is not None else config.DATA_DIR)
+        # Raw frames can contain private native signatures. Only the blob
+        # reference and structural facts enter the ordinary public projection.
+        raw_ref = write_blob(root, evidence, kind="json")
+        retained = persist_call(root, task_id=str(getattr(scope, "task_id", "") or "llm"),
+                                call_id=f"physical_{attempt_id}_stream", call_type="physical_stream",
+                                payload={**facts, "private_wire_ref": raw_ref}, manifest=facts)
+        facts["manifest_ref"] = retained["manifest_ref"]
+    except Exception as retention_error:
+        facts["retention_error"] = type(retention_error).__name__
+        if error is not None:
+            error.stream_evidence = evidence
+    if error is not None:
+        error.stream_receipt = facts
+        error.stream_incomplete = True
+    return facts
 
 
 def consume_stream(stream: Any, *, native: bool = False, expected_choices: int = 1,
@@ -867,8 +915,7 @@ def consume_stream(stream: Any, *, native: bool = False, expected_choices: int =
         except BaseException:
             pass  # Cleanup cannot replace the original stream/cancellation cause.
         raise
-    body["_stream_receipt"] = assembly.retain(complete=True)
-    return AssembledResponse(body)
+    return assembly.completed_response(body)
 
 
 async def consume_stream_async(stream: Any, *, expected_choices: int = 1, responses: bool = False,
@@ -898,5 +945,4 @@ async def consume_stream_async(stream: Any, *, expected_choices: int = 1, respon
         except BaseException:
             pass
         raise
-    body["_stream_receipt"] = assembly.retain(complete=True)
-    return AssembledResponse(body)
+    return assembly.completed_response(body)

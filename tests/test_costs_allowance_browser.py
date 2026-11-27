@@ -5,10 +5,11 @@ and read back after a reload, the posted body is that one limit, and an unrelate
 row posts its own key and nothing else. Settings has no control for it, only the home's door to Costs.
 Under the field stands the clock's own 24-hour window, from spend seeded through the ledger itself: what it leaves
 out, a reached limit with its conditional room time in the viewer's named zone. A wake held at the allowance it started
-with, the Off switch and an unreadable ledger are said apart; the held state's snapshot is the consciousness
-producers' own (``hold_cause``, ``describe_consciousness_state``) over the server's answer, and the Consciousness tab
-and the chip's Shade say it and open Costs. Desktop and phone, light and dark, Chromium and WebKit; the frames go to
-``OUROBOROS_UI_EVIDENCE_DIR`` when it is set.
+with (and one whose host says the room a Resume would add beside what the total budget leaves of it), the Off switch and
+an unreadable ledger are said apart; the held state's snapshot is the consciousness producers' own (``hold_cause``,
+``describe_consciousness_state``) over the server's answer, and the Consciousness tab and the chip's Shade say it and
+open Costs. Desktop and phone, light and dark, Chromium and WebKit; the frames go to ``OUROBOROS_UI_EVIDENCE_DIR`` when
+it is set.
 """
 from __future__ import annotations
 
@@ -267,8 +268,9 @@ def _room_words(after: float, now: float) -> str:
     return f"{date}{at:%H:%M} GMT+3"
 
 
-def _held(bg: dict) -> dict:
-    """The server's snapshot with its own wake held at the allowance it started with, as the producers say it."""
+def _held(bg: dict, room: dict | None = None) -> dict:
+    """The server's snapshot with its own wake held at the allowance it started with, as the producers say it; ``room``
+    is what a host that estimates a Resume adds (``held_wake_cause``)."""
     from ouroboros.consciousness_view import describe_consciousness_state, hold_cause
     from ouroboros.consciousness_wake import wake_task_metadata
 
@@ -279,7 +281,7 @@ def _held(bg: dict) -> dict:
                                          root_cost_ceiling_source="allowance"), pause)
     assert hold == {"cause": "allowance", "ceiling_usd": 2.99}
     return describe_consciousness_state({**bg, "live_wake_task_id": "wake-held", "live_wake_held": True,
-                                         "live_wake_hold": hold}, True)
+                                         "live_wake_hold": {**hold, **(room or {})}}, True)
 
 
 def _unreadable(bg: dict) -> dict:
@@ -363,6 +365,17 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
             model = "Model: mock-model (Main model)."
             each("normal", lambda page: (meter_says(page, **normal),
                                          expect(page.locator(".costs-allowance-line")).to_have_text([model])))
+            # 1b. Its wake held, on a host that says the room a Resume would add: the allowance's (no more than the $7 it has
+            # left), beside what the total budget leaves of it.
+            for page in pages.values():
+                _overlay(page, lambda bg: _held(bg, {"resume_additional_usd": 7.0, "resume_available_usd": 3.0}))
+            held_room = ("The consciousness wake-up is paused at its allowance ($2.99). Estimated room on Resume: $7.00 from the "
+                         "allowance, $3.00 available now because the total budget has less left; raising the limit alone "
+                         "resumes nothing. Stop now on its card ends it and frees the clock for its next check. Open in Main ↗")
+            each("held-room", lambda page: (meter_says(page, **normal),
+                                            expect(page.locator(".costs-allowance-line")).to_have_text([held_room, model])))
+            for page in pages.values():
+                _overlay(page, None)
             # 2. The limit reached: what waits, and when room returns if nothing more is charged, in the viewer's zone.
             page = pages[COMBOS[0]]
             with _saving(page):
@@ -380,9 +393,9 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
             # 3. Its wake held at the allowance it started with: two facts, the window and the wake, with its card's door.
             for page in pages.values():
                 _overlay(page, _held)
-            held = ("The consciousness wake-up is paused at the allowance it had left when it started ($2.99). Resume keeps "
-                    "that limit, so it pauses again while its known spend is at it; room returning or a higher limit does "
-                    "not raise it. Stop now on its card ends it and frees the clock for its next check. Open in Main ↗")
+            held = ("The consciousness wake-up is paused at its allowance ($2.99). No spending estimate is available "
+                    "for Resume. Raising the limit alone resumes nothing. Stop now on its card ends it and frees "
+                    "the clock for its next check. Open in Main ↗")
             each("held", lambda page: (meter_says(page, **exhausted),
                                        expect(page.locator(".costs-allowance-line")).to_have_text([reached, held, model])))
             page = pages[COMBOS[0]]
@@ -397,11 +410,11 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                 page.locator("[data-costs-consciousness]").click()
                 headline = page.locator(".consciousness-headline")  # the switch's position and the owner's mark
                 expect(page.locator(".consciousness-headline-state")).to_contain_text(
-                    "Wake-up wake-held stopped at the allowance it had left when it started ($2.99).", timeout=30_000)
+                    "Wake-up wake-held stopped at its allowance ($2.99).", timeout=30_000)
                 assert headline.locator(".status-mark").get_attribute("data-hue") == "owner"
                 expect(page.locator(".consciousness-headline-note")).to_have_text(
-                    "Resume keeps that limit, so it pauses again while its known spend is at it, and a higher allowance "
-                    "does not raise it. Stop now on its card ends it and frees the clock for its next check.")
+                    "No spending estimate is available for Resume. Raising the limit alone resumes nothing. "
+                    "Stop now on its card ends it and frees the clock for its next check.")
                 if (shot := _evidence(f"{engine}-{width}-{theme}-held-consciousness.png")) is not None:
                     page.locator("[data-cx-summary]").screenshot(path=str(shot))
                 page.locator('#page-dashboard [data-setting-row="consciousness-allowance"]').click()
@@ -413,8 +426,8 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                 chip.click()
                 shade = page.locator("#page-chat .cx-shade")
                 expect(shade.locator(".cx-state")).to_have_text("Also on its own")  # the switch's position
-                expect(shade.locator(".cx-state-note")).to_contain_text("stopped at the allowance it had left")
-                expect(shade.locator(".cx-state-note")).to_contain_text("Resume keeps that limit, so it pauses again")
+                expect(shade.locator(".cx-state-note")).to_contain_text("stopped at its allowance")
+                expect(shade.locator(".cx-state-note")).to_contain_text("No spending estimate is available for Resume.")
                 costs = shade.locator(".cx-door", has_text="Costs ›")
                 expect(costs).to_be_visible()
                 page.wait_for_function("""() => [...document.querySelectorAll('#page-chat .cx-shade')].every((shade) =>

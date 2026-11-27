@@ -425,6 +425,242 @@ test('an answer whose delivery is unknown is amber on a Project question\'s card
     } finally { mirror.restore(); }
 });
 
+test('a Telegram Reply\'s files ride the answered pointer into the Main copy of a Project question as host facts distinct from owner words, and narrower deliveries never blank them', () => {
+    const files = [{ name: 'shot.png', kind: 'image', size: 12, sha256: 'a'.repeat(64) },
+        { name: 'clip.mp4', kind: 'file', unavailable: 'download_failed' }];
+    const column = new NodeStub();
+    const mirror = fixture({ isMain: true, frameNode: frameBubble, insertMessageNode: (node) => { column.append(node); return true; } });
+    try {
+        const row = { role: 'system', system_type: 'project_question_pointer', task_id: 't-1', quiz_id: 'qz-1', project_id: 'p1',
+            project_chat_id: 23, project_name: 'Storage', ts: '2026-09-18T22:00:00+00:00', quiz_state: 'answered',
+            question: 'Merge now?', options: ['Yes', 'No'], comment: 'this one', attachments: files,
+            question_delivery: { kind: 'answer', state: 'owed', reason_code: 'late_answer_delivery_unknown' } };  // owed: the copy stays
+        mirror.decision.appendQuestionPointer(row);
+        const answer = () => column.querySelector('.chat-quiz-answer')?.textContent;
+        const fileLines = () => column.querySelector('.chat-quiz-answer-files')?.textContent;
+        const expectedWords = "Owner's answer: this one";
+        const expectedFiles = '\u{1F4CE} shot.png\n\u{1F4CE} clip.mp4: not received, the download failed';
+        assert.equal(answer(), expectedWords, 'owner words stay separate from host file facts');
+        assert.equal(fileLines(), expectedFiles);
+        // The census or a lifecycle frame names the same winner without its files: the copy keeps what it shows.
+        const narrower = { ...row };
+        delete narrower.attachments;
+        mirror.decision.appendQuestionPointer(narrower);
+        assert.equal(answer(), expectedWords);
+        assert.equal(fileLines(), expectedFiles);
+        mirror.decision.applyQuizStateFrame({}, { quiz_id: 'qz-1', task_id: 't-1', state: 'answered' });
+        assert.equal(answer(), expectedWords);
+        assert.equal(fileLines(), expectedFiles);
+    } finally { mirror.restore(); }
+});
+
+test('a full read without a delivery fact drops an owed observation older than its start; a live one stated since survives', async () => {
+    const delivery = { kind: 'answer', state: 'owed', reason_code: 'late_answer_delivery_unknown' };
+    const address = 'row:23@2024-04-09T10:14:00+00:00#0123456789ab';
+    const row = (extra = {}) => ({ ...WS_MSG, state: 'answered', answered_index: 0, project_id: 'p1', ...extra });
+    // A history row is a full read as of `requestedAt`, when its read was asked for (api_client chatHistory).
+    const room = fixture({ projectId: 'p1', chatId: 23 });
+    try {
+        const card = room.decision.buildQuizCard(row({ question_delivery: { ...delivery } }), null, Date.now());
+        assert.deepEqual(markOf(card), ['dot', 'owner', false]);
+        // A later read of the same row whose block names no delivery: the answer row's own address
+        // proves recording, not receipt — the owed observation leaves as unknown, never delivered.
+        assert.equal(room.decision.buildQuizCard(row({ answer_row_address: address }), null, Date.now()), null);
+        assert.equal(room.decision.observedQuestion('t-1', 'qz-1').question_delivery, undefined);
+        assert.deepEqual(markOf(card), ['dot', 'ok', false]);
+        // Delivered is durable: a later full read without the fact never downgrades it to unknown.
+        room.decision.buildQuizCard({ ...row({ answer_row_address: address }), quiz_id: 'qz-2',
+            question_delivery: { kind: 'answer', state: 'delivered' } }, null, Date.now());
+        assert.equal(room.decision.buildQuizCard(row({ quiz_id: 'qz-2', answer_row_address: address }), null, Date.now()), null);
+        assert.equal(room.decision.observedQuestion('t-1', 'qz-2').question_delivery.state, 'delivered');
+        // A live question frame, a copy's repaint or a row no read dates is partial: its missing fact decides nothing.
+        room.decision.buildQuizCard({ ...row({ question_delivery: { ...delivery } }), quiz_id: 'qz-6' }, null, Date.now());
+        assert.equal(room.decision.buildQuizCard(row({ quiz_id: 'qz-6' })), null);
+        assert.equal(room.decision.observedQuestion('t-1', 'qz-6').question_delivery.state, 'owed');
+        // A closure's owed delivery follows the same rule.
+        room.decision.buildQuizCard({ ...row({ question_delivery: { kind: 'closure', state: 'owed' } }),
+            quiz_id: 'qz-5', state: 'closed', closed_reason: 'Closed by the owner without an answer.' }, null, Date.now());
+        assert.equal(room.decision.observedQuestion('t-1', 'qz-5').question_delivery.state, 'owed');
+        room.decision.buildQuizCard(row({ quiz_id: 'qz-5', state: 'closed', closed_reason: 'Closed by the owner without an answer.' }),
+            null, Date.now());
+        assert.equal(room.decision.observedQuestion('t-1', 'qz-5').question_delivery, undefined);
+    } finally { room.restore(); }
+    // Main's own card, open in the feed, and the two orders of one live delivery and one canonical read of its record
+    // whose block names none; the read's start is its own (readQuestion), its answer arrives after the frame both times.
+    const replies = [];
+    const main = fixture({ isMain: true, fetchDetail: () => new Promise((resolve) => replies.push(resolve)) });
+    const record = (quizId) => ({ task_id: 't-1', chat_id: 1,
+        owner_quiz: { [quizId]: { ...WS_MSG, quiz_id: quizId, state: 'answered', answered_index: 0, asked_at: WS_MSG.ts } } });
+    const liveOwed = (quizId) => main.decision.applyQuizStateFrame(new NodeStub(), { ...WS_MSG, quiz_id: quizId,
+        state: 'answered', answered_index: 0, question_delivery: { ...delivery } });
+    const statusOf = (card) => card.querySelector('.chat-quiz-status-text').textContent;
+    try {
+        const [first, second] = ['qz-7', 'qz-8'].map((quizId) => main.decision.buildQuizCard({ ...WS_MSG, quiz_id: quizId,
+            state: 'answered', answered_index: 0, question_delivery: { ...delivery } }, null, Date.now()));
+        assert.deepEqual([statusOf(first), statusOf(second)], Array(2).fill('Answer recorded · delivery unknown'));
+        // 1. The live frame came first; a read asked for after it finds no delivery: that older owed fact goes.
+        liveOwed('qz-7');
+        const stated = Date.now();
+        while (Date.now() <= stated) await new Promise((resolve) => setTimeout(resolve, 1));
+        const early = main.decision.readQuestion('t-1', 'qz-7', '', { fresh: true });
+        await turn();
+        replies.shift()(record('qz-7'));
+        assert.equal((await early).question_delivery, undefined);
+        assert.equal(main.decision.observedQuestion('t-1', 'qz-7').question_delivery, undefined);
+        assert.equal(statusOf(first), 'You answered', 'the open card drops its stale pending words');
+        // 2. A read already asked for when the live frame came answers late without it: the newer fact stays.
+        const late = main.decision.readQuestion('t-1', 'qz-8', '', { fresh: true });
+        await turn();
+        liveOwed('qz-8');
+        replies.shift()(record('qz-8'));
+        assert.equal((await late).question_delivery.state, 'owed');
+        assert.equal(main.decision.observedQuestion('t-1', 'qz-8').question_delivery.state, 'owed');
+        assert.equal(statusOf(second), 'Answer recorded · delivery unknown', 'the late snapshot clears no newer fact');
+    } finally { main.restore(); }
+    // A census pointer is partial: its missing fact changes nothing, while the canonical read drops the owed
+    // observation — Main's copy keeps its Remove control until that read, never by the pointer alone.
+    const column = new NodeStub();
+    const answers = [];
+    const mirror = fixture({ isMain: true, frameNode: frameBubble, insertMessageNode: (node) => { column.append(node); return true; },
+        fetchDetail: () => new Promise((resolve) => answers.push(resolve)) });
+    const canonicalRecord = { task_id: 't-1', project_id: 'p1',
+        owner_quiz: { 'qz-4': { ...WS_MSG, quiz_id: 'qz-4', state: 'answered', answered_index: 0, asked_at: WS_MSG.ts } },
+        question_rooms: { 'qz-4': { state: 'known', chat_id: 23, project_id: 'p1' } } };
+    const past = async (at) => { while (Date.now() <= at) await new Promise((resolve) => setTimeout(resolve, 1)); };
+    try {
+        const pointer = (extra = {}) => ({ role: 'system', system_type: 'project_question_pointer', task_id: 't-1',
+            quiz_id: 'qz-4', project_id: 'p1', project_chat_id: 23, project_name: 'Storage', ts: '2026-09-18T22:00:00+00:00',
+            quiz_state: 'answered', question: 'Merge now?', options: ['Yes', 'No'], answered_index: 0,
+            question_delivery: { ...delivery }, ...extra });
+        mirror.decision.appendQuestionPointer(pointer());
+        const card = column.querySelector('.chat-quiz-card');
+        assert.equal(card.querySelector('.chat-quiz-dismiss')?.textContent, 'Remove from pending');
+        const partial = pointer();
+        delete partial.question_delivery;
+        mirror.decision.appendQuestionPointer(partial);
+        assert.equal(card.querySelector('.chat-quiz-dismiss')?.textContent, 'Remove from pending');
+        // An earlier live frame states the debt; the canonical read is asked for after it, and while it waits a raw
+        // partial frame (answered, no delivery fact) arrives: the copy is observed live then, the debt it repaints is not.
+        const frame = { ...WS_MSG, quiz_id: 'qz-4', state: 'answered', answered_index: 0 };
+        mirror.decision.applyQuizStateFrame(new NodeStub(), { ...frame, question_delivery: { ...delivery } });
+        await past(Date.now());
+        const reading = mirror.decision.readQuestion('t-1', 'qz-4', 'p1');
+        await turn();
+        const censusAskedAt = Date.now();
+        await past(censusAskedAt);
+        mirror.decision.applyQuizStateFrame(new NodeStub(), frame);
+        mirror.decision.syncCurrentQuestions([], () => true, censusAskedAt);
+        await turn();
+        assert.equal(answers.length, 1, 'a census asked for before that frame reads no copy observed live since');
+        answers.shift()(canonicalRecord);
+        const canonical = await reading;
+        assert.equal(canonical.question_delivery, undefined);
+        // One source: the copy's row loses that delivery with its observation, so its next repaint (here a renamed
+        // Project) neither brings the owed fact back through mirrorQuiz nor keeps Remove from pending.
+        mirror.decision.appendQuestionPointer({ ...partial, project_name: 'Storage room' });
+        assert.equal(mirror.decision.observedQuestion('t-1', 'qz-4').question_delivery, undefined);
+        assert.equal(card.querySelector('.chat-quiz-dismiss'), null);
+    } finally { mirror.restore(); }
+});
+
+test('a full read asked for before a live delivery never replaces it: neither by the older fact it states nor by its silence', async (t) => {
+    const unknown = { kind: 'answer', state: 'owed', reason_code: 'late_answer_delivery_unknown' };
+    const saved = { kind: 'answer', state: 'owed', reason_code: 'awaiting_recipient_read' };
+    const pending = { kind: 'answer', state: 'owed' };
+    const words = { unknown: 'Answer recorded · delivery unknown', saved: 'Answer saved · the task reads it when it continues',
+        pending: 'Answer recorded · delivery pending' };
+    const statusOf = (card) => card.querySelector('.chat-quiz-status-text').textContent;
+    const later = async () => { const at = Date.now(); while (Date.now() <= at) await new Promise((resolve) => setTimeout(resolve, 1)); };
+    // Main's own cards; each canonical read is a full read as of its own start (readQuestion) and answers last.
+    const replies = [];
+    const main = fixture({ isMain: true, fetchDetail: () => new Promise((resolve) => replies.push(resolve)) });
+    const record = (quizId, delivery) => ({ task_id: 't-1', chat_id: 1, owner_quiz: { [quizId]: { ...WS_MSG, quiz_id: quizId,
+        state: 'answered', answered_index: 0, asked_at: WS_MSG.ts, ...(delivery ? { delivery: { ...delivery } } : {}) } } });
+    const live = (quizId, delivery) => main.decision.applyQuizStateFrame(new NodeStub(), { ...WS_MSG, quiz_id: quizId,
+        state: 'answered', answered_index: 0, question_delivery: { ...delivery } });
+    const ask = (quizId) => main.decision.readQuestion('t-1', quizId, '', { fresh: true });
+    const card = (quizId, delivery) => main.decision.buildQuizCard({ ...WS_MSG, quiz_id: quizId, state: 'answered',
+        answered_index: 0, question_delivery: { ...delivery } }, null, Date.now());
+    try {
+        // 1. A new unknown, and 2. a new saved answer, each stated live while the read waits: the read's older pending
+        // fact keeps neither from the card (Remove from pending of a Project's copy rides on the first, below).
+        for (const [quizId, fresh] of [['qz-11', unknown], ['qz-12', saved]]) {
+            const shown = card(quizId, pending);
+            assert.equal(statusOf(shown), words.pending);
+            const reading = ask(quizId);
+            await turn();
+            live(quizId, fresh);
+            replies.shift()(record(quizId, pending));
+            assert.deepEqual((await reading).question_delivery, fresh, 'the read hands on the newer fact, never its own');
+            assert.deepEqual(main.decision.observedQuestion('t-1', quizId).question_delivery, fresh);
+            assert.equal(statusOf(shown), fresh === unknown ? words.unknown : words.saved);
+        }
+        // 3. Equal moments: a delivery stated live in the same millisecond the read was asked for is still the newer.
+        const sameMoment = card('qz-13', pending);
+        const clock = t.mock.method(Date, 'now', () => 1_800_000_000_000);
+        const reading = ask('qz-13');
+        await turn();
+        live('qz-13', unknown);
+        clock.mock.restore();
+        replies.shift()(record('qz-13', saved));
+        await reading;
+        assert.equal(statusOf(sameMoment), words.unknown);
+        // 4. Two reads around one live frame: the newer read finds no delivery and the frame's fact goes; the older one,
+        // answering last with its pending fact, brings back nothing — not through what it hands on either.
+        const both = card('qz-14', pending);
+        const older = ask('qz-14');
+        await turn();
+        await later();
+        live('qz-14', unknown);
+        await later();
+        const newer = ask('qz-14');
+        await turn();
+        replies.pop()(record('qz-14'));
+        assert.equal((await newer).question_delivery, undefined);
+        assert.equal(statusOf(both), 'You answered');
+        replies.shift()(record('qz-14', pending));
+        assert.equal((await older).question_delivery, undefined);
+        assert.equal(main.decision.observedQuestion('t-1', 'qz-14').question_delivery, undefined);
+        assert.equal(statusOf(both), 'You answered');
+        // 5. A read asked for after the live frame is the newer fact itself, whatever it states.
+        const replaced = card('qz-15', pending);
+        live('qz-15', unknown);
+        await later();
+        const after = ask('qz-15');
+        await turn();
+        replies.shift()(record('qz-15', saved));
+        assert.deepEqual((await after).question_delivery, saved);
+        assert.equal(statusOf(replaced), words.saved);
+    } finally { main.restore(); }
+    // A Project question's Main copy, revalidated by a census that vouches for it: the read is asked for before the live
+    // unknown, and its older saved fact neither replaces the words nor takes Remove from pending away.
+    const column = new NodeStub();
+    const answers = [];
+    const mirror = fixture({ isMain: true, frameNode: frameBubble, insertMessageNode: (node) => { column.append(node); return true; },
+        fetchDetail: () => new Promise((resolve) => answers.push(resolve)) });
+    try {
+        mirror.decision.appendQuestionPointer({ role: 'system', system_type: 'project_question_pointer', task_id: 't-1',
+            quiz_id: 'qz-4', project_id: 'p1', project_chat_id: 23, project_name: 'Storage', ts: '2026-09-18T22:00:00+00:00',
+            quiz_state: 'answered', question: 'Merge now?', options: ['Yes', 'No'], answered_index: 0, question_delivery: { ...saved } });
+        const copy = column.querySelector('.chat-quiz-card');
+        assert.equal(statusOf(copy), words.saved);
+        assert.equal(copy.querySelector('.chat-quiz-dismiss'), null);
+        await later();
+        mirror.decision.syncCurrentQuestions([], () => true, Date.now());
+        await turn();
+        assert.equal(answers.length, 1, 'the vouched-for copy reads its own record');
+        mirror.decision.applyQuizStateFrame(new NodeStub(), { ...WS_MSG, quiz_id: 'qz-4', state: 'answered', answered_index: 0,
+            question_delivery: { ...unknown } });
+        assert.equal(copy.querySelector('.chat-quiz-dismiss')?.textContent, 'Remove from pending');
+        answers.shift()({ task_id: 't-1', project_id: 'p1', owner_quiz: { 'qz-4': { ...WS_MSG, quiz_id: 'qz-4', state: 'answered',
+            answered_index: 0, asked_at: WS_MSG.ts, delivery: { ...saved } } },
+            question_rooms: { 'qz-4': { state: 'known', chat_id: 23, project_id: 'p1' } } });
+        await turn();
+        assert.equal(statusOf(copy), words.unknown);
+        assert.equal(copy.querySelector('.chat-quiz-dismiss')?.textContent, 'Remove from pending');
+    } finally { mirror.restore(); }
+});
+
 test('a private Presence question is Main\'s wherever it is drawn: its unknown delivery is not amber in its work\'s Project', async () => {
     const delivery = { kind: 'answer', state: 'owed', reason_code: 'late_answer_delivery_unknown' };
     const answered = { ...WS_MSG, state: 'answered', answered_index: 0, question_delivery: delivery };
@@ -1357,5 +1593,80 @@ test('the owner\'s own press still hands focus to the question; a landing on the
         first.focus();  // a Reply's landing (chat_reply.markTarget)
         fx.decision.applyQuizStateFrame({}, { quiz_id: 'qz-focus', task_id: 't-1', state: 'answered', answered_index: 0 });
         assert.equal(globalThis.document.activeElement, first, 'a repeated settlement does not move a landing');
+    } finally { fx.restore(); }
+});
+
+test('a file-only settled answer keeps host file facts out of Owner\'s answer and carries the Reply landing address', async () => {
+    const files = [
+        { name: 'shot.png', kind: 'image', size: 12, sha256: 'a'.repeat(64) },
+        { name: 'clip.mp4', kind: 'file', unavailable: 'too_large', limit_bytes: 10485760 },
+        { name: 'gone.pdf', kind: 'file', unavailable: 'missing' },
+    ];
+    const fx = fixture({
+        isMain: true,
+        fetchDetail: async () => ({
+            task_id: 't-1', chat_id: 1,
+            owner_quiz: { 'qz-detail': { ...WS_MSG, quiz_id: 'qz-detail', state: 'answered', asked_at: WS_MSG.ts, attachments: files } },
+        }),
+    });
+    try {
+        // History row with file-only answer: no Owner's answer: label wrapping host facts; Reply lands on file block.
+        const card = fx.decision.buildQuizCard(answeredRow({ quiz_id: 'qz-files', attachments: files, answer_row_address: ANSWER_ROW }));
+        assert.equal(card.querySelector('.chat-quiz-answer'), null, 'no Owner\'s answer block when there is no caption');
+        const fileBlock = card.querySelector('.chat-quiz-answer-files');
+        assert.equal(fileBlock?.textContent,
+            '📎 shot.png\n📎 clip.mp4: not received, too large\n📎 gone.pdf: not received, unavailable');
+        assert.deepEqual([fileBlock.dataset.rowAddress, fileBlock.tabIndex], [ANSWER_ROW, -1]);
+        assert.equal(card.querySelectorAll('a').length, 0, 'answer files never open a download link');
+
+        // Task-detail re-read (GET /api/tasks/{id}) also settles a card with projected answer files.
+        const detailCard = fx.decision.buildQuizCard({ ...WS_MSG, quiz_id: 'qz-detail' });
+        await fx.decision.readQuestion('t-1', 'qz-detail', '');
+        assert.equal(detailCard.dataset.state, 'answered');
+        assert.equal(detailCard.querySelector('.chat-quiz-answer'), null);
+        assert.equal(detailCard.querySelector('.chat-quiz-answer-files')?.textContent, fileBlock.textContent);
+    } finally { fx.restore(); }
+});
+
+test('a known secret allow and its reader snapshot outlive older replies, task-detail reads and history', async () => {
+    const ask = { task_id: 't-1', quiz_id: 'secret-race', project_id: 'p1', state: 'open',
+        question: 'Secret needed for demo', options: [], secret_request: { plugin_name: 'demo', fields: [
+            { id: 'primary', setting_key: 'SYNTH_PRIMARY' }, { id: 'other', setting_key: 'SYNTH_OTHER' },
+        ] } };
+    const old = { event: 'secret_filled', pluginName: 'demo', at: 'save-time', fields: ['primary', 'other'],
+        allow: { state: 'deferred', skill: 'demo', keys: ['SYNTH_PRIMARY', 'SYNTH_OTHER'], enable: true },
+        consumers: [{ name: 'mailer', enabled: true, reads: ['SYNTH_PRIMARY', 'SYNTH_OTHER'], granted: [] }] };
+    const final = { ...old, allow: { ...old.allow, state: 'granted', granted_keys: ['SYNTH_PRIMARY'],
+        resolved_at: 'resolution-time', enabled: false, enable_reason: 'owner_off' },
+        consumers: [{ ...old.consumers[0], granted: ['SYNTH_OTHER'] }] };
+    const update = (secret_outcome) => ({ ...ask, state: 'answered', secret_outcome });
+    let returnDetail;
+    const fx = fixture({ projectId: 'p1', chatId: 23, fetchDetail: () => new Promise((resolve) => { returnDetail = resolve; }) });
+    const rows = (card, selector) => card.querySelectorAll(selector).map((row) => row.textContent).join('\n');
+    try {
+        const card = fx.decision.buildQuizCard(ask);
+        fx.decision.applyQuizStateFrame(card, update(old));
+        const olderRead = fx.decision.readQuestion(ask.task_id, ask.quiz_id, ask.project_id);
+        await Promise.resolve();
+        fx.decision.applyQuizStateFrame(card, update(final));
+        // The detail readQuestion checks: its block and the room the question is shown in (question_rooms).
+        returnDetail({ task_id: ask.task_id, project_id: 'p1', owner_quiz: { [ask.quiz_id]: update(old) },
+            question_rooms: { [ask.quiz_id]: { state: 'known', project_id: 'p1', chat_id: 23 } } });
+        assert.deepEqual((await olderRead).secret_outcome, final);
+        for (const state of ['requested', 'running', 'deferred', 'unknown']) {
+            fx.decision.applyQuizStateFrame(card, update({ ...old, allow: { ...old.allow, state } }));
+            fx.decision.buildQuizCard(update(old));
+            assert.equal(card.dataset.state, 'answered');
+            assert.match(rows(card, '.chat-secret-outcome-line'), /Granted SYNTH_PRIMARY to demo/);
+            assert.match(rows(card, '.chat-secret-outcome-line'), /stayed off/);
+            assert.doesNotMatch(rows(card, '.chat-secret-outcome-line'), /waits|Granted SYNTH_OTHER/);
+            assert.match(rows(card, '.chat-secret-reader'), /was allowed to read SYNTH_OTHER, not SYNTH_PRIMARY/);
+            assert.equal(card.querySelector('.chat-secret-actions'), null);
+        }
+        fx.decision.releaseViews(card);
+        const reopened = fx.decision.buildQuizCard(update(old));
+        assert.match(rows(reopened, '.chat-secret-outcome-line'), /Granted SYNTH_PRIMARY to demo/);
+        assert.match(rows(reopened, '.chat-secret-reader'), /was allowed to read SYNTH_OTHER/);
+        assert.equal(reopened.querySelector('.chat-secret-actions'), null);
     } finally { fx.restore(); }
 });

@@ -120,6 +120,33 @@ def test_authored_stop_money_check_uses_real_cap_not_planning_margin(monkeypatch
     assert authored_completion_budget_exhausted(ctx, 10, None) is True
 
 
+def test_authored_stop_uses_the_amended_cap_from_the_same_snapshot(monkeypatch):
+    """#4267 area C: a work raised from $10 to $15 mid-run must not complete as a money
+    failure at $11 — the fresh snapshot's own limit is the cap the fence admits against,
+    the start-cached number is only the fallback when the observation reports no limit."""
+    import ouroboros.loop as loop
+    from ouroboros.loop_budget import authored_completion_budget_exhausted
+    monkeypatch.setattr('ouroboros.loop_budget._wrapup_global_remaining', lambda: 10)
+    ctx = SimpleNamespace(active_use_local=False, active_model=PAID, accumulated_usage={'cost': 11.0})
+    ceiling = SimpleNamespace(root_cap_usd=10.0, ceiling_usd=7.0)  # cached at loop start
+    monkeypatch.setattr(loop, '_loop_tree_accounting',
+                        lambda **kw: {'settled_usd': 11.0, 'accounted_usd': 11.0, 'root_limit_usd': 15.0})
+    assert authored_completion_budget_exhausted(ctx, 10, ceiling) is False  # $4 of the raised cap left
+    monkeypatch.setattr(loop, '_loop_tree_accounting',
+                        lambda **kw: {'settled_usd': 15.0, 'accounted_usd': 15.0, 'root_limit_usd': 15.0})
+    assert authored_completion_budget_exhausted(ctx, 10, ceiling) is True  # the raised total reached
+    # No limit in the observation: the cached cap stays the only known bound.
+    monkeypatch.setattr(loop, '_loop_tree_accounting', lambda **kw: {'settled_usd': 11.0})
+    assert authored_completion_budget_exhausted(ctx, 10, ceiling) is True
+    # A cap first recorded after loop start is seen through the same snapshot.
+    monkeypatch.setattr(loop, '_loop_tree_accounting',
+                        lambda **kw: {'settled_usd': 4.0, 'root_limit_usd': 5.0})
+    assert authored_completion_budget_exhausted(ctx, 10, SimpleNamespace(root_cap_usd=None)) is False
+    monkeypatch.setattr(loop, '_loop_tree_accounting',
+                        lambda **kw: {'settled_usd': 5.0, 'root_limit_usd': 5.0})
+    assert authored_completion_budget_exhausted(ctx, 10, SimpleNamespace(root_cap_usd=None)) is True
+
+
 PAID, SUBSCRIPTION = 'openai/gpt-5.2', 'claudexor::codex=gpt-6-astra'
 ROUTES = [('local-model', True, False), (SUBSCRIPTION, False, False), (PAID, False, True)]
 

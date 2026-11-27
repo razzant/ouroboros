@@ -93,6 +93,13 @@ def request_drive_root(request: Request) -> pathlib.Path:
     return pathlib.Path(drive_root) if drive_root is not None else pathlib.Path(DATA_DIR)
 
 
+def request_profile_scope(request: Request) -> str:
+    """The serving generation's data-profile scope, frozen when it applied (``ServedUI.serving_profile_scope``, #3294);
+    ``""`` on an app that applied none. Read from memory: no disk I/O on the request."""
+    served_ui = getattr(getattr(getattr(request, "app", None), "state", None), "served_ui", None)
+    return served_ui.serving_profile_scope() if served_ui is not None else ""
+
+
 def request_repo_dir(request: Request) -> pathlib.Path:
     """Repo dir pinned on ``request.app.state`` or the configured default."""
     from ouroboros.config import REPO_DIR
@@ -124,6 +131,12 @@ def coerce_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def request_base(request: Request) -> str:
+    """Where this browser reached the server (its Origin, the deployment prefix kept): a sign-in returns there."""
+    origin = request.headers.get("origin") or f"{request.url.scheme}://{request.url.netloc}"
+    return origin.rstrip("/") + str(request.scope.get("root_path") or "")
+
+
 async def request_json_or(request: Request, default: Any) -> Any:
     """The JSON object the request carries, ``default`` for an empty body, else ``None``.
 
@@ -150,6 +163,21 @@ def json_error(message: str, status: int = 500, **extra: Any) -> JSONResponse:
     payload: dict[str, Any] = {"error": message}
     payload.update(extra)
     return UTF8JSONResponse(payload, status_code=status)
+
+
+def boot_precondition(body: dict) -> JSONResponse | None:
+    """A command's or an agent note's optional ``if_boot``: refused before anything is queued when it is not a
+    non-empty string (400) or the server restarted since that boot (409 ``boot_changed``); None otherwise."""
+    if "if_boot" not in body:
+        return None
+    from ouroboros.server_liveness import BOOT
+
+    expected = body["if_boot"]
+    if not isinstance(expected, str) or not expected:
+        return json_error("if_boot must be a non-empty boot.since string", 400, accepted=False)
+    if expected != BOOT.snapshot(jobs=False)["since"]:
+        return json_error("Ouroboros restarted before this command arrived.", 409, accepted=False, reason_code="boot_changed")
+    return None
 
 
 def migrating_error(drive_root: Any) -> JSONResponse | None:

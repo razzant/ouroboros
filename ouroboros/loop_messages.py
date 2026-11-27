@@ -5,10 +5,11 @@ Extracted from loop.py (v7 L-B split); loop.py re-exports every name."""
 
 from __future__ import annotations
 
-from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, bound_host_row
-from ouroboros.context_view_facts import CONTEXT_FACTS_NAME
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, bound_host_row
+from ouroboros.context_view_facts import CONTEXT_FACTS_NAME, FRESH_FACTS_KEY
 from ouroboros.config import runtime_setting
 
+import copy
 import hashlib
 import logging
 from contextlib import nullcontext
@@ -153,7 +154,11 @@ def _append_or_merge_user_content(
         prefix = prior_text.rstrip() + "\n\n---\n\n" if prior_text else ""
         merged = (([{"type": "text", "text": prefix}] if prefix else []) + list(content)
                   if isinstance(content, list) else prefix + str(content or ""))
-    messages[-1] = {**messages[-1], "content": merged}
+    from ouroboros.context_assembly_trace import move_contributions
+
+    prior_row = messages[-1]
+    messages[-1] = {**prior_row, "content": merged}
+    move_contributions(slot, prior_row, messages[-1])
 
 
 def _owner_marked_content(content: Any) -> Any:
@@ -211,18 +216,24 @@ def _record_owner_directive(
     stable_id = str(msg_id or "").strip()
     client, room = (str((origin or {}).get(key) or "") for key in ("client_message_id", "chat_id"))  # unique per room
     digest = (origin or {}).get("row_sha256")
+    from ouroboros.safety_evidence import trusted_mail_kind
+    direct_kind = trusted_mail_kind((origin or {}).get("mail_kind"), source=source) if not carried else ""
     for known in directives:
         if isinstance(known, dict) and (digest or known.get("row_sha256")):
             if digest != known.get("row_sha256"):
                 continue
             if not carried:
                 known.pop("carried", None)
+                if direct_kind and known.get("source") == "owner_mailbox":
+                    known["mail_kind"] = direct_kind
             return
         if isinstance(known, dict) and ((stable_id and str(known.get("msg_id") or "") == stable_id) or (
                 client and str(known.get("client_message_id") or "") == client
                 and room in ("", str(known.get("chat_id") or room)))):
             if not carried:
                 known.pop("carried", None)
+                if direct_kind and known.get("source") == "owner_mailbox":
+                    known["mail_kind"] = direct_kind
             return
     try:
         frozen_content = json.loads(json.dumps(content, ensure_ascii=False, default=str))
@@ -232,7 +243,15 @@ def _record_owner_directive(
            **({"words": words} if words is not None and words != frozen_content else {})}
     if stable_id:
         row["msg_id"] = stable_id
-    row.update({key: str(value) for key, value in (origin or {}).items() if value})
+    for key, value in (origin or {}).items():
+        if key == "mail_kind":
+            if trusted := trusted_mail_kind(value, source=row["source"]):
+                row["mail_kind"] = trusted
+        elif key == "delivered":  # what a delivered copy verified (``verified_delivery``), kept whole; a non-record is dropped
+            if isinstance(value, dict) and value:
+                row[key] = dict(value)
+        elif value:
+            row[key] = str(value)
     if reply_to:
         row["reply_to"] = dict(reply_to)
     if attachments:
@@ -243,12 +262,72 @@ def _record_owner_directive(
     directives.append(row)
 
 
+def append_addressed_task_message(messages, ctx, entry, task_id, event_queue, *,
+                                  place_owner_words=False, recovered=False):
+    """Project task-message provenance into the transcript and its review premises.
+
+    Plan and acceptance share the principal's corpus. A host frame or descendant
+    escalation is not a directive; a parent's relay remains the sibling's words,
+    not the parent's. Independent roots and peers are context outside the corpus:
+    owner_source_sha256, post-drain growth and acceptance do not gain owner words.
+    The renderer keeps typed sender/relay attribution, including in live events.
+    """
+    from ouroboros.context_budget import OWNER_WORDS_KIND
+    from ouroboros.owner_mailbox import CONTEXT_ONLY_TASK_PROVENANCES, deliver_task_message
+
+    provenance = str(entry.get("provenance") or "ancestor_task")
+    principal = provenance not in CONTEXT_ONLY_TASK_PROVENANCES
+    if principal:
+        _loop()._record_owner_directive(
+            ctx, content=entry.get("text") or "", msg_id=str(entry.get("msg_id") or ""),
+            source="relayed_peer_message" if provenance == "peer_via_ancestor" else "principal_task_message",
+            origin={"source_task_id": str(entry.get("source_task_id") or ""),
+                    "relayed_from_task_id": str(entry.get("relayed_from_task_id") or "")},
+        )
+    words = OWNER_WORDS_KIND if principal or place_owner_words else ""  # owned words do not fold as context
+    history = "[Previous-attempt mailbox history; not a new delivery]\n" if recovered else ""
+    deliver_task_message(entry, task_id, event_queue,
+                         lambda text: _loop()._append_or_merge_user_message(messages, history + text, slot=ctx, kind=words))
+    from ouroboros.context_assembly_trace import note_contribution  # the row this delivery reached, live or recovered
+
+    arrival = entry.get("place_arrival") if isinstance(entry.get("place_arrival"), dict) else {}
+    note_contribution(ctx, messages[-1], "place_arrival" if provenance == "place_event" else "task_mail",
+                      source=arrival.get("source_event_id") or entry.get("msg_id"), form="containing_row")
+
+
+def restore_acknowledged_task_mail(ctx, drive_root, messages, seen):
+    """A from-start retry rebuilds its own held maps and ordinary same-tree input once, not as a new delivery."""
+    from ouroboros.owner_mailbox import (
+        KIND_TASK_MESSAGE, PROVENANCE_PEER_TASK, acknowledged_task_message_ids, drain_owner_entries,
+    )
+
+    attempt = getattr(ctx, "task_attempt", None)
+    if type(attempt) is not int or attempt <= 1:
+        return
+    from ouroboros.owner_relay import held_owner_messages
+    held = held_owner_messages(ctx, defer_persist=True)  # own maps before any writer, without opening a write here; built maps stay
+    # This start restored no saved transcript: a row its record holds as having reached this work is told once more when
+    # its carriage is read again, judged by this attempt's built input under its held receipt (``owner_relay.inject_carried``).
+    ctx._untold_carried = {address: True for address, row in held.items()
+                           if isinstance(row, dict) and isinstance(row.get("carried"), dict)
+                           and not row["carried"].get("went_to") and not row["carried"].get("work_reply")}
+    acked = acknowledged_task_message_ids(drive_root, ctx.task_id, attempt_key=attempt)
+    if not acked:
+        return
+    for entry in drain_owner_entries(drive_root, ctx.task_id, include_acknowledged=True, kinds={KIND_TASK_MESSAGE}):
+        mid = entry["msg_id"]
+        if (mid in acked and mid not in seen and entry.get("source_task_id") and not entry.get("reply_to")
+                and entry["provenance"] in {"ancestor_task", PROVENANCE_PEER_TASK, "peer_via_ancestor"}):
+            append_addressed_task_message(messages, ctx, entry, ctx.task_id, None, recovered=True)
+            seen.add(mid)  # suppress receipts' duplicate views; the durable ACK already exists
+
+
 def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> None:
     """Capture the run's first user turn before system notices are added.
 
     Drafted and continued work seed the retained owner corpus. Ordinary stamped first
     turns are ``initial_user`` (``run_origin``'s ``owner_ingress``). Unstamped turns
-    and host-composed ``ui_control`` turns use ``initial_text``. A late quiz or
+    and host-composed ``ui_control`` turns use ``initial_text``. An agent-note opening stays outside this corpus. A late quiz or
     living-card press without words is ``owner_press``. A living form with words is
     ``owner_mailbox``. An unavailable living submission or an unresolved late quiz answer
     is ``owner_card_input``. A private Presence quiz with words uses ``owner_quiz_answer``. Confirmed place
@@ -260,16 +339,19 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     existing = getattr(ctx, "_owner_directives", None)
     if isinstance(existing, list) and existing:
         return
+    if getattr(ctx, "_admission_author", None):
+        return  # the note is visible in the dialogue, not an opening owner input
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
     from ouroboros.answer_facts import answer_source, card_input
     from ouroboros.dialogue_provenance import run_origin
     from ouroboros.owner_quiz import late_answer_ref, late_answer_owner_text
-    from ouroboros.owner_continue import ROW_IDS
+    from ouroboros.owner_continue import ROW_IDS, verified_delivery
     from ouroboros.owner_words import (
         OWNER_SOURCES, PLACE_CONFIRMED, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT, answered_card_reply,
-        place_confirmed_words, place_row_facts, reply_target, scheduled_text_items, task_schedule_items,
+        place_confirmed_words, reply_target, scheduled_text_items, task_schedule_items,
     )
+    from ouroboros.presence_message_facts import place_row_facts
 
     def schedule_text() -> None:  # the schedule this run fired from, then what its tree carried (a helper's field)
         for item in (*scheduled_text_items(metadata, getattr(ctx, "task_contract", None)), *task_schedule_items({"metadata": metadata})):
@@ -282,12 +364,13 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
         # rides beside them; the source-work link in the model's frame and the external request are context.
         _loop()._record_owner_directive(ctx, source=answer_source(answered), content=late_answer_owner_text(answered),
                                       origin={"source_task_id": late["task_id"], "quiz_id": late["quiz_id"], "ts": answered.get("answered_at")},
-                                      reply_to=answered_card_reply(answered, late["task_id"]))
+                                      reply_to=answered_card_reply(answered, late["task_id"]), attachments=answered.get("attachments"))
         return
     author = metadata.get("objective_author")
     # A task-drafted objective, or the host's Continue work order (its facts are
     # the host's; the owner's exact words ride ``owner_corpus``).
     if isinstance(author, dict) and author.get("kind") in {"task", "continuation"}:
+        from ouroboros.safety_evidence import trusted_mail_kind
         for index, row in enumerate(metadata.get("owner_corpus") or []):
             if isinstance(row, dict) and (row.get("source") in OWNER_SOURCES or row.get("source") in {PLACE_CONFIRMED, SCHEDULE_TEXT}):
                 # Continue seeded its original in slot zero, with the address on the task.
@@ -295,10 +378,13 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
                     from ouroboros.owner_words import _opening, _opening_identity
                     if _opening(row, metadata.get("origin_message_ref") or {}, first=True):
                         row = {**row, **_opening_identity(ctx, read=True)}
+                mail_kind = trusted_mail_kind(row.get("mail_kind"), source=row.get("source"))
                 _loop()._record_owner_directive(
                     ctx, source=str(row["source"]), content=row.get("content"), words=row.get("words"),
                     msg_id=str(row.get("msg_id") or ""),
-                    origin={key: row[key] for key in (*ROW_IDS[1:], *SCHEDULE_ITEM_IDS, "ts", "received", "basis", "cited") if row.get(key)},
+                    origin={**{key: row[key] for key in (*ROW_IDS[1:], *SCHEDULE_ITEM_IDS, "ts", "received", "basis", "cited") if row.get(key)},
+                            **({"mail_kind": mail_kind} if mail_kind else {}),
+                            **({"delivered": delivered} if (delivered := verified_delivery(row)) else {})},
                     reply_to=row.get("reply_to") if isinstance(row.get("reply_to"), dict) else None, carried=True,
                     attachments=row.get("attachments"),
                 )
@@ -324,10 +410,14 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
             # A late answer's head: my human's words with the card they answered, never the host's frame; a press
             # without words is their act, kept under the door's own message id and time.
             if stamped and (submitted := card_input(metadata, root, "initial_user")):
+                from ouroboros.safety_evidence import opening_card_mail_kind
                 door = metadata.get("origin_message_ref") or {}
+                opening_kind = opening_card_mail_kind(submitted)
                 _loop()._record_owner_directive(ctx, source=submitted["source"], content=submitted["content"],
                         reply_to=submitted.get("reply_to"), origin={**{key: door.get(key) for key in ("chat_id", "client_message_id", "ts", "row_sha256")},
-                                                                   **{key: submitted.get(key) for key in ("source_task_id", "quiz_id")}})
+                                                                   **{key: submitted.get(key) for key in ("source_task_id", "quiz_id")},
+                                                                   **({"mail_kind": opening_kind} if opening_kind else {})},
+                        attachments=submitted.get("attachments"))  # a late answer's Reply files, words or none
                 break
             snapshot = (metadata.get("origin_message_snapshot") or {}) if stamped else {}
             content = message.get("content")
@@ -351,12 +441,17 @@ def owner_source_sha256(ctx: Any) -> str:
                                      separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
 
 
-def owner_input_revision(ctx: Any) -> int:
-    """How many of the owner's own rows were delivered to this run (never ``initial_text``, peers or carried words)."""
+def _owner_rows(ctx: Any) -> List[Dict[str, Any]]:
+    """The owner's own rows delivered to this run, in arrival order (never ``initial_text``, peers or carried words)."""
     from ouroboros.owner_words import OWNER_SOURCES
 
-    return sum(isinstance(row, dict) and row.get("source") in OWNER_SOURCES and not row.get("carried")
-               for row in getattr(ctx, "_owner_directives", None) or [])
+    return [row for row in getattr(ctx, "_owner_directives", None) or []
+            if isinstance(row, dict) and row.get("source") in OWNER_SOURCES and not row.get("carried")]
+
+
+def owner_input_revision(ctx: Any) -> int:
+    """How many of the owner's own rows were delivered to this run (``_owner_rows``)."""
+    return len(_owner_rows(ctx))
 
 
 OWNER_REPLY_OWED_REFUSAL = "owner_reply_owed: your human wrote after your last live message; answer before finishing silently"
@@ -367,8 +462,43 @@ def owner_reply_owed(ctx: Any) -> bool:
 
     A failed or deferred send discharges nothing; queue admission is not a read receipt, and
     whether a sent line answered completely remains the author's judgment, not the host's.
+    A direct Reply to this work (``work_reply``) is discharged only by its own answer: one
+    answer does not close another work-reply relay's debt, and an ordinary message closes none;
+    a first answer already kept discharges its own row by address (``discharge_reply_row``).
     """
-    return owner_input_revision(ctx) > int(getattr(ctx, "_owner_reply_revision", None) or 0)
+    if any(relay.get("work_reply") is True for relay in (getattr(ctx, "_open_relays", None) or {}).values()):
+        return True
+    answered = set(getattr(ctx, "_answered_reply_rows", None) or ())
+    return any(str(row.get("msg_id") or "") not in answered
+               for row in _owner_rows(ctx)[int(getattr(ctx, "_owner_reply_revision", None) or 0):])
+
+
+def discharge_reply_row(ctx: Any, relay: Dict[str, Any]) -> None:
+    """A first answer that the outbox or history already holds for my human's Reply to this work answers that Reply's
+    own row (``control_runtime._relay_answered``), in whatever order a run restored from before those sends meets them:
+    its one direct source (``relay.source.address``, the row ``_first_answer_witness`` checks, never another quote)
+    joins this turn's ``_answered_reply_rows``, so another unanswered owner row still holds a silent finish."""
+    source = relay.get("source") if isinstance(relay.get("source"), dict) else {}
+    if address := str(source.get("address") or ""):  # a list, as the checkpoint keeps it (``owner_wait``)
+        ctx._answered_reply_rows = sorted({*(getattr(ctx, "_answered_reply_rows", None) or ()), address})
+
+
+def work_reply_finish_hold(tools: Any, messages: List[Dict[str, Any]], content: str) -> bool:
+    """Hold a regular finish while my human's direct Reply to this work is open and the work can answer it in its
+    source room (``open_work_reply_ids``). Its local result is no answer to a question it was not keyed to: the host
+    names the one way, ``send_user_message(reply_to_relay=...)``, and sends no words. The attempted final stands in
+    the transcript before the notice. A stop is never held here; a forced rail cannot wait, its keyed words ride
+    its one call (``commit_forced_work_replies``)."""
+    from ouroboros.tools.control_runtime import open_work_reply_ids
+
+    if not (ids := open_work_reply_ids(tools)):
+        return False
+    if content.strip():
+        messages.append({"role": "assistant", "content": content})
+    _append_or_merge_user_message(messages, (
+        "[SYSTEM NOTICE] Completion held: work_reply_open: your human's Reply to this work has no answer in its source "
+        "room yet. Answer each with send_user_message(reply_to_relay=<id>), then finish: " + ", ".join(map(repr, ids))))
+    return True
 
 
 def queue_inspection_unknown(ctx: Any, exc: BaseException) -> Dict[str, Any]:
@@ -418,12 +548,16 @@ def owner_authority_kinds(entries: List[Dict[str, Any]]) -> List[str]:
 
     Context-only task mail (a host system frame, a descendant's escalation, an
     independent task) wakes the mind but is not the owner's input — the same
-    provenance boundary the ordinary drain uses for the owner corpus.
+    provenance boundary the ordinary drain uses for the owner corpus. Passive
+    carriage (``owner_mailbox.passive_mail``: a row another work answers) neither
+    wakes nor enters the corpus, so it never holds acceptance or the seal open.
     """
-    from ouroboros.owner_mailbox import CONTEXT_ONLY_TASK_PROVENANCES, KIND_OWNER_TEXT, KIND_TASK_MESSAGE
+    from ouroboros.owner_mailbox import CONTEXT_ONLY_TASK_PROVENANCES, KIND_OWNER_TEXT, KIND_TASK_MESSAGE, passive_mail
 
     kinds: List[str] = []
     for entry in entries:
+        if passive_mail(entry):
+            continue
         kind, provenance = str(entry.get("kind") or KIND_OWNER_TEXT), str(entry.get("provenance") or "ancestor_task")
         if kind != KIND_TASK_MESSAGE or provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
             kinds.append(f"{kind}:{provenance}" if kind == KIND_TASK_MESSAGE else kind)
@@ -1023,6 +1157,22 @@ def _own_focus_fact(ctx: Any, now: float) -> Tuple[str, str]:
     return focus_fingerprint(focus), focus_line(ctx.messages, focus_fingerprint(focus), written, view)
 
 
+def _unsent_facts_row(messages: List[Dict[str, Any]], usage: Dict[str, Any], round_idx: Any) -> Optional[int]:
+    """Where this round's newest facts row stands while no candidate has carried it (``FRESH_FACTS_KEY``: written with
+    the row; ``loop_model_call._presend_context_fit`` clears it at each candidate's admission and at every end of a call
+    but a refusal before dispatch): the last facts row in view, exactly as written. None otherwise: a row a send may
+    have carried, an earlier round's and any words of another author stay where they are."""
+    from ouroboros.context_budget import host_row_intact
+
+    fresh = usage.get(FRESH_FACTS_KEY)
+    if not fresh or usage.get("_context_facts_round") != round_idx:
+        return None
+    at = max((i for i, row in enumerate(messages) if row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME), default=None)
+    row = messages[at] if at is not None else {}
+    return at if (row.get("role") == "user" and host_row_intact(row) and row.get(HOST_TEXT_SHA_KEY) == fresh
+                  and row.get("content") == usage.get("_context_facts_line")) else None
+
+
 @timed_section("context_facts")
 def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) -> bool:
     """Append facts for this round's current route and working view, before dispatch.
@@ -1031,18 +1181,27 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
     sample instant. A fallback, owner switch or recovery rewrite gets fresh facts
     rather than inheriting another route's window and tariff. Sent history is never
     rewritten; the producer-labelled standalone rows let refusal recovery address
-    obsolete snapshots. The caller remeasures including this line before sending.
+    obsolete snapshots. A row of this round no candidate carried never left the process
+    (``_unsent_facts_row``): fresh facts, told against the view as sent, take its place
+    whenever its own facts no longer hold (its quota part included, by the census's own
+    reading), never as a superseded copy a refusal pass or a map pays for again (#3649).
+    The caller remeasures including this line before sending.
     """
     from ouroboros.context_compaction import context_reclaim_transcript_sha256
+    from ouroboros.context_view_facts import append_refused_sends
     from ouroboros.subscription_census import quota_part
     from ouroboros.transcript_prefix import reasoning_retirement_fact
 
     usage = ctx.accumulated_usage
+    refused_added = append_refused_sends(usage, ctx.messages)
     plan = ctx.context_fit_plan
     now = time.time()  # the row's one sample instant: its clock segment and its focus line's age
-    focus_identity, focus_fact = _own_focus_fact(ctx, now)
+    pending = _unsent_facts_row(ctx.messages, usage, ctx.round_idx)
+    sent = copy.copy(ctx)  # the view as sent: what a new row tells is told against it
+    sent.messages = [row for i, row in enumerate(ctx.messages) if i != pending]
+    focus_identity, focus_fact = _own_focus_fact(sent, now)
     subagents_fact = subagents_fact_line()
-    quota, quota_term = quota_part(ctx)  # the census file alone, change-only against the latest part in view
+    quota, quota_term = quota_part(sent)  # the census file alone, change-only against the latest part in view
     source = [{k: v for k, v in m.items() if k != "cache_control"} for m in ctx.messages if m.get(HOST_CONTEXT_KIND_KEY) != CONTEXT_FACTS_NAME]
     source.append({"role": "system", "content": json.dumps(ctx.tool_schemas, ensure_ascii=False, sort_keys=True)})
     key = (ctx.round_idx, ctx.active_model, ctx.active_context_mode, ctx.active_effort,
@@ -1052,8 +1211,11 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
            quota_term)
     visible = any(m.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME and m.get("content") == usage.get("_context_facts_line")
                   for m in ctx.messages)
-    if tuple(usage.get("_context_facts_key") or ()) == key and visible and quota is None:  # a due quota part is sent
-        return False
+    due = quota if pending is None else quota_part(ctx)[0]  # an unsent row's part is current when nothing more is due
+    if tuple(usage.get("_context_facts_key") or ()) == key and visible and due is None:  # a due quota part is sent
+        return refused_added
+    if pending is not None:
+        del ctx.messages[pending]  # before the measure and the superseded count this line states
     measured = False
     if plan is not None:
         try:
@@ -1077,7 +1239,8 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
         money = {**money, "quota": quota}
     line = context_facts_line(ctx, money=money, measured=measured, focus_fact=focus_fact, subagents_fact=subagents_fact,
                               now=now)
-    ctx.messages.append(bound_host_row(CONTEXT_FACTS_NAME, line))
+    ctx.messages.append(row := bound_host_row(CONTEXT_FACTS_NAME, line))
+    usage[FRESH_FACTS_KEY] = row[HOST_TEXT_SHA_KEY]  # new: no candidate has carried it yet
     usage["_context_facts_round"] = ctx.round_idx
     usage["_context_facts_key"] = key
     usage["_context_facts_line"] = line

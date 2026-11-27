@@ -41,7 +41,7 @@ export const ROWS = [
         control: { kind: 'choices', options: [
             { value: 'light', label: 'Light', note: 'Works on your projects. Never changes its own code.' },
             { value: 'advanced', label: 'Advanced', note: 'May grow its own skills and outer layer.' },
-            { value: 'pro', label: 'Pro', note: 'May change its protected core. Reads a review before each change.' },
+            { value: 'pro', label: 'Pro', note: 'May change its protected core. Asks for a review before committing new code.' },
             { value: 'cyber_pro', label: 'Cyber Pro', note: 'Full say over itself and this computer. Asks for reviews when it judges.' }] },
         aliases: ['Runtime mode', 'self-modification', 'own code', 'Light', 'Advanced', 'Pro', 'Cyber Pro'],
         writer: 'runtimeMode', codec: '', confirm: 'raiseAccess', hiddenWhen: '' },
@@ -84,9 +84,10 @@ export const ROWS = [
         aliases: ['Task Result Review', 'Review of task results', 'acceptance'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_REVIEW_MAX_CYCLES', keys: ['OUROBOROS_REVIEW_MAX_CYCLES'], page: 'permissions', fold: false,
-        name: 'Max review cycles', meta: 'Paid cycles per task, for each kind of review.',
-        more: 'After the last one it may still correct its work. Counts paid review waves, a failed one included: result review and '
-            + 'commit review per task, skill review per task or snapshot. '
+        name: 'Max review cycles', meta: 'Paid cycles per task and kind of review; code review per repository, across Continue.',
+        more: 'After the last one it may still correct its work. Counts paid review waves, a failed one included: result review '
+            + 'per task; code review per task and repository (a change review and a commit review spend the same count, and '
+            + 'Continue carries it on); skill review per task or snapshot. '
             + 'Collecting and replaying a review is free. ∞ removes the count; deadlines and budgets still apply.',
         control: { kind: 'strip', options: [{ value: '1', label: '1' }, { value: '2', label: '2' }, { value: '3', label: '3' },
             { value: '5', label: '5' }, { value: 'unlimited', label: '∞' }] },
@@ -202,11 +203,13 @@ export const ROWS = [
     { id: 'OUROBOROS_EXTRA_CA_BUNDLE', keys: ['OUROBOROS_EXTRA_CA_BUNDLE'], page: 'computer/advanced', fold: false,
         name: 'Extra certificate bundle', meta: 'A PEM file on this computer, for a network with its own authority.',
         more: 'Only for a network whose certificates the default bundle does not trust: a proxy that inspects TLS, or an endpoint '
-            + 'behind a national authority. Leave empty unless a provider fails with a certificate error.',
+            + 'behind a national authority. Model providers and HTTPS MCP servers, including their sign-in, use it. Leave empty unless '
+            + 'one of them fails with a certificate error. In Settings, Test and sign-in use a saved path immediately. Running tasks '
+            + 'keep the path they started with.',
         control: { kind: 'text', empty: 'none' }, aliases: ['Extra CA bundle', 'Extra CA Certificates', 'PEM', 'certificate'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'computer:reset', keys: [], page: 'computer/about', fold: true, name: 'Reset all data',
-        meta: 'Deletes state, memory, logs and settings, then restarts. The code stays.', more: '',
+        meta: 'Clears saved conversations, memory and settings. Earlier Project notes are set aside. Code and working folders stay.', more: '',
         control: { kind: 'custom' }, aliases: ['Danger Zone', 'Erase all data', 'Reset All Data'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
 
     // Dashboard › Consciousness: the card "On its own" (the first four, then its fold), then the four doors of "Around it".
@@ -480,8 +483,8 @@ export const HAND_WRITTEN = [
     { id: 'accounts:key:openai', keys: ['OPENAI_API_KEY', 'OPENAI_API_SURFACE'], page: 'accounts/key/openai', name: 'OpenAI key',
         aliases: ['OpenAI', 'Responses API', 'Chat Completions API'] },
     { id: 'accounts:key:anthropic', keys: ['ANTHROPIC_API_KEY'], page: 'accounts/key/anthropic', name: 'Anthropic key', aliases: ['Anthropic'] },
-    { id: 'accounts:key:openai-compatible', keys: ['OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_COMPATIBLE_API_KEY'], page: 'accounts/key/openai-compatible',
-        name: 'OpenAI Compatible key', aliases: ['OpenAI Compatible', 'Custom OpenAI-style endpoint', 'Base URL'] },
+    { id: 'accounts:key:openai-compatible', keys: ['OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_COMPATIBLE_API_KEY', 'OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED'],
+        page: 'accounts/key/openai-compatible', name: 'OpenAI Compatible key', aliases: ['OpenAI Compatible', 'Custom OpenAI-style endpoint', 'Base URL'] },
     { id: 'accounts:key:cloudru', keys: ['CLOUDRU_FOUNDATION_MODELS_API_KEY', 'CLOUDRU_FOUNDATION_MODELS_BASE_URL'], page: 'accounts/key/cloudru',
         name: 'Cloud.ru key', aliases: ['Cloud.ru Foundation Models', 'More providers'] },
     { id: 'accounts:key:minimax', keys: ['MINIMAX_API_KEY', 'MINIMAX_REGION'], page: 'accounts/key/minimax', name: 'MiniMax key', aliases: ['MiniMax', 'More providers'] },

@@ -452,12 +452,12 @@ def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
     """Log owner injections so health checks can detect duplicate processing."""
     if evt.get("quiz_ack"):
         from ouroboros.owner_quiz import quiz_states, question_delivery_projection
-        from ouroboros.gateway.task_decision import _send_quiz_state
+        from ouroboros.gateway.task_decision import _answer_fields, _send_quiz_state
         ack = evt["quiz_ack"]
         block = quiz_states(ctx.DRIVE_ROOT, ack["task_id"]).get(ack["quiz_id"]) or {}
-        # The recorded winner rides with the delivery: a card rebuilt from this fact keeps its answer.
-        _send_quiz_state(ack["quiz_id"], ack["task_id"], str(block.get("state") or "answered"),
-                         answered_index=block.get("answered_index"), comment=str(block.get("comment") or ""),
+        # The whole recorded winner (option, words, a Reply's files) rides with the delivery: a card rebuilt from
+        # this fact keeps its answer.
+        _send_quiz_state(ack["quiz_id"], ack["task_id"], str(block.get("state") or "answered"), **_answer_fields(block),
                          question_delivery=question_delivery_projection(block))
         return
     if evt.get("relay_ack"):

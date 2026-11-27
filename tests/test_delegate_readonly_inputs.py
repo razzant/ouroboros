@@ -13,6 +13,28 @@ import pytest
 from tests.test_delegated_skill_payload import _payload_ctx, _StartStub
 
 
+def test_admitted_placed_source_handle_carries_digest_to_copy(tmp_path, monkeypatch):
+    from ouroboros import artifacts
+    from ouroboros.delegate_readonly_inputs import copy_selection, resolve_selection
+
+    ctx = _payload_ctx(tmp_path, monkeypatch)
+    data = b"A short fictional note.\n"
+    ref = artifacts.store_actor_source_bytes(ctx.drive_root, ctx.task_id, category="tool_results",
+                                             source_id="fictional-note", data=data, extension="txt")
+    copy_file = artifacts.copy_artifact_file
+    expectations = []
+
+    def observe_copy(source, destination, *, expected):
+        expectations.append(expected)
+        return copy_file(source, destination, expected=expected)
+
+    monkeypatch.setattr(artifacts, "copy_artifact_file", observe_copy)
+    selected = resolve_selection(ctx, [{"root": ref["root"], "path": ref["path"]}])
+    [receipt] = copy_selection(selected, tmp_path / "copy")
+    assert expectations == [{"sha256": ref["sha256"]}]
+    assert receipt["sha256"] == ref["sha256"] and pathlib.Path(receipt["local"]).read_bytes() == data
+
+
 def test_readonly_source_permissions_do_not_prevent_exact_session_input(tmp_path, monkeypatch):
     from ouroboros import claudexor_daemon, safety
     from ouroboros.tools.registry import ToolRegistry
@@ -384,3 +406,77 @@ def test_an_unreadable_lineage_file_refuses_the_start_unrun_with_nothing_sent(tm
     assert result["reason"] == "readonly_inputs_unavailable" and result["definitely_unrun"] is True, result
     assert engine.views == [] and not delegate_custody.pending_invocations(data)
     assert "input_files" not in result, "nothing claims to be prepared"
+
+
+def test_a_selected_exported_file_reaches_the_helper_as_its_own_copy_and_delegates_no_room(tmp_path, monkeypatch):
+    """One explicit ``input_files`` selection is the whole set the helper's start reads: the neutral exported
+    file arrives as the helper's own verified copy and nothing else is staged. Passing that one file delegates
+    no project: the helper reads its own synthetic journal through ``journal_read``, and the policy refuses a
+    foreign fictional project (which holds no data here). Fictional ids and this test's data root only."""
+    from ouroboros import claudexor_daemon, safety
+    from ouroboros.tool_access import resource_root_path
+    from ouroboros.tools.project_journal import _project_scope
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    ctx = _payload_ctx(tmp_path, monkeypatch)
+    ctx.task_metadata = {"root_task_id": "t-payload", "resource_intent": {"kind": "explicit_none"}}
+    data = pathlib.Path(ctx.drive_root)
+    exported = resource_root_path(ctx, "task_drive") / "export-for-the-helper.txt"
+    exported.parent.mkdir(parents=True, exist_ok=True)
+    initial_bytes = b"Exported file: one neutral handoff line.\n"
+    exported.write_bytes(initial_bytes)
+    source_bytes = exported.read_bytes()
+    assert source_bytes == initial_bytes
+    engine = _Reader()
+    monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", lambda: engine)
+    monkeypatch.setattr(safety, "check_safety", lambda *_a, **_k: (True, ""))
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+    result = json.loads(registry.execute("delegate_start", {
+        "subagent_id": "payload-session", "access": "readonly", "prompt": "Read the exported file.",
+        "input_files": [{"root": "task_drive", "path": str(exported)}],
+    }))
+    assert result["status"] == "started", result
+    digest = hashlib.sha256(source_bytes).hexdigest()
+    [receipt] = result["input_files"]
+    assert receipt["status"] == "prepared" and receipt["source"] == str(exported)
+    assert receipt["sha256"] == digest and receipt["size"] == len(source_bytes)
+    assert "source_handles/delegated_readonly_inputs" in pathlib.Path(receipt["retained"]).as_posix(), receipt
+    assert pathlib.Path(receipt["retained"]).read_bytes() == source_bytes, "the retained copy holds this file"
+
+    # The helper's first start reads exactly this one copy: the explicit selection replaced lineage staging.
+    [view] = engine.views
+    [row] = view["rows"]
+    assert row["selected_path"] == str(exported) and row["source"] == str(exported)
+    assert row["source_sha256"] == row["sha256"] == digest
+    assert row["source_size"] == row["size"] == len(source_bytes)
+    copy = view["scope"] / row["local"]
+    assert pathlib.Path(receipt["local"]) == copy, "the receipt names the same copy the helper reads"
+    assert view["bytes"][str(exported)] == source_bytes and copy.read_bytes() == source_bytes
+    assert os.lstat(copy).st_ino != os.lstat(exported).st_ino, "the helper's own resource, not the live file"
+    updated_bytes = b"Exported file: later neutral handoff line.\n"
+    exported.write_bytes(updated_bytes)
+    assert copy.read_bytes() == source_bytes and pathlib.Path(receipt["retained"]).read_bytes() == source_bytes
+    with copy.open("r+b") as handle:
+        handle.write(b"helper-local")
+    assert exported.read_bytes() == updated_bytes, "the live source is untouched by the copy"
+
+    # A helper whose own project is a test-local id: the standard reader pages that project's synthetic rows;
+    # the foreign fictional project is refused by the policy decision.
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", data)
+    from ouroboros.project_facts import project_journal_path
+
+    mine = project_journal_path("mine")
+    mine.parent.mkdir(parents=True, exist_ok=True)
+    mine.write_bytes(b'{"ts": "2026-01-01T00:00:00Z", "kind": "note", "text": "synthetic helper row"}\n')
+    helper = ToolContext(repo_dir=ctx.repo_dir, drive_root=data)
+    helper.task_id, helper.project_id = "h-journal", "mine"
+    helper.task_metadata = {"parent_task_id": "t-payload", "delegation_role": "subagent",
+                            "project_id": "mine", "budget_drive_root": str(data),
+                            "resource_intent": {"kind": "explicit_none"}}
+    helper_registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=data)
+    helper_registry.set_context(helper)
+    page = helper_registry.execute("journal_read", {})
+    assert "## Project journal (mine)" in page and "synthetic helper row" in page, page
+    pid, refusal, code = _project_scope(helper, "alpha", write=False)
+    assert pid == "" and code == "ACCESS_BLOCKED" and "only its current project" in refusal

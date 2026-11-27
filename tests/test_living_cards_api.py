@@ -492,6 +492,18 @@ def test_the_living_card_drain_records_the_choice_or_supplied_values(tmp_path, d
     assert (unread["source"], unread["content"], unread["reply_to"]) == (row["source"], row["content"], row["reply_to"])
     assert field[0]["source"] == row["source"] and label in field[1]["text"]
     assert field[0]["text"] == values["from"] if values else "pressed" in field[0]["text"]
+    from ouroboros.owner_words import safety_sources
+    from ouroboros.safety_evidence import with_author
+    if values:
+        assert (row.get("mail_kind"), unread.get("mail_kind"), recovered.get("mail_kind")) == ("card_input",) * 3
+        [rendered] = [with_author(item, {}) for item in safety_sources(ctx)]
+        assert rendered["author"] == (
+            "the owner: the owner's submitted field values delivered later to this work on the living card in reply_to "
+            "(the card's text and pressed label were written by Ouroboros, not the owner)"
+        )
+        assert "note" not in rendered["reply_to"]
+    else:
+        assert "mail_kind" not in row and "mail_kind" not in unread
 
 
 @pytest.mark.parametrize("action, values", [("book", None), ("dates", {"from": "  after moonrise  "})])
@@ -552,6 +564,35 @@ def test_forwarded_card_keeps_its_bubble_and_opens_a_typed_head(tmp_path, decide
     recovered = owner_sources(tmp_path, {"origin_message_text": "Read the chart", "origin_message_ref": {}}, reader.task_id)
     later = owner_corpus_rows(recovered)[-1]
     assert (later["source"], later["content"], later["reply_to"]) == (source, opening["content"], opening["reply_to"])
+    from ouroboros.owner_words import FIELD, safety_sources
+    from ouroboros.safety_evidence import with_author
+    if values:
+        assert (ctx._owner_directives[0].get("mail_kind"), opening.get("mail_kind")) == ("opening_card_input",) * 2
+        [opened_rendered] = [with_author(item, metadata) for item in safety_sources(ctx)]
+        assert opened_rendered["author"] == (
+            "the owner: the owner's submitted field values on the living card in reply_to that opened this task "
+            "(the card's text and pressed label were written by Ouroboros, not the owner)"
+        )
+        assert "later" not in opened_rendered["author"]
+        assert all("mail_kind" not in item for item in field)
+        helper = SimpleNamespace(task_id="field-helper", task_metadata={FIELD: field}, drive_root=tmp_path, _owner_directives=[])
+        [from_field] = [with_author(item, helper.task_metadata) for item in safety_sources(helper)]
+        assert "mail_kind" not in from_field
+        assert from_field["author"] == "a record of owner input carried into this run; any host framing is not the owner's wording"
+        import queue
+        from ouroboros.loop_round_limits import _drain_incoming_messages
+        from ouroboros.owner_mailbox import KIND_OWNER_TEXT, write_owner_message
+        steered = SimpleNamespace(task_id="steered-desk", task_metadata={}, drive_root=tmp_path)
+        assert write_owner_message(tmp_path, bubble, steered.task_id, msg_id="steer-card-1",
+                                   kind=KIND_OWNER_TEXT, card_press=queued["task_metadata"]["card_press"])
+        _drain_incoming_messages([], queue.Queue(), tmp_path, steered.task_id, None, set(), owner_ctx=steered)
+        assert steered._owner_directives[0].get("mail_kind") == "card_input"
+        [steered_rendered] = [with_author(item, {}) for item in safety_sources(steered)]
+        assert steered_rendered["author"] == (
+            "the owner: the owner's submitted field values delivered later to this work on the living card in reply_to "
+            "(the card's text and pressed label were written by Ouroboros, not the owner)"
+        )
+        assert steered_rendered["author"] != opened_rendered["author"]
 
 
 def test_continue_normalizes_only_the_exact_forwarded_form_bubble(tmp_path, decide, monkeypatch):
@@ -587,7 +628,7 @@ def test_continue_normalizes_only_the_exact_forwarded_form_bubble(tmp_path, deci
     [successor] = workers.PENDING
     [form] = [r for r in successor["metadata"]["owner_corpus"] if r.get("msg_id") == "fern-forward"]
     assert form["source"] == "owner_mailbox" and form["content"] == "\n".join(values.values())
-    assert form["reply_to"]["card_id"] == card["card_id"]
+    assert form["reply_to"]["card_id"] == card["card_id"] and form.get("mail_kind") == "card_input"
 
 
 @pytest.mark.parametrize("component, caption, heading, bubble", [
@@ -649,7 +690,7 @@ def test_form_fields_keep_their_word_boundaries_in_the_corpus_and_its_copies(tmp
             assert owner_words_contain(focus, value) and cited_owner_basis(focus, value)[0]
     check(ctx)
     from ouroboros.owner_relay import _rows_to_carry, inject_relay, write_relay
-    [(_, _, quote, _, _)] = _rows_to_carry(ctx, tmp_path)
+    [(_, _, quote, *_rest)] = _rows_to_carry(ctx, tmp_path)
     entry, created = write_relay(tmp_path, "elm-reader", relay_id="elm-fields", note="Read the dates",
                                  quotes=[quote], teller_task_id=ctx.task_id, chat_id=1)
     assert created

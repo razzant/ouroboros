@@ -120,7 +120,9 @@ export function summaryHtml(snapshot, { hasSocket = true, toggling = '', details
     const mark = consciousnessMark(snapshot);
     const markHtml = mark.shape === 'none' ? '' : statusMarkHtml('consciousness-mark', mark);
     const busy = { read: switchReadingWords(), stop: 'Turning off…', start: 'Turning on…' }[toggling] || '';
-    const toggle = snapshot.enabled === null ? '' : `<button type="button" class="btn btn-default btn-sm" data-cx-act="toggle" data-enabled="${snapshot.enabled ? '1' : '0'}"${hasSocket && !busy ? '' : ' disabled'}>${busy || escapeHtml(switchActionWords(snapshot.enabled))}</button>`;
+    const toggle = snapshot.enabled === null ? '' : `<button type="button" class="btn btn-default btn-sm" data-cx-act="toggle" data-enabled="${snapshot.enabled ? '1' : '0'}"${hasSocket && !toggling ? '' : ' disabled'}>${busy || escapeHtml(switchActionWords(snapshot.enabled))}</button>`;
+    const panicChoice = snapshot.enabled === true && snapshot.panicChoiceAvailable
+        ? `<button type="button" class="btn btn-default btn-sm" data-cx-act="panic-choice"${hasSocket && !toggling ? '' : ' disabled'}>${toggling === 'read-panic' ? switchReadingWords() : escapeHtml(tr('consciousness.switch.allow_panic_resume', 'Allow Panic resume'))}</button>` : '';
     // It cannot wake until Ouroboros starts again: the next step is beside the words that say so.
     const restart = snapshot.enabled && snapshot.status === 'stopped'
         ? `<button type="button" class="btn btn-default btn-sm" data-cx-act="restart"${hasSocket ? '' : ' disabled'}>Restart</button>` : '';
@@ -137,7 +139,7 @@ export function summaryHtml(snapshot, { hasSocket = true, toggling = '', details
             ${headline.note ? `<p class="dashboard-hero-meta consciousness-headline-note">${escapeHtml(headline.note)}</p>` : ''}
             ${money ? `<p class="dashboard-hero-meta">${escapeHtml(money)}</p>` : ''}
             ${roots ? `<p class="dashboard-hero-meta">${escapeHtml(roots.head)}</p>` : ''}
-            ${toggle || restart ? `<div class="dashboard-hero-actions">${restart}${toggle}</div>` : ''}
+            ${toggle || panicChoice || restart ? `<div class="dashboard-hero-actions">${restart}${panicChoice}${toggle}</div>` : ''}
         </div>
         ${details ? `<details class="ui-disclosure consciousness-details"${detailsOpen ? ' open' : ''}><summary>Details</summary>${details}</details>` : ''}`;
 }
@@ -409,6 +411,19 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
         if (act === 'restart') {
             // The house Restart (the chat header's): it confirms first and names the work it would interrupt.
             await confirmAndSendRestart({ openConfirmDialog, ws });
+            return;
+        }
+        if (act === 'panic-choice') {
+            toggling = 'read-panic';
+            toggledAt = Number.POSITIVE_INFINITY;
+            paint();
+            const sent = await turnConsciousness('on', { ws, onRead: () => { toggling = ''; paint(); } });
+            if (!sent) { toggling = ''; paint(); return; }
+            toggling = 'panic';
+            toggledAt = Date.now();
+            paint();
+            await new Promise((resolve) => setTimeout(resolve, COMMAND_SETTLE_MS));
+            await refresh();
             return;
         }
         if (act === 'toggle') {

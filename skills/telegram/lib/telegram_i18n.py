@@ -40,6 +40,9 @@ log = logging.getLogger(__name__)
 CATALOG_PREFIX = "tg"
 _DRIVE_ROOT: Optional[pathlib.Path] = None
 _REGISTERED: Dict[str, Dict[str, str]] = {}
+# Keys already reported as missing in this process, per language: a row the memory lacks is
+# reported once, not on every render (the pending file dedupes too; this spares the disk).
+_REPORTED: Dict[str, set] = {}
 
 
 def configure(drive_root: Optional[pathlib.Path]) -> None:
@@ -98,7 +101,10 @@ class Texts(Mapping[str, str]):
         found = memory.tr(code, self._tag, None, drive_root=drive_root())
         if isinstance(found, str) and found:
             return found
-        # Passive read-only fallback: never write directly to shared install i18n state from a skill.
+        # English for now; the miss goes to the generator exactly as a browser miss would, so a
+        # table registered after the language was chosen (a skill enabled later, a new line) is
+        # translated without another language event.
+        _report_miss(code, self._tag, {"source": source, "table": f"{CATALOG_PREFIX}.{self._table}", "role": "telegram"})
         return source
 
     def format(self, key: str, **params: Any) -> str:
@@ -153,7 +159,31 @@ def host_sentence(source: str, tag: str) -> str:
     if english(tag):
         return source
     found = memory.tr(source, tag, drive_root=drive_root())
+    if found is None:
+        _report_miss(source, tag, {"source": source, "role": "telegram"})
     return found or source
+
+
+def _report_miss(key: str, tag: str, context: Dict[str, Any]) -> None:
+    seen = _REPORTED.setdefault(tag, set())
+    if key in seen:
+        return
+    seen.add(key)
+    try:
+        root = drive_root()
+        if memory.record_missing(root, tag, [{"key": key, "context": context}])["accepted"]:
+            _wake_generator(root, tag)
+    except Exception:
+        log.debug("telegram i18n: miss not recorded", exc_info=True)
+
+
+def _wake_generator(root: pathlib.Path, tag: str) -> None:
+    try:
+        from ouroboros.ui_translation import on_language_event
+
+        on_language_event("missing", root, tag)
+    except Exception:
+        log.debug("telegram i18n: generator wake skipped", exc_info=True)
 
 
 def migration_target(settings: Mapping[str, Any]) -> Optional[str]:

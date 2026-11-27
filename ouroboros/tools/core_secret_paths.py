@@ -48,7 +48,9 @@ def _is_runtime_secret_data_path(norm: str, *, include_owner_state: bool = True)
         return False
     # These are stores at the runtime root, not directory-name patterns in
     # task payloads, source trees or artifact stores beneath it.
-    if parts[0] in {"auth", "credentials", "secrets", "tokens"}:
+    if parts[0] in {"auth", "credentials", "secrets", "tokens"} or (
+        ".." not in parts and parts[:2] == ["state", "sign_in"]
+    ):
         return True
     name = parts[-1]
     normalized_names = {name, name.lstrip(".")}
@@ -109,6 +111,15 @@ def runtime_data_roots(ctx: ToolContext) -> list[pathlib.Path]:
         if root not in roots:
             roots.append(root)
     return roots
+
+
+def scoped_runtime_read_refusal(ctx: ToolContext, target: pathlib.Path, roots: list[pathlib.Path]) -> str:
+    """The original source keeps its reader policy under any generic file root."""
+    from ouroboros.tools.project_journal import journal_resource_read_refusal
+    from ouroboros.tools.recent_tasks import retained_focus_path_refusal
+
+    return (journal_resource_read_refusal(ctx, target, data_roots=roots)
+            or retained_focus_path_refusal(ctx, target, data_roots=roots))
 
 
 def is_runtime_secret_target(

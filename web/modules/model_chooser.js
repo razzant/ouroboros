@@ -2,6 +2,7 @@
 // the draft authority; catalogs enrich its list and never assign a value.
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { bindOptionPress, bindPopoverPosition } from './ui_interactions.js';
+import { bindScrollFade, revealPastFade } from './scroll_fade.js';
 import { bindModelProgramFooter } from './model_program.js';
 
 const choosers = new WeakMap();
@@ -33,7 +34,7 @@ function optionsHtml(items, listId) {
 }
 
 export function modelChooserHtml(attrs, value, listId, items = [], { placeholder = 'Choose a model', labelUnlisted = true, programs = [] } = {}) {
-    const options = `<div id="${escapeHtml(listId)}" role="listbox">${optionsHtml(items, listId)}</div>`;
+    const options = `<div id="${escapeHtml(listId)}" class="scroll-fade-y" role="listbox">${optionsHtml(items, listId)}</div>`;
     const footer = '<div class="ui-model-footer" data-model-footer role="group" aria-label="Supplying program" aria-live="polite" aria-atomic="true" hidden></div>';
     const popup = `<div class="ui-popup ui-model-options" data-model-popup hidden>${options}${footer}</div>`;
     return `<span class="ui-model-chooser"><input class="ui-control" type="text" ${attrs}
@@ -81,6 +82,8 @@ export function bindModelChooser(input) {
     });
     programs.update(JSON.parse(input.dataset.modelPrograms || '[]'));
     const disposers = [];
+    // The listbox is the popup's one scroller (the popup shell clips, never scrolls); the cue follows its options.
+    disposers.push(bindScrollFade(list));
     const listen = (target, type, listener) => {
         target.addEventListener(type, listener);
         disposers.push(() => target.removeEventListener(type, listener));
@@ -92,7 +95,8 @@ export function bindModelChooser(input) {
             node.setAttribute('aria-selected', String(ordinal === active));
             if (ordinal === active) {
                 input.setAttribute('aria-activedescendant', node.id);
-                node.scrollIntoView({ block: 'nearest' });
+                if (list.getBoundingClientRect && node.getBoundingClientRect) revealPastFade(list, node);
+                else node.scrollIntoView({ block: 'nearest' });
             }
         });
         if (active < 0) input.removeAttribute('aria-activedescendant');

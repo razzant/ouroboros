@@ -46,13 +46,16 @@ class ClaudexorStatusResponse(TypedDict, total=False):
     # Full Accounts adds profiles.login_capable_harnesses (list[str] | None):
     # login eligibility from the catalog's setupLogin (the manifests when the
     # catalog is not current evidence); None retains the unread fail-open.
+    # A saved subscription account is NOT in this list: it keeps its own row
+    # (per profile, by credential_kind) while the list stays the capability,
+    # so an api_key profile of the same harness gains no sign-in from it.
     profiles: Dict[str, Any]
     quota: List[Dict[str, Any]]
     quota_absences: List[Dict[str, Any]]
-    resources: List[Dict[str, Any]]
-    availability_scope: Dict[str, Any]  # Optional engine binding {model, requestKind, basis: quota_block}.
-    resource_capabilities: Dict[str, bool]
-    resource_capabilities_read: ClaudexorReadState
+    resources: List[Dict[str, Any]]  # Engine resource facets retain decimal strings, units and independent observation times.
+    availability_scope: Dict[str, Any]  # Optional engine binding {model, requestKind, basis: quota_block}; model is a string or null, requestKind text or image.
+    resource_capabilities: Dict[str, bool]  # Catalog-negotiated read, refresh, reset and inspect_reset operations.
+    resource_capabilities_read: ClaudexorReadState  # Operations-catalog evidence, independent of reads.catalog (agent capabilities).
     reads: ClaudexorStatusReads
     # True when this read's roster is the unified account model (named rows, routing in
     # `profiles.accountPools`); a pre-unified roster fails `accounts` as `account_model_unsupported`.

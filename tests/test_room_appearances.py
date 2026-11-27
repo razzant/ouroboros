@@ -297,13 +297,422 @@ class TestOwnerReplyLink:
         return types.SimpleNamespace(root=tmp_path, nova=nova, notice=notice, host=host,
                                      bridge=message_bus.get_bridge())
 
-    def test_a_direct_reply_in_main_to_a_project_message_is_in_that_project_and_dispatches_only_in_main(self, room):
+    @pytest.mark.parametrize("source", ["work_card", "notice", "handoff", "nested", "legacy_depth_two", "child",
+                                        "legacy_grandchild", "detached", "moved_opening"])
+    def test_explicit_work_wins_over_the_live_room_reader_and_replay_is_once(self, room, source, monkeypatch):
+        from ouroboros import server_owner_routing as router
+        from ouroboros.conversation_lease import follow_loop_admission, root_intake
+        from ouroboros.owner_mailbox import _mailbox_path
+        from ouroboros.task_results import write_task_result
+
+        target = "nova-root"
+        address = room.notice["row_address"]
+        if source == "work_card":
+            address = f"task:{target}"
+        elif source == "handoff":
+            from ouroboros.task_finalization import TERMINAL_ORIGIN_MODEL_FINAL, prepare_terminal_send_event
+            from ouroboros.tools.control_runtime import completion_request
+
+            # Simulate a confirmed start receipt, not a pre-stamped dialogue row. Publish through the
+            # terminal event, bus and canonical store used by the owner's actual launcher.
+            launcher = _ctx(room.root, "launcher", 1)
+            launcher.is_direct_chat = True
+            launcher.task_metadata = {"origin_suppressed": True}
+            launcher._confirmed_reply_works = {target}
+            words = "I sent that to the work."
+            args = {"action": "finish", "answer": words}
+            plain, error = completion_request(launcher, args)
+            assert not error and "about_work_task_id" not in plain
+            rejected, error = completion_request(launcher, {**args, "about_work": "not-a-confirmed-work"})
+            assert error and rejected is None
+            selected, error = completion_request(launcher, {**args, "about_work": target})
+            assert not error
+            event = prepare_terminal_send_event(room.root, {"id": "launcher", "chat_id": 1, "_is_direct_chat": True},
+                       words, {"terminal_origin": TERMINAL_ORIGIN_MODEL_FINAL,
+                               "about_work_task_id": selected["about_work_task_id"]},
+                       {"type": "send_message", "chat_id": 1, "task_id": "launcher", "text": words},
+                       presence=False, custody_audit={})
+            from supervisor.message_bus import send_with_budget
+
+            send_with_budget(1, words, task_id="launcher", progress_meta=event["progress_meta"])
+            write_task_result(room.root, "launcher", "completed", chat_id=1, _is_direct_chat=True)
+            address = next(frame["row_address"] for frame in room.host.frames if frame.get("content") == words)
+        elif source == "nested":
+            earlier, _ = _owner(room.bridge, room.root, "My first reply", address, message_id="earlier")
+            address = format_address(row_address(earlier))
+        elif source == "legacy_depth_two":
+            # Both ancestors were written before work_task_id existed. The second
+            # quote is a user row with no task_id; only its canonical link finds the card.
+            quote = {"address": f"task:{target}", "kind": "work_card", "task_id": target}
+            for depth in range(2):
+                saved = ds.append(room.root, "chat", {"ts": f"2026-11-18T22:02:0{depth}Z", "direction": "in",
+                                  "source": "web", "chat_id": 1, "client_message_id": f"old-{depth}",
+                                  "text": f"Legacy reply {depth}", "reply_to": quote}).row
+                address = format_address(row_address(saved))
+                quote = {"address": address, "kind": "message", "role": "user"}
+        elif source == "moved_opening":
+            # This is the same author, still running under its original room, not
+            # an about_work handoff to a new task or a saved terminal result.
+            target = "moved-opening"
+            row = ds.append(room.root, "chat", {"ts": "2026-11-01T10:00:00Z", "direction": "out", "chat_id": 1,
+                            "task_id": target, "type": "proactive_message", "text": "I will work on this."}).row
+            address = format_address(row_address(row))
+            _bound(room.root, target, "nova", room.nova)
+        elif source == "detached":
+            target = "detached-turn"
+            write_task_result(room.root, target, "running", chat_id=1, _is_direct_chat=True,
+                              detached_at="2026-11-01T09:59:00Z")
+            row = ds.append(room.root, "chat", {"ts": "2026-11-01T10:00:00Z", "direction": "out", "chat_id": 1,
+                            "task_id": target, "type": "proactive_message", "text": "An update from the detached turn."}).row
+            address = format_address(row_address(row))
+        elif source in {"child", "legacy_grandchild"}:
+            target, parent = (("exact-child", "nova-root") if source == "child" else ("old-grandchild", "old-child"))
+            row = ds.append(room.root, "chat", {"ts": "2026-11-01T10:01:00Z", "direction": "out",
+                            "chat_id": 1, "task_id": target, "parent_task_id": parent, "role": "system",
+                            "card_row": "timeline", "text": "A milestone from the child."}).row
+            address = format_address(row_address(row))
+        written, handover = _owner(room.bridge, room.root, "Only for this work", address, message_id="explicit")
+        repeat, duplicate = _owner(room.bridge, room.root, "Only for this work", address, message_id="explicit")
+        assert repeat == written and not duplicate
+        assert written["reply_to"]["work_task_id"] == target
+        assert written["reply_to"]["address"] == address
+        helper_card = source in {"child", "legacy_grandchild"}
+        if helper_card:
+            assert written["reply_to"]["role"] == written["reply_to"]["kind"] == "system"
+        current = []
+        monkeypatch.setattr(router, "_route_main_followup", lambda *args, **kw: current.append(args[2]) or "")
+        monkeypatch.setattr(router, "_decision_turn_metadata", lambda _ctx, _chat, _id, metadata, _roots, **_kw: metadata)
+        task = {"id": target, "chat_id": 1 if helper_card or source in {"detached", "moved_opening"} else room.nova,
+                "root_task_id": "nova-root" if source == "child" else target,
+                "delegation_role": "subagent" if helper_card else "root"}
+        if helper_card:
+            _bound(room.root, "nova-root", "nova", room.nova)
+            task["parent_task_id"] = "nova-root"
+            if source == "legacy_grandchild":  # older nested rows name only a parent, never their root
+                del task["root_task_id"]
+                task["parent_task_id"] = "old-child"
+                for tid, above in (("old-child", "nova-root"), (target, "old-child")):
+                    write_task_result(room.root, tid, "completed", chat_id=1, title=tid, parent_task_id=above,
+                                      delegation_role="subagent")
+            child, target = task, "nova-root"
+            task = {"id": target, "chat_id": room.nova, "delegation_role": "root"}
+        else:
+            child = None
+        turns = []
+        running = {target: {"task": task}}
+        if child:
+            running[child["id"]] = {"task": child}
+        context = types.SimpleNamespace(DRIVE_ROOT=room.root, RUNNING=running, PENDING=[],
+                                        handle_chat_direct=lambda *args, **kw: turns.append((args, kw)))
+
+        def accept(text, passed):
+            router._route_owner_message(room.bridge, context,
+                {**passed, "text": text, "origin_message_ref": passed["accepted_source_ref"]})
+
+        recipient = _ctx(room.root, target, task["chat_id"])
+        recipient.task_attempt = 1
+        with root_intake(room.root, task):
+            accept("Only for this work", handover[0])
+            assert not current and not turns
+            path = _mailbox_path(room.root, target)
+            entry = json.loads(path.read_text(encoding="utf-8"))
+            assert entry["work_reply"] is True
+            assert entry["owner_rows"] == [written]
+            if child:
+                assert not _mailbox_path(room.root, child["id"]).exists() or all(
+                    not row.get("work_reply") for row in map(json.loads, _mailbox_path(room.root, child["id"]).read_text().splitlines()))
+            if source == "notice":  # recipient loop → existing outbox → canonical source room
+                from ouroboros.loop_round_limits import _drain_incoming_messages
+                from ouroboros.owner_relay import held_owner_messages
+
+                transcript, q = [], queue.Queue()
+                recipient.event_queue = q
+                _drain_incoming_messages(transcript, queue.Queue(), room.root, target, None, set(), recipient)
+                assert "Only for this work" in str(transcript)
+                owner_address = format_address(row_address(written))
+                held = held_owner_messages(recipient)[owner_address]
+                assert (held["chat_id"], held["ts"], held["text"]) == (1, written["ts"], "Only for this work")
+                assert _send_user_message(recipient, "One answer", reply_to_relay="").startswith("OK:")
+                room.host.handle(q.get_nowait())
+                answer = next(f for f in room.host.frames if f.get("content") == "One answer")
+                assert answer["chat_id"] == 1 and answer["reply_to"]["address"] == owner_address
+                assert answer["system_type"] == "relay_reply" and answer["also_rooms"] == [room.nova]
+                assert not any(f.get("system_type") == "relay_entry" for f in room.host.frames)
+                assert "One answer" in _texts(room.root, 1) and "One answer" in _texts(room.root, room.nova)
+                assert "RELAY_RETURN" not in str(recipient._open_relays) and not recipient._open_relays
+            # Model's final close, while the dispatcher still lists RUNNING.
+            follow_loop_admission(recipient, False)
+            _, late = _owner(room.bridge, room.root, "Too late", address, message_id="closed")
+            accept("Too late", late[0])
+            assert [args[:2] for args, _ in turns] == [(1, "Too late")]
+            assert "Too late" not in path.read_text(encoding="utf-8")
+        _, ordinary = _owner(room.bridge, room.root, "Now something else", "", message_id="ordinary")
+        accept("Now something else", ordinary[0])
+        assert current == ["Too late", "Now something else"]
+
+    @pytest.mark.parametrize("source", ["missing_card", "unreadable_work"])
+    def test_reply_to_an_unresolved_work_address_answers_in_the_source_room(self, room, source, monkeypatch):
+        from ouroboros import server_owner_routing as router, task_results
+
+        address = "task:missing-work"
+        if source == "unreadable_work":
+            task_results.write_task_result(room.root, "bad-work", "running", chat_id=1)
+            original = ds.append(room.root, "chat", {"ts": "2026-11-18T22:00:00Z", "chat_id": 1,
+                                "direction": "out", "text": "Exact quote, unknown work", "task_id": "bad-work"}).row
+            address = format_address(row_address(original))
+            original_reader = task_results.load_task_result
+
+            def read(root, task, *args, **kwargs):
+                if task == "bad-work" and kwargs.get("strict"):
+                    raise ValueError("Unreadable task authority")
+                return original_reader(root, task, *args, **kwargs)
+
+            monkeypatch.setattr(task_results, "load_task_result", read)
+        first, admitted = _owner(room.bridge, room.root, "First reply", address, message_id="first-refused")
+        nested, branch = _owner(room.bridge, room.root, "Following up", format_address(row_address(first)),
+                                message_id="second-refused")
+        assert "unresolved" not in nested["reply_to"] and nested["reply_to"]["snippet"] == "First reply"
+        if source == "unreadable_work":
+            # A failed authority read proves neither work nor its absence: the exact quote is kept, no work key is
+            # stamped, and the room's current reader takes the Reply.
+            assert first["reply_to"]["snippet"] == "Exact quote, unknown work"
+            for saved in (first, nested):
+                assert "work_task_id" not in saved["reply_to"] and "ordinary" not in saved["reply_to"], saved["reply_to"]
+            return
+        assert first["reply_to"]["work_task_id"] == nested["reply_to"]["work_task_id"] == ""
+        turns = []
+        ctx = types.SimpleNamespace(DRIVE_ROOT=room.root, RUNNING={}, PENDING=[],
+                                    handle_chat_direct=lambda *a, **k: turns.append((a, k)))
+        for words, packet in [("First reply", admitted[0]), ("Following up", branch[0])]:
+            router._route_owner_message(room.bridge, ctx, {**packet, "text": words,
+                                                           "origin_message_ref": packet["accepted_source_ref"]})
+        assert [args[:2] for args, _ in turns] == [(1, "First reply"), (1, "Following up")]
+        assert all(k["task_metadata"]["routing_contract"]["work_reply"]["state"] == "unresolved" for _, k in turns)
+
+    @pytest.mark.parametrize("state", ["sleeping", "paused", "unknown_write", "torn_earlier_row"])
+    def test_work_reply_delivery_boundary(self, room, state, monkeypatch):
+        from ouroboros import server_owner_routing as router, utils
+        from ouroboros.conversation_lease import root_intake
+        from ouroboros.loop_round_limits import _drain_incoming_messages
+        from ouroboros.model_sleep import wake_reason
+        from ouroboros.owner_mailbox import OwnerMailboxPeek, _mailbox_path
+
+        task = {"id": "nova-root", "chat_id": room.nova}
+        if state == "sleeping":
+            task["_budget_pause"] = {"reason": "sleep", "sleep": {"senders": ["someone-else"]}}
+        if state == "paused":
+            task["_owner_hold"] = True
+        peer = {"id": "watching", "chat_id": room.nova}
+        _born_in(room.root, peer["id"], room.nova)
+        other = _project(room.root, "other")
+        _born_in(room.root, "unrelated", other)
+        running = {peer["id"]: {"task": peer}, "unrelated": {"task": {"id": "unrelated", "chat_id": other}}}
+        running_states = {"unknown_write", "torn_earlier_row"}
+        if state in running_states:
+            running[task["id"]] = {"task": task}
+        turns = []
+        ctx = types.SimpleNamespace(DRIVE_ROOT=room.root, RUNNING=running,
+                                    PENDING=[task] if state not in running_states else [],
+                                    handle_chat_direct=lambda *a, **k: turns.append((a, k)))
+        row, admitted = _owner(room.bridge, room.root, "Update the priority?", room.notice["row_address"],
+                               message_id="work-input")
+        packet = {**admitted[0], "text": row["text"], "origin_message_ref": admitted[0]["accepted_source_ref"]}
+        if state == "unknown_write":
+            append = utils.append_jsonl
+
+            def lost_receipt(path, *args, **kwargs):
+                written = append(path, *args, **kwargs)
+                return False if path == _mailbox_path(room.root, task["id"]) else written
+
+            monkeypatch.setattr(utils, "append_jsonl", lost_receipt)
+        torn = b'{"kind": "relay_entry", "msg_id": "relay:an-earlier-append", "text": "\xd0'
+        if state in running_states:  # one recipient: the addressed work's tree hears it from that work's carriage
+            monkeypatch.setattr("ouroboros.owner_relay.carry_row_at_receipt",
+                                lambda *_a, **_k: pytest.fail("a direct Reply is carried to no member at receipt"))
+        if state == "torn_earlier_row":  # an earlier append to this work tore mid-character
+            _mailbox_path(room.root, task["id"]).parent.mkdir(parents=True, exist_ok=True)
+            _mailbox_path(room.root, task["id"]).write_bytes(torn)
+        with root_intake(room.root, task):
+            router._route_owner_message(room.bridge, ctx, packet)
+        target, watcher = (_ctx(room.root, tid, room.nova) for tid in (task["id"], peer["id"]))
+        target.task_attempt = watcher.task_attempt = 1
+        target_mail = _mailbox_path(room.root, target.task_id)
+        if state == "torn_earlier_row":
+            raw = target_mail.read_bytes()
+            assert raw.startswith(torn + b"\n"), "the torn bytes stay as they landed"
+            raw = raw[len(torn) + 1:]
+        else:
+            raw = target_mail.read_bytes()
+        assert len(raw.decode("utf-8").splitlines()) == 1
+        assert not _mailbox_path(room.root, "unrelated").exists()
+        if state == "paused":
+            assert len(turns) == 1 and turns[0][0][0] == 1
+            assert turns[0][1]["task_metadata"]["routing_contract"]["work_reply"]["state"] == "paused"
+            assert task["_owner_hold"] and ctx.PENDING == [task]
+            assert not OwnerMailboxPeek(waking_only=True).pending(room.root, target.task_id, set(), 1)
+            transcript = []  # delivery only when the held work later runs its ordinary drain
+            _drain_incoming_messages(transcript, queue.Queue(), room.root, target.task_id, None, set(), target)
+            assert "the source room handles the answer; context only" in str(transcript)
+            assert not target._open_relays
+        elif state == "sleeping":
+            assert not turns and ctx.PENDING == [task]  # intake does not grant Resume itself
+            assert wake_reason(target, task["_budget_pause"]["sleep"]) == "owner_text"
+        elif state == "torn_earlier_row":
+            assert not turns, "an earlier torn row never sends the exact Reply to Main"
+            assert json.loads(raw)["work_reply"] is True
+            assert any(f.get("status") == "delivered" and f.get("action") == "mailbox_delivery" for f in room.host.frames)
+        else:
+            assert not turns  # the append landed, but the sender couldn't know; never answer via a second author
+            assert any(f.get("status") == "unconfirmed" and f.get("action") == "mailbox_delivery" for f in room.host.frames)
+        assert "Update the priority?" in _mailbox_path(room.root, watcher.task_id).read_text(encoding="utf-8")
+        assert not OwnerMailboxPeek(waking_only=True).pending(room.root, watcher.task_id, set(), 1)
+        assert not wake_reason(watcher, {"any_mail": True})
+
+    @pytest.mark.parametrize("landed", [True, False], ids=["append_landed", "append_lost"])
+    def test_an_unconfirmed_addressed_write_is_only_context_elsewhere_and_a_replay_adds_nothing(
+            self, room, landed, monkeypatch):
+        """The write to the addressed work began without a receipt: it stays that work's alone to answer (no retry, no
+        other turn). Other running readers hear the words as context that says the delivery is unconfirmed; its helper,
+        a held, sleeping or unrelated work hear nothing, and the same client id handed in again changes nothing."""
+        from ouroboros import owner_words, utils
+        from ouroboros import server_owner_routing as router
+        from ouroboros.conversation_lease import root_intake
+        from ouroboros.loop_round_limits import _drain_incoming_messages
+        from ouroboros.model_sleep import wake_reason
+        from ouroboros.owner_mailbox import OwnerMailboxPeek, _mailbox_path
+        from ouroboros.owner_relay import held_owner_messages
+        from ouroboros.task_results import write_task_result
+        from supervisor import message_bus
+
+        other = _project(room.root, "other")
+        running = {tid: {"id": tid, "chat_id": chat} for tid, chat in (
+            ("nova-root", room.nova), ("peer", room.nova), ("main-peer", 1), ("held", room.nova), ("far", other))}
+        running["held"]["_owner_hold"] = True
+        running["helper"] = {"id": "helper", "chat_id": room.nova, "root_task_id": "nova-root",
+                             "parent_task_id": "nova-root", "delegation_role": "subagent"}
+        asleep = {"id": "asleep", "chat_id": room.nova,
+                  "_budget_pause": {"reason": "sleep", "sleep": {"sleep_id": "s"}}}
+        for task in (*running.values(), asleep):
+            write_task_result(room.root, task["id"], "running", chat_id=task["chat_id"], title=task["id"],
+                              **{k: v for k, v in task.items() if k in ("root_task_id", "parent_task_id",
+                                                                        "delegation_role")})
+        turns = []
+        ctx = types.SimpleNamespace(DRIVE_ROOT=room.root, PENDING=[asleep],
+                                    RUNNING={tid: {"task": task} for tid, task in running.items()},
+                                    handle_chat_direct=lambda *a, **k: turns.append((a, k)))
+        row, admitted = _owner(room.bridge, room.root, "Use the smaller set.", room.notice["row_address"],
+                               message_id="work-input")
+        target_mail, append, attempts = _mailbox_path(room.root, "nova-root"), utils.append_jsonl, []
+
+        def no_receipt(path, *args, **kwargs):
+            if path != target_mail:
+                return append(path, *args, **kwargs)
+            attempts.append(path)
+            if landed:
+                append(path, *args, **kwargs)
+            return False
+
+        monkeypatch.setattr(utils, "append_jsonl", no_receipt)
+        with root_intake(room.root, running["nova-root"]):
+            router._route_owner_message(room.bridge, ctx, {**admitted[0], "text": row["text"],
+                                                           "origin_message_ref": admitted[0]["accepted_source_ref"]})
+
+        def mailboxes():
+            return {tid: path.read_bytes() for tid in (*running, "asleep")
+                    if (path := _mailbox_path(room.root, tid)).exists()}
+
+        written = mailboxes()
+        assert set(written) == {"peer", "main-peer"} | ({"nova-root"} if landed else set()), written
+        assert not turns and len(attempts) == 1, "no second responder and no retried write"
+        assert any(f.get("action") == "mailbox_delivery" and f.get("target") == "nova-root"
+                   and f.get("status") == "unconfirmed" for f in room.host.frames)
+        if landed:
+            (addressed,) = map(json.loads, written["nova-root"].splitlines())
+            assert addressed["work_reply"] is True and "host_carried" not in addressed
+        for tid in ("peer", "main-peer"):
+            (heard,) = map(json.loads, written[tid].splitlines())
+            assert "work_reply" not in heard and heard["owner_rows"] == [row]
+            assert heard["host_carried"] == {"went_to": "nova-root", "context_only": True,
+                                             "delivery_unconfirmed": True}
+            assert not OwnerMailboxPeek(waking_only=True).pending(room.root, tid, set(), 1)
+            sleeper = _ctx(room.root, tid, room.nova)
+            sleeper.task_attempt = 1
+            assert not wake_reason(sleeper, {"any_mail": True})
+
+        repeat, handed_over = _owner(room.bridge, room.root, "Use the smaller set.", room.notice["row_address"],
+                                     message_id="work-input")
+        assert repeat == row and not handed_over, "the same client id hands the router nothing again"
+        assert message_bus.recover_pending_dispatches(room.bridge, room.root) == 0, "nothing is still owed"
+        assert mailboxes() == written and len(attempts) == 1 and not turns
+
+        observer, transcript = _ctx(room.root, "peer", room.nova), []
+        observer.task_attempt = 1
+        _drain_incoming_messages(transcript, queue.Queue(), room.root, "peer", None, set(), observer)
+        assert "Use the smaller set." in str(transcript)
+        assert "carried to this work by the host (delivery to nova-root unconfirmed; context only)" in str(transcript)
+        assert "went to nova-root" not in str(transcript) and "send_user_message" not in str(transcript)
+        assert not getattr(observer, "_open_relays", None), "an observer owes no answer"
+        held = held_owner_messages(observer)
+        assert [row_["carried"]["delivery_unconfirmed"] for row_ in held.values()] == [True]
+        carriers = {item["carrier"] for item in owner_words._held_words(held, room.root, "peer")}
+        assert carriers == {"went to nova-root (unconfirmed)"}, "a later rendering claims no receipt either"
+
+    def test_two_replies_keep_exact_return_sources_and_deliver_the_attached_bytes(self, room, monkeypatch):
+        from ouroboros import server_owner_routing as router
+        from ouroboros.chat_uploads import store_upload
+        from ouroboros.conversation_lease import root_intake
+        from ouroboros.gateway import ws
+        from ouroboros.loop_round_limits import _drain_incoming_messages
+        from ouroboros.owner_relay import held_owner_messages
+
+        tid = "nova-root"
+        task = {"id": tid, "chat_id": room.nova}
+        host = types.SimpleNamespace(DRIVE_ROOT=room.root, RUNNING={tid: {"task": task}}, PENDING=[],
+                                     handle_chat_direct=lambda *a, **k: pytest.fail("duplicate author"))
+        refs = {}
+        with root_intake(room.root, task):
+            for chat, cmid, body in [(1, "cm-1", "Read this attached note"), (room.nova, "cm-2", "And the priority?")]:
+                if chat == 1:
+                    data = b"synthetic owner attachment\n"
+                    monkeypatch.setattr("ouroboros.config.DATA_DIR", room.root)
+                    path, ref = store_upload(data, "priority.txt", data_dir=room.root, pending=True)
+                    uploads = [{"filename": path.name, "display_name": ref["name"], "mime": ref["mime"]}]
+                    ws._accept_with_attachments(room.bridge, body, {"chat_id": chat, "client_message_id": cmid,
+                        "task_metadata": {"reply_to": f"task:{tid}"}}, uploads)
+                    packet = room.bridge._inbox.get_nowait()
+                    row = packet["accepted_source_row"]
+                else:
+                    row, handed = _owner(room.bridge, room.root, body, f"task:{tid}", chat_id=chat, message_id=cmid)
+                    packet = handed[0]
+                refs[cmid] = format_address(row_address(row))
+                router._route_owner_message(room.bridge, host, {**packet, "text": body,
+                        "chat_id": chat, "origin_message_ref": packet["accepted_source_ref"]})
+        recipient, transcript = _ctx(room.root, tid, room.nova, queue.Queue()), []
+        _drain_incoming_messages(transcript, queue.Queue(), room.root, tid, None, set(), recipient)
+        held = held_owner_messages(recipient)
+        assert held[refs["cm-1"]]["attachments"][0]["sha256"] == ref["sha256"]
+        assert str(transcript).count("synthetic owner attachment") <= 1  # never joins the text as the owner's words
+        staged = list((room.root / "task_results" / "artifacts" / tid / "attachments").glob("*priority.txt"))
+        assert len(staged) == 1 and staged[0].read_bytes() == data
+        opened = {r["source"]["client_message_id"]: key for key, r in recipient._open_relays.items()}
+        assert set(opened) == {"cm-1", "cm-2"}
+        assert "RELAY_RETURN_UNRESOLVED" in _send_user_message(recipient, "Ambiguous", reply_to_relay="")
+        for cmid, chat in [("cm-2", room.nova), ("cm-1", 1)]:
+            words = f"Answer to {cmid}"
+            assert _send_user_message(recipient, words, reply_to_relay=opened[cmid]).startswith("OK:")
+            room.host.handle(recipient.event_queue.get_nowait())
+            row = next(f for f in room.host.frames if f.get("content") == words)
+            assert row["chat_id"] == chat and row["reply_to"]["address"] == refs[cmid]
+        assert not recipient._open_relays
+
+    def test_a_work_reply_keeps_one_canonical_row_and_targets_the_work(self, room):
         row, dispatched = _owner(room.bridge, room.root, "Why is this not in Nova?", room.notice["row_address"],
                                  message_id="owner-1")
         echo = next(f for f in room.host.frames if f.get("client_message_id") == "owner-1" and f.get("role") == "user")
         assert echo["chat_id"] == 1 and echo["also_rooms"] == [room.nova]
         assert row["reply_to"]["target_home"] == "work" and row["reply_to"]["task_id"] == "nova-root"
-        # Shown in both rooms at its one Main address; handed only to Main's ordinary routing.
+        assert row["reply_to"]["work_task_id"] == "nova-root"
+        # Shown in both rooms at its one Main address; ingress still hands over the original room.
         assert "Why is this not in Nova?" in _texts(room.root, 1)
         assert "Why is this not in Nova?" in _texts(room.root, room.nova)
         address = format_address(row_address(row))
@@ -312,19 +721,81 @@ class TestOwnerReplyLink:
         from ouroboros.owner_mailbox import _mailbox_path
         assert not _mailbox_path(room.root, "nova-root").exists()  # appearance is not a tell, wake or Resume
 
-    def test_unrelated_main_speech_and_the_reply_chain_stay_in_main(self, room):
-        # A Main direct turn's answer: not a Project message.
+    @pytest.mark.parametrize("kind", ["proactive_message", "main_notice"])
+    def test_unrelated_main_speech_stays_in_main_and_an_addressed_reply_chain_keeps_the_work(self, room, kind):
+        # A Main direct turn's ordinary proactive words: not a work address.
+        from ouroboros.task_results import write_task_result
+
+        write_task_result(room.root, "main-turn", "completed", chat_id=1, _is_direct_chat=True)
         ds.append(room.root, "chat", {"ts": "2026-10-28T06:00:00Z", "direction": "out", "chat_id": 1,
-                                      "task_id": "main-turn", "text": "A Main answer."})
+                                      "type": kind, "task_id": "main-turn", "text": "A Main answer."})
         main_answer = format_address(row_address(ds.rows_by_identity(room.root, 1, "2026-10-28T06:00:00Z")[0].row))
-        _owner(room.bridge, room.root, "About the Main answer.", main_answer, message_id="owner-2")
+        ordinary, _ = _owner(room.bridge, room.root, "About the Main answer.", main_answer, message_id="owner-2")
+        assert "work_task_id" not in ordinary["reply_to"]
         first, _ = _owner(room.bridge, room.root, "About the notice.", room.notice["row_address"], message_id="owner-3")
-        # A Reply to that Reply: one hop only, never the chain.
-        _owner(room.bridge, room.root, "And about my own reply.", format_address(row_address(first)), message_id="owner-4")
+        # The immediate quote stays the owner's row; its work address is inherited separately.
+        nested, _ = _owner(room.bridge, room.root, "And about my own reply.", format_address(row_address(first)),
+                           message_id="owner-4")
+        assert nested["reply_to"]["role"] == "user" and nested["reply_to"]["work_task_id"] == "nova-root"
         project = _texts(room.root, room.nova)
         assert "About the notice." in project
-        assert "About the Main answer." not in project and "And about my own reply." not in project
+        assert "About the Main answer." not in project and project.count("And about my own reply.") == 1
         assert {"About the Main answer.", "And about my own reply."} <= set(_texts(room.root, 1))
+
+    def test_an_ordinary_reply_chain_is_never_walked_and_never_stamps_a_work_address(self, room, monkeypatch):
+        """Each accepted ordinary Reply carries the host's own verdict (no `work_task_id` for the router), so a link
+        of a new chain costs the one read of its source however long the chain; a confirmed work chain keeps its
+        work at every depth."""
+        from ouroboros import chat_references
+        from ouroboros.task_results import write_task_result
+
+        write_task_result(room.root, "main-turn", "completed", chat_id=1, _is_direct_chat=True)
+        ds.append(room.root, "chat", {"ts": "2026-10-28T06:10:00Z", "direction": "out", "chat_id": 1,
+                                      "type": "proactive_message", "task_id": "main-turn", "text": "A Main answer."})
+        reads = []
+        real = chat_references.resolve_history_row
+        monkeypatch.setattr(chat_references, "resolve_history_row", lambda root, address: reads.append(address) or real(root, address))
+        for start, label in [(format_address(row_address(ds.rows_by_identity(room.root, 1, "2026-10-28T06:10:00Z")[0].row)),
+                              "ordinary"), (room.notice["row_address"], "work")]:
+            target = start
+            for depth in range(22):
+                reads.clear()
+                row, _ = _owner(room.bridge, room.root, f"{label} {depth}", target, message_id=f"{label}-{depth}")
+                target = format_address(row_address(row))
+                assert reads == [reads[0]] if reads else True, (label, depth, reads)  # the source itself, nothing behind it
+                if label == "ordinary":
+                    assert "work_task_id" not in row["reply_to"] and row["reply_to"]["ordinary"] is True, depth
+                    assert not row["reply_to"].get("unresolved"), depth
+                else:
+                    assert row["reply_to"]["work_task_id"] == "nova-root", depth
+
+    def test_an_unreadable_task_of_an_ordinary_turn_row_proves_no_work(self, room, monkeypatch):
+        """A failed task or binding read is no proof of work or of its absence: the Reply keeps no work key at all."""
+        from ouroboros import projects_registry
+        from ouroboros.store import StoreError
+        from ouroboros.task_results import write_task_result
+
+        write_task_result(room.root, "main-turn", "completed", chat_id=1, _is_direct_chat=True)
+        ds.append(room.root, "chat", {"ts": "2026-10-28T06:10:00Z", "direction": "out", "chat_id": 1,
+                                      "type": "proactive_message", "task_id": "main-turn", "text": "A Main answer."})
+        target = format_address(row_address(ds.rows_by_identity(room.root, 1, "2026-10-28T06:10:00Z")[0].row))
+
+        def unreadable(*args, **kwargs):
+            raise StoreError("binding unreadable")
+        monkeypatch.setattr(projects_registry, "project_binding_for_task", unreadable)
+        row, _ = _owner(room.bridge, room.root, "About the Main answer.", target, message_id="owner-unreadable")
+        assert row["reply_to"]["address"] == target
+        assert "work_task_id" not in row["reply_to"] and "ordinary" not in row["reply_to"], row["reply_to"]
+
+    @pytest.mark.parametrize("old_quote", ["card", "notice"])
+    def test_a_branch_from_a_saved_web_reply_without_work_stamp_keeps_its_exact_target(self, room, old_quote):
+        quote = ({"address": "task:nova-root", "kind": "work_card", "task_id": "nova-root"}
+                 if old_quote == "card" else {"address": room.notice["row_address"], "kind": "message", "task_id": "nova-root"})
+        previous = ds.append(room.root, "chat", {"ts": "2026-11-18T22:01:00Z", "direction": "in", "source": "web",
+                             "chat_id": 1, "client_message_id": "legacy-owner", "text": "Earlier reply", "reply_to": quote}).row
+        row, _ = _owner(room.bridge, room.root, "Still about Nova", format_address(row_address(previous)),
+                        message_id="owner-legacy-branch")
+        assert row["reply_to"]["work_task_id"] == "nova-root" and row["reply_to"]["snippet"] == "Earlier reply"
 
     def test_a_reply_to_an_owner_row_written_in_the_project_is_in_that_project(self, room):
         ds.append(room.root, "chat", {"ts": "2026-10-28T06:05:00Z", "direction": "in", "chat_id": room.nova,
@@ -345,6 +816,181 @@ class TestOwnerReplyLink:
         from ouroboros.projects_registry import bind_task_to_project
         bind_task_to_project(room.root, "later", "nova", room.nova, origin={"absent": "system"})
         assert {"Draft plan in Main.", "Please widen the plan."} <= set(_texts(room.root, room.nova))
+
+    def _main_fallback_ctx(self, room):
+        from ouroboros.conversation_lease import open_author_intake
+        from ouroboros.task_carrier import LANE_CONVERSATION
+
+        paused = {"id": "nova-root", "chat_id": room.nova, "_owner_hold": True}
+        main_turn = {"id": "main-turn", "chat_id": 1, "_is_direct_chat": True,
+                     "execution_owner": {"kind": "direct", "lane": LANE_CONVERSATION},
+                     "metadata": {"origin_suppressed": True}}
+        _born_in(room.root, "watching", room.nova)
+        open_author_intake(room.root, "main-turn", "owner:1", attempt=1)
+        turns = []
+        ctx = types.SimpleNamespace(
+            DRIVE_ROOT=room.root,
+            RUNNING={"main-turn": {"task": main_turn, "lane": LANE_CONVERSATION, "reply_expected": True, "attempt": 1},
+                     "watching": {"task": {"id": "watching", "chat_id": room.nova}}},
+            PENDING=[paused],
+            handle_chat_direct=lambda *a, **k: turns.append((a, k)),
+        )
+        return paused, turns, ctx
+
+    def test_main_fallback_routes_to_existing_main_turn_and_fresh_turn_while_stripping_ingress(self, room):
+        from ouroboros import server_owner_routing as router
+        from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, REPLY_CITATION_KIND
+        from ouroboros.conversation_lease import root_intake
+        from ouroboros.loop_round_limits import _drain_incoming_messages
+        from ouroboros.owner_mailbox import OwnerMailboxPeek, _mailbox_path
+        from ouroboros.task_results import write_task_result
+        from ouroboros.work_reply import FALLBACK_RULE
+
+        write_task_result(room.root, "nova-root", "running", chat_id=room.nova, title="Nova Root")
+        paused, turns, ctx = self._main_fallback_ctx(room)
+        row, admitted = _owner(room.bridge, room.root, "Use the saved notes.", room.notice["row_address"],
+                               message_id="fb-main-existing")
+        packet = {**admitted[0], "text": row["text"], "origin_message_ref": admitted[0]["accepted_source_ref"],
+                  "task_metadata": {**admitted[0].get("task_metadata", {}), "work_reply_fallback": {"spoof": True}}}
+        with root_intake(room.root, paused):
+            router._route_owner_message(room.bridge, ctx, packet)
+        assert not turns, "open Main owner turn must take the fallback without starting a second turn"
+        main_ctx, main_transcript = _ctx(room.root, "main-turn", 1), []
+        main_ctx.task_attempt = 1
+        _drain_incoming_messages(main_transcript, queue.Queue(), room.root, "main-turn", None, set(), main_ctx)
+        fb_rows = [m for m in main_transcript if m.get(HOST_CONTEXT_KIND_KEY) == REPLY_CITATION_KIND
+                   and str(m.get("content", "")).startswith("[Work Reply fallback] ")]
+        assert len(fb_rows) == 1
+        fb_payload = json.loads(fb_rows[0]["content"].split("[Work Reply fallback] ", 1)[1])
+        assert fb_payload == {
+            "target": "nova-root", "state": "paused", "rule": FALLBACK_RULE,
+            "reader": {"tool": "get_task_result", "arguments": {"task_id": "nova-root", "include_authority": True}},
+            "reply_to": {"address": room.notice["row_address"]},
+        }
+        assert any(m.get("role") == "user" and "Use the saved notes." in str(m.get("content")) for m in main_transcript)
+
+        obs_mail = [json.loads(line) for line in _mailbox_path(room.root, "watching").read_text(encoding="utf-8").splitlines()]
+        assert len(obs_mail) == 1 and obs_mail[0]["host_carried"]["handled_by_source_room"] is True
+        assert not OwnerMailboxPeek(waking_only=True).pending(room.root, "watching", set(), 1)
+        obs_ctx, obs_transcript = _ctx(room.root, "watching", room.nova), []
+        obs_ctx.task_attempt = 1
+        _drain_incoming_messages(obs_transcript, queue.Queue(), room.root, "watching", None, set(), obs_ctx)
+        assert "the source room handles the answer; context only" in str(obs_transcript)
+        assert "in the project room; routed by a head" not in str(obs_transcript)
+
+        # No eligible Main owner turn -> fresh Main decision turn gets minimal routing_contract["work_reply"].
+        ctx.RUNNING.pop("main-turn")
+        row2, admitted2 = _owner(room.bridge, room.root, "What was the result?", room.notice["row_address"],
+                                 message_id="fb-main-fresh")
+        packet2 = {**admitted2[0], "text": row2["text"], "origin_message_ref": admitted2[0]["accepted_source_ref"],
+                   "task_metadata": {**admitted2[0].get("task_metadata", {}), "work_reply_fallback": {"spoof": True}}}
+        with root_intake(room.root, paused):
+            router._route_owner_message(room.bridge, ctx, packet2)
+        assert len(turns) == 1 and turns[0][0][0] == 1
+        wr = turns[0][1]["task_metadata"]["routing_contract"]["work_reply"]
+        assert wr == {
+            "target": "nova-root", "state": "paused", "rule": FALLBACK_RULE,
+            "reader": {"tool": "get_task_result", "arguments": {"task_id": "nova-root", "include_authority": True}},
+        }
+
+    def test_project_room_fallback_opens_project_turn_even_with_sole_reader(self, room):
+        from ouroboros import server_owner_routing as router
+        from ouroboros.conversation_lease import root_intake
+        from ouroboros.owner_mailbox import OwnerMailboxPeek, _mailbox_path
+        from ouroboros.owner_relay import KIND_RELAY, ROUTED_BY_HEAD
+
+        paused = {"id": "nova-root", "chat_id": room.nova, "_owner_hold": True}
+        other = _project(room.root, "other")
+        _born_in(room.root, "proj-reader", room.nova)
+        _born_in(room.root, "other-reader", other)
+        turns = []
+        ctx = types.SimpleNamespace(
+            DRIVE_ROOT=room.root,
+            RUNNING={"proj-reader": {"task": {"id": "proj-reader", "chat_id": room.nova}},
+                     "other-reader": {"task": {"id": "other-reader", "chat_id": other}}},
+            PENDING=[paused],
+            handle_chat_direct=lambda *a, **k: turns.append((a, k)),
+        )
+        row, admitted = _owner(room.bridge, room.root, "Project follow-up", "task:nova-root",
+                               chat_id=room.nova, message_id="fb-proj-own-turn")
+        packet = {**admitted[0], "chat_id": room.nova, "text": row["text"],
+                  "origin_message_ref": admitted[0]["accepted_source_ref"]}
+        with root_intake(room.root, paused):
+            router._route_owner_message(room.bridge, ctx, packet)
+        assert len(turns) == 1 and turns[0][0][0] == room.nova
+        wr = turns[0][1]["task_metadata"]["routing_contract"]["work_reply"]
+        assert wr["target"] == "nova-root" and wr["state"] == "paused" and "rule" in wr
+        assert wr["reader"] == {"tool": "get_task_result",
+                                "arguments": {"task_id": "nova-root", "include_authority": True}}
+        proj_entries = [json.loads(line) for line in _mailbox_path(room.root, "proj-reader").read_text(encoding="utf-8").splitlines()]
+        assert len(proj_entries) == 1 and proj_entries[0]["kind"] == KIND_RELAY
+        assert proj_entries[0]["host_carried"] == {
+            "went_to": ROUTED_BY_HEAD, "handled_by_source_room": True, "context_only": True}
+        assert not OwnerMailboxPeek(waking_only=True).pending(room.root, "proj-reader", set(), 1)
+        assert not _mailbox_path(room.root, "other-reader").exists()
+
+    def test_unconfirmed_fallback_write_keeps_single_author_while_refusal_before_append_starts_fresh(self, room, monkeypatch):
+        from ouroboros import owner_mailbox, project_dialogue, utils
+        from ouroboros import server_owner_routing as router
+        from ouroboros.conversation_lease import follow_loop_admission, root_intake
+        from ouroboros.owner_mailbox import KIND_OWNER_TEXT, _mailbox_path, write_owner_message
+        from ouroboros.owner_relay import KIND_RELAY, ROUTED_BY_HEAD
+
+        paused, turns, ctx = self._main_fallback_ctx(room)
+        main_mail = _mailbox_path(room.root, "main-turn")
+        plain_mail = _mailbox_path(room.root, "plain-task")
+        append = utils.append_jsonl
+
+        def lost_receipt(path, *args, **kwargs):
+            written = append(path, *args, **kwargs)
+            return False if path in {main_mail, plain_mail} else written
+
+        monkeypatch.setattr(owner_mailbox, "append_jsonl", lost_receipt)
+        # Ordinary write_owner_message callers still receive False on unconfirmed appends.
+        assert write_owner_message(room.root, "ping", "plain-task", client_message_id="default-false") is False
+
+        row, admitted = _owner(room.bridge, room.root, "Fallback to unconfirmed main", room.notice["row_address"],
+                               message_id="fb-unconf-main")
+        packet = {**admitted[0], "text": row["text"], "origin_message_ref": admitted[0]["accepted_source_ref"]}
+        with root_intake(room.root, paused):
+            router._route_owner_message(room.bridge, ctx, packet)
+        assert not turns, "unconfirmed fallback mailbox write must preserve single author and start no second turn"
+        assert not _mailbox_path(room.root, "watching").exists()
+        saved_main = [json.loads(line) for line in main_mail.read_text(encoding="utf-8").splitlines()]
+        assert len(saved_main) == 1 and saved_main[0]["client_message_id"] == "fb-unconf-main"
+        assert saved_main[0]["work_reply_fallback"]["target"] == "nova-root"
+        expected_cause = project_dialogue.routing_refusal_cause(
+            "mailbox_delivery", "unconfirmed", "mailbox_write_unconfirmed")
+        assert any(f.get("action") == "mailbox_delivery" and f.get("target") == "main-turn"
+                   and f.get("status") == "unconfirmed" and f.get("cause") == expected_cause
+                   for f in room.host.frames)
+
+        # Refusal BEFORE append (intake closes before mail lock runs admit()) falls through to a fresh turn.
+        monkeypatch.setattr(owner_mailbox, "append_jsonl", append)
+        orig_label = project_dialogue.routing_target_label
+        main_ctx = _ctx(room.root, "main-turn", 1)
+        main_ctx.task_attempt = 1
+        monkeypatch.setattr(project_dialogue, "routing_target_label",
+                            lambda *a, **kw: (follow_loop_admission(main_ctx, False), orig_label(*a, **kw))[1])
+        row2, admitted2 = _owner(room.bridge, room.root, "Fallback after refusal", room.notice["row_address"],
+                                 message_id="fb-refuse-main")
+        packet2 = {**admitted2[0], "text": row2["text"], "origin_message_ref": admitted2[0]["accepted_source_ref"]}
+        with root_intake(room.root, paused):
+            router._route_owner_message(room.bridge, ctx, packet2)
+        assert len(turns) == 1 and turns[0][0][0] == 1
+        assert turns[0][1]["task_metadata"]["routing_contract"]["work_reply"]["target"] == "nova-root"
+        entries_after = [json.loads(line) for line in main_mail.read_text(encoding="utf-8").splitlines()]
+        # Its intake closed before the write, so it reads no more: the refused Reply left it no passive copy either.
+        assert [(e["kind"], e.get("client_message_id")) for e in entries_after] == [(KIND_OWNER_TEXT, "fb-unconf-main")]
+        # A root that still reads the room hears it as context.
+        (heard,) = [json.loads(line) for line in _mailbox_path(room.root, "watching").read_text(encoding="utf-8").splitlines()]
+        assert heard["kind"] == KIND_RELAY
+        assert heard["host_carried"] == {
+            "went_to": ROUTED_BY_HEAD,
+            "handled_by_source_room": True,
+            "context_only": True,
+        }
+        assert [row["client_message_id"] for row in heard["owner_rows"]] == ["fb-refuse-main"]
 
 
 class TestDerivedIndex:

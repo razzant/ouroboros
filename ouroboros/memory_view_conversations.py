@@ -21,7 +21,9 @@ A writer's terminal rows its page links below it (``memory_sealing.linked_rows``
 here. A room's later delivery of words it already holds (the same ``text_sha256``, not my human's; by the same
 recorded speaker, or by none, with the same connector facts), and one row several rooms hold by membership beyond the one keeping it whole
 (``_once``), is one line naming that earlier copy and its reader; its text is not read.
-The capture keeps consideration and author facts. A replacement is my telling of the
+The capture keeps consideration and author facts: an act of mine (an outward reply, a quiet or ``fold_read``
+finish) counts as read only what its work was shown whole or read (``memory_reading``), each fold keeping its own
+sentence; a finish without that stamp counts every row before it. A replacement is my telling of the
 same source printed in this block beside its address, a host fact, or a recorded
 window/mode emergency. ``memory_forms.STAGES`` orders remote ordinary forms first,
 then this room's intermediate replies, remote untold words, this room's final replies,
@@ -108,7 +110,8 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
     """The other conversations, by key. The full catalogue includes the focus room when calculating event readers;
     the visible groups then exclude it (``spec.room_id``). From the rows ``memory_inventory.open_rows_by_room`` read for this capture."""
     from ouroboros import memory_view as mv
-    from ouroboros.memory_room_activity import considered_through, running_by_room
+    from ouroboros import memory_reading as reading
+    from ouroboros.memory_room_activity import quiet_finishes, running_by_room
     from ouroboros.memory_sealing import linked_rows
     from ouroboros.memory_view_work import gists
 
@@ -119,6 +122,23 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
                    | {room for room, tasks in running.items() if tasks})
     linked = linked_rows(root, store, by_room, projects or ())
     here = {entry[0]["row_sha256"] for entry in by_room.get(str(spec.room_id), ())} if spec.room_lanes else set()
+    # Every work whose finish row is in hand (with its stamp, or ended before stamps), and one read of the stored
+    # stamp and status of the works whose replies are in hand (open, or sealed after their room's first open row)
+    # and whose finish is not (``reading.reply_marks``).
+    later = {}
+    for room, rows in sealed.items():  # sealed rows are in append order; open ones in reading order: their lowest
+        first_open = min((entry[2] for entry in by_room.get(room, ())), default=None)  # a room with none adds nothing
+        for entry in reversed(rows) if first_open is not None else ():
+            if entry[2] <= first_open:
+                break
+            later.setdefault(room, []).append(entry)
+        later.get(room, []).reverse()  # back to append order: a work's newest finish wins
+    finished, ended = {}, set()
+    for rows in (*by_room.values(), *quiet.values(), *later.values()):
+        for _a, meta, _p in rows:
+            ended.add(_finished(meta, finished))
+    stored = reading.reply_marks(root, {reading.sender_of(meta) for rows in (*by_room.values(), *later.values())
+                                        for _a, meta, _p in rows if meta.get("direction") == "out"} - ended)
     # Labels come from the rows in hand (open and sealed): a room's newest row that came over a transport, whose tail
     # metadata 7 keeps its conversation's name and audience. Only rooms none of whose rows carries them, and their
     # conversations, read the newest inbound row's transport, all in one read (``warm``), never a row per room.
@@ -140,27 +160,55 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
         classed = [(entry, row_class(entry[1], pos=entry[2], **lineage)) for entry in entries]
         spoken = [(entry, cls) for entry, cls in classed if cls["lane"] == 1]
         key, place = conversation_of(room, held or sealed.get(room, []), notes.get(room, []), membership.project_chat_ids)
-        own = max((entry[2] for entry, cls in spoken if _outward(cls["author"])), default=-1)  # §3.4 (i)
+        # The acts that consider here (§3.4 (i)): my outward replies, quiet finishes and ``fold_read`` finishes,
+        # each counting what its work was shown whole or read (``memory_reading``); a finish without that stamp
+        # counts every row at or before it, as before the stamp existed.
+        replies = [entry for entry, cls in spoken if _outward(cls["author"])]
         ours = any(_ours(entry[1], cls["author"]) for entry, cls in spoken)
-        participated = not place or own >= 0 or any(cls["author"].get("owner_confirmed") is True for _entry, cls in spoken)
+        participated = not place or bool(replies) or any(cls["author"].get("owner_confirmed") is True for _entry, cls in spoken)
         first = entries[0][2] if entries else -1
-        for _address, meta, pos in reversed(sealed.get(room, ())):
-            if ours and participated and (pos < first or first < 0):  # older rows can add neither fact nor consideration
+        lowest = min((entry[2] for entry in entries), default=-1)  # by stream position: display order may differ
+        for address, meta, pos in reversed(sealed.get(room, ())):
+            if ours and participated and (pos < lowest or lowest < 0):  # older rows add neither fact nor consideration
                 break
             author = row_class(meta, pos=pos, **lineage)
             if author["lane"] == 1:
                 participated |= author["author"].get("owner_confirmed") is True
             if author["lane"] == 1 and _outward(author["author"]):
-                ours, own = True, max(own, pos) if pos > first else own
-                participated = True
+                ours, participated = True, True
+                replies += [(address, meta, pos)] if pos > lowest else []
             elif author["lane"] == 1 and _ours(meta, author["author"]):
                 ours = True
         engaged = not place or ours
-        fold = max((e for e in held if e[1].get("fold_read") is True and e[1].get("wake_summary")),
-                   key=lambda e: e[2], default=None)
-        considered = max(own, considered_through(quiet.get(room, ()), lineage), fold[2] if fold else -1)
+        overheard = bool(place) and engaged and not participated
+        # A reply counts its work's finish stamp wherever that finish lives (a stamp of another room names only its
+        # events and thread messages here); a work not in hand and not read above keeps the positional rule.
+        # In an overheard room only stamped acts create a debt (``counted``): an act from before the rule ranks as
+        # before but makes no room owe a page.
+        # An act before the room's lowest open position names no open row: it stays out of every index.
+        lowest = lowest if entries else None
+        acts, folding, telling, debt = (reading.Acts(room) for _ in range(4))
+        for _address, meta, pos in replies:  # open, or sealed after the first open row
+            task = reading.sender_of(meta)
+            mark = finished[task] if task in finished else stored.get(task) if task in stored else None
+            acts.add(pos, mark)
+            debt.add(pos, mark) if mark is not None else None
+        stamped = {e[0]["row_sha256"]: e for e in [*quiet.get(room, ()), *held]
+                   if e[1].get("fold_read") is True and e[1].get("wake_summary") and _mark(e[1]) is not None}
+        legacy = max((e for e in held if e[1].get("fold_read") is True and e[1].get("wake_summary")
+                      and _mark(e[1]) is None), key=lambda e: e[2], default=None)  # the last one tells, as before
+        folds = [e for e in sorted([*stamped.values(), *([legacy] if legacy else [])], key=lambda e: e[2])
+                 if lowest is not None and e[2] >= lowest]
+        for _address, meta, pos in (e for e in [*quiet_finishes(quiet.get(room, ()), lineage), *(
+                e for e in held if e[1].get("fold_read") is True and e[1].get("wake_summary"))] if lowest is not None and e[2] >= lowest):
+            acts.add(pos, _mark(meta))
+            debt.add(pos, _mark(meta)) if _mark(meta) is not None else None
+        for _address, meta, pos in folds:
+            folding.add(pos, _mark(meta))
+        for _address, meta, pos in (e for e in held if e[1].get("wake_summary") and lowest is not None and e[2] >= lowest):
+            telling.add(pos, _mark(meta))
+            debt.add(pos, _mark(meta)) if _mark(meta) is not None else None
         noted = max((_instant(note.get("ts")) for note in notes.get(room, ()) if _instant(note.get("ts"))), default=None)
-        retold = max((pos for _a, meta, pos in held if meta.get("wake_summary")), default=-1)
         sample = samples[room]
         group = groups.setdefault(key, {"key": key, "rooms": [], "running": [], "latest": "", "place": bool(place)})
         if place and "label" not in group:  # a conversation; its rooms carry their own ids
@@ -173,8 +221,8 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
         newest = max(entries, key=lambda entry: entry[2]) if entries else None
         item: Dict[str, Any] = {"room_id": room, "label": label(room, sample), "engaged": engaged, "facts": facts,
                                 "running_tasks": list(running.get(room, ())),
-                                "overheard": bool(place) and engaged and not participated,
-                                "first": first, "notes": [], "words": [], "tasks": [], "silent": "", "folded": {},
+                                "overheard": overheard,
+                                "first": first, "notes": [], "words": [], "tasks": [], "silent": "", "folds": [],
                                 "newest": chat_chain.format_address(newest[0]) if newest else "",
                                 "last": newest[2] if newest else -1}
         group.setdefault("label", item["label"])
@@ -184,28 +232,36 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
             item["events"] = events.capture([*previous, *spoken])
         item["notes"] = list(notes.get(room, ()))
         again = _repeats(sorted((*sealed.get(room, ()), *held), key=lambda entry: entry[2]))
-        folded_rows = []
-        for entry, cls in (pair for pair in spoken if pair[0][0]["row_sha256"] not in here):  # once, in this room
-            if room == str(spec.room_id) or not engaged and not (
-                cls["author"]["kind"] == "place_fact" and entry[1].get("direction") == "out"
-            ):
+        folded_rows: Dict[int, List[Entry]] = {}  # by the fold that first counted them: each keeps its sentence
+        visible = [(entry, cls) for entry, cls in spoken if entry[0]["row_sha256"] not in here  # once, in this room
+                   and room != str(spec.room_id) and (engaged or (cls["author"]["kind"] == "place_fact"
+                                                                  and entry[1].get("direction") == "out"))]
+        # My human's words stay whole, and so does a relay row, which may carry them quoted (``relay_quotes``):
+        # a fold of what a finish read stands for its room's other words only. One walk of the folds per room.
+        foldable = [n for n, (entry, cls) in enumerate(visible) if not owner_speech(entry[1], cls["author"])
+                    and entry[1].get("type") != "relay_entry"] if folding else []
+        claims = folding.claims([visible[n][0] for n in foldable]) if foldable else {}
+        claimed = {foldable[k]: act for k, act in claims.items()}
+        for n, (entry, cls) in enumerate(visible):
+            if n in claimed:
+                folded_rows.setdefault(claimed[n], []).append(entry)
                 continue
-            # My human's words stay whole, and so does a relay row, which may carry them quoted (``relay_quotes``):
-            # a fold of what a finish read stands for its room's other words only.
-            if (fold and entry[2] <= fold[2] and not owner_speech(entry[1], cls["author"])
-                    and entry[1].get("type") != "relay_entry"):
-                folded_rows.append(entry)
-                continue
-            rank = 0 if entry[2] <= retold else 1 if not _unconsidered(entry, cls["author"], considered) or (
+            told = telling.considers(entry)
+            # The rank keeps every act, an act from before the rule too; ``counted`` (what awaits a page) takes in an
+            # overheard room only stamped acts.
+            considered = told or acts.considers(entry)
+            counted = (debt if overheard else acts).considers(entry) or told and not overheard  # an act of mine named it
+            rank = 0 if told else 1 if not _unconsidered(entry, cls["author"], considered) or (
                 noted is not None and (_instant(entry[1].get("ts")) or noted) <= noted) else 2
-            shown.append((item, entry, {**cls["author"], "rank": rank},
+            shown.append((item, entry, {**cls["author"], "rank": rank, "counted": counted},
                           None if owner_speech(entry[1], cls["author"]) else again.get(entry[0]["row_sha256"])))
-        if folded_rows:
-            item["folded"] = {"sentence": str(fold[1]["wake_summary"]), "ts": str(fold[1].get("ts") or ""),
-                              "task": str(fold[1].get("task_id") or ""), "finish_address": chat_chain.format_address(fold[0]),
-                              "count": len(folded_rows), "chars": sum(int(e[1].get("text_chars") or 0) for e in folded_rows),
-                              "from": chat_chain.format_address(folded_rows[0][0]), "to": chat_chain.format_address(folded_rows[-1][0]),
-                              "stored_bounds": stored_bounds(folded_rows)}
+        for k, rows in sorted(folded_rows.items()):
+            fold = folds[k]
+            item["folds"].append({"sentence": str(fold[1]["wake_summary"]), "ts": str(fold[1].get("ts") or ""),
+                                  "task": str(fold[1].get("task_id") or ""), "finish_address": chat_chain.format_address(fold[0]),
+                                  "count": len(rows), "owing": sum(1 for e in rows if not overheard or debt.considers(e)), "chars": sum(int(e[1].get("text_chars") or 0) for e in rows),
+                                  "from": chat_chain.format_address(rows[0][0]), "to": chat_chain.format_address(rows[-1][0]),
+                                  "stored_bounds": stored_bounds(rows), "stream_span": [min(e[2] for e in rows), max(e[2] for e in rows)]})
         tasks: Dict[str, List[Tuple[Entry, Dict[str, Any]]]] = {}
         for entry, cls in classed:
             task = str(entry[1].get("root_task_id") or entry[1].get("task_id") or "")
@@ -249,7 +305,8 @@ def _write_lines(shown, event_rooms, texts):
             same = "the same words as" if earlier[1] is None else f"the same row as in room {where}:"
             word.update(again=first, again_room=where, line=f"{word['head']} delivered again: {same} {first}; "
                         f"memory_read(room_id='{where}', rows=true, from='{first}', to='{first}')")
-        item["words"].append({**word, "id": f"{item['room_id']}:{word['address']}", "rank": author["rank"]})
+        item["words"].append({**word, "id": f"{item['room_id']}:{word['address']}", "rank": author["rank"],
+                              "counted": author.get("counted", False)})
 
 
 def _once(shown: List[Tuple[Dict[str, Any], Entry, Dict[str, Any], Any]],
@@ -310,7 +367,11 @@ def _repeats(rows: List[Entry]) -> Dict[str, Dict[str, Any]]:
     row and reader; edited words and wordless rows are none. No similarity, prefix or length."""
     first: Dict[Tuple[str, str, str], Dict[str, Any]] = {}  # (words, speaker or "" for any, facts) -> earliest copy
     found: Dict[str, Dict[str, Any]] = {}
+    from ouroboros.dialogue_provenance import non_owner_author
+
     for address, meta, _pos in rows:
+        if non_owner_author(meta):  # the neutral receipt's text is not the letter's identity or words
+            continue  # repeated appearances of one letter are already covered by _once
         digest = meta.get("text_sha256") if int(meta.get("text_chars") or 0) else ""
         if digest:
             speaker, facts = recorded_speaker(meta), str(meta.get("message_facts_sha256") or "")
@@ -333,13 +394,35 @@ def _outward(author: Mapping[str, Any]) -> bool:
     return author.get("kind") == "ouroboros" and author.get("via") != "own_account"
 
 
-def _unconsidered(entry: Entry, author: Mapping[str, Any], considered: int) -> bool:
-    """A recorded person's words after the considered point, not my human's: words nobody considered (a silent
-    room's count, ``F6w``'s last rank). A reaction, a row with no recorded speaker, my words and my account's are not."""
-    return recorded_person(author) and entry[2] > considered and not owner_speech(entry[1], author)
+def _mark(meta: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    """A finish's stamp of what its work was shown here, or None: a finish written before the stamp existed."""
+    mark = meta.get("read_spans")
+    return mark if isinstance(mark, Mapping) else None
 
 
-def nobody_considered(spoken: List[Tuple[Entry, Mapping[str, Any]]], considered: int) -> int:
+def _finished(meta: Mapping[str, Any], finishes: Dict[str, Any]) -> str:
+    """The work a finish row ends (its stamp into ``finishes``), or ``""`` for any other row."""
+    task = str(meta.get("task_id") or "")
+    if not task or meta.get("summary_kind") not in ("terminal_root_projection", "terminal_result_projection") and (
+            meta.get("quiet_finish") is not True):
+        return ""
+    if _mark(meta) is not None:
+        finishes[task] = meta["read_spans"]
+    return task
+
+
+def _unconsidered(entry: Entry, author: Mapping[str, Any], considered: Any) -> bool:
+    """A recorded person's words no act of mine counted as read, not my human's: words nobody considered (a silent
+    room's count, ``F6w``'s last rank). ``considered``: whether an act counted it, the room's acts
+    (``memory_reading.Acts``), or a position (every row at or before it). A reaction, a row with no recorded speaker,
+    my words and my account's are not."""
+    if not recorded_person(author) or owner_speech(entry[1], author):
+        return False
+    return not (considered if isinstance(considered, bool) else considered.considers(entry)
+                if hasattr(considered, "considers") else entry[2] <= considered)
+
+
+def nobody_considered(spoken: List[Tuple[Entry, Mapping[str, Any]]], considered: Any) -> int:
     """How many of a room's words nobody considered (``_unconsidered``)."""
     return sum(1 for entry, cls in spoken if _unconsidered(entry, cls["author"], considered))
 

@@ -12,7 +12,7 @@ exact-pause suites. The selected child's sends under a monetary latch are in
   durable row names.
 - ``test_an_explicit_pause_root_is_kept_verbatim``: an explicit root (the
   dispatch-refused rail passes ``BudgetExceeded.root_task_id``, which
-  ``usage_admission.raise_group_refusal`` may fill from the billing group) is
+  ``usage_admission.raise_work_refusal`` may fill from the billing group) is
   neither re-derived nor replaced.
 - ``test_restore_follows_the_roots_durable_owner_fence``: after the root's
   Resume released owner fence A, a parked child's canonical marker must not
@@ -237,7 +237,7 @@ def test_an_explicit_pause_root_is_kept_verbatim(tmp_path, monkeypatch):
     from ouroboros import budget_pause, owner_pause
 
     _tree(tmp_path, monkeypatch)
-    explicit = "rl-billing-group"  # what ``raise_group_refusal`` names when the scope has no root
+    explicit = "rl-billing-group"  # what ``raise_work_refusal`` names when the scope has no root
     locks: list = []
     real_lock = owner_pause.launch_lock
     monkeypatch.setattr(owner_pause, "launch_lock",

@@ -690,6 +690,18 @@ def test_a_quote_is_exact_up_to_emphasis_markers_and_a_changed_word_is_refused(t
     assert published.ok and published.record["quotes"][0]["text"] == "the product fork, but not the red"
 
 
+def test_an_agent_notes_words_are_quotable_under_the_agent_speaker():
+    from ouroboros.chronicle_quotes import SPEAKERS, quote_refusal
+
+    assert "agent" in SPEAKERS  # the tool's speaker enum derives from this set
+    body = "The example comparison is ready."
+    resolver = lambda _address: (body, "agent")
+    assert quote_refusal([{"address": "a", "text": "comparison is ready", "speaker": "agent"}], resolver) is None
+    for speaker in ("human", "ouroboros", "host"):
+        reason = quote_refusal([{"address": "a", "text": body, "speaker": speaker}], resolver)
+        assert reason and reason[0] == "quote_mismatch" and "spoken by agent" in reason[1]
+
+
 def store_verify(quote, resolver):
     from ouroboros.chronicle_store import verify_quotes
 

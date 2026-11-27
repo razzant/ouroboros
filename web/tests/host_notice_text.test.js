@@ -9,9 +9,9 @@ import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { HOST_NOTICE_PREFIXES, RETIRED_HOST_NOTICE_PREFIXES, hostNoticeDisplayText, hostRowDisplayText, noticeLine, toolErrorDisplayText } from '../modules/host_notice_text.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
-import { cardRowSummary } from '../modules/chat_activity.js';
+import { cardRowSummary } from '../modules/chat_row_placement.js';
 import { loadSkillReviewDetail, renderSkillReviewDisclosure, summarizeSkillReviewMessage } from '../modules/skill_review_card.js';
-import { installDom, restoreDom } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom } from './chat_dom_fixture.js';
 
 const STARTUP = '♻️ Restored pending queue from snapshot: 2 tasks.';
 const TS = '2026-10-10T12:00:00Z';
@@ -110,7 +110,7 @@ test('a retired producer\'s old rows still lose only their mark, and nothing wri
 function chatFixture(history = []) {
     const env = installDom(async (url) => ({ ok: true, json: async () =>
         String(url).startsWith('/api/chat/history')
-            ? { messages: history, window: { complete: true } }
+            ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } }
             : { active_direct_turns: [] } }));
     const handlers = new Map();
     let generation = 0;
@@ -210,7 +210,7 @@ test('a live notice row says its line, Copy keeps that line and its raw details 
     try {
         await f.instance.refreshHistory({ revision: 1 });
         const step = { code: 'budget_exhausted', step: 'raise_total_budget',
-            line: 'The total budget is spent, so this turn did not start. Raise Total budget in Settings → Costs.' };
+            line: 'The total budget is spent, so this turn did not start. Raise Total budget in Dashboard → Costs.' };
         f.emit({ role: 'system', system_type: 'task_error', content: 'This turn stopped on an unexpected error.',
             text: 'This turn stopped on an unexpected error.', notice: NOTICE });
         f.emit({ role: 'system', system_type: 'task_not_started', ts: '2026-10-10T12:00:01Z',
@@ -224,7 +224,7 @@ test('a live notice row says its line, Copy keeps that line and its raw details 
         assert.equal(details.children[1].textContent, 'ValueError: boom');
         assert.doesNotMatch(error.querySelector('.message').innerHTML, /ValueError/, 'the raw error is not in the main line');
         assert.equal(await copied(error), NOTICE.line);
-        assert.match(budget.innerHTML, /Raise Total budget in Settings → Costs\./, 'the step follows the phrase');
+        assert.match(budget.innerHTML, /Raise Total budget in Dashboard → Costs\./, 'the step follows the phrase');
         assert.equal(budget.children.find((child) => child.tagName === 'DETAILS'), undefined, 'no details, no disclosure');
         assert.equal(await copied(budget), step.line);
     } finally { f.close(); }

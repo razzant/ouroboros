@@ -28,7 +28,7 @@ from ouroboros.utils import append_jsonl, utc_now_iso
 from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
 from ouroboros.work_stop import hold_fact as budget_hold_fact  # noqa: F401
 from ouroboros.work_stop import (
-    SELECTION_KEY, clear_refusal, continuation_refusal, declare_stop, direct_selection, pause_marker, reason_policy,
+    SELECTION_KEY, clear_refusal, continuation_refusal, declare_stop, direct_selection, pause_marker,
     record_policy, release_refusal, resume_selection, selection_record, stop_record, writer_wait,
 )
 
@@ -927,12 +927,11 @@ def hold_budget_row(task: Dict[str, Any], *, reason: str, detail: str = "",
     declared = declare_stop(task, hold)
     if declared is not hold:
         return declared
-    policy = reason_policy(str(reason))
     if result_root is not None:
         try:
             write_task_result(
                 result_root, str(task.get("id") or ""), STATUS_SCHEDULED,
-                reason_code=policy["ui_code"],
+                reason_code=record_policy(hold)["ui_code"],
                 resource_limit={"status": "budget_hold", "auto_resume": False, "exact_continuation": False,
                                 "resume_policy": "explicit_selection_same_seam", **hold},
                 # Restoring accepted work must not manufacture a scheduled
@@ -1153,7 +1152,10 @@ def observe_held_budget_selection(q: Any, task_id: str) -> Dict[str, Any]:
             prestart = {"prestart_proof": prestart_returned_unsent(candidate)}
         except Exception:
             prestart = {"prestart_proof_unreadable": True}  # the selection then keeps its hold's result as it is
-        return {"candidate": task, "authority": authority, "blockers": blockers,
+        from supervisor.budget_resume_unstarted import observe_predecessor_starts
+
+        carried = observe_predecessor_starts(q, candidate, predecessor, blockers) if safe and blockers else {}
+        return {"candidate": task, "authority": authority, "blockers": blockers, **carried,
                 "safe": safe, "unsafe_error": error, **({"refusal_basis": basis} if basis else {}), **prestart}
     except Exception:
         log.warning("Held selection observation unavailable for %s", task_id, exc_info=True)
@@ -1161,7 +1163,8 @@ def observe_held_budget_selection(q: Any, task_id: str) -> Dict[str, Any]:
 
 
 def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any], *, selected_by: str,
-                           observation: Dict[str, Any], current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                           observation: Dict[str, Any], current: Optional[Dict[str, Any]] = None,
+                           locked_tree: Optional[tuple[pathlib.Path, str]] = None) -> Dict[str, Any]:
     """Record an explicit selection on a held or globally paused row (queue lock held).
 
     Release requires current saved-continuation or never-dispatched evidence. A model-issued
@@ -1180,14 +1183,21 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any], *
             or current != observation.get("authority")
             or selection_record(task) != hold):
         return {"ok": False, "error": "selection_authority_changed"}
-    from ouroboros.control_actor import control_actor, observed_control_stop
+    from ouroboros.control_actor import observed_control_stop, resume_author
     from ouroboros.work_stop import unsafe_replay_response
     if refusal := release_refusal(observed_control_stop(
-            result_root, task, budget=q.BUDGET_ROOT_FENCES, owner=current["owner_fence"]), control_actor()):
+            result_root, task, budget=q.BUDGET_ROOT_FENCES, owner=current["owner_fence"]), resume_author()):
         return refusal
     native_read_gap = native_continuation_repair(task)
     # This native repair cannot complete a shadow working carrier's root Resume.
     completing = {} if selected_by or native_read_gap else current["consumed_resume"]
+    if locked_tree is not None and completing:
+        from ouroboros.work_stop import interrupted_owner_resume
+
+        interrupted = interrupted_owner_resume(result_root, task, task_id)
+        if interrupted is not True:
+            return {"ok": False, "error": "selection_authority_unavailable" if interrupted is None
+                    else "selection_owner_held"}
     if current["cancel_pending"] or current["owner_fence"] and not completing or current["owner_restart"]:
         return {"ok": False, "error": "selection_owner_held"}
     continuation = ((task.get("metadata") or {}).get("continuation") or {}) if isinstance(
@@ -1197,13 +1207,20 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any], *
     # writer hold once every check below passed (owner, 1 Nov); its reconciliation, a wait it is already in and a fact
     # no wait settles (an unknown outcome, unreadable custody) keep the refusal.
     writers = list(observation["blockers"] or ()) if continuation.get("predecessor_task_id") else []
-    if writers:
+    carried = writers and not selected_by and observation.get("predecessor_starts")
+    if carried:  # its own choice over its predecessor's proven read-only starts; no fence is closed here
+        from supervisor.budget_resume_unstarted import accept_predecessor_starts
+
+        if refusal := accept_predecessor_starts(task, observation, writers, result_root, fence_id=""):
+            return refusal
+        writers = []
+    elif writers:
         from supervisor.continuation_admission import only_running_writers, writers_unsettled_refusal
 
         if selected_by == "reconciliation" or writer_wait(task) or not only_running_writers(writers):
             return writers_unsettled_refusal(writers)
     from ouroboros.delegate_resume import names_start
-    if names_start():
+    if names_start() and not carried:
         return {"ok": False, "error": "selection_authority_changed"}
     # Use the identity already revalidated with this selection's snapshot.
     # A reciprocal retry is the root actor even though its physical id differs.
@@ -1228,7 +1245,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any], *
     if writers:
         return resume_into_writer_wait(q, task, writers, predecessor=str(continuation["predecessor_task_id"]),
                                        result_root=result_root, root_task_id=root_task_id)
-    selection = resume_selection(hold, by=control_actor(), selected_at=utc_now_iso(),
+    selection = resume_selection(hold, by=resume_author(), selected_at=utc_now_iso(),
                                  selected_by=str(selected_by or "owner"))
     if not native_read_gap:
         selection['root_resume_basis'] = current['root_resume_basis']
@@ -1327,7 +1344,8 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any], *
         return bool(q.publish_queue_snapshot(reason='budget_hold_selected'))  # durable before the selection stands
 
     from ouroboros.owner_pause import complete_consumed_member_resume
-    refused = (complete_consumed_member_resume(result_root, root_task_id, task_id, completing, publish, withdraw)
+    refused = (complete_consumed_member_resume(result_root, root_task_id, task_id, completing, publish, withdraw,
+                                               locked_tree=locked_tree)
                if completing else "" if publish() else "snapshot_not_persisted")
     if refused:
         withdraw()

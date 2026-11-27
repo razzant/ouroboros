@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from ouroboros.subagent_messages import subagent_message_meta
+
 
 def terminal_executor_route(effective_result: Dict[str, Any]) -> str:
     """The route a finished child's card names: the recorded one, or for a child refused before it started (its route
@@ -34,9 +36,12 @@ def terminal_executor_route(effective_result: Dict[str, Any]) -> str:
 def enrich_task_done_event(
     task_done_event: Dict[str, Any], effective_result: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Stamp executor_route/execution_evidence/actual_substrate; return the envelope."""
+    """Carry the child's stored model and coordinator facts with its terminal receipt."""
     envelope = effective_result.get("subagent_envelope")
     envelope = envelope if isinstance(envelope, dict) else {}
+    for key, value in subagent_message_meta(effective_result).items():
+        if key != "executor_route":
+            task_done_event.setdefault(key, value)
     if route := terminal_executor_route(effective_result):
         task_done_event.setdefault("executor_route", route)
     if isinstance(envelope.get("execution_evidence"), dict):

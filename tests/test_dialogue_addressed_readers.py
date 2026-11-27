@@ -11,7 +11,7 @@ from ouroboros.project_dialogue import (
     append_chat_annotation, build_owner_message_ref, latest_chat_annotations, resolve_owner_message_source,
     resolve_legacy_continuation_narrative,
 )
-from tests._dialogue import seed
+from tests._dialogue import healthy_main_fixture, seed  # noqa: F401 -- the "healthy_main" fixture
 
 
 def owner(client_id="owner-one", *, chat_id=1, **extra):
@@ -299,6 +299,54 @@ def test_annotation_compaction_asks_the_store_once_however_many_messages_it_keep
     assert counts[0] == counts[1], counts
 
 
+def test_a_receipt_question_asks_the_store_about_its_own_message_only(tmp_path, monkeypatch):
+    """The waiter reading its act's receipt and a guarded append comparing its message's latest act ask the store
+    about that one message on every branch, never the journal's other id-only receipts (each question used to pay
+    for all of them). Each message resolves alone, so each answer is the whole journal's: the act's own room, a
+    stated-unplaced act and an act saved at two rows (no answer) included."""
+    from ouroboros import chat_annotations as journal
+
+    for message, room in (("owner-one", 1), ("owner-two", 1), *((f"foreign-{number}", 22) for number in range(30))):
+        ds.append(tmp_path, "chat", owner(message, chat_id=room))
+        append_chat_annotation(tmp_path, message, action="steer_task", status="queued", routing_token="act")  # id-only
+    append_chat_annotation(tmp_path, "foreign-0", action="steer_task", status="read", routing_token="act", source_chat_id=22)
+    first, second = (chat_chain.format_address(chat_chain.row_address(owner(text=text))) for text in ("one", "two"))
+    for token, status, address, unplaced in (("act", "delivered", "", False), ("unplaced", "delivered", "", True),
+                                              ("twice", "delivered", first, False), ("twice", "read", second, False)):
+        append_chat_annotation(tmp_path, "owner-one", action="steer_task", status=status, routing_token=token,
+                               source_chat_id=1, source_row_address=address, source_unplaced=unplaced)
+    path, asked, sources = tmp_path / "logs" / "chat_annotations.jsonl", [], ds.annotation_sources
+
+    def resolving(root, ids):
+        asked.append(set(ids))
+        return sources(root, asked[-1])
+
+    monkeypatch.setattr(ds, "annotation_sources", resolving)
+
+    def whole(scoped, key, by_token=True):  # the whole journal's answer, as each question was read before
+        answer = journal._compatible_annotations(path, by_token=by_token, scoped=scoped).get(key)
+        asked.clear()
+        return answer
+
+    for token in ("act", "unplaced", "twice", "absent"):
+        for room in (None, 1):
+            expected = whole(room is not None, (room, "owner-one", token) if room else ("owner-one", token))
+            assert journal.chat_annotation_receipt(tmp_path, "owner-one", token, source_chat_id=room) == dict(expected or {})
+            assert set().union(*asked) <= {"owner-one"}, (token, room, asked)
+    assert journal.chat_annotation_receipt(tmp_path, "owner-one", "act")["status"] == "delivered"
+    assert journal.chat_annotation_receipt(tmp_path, "owner-one", "unplaced", source_chat_id=1)["source_row_address"] == ""
+    for room, latest_status in ((None, "queued"), (1, "closing")):  # the guarded append's compare, either branch
+        expected = whole(room is not None, (room, "owner-two") if room else "owner-two", by_token=False)
+        assert expected["status"] == latest_status
+        assert append_chat_annotation(tmp_path, "owner-two", action="steer_task", status="closing", routing_token="act",
+                                      source_chat_id=room, require_latest_status={latest_status})
+        assert set().union(*asked) <= {"owner-two"}, (room, asked)
+    assert whole(False, "owner-one", by_token=False) is None  # its act saved at two rows: no latest act to compare
+    assert not append_chat_annotation(tmp_path, "owner-one", action="steer_task", status="closing",
+                                      require_latest_status={"delivered", "read"})
+    assert set().union(*asked) <= {"owner-one"}, asked
+
+
 def test_continuation_narrative_is_addressed_to_its_task_and_checks_result_identity(tmp_path):
     result_ref = {"kind": "task_result", "task_id": "selected", "reader": "get_task_result"}
     summary = {"task_id": "selected", "chat_id": 1, "type": "task_summary",
@@ -343,7 +391,7 @@ def test_quiz_last_inbound_only_needs_coverage_after_the_known_owner_row(tmp_pat
     assert "2026-10-17 01:00 UTC" in facts and "invalid intervals" not in facts
 
 
-def test_routing_recent_text_rows_report_only_missing_parts_of_the_window(tmp_path, monkeypatch):
+def test_routing_recent_text_rows_report_only_missing_parts_of_the_window(tmp_path, monkeypatch, healthy_main):
     from types import SimpleNamespace
     from ouroboros import server_routing_context as routing
 
@@ -575,13 +623,22 @@ def test_memory_readers_do_equal_work_with_one_or_thirty_foreign_rooms(tmp_path,
             "identity": lambda: chat_chain.resolve_row(root, chat_chain.row_address(row))[0],
             "room": lambda: [r for _a, r, _p in chat_chain.iter_room_rows(root, 777)],
             "evidence": lambda: read_room_source(root, 777),
-            "task": lambda: Memory(root).read_task_recent("chat.jsonl", "selected", 5)[0],
+            "task": lambda: Memory(root).read_task_recent("chat.jsonl", "selected", 5),
         }
         with metered(monkeypatch) as measured:
             result = reads[reader]()
         assert result
         if reader == "evidence":
             assert len(result["rows"]) == 1 and result["rows"][0]["text"] == row["text"]
+        elif reader == "task":
+            # #4012: the task reader also names the row in the retained store — ``dialogue_store.Row.history_id``,
+            # the store's own coordinate ("<stream>:<seq>"), which the mind's clipped progress line quotes. The
+            # row's data, its order, the read's volume and its gaps are what they were; the id is that coordinate.
+            task_rows, task_coverage = result
+            stored = ds.probe_rows(root, "chat", [("task_id", "selected")], limit=5)
+            assert task_rows == [{**row, "history_id": stored[0].history_id}]
+            assert stored[0].history_id == "chat:0"
+            assert task_coverage["shown"] == task_coverage["matched"] == 1 and task_coverage["gaps"] == []
         else:
             assert result == (row if reader == "identity" else [row])
         measurements.append(dict(measured))

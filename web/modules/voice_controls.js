@@ -11,6 +11,7 @@ import { fmt, tr } from './i18n.js';
 import { controlIcon } from './page_icons.js';
 import { showToast } from './toast.js';
 import { bindMenu } from './ui_interactions.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { copyTextWithToast } from './ui_helpers.js';
 import { setDictationOffer } from './composer_plus.js';
 import { createDictation } from './dictation.js';
@@ -66,6 +67,7 @@ export function bindVoiceControls({ composer, speech = getSpeech(), notice = (te
     let clock = 0;
     let meter = null;
     let offer = null;
+    let disposeOfferFade = null;
     let menu = null;
     let revision = 0;
     let disposed = false;
@@ -82,6 +84,8 @@ export function bindVoiceControls({ composer, speech = getSpeech(), notice = (te
     }
 
     function closeOffer() {
+        disposeOfferFade?.();
+        disposeOfferFade = null;
         offer?.remove();
         offer = null;
     }
@@ -97,9 +101,12 @@ export function bindVoiceControls({ composer, speech = getSpeech(), notice = (te
         note.className = 'voice-offer-note';
         note.textContent = tr('voice.offer.note', 'The draft changed while this was transcribed.');
         const words = doc.createElement('p');
-        words.className = 'voice-offer-text';
+        words.className = 'voice-offer-text scroll-fade-y';
         words.setAttribute('aria-live', 'polite');
         words.textContent = text;
+        const wordsFrame = doc.createElement('div');
+        wordsFrame.className = 'scroll-fade-focus-frame';
+        wordsFrame.append(words);
         const actions = doc.createElement('div');
         actions.className = 'voice-offer-actions';
         actions.append(
@@ -113,12 +120,15 @@ export function bindVoiceControls({ composer, speech = getSpeech(), notice = (te
                 text: tr('voice.offer.copy', 'Copy'), onPress: () => { closeOffer(); void copy(text); } }),
             button(doc, { className: 'voice-offer-close', label: tr('voice.offer.discard', 'Discard dictated text'),
                 icon: 'close', onPress: closeOffer }));
-        panel.append(note, words, actions);
+        panel.append(note, wordsFrame, actions);
         panel.addEventListener('keydown', (event) => {
             if (event.key === 'Escape') { event.stopPropagation(); closeOffer(); input.focus?.({ preventScroll: true }); }
         });
         wrap.append(panel);
         offer = panel;
+        // A long transcription scrolls inside its own bounded line; the cue follows the words waiting past its edge,
+        // and only while they overflow does the body become a named keyboard stop ahead of Insert/Copy/Discard.
+        disposeOfferFade = bindScrollFade(words, { region: tr('voice.offer.words', 'Dictated words') });
     }
 
     function stopMeter() {

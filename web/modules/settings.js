@@ -39,6 +39,7 @@ import './settings_local_model.js';
 // The first-level page last opened on this device (docs/DESIGN.md "Settings": a section lands on its first page the
 // first time, later on the last one opened on the device). A stored page no longer registered falls back to Models.
 const LAST_PAGE_KEY = 'ouroboros.settings.last-page';
+const RETURN_RESET_ABOUT = 'ouroboros.settings.return-reset-about';
 function readLastFirst() {
     try { return String(globalThis.localStorage?.getItem(LAST_PAGE_KEY) || ''); } catch { return ''; }
 }
@@ -97,6 +98,12 @@ export function initSettings(ctx = {}) {
         if (at >= 0) {
             if (levels.length > at + 1) closeLevels(at + 1);
             return true;
+        }
+        if (path === 'page:skills'
+            && options.opener && homeEl.contains(options.opener)
+            && options.opener.dataset?.settingsOpen === 'page:skills'
+            && !options.opener.dataset?.settingsResult) {
+            return leave(path, { row: options.row || '', opener: options.opener, resume: true });
         }
         return go(path, { ...options, fresh: true });
     };
@@ -185,7 +192,9 @@ export function initSettings(ctx = {}) {
     // A door uses the shell's ordinary jump: no return callback belongs to a link.
     async function leave(door, { row = '', ...options } = {}) {
         const [kind, name] = door.split(':');
-        if (kind === 'skills' || door === 'page:skills') return openExtensions?.(kind === 'skills' ? door.slice(7) : '', { row, ...options });
+        if (kind === 'skills' || door === 'page:skills') {
+            return openExtensions?.(kind === 'skills' ? door.slice(7) : '', { row, ...options });
+        }
         if (kind === 'dashboard') return openDashboardTab?.(name, { row, ...options });
         return showPage?.(kind === 'main' ? 'chat' : name, options);
     }
@@ -303,7 +312,7 @@ export function initSettings(ctx = {}) {
 
     // From outside Settings (app.js `openSettings`): Settings is shown first, and refused when the page left vetoes.
     // A path already open keeps its level and its place (a Dashboard tab's Back returns there); any other starts anew.
-    async function openFromOutside(path = '', { row = '', ...options } = {}) {
+    async function openFromOutside(path = '', { row = '', resume: _ignored, ...options } = {}) {
         const target = settingsTarget(path, row);
         if (isDoorId(target)) return leave(target, { row, ...options });
         if (extensionsPageOf(target)) return openExtensions?.(target, { row, ...options });
@@ -382,6 +391,10 @@ export function initSettings(ctx = {}) {
     window.addEventListener('pagehide', (event) => {
         resetSecretReveals(page);
         if (event.persisted) return;
+        // A confirmed profile change may reopen About in this same tab. No page data or receipt crosses the reload.
+        if (ws?.foreignProfile?.() && shown() && state.settingsPath === 'computer/about') {
+            try { globalThis.sessionStorage?.setItem(RETURN_RESET_ABOUT, '1'); } catch { /* settings stay reachable manually */ }
+        }
         resize?.disconnect();
         if (frame) cancelAnimationFrame(frame);
         disposeFade();
@@ -396,6 +409,20 @@ export function initSettings(ctx = {}) {
     // Loopback-only debug hook, like app.js's __ouroWs: Settings has no URL, so browser tests open a path through it.
     window.__ouroSettings = { open: openFromOutside };
     return { page, open: openFromOutside, pressedAgain, stateApplied: (data) => home.stateApplied(data),
+        returnResetAbout() {
+            try {
+                const session = globalThis.sessionStorage;
+                if (session?.getItem(RETURN_RESET_ABOUT) !== '1') return;
+                session.removeItem(RETURN_RESET_ABOUT);
+            } catch { return; }
+            return openFromOutside('computer/about').then((opened) => {
+                const about = top();
+                if (opened && about?.path === 'computer/about') {
+                    about.el.querySelector('[data-settings-fold]')?.setAttribute('open', '');
+                }
+                return opened;  // About reads the serving profile's Reset receipt itself.
+            });
+        },
         capture(opener) {
             const snapshot = sectionLevels.capture(), own = ownChosen;
             const origin = homeEl.contains(opener) ? [] : levels;

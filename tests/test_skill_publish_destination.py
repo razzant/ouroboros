@@ -154,6 +154,25 @@ def test_an_existing_hub_entry_keeps_its_owner_and_refusals_are_typed():
         assert refused.value.reason_code == code
 
 
+def test_an_update_keeps_the_hubs_words_for_people_as_the_hubs_own_refresh_does():
+    # Hub README: a refresh keeps an entry's title, pitch, needs and mark; generated fields follow the files.
+    words = {"title": "Account limits", "pitch": "Limits and resets reported by Claudexor", "needs": "",
+             "mark": "linked account"}
+    existing = {"schema_version": 2, "name": "demo", "description": "old", "category": ["city"], "owner": "bob",
+                "version": "0.9.0", "source": {"kind": "hosted", "path": "skills/demo"}, "digest": "1" * 64,
+                "withdrawn": None, **words, "trust": "trusted", "permissions": ["net"]}
+    read = _reader({"categories.json": _CATEGORIES, "entries/demo.json": json.dumps(existing).encode()})
+    files, previous = hub_entry_listing(read, _snapshot(), skill="demo", login="alice", category=None, new_entry=False)
+    entry = json.loads(files["entries/demo.json"])
+    assert previous == "0.9.0" and {key: entry.get(key) for key in words} == words, "kept as written, a blank needs too"
+    assert not {"trust", "permissions"} & set(entry), "nothing else the old entry held rides along"
+    assert (entry["version"], entry["digest"], entry["description"]) == (
+        "1.0.0", captured_release_digest(_snapshot()), _snapshot().manifest.description)
+    new, _ = hub_entry_listing(_reader({"categories.json": _CATEGORIES}), _snapshot(), skill="demo", login="alice",
+                               category=["writing"], new_entry=False)
+    assert not set(words) & set(json.loads(new["entries/demo.json"])), "a new entry has no wording the hub never wrote"
+
+
 def _destination(monkeypatch, destination):
     monkeypatch.setattr(skill_publish, "resolve_publish_destination", lambda *_a, **_k: destination)
 
@@ -829,6 +848,7 @@ def test_a_copy_without_a_usable_base_replaces_destination_content_only_on_a_dec
 
 @pytest.mark.parametrize(("change", "replaced"), [
     ({"category": ["city"]}, ""), ({"owner": "bob"}, ""),
+    ({"title": "Account limits", "pitch": "Limits and resets.", "needs": "", "mark": "linked account"}, ""),
     ({"withdrawn": {"reason": "Withdrawn by the hub."}}, "withdrawn"), ({"description": "Better words."}, "description"),
 ])
 def test_entry_fields_the_destination_changed_need_a_decision_only_when_this_publication_replaces_them(

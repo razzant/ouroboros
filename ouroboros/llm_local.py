@@ -20,6 +20,7 @@ from ouroboros.model_concurrency import limit_physical_send, measurement_slot
 
 from ouroboros.context_budget import LocalContextTooLargeError  # the typed overflow lives with the overflow vocabulary
 from ouroboros.llm_messages import DISPLAY_KEY
+from ouroboros.llm_stream import LATER_OUTPUT_LIMIT_USAGE_KEY
 from ouroboros.llm_attempt import (
     _attempt_request,
     _candidate_before_dispatch,
@@ -122,6 +123,21 @@ def stamp_display(msg: Dict[str, Any]) -> Dict[str, Any]:
         if visible != content:
             msg[DISPLAY_KEY] = {"text": visible, "reasoning": reasoning}
     return msg
+
+
+def split_message_reasoning(message: Dict[str, Any]) -> None:
+    """Separate leading reasoning on compatible/native text replies using the local reader."""
+    if message.get("tool_calls"):
+        stamp_display(message)
+        return
+    if (not isinstance(message.get("content"), str)
+            or any(message.get(key) for key in ("reasoning_content", "reasoning", "reasoning_details"))):
+        return
+    answer, reasoning = _split_leading_reasoning(message["content"])
+    if answer != message["content"]:
+        message["content"] = answer
+        if reasoning:
+            message["reasoning"] = reasoning
 
 
 def _code_spans(text: str) -> List[Tuple[int, int]]:
@@ -252,6 +268,10 @@ class _LocalLaneMixin:
         if not (isinstance(evidence, dict) and evidence.get("supported")):
             return candidate
         target["local_input_measurement"] = evidence
+        pid = str(evidence.get("process_id") or "")
+        if (target.get("local_dispatch_base_url") and target.get("context_window_confirmed")
+                and pid and pid == target.get("window_instance_id")):
+            target["dispatch_account"] = f"local-instance:{pid}"
         # Rebuild from the original prepared source so the exact measured
         # input and output cap are sealed together.
         return _finalized_physical_candidate(target, payload, "chat.completions")
@@ -340,7 +360,9 @@ class _LocalLaneMixin:
             raise
 
         resp_dict = resp.model_dump()
-        usage = resp_dict.get("usage") or {}
+        usage = dict(resp_dict.get("usage") or {})
+        for host_key in ("stream_receipt", "response_finish_reason", LATER_OUTPUT_LIMIT_USAGE_KEY):
+            usage.pop(host_key, None)  # host-owned facts (the choice's own finish below), never a usage extension
         choices = resp_dict.get("choices") or [{}]
         msg = (choices[0] if choices else {}).get("message") or {}
 

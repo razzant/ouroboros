@@ -14,8 +14,9 @@ const logUrl = (name) => `/api/logs/${name}?view=compact&limit=150`;
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const STREAMS = ['events', 'tools', 'progress', 'supervisor'];
 
-function mountLogs(t, { page = 'dashboard', history = {}, beforeLeave } = {}) {
+function mountLogs(t, { page = 'dashboard', history = {}, beforeLeave, bridge } = {}) {
     const fixture = setup(t);
+    if (bridge) fixture.window.pywebview = { api: bridge };  // the desktop shell is there before Logs binds
     for (const name of STREAMS) fixture.routes.set(logUrl(name), response({ entries: history[name] || [] }));
     const state = { activePage: page, dashboardActiveSubtab: 'logs' };
     const controls = initLogs({ mount: fixture.mount, ws: fixture.ws, state, setBeforePageLeave: beforeLeave });
@@ -48,12 +49,11 @@ test('the section owns the filter rail and Clear; the list has no sticky chrome'
     assert.equal(tab, 'logs');
     assert.equal(mount.querySelector('#log-filters'), null);
     assert.ok(band.querySelector('#log-filters').classList.contains('app-tab-strip'));
+    assert.ok(band.querySelector('#log-filters').classList.contains('scroll-fade-x'), 'the rail uses the shared edge');
     assert.equal(band.querySelector('#btn-clear-logs').textContent, 'Clear');
     assert.ok(mount.querySelector('#log-entries'), 'the events stay in their scroller');
     assert.ok(band.querySelector('#btn-clear-logs').classList.contains('btn-default'));
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
-    assert.match(css, /\.logs-kinds\[data-scroll-end\] \{ --tab-fade-end: var\(--space-4\); \}/);
-    assert.match(css, /\.logs-kinds\[data-scroll-start\] \{ --tab-fade-start: var\(--space-4\); \}/);
     assert.match(css, /html\[data-layout="stack"\] #page-dashboard \.logs-kinds \{ grid-area: 2 \/ 1 \/ auto \/ -1; padding: var\(--space-2\) var\(--page-header-padding-x\);\s*margin: 0 calc\(-1 \* var\(--page-header-padding-x\)\); max-width: none; scroll-padding-inline: var\(--page-header-padding-x\); \}/,
         'a phone\'s rail runs to the page\'s edges, its chips starting at the column, so a hidden chip fades at the edge');
     const wide = css.indexOf('html[data-layout="stack"] #page-dashboard .logs-kinds { margin-block: calc(-1 * var(--space-2)) calc(-1 * var(--space-5)); }');
@@ -463,4 +463,90 @@ test('adopting exact sources for live twins costs one pass over the entries, not
     await settle();
     const entriesHeld = live.length;  // 120 groups x 30 rows
     assert.ok(reads <= entriesHeld * 3, `adoption read live keys ${reads} times for ${twins.length} twins over ${entriesHeld} held rows`);
+});
+test('a refused send\'s row and its error row say the two counts whole on live and reloaded Logs', async (t) => {
+    const text = 'Refused send abc123: host estimate ~1,500 input tokens; provider answer: input 90,000, window 80,000.';
+    const rows = [
+        { type: 'remote_context_overflow', ts: at(1), task_id: 'saved', physical_attempt_id: 'saved-send', refused_send: { text } },
+        { type: 'llm_api_error', ts: at(2), task_id: 'saved', error: 'boom', physical_attempt_id: 'saved-error', refused_send: { text } },
+    ];
+    const logs = mountLogs(t, { history: { events: rows.map(row => compactRef(row)) } });
+    await settle();
+    for (const row of rows) logs.emit({ ...row, ts: at(row.type === 'llm_api_error' ? 4 : 3), task_id: 'live' });
+    for (const group of ['saved', 'live']) {
+        const card = logs.card(group);
+        assert.equal(card.dataset.category, 'errors');
+        assert.match(card.textContent, /host estimate ~1,500/);
+        assert.match(card.textContent, /input 90,000/);
+        assert.match(card.textContent, /window 80,000/);
+    }
+});
+
+test('Logs offers the native recent-requests action beside Clear only on a capable shell and disposes it on pagehide', async (t) => {
+    const logs = mountLogs(t, { page: 'dashboard' });
+    await settle();
+    const slot = logs.mount.querySelector('[data-local-context-report]');
+    const band = logs.mount.querySelector('.logs-filters');
+    assert.ok(slot && band.contains(slot), 'the action stands in the band the section header carries');
+    assert.equal(slot.nextElementSibling, band.querySelector('#btn-clear-logs'), 'right before Clear, which still ends the band');
+    assert.equal(logs.mount.querySelector('.logs-card').contains(slot), false, 'never at the top of the scrolled list');
+    assert.equal(slot.hidden, true, 'browsers keep the native action hidden');
+    assert.equal(slot.querySelector('button'), null);
+
+    let opens = 0;
+    logs.window.pywebview = { api: {
+        shell_info: async () => ({ local_context_archive: true }),
+        open_local_context_report: async () => { opens += 1; return { state: 'opened' }; },
+    } };
+    logs.window.dispatchEvent({ type: 'pywebviewready' });
+    await settle();
+    assert.equal(slot.hidden, false);
+    const button = slot.querySelector('button');
+    assert.equal(button.textContent, 'Open recent requests');
+    await button.fire('click');
+    await settle();
+    assert.equal(opens, 1);
+    assert.equal(slot.querySelector('[role="status"]'), null, 'the answer does not reflow the header');
+    assert.deepEqual(logs.toasts(), ['Opened in a separate local window.']);
+
+    logs.window.dispatchEvent({ type: 'pagehide', persisted: false });
+    assert.equal(slot.hidden, true);
+    assert.equal(slot.children.length, 0);
+    assert.deepEqual(logs.toasts(), []);
+});
+
+test('a failed first read of the shell is asked again at the next real showing of Logs, one read at a time', async (t) => {
+    const reads = [];
+    let opens = 0;
+    const logs = mountLogs(t, { bridge: {
+        shell_info: () => new Promise((resolve, reject) => { reads.push({ resolve, reject }); }),
+        open_local_context_report: async () => { opens += 1; return { state: 'opened' }; },
+    } });
+    const slot = logs.mount.querySelector('[data-local-context-report]');
+    await settle();
+    assert.equal(reads.length, 1, 'the binding and the first showing share one read');
+    reads[0].reject(new Error('bridge not ready'));
+    await settle();
+    assert.equal(slot.hidden, true);
+
+    logs.state.activePage = 'settings';
+    logs.window.dispatchEvent({ type: 'ouro:page-shown' });  // Logs is not on screen: no showing
+    await settle();
+    assert.equal(reads.length, 1, 'a failed read is not polled');
+
+    logs.show();  // the next real showing asks again
+    await settle();
+    logs.show();  // while that read is pending nothing asks twice
+    await settle();
+    assert.equal(reads.length, 2);
+    assert.equal(slot.querySelectorAll('button').length, 1);
+    assert.equal(slot.hidden, true, 'hidden until the shell confirms');
+    reads[1].resolve({ local_context_archive: true });
+    await settle();
+    assert.equal(slot.hidden, false);
+    assert.equal(slot.querySelector('button').textContent, 'Open recent requests');
+    logs.show();
+    await settle();
+    assert.equal(reads.length, 2, 'an answer is final');
+    assert.equal(opens, 0, 'asking again is never a press');
 });

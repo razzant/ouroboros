@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom, ElementStub } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, ElementStub } from './chat_dom_fixture.js';
 const row = (id, hour) => ({ role: 'assistant', text: id, ts: `2026-09-26T${hour}:00:00.000Z`,
   history_id: `chat:${id}`, history_position: { source: 'chat', offset: Number(id) } });
-const page = (messages, cursor, next = null) => ({ messages, page_cursor: cursor, next_cursor: next,
+const page = (messages, cursor, next = null) => ({ profile_scope: PREVIEW_SCOPE, messages, page_cursor: cursor, next_cursor: next,
   has_more: next !== null, window: { complete: !next, truncated_by: next ? ['quota'] : [] } });
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
@@ -133,7 +133,7 @@ for (const shallow of [false, true]) test(shallow
     const reads = [
         { ...page(rows(100), 'latest:0', 'older:1'), coverage: coverage(span(100, 115), empty) },
         // HTTP 200: a source is unreadable, so readable rows arrive without a page boundary.
-        { messages: rows(shallow ? 100 : 200), reason_code: 'history_source_unavailable', page_cursor: null, next_cursor: null,
+        { profile_scope: PREVIEW_SCOPE, messages: rows(shallow ? 100 : 200), reason_code: 'history_source_unavailable', page_cursor: null, next_cursor: null,
             has_more: true, window: { complete: false, truncated_by: ['progress_source_unavailable'] },
             coverage: coverage(shallow ? span(100, 115) : span(200, 215), null) },
         { ...page(rows(200), 'latest:1', 'older:2'), coverage: coverage(span(200, 215), empty) },

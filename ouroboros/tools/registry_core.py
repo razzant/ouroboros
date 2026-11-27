@@ -348,7 +348,7 @@ class ToolRegistry:
         "core", "delegate", "edit_ops", "followup", "git", "git_pr", "git_rollback", "github",
         "health", "imagegen", "join_ledger", "knowledge", "mcp_sign_in", "media", "memory_tools", "plan_review",
         "preflight_review",
-        "project_journal", "presence",
+        "project_journal", "presence", "peer_letter", "peer_delegate",
         "recent_tasks",
         "query_code", "query_data", "review", "review_change", "search", "secret_hitl", "services", "shell", "skill_exec",
         "skill_publish", "skill_preflight", "skill_source_tools", "subagent_integration", "task_retention", "task_tree",
@@ -579,7 +579,8 @@ class ToolRegistry:
         schema = entry.schema
         if entry.name == "finish_task" and (self._is_local_readonly_subagent() or self._is_acting_subagent()):
             schema = copy.deepcopy(schema)
-            schema["parameters"]["properties"].pop("pending_review", None)
+            for field in ("pending_review", "about_work"):
+                schema["parameters"]["properties"].pop(field, None)
         if self._is_local_readonly_subagent():
             if entry.name == "verify_and_record" and self._readonly_tool_allowed(entry.name):
                 # The read-only actor is allowed to mint exactly one kind of
@@ -618,10 +619,12 @@ class ToolRegistry:
                     if isinstance((value_schema := props.get("value", {})), dict): value_schema["description"] = "Value for fill/select or direction for scroll"
             elif entry.name == "schedule_subagent":
                 # A read-only subagent may delegate read-only children only — hide the
-                # acting (mutative) fields so it cannot spawn an acting grandchild.
+                # acting (mutative) fields so it cannot spawn an acting grandchild, and the
+                # write-side geometry a read-only child refuses or treats as omitted.
                 schema = copy.deepcopy(schema)
                 props = schema.get("parameters", {}).get("properties", {})
-                for field in ("write_surface", "write_root", "protected_paths_grant", "external_tool_grants"):
+                for field in ("write_surface", "write_root", "workspace", "directory_strategy", "scope_paths",
+                              "protected_paths_grant", "external_tool_grants"):
                     props.pop(field, None)
             elif entry.name == "delegate_start":
                 # Same selector trap the acting branch hides: a readonly child
@@ -852,6 +855,11 @@ class ToolRegistry:
             except Exception as exc:
                 self._capability_omissions.append({"surface": "mcp", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
         combined = built_in + extension_schemas + mcp_schemas
+        from ouroboros.context_assembly_trace import note_schema_origin
+
+        for origin, schemas in (('builtin', built_in), ('extension', extension_schemas), ('mcp', mcp_schemas)):
+            for schema in schemas:
+                note_schema_origin(self._ctx, schema, origin)
         if disabled_tools:
             # Apply the declarative tool policy to dynamic extension/MCP schemas too, not just
             # built-ins, so a disabled name can never surface from any discovery source.
@@ -892,6 +900,8 @@ class ToolRegistry:
 
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Return the full schema for a specific tool."""
+        from ouroboros.context_assembly_trace import note_schema_origin
+
         requested = str(name or "").strip()
         if requested == "presence_finish":
             self._retry_schedule_door()
@@ -905,7 +915,7 @@ class ToolRegistry:
                     "tools": [requested],
                     "details": {requested: availability[2]},
                 })
-            return None if cause else self._schema_for_entry(entry)
+            return None if cause else note_schema_origin(self._ctx, self._schema_for_entry(entry), 'builtin')
         # Declarative tool policy applies across ALL discovery sources (built-in, extension, MCP),
         # so enable_tools/discovery can never surface a disabled name — consistent with schemas()/execute().
         if requested in _disabled_tools(self._ctx) and not registry_guards.disabled_tools_dispatch_only(self._ctx):
@@ -931,7 +941,7 @@ class ToolRegistry:
             except Exception:
                 ext_tool = None
             if ext_tool:
-                return _dynamic_tool_schema(ext_tool)
+                return note_schema_origin(self._ctx, _dynamic_tool_schema(ext_tool), 'extension')
         try:
             from ouroboros.mcp_client import (
                 ensure_configured_from_settings as _mcp_ensure_configured,
@@ -950,7 +960,7 @@ class ToolRegistry:
                 return None
             mcp_tool = _mcp_get_manager().get_tool(requested)
             if mcp_tool:
-                return _dynamic_tool_schema(mcp_tool)
+                return note_schema_origin(self._ctx, _dynamic_tool_schema(mcp_tool), 'mcp')
         return None
 
     def on_demand_schema_names(self) -> frozenset:

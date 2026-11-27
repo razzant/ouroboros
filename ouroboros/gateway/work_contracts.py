@@ -1,7 +1,7 @@
 """``/api/state`` work projection contracts (v1): one row per work, one rollup per room, and the owner's model and
-tier writes those rows and rooms carry (re-exported by ``client_contracts``, twinned in ``client_contract_types.js``).
+tier writes those rows and rooms carry (re-exported by ``client_contracts``).
 
-Descriptive, not runtime validation. The browser twin is ``web/modules/work_types.js``; the frozen census
+Descriptive, not runtime validation. The frozen census
 (``active_chat_activities``) stays beside these fields unchanged (docs/architecture/11-frozen-contracts-v1.md).
 """
 from __future__ import annotations
@@ -21,6 +21,7 @@ class ChatModelRoute(TypedDict):
     use_local: bool
 
 
+# The owner's cited words or pressed label, kept as authored (CLIENT_CONTRACT §5).
 class CitedModelWords(TypedDict):
     """Up to 1024 Unicode characters of the verified span; clipped says whether more was retained."""
 
@@ -28,8 +29,9 @@ class CitedModelWords(TypedDict):
     clipped: bool
 
 
+# A work's primary route and whose choice it is.
 class WorkPrimaryRoute(ChatModelRoute):
-    basis: str
+    basis: str  # main | a role it follows | room | owner | owner_words | owner_press | mind | fallback | place | circle.
     cited: NotRequired[CitedModelWords]
 
 
@@ -39,13 +41,15 @@ class WorkPendingRoute(ChatModelRoute):
     basis: NotRequired[str]
 
 
+# Departures by fallback, mind switch or owner wait-card switch carry `since` and `cause`, with
+# `basis` respectively `fallback`, `mind` or `owner`. A wait-card switch has `cause=wait_card`.
 class WorkLead(WorkPrimaryRoute):
     """Acting route and chooser; a departure names the primary it left."""
 
-    role: NotRequired[str]
+    role: NotRequired[str]  # a fallback's chain row (`fallback:<n>`, n from 0): tells apart two rows of one model.
     primary: NotRequired[WorkPrimaryRoute]
-    since: NotRequired[str]
-    cause: NotRequired[str]
+    since: NotRequired[str]  # an ISO instant in UTC.
+    cause: NotRequired[str]  # a short code or phrase: `switch_model`, a failure's code, `configured fallback`.
     pending: NotRequired[WorkPendingRoute]
 
 
@@ -86,18 +90,21 @@ class WorkLeadFields(TypedDict):
     processing: NotRequired[WorkProcessing]
 
 
+# One act on a work's model (POST /api/tasks/{task_id}/model): `set` gives it a model, `follow` returns
+# it to Main; `return`, `wait` and `keep` leave a fallback; `processing` sets its own tier from its next
+# call ('' = Default).
 class TaskModelRequest(TypedDict):
-    request_id: str
+    request_id: str  # a retry of the same act carries the same id.
     action: Literal["set", "follow", "return", "wait", "keep", "processing"]
-    model: NotRequired[str]
-    use_local: NotRequired[bool]
+    model: NotRequired[str]  # `set` only.
+    use_local: NotRequired[bool]  # `set` only.
     processing: NotRequired[ProcessingTier]  # action ``processing`` only: the work's own tier from its next call
 
 
 class TaskModelResponse(TypedDict):
     ok: Literal[True]
     task_id: str
-    applied: Literal["next_step", "at_start"]
+    applied: Literal["next_step", "at_start"]  # a running work switches at its next step, a queued one starts on it.
     lead: NotRequired[WorkLead]  # every model act
     processing: NotRequired[WorkProcessing]  # a tier act
 
@@ -123,6 +130,7 @@ class MainBindingConditions(TypedDict):
     connection: NotRequired[str]  # required where Ultrafast is written or carried on an API connection
 
 
+# Without `project_id` only kind `model` is a choice.
 class OwnerChatModelRequest(ChatModelChoice):
     """``POST /api/owner/chat-model``: a Project follows Main or chooses a model; without project_id this writes
     Main itself, on the binding its ``if_unchanged`` names when sent (Main only)."""
@@ -131,9 +139,12 @@ class OwnerChatModelRequest(ChatModelChoice):
     if_unchanged: NotRequired[MainBindingConditions]
 
 
+# A Project's answer carries its choice; Main's own carries what Main is and was, what became of its
+# pinned account (`kept`, dropped to `auto`, or `none` on a route without accounts) and whether a window
+# set by hand was cleared.
 class OwnerChatModelResponse(TypedDict):
     ok: bool
-    project_id: str
+    project_id: str  # '' for Main.
     model_choice: NotRequired[ChatModelChoice]  # Project response
     previous_model_choice: NotRequired[ChatModelChoice]
     main_route: NotRequired[ChatModelRoute]  # Main response
@@ -153,10 +164,10 @@ class OwnerChatProcessingRequest(TypedDict):
 
 class OwnerChatProcessingResponse(TypedDict):
     ok: bool
-    project_id: str
+    project_id: str  # '' for Main.
     processing_choice: NotRequired[ProcessingTier]  # Project response
     previous_processing_choice: NotRequired[ProcessingTier]
-    main_processing: NotRequired[ProcessingTier]
+    main_processing: NotRequired[ProcessingTier]  # Main response: Main's own tier (a Settings value).
     previous_main_processing: NotRequired[ProcessingTier]
     processing_default: NotRequired[Literal["", "standard", "fast", "economy"]]  # what Default resolves to
 
@@ -190,7 +201,7 @@ class PauseAuthor(TypedDict):
 
     actor: str
     text: str
-    at: Any
+    at: Any  # the press time.
 
 
 class SleepWake(TypedDict):
@@ -199,7 +210,7 @@ class SleepWake(TypedDict):
     clauses are joined by "or", its time last."""
 
     kind: str  # task | task_or_writes | tasks | all_tasks | runs | service | reviewer | sender | mail | time
-    name: NotRequired[str]
+    name: NotRequired[str]  # a chosen task's or sender's work name, as the census holds it.
     count: NotRequired[int]
     at: NotRequired[str]
 
@@ -247,12 +258,23 @@ class WorkTurn(TypedDict):
     code: NotRequired[str]
 
 
+# `stop_action_id` is at most 200 characters; a later Stop needs a new one.
+class TaskCancelRequest(TypedDict, total=False):
+    """Optional body; stop_action_id retries one action, distinct from custody ID.
+    Omission preserves legacy ingress without exact-replay assurance."""
+    cascade: bool
+    stop_policy: str  # "immediate" | "finalize_then_cancel" | "close_expired".
+    stop_action_id: str
+    close_expired: str  # only with stop_policy="close_expired", no cascade or Stop action id
+
+
 class WorkControl(TypedDict):
     """An action the named door accepts now, on its exact target."""
 
-    action: str
-    target: str
-    scope: NotRequired[str]
+    action: str  # stop | stop_earlier | pause | resume | hurry | wrap_up | model | close.
+    target: str  # the exact task id the door acts on.
+    scope: NotRequired[str]  # single | cascade | work.
+    close_expired: NotRequired[str]  # exact park offer, only for close.
 
 
 class WorkEpisode(TypedDict):
@@ -275,11 +297,12 @@ class WorkMemberState(TypedDict):
     mark: str  # the member's own mark, independent of its tails
     queue_attempt: NotRequired[int]  # observed queue ordinal of this member's state, not an executor ordinal
     last_resume: NotRequired[LastResume]
+    close_expired: NotRequired[WorkControl]
 
 
 class WorkMembers(TypedDict):
-    ids: List[str]
-    states: NotRequired[Dict[str, WorkMemberState]]
+    ids: List[str]  # every member task id (episode roots and helpers): a card of another id re-reads the state.
+    states: NotRequired[Dict[str, WorkMemberState]]  # keyed by the exact member task id.
 
 
 class WorkFocus(TypedDict):
@@ -293,24 +316,24 @@ class Work(WorkLeadFields):
     work_id: str
     room: Any
     name: str
-    kind: str
+    kind: str  # direct | task.
     project_id: str
     episode: WorkEpisode
-    activity: str
-    transition: str
-    call: str
-    because: List[WorkReason]
+    activity: str  # working | queued | waiting | paused | unknown.
+    transition: str  # none | finalizing | pausing.
+    call: str  # preparing | sending | thinking | working, when every working member agrees.
+    because: List[WorkReason]  # the current episode's own reason (or, once it ended, nothing).
     tails: List[WorkTail]
-    live: bool
+    live: bool  # something of the work actually executes now.
     turn: List[WorkTurn]
-    release: str
+    release: str  # self | owner | mind | none.
     members: WorkMembers
     controls: List[WorkControl]
     since: Any
     confirmed: bool
-    mark: str
-    stop: NotRequired[Dict[str, Any]]
-    refusal: NotRequired[Dict[str, Any]]
+    mark: str  # moving | still | pause | ring | none (docs/DESIGN.md "Status marks").
+    stop: NotRequired[Dict[str, Any]]  # current stop and any independent member stop.
+    refusal: NotRequired[Dict[str, Any]]  # the continuation's last refusal, rechecked by Resume.
     last_resume: NotRequired[LastResume]  # also on each held member's state
     outcome: NotRequired[str]
     focus: NotRequired[WorkFocus]
@@ -327,14 +350,15 @@ class RoomStatus(TypedDict):
     ``turn`` holds its works' items (with ``work_id``) and the room's own current questions no work holds (without):
     a room at rest can be the owner's turn."""
 
-    activity: str
+    activity: str  # working | queued | waiting | paused | idle | unknown.
     transition: str
     call: str
     turn: List[Dict[str, Any]]
     amber: bool
-    mark: str
+    mark: str  # moving | still | pause | ring | none.
     confirmed: bool
     works: List[str]
+    deadline_expired: NotRequired[bool]
 
 
 class WorkSummary(TypedDict):
@@ -343,11 +367,25 @@ class WorkSummary(TypedDict):
     confirmed: bool
 
 
+class PanicRecoveryMember(TypedDict):
+    """One saved queue member with an opaque hold identity for explicit owner selection."""
+
+    task_id: str
+    task_name: str
+    panic_hold_id: str
+    close_expired: NotRequired[WorkControl]
+    project_id: NotRequired[str]
+    chat_id: NotRequired[int]
+    root_task_id: NotRequired[str]
+
+
 class WorkStateFields(TypedDict):
-    """The work projection's ``/api/state`` fields, inherited by ``contracts.StateResponse``."""
+    """Work and recovery fields of ``/api/state``, inherited by ``contracts.StateResponse``."""
 
     works: List[Work]
-    rooms: Dict[str, RoomStatus]
-    work_summary: WorkSummary
-    works_complete: bool
-    works_gaps: List[Dict[str, Any]]
+    rooms: Dict[str, RoomStatus]  # keyed by chat_id
+    work_summary: WorkSummary  # the tray's one line.
+    works_complete: bool  # false: a source was unreadable; keep what was seen, never read it as empty.
+    works_gaps: List[Dict[str, Any]]  # typed gaps of the work projection.
+    panic_recovery: NotRequired[List[PanicRecoveryMember]]  # global pending members, not Main's attention filter
+    panic_recovery_complete: NotRequired[bool]  # complete post-readiness census with custody of the saved queue; false or absent: do not offer to return all work

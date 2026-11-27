@@ -26,10 +26,10 @@ import { questionPresentation, questionWords } from './question_presentation.js'
 import { taskCancelPending } from './log_events.js';
 import { desiredLiveCardPhase, replayTerminalPhase } from './task_phase_chip.js';
 import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
-import { closeTaskControlMenu, createTaskResumeButton, requestStop, taskControlBusy } from './task_control_menu.js';
+import { closeTaskControlMenu, createTaskCloseButton, createTaskResumeButton, requestStop, taskControlBusy } from './task_control_menu.js';
 import {
-    OUTCOME_TONES, amberNote, behindWords, clock, openWorkControls, resumeAttemptWords, workControls, workMenuActions,
-    workQuestion, workRowView,
+    OUTCOME_TONES, amberNote, behindWords, clock, openWorkControls, resumeAttemptWords, workCloseOffer, workControls,
+    workMenuActions, workMenuTargetGuard, workMenuTargets, workQuestion, workRowView,
 } from './work_status.js';
 import { showToast } from './toast.js';
 import { errorWords } from './ui_primitives.js';
@@ -78,6 +78,8 @@ export function workCard(work, records) {
     }
     return null;
 }
+
+const menuActionKey = (controls, cancelPending) => JSON.stringify([...workMenuTargets(controls, { cancelPending })]);
 
 /**
  * Mount the status control and its list for one chat instance. The caller passes its own owners by their
@@ -196,7 +198,7 @@ export function createRoomWork({
     const name = panel && bar?.querySelector('.app-page-title');
 
     // ---- the surface: one floating list in every room, hung under the room's bar (room_work.css)
-    const surface = element('div', 'rw-surface scroll-fade-y rw-shade');
+    const surface = element('div', 'rw-surface rw-shade');
     surface.id = `${uid}-surface`;
     surface.hidden = true;
     surface.tabIndex = -1;  // where a pointer open lands: a landing point, never a control
@@ -213,7 +215,10 @@ export function createRoomWork({
     const extras = element('div', 'rw-extras');
     // A failed start heads the list: the same state the capsule says, with Restart beside it (host_starting_status.js).
     const failure = createStartFailure(doc, { restart: () => confirmAndSendRestart({ openConfirmDialog, ws }) });
-    surface.append(...[head, failure.el, list, note, extras].filter(Boolean));
+    const scroll = element('div', 'rw-shade-body scroll-fade-y');
+    scroll.tabIndex = -1;  // where a pointer open lands: the inner scrollport, never a control
+    scroll.append(...[head, failure.el, list, note, extras].filter(Boolean));
+    surface.append(scroll);
     // A zero-height anchor under the bar: the list follows the bar's real height at every width. Main's
     // header floats over the transcript, so its anchor is the header's own last child at its bottom edge.
     const shadeAnchor = element('div', 'rw-shade-anchor');
@@ -269,7 +274,7 @@ export function createRoomWork({
     const detailNames = new Map();
     const detailReads = new Set();
     const disposers = [];
-    disposers.push(bindScrollFade(surface));
+    disposers.push(bindScrollFade(scroll));
     const listen = (target, type, fn, options) => {
         if (!target?.addEventListener) return;
         target.addEventListener(type, fn, options);
@@ -478,6 +483,7 @@ export function createRoomWork({
         // main: the row's one primary target, the way to its card or (no card loaded) its details
         const main = element('div', 'rw-main');
         const nameEl = element('span', 'rw-name');
+        nameEl.id = `${uid}-name-${(detailSequence + 1)}`;
         const state = element('span', 'rw-state');
         const mark = createStatusMark(doc);
         const word = element('span', 'rw-word');
@@ -607,7 +613,10 @@ export function createRoomWork({
         // A new episode (or a new attempt of it) never inherits a menu opened for the previous one.
         const episode = `${row.episode}|${row.attempt ?? ''}`;
         if (view.episode !== undefined && view.episode !== episode
-            && view.more?.getAttribute('aria-expanded') === 'true') closeTaskControlMenu();
+            && view.more?.getAttribute('aria-expanded') === 'true') {
+            menuIntent += 1;
+            closeTaskControlMenu();
+        }
         view.episode = episode;
         reconcileActions(view, row);
     }
@@ -640,6 +649,24 @@ export function createRoomWork({
         }
         // Resume stands only where the work's own Resume control names its exact target.
         const wantResume = row.settled ? '' : row.resume;
+        // Close stands only where the work's own Close names this row's exact episode, found among all its controls
+        // (a Stop for the same task may come first): a helper's Close sits on that helper's own card and Activity row.
+        const closeNow = (current) => (currentControls(current) ? workCloseOffer(workOf(current.id), current.episode) : '');
+        const wantClose = row.settled ? '' : closeNow(row);
+        if (view.close && (view.close.offer !== wantClose || view.close.targetId !== row.episode)) {
+            keepFocus(view.close); view.close.remove(); view.close = null;
+        }
+        if (wantClose && !view.close) {
+            const button = createTaskCloseButton(row.episode, { onSettled: refresh, nameId: view.nameEl.id,
+                tokenNow: () => (closeNow(view.row) === wantClose && view.row.episode === row.episode ? wantClose : ''),
+            });
+            button.offer = wantClose;
+            button.targetId = row.episode;
+            // The same neutral capsule as Resume beside it: closing a tail is not urgent.
+            button.classList.add('rw-action', 'rw-pill', 'rw-pill-resume');
+            view.close = button;
+            view.verb.append(button);
+        }
         if (view.resume && view.resumeTarget !== wantResume) {
             keepFocus(view.resume);
             view.resume.remove();
@@ -660,10 +687,10 @@ export function createRoomWork({
         }
         // The ⋯ is the one door to every other action: the work's own controls, each aimed at its exact target.
         const wantMore = row.canMenu && !row.settled;
-        const actionKey = wantMore ? workMenuActions(row.controls, {
-            cancelPending: Boolean(records.get(row.episode)?.cancelPendingPolicy),
-        }).join(',') : '';
-        // A row may keep its menu door while the actions behind it change (Working → Paused).
+        const actionKey = wantMore ? menuActionKey(row.controls,
+            Boolean(records.get(row.episode)?.cancelPendingPolicy)) : '';
+        // A row may keep its menu door while the actions behind it change (Working → Paused),
+        // or while an action's target changes under the same label (e.g. an earlier root's Pause).
         // Withdraw the old portal immediately, not just its ability to dispatch stale actions.
         if (view.actionKey !== actionKey && view.more?.getAttribute('aria-expanded') === 'true') {
             menuIntent += 1;
@@ -683,20 +710,22 @@ export function createRoomWork({
             view.more = button;
             view.moreSlot.append(button);
         } else if (!wantMore && view.more) {
-            if (view.more.getAttribute('aria-expanded') === 'true') closeTaskControlMenu();
+            if (view.more.getAttribute('aria-expanded') === 'true') {
+                menuIntent += 1;
+                closeTaskControlMenu();
+            }
             keepFocus(view.more, view.main.tabIndex >= 0 ? view.main : null);
             view.more.remove();
             view.more = null;
         }
         if (view.more) view.more.dataset.id = row.episode;  // Pause reads its exact target here, never the nearest card
         view.more?.setAttribute('aria-label', fmt('Task actions: {name}', { name: full }));
-        view.el.dataset.verb = view.question ? 'question' : view.resume ? 'resume' : '';
+        view.el.dataset.verb = view.question ? 'question' : (view.resume || view.close) ? 'resume' : '';
     }
 
     // The work's current controls, only while the list is shown over a live connection and the projection still
     // lists the same episode (and attempt): a press re-checks them before any effect.
-    function currentControls(row) {
-        const work = row ? workOf(row.id) : null;
+    function currentControls(row, work = row ? workOf(row.id) : null) {
         const current = open && !destroyed && !page.hidden && page.isConnected && connected() && hostReady()
             && work && String(work.episode?.task_id || work.work_id) === row.episode
             && (works()?.attempts?.get?.(row.episode) ?? null) === row.attempt;
@@ -722,15 +751,22 @@ export function createRoomWork({
             if (intent !== menuIntent || !anchor.isConnected || !currentControls(row)) return;
             cancelPending = taskCancelPending(stored);
         }
+        const openedWork = workOf(row.id);
+        const opened = currentControls(row, openedWork);
+        if (!opened) return;
+        const stillOffered = workMenuTargetGuard(opened, { cancelPending });
         const canAct = (action) => {
             const current = currentControls(row);
             if (intent !== menuIntent || !anchor.isConnected || !current || taskControlBusy(row.episode)) return false;
-            return workMenuActions(current, {
+            return stillOffered(action, current, {
                 cancelPending: cancelPending || Boolean(records.get(row.episode)?.cancelPendingPolicy),
-            }).includes(action);
+            });
         };
         const stopOne = (target, action) => (loaded(target) ? cancelRunFromCard(loaded(target), action) : requestStop(target, action));
-        openWorkControls(anchor, workOf(row.id), { cancelPending, canAct, stopOne, afterAction: () => refresh() });
+        if (openWorkControls(anchor, openedWork, { cancelPending, canAct, stopOne, afterAction: () => refresh() })) {
+            const view = views.get(row.key);
+            if (view) view.actionKey = menuActionKey(opened, Boolean(records.get(row.episode)?.cancelPendingPolicy));
+        }
     }
 
     // ---- paint
@@ -927,6 +963,22 @@ export function createRoomWork({
         });
     }
 
+    function firstControl() {
+        const enabled = (node) => Boolean(node) && !node.hidden && !node.disabled;
+        const restart = !failure.el.hidden ? failure.el.querySelector('.btn') : null;
+        if (enabled(restart)) return restart;
+        for (const row of list.children) {
+            if (row.hidden) continue;
+            const main = row.querySelector('.rw-main');
+            if (enabled(main) && main.tabIndex === 0 && main.getAttribute('role') === 'button') return main;
+            const action = [...row.querySelectorAll('.rw-action')].find(enabled);
+            if (action) return action;
+            const more = row.querySelector('.rw-more');
+            if (enabled(more)) return more;
+        }
+        return [...extras.children].find((node) => enabled(node) && (node.tagName === 'BUTTON' || node.tabIndex >= 0)) || null;
+    }
+
     function openSurface(viaKeyboard = false) {
         if (open || destroyed || trigger.disabled || trigger.hidden) return;
         open = true;
@@ -936,9 +988,10 @@ export function createRoomWork({
         surface.hidden = false;
         openHost?.setAttribute('data-rw-open', '');
         render();
-        // A pointer open lands on the (ring-less) list; a keyboard open enters its first real control.
-        const first = viaKeyboard ? list.querySelector('.rw-main[tabindex="0"], .rw-action, .rw-more') : null;
-        (first || surface).focus?.({ preventScroll: true });
+        // A pointer open lands on the (ring-less) inner scrollport so PageDown scrolls it at once;
+        // a keyboard open enters the first enabled control.
+        const first = viaKeyboard ? firstControl() : null;
+        (first || scroll).focus?.({ preventScroll: true });
     }
 
     function close({ restoreFocus = true } = {}) {

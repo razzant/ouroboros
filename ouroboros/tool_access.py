@@ -160,22 +160,48 @@ def lineage_read_base(ctx: Any, root: ResourceRoot, target: pathlib.Path) -> pat
                  if path_is_relative_to(candidate, base)), None)
 
 
-def _lineage_source_target(ctx: Any, root: ResourceRoot, target: pathlib.Path) -> pathlib.Path:
+def _lineage_source_handle(ctx: Any, root: ResourceRoot, target: pathlib.Path) -> tuple[str, str, str] | None:
+    """The task, relative address and digest of a handle in a known artifact placement."""
+    from ouroboros.source_retention import source_handle_digest
+
+    base = lineage_read_base(ctx, "artifact_store", target) if root in {"artifact_store", "runtime_data"} else None
+    if base is not None and base.name in lineage_task_ids(ctx):
+        relative = target.relative_to(base).as_posix()
+        if digest := source_handle_digest(relative):
+            return base.name, relative, digest
+    return None
+
+
+def placed_source_handle_digest(ctx: Any, binding: ResolvedResourceBinding) -> str:
+    """Expected copy identity at this binding's target, not a grant or another read target."""
+    handle = _lineage_source_handle(ctx, binding.root, binding.target_path)
+    return handle[2] if handle else ""
+
+
+def _lineage_source_target(ctx: Any, root: ResourceRoot, target: pathlib.Path, defer_reads=None) -> pathlib.Path:
     """A READ, through artifact_store or runtime_data, of a lineage task's SHA-named source handle with no
     entry at the asked placement opens that task's own verified source (#2645: the writer kept it in the
     canonical store while an execution-drive artifact_store was advertised). An existing entry, a denied
     lookup and every other path stay as asked; dispatch then judges the opened target as for any read."""
-    from ouroboros.source_retention import retained_actor_source_read_target, source_handle_digest
-
-    base = lineage_read_base(ctx, "artifact_store", target) if root in {"artifact_store", "runtime_data"} else None
-    relative = target.relative_to(base).as_posix() if base is not None and base.name in lineage_task_ids(ctx) else ""
-    if not source_handle_digest(relative):
+    handle = _lineage_source_handle(ctx, root, target)
+    if handle is None:
         return target
+    task_id, relative, _digest = handle
     try:
         os.lstat(target)
         return target
     except FileNotFoundError:
-        return retained_actor_source_read_target(canonical_data_root(ctx), base.name, relative) or target
+        return _admitted_retained_target(ctx, task_id, relative, defer_reads) or target
+
+
+def _admitted_retained_target(ctx: Any, task_id: str, relative: str, defer_reads=None) -> pathlib.Path | None:
+    """Apply original-source admission; a multi-party read defers the byte check."""
+    from ouroboros.source_retention import retained_actor_source_read_target
+    from ouroboros.tools.recent_tasks import retained_focus_path_refusal
+
+    return retained_actor_source_read_target(canonical_data_root(ctx), task_id, relative,
+                                             target_refused=lambda target: retained_focus_path_refusal(ctx, target),
+                                             defer_reads=defer_reads)
 
 
 def _effective_policy_profile(profile: ToolProfile) -> ToolProfile:
@@ -664,6 +690,7 @@ def _resolve_target_in_selected_base(
     operation: Operation,
     alias: bool = True,
     literal: bool = False,
+    defer_reads=None,
 ) -> pathlib.Path:
     """Resolve one target inside an already-selected physical base; ``alias=False`` returns the address a READ
     asked for, without the re-anchors that open a capture or source where its writer kept it."""
@@ -712,7 +739,7 @@ def _resolve_target_in_selected_base(
                     from ouroboros.tool_access_reads import inherited_read_base
                     if (lineage_read_base(ctx, root, candidate) is not None
                             or inherited_read_base(ctx, root, candidate) is not None):
-                        return _lineage_source_target(ctx, root, candidate) if alias else candidate
+                        return _lineage_source_target(ctx, root, candidate, defer_reads) if alias else candidate
                     if root == "artifact_store":
                         from ouroboros.delegate_shared import orphan_capture_read_target
 
@@ -734,10 +761,7 @@ def _resolve_target_in_selected_base(
         if anchored is not None and anchored.exists():
             return anchored
         if anchored is not None or not (resolved_base / safe_relpath(path_text)).exists():
-            from ouroboros.source_retention import retained_actor_source_read_target
-
-            retained = retained_actor_source_read_target(
-                canonical_data_root(ctx), task_id_for_artifacts(ctx), safe_relpath(path_text))
+            retained = _admitted_retained_target(ctx, task_id_for_artifacts(ctx), safe_relpath(path_text), defer_reads)
             if retained is not None:
                 return retained
         if anchored is not None:
@@ -747,7 +771,8 @@ def _resolve_target_in_selected_base(
         resolved.relative_to(resolved_base)
     except ValueError as exc:
         raise ValueError(f"path escapes {resolved_base}") from exc
-    return _lineage_source_target(ctx, root, resolved) if alias and root == "runtime_data" and operation in _READ_OPS else resolved
+    return (_lineage_source_target(ctx, root, resolved, defer_reads)
+            if alias and root == "runtime_data" and operation in _READ_OPS else resolved)
 
 
 def _settle(path: Any) -> pathlib.Path:
@@ -767,8 +792,10 @@ def build_resolved_resource_binding(
     skill_name: str = "",
     process_cwd: str | None = None,
     literal: bool = False,
+    defer_reads=None,
 ) -> ResolvedResourceBinding:
-    """Resolve policy, base and target. ``literal`` is for host-bound Git operands, not public tool args."""
+    """Resolve policy, base and target. ``literal`` names a host-bound Git operand. ``defer_reads`` collects
+    retained alias verification by target for a caller that still owes other admission decisions."""
 
     if literal and (process_cwd is not None or root not in {"active_workspace", "system_repo"}
                     or operation not in {"read", "vcs"}):
@@ -904,6 +931,7 @@ def build_resolved_resource_binding(
         path=path,
         operation=operation,
         literal=literal,
+        defer_reads=defer_reads,
     )
     asked = (_resolve_target_in_selected_base(ctx, root=normalized, base_path=base, path=path, operation=operation,
                                               alias=False)

@@ -584,13 +584,16 @@ def test_reconciliation_recovers_a_pending_invocation_whose_worker_died(tmp_path
 
     script = ["transport_error"]
     posted = []
+    project = None
+    project_ids = iter(("prj-first", "prj-second"))
 
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal project
         path = request.url.path
         if path == "/v2/handshake":
             return httpx.Response(200, json={"protocolMajor": CLAUDEXOR_PROTOCOL_MAJOR,
                                              "compatible": True,
-                                             "engine": {"version": CLAUDEXOR_MIN_VERSION}})
+                                             "engine": {"version": CLAUDEXOR_MIN_VERSION, "sha": "2" * 40}})
         if path == "/v2/agent-capabilities":
             return httpx.Response(200, json={"harnesses": [
                 {"id": "some-route", "enabled": True, "status": "ok",
@@ -598,8 +601,15 @@ def test_reconciliation_recovers_a_pending_invocation_whose_worker_died(tmp_path
         if path == "/v2/quota":
             return httpx.Response(200, json={"snapshots": []})
         if path == "/v2/projects":
-            return httpx.Response(200, json={"projects": []}) if request.method == "GET" \
-                else httpx.Response(200, json={"id": "prj-owned"})
+            if request.method == "GET":
+                return httpx.Response(200, json={"projects": [project] if project else []})
+            assert request.method == "POST"
+            root = json.loads(request.read())["root"]
+            created = project is None
+            if created:
+                project = {"id": next(project_ids), "root": root}
+            assert project["root"] == root
+            return httpx.Response(200, json={**project, "created": created})
         assert path == "/v2/runs", path
         posted.append((request.headers.get("Idempotency-Key"), json.loads(request.read())))
         if script.pop(0) == "transport_error":
@@ -624,6 +634,7 @@ def test_reconciliation_recovers_a_pending_invocation_whose_worker_died(tmp_path
     # The durable residue of the crash, produced through the REAL path: an accepted
     # POST whose response was lost. Only START_REQUESTED names the invocation.
     lost = json.loads(delegate._delegate_start(ctx, "the intended work", max_seconds=60).text)
+    assert lost["reason"] == "daemon_unreachable" and len(posted) == 1, lost
     token = lost["pending_invocation_id"]
     delegate._CUSTODY.clear()            # the worker that knew the token is gone
     assert [r["invocation_id"] for r in dc.pending_invocations(tmp_path)] == [token]
@@ -674,8 +685,10 @@ def test_reconciliation_recovers_a_pending_invocation_whose_worker_died(tmp_path
 
     # 3. Neither an engine refusal answering the recovery's replay (#3138) nor an unreachable daemon
     #    retires the invocation or the registration the original attempt owned: both stay pending.
+    project = None  # independent case on an empty fixture registry: this start is the creator, not an adopter
     script[:] = ["transport_error"]
     lost2 = json.loads(delegate._delegate_start(ctx, "other intended work").text)
+    assert lost2["reason"] == "daemon_unreachable" and len(posted) == 2, lost2
     token2 = lost2["pending_invocation_id"]
     delegate._CUSTODY.clear()
 
@@ -706,9 +719,10 @@ def test_reconciliation_recovers_a_pending_invocation_whose_worker_died(tmp_path
                                       replay_pending=lambda: True)  # a replay alone is admitted: nothing is read
     assert [(o["action"], o["reason"], o["lookup"]) for o in kept] == [
         ("invocation_retained", "invocation_store_unproven", "not_read")]
-    assert refusing.removed == [], "the ORIGINAL attempt's owned registration is kept"
+    assert refusing.removed == [] and project["id"] == "prj-second"
     assert [r["invocation_id"] for r in dc.pending_invocations(tmp_path)] == [token2]
-    assert dc.invocation_record(tmp_path, token2)["state"] == "pending"
+    retained = dc.invocation_record(tmp_path, token2)
+    assert (retained["state"], retained["project_owned"], retained["project_id"]) == ("pending", True, project["id"])
     refused_rows = [r for r in dc.custody_rows(tmp_path) if r.get("type") == dc.START_FAILED
                     and r.get("reason") == "recovery_refused_bad_request"]
     assert refused_rows == [], "identity-less automatic recovery never entered another POST"
@@ -780,14 +794,14 @@ def test_a_failed_start_does_not_leave_the_registration_it_created(
 
     live = {"prj-new"}
 
-    class _Stub(_LiveRunStub):
+    from tests._bound_registration import StartRegistry
+
+    class _Stub(StartRegistry, _LiveRunStub):
         def find_project_id(self, root): return ""
         def register_project(self, root): return "prj-new"
-        def remove_project(self, pid):
-            if remove_absent:
-                live.discard(pid)   # it was never there to begin with
-                raise gw.ClaudexorUnavailable("project_not_found", "gone", status_code=404)
+        def release_registered(self, pid):
             live.discard(pid)
+            return "absent" if remove_absent else "released"
         def start_run(self, request, *, idempotency_key=""):
             raise gw.ClaudexorUnavailable("daemon_busy" if status_code == 503 else "run_start_failed",
                                           "start outcome", status_code=status_code)
@@ -859,21 +873,24 @@ def test_shared_project_retirement_defers_quietly_for_non_canonical_sharers(tmp_
     import ouroboros.delegate_custody as dc
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
-    class _RefusingGateway:
+    from tests._bound_registration import BoundRegistry, owner_facts
+
+    class _RefusingGateway(BoundRegistry):
         def __init__(self):
             self.removals = []
             self.refuse = True
 
-        def remove_project(self, pid):
+        def release_registered(self, pid):
             self.removals.append(pid)
             if self.refuse:
-                raise ClaudexorUnavailable("project_busy", "project has live runs", status_code=409)
+                raise ClaudexorUnavailable("project_has_active_run", "project has live runs", status_code=409)
+            return "released"
 
     gateway = _RefusingGateway()
     for rid, tid in (("run-aa", "t-1"), ("run-bb", "t-2")):
         dc.record_started(tmp_path, dc.RunCustody(
             run_id=rid, task_id=tid, route_id="r", model="m", source="review_substrate",
-            project_id="prj-shared", project_owned=True, ledger_root=str(tmp_path)))
+            project_id="prj-shared", project_owned=True, **owner_facts(), ledger_root=str(tmp_path)))
     dc._CUSTODY.clear()
 
     # Non-canonical sharer: quiet deferral.

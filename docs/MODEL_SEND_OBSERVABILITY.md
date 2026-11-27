@@ -12,17 +12,37 @@ a reconstruction mismatch is an observability fact, not a dispatch gate.
 
 From a **separate matching source checkout** without an adoption pointer, run `python -m ouroboros.context_attempt_reader --data-root DATA TASK` to list a task's physical attempts, newest first, with their states and times; a delegated session, an unmetered dispatch or imported history is not one request, and selecting it says so (`not_one_attempt`). `TASK` is the task's own full ID. Dashboard › Logs shows it: open the task's entry, then one of its events; the record under the event names it as `subagent_task_id` when the event has one, else as `task_id`. The ID beside a Logs entry is cut to eight characters, and a Context Lens chart is named by a hash; neither is the full ID. Do not use the serving checkout: Python imports its startup hook before even `--help`, and may finish a pending body adoption. Pass the original installation's data root explicitly; one without `state/usage.sqlite` is named as such. Add `--attempt ID` to print the selected redacted body to standard output and its ledger state, exclusions and file trace to standard error; the recorded times, route and a failure's type come only with `--report`. The tool uses local OS file access; it is not an HTTP or extension API. The body is private even after default redaction, so keep it out of shared terminals and logs.
 
-If the selected body exceeds the 16 MiB default, or its sealed record (manifest) 2 MiB, the reader reports that size (the body also its redacted reference, the path relative to DATA) without printing a partial body. `--attempt ID --max-bytes N` only raises bounds: the request's to N, the record's too above 2 MiB. `over_limit` names the one N that admits both; `manifest_over_limit` can name only the record's size, so that run opens the record and learns the request's, and a request larger than the record then names its own N. Integrity verification still comes before output. A recorded candidate can have been released without dispatch. The reader never replaces a missing selection with a subsequent attempt and never reads the raw blob. A file trace names the captured `prompts/SYSTEM.md` SHA-256 when the leading system message still carries its exact normalized text. The capture's witness rides beside the send's physical context in memory and is no field of that record: the manifest's verified `file_trace` is its one durable copy, and no accounting row, receipt, capture or checkpoint carries it. Native top-level `system`/other serializers, older attempts and a send whose first message is not that prompt report no trace; a run that did not open the record reports it `not_read`. The digest describes the file at capture, not its present contents, and no offset in the redacted body or provider receipt is asserted.
+If the selected body exceeds the 16 MiB default, or its sealed record (manifest) 2 MiB, the reader reports that size (the body also its redacted reference, the path relative to DATA) without printing a partial body. `--attempt ID --max-bytes N` only raises bounds: the request's to N, the record's too above 2 MiB. `over_limit` names the one N that admits both; `manifest_over_limit` can name only the record's size, so that run opens the record and learns the request's, and a request larger than the record then names its own N. Integrity verification still comes before output. A recorded candidate can have been released without dispatch. The reader never replaces a missing selection with a subsequent attempt and never reads the raw blob. A file trace names the captured `prompts/SYSTEM.md` SHA-256 when the leading system message still carries its exact normalized text. When the same prepared text carries the captured `BIBLE.md` at its governance boundary, its digest and location are recorded too. Witnesses travel beside physical context and are not ledger fields: only the manifest keeps validated `file_trace` rows. New rows give character ranges in the prepared text before redaction; older rows need not give a range. Unsupported layouts (including native top-level `system`), unmatched content and missing witnesses leave a gap; an unopened seal reports `not_read`. Digests describe the files at capture, not today's files. There are no offsets in the redacted JSON and no provider input receipt.
 
 An attempt without a ledger-bound capture reference reports `not_linked` (trace `not_read`), even if failed preparation left a manifest on disk; a usage-reported row (a live conversation's), `receipt_only` (trace `not_recorded`). Inspection declines an export-marked usage store without completing its handoff. SQLite may use its ordinary sidecars and locks. A packed body is read from its task's own pack first; the shared evidence index is only read, never rebuilt (the packing pass rebuilds it). A read that must consult it and finds it missing or damaged leaves `observability/packs/.index.sqlite.damaged` for that pass, and a place that cannot be learned now is `evidence_unavailable`, never a loss. None of this changes the recorded request or accounting rows. Diagnostics and the redacted body may still contain private text or paths.
 
-Beautiful Context on Widgets opens a locally selected report in an isolated frame, not from a server archive route. Generate one with the retained request reader in a separate source checkout containing it, from a private local shell:
+The optional bundled **Beautiful Context** skill (off by default; enable in Extensions → Browse) opens a locally selected report in an isolated widget frame on Widgets, not from a server archive route. On a supported Windows WebView2 shell, Dashboard › Logs also offers **Open recent requests**: a separate offline window finds attempts in the bounded recent Main or Project dialogue and usage indexes, then reads the selected sealed copy. The opener gets only status. There is no background indexer, raw-body selector, HTTP route or file export on that path. To open a report in a browser, generate one with the retained reader in a separate source checkout containing it, from a private local shell:
 
 ```sh
-python -m ouroboros.context_attempt_reader --data-root LOCAL_DATA TASK_ID --attempt ATTEMPT_ID --report > PRIVATE_REPORT.json
+python -m ouroboros.context_attempt_reader --data-root LOCAL_DATA TASK_ID --attempt ATTEMPT_ID --report > "/path/to/private-directory/ATTEMPT_ID.json"
 ```
 
-Use binary-safe stdout redirection (e.g. a POSIX shell or `cmd.exe`), a new private non-synced path outside Files, and discard failed exports. Reports can contain private text even after redaction and are not meant to be forwarded automatically. Open the JSON with **Beautiful Context → Open local report**; the frame neither uploads nor persists its selection, and closing it clears the view. A report belongs to one attempt: it carries that attempt's IDs, ledger state and what the ledger recorded of its times, route and a failure's type (never its words), so two attempts that sent the same body stay two reports. The page lists the request's messages and tools as rows that open into their whole text, and keeps the retained redacted host JSON literal and whole beside the recorded file versions. It is the host's historical copy, not a receipt of provider input, and a ledger state is accounting of the attempt's record, never proof of delivery or of a final price. A gap stays a gap: a report without a body (`not_linked`, `not_recorded`, `unavailable`, any reason above) is still written, the terminal names the gap, and the page says which one it is instead of showing an earlier result; an empty or cut file is refused as such. A request whose report would exceed the page's 48 MiB is `over_page_limit`: a bounded report of the attempt with a failure's type and its file trace, the request's size and the report's (a floor when the request alone exceeds the page, whose report is never built), and the reader's command that writes the request to a file without `--report`, which still writes the exact stored JSON bytes.
+Use a byte-preserving shell (binary-safe stdout redirection, e.g. a POSIX shell or `cmd.exe`), a new file for each attempt in a private, non-synced directory outside both the checkout and Files, and discard failed exports. Reports can contain private text even after redaction and are not meant to be forwarded automatically. Open the JSON with **Beautiful Context → Open local report**; the frame neither uploads nor persists its selection; the bundled skill's own page (`skills/beautiful_context/SKILL.md`) says what leaving Widgets, the card's Stop and disabling the skill each do to the open report. A report belongs to one attempt: it carries that attempt's IDs, ledger state and what the ledger recorded of its times, route and a failure's type (never its words), so two attempts that sent the same body stay two reports. The page lists the request's messages and tools as rows that open into their whole text, and keeps the retained redacted host JSON literal and whole beside the recorded file versions. It is the host's historical copy, not a receipt of provider input, and a ledger state is accounting of the attempt's record, never proof of delivery or of a final price. A gap stays a gap: a report without a body (`not_linked`, `not_recorded`, `unavailable`, any reason above) is still written, the terminal names the gap, and the page says which one it is instead of showing an earlier result; an empty or cut file is refused as such. A request whose report would exceed the page's 48 MiB is `over_page_limit`: a bounded report of the attempt with a failure's type and its file trace, the request's size and the report's (a floor when the request alone exceeds the page, whose report is never built), and the reader's command that writes the request to a file without `--report`, which still writes the exact stored JSON bytes.
+
+The report's **How this request was built** view uses the selected attempt's
+ledger facts even when its body is unavailable. It shows the recorded context
+mode and sizing basis, such as recent route usage or a cold estimate, and any
+mode-change cause the host observed. The host's prefix comparison describes
+the logical view within the task, which a retry can inherit; it is neither a
+physical byte diff between two requests nor a provider cache verdict. The separate ledger token counters may contain normalized zeros; a displayed
+zero does not prove the provider reported that counter. File versions come from the sealed file
+trace, not the files currently on disk; it is not a complete block-to-source map.
+
+**Compare with another report** opens a second locally selected attempt without
+altering the first. It compares the UTF-8 text of the stored redacted copies,
+including order and whitespace, and lists top-level fields whose recorded value
+text changed. Changed ordered message, input and tool lists also show the first
+locatable item difference in their stored text. The two files together must fit the page's 48 MiB bound. The
+comparison reports each attempt's ledger counters separately. An identical
+redacted copy does not establish identical unmasked or provider inputs, and
+neither a common prefix nor a cache counter identifies a cache donor. The
+second file and its comparison do not leave the frame; replacing the first
+report clears them.
 
 ## 1. Scope of the claim
 
@@ -142,6 +162,49 @@ AND written beside the seal (so it survives log rotation with its subject):
 ```
 
 No secret bytes ever enter the fact — digests and offsets only.
+
+### Beautiful Context source map
+
+The retained attempt can carry `assembly_source_map` from the chosen context
+render: logical sections, selected forms, bounded source addresses and captured
+book-file identities. A carrier digest binds a block to one supported placement;
+changed or ambiguous carriers keep their selected groups but no physical range.
+Ranges use Python Unicode positions before masking. They do not index the redacted
+body. Chapter identities attest the navigation's inputs, not delivery of whole
+chapter text. Conversation address samples are not a list of members or evidence
+that a captured archive window had no gaps.
+
+`prepared_inventory` separately counts prepared input and tool fields, regardless
+of whether the reader can open the stored body. An item with a located origin
+may also contain other material. Selection not recorded, position unverified,
+and text withheld are different facts; legacy manifests do not gain retroactive
+coverage. Neither map rereads current sources, changes the send, nor claims
+provider-side provenance. The local report keeps these facts visible when the
+saved request body is unavailable.
+
+`late_contributions` observes typed rows and selected schemas at Main's send
+boundary. In-process producer receipts on owner input, task mail, Presence
+reentry, result allocation and registry materialization stay off transcript and
+schemas. If still available, they identify the decision and safe source address
+or count. Attachment staging observes the files listed and composed as images;
+the image route binds caption, refusal or unavailable pixels to its actual
+replacement part beside the send copy. A unique comparable physical representation locates the containing
+row (not every part), or the exact schema. Changed, duplicate, unsupported or
+unobserved forms stay unverified. Limits are recorded; older attempts and cold
+restores lacking those receipts gain no historical attribution. None of the
+facts stores image bytes, caption text, schema bodies or underlying words.
+The report is private: source addresses and exact saved request previews are
+not anonymized, even when the existing request redactor masks credentials.
+
+`provider_token_receipt` is optional response evidence from the HTTP parser,
+separate from accounting. Chat and native Messages SSE resolve aliases in each
+actual usage object and keep the latest usable counters in arrival order,
+including on an unresolved attempt. An envelope price alone does not imply a
+usage object. The receipt holds no text, projected ledger zeros or counters from
+a neighboring attempt. Missing counters stay unknown; an empty receipt means an
+observed usage object supplied no usable count. The native input field keeps its
+provider-specific meaning. Legacy rows and engine-only paths without a parser
+witness have no receipt.
 
 ## 4. Typed exclusions (closed set)
 

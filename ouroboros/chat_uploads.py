@@ -8,7 +8,8 @@ a ref the SERVER measured: ``{"upload", "name", "mime", "kind", "size", "sha256"
 image/video/audio/file from the bytes, never from the client or the extension alone;
 ``size`` and ``mtime_ns`` are the stored file's stat witness). No absolute path,
 base64 or client URL is ever recorded. A frame naming an upload that does not
-exist records ``{"name", "kind": "file", "unavailable": "missing"}`` instead.
+exist records ``{"name", "kind": "file", "unavailable": "missing"}`` instead; media a
+transport could not receive records its own pathless fact (``delivery_ref``).
 
 ``sha256`` is what the bytes were when measured (retry identity, staging
 verification); nothing re-proves it on replay or download. Replay compares only
@@ -27,11 +28,16 @@ cleanup after a failed send); acceptance claims it inside the message bus's
 ingress critical section, so DELETE and acceptance are serialized and an
 accepted original is never removed. After a restart nothing is pending: DELETE
 fails closed and an unaccepted copy stays (no second store tracks it).
+
+A task that copies a held row's files reads them here too: staging specs under
+the root the row was read from (``upload_specs``), and rows verified against their
+saved identity for a successor's own copy (``quoted_inputs``).
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import os
 import pathlib
@@ -40,7 +46,7 @@ import stat
 import threading
 import uuid
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import quote
 
 from ouroboros.confined_files import open_regular_file, plain_name
@@ -54,16 +60,28 @@ _PENDING: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _PENDING_LOCK = threading.Lock()
 # Host placeholders logged when a message carries attachments but no words; the row that
 # carries one says so (``text_placeholder``), so an owner who typed the same words keeps them.
-PLACEHOLDER_TEXTS = ("(image attached)", "(file attached)")
+PLACEHOLDER_TEXTS = ("(image attached)", "(file attached)", "(attachment unavailable)")
+# Media a transport never received (over its download cap, or a failed download): no bytes, no upload.
+DELIVERY_FAILURES = ("too_large", "download_failed")
+_MIME_RE = re.compile(r"[\w.+-]{1,100}/[\w.+-]{1,100}", re.ASCII)
 
 
 def attachment_placeholder(image_base64: Any, metadata: Any) -> str:
     """The same canonical empty-caption text at acceptance and batch dispatch."""
     metadata = metadata if isinstance(metadata, dict) else {}
-    image_ref = any(isinstance(ref, dict) and ref.get("kind") == "image"
-                    for ref in metadata.get("chat_attachments") or ())
+    refs = [ref for ref in metadata.get("chat_attachments") or () if isinstance(ref, dict)]
+    if refs and not image_base64 and all(ref.get("unavailable") in DELIVERY_FAILURES for ref in refs):
+        return "(attachment unavailable)"
+    image_ref = any(ref.get("kind") == "image" for ref in refs)
     return ("(image attached)" if image_base64 or image_ref else
             "(file attached)" if metadata.get("chat_attachment_uploads") or metadata.get("chat_attachments") else "")
+
+
+def local_message_words(source: str, text: str, caption: str) -> str:
+    """Named Telegram media keep their exact caption; other local doors keep their text convention."""
+    if source == "skill:telegram" and caption.strip() and (not text.strip() or text == caption):
+        return caption
+    return text.strip() or caption.strip()
 
 
 def uploads_dir(data_dir: Any = None) -> pathlib.Path:
@@ -257,6 +275,23 @@ def unavailable_ref(label: Any) -> Dict[str, Any]:
     return {"name": _label(label), "kind": "file", "unavailable": "missing"}
 
 
+def delivery_ref(item: Dict[str, Any]) -> Dict[str, Any]:
+    """The ref a row records for a transport's pathless fact ``{name, mime?, size?, unavailable, limit_bytes?}``:
+    media it never received, so nothing is read, stored or downloadable. ``limit_bytes`` (the transport's cap)
+    comes with ``too_large`` only. Anything else is refused (``ValueError``)."""
+    reason, size, limit = item.get("unavailable"), item.get("size"), item.get("limit_bytes")
+    if (reason not in DELIVERY_FAILURES or set(item) - {"name", "mime", "size", "unavailable", "limit_bytes"}
+            or "size" in item and (type(size) is not int or size < 0)
+            or ("limit_bytes" in item) != (reason == "too_large")
+            or "limit_bytes" in item and (type(limit) is not int or limit < 1)):
+        raise ValueError("is not a valid unavailable-media fact")
+    mime = item.get("mime")
+    return {"name": _label(re.split(r"[/\\]", str(item.get("name") or ""))[-1]), "kind": "file",
+            "mime": mime if isinstance(mime, str) and _MIME_RE.fullmatch(mime) else "application/octet-stream",
+            "unavailable": reason, **({"size": size} if "size" in item else {}),
+            **({"limit_bytes": limit} if "limit_bytes" in item else {})}
+
+
 def refs_for_frame(attachments: Any, data_dir: Any = None) -> List[Dict[str, Any]]:
     """Measured refs for a web chat frame's ``attachments``: every one, in order.
 
@@ -316,10 +351,79 @@ def delete_pending_upload(upload: str, data_dir: Any = None) -> str:
 # Identity and presentation
 # ---------------------------------------------------------------------------
 
-def attachment_identity(refs: Any) -> List[List[str]]:
+def delivery_failures(refs: Any) -> list[dict]:
+    """Only observed never-received files, not vanished uploads or user-supplied URLs."""
+    return [{**ref, "ordinal": ordinal} for ordinal, ref in enumerate(refs if isinstance(refs, list) else []) if isinstance(ref, dict)
+            and ref.get("unavailable") in DELIVERY_FAILURES and not ref.get("upload")]
+
+
+def delivery_manifest_rows(attachments: Any) -> list[dict]:
+    """Reports of bytes the transport never received, not staging failures."""
+    return [row for row in (attachments if isinstance(attachments, list) else []) if isinstance(row, dict)
+            and row.get("status") == "rejected" and row.get("reason") in DELIVERY_FAILURES]
+
+
+def delivery_manifest_refs(manifest: Any) -> list[dict]:
+    """The mailbox's retained facts as corpus attachment refs, independent of any other stored row."""
+    return [{"name": row.get("label") or "attachment", "kind": "file", "unavailable": row["reason"],
+             **{key: row[key] for key in ("mime", "size", "limit_bytes") if key in row}}
+            for row in delivery_manifest_rows(manifest)]
+
+
+def delivery_failure_line(name: str, reason: str, ordinal: int, facts: dict) -> str:
+    said = "".join(f", {key}={facts[key]}" for key in ("mime", "size", "limit_bytes") if facts.get(key) is not None)
+    return f"- {name}: not received (reason={reason}{said}, ordinal={ordinal})"
+
+
+def _delivery_block(lines) -> str:
+    body = "\n".join(lines)
+    return ("[Host fact: attachment delivery; not the owner's words]\n"
+            f"[ATTACHMENTS]\n{body}\n[END_ATTACHMENTS]") if body else ""
+
+
+def attachment_delivery_block(manifest: Any) -> str:
+    """Attributed model input on a new delivery, independent of the caption's words."""
+    return _delivery_block(delivery_failure_line(row.get("label") or "attachment", row["reason"], row.get("ordinal", 0), row)
+                           for row in delivery_manifest_rows(manifest))
+
+
+def attachment_ref_delivery_block(refs: Any) -> str:
+    """Same facts from a verified chat row, including each declaration's original position."""
+    return _delivery_block(delivery_failure_line(ref.get("name") or "attachment", ref["unavailable"], ref.get("ordinal", ordinal), ref)
+                           for ordinal, ref in enumerate(refs if isinstance(refs, list) else [])
+                           if isinstance(ref, dict) and ref.get("unavailable") in DELIVERY_FAILURES and not ref.get("upload"))
+
+
+def attachment_reply_context(target: Any) -> str:
+    """An ordinary Reply's exact resolved source, only when it records a transport refusal."""
+    facts = attachment_ref_delivery_block(target.get("attachments"))
+    if not facts or not target.get("address"):
+        return ""
+    return "\n".join(part for part in (
+        f"[Reply source from {target.get('author') or 'author not recorded'} at {target['address']}]",
+        target.get("text"), facts) if part)
+
+
+def retained_attachments_note(files: Any) -> str:
+    """Files named by the host under the row's words: name, type, size, staged path or delivered download URL,
+    or the fact that the file was not given to this work. ``""`` for a row with none."""
+    named = []
+    for ref in files if isinstance(files, list) else []:
+        if isinstance(ref, Mapping) and ref.get("unavailable") not in DELIVERY_FAILURES:
+            facts = ([str(ref["mime"])] * bool(ref.get("mime")) + [f"{ref['size']} bytes"] * (ref.get("size") is not None)
+                     + [str(ref[key]) for key in ("staged", "download_url") if ref.get(key)])
+            if ref.get("unavailable"):
+                facts.append("unavailable")
+            named.append(str(ref.get("name") or "attachment") + (f" ({', '.join(facts)})" if facts else ""))
+    return "\n".join(part for part in (
+        f"[Host-retained attachments: {'; '.join(named)}]" if named else "", attachment_ref_delivery_block(files)) if part)
+
+
+def attachment_identity(refs: Any) -> list:
     """What makes two deliveries the SAME message's attachments: ordered content and
     names, never the regenerated stored id."""
-    return [[str(ref.get("sha256") or ""), str(ref.get("name") or "")]
+    return [[ref.get(key) for key in ("unavailable", "name", "mime", "size", "limit_bytes")]
+            if ref.get("unavailable") in DELIVERY_FAILURES else [str(ref.get("sha256") or ""), str(ref.get("name") or "")]
             for ref in (refs if isinstance(refs, list) else []) if isinstance(ref, dict)]
 
 
@@ -352,7 +456,9 @@ def same_message(row: Any, text: str, refs: Any) -> bool:
     from ouroboros.project_dialogue import _text_sha256
 
     row = row if isinstance(row, dict) else {}
-    return (_text_sha256(row.get("text")) == _text_sha256(text)
+    same_words = (row.get("text") == text if row.get("source") == "skill:telegram"
+                  else _text_sha256(row.get("text")) == _text_sha256(text))
+    return (same_words
             and attachment_identity(row.get("attachments")) == attachment_identity(refs))
 
 
@@ -362,7 +468,9 @@ def attachment_view(ref: Any) -> Dict[str, Any]:
     upload = upload_id(ref.get("upload"))
     name = _label(ref.get("name"))
     if not upload or ref.get("unavailable"):
-        return {"name": name, "kind": "file", "mime": "", "available": False}
+        facts = ({key: ref[key] for key in ("unavailable", "size", "limit_bytes") if key in ref}
+                 if ref.get("unavailable") in DELIVERY_FAILURES and not upload else {})
+        return {"name": name, "kind": "file", "mime": "", "available": False, **facts}
     kind = ref.get("kind") if ref.get("kind") in {"image", "video", "audio", "file"} else "file"
     size = ref.get("size")
     return {"name": name, "kind": kind, "mime": str(ref.get("mime") or "application/octet-stream"),
@@ -412,15 +520,297 @@ def attachment_views(refs: Any, data_dir: Any = None) -> List[Dict[str, Any]]:
 
 def stored_refs(value: Any) -> List[Dict[str, Any]]:
     """The refs a canonical writer persists: every one, as plain JSON dicts, nothing else."""
-    keys = ("upload", "name", "mime", "kind", "size", "sha256", "mtime_ns", "unavailable")
+    keys = ("upload", "name", "mime", "kind", "size", "sha256", "mtime_ns", "unavailable", "limit_bytes")
     return [{key: ref[key] for key in keys if key in ref}
             for ref in (value if isinstance(value, list) else []) if isinstance(ref, dict)]
 
 
+def answer_files(refs: Any) -> List[Dict[str, Any]]:
+    """A recorded answer's files as its card and receipt state them: name, kind, type, size, digest, or why one was
+    never received. No stored id or stat witness: these facts open no download."""
+    return [{key: ref[key] for key in ("name", "kind", "mime", "size", "sha256", "unavailable", "limit_bytes")
+             if key in ref} for ref in stored_refs(refs)]
+
+
+def _project_attachments(mapping: Dict[str, Any], key: str = "attachments") -> Dict[str, Any]:
+    """Shallow-copy ``mapping`` with ``key`` projected via ``answer_files`` (dropped when empty)."""
+    out = dict(mapping)
+    if key in out:
+        files = answer_files(out[key])
+        if files:
+            out[key] = files
+        else:
+            out.pop(key, None)
+    return out
+
+
+def _is_secret_quiz(block: Any) -> bool:
+    """Whether ``block`` carries protected secret-form metadata (never altered by display projection)."""
+    if not isinstance(block, dict):
+        return False
+    from ouroboros.owner_quiz import SECRET_FIELDS, secret_outcome_block
+
+    return any(block.get(key) for key in SECRET_FIELDS) or secret_outcome_block(block) is not None
+
+
+def public_quiz_block(block: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy a stored quiz/answer block with top-level and ``delivery.answer_row`` attachments projected via
+    ``answer_files`` (shallow-copying only touched branches, never mutating ``block``)."""
+    out = _project_attachments(block)
+    delivery = out.get("delivery")
+    answer_row = delivery.get("answer_row") if isinstance(delivery, dict) else None
+    if isinstance(answer_row, dict) and ("attachments" in answer_row or (
+            isinstance(answer_row.get("quiz"), dict) and "attachments" in answer_row["quiz"])):
+        row_copy = _project_attachments(answer_row)
+        if isinstance(row_copy.get("quiz"), dict) and "attachments" in row_copy["quiz"]:
+            row_copy["quiz"] = _project_attachments(row_copy["quiz"])
+        out["delivery"] = {**delivery, "answer_row": row_copy}
+    return out
+
+
+def _public_late_answer(late: Any) -> Any:
+    """Copy a ``late_answer`` carrier with ``answer_snapshot.quiz`` projected via ``public_quiz_block``."""
+    snapshot = late.get("answer_snapshot") if isinstance(late, dict) else None
+    if not (isinstance(snapshot, dict) and isinstance(snapshot.get("quiz"), dict)) or _is_secret_quiz(snapshot["quiz"]):
+        return late
+    return {**late, "answer_snapshot": {**snapshot, "quiz": public_quiz_block(snapshot["quiz"])}}
+
+
+def _late_quiz_file_snapshot(late: Any) -> bool:
+    """Pure typed-shape check for an accepted late-answer snapshot of an ordinary (non-secret)
+    quiz carrying recorded file refs — the exact shape ``gateway/task_decision._forward_late_quiz_answer``
+    and ``supervisor/message_ingress._chat_record`` pair with ``metadata.chat_attachments`` /
+    ``metadata.chat_attachment_uploads`` and a held late-answer row's ``attachments``. Never reads a store."""
+    if not isinstance(late, dict):
+        return False
+    snapshot = late.get("answer_snapshot")
+    quiz = snapshot.get("quiz") if isinstance(snapshot, dict) else None
+    if not isinstance(quiz, dict):
+        return False
+    if not (quiz.get("answered_after_terminal") is True or quiz.get("delivery_after_terminal") is True
+            or isinstance(quiz.get("delivery"), dict)):
+        return False
+    from ouroboros.owner_quiz import late_answer_ref
+
+    ref = late_answer_ref(late)
+    block = (ref.get("answer_snapshot") or {}).get("quiz") if isinstance(ref, dict) else None
+    if not isinstance(block, dict) or _is_secret_quiz(block):
+        return False
+    return any(stored_refs(block.get("attachments")))
+
+
+def _public_late_carrier(
+    mapping: Dict[str, Any], *, attachments_key: str, drop_uploads: bool = False,
+) -> Dict[str, Any]:
+    """Project ``late_answer.answer_snapshot.quiz`` and, when ``_late_quiz_file_snapshot`` holds,
+    the carrier's companion file refs (and optional transport-only uploads) without mutating ``mapping``."""
+    late = mapping.get("late_answer")
+    projected_late = _public_late_answer(late)
+    late_files = _late_quiz_file_snapshot(late)
+    if projected_late is late and not late_files:
+        return mapping
+    out = _project_attachments(mapping, attachments_key) if late_files else dict(mapping)
+    if projected_late is not late:
+        out["late_answer"] = projected_late
+    if late_files and drop_uploads:
+        out.pop("chat_attachment_uploads", None)
+    return out
+
+
+def public_owner_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """A held owner row's display copy: its ``quiz`` block and/or accepted ``late_answer`` snapshot as their cards
+    state them (``public_quiz_block`` / ``_public_late_carrier``), plus its own ``attachments`` when the row carries
+    a ``quiz`` block or a typed late ordinary quiz file snapshot, shallow-copying only the touched branches. A row
+    carrying neither stays as it is."""
+    if not isinstance(row, dict):
+        return row
+    out = _public_late_carrier(row, attachments_key="attachments")
+    if not isinstance(row.get("quiz"), dict):
+        return out
+    return {**public_quiz_block(out), "quiz": public_quiz_block(row["quiz"])}
+
+
+def _public_held_rows(held: Dict[str, Any]) -> Dict[str, Any]:
+    return {address: public_owner_row(row) if isinstance(row, dict) else row
+            for address, row in held.items()}
+
+
+def _public_mailbox_row(line: Any) -> Any:
+    """Project ``quiz_delivery.answer_snapshot`` on one serialized ordinary ``quiz_answer`` mailbox line,
+    keeping its string wire type and leaving every other line byte-for-byte untouched."""
+    if not isinstance(line, str):
+        return line
+    try:
+        entry = json.loads(line)
+    except (ValueError, TypeError):
+        return line
+    if not isinstance(entry, dict) or entry.get("kind") != "quiz_answer":
+        return line
+    delivery = entry.get("quiz_delivery")
+    snapshot = delivery.get("answer_snapshot") if isinstance(delivery, dict) else None
+    if not isinstance(snapshot, dict) or _is_secret_quiz(snapshot) or _is_secret_quiz(entry):
+        return line
+    projected = public_quiz_block(snapshot)
+    if projected == snapshot:
+        return line
+    from ouroboros.utils import machine_json
+
+    return machine_json({**entry, "quiz_delivery": {**delivery, "answer_snapshot": projected}})
+
+
+def _public_mailbox_capture(capture: Any) -> Any:
+    """Project serialized ``quiz_answer`` lines inside a mailbox capture dict without mutating ``capture``."""
+    rows = capture.get("rows") if isinstance(capture, dict) else None
+    if not isinstance(rows, list):
+        return capture
+    projected = [_public_mailbox_row(line) for line in rows]
+    if all(new is old for new, old in zip(projected, rows)):
+        return capture
+    return {**capture, "rows": projected}
+
+
+def public_quiz_copies(payload: Dict[str, Any]) -> None:
+    """Project all named public task-result and task-event carriers of quiz answer files in place on ``payload``:
+    a task-scoped ``quiz_answer`` event row's top-level ``quiz`` (and ``attachments`` if present),
+    ``owner_quiz``, top-level ``held_owner_messages`` (both ``quiz`` rows and held inbound ``late_answer`` rows),
+    serialized ``quiz_answer`` rows inside ``owner_mailbox.rows`` / ``unread_mailbox.rows``,
+    ``metadata.late_answer.answer_snapshot.quiz`` (plus sibling ``metadata.chat_attachments`` and transport-only
+    ``metadata.chat_attachment_uploads`` when ``metadata.late_answer`` establishes a typed late ordinary quiz file
+    snapshot) and ``metadata.continuation.owner_sources.held_owner_messages``. Only these named carriers are touched —
+    never a walk of the whole document, and non-quiz rows stay verbatim — shallow-copying touched containers so the
+    stored result, the canonical chat row, exact owner reads and every other carrier keep their own bytes."""
+    if not isinstance(payload, dict):
+        return
+    quiz = payload.get("quiz")
+    if (payload.get("type") == "quiz_answer" and isinstance(quiz, dict)
+            and not _is_secret_quiz(quiz) and not _is_secret_quiz(payload)):
+        payload["quiz"] = public_quiz_block(quiz)
+        if "attachments" in payload:
+            files = answer_files(payload["attachments"])
+            if files:
+                payload["attachments"] = files
+            else:
+                payload.pop("attachments", None)
+    owner_quiz = payload.get("owner_quiz")
+    if isinstance(owner_quiz, dict):
+        payload["owner_quiz"] = {
+            qid: public_quiz_block(block) if isinstance(block, dict) else block
+            for qid, block in owner_quiz.items()
+        }
+    held = payload.get("held_owner_messages")
+    if isinstance(held, dict):
+        payload["held_owner_messages"] = _public_held_rows(held)
+    for key in ("owner_mailbox", "unread_mailbox"):
+        capture = payload.get(key)
+        projected_capture = _public_mailbox_capture(capture)
+        if projected_capture is not capture:
+            payload[key] = projected_capture
+    meta = payload.get("metadata")
+    if not isinstance(meta, dict):
+        return
+    meta_out = _public_late_carrier(meta, attachments_key="chat_attachments", drop_uploads=True)
+    continuation = meta_out.get("continuation")
+    sources = continuation.get("owner_sources") if isinstance(continuation, dict) else None
+    inherited = sources.get("held_owner_messages") if isinstance(sources, dict) else None
+    if isinstance(inherited, dict):
+        meta_out = {
+            **meta_out,
+            "continuation": {
+                **continuation,
+                "owner_sources": {**sources, "held_owner_messages": _public_held_rows(inherited)},
+            },
+        }
+    if meta_out is not meta:
+        payload["metadata"] = meta_out
+
+
+def staging_specs(refs: Any, data_dir: Any = None) -> List[Dict[str, Any]]:
+    """Recorded refs as ``artifacts.stage_task_attachments`` specs, built when delivered: a stored upload by its path
+    and measured size and digest, verified while copied (a file changed or gone since is refused, never replaced); a
+    file never received or gone at acceptance, by its reason and facts, with no path."""
+    specs = []
+    for ref in stored_refs(refs):
+        upload = "" if ref.get("unavailable") else upload_id(ref.get("upload"))
+        specs.append({"label": str(ref.get("name") or "attachment"),
+                      **{key: ref[key] for key in ("mime", "size", "sha256", "unavailable", "limit_bytes") if key in ref},
+                      **({"path": str(uploads_dir(data_dir) / upload)} if upload else {})})
+    return specs
+
+
+def answer_evidence(refs: Any) -> List[Dict[str, Any]]:
+    """The recorded refs that are a file's evidence: a stored upload id, or the typed reason none was held. A ref
+    with neither (an empty or display-only entry) evidences nothing and answers nothing."""
+    return [ref for ref in stored_refs(refs) if upload_id(ref.get("upload"))
+            or ref.get("unavailable") in (*DELIVERY_FAILURES, "missing", "outside_store")]
+
+
+def row_attachments(row: Any, root: Any = None) -> List[Dict[str, Any]]:
+    """The stored refs of the files an owner row carries, by its own record: an inbound row's ``attachments``; a card's
+    answer row (``type == quiz_answer``), the files its recorded winner holds (``quiz.attachments``); a late answer's
+    row recorded without them, its accepted snapshot's. Display facts (``answer_files``) never come here."""
+    if not isinstance(row, dict):
+        return []
+    if row.get("attachments") or (row.get("type") != "quiz_answer" and not row.get("late_answer")):
+        return stored_refs(row.get("attachments"))
+    if row.get("type") == "quiz_answer":  # the host's own answer row (``owner_relay.quotable_owner_row``), never a secret outcome
+        from ouroboros.owner_quiz import secret_outcome_block
+        quiz = row.get("quiz")
+        return (stored_refs(quiz.get("attachments")) if row.get("source") == "owner_quiz_answer" and isinstance(quiz, dict)
+                and quiz.get("state") == "answered" and secret_outcome_block(row) is None else [])
+    from ouroboros.owner_quiz import late_answer_ref, resolved_late_quiz
+    late = late_answer_ref(row.get("late_answer"))
+    return stored_refs(resolved_late_quiz(root, late).get("attachments")) if late else []
+
+
+def upload_specs(row: Any, root: Any) -> List[Dict[str, Any]]:
+    """A held row's files as staging specs for ``artifacts.stage_task_attachments``: each saved upload under the root
+    the row was read from, with its saved identity (a file with no saved upload keeps its name and stages nothing).
+    Retains the full stored ref fields and an explicit ``path`` (empty when unavailable), distinct from ``staging_specs``."""
+    specs = []
+    for ref in row_attachments(row, root):
+        upload = upload_id(ref.get("upload"))
+        path = str(uploads_dir(root) / upload) if upload and not ref.get("unavailable") else ""
+        specs.append({**ref, "path": path, "label": str(ref.get("name") or "attachment")})
+    return specs
+
+
+def quoted_inputs(root, refs: list) -> list:
+    """The owner files a relay's quoted rows carried (their saved chat uploads, which ``owner_relay.quote_content``
+    stages on delivery), as rows another task's own copy reads (``artifacts.materialize_inherited_attachment_manifest``):
+    each upload verified against its saved identity and named by its unique upload id, so two same-named files stay
+    two. One gone or changed is a rejected ``source_missing`` row under its name, never other bytes; a secret-named one
+    is refused as staging refuses it (``secret_source``)."""
+    from ouroboros.artifacts import stream_artifact_file
+    from ouroboros.workspace_patch_rules import _sensitive_untracked_reason
+
+    rows = []
+    for ordinal, ref in enumerate(refs):
+        uid = upload_id(ref.get("upload"))
+        source_root = ref.get("_owner_source_root") or root
+        path, original = uploads_dir(source_root) / uid, re.sub(r"^[0-9a-f]{32}_", "", uid)
+        row = {"ordinal": ordinal, "label": str(ref.get("name") or "attachment"),
+               **{key: ref[key] for key in ("mime", "size", "sha256") if key in ref}}
+        if uid and (reason := _sensitive_untracked_reason(original)):
+            rows.append({**row, "status": "rejected", "reason": "secret_source",
+                         "rule": f"uploaded file name {original!r}: {reason}"})
+            continue
+        try:
+            if not uid:
+                raise OSError("the quoted row names no saved upload")
+            stream_artifact_file(path, expected=ref)
+            mime, kind = file_media(path)
+        except OSError:
+            rows.append({**row, "status": "rejected", "reason": "source_missing"})
+            continue
+        rows.append({**row, "status": "staged", "root": "artifact_store", "relpath": f"attachments/{uid}",
+                     "abs_path": str(path), "mime": mime, "is_image": kind == "image"})
+    return rows
+
+
 __all__ = [
-    "DOWNLOAD_ROUTE", "PLACEHOLDER_TEXTS", "attachment_identity", "attachment_view",
-    "attachment_views", "bytes_identity", "claim_refs", "delete_pending_upload", "detect_media",
-    "inline_image_name", "measure_upload", "new_upload_id", "open_upload", "refs_for_frame",
-    "safe_upload_name", "same_message", "source_identity", "store_upload", "stored_refs",
-    "unavailable_ref", "upload_id", "uploads_dir",
+    "DELIVERY_FAILURES", "DOWNLOAD_ROUTE", "PLACEHOLDER_TEXTS", "answer_files", "attachment_identity",
+    "attachment_view", "attachment_views", "bytes_identity", "claim_refs", "delete_pending_upload", "delivery_ref",
+    "detect_media", "inline_image_name", "measure_upload", "new_upload_id", "open_upload", "public_owner_row",
+    "public_quiz_copies", "quoted_inputs", "refs_for_frame", "row_attachments", "safe_upload_name", "same_message", "source_identity",
+    "staging_specs", "store_upload", "stored_refs", "unavailable_ref", "upload_id", "upload_specs", "uploads_dir",
 ]

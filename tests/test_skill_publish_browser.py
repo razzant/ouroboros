@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.settings_section_helpers import open_extensions
 from tests.test_ui_smoke_playwright import (
     direct_server_with_data as _direct_server_with_data,
 )
@@ -58,7 +59,7 @@ def test_ui_publish_stale_card_reaches_selected_preflight_and_task(
                 page.route("**/api/skill-sources", lambda route: route.fulfill(json=SOURCES))
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 # Installed cards are usable before any source is read.
-                page.click('[data-nav-page="skills"]')
+                open_extensions(page)
                 card = page.locator(f'.skills-card[data-skill="{skill_name}"]').first
                 card.wait_for(state="visible", timeout=30_000)
                 assert card.locator(".skills-submit-hub").get_attribute("data-submit-disabled") == "false"

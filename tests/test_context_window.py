@@ -4,6 +4,7 @@ from dataclasses import replace
 import pytest
 
 from ouroboros import capability_evidence as ce
+from ouroboros import context_measurement
 from ouroboros.context_window import WindowLimit, WindowRecord, record_observation, resolve_window
 
 
@@ -195,8 +196,10 @@ def test_a_request_inside_the_reply_reservation_is_known_as_one(tmp_path, monkey
     core, _snap = _core(True)
     plan = cf.build_context_fit_plan(None, core, {"usage_category": "consciousness"}, preferred_mode="max",
         route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "test"},
-            ce.CapabilityEvidence(300_000, "confirmed", source, "probe-route")))
-    monkeypatch.setattr(cf, "estimate_context_prompt_tokens", lambda *_a, **_kw: size)
+            ce.CapabilityEvidence(300_000, "confirmed", source, "probe-route", ts=ce.utc_now_iso())))
+    assert plan.window_tokens == 300_000
+    assert plan.window_record.usable == 234_464
+    monkeypatch.setattr(context_measurement, "estimate_context_prompt_tokens", lambda *_a, **_kw: size)
     anchor = InputAnchor(input_tokens=size, estimate_tokens=size, transcript_tokens=size, round=1) if anchored else None
     fit = cf.measure_main_fit(plan, [], [], profile="owner_max", rendered_mode="max", round_id="r", anchor=anchor).measurement
     assert fit.estimated_input_tokens == size and fit.probes_reply_reservation is probes
@@ -324,7 +327,7 @@ def test_start_and_in_task_admission_share_the_input_bound(tmp_path, monkeypatch
     elif accepted > stated:
         assert "input: accepted 2026-10-19" in line
     for size in ([880_000, 921_227, 921_228] if stated == 872_000 else [900_000, 950_000, 991_808, 991_809]):
-        monkeypatch.setattr(cf, "estimate_context_prompt_tokens", lambda *_a, **_kw: size)
+        monkeypatch.setattr(context_measurement, "estimate_context_prompt_tokens", lambda *_a, **_kw: size)
         disposition = cf.measure_main_fit(plan, [], [], profile="owner_max", rendered_mode="max", round_id="r",
                                           accepted_input_tokens=accepted)
         physical = cf._physical_context_for_fit(disposition)
@@ -336,6 +339,30 @@ def test_start_and_in_task_admission_share_the_input_bound(tmp_path, monkeypatch
         if refusal is not None:  # one line: what the check refuses is what the passes then measure
             assert refusal["predicted_free_tokens"] == refusal["free_tokens"] == admitted - size
             assert refusal["response_reserve_tokens"] == 65_536
+
+
+def test_presend_refusal_reclaims_an_eighth_of_stated_total_not_shifted_admission(tmp_path, monkeypatch):
+    from ouroboros import context_fit as cf
+    from ouroboros.llm_attempt import main_context_fit_refusal
+    from ouroboros.usage_accounting import AttemptRequest
+
+    monkeypatch.setattr(ce, 'canonical_evidence_root', lambda: tmp_path)
+    monkeypatch.setattr(cf, '_route_calibration_ratio', lambda *_a, **_kw: 1.0)
+    core = cf.ContextCore('Core', '', '', '', '', '', '"Assignment"', False)
+    plan = cf.build_context_fit_plan(None, core, {'type': 'task'}, preferred_mode='max',
+        route_resolver=lambda *_a, **_kw: ({'provider': 'test', 'model': 'test'},
+            ce.CapabilityEvidence(100_000, 'confirmed', 'metadata', 'synthetic')))
+    monkeypatch.setattr(ce, 'resolve_main_token_density', lambda *_a, **_kw: (1.0, 'cold_estimate'))
+    monkeypatch.setattr(context_measurement, 'estimate_context_prompt_tokens', lambda *_a, **_kw: 93_808)
+    fit = cf.measure_main_fit(plan, [], [], profile='owner_max', rendered_mode='max', round_id='r')
+    physical = cf._physical_context_for_fit(fit)
+    request = AttemptRequest(model='test', provider='test', prompt_tokens_bounded_estimate=93_808,
+                             physical_context=physical)
+    refusal = main_context_fit_refusal(request)
+    assert plan.window_record.boundary == 100_000 and physical.capacity_total_tokens == 157_344
+    assert physical.response_reserve_tokens == 65_536 and refusal['predicted_free_tokens'] == -2_000
+    assert refusal['predicted_slack_tokens'] == fit.measurement.reclaim_goal_tokens - 2_000 == 12_500
+    print('text candidate: 93,808 input, reserve 65,536, stated 100,000, admitted 91,808; miss 2,000; slack 12,500')
 
 
 @pytest.mark.parametrize(("mode", "kind", "account_refusal"), [
@@ -474,12 +501,10 @@ def test_a_claudexor_account_reads_the_acceptances_its_receipts_wrote(tmp_path, 
                              "_last_round_cache_usage": {"prompt_tokens": tokens, "provider": "claudexor"},
                              "_context_raw_input_tokens": tokens}, plan, round_idx=1, estimate_tokens=tokens)
 
-    estimate = cf.estimate_context_prompt_tokens
-
     def refused(plan, size):  # the pre-send gate on a request of ``size`` estimated tokens
-        monkeypatch.setattr(cf, "estimate_context_prompt_tokens", lambda *_a, **_kw: size)
-        measured = cf.measure_main_fit(plan, [], [], profile="owner_max", rendered_mode="max", round_id="r")
-        monkeypatch.setattr(cf, "estimate_context_prompt_tokens", estimate)
+        with monkeypatch.context() as sizing:
+            sizing.setattr(context_measurement, "estimate_context_prompt_tokens", lambda *_a, **_kw: size)
+            measured = cf.measure_main_fit(plan, [], [], profile="owner_max", rendered_mode="max", round_id="r")
         return main_context_fit_refusal(AttemptRequest(model=model, provider="claudexor",
             prompt_tokens_bounded_estimate=size, physical_context=cf._physical_context_for_fit(measured))) is not None
 

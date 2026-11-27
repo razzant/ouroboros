@@ -220,6 +220,8 @@ def test_partial_account_refresh_keeps_draft_and_only_failed_account_history(acc
 
 
 def test_models_auto_does_not_borrow_largest_context_or_processing_modes(account_catalog_ui):
+    from playwright.sync_api import expect
+
     ui = account_catalog_ui
     ui["settings"]["OUROBOROS_MODEL"] = f"claudexor::{SOURCE}=catalog-shared"
     ui["settings"]["OUROBOROS_PROCESSING_PREFERENCE"] = "fast"
@@ -235,9 +237,8 @@ def test_models_auto_does_not_borrow_largest_context_or_processing_modes(account
     assert "unknown" in note.inner_text() or "not known" in note.inner_text()
     assert "1M" not in note.inner_text()
     account.select_option("work")
+    # The pin changes before its scoped catalog returns. Wait for this account's listed Fast, with no caveat.
+    expect(row.locator("[data-processing-capability]")).to_have_text("Requests faster processing. It may cost more.")
     assert "1M" not in note.inner_text()
-    listed = row.locator("[data-processing-capability]").inner_text()  # this account lists Fast: no caveat is added
-    assert listed.startswith("Requests faster processing.") and not any(
-        caveat in listed for caveat in ("Not confirmed", "does not list", "Only some")), listed
     assert field.input_value() == "catalog-shared"
     roles.capture(page, "account-catalog-exact-context-processing")

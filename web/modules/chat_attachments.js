@@ -18,6 +18,7 @@ import { documentReaderKind } from './document_reader.js';
 // At most this many `[Attached file: …]` lines ride the message text.
 export const ATTACHMENT_PREVIEW_COUNT = 25;
 const KINDS = new Set(['image', 'video', 'audio', 'file']);
+const DELIVERY_FAILURES = new Set(['too_large', 'download_failed']);
 const UPLOAD_URL_RE = /^\/api\/files\/download\?upload=[0-9a-f]{32}_[^&#\s]+$/;
 const FILE_GLYPH = '<span class="chat-file-glyph" aria-hidden="true">▤</span>';
 
@@ -68,7 +69,8 @@ export function attachmentViews(value) {
     // Every attachment renders: ATTACHMENT_PREVIEW_COUNT bounds only the text tail.
     return value.filter((view) => view && typeof view === 'object').map((view) => {
         const url = String(view.url || '');
-        const available = view.available === true && UPLOAD_URL_RE.test(url);
+        const failure = DELIVERY_FAILURES.has(view.unavailable) ? view.unavailable : '';
+        const available = !failure && view.available === true && UPLOAD_URL_RE.test(url);
         const size = Number.isFinite(Number(view.size)) && view.size !== null && view.size !== '' ? Number(view.size) : null;
         return {
             // Bounded per code point, as the server labels it (chat_uploads._label): a server
@@ -79,6 +81,8 @@ export function attachmentViews(value) {
             size,
             available,
             url: available ? url : '',
+            ...(failure ? { unavailable: failure, ...(Number.isSafeInteger(view.limit_bytes) && view.limit_bytes > 0
+                ? { limit_bytes: view.limit_bytes } : {}) } : {}),
         };
     });
 }
@@ -92,7 +96,8 @@ export function attachmentViews(value) {
 export function paintAttachmentOutcome(bubble, annotation) {
     if (!bubble) return false;
     const rows = Array.isArray(annotation?.attachment_manifest) ? annotation.attachment_manifest : [];
-    const names = rows.filter((row) => row && typeof row === 'object' && row.status === 'rejected')
+    const names = rows.filter((row) => row && typeof row === 'object' && row.status === 'rejected'
+        && !DELIVERY_FAILURES.has(row.reason)) // these files already explain their absence in their own inert cards
         .map((row) => String(row.label || `#${Number(row.ordinal || 0) + 1}`));
     const text = names.length ? `${tr('chat.attachment_not_attached', 'Not attached to the task')}: ${names.join(', ')}` : '';
     const child = (name) => [...bubble.children].find((node) => node.classList?.contains(name));
@@ -124,7 +129,14 @@ function readable(view) {
     return kind === 'markdown' || kind === 'text' ? kind : '';
 }
 
-function cardHtml(view, atoms, note = view.available ? '' : tr('media.attachment_unavailable', 'Unavailable')) {
+function cardHtml(view, atoms, note = '') {
+    if (!note && !view.available) {
+        const limit = atoms.humanSize(view.limit_bytes);
+        note = view.unavailable === 'too_large' && limit
+            ? fmt('media.attachment_download_limit', { limit }, 'File exceeds the download limit ({limit})')
+            : view.unavailable === 'download_failed' ? tr('media.attachment_download_failed', 'File could not be downloaded')
+                : tr('media.attachment_unavailable', 'Unavailable');
+    }
     const meta = metaText(view, atoms, note);
     const kind = note ? '' : readable(view);
     return `<div class="chat-file-item${view.available ? '' : ' is-unavailable'}">
@@ -135,7 +147,7 @@ function cardHtml(view, atoms, note = view.available ? '' : tr('media.attachment
                 <span class="chat-file-name" title="${escapeHtmlAttr(view.name)}">${escapeHtml(view.name)}</span>
                 <span class="chat-file-meta">${escapeHtml(meta)}</span>
             </span>
-            ${kind ? atoms.readLabelHtml(kind) : '<span class="chat-file-more" aria-hidden="true">•••</span>'}
+            ${kind ? atoms.readLabelHtml(kind) : view.available ? '<span class="chat-file-more" aria-hidden="true">•••</span>' : ''}
         </button>
     </div>`;
 }
@@ -384,9 +396,14 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
     };
 }
 
-// What a reload keeps of a sent frame: its words, identity, routing and the refs of uploads the
-// host already stores — never bytes, never the send-time client_surface (an honest gap on resend).
-const KEPT_FRAME_KEYS = ['type', 'content', 'client_message_id', 'sender_session_id', 'chat_id', 'project_id', 'reply_to', 'reply_excerpt'];
+// What a reload keeps of a sent frame: its words, identity, routing, its data-profile claim and the
+// refs of uploads the host already stores — never bytes, never the send-time client_surface (an
+// honest gap on resend). The claim stays the frame's own, so a frame kept under one profile is resent
+// with that profile and refused by a connection serving another (#3294), never re-scoped into it.
+const KEPT_FRAME_KEYS = ['type', 'content', 'client_message_id', 'sender_session_id', 'chat_id', 'project_id', 'reply_to', 'reply_excerpt', 'profile_scope'];
+// The typed cause of a refused Send again whose room the core's acceptance no longer confirms (gateway/ws.py
+// `_RoomWordLapsed.reason_code`).
+const ROOM_WORD_LAPSED = 'ordinary_room_unconfirmed';
 
 function draftUpload(raw) {
     const filename = String(raw?.filename || '');
@@ -449,12 +466,33 @@ export function placeIngressNote(bubble, note) {
  * instance's `hasPendingWork`, which keeps a Project room holding one hidden instead of
  * destroying it. Nothing here resends by itself or deletes an upload: those stay on the host.
  */
-export function createUnconfirmedSends({ send, root, onDomWrite, showToast, compose = null, storage = null, storageKey = '' }) {
+export function createUnconfirmedSends({ send, root, onDomWrite, showToast, compose = null, storage = null, storageKey = '',
+    release = null }) {
     const frames = new Map();  // id -> { frame, reply, views, ts, restored, queued, deliveryUnknown }
     const bubbleOf = id => {
         const frame = frames.get(id)?.frame;
         return ownerMessageBubble(root(), frame, Number(frame?.chat_id ?? 1));
     };
+    // Kept copies a reconcile showed on a word that can lapse (`reconcile`'s `word`, chat_preview.js): id -> { word,
+    // bubble, asking }. While `word.holds()` they stay shown; once not, the bubble leaves the feed (`release`; one a
+    // canonical row adopted stays) and the frame waits, kept, for the next reconcile. Their Send again first asks the core
+    // anew (`word.confirm`), then names the room it stood on (`ordinary_room`), which the core's acceptance asks again
+    // before it saves anything (gateway/ws.py). The host's own word on the row (`settle`) or the room's canonical read
+    // ends the entry.
+    const proven = new Map();
+    // A Panic attempt (chat_activity.js raises ouro:panic once its frame is sent) ends a Send again still waiting for that
+    // answer, as it ends the composer's send (composer.js): nothing goes after it, and a press made afterwards is new.
+    let panicGeneration = 0;
+    const onPanic = () => { panicGeneration += 1; };
+    globalThis.addEventListener?.('ouro:panic', onPanic);
+    const lapsed = id => proven.has(id) && !proven.get(id).word.holds();
+    function withdraw(id) {
+        const { bubble } = proven.get(id);
+        proven.delete(id);
+        if (frames.has(id)) frames.get(id).restored = true;
+        if (bubble && !bubble.dataset.historyId) (release || (node => node.remove()))(bubble);
+    }
+    const sweep = () => { for (const id of [...proven.keys()]) if (lapsed(id)) withdraw(id); };
     let unreadable = false;  // a kept copy this tab cannot read restores nothing, and says so
     try {
         const kept = storage && storageKey ? storage.getItem(storageKey) : null;
@@ -491,7 +529,28 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
     function retry(id, note) {
         const entry = frames.get(id);
         if (!entry || entry.deliveryUnknown) return;
-        if (send(entry.frame, { queue: false })?.status !== 'sent') {
+        // A copy whose word lapsed leaves the feed and sends nothing; one still standing on it asks the core first.
+        if (lapsed(id)) return void withdraw(id);
+        if (proven.has(id)) return void confirmThenSend(id, entry, proven.get(id), note);
+        sendAgain(id, note, entry);
+    }
+
+    // The press on a copy shown while its room's history could not be read: the frame goes once, and only after the core's
+    // fresh answer confirms the room (`word.confirm`) while the copy still waits as it was, not settled, discarded or
+    // taken off the feed meanwhile, and no Panic came. One ask per copy at a time, nothing before its answer, nothing
+    // queued. The kept frame stays as it was; the one sent names the room (`ordinary_room`).
+    async function confirmThenSend(id, entry, shown, note) {
+        if (shown.asking) return;
+        shown.asking = true;
+        const generation = panicGeneration;
+        let fresh = false;
+        try { fresh = await shown.word.confirm(); } catch { fresh = false; } finally { shown.asking = false; }
+        if (fresh && generation === panicGeneration && proven.get(id) === shown && frames.get(id) === entry
+            && !entry.deliveryUnknown) sendAgain(id, note, entry, { ...entry.frame, ordinary_room: shown.word.room });
+    }
+
+    function sendAgain(id, note, entry, frame = entry.frame) {
+        if (send(frame, { queue: false })?.status !== 'sent') {
             showToast(tr('chat.send_again_offline', 'Still offline. Reconnect and send again.'), 'error');
             return;
         }
@@ -579,7 +638,9 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
     }
 
     // Every still-held message (or only `ids`) whose bubble is in the feed: a plain saved mark ends it; anything else offers the actions.
+    // A copy whose word lapsed leaves the feed first instead (`withdraw`), so it offers nothing.
     function unsettle(ids = [...frames.keys()]) {
+        sweep();
         for (const id of ids) {
             const bubble = frames.has(id) && bubbleOf(id);
             if (!bubble) continue;  // settled meanwhile, or not in the feed now: still unsaved, the frame stays
@@ -606,7 +667,9 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
          *  has since ended (neither dispatch fact) ends it in a delivery doubt. */
         settle(row) {
             const id = String(row?.client_message_id || '');
-            if (row?.role !== 'user' || row.ingress_accepted !== true || !frames.has(id)) return;
+            if (row?.role !== 'user' || row.ingress_accepted !== true) return;
+            proven.delete(id);  // the host's own word on the row now speaks for its bubble
+            if (!frames.has(id)) return;
             const entry = frames.get(id), bubble = bubbleOf(id);
             if (row.ingress_dispatched === true) {
                 forget(id);
@@ -634,21 +697,37 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         },
         /** The socket closed or a frame was refused: every still-unsaved sent message in the feed says so. */
         unsettle,
+        /** The host refused a frame (`initialization_notice`): the one it names, or every held one, says so (`unsettle`).
+         *  A Send again its acceptance refused because it no longer confirms the room the copy's word named (typed
+         *  `reason_code`, gateway/ws.py) first loses that word: the copy leaves the feed, kept for the next fresh word.
+         *  Any other refusal (a busy store, no socket) leaves it offered as before. */
+        refused(notice) {
+            const id = String(notice?.client_message_id || '');
+            if (id && notice.reason_code === ROOM_WORD_LAPSED && proven.has(id)) withdraw(id);
+            unsettle(id ? [id] : undefined);
+        },
         /** What a disconnect now puts in doubt: the held messages the socket has written (a queued one is the queue's). */
         written: () => [...frames].filter(([, entry]) => !entry.queued && !entry.deliveryUnknown).map(([id]) => id),
-        /** After a reload's first history read (or its failure): a kept message it did not settle (nor show
-         *  `ingress_pending`) shows its bubble again from the kept words and views if the read did not, then its doubt.
-         *  A message this page sent while that read was pending is not in doubt: the read predates it. */
-        reconcile(show) {
+        /** After a reload's first history read, or a failed one on a word that can lapse (`word`): a kept message it did
+         *  not settle (nor show `ingress_pending`) shows its bubble again from the kept words and views if the read did
+         *  not, then its doubt. A message this page sent while that read was pending is not in doubt: the read predates it. */
+        reconcile(show, word = null) {
             const kept = [...frames].filter(([, entry]) => entry.restored);
             for (const [id, entry] of kept) {
                 if (!bubbleOf(id)) show(entry);
                 entry.restored = false;
+                if (word) proven.set(id, { word, bubble: bubbleOf(id), asking: false });
             }
             unsettle(kept.map(([id]) => id));
         },
+        /** The word shown copies stand on may have lapsed: those it no longer holds leave the feed, kept (`withdraw`). */
+        withdraw: sweep,
+        /** The room's canonical read now stands for the copies shown on a word: they act like any other kept copy. */
+        canonicalRead() { proven.clear(); },
+        /** Whether a copy this tab kept for a reload still waits for a reconcile. */
+        get unreconciled() { return [...frames.values()].some(entry => entry.restored); },
         get count() { return [...frames.values()].filter(entry => !entry.deliveryUnknown).length; },
         /** Room teardown: this instance forgets; the tab's kept copies stay for the room's next instance. */
-        release() { frames.clear(); },
+        release() { frames.clear(); proven.clear(); globalThis.removeEventListener?.('ouro:panic', onPanic); },
     };
 }

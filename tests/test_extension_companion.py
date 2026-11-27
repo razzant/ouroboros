@@ -2471,12 +2471,6 @@ def test_a_reload_of_new_bytes_deferred_by_a_live_call_keeps_the_held_companion_
         _end_fake_companions(supervisor, spawned, loaded.name)
 
 
-def _js_typedef(path: pathlib.Path, name: str) -> str:
-    text = path.read_text(encoding="utf-8")
-    start = text.index(f"@typedef {{Object}} {name}\n")
-    return text[start:text.index("*/", start)]
-
-
 def test_grant_with_enable_and_the_named_catalogue_keep_the_observed_pending_exit(tmp_path, monkeypatch) -> None:
     """Alpha exhausted its restarts and beta awaits an unconfirmed exit. A grant carrying the owner's Enable, the named
     ``list_skills`` row and the listing name both facts alike; the catalogue only reads what the server observed,
@@ -2517,10 +2511,6 @@ def test_grant_with_enable_and_the_named_catalogue_keep_the_observed_pending_exi
         _end_fake_companions(supervisor, spawned, loaded.name)
     for typed in (contracts.SkillGrantResponse, management_contracts.SkillActionRefusal):
         assert "retained_companions" in typed.__annotations__, typed.__name__
-    web = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules"
-    for path, name in ((web / "api_types.js", "SkillGrantResponse"),
-                       (web / "management_contract_types.js", "SkillActionRefusal")):
-        assert "@property {Object<string,string>=} retained_companions" in _js_typedef(path, name), name
 
 
 def _pending_exit(skill_name: str, name: str, skill_dir) -> types.SimpleNamespace:
@@ -2826,8 +2816,9 @@ def test_a_deferred_reconcile_writes_the_name_s_record_only_from_the_held_folder
 def test_a_grant_still_short_of_its_requests_keeps_the_switch_and_this_folder_s_pending_exit(
     tmp_path, monkeypatch, case: str,
 ) -> None:
-    """Saved Settings added a key the skill requests, so its companion was stopped and still awaits exit. The owner's
-    Grant with Enable grants only the other key: the grant answers 200, and its Enable keeps the Toggle's typed
+    """Saved Settings added a key the skill requests; while no grant decision covers it, it is pending (owner B″,
+    21.11) and stops nothing. Once the owner's decision covers it without granting it, the companion is stopped and
+    still awaits exit. The owner's Grant with Enable grants only the other key: the grant answers 200, and its Enable keeps the Toggle's typed
     refusal and words, before any write or reconcile. Whatever ended that Enable before an answer of its own (the
     ``grants`` precheck, another one, an unknown failure), the grant answers the saved switch as it reads, never the
     effective one: On or Off, no saved file at all is Off, a package a deployment requires is Off while saved Off,
@@ -2874,6 +2865,8 @@ def test_a_grant_still_short_of_its_requests_keeps_the_switch_and_this_folder_s_
     try:
         assert extension_loader.reconcile_extension(loaded.name, drive, lambda: {}, repo_path=str(repo))["live_loaded"]
         settings["ACME_TOKEN"] = "synthetic"  # a custom key saved in Settings joins the request, missing
+        assert extension_loader.reconcile_extension(loaded.name, drive, lambda: {}, repo_path=str(repo))["live_loaded"]
+        save_skill_grants(drive, loaded.name, keys[:1], content_hash=loaded.content_hash, requested_keys=keys)
         if case == "required_off":  # a deployment requires exactly these bytes: they read On over a saved Off
             required = types.SimpleNamespace(name=loaded.name, path=str(loaded.skill_dir),
                                              content_hash=loaded.content_hash, settings=())

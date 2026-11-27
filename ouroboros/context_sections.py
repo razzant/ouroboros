@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any, List, Optional
 
 from ouroboros.context_budget import LARGE_CONTEXT_SECTION_CHARS
-from ouroboros.section_floor import HostSection
+from ouroboros.section_floor import HostSection, report_text
 from ouroboros.context_timing import timed_section
 
 log = logging.getLogger(__name__)
@@ -94,8 +94,8 @@ def build_knowledge_sections(
             journal = journal_tail_digest(pid)
             if journal:
                 sections.append(
-                    f"## Project journal ({pid}) — recent milestones\n\n{journal}\n\n"
-                    "(journal_read shows the full history; journal_write appends.)"
+                    report_text(f"## Project journal ({pid}) — recent milestones\n\n{journal}\n\n"
+                                "(journal_read shows the full history; journal_write appends.)", "project_journal")
                 )
             page = project_workpad_path(pid)
             raw = page.read_bytes() if page.is_file() else b""  # one capture: the page shown and its revision
@@ -107,8 +107,8 @@ def build_knowledge_sections(
                 # consolidate, not a reason to amputate context.
                 if len(workpad) > _LARGE_CONTEXT_SECTION_CHARS:
                     log.warning("context: project workpad (%s) is large (%d chars)", pid, len(workpad))
-                sections.append(f"## Project workpad ({pid})\n\n{workpad}"
-                                + revision_line("workpad", workpad, hashlib.sha256(raw).hexdigest()))
+                sections.append(report_text(f"## Project workpad ({pid})\n\n{workpad}"
+                                + revision_line("workpad", workpad, hashlib.sha256(raw).hexdigest()), "project_workpad"))
         except Exception:
             log.debug("project journal/workpad context injection failed", exc_info=True)
     return sections
@@ -239,7 +239,8 @@ _NOT_PASSED: Any = object()  # ``skills`` omitted: the section discovers them it
 
 
 @timed_section("installed_skills")
-def _build_installed_skills_section(env: Any, *, skills: Any = _NOT_PASSED, selected_skill: str = "") -> str:
+def _build_installed_skills_section(env: Any, *, skills: Any = _NOT_PASSED, selected_skill: str = "",
+                                    first_view: Any = None) -> str:
     """Every enabled, admitted skill in both forms: the compact one keeps its status, description and
     trigger (owner 2.11.2026); tools, schedules and model experience are the full form's. A long field
     is a labelled prefix naming its manifest's ``read_file`` address, which the root and both child tool
@@ -253,7 +254,15 @@ def _build_installed_skills_section(env: Any, *, skills: Any = _NOT_PASSED, sele
     Any failure on the way (discovery, the summary, a row it renders) is said in both forms with its cause, never
     a missing or partly built section. A context build passes its own discovery's result (``skills``), a failed
     one included, so the catalog and the always-in-context block rest on one read. ``selected_skill``: the payload
-    this work is bound to, where reading another skill's manifest is refused (a cut purpose then names list_skills)."""
+    this work is bound to, where reading another skill's manifest is refused (a cut purpose then names list_skills).
+    ``first_view``: the work's context, which keeps the first enabled digests and differences seen on later reads
+    for the end-of-work fact (``skill_readiness.note_enabled_skill_digests``)."""
+    if first_view is not None and skills is not _NOT_PASSED:
+        from ouroboros.skill_catalogue import SkillDiscoveryFailure
+        from ouroboros.skill_readiness import note_enabled_skill_digests
+
+        if not isinstance(skills, SkillDiscoveryFailure):
+            note_enabled_skill_digests(first_view, skills)
     try:
         return _installed_skills_section(env, skills, selected_skill)
     except Exception as exc:
@@ -437,11 +446,14 @@ def _append_unadmitted(lines: List[str], operative: List[str], rows: List[Any], 
 
 
 def _places_imported(root: Any) -> bool:
-    """Whether the place store exists with its legacy import done (a plain read, so it never runs the import)."""
+    """Whether the place store exists with its legacy import materialized, final or still
+    provisional — the same marker ``places_migration.import_recorded`` reads — so a plain
+    read answers and never runs the import."""
+    from ouroboros.places_migration import import_recorded
     from ouroboros.utils import read_json_dict
 
     document = read_json_dict(pathlib.Path(root) / "state" / "places.json") or {}
-    return bool((document.get("migration") or {}).get("presence_bindings_v1"))
+    return import_recorded(document) if isinstance(document.get("migration"), dict) else False
 
 
 def _switch_fact(root: Any, observed: Any, authority: Any) -> str:
@@ -522,6 +534,9 @@ def _drive_state_section(env: Any) -> str:
                 "read_file(root='runtime_data', path='state/state.json').") if omitted else ""))
     values = json.dumps(projected, ensure_ascii=False, indent=1, sort_keys=True, default=str)
     body = "## Drive state\n\n" + values + _switch_fact(root, observed, authority)
+    from supervisor.panic_choice import wake_fact
+    if choice := wake_fact(root, getattr(env, "task", None)):  # an own wake's right after my human's Turn on, while it holds
+        body += "\n\n" + choice
     if comparison := _openrouter_comparison(raw):
         body += "\n\n" + comparison
     operative = (body + f"\n\nState authority: {observed.quality}; {observed.reason}. "

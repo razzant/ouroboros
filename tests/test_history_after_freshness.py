@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from ouroboros import dialogue_import, dialogue_store as ds
 from ouroboros.gateway import history, history_paging
 from ouroboros.gateway.history import make_chat_history_endpoint
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 from tests._store_shared import seed_result
 
 TS = "2026-10-16T10:00:{:02d}Z"
@@ -78,14 +79,15 @@ def test_a_shown_task_that_changes_after_it_settled_takes_the_newest_page_again(
     # A settled task changed with no row to say so (its question closed): the newest page answers.
     _task(tmp_path, "done", "completed", 0, owner_quiz={"q1": {"quiz_id": "q1", "state": "closed"}})
     status, refused = _read(tmp_path, going["after_cursor"])
-    assert status == 409 and refused["reason_code"] == "history_delta_reset"
+    assert status == 409 and refused["reason_code"] == "history_delta_reset" and refused["detail"] == "task_settled"
+    assert "detail" not in going and "stream" not in refused  # a 200 names no refusal; no one stream refused
     status, fresh = _read(tmp_path)
     assert status == 200 and _read(tmp_path, fresh["after_cursor"])[0] == 200
 
     # The late phase settling is a change the window cannot see either.
     _task(tmp_path, "late", "completed", 2, root_phase_checkpoint={"post_task_synthesis": "completed"})
     status, refused = _read(tmp_path, fresh["after_cursor"])
-    assert status == 409 and refused["reason_code"] == "history_delta_reset"
+    assert status == 409 and refused["reason_code"] == "history_delta_reset" and refused["detail"] == "task_settled"
 
 
 def test_an_after_read_that_cannot_read_a_stored_row_refuses(tmp_path):
@@ -99,6 +101,7 @@ def test_an_after_read_that_cannot_read_a_stored_row_refuses(tmp_path):
                          raw="{not json\n")
     status, refused = _read(tmp_path, finished["after_cursor"])
     assert status == 409 and refused["reason_code"] == "history_delta_reset"
+    assert (refused["detail"], refused["stream"]) == ("replay_gap", "chat")
     status, fresh = _read(tmp_path)
     assert status == 200 and "chat_malformed_jsonl" in fresh["window"]["truncated_by"]
     assert [row["text"] for row in fresh["messages"]] == ["hello", "whole", "after it"]
@@ -116,7 +119,7 @@ def test_a_shown_skill_operation_that_ended_takes_the_newest_page_again(tmp_path
     assert status == 200  # still running: the delta shows it again
     running["row"] = None
     status, refused = _read(tmp_path, going["after_cursor"])
-    assert status == 409 and refused["reason_code"] == "history_delta_reset"
+    assert status == 409 and refused["reason_code"] == "history_delta_reset" and refused["detail"] == "lifecycle_ended"
     status, fresh = _read(tmp_path)
     assert status == 200 and _cursor(fresh["after_cursor"])["lifecycle"] is False
     assert _read(tmp_path, fresh["after_cursor"])[0] == 200
@@ -148,7 +151,41 @@ def test_a_window_too_large_for_its_cursor_reads_its_newest_page(tmp_path, monke
     assert status == 400 and refused["reason_code"] == "history_cursor_invalid"  # longer than the bound
 
 
-def test_rows_that_show_no_task_facts_do_not_tie_the_window_to_their_task(tmp_path):
+def test_each_refusal_names_the_branch_that_knew_it(tmp_path, monkeypatch):
+    """A refused ``after`` read says why in ``detail`` (with ``stream`` where one stream refused), named where the
+    refusal is decided and with no further read for a second cause; the answer is otherwise the same 409."""
+    from ouroboros import task_store
+
+    _task(tmp_path, "done", "completed", 0)
+    _answered(tmp_path, "done", 0)
+    status, page = _read(tmp_path)
+    assert status == 200 and _read(tmp_path, page["after_cursor"])[0] == 200
+    # The window read further than the store now holds (a restored store): its stream rewound.
+    rewound = _cursor(page["after_cursor"])
+    rewound["upper"]["chat"] += 100
+    status, refused = _read(tmp_path, history_paging.encode_cursor(rewound))
+    assert status == 409 and (refused["detail"], refused["stream"]) == ("stream_rewound", "chat")
+
+    def unreadable(*_args):
+        raise OSError("the task store cannot be read")
+
+    real = task_store.task_versions
+    monkeypatch.setattr(task_store, "task_versions", unreadable)  # unknown is a change
+    status, refused = _read(tmp_path, page["after_cursor"])
+    assert status == 409 and refused["detail"] == "task_versions_unavailable" and "stream" not in refused
+    monkeypatch.setattr(task_store, "task_versions", lambda _root, _tasks: {})  # a shown task the store lost
+    status, refused = _read(tmp_path, page["after_cursor"])
+    assert status == 409 and refused["detail"] == "task_missing"
+    monkeypatch.setattr(task_store, "task_versions", real)
+    # The next cursor would pass its bound (a new task to name): the window reads its newest page.
+    monkeypatch.setattr(history_paging, "_CURSOR_CHARS", len(page["after_cursor"]))
+    _task(tmp_path, "more", "running", 1)
+    _answered(tmp_path, "more", 1)
+    status, refused = _read(tmp_path, page["after_cursor"])
+    assert status == 409 and refused["detail"] == "cursor_size" and refused["next_cursor"] == page["after_cursor"]
+
+
+def test_rows_that_show_no_task_facts_do_not_tie_the_window_to_their_task(tmp_path, healthy_main):
     """An owner's row and a notice pinned to Main show no facts of their task: its later writes
     (a Project task finishing in its own room) leave the window's delta alone."""
     _task(tmp_path, "asked", "completed", 0)
@@ -174,7 +211,7 @@ def test_a_settled_successor_whose_facts_a_shown_row_takes_is_versioned_too(tmp_
     assert status == 200 and {"old", "new"} <= set(_cursor(page["after_cursor"])["tasks"])
     _task(tmp_path, "new", "completed", 1, title="settled again")
     status, refused = _read(tmp_path, page["after_cursor"])
-    assert status == 409 and refused["reason_code"] == "history_delta_reset"
+    assert status == 409 and refused["reason_code"] == "history_delta_reset" and refused["detail"] == "task_settled"
 
 
 def test_a_page_whose_read_failed_part_way_carries_no_after_cursor(tmp_path, monkeypatch):

@@ -232,7 +232,7 @@ def test_spent_group_money_refuses_the_press_with_nothing_written(tmp_path, monk
 
 
 def test_an_unreadable_ledger_refuses_the_press_as_unknown_never_as_money(tmp_path, monkeypatch):
-    from ouroboros import usage_accounting
+    from ouroboros import usage_store
     from ouroboros.task_results import load_task_result
     from supervisor.continuation_admission import admit_continuation
 
@@ -242,7 +242,9 @@ def test_an_unreadable_ledger_refuses_the_press_as_unknown_never_as_money(tmp_pa
     def unreadable(*_args, **_kwargs):
         raise OSError("ledger unreadable")
 
-    monkeypatch.setattr(usage_accounting, "usage_projection", unreadable)
+    # group_money_spent reads through usage_store.read now, not
+    # usage_accounting.usage_projection: patch the store the reader actually opens.
+    monkeypatch.setattr(usage_store, "read", unreadable)
     assert admit_continuation("stop-root", action_nonce=NONCE) == {"ok": False, "error": "billing_authority_unavailable"}
     assert workers.PENDING == [] and "continued_by" not in load_task_result(data, "stop-root")
 
@@ -547,10 +549,12 @@ def test_an_owner_image_the_loop_read_continues_with_its_exact_words_and_files(t
         assert [base64.b64decode(part["image_url"]["url"].split(",", 1)[1]) for part in sent] == pixels
     successor = next(row for row in workers.PENDING if row["id"] == first.json()["successor_task_id"])
     mine = [row for row in successor["metadata"]["owner_corpus"] if row.get("msg_id") == MID]
-    # The corpus row keeps its message's own time beside its identity (the captured mailbox row's), as the chain reads it.
-    [sent_at] = [json.loads(line)["ts"] for line in stored["owner_mailbox"]["rows"] if json.loads(line)["msg_id"] == MID]
-    assert mine == [{"source": "owner_mailbox", "content": text, "msg_id": MID, "ts": sent_at,
-                     "reply_to": {"address": REPLY["address"], "author": "", "text": ""}}]
+    # The corpus row keeps its writer's kind and the captured mailbox row's time in ``ts``, the bytes it always carried,
+    # named beside it for what it is (``received``): no chat row here recorded the message's own time. The chain reads
+    # it the same.
+    [received] = [json.loads(line)["ts"] for line in stored["owner_mailbox"]["rows"] if json.loads(line)["msg_id"] == MID]
+    assert mine == [{"source": "owner_mailbox", "content": text, "msg_id": MID, "ts": received, "received": received,
+                     "mail_kind": "owner_text", "reply_to": {"address": REPLY["address"], "author": "", "text": ""}}]
     assert successor["text"].count(WORDS) == 1, "the exact words once, never beside a rendering of them"
     again = door.post("/api/tasks/stop-root/continue", json={"action_nonce": NONCE})
     assert again.status_code == 200 and again.json()["successor_task_id"] == successor["id"]

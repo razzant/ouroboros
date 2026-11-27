@@ -15,7 +15,7 @@ import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { buildTimelineItemHtml } from '../modules/chat_activity.js';
 import { updateLiveTimelineItem } from '../modules/chat_render_batch.js';
 import { formatMsgTime } from '../modules/utils.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const originalQuery = ElementStub.prototype.querySelector;
 after(() => { ElementStub.prototype.querySelector = originalQuery; });
@@ -35,7 +35,7 @@ const NOTE = 'Checkpoint 3 at round 12';
 function fixture(history = []) {
     const env = installDom(async (url) => ({ ok: true, json: async () =>
         String(url).startsWith('/api/chat/history')
-            ? { messages: history, window: { complete: true } }
+            ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } }
             : { active_direct_turns: [] } }));
     const handlers = new Map();
     let generation = 0;
@@ -679,6 +679,9 @@ test('a skill lifecycle row ends at its typed fact, and an older row at the word
     // A row with its fact is read from the fact, whatever its words say.
     assert.equal(row({ content: 'Skill install: `alpha` — completed', lifecycle: { status: 'failed', phase: 'failed' } }).phase,
         'lifecycle_error');
+    // Another work's row keeps working, whatever its words end with: only a skill lifecycle row ends here.
+    assert.equal(summarizeChatLiveEvent({ type: 'chat', is_progress: true, role: 'system',
+        task_id: 'turn-1', ts: TS, content: 'Step — completed' }).phase, 'working');
 });
 
 test('a host notice on a task card says its line with its step, and its raw details open from that line (RV4 1)', () => {

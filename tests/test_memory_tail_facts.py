@@ -480,6 +480,15 @@ def test_a_focus_start_sees_the_same_reading_no_thread_copy_no_task_body_and_no_
     monkeypatch.setattr(chronicle_store, "_TAIL_PAGE", 4)  # the stored tail in many pages
     assert views() == reference
     assert not any("thread line" in meta for meta in _tail_meta(tmp_path))
+    # A reply whose finish row is not in hand reads its work's stored reading stamp, one indexed read of those
+    # works' documents by design (``memory_reading.reply_marks``), as the wake's directory reads its focus: that read
+    # answers as it did before the damage, and nothing else may parse the damaged bodies.
+    from ouroboros import memory_reading as reading
+
+    damaged, real_marks = {"t2", "pturn1", "conv1"}, reading.reply_marks
+    stamps = real_marks(tmp_path, damaged)
+    monkeypatch.setattr(reading, "reply_marks", lambda root, tasks: {
+        **real_marks(root, set(tasks) - damaged), **{task: stamps[task] for task in tasks if task in damaged}})
     with store.open_store(tmp_path, write=True) as txn:
         assert txn.row("conv1", "chat_id") == beta
         txn.conn.execute("UPDATE task_bodies SET body='{' WHERE task_id IN ('t2', 'pturn1', 'conv1')")

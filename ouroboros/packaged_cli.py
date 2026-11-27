@@ -28,14 +28,16 @@ from typing import Iterable, Sequence
 sys.dont_write_bytecode = True
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
+from ouroboros.git_selection import GitUnverified, select_git
 from ouroboros.launch_roots import TUPLE_KEYS, WORK_ROOT_KEYS, configured_roots
 from ouroboros.launcher_bootstrap import (
-    BootstrapContext, appimage_extracts_and_runs, bootstrap_repo, check_git, embedded_python_env,
+    BootstrapContext, appimage_extracts_and_runs, bootstrap_repo, embedded_python_env,
 )
 from ouroboros.platform_layer import (
     BUNDLE_DIR_ENV,
     IS_MACOS,
     IS_WINDOWS,
+    common_tool_directories,
     embedded_python_candidates,
     git_install_hint,
 )
@@ -201,7 +203,15 @@ def _read_version(bundle_root: pathlib.Path) -> str:
 
 
 def _bootstrap_runtime(runtime: PackagedRuntime) -> None:
-    if not check_git(IS_WINDOWS):
+    from ouroboros.desktop_media import host_environment
+
+    try:  # the terminal's PATH stays first; common tool folders are only searched after it
+        choice = select_git(runtime.bundle_root, extra_dirs=common_tool_directories(os.environ.get("PATH", "")),
+                            host=host_environment if sys.platform == "linux" else None)
+    except GitUnverified as unverified:  # unjudged is not absent: no install advice
+        raise PackagedCLIError(f"Git did not answer in time: could not finish checking {unverified}. "
+                               "Run the command again.") from None
+    if choice == "missing":
         raise PackagedCLIError(f"Git is required before first CLI use. {git_install_hint()}")
     runtime.data_dir.mkdir(parents=True, exist_ok=True)
     context = BootstrapContext(
@@ -212,7 +222,7 @@ def _bootstrap_runtime(runtime: PackagedRuntime) -> None:
         embedded_python=str(runtime.embedded_python),
         app_version=runtime.app_version,
         hidden_run=_hidden_run,
-        save_settings=lambda settings: _save_settings(runtime.settings_path, settings),
+        save_settings=lambda settings: _save_settings(runtime.settings_path, settings, drive_root=runtime.data_dir),
         log=_StdLogger(),
     )
     bootstrap_repo(context)
@@ -222,7 +232,7 @@ def _hidden_run(command: Sequence[str], **kwargs: object) -> subprocess.Complete
     return subprocess.run(list(command), **kwargs)  # type: ignore[arg-type]
 
 
-def _save_settings(path: pathlib.Path, settings: dict) -> None:
+def _save_settings(path: pathlib.Path, settings: dict, drive_root: pathlib.Path | None = None) -> None:
     """The packaged bootstrap's settings writer — same prologue, same bytes.
 
     It is a THIRD writer only in the sense that it owns its own path; what it persists
@@ -240,11 +250,16 @@ def _save_settings(path: pathlib.Path, settings: dict) -> None:
     refuse. Passing its own path is what keeps that honest while the disclosed override
     split above exists."""
     from ouroboros.config import prepare_settings_for_persist, serialize_settings
-    from ouroboros.settings_integrity import guard_live_settings_write
+    from ouroboros.settings_integrity import guard_live_settings_write, settings_publication_boundary
     from ouroboros.utils import write_text_atomic
 
     guard_live_settings_write(path, pathlib.Path.home())
-    write_text_atomic(path, serialize_settings(prepare_settings_for_persist(dict(settings))))
+    document = serialize_settings(prepare_settings_for_persist(dict(settings)))
+    # The publication boundary binds the packaged RUNTIME's data root, not the document
+    # path: even when the document is split from the Runtime root, its profile witness and
+    # ``state.lock`` live under the Runtime root (``drive_root``), so the gate is the right one.
+    with settings_publication_boundary(path.parent if drive_root is None else pathlib.Path(drive_root)):
+        write_text_atomic(path, document)
 
 
 def _run_inner_cli(runtime: PackagedRuntime, args: Sequence[str]) -> int:

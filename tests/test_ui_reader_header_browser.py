@@ -7,6 +7,7 @@ Run this file with the browser marker; evidence is kept in OUROBOROS_UI_EVIDENCE
 from __future__ import annotations
 
 import functools
+import io
 import json
 import os
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +15,7 @@ from pathlib import Path
 from threading import Thread
 
 import pytest
+from PIL import Image, ImageChops
 
 pytestmark = [pytest.mark.ui_browser]
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +67,8 @@ STATE = """() => {
     return {viewport: [innerWidth, innerHeight], dialog: box(dialog),
         head: box(dialog.querySelector('header')), title: box(title), name: title.textContent,
         titleHeight: [title.clientHeight, title.scrollHeight], titleScroll: title.scrollTop,
+        titleFade: [title.classList.contains('scroll-fade-y'), title.hasAttribute('data-scroll-above'),
+            title.hasAttribute('data-scroll-below'), title.getAttribute('tabindex')],
         whiteSpace: getComputedStyle(title).whiteSpace,
         body: box(body), bodyScroll: [body.scrollLeft, body.scrollTop],
         image: image ? box(image) : null, natural: image ? [image.naturalWidth, image.naturalHeight] : null,
@@ -167,6 +171,7 @@ def test_long_reader_title_keeps_controls_and_content_reachable(component_url, t
                         _check_geometry(state)
                         if case == "ordinary":
                             assert state["titleHeight"][1] <= state["titleHeight"][0] + 1, state
+                            assert state["titleFade"] == [True, False, False, "0"], state
                         if kind == "text":
                             assert state["bodyText"] == "The complete text body.\n" * 100, state
                         # Body starts focused. Tab wraps to the title, which must let a
@@ -174,10 +179,13 @@ def test_long_reader_title_keeps_controls_and_content_reachable(component_url, t
                         page.keyboard.press(tab)
                         assert page.locator(".document-reader-title").evaluate("n => n === document.activeElement")
                         if state["titleHeight"][1] > state["titleHeight"][0] + 1:
+                            assert state["titleFade"] == [True, False, True, "0"], state
                             page.keyboard.press("End")
                             page.wait_for_function("() => {const t = document.querySelector('.document-reader-title'); "
-                                                   "return t.scrollTop + t.clientHeight >= t.scrollHeight - 1;}")
+                                                   "return t.scrollTop + t.clientHeight >= t.scrollHeight - 1 "
+                                                   "&& t.hasAttribute('data-scroll-above') && !t.hasAttribute('data-scroll-below');}")
                             records[key]["title_end"] = page.evaluate(STATE)
+                            assert records[key]["title_end"]["titleFade"] == [True, True, False, "0"], records[key]["title_end"]
                             _check_geometry(records[key]["title_end"])
                             page.screenshot(path=str(evidence / f"{key}-title-end.png"))
                         # Every visible header control is in the keyboard cycle.
@@ -355,4 +363,132 @@ def test_phone_reader_keeps_every_action_in_sight_in_two_groups(component_url, t
             assert not errors, errors
         finally:
             (evidence / f"{engine}-groups.json").write_text(json.dumps(records, indent=2) + "\n")
+            browser.close()
+
+
+# The reader's body holds the keys inside an unmasked focus frame (ui.css .scroll-fade-focus-frame, style.css),
+# so the full ring stays visible on every edge while the scrolling body keeps fading in the hidden direction(s).
+FOCUSED_BODY = """() => {
+    const dialog = document.querySelector('dialog.document-reader[open]');
+    const frame = dialog.querySelector('.document-reader-body-frame.scroll-fade-focus-frame');
+    const body = frame.querySelector(':scope > .document-reader-body');
+    const fs = getComputedStyle(frame), bs = getComputedStyle(body);
+    const mask = (s) => (s.maskImage && s.maskImage !== 'none' ? s.maskImage : (s.webkitMaskImage || 'none'));
+    const rect = frame.getBoundingClientRect();
+    return {
+        focused: document.activeElement === body,
+        keyboard: body.matches(':focus-visible'),
+        quiet: body.classList.contains('is-quiet-focus'),
+        above: body.hasAttribute('data-scroll-above'),
+        below: body.hasAttribute('data-scroll-below'),
+        top: body.scrollTop,
+        frameMask: mask(fs),
+        frameOutline: [fs.outlineStyle, fs.outlineWidth, fs.outlineOffset],
+        bodyMask: mask(bs),
+        bodyOutline: [bs.outlineStyle, bs.outlineWidth, bs.outlineOffset],
+        frameBox: {x: rect.x, y: rect.y, width: rect.width, height: rect.height, right: rect.right, bottom: rect.bottom},
+    };
+}"""
+
+
+def _edge_pixels(page, box):
+    clips = {
+        "top": {"x": box["x"] + box["width"] / 2 - 12, "y": box["y"], "width": 24, "height": 4},
+        "bottom": {"x": box["x"] + box["width"] / 2 - 12, "y": box["bottom"] - 4, "width": 24, "height": 4},
+        "left": {"x": box["x"], "y": box["y"] + box["height"] / 2 - 12, "width": 4, "height": 24},
+        "right": {"x": box["right"] - 4, "y": box["y"] + box["height"] / 2 - 12, "width": 4, "height": 24},
+    }
+    return {edge: Image.open(io.BytesIO(page.screenshot(clip=clip, animations="disabled"))).convert("RGB")
+            for edge, clip in clips.items()}
+
+
+def _edge_ring_diffs(page, box):
+    ring_on = _edge_pixels(page, box)
+    page.evaluate("() => document.querySelector('dialog.document-reader [data-reader-action=\"close\"]').focus({preventScroll: true})")
+    page.wait_for_function("() => getComputedStyle(document.querySelector('.document-reader-body-frame')).outlineStyle === 'none'")
+    ring_off = _edge_pixels(page, box)
+    return {edge: max(high for _, high in ImageChops.difference(ring_on[edge], ring_off[edge]).getextrema())
+            for edge in ("top", "bottom", "left", "right")}
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_a_reader_keeps_an_unmasked_focus_ring_and_active_fade(component_url, tmp_path, engine):
+    from playwright.sync_api import sync_playwright
+
+    evidence = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(tmp_path / "evidence")))
+    evidence.mkdir(parents=True, exist_ok=True)
+    records = {}
+    with sync_playwright() as playwright:
+        browser = getattr(playwright, engine).launch()
+        page = browser.new_page(viewport={"width": 621, "height": 600})
+        tab = "Alt+Tab" if engine == "webkit" else "Tab"
+        try:
+            page.goto(component_url)
+            page.evaluate(MOUNT.replace("window.openerTile.click();", ""), {"kind": "text", "name": "notes.txt"})
+
+            # 1. Pointer open stays quiet (no ring on frame or body) while the scroll fade is active;
+            #    PageDown scrolls and clears quiet focus; Tab returns to the body with the full unmasked ring.
+            page.locator(".chat-file-card").click()
+            page.wait_for_function("() => document.querySelector('.document-reader-body')?.getAttribute('aria-busy') === 'false'"
+                                   " && document.querySelector('.document-reader-body').hasAttribute('data-scroll-below')")
+            pointer_opened = records["pointer_opened"] = page.evaluate(FOCUSED_BODY)
+            assert pointer_opened["focused"] and pointer_opened["quiet"], records
+            assert pointer_opened["frameOutline"][0] == "none" and pointer_opened["bodyOutline"][0] == "none", records
+            assert pointer_opened["frameMask"] == "none" and "linear-gradient" in pointer_opened["bodyMask"], records
+            page.keyboard.press("PageDown")
+            page.wait_for_function("() => document.querySelector('.document-reader-body').scrollTop > 0"
+                                   " && document.querySelector('.document-reader-body').hasAttribute('data-scroll-above')")
+            pointer_scrolled = records["pointer_scrolled"] = page.evaluate(FOCUSED_BODY)
+            assert pointer_scrolled["focused"] and not pointer_scrolled["quiet"] and pointer_scrolled["top"] > 0, records
+            assert pointer_scrolled["bodyOutline"][0] == "none" and pointer_scrolled["frameMask"] == "none", records
+            assert "linear-gradient" in pointer_scrolled["bodyMask"] and pointer_scrolled["above"] and pointer_scrolled["below"], records
+            if engine == "chromium":
+                assert pointer_scrolled["frameOutline"] == ["solid", "2px", "-2px"], records
+            page.keyboard.press(tab)
+            assert not page.evaluate("() => document.activeElement === document.querySelector('.document-reader-body')")
+            for _ in range(10):
+                page.keyboard.press(tab)
+                if page.evaluate("() => document.activeElement === document.querySelector('.document-reader-body')"):
+                    break
+            tabbed = records["tabbed"] = page.evaluate(FOCUSED_BODY)
+            assert tabbed["focused"] and tabbed["keyboard"] and not tabbed["quiet"], records
+            assert tabbed["frameOutline"] == ["solid", "2px", "-2px"] and tabbed["frameMask"] == "none", records
+            assert tabbed["bodyOutline"][0] == "none" and "linear-gradient" in tabbed["bodyMask"], records
+            page.keyboard.press("Escape")
+            page.locator("dialog.document-reader").wait_for(state="detached")
+
+            # 2. Keyboard open shows the full unmasked ring on all four edges (pixel-verified) while the body fades below.
+            page.focus(".chat-file-card")
+            page.keyboard.press("Enter")
+            page.wait_for_function("() => document.querySelector('.document-reader-body')?.getAttribute('aria-busy') === 'false'"
+                                   " && document.querySelector('.document-reader-body').hasAttribute('data-scroll-below')")
+            opened = records["opened"] = page.evaluate(FOCUSED_BODY)
+            page.screenshot(path=str(evidence / f"{engine}-reader-keyboard-opened.png"))
+            assert opened["focused"] and opened["keyboard"] and not opened["quiet"], records
+            assert opened["frameMask"] == "none" and opened["frameOutline"] == ["solid", "2px", "-2px"], records
+            assert opened["bodyOutline"][0] == "none" and "linear-gradient" in opened["bodyMask"] and opened["below"], records
+            top_diffs = records["top_edge_diffs"] = _edge_ring_diffs(page, opened["frameBox"])
+            assert all(diff >= 20 for diff in top_diffs.values()), ("every edge keeps visible ring pixels", top_diffs)
+
+            # 3. Tab back to body and PageDown: both top and bottom fades are active while all four ring edges stay visible.
+            page.keyboard.press(tab)
+            assert page.evaluate("() => document.activeElement === document.querySelector('.document-reader-body')")
+            page.keyboard.press("PageDown")
+            page.wait_for_function("() => document.querySelector('.document-reader-body').scrollTop > 0"
+                                   " && document.querySelector('.document-reader-body').hasAttribute('data-scroll-above')"
+                                   " && document.querySelector('.document-reader-body').hasAttribute('data-scroll-below')")
+            scrolled = records["scrolled"] = page.evaluate(FOCUSED_BODY)
+            page.screenshot(path=str(evidence / f"{engine}-reader-keyboard-scrolled.png"))
+            assert scrolled["top"] > 0 and scrolled["focused"] and scrolled["keyboard"], records
+            assert scrolled["frameMask"] == "none" and scrolled["frameOutline"] == ["solid", "2px", "-2px"], records
+            assert scrolled["bodyOutline"][0] == "none" and "linear-gradient" in scrolled["bodyMask"], records
+            assert scrolled["above"] and scrolled["below"], records
+            mid_diffs = records["mid_edge_diffs"] = _edge_ring_diffs(page, scrolled["frameBox"])
+            assert all(diff >= 20 for diff in mid_diffs.values()), ("top and bottom ring pixels stay unmasked", mid_diffs)
+
+            page.keyboard.press("Escape")
+            page.locator("dialog.document-reader").wait_for(state="detached")
+            assert page.evaluate("() => document.activeElement === window.openerTile")
+        finally:
+            (evidence / f"{engine}-reader-keyboard.json").write_text(json.dumps(records, indent=2) + "\n")
             browser.close()

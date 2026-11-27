@@ -93,6 +93,34 @@ test('an update is named by its versions, else by its count of changes, never by
     });
 });
 
+test('a rerun and its earlier red name and address different exact attempts', () => {
+    const url = 'https://github.com/owner/repo/actions/runs/77';
+    const run = { sha: 'bbbb', status: 'completed', run_id: 77, url };
+    const qualification = { ...plan, github: { status: 'observed', runs: [
+        { ...run, attempt: 2, conclusion: 'success' },
+        { ...run, attempt: 1, conclusion: 'failure', retained: true, url: `${url}/attempts/2`, covered_shas: ['earlier-merge'] },
+        { ...run, attempt: 3, conclusion: 'cancelled', url: 'https://example.org/owner/repo/actions/runs/77' },
+        { ...run, attempt: 4, conclusion: 'failure', url: 'https://github.com/owner/repo/actions/runs/78' },
+    ] } };
+    const rows = preflightEvidenceRows({ merge_plan: plan, letter, qualification });
+    assert.deepEqual(rows.filter(row => row.label.startsWith('bbbb post-merge')), [
+        { label: 'bbbb post-merge · run ID 77, attempt 2', value: `success ${url}/attempts/2` },
+        { label: 'bbbb post-merge · run ID 77, attempt 1', value: `failure (previously observed) ${url}/attempts/1\nThis run also covers: earlier-.` },
+        { label: 'bbbb post-merge · run ID 77, attempt 3', value: 'cancelled' },
+        { label: 'bbbb post-merge · run ID 77, attempt 4', value: 'failure' },
+    ]);
+});
+
+test('an attempt a newer one followed, never read as settled, keeps its exact link and says its outcome is unknown', () => {
+    const url = 'https://github.com/owner/repo/actions/runs/77';
+    const run = { sha: 'bbbb', run_id: 77, url, status: 'in_progress', conclusion: null };
+    const qualification = { ...plan, github: { status: 'partial', runs: [{ ...run, attempt: 1, retained: true }, { ...run, attempt: 2 }] } };
+    assert.deepEqual(preflightEvidenceRows({ merge_plan: plan, letter, qualification }).filter(row => row.label.startsWith('bbbb post-merge')), [
+        { label: 'bbbb post-merge · run ID 77, attempt 1', value: `final outcome unknown, last seen in_progress (previously observed) ${url}/attempts/1` },
+        { label: 'bbbb post-merge · run ID 77, attempt 2', value: `in_progress ${url}/attempts/2` },
+    ]);
+});
+
 test('each commit keeps its own verdict, record state and request-time relation; a legacy receipt invents neither', () => {
     const at = (sha, review) => ({ sha, subject: sha, receipt: { checks: [], review } });
     const qualification = { ...plan, github: { status: 'observed', runs: [] }, commits: [

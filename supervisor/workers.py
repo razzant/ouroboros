@@ -704,7 +704,6 @@ def _apply_presence_promotion_authority(
     binding's related work under the same ceiling and never a speaker.
     """
     from ouroboros.dialogue_provenance import presence_root_carrier, presence_root_relation
-    from ouroboros.presence_context import PRESENCE_FINAL_ROUTE_KEY
 
     contract = evt.get("task_contract") if isinstance(evt.get("task_contract"), dict) else {}
     carrier = presence_root_carrier(evt, task_contract=contract)
@@ -715,9 +714,6 @@ def _apply_presence_promotion_authority(
         task["_presence_origin"] = True
     task["source"] = "presence_promote"
     task.setdefault("metadata", {}).update(carrier)
-    route_fact = evt.get(PRESENCE_FINAL_ROUTE_KEY)
-    if "presence" in carrier and isinstance(route_fact, dict):
-        task["metadata"][PRESENCE_FINAL_ROUTE_KEY] = dict(route_fact)
     inherited_manifest = [
         dict(row) for row in (contract.get("attachment_manifest") or [])
         if isinstance(row, dict)
@@ -1273,7 +1269,7 @@ def _reconcile_confirmed_dead_review_owner(owner_pid: int) -> None:
     _reconcile_review_owners(DRIVE_ROOT, {owner_pid})
 
 
-from supervisor.worker_pool_lifecycle import _serialized_worker_lifecycle  # noqa: E402 -- moved span, decorator read at import time below
+from supervisor.worker_pool_lifecycle import _serialized_worker_lifecycle, provides_pool  # noqa: E402 -- moved span, decorator read at import time below
 
 
 @_serialized_worker_lifecycle
@@ -1281,7 +1277,7 @@ def spawn_workers(n: int = 0) -> None:
     global _CTX, _WORKER_POOL_DISABLED_REASON
     global _LAST_SPAWN_TIME
     with _queue_lock:
-        if WORKERS:
+        if any(map(provides_pool, WORKERS)):  # a Host thread's negative pseudo-slot is no pool (#3149)
             raise RuntimeError(
                 "spawn_workers requires an empty pool; stop the current workers "
                 "or use respawn_worker for one slot"
@@ -1334,7 +1330,7 @@ def spawn_workers(n: int = 0) -> None:
         conversation_lane._SPAWN_REFUSED[0] = f"carrier_spawn_refused:{type(exc).__name__}"
         raise
     with _queue_lock:
-        if WORKERS:
+        if any(map(provides_pool, WORKERS)):
             for worker in new_workers.values():
                 try:
                     worker.proc.terminate()
@@ -1355,12 +1351,15 @@ def spawn_workers(n: int = 0) -> None:
     threading.Thread(target=_verify_worker_sha_after_spawn, args=(dict(new_workers), events_cursor, 1, spawned_at), daemon=True).start()
 
 
-def _partition_slots_for_stop(lanes: Optional[frozenset]) -> List[Worker]:
+def _partition_slots_for_stop(lanes: Optional[frozenset], *, startup: bool) -> List[Worker]:
     """Under the lifecycle serializer, then Q (``kill_workers``' order): the slots a stop owns, marked ``reaping``.
 
-    ``lanes`` None owns every slot and ends the generation (no carrier grows behind the stop).
+    ``lanes`` None owns every slot and ends the generation (no carrier grows behind the stop),
+    except at ``startup`` (the boot's old-workers stop, #3149): a live Host thread's negative
+    pseudo-slot stays, so its Presence author finishes its own turn and keeps its row.
     """
-    doomed = [w for w in WORKERS.values() if lanes is None or getattr(w, "lane", LANE_PROJECT) in lanes]
+    doomed = [w for w in WORKERS.values() if (lanes is None or getattr(w, "lane", LANE_PROJECT) in lanes)
+              and not (startup and w.wid < 0 and w.proc.is_alive())]
     if lanes is None:
         from supervisor import conversation_lane
 
@@ -1372,18 +1371,23 @@ def _partition_slots_for_stop(lanes: Optional[frozenset]) -> List[Worker]:
     return doomed
 
 
-def _spare_rows_for_stop(lanes: Optional[frozenset], doomed: List[Worker]) -> Dict[str, Dict[str, Any]]:
+def _spare_rows_for_stop(lanes: Optional[frozenset], doomed: List[Worker],
+                         *, startup: bool = False) -> Dict[str, Dict[str, Any]]:
     """Under the SAME Q hold as the stop's terminalization: the RUNNING rows the stop spares, popped.
 
     A project fence spares the rows of the slots it does not own and every conversation-lane row,
     the ones awaiting a carrier and the ones admitted while the doomed slots were torn down outside
-    Q included: a lane turn is never failed by a project stop. ``kill_workers`` restores them at its end.
+    Q included: a lane turn is never failed by a project stop. At ``startup`` (#3149), a Presence
+    row this Host admitted that still awaits its carrier stays beside any spared Host slot's row.
     """
+    from supervisor.conversation_lane import awaiting_presence_row
+
     spared_ids = {w.busy_task_id for w in WORKERS.values() if w not in doomed and w.busy_task_id}
     lane_spared = lanes is not None and LANE_CONVERSATION not in lanes
     spared_rows = {tid: meta for tid, meta in RUNNING.items()
-                   if tid in spared_ids or (lane_spared and isinstance(meta, dict)
-                                            and meta.get("lane") == LANE_CONVERSATION)}
+                   if tid in spared_ids
+                   or (lane_spared and isinstance(meta, dict) and meta.get("lane") == LANE_CONVERSATION)
+                   or (startup and awaiting_presence_row(meta))}
     for tid in spared_rows:
         RUNNING.pop(tid, None)
     return spared_rows
@@ -1431,6 +1435,7 @@ def kill_workers(
     archive_service_logs: bool = True,
     disable_reason: str = "",
     preserve_pending: bool = False,
+    startup: bool = False,  # the boot's old-workers sweep: a live inline Presence author keeps its slot and row (#3149)
     preserve_running_task_ids: Optional[set[str]] = None,
     reconcile_delegate_custody: bool = True,
     reconcile_review_custody: bool = True,
@@ -1446,6 +1451,7 @@ def kill_workers(
     under Q and return at its end, a returned owner turn still queued stays queued, so a
     project-pool fence never terminalises an owner's turn (owner decision 1A).
     A stop without ``lanes`` owns every slot: Panic, Restart and a managed update.
+    The boot's old-workers sweep (``startup=True``, #3149) leaves a live Host Presence author its slot and row.
     """
     global _WORKER_POOL_DISABLED_REASON
     from supervisor import conversation_lane, events_budget, queue, restart_retention as retention
@@ -1467,14 +1473,14 @@ def kill_workers(
                 _WORKER_POOL_DISABLED_REASON = previous_disable_reason
                 log.error("Worker shutdown blocked: disable fence was not durable")
                 return False
-        doomed = _partition_slots_for_stop(lanes)
+        doomed = _partition_slots_for_stop(lanes, startup=startup)
     # Kill and join OUTSIDE the queue lock: the lifecycle serializer still
     # excludes pool starts and kills, and ingress/stop doors are not held.
     _tear_down_slots(doomed)
     with events_budget._parking_lock() as revoked:
         # The spared rows are chosen under THIS hold, the one the terminalization below runs under:
         # a lane turn admitted during the teardown is spared with the rest.
-        spared_rows = _spare_rows_for_stop(lanes, doomed)
+        spared_rows = _spare_rows_for_stop(lanes, doomed, startup=startup)
         cleared_running = len(RUNNING)
         dead_pids, unconfirmed_pids = _confirm_dead_slots(doomed)
         for w in doomed:

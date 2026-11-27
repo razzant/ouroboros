@@ -1,4 +1,12 @@
 import { backrefs } from './dom_backrefs.js';
+import { ResizeObserverStub } from './helpers/resize_observer.js';
+
+// The proven data profile a core-served document names before the chat mounts (server_web.chat_preview_scope):
+// the saved preview keys its rooms by this fact, so a test document that never says it opens cold.
+export const PREVIEW_SCOPE = '0123456789abcdef';
+// The key a room keeps its session record (reply, unconfirmed sends, draft) under once its document proves that
+// profile (chat_preview.roomStoreKey): Main's is `base:scope`, another room's `base:scope:chatId`; `base` is the bare name.
+export const roomKey = (base, chatId = 1) => (chatId === 1 ? `${base}:${PREVIEW_SCOPE}` : `${base}:${PREVIEW_SCOPE}:${chatId}`);
 
 export class ClassList {
     constructor(node) { this.node = node; this.names = new Set(); }
@@ -147,6 +155,7 @@ export class ElementStub {
     }
     get firstElementChild() { return this.children.find((child) => child.nodeType !== 3) || null; }
     get lastElementChild() { return this.children.findLast((child) => child.nodeType !== 3) || null; }
+    get childNodes() { return this.children; }  // the fixture's backing list includes text nodes
     get firstChild() { return this.children[0] || null; }
     get lastChild() { return this.children.at(-1) || null; }
     replaceChild(next, current) { this.insertBefore(next, current); this.removeChild(current); return current; }
@@ -202,6 +211,21 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
         byId: new Map(), hidden: false, activeElement: null,
         createElement(tag) { return new ElementStub(tag, document); },
         createTextNode(data) { return new TextStub(data); },
+        // The core's own index carries the profile meta and, for theme, the installation scope; a document
+        // model without them would be a page the core never serves.
+        querySelector(selector) {
+            if (selector === 'meta[name="ouroboros-chat-preview-scope"]') return { content: PREVIEW_SCOPE };
+            if (selector === 'meta[name="ouroboros-appearance-scope"]') return { content: 'fedcba9876543210' };
+            return null;
+        },
+        createComment() {
+            const comment = new TextStub();
+            comment.nodeType = 8;
+            // This fixture's children array also stores non-elements; an origin marker has no geometry.
+            comment.getBoundingClientRect = () => ({ top: 0, bottom: 0, width: 0, height: 0 });
+            comment.replaceWith = (node) => comment.parentNode?.replaceChild(node, comment);
+            return comment;
+        },
         createTreeWalker(root) {
             const texts = [];
             const collect = node => { for (const child of node.children || []) {
@@ -242,16 +266,32 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
         removeItem: (key) => storage.delete(key),
     };
     // The origin's persistent store (the saved preview, chat_preview.js), apart from the tab's.
-    const persistent = new Map();
-    globalThis.localStorage = { getItem: (key) => persistent.get(key) ?? null,
-        setItem: (key, value) => persistent.set(key, String(value)), removeItem: (key) => persistent.delete(key) };
+    globalThis.localStorage = memoryStorage();
     globalThis.fetch = fetchImpl;
-    globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+    globalThis.ResizeObserver = ResizeObserverStub;
     globalThis.requestAnimationFrame = (fn) => { fn(); return 1; };
     return { prior, mount };
 }
 export function restoreDom(prior) {
     Object.assign(globalThis, prior);
+}
+
+/** A browser's Storage over `values`: the saved preview lists its keys (length, key) as well as reading them. */
+export function memoryStorage(values = new Map()) {
+    return {
+        values,
+        get length() { return values.size; },
+        key: (index) => [...values.keys()][index] ?? null,
+        getItem: (key) => values.get(key) ?? null,
+        setItem: (key, value) => { values.set(key, String(value)); },
+        removeItem: (key) => { values.delete(key); },
+    };
+}
+
+// The chat double's textContent does not include nested elements. Read the notice's words,
+// not its action labels; a room notice without controls writes directly on the toast.
+export function toastMessages(root) {
+    return root.querySelectorAll('.toast').map((toast) => (toast.querySelector('.toast-words') || toast).textContent);
 }
 
 export function walkCard(node, taskId) {

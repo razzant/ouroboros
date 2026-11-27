@@ -237,7 +237,7 @@ def reopen_reconciled_presence_placeholder(drive_root: Any, task_id: str) -> boo
     projection = ("canonical_terminal_projection", "canonical_terminal_projection_ready",
                   "canonical_terminal_projection_origin", "terminal_time")
     cleared = {"reason_code", "outcome_axes", "artifact_status", "artifact_bundle", "result",
-               "status_reconciled_from", *projection}
+               "status_reconciled_from", "read_spans", *projection}  # a re-run records its own reading
 
     def _reopen(existing: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not is_reconciled_presence_placeholder(existing):
@@ -247,13 +247,19 @@ def reopen_reconciled_presence_placeholder(drive_root: Any, task_id: str) -> boo
                 if key in existing}
         reopened.append(utc_now_iso())
         return stamp_task_result_schema({
-            **{key: value for key, value in existing.items() if key not in cleared},
+            **{key: value for key, value in existing.items() if key not in cleared}, "read_spans": _empty_reading(),
             "status": STATUS_RUNNING, "ts": reopened[0], "updated_at": reopened[0],
             "superseded_placeholder": {**mark, "result": str(existing.get("result") or "")[-500:]},
         })
 
     patch_document(drive_root, task_id, _reopen)
     return bool(reopened)
+
+
+def _empty_reading() -> Dict[str, Any]:
+    from ouroboros.memory_reading import NOTHING  # a reopened work records its own reading
+
+    return dict(NOTHING)
 
 
 def validate_task_id(task_id: Any) -> str:
@@ -612,6 +618,12 @@ def write_task_result(
         if projected_fields["unread_mailbox"] is None:
             projected_fields.pop("unread_mailbox")
         projected_fields = preserve_terminal_attempt(existing, projected_fields)
+        if "read_spans" not in projected_fields and (not existing or task_attempt_witness(existing) != task_attempt_witness(
+                {**existing, **projected_fields}) or transition.get("terminal") and "read_spans" not in existing):
+            # A work under the reading rule starts, and each new attempt restarts, with an empty stamp: one that never
+            # writes its own finish counts nothing. A row stored before the rule is never rewritten (``memory_reading``).
+            from ouroboros.memory_reading import NOTHING
+            projected_fields["read_spans"] = dict(NOTHING)
         if ((existing.get("wake_summary") or existing.get("suggested_name")) and not projected_fields.get("wake_summary")
                 and (transition.get("terminal") or task_attempt_witness(existing)
                      != task_attempt_witness({**existing, **projected_fields}))):
@@ -621,6 +633,9 @@ def write_task_result(
             if title or existing.get("wake_summary"):
                 projected_fields.update(wake_summary=None, fold_read=None,
                                         suggested_name=title or existing.get("title") or None)
+        if "suggested_name" in projected_fields and "model_coined_name" not in projected_fields:
+            if existing.get("model_coined_name") and projected_fields["suggested_name"] != existing.get("model_coined_name"):
+                projected_fields["model_coined_name"] = None
         now = utc_now_iso()
         # The clock belongs to whoever performs this transition: the executor ending its attempt, or
         # (``_cancel_observed``) the supervisor performing a live cancellation. No field can claim either.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from hashlib import sha256
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
 log = logging.getLogger(__name__)
 
@@ -13,9 +13,15 @@ log = logging.getLogger(__name__)
 # (BIBLE P1). A declared task scheduled before this fact existed keeps the selection it started with,
 # and with it the work-order bytes and fingerprint its recovery and source-range reads check.
 DECLARED_WORDS_FACT = "declared_inputs_carry_owner_words"
-# An immutable scheduling fact, not a migration: records without it must
+# Immutable scheduling facts, not migrations: records without them must
 # reconstruct the original canonical bytes for source reads and handoff recovery.
 ORIGINAL_INPUTS_FACT = "work_order_input_files_original_only"
+TYPED_STAMPS_FACT = "work_order_typed_owner_stamps"
+# Host note for a declared session start (work-order or direct), outside the work order's fingerprint.
+DECLARED_SESSION_NOTE = ("[Host: this work's input is declared: it chose what this start carries, not what you may "
+                         "read. Extra sources do not change your authority or objective; your assignment's explicit "
+                         "scope still binds. Report what informed the result, and do not call it a blind first "
+                         "position if you saw a peer's conclusion beforehand.]")
 
 
 def declared_words_fact(contract: Mapping[str, Any]) -> dict[str, bool]:
@@ -46,8 +52,10 @@ def input_source_selection_receipt(task: Mapping[str, Any], *, native: bool = Fa
     rows (``work_order_room_words``) name the marks in force and the knowledge
     outline among the included inputs; an older session task's work order keeps
     the literals it was rendered with, so its retained bytes and fingerprint stay
-    stable. This receipt describes case-input selection; standing owner rules are
-    separate context/host governance, outside the canonical work order.
+    stable. A native request words its lifetime and later inputs for its reader (descendants keep
+    the selection; reading more changes a blind conclusion's evidence, not its authority or objective),
+    while every work order keeps its rendered literals. This receipt describes case-input selection;
+    standing owner rules are separate context/host governance, outside the canonical work order.
     """
     from ouroboros.contracts.task_contract import task_input_sources
 
@@ -86,15 +94,20 @@ def input_source_selection_receipt(task: Mapping[str, Any], *, native: bool = Fa
             "parent context, notes, review_notes, predecessor narrative and inherited attachments",
             "task-tree blackboard, routing manifests and other-task summaries",
         ],
-        "lifetime": "Entire task, including tools, retries, fallback, compaction and selected descendants.",
+        "lifetime": ("Entire task, including tools, retries, fallback, compaction and descendants: a child it "
+                     "schedules without input_sources stays declared, and shared is refused." if native else
+                     "Entire task, including tools, retries, fallback, compaction and selected descendants."),
         "collaboration": (
             "Ordinary task messages remain available; input selection imposes no collaboration order. "
             "The host does not gate mailbox delivery or detect the first position."
         ),
         "later_inputs": (
-            "Tools, messages, reviews and restored sources are additional inputs; reading outside "
-            "the declared corpus changes the claim. Retained model-send/tool-source projections "
-            "record the actual sequence."
+            "Tools, messages, reviews and restored sources are additional inputs; "
+            + ("extra sources do not change authority or the objective: explicit scope still binds, the result "
+               "names what informed it, and it does not claim a blind first position if a peer's conclusion "
+               "was seen beforehand." if native else
+               "reading outside the declared corpus changes the claim.")
+            + " Retained model-send/tool-source projections record the actual sequence."
             + (" When this task delegates through schedule_subagent or delegate_start, the host adds "
                "the knowledge index (the global shelf's and its room's) once, to the result of the "
                "first accepted call; knowledge_list reads it again." if with_words else "")
@@ -219,16 +232,11 @@ def work_order_room_words(task: Mapping[str, Any]) -> list | None:
 def _owner_words_section(task: Mapping[str, Any]) -> str:
     """The owner's words carried into this task by value; "" for a task scheduled without them.
 
-    Both the payload (nested ``metadata``) and the flat task-metadata/record shapes
-    give the same bytes, so a source-range check never sees a digest mismatch. A
-    declared task scheduled before ``DECLARED_WORDS_FACT`` carries the field too, but
-    its receipt names the words among the omitted inputs, so its work order holds none
-    and keeps the bytes and fingerprint it started with. A session task's room rows
-    (``work_order_room_words``) follow the field's rows, one row per identity; nothing
-    is read from a store here, so the order is a function of the record. The key also
-    tells the heading and frame: a record without it keeps the literals it launched with.
-    The schedule text it was scheduled with (``owner_words.SCHEDULE_FIELD``) follows them
-    in its own section; a record without that field renders as it always did.
+    Payload (nested ``metadata``) and flat metadata/record shapes render identical bytes for source-range digests.
+    A declared task predating ``DECLARED_WORDS_FACT`` carries none so its bytes and fingerprint stay stable. Room
+    rows (``work_order_room_words``) follow the field's rows, one per identity, with no store reads, and select the
+    current heading/frame; records without ``TYPED_STAMPS_FACT`` keep pre-update stamp bytes. Carried schedule text
+    (``owner_words.SCHEDULE_FIELD``) follows in its own section; records without it render as before.
     """
     from ouroboros.owner_words import render_owner_words, render_schedule_text, task_schedule_items
 
@@ -236,8 +244,10 @@ def _owner_words_section(task: Mapping[str, Any]) -> str:
     if carried is None:
         return ""
     rows, absent, current = carried
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+    typed_stamps = task.get(TYPED_STAMPS_FACT) is True or metadata.get(TYPED_STAMPS_FACT) is True
     words = render_owner_words(rows, absent, audience="session", root_task_id=str(task.get("root_task_id") or ""),
-                               current=current)
+                               current=current, typed_stamps=typed_stamps)
     schedule = render_schedule_text(task_schedule_items(task), audience="session")
     return "\n\n".join(part for part in (words, schedule) if part)
 
@@ -346,6 +356,8 @@ def _source_task_from_context(ctx: Any, task_id: str) -> dict[str, Any]:
     except Exception:
         stored = {}
     if isinstance(stored, Mapping) and stored:
+        if task_id != str(getattr(ctx, "task_id", "") or "").strip():
+            task.pop(TYPED_STAMPS_FACT, None)
         stored_nonempty = {
             key: value for key, value in stored.items() if value not in (None, "")
         }
@@ -448,18 +460,14 @@ def _own_body_source(ctx: Any, target_root: str, source_root: str) -> tuple[Any,
     Identity comes from the selected task source; bytes come from the prepared copy
     (``prepared``), never a foreign target's file. Declared folderless body work
     reads the system docs, not its scratch."""
-    from pathlib import Path
-
+    from ouroboros import work_domain
     from ouroboros.context_layout import task_design_source
 
-    metadata = getattr(ctx, "task_metadata", {})
-    task = dict(metadata) if isinstance(metadata, Mapping) else {}
-    task["task_contract"] = getattr(ctx, "task_contract", {})
-    selected = task_design_source(ctx, task)
+    selected = task_design_source(ctx, _context_task(ctx))
     if selected is None:
         return None, False
     try:
-        folder = Path(target_root).resolve().relative_to(selected.resolve())
+        folder = work_domain.settle(target_root).relative_to(work_domain.settle(selected))
     except ValueError:
         from ouroboros.tools.tool_resolution import active_repo_dir_for
         from ouroboros.workspace_copies import same_directory
@@ -467,34 +475,46 @@ def _own_body_source(ctx: Any, target_root: str, source_root: str) -> tuple[Any,
         if not same_directory(target_root, active_repo_dir_for(ctx)):
             return None, False  # e.g. a payload session launched by an own-body task
         return selected, False
-    source = Path(source_root).resolve()
+    source = work_domain.settle(source_root)
     for _part in folder.parts:
         source = source.parent  # an investigation can start below the copied repo root
     return source, True
 
 
+def _context_task(ctx: Any) -> dict[str, Any]:
+    """The task facts a design source is selected by: the context's metadata and its contract."""
+    metadata = getattr(ctx, "task_metadata", {})
+    task = dict(metadata) if isinstance(metadata, Mapping) else {}
+    task["task_contract"] = getattr(ctx, "task_contract", {})
+    return task
+
+
 def session_design_navigation(ctx: Any, *, target_root: str, source_root: str) -> str:
-    """Pin body navigation in the prepared session request, beside its work order.
+    """Pin the body's DESIGN in the prepared session request, beside its work order: the author's view, its
+    design bible whole and the rest by headings (``context_layout.design_bible_view``), with the bytes' digest.
 
     The canonical work order is reconstructed for source-range validation and
     cannot depend on mutable files. Session instructions instead ride the durable
     start request and its byte-identical retry (``_own_body_source`` selects the bytes).
+    A session on the task's own working folder that is not the body takes the author's wider choice (item 97, RV1):
+    the installed book for a true ``context_requires_self_body_docs`` or an unknown body. The BIBLE pointer and the
+    environment facts keep ``_own_body_source``.
     """
-    from ouroboros.context_layout import design_navigation
+    from ouroboros.context_layout import author_design_source, design_bible_view, read_design_source
+    from ouroboros.tools.tool_resolution import active_repo_dir_for
+    from ouroboros.workspace_copies import same_directory
 
-    source, _prepared = _own_body_source(ctx, target_root, source_root)
+    source, prepared = _own_body_source(ctx, target_root, source_root)
+    installed = False
+    if not prepared and same_directory(target_root, active_repo_dir_for(ctx)):
+        source, installed = author_design_source(ctx, _context_task(ctx))
     if source is None:
         return ""
     path = source / "docs/DESIGN.md"
-    try:
-        raw = path.read_bytes()
-        text = raw.decode("utf-8")
-    except (OSError, UnicodeError):
-        raw, text = None, None
-    navigation = design_navigation(text, source=str(path))
+    raw, text = read_design_source(path) or (None, None)
+    view = design_bible_view(text, source=str(path), installed=installed)
     digest = f"\nSource bytes SHA-256: {sha256(raw).hexdigest()}." if raw is not None else ""
-    return ("\n\nDESIGN NAVIGATION DELIVERY (host instructions, separate from canonical work order)\n"
-            + navigation + digest)
+    return "\n\nDESIGN DELIVERY (host instructions, separate from canonical work order)\n" + view + digest
 
 
 def session_constitution_pointer(ctx: Any, *, target_root: str, source_root: str) -> str:
@@ -524,7 +544,8 @@ def session_service_directories(ctx: Any, gateway: Any, route: Any, authority: A
     The delegating task's drive owns the short scratch, keyed by the snapshot. A same-tree
     continuation from another task can receive a different scratch. ``in_place`` is the invocation
     of an in-place run, which has no copy: at full access it gets its own scratch, named and never
-    granted; a ``workspace_write`` one gets none, since that would be a new grant. A skill payload,
+    granted, in a private child of the home where it qualifies (``private``); a ``workspace_write``
+    one gets none, since that would be a new grant. A skill payload,
     an engine directory copy and any other session without a copy get none; a retry replays
     recorded old paths and never comes here, even if the original task's drive or the OS already
     retired them."""
@@ -537,7 +558,7 @@ def session_service_directories(ctx: Any, gateway: Any, route: Any, authority: A
                    data_root=canonical_data_root(ctx), drive_root=getattr(ctx, "drive_root", ""),
                    task_id=str(getattr(ctx, "task_id", "") or ""),
                    key=snapshot.snapshot_id if snapshot is not None else f"in-place-{in_place}",
-                   execution_root=execution_root)
+                   execution_root=execution_root, private=snapshot is None)
 
 
 def in_place_scratch(ctx: Any, gateway: Any, route: Any, authority: Any, invocation_id: str, target_root: str) -> Any:
@@ -580,7 +601,266 @@ def unseen_words_section(ctx: Any, text: str, fact: str) -> str:
     return render_owner_words(rows, audience="session", root_task_id=root, gaps=[*gaps, fact])
 
 
-def session_memory_references(ctx: Any) -> str:
+NAMED_NOTES = "knowledge_notes"  # the notes the delegating mind names for a helper, by knowledge_read's address
+
+
+def knowledge_notes_parameter(text: str) -> dict[str, Any]:
+    """Shared address shape; each tool documents when its selection takes effect.
+
+    Compact custom projection keeps the address shape without the parameter prose.
+    """
+    item = {"type": "object", "required": ["topic"], "additionalProperties": False,
+            "properties": {"topic": {"type": "string"}, "scope": {"type": "string"}}}
+    return {NAMED_NOTES: {"type": "array", "items": item,
+                          "description": "Select knowledge notes by knowledge_read address ({topic, scope?}). " + text}}
+
+
+class NamedNoteError(ValueError):
+    """Named notes the caller cannot hand on, each problem with the call that works; nothing was queued or sent."""
+
+    def __init__(self, problems: list[str], *, code: str = "knowledge_note_unresolved") -> None:
+        super().__init__("; ".join(problems))
+        self.code, self.detail = code, str(self)
+
+
+def note_label(entry: Mapping[str, Any]) -> str:
+    return f"{entry.get('topic')} ({entry.get('scope')})"
+
+
+def _note_address(reader: Any, topic: str, scope: str, *, transfer: bool):
+    """Check reader and path first; the range and revision may depend on the captured note."""
+    from inspect import signature
+
+    from ouroboros.delegate_readonly_inputs import admit_selected_path_policy, require_selected_tool
+    from ouroboros.knowledge import shelf_spelling
+    from ouroboros.tool_access import active_tool_profile, decide_tool_access, workspace_mode_block_reason
+    from ouroboros.tool_access_types import ResolvedResourceBinding
+    from ouroboros.tools.knowledge import _address, _knowledge_read, _range
+    from ouroboros.tools.registry_core import PRESENCE_RESOURCE_BLOCKED, _presence_binding_allowed
+
+    bound = require_selected_tool(reader, "knowledge_read", {"topic": topic, "scope": scope})
+    if problem := workspace_mode_block_reason(reader):
+        raise PermissionError(f"Workspace restriction ({problem}).")
+    try:
+        call = signature(_knowledge_read).bind(reader, **bound)
+        call.apply_defaults()
+        args = call.arguments
+        start, end, version = args["start_char"], args["end_char"], args["version"]
+        # A zero-length source is the necessary shape check: any valid whole
+        # range starts at zero, and _range clamps a nonnegative end to EOF.
+        _range(0, start, end)
+    except (TypeError, ValueError):
+        raise _not_whole() from None
+    if (args["view"] not in ("note", None, "") or args["fingerprint"] not in (None, "")
+            or (version is not None and not isinstance(version, str))):
+        raise _not_whole()
+    version = version if version and version.strip() else None
+    if version is not None and (len(version) != 64 or version.strip("0123456789abcdef")):
+        raise _not_whole()
+    # A host binding may fill the default scope or name the same shelf entry, not select another one.
+    effective = (args["topic"], args["scope"])
+    requested = (topic, scope or args["scope"])
+    address = _address(reader, *requested)
+    # Project knowledge has a semantic reader and is deliberately not a generic
+    # file-tool target. Check the positive ceiling and path policy on its exact canonical path.
+    profile = active_tool_profile(reader)
+    decision = decide_tool_access(profile=profile, root="runtime_data", operation="read")
+    if not decision.allow:
+        raise PermissionError(decision.reason)
+    binding = ResolvedResourceBinding(
+        profile=profile, root="runtime_data", operation="read", base_path=address.canonical_root,
+        target_path=address.path.resolve(), source="runtime_data", skill_name="",
+        state_drive_root=address.canonical_root, requested_path=address.path)
+    if not _presence_binding_allowed(reader, binding):
+        raise PermissionError(PRESENCE_RESOURCE_BLOCKED)
+    admit_selected_path_policy(reader, binding, transfer=transfer)
+    if effective != requested:
+        bound_address = _address(reader, *effective)
+        if bound_address != address and (bound_address.shelf != address.shelf
+                                         or shelf_spelling(bound_address) != shelf_spelling(address)):
+            raise PermissionError("The bound knowledge_read selects a different note.")
+    return address, (end, version)
+
+
+def _not_whole() -> PermissionError:
+    return PermissionError("The bound knowledge_read does not select the whole current note.")
+
+
+def named_note_arguments(value: Any, *, admitted: bool = False) -> tuple[list[dict] | None, list[str]]:
+    """The shared shape pass for both launch commands. No reader or store is consulted."""
+    from ouroboros.tools.arg_feedback import ignored_argument_note
+
+    if value is None:
+        return None, []
+    code = "knowledge_note_unresolved" if admitted else "knowledge_notes_invalid"
+    if not isinstance(value, list):
+        raise NamedNoteError([f"{NAMED_NOTES}={value!r}: use an array of {{topic, scope?}} objects, as knowledge_read "
+                              "takes them"], code=code)
+    entries, problems, notes = [], [], []
+    for index, item in enumerate(value, 1):
+        name = f"{NAMED_NOTES} {index}"
+        if isinstance(item, str):
+            notes.append(f"{name}={item!r} read as {{'topic': {item!r}}}")
+            item = {"topic": item}
+        if (not isinstance(item, dict) or set(item) - {"topic", "scope"} or not isinstance(item.get("topic"), str)
+                or not item["topic"].strip() or not isinstance(item.get("scope", ""), str)):
+            problems.append(f"{name}={item!r}: an object {{topic, scope?}} with a nonempty topic, as knowledge_read "
+                            "takes it")
+            continue
+        if "scope" in item and not item["scope"]:
+            notes.append(ignored_argument_note(f"{name}.scope", item["scope"],
+                                               "this task's project shelf, else global"))
+        entries.append({"topic": item["topic"], "scope": item.get("scope", "")})
+    if problems:
+        raise NamedNoteError(problems, code=code)
+    return entries, notes
+
+
+def _note_readers(ctx, recipient, topic, scope, *, transfer, admitted):
+    from ouroboros import knowledge as store
+
+    address, limit = _note_address(ctx, topic, scope, transfer=transfer)
+    limits = [limit]
+    if admitted:
+        if (address.topic, address.scope) != (topic, scope):
+            raise PermissionError("The current knowledge_read does not select the admitted note address.")
+    else:
+        canonical = store.shelf_spelling(address)
+        if canonical != address:
+            address, limit = _note_address(ctx, canonical.topic, canonical.scope, transfer=transfer)
+            if address != canonical:
+                raise PermissionError("The bound knowledge_read does not select the canonical note address.")
+            limits.append(limit)
+    if recipient is not None:
+        received, limit = _note_address(recipient, address.topic, address.scope, transfer=transfer)
+        if received != address:
+            raise PermissionError("The recipient's knowledge_read selects a different source.")
+        limits.append(limit)
+    return address, limits
+
+
+def _whole_current(note, limits):
+    from ouroboros.tools.knowledge import _range
+
+    size = len(note.text) if any(end for end, _ in limits) else None
+    for end, revision in limits:
+        if ((revision is not None and revision != note.revision)
+                or (end and _range(size, 0, end)[:2] != (0, size))):
+            raise _not_whole()
+
+
+class _SelectedNote(NamedTuple):
+    entry: dict
+    note: Any = None  # an immutable KnowledgeNote, held only by a start that will include its bytes
+    gap: str = ""
+
+
+def _selected_notes(ctx, entries, notes, *, recipient=None, transfer=False, capture=False, admitted=False):
+    """Validate a schedule or take the one capture for a start. An admitted default may lose its source, not its gates."""
+    from ouroboros import knowledge as store
+
+    if entries is None:
+        return None, notes
+    found, problems = {}, []
+    for index, entry in enumerate(entries, 1):
+        name = f"{NAMED_NOTES} {index}"
+        topic, scope = entry["topic"], entry["scope"]
+        try:
+            address, limits = _note_readers(ctx, recipient, topic, scope, transfer=transfer, admitted=admitted)
+        except (PermissionError, ValueError) as exc:
+            problems.append(f"{name} {topic!r}: {exc}")
+            continue
+        except OSError as exc:
+            problems.append(f"{name} {topic!r}: the note address could not be checked ({type(exc).__name__})")
+            continue
+        identity = address.scope, address.topic
+        entry = {"topic": address.topic, "scope": address.scope}
+        if identity in found:
+            notes.append(f"{name} names {note_label(entry)} again; it is carried once")
+            continue
+        try:
+            note = store.read_knowledge_note(address)
+        except (OSError, UnicodeDecodeError) as exc:
+            if admitted:
+                found[identity] = _SelectedNote(entry, gap=type(exc).__name__)
+            elif any(end or revision for end, revision in limits):
+                problems.append(f"{name} {topic!r}: {_not_whole()}")
+            elif isinstance(exc, FileNotFoundError):
+                elsewhere = _global_note_hint(ctx, recipient, address, transfer=transfer)
+                problems.append(f"{name}: no note {address.topic!r} on the {address.scope} shelf; "
+                                f"knowledge_list(scope={address.scope!r}) lists that shelf{elsewhere}")
+            else:
+                problems.append(f"{name} {topic!r}: the note could not be read ({type(exc).__name__})")
+            continue
+        try:
+            _whole_current(note, limits)
+        except PermissionError as exc:
+            problems.append(f"{name} {topic!r}: {exc}")
+            continue
+        found[identity] = _SelectedNote(entry, note if capture else None)
+    if problems:
+        raise NamedNoteError(problems)
+    return list(found.values()), notes
+
+
+def _global_note_hint(ctx, recipient, address, *, transfer):
+    if address.scope != "global":
+        try:
+            alternate, limits = _note_readers(ctx, recipient, address.topic, "global", transfer=transfer, admitted=True)
+            if not any(end or revision for end, revision in limits) and alternate.path.is_file():
+                return f"; a global note exists: {{'topic': {address.topic!r}, 'scope': 'global'}}"
+        except (OSError, ValueError):
+            pass  # A repair hint cannot reveal an unreadable alternate source.
+    return ""
+
+
+def resolve_named_notes(ctx, selection, *, recipient=None, session=False):
+    """Schedule addresses, not bodies or claims about their eventual delivery."""
+    rows, feedback = _selected_notes(ctx, *selection, recipient=recipient, transfer=session)
+    return None if rows is None else [row.entry for row in rows], feedback
+
+
+def prepare_named_notes(ctx, value, *, admitted=False):
+    """Prepare one start from one read of each admitted note; rendering never reopens it."""
+    rows, feedback = _selected_notes(ctx, *named_note_arguments(value, admitted=admitted),
+                                     transfer=True, capture=True, admitted=admitted)
+    return named_notes_section(rows), feedback
+
+
+def named_notes_section(rows: list[_SelectedNote] | None) -> tuple[str, dict | None]:
+    if not rows:
+        return "", ({"sent": []} if rows == [] else None)
+    parts = ["## Named knowledge notes\nThe notes named for this work (knowledge_notes), each whole as it stood when "
+             "this start was prepared."]
+    sent, gaps = [], []
+    for entry, note, gap in rows:
+        if gap:
+            gaps.append({**entry, "reason": gap})
+            parts.append(f"### {note_label(entry)}\n[Host: this named note could not be read at this start "
+                         f"({gap}); its text is not here.]")
+            continue
+        topic, scope = entry["topic"], entry["scope"]
+        text, revision = note.text, note.revision
+        state = "metadata unavailable" if note.parse_error else f"state {note.state}"
+        parts.append(f"### {note.title}\nNote: knowledge_read(topic={topic!r}, scope={scope!r})\n"
+                     f"Revision: {revision} ({state}, {len(text)} chars)\n\n{text}")
+        sent.append({**entry, "revision": revision, "chars": len(text)})
+    return "\n\n".join(parts), {key: value for key, value in (("sent", sent), ("gaps", gaps)) if value}
+
+
+def named_notes_block(entries: Any, *, session: bool) -> str:
+    """A scheduled child's own reference to the notes its parent named, frozen into its first input: addresses only,
+    as ``knowledge_read`` calls; "" without any, so a child scheduled without them keeps its first input."""
+    if not entries:
+        return ""
+    calls = "\n".join(f"- knowledge_read(topic={entry['topic']!r}, scope={entry['scope']!r})" for entry in entries)
+    where = ("These are the default for the initial session start only. Their text is not in this input." if session else
+             "Their text is not in this input.")
+    return ("[NAMED KNOWLEDGE NOTES]\nThe parent named these knowledge notes for this work (knowledge_notes). "
+            f"{where}\n{calls}")
+
+
+def session_memory_references(ctx: Any, named: str = "") -> str:
     """The marks in force for the session task's room (this room's and the global ones), the knowledge outline
     (the global shelf's and its room's: every note by address and title, people's summaries kept) and the heads of
     the notes that claim the situation names a helper of this work carries and of the notes their heads link
@@ -592,8 +872,9 @@ def session_memory_references(ctx: Any) -> str:
     The stores are read once as they stand, through the memory
     view's own capture and render (``memory_view._capture_marks``, ``render_room`` over a marks-only snapshot), the
     helper's outline (``context_sections.helper_navigation_sections``) and the heads resolved now, never the
-    launcher's own capture. ``ctx._session_held_heads`` keeps the heads sent, by address and revision, for the start's
-    custody; nothing else is written or activated here. A retry replays the recorded bytes."""
+    launcher's own capture. For a new session its already captured ``named`` selection follows, shared or declared.
+    ``ctx._session_held_heads`` keeps the heads sent, by address and revision, for the start's custody; nothing else
+    is written or activated here. A retry replays the recorded bytes."""
     import dataclasses
     from types import SimpleNamespace
 
@@ -615,8 +896,9 @@ def session_memory_references(ctx: Any) -> str:
     task = {**(meta if isinstance(meta, Mapping) else {}), "id": str(getattr(ctx, "task_id", "") or "")}
     task["task_contract"] = getattr(ctx, "task_contract", None) or task.get("task_contract")
     ctx._session_held_heads = held = None
+    helper = declared = False  # the working-notes line closes held heads and named notes alike
     try:
-        root = canonical_data_root(ctx)
+        root, declared = canonical_data_root(ctx), task_input_sources(task) == "declared"
         navigation = {"bodies": {}, "names": helper_names(ctx, root)}
         outline = "\n\n".join(helper_navigation_sections(root, str(getattr(ctx, "project_id", "") or ""),
                                                          global_capture=navigation))
@@ -629,30 +911,32 @@ def session_memory_references(ctx: Any) -> str:
         store = ChronicleStore(root)  # a chronicle never activated holds no mark; nothing activates it here
         marks = tuple(_capture_marks(store, spec, room_labeler(root))) if store.log_path.exists() else ()
         marks_text = render_room(MemoryViewSnapshot(spec=spec, store_status={"state": "active"}, frontier={}, marks=marks))
-        if task_input_sources(task) == "declared":
+        if declared:
             if topics := held_notes.claimed_topics(root, navigation["names"], navigation.get("inventory", ())):
-                held = ("[Host: the heads of the knowledge notes that claim this work's room, and of the notes their "
-                        "heads link, are not in this start, because its input is declared: " + ", ".join(topics) + ".]")
+                held = ("[Host: this start does not automatically add heads of room-claiming notes or of the notes "
+                        "those heads link, because its input is declared: " + ", ".join(topics) + ".]")
         elif entries := held_notes.turn_sections(root, task, spec, navigation, ctx=SimpleNamespace(
                 held_reader_unavailable=held_notes.EXTERNAL_READER)):  # a fresh namespace, never the launcher's capture
-            held = "\n\n".join([*(part.full_text for part in entries), held_notes.HELPER_NOTE])
+            held, helper = "\n\n".join(part.full_text for part in entries), True
             ctx._session_held_heads = held_notes.sent_heads(entries) or None
     except Exception as exc:  # an unreadable store is a named gap in the start, never a withheld start
         log.warning("session references: my memory could not be read at this start", exc_info=True)
-        return head + f"My memory could not be read here ({type(exc).__name__}); this start carries no marks and no outline."
+        return head + "\n\n".join(part for part in (
+            f"My memory could not be read here ({type(exc).__name__}); this start carries no marks and no outline.",
+            declared and DECLARED_SESSION_NOTE, named, named and held_notes.HELPER_NOTE) if part)
     return head + "\n\n".join(part for part in (
-        marks_text or "No marks are in force for this work's room or globally.", outline, held) if part)
+        marks_text or "No marks are in force for this work's room or globally.", outline, held,
+        declared and DECLARED_SESSION_NOTE, named, (helper or named) and held_notes.HELPER_NOTE) if part)
 
 
 def session_host_references(ctx: Any, *, target_root: str, source_root: str,
                             private_copy: bool = False, payload_skill: str = "", service: Any = None,
-                            start_body: str | None = None) -> str:
+                            start_body: str | None = None, named_notes: str = "") -> str:
     """Host references pinned in a session's start request, computed once at first start.
 
-    Own-body DESIGN navigation and BIBLE path, the owner's standing rules for every session (declared
-    inputs included: they govern the work, as BIBLE does), the marks in force, the knowledge outline and the held heads
-    as text (``session_memory_references``: outside the work order's fingerprint, at every start of the line), and the
-    installed instruction-skill index for any workspace;
+    Own-body DESIGN (bible whole, the rest by headings) and BIBLE path, the owner's standing rules for every session
+    (declared included), marks, outline, held heads and any named notes for this start (``session_memory_references``,
+    outside the work order's fingerprint), and the installed instruction-skill index for any workspace;
     a skill-payload builder also gets the serving host's skill contract, whatever its input
     selection, and any other private copy its environment facts: dependency files read at the
     copy's repository root, the environment placed where the session may write (``source_root``,
@@ -667,7 +951,8 @@ def session_host_references(ctx: Any, *, target_root: str, source_root: str,
 
     text = (session_design_navigation(ctx, target_root=target_root, source_root=source_root)
             + session_constitution_pointer(ctx, target_root=target_root, source_root=source_root)
-            + owner_rules_section(session=True) + session_memory_references(ctx) + session_skill_index(ctx))
+            + owner_rules_section(session=True) + session_memory_references(ctx, named_notes)
+            + session_skill_index(ctx))
     tail = unseen_words_section(ctx, start_body, START_TAIL_FACT) if start_body is not None else ""
     tail = f"\n\n{tail}" if tail else ""
     if payload_skill:
@@ -707,7 +992,7 @@ def work_order_fingerprint(task: Mapping[str, Any]) -> str:
 
 
 __all__ = [
-    "DECLARED_WORDS_FACT", "declared_inputs_carry_owner_words", "declared_words_fact",
+    "DECLARED_WORDS_FACT", "TYPED_STAMPS_FACT", "declared_inputs_carry_owner_words", "declared_words_fact",
     "assignment_instructions", "compile_external_work_order", "canonical_work_order_source",
     "work_order_source_projection",
     "validate_work_order_source_response",

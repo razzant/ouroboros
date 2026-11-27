@@ -24,12 +24,12 @@ and the derived affinity keys, whose presence and shape are still checked.
 
 Name-dependent wire facts that are genuinely about a provider's routing contract
 are DECLARED below with the code symbol, the exact name scope the code tests and
-the payload path, each pointing at its dated row in DEVELOPMENT ("Naming and
-boundaries"). A probe is compared with a control from the same declared scope,
-so a declared fact never hides another difference; separately, every scope is
-compared with the plain control and must show its declared effects and nothing
-else, so a declared exception that stops diverging, or reaches wider than its
-scope, fails too.
+the payload path, each pointing at the evidence its symbol keeps (DEVELOPMENT
+"External facts: unknown is not no"). A probe is compared with a control from
+the same declared scope, so a declared fact never hides another difference;
+separately, every scope is compared with the plain control and must show its
+declared effects and nothing else, so a declared exception that stops
+diverging, or reaches wider than its scope, fails too.
 
 The exact direct MiniMax Flash tier exception has a separate test below: it
 diverges only at none/minimal/ultra. The high comparison remains unchanged.
@@ -170,7 +170,7 @@ def _messages(*, declared: bool):
 
 
 PROMPT_SHAPES = ("main-declared-prefix", "undeclared-multiblock")
-# DEVELOPMENT "External facts", provider_models.MINIMAX_FLASH_EFFORT_ALIASES.
+# Evidence: the comment above provider_models.MINIMAX_FLASH_EFFORT_ALIASES.
 MINIMAX_FLASH_NAME = "MiniMax-M3.1-Flash"
 MINIMAX_FLASH_TIERS = ("none", "minimal", "ultra")
 
@@ -360,7 +360,7 @@ def test_physical_payload_does_not_depend_on_the_model_name(empty_evidence):
         "The physical payload depends on the model NAME although no evidence about the route "
         "exists. A name is not capability evidence: decide from the exact route's sourced "
         "evidence, or declare a dated provider wire fact in DECLARED_EXCEPTIONS with its symbol, "
-        "exact name scope, payload path and DEVELOPMENT row.\n"
+        "exact name scope, payload path and row, its evidence kept at that symbol.\n"
         + "\n".join(describe(key, found) for key, found in sorted(differences.items()))
     )
 

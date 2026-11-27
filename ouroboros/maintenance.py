@@ -12,6 +12,7 @@ Server half: ``child`` (``MaintenanceChildren``, one dispatch slot per lane). Th
 The dispatcher reserves the slot; the lane thread reads the due facts and spawns only for due work.
 The trash lane retries unchanged holds on the reconcile cadence (``request(retry=True)``), looks
 only at its own facts, and requests an ordinary look for retirement after its child runs.
+Providerless boot uses the ordinary slot for dialogue alone, retrying contention until the job rests.
 The spawn is the existing custodied one (``startup_historical_audit.
 spawn_maintenance_job``: session custody, its own process group, a parent lifeline; ``stop`` and
 ``live_children`` serve the Panic and exit census). Queue-owned work (orphan recovery, drive
@@ -361,13 +362,20 @@ def _packing_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[st
 
 
 def _dialogue_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
-    """Archive segments the cutover planned and the import has not read (``import_ledger`` pending);
-    a failed segment waits on its own input, which the runner compares, so it is no reason to spawn."""
+    """Archive segments the cutover planned and the import has not read (``import_ledger`` pending), or chain
+    files no cutover has planned yet: the runner opens with the cutover, so a legacy profile reaches its
+    store through this job even on a boot whose provider-gated dialogue step never ran. A failed segment
+    waits on its own input, which the runner compares, so it is no reason to spawn."""
     from ouroboros import dialogue_import, dialogue_store
 
     if row.get("state") == "failed":
         return child
-    return dialogue_store.present(root) and dialogue_import.import_owed(root)
+    if not dialogue_store.present(root):
+        return dialogue_store.holds_dialogue_files(root)
+    with dialogue_store.transaction(root, write=False) as conn:
+        if not dialogue_store._planned(conn, root):
+            return True
+    return dialogue_import.import_owed(root)
 
 
 def _dialogue_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
@@ -503,11 +511,12 @@ def _last_error(root: pathlib.Path, name: str, exc: Optional[BaseException]) -> 
         log.debug("Maintenance job %s outcome not recorded", name, exc_info=True)
 
 
-def run(root: Any, *, should_stop: Optional[Callable[[], bool]] = None, lane: Optional[str] = None) -> Dict[str, Any]:
-    """The child's pass: every due job of LANE (every job without one) in order; one job's failure never skips the next."""
+def run(root: Any, *, should_stop: Optional[Callable[[], bool]] = None, lane: Optional[str] = None,
+        dialogue_only: bool = False) -> Dict[str, Any]:
+    """Run due jobs in lane order, or only dialogue import for providerless boot; failures are per job."""
     root, stop = pathlib.Path(root), should_stop or (lambda: False)
     report: Dict[str, Any] = {"status": "completed", "jobs": {}}
-    for name in lane_jobs(lane):
+    for name in (("dialogue_import",) if dialogue_only else lane_jobs(lane)):
         if stop():
             break
         try:
@@ -586,19 +595,24 @@ class MaintenanceChild:
     def owed(self) -> bool:
         return self._owed and not self._stopped.is_set()
 
-    def tick(self, data_root: Any, repo_dir: Any, *, owed_only: bool = False) -> bool:
+    def tick(self, data_root: Any, repo_dir: Any, *, owed_only: bool = False,
+             after_dialogue: Optional[Callable[[], None]] = None) -> bool:
         """Reserve the one slot; True means the dispatch thread started (it spawns the child only
         when a job is due). No filesystem or store access on the caller's thread. OWED_ONLY (the
         supervisor tick's event-driven look) reserves nothing for a lane no producer asked for, so a
-        long child of one lane never starts a fresh fact-reading thread of the other on every tick."""
+        long child of one lane never starts a fresh fact-reading thread of the other on every tick. Providerless boot leaves the ordinary first look owed."""
         with self._lock:
             if self._stopped.is_set() or (owed_only and not self._owed) or (
                     self._thread is not None and self._thread.is_alive()):
                 return False
-            self._owed, (retry, self._retry) = False, (self._retry, False)
             name = "maintenance-child" if self._lane in (None, "ordinary") else f"maintenance-{self._lane}"
-            self._thread = threading.Thread(target=self._run, args=(pathlib.Path(data_root), pathlib.Path(repo_dir), retry),
-                                            name=name, daemon=True)
+            args = (pathlib.Path(data_root), pathlib.Path(repo_dir))
+            if after_dialogue is None:
+                self._owed, (retry, self._retry) = False, (self._retry, False)
+                target, args = self._run, (*args, retry)
+            else:
+                target, args = self._recover_dialogue, (*args, after_dialogue)
+            self._thread = threading.Thread(target=target, args=args, name=name, daemon=True)
             self._thread.start()
         return True
 
@@ -619,6 +633,43 @@ class MaintenanceChild:
     def _signal(process) -> None:
         with contextlib.suppress(OSError):
             process.kill()  # its own process group: the signal reaches only our child
+
+    def _recover_dialogue(self, root: pathlib.Path, repo: pathlib.Path, reconcile: Callable[[], None]) -> None:
+        """Boot-only bounded probe, then the usual named child job; only contention repeats this pass."""
+        from ouroboros import dialogue_store
+
+        while not self._stopped.is_set():
+            started = time.monotonic()
+            try:
+                if not (dialogue_store.present(root) or dialogue_store.holds_dialogue_files(root)):
+                    return  # a fresh root did not cut over; the ordinary projects step owns it
+                with store.acquisition_budget(0):
+                    due_now = _dialogue_due(root, maintenance_jobs.job(root, "dialogue_import") or {}, {}, True)
+                if self._stopped.is_set():
+                    return
+                if due_now:
+                    process = spawn_maintenance_job(root, repo, PURPOSE, args=("--dialogue-only",))
+                    fields = finish_maintenance_job(self, process, root, started, _report_fields, _record)
+                    if not fields or process.returncode:
+                        return  # failed/unknown exit: do not loop on it
+                    state = fields.get("jobs", {}).get("dialogue_import", {}).get("state")
+                    if state == "pending":
+                        if self._stopped.wait(0.25):
+                            return
+                        continue
+                    if state not in (None, "done"):
+                        return
+                if not self._stopped.is_set():
+                    reconcile()
+                return
+            except Exception as exc:
+                if not _contention(exc):
+                    log.warning("Providerless dialogue recovery did not complete", exc_info=True)
+                    return
+                self._stopped.wait(0.25)
+            finally:
+                with self._lock:
+                    self._process = None
 
     def _run(self, data_root: pathlib.Path, repo_dir: pathlib.Path, retry: bool = False) -> None:
         started = time.monotonic()
@@ -673,7 +724,10 @@ class MaintenanceChildren:
     def owed(self) -> bool:
         return any(lane.owed() for lane in self._lanes)
 
-    def tick(self, data_root: Any, repo_dir: Any, *, owed_only: bool = False) -> bool:
+    def tick(self, data_root: Any, repo_dir: Any, *, owed_only: bool = False,
+             after_dialogue: Optional[Callable[[], None]] = None) -> bool:
+        if after_dialogue is not None:
+            return self.ordinary.tick(data_root, repo_dir, owed_only=owed_only, after_dialogue=after_dialogue)
         return any([lane.tick(data_root, repo_dir, owed_only=owed_only) for lane in self._lanes])  # a list: every lane is asked
 
     def stop(self) -> None:
@@ -709,6 +763,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--custody-session", default="")
     parser.add_argument("--lane", choices=LANES, default=None)  # no lane: every job (a manual run)
+    parser.add_argument("--dialogue-only", action="store_true")
     args = parser.parse_args(argv)
     os.environ["OUROBOROS_DATA_DIR"] = str(pathlib.Path(args.data_root).resolve())
     # Roots are bound before importing readers that capture config globals.
@@ -718,7 +773,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     start_parent_lifeline(label=PURPOSE)
     _lower_priority()
     try:
-        report = run(pathlib.Path(args.data_root), lane=args.lane)
+        report = run(pathlib.Path(args.data_root), lane=args.lane, dialogue_only=args.dialogue_only)
     except Exception as exc:
         report = {"status": "failed", "jobs": {}, "exception_class": type(exc).__name__}
     print(json.dumps({key: report[key] for key in ("status", "jobs")}, separators=(",", ":")), flush=True)

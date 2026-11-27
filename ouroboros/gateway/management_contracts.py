@@ -1,6 +1,5 @@
 """Product-management envelopes beside ``contracts.py`` (skills, marketplaces, agent accounts, local model,
-MCP, model catalog, updates, core control): descriptive TypedDicts, the twin of ``web/modules/management_contract_types.js``
-(twins older tests read stay in ``api_types.js``; the Restart Claudexor shapes' in ``claudexor_restart_types.js``). Account routes relay the bundled Claudexor engine's own API v2 objects
+MCP, model catalog, updates, core control): descriptive TypedDicts. Account routes relay the bundled Claudexor engine's own API v2 objects
 (protocol major 3, release pinned in ``ouroboros/claudexor_runtime_pin.json``, source https://github.com/razzant/claudexor), named by their engine schema type."""
 
 from __future__ import annotations
@@ -56,18 +55,18 @@ class InstalledSkill(TypedDict, total=False):
     source: Required[str]  # native | clawhub | ouroboroshub | external | self_authored | user_repo
     content_hash: Required[str]  # the revision every expected_content_hash names
     payload_root: Required[str]  # skills/<bucket>/<dir>, or ""
-    manifest_file: str  # the manifest the loader parsed; "" when none was readable (permissions/grants are then a placeholder)
+    manifest_file: str  # the manifest the loader parsed; "" when none was readable (permissions/grants are then a placeholder); legacy hosts may omit it
     installed_at: Required[str]
     removal: str  # uninstall | delete | "": the server's available removal action
     review_status: str  # clean | warnings | blockers | pending
     review_stale: bool
-    review_gate: Dict[str, Any]
+    review_gate: Dict[str, Any]  # {status, stale, executable_review, blocking_reason, review_enforcement, summary, author_accepted?, author_disposition?, preflight_failed?, preflight_failed_stale?}
     author_disposition: Dict[str, Any]
     reviewed_content_hash: str
     executable_review: bool
     review_profile: str
     owner_attestable: Optional[bool]
-    submit_hub: Dict[str, Any]
+    submit_hub: Dict[str, Any]  # {visible, publication_ready, task_start_allowed, disabled, state, reason}: three separate checks; state, disabled and reason explain them
     conflict: Optional[Dict[str, Any]]  # {code: "skill_conflict", skills, omitted}
     desired_live: bool
     live_loaded: bool
@@ -80,26 +79,30 @@ class InstalledSkill(TypedDict, total=False):
     health_observations: Dict[str, Any]
     dispatch_live: bool
     review_findings: List[Dict[str, Any]]
-    skill_review: Dict[str, Any]  # {} or {current, history, history_omitted}
+    skill_review: Dict[str, Any]  # {} or {current, history, history_omitted}; history_omitted counts unprojected records
     # Declared secret fields (manifest ``secret_fields``) and whether each holds a value now, never the value:
     # {fields: [{id, key, state: configured | missing | unknown}]}; null for a skill that declares none.
     secret_config: Optional[Dict[str, List[Dict[str, str]]]]
     grants: Dict[str, Any]  # requested/granted/missing keys and permissions, all_granted, usable
     mcp_servers: List[SkillMcpServerFact]  # absent on identity-collision rows
-    published: Optional[Dict[str, Any]]
+    published: Optional[Dict[str, Any]]  # {slug, version, content_hash, repository, pr_number, pr_url, published_at} of the Hub publication receipt; null without a valid one
     published_malformed: bool
     presence_runtime: Dict[str, Any]  # a reviewed presence profile's runtime choice
     provenance: Dict[str, Any]  # a ClawHub install record
     identity_collision: bool
     collision_row_id: str  # display identity for one colliding directory, never an operation target
-    # The install record joined with the cached catalog of its source (skill_source_catalog.install_listing): source {id (the connected source it
-    # matches now, whatever id it was installed under; absent when none does), name, kind, part (as recorded)}, official (exact endorsed bytes),
-    # release, basis, base_known, modified (null: base unknown), update_available {version, digest} | null, withdrawn ({reason, version} for a withdrawn release), left_source,
-    # turn_on_when_ready, installed_by, installed_at, and reason and task_id when the record has them (an install Ouroboros made says why and in which task); check {by, notes,
-    # at}, pending_update {version, digest}, and update_rejected {version, digest, reason: review_blockers|review_unfinished|preflight_failed, at}. null: not installed from a
-    # source (made here, a local folder, a built-in seed).
+    # Install record and cached update facts; see CLIENT_CONTRACT §11.
     install: Optional[Dict[str, Any]]
-    category: List[str]  # the source's category ids for this skill, [] when it has none
+    source_key: Optional[str]  # opaque key of the original install origin; null when unknown
+    registry_slug: str  # a registry-origin install's full slug, namespace kept; absent otherwise
+    title: str  # its manifest's title, else its first place label; "" none
+    widget_title: str  # the title its manifest's widget declares (ui_tab.title); "" none
+    search_names: List[str]  # other full names for search (place labels, this folder's live widget headers, a ClawHub row's registry name); absent: none
+    connects: List[str]  # the services it connects ("Slack"), [] none
+    icon: Dict[str, str]  # its icon_spec; {} the fallback
+    category: List[str]  # the category ids of the entry presenting it (catalog_id), [] none
+    catalog_id: Optional[str]  # <source_id>/<name> of the item listing its own source's entry, read at the address its record names (never another source's, nor a reused id's other repository); null: none, no catalog sheet
+    catalog_title: str  # that entry's title; absent: none
     # A deployment policy requires this name: the server's requirement row with its when_unmet (client
     # SettingsDeploymentRequirement); the switch is the organization's and no removal, update or repair is offered.
     deployment: Dict[str, Any]
@@ -531,7 +534,7 @@ class ClaudexorMaintenanceProblem(TypedDict):
     error: Dict[str, Any]
 
 
-class ClaudexorLoginJobProblem(TypedDict, total=False):
+class ClaudexorLoginJobProblem(TypedDict, total=False):  # A retryable terminal probe is a marked 503.
     """Typed job errors preserve engine prose/status/code and bounded actions
     (16 strings, 512 chars each). Covers absent jobs, input/reconcile conflicts,
     setup 400/409, terminal-probe 503 and Connect maintenance problems/context.
@@ -910,7 +913,7 @@ class ModelPrice(TypedDict, total=False):
     cache_write_ttl: str
 
 
-class ModelCatalogItem(TypedDict, total=False):
+class ModelCatalogItem(TypedDict, total=False):  # the local row: `id` names it; its `value` is never a route
     """One selectable model. ``value`` is what a model setting stores: the raw id for OpenRouter,
     ``<provider_id>::<id>`` for another API provider, ``<kind>@<name>::<id>`` for a named API
     connection (its ``provider``/``provider_id`` = ``<kind>@<name>``, ``provider_label`` its
@@ -957,6 +960,8 @@ class ModelCatalogApiSource(TypedDict):
     processing_transport: NotRequired[List[Literal["standard", "fast", "economy", "ultrafast"]]]
 
 
+# `view=sources` answers its descriptors with empty `items`; `source_id` takes an optional
+# `credential_profile_id`.
 class ModelCatalogResponse(TypedDict, total=False):
     """Subscription declarations (``view=sources``), raw models (``source_id``), a native agent inventory
     (``harness_id``) or one API/local connection (``provider_id``). A whole read keeps completed results and
@@ -1009,6 +1014,13 @@ class OpenAICompatibleModelsRequest(TypedDict):
     connection: NotRequired[str]  # named compatible row; omitted = the built-in pair
     # which built-in pair a kept apiKey belongs to; omitted = the saved effective pair
     apiKeySetting: NotRequired[Literal["OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY"]]
+
+
+class OpenAICompatibleModelsResponse(TypedDict):
+    """``POST /api/openai-compatible/models``: upstream ``data[].id`` in upstream order."""
+
+    models: List[str]
+    error: NotRequired[str]
 
 
 class LocalModelStartRequest(TypedDict):
@@ -1082,6 +1094,7 @@ class McpSignIn(TypedDict, total=False):
     issuer: str
     pending: bool  # a sign-in was begun and not completed
     required_scope: str  # with insufficient_scope: what a new sign-in asks for
+    required_scope_since: Optional[str]  # with insufficient_scope: when that gap opened (None when an old record kept none); ISO timestamp, absent outside an open scope requirement.
 
 
 class McpServerStatus(TypedDict, total=False):
@@ -1176,7 +1189,8 @@ class McpSignInRequest(TypedDict, total=False):
 
 
 class McpSignInResponse(TypedDict, total=False):
-    """``ok: false`` carries ``code`` (``MCP_AUTH_REQUIRED`` with its ``reason``) and ``error``."""
+    """``ok: false`` carries ``code`` (``MCP_AUTH_REQUIRED`` with its ``reason``, or ``MCP_UNAVAILABLE`` with reason
+    ``not_sent``: stopped here before anything changed at the provider, its technical ``detail`` apart) and ``error``."""
 
     ok: Required[bool]
     server: str
@@ -1188,6 +1202,7 @@ class McpSignInResponse(TypedDict, total=False):
     code: str
     reason: str
     error: str
+    detail: str
 
 
 class McpTestRequest(TypedDict, total=False):
@@ -1245,31 +1260,34 @@ class UpdateProgress(TypedDict, total=False):
     stash_note: str
 
     retention_unconfirmed: bool  # live only: saving this observation failed, not the update itself
-    generation_facts: Optional[Dict[str, Any]]
+    generation_facts: Optional[Dict[str, Any]]  # Before/after observations, never an update verdict.
 
 
-class UpdateLetter(TypedDict):
+class UpdateLetter(TypedDict):  # outlives the update it describes; relation lets the panel relabel it without deleting
     """The update description, written by Ouroboros as ordinary work and never by a check.
     ``relation``: pending, applied, superseded, other, or '' without text. ``state`` none: nothing
     saved yet (still projected for a checked range, retained material or the owner's request)."""
 
     state: str  # ready | failed (old records only) | none
-    relation: str
-    text: str
-    author_version: str
-    target_version: str
-    written_at: str
-    error_kind: str
-    error_text: str
-    key: Dict[str, Any]  # {base_sha, target_sha, update_channel, target_ref}
-    has_last_good: bool
-    description_current: bool
-    failed_at: str
-    latest_failed_key: Optional[Dict[str, Any]]
-    qualification: NotRequired[Optional[Dict[str, Any]]]
-    revision: int
+    relation: str  # pending: offered now; applied: in the running source; superseded: a newer target appeared; other: the source moved elsewhere
+    text: str  # markdown; empty when nothing is saved.
+    author_version: str  # the Ouroboros version that wrote it.
+    target_version: str  # the version it describes.
+    written_at: str  # ISO 8601.
+    error_kind: str  # a retained old failure, or the last check's `material_unavailable`/`runtime_source_unavailable`.
+    error_text: str  # short, secret-free.
+    key: Dict[str, Any]  # {base_sha, target_sha, update_channel, target_ref}; the exact range the text describes ({} without text).
+    has_last_good: bool  # `text` is an old previous good letter kept through a failed rewrite; `relation`, `key` and the provenance describe THAT letter.
+    description_current: bool  # the shown text covers exactly the running-source to checked-target range; a newer post-merge run never clears it.
+    failed_at: str  # ISO 8601 of the retained failure or the check's material error.
+    latest_failed_key: Optional[Dict[str, Any]]  # that failure's range, never the provenance of retained text.
+    # Exact-range receipts and observed CI, with gaps. ``landed_over_review`` lists this install's recorded
+    # FAIL/no-verdict landings in the range ({sha, subject, reason, outcome}); [] means none, absent is unknown.
+    qualification: NotRequired[Optional[Dict[str, Any]]]  # Only ``qualification_summary`` reduces that list to a count.
+    revision: int  # compared by every writer; 0 before the first save.
     author: Dict[str, Any]  # {task_id, model, requested} — host-derived
-    checked_key: Optional[Dict[str, Any]]
+    checked_key: Optional[Dict[str, Any]]  # the range the last fetching check offered.
+    # text_bytes is the max_bytes for reading the whole update_material text.
     material: Optional[Dict[str, Any]]  # {key, collected_at, text_bytes (query_data's count), commits, bodies_read, bodies_omitted}
     request: Optional[Dict[str, Any]]  # {task_id, current_task_id, mode, key, requested_at, status (retry/Continue), saved,
     #                                    cancel_state "pending" while a Stop is carried out (status stays as read)}
@@ -1277,7 +1295,8 @@ class UpdateLetter(TypedDict):
 
 class UpdateTransactionState(TypedDict, total=False):
     """An update in progress: ``{active: false}``, or active with its phase, assisted task and the
-    ``attempt_id`` a retained attempt's ``tx_attempt_id`` binds to."""
+    ``attempt_id`` a retained attempt's ``tx_attempt_id`` binds to. ``pre_restart_smoke`` is its own
+    check before the restart, omitted when the transaction does not say or this version cannot read it."""
 
     active: Required[bool]
     phase: str
@@ -1285,6 +1304,7 @@ class UpdateTransactionState(TypedDict, total=False):
     attempt_id: str
     restart_required: bool
     local_work_recovery: bool
+    pre_restart_smoke: Literal["pending", "passed"]
 
 
 class UpdateStatusResponse(TypedDict, total=False):
@@ -1302,8 +1322,8 @@ class UpdateStatusResponse(TypedDict, total=False):
     update_tx: Required[UpdateTransactionState]
     update_progress: Required[UpdateProgress]
     letter: Optional[UpdateLetter]
-    letter_unavailable: bool  # projection failed; a null letter alone is an observed absence
-    after_update: Optional[Dict[str, Any]]
+    letter_unavailable: bool  # projection failed; a null letter alone is an observed absence; the other update facts stay usable
+    after_update: Optional[Dict[str, Any]]  # Retained before/after process samples; missing observations stay null.
     managed: bool
     remote: str
     remote_branch: str
@@ -1336,7 +1356,8 @@ class UpdateStatusResponse(TypedDict, total=False):
 
 class CommandRequest(TypedDict):
     """``POST /api/command``: a slash command (``/restart``, ``/panic``, ``/review``, ``/evolve``,
-    ``/bg``, ``/status``) or any other text, which becomes an owner message in Main. ``visible_text``
+    ``/bg``, ``/status``) or any other text, which becomes an owner message in Main (a program that is not the
+    owner sends ``AgentNoteRequest`` instead; a body with neither is a 400). ``visible_text``
     adds a system row; the same ``visible_task_id`` within 5 seconds is answered as deduped.
     ``ui_control`` (``{name, owner_text?}``) says a host-drawn control composed ``cmd``: no owner
     message is written for it, only ``owner_text`` (words typed into the control) is theirs; malformed: 400."""
@@ -1350,6 +1371,35 @@ class CommandRequest(TypedDict):
     visible_task_id: NotRequired[str]
     task_constraint: NotRequired[Dict[str, Any]]
     ui_control: NotRequired[Dict[str, Any]]
+
+
+class AgentNoteAuthor(TypedDict):
+    """The author an agent's note declares: exactly these two keys (a basis or identity field is refused)."""
+
+    kind: Literal["agent"]
+    label: str  # 1-120 characters after control and line-break characters become spaces; shown as declared
+
+
+class AgentNoteRequest(TypedDict):
+    """An agent's literal note for Main (#3873), not owner input. Other keys are a 400 before any note effect.
+    The real Panic command takes its emergency path before note handling; it is not part of this request shape."""
+
+    text: str
+    author: AgentNoteAuthor
+    reply_to: NotRequired[str]  # a citation, as a command's: never steering
+    reply_excerpt: NotRequired[ReplyExcerpt]
+    if_boot: NotRequired[str]
+
+
+class AgentNoteResponse(TypedDict):
+    """A note's receipt: the author the host recorded (``basis`` is the host's), the saved row and ``delivery``:
+    ``queued`` once the row is saved and handed to the queue. An answer without these fields is an older host's."""
+
+    status: Literal["ok"]
+    accepted: Literal[True]
+    author: Dict[str, Any]  # history's ``DeclaredAuthor``
+    row_address: str
+    delivery: Literal["queued"]
 
 
 class CommandResponse(TypedDict, total=False):
@@ -1392,20 +1442,82 @@ class GitPromoteResponse(TypedDict):
     message: str
 
 
+class ResetRequest(TypedDict):
+    """The owner's explicitly versioned ``POST /api/reset/v1`` confirmation. Any other body or the legacy path is
+    refused (400 ``reset_confirmation_required``) and records nothing. R8/R9 have no such route and refuse this
+    token; a legacy bodyless POST performs no Reset here either."""
+
+    confirm: str  # "reset_all_data:v1"
+
+
 class ResetResponse(TypedDict):
-    """``POST /api/reset``: irreversible. The listed data folders and the settings were deleted and
-    a restart was requested; a dropped connection is an unknown outcome, never a reason to resend."""
+    """POST acknowledges the request for a restart, never a deletion, and names the Reset it accepted
+    (``reset_id``). GET reports ``none``, ``requested``, ``complete``, ``interrupted`` or ``unknown``: ``requested``,
+    ``complete`` and ``interrupted`` carry that Reset's ``reset_id``, while ``none`` and ``unknown`` name none. A
+    complete read names what was removed, any kept open logs and where the previous profile's Project notes were set
+    aside, relative to the data root and as a path on this computer: both ``None`` when no Project had notes to keep.
+    An interrupted read carries its ``error``, ``deleted`` once something was removed, and the pair only while that
+    folder holds notes: a move that fails is undone and names none."""
 
     status: str
-    deleted: List[str]
-    restarting: bool
+    reset_id: NotRequired[str]
+    deleted: NotRequired[List[str]]
+    retained_logs: NotRequired[List[str]]
+    projects_set_aside: NotRequired[Optional[str]]
+    projects_set_aside_path: NotRequired[Optional[str]]
+    restarting: NotRequired[bool]
+    error: NotRequired[str]
+
+
+class _ProjectCostTotals(TypedDict):
+    """Day or span spend, aggregated before rounding; null means no settled price was recorded."""
+
+    settled_usd: Optional[float]  # the known parts (estimated and partial included); null when none has a price.
+    confirmed_usd: Optional[float]  # the confirmed part of settled_usd.
+    estimated_usd: Optional[float]  # the estimated part of settled_usd.
+    price_basis: Literal["confirmed", "estimated", "mixed", "unknown"]  # presence, not the amount's magnitude
+    unknown_unmetered: int  # records without a full price.
+    non_final_rows: int
+    accounting_open_rows: int  # the ledger's open accounting: the two counts below and settled estimates
+    open_rows: int  # calls with no recorded outcome (reserved, dispatched)
+    unresolved_rows: int  # calls ended unreconciled (an answer may have arrived) or with an unknown outcome
+    physical_calls: int
+    subscription_sessions: int
+
+
+class ProjectDayCost(_ProjectCostTotals):
+    day: str  # YYYY-MM-DD, UTC.
+
+
+# One room's spend by UTC calendar day over [`since`, `until`) (ISO UTC: the oldest day's midnight to
+# the request), records with a known date only: `selector` is `project:<id>` (closed projects too),
+# `main` or `unassigned` (records outside Main and the projects: other rooms such as places, or none
+# known; a deleted project's records stay its own, never Main's or these); `rows` are the days with
+# records, newest first, `[]` when there are none. A null amount is unknown, never zero; 0 is a measured
+# zero.
+class ProjectDaysView(TypedDict):
+    available: Literal[True]
+    selector: str
+    days: Literal[7, 30]
+    timezone: Literal["UTC"]
+    since: str
+    until: str
+    rows: List[ProjectDayCost]
+    total: _ProjectCostTotals  # the whole span, aggregated before rounding.
+    integrity_degraded: bool  # ledger-wide: earlier journal rows were quarantined, so sums or this slice may be incomplete.
+
+
+class ProjectDaysUnavailable(TypedDict):  # A view refused: selector or span unknown, or the ledger or room assignments cannot be read.
+    available: Literal[False]
+    selector: str
+    error_code: Literal["unknown_selector", "unknown_days", "ledger_unavailable", "project_source_unavailable"]
 
 
 class CostBreakdownResponse(TypedDict, total=False):
     """``GET /api/cost-breakdown``: spend from the physical-attempt ledger. Table rows (``by_model``,
     ``by_api_key``, ``by_model_category``, ``by_task_category``) are ``{cost, calls, unknown_unmetered,
-    non_final_rows, cost_final, ...tokens}``; ``cost_final`` false means rows are still open. A 503
-    carries ``accounting.available: false`` (ledger_unavailable): unknown spend, never zero."""
+    non_final_rows, cost_final, ...tokens}``; ``cost_final`` false means rows are still open. A 503 is
+    ``CostBreakdownUnavailableResponse``."""
 
     total_cost: float
     total_calls: int
@@ -1427,6 +1539,30 @@ class CostBreakdownResponse(TypedDict, total=False):
     # [{class, detail, calls, write_tokens, write_cost, unshared_calls, shared_write_tokens (the tokens write_cost is
     # of)}]}``, or ``{available: false, period, error_code}`` (``unknown_period`` adds ``periods``).
     period: Dict[str, Any]
+    project_days: Union[ProjectDaysView, ProjectDaysUnavailable]  # ``?project_days=<selector>&days=7|30`` only
+
+
+class CostProjectDaysResponse(TypedDict):
+    """``GET /api/cost-breakdown?view=project_days``: the room view alone, without reading the page's totals;
+    its refusal answers 200 as in the combined response."""
+
+    project_days: Union[ProjectDaysView, ProjectDaysUnavailable]
+
+
+class CostAccountingUnavailable(TypedDict):
+    available: Literal[False]
+    authority: Literal["physical_attempt_ledger"]
+    cost_final: Literal[False]
+    error_code: Literal["ledger_unavailable"]
+
+
+class CostBreakdownUnavailableResponse(TypedDict):
+    """``GET /api/cost-breakdown`` 503: the ledger cannot be read, so spend is unknown, never zero; a requested
+    room view is refused with its own selector (``ledger_unavailable``), never dropped."""
+
+    error: str  # "Physical-attempt accounting unavailable"
+    accounting: CostAccountingUnavailable
+    project_days: NotRequired[ProjectDaysUnavailable]
 
 
 __all__ = [
@@ -1450,12 +1586,14 @@ __all__ = [
     "ClaudexorProfileEnabledResponse", "ReviewPoolResponse",
     "ModelPriceTier", "ModelPrice",
     "ModelCatalogItem", "ModelCatalogApiSource", "ModelCatalogResponse", "ModelProcessingEndpoint", "ModelProcessing",
-    "ModelProcessingResponse", "OpenAICompatibleModelsRequest", "LocalModelStartRequest",
+    "ModelProcessingResponse", "OpenAICompatibleModelsRequest", "OpenAICompatibleModelsResponse", "LocalModelStartRequest",
     "LocalModelStartResponse", "LocalModelRuntimeMissingResponse", "LocalModelStatusResponse",
     "LocalModelTestResponse", "McpListingAttempt", "McpSignIn", "McpServerStatus", "McpStatusResponse",
     "McpRefreshRequest", "McpRefreshResponse", "McpSignInRequest", "McpSignInResponse", "McpTestRequest",
     "McpTestResponse",
     "UpdateProgress", "UpdateLetter", "UpdateTransactionState", "UpdateStatusResponse",
-    "CommandRequest", "CommandResponse", "CommandRefusal", "GitRollbackRequest", "GitRollbackResponse", "GitPromoteResponse",
-    "ResetResponse", "CostBreakdownResponse",
+    "CommandRequest", "AgentNoteAuthor", "AgentNoteRequest", "AgentNoteResponse", "CommandResponse", "CommandRefusal",
+    "GitRollbackRequest", "GitRollbackResponse", "GitPromoteResponse",
+    "ResetRequest", "ResetResponse", "CostBreakdownResponse", "CostAccountingUnavailable", "CostBreakdownUnavailableResponse",
+    "CostProjectDaysResponse", "ProjectDayCost", "ProjectDaysView", "ProjectDaysUnavailable",
 ]

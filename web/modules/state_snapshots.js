@@ -41,7 +41,8 @@ import { carryOpenQuestions } from './question_presentation.js';
  */
 // A feed the server could not read (`project_listable_count: null` with no rows) is unknown, never empty: the page
 // keeps the rows it showed and the message revision they were read at, so a room that is the owner's turn keeps its
-// row, until a read names them. Rows a body carries are the feed, whatever its count says.
+// row, until a read names them. Rows a body carries are the feed, whatever its count says. `onApply` is told those
+// rows apart (its fourth argument): a row held here, or carried for an open question, was heard in an earlier body.
 const heldFeed = (prior, data) => (data?.project_listable_count === null && Array.isArray(data.projects)
     && !data.projects.length && Array.isArray(prior?.projects) ? { ...data, projects: prior.projects,
         project_messages_revision: prior.project_messages_revision ?? null } : data);
@@ -116,14 +117,15 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
                 const generation = Number(request?.generation) || 0;
                 if (!generation || generation <= appliedGeneration) return false;
                 appliedGeneration = generation;
-                latest = data = carryOpenQuestions(asked, heldFeed(asked, withBindings(data)));
+                const own = withBindings(data);  // the body as it came: the Project rows it carries itself
+                latest = data = carryOpenQuestions(asked, heldFeed(asked, own));
                 changed = true;
                 if (data?.rooms && Array.isArray(data.works)) {
                     const fed = Array.isArray(data.projects);
                     asked = { rooms: data.rooms, projects: fed ? data.projects : asked?.projects,
                         project_messages_revision: fed ? data.project_messages_revision : asked?.project_messages_revision };
                 }
-                onApply(data, request.requestedAt, generation);
+                onApply(data, request.requestedAt, generation, Array.isArray(own?.projects) ? own.projects : []);
                 return true;
             } finally {
                 settle(request);

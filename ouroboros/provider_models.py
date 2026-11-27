@@ -78,15 +78,16 @@ def normalize_deepseek_reasoning_effort(value: str) -> str:
     return DEEPSEEK_REASONING_EFFORT_ALIASES.get(normalized, normalized)
 
 
-# Z.ai (GLM) serves the same Chat Completions ``reasoning_effort`` shape but a
-# DIFFERENT enum mapping than DeepSeek — do not reuse the DeepSeek table. The
-# provider has exactly three tiers (low | high | max); ``medium`` does not
-# exist, thinking cannot be disabled (``thinking={"type":"disabled"}`` answers
-# 400 code 1210 "please use low, high or max" on PAYG), and an ABSENT
-# parameter is served at MAX — so a silently dropped tier means every call
-# runs (and bills) at max. Projection of the canonical scale, measured live
-# 2026-09-21 on the Coding Plan endpoint: none/minimal/low -> low,
-# medium/high -> high, xhigh/ultra -> max.
+# Z.ai (GLM) serves the same Chat Completions ``reasoning_effort`` shape but a DIFFERENT enum mapping
+# than DeepSeek — do not reuse the DeepSeek table. Measured live 2026-09-21 by a contributor's probe
+# (PR #1207, Coding Plan key, glm-5.3): only low | high | max exist (``medium`` does not), thinking
+# cannot be disabled (``thinking={"type":"disabled"}`` answers 400 code 1210 "please use low, high or
+# max" on PAYG), forced tool_choice works with thinking on, and an ABSENT parameter is served at MAX —
+# so a silently dropped tier means every call runs (and bills) at max. Projection of the canonical scale:
+# none/minimal/low -> low, medium/high -> high, xhigh/ultra -> max. GLM-5.2 is recorded as accepting the
+# wider scale, with no probe on record; this provider-keyed map still sends its medium as high, and
+# whether 5.2 takes medium today is unknown (never sent). Re-probe the exact endpoint/model when Z.ai
+# changes the enum or a GLM release changes semantics: a stale map rewrites tiers the provider accepts.
 ZAI_REASONING_EFFORT_ALIASES = {
     "none": "low",
     "minimal": "low",
@@ -100,20 +101,15 @@ ZAI_REASONING_EFFORT_ALIASES = {
 
 
 def normalize_zai_reasoning_effort(value: str) -> str:
-    """Project one canonical effort tier onto Z.ai's Chat wire enum.
-
-    Every canonical tier maps to a concrete provider tier; unlike DeepSeek
-    there is no "off" arm — GLM reasoning cannot be disabled, so an unmapped
-    value still resolves to a tier rather than being dropped (a dropped tier
-    is served at max).
-    """
+    """Project a canonical tier onto Z.ai's wire enum; an unmapped one becomes low, never dropped (served at max)."""
     normalized = str(value or "").strip().lower()
     return ZAI_REASONING_EFFORT_ALIASES.get(normalized, "low")
 
 
-# MiniMax's global/China OpenAI docs (2026-11-01; no live send) list five tiers
-# for this exact model, default to max and reject none. Other models keep their
-# requested tier. Evidence and re-check policy: DEVELOPMENT "External facts".
+# MiniMax's global/China OpenAI docs (https://platform.minimax.io/docs/api-reference/text-openai-api.md,
+# read 2026-11-01; no live send) list five tiers for this exact model (low/medium/high/xhigh/max), default
+# to max and reject none with a 400. Other models keep their requested tier. Recheck the docs before
+# widening: without this map none fails; a stale one rewrites tiers added later.
 MINIMAX_FLASH_MODEL = "MiniMax-M3.1-Flash"
 MINIMAX_FLASH_EFFORT_ALIASES = {"none": "low", "minimal": "low", "ultra": "max"}
 
@@ -123,13 +119,13 @@ def normalize_minimax_reasoning_effort(model: str, value: str) -> str:
     return MINIMAX_FLASH_EFFORT_ALIASES.get(value, value) if model == MINIMAX_FLASH_MODEL else value
 
 
-# Direct Anthropic models whose Messages API refuses thinking={"type": "disabled"} and names
-# another off state. Sonnet 5.5 400s on "disabled"; "between_tools" turns off up-front
-# thinking, and its progress notes between tool calls return as signed thinking blocks
-# (build-with-claude/thinking, read 2026-11-16; a direct send the same day answered that
-# 400). Other ids have no vouched alternate here: they keep "disabled" and their existing
-# repair. request_wire_contract.payload_effort reads each value back as "none".
-# Evidence and re-check policy: DEVELOPMENT "External facts".
+# Direct Anthropic models whose Messages API refuses thinking={"type": "disabled"} and names another off
+# state. Sonnet 5.5 400s on "disabled"; "between_tools" turns off up-front thinking, and its progress notes
+# between tool calls return as signed thinking blocks (read 2026-11-16 at
+# https://platform.claude.com/docs/en/build-with-claude/thinking; a direct send the same day answered that
+# 400). Other ids have no vouched alternate here: they keep "disabled" and their existing repair.
+# request_wire_contract.payload_effort reads each value back as "none". Recheck before widening: without
+# this map none fails; a stale one rewrites an off state the API would take as sent.
 ANTHROPIC_THINKING_OFF_TYPES = {"claude-sonnet-5-5": "between_tools"}
 
 
@@ -173,8 +169,8 @@ PROVIDER_KINDS: dict[str, KindSpec] = {
         ready=(("credentials",), ("user", "password"))),
     # An empty key is a keyless endpoint; the endpoint itself is what configures it.
     "openai-compatible": KindSpec("OpenAI-compatible endpoint", (
-        ("api_key", "OPENAI_COMPATIBLE_API_KEY", True),
-        ("base_url", "OPENAI_COMPATIBLE_BASE_URL", False)), ready=(("base_url",),)),
+        ("api_key", "OPENAI_COMPATIBLE_API_KEY", True), ("base_url", "OPENAI_COMPATIBLE_BASE_URL", False),
+        ("continue_unconfirmed", "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED", False)), ready=(("base_url",),)),
 }
 # The extra connections, one JSON list (secrets masked by row identity, never exported to env).
 CONNECTIONS_KEY = "OUROBOROS_CONNECTIONS"
@@ -287,10 +283,11 @@ def provider_for_model(model: str) -> str:
     return parse_model_route(model).kind
 
 
-# Physical per-request ceilings on tool schemas, by execution provider; a provider
-# absent here has no known ceiling. OpenAI's own API refuses a longer `tools` array
-# (400 array_above_max_length); the same models through OpenRouter accepted 129
-# (provider canary, CI run 37204372307, 2026-10-04).
+# Physical per-request ceilings on tool schemas, by execution provider; a provider absent here has no known
+# ceiling. OpenAI's own API refuses a longer `tools` array (400 array_above_max_length); the same models through
+# OpenRouter accepted 129 (provider canary, CI run 37204372307, 2026-10-04). Change a number only on a documented
+# limit or one bounded send of ceiling + 1 schemas to the exact route (the provider canaries): too high refuses
+# requests above it; too low or invented sends overflow schemas out of the request needlessly (still loadable).
 PROVIDER_TOOL_SCHEMA_LIMITS: dict[str, int] = {"openai": 128}
 
 
@@ -696,6 +693,9 @@ DIRECT_PROVIDER_REVIEW_ROLES = {
     "zai": ("main",),
 }
 
+# Direct-provider id spellings (with ``migrate_model_value``), shipped: a catalog confirms a current id, never a
+# saved spelling's intent. Retire an alias only through a documented window: removing one breaks upgrades,
+# guessing one silently reroutes.
 _ANTHROPIC_MODEL_ALIASES = {
     "claude-opus-4.6": "claude-opus-4-6",
     "claude-opus-4.7": "claude-opus-4-7",
@@ -748,8 +748,7 @@ def migrate_model_value(provider: str, value: str) -> str:
 
 
 def legacy_openai_base(settings: Mapping[str, Any] | None = None) -> bool:
-    """Whether the legacy compatible base URL is set: the built-in OpenAI key then belongs
-    to that endpoint (``compatible_endpoint``), so it is not official OpenAI access."""
+    """Whether the legacy base URL is set; the built-in OpenAI key then serves that endpoint, not OpenAI."""
     read = runtime_setting if settings is None else settings.get
     return bool(str(read("OPENAI_BASE_URL", "") or "").strip())
 
@@ -761,16 +760,17 @@ def configured_kinds(settings: Mapping[str, Any] | None = None) -> set[str]:
     return {kind for kind, _name in configured_connections(settings)}
 
 
-def exclusive_direct_kind(settings: Mapping[str, Any] | None = None) -> str:
-    """The one direct provider an install reaches, else '' (``settings`` None = this process's view).
-
-    OpenRouter, an OpenAI-compatible endpoint or the legacy base URL each mean the
-    router-style defaults stay; among the direct providers one is returned only when
-    exactly one is configured."""
+def direct_only_kinds(settings: Mapping[str, Any] | None = None) -> tuple[str, ...]:
+    """Direct API kinds that serve, in order; none when OpenRouter or a compatible endpoint (the legacy pair too) does."""
     kinds = configured_kinds(settings)
-    if {"openrouter", "openai-compatible"} & kinds or legacy_openai_base(settings):
-        return ""
-    direct = [kind for kind in PROVIDER_KINDS if kind in kinds and kind in DIRECT_PROVIDER_DEFAULTS]
+    if {"openrouter", "openai-compatible"} & kinds:
+        return ()
+    return tuple(kind for kind in PROVIDER_KINDS if kind in kinds and kind in DIRECT_PROVIDER_DEFAULTS)
+
+
+def exclusive_direct_kind(settings: Mapping[str, Any] | None = None) -> str:
+    """The one direct-only kind, else ''; any legacy base URL keeps the router-style defaults it always kept."""
+    direct = () if legacy_openai_base(settings) else direct_only_kinds(settings)
     return direct[0] if len(direct) == 1 else ""
 
 

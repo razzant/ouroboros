@@ -37,7 +37,7 @@ _SAFE_TEMP_ROOT = os.environ.get("OUROBOROS_TEST_TEMP_ROOT", "")
 # so the hermetic lane never creates an unused temp dir.
 _PYTEST_REPO_FALLBACK = None
 _NEVER_INHERITED = ("OUROBOROS_MANAGED_BY_LAUNCHER", "OUROBOROS_MANAGED_REPO_DIR",
-                    "OUROBOROS_REVIEW_RUN_CAP_USD", "OUROBOROS_CLAUDEXOR_ATTACH_HOME")
+                    "OUROBOROS_REVIEW_RUN_CAP_USD", "OUROBOROS_CLAUDEXOR_ATTACH_HOME", "OUROBOROS_GIT")
 if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
     _LIVE_DATA_ROOT = (
         os.environ.get("OUROBOROS_TEST_LIVE_DATA_ROOT")
@@ -71,8 +71,8 @@ if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
     # launcher's root under safe_test, the invoking temp directory otherwise.
     _PYTEST_DEFAULTS["GIT_CEILING_DIRECTORIES"] = str(_PYTEST_ROOT.parent)
     os.environ.update(_PYTEST_DEFAULTS)
-    # Run identities, never lane controls: launcher authority, and the isolated
-    # review's run cap / attach-only engine selection (no test reaches a host engine).
+    # Run identities, never lane controls: launcher authority, the isolated review's run cap /
+    # attach-only engine selection (no test reaches a host engine) and the host's chosen Git.
     for _key in _NEVER_INHERITED:
         os.environ.pop(_key, None)
     os.environ["OUROBOROS_TEST_LIVE_DATA_ROOT"] = _LIVE_DATA_ROOT
@@ -643,8 +643,9 @@ def pytest_configure(config):
                                        "(conftest `_starter_skills_stay_off`); its skill sources are local fixtures")
     config.addinivalue_line("markers", "program_observations: explicitly exercise and join vendor-program observation work")
     evidence = os.environ.get("OUROBOROS_TEST_EVIDENCE_ROOT")
-    if evidence and _PYTEST_ROOT is not None and not getattr(config.option, "ci_evidence_dir", None):
-        config.option.ci_evidence_dir = str(pathlib.Path(evidence) / ("pytest-" + _PYTEST_ROOT.name))
+    if not getattr(config.option, "ci_evidence_dir", None) and evidence and _PYTEST_ROOT is not None:
+        config.option.ci_evidence_dir = os.environ.get("OUROBOROS_PRECOMMIT_SESSION_DIR") or str(
+            pathlib.Path(evidence) / ("pytest-" + _PYTEST_ROOT.name))
     selected = getattr(config.option, "ci_evidence_dir", None)
     if selected and _SAFE_TEMP_ROOT and pathlib.Path(selected).resolve().is_relative_to(pathlib.Path(_SAFE_TEMP_ROOT).resolve()):
         _environment["retain_tree"](_SAFE_TEMP_ROOT, f"explicit diagnostics remain inside scratch: {selected}")
@@ -1265,6 +1266,7 @@ def _reset_executing_source_baseline_between_tests(monkeypatch):
     from ouroboros import preflight_receipts
 
     monkeypatch.setattr(preflight_receipts, "_baseline", None)
+    monkeypatch.setattr(preflight_receipts, "_precommit_reader", None)
 
 
 @pytest.fixture(autouse=True)

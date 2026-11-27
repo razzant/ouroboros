@@ -20,6 +20,7 @@ from ouroboros import budget_pause
 from ouroboros.tool_custody import submit_tool_future
 from ouroboros.config import NESTED_SETTLEMENT_MARGIN_SEC, load_settings
 from ouroboros.deadline_utils import deadline_clamped_timeout_sec
+from ouroboros.extension_late_result import acknowledge_inline_result, local_finish_call
 from ouroboros.late_tool_results import late_watch_fields, record_call_id
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_call_log import (
@@ -446,10 +447,8 @@ def _typed_result_metadata(
     outcome classifier and the web client already read, so the
     cutover replaces the PRODUCER of the field, not its consumers.
 
-    The rules below are deliberately NOT text classification and stay here: the
-    untruncated artifact-registration fallback, the plan-review metadata, the
-    process facts, and the
-    skill-publish projection — all keyed on the tool name and on trusted meta.
+    Use producer facts for artifact registration, plan review, process results and
+    skill publication. Only legacy artifact producers need the full result body.
     """
     text = str(result or "")
     if isinstance(tool_result, ToolResult):
@@ -468,10 +467,11 @@ def _typed_result_metadata(
             meta["verification"] = dict(tool_result.meta["verification"])
         if isinstance(tool_result.meta.get("image_attachment"), dict):
             meta["image_attachment"] = dict(tool_result.meta["image_attachment"])
-    # Legacy non-process deliverable fallback reads the FULL result before trace
-    # truncation. Process producers must supply the typed fact below.
+    # Only fall back to legacy text where no producer effect facts apply.
+    facts = meta.get("tool_result_meta", {})
     if (
         fn_name not in _PROCESS_RESULT_TOOLS
+        and not {"artifact_registered", "target_files_changed"}.intersection(facts)
         and not is_error
         and "ARTIFACT_OUTPUTS" in text
     ):
@@ -1237,6 +1237,8 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
     from ouroboros.presence_context import keep_first_receipts
 
     def _execute(tc: Dict[str, Any]) -> Dict[str, Any]:
+        if not local_finish_call(tools._ctx, tc):
+            return _batch_error_result(tools, tc, "This letter may be considered locally; it authorizes no tool action.")
         receipt = validation_by_id.get(str(tc.get("id") or ""))
         if receipt is not None and not receipt.allows_execution:
             fn_name = str((tc.get("function") or {}).get("name") or "").strip()
@@ -1257,8 +1259,6 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
         before = confirmed_delivery_receipts(tools._ctx)
         with extension_call_scope():  # the descriptor the timeout was chosen from is the one dispatched
             timeout = _get_tool_timeout(tools, str(tc["function"]["name"] or "").strip(), _tc_args(tc))
-            from ouroboros.place_reply import note_dispatch
-            note_dispatch(tools._ctx, llm_trace, tc, bound=True)
             result = _execute_with_timeout(tools, tc, drive_logs, timeout, task_id, stateful_executor)
         confirmed = confirmed_delivery_receipts(tools._ctx) - before
         if confirmed and not result.get("is_error"):
@@ -1492,8 +1492,7 @@ def process_tool_results(
             from ouroboros.delegate_output import acknowledge_staged_output_delivery
 
             acknowledge_staged_output_delivery(ctx, exec_result, view)
-        fn_name = exec_result["fn_name"]
-        is_error = exec_result["is_error"]
+        fn_name, is_error = exec_result["fn_name"], exec_result["is_error"]
 
         if is_error:
             error_count += 1
@@ -1503,9 +1502,9 @@ def process_tool_results(
         result_source_ref = view.get("result_source_ref") if isinstance(view.get("result_source_ref"), dict) else {}
         typed = exec_result.get("tool_result")
         producer_ref = exec_result.get("producer_source_ref") or {}
+        from ouroboros.context_assembly_trace import note_contribution
         truncated_result = with_producer_source(exec_result, truncated_result)
         shown_result = with_delivery_note(exec_result, truncated_result)
-
         messages.append({
             "role": "tool",
             "tool_call_id": exec_result["tool_call_id"],
@@ -1514,6 +1513,9 @@ def process_tool_results(
                 exec_result, shown_result, facts=typed_result_facts(exec_result),
                 source_ref=result_source_ref),
         })
+        note_contribution(ctx, messages[-1], 'result_selection', form=(
+            'partial_retained' if result_partial and result_source_ref else 'partial_unavailable' if result_partial else 'selected_result'))
+        acknowledge_inline_result(ctx, typed, view)
         published = (exec_result.get("result_meta") or {}).get("tool_result_meta") or {}
         if ctx is not None and published.get("sleep_question_notice") and not (is_error or result_partial):
             from ouroboros.model_sleep import acknowledge_question_delivery

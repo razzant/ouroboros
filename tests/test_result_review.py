@@ -157,7 +157,13 @@ def test_required_review_retains_exact_subject_of_named_artifact(tmp_path, monke
     text = rr._retained_subject_text(ctx, digest)
     assert hashlib.sha256(text.encode("utf-8")).hexdigest() == digest
     assert f"## The reply\n\n{answer}\n" in text
-    assert f"- {named} (artifact;" in text and f"exact copy: {named})" in text
+    digest_hex = hashlib.sha256(data).hexdigest()
+    expected_copy = (
+        task_artifact_dir_path(ctx.drive_root, ctx.task_id)
+        / "source_handles" / "tool_results" / f"result-material-{digest_hex[:16]}-{digest_hex}.txt"
+    )
+    assert f"- {named} (artifact;" in text and f"exact copy: {expected_copy})" in text
+    assert expected_copy.read_bytes() == data and expected_copy != source
     assert f"### {named} (the whole file shown)" in text and "Findings: 雪." in text
     assert source.read_bytes() == data
     verification = text.split("## Host-attested verification\n\n", 1)[1].strip()
@@ -483,6 +489,7 @@ def test_an_advisory_finish_over_findings_is_the_authors_own_decision(tmp_path, 
 def test_money_refusal_keeps_its_recovery_not_the_review_cycle_ceiling(tmp_path, monkeypatch):
     from ouroboros import usage_accounting as ua
     from ouroboros.tools.review_result import result_review_at_delivery
+    from ouroboros.usage_admission import work_cap_target
 
     ctx = _floor_ctx(tmp_path, monkeypatch)
     _produced_answer_protocol(monkeypatch)
@@ -498,9 +505,21 @@ def test_money_refusal_keeps_its_recovery_not_the_review_cycle_ceiling(tmp_path,
         assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True
     assert not sends
     assert trace["review_runs"][0]["dispatch_refusal"] == "review_wave_budget_insufficient"
-    assert "raises the review ceiling" not in shown[-1]
-    assert "per-task budget" in shown[-1]
-    assert "was reviewed before delivery" not in shown[-1]
+    said = shown[-1]
+    assert "raises the review ceiling" not in said
+    # The scope's first attempt bound this root as its own ordinary $1 group (here the ledger's first row, as no task
+    # record exists; a started task pins it at admission). A conversational raise amends that cap; the per-task
+    # setting applies only to later work (#4267).
+    bound = work_cap_target(ctx.drive_root, {}, ctx.task_id)
+    assert [bound.get(key) for key in ("error", "billing_group_id", "billing_group_limit_usd")] == [
+        None, ctx.task_id, 1.], bound
+    assert f"$1.000000 for group {ctx.task_id}" in said
+    assert "this work's cap" in said and "set_task_cost_cap" in said
+    assert "per-task setting does not amend" in said
+    assert "raise the per-task budget" not in said and "raise TOTAL_BUDGET" not in said
+    assert "retry this review" in said and 'review_change(subject="result")' in said
+    assert "commit-gate" not in said and "same commit" not in said
+    assert "was reviewed before delivery" not in said
 
 
 def test_an_advisory_delivery_after_a_shown_refusal_is_the_authors_own_decision(tmp_path, monkeypatch):
@@ -975,8 +994,8 @@ def test_new_owner_words_after_a_review_of_the_same_answer_are_asked_about_once(
     # row is now held with its chat row (one identity, two printed references); a second «да» (``msg m-1``, inside
     # the seen ``msg m-12`` as a substring), the change, and a «да» in the Project room are new.
     ctx._owner_directives = [{"source": "owner_corpus", "content": "да", "msg_id": "m-12", "ts": "2026-10-01T00:00:01+00:00"},
-                             ctx._owner_directives[1], {"source": "owner_mailbox", "content": "да", "msg_id": "m-1"},
-                             {"source": "owner_mailbox", "content": words, "msg_id": "m-2"}]
+                             ctx._owner_directives[1], {"source": "owner_mailbox", "mail_kind": "owner_text", "content": "да", "msg_id": "m-1"},
+                             {"source": "owner_mailbox", "mail_kind": "owner_text", "content": words, "msg_id": "m-2"}]
     ctx._held_owner_messages = {"row:held": {"ts": "2026-10-01T00:00:02+00:00", "direction": "in", "chat_id": 1,
                                              "text": "Use miles", "client_message_id": "cm-3", "task_id": ""}}
     ds.append(ctx.drive_root, "chat", {"ts": "2026-10-01T00:00:03+00:00", "direction": "in", "chat_id": room, "text": "да",
@@ -1916,3 +1935,497 @@ def test_result_subject_states_ordinary_copy_failure_for_byte_named_material(tmp
     literal = line.split("no exact copy: ", 1)[1].rsplit(")", 1)[0]
     assert _json.loads(literal) == gap  # the prose is the gap exactly, as a JSON string
     assert subject.name_status == (("M", raw),) and item["path"] == raw and item["retained_gap"] == gap
+
+
+def _native_write(ctx, tool, args):
+    """One ordinary native writer call as the loop runs and records it, with nothing replaced: the registry's own
+    dispatch behind its real gates, and the trace row the result review reads, carrying the producer's own typed
+    receipt (``tool_result_meta``)."""
+    import pathlib
+
+    from ouroboros import loop_tool_execution as execution
+    from ouroboros.tools.registry import ToolRegistry
+
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+    trace = ctx._execution_trace = getattr(ctx, "_execution_trace", None) or {"tool_calls": []}
+    call = {"id": f"call-{len(trace['tool_calls'])}", "function": {"name": tool, "arguments": json.dumps(args)}}
+    row = execution._execute_single_tool(registry, call, pathlib.Path(ctx.drive_root) / "logs", ctx.task_id)
+    execution.process_tool_results([row], [], trace, lambda *_a, **_kw: None, registry)
+    return trace["tool_calls"][-1]
+
+
+@pytest.mark.parametrize("entry", ["explicit", "delivery"])
+def test_a_report_this_task_created_on_its_result_shelf_reaches_its_delivery_review(tmp_path, monkeypatch, entry):
+    """#4314: an ordinary report written on ``artifact_store`` reaches explicit ``review_change(subject='result')``
+    and Required ``result_review_at_delivery``, each in its own context, with exact text, full 64-hex SHA-256 and an
+    immutable retained copy. All four native writers edit that one report, its own; the ordinary ``draft.md`` the
+    task created beside it is included and an untouched neighbor stays out."""
+    import hashlib
+    import pathlib
+
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.tools.review_result import _retained_subject_text, produced_material, result_review_at_delivery
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    shelf = task_artifact_dir_path(ctx.drive_root, ctx.task_id, create=True).resolve()
+    (shelf / "untouched_neighbor.md").write_text("UNTOUCHED NEIGHBOR\n", encoding="utf-8")
+
+    def report(tool, **args):
+        row = _native_write(ctx, tool, {"root": "artifact_store", **args})
+        assert row["is_error"] is False, row
+        return row["tool_result_meta"]
+
+    first = "# Findings\n\n1. the first\n2. the second\n"
+    assert report("write_file", path="report.md", content=first) == {
+        "resolved_root": str(shelf), "changed_paths": ["report.md"], "logical_root": "artifact_store",
+        "changed_paths_created": [0], "changed_versions": ["sha256:" + hashlib.sha256(first.encode()).hexdigest()]}
+    assert report("edit_text", path="report.md", old_str="the second",
+                  new_str="the second, checked")["changed_paths"] == ["report.md"]
+    assert report("apply_patch", patch=(
+        "*** Update File: report.md\n-1. the first\n+1. the first, confirmed\n"
+        "*** Add File: draft.md\n+a draft the task wrote as its result\n"))["logical_root"] == "artifact_store"
+    appended = report("write_file", path="report.md", content="3. the third\n", mode="append")
+    assert len(appended["changed_versions"][0].split(":")) == 5, appended  # an append's witness is file metadata
+    batch = report("edit_batch", edits=[{"path": "report.md", "old_str": "the third", "new_str": "the third, added"}])
+    assert len(batch["changed_versions"][0]) == 71, batch  # "sha256:" and the full 64-hex digest
+    final = "# Findings\n\n1. the first, confirmed\n2. the second, checked\n3. the third, added\n"
+    assert report("write_file", path="report.md", content=final)["operation_outcome"] == "completed_no_effect"
+
+    material = produced_material(ctx)
+    listed = {pathlib.Path(item["path"]).name: item for item in material["files"]}
+    assert set(listed) == {"report.md", "draft.md"}, (material["files"], material["issues"])
+    assert "UNTOUCHED NEIGHBOR" not in json.dumps(material), material
+
+    trace = ctx._execution_trace
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))  # the review model alone is a stand-in
+    if entry == "explicit":
+        explicit = run_review_change(ctx, subject="result", answer="The report is report.md.")
+        assert explicit["aggregate"] == "PASS" and len(sends) == 3
+        record_id = explicit["record_id"]
+    else:
+        assert result_review_at_delivery(ctx, "The report is report.md.", trace, lambda _text: None) is True
+        assert trace["review_decision"]["trigger"] == "observed_production" and len(sends) == 3
+        record_id = trace["review_runs"][-1]["record_id"]
+
+    record = review_ledger.load_record(review_ledger.ledger_root(ctx), record_id)
+    subject_text = _retained_subject_text(ctx, record["subject"]["diff_sha"])
+    item, copy = listed["report.md"], pathlib.Path(listed["report.md"]["retained"])
+    assert item["sha256"] == hashlib.sha256(final.encode()).hexdigest() == hashlib.sha256(copy.read_bytes()).hexdigest()
+    assert f"sha256 {item['sha256']}" in subject_text and f"exact copy: {copy}" in subject_text
+    assert "3. the third, added" in subject_text and "a draft the task wrote as its result" in subject_text
+    assert "UNTOUCHED NEIGHBOR" not in subject_text
+
+    later = final + "4. a fourth, added after the review\n"
+    report("write_file", path="report.md", content=later)
+    assert copy.read_text(encoding="utf-8") == final, "the reviewed copy never follows the live path"
+    assert "4. a fourth" not in _retained_subject_text(ctx, record["subject"]["diff_sha"]), "the frozen subject stands"
+    relisted = {pathlib.Path(i["path"]).name: i for i in produced_material(ctx)["files"]}["report.md"]
+    later_copy = pathlib.Path(relisted["retained"])
+    assert relisted["sha256"] == hashlib.sha256(later.encode()).hexdigest() == hashlib.sha256(later_copy.read_bytes()).hexdigest()
+    assert later_copy != copy
+
+
+def test_shelf_provenance_and_versions_are_read_from_inert_receipts(tmp_path):
+    """Pure checks over inert receipt dicts and string labels: shelf provenance, scratch/input/recovery exclusion,
+    folderless workspace provenance, an origin left unsettled, exact 64-hex sha256 vs 5-part append metadata
+    verification, registration mismatch, a later registration confirmed by structured facts alone, and an inert
+    user_files capture-failure receipt."""
+    import hashlib
+    import os
+    from types import SimpleNamespace
+
+    from ouroboros.outcomes import reviewable_effect_projection, write_logical_root
+    from ouroboros.result_material import (
+        _collect_trace_evidence,
+        _later_registered_source,
+        _output_registration,
+        _registration_mismatch,
+        _shelf_versions,
+        _source_origin,
+        _unread_target,
+        _verify_version,
+        _written_paths,
+    )
+    from ouroboros.tools.git_repo_edit import version_witness
+
+    shelf = (tmp_path / "shelf").resolve()
+    scratch = (tmp_path / "task_drive").resolve()
+    shelf.mkdir()
+    h1, h2, h3, h4, h5 = (ch * 64 for ch in "12345")
+
+    def receipt(paths, *, created=(), versions=(), root="artifact_store", omitted=0, base=shelf,
+                is_error=False, args_root=True, result="OK"):
+        return {"tool": "write_file", "args": {"root": root} if args_root else {}, "is_error": is_error,
+                "status": "error" if is_error else "ok", "result": result,
+                "tool_result_meta": {"resolved_root": str(base), "logical_root": root, "changed_paths": list(paths),
+                                     "changed_paths_created": list(created), "changed_versions": list(versions),
+                                     **({"changed_paths_omitted": omitted} if omitted else {})}}
+
+    calls = [receipt(["report.md"], created=[0], versions=[f"sha256:{h1}"]),
+             receipt(["note.md"], created=[0], versions=[f"sha256:{h2}"]),
+             receipt(["report.md", "registered.md", "neighbour.md"], versions=[f"sha256:{h3}", f"sha256:{h4}"]),
+             receipt(["partial.md"], created=[0], versions=[""]),
+             receipt(["attachments/brief.md", ".artifact_manifest.json"], created=[0, 1]),
+             receipt(["other.md"], created=[0], versions=[f"sha256:{h5}"], root="task_drive", args_root=False),
+             receipt(["unnamed.md"], omitted=2)]
+    ctx = SimpleNamespace(_execution_trace={"tool_calls": calls})
+    effects = [{"tool": "write_file", "index": index} for index in range(len(calls))]
+    latest, gaps = _shelf_versions(ctx, effects, shelf, {"registered.md"})
+    assert latest == {"report.md": f"sha256:{h3}", "note.md": f"sha256:{h2}",
+                      "registered.md": f"sha256:{h4}", "partial.md": ""}, latest
+    text = " ".join(gaps)
+    for named in ("artifact_store:neighbour.md", "artifact_store:attachments/brief.md",
+                  "artifact_store:.artifact_manifest.json", "artifact_store:unnamed.md"):
+        assert named in text, (named, text)
+    assert "2 more path(s) under artifact_store" in text and "other.md" not in text, text
+    assert write_logical_root(calls[5]["args"], calls[5]["tool_result_meta"]) == "task_drive"
+    assert reviewable_effect_projection({"tool_calls": [calls[5]]}, observed_only=True) == []
+
+    # Work without a folder: a capture of the default folder is this task's result only at the version the capture of
+    # its latest write there recorded in that write's own receipt, whichever native writer made it. A receipt without
+    # that fact (its capture failed, or its digest is incomplete) names the path and no version; a scratch receipt is
+    # private whatever it carries, and takes the path back from an earlier workspace write.
+    row = {"path": str(shelf / "copy.md")}
+    adjacent, edited, uncaptured = (str(scratch / name) for name in ("adjacent.md", "edited.md", "uncaptured.md"))
+
+    def workspace(tool, paths, versions=(), failed=False):
+        call = receipt(paths, versions=versions, root="active_workspace", base=scratch, is_error=failed)
+        del call["tool_result_meta"]["logical_root"]  # as its writer publishes it: the workspace is the unnamed root
+        return {**call, "tool": tool}
+
+    folderless_ctx = SimpleNamespace(_execution_trace={"tool_calls": [
+        workspace("write_file", ["adjacent.md", "retaken.md"], [f"sha256:{h1}", f"sha256:{h1}"]),
+        workspace("edit_text", ["adjacent.md"], [f"sha256:{h2}"]),
+        workspace("edit_batch", ["adjacent.md", "edited.md"], [f"sha256:{h3}", f"sha256:{h4}"]),
+        workspace("apply_patch", ["adjacent.md", "uncaptured.md"], [f"sha256:{h5}"], failed=True),  # partly applied
+        workspace("write_file", ["short.md"], [f"sha256:{h1[:16]}"]),
+        receipt(["private.md", "retaken.md"], versions=[f"sha256:{h1}", f"sha256:{h1}"], root="task_drive",
+                base=scratch, args_root=False)]})
+    traced = _collect_trace_evidence(folderless_ctx, scratch=scratch)  # what produced_material reads of that folder
+    allowed = {key: ver for key, (ver, _pos, where) in traced.items() if ver is not None and where == "active_workspace"}
+    positions = {key: pos for key, (_ver, pos, _where) in traced.items()}
+    assert allowed == {adjacent: h5, edited: h4, uncaptured: "", str(scratch / "short.md"): ""}, allowed
+    assert (positions[adjacent], positions[edited], positions[str(scratch / "retaken.md")]) == (3, 2, 5), positions
+    # After a shelf edit (trace position 2 here) that original is never measured: the registration is the newer one
+    # only if that path's own latest receipt recorded exactly its version, later, though the call failed elsewhere.
+    newer = {"sha256": h5, "size": 5}
+    assert _later_registered_source(2, newer, recorded=(allowed[adjacent], positions[adjacent])) == newer
+    for recorded in ((h5, 2), (h4, 3), ("", 3), (allowed.get("absent", ""), positions.get("absent", -1))):
+        assert _later_registered_source(2, newer, recorded=recorded) is None
+    assert _source_origin(adjacent, shelf=shelf, scratch=scratch, allowed_sources=allowed, version=h5) == ""
+    for path, version in ((adjacent, h1), (edited, h1), (uncaptured, h5), (adjacent, "")):
+        assert "not the one the capture of its latest default-folder write recorded" in _source_origin(
+            path, shelf=shelf, scratch=scratch, allowed_sources=allowed, version=version), (path, version)
+    assert _output_registration({"kind": "user_file", "immutable": True, "sha256": h1, "size": 5,
+                                 "source_path": "/elsewhere/report.md"}, row, shelf=shelf, scratch=scratch)
+    assert _output_registration({"kind": "process_output", "sha256": h1, "size": 5,
+                                 "source_path": "/elsewhere/out.csv"}, row, shelf=shelf, scratch=scratch)
+    for decl_kind in ("process_output", "process_output_directory", "process_output_directory_manifest"):
+        assert _output_registration({"kind": decl_kind, "sha256": h1, "size": 5,
+                                     "source_path": str(scratch / "declared.out")}, row, shelf=shelf, scratch=scratch)
+    assert _output_registration({"kind": "user_file", "sha256": h5, "size": 5, "source_path": adjacent},
+                                row, shelf=shelf, scratch=scratch, allowed_sources=allowed)
+    for rejected in (
+        {"kind": "user_file", "sha256": h1[:16], "size": 5, "source_path": "/elsewhere/report.md"},
+        {"kind": "user_file", "size": 5, "source_path": "/elsewhere/report.md"},
+        {"kind": "task_artifact", "immutable": True, "sha256": h1, "size": 5},
+        {"kind": "user_file", "sha256": h1, "size": 5, "source_path": str(scratch / "private.md")},
+        {"kind": "user_file", "sha256": h1, "size": 5, "source_path": adjacent},
+        {"kind": "user_file", "sha256": h1, "size": 5, "source_path": edited},
+        {"kind": "user_file", "sha256": h5, "size": 5, "source_path": uncaptured},
+        {"kind": "user_file", "sha256": h1, "size": 5, "source_path": str(scratch / "retaken.md")},
+        {"kind": "user_file", "sha256": h1, "size": 5, "source_path": str(scratch / "prior_auto.md")},
+        {"kind": "user_file", "sha256": h1, "size": 5, "source_path": str(shelf / "attachments" / "brief.md")},
+        {"kind": "delete_recovery", "immutable": True, "sha256": h1, "size": 5, "source_path": str(shelf / "copy.md")},
+    ):
+        assert not _output_registration(rejected, row, shelf=shelf, scratch=scratch, allowed_sources=allowed), rejected
+    # A known private source is excluded outright; where the boundary or the provenance inside it could not be
+    # established, a source that may be private is the named reason instead, and it admits no registration.
+    private, why = str(scratch / "private.md"), "this task's work folder could not be determined (OSError)"
+    assert _source_origin(private, shelf=shelf, scratch=scratch) == "private"
+    assert _source_origin(private, shelf=shelf, scratch=scratch, unsettled=why) == why
+    assert _source_origin("/elsewhere/report.md", shelf=shelf, scratch=scratch, unsettled=why) == ""
+    assert _source_origin("/elsewhere/report.md", shelf=shelf, unsettled=why) == why, "no boundary: it may be private"
+    assert _source_origin(str(shelf / "attachments" / "brief.md"), shelf=shelf, unsettled=why) == "private"
+    assert not _output_registration({"kind": "user_file", "sha256": h1, "size": 5, "source_path": private},
+                                    row, shelf=shelf, scratch=scratch, unsettled=why)
+    # An observed write's own target is judged by its folder alone: in an ordinary folder it is read as before; in
+    # the scratch, the default folder of work without one, only its listed capture stands for it, so the missing
+    # fact is named and the live file stays unread, a default-folder write's too.
+    assert _unread_target("write_file", "/elsewhere/report.md", scratch, "") == ""
+    assert _unread_target("write_file", "/elsewhere/report.md", scratch, why) == "", "its boundary is known"
+    in_scratch = _unread_target("write_file", str(scratch / "adjacent.md"), scratch, "")
+    assert "no listed capture of that write" in in_scratch and "the live file is not read" in in_scratch, in_scratch
+    assert why in _unread_target("write_file", private, scratch, why)
+    assert why in _unread_target("write_file", "/elsewhere/report.md", None, why), "no boundary: it may be private"
+    # A missing source path is an ordinary metadata gap: an ordinary mutable copy that names none admits no shelf
+    # edit by its registration, while an explicit delivery needs none (nor do directly registered bytes, unasked).
+    bare = {"kind": "user_file", "sha256": h1, "size": 5}
+    assert _source_origin(None, shelf=shelf, scratch=scratch) == ""
+    assert "names no source path" in _source_origin("", shelf=shelf, scratch=scratch, required=True)
+    for kind in ("user_file", "process_output"):
+        assert not _output_registration({**bare, "kind": kind}, row, shelf=shelf, scratch=scratch), kind
+    assert _output_registration({**bare, "immutable": True}, row, shelf=shelf, scratch=scratch)
+
+    assert _verify_version(f"sha256:{h1}", {"sha256": h1, "size": 3}, None) == ("sha256", "")
+    for bad in (f"sha256:{h1[:16]}", f"sha256:{h2}", ""):
+        assert _verify_version(bad, {"sha256": h1, "size": 3}, None)[0] == ""
+    assert _registration_mismatch({"sha256": h1, "size": 3}, {"sha256": h1, "size": 3}) == ""
+    assert "sha256 mismatch" in _registration_mismatch({"sha256": h1, "size": 3}, {"sha256": h2, "size": 3})
+    assert "size mismatch" in _registration_mismatch({"sha256": h1, "size": 3}, {"sha256": h1, "size": 4})
+
+    sample = shelf / "append.txt"
+    sample.write_bytes(b"abc")
+    sample_id = {"sha256": hashlib.sha256(b"abc").hexdigest(), "size": 3}
+    stat_witness = version_witness(target=sample)
+    assert stat_witness.startswith("stat:") and len(stat_witness.split(":")) == 5
+    with sample.open("rb") as fh:
+        assert _verify_version(stat_witness, sample_id, fh) == ("metadata", "")
+        info = os.fstat(fh.fileno())
+        assert _verify_version(f"stat:{info.st_size}:{info.st_mtime_ns}", sample_id, fh)[0] == ""
+        assert _verify_version("stat:0:0:3:1", sample_id, fh)[0] == ""
+        assert _verify_version(stat_witness, {**sample_id, "size": 99}, fh)[0] == ""
+    assert _verify_version(stat_witness, sample_id, None)[0] == ""
+
+    uf_call = receipt(["missed.md"], root="user_files", base=tmp_path / "inert_user", is_error=True)
+    uf_ctx = SimpleNamespace(_execution_trace={"tool_calls": [uf_call]})
+    paths, uf_gap = _written_paths(uf_ctx, tmp_path, "task-inert", {"tool": "write_file", "index": 0, "args": {}}, shelf)
+    assert paths == [] and "missed.md" in uf_gap and "user_files" in uf_gap, uf_gap
+
+    # A registration follows a shelf write only by structured per-file capture digests collected in one pass over
+    # native write receipts (ordinary workspace, user_files, partial batch). Tool text, arguments or a shared flag
+    # confirm nothing, and live files are never measured here.
+    work = (tmp_path / "inert_work").resolve()
+    words = "Retained file outputs: report.md (artifact_store:report.md, 3 bytes)"
+    later_ctx = SimpleNamespace(_execution_trace={"tool_calls": [
+        calls[0],
+        receipt(["report.md"], versions=[f"sha256:{h1}"], root="active_workspace", base=work),
+        receipt(["elsewhere.md"], root="active_workspace", base=work, result=words),
+        receipt(["report.md", "other.md"], versions=[f"sha256:{h2}", ""], root="user_files", base=work, is_error=True),
+    ]})
+    captures = _collect_trace_evidence(later_ctx, shelf, scratch)
+    version = {"sha256": h2, "size": 3}
+    rec = captures[str(work / "report.md")]
+    assert rec[:2] == (h2, 3), rec  # independent of neighbor "other.md" failure in same batch
+    assert captures[str(work / "other.md")][:2] == ("", 3)
+    assert _later_registered_source(0, version, recorded=rec[:2]) == version
+    assert _later_registered_source(3, version, recorded=rec[:2]) is None, "not strictly later"
+    assert _later_registered_source(0, {"sha256": h1, "size": 3}, recorded=rec[:2]) is None, "stale digest"
+    assert _later_registered_source(0, {"sha256": h1, "size": 3}, recorded=("", 2)) is None, "text proves nothing"
+
+
+@pytest.mark.parametrize("folder", ["ordinary", "folderless"])
+def test_an_edit_of_its_own_registered_report_wins_and_a_newer_registration_is_not_lost(tmp_path, monkeypatch, folder):
+    """An ordinary report written in an ordinary folder, or in the default folder of work without one (the task's own
+    scratch), is registered by its automatic capture (v1). The task's intentional edit of that report on its shelf
+    wins (v2) without listing the stale original beside it, and a later write of the original, registered again (v3),
+    is not lost: its typed receipt and its already-measured capture digest confirm it uniformly across folders.
+    Every ordinary writer then edits the report where it lies (append, edit_text, edit_batch, apply_patch), and
+    each time the one listed report holds exactly what that write left: the copy its own capture retained."""
+    import hashlib
+    import pathlib
+
+    from ouroboros.result_material import produced_material
+    from ouroboros.tools.registry import ToolContext
+
+    base = _floor_ctx(tmp_path, monkeypatch)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    where = ({"workspace_root": plain, "workspace_mode": "external"} if folder == "ordinary" else
+             {"task_metadata": {"resource_intent": {"kind": "explicit_none"}}})  # no folder: its scratch is the default
+    ctx = ToolContext(repo_dir=base.repo_dir, system_repo_dir=base.repo_dir, drive_root=base.drive_root,
+                      task_id="task-shelf-flow", **where)
+
+    def listed_after(tool, text, **args):  # the one report.md the material lists after this call holds exactly TEXT
+        call, digest = _native_write(ctx, tool, args), hashlib.sha256(text.encode()).hexdigest()
+        assert call["is_error"] is False, call
+        if args.get("root") != "artifact_store":  # unified: every folder records the capture's already-measured digest
+            assert call["tool_result_meta"].get("changed_versions") == [f"sha256:{digest}"], call
+        material = produced_material(ctx)
+        assert not [gap for gap in material["issues"] if "report.md" in gap], material["issues"]
+        [row] = [item for item in material["files"] if pathlib.Path(item["path"]).name == "report.md"]
+        assert row["sha256"] == digest, material
+
+    listed_after("write_file", "report v1\n", path="report.md", content="report v1\n")
+    listed_after("edit_text", "report v2\n", root="artifact_store", path="report.md", old_str="v1", new_str="v2")
+    listed_after("write_file", "report v3\n", path="report.md", content="report v3\n")
+    listed_after("write_file", "report v3\nappended\n", path="report.md", content="appended\n", mode="append")
+    listed_after("edit_text", "report v4\nappended\n", path="report.md", old_str="v3", new_str="v4")
+    listed_after("edit_batch", "report v5\nappended\n", edits=[{"path": "report.md", "old_str": "v4", "new_str": "v5"}])
+    listed_after("apply_patch", "report v6\nappended\n", patch="*** Update File: report.md\n-report v5\n+report v6\n")
+
+
+def test_declared_process_and_directory_outputs_from_scratch_enter_review_without_reading_live_scratch(tmp_path, monkeypatch):
+    """Explicitly declared process_output and directory/manifest captures sourced from task_drive (scratch) enter
+    result review via their verified registered copies without reading live scratch, even for deduplication. Private
+    scratch copies, input attachments and store bookkeeping stay excluded; inert receipts and registrations check them
+    (``test_shelf_provenance_and_versions_are_read_from_inert_receipts``)."""
+    import hashlib
+    import pathlib
+
+    from ouroboros import result_material
+    from ouroboros.artifact_directories import copy_directory_to_task_artifacts
+    from ouroboros.artifacts import copy_file_to_task_artifacts
+    from ouroboros.tool_access import resource_root_path
+    from ouroboros.tools.registry import ToolContext
+
+    base = _floor_ctx(tmp_path, monkeypatch)
+    ctx = ToolContext(repo_dir=base.repo_dir, system_repo_dir=base.repo_dir, drive_root=base.drive_root,
+                      task_id="task-scratch-declared",
+                      task_metadata={"resource_intent": {"kind": "explicit_none"}})
+    scratch = resource_root_path(ctx, "task_drive").resolve()
+    scratch.mkdir(parents=True, exist_ok=True)
+
+    csv_path = scratch / "summary.csv"
+    csv_body = "region,total\nnorth,42\n"
+    csv_path.write_bytes(csv_body.encode("utf-8"))  # exact UTF-8/LF bytes on every OS
+    csv_rec = copy_file_to_task_artifacts(ctx, csv_path, kind="process_output")
+    assert csv_rec and csv_rec["kind"] == "process_output"
+
+    out_dir = scratch / "tables"
+    out_dir.mkdir()
+    (out_dir / "q1.txt").write_bytes(b"quarter one\n")
+    dir_recs = copy_directory_to_task_artifacts(ctx, out_dir, kind="process_output_directory")
+    assert {r["kind"] for r in dir_recs} == {"process_output_directory", "process_output_directory_manifest"}
+
+    # Mutate live scratch files after registration; live scratch must never be opened or read.
+    csv_path.write_bytes(b"MUTATED LIVE SCRATCH\n")
+    (out_dir / "q1.txt").write_bytes(b"MUTATED LIVE DIR\n")
+
+    read_paths: list[str] = []
+    real_identity = result_material._file_identity
+
+    def spy_identity(path, handle=None):
+        if handle is None:
+            read_paths.append(str(pathlib.Path(path).resolve(strict=False)))
+        return real_identity(path, handle)
+
+    monkeypatch.setattr(result_material, "_file_identity", spy_identity)
+
+    material = result_material.produced_material(ctx)
+    assert material["issues"] == [], material["issues"]
+    by_name = {pathlib.Path(item["path"]).name: item for item in material["files"]}
+    expected_names = {csv_rec["name"], *(r["name"] for r in dir_recs)}
+    assert set(by_name) == expected_names, by_name
+    assert by_name[csv_rec["name"]]["sha256"] == hashlib.sha256(csv_body.encode("utf-8")).hexdigest()
+    assert all("source_handles" in item["retained"] for item in by_name.values())
+    assert not any(pathlib.Path(p).is_relative_to(scratch) for p in read_paths), read_paths
+    serialized = json.dumps(material)
+    for excluded in ("MUTATED LIVE SCRATCH", "MUTATED LIVE DIR"):
+        assert excluded not in serialized, excluded
+
+
+@pytest.mark.parametrize("entry", ["explicit", "delivery"])
+def test_a_report_declared_as_a_command_output_in_task_drive_reaches_its_review(tmp_path, monkeypatch, entry):
+    """#4314: an ordinary permitted command, ``run_command(cwd='task_drive', outputs=['summary.md'])``, captures the
+    report this task keeps in its own scratch; explicit ``review_change(subject='result')`` and Required
+    ``result_review_at_delivery`` read its exact text and full SHA-256 from that registered copy. Tool rules and the
+    Safety reading run unreplaced (``whoami``, one of its allowed subjects on every OS, never opens the report); only
+    the review model is a stand-in. An inert receipt of a shelf write recording another version or a deletion, which
+    nothing orders against the registration, leaves the registered report listed beside a named gap."""
+    import hashlib
+    import pathlib
+
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.tool_access import resource_root_path
+    from ouroboros.tools.review_result import _retained_subject_text, produced_material, result_review_at_delivery
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    scratch = resource_root_path(ctx, "task_drive")
+    scratch.mkdir(parents=True, exist_ok=True)
+    body = "# Summary\n\n1. The first finding.\n2. The second finding, checked.\n"
+    (scratch / "summary.md").write_bytes(body.encode("utf-8"))  # exact UTF-8/LF bytes on every OS
+    call = _native_write(ctx, "run_command", {"cmd": ["whoami"], "cwd": "task_drive", "outputs": ["summary.md"]})
+    assert call["is_error"] is False and call["tool_result_meta"].get("artifact_registered") is True, call
+    digest, shelf = hashlib.sha256(body.encode("utf-8")).hexdigest(), task_artifact_dir_path(ctx.drive_root, ctx.task_id).resolve()
+    [item] = [row for row in produced_material(ctx)["files"] if pathlib.Path(row["path"]).name == "summary.md"]
+    copy = pathlib.Path(item["retained"])
+    assert (item["kind"], item["sha256"], pathlib.Path(item["path"]).parent) == ("artifact", digest, shelf), item
+    assert copy.read_bytes() == body.encode("utf-8") and "source_handles" in copy.parts
+
+    trace = ctx._execution_trace
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))  # the review model alone is a stand-in
+    if entry == "explicit":
+        explicit = run_review_change(ctx, subject="result", answer="The summary is summary.md.")
+        assert explicit["aggregate"] == "PASS" and len(sends) == 3
+        record_id = explicit["record_id"]
+    else:
+        assert result_review_at_delivery(ctx, "The summary is summary.md.", trace, lambda _text: None) is True
+        assert trace["review_decision"]["trigger"] == "observed_production" and len(sends) == 3
+        record_id = trace["review_runs"][-1]["record_id"]
+    record = review_ledger.load_record(review_ledger.ledger_root(ctx), record_id)
+    subject_text = _retained_subject_text(ctx, record["subject"]["diff_sha"])
+    assert f"sha256 {digest}" in subject_text and f"exact copy: {copy}" in subject_text
+    assert "2. The second finding, checked." in subject_text
+
+    for witness in ("sha256:" + "0" * 64, "deleted"):  # inert receipts only: no write or deletion happens
+        trace["tool_calls"].append({"tool": "apply_patch", "args": {"root": "artifact_store"}, "is_error": False,
+                                    "status": "ok", "result": "OK", "tool_result_meta": {
+                                        "resolved_root": str(shelf), "logical_root": "artifact_store",
+                                        "changed_paths": ["summary.md"], "changed_versions": [witness]}})
+        material = produced_material(ctx)
+        assert [row["sha256"] for row in material["files"] if pathlib.Path(row["path"]).name == "summary.md"] == [digest]
+        assert any(gap.startswith("artifact_store:summary.md: listed at its registered version")
+                   for gap in material["issues"]), (witness, material["issues"])
+
+
+def test_case_variants_correlate_on_case_insensitive_volume_without_conflating_distinct_entries(tmp_path, monkeypatch):
+    """Case variants of one physical shelf entry (Report.md -> report.md) correlate cleanly when their filesystem
+    identities match, while distinct files with differing case on case-sensitive volumes are never conflated."""
+    import hashlib
+    import os
+    import pathlib
+
+    from ouroboros import result_material
+    from ouroboros.artifacts import task_artifact_dir_path
+
+    shelf = (tmp_path / "case_shelf").resolve()
+    shelf.mkdir()
+    h1, h2 = "a" * 64, "b" * 64
+    calls = [
+        {"tool": "write_file", "args": {"root": "artifact_store"}, "is_error": False,
+         "tool_result_meta": {"resolved_root": str(shelf), "logical_root": "artifact_store",
+                              "changed_paths": ["Report.md"], "changed_paths_created": [0],
+                              "changed_versions": [f"sha256:{h1}"]}},
+        {"tool": "edit_text", "args": {"root": "artifact_store"}, "is_error": False,
+         "tool_result_meta": {"resolved_root": str(shelf), "logical_root": "artifact_store",
+                              "changed_paths": ["report.md"], "changed_versions": [f"sha256:{h2}"]}},
+    ]
+    ctx = SimpleNamespace(_execution_trace={"tool_calls": calls})
+    effects = [{"tool": calls[0]["tool"], "index": 0}, {"tool": calls[1]["tool"], "index": 1}]
+
+    with monkeypatch.context() as mp:
+        # Same physical inode (case-insensitive volume): Report.md -> report.md updates the one owned entry.
+        mp.setattr(result_material, "_confined_entry_identity", lambda _s, _rel: ("ok", (1, 42)))
+        latest_ci, gaps_ci = result_material._shelf_versions(ctx, effects, shelf, set())
+        assert latest_ci == {"Report.md": f"sha256:{h2}"} and gaps_ci == [], (latest_ci, gaps_ci)
+
+        # Distinct physical inodes (case-sensitive volume): report.md stays a separate unowned neighbor gap.
+        identities = {"Report.md": ("ok", (1, 42)), "report.md": ("ok", (1, 99))}
+        mp.setattr(result_material, "_confined_entry_identity", lambda _s, rel: identities.get(rel, ("missing", None)))
+        latest_cs, gaps_cs = result_material._shelf_versions(ctx, effects, shelf, set())
+        assert latest_cs == {"Report.md": f"sha256:{h1}"}, latest_cs
+        assert len(gaps_cs) == 1 and "artifact_store:report.md" in gaps_cs[0], gaps_cs
+
+    # Live check on the affected file itself when this volume maps Report.md and report.md to one inode.
+    live_ctx = _floor_ctx(tmp_path / "live_case", monkeypatch)
+    assert _native_write(live_ctx, "write_file", {
+        "root": "artifact_store", "path": "Report.md", "content": "Section 1\n",
+    })["is_error"] is False
+    live_shelf = task_artifact_dir_path(live_ctx.drive_root, live_ctx.task_id).resolve()
+    try:
+        same_live = ((os.lstat(live_shelf / "Report.md").st_dev, os.lstat(live_shelf / "Report.md").st_ino)
+                     == (os.lstat(live_shelf / "report.md").st_dev, os.lstat(live_shelf / "report.md").st_ino))
+    except FileNotFoundError:
+        same_live = False
+    if same_live:
+        assert _native_write(live_ctx, "edit_text", {
+            "root": "artifact_store", "path": "report.md", "old_str": "Section 1", "new_str": "Section 1 updated",
+        })["is_error"] is False
+        material = result_material.produced_material(live_ctx)
+        assert material["issues"] == [], material["issues"]
+        [row] = [item for item in material["files"] if pathlib.Path(item["path"]).parent.resolve() == live_shelf]
+        assert row["sha256"] == hashlib.sha256(b"Section 1 updated\n").hexdigest()

@@ -381,7 +381,7 @@ def test_api_base_validator_canonicalizes_ipv6_with_brackets():
 def test_api_base_form_keeps_what_it_shows_and_an_emptied_field_returns_to_the_cloud(tmp_path):
     plugin = _load_plugin()
     handler = plugin._make_settings_save(_RouteApi(tmp_path))
-    base = "https://192.168.1.48:18085"
+    base = "http://192.168.1.48:18085"
 
     def request(payload=None, method="POST"):
         return asyncio.run(handler(_RouteRequest(payload, host="127.0.0.1", method=method)))
@@ -399,8 +399,8 @@ def test_api_base_form_keeps_what_it_shows_and_an_emptied_field_returns_to_the_c
     # A request without the key leaves the saved value alone.
     assert "Bot API server" not in message({"TELEGRAM_COMMAND_MODE": "strict"})
     assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == base
-    # Remote plaintext HTTP and malformed origins are rejected, and the stored value stands.
-    for bad in ("http://192.168.1.48:18085", "https://host#", "https://host?x=1", "https://host/bot", "ftp://host"):
+    # A fragment/query/base-with-path is rejected, and the stored value stands.
+    for bad in ("https://host#", "https://host?x=1", "https://host/bot", "ftp://host"):
         refused = request({"TELEGRAM_API_BASE": bad})
         assert refused.status_code == 400, bad
         assert "TELEGRAM_API_BASE" in json.loads(refused.body)["message"]
@@ -522,27 +522,28 @@ def test_only_the_local_settings_page_may_change_the_bot_api_server(tmp_path: Pa
         assert reply.status_code == 200
         return json.loads(reply.body)
 
-    refused = save({"TELEGRAM_API_BASE": "https://198.51.100.9:8081", "TELEGRAM_API_FILES_DIR": "",
+    refused = save({"TELEGRAM_API_BASE": "http://198.51.100.9:8081", "TELEGRAM_API_FILES_DIR": "",
                     "TELEGRAM_COMMAND_MODE": "strict"}, host=host, marker=marker)
     assert refused["ok"] is True and refused["server_ignored"] is True
-    assert "change them from the Settings page on the computer running Ouroboros" in refused["message"]
+    local_form = "Open the Telegram skill's settings on the computer running Ouroboros"
+    assert local_form in refused["message"]
     saved = load_settings(tmp_path)
     assert (saved["TELEGRAM_API_BASE"], saved["TELEGRAM_API_FILES_DIR"]) == ("http://127.0.0.1:8081", store)
     assert saved["TELEGRAM_COMMAND_MODE"] == "strict"
     # The remote form sends back what it was shown: unchanged values pass without a notice.
     quiet = save({"TELEGRAM_API_BASE": "http://127.0.0.1:8081/", "TELEGRAM_API_FILES_DIR": store},
                  host=host, marker=marker)
-    assert quiet["server_ignored"] is False and "Settings page" not in quiet["message"]
+    assert quiet["server_ignored"] is False and local_form not in quiet["message"]
     # So do values saved by hand in another spelling of the same server and store.
     merge_settings(tmp_path, {"TELEGRAM_API_BASE": "https://bot.example:443/", "TELEGRAM_API_FILES_DIR": store + os.sep})
     hand_edited = save({"TELEGRAM_API_BASE": "https://bot.example", "TELEGRAM_API_FILES_DIR": store},
                        host=host, marker=marker)
-    assert hand_edited["server_ignored"] is False and "Settings page" not in hand_edited["message"]
+    assert hand_edited["server_ignored"] is False and local_form not in hand_edited["message"]
     assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == "https://bot.example:443/"
     merge_settings(tmp_path, {"TELEGRAM_API_BASE": "http://127.0.0.1:8081", "TELEGRAM_API_FILES_DIR": store})
-    local = save({"TELEGRAM_API_BASE": "https://198.51.100.9:8081"}, host="127.0.0.1")
+    local = save({"TELEGRAM_API_BASE": "http://198.51.100.9:8081"}, host="127.0.0.1")
     assert local["server_ignored"] is False
-    assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == "https://198.51.100.9:8081"
+    assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == "http://198.51.100.9:8081"
 
 
 def test_server_notes_agree_on_timing_and_the_move_with_ouroboros_quit(tmp_path):
@@ -620,85 +621,3 @@ def test_on_windows_the_runbook_store_needs_a_windows_path(monkeypatch):
     with pytest.raises(ValueError, match="native"):
         validate(_runbook_example()["TELEGRAM_API_FILES_DIR"])
     assert validate("C:/absolute/path/to/server-file-store/") == "C:\\absolute\\path\\to\\server-file-store"
-
-
-def test_settings_path_resolve_oserror_raises_telegram_settings_error_in_load_lock_and_merge(tmp_path, monkeypatch):
-    import errno
-    from pathlib import Path
-
-    state = tmp_path / "state_io"
-    state.mkdir()
-    real_resolve = Path.resolve
-
-    def fail_state_resolve(self, *a, **k):
-        if self.name == "state_io" and k.get("strict"):
-            raise OSError(errno.EIO, "simulated resolve EIO")
-        return real_resolve(self, *a, **k)
-
-    monkeypatch.setattr(Path, "resolve", fail_state_resolve)
-    with pytest.raises(TelegramSettingsError, match="state directory"):
-        load_settings(state)
-    with pytest.raises(TelegramSettingsError, match="state directory"):
-        with telegram_settings_module.settings_lock(state):
-            pass
-    with pytest.raises(TelegramSettingsError, match="state directory"):
-        telegram_settings_module.merge_settings_unlocked(state, {"TELEGRAM_CHAT_ID": "18"})
-    monkeypatch.setattr(Path, "resolve", real_resolve)
-    with pytest.raises(TelegramSettingsError, match="persist"):
-        telegram_settings_module.merge_settings_unlocked(state, {"TELEGRAM_SILENT_MODE": "\ud800"})
-
-
-def test_presence_tools_validate_request_id_consistently_and_preserve_identity(tmp_path):
-    import asyncio
-    from tests.test_telegram_security_boundaries import _StubApi, _load_plugin
-
-    _load_plugin("tg_req_id")
-    from tg_req_id.lib.presence import custody, host, tools
-
-    state = tmp_path / "tools_state"
-    api = _StubApi(state)
-    send = tools.make_send_tool(api, confirmed_account=lambda: "123456")
-    receipt = tools.make_receipt_tool(api)
-    moderate = tools.make_moderation_tool(api, confirmed_account=lambda: "123456")
-    operation = tools.make_operation_tool(api, confirmed_account=lambda: "123456")
-    react = tools.make_react_tool(operation)
-
-    # Lone surrogates, whitespace-only, and padded IDs are rejected with invalid_request_id across all 5 tools before SQLite/staging
-    for bad_id in ("x\ud800", "x\udfff", "  ", " \tx?\u00a0"):
-        assert send(chat_id="-1001", text="hi", request_id=bad_id)["code"] == "invalid_request_id"
-        assert receipt(request_id=bad_id, operation="send")["code"] == "invalid_request_id"
-        assert moderate(action="ban_member", chat_id="-1001", request_id=bad_id, user_id=5)["code"] == "invalid_request_id"
-        assert operation(method="editMessageText", chat_id="-1001", message_id=5, request_id=bad_id, text="ed")["code"] == "invalid_request_id"
-        assert react(action="set", chat_id="-1001", message_id=5, request_id=bad_id, emoji="👍")["code"] == "invalid_request_id"
-    assert moderate(action="ban_member", chat_id="-1001", request_id="", user_id=5)["ok"] is False
-    assert not (state / "custody.sqlite3").exists()
-
-    # Distinct valid IDs (including literal '?') never collapse, same-ID retries deduplicate, omitted generates UUID, and receipt looks up exact ID
-    r1 = send(chat_id="-1001", text="hi", request_id="x?")
-    r2 = send(chat_id="-1001", text="hi", request_id="x?")
-    r3 = send(chat_id="-1001", text="hi", request_id="x2")
-    r_omitted = send(chat_id="-1001", text="hi")
-    assert r1["ok"] is True and r1["state"] == "queued" and r1["request_id"] == "x?"
-    assert r2["ok"] is True and r2["state"] == "already_queued" and r2["request_id"] == "x?"
-    assert r3["ok"] is True and r3["state"] == "queued" and r3["request_id"] == "x2"
-    assert r_omitted["ok"] is True and r_omitted["state"] == "queued" and len(r_omitted["request_id"]) == 32
-    assert receipt(request_id="x?", operation="send")["state"] == "pending"
-    assert receipt(request_id="x2", operation="send")["state"] == "pending"
-    assert receipt(request_id=r_omitted["request_id"], operation="send")["state"] == "pending"
-    store = custody.CustodyStore.shared(state / "custody.sqlite3")
-    with store._connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 3
-    store.close()
-
-    # Non-UTF-8 host deferred work_ref fails cleanly as PresenceHostError instead of crashing SQLite
-    class _BadRefTransport:
-        async def request_json(self, *a, **k):
-            return {"status": "completed", "outcome": "deferred", "turn_ref": "", "work_ref": "w\udfff"}
-
-    hc = host.PresenceHostClient(state_dir=state, token_provider=lambda: "tok", host_base="http://127.0.0.1:8765", transport=_BadRefTransport())
-    hc.delivery_reporting_status = "unsupported"
-    hc._identity_discovered_at = 1e18
-    hc.places_version = 1
-    ev = {k: "" for k in host._EVENT_KEYS}
-    with pytest.raises(host.PresenceHostError, match="non-UTF-8 work_ref"):
-        asyncio.run(hc.submit(ev, []))

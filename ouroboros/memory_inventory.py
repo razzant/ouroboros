@@ -63,8 +63,8 @@ from ouroboros import chat_chain
 from ouroboros.chronicle_import import legacy_frontier
 from ouroboros.chronicle_store import ChronicleStore, capture, capture_memo, draft_signer, source_time_span
 from ouroboros.context_timing import counted, timed_section
-from ouroboros.dialogue_provenance import (in_reading_order, place_message_facts, recorded_person, rooms_read_by_time,
-                                           row_class, row_provenance)
+from ouroboros.dialogue_provenance import (agent_note_text, declared_author, in_reading_order, place_message_facts,
+                                           recorded_person, rooms_read_by_time, row_class, row_provenance)
 
 # The key of the memory view's last-capture fact in a task's ``llm_trace``.
 VIEW_TRACE_KEY = "memory_view"
@@ -79,14 +79,16 @@ _META_FIELDS = ("chat_id", "ts", "type", "kind",  # ``kind``: the display stamp 
                 "direction", "task_id", "parent_task_id", "root_task_id",
                 "client_message_id", "subagent_task_id", "delegation_role", "subagent_role", "initiator",
                 "summary_kind", "sender_label", "username", "author", "source", "transport",
+                "declared_author",  # an agent's note keeps its recorded author: never the owner's words (#3873)
                 "status", "outcome", "outcome_phase", "reason_code", "outcome_final", "outcome_authority",
                 "result_ref", "presence", "presence_provenance", "host_fact", "historical_import", "source_order", "terminal_origin",
                 "wake_summary",  # a finished root's closing sentence: how my other conversations know that turn
-                "fold_read")  # and that its sentence stands for what it read there (``finish_task(fold_read=true)``)
+                "fold_read",  # and that its sentence stands for what it read there (``finish_task(fold_read=true)``)
+                "read_spans")  # what that work was shown whole of its room: what its acts there count as read
 _MEMBERSHIP_FIELDS = ("chat_id", "ts", "type", "task_id", "parent_task_id", "root_task_id", "source_keys")
 # ``telegram_room_chat_id``: the room the host decided for the bundled bridge's Reply (``room_membership``); no
 # stored prefix lacks it wrongly, since no released body wrote it before it joined this list.
-_REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unresolved", "telegram_room_chat_id")
+_REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unresolved", "telegram_room_chat_id", "work_task_id")
 # What a row's ``transport`` keeps: its scalars, which ``dialogue_provenance.place_row_facts`` spreads as the row's
 # place facts (``place_activity`` reads the event, place and conversation keys) and which name its provider, account,
 # conversation and thread (``dialogue_provenance``, ``RoomLabelResolver.label``), so a row that came over a transport
@@ -97,12 +99,13 @@ _REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unreso
 _TRANSPORT_NESTED = {
     "actor": ("display_name", "username", "platform_actor_id", "id",  # who spoke (``dialogue_speaker``)
               "kind",  # who made a wordless reaction (``row_author``)
-              "authenticated", "is_bot"),  # the author fact (``places.owner_confirmed_row``, ``_place_speaker``)
+              "authenticated", "is_bot", "origin"),  # author facts (``places.owner_confirmed_row``, ``row_author``)
     "identity": ("sends_as",),  # the account I send as (``_place_speaker``)
     "delivery": ("state",  # ``dialogue_provenance``, ``reaction_note``, the view's typed fact, ``place_activity``
                  "presence_provenance"),  # an older receipt's place facts (``place_row_facts``)
     "message": ("reaction",  # the typed reaction (``reaction_fact``): its words, or a row that is that act alone
-                "message_id", "forward_origin"),  # provider identity and word authorship (``places.owner_author``)
+                "message_id", "id", "ts",  # provider identity, as a thread snapshot names it (``memory_reading``)
+                "forward_origin"),  # word authorship (``places.owner_author``)
     "origin": ("kind", "task_id"),  # the work that sent my delivered message (``memory_view``'s own-row head)
     "conversation": ("title", "name", "full_name", "username", "topic_id",  # its own name (``RoomLabelResolver``)
                      "chat_type", "channel_type", "is_im", "is_mpim", "is_private", "visibility",  # who reads it
@@ -111,9 +114,11 @@ _TRANSPORT_NESTED = {
 # Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read; 6: and the author
 # fact's; 7: the sending work, the conversation's name and audience, a finish's sentence and its fold, a project
 # closure notice's delivery; 8: provider id; 9: forwarded authorship and connector-facts digest; 10: the row's
-# ``kind`` stamp; 11: whole-row identity for a bound opening, including an answered card): a prefix of another
+# ``kind`` stamp; 11: whole-row identity for a bound opening, including an answered card; 12: actor origin): a prefix of another
 # version is another source, read live until the maintenance job ``memory_tail`` refills it.
-_META_VERSION = 11
+# 13: an agent's note keeps its size and comparison facts on its literal body (``agent_note_text``), never the
+# neutral receipt fact, and is no owner source (``declared_author``).
+_META_VERSION = 13
 
 Entry = Tuple[Dict[str, Any], Dict[str, Any], int]
 
@@ -130,7 +135,11 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
     meta = {key: row[key] for key in _META_FIELDS if key in row}
     if isinstance(meta.get("transport"), Mapping):
         meta["transport"] = _transport_facts(meta["transport"])
-    meta["text_chars"] = len(str(row.get("text") or ""))
+    # An agent's note is compared and sized by its literal body as program data (the one projection every reader
+    # shares, ``agent_note_text``), never the neutral receipt fact its ``text`` keeps for older readers.
+    note = declared_author(row)
+    words = agent_note_text(row) if note else str(row.get("text") or "")
+    meta["text_chars"] = len(words)
     if row.get("wake_silent") is True:
         from ouroboros.task_finalization import quiet_finish
 
@@ -151,10 +160,10 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
         from ouroboros.project_dialogue import _entry_source_identities, _text_sha256  # D15->D17 is lazy-only
 
         if row.get("direction") == "in":
-            meta["text_sha256"] = _text_sha256(row.get("text"))
+            meta["text_sha256"] = _text_sha256(words)
             if facts := place_message_facts(row):  # same words alone do not make different forwards/files a repeat
                 meta["message_facts_sha256"] = hashlib.sha256(facts.encode("utf-8")).hexdigest()
-        if keys := _entry_source_identities(row):
+        if not note and (keys := _entry_source_identities(row)):  # a program's note is never an owner source
             meta["source_keys"] = tuple(sorted(keys))
     return meta
 
@@ -624,9 +633,25 @@ def _retelling_chars(store: ChronicleStore, ids: set) -> Dict[str, int]:
     return known
 
 
+def legacy_pointer_rows(store: ChronicleStore) -> List[Dict[str, Any]]:
+    """One compact row per legacy section or gap: room, label, period and how to open it; the activation
+    import's by block, then room, then sequence; a transfer's (``chronicle_import``) after them all, by sequence."""
+    pointers = []
+    for row in store.interpreted(kinds=("legacy", "gap")):
+        meta = row.get("metadata") or {}
+        pointers.append({"node_id": row["id"], "kind": row["kind"], "room_id": row["room_id"],
+                         "label": meta.get("label"), "legacy_type": meta.get("legacy_type"),
+                         "legacy_block": meta.get("legacy_block"), "range_text": meta.get("legacy_range_text"),
+                         "messages": meta.get("room_message_count"),  # the old writer's own count for the room
+                         "covers": row.get("covers"), "revision": row["revision"], "transfer": meta.get("transfer"),
+                         "folded_into": row["folded_into"], "sequence": row["sequence"]})
+    return sorted(pointers, key=lambda p: (p["legacy_block"] if type(p["legacy_block"]) is int else float("inf"),
+                                           bool(p["transfer"]), "" if p["transfer"] else p["room_id"], p["sequence"]))
+
+
 def legacy_pointers(store: ChronicleStore) -> List[Dict[str, Any]]:
-    """``ChronicleStore.legacy_pointer_rows``, read once per capture for its readers (shared: never changed)."""
-    return capture_memo(store.data_root, "legacy_pointers", store.legacy_pointer_rows)
+    """``legacy_pointer_rows``, read once per capture for its readers (shared: never changed)."""
+    return capture_memo(store.data_root, "legacy_pointers", lambda: legacy_pointer_rows(store))
 
 
 def legacy_units(store: ChronicleStore, root: Any) -> List[LegacyUnit]:

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { carryOpenQuestions, questionMark, questionPresentation, questionWaits, vouchedBy, waitFacts }
+import { answerFileLines, carryOpenQuestions, hasAnswerFiles, questionMark, questionPresentation, questionWaits, vouchedBy, waitFacts }
     from '../modules/question_presentation.js';
 
 // Each fixture row is the pointer row the Python producer emits for that case
@@ -90,6 +90,28 @@ test('a question whose task is a paused member of its work says that its answer 
     assert.deepEqual(questionMark(waiting), { shape: 'dot', hue: 'owner' });
 });
 
+test('a confirmed expired recipient keeps its saved answer without promising Resume, leaving healthy and unknown unchanged', () => {
+    const waiting = { state: 'open', owner_wait_state: 'waiting' };
+    const saved = { quiz_state: 'answered', question_delivery: { state: 'owed', reason_code: 'awaiting_recipient_read' } };
+    const savedExpired = questionPresentation(saved, { expired: true }).status;
+    assert.equal(savedExpired, 'Answer saved · task deadline expired');
+    assert.doesNotMatch(savedExpired, /\bResume\b|when it continues/i);
+    assert.equal(questionPresentation(saved, { paused: true, expired: true }).status, savedExpired,
+        'positive expiry overrides paused and never promises Resume');
+    assert.equal(questionPresentation(saved, { paused: true, expired: false }).status, 'Answer saved · read after Resume');
+    assert.equal(questionPresentation(saved, { paused: false, expired: false }).status,
+        'Answer saved · the task reads it when it continues');
+    const waitingExpired = questionPresentation(waiting, { expired: true }).status;
+    assert.equal(waitingExpired, 'Unanswered · task deadline expired');
+    assert.doesNotMatch(waitingExpired, /\bResume\b/i);
+    assert.equal(questionPresentation(waiting, { paused: true, expired: true }).status, waitingExpired);
+    // Non-recipient-read lifecycles keep their own words unchanged.
+    for (const row of [{ state: 'open' }, { quiz_state: 'answered' }, { quiz_state: 'closed' }, { state: 'expired_terminal' },
+        { quiz_state: 'answered', question_delivery: { state: 'owed', reason_code: 'late_answer_delivery_unknown' } }]) {
+        assert.equal(questionPresentation(row, { expired: true }).status, questionPresentation(row).status, JSON.stringify(row));
+    }
+});
+
 test('a read vouches for every question when complete, for what its gaps do not name when not, for nothing without gaps', () => {
     assert.equal(vouchedBy({ current_questions_complete: true })('t', 'q'), true);
     const named = vouchedBy({ current_questions_complete: false, current_questions_gaps: [{ task_id: 't', quiz_id: 'q' }] });
@@ -157,4 +179,27 @@ test('a partial read keeps a known question whatever its item was; a bare wait i
     const bare = { ...gap, rooms: { 42: idle([{ kind: 'question', task_id: 't' }]) } };
     assert.deepEqual(carryOpenQuestions({ rooms: { 42: idle([open]) } }, bare).rooms['42'].turn,
         [{ kind: 'question', task_id: 't' }, open]);
+});
+
+test('a Telegram Reply\'s files read as host file-outcome lines: received name, or why one never arrived; no link', () => {
+    assert.deepEqual(answerFileLines([
+        { name: 'shot.png', kind: 'image', size: 12, sha256: 'a'.repeat(64) },
+        { name: 'clip.mp4', kind: 'file', unavailable: 'too_large', limit_bytes: 10485760 },
+        { name: 'voice.ogg', kind: 'file', unavailable: 'download_failed' },
+        { name: 'gone.pdf', kind: 'file', unavailable: 'missing' },
+        {},
+    ]), [
+        '📎 shot.png',
+        '📎 clip.mp4: not received, too large',
+        '📎 voice.ogg: not received, the download failed',
+        '📎 gone.pdf: not received, unavailable',
+        '📎 attachment',
+    ]);
+    assert.deepEqual(answerFileLines(undefined), []);
+    assert.equal(hasAnswerFiles([{ name: 'shot.png' }]), true);
+    assert.equal(hasAnswerFiles([{ name: 'clip.mp4', unavailable: 'too_large' }]), true);
+    assert.equal(hasAnswerFiles([{}]), false);
+    assert.equal(hasAnswerFiles([{ name: '  ' }]), false);
+    assert.equal(hasAnswerFiles([]), false);
+    assert.equal(hasAnswerFiles(undefined), false);
 });

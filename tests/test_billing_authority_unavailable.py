@@ -388,7 +388,9 @@ def test_review_wave_discloses_unknown_without_a_new_gate_and_names_the_authorit
         assert review_wave_budget_gate(SimpleNamespace(task_id="C"), surface="plan_review",
                                        models=["openai/gpt-5.2"], prompt_chars=4000) is None
         assert [event["type"] for event in events] == ["review_wave_billing_authority_unavailable"]
-    monkeypatch.setattr(ua, "usage_projection", lambda *_a, **_k: (_ for _ in ()).throw(OSError("ledger unreadable")))
+    from ouroboros import usage_store
+
+    monkeypatch.setattr(usage_store, "read", lambda *_a, **_k: (_ for _ in ()).throw(OSError("ledger unreadable")))
     with ua.usage_scope(_scope(data_root, "S", "S", **dict(group="S", group_limit=20.0, root_limit=20.0))):
         wave = ua.review_wave_admission(data_root, root_task_id="S", models=["openai/gpt-5.2"], prompt_chars=4000)
     assert wave["fits"] is None and wave["admission_unknown"] == "OSError"

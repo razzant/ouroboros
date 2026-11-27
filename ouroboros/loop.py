@@ -26,7 +26,6 @@ from ouroboros.llm_observability import round_starts, round_window
 from ouroboros.tool_policy import CAPABILITY_OMISSION_HEADER, format_capability_omissions, initial_tool_schemas, list_non_core_tools  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.llm_claudexor import ModelTurnState
-from ouroboros.anthropic_native_custody import custody_private_key
 from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros.loop_completion_schema import refused_door_end, resolve_completion_selection
 from ouroboros._usage_wait import receiver_abandonable
@@ -154,8 +153,7 @@ def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_
             # Enrich only this round's complete held row; earlier equal answers keep their own continuation.
             for row in limit_ctx.messages[response_start:]:
                 if row == {"role": "assistant", "content": content}:
-                    row.update({key: value for key, value in assistant_message.items()
-                                if key in ("reasoning_details", "reasoning_content") or custody_private_key(key)})
+                    row.update(output_recovery.kept_assistant_fields(assistant_message))
     return result
 
 
@@ -402,11 +400,16 @@ def _record_transcript_prefix(ctx, messages, round_idx, accumulated_usage,
     included, is counted in ``prompt_prefix_breaks``; a seam's
     ``transcript_prefix.sanction_rewrite`` names its origin, never exempts it. Never gated.
     """
+    from ouroboros.memory_reading import note_view
     from ouroboros.tools.compact_context import record_context_view
 
     # Before the view replaces it: a restored slot's baseline is its context observation.
     fact = _observe_transcript_send(ctx, messages, round_idx=round_idx, tools=tool_schemas, usage=accumulated_usage)
     record_context_view(ctx, messages, tool_schemas, physical_capture=getattr(ctx, "_usable_main_capture", None))
+    note_view(ctx, accumulated_usage, messages)  # what this accepted request delivered whole (``memory_reading``)
+    from ouroboros.own_time_seed import spend_offer  # the same usable answer's physical request spends a one-time fact
+
+    spend_offer(ctx, getattr(ctx, "_usable_main_capture", None))
     from ouroboros.context_input_selection import capture_historical_inputs
 
     capture_historical_inputs(ctx)
@@ -435,7 +438,7 @@ def _reset_turn_state(ctx: Any) -> None:
     ctx._completion_conflict, ctx._completion_held_sha256, ctx._acceptance_pending_review_choice = False, "", ""
     ctx._result_review_pending, ctx._result_review_shown, ctx._result_review_refused = "", [], {}  # this turn's result review step
     ctx._result_review_request_asked = []
-    ctx._owner_reply_revision = None  # no live reply of an earlier turn answers this turn's owner rows
+    ctx._owner_reply_revision = ctx._answered_reply_rows = None  # no reply of an earlier turn answers this turn's rows
     ctx._delivery_candidate, ctx._delivery_candidate_revision, ctx._delivery_control_required = None, 0, False
     ctx._selected_answer_context = None
     ctx._delivery_evidence_revision, ctx._delivery_evidence_fingerprint = 0, ""
@@ -454,14 +457,16 @@ def _reset_turn_state(ctx: Any) -> None:
 
 
 def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dict, usage: dict, seen: set,
-                         route: tuple, cost_ceiling: Any, budget_remaining_usd: Optional[float]) -> tuple:
+                         route: tuple, cost_ceiling: Any, budget_remaining_usd: Optional[float],
+                         *, retry_mail_root: Optional[pathlib.Path] = None) -> tuple:
     """Restore whichever saved continuation this start carries (at most one); then the start has entered.
 
     Returns ``(*route, round_idx, cost_ceiling, pending_tool_budget,
     pending_no_tool_budget, free_redial)``: a cold owner wait rejoins its tool
     tail; an exact pause, or its Resume handover, its saved budget tail; a
-    working checkpoint its tool tail after a batch, else the same logical round
-    (#1563). A moved Presence turn's saved work first takes its conversation and slot
+    working checkpoint its tool tail after a batch, the next round's no-tool
+    tail after a spent continuing round (``post_batch`` + ``no_tool``), else the
+    same logical round (#1563). A moved Presence turn's saved work first takes its
     (``presence_carrier.reenter``), and reads the facts since its park once restored.
     """
     from ouroboros.presence_carrier import reenter
@@ -477,13 +482,15 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
             resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), not no_tool, no_tool, no_tool)
         elif saved_working:
             *resumed, tool_tail = working_checkpoint.resume_from_working(tools, saved_working, messages, trace, usage, seen)
-            no_tool = not tool_tail and (saved_working.get("working") or {}).get("boundary") == working_checkpoint.RESUMED
-            resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), tool_tail, no_tool, not tool_tail)
+            boundary = (saved_working.get("working") or {}).get("boundary")
+            resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), tool_tail,
+                       not tool_tail and boundary in {working_checkpoint.RESUMED, "post_batch"}, not tool_tail and boundary != "post_batch")
         else:
             resumed = (*route, cost_ceiling, False, False, False)
             apply_current(tools._ctx)
-            from ouroboros.place_reply import seed_no_send
-            seed_no_send(tools._ctx, trace)  # a fresh place-carrying lineage starts having said nothing there
+            if carried is None and retry_mail_root is not None:
+                from ouroboros.loop_messages import restore_acknowledged_task_mail
+                restore_acknowledged_task_mail(tools._ctx, retry_mail_root, messages, seen)
         if carried is not None:
             carried.reentered(tools._ctx, messages)
         from ouroboros.subagent_bootstrap import append_startup_receipt
@@ -507,7 +514,7 @@ def _load_working_recovery(ctx: Any, messages: List[Dict[str, Any]]) -> Dict[str
         return state
     except Exception as exc:
         log.warning("Working recovery source unusable for %s", getattr(ctx, "task_id", ""), exc_info=True)
-        ctx.working_recovery, ctx._working_recovery_lost = None, True  # a lost source still precedes this start
+        ctx.working_recovery = None  # a lost source still precedes this start
         messages.append({"role": "user", "content": (
             "[SYSTEM NOTICE]\nThis task was interrupted and its saved working state could not be restored "
             f"({type(exc).__name__}). It starts again from the original request: earlier tool effects may "
@@ -576,6 +583,7 @@ def run_llm_loop(
     continuation = saved or saved_pause or saved_working
     tool_schemas = continuation["tool_schemas"] if continuation else initial_tool_schemas(tools, context_mode=active_context_mode)
     tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(tools, tool_schemas, messages, context_mode=active_context_mode, gateway=True)
+    retry_mail_root = drive_root if task_type == "task" and task_id and task_id == getattr(ctx, "task_id", None) else None
     ctx.event_queue, ctx.task_id, ctx.messages = event_queue, task_id, messages
     stateful_executor = StatefulToolExecutor()
     exit_ctx = _LoopExitContext(
@@ -592,7 +600,7 @@ def run_llm_loop(
          pending_tool_budget, pending_no_tool_budget, free_redial) = _resume_continuation(
             tools, (saved, saved_pause, saved_working), messages, llm_trace, accumulated_usage, _owner_msg_seen,
             (active_model, active_effort, active_use_local, active_context_mode, round_idx, context_fit_plan),
-            cost_ceiling, budget_remaining_usd)
+            cost_ceiling, budget_remaining_usd, retry_mail_root=retry_mail_root)
         pending_candidate = resume_delivery_candidate(tools, saved_working or saved_pause, tool_schemas)
         candidate_tail = ((continuation.get("resume_point") or continuation.get("working") or {}).get("budget_tail")
                           if pending_candidate else None)
@@ -638,6 +646,8 @@ def run_llm_loop(
                 _owner_msg_seen, owner_ctx=ctx, defer_content_ack=True, place_live_runs=True)
             if pending_candidate and _controls.get("owner_carried_addressed"):
                 ctx._delivery_candidate.finalization_control = "owner_revision_required"
+            if _controls.get("agent_note"):
+                pending_candidate = False  # a ready answer is context, not consideration of new mail
             active_model, active_use_local, active_effort, context_fit_plan, active_context_mode = after_mail(
                 limit_ctx, context_fit_plan, active_context_mode, _preferred_context_mode, _controls)
             _held = _delegate_hold_round_top(tools, limit_ctx, _controls, emit_progress,
@@ -778,8 +788,8 @@ def run_llm_loop(
             _record_transcript_prefix(tools._ctx, messages, round_idx, accumulated_usage, event_queue, task_id, drive_logs, tool_schemas)
             from ouroboros.openai_chat_dispatch import CUSTOM_RECEIPTS_USAGE_KEY
 
-            tool_calls = msg.get("tool_calls") or []
             tools._ctx._request_wire_custom_receipts = accumulated_usage.pop(CUSTOM_RECEIPTS_USAGE_KEY, ())
+            msg, tool_calls = output_recovery.admit_calls(tools._ctx, msg, drive_logs)  # its raw record stays as received
             content = msg.get("content")
             output_recovery.latch_final_marker(limit_ctx, msg)  # a commentary or a cut is never the answer to fall back on
             # Every metered response counts as nanny progress; its delegate verb requests
@@ -789,8 +799,8 @@ def run_llm_loop(
                 final_result = (None if output_recovery.intermediate_reply(limit_ctx, msg, emit_progress)
                                 else _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, assistant_message=msg))
                 if final_result is None:
-                    # Unfinished or intermediate (commentary): the loop keeps spending on the SAME budget tail
-                    # a tool round does. A ready answer returns above and buys no extra wrap-up.
+                    # Unfinished, intermediate (commentary) or a cut batch that started nothing: the loop keeps spending
+                    # on the SAME budget tail a tool round does. A ready answer returns above and buys no extra wrap-up.
                     pending_no_tool_budget = True
                     continue
                 return final_result
@@ -895,7 +905,6 @@ from ouroboros.loop_nudges import (  # noqa: E402, F401 -- intentional public re
 )
 from ouroboros.loop_model_call import (  # noqa: E402, F401 -- intentional public re-exports
     _adopt_fallback_route,
-    _apply_round_route_overrides,
     _recover_failed_round,
     _snapshot_context_fit_usage,
     _restore_context_fit_usage,
@@ -988,5 +997,6 @@ from ouroboros.loop_forced_finalization import (  # noqa: E402, F401 -- intentio
     _prepare_forced_prompt,
 )
 
+from ouroboros.loop_routes import _apply_round_route_overrides  # noqa: E402, F401 -- loop facade
 from ouroboros.loop_routes import bind_round_route, after_mail
 from ouroboros.route_choice import initial_round_route as _initial_round_route

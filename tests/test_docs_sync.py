@@ -263,6 +263,7 @@ def test_prompt_tool_names_resolve_to_registered_tools(tmp_path):
         ("prompts/SAFETY.md", universe),
         ("prompts/CONSCIOUSNESS.md", wake_universe),
         ("prompts/FOCUS.md", universe | set(FOCUS_PLACEHOLDERS)),
+        ("prompts/FIRST_MEETING.md", universe),
     ):
         text = (root / rel).read_text(encoding="utf-8")
         unresolved = _prompt_backticked_identifiers(text) - allowed
@@ -444,7 +445,7 @@ SETTINGS_TABLE_ENV_ONLY_ROWS = frozenset({
     "OUROBOROS_CHROMIUM_SANDBOX",
     "OUROBOROS_OBSERVABILITY_RETENTION_DAYS", "OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC",
     "OUROBOROS_REVIEW_MAX_TOKENS", "OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "OUROBOROS_PREFLIGHT_SERIAL",
-    "OUROBOROS_PREFLIGHT_TEST_WORKERS", "OUROBOROS_BUNDLE_DIR",
+    "OUROBOROS_PREFLIGHT_TEST_WORKERS", "OUROBOROS_BUNDLE_DIR", "OUROBOROS_GIT",
     "OUROBOROS_EXTERNAL_HOST_UPDATE", "OUROBOROS_EXTERNAL_HOST_RESULT",
 })
 SETTINGS_TABLE_RETIRED_ROWS = frozenset({

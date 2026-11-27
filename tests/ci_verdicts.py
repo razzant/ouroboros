@@ -13,15 +13,34 @@ from __future__ import annotations
 
 import fnmatch
 import html
+import importlib.util
 import json
 import math
 import os
 from pathlib import Path
 import re
+import runpy
 import sys
 import tempfile
 
-PHASES = frozenset({"setup", "call", "teardown"})
+# These scripts run under -I -S; importing ouroboros.__init__ is not a CI operation.
+_spec = importlib.util.spec_from_file_location(
+    "_ci_case_facts", Path(__file__).resolve().parents[1] / "ouroboros" / "preflight_case_facts.py")
+_case_facts = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_case_facts)
+PHASES = _case_facts.PHASES
+CRASH_FACTS = _case_facts.CRASH_FACTS
+attempt_text, error_text = _case_facts.attempt_text, _case_facts.error_text
+valid = _case_facts.valid
+observed_outcomes, case_key = _case_facts.observed_outcomes, _case_facts.case_key
+
+# One spelling, the runner's: scripts/run_tests.py sets this marker aside with an attempt's files and takes no
+# tests/ helper for it. Read from this checkout's own file by path, never by name: `scripts` is a namespace
+# package, so an import finds whichever checkout stands first on sys.path (a miniature one's adapter runs the
+# CLI as it loads), and a home in `ouroboros` would start the body's package on the bare interpreter this
+# module's CLI runs on. That file's top level is stdlib imports and definitions; its CLI is under its main guard.
+SESSION_UNAVAILABLE = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts" / "run_tests.py"))[
+    "SESSION_UNAVAILABLE"]
 # scripts/ci_retry.py: retry round k of a pass runs in <pass>/retry-<k>.
 ROUND_DIR = re.compile(r"retry-[1-9][0-9]*")
 VERDICTS = frozenset({"green", "flaky", "accepted", "red"})
@@ -44,7 +63,7 @@ def write_json(path: Path, value) -> None:
                                          prefix="." + path.name, suffix=".tmp", delete=False) as handle:
             temporary = Path(handle.name)
             handle.write(payload)
-        temporary.replace(path)
+        os.replace(temporary, path)  # one seam on every Python: 3.10's Path.replace binds os.replace at import
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -52,15 +71,6 @@ def write_json(path: Path, value) -> None:
 
 def cell(value) -> str:
     return html.escape(str(value), quote=True).replace("|", "&#124;").replace("\n", "<br>")
-
-
-def valid(row) -> bool:
-    return (isinstance(row, dict)
-            and all(isinstance(row.get(key), str) for key in ("nodeid", "phase", "outcome"))
-            and (row["phase"] in PHASES or row["phase"] == "crash")
-            and row["outcome"] in {"passed", "failed", "skipped"}
-            and ("is_subtest" not in row or type(row["is_subtest"]) is bool)
-            and (row.get("wasxfail") is None or isinstance(row["wasxfail"], str)))
 
 
 def expected_failures(rows) -> dict[str, str]:
@@ -87,26 +97,34 @@ def expected_failures(rows) -> dict[str, str]:
             if node not in spoiled and {(node, "setup"), (node, "teardown")} <= passed}
 
 
-def error_text(row) -> str:
-    """The error type, and for a lost worker the timeout callback its own record shows was invoked."""
-    seconds = row.get("timeout_callback_seconds")
-    return str(row.get("error_type") or "") + (
-        f"; timeout callback invoked ({seconds:g}s), worker subsequently lost" if type(seconds) in (int, float) else "")
+def session_unavailable(root: Path) -> bool:
+    """The producer has not established a new journal in this reused directory."""
+    return (Path(root) / SESSION_UNAVAILABLE).exists()
 
 
-def attempt_text(row) -> str:
-    """Phase and error of a report row or of a retry attempt (scripts/ci_retry.py)."""
-    return ", ".join(str(part) for part in (row.get("phase"), error_text(row)) if part)
-
-
-def final(root: Path) -> tuple[dict, str]:
+def final(root: Path, *, session: str | None = None) -> tuple[dict, str]:
     """The session's final projection, or the reason it cannot be trusted."""
     try:
+        if session_unavailable(root):
+            return {}, "the reused directory has no confirmed current session"
         data = json.loads((Path(root) / "results.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}, "result projection unavailable"
-    reports = data.get("reports") if isinstance(data, dict) else None
-    if isinstance(reports, list) and all(map(valid, reports)):
+    # The controller starts its journal before any test. Even if an existing results.json
+    # could neither be parked nor replaced, it cannot stand in for that controller.
+    try:
+        with (Path(root) / "events.jsonl").open("rb") as journal:
+            first = journal.readline(128)
+        header = json.loads(first) if first.startswith(b'{"event": "session"') else {}
+        if header and (not isinstance(header.get("session"), str) or header["session"] != data.get("session")):
+            return {}, "result projection belongs to another session"
+    except FileNotFoundError:
+        pass  # Historical or export-only evidence. A caller's expected identity still applies.
+    except (OSError, ValueError, AttributeError):
+        return {}, "session identity unavailable"
+    if session is not None and (not isinstance(data, dict) or data.get("session") != session):
+        return {}, "result projection belongs to another session"
+    if _case_facts.valid_final(data):
         return data, ""
     return {}, "invalid result projection"
 
@@ -117,18 +135,12 @@ def journal_rows(root: Path) -> list[dict] | None:
     A kill can tear the last line; unparsable rows are skipped.
     """
     try:
+        if session_unavailable(root):
+            return None
         text = (Path(root) / "events.jsonl").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    rows = []
-    for line in text.split("\n"):
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(row, dict) and isinstance(row.get("nodeid"), str):
-            rows.append(row)
-    return rows
+    return _case_facts.journal_reports(text)
 
 
 def journal_projection(root: Path) -> dict | None:

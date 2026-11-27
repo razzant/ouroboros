@@ -209,6 +209,24 @@ test('#931 typed checkpoints are task facts in the expanded card, never narratio
     assert.equal(summarizeChatLiveEvent({ type: 'context_reclaim', checkpoint_kind: 'context_reclaim_automatic' }).visible, true);
 });
 
+test('a book map shortened for a required handbook names its own map, one row per map', () => {
+    // A Low view already shows both books as maps: the row names the map shortened for the retry being prepared,
+    // before any send accepts or refuses it, never the books as newly shown; two maps of one round are two rows (#3649).
+    const row = (map) => summarizeChatLiveEvent({
+        type: 'task_checkpoint', task_id: 't1', checkpoint_kind: 'context_fit_low_retry', round: 4, book_map: map,
+        effective_mode: 'low', books: 'maps',
+    });
+    const development = row('development_map');
+    const architecture = row('architecture_map');
+    assert.equal(development.headline, 'Preparing a smaller request: Development map shortened to its chapter list');
+    assert.equal(architecture.headline, 'Preparing a smaller request: Architecture map shortened to its chapter list');
+    assert.notEqual(development.dedupeKey, architecture.dedupeKey);
+    assert.equal(development.phase, 'warn');
+    assert.equal(summarizeLogEvent({ type: 'task_checkpoint', checkpoint_kind: 'context_fit_low_retry', round: 4,
+        book_map: 'architecture_map' }).headline, 'Preparing a smaller request: Architecture map shortened to its chapter list');
+    assert.equal(row('design_bible').headline, 'Preparing a smaller request: Design bible shortened to its map');
+});
+
 test('a Low size-recovery checkpoint does not claim a physical retry', () => {
     const event = {
         type: 'task_checkpoint', checkpoint_kind: 'context_fit_low_retry',

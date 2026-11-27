@@ -23,13 +23,11 @@ Checks (exit 0 green, 1 findings, 2 structurally broken inputs):
     one domain equal the pinned ``[duplicates].allowed`` baseline. "Fixing" a
     cycle by copying the body across the boundary instead of importing it is
     exactly what turns this red.
-6.  **DOMAIN_MAP.md** — the generated map equals what the manifest renders
-    (gen/verify pair: regeneration must not change the committed file).
 
-``--write`` regenerates the manifest's generated sections and
-``docs/DOMAIN_MAP.md`` from the live tree; the resulting diff is the reviewed
-decision surface. ``tests/test_domain_manifest.py`` runs the same checks as
-the CI verify half of the pair.
+``--write`` regenerates only the manifest's generated sections from the live
+tree; the resulting diff is the reviewed decision surface. ``--map`` renders
+the manifest as Markdown on stdout, without writes. ``tests/test_domain_manifest.py``
+exercises the gate and the map.
 """
 from __future__ import annotations
 
@@ -41,7 +39,6 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.domain_graph import (  # noqa: E402
-    DOMAIN_MAP_PATH,
     MANIFEST_PATH,
     Manifest,
     build_import_graph,
@@ -117,8 +114,7 @@ def manifest_with_generated_block(raw_text: str, block: str) -> str:
 
 
 def render_domain_map(manifest: Manifest) -> str:
-    """docs/DOMAIN_MAP.md — rendered from the manifest ONLY (no live-tree
-    reads), so it drifts exactly when the manifest drifts."""
+    """The human map over the pinned manifest, without a second source."""
     mods_by_domain: dict[str, list[str]] = {d: [] for d in sorted(manifest.domains)}
     for path in sorted(manifest.modules):
         mods_by_domain[manifest.modules[path]].append(path)
@@ -126,9 +122,7 @@ def render_domain_map(manifest: Manifest) -> str:
     L: list[str] = []
     L.append("# Domain map")
     L.append("")
-    L.append("Generated from `ouroboros/domains.toml` by `python scripts/check_domains.py"
-             " --write`. Do not edit — edit the manifest and regenerate;"
-             " `tests/test_domain_manifest.py` pins byte-identity.")
+    L.append("Rendered from `ouroboros/domains.toml` by `python scripts/check_domains.py --map`.")
     L.append("")
     L.append("The manifest is the SSOT of the module→domain assignment (1:1, complete"
              " over the tracked runtime population) and pins today's factual"
@@ -288,12 +282,6 @@ def run_checks(root: pathlib.Path = REPO_ROOT) -> tuple[list[str], list[str]]:
             f"literal-copy: baseline row no longer observed: {row} — regenerate with"
             " --write to bank the shrink")
 
-    rendered = render_domain_map(manifest)
-    if not DOMAIN_MAP_PATH.is_file():
-        findings.append(f"domain map: {DOMAIN_MAP_PATH.name} is missing — run --write")
-    elif DOMAIN_MAP_PATH.read_text(encoding="utf-8") != rendered:
-        findings.append(
-            "domain map: docs/DOMAIN_MAP.md is stale (regeneration changes it) — run --write")
     return findings, notes
 
 
@@ -312,16 +300,14 @@ def write_generated(root: pathlib.Path = REPO_ROOT) -> None:
     block = render_generated_block(sections, dups)
     text = manifest.path.read_text(encoding="utf-8")
     manifest.path.write_text(manifest_with_generated_block(text, block), encoding="utf-8")
-    # Re-load so the map renders the freshly pinned data.
-    DOMAIN_MAP_PATH.write_text(render_domain_map(load_manifest()), encoding="utf-8")
-    print(f"wrote {manifest.path.relative_to(root)} generated sections and "
-          f"{DOMAIN_MAP_PATH.relative_to(root)}")
+    print(f"wrote {manifest.path.relative_to(root)} generated sections")
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--write", action="store_true",
-                    help="regenerate the manifest's generated sections and docs/DOMAIN_MAP.md")
+    action = ap.add_mutually_exclusive_group()
+    action.add_argument("--write", action="store_true", help="regenerate the manifest's generated sections")
+    action.add_argument("--map", action="store_true", help="render the domain map to stdout without writing files")
     args = ap.parse_args(argv)
 
     if not MANIFEST_PATH.is_file():
@@ -333,6 +319,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
+        if args.map:
+            print(render_domain_map(load_manifest()), end="")
+            return 0
         findings, notes = run_checks()
     except (OSError, SyntaxError, ValueError, KeyError) as exc:
         print(f"structural failure: {exc}", file=sys.stderr)
@@ -344,9 +333,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"RED: {f}", file=sys.stderr)
         return 1
     print("OK: domain manifest complete; directions, cycles, classification,"
-          " literal-copy baseline and DOMAIN_MAP.md all match the tree")
+          " and literal-copy baseline match the tree")
     return 0
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8", newline="\n")
     sys.exit(main())

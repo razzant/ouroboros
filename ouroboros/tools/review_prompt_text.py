@@ -121,14 +121,6 @@ _ANTI_THRASHING_RULE_VERDICT = (
 )
 
 
-_CONVERGENCE_RULE_TEXT = (
-    "CONVERGENCE RULE (attempt 3+): Do NOT raise new critical findings on code that "
-    "was not changed between this attempt and the previous attempt. New critical "
-    "findings are allowed only on genuinely new code introduced in this revision. "
-    "Pre-existing issues in unchanged code are advisory at most."
-)
-
-
 _HISTORY_VERIFICATION_ONLY_RULE = (
     "Use prior review history for verification only. "
     "Do NOT manufacture a new FAIL from historical text alone. Any new FAIL must be "
@@ -194,7 +186,7 @@ def build_review_history_section(
             lines.append(format_prompt_code_block(json.dumps(details, ensure_ascii=False, indent=2, default=str), "json"))
         lines.append("")
 
-    lines.append(build_anti_thrashing_rules_section(convergence_fires=len(history) >= 2))
+    lines.append(build_anti_thrashing_rules_section())
     return "\n".join(lines)
 
 
@@ -219,13 +211,11 @@ def goal_with_author_questions(goal: str, questions) -> str:
     return f"{goal}\n\n{block}".lstrip("\n") if block else str(goal or "")
 
 
-def build_anti_thrashing_rules_section(*, convergence_fires: bool) -> str:
-    """Render the shared anti-thrashing rules block."""
-    lines = ["\n**IMPORTANT RULES FOR THIS REVIEW:**", f"1. {_ANTI_THRASHING_RULE_VERDICT}",
-             f"2. {_HISTORY_VERIFICATION_ONLY_RULE}"]
-    if convergence_fires:
-        lines.append(f"3. {_CONVERGENCE_RULE_TEXT}")
-    return "\n".join(lines)
+def build_anti_thrashing_rules_section() -> str:
+    """Render the shared anti-thrashing rules block. The round number restricts
+    nothing: a defect evidenced in the current subject may be raised on any round."""
+    return "\n".join(["\n**IMPORTANT RULES FOR THIS REVIEW:**", f"1. {_ANTI_THRASHING_RULE_VERDICT}",
+                      f"2. {_HISTORY_VERIFICATION_ONLY_RULE}"])
 
 
 # The author's duty toward open review findings (docs/CHECKLISTS.md "Before
@@ -359,8 +349,8 @@ def format_prompt_code_block(content: str, language: str = "") -> str:
 
 def round_material() -> list:
     """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): the later-round sections
-    rendered over fixed placeholder records in these branches (rebuttal, author questions, earlier rounds with and
-    without the convergence rule). The records are data; their frames and rules count."""
+    rendered over fixed placeholder records in these branches (rebuttal, author questions, one and two earlier
+    rounds). The records are data; their frames and rules count."""
     finding = {"severity": "critical", "tag": "⟨tag⟩", "model": "⟨model⟩", "obligation_id": "⟨id⟩",
                "item": "⟨item⟩", "reason": "⟨reason⟩", "detail": "⟨detail⟩"}
     rounds = [{"attempt": 1, "commit_message": "⟨message⟩", "critical": [finding], "advisory": [finding],

@@ -47,16 +47,19 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
                     <fieldset class="new-project-sources new-project-field">
                         <legend>Working folder</legend>
                         <div class="new-project-source-choices">${SOURCES.map(([value, label], index) => `
-                            <label><input class="ui-checkbox" type="radio" name="np-source" value="${value}"${index ? '' : ' checked'}> ${label}</label>`).join('')}
+                            <label><input class="ui-radio" type="radio" name="np-source" value="${value}"${index ? '' : ' checked'}> ${label}</label>`).join('')}
                         </div>
                         <p class="ui-field-help" data-np-help>${SOURCES[0][2]}</p>
                     </fieldset>
-                    <div data-np-attach hidden>
+                    <div class="new-project-attach" data-np-attach hidden>
                         <div data-np-browser></div>
-                        <label class="local-toggle ui-field ui-field-inline" title="Runs git init + an 'attach snapshot' commit of the current state with a local identity. Never done without this checkbox.">
-                            <input class="ui-checkbox" type="checkbox" name="project-init-git" data-np-initgit>
-                            Initialize Git and commit current files
-                        </label>
+                        <div class="ui-field">
+                            <label class="local-toggle ui-field-inline">
+                                <input class="ui-checkbox" type="checkbox" name="project-init-git" data-np-initgit aria-describedby="new-project-init-git-help">
+                                Initialize Git and commit current files
+                            </label>
+                            <p class="ui-field-help" id="new-project-init-git-help">If this folder is not a Git repository yet, creates one and saves a snapshot of the current files using a local author identity. An existing repository is left as it is.</p>
+                        </div>
                     </div>
                     <div data-np-clone hidden>
                         <label class="new-project-field ui-field">

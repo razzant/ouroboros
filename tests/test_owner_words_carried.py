@@ -309,6 +309,110 @@ def test_a_root_hands_on_the_words_it_carries_beside_its_own(tmp_path):
     assert [row["text"] for row in governing_words_for_schedule(ctx)[FIELD]] == ["The original ask.", "A newer word."]
 
 
+def test_a_direct_reply_stands_in_the_words_a_helper_is_handed_as_context_that_went_to_its_work(tmp_path):
+    """A work's held rows by their standing: an ordinary delivery and a row the host carried to it address it. My human's
+    direct Reply to it is its own to answer; the host carries it to its tree as context (``member_carriage``), as it does a
+    row held for another work or already answered by the room. The words a helper is handed by value keep the Reply whole,
+    with its source, time, reference and files, under the standing its carried copy has (``went to <work>``): only the
+    rows addressed to the tree stay orders, and a helper's own helper inherits that standing as it is."""
+    from ouroboros.owner_mailbox import passive_carriage
+    from ouroboros.owner_relay import ROUTED_BY_HEAD, owner_row_address, owner_row_identity
+    from ouroboros.owner_words import ABSENT_FIELD, ROOM_FIELD, work_words
+
+    file = {"upload": "0" * 32 + "_regions.txt", "name": "regions.txt", "mime": "text/plain", "kind": "file", "size": 16,
+            "sha256": "a" * 64}
+    standing = {"ordinary": None, "carried": {"from": "root-0", "went_to": ""},
+                "reply": {"went_to": "", "work_reply": True},
+                "elsewhere": {"went_to": "other-root", "context_only": True},
+                "answered": {"went_to": ROUTED_BY_HEAD, "handled_by_source_room": True}}
+    held, digests, addresses = {}, {}, {}
+    for index, (name, fact) in enumerate(standing.items()):
+        row = {"chat_id": 1, "direction": "in", "ts": f"2026-11-23T10:0{index}:00+00:00", "text": f"words {name}",
+               "client_message_id": f"held-{name}", **({"carried": fact} if fact is not None else {}),
+               **({"attachments": [dict(file)]} if name == "reply" else {})}
+        addresses[name], digests[name] = owner_row_address(row), owner_row_identity(row)["row_sha256"]
+        held[addresses[name]] = row
+    ctx = _owner_root(tmp_path)
+    ctx._owner_directives, ctx._held_owner_messages = [], held
+    field = governing_words_for_schedule(ctx)[FIELD]
+    assert [(row["text"], row["carrier"]) for row in field] == [
+        ("words ordinary", "held"), ("words carried", "held"), ("words reply", "went to root-1")]
+    assert passive_carriage(ctx) == {digests["reply"]: ("root-1", addresses["reply"])}, \
+        "only the Reply this work answers: not a row that went elsewhere, nor one the room already answered"
+    assert passive_carriage(SimpleNamespace(task_id="t", _held_owner_messages={"x": "no row"})) == {}
+    [own] = [row for row in work_words(ctx)[0] if row["text"] == "words reply"]
+    reply = field[2]
+    assert own["carrier"] == "held", "the work it is addressed to still holds it as its own"
+    kept = ("text", "source", "task_id", "ts", "ref", "row_sha256")
+    assert {key: reply[key] for key in kept} == {key: own[key] for key in kept}, "the same words, source, time and identity"
+    assert (reply["attachments"][0]["name"], reply["attachments"][0]["sha256"]) == ("regions.txt", "a" * 64)
+    assert reply["attachments"][0]["staged"].startswith("not given to this work: owner_source='row:1@")
+    assert "staged" not in held[addresses["reply"]]["attachments"][0], "the work's own held row is never marked"
+    session = governing_words_for_schedule(ctx, session=True)  # an external session's work order is handed the same words
+    assert session[FIELD] == field and ROOM_FIELD in session
+    child = _owner_root(tmp_path, {FIELD: field})
+    child.task_id, child.task_metadata["delegation_role"] = "child-1", "subagent"
+    assert governing_words_for_schedule(child)[FIELD] == field, "a helper's own helper: the same standing, never an order"
+    alone = _owner_root(tmp_path)
+    alone._owner_directives, alone._held_owner_messages = [], {addresses["reply"]: held[addresses["reply"]]}
+    facts = governing_words_for_schedule(alone)
+    assert [row["carrier"] for row in facts[FIELD]] == ["went to root-1"] and ABSENT_FIELD not in facts
+
+
+def test_a_helper_hands_on_only_the_replys_passive_copy_its_own_trees_root_carried_to_it(tmp_path):
+    """The passive copy of a Reply that a helper holds is handed to its own helper as it is (``went to <work>``) when the
+    host's stamp names the root of its tree: the teller (``from``), which a retry of that root keeps, or the work it went
+    to. Nothing else is: another root's observer copy, a stamped copy of another tree, a row that merely went to its root
+    without the passive fact, nor one the room already answered."""
+    from ouroboros.owner_mailbox import passive_carriage
+    from ouroboros.owner_relay import ROUTED_BY_HEAD, owner_row_address
+
+    standing = {"tree": {"from": "root-1", "went_to": "root-1", "context_only": True},
+                "retry": {"from": "root-1", "went_to": "root-1b", "context_only": True},
+                "unstamped": {"went_to": "root-1", "context_only": True},
+                "observer": {"from": "", "went_to": "other-root", "context_only": True},
+                "other-tree": {"from": "other-root", "went_to": "other-root", "context_only": True},
+                "plain": {"from": "root-1", "went_to": "root-1"},
+                "answered": {"from": "root-1", "went_to": ROUTED_BY_HEAD, "handled_by_source_room": True}}
+    held, addresses = {}, {}
+    for index, (name, fact) in enumerate(standing.items()):
+        row = {"chat_id": 1, "direction": "in", "ts": f"2026-11-23T10:0{index}:00+00:00", "text": f"words {name}",
+               "client_message_id": f"copy-{name}", "carried": {**fact, "at": "2026-11-23T11:00:00+00:00"}}
+        addresses[name], held[owner_row_address(row)] = owner_row_address(row), row
+    helper = _owner_root(tmp_path, {"delegation_role": "subagent"})
+    helper.task_id, helper._owner_directives, helper._held_owner_messages = "child-1", [], held
+    kept = {name for name, address in addresses.items() if address in {a for _went, a in passive_carriage(helper).values()}}
+    assert kept == {"tree", "retry", "unstamped"}
+    handed = governing_words_for_schedule(helper)[FIELD]
+    assert [(row["text"], row["carrier"], row["task_id"]) for row in handed] == [
+        ("words tree", "went to root-1", "root-1"), ("words retry", "went to root-1b", "root-1b"),
+        ("words unstamped", "went to root-1", "root-1")], "each stands under the work its copy went to"
+    helper.task_metadata["root_task_id"] = "other-root"  # the same copies held under another root: only its own stand
+    assert {row["text"] for row in governing_words_for_schedule(helper)[FIELD]} == {"words observer", "words other-tree"}
+    bare = SimpleNamespace(task_id="", task_metadata={}, _held_owner_messages=held)
+    assert passive_carriage(bare) == {}, "a work that names no root has no tree whose stamp could match an empty teller"
+
+
+@pytest.mark.parametrize("standing", ["held", "went to root-1"])
+def test_safety_never_reads_a_field_row_that_went_to_another_work_nor_pairs_its_reply_target_with_a_neighbour(tmp_path, standing):
+    """The Safety check reads the rows addressed to this work (``reaches``): a field row in the standing of a Reply to the
+    root is no permission of its helper's, and the message it replied to goes with it, never onto the row before or
+    after. The same rows with the Reply addressed (``held``) are listed whole with that message."""
+    from ouroboros.owner_words import safety_sources
+
+    def row(text, ref, *, carrier="held", **extra):
+        return {"text": text, "source": "owner_mailbox", "carrier": carrier, "task_id": "root-1", "ts": "", "ref": ref, **extra}
+
+    target = {"text": "Which regions?", "source": REPLY_TARGET, "carrier": "ctx", "task_id": "root-1", "ts": "",
+              "ref": "row:1@2026-11-23T09:00:00+00:00#0123456789ab", "author": "Ouroboros"}
+    rows = [row("Before", "chat 1 / before"), row("Use the smaller set.", "chat 1 / reply", carrier=standing), target,
+            row("After", "chat 1 / after")]
+    listed = safety_sources(_owner_root(tmp_path, {FIELD: rows}))
+    named = {item["content"]: item for item in listed}
+    assert set(named) == {"Before", "After", *(["Use the smaller set."] if standing == "held" else [])}
+    assert [item["content"] for item in listed if "reply_to" in item] == (["Use the smaller set."] if standing == "held" else [])
+
+
 @pytest.fixture(params=["live_call", "initial_user", "confirmed_owner_place"])
 def cited_door(tmp_path, monkeypatch, request):
     from ouroboros.owner_words import PLACE_CONFIRMED

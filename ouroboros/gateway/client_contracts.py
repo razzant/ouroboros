@@ -1,4 +1,4 @@
-"""Replaceable-client envelopes beside ``contracts.py``, mirrored in ``web/modules/client_contract_types.js``.
+"""Replaceable-client envelopes beside ``contracts.py``.
 
 These TypedDicts describe the generation's interface (``StateResponse.served_ui``), read-only setup
 (``GET /api/onboarding/bootstrap`` mirrors ``settings_setup_contract``), the settings writers' durable-outcome refusal, the
@@ -43,7 +43,7 @@ class SetupStep(TypedDict):
 
 
 class SetupProviderField(TypedDict):
-    """One credential or endpoint input; ``settingKey`` is the settings key it saves into."""
+    """One credential, endpoint or consent input; ``settingKey`` is the settings key it saves into."""
 
     id: str
     stateKey: str
@@ -155,7 +155,7 @@ class SetupInitialState(TypedDict):
     modelAccounts: Dict[str, Any]
     modelContextWindows: Dict[str, Any]
     processingPreference: str
-    modelProcessingPreferences: Dict[str, Any]
+    modelProcessingPreferences: Dict[str, Any]  # Role tiers; only `.main` may also be `ultrafast`.
     automaticModels: List[str]  # model-slot stateKeys neither the document nor an operator's variable sets
 
 
@@ -167,7 +167,7 @@ class SetupConsciousnessOffer(TypedDict):
     autonomy: Literal["observe", "act", "full"]
     dailyUsd: float  # rolling-24h recorded-spend allowance; subscription quota is separate
     maxTasks: int  # how many of its own tasks may run at once; 0 = it starts none
-    words: Dict[str, str]  # gloss, off, on, meaning, subscriptionCost, door (and choice, kept for older pages)
+    words: Dict[str, str]  # gloss, off, on, lead, offAway, onAway, subscriptionCost, door, summaryLead (meaning, choice: older pages)
 
 
 class SetupBootstrap(TypedDict):
@@ -189,7 +189,8 @@ class SetupBootstrap(TypedDict):
 
 class OnboardingBootstrapResponse(TypedDict):
     """``GET /api/onboarding/bootstrap``: a read that writes nothing. ``ready`` is the readiness
-    ``GET /api/onboarding`` answers with 204; setup completes through ``POST /api/onboarding/complete``."""
+    ``GET /api/onboarding`` answers with 204; setup completes through ``POST /api/onboarding/complete``.
+    A boot held for an interrupted Reset instead answers 409 ``reset_interrupted`` and serves no setup."""
 
     ready: bool
     bootstrap: SetupBootstrap
@@ -275,9 +276,9 @@ class SettingsDeploymentRequirement(TypedDict):
 
 
 class SettingsDeploymentExtensions(TypedDict):
-    """The policy's required extensions and what ordinary work does while one is not running ("" when none is);
-    with an execution domain, ``trusted`` lists the only packages ({name, path, content_hash}) whose code the
-    service runs."""
+    """Required extensions and how ordinary work responds when one is not ready, including when it cannot read a
+    fixed setting (``when_unmet`` is "" with no required extensions). With an execution domain, ``trusted`` lists
+    the only packages ({name, path, content_hash}) whose code the service runs."""
 
     when_unmet: Literal["hold", "warn", ""]
     required: List[SettingsDeploymentRequirement]
@@ -380,7 +381,7 @@ class OwnerRuntimeModeRequest(TypedDict):
     mode: Literal["light", "advanced", "pro", "cyber_pro"]
 
 
-class OwnerContextModeRequest(TypedDict):
+class OwnerContextModeRequest(TypedDict):  # `POST /api/owner/context-mode`.
     """Save the room's context for future actors; existing actors retain theirs."""
 
     mode: Literal["nano", "low", "max"]
@@ -494,6 +495,7 @@ class PlaceConnectRequest(TypedDict):
     note: NotRequired[str]
     description: NotRequired[str]
     circle_id: NotRequired[str]
+    contribution_id: NotRequired[str]  # one of the connector's rows (``connectors[].contribution_id``)
 
 
 class PlaceCircleChoice(TypedDict):
@@ -558,6 +560,8 @@ class PlaceReadiness(TypedDict):
     tone: str
 
 
+# A stored alias (`main`, `light`) reads as the model it resolves to now; `local` follows the slot's rule for an
+# inherited or alias route, and a model of the place's own is never local here.
 class PlaceModelRoute(TypedDict):
     """The model a place thinks with now, the scope that chose it, and whether that route is the local runtime."""
 
@@ -594,6 +598,8 @@ class PlaceSummary(TypedDict):
     icon: PlaceIcon
     readiness: PlaceReadiness
     wake_suggestions: List[str]
+    wake_review: NotRequired[Literal["pending", "ambiguous"]]
+    unpublished_signals: NotRequired[List[str]]  # declared signals a save refuses until the connector is on
     facts: NotRequired[List[Any]]
     source: NotRequired[Dict[str, Any]]
     settings: NotRequired[str]
@@ -608,13 +614,31 @@ class PlaceSummary(TypedDict):
     shared_owner_accounts: List[Dict[str, str]]  # confirmed in another place of this bot/app; count here
     circle: Optional[PlaceCircleChoice]
     description: Optional[PlaceDescription]
+    # A linked Ouroboros (connector "ouroboros", peer_links): my human's two stored choices; what is in effect now
+    # beside them, derived on every read ({messages, assignments: true | false | null when the link registry cannot
+    # be read, reason: "" | unlinked | revoked | code_check_pending | paused | not_mine | may_not_start | silent |
+    # panic | unknown}); the host's line stating both; and its link (id, six-digit code and whether it was confirmed
+    # here, when made or revoked, since when the other side no longer knows it); never a key or a hash.
+    peer: NotRequired[Optional[Dict[str, bool]]]
+    peer_effective: NotRequired[Dict[str, Any]]
+    peer_facts: NotRequired[str]
+    link: NotRequired[Optional[Dict[str, Any]]]
+    # The owner's GET /api/places only (place_projection.peer_works): the work this link's letters started here whose
+    # record changed last, not the latest acceptance. {task_id, title, status, phase, from, room_chat_id}: phase
+    # is the stored outcome projection (or paused; empty means unknown), from is the label recorded at acceptance,
+    # and room_chat_id is null without a recorded room. Null when none was accepted, {unknown: true} on an unread store.
+    peer_work: NotRequired[Optional[Dict[str, Any]]]
+    # Likewise only there (place_projection.peer_rooms): while its arrival index lists no room, {room_chat_id,
+    # wrote_at} names the room this side wrote to and its newest message receipt there. Null if a room is listed or
+    # this side has no receipt there; {unknown: true} when history cannot be read now.
+    peer_room: NotRequired[Optional[Dict[str, Any]]]
 
 
 class PlaceDisconnectRequest(TypedDict, total=False):
     expected_revision: int
 
 
-class PlaceRoomSummary(TypedDict):
+class PlaceRoomSummary(TypedDict):  # not a complete remote-provider history
     """One captured local conversation; an unknown open-focus count stays null."""
 
     room_chat_id: int
@@ -658,6 +682,7 @@ class PlaceUpdateRequest(TypedDict, total=False):
     model: str
     confirm_owner_account: PlaceOwnerAccountRequest
     revoke_owner_account: str
+    peer: Dict[str, bool]  # a linked Ouroboros's {mine, may_start}: my human's door only
     circle_id: str  # "" takes it out of its circle
     description: str  # "" clears it
     expected_revision: int
@@ -697,6 +722,8 @@ class ProjectListResponse(TypedDict):
     last_message_at, lifecycle, optional closed, routing_generation, visible_revision, delete_error, has_thread_activity."""
 
     projects: List[ProjectEntry]
+    complete: NotRequired[bool]  # ``?all=1`` only: its registry read covered every row; only true proves an absence
+    profile_scope: NotRequired[str]  # the serving generation's frozen data-profile scope, as history's; absent: none
 
 
 class ProjectCreateResponse(TypedDict):
@@ -721,15 +748,17 @@ class ProjectUpdateResponse(TypedDict):
 
 
 class ProjectFromTaskRequest(TypedDict):
-    """``POST /api/projects/from-task``. The default ``id`` is ``task-<task_id>``: a request naming no
-    other room joins the project the task's work already has. ``project_id`` is an alias of ``id``.
-    Without ``name`` the core names the project, which may wait for one model call."""
+    """``POST /api/projects/from-task``. Leave ``id`` out: the server owns the default destination (``task-<task_id>``,
+    or a bounded id from a long task id; the truncated id older browsers sent without ``name`` reads as it) and a
+    request naming no other room joins the project the task's work already has. Any other ``id`` is kept as sent;
+    ``project_id`` is an alias of ``id``. Without ``name`` a new project needs a proven title or one successful Light
+    call from the captured opening; a refusal leaves the work in Main and its ``error`` is the sentence to show."""
 
     task_id: str
     id: NotRequired[str]
     project_id: NotRequired[str]
     name: NotRequired[str]
-    objective_hint: NotRequired[str]  # the owner's original request, a naming hint
+    objective_hint: NotRequired[str]  # legacy input; ignored for naming
 
 
 class ProjectTaskBinding(TypedDict, total=False):
@@ -890,11 +919,16 @@ class ScheduleActionRequest(TypedDict):
     relation: NotRequired[str]
 
 
+# `accept_unknown` returns the opaque IDs of the refusal's `acceptable_unknown`, never reconstructed ones;
+# accepting a delegated start (it needs `reason`) means its external work and costs may continue.
+# `expected_panic_hold_id` comes from `panic_recovery[].panic_hold_id`; a changed or used stop answers 409
+# `panic_selection_changed`.
 class TaskResumeRequest(TypedDict, total=False):
-    """Resume this saved task with the opaque IDs offered in acceptable_unknown and a reason; never reconstruct an ID."""
+    """Resume one saved task. A Panic group selection sends only the observed hold ID."""
 
     accept_unknown: List[str]
     reason: str
+    expected_panic_hold_id: str
 
 
 class TaskResumeResponse(TypedDict, total=False):
@@ -915,6 +949,7 @@ class TaskResumeResponse(TypedDict, total=False):
     grant_id: str
     grant_generation: int
     paused_duration_sec: float
+    consciousness_resume: Dict[str, float]  # additional_usd (decided at the wake's own allowance grant), available_now_usd (what the total budget leaves of it); observations, not a reservation
     eligible_descendants: List[str]
     held_siblings: List[str]
     rebound_held_siblings: List[str]

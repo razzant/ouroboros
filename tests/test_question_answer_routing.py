@@ -341,3 +341,642 @@ def test_an_appended_answer_whose_receipt_failed_stays_with_its_paused_recipient
     task.pop("_owner_hold")
     ctx, _ = drain(tmp_path, "asker")
     assert [r["content"] for r in ctx._owner_directives] == ["exact answer"]
+
+
+def _continuable_asker(tmp_path, monkeypatch, *, chat_id=1):
+    """A live root task wired for real Continue admission and real question delivery recovery."""
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests._owner_continue_helpers import _running_predecessor
+
+    q, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _running_predecessor(tmp_path, "asker", chat_id=chat_id)
+    task = {"id": "asker", "chat_id": chat_id, "drive_root": str(tmp_path)}
+    q.RUNNING["asker"] = {"task": task}
+    monkeypatch.setattr(q, "_task_drive_for_task", lambda _task, _tid: tmp_path)
+    monkeypatch.setattr(td, "request_drive_root", lambda request: tmp_path)
+    record_asked(tmp_path, "asker", quiz_id="q", question="Which database?", options=["sqlite", "postgres"],
+                 assumption="sqlite", chat_id=chat_id)
+    record_publication(tmp_path, "asker", "q", chat_id)
+    bridge, _frames = _late_bridge(tmp_path, monkeypatch)
+    app = Starlette(routes=[Route("/api/decisions", endpoint=td.api_decision_answer, methods=["POST"])])
+    return app, bridge, q, workers
+
+
+def _interrupt_asker(tmp_path, q, *, settle_mailbox: bool = False):
+    from ouroboros.owner_mailbox import _ack_path, _mailbox_path
+    from ouroboros.task_custody import settle_task_mailbox
+    from ouroboros.task_results import STATUS_CANCELLED, write_task_result
+
+    q.RUNNING.clear()
+    write_task_result(tmp_path, "asker", STATUS_CANCELLED, result="interrupted",
+                      cancel_origin={"source": "snapshot_restore", "reason": "server_shutdown"})
+    if settle_mailbox:
+        assert settle_task_mailbox(tmp_path, "asker", tmp_path) is True
+        assert not _mailbox_path(tmp_path, "asker").exists()
+        assert not _ack_path(tmp_path, "asker").exists()
+
+
+@pytest.mark.parametrize("mode", ["text", "button_press"])
+@pytest.mark.parametrize("settled_mailbox", [False, True])
+def test_continue_then_recovery_hands_unread_answer_once_to_successor(tmp_path, monkeypatch, mode, settled_mailbox):
+    """Continue omits an unread quiz answer from the prepared opening (keeping ordinary owner mail),
+    leaving question_answers.deliver_answer as the single delivery owner to hand it once to the successor."""
+    import asyncio
+
+    from ouroboros.owner_mailbox import KIND_OWNER_TEXT, write_owner_message
+    from supervisor.continuation_admission import admit_continuation
+    from tests._owner_continue_helpers import NONCE
+
+    app, bridge, q, workers = _continuable_asker(tmp_path, monkeypatch)
+    assert write_owner_message(tmp_path, "Also include Q3 notes", "asker", msg_id="owner-2", kind=KIND_OWNER_TEXT)
+    body = {"decision_id": "quiz:asker:q", "request_id": "r", "option_index": 1}
+    if mode == "text":
+        body["comment"] = "exact answer"
+    assert _post(app, body).status_code == 200
+    assert debt(tmp_path)["state"] == "owed" and debt(tmp_path)["recipient_task_id"] == "asker"
+
+    _interrupt_asker(tmp_path, q, settle_mailbox=settled_mailbox)
+
+    admitted = admit_continuation("asker", action_nonce=NONCE)
+    assert admitted["ok"] is True, admitted
+    successor = admitted["successor_task_id"]
+    task = next(row for row in workers.PENDING if row["id"] == successor)
+    later = task["metadata"]["continuation"]["owner_sources"]["later"]
+    assert [row["content"] for row in later] == ["Also include Q3 notes"]
+    assert "exact answer" not in task["text"] and "Which database?" not in task["text"]
+    assert not any(row.get("quiz_id") == "q" for row in task["metadata"]["owner_corpus"])
+
+    due(tmp_path)
+    asyncio.run(td.recover_question_deliveries(tmp_path))
+    assert _inbox(bridge) == [], "an admitted successor receives the answer via its mailbox, not fresh_head"
+    assert debt(tmp_path)["recipient_task_id"] == successor and debt(tmp_path)["state"] == "owed"
+
+    ctx, messages = drain(tmp_path, successor)
+    assert debt(tmp_path)["state"] == "delivered" and debt(tmp_path)["read_at"]
+    assert "Which database?" in str(messages) and "postgres" in str(messages)
+    if mode == "text":
+        assert [(r["source"], r["content"]) for r in ctx._owner_directives] == [("owner_quiz_answer", "exact answer")]
+    else:
+        assert [(r["source"], r["content"]) for r in ctx._owner_directives] == [("owner_press", "2. postgres")]
+
+    assert _post(app, body).status_code == 200 and _inbox(bridge) == []
+    assert getattr(drain(tmp_path, successor)[0], "_owner_directives", []) == []
+
+
+@pytest.mark.parametrize("settled_mailbox", [False, True])
+@pytest.mark.parametrize("ingress", ["accepted", "accepted_before_restart"])
+def test_late_then_continue_keeps_one_delivery_without_opening_copy(tmp_path, monkeypatch, settled_mailbox, ingress):
+    """Once the late path took an unread answer (whether settled or accepted before restart),
+    a subsequent Continue keeps ordinary owner mail and never carries the quiz answer into its opening."""
+    import asyncio
+
+    from ouroboros import owner_quiz, process_custody
+    from ouroboros.owner_mailbox import KIND_OWNER_TEXT, drain_owner_entries, write_owner_message
+    from supervisor.continuation_admission import admit_continuation
+    from tests._owner_continue_helpers import NONCE
+
+    app, bridge, q, workers = _continuable_asker(tmp_path, monkeypatch)
+    assert write_owner_message(tmp_path, "Also include Q3 notes", "asker", msg_id="owner-2", kind=KIND_OWNER_TEXT)
+    assert answer(app).status_code == 200
+    _interrupt_asker(tmp_path, q, settle_mailbox=settled_mailbox)
+
+    due(tmp_path)
+    with monkeypatch.context() as lost:
+        if ingress == "accepted_before_restart":
+            lost.setattr(owner_quiz, "mark_discharged", lambda *a, **k: {})
+        asyncio.run(td.recover_question_deliveries(tmp_path))
+    assert len(_inbox(bridge)) == 1 and debt(tmp_path)["route"] == "fresh_head"
+    if ingress == "accepted_before_restart":
+        monkeypatch.setattr(process_custody, "current_custody_session_id", lambda: "next-generation")
+
+    admitted = admit_continuation("asker", action_nonce=NONCE)
+    assert admitted["ok"] is True, admitted
+    successor = admitted["successor_task_id"]
+    task = next(row for row in workers.PENDING if row["id"] == successor)
+    assert [row["content"] for row in task["metadata"]["continuation"]["owner_sources"]["later"]] == [
+        "Also include Q3 notes"]
+    assert "exact answer" not in task["text"] and "Which database?" not in task["text"]
+
+    due(tmp_path)
+    asyncio.run(td.recover_question_deliveries(tmp_path))
+    assert _inbox(bridge) == []
+    assert drain_owner_entries(tmp_path, successor, set()) == []
+    if ingress == "accepted_before_restart":
+        assert (debt(tmp_path)["state"], debt(tmp_path)["reason_code"]) == ("owed", "late_answer_delivery_unknown")
+    else:
+        assert debt(tmp_path)["state"] == "delivered"
+
+
+@pytest.mark.parametrize("mode", ["text", "button_press"])
+def test_read_answer_survives_settlement_in_continue_opening_without_resend(tmp_path, monkeypatch, mode):
+    """When the predecessor durably ACKed the letter (even if acknowledge_answer never landed) and
+    mailbox settlement persisted the existing read_at receipt before unlinking files, Continue
+    carries the consumed text or wordless press as history and recovery settles without resending."""
+    import asyncio
+
+    from ouroboros.owner_mailbox import acknowledge_task_messages, drain_owner_entries
+    from supervisor.continuation_admission import admit_continuation
+    from tests._owner_continue_helpers import NONCE
+
+    app, bridge, q, workers = _continuable_asker(tmp_path, monkeypatch)
+    body = {"decision_id": "quiz:asker:q", "request_id": "r", "option_index": 1}
+    if mode == "text":
+        body["comment"] = "exact answer"
+    assert _post(app, body).status_code == 200
+    assert acknowledge_task_messages(tmp_path, "asker", ["quiz_answer:asker:q"], wake_id="loop_delivery")
+    assert not debt(tmp_path).get("read_at") and debt(tmp_path)["state"] == "owed"
+
+    _interrupt_asker(tmp_path, q, settle_mailbox=True)
+    assert debt(tmp_path).get("read_at") and debt(tmp_path)["state"] == "delivered"
+
+    admitted = admit_continuation("asker", action_nonce=NONCE)
+    assert admitted["ok"] is True, admitted
+    successor = admitted["successor_task_id"]
+    task = next(row for row in workers.PENDING if row["id"] == successor)
+    later = task["metadata"]["continuation"]["owner_sources"]["later"]
+    if mode == "text":
+        assert [(row["source"], row["content"]) for row in later] == [("owner_quiz_answer", "exact answer")]
+    else:
+        assert [(row["source"], row["content"]) for row in later] == [("owner_press", "2. postgres")]
+
+    due(tmp_path)
+    asyncio.run(td.recover_question_deliveries(tmp_path))
+    assert debt(tmp_path)["state"] == "delivered" and debt(tmp_path)["read_at"]
+    assert _inbox(bridge) == [] and drain_owner_entries(tmp_path, successor, set()) == []
+
+
+@pytest.mark.parametrize("evidence", [
+    "legacy_unread_without_receipt",
+    "incomplete_unread_empty",
+    "incomplete_unread_with_row",
+    "absent_unread_no_acks",
+])
+def test_incomplete_or_legacy_terminal_capture_stays_unknown_while_non_quiz_continue_proceeds(
+        tmp_path, monkeypatch, evidence):
+    """Without an exact per-letter settlement receipt (or positive read_at), neither an incomplete
+    or absent unread_mailbox nor a legacy/unioned unread_mailbox row proves read or unread: delivery
+    stays owed without resending or marking read, while Continue still carries ordinary non-quiz mail."""
+    import asyncio
+
+    from ouroboros.owner_mailbox import KIND_OWNER_TEXT, drain_owner_entries, write_owner_message
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+    from tests._owner_continue_helpers import NONCE
+
+    app, bridge, q, workers = _continuable_asker(tmp_path, monkeypatch)
+    assert write_owner_message(tmp_path, "Also include Q3 notes", "asker", msg_id="owner-2", kind=KIND_OWNER_TEXT)
+    assert answer(app).status_code == 200
+    _interrupt_asker(tmp_path, q, settle_mailbox=True)
+
+    row = load_task_result(tmp_path, "asker", strict=True)
+    quiz_line = next(line for line in row["owner_mailbox"]["rows"] if "quiz_answer:asker:q" in line)
+
+    def degrade(current):
+        updated = dict(current)
+        quizzes = dict(updated.get("owner_quiz") or {})
+        block = dict(quizzes["q"])
+        block["delivery"] = {k: v for k, v in (block.get("delivery") or {}).items() if k != "settled_unread"}
+        quizzes["q"] = block
+        updated["owner_quiz"] = quizzes
+        if evidence == "legacy_unread_without_receipt":
+            updated["unread_mailbox"] = {"schema": 1, "total": 1, "rows": [quiz_line], "read_complete": True,
+                                         "captured_at": "2026-11-24T00:00:00+00:00"}
+        elif evidence == "incomplete_unread_empty":
+            updated["unread_mailbox"] = {"schema": 1, "total": 0, "rows": [], "read_complete": False,
+                                         "captured_at": "2026-11-24T00:00:00+00:00"}
+        elif evidence == "incomplete_unread_with_row":
+            updated["unread_mailbox"] = {"schema": 1, "total": 1, "rows": [quiz_line], "read_complete": False,
+                                         "captured_at": "2026-11-24T00:00:00+00:00"}
+        else:
+            updated.pop("unread_mailbox", None)
+        return updated
+
+    patch_document(tmp_path, "asker", degrade)
+
+    admitted = admit_continuation("asker", action_nonce=NONCE)
+    assert admitted["ok"] is True, admitted
+    successor = admitted["successor_task_id"]
+    task = next(item for item in workers.PENDING if item["id"] == successor)
+    assert [r["content"] for r in task["metadata"]["continuation"]["owner_sources"]["later"]] == [
+        "Also include Q3 notes"]
+    assert "exact answer" not in task["text"]
+
+    due(tmp_path)
+    asyncio.run(td.recover_question_deliveries(tmp_path))
+    assert (debt(tmp_path)["state"], debt(tmp_path)["reason_code"]) == ("owed", "mailbox_write_failed")
+    assert not debt(tmp_path).get("read_at")
+    assert _inbox(bridge) == [] and drain_owner_entries(tmp_path, successor, set()) == []
+
+
+def test_previously_accepted_ordinary_letter_moves_on_from_the_reader_fresh_full_unread_capture(
+        tmp_path, monkeypatch):
+    """An accepted ordinary letter with a recorded reader moves on when that settled reader's own complete
+    unread capture, not older than the accepted write, names the letter: a legacy cleanup left no stamp, yet the
+    positive terminal row proves delivered-and-unread, so recovery re-stages to the Continue instead of owing
+    forever. Stale, partial or foreign captures keep the owed/unknown boundary of the parametrized seam above."""
+    import asyncio
+
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+    from tests._owner_continue_helpers import NONCE
+
+    app, bridge, q, workers = _continuable_asker(tmp_path, monkeypatch)
+    assert answer(app).status_code == 200
+    _interrupt_asker(tmp_path, q, settle_mailbox=True)
+
+    row = load_task_result(tmp_path, "asker", strict=True)
+    quiz_line = next(line for line in row["owner_mailbox"]["rows"] if "quiz_answer:asker:q" in line)
+    mailbox_at = debt(tmp_path)["mailbox_at"]
+
+    def degrade(current):
+        updated = dict(current)
+        quizzes = dict(updated.get("owner_quiz") or {})
+        block = dict(quizzes["q"])
+        block["delivery"] = {k: v for k, v in (block.get("delivery") or {}).items() if k != "settled_unread"}
+        quizzes["q"] = block
+        updated["owner_quiz"] = quizzes
+        updated["unread_mailbox"] = {"schema": 1, "total": 1, "rows": [quiz_line], "read_complete": True,
+                                     "captured_at": mailbox_at}
+        return updated
+
+    patch_document(tmp_path, "asker", degrade)
+
+    admitted = admit_continuation("asker", action_nonce=NONCE)
+    assert admitted["ok"] is True, admitted
+    successor = admitted["successor_task_id"]
+
+    due(tmp_path)
+    asyncio.run(td.recover_question_deliveries(tmp_path))
+
+    moved = debt(tmp_path)
+    assert moved["state"] == "owed" and moved["reason_code"] == "awaiting_recipient_read"
+    assert moved["recipient_task_id"] == successor and not moved.get("read_at")
+    assert _inbox(bridge) == []  # it moved to the Continue, not to the owner's late path
+    assert len(drain_owner_entries(tmp_path, successor, set())) == 1
+
+
+def test_unreadable_ordinary_quiz_receipt_omits_quiz_letter_while_continue_proceeds(tmp_path, monkeypatch):
+    """An unreadable asker record for an addressed quiz_answer omits only that letter without
+    producing a fatal source gap, so ordinary owner mail and Continue admission proceed."""
+    from ouroboros import task_store
+    from ouroboros.owner_mailbox import KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, write_owner_message
+    from supervisor.continuation_admission import admit_continuation
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests._owner_continue_helpers import NONCE, _interrupted
+
+    _q, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path, task_id="pred-1", chat_id=1)
+    assert write_owner_message(tmp_path, "Also include Q3 notes", "pred-1", msg_id="owner-2", kind=KIND_OWNER_TEXT)
+    card = {"state": "answered", "quiz_id": "q", "question": "Which db?", "options": ["sqlite", "postgres"],
+            "answered_index": 1, "comment": "secretive choice"}
+    assert write_owner_message(tmp_path, "secretive choice", "pred-1", msg_id="quiz_answer:other-asker:q",
+                               kind=KIND_QUIZ_ANSWER,
+                               quiz_delivery={"task_id": "other-asker", "quiz_id": "q",
+                                              "canonical_root": str(tmp_path), "answer_snapshot": card})
+
+    real_read = task_store.read_document
+
+    def fail_asker(root, task_id, *args, **kwargs):
+        if str(task_id) == "other-asker":
+            raise OSError("asker store unavailable")
+        return real_read(root, task_id, *args, **kwargs)
+
+    monkeypatch.setattr(task_store, "read_document", fail_asker)
+
+    admitted = admit_continuation("pred-1", action_nonce=NONCE)
+    assert admitted["ok"] is True, admitted
+    successor = admitted["successor_task_id"]
+    task = next(item for item in workers.PENDING if item["id"] == successor)
+    assert [r["content"] for r in task["metadata"]["continuation"]["owner_sources"]["later"]] == [
+        "Also include Q3 notes"]
+    assert "secretive choice" not in task["text"]
+
+
+@pytest.mark.parametrize("route", ["history", "continue"])
+def test_protected_secret_outcome_keeps_pre_change_delivery_and_settlement_behavior(tmp_path, monkeypatch, route):
+    """Protected-question outcomes keep their exact pre-change deliver_answer and mailbox-settlement behavior: no
+    ordinary settled_unread receipt and no mailbox route mutation, and once their reader ended with the outcome's
+    letter unread and settled away, the earlier route moves it on once, to that reader's admitted Continue or else to
+    the caller's history fallback. The block holds dummy outcome facts only (names, never a value)."""
+    from ouroboros import question_answers as qa
+    from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, drain_owner_entries
+    from ouroboros.task_custody import settle_task_mailbox
+    from ouroboros.task_results import STATUS_CANCELLED, STATUS_RUNNING, write_task_result
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    q, _state, _workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(q, "_task_drive_for_task", lambda _t, _tid: tmp_path)
+    write_task_result(tmp_path, "asker", STATUS_RUNNING, chat_id=1, root_task_id="asker")
+    block = {
+        "quiz_id": "sec-1", "state": "answered", "question": "Provide token", "options": [],
+        "secret_request": {"plugin": "demo", "pluginName": "Demo", "fields": [{"id": "api_key"}]},
+        "secret_outcome": {"event": "secret_filled", "pluginName": "Demo", "fields": ["api_key"]},
+        "delivery": {"kind": "answer", "state": "owed", "logical_id": "quiz_answer:asker:sec-1"},
+    }
+    patch_document(tmp_path, "asker", lambda row: {**row, "owner_quiz": {"sec-1": block}})
+
+    outcome = qa.deliver_answer(tmp_path, "asker", "sec-1", block,
+                                lambda tid: ({"id": tid, "chat_id": 1, "drive_root": str(tmp_path)}, ""),
+                                lambda *a, **k: (True, ""))
+    assert outcome == (False, "awaiting_recipient_read")
+    delivery = quiz_states(tmp_path, "asker")["sec-1"]["delivery"]
+    assert "route" not in delivery and "settled_unread" not in delivery
+
+    write_task_result(tmp_path, "asker", STATUS_CANCELLED, result="interrupted")
+    assert settle_task_mailbox(tmp_path, "asker", tmp_path) is True
+    delivery = quiz_states(tmp_path, "asker")["sec-1"]["delivery"]
+    assert "settled_unread" not in delivery
+    if route == "continue":
+        continue_to(tmp_path)
+
+    def reader(tid):  # the asker ended; only its admitted Continue reads now
+        return ({"id": tid, "chat_id": 1, "drive_root": str(tmp_path)}, "") if tid == "successor" else (
+            None, "task_not_live")
+
+    routed = []
+    retry = qa.deliver_answer(tmp_path, "asker", "sec-1", block, reader, lambda *a, **k: routed.append(a) or (True, ""))
+    delivery = quiz_states(tmp_path, "asker")["sec-1"]["delivery"]
+    if route == "continue":
+        assert retry == (False, "awaiting_recipient_read") and routed == []
+        assert (delivery["recipient_task_id"], delivery["state"]) == ("successor", "owed")
+        [letter] = [e for e in drain_owner_entries(tmp_path, "successor", set()) if e.get("kind") == KIND_QUIZ_ANSWER]
+        assert letter["quiz_delivery"]["answer_snapshot"]["secret_outcome"] == block["secret_outcome"]
+    else:
+        assert retry == (True, "") and len(routed) == 1 and delivery["state"] == "delivered"
+
+
+@pytest.mark.parametrize("cleanup_point", ["before_live_ack", "after_live_ack"])
+def test_live_ack_transfer_during_settlement_keeps_consumed_answer_in_continue(tmp_path, monkeypatch, cleanup_point):
+    """Continue checks the vanishing live ACK ledger before the canonical receipt, so mailbox
+    cleanup transferring that positive ACK to read_at right before or right after the live ACK
+    check never drops the consumed answer from the successor's opening."""
+    import asyncio
+
+    from ouroboros import owner_mailbox
+    from ouroboros.owner_mailbox import acknowledge_task_messages, drain_owner_entries
+    from ouroboros.task_custody import settle_task_mailbox
+    from supervisor.continuation_admission import admit_continuation
+    from tests._owner_continue_helpers import NONCE
+
+    app, bridge, q, workers = _continuable_asker(tmp_path, monkeypatch)
+    assert answer(app).status_code == 200
+    assert acknowledge_task_messages(tmp_path, "asker", ["quiz_answer:asker:q"], wake_id="loop_delivery")
+    assert not debt(tmp_path).get("read_at")
+    _interrupt_asker(tmp_path, q, settle_mailbox=False)
+
+    real_read_state = owner_mailbox.mail_read_state
+    settled = []
+
+    def racing_mail_read_state(drive_root, task_id, msg_id):
+        if task_id == "asker" and msg_id == "quiz_answer:asker:q" and not settled:
+            settled.append(True)
+            if cleanup_point == "before_live_ack":
+                assert settle_task_mailbox(tmp_path, "asker", tmp_path) is True
+                return real_read_state(drive_root, task_id, msg_id)
+            observed = real_read_state(drive_root, task_id, msg_id)
+            assert observed is True
+            assert settle_task_mailbox(tmp_path, "asker", tmp_path) is True
+            return observed
+        return real_read_state(drive_root, task_id, msg_id)
+
+    monkeypatch.setattr(owner_mailbox, "mail_read_state", racing_mail_read_state)
+
+    admitted = admit_continuation("asker", action_nonce=NONCE)
+    assert admitted["ok"] is True, admitted
+    assert settled == [True]
+    successor = admitted["successor_task_id"]
+    task = next(row for row in workers.PENDING if row["id"] == successor)
+    later = task["metadata"]["continuation"]["owner_sources"]["later"]
+    assert [(row["source"], row["content"]) for row in later] == [("owner_quiz_answer", "exact answer")]
+
+    due(tmp_path)
+    asyncio.run(td.recover_question_deliveries(tmp_path))
+    assert debt(tmp_path)["state"] == "delivered" and debt(tmp_path)["read_at"]
+    assert _inbox(bridge) == [] and drain_owner_entries(tmp_path, successor, set()) == []
+
+
+def closing_asker(tmp_path, monkeypatch, *, ended=True, published=True, state="admitted"):
+    """An owner about to close a published card whose one immediate Continue reads now. Setup facts:
+    ``mark_published`` (what the strict publication writer stores), ``continue_to`` (both ends of an admission) and
+    ``q.RUNNING`` (its queue row). The close, pin, letter, drain and the debt's recovery are the real code."""
+    from ouroboros.owner_quiz import mark_published
+
+    app, bridge, q, task = runtime(tmp_path, monkeypatch, running=not ended)
+    if published:
+        mark_published(tmp_path, "asker", "q")
+    continue_to(tmp_path, state)
+    q.RUNNING["successor"] = {"task": {**task, "id": "successor"}}
+    return app, bridge, q
+
+
+def owner_close(app):
+    return _post(app, {"decision_id": "quiz:asker:q", "request_id": "close", "action": "close",
+                       "reason": "Wait until Tuesday"})
+
+
+def letters(root, task_id="successor"):
+    """The closure rows a work's mailbox in ROOT holds, exactly as written."""
+    from ouroboros.owner_mailbox import _mailbox_path, mail_records
+    return [row for row in mail_records(_mailbox_path(root, task_id)) if row.get("kind") == "quiz_closed"]
+
+
+def read_closure(tmp_path, task_id="successor"):
+    """The real loop drain of a work's mailbox: its transcript rows, and the acknowledgement it writes."""
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from tests._budget_pause_exact_helpers import _loop_ctx
+
+    ctx, limit = _loop_ctx(tmp_path, task_id)
+    _drain_incoming_messages(limit.messages, queue.Queue(), tmp_path, task_id, None, limit.owner_msg_seen,
+                             owner_ctx=ctx)
+    return str(limit.messages)
+
+
+def lose_mailbox_receipt(monkeypatch):
+    """The letter's append lands, its ``mailbox_at`` receipt never does; returns what restores the real writer."""
+    from ouroboros import owner_quiz
+
+    real = owner_quiz.mark_quiz_history_written
+
+    def lose(root, task, quiz, receipt="history_at", source_row=None):
+        if receipt == "mailbox_at":
+            raise OSError("mailbox append saved; its receipt is unavailable")
+        return real(root, task, quiz, receipt, source_row)
+
+    monkeypatch.setattr(owner_quiz, "mark_quiz_history_written", lose)
+    return lambda: monkeypatch.setattr(owner_quiz, "mark_quiz_history_written", real)
+
+
+def deny_mail_lock_once(monkeypatch, task_id="successor"):
+    """Another holder keeps TASK_ID's mail lock past one wait: ``task_mail_lock`` yields False, its own answer to
+    contention (``task_custody._task_lock``), as ``test_place_conversation_work`` denies it; later takes are real."""
+    import contextlib
+
+    from ouroboros import task_custody
+
+    real, denied = task_custody.task_mail_lock, []
+
+    def denied_once(drive_root, tid, **kwargs):
+        if tid == task_id and not denied:
+            denied.append(1)
+            return contextlib.nullcontext(False)
+        return real(drive_root, tid, **kwargs)
+
+    monkeypatch.setattr(task_custody, "task_mail_lock", denied_once)
+
+
+def pinned_to_own_drive(tmp_path, monkeypatch):
+    """``closing_asker`` whose Continue runs in a drive of its own, as a split root does: its mailbox lives there, and
+    the worker's start writes ``running`` there before the canonical row (``agent.py``). Setup facts, both."""
+    from ouroboros.task_results import write_task_result
+
+    app, bridge, q = closing_asker(tmp_path, monkeypatch)
+    child = tmp_path / "task_drives" / "successor"
+    child.mkdir(parents=True)
+    write_task_result(child, "successor", "running", chat_id=1)
+    monkeypatch.setattr(q, "_task_drive_for_task", lambda task, tid, **_: child if tid == "successor" else tmp_path)
+    return app, bridge, child
+
+
+def test_an_ordinary_owner_close_reaches_the_reading_continue_through_slot_ack_and_replay(tmp_path, monkeypatch):
+    from ouroboros.owner_mailbox import mail_read_state
+
+    app, bridge, q = closing_asker(tmp_path, monkeypatch)
+    assert owner_close(app).status_code == 200
+    block = quiz_states(tmp_path, "asker")["q"]
+    delivery = block["delivery"]
+    # Closed and in history as for any closure; the pin and the letter are separate facts beside them.
+    assert block["state"] == "closed" and delivery["state"] == "delivered" and delivery["history_at"]
+    assert (delivery["recipient_task_id"], delivery["recipient_drive"]) == ("successor", str(tmp_path))
+    assert delivery["mailbox_at"] and mail(tmp_path, "quiz_closed") == []  # the ended asker holds none
+    [row] = letters(tmp_path)
+    assert row["msg_id"] == delivery["logical_id"] == "quiz_closure:asker:q" and "quiz_delivery" not in row
+    assert row["text"] == (f"[Owner question closed without answer] quiz q — closed {block['closed_at']}. "
+                           "Reason: Wait until Tuesday\n"
+                           "This closes the question; no option was chosen and no approval was given.")
+    assert mail_read_state(tmp_path, "successor", row["msg_id"]) is False  # appended, not read
+    seen = read_closure(tmp_path)  # the transcript slot, then the acknowledgement
+    assert "Reason: Wait until Tuesday" in seen and "no approval was given" in seen
+    assert mail_read_state(tmp_path, "successor", row["msg_id"]) is True
+    assert "Wait until Tuesday" not in read_closure(tmp_path)  # replay: an acknowledged letter is not delivered again
+    assert owner_close(app).status_code == 200 and len(letters(tmp_path)) == 1 and _inbox(bridge) == []
+
+
+def test_the_same_closure_processed_again_after_its_letter_was_read_makes_no_second_letter(tmp_path, monkeypatch):
+    import asyncio
+
+    app, bridge, q = closing_asker(tmp_path, monkeypatch)
+    restore = lose_mailbox_receipt(monkeypatch)
+    assert owner_close(app).status_code == 200  # the letter landed, its receipt did not: the closure stays owed
+    delivery = quiz_states(tmp_path, "asker")["q"]["delivery"]
+    assert delivery["state"] == "owed" and not delivery.get("mailbox_at") and len(letters(tmp_path)) == 1
+    assert "Wait until Tuesday" in read_closure(tmp_path)  # the real reader takes and acknowledges it
+    restore()
+
+    due(tmp_path)
+    asyncio.run(td.recover_question_deliveries(tmp_path))  # the same close, processed again
+    assert owner_close(app).status_code == 200  # and the owner's own retry of it
+    delivery = quiz_states(tmp_path, "asker")["q"]["delivery"]
+    assert delivery["state"] == "delivered" and delivery["mailbox_at"]  # its own row in that store settled the repeat
+    assert len(letters(tmp_path)) == 1 and "Wait until Tuesday" not in read_closure(tmp_path) and _inbox(bridge) == []
+
+
+def test_a_busy_mail_lock_keeps_the_letter_owed_and_the_retry_writes_it_at_the_pin(tmp_path, monkeypatch):
+    import asyncio
+
+    app, bridge, child = pinned_to_own_drive(tmp_path, monkeypatch)
+    deny_mail_lock_once(monkeypatch)
+    assert owner_close(app).status_code == 200
+    delivery = quiz_states(tmp_path, "asker")["q"]["delivery"]
+    pin = ("successor", str(child), "quiz_closure:asker:q")
+    # Closed and its room row written; the letter stays owed at its pin, never reported delivered.
+    assert (delivery["state"], delivery["reason_code"]) == ("owed", "mailbox_write_failed") and delivery["history_at"]
+    assert (delivery["recipient_task_id"], delivery["recipient_drive"], delivery["logical_id"]) == pin
+    assert not delivery.get("mailbox_at") and letters(child) == []
+
+    due(tmp_path)
+    asyncio.run(td.recover_question_deliveries(tmp_path))  # the ordinary debt book's retry
+    delivery = quiz_states(tmp_path, "asker")["q"]["delivery"]
+    assert delivery["state"] == "delivered" and delivery["mailbox_at"]
+    assert (delivery["recipient_task_id"], delivery["recipient_drive"], delivery["logical_id"]) == pin
+    [row] = letters(child)
+    assert row["msg_id"] == "quiz_closure:asker:q" and "Reason: Wait until Tuesday" in row["text"]
+    assert letters(tmp_path) == [] and mail(tmp_path, "quiz_closed") == [] and _inbox(bridge) == []
+
+
+def test_a_retry_after_the_readers_canonical_end_writes_no_letter_while_its_drive_still_reads_running(
+        tmp_path, monkeypatch):
+    import asyncio
+
+    from ouroboros.owner_mailbox import _mailbox_path
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+    from ouroboros.task_store import task_drive_status
+
+    app, bridge, child = pinned_to_own_drive(tmp_path, monkeypatch)
+    deny_mail_lock_once(monkeypatch)
+    assert owner_close(app).status_code == 200  # closed and in history; its letter stays owed
+    write_task_result(tmp_path, "successor", STATUS_COMPLETED, result="finished")  # the canonical row ends
+    assert task_drive_status(child, ["successor"])["successor"][0] == "running"  # its own drive still says running
+
+    due(tmp_path)
+    asyncio.run(td.recover_question_deliveries(tmp_path))
+    delivery = quiz_states(tmp_path, "asker")["q"]["delivery"]
+    # A proven end: no new letter and no other address; the history discharges alone, never as a letter received.
+    assert delivery["state"] == "delivered" and delivery["history_at"] and not delivery.get("mailbox_at")
+    assert (delivery["recipient_task_id"], delivery["recipient_drive"]) == ("successor", str(child))
+    assert not _mailbox_path(child, "successor").exists() and letters(tmp_path) == []
+    assert mail(tmp_path, "quiz_closed") == [] and _inbox(bridge) == []
+
+
+def test_a_retry_after_the_readers_drive_was_released_recreates_no_directory_there(tmp_path, monkeypatch):
+    """Simulation, not a GC test: the finished reader's drive is removed here as ``task_custody.settle_child_drive``
+    releases a settled one. The standard retry of the still-owed closure then writes nothing there, not even the
+    mailbox directory, and reports no letter it never confirmed."""
+    import asyncio
+    import shutil
+
+    from ouroboros import store
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+
+    app, bridge, child = pinned_to_own_drive(tmp_path, monkeypatch)
+    deny_mail_lock_once(monkeypatch)
+    assert owner_close(app).status_code == 200  # closed and in history; nothing appended, the letter stays owed
+    write_task_result(tmp_path, "successor", STATUS_COMPLETED, result="finished")  # the reader ends
+    store.close_connections_under(child)  # an open store keeps its folder on Windows
+    shutil.rmtree(child)  # the simulated release of its finished drive
+
+    due(tmp_path)
+    asyncio.run(td.recover_question_deliveries(tmp_path))  # the standard retry
+    delivery = quiz_states(tmp_path, "asker")["q"]["delivery"]
+    assert not child.exists(), "the retry recreated the released drive's directory"
+    assert delivery["state"] == "delivered" and delivery["history_at"] and not delivery.get("mailbox_at")
+    assert (delivery["recipient_task_id"], delivery["recipient_drive"]) == ("successor", str(child))
+    assert letters(tmp_path) == [] and mail(tmp_path, "quiz_closed") == [] and _inbox(bridge) == []
+
+
+@pytest.mark.parametrize("control", ["still_reading_asker", "unadmitted_continue", "unpublished_card", "older_close"])
+def test_unpinned_closes_keep_their_behavior_and_send_no_letter_to_a_continue(tmp_path, monkeypatch, control):
+    import asyncio
+
+    from ouroboros.owner_quiz import record_closed
+
+    app, bridge, q = closing_asker(
+        tmp_path, monkeypatch, ended=control != "still_reading_asker", published=control != "unpublished_card",
+        state="bound" if control == "unadmitted_continue" else "admitted")
+    if control == "older_close":  # recorded before pins existed: no route, whatever its Continue does now
+        assert record_closed(tmp_path, "asker", quiz_id="q", reason="Wait until Tuesday", actor="owner",
+                             request_id="close")["ok"]
+        due(tmp_path)
+        asyncio.run(td.recover_question_deliveries(tmp_path))
+    else:
+        assert owner_close(app).status_code == 200
+    delivery = quiz_states(tmp_path, "asker")["q"]["delivery"]
+    assert letters(tmp_path) == [] and delivery["state"] == "delivered" and delivery["history_at"]
+    assert "recipient_task_id" not in delivery
+    if control == "still_reading_asker":  # its own letter, under its own id, exactly as before
+        assert mail(tmp_path, "quiz_closed") == ["quiz_closed:q"] and delivery["mailbox_at"]
+    else:
+        assert mail(tmp_path, "quiz_closed") == [] and not delivery.get("mailbox_at")

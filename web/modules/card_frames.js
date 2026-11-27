@@ -19,6 +19,7 @@
    properties (the values of the material the frame lies on), `data-theme` and `OuroborosCard.onTheme`. */
 
 import { onThemeChange } from './theme_palette.js';
+import { bindScrollFade, syncFoldStops } from './scroll_fade.js';
 import { WIDGET_FRAME_MAX_HEIGHT } from './widget_module.js';
 
 export const CARD_APP_SANDBOX = 'allow-scripts';
@@ -50,13 +51,44 @@ export function inlineFrameHeight(content, { expanded = false, viewport = global
 /**
  * The inline size policy for the frame in `host`: `fit(contentHeight)` sizes it (the height is the host's
  * `--widget-frame-height`, which the frame inherits); `toggle` (a button) shows only while the collapsed frame would
- * cut its content, and switches Expand / Collapse. Re-fits when the window resizes.
+ * cut its content, and switches Expand / Collapse. Re-fits when the window resizes. With `fade`, a host that draws its
+ * own content (not a frame) wears the shared fade while its box cuts that content: a collapsed cut is the static
+ * `data-fold-clipped` fold, and its fully hidden stops leave sequential Tab order (the shared fold-stop owner) until
+ * Expand returns them in their original order. Past the frame ceiling an open box is a real scrollport instead —
+ * `data-fold-scroll`, the live `.scroll-fade-y` edge cues, and `region` names it for the keyboard while it scrolls —
+ * and leaving that scrollport returns it to the top before folding so the collapsed cut shows the real beginning.
+ * The toggle stays outside the host, so outside the fade. A frame host (no `fade`) is never touched.
  */
-export function createInlineFit(host, toggle) {
+export function createInlineFit(host, toggle, { fade = false, region = '' } = {}) {
     let content = 0;
     let expanded = false;
+    let unbind = null;
     const apply = () => {
-        host.style.setProperty('--widget-frame-height', `${inlineFrameHeight(content, { expanded })}px`);
+        const height = inlineFrameHeight(content, { expanded });
+        host.style.setProperty('--widget-frame-height', `${height}px`);
+        const cuts = height < Math.ceil(content);
+        if (fade) {
+            const scrollable = expanded && cuts;
+            const folded = !expanded && cuts;
+            host.classList.toggle('scroll-fade-y', scrollable);
+            host.toggleAttribute('data-fold-scroll', scrollable);
+            host.toggleAttribute('data-fold-clipped', folded);
+            if (scrollable) {
+                syncFoldStops(host, false);
+                unbind ||= bindScrollFade(host, { axis: 'y', region });
+            } else {
+                const hadScroll = Boolean(unbind);
+                unbind?.();
+                unbind = null;
+                if ((hadScroll || folded) && host.scrollTop) host.scrollTop = 0;
+                if (folded) {
+                    const limit = host.getBoundingClientRect?.().bottom ?? 0;
+                    syncFoldStops(host, true, (el) => (el.getBoundingClientRect?.().top ?? 0) >= limit - 1);
+                } else {
+                    syncFoldStops(host, false);
+                }
+            }
+        }
         const clips = inlineFrameHeight(content) < Math.ceil(content);
         if (!toggle) return;
         toggle.hidden = !clips;
@@ -69,7 +101,13 @@ export function createInlineFit(host, toggle) {
     apply();
     return {
         fit(height) { content = Number(height) || 0; apply(); },
-        dispose() { toggle?.removeEventListener('click', onToggle); globalThis.removeEventListener?.('resize', apply); },
+        dispose() {
+            toggle?.removeEventListener('click', onToggle);
+            globalThis.removeEventListener?.('resize', apply);
+            unbind?.();
+            unbind = null;
+            if (fade) syncFoldStops(host, false);
+        },
     };
 }
 
@@ -95,7 +133,7 @@ export function cardThemeTokens(doc = globalThis.document, material = doc?.docum
 }
 
 /** The same theme as values, `{name, tokens}` (each present `--ouro-*` value of `material`), for a frame that is told
- * them by message and applies them itself (Beautiful Context, `context_report_host.js`). */
+ * them by message and applies them itself. */
 export function cardThemeValues(doc = globalThis.document, material = doc?.documentElement) {
     const candidate = globalThis.ouroTheme?.theme || doc?.documentElement?.dataset?.theme;
     const computed = material && globalThis.getComputedStyle ? globalThis.getComputedStyle(material) : null;

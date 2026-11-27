@@ -6,7 +6,7 @@
 import { confirmAndSendRestart, headerBudgetPresentation, sendPanic } from './chat_activity.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { createConsciousnessStatus } from './consciousness_status.js';
-import { bindHeaderControlPlacement } from './page_header.js';
+import { bindHeaderControlPlacement, renderPageHeader } from './page_header.js';
 
 /** Panic: immediate in every room's bar, never behind a menu or a save. */
 export function panicButtonHtml() {
@@ -28,6 +28,22 @@ export function mainHeaderActionsHtml() {
                 </button>
                 <span id="chat-status" class="status-badge offline">Connecting…</span>
             `;
+}
+
+/** The bar a room's own page draws (chat.js): Main's overlay bar with its actions above; a Project panel's bar comes
+ * from app.js (page_header.js), so its instance seeds only its status badge. */
+export function roomBarHtml({ asPanel, title }) {
+    return asPanel
+        ? `<div class="chat-panel-statusbar"><span id="chat-status" class="status-badge offline">Connecting…</span></div>`
+        : renderPageHeader({
+            title,
+            variant: 'overlay',
+            className: 'chat-page-header',
+            roomEdge: true,
+            toolbarClass: 'ui-chrome-group',
+            actionsHtml: mainHeaderActionsHtml(),
+            showMobileNav: false,  // a room's ☰ is its composer row's first control
+        });
 }
 
 /**

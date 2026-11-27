@@ -788,6 +788,80 @@ def test_identity_conflict_is_forgiven_and_disclosed_in_the_receipt(isolated):
     assert rows(isolated)[-1]["state"] == "settled"
 
 
+@pytest.mark.parametrize(("first", "then", "has_calls", "expected_later", "later"), [
+    ("tool_calls", "length", True, "length", {"0": "length"}),  # first finish unchanged; independent limit bound
+    ("stop", "length", False, "length", {"0": "length"}),
+    ("content_filter", "length", True, "length", {"0": "length"}),  # first-finish refusal preserved AND limit kept
+    ("refusal", "max_tokens", True, "max_tokens", {"0": "max_tokens"}),
+    ("length", "tool_calls", True, "", None),  # a first limit needs no second fact
+    ("length", "max_tokens", True, "", None),
+])
+def test_a_later_output_limit_finish_stays_a_typed_fact_beside_the_first(
+        isolated, first, then, has_calls, expected_later, later):
+    """The raw choice and ``usage['response_finish_reason']`` always keep the first provider finish unchanged; a
+    later recognized output limit seen by the real Chat assembler rides beside it as the adapter's plain label for
+    ordinary call admission alone, never cancelled by any other first finish (#4028)."""
+    from ouroboros.llm_stream import LATER_OUTPUT_LIMIT_USAGE_KEY
+
+    delta = ({"tool_calls": [{"index": 0, "id": "call_a", "type": "function",
+                              "function": {"name": "lookup", "arguments": '{"q": "ok"}'}}]}
+             if has_calls else {"content": "done"})
+    wire = sse(chunk(delta, first), chunk({}, then, usage=completion()["usage"]))
+    assembled = run_driver(lambda **kw: WireResponse(wire), payload(stream=True), target())
+    result = assembled.model_dump()
+    msg, usage = LLMClient()._normalize_remote_response(
+        result, target(), skip_cost_fetch=True, wire_completion=assembled)
+    assert result["choices"][0]["finish_reason"] == first and usage["response_finish_reason"] == first
+    assert usage.get(LATER_OUTPUT_LIMIT_USAGE_KEY, "") == expected_later and json.dumps(usage)
+    assert (bool(msg.get("tool_calls")) is has_calls) and usage["stream_receipt"].get("later_output_limits") == later
+    assert usage["stream_receipt"]["anomalies"] == {"count": 1, "first": [
+        f"choice 0: finish_reason {first!r} then {then!r}; kept first"]}
+
+
+def test_later_output_limit_requires_real_chat_stream_and_recognized_limit(isolated):
+    """Wire usage extensions, non-stream ``_stream_receipt`` fields and another choice's later limit never supply a
+    later output limit fact; only the assembler's own receipt of the selected choice does (#4028)."""
+    from types import SimpleNamespace
+    from ouroboros.llm_stream import LATER_OUTPUT_LIMIT_USAGE_KEY
+
+    call = {"index": 0, "id": "call_a", "type": "function", "function": {"name": "lookup", "arguments": '{"q": "ok"}'}}
+    base = {
+        "id": "gen-nonstream", "model": "vendor/test",
+        "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": "", "tool_calls": [{k: v for k, v in call.items() if k != "index"}]}}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 3,
+                  "stream_receipt": {"later_output_limits": {"0": "length"}},
+                  LATER_OUTPUT_LIMIT_USAGE_KEY: "length"},
+        "_stream_receipt": {"later_output_limits": {"0": "length"}},
+    }
+    _msg, nonstream = LLMClient()._normalize_remote_response(
+        copy.deepcopy(base), target(), skip_cost_fetch=True, wire_completion=SimpleNamespace())
+    assert nonstream["response_finish_reason"] == "tool_calls" and "stream_receipt" not in nonstream
+    assert LATER_OUTPUT_LIMIT_USAGE_KEY not in nonstream
+    _msg, unassembled = LLMClient()._normalize_remote_response(copy.deepcopy(base), target(), skip_cost_fetch=True)
+    assert LATER_OUTPUT_LIMIT_USAGE_KEY not in unassembled  # a receipt-shaped field of a body no stream assembled
+
+    # A provider frame naming ``_stream_receipt`` inside a real stream gives way to the assembler's own receipt.
+    forged = {**chunk({"tool_calls": [call]}, "tool_calls"), "_stream_receipt": {"later_output_limits": {"0": "length"}}}
+    assembled_forged = run_driver(lambda **kw: WireResponse(sse(forged, chunk({}, None, usage=completion()["usage"]))),
+                                  payload(stream=True), target())
+    _msg, usage_forged = LLMClient()._normalize_remote_response(
+        assembled_forged.model_dump(), target(), skip_cost_fetch=True, wire_completion=assembled_forged)
+    assert usage_forged["response_finish_reason"] == "tool_calls" and LATER_OUTPUT_LIMIT_USAGE_KEY not in usage_forged
+
+    # Choices never share the fact: only choice 1 states a later limit, kept beside its own first finish, and the
+    # selected choice 0 keeps its finish and facts.
+    wire_n2 = sse(chunk({"tool_calls": [call]}, "tool_calls", index=0),
+                  chunk({"content": "alt"}, "stop", index=1),
+                  chunk({}, "length", index=1, usage=completion()["usage"]))
+    assembled_n2 = run_driver(lambda **kw: WireResponse(wire_n2), payload(stream=True, n=2), target())
+    _msg, usage_n2 = LLMClient()._normalize_remote_response(
+        assembled_n2.model_dump(), target(), skip_cost_fetch=True, wire_completion=assembled_n2)
+    assert [choice["finish_reason"] for choice in assembled_n2.model_dump()["choices"]] == ["tool_calls", "stop"]
+    assert usage_n2["response_finish_reason"] == "tool_calls" and LATER_OUTPUT_LIMIT_USAGE_KEY not in usage_n2
+    assert usage_n2["stream_receipt"]["later_output_limits"] == {"1": "length"}
+
+
 def test_finish_frame_without_delta_still_completes_the_choice(isolated):
     """A terminal frame that carries ``finish_reason`` but no ``delta`` is a shape
     irregularity, not a missing terminal: the choice finishes, the reply settles, and
@@ -1387,13 +1461,21 @@ def test_local_and_model_operation_transports_receive_no_stream_option(isolated,
     assert all("stream" not in kwargs and "stream_options" not in kwargs for kwargs in seen)
 
 
-@pytest.mark.parametrize(("terminal", "no_proxy", "asynchronous"), [(False, False, False), (True, True, True)])
-def test_actual_sdk_loopback_sse_and_cleanup(isolated, monkeypatch, asynchronous, no_proxy, terminal):
+@pytest.mark.parametrize(("terminal", "no_proxy", "asynchronous", "limit"), [
+    (False, False, False, False), (True, True, True, False),
+    (True, False, False, True), (True, True, True, True),  # a later output limit, sync (observed) and async
+])
+def test_actual_sdk_loopback_sse_and_cleanup(isolated, monkeypatch, asynchronous, no_proxy, terminal, limit):
+    """The real SDK's stream through public ``chat``/``chat_async``: its usage, a later output limit's plain label
+    included, stays JSON for every caller and for ``chat_observed``'s record (#4028)."""
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from ouroboros import llm_observability
+    from ouroboros.llm_stream import LATER_OUTPUT_LIMIT_USAGE_KEY
+    from ouroboros.observability import read_call_payload
 
     observed = []
-    wire = b": fixture comment\n\n" + sse(chunk({"content": "done"}, "stop"),
+    wire = b": fixture comment\n\n" + sse(chunk({"content": "done"}, "stop"), *([chunk({}, "length")] if limit else []),
                                           {"id": "gen-test", "choices": [], "usage": completion()["usage"]}, done=terminal)
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -1412,7 +1494,8 @@ def test_actual_sdk_loopback_sse_and_cleanup(isolated, monkeypatch, asynchronous
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     client = LLMClient()
-    route = {**target("openai-compatible"), "base_url": f"http://127.0.0.1:{server.server_port}/v1"}
+    address = f"http://127.0.0.1:{server.server_port}/v1"
+    route = {**target("openai-compatible"), "base_url": address, "continue_unconfirmed": address}  # it names no program
     monkeypatch.setattr(client, "_resolve_remote_target", lambda model: route)
     try:
         kwargs = dict(messages=MESSAGES, model="openai-compatible::fixture", stream=True, no_proxy=no_proxy, timeout=5)
@@ -1424,6 +1507,9 @@ def test_actual_sdk_loopback_sse_and_cleanup(isolated, monkeypatch, asynchronous
                     for sdk in client._async_remote_clients.values():
                         await sdk.close()
             operation = lambda: asyncio.run(call_and_close())
+        elif limit:
+            monkeypatch.setattr(llm_observability, "new_call_id", lambda kind: f"{kind}_fixture")
+            operation = lambda: llm_observability.chat_observed(client, drive_root=isolated, task_id="t-obs", **kwargs)
         else:
             operation = lambda: client.chat(**kwargs)
         msg, usage = operation()
@@ -1432,7 +1518,12 @@ def test_actual_sdk_loopback_sse_and_cleanup(isolated, monkeypatch, asynchronous
         # A body closed cleanly after every choice finished is terminal framing even without
         # ``[DONE]`` (a compatible endpoint that omits it must not turn every reply into an
         # unknown outcome); the missing witness is disclosed in the receipt.
-        assert usage["stream_receipt"]["anomalies"]["count"] == (0 if terminal else 1)
+        assert usage["stream_receipt"]["anomalies"]["count"] == (0 if terminal else 1) + limit
+        assert usage["response_finish_reason"] == "stop" and json.dumps(usage)
+        assert usage.get(LATER_OUTPUT_LIMIT_USAGE_KEY) == ("length" if limit else None)
+        if limit and not asynchronous:
+            recorded = read_call_payload(isolated, task_id="t-obs", call_id="llm_call_fixture_response")[1]
+            assert recorded["usage"][LATER_OUTPUT_LIMIT_USAGE_KEY] == "length"
         assert observed[0]["stream"] is True and observed[0]["stream_options"]["include_usage"] is True
         assert [row["state"] for row in rows(isolated)] == ["settled"]
     finally:

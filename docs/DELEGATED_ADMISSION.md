@@ -37,8 +37,8 @@ investigation and task copies, so shallow and partial clones work and a
 target edit during provisioning cannot reach or refuse the copy). `live` means
 that Claudexor works in that supplied execution root; it does not mean direct
 edits to the authoritative target. The host captures the result as a commit,
-releases the checkout once that capture and its named evidence are saved, and
-applies the result through its existing integration path. The exception is the
+can release the checkout after capture and named-evidence retention; native disposition
+defers cleanup to custody GC. The existing integration path applies the result. The exception is the
 starter's explicit `workspace: in_place` (Git writers only; owner 25.10): the
 supplied root is the starter's own write root, edits land as the run makes them,
 nothing is captured, applied or rejected, undo is through Git, the receipt and
@@ -101,7 +101,8 @@ The host adds only these workspaces, never containers, markers or records, as
 `execution.auxiliaryWritableRoots`; the binding, a seat's checking text and the facts then
 name that scratch instead of the default parent (`workspace_preflight.session_service_directories`).
 A `full` Agent start, whose rights already reach such a folder, gets the same owned scratch with nothing
-sent: a private copy's (keyed by its snapshot), an in-place run's (`in-place-<invocation>`) and a reviewer seat's.
+sent: a private copy's (keyed by its snapshot), an in-place run's (`in-place-<invocation>`), or a reviewer seat's.
+For local in-place placement and binding notices, see [session scratch in PERSISTENCE](PERSISTENCE.md).
 The binding declares scratch disposable before use (`DISPOSABLE_SCRATCH`). Create one-off measurement
 snapshots there. Return the report, script, results, source and hash; explicitly return needed exact
 bytes as evidence. Scratch follows its seat or task and parent decision through Continue.
@@ -191,13 +192,35 @@ to the immutable stored request (`execution.workspaceRoot` + `access`) at recove
 (`record_persistent`); rows that carry the key are authoritative and are never
 recomputed from a live engine. Older engines keep the legacy snapshot-in-`scope.root`
 shape: that host-minted snapshot declares `scope.ephemeral` and registers nothing where
-the engine accepts the field (`CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION`), and otherwise
-retires its one-shot registration as before. A target Ouroboros minted itself
+the engine accepts the field (`CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION`). A target Ouroboros minted itself
 (`delegate_registration_policy.minted_root`: a folder inside a task's own drive, a review
 tree, a registry copy) is no user identity either and declares `scope.ephemeral` the same
 way; a sticky thread on such a root does so from `CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION`,
 the engine release that sweeps the lanes those threads leave, and below it keeps the
 registration the thread is bound to.
+
+A disposable registration's keyed POST records store, project id, canonical root and `created`.
+The historical walk needs a minted folder and a registry receipt binding its creation to this store
+and folder. Creator custody can supply the ownership bit, never the store of a handshake or run.
+Adoption or a completed release grants nothing. Automatic release needs catalog `POST /v2/projects/:id/release` and
+`GET /v2/projects/:id/registration`, both bound by `expectedStoreId` and `expectedRoot`.
+A lost send closes on a matching `absent` read or on a repeated bound release returning
+`released`/`absent`; `present`, 404 or changed binding keep the intent pending until a definite
+addressed answer, and never authorize a second START.
+Missing proof or routes opens no release intent. A later engine upgrade does not give the host ownership of an old entry: registrations left without creation evidence stay for manual resolution.
+
+Ordinary starts and fresh or continued reviews hold the confirmed registration per invocation, not
+across everyone's imports. START takes over that hold through binding or definite refusal. A start of
+another project whose `execution.workspaceRoot` may be a temporary registration's folder holds it too,
+without registering or owning it (`delegate_workspace_hold`): only the engine's `candidateMatch` on the
+bound read (`candidate` = the folder as sent) frees it with `different`; `unknown`, no field, a refusal
+or a lost read hold, and no START carries it. One lock per engine route orders preparations, claims and
+releases; each side records what it observed before the lock goes, and a release's folder mark keys its
+exact recorded root until answered. An ended use keeps holding through its task's Keep gate and Continue,
+found only through the owed duty of each temporary registration (`workspace_uses`, gone with the duty): a
+START's claim names the duties alive on its engine and adds its invocation to each, and a creation records
+the live uses it observed before its possibly-creating request, under the one hold that writes its duty; unable to
+observe, it sends nothing. A use that ended before a registration existed never met it; its next start prepares again.
 
 ## 3. What Ouroboros actually controls
 
@@ -356,7 +379,8 @@ Engine documents use `attachment_paths` (§3a).
 
 `delegate_readonly_inputs` resolves each reader's own dispatch address; a shared
 physical source does not carry the caller's logical grant into the receiver.
-Both must admit read, copy and hash. `delegate_git_range` also checks fixed VCS
+Both must admit read, copy and hash, including the receiver's project-journal scope
+and the retained focus-source catalogue's role restriction. `delegate_git_range` also checks fixed VCS
 scopes and introspection of exact historical entries. A receiver-relative protected
 directory still covers its historical descendants when absent from the worktree.
 Only a scheduled child's own read of each exact copy address, a fixed file binding included, is
@@ -385,6 +409,7 @@ The selecting task's artifact store retains verified bytes under
 with an `inputs.json` source map. A colliding occupied address refuses. Long paths
 can still fail on Windows. Source handles survive drive retirement, stay out of
 deliverables and automatic lineage walks, and can themselves be selected explicitly.
+An admitted source handle in a task artifact store keeps its address hash through the copy check.
 One receipt row names each retained file, its full hash, size, source and local path.
 A range has one row per product. Prepared is not read. Native `read_file` reads
 and hashes the entire file per page; smaller pages bound delivery, not file I/O.

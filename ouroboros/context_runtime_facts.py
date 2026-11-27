@@ -402,21 +402,75 @@ def _runtime_budget_info(env: Any, task: Dict[str, Any], ctx: Any = None) -> Dic
         root_cap = float(runtime_setting("OUROBOROS_PER_TASK_COST_USD", "0") or 0)
     except (TypeError, ValueError):
         root_cap = 0.0
-    if root_cap > 0:
-        budget_info["per_task_tree_cap_usd"] = root_cap
+    money = _addressed_work_money(env, task, root_cap)
+    effective_cap = None
+    if isinstance(money, dict):
+        cap_value = money.get("root_limit_usd")
+        effective_cap = float(cap_value) if cap_value is not None else None
+    if effective_cap is not None and effective_cap > 0:
+        budget_info["per_task_tree_cap_usd"] = effective_cap
+        budget_info["per_task_tree_cap_basis"] = "task_money_snapshot"
+        # Spend and cap co-observed from ONE snapshot (P1): the allowance is GROUP-based —
+        # sibling roots' known spend rides in it — so the group's known spend and this
+        # tree's remaining room are rendered beside it, and the ROOT's own limit is
+        # labelled when it binds this tree's own spend separately.
+        group_spent = money.get("settled_usd")
+        if group_spent is not None:
+            budget_info["per_task_tree_group_spent_usd"] = float(group_spent)
+        room = money.get("remaining_known_usd")
+        if room is not None:
+            budget_info["per_task_tree_room_usd"] = float(room)
+        root_axis = money.get("root_axis") if isinstance(money.get("root_axis"), dict) else {}
+        root_limit = root_axis.get("limit_usd")
+        if root_limit is not None:
+            budget_info["per_task_root_limit_usd"] = float(root_limit)
         budget_info["per_task_tree_cap_rule"] = (
-            "Hard cap for THIS task's WHOLE tree (own model calls + all subagents), enforced "
-            "by the physical-attempt ledger: new dispatches are refused once the tree's KNOWN "
-            "spend (confirmed and estimated) reaches it. A task with an exact continuation then "
-            "pauses with its work saved; an actor without one (no continuation owner, task id or "
-            "durable root) ends with a typed budget_exhausted result and no paid recap. "
-            "Open reservations and unresolved charges are not counted as spending, and calls "
-            "in flight or charged late can take the tree past the cap. The facts line of each "
-            "round reports the live tree number."
+            "Effective hard cap for THIS task's WHOLE tree (own model calls + all subagents), read "
+            "from the work's money snapshot: the whole billing GROUP's KNOWN spend (confirmed and "
+            "estimated, other roots' spend included) plus this tree's remaining room on that basis; "
+            "the ROOT's own limit, labelled separately, binds this tree's own spend when tighter. "
+            "The per-task setting only defaulted the start cap; a mid-run amendment "
+            "(set_task_cost_cap) may since have changed it. Enforced by the physical-attempt "
+            "ledger: new dispatches are refused once KNOWN spend reaches a binding axis's own "
+            "limit — the root tree's or the whole group's; the room, when shown, is what this "
+            "tree can still add before that refusal. A task with an exact continuation then "
+            "pauses with its work saved; an actor without one (no continuation owner, task id "
+            "or durable root) ends with a typed budget_exhausted result and no paid recap. Open "
+            "reservations and unresolved charges are not counted as spending, and calls in flight "
+            "or charged late can take the tree past the cap. The facts line of each round "
+            "reports the live tree number."
+        )
+    elif root_cap > 0:
+        budget_info["per_task_tree_cap_default_usd"] = root_cap
+        budget_info["per_task_tree_cap_rule"] = (
+            f"The per-task setting (OUROBOROS_PER_TASK_COST_USD, ${root_cap:.2f}) is the DEFAULT "
+            "cap for new works, not this task's measured limit: this work's own effective cap could "
+            "not be read right now, so no number is shown for it. The ledger still enforces the "
+            "work's actual cap on every call; at it, a task with an exact continuation then pauses "
+            "with its work saved, an actor without one (no continuation owner, task id or durable "
+            "root) ends with a typed budget_exhausted result and no paid recap. The facts line of "
+            "each round reports the live tree number."
         )
     if ctx is not None:
         budget_info["in_task_cost_ceiling"] = _in_task_cost_ceiling(ctx, budget_info.get("remaining_usd"))
     return budget_info
+
+
+def _addressed_work_money(env: Any, task: Dict[str, Any], default_cap: float) -> Optional[Dict[str, Any]]:
+    """The addressed work's ONE money snapshot; the default setting is the root limit's
+    fallback input, never shown as the work's measured limit (P1)."""
+    root_id = str(task.get("root_task_id") or task.get("id") or "")
+    if not root_id:
+        return None
+    try:
+        from ouroboros.usage_admission import task_money_snapshot
+
+        budget_root = pathlib.Path(task.get("budget_drive_root") or env.drive_root)
+        return task_money_snapshot(budget_root, task, root_id,
+                                   root_limit=(default_cap if default_cap > 0 else None))
+    except Exception:
+        log.debug("Addressed work money snapshot unavailable for runtime context", exc_info=True)
+        return None
 
 
 def disk_view(path: Any, *, observed_at: Optional[str] = None) -> Dict[str, Any]:

@@ -739,15 +739,12 @@ def _subagent_card_text(event: Dict[str, Any], sub_event: str, lang: str) -> str
     return header
 
 
-from .telegram_owner_auth import owner_matches_live
-
-
 async def _render_subagent_card(api, client, chat_id: int, event: Dict[str, Any], sub_event: str, lang: str,
                                 *, quiet: bool = False) -> None:
     """One Telegram message per subagent, edited in place across its lifecycle; in Silent
     mode (``quiet``) a new bubble is sent without sound, as other progress is."""
     child = str(event.get("subagent_task_id") or event.get("task_id") or "").strip()
-    if not child or not owner_matches_live(api.get_state_dir(), int(chat_id or 0)):
+    if not child:
         return
 
     def remember_card(mid: int) -> None:  # an edit keeps the card a known Reply target, as a new bubble is

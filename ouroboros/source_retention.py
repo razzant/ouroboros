@@ -21,6 +21,7 @@ import uuid
 import zlib
 from collections import deque
 from contextlib import contextmanager
+from functools import partial
 from typing import Any
 
 from ouroboros import evidence_packs as packs, store
@@ -48,60 +49,102 @@ def active_walk():
     return _WALK.get()
 
 
-def retained_child_root(canonical: pathlib.Path, child: pathlib.Path, task_id: str = "") -> bool:
-    """Only the installation's physical child layouts confer fallback custody."""
-    from ouroboros.confined_files import physical_path, root_spellings
+def retained_child_root(canonical: pathlib.Path, child: pathlib.Path, task_id: str = "", *,
+                        strict: bool = False, _canonical_row: Any = None) -> bool:
+    """Only the installation's physical child layouts confer fallback custody. With ``strict=True``, unreadable store
+    or directory checks raise instead of posing as absence; missing paths, links and non-matching rows stay ``False``."""
+    import errno
+    from ouroboros.confined_files import confined_directory, physical_path, real_directory, root_spellings
+    from ouroboros.task_custody import recorded_execution_drive
+    from ouroboros.task_store import read_document
 
-    spellings = root_spellings(canonical)  # a configured child keeps its layout checks
-    canonical, child = spellings[0], physical_path(spellings, child)
     try:
-        relative = child.relative_to(canonical)
-        parts = relative.parts
-        layout = ((len(parts) == 4 and parts[:2] == ("state", "headless_tasks") and parts[3] == "data")
-                  or (len(parts) == 2 and parts[0] == "task_drives"))
-        if not layout:
+        spellings = root_spellings(canonical)  # a configured child keeps its layout checks
+        canonical, child = spellings[0], physical_path(spellings, child)
+        try:
+            parts = child.relative_to(canonical).parts
+        except ValueError:
+            return False
+        if not ((len(parts) == 4 and parts[:2] == ("state", "headless_tasks") and parts[3] == "data")
+                or (len(parts) == 2 and parts[0] == "task_drives")):
             return False
         owner = parts[2] if len(parts) == 4 else parts[1]
         if task_id and task_id != owner:
-            # Prove a retry's execution placement from canonical facts BEFORE
-            # touching scratch or reading the alleged occupant's store.
-            from ouroboros.task_store import read_document
-            from ouroboros.task_custody import recorded_execution_drive
-            if not recorded_execution_drive(read_document(canonical, task_id) or {}, child, spellings):
+            # Prove a retry's execution placement from canonical facts BEFORE touching scratch or its store.
+            proven = _canonical_row if isinstance(_canonical_row, dict) else (read_document(canonical, task_id) or {})
+            if not recorded_execution_drive(proven, child, spellings):
                 return False
-        from ouroboros.confined_files import confined_directory
-        with confined_directory(canonical, parts):
-            pass
+        try:
+            with confined_directory(canonical, parts):
+                pass
+        except OSError as exc:
+            if (not strict or isinstance(exc, (FileNotFoundError, NotADirectoryError))
+                    or exc.errno == errno.ELOOP or not real_directory(child)):
+                return False
+            raise
         if not task_id or task_id == owner:
             return True
-        # A timeout successor may occupy the original drive. Its own durable
-        # result binds that occupant; a directory name alone does not.
-        from ouroboros.task_store import read_document
+        # A timeout successor may occupy the original drive; its own durable result binds that occupant.
         row = read_document(child, task_id)
         return isinstance(row, dict) and row.get("task_id") == task_id
     except Exception:
+        if strict:
+            raise
         return False
 
 
-def retained_task_roots(canonical: pathlib.Path, task_id: str) -> list[pathlib.Path]:
-    """Read-only source candidates for the task's own retained execution bytes."""
+def retained_task_roots(canonical: pathlib.Path, task_id: str, *, strict: bool = False,
+                        on_error: Any = None) -> list[pathlib.Path]:
+    """Read-only source candidates for the task's own retained execution bytes. With ``strict=True``, unreadable
+    placements or retry lookups raise (or report via ``on_error(path, exc)`` and stop before staler fallbacks)."""
     from ouroboros.confined_files import physical_path, root_spellings
+    from ouroboros.task_custody import child_drive_candidates
+    from ouroboros.task_store import read_document
 
-    spellings = root_spellings(canonical)
-    root = spellings[0]
-    candidates = [root / "state" / "headless_tasks" / task_id / "data", root / "task_drives" / task_id]
+    strict = bool(strict or on_error is not None)
+
+    def _fail(path: pathlib.Path, exc: Exception) -> bool:
+        if on_error is not None:
+            on_error(path, exc)
+            return True
+        if strict:
+            raise exc
+        return False
+
     try:
-        from ouroboros.task_custody import child_drive_candidates
-        from ouroboros.task_store import read_document
+        spellings = root_spellings(canonical)
+    except Exception as exc:
+        _fail(pathlib.Path(canonical), exc)
+        return []
+    root, found, seen = spellings[0], [], set()
+    for path in (root / "state" / "headless_tasks" / task_id / "data", root / "task_drives" / task_id):
+        seen.add(path)
+        try:
+            if retained_child_root(canonical, path, task_id, strict=strict):
+                found.append(path)
+        except Exception as exc:
+            if _fail(path, exc):
+                return found
+    try:
         row = read_document(root, task_id) or {}
-        # Rows name drives in the configured spelling, in the vocabulary the retry proof reads.
-        candidates.extend(physical_path(spellings, path) for path in child_drive_candidates(row))
-    except Exception:
-        pass
-    return list(dict.fromkeys(path for path in candidates if retained_child_root(canonical, path, task_id)))
+    except Exception as exc:
+        _fail(root, exc)
+        return found
+    for candidate in child_drive_candidates(row):  # configured spelling, matching the retry proof
+        path = physical_path(spellings, candidate)
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            if retained_child_root(canonical, path, task_id, strict=strict, _canonical_row=row):
+                found.append(path)
+        except Exception as exc:
+            if _fail(path, exc):
+                return found
+    return found
 
 
-def read_retained_task_source(root, task_id, ref, *, anchor=None):
+def read_retained_task_source(root, task_id, ref, *, anchor=None, admit_target=None):
     """Resolve retained execution or retry-predecessor bytes with the same verifier."""
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.saved_state_retirement import retired_message
@@ -110,7 +153,8 @@ def read_retained_task_source(root, task_id, ref, *, anchor=None):
     for source_root, owner in _source_locations(root, task_id, anchor=anchor):
         tried.append((source_root, owner))
         try:  # loose or packed at this placement; damage is explicit, absence tries the next one
-            return read_actor_source_bytes(source_root, owner, ref, retained=False, anchor=anchor)
+            return read_actor_source_bytes(source_root, owner, ref, retained=False, anchor=anchor,
+                                           admit_target=admit_target)
         except FileNotFoundError:
             continue
     name = pathlib.PurePosixPath(str(ref["path"])).name
@@ -162,10 +206,10 @@ def source_handle_digest(relative) -> str:
     return match[1] if len(rel.parts) == 3 and rel.parts[0] == "source_handles" and match else ""
 
 
-def retained_actor_source_read_target(root, task_id, relative):
-    """Placement alias for an advertised immutable source read, not write authority. A name gone everywhere that one
-    location's record says was retired answers with that location, so the miss there names the record."""
-    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
+def retained_actor_source_read_target(root, task_id, relative, *, target_refused=None, defer_reads=None):
+    """Placement alias, not write authority. With a deferred-read map, resolve using only placement metadata
+    and register verification at the exact target instead of opening it. A retired name still explains a miss."""
+    from ouroboros.artifacts import task_artifact_dir_path
     from ouroboros.saved_state_retirement import retired_message
 
     digest = source_handle_digest(relative)
@@ -174,14 +218,34 @@ def retained_actor_source_read_target(root, task_id, relative):
     retired = None
     for source_root, owner in _source_locations(root, task_id):
         path = task_artifact_dir_path(source_root, owner, create=False) / relative
-        if not (path.exists() or path.is_symlink()) and packs.materialize_handle(source_root, owner, relative) is None:
-            retired = retired or (path if retired_message(source_root, owner, pathlib.PurePosixPath(relative).name) else None)
-            continue  # a packed handle is written back beside its name first
-        ref = {"kind": "task_source", "root": "artifact_store", "path": relative,
-               "size": path.stat().st_size, "sha256": digest}
-        read_actor_source_bytes(source_root, owner, ref)
-        return path.resolve(strict=True)
+        target = path.resolve(strict=False)
+        if target_refused is not None and target_refused(target):
+            return target  # let the file-admission owner publish the refusal; no materialization
+        loose = path.exists() or path.is_symlink()
+        if defer_reads is not None:
+            if loose or packs.has_packed_handle(source_root, owner, relative):
+                defer_reads.setdefault(target, {}).setdefault(
+                    digest, partial(_verify_retained_handle, source_root, owner, relative, digest, path,
+                                    restore=not loose, exact=target))
+                return target
+        elif loose or packs.materialize_handle(source_root, owner, relative) is not None:
+            _verify_retained_handle(source_root, owner, relative, digest, path)
+            return path.resolve(strict=True)
+        retired = retired or (path if retired_message(source_root, owner, pathlib.PurePosixPath(relative).name) else None)
     return retired
+
+
+def _verify_retained_handle(root, owner, relative, digest, path, *, restore=False, exact=None):
+    from ouroboros.artifacts import read_actor_source_bytes
+
+    if exact is not None and path.resolve(strict=False) != exact:
+        raise ValueError("retained source placement changed after admission")
+    if restore:
+        packs.materialize_handle(root, owner, relative)
+    ref = {"kind": "task_source", "root": "artifact_store", "path": relative,
+           "size": path.stat().st_size, "sha256": digest}
+    read_actor_source_bytes(root, owner, ref, retained=exact is None)
+    return {"sha256": digest, "size": ref["size"]}
 
 
 def manifest_version_ref(root: pathlib.Path, digest: str) -> dict:

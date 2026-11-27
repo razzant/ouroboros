@@ -2,11 +2,11 @@
 
 REASON-TO-CHANGE (why this is its own module and not part of ``llm.py``): it owns
 MUTABLE EXTERNAL PROVIDER FACTS — which upstream families' opaque reasoning
-artifacts survive a same-model cross-provider switch. That is an entry in the
-registry of decaying provider facts (docs/DEVELOPMENT.md), re-probed when a
-provider changes behavior; it does not change when the LLM client changes. Two
-consumers in ``llm.py``: the proactive dispatch continuity pin and the reactive
-same-model reroute.
+artifacts survive a same-model cross-provider switch, and which blocks a changed
+conversation prefix invalidates. Their records live here (indexed in DEVELOPMENT
+"External facts: unknown is not no"), re-probed when a provider changes behavior;
+they do not change when the LLM client changes. The switch facts have two consumers
+in ``llm.py``: the proactive dispatch continuity pin and the reactive same-model reroute.
 
 THE QUESTION: replaying an assistant turn that carries provider-private reasoning
 back to a DIFFERENT endpoint of the SAME model either works or 400s. It 400s only
@@ -188,6 +188,14 @@ def pop_replay_omission() -> bool:
     return omitted
 
 
+# Anthropic binds signed reasoning to the system prompt, tools and messages it followed (Opus 5.5,
+# Fable 5.1, Sonnet 5.5, Haiku 5.5): accounts created from 2026-08-31 answer a mismatch with 400,
+# older ones log it unless opted in (migration guide, Breaking change 3,
+# https://platform.claude.com/docs/en/models/fable-5-1/migration-guide#breaking-changes; direct
+# Opus 5.5 probe 2026-10-21). By owner decision of 2026-10-21 a prefix change retires signed
+# ``anthropic-*`` blocks on all routes and accounts (``transcript_prefix.retire_unbound_reasoning``).
+# Re-probe the exact route and account before editing: excess trust causes 400s, excess
+# retirement loses reasoning.
 def _prefix_bound_detail(entry: Any) -> bool:
     return isinstance(entry, dict) and str(entry.get("format") or "").startswith("anthropic-")
 

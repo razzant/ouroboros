@@ -20,6 +20,10 @@
 // unknown outcome (no readable reply, saved null, or written but unverified/unrecorded) blocks Save
 // until Check status; saving again over an unconfirmed attempt is then an explicit owner action under a
 // NEW request id. Only fixed, code-driven copy is shown: a reply's free text is never rendered.
+// Beside Save, a status read that names the request's own skill (`skill`, from a server that knows the allow)
+// offers one explicit "Save and allow <skill>" ("…, allow and turn on …" while nothing was chosen for its switch):
+// it sends `allow` with the files, installation and fields the form showed. Enter and Save never send it; an older server shows
+// no such facts, so the form offers Save alone. The card then says the save, the allow and the switch apart.
 import { apiClient } from './api_client.js';
 import { bindDialogFocus } from './ui_interactions.js';
 import { bindSecretReveal } from './settings_secrets.js';
@@ -36,6 +40,8 @@ const REFUSAL = {
     secret_fields_mismatch: ['secret.error_mismatch', 'The form no longer matches the request; nothing was saved. Close it and open it again.'],
     observed_required: ['secret.error_mismatch', 'The form no longer matches the request; nothing was saved. Close it and open it again.'],
     secret_request_stale: ['secret.error_stale', 'The skill no longer maps these fields to the same Settings keys; nothing was saved. Ask Ouroboros to request it again.'],
+    allow_invalid: ['secret.error_mismatch', 'The form no longer matches the request; nothing was saved. Close it and open it again.'],
+    secret_allow_stale: ['secret.error_allow_stale', "The skill's files or installation changed after the form read them, so nothing was saved or allowed. Review the form and choose again."],
     settings_busy: ['secret.error_busy', 'Settings are being saved elsewhere; nothing was saved. Try again.'],
     settings_locked: ['secret.error_busy', 'Settings are being saved elsewhere; nothing was saved. Try again.'],
     secret_save_failed: ['secret.error_failed', 'Settings could not be written; nothing was saved. Try again.'],
@@ -94,20 +100,141 @@ function setLines(container, className, lines) {
     return true;
 }
 
-/** What one reader of the key can read, from the host's facts (a grant is never inferred here). */
-export function readerLine(row) {
-    const state = row.enabled ? tr('secret.reader_enabled', 'enabled') : tr('secret.reader_disabled', 'disabled');
-    let grant;
-    if (row.grant_unknown) grant = tr('secret.reader_grant_unknown', 'its grant could not be read');
-    else if (row.unsupported) grant = tr('secret.reader_unsupported', 'this skill type receives no Settings keys');
+// Progress of one recorded Save and allow. A concrete result can resolve unknown; a stale
+// pending observation cannot. Reader facts belong to the chosen phase, never to another one.
+const ALLOW_PHASE = new Map(['requested', 'running', 'deferred', 'unknown', 'granted', 'refused']
+    .map((state, i) => [state, Math.min(i + 1, 5)]));
+const hasReaders = (outcome) => Array.isArray(outcome.consumers) || outcome.consumers_unknown === true;
+
+/** One question's secret outcome from two observations of the same save: the more advanced allow wins with its own
+ * reader snapshot; an older frame (a pending reply, a detail read or history) never takes a result back. */
+export function mergeSecretOutcome(previous, incoming) {
+    if (!incoming?.event) return previous;
+    if (!previous?.event) return incoming;
+    if (previous.event !== incoming.event || (previous.at && incoming.at && previous.at !== incoming.at)) return previous;
+    const before = previous.allow, after = incoming.allow;
+    const a = ALLOW_PHASE.get(before?.state) || 0, b = ALLOW_PHASE.get(after?.state) || 0;
+    const advance = b > a || (a === b && before?.state === after?.state
+        && ((after?.resolved_at && !before?.resolved_at) || (!hasReaders(previous) && hasReaders(incoming))));
+    const chosen = advance ? incoming : previous;
+    // A later delivery can confirm that the asker had ended, without changing the grant result.
+    return !chosen.late && (previous.late || incoming.late) ? { ...chosen, late: true } : chosen;
+}
+
+/** A skill's switch and its grant coverage, either now (live form) or in the recorded result (`historical`): the
+ * host's facts, never an inferred grant or readiness. */
+export function readerLine(row, { historical = false } = {}) {
+    const state = historical
+        ? (row.enabled ? tr('secret.reader_was_on', 'was on') : tr('secret.reader_was_off', 'was off'))
+        : (row.enabled ? tr('secret.reader_enabled', 'enabled') : tr('secret.reader_disabled', 'disabled'));
+    const reads = row.reads || [];
+    const asks = fmt(historical ? 'requested {keys}' : 'asks for {keys}', { keys: list(reads) });
+    let right;
+    if (row.grant_unknown) right = tr('secret.reader_grant_unknown', 'its access could not be read');
+    else if (row.unsupported) right = historical ? tr('secret.reader_was_unsupported', 'this skill type received no Settings keys')
+        : tr('secret.reader_unsupported', 'this skill type receives no Settings keys');
     else {
-        const missing = (row.reads || []).filter((key) => !(row.granted || []).includes(key));
-        grant = missing.length ? fmt('needs {keys} granted in Skills', { keys: list(missing) })
-            : tr('secret.reader_covered', 'its grant covers it');
-        if (missing.length && row.enabled)
-            grant += tr('secret.reader_blocked', '; after saving, this enabled skill cannot run until the keys are granted');
+        const granted = reads.filter((key) => (row.granted || []).includes(key));
+        const missing = reads.filter((key) => !granted.includes(key));
+        right = !missing.length ? (historical ? tr('secret.reader_was_allowed', 'was allowed to read it')
+            : tr('secret.reader_allowed', 'allowed to read it'))
+            : granted.length ? fmt(historical ? 'was allowed to read {granted}, not {missing}'
+                : 'allowed to read {granted}, not {missing}', { granted: list(granted), missing: list(missing) })
+                : historical ? tr('secret.reader_was_not_allowed', 'was not allowed to read it')
+                    : tr('secret.reader_not_allowed', 'not allowed yet');
     }
-    return fmt('{name} · {state} · {grant}', { name: row.name, state, grant });
+    return fmt('{name} · {state} · {asks} · {right}', { name: row.name, state, asks, right });
+}
+
+// Why an allow gave no access, and why the skill was not turned on: fixed copy per typed reason.
+const ALLOW_REASON = {
+    skill_changed: ['secret.allow_reason_changed', 'its files changed after the form showed them'],
+    skill_unavailable: ['secret.allow_reason_unavailable', 'it could not be loaded'],
+    not_admitted: ['secret.allow_reason_not_admitted', 'the files had not passed review or been explicitly accepted'],
+    unsupported: ['secret.allow_reason_unsupported', 'this skill type receives no Settings keys'],
+    not_requested: ['secret.allow_reason_not_requested', 'it no longer asks for this key'],
+    consent_unrecorded: ['secret.allow_reason_unrecorded', 'your consent could not be recorded'],
+    installation_changed: ['secret.allow_reason_installation', 'it is not the installation the form showed'],
+    installation_ended: ['secret.allow_reason_ended', 'the installation it was for ended'],
+    update_rolled_back: ['secret.allow_reason_rolled_back', 'the update was rolled back'],
+    not_started: ['secret.allow_reason_not_started', 'its grant step did not start'],
+};
+const ENABLE_REASON = {
+    switch_unreadable: ['secret.enable_reason_unreadable', 'its switch could not be read'],
+    not_allowed: ['secret.enable_reason_not_allowed', 'access was not granted'],
+    dependencies: ['secret.enable_reason_dependencies', 'its dependencies were not ready'],
+    dependencies_failed: ['secret.enable_reason_dependencies_failed', 'its dependencies could not be installed'],
+    acceptance: ALLOW_REASON.not_admitted,
+    grants: ['secret.enable_reason_grants', 'it still lacked other keys or permissions'],
+    conflict: ['secret.enable_reason_conflict', 'another enabled skill used the same tool names'],
+    load_error: ['secret.enable_reason_load_error', 'it could not start'],
+    managed_by_deployment: ['secret.enable_reason_managed', 'your organization managed it'],
+};
+
+/** The card's lines for a save's allow: access, then the switch when the pressed button named it. A settled result
+ * says what happened then, never what holds now (the owner may change either since). */
+export function allowLines(allow) {
+    if (!allow || typeof allow !== 'object' || !allow.skill) return [];
+    const skill = allow.skill;
+    const keys = list(allow.keys || []);
+    const lines = [];
+    if (allow.state === 'granted') {
+        const granted = list(allow.granted_keys || []);
+        lines.push(granted
+            ? { text: fmt('Granted {keys} to {skill} for the files shown.', { skill, keys: granted }), tone: 'ok' }
+            : { text: fmt('Access for {skill} was granted; no granted fields were recorded.', { skill }), tone: 'warn' });
+    } else if (allow.state === 'deferred') {
+        lines.push({ text: fmt('Access for {skill} to {keys} waits for these exact files to pass review or be explicitly accepted.',
+            { skill, keys }), tone: 'neutral' });
+    } else if (allow.state === 'refused') {
+        const [code, english] = ALLOW_REASON[allow.reason] || ['secret.allow_reason_refused', 'the host refused it'];
+        lines.push({ text: fmt('{skill} was not allowed: {reason}.', { skill, reason: tr(code, english) }), tone: 'warn' });
+    } else if (allow.state === 'unknown') {
+        lines.push({ text: fmt('Whether {skill} was allowed is unknown. Check it in Skills.', { skill }), tone: 'warn' });
+    } else {  // requested or running: its own step, or the question's next state, settles it
+        lines.push({ text: fmt('Allowing {skill}…', { skill }), tone: 'neutral' });
+        return lines;
+    }
+    if (!allow.enable) return lines;
+    if (allow.enabled === true) lines.push({ text: fmt('{skill} was on at the time.', { skill }), tone: 'ok' });
+    else if (allow.enable_reason === 'deferred') lines.push({ text: tr('secret.allow_turn_on_waits', 'Turn-on waits too, unless you choose Off.'), tone: 'neutral' });
+    else if (allow.enable_reason === 'owner_off') lines.push({ text: fmt('{skill} stayed off as chosen.', { skill }), tone: 'neutral' });
+    else if (allow.enabled === null || allow.enable_reason === 'unknown') lines.push({ text: fmt('Whether {skill} was on at the time is unknown.', { skill }), tone: 'warn' });
+    else {
+        const [code, english] = ENABLE_REASON[allow.enable_reason] || ['secret.enable_reason_failed', 'turning it on failed'];
+        lines.push({ text: fmt('{skill} was not turned on: {reason}.', { skill, reason: tr(code, english) }), tone: 'warn' });
+    }
+    return lines;
+}
+
+// Toned lines, rebuilt only when a line or its tone changed.
+function setToneLines(container, className, rows) {
+    const current = [...container.children].map((node) => `${node.dataset.tone || ''}|${node.textContent}`);
+    const next = rows.map((row) => `${row.tone || ''}|${row.text}`);
+    if (current.length === next.length && current.every((line, index) => line === next[index])) return false;
+    while (container.children.length) container.children[0].remove();
+    container.append(...rows.map((row) => {
+        const node = el('li', className, row.text);
+        if (row.tone) node.dataset.tone = row.tone;
+        return node;
+    }));
+    return true;
+}
+
+/** Skills whose grant already covers an asked key: a replaced value may reach them; their permissions stay the same. */
+function allowedReaders(form, consumers) {
+    const keys = form.request.fields.map((field) => field.settingKey);
+    return consumers.filter((row) => (row.granted || []).some((key) => keys.includes(key))).map((row) => row.name);
+}
+
+/** What the form may offer beside Save for the request's own skill, from a status read that names it; or null. */
+export function allowOffer(form) {
+    const skill = form.facts?.skill;
+    if (!skill?.available || !skill.supported || !skill.content_hash || !skill.installation) return null;
+    const keys = form.request.fields.map((field) => field.settingKey);
+    const covered = new Set([...(skill.granted || []), ...(skill.waiting || [])]);
+    if (keys.every((key) => covered.has(key))) return null;
+    return { skill, keys, enable: skill.switch === 'unset' };
 }
 
 /**
@@ -149,14 +276,15 @@ export function createSecretRequestForms({ apiFetch, accept = () => {}, showToas
         }
         const status = el('div', 'chat-secret-status ui-status');
         status.setAttribute('role', 'status');
+        const outcome = el('ul', 'chat-secret-outcome');
         const readers = el('ul', 'chat-secret-readers');
         const actions = el('div', 'chat-secret-actions');
         const open = button('btn btn-primary btn-sm chat-secret-open', tr('secret.enter', 'Enter secret…'));
         const cancel = button('btn btn-default btn-sm chat-secret-cancel', tr('secret.cancel_request', 'Cancel request'));
         actions.append(open, cancel);
-        box.append(fields, status, readers, actions);
+        box.append(fields, status, outcome, readers, actions);
         card.append(box);
-        views.set(card, { card, form, status, readers, actions, open, cancel });
+        views.set(card, { card, form, status, outcome, readers, actions, open, cancel });
         open.addEventListener('click', () => openDialog(form, card));
         cancel.addEventListener('click', () => cancelRequest(form));
     }
@@ -173,7 +301,8 @@ export function createSecretRequestForms({ apiFetch, accept = () => {}, showToas
             form.unknown = true;
         let changed = paintCard(view, state, outcome);
         if (!OPEN_STATES.includes(state) && state !== 'unknown') {
-            if (view.actions.isConnected) { view.actions.remove(); changed = true; }
+            // A first render's card is not in the document yet, but its actions are already inside it.
+            if (view.actions.parentNode) { view.actions.remove(); changed = true; }
             settle(form);
         } else renderDialog(form);
         return paintSubmission(form) || changed;
@@ -181,10 +310,13 @@ export function createSecretRequestForms({ apiFetch, accept = () => {}, showToas
 
     function cardStatus(form, state, outcome) {
         const fields = list(outcome.fields || form.request.fields.map((field) => field.id));
-        if (state === 'answered' && outcome.event === 'secret_replaced')
-            return fmt('Replaced in Settings: {fields}. Enabled skills may use it at their next call; some keep the old value until disabled and re-enabled.', { fields });
-        if (state === 'answered' && outcome.event === 'secret_filled')
-            return fmt('Saved to Settings: {fields}. Access and enablement are unchanged.', { fields });
+        if (state === 'answered' && SAVED_EVENTS.includes(outcome.event)) {
+            const replaced = outcome.event === 'secret_replaced';  // the save's own facts, apart from its allow
+            return [fmt(replaced ? 'Replaced in Settings: {fields}.' : 'Saved to Settings: {fields}.', { fields }),
+                outcome.allow ? '' : tr('secret.saved_only', 'This save did not grant access or turn on a skill.'),
+                replaced ? tr('secret.replaced_readers', 'Enabled skills may use it at their next call; some keep the old value until disabled and re-enabled.') : '']
+                .filter(Boolean).join(' ');
+        }
         if (state === 'closed' && outcome.interrupted_save)
             return tr('secret.cancel_interrupted', 'An earlier save was never confirmed; whether its value reached Settings is unknown.');
         if (form.pending) return tr('secret.saving', 'Saving…');
@@ -207,10 +339,12 @@ export function createSecretRequestForms({ apiFetch, accept = () => {}, showToas
             if (tone) view.status.dataset.tone = tone; else delete view.status.dataset.tone;
             changed = true;
         }
+        if (setToneLines(view.outcome, 'chat-secret-outcome-line ui-status',
+            state === 'answered' ? allowLines(outcome.allow) : [])) changed = true;
         if (state === 'answered' || !OPEN_STATES.includes(state)) {
-            const lines = state !== 'answered' ? [] : outcome.consumers_unknown
-                ? [tr('secret.readers_unknown', 'Which skills read this key could not be read.')]
-                : (outcome.consumers || []).map(readerLine);
+            const lines = state !== 'answered' ? [] : outcome.consumers_unknown || (outcome.event && !Array.isArray(outcome.consumers))
+                ? [tr('secret.readers_then_unknown', 'Which skills requested these keys at the time could not be established.')]
+                : (outcome.consumers || []).map((row) => readerLine(row, { historical: true }));
             if (setLines(view.readers, 'chat-secret-reader', lines)) changed = true;
         }
         const answerable = OPEN_STATES.includes(state) && canUse(view.card);
@@ -310,23 +444,30 @@ export function createSecretRequestForms({ apiFetch, accept = () => {}, showToas
         error.setAttribute('role', 'alert');
         error.dataset.tone = 'danger';
         const check = button('btn btn-default btn-sm secret-request-check', tr('secret.check_status', 'Check status'));
-        body.append(late, fieldsBox, readersTitle, readers, warning, error, check);
+        const allowNote = el('p', 'secret-request-allow-note');
+        body.append(late, fieldsBox, readersTitle, readers, warning, allowNote, error, check);
         const footer = el('div', 'ui-modal-actions');
         const dismiss = button('btn btn-default secret-request-cancel', tr('secret.close', 'Close'));
+        // The explicit extended action: a neutral capsule, never the primary slot and never Enter's.
+        const allow = button('btn btn-default secret-request-allow');
+        const allowLabel = el('span', 'secret-request-allow-label');
+        allow.append(allowLabel);
+        allow.hidden = true;
         const ok = button('btn secret-request-ok', tr('secret.save', 'Save'));
         ok.dataset.primary = '';  // the dialog foot's one primary action (ui.css primary slot)
-        footer.append(dismiss, ok);
+        footer.append(dismiss, allow, ok);
         panel.append(head, body, footer);
         backdrop.append(panel);
         form.dialog = { backdrop, panel, inputs, helps, readersTitle, readers, late, warning, error, check, ok, close,
-            dismiss, release: null, reveals: [], errorText: '', errorTone: 'danger', loading: true, read: null,
-            timers: new Set() };
+            dismiss, allow, allowLabel, allowNote, release: null, reveals: [], errorText: '', errorTone: 'danger',
+            loading: true, read: null, timers: new Set() };
         form.facts = null;  // an earlier form's read is not Settings now: only this form's own read decides
         // Every way out waits for a save in flight: its reply settles this form (a reopened one stayed loading).
         const hide = () => { if (!form.pending) closeDialog(form); };
         close.addEventListener('click', hide);
         dismiss.addEventListener('click', hide);
         ok.addEventListener('click', () => submit(form));
+        allow.addEventListener('click', () => submit(form, { allow: true }));
         check.addEventListener('click', () => checkStatus(form));
         backdrop.addEventListener('click', (event) => { if (event.target === backdrop) hide(); });
         host().append(backdrop);
@@ -358,17 +499,17 @@ export function createSecretRequestForms({ apiFetch, accept = () => {}, showToas
         });
         const consumers = form.facts?.consumers || [];
         const title = form.facts && !form.facts.consumers_unknown && consumers.length
-            ? tr('secret.readers_title', 'Skills that read this key:') : '';
+            ? tr('secret.readers_title', 'Skills that request this setting:') : '';
         if (dialog.readersTitle.textContent !== title) dialog.readersTitle.textContent = title;
         setLines(dialog.readers, 'secret-request-reader', form.facts?.consumers_unknown
-            ? [tr('secret.readers_unknown', 'Which skills read this key could not be read.')]
-            : !form.facts ? [] : consumers.length ? consumers.map(readerLine)
-                : [tr('secret.readers_none', 'No installed skill reads this key yet.')]);
+            ? [tr('secret.readers_unknown', 'Which skills request this setting could not be read.')]
+            : !form.facts ? [] : consumers.length ? consumers.map((row) => readerLine(row))
+                : [tr('secret.readers_none', 'No installed skill requests this setting yet.')]);
         const replace = replacing(form);
-        const enabledReaders = consumers.filter((row) => row.enabled).map((row) => row.name);
-        dialog.warning.textContent = !replace ? '' : enabledReaders.length
-            ? fmt('Replace overwrites the saved value. Enabled skills that read it ({skills}) may use the new value on their next call; some keep the old one until you disable and re-enable them in Skills.', { skills: list(enabledReaders) })
-            : tr('secret.replace_warning', 'Replace overwrites the saved value; it cannot be restored from here.');
+        const allowed = allowedReaders(form, consumers);
+        dialog.warning.textContent = !replace ? '' : allowed.length
+            ? fmt('Replace overwrites the saved value. Other skills’ permissions stay the same; those already allowed to read it ({skills}) may get the new value.', { skills: list(allowed) })
+            : tr('secret.replace_warning', 'Replace overwrites the saved value; it cannot be restored from here. Other skills’ permissions stay the same.');
         dialog.late.textContent = form.state === 'expired_terminal'
             ? tr('secret.finished_form', 'The task that asked has finished. Saving still stores the key; it does not resume that work.') : '';
         dialog.error.textContent = dialog.errorText;
@@ -379,6 +520,42 @@ export function createSecretRequestForms({ apiFetch, accept = () => {}, showToas
             : replace ? tr('secret.replace', 'Replace') : tr('secret.save', 'Save');
         dialog.ok.disabled = form.pending || form.unknown || !form.facts?.keys || dialog.loading || !filled(form)
             || !usable(form);
+        renderAllow(form, replace);
+    }
+
+    // The extended action and the one note that says, before the press, what it changes and for whom.
+    function renderAllow(form, replace) {
+        const dialog = form.dialog;
+        const skill = form.unknown || dialog.loading ? null : form.facts?.skill;
+        const offer = skill ? allowOffer(form) : null;
+        const name = skill?.name || form.request.pluginName;
+        const label = !offer ? '' : offer.enable
+            ? fmt(replace ? 'Replace, allow and turn on {skill}' : 'Save, allow and turn on {skill}', { skill: name })
+            : fmt(replace ? 'Replace and allow {skill}' : 'Save and allow {skill}', { skill: name });
+        if (dialog.allowLabel.textContent !== label) dialog.allowLabel.textContent = label;
+        dialog.allow.hidden = !offer;
+        dialog.allow.disabled = !offer || dialog.ok.disabled;
+        const keys = list(form.request.fields.map((field) => field.settingKey));
+        const parts = [];
+        if (offer) {
+            if (skill.admitted) parts.push(offer.enable
+                ? fmt('Allow access to {keys} for {skill} and request turn-on.', { skill: name, keys })
+                : fmt('Allow access to {keys} for {skill}.', { skill: name, keys }));
+            else {
+                parts.push(fmt('Access to {keys} for {skill} waits for these exact files to pass review or be explicitly accepted. This button does not approve the files.',
+                    { skill: name, keys }));
+                if (offer.enable) parts.push(tr('secret.allow_turn_on_waits', 'Turn-on waits too, unless you choose Off.'));
+            }
+            if (!replace) parts.push(tr('secret.allow_others_same', 'Other skills’ permissions stay the same.'));  // Replace says it
+            if (skill.switch === 'off') parts.push(fmt('{skill} stays off; it was turned off.', { skill: name }));
+        } else if (skill?.available && (skill.waiting || []).length)
+            parts.push(fmt('Access for {skill} already waits for these exact files to pass review or be explicitly accepted.', { skill: name }));
+        if (parts.length && skill?.installation && skill.content_hash)
+            parts.unshift(fmt('Skill installation {installation} · File revision {revision}.', {
+                installation: skill.installation, revision: skill.content_hash.replace(/^sha256:/, '').slice(0, 12),
+            }));
+        const note = parts.join(' ');
+        if (dialog.allowNote.textContent !== note) dialog.allowNote.textContent = note;
     }
 
     function setMessage(form, text, tone = 'danger') {
@@ -394,7 +571,8 @@ export function createSecretRequestForms({ apiFetch, accept = () => {}, showToas
         if (!body || typeof body !== 'object') return;
         if (!(Array.isArray(body.keys) || body.keys_unknown || Array.isArray(body.consumers) || body.consumers_unknown)) return;
         form.facts = { keys: body.keys || null, keys_unknown: Boolean(body.keys_unknown),
-            consumers: body.consumers || [], consumers_unknown: Boolean(body.consumers_unknown) };
+            consumers: body.consumers || [], consumers_unknown: Boolean(body.consumers_unknown),
+            skill: body.skill && typeof body.skill === 'object' ? body.skill : null };
         if (form.dialog) Object.assign(form.dialog, { loading: false, statusFailed: false });
     }
 
@@ -530,21 +708,34 @@ export function createSecretRequestForms({ apiFetch, accept = () => {}, showToas
             return;
         }
         form.unknown = false;  // a definite refusal ends the doubt that releasing a stalled wait left
+        const shownInstallation = form.facts?.skill?.installation;
         takeFacts(form, body);
         if (body.reason_code === 'secret_key_state_changed') {
             setMessage(form, replacing(form)
                 ? tr('secret.error_now_set', 'This key got a value in Settings after the form opened, so your entry was not saved. Replace overwrites that value.')
                 : tr('secret.error_now_cleared', 'This key was cleared in Settings after the form opened, so your entry was not saved. Save fills it.'), 'warn');
+        } else if (body.reason_code === 'secret_allow_stale' && shownInstallation && body.skill?.installation
+                && body.skill.installation !== shownInstallation) {
+            setMessage(form, tr('secret.error_allow_reinstalled',
+                'This is a different installation of the skill. Nothing was saved or allowed. Review the recipient and choose again.'), 'warn');
         } else setMessage(form, tr(...(REFUSAL[body.reason_code] || REFUSED)));
         repaintCards(form);
         keepFocus(form, previous);
     }
 
-    async function submit(form) {
+    async function submit(form, { allow: allowing = false } = {}) {
         if (form.pending || form.unknown || !form.dialog || !filled(form) || !usable(form) || !form.facts?.keys) return;
+        const offer = allowing ? allowOffer(form) : null;
+        if (allowing && !offer) return;
         const previous = globalThis.document?.activeElement;
         const values = Object.fromEntries(form.dialog.inputs.map((input) => [input.dataset.secretField, input.value]));
         const observed = Object.fromEntries((form.facts.keys || []).map((row) => [row.id, Boolean(row.configured)]));
+        // The files and fields the form showed, and whether the pressed label named turning on.
+        const allow = offer ? { content_hash: offer.skill.content_hash, installation: offer.skill.installation,
+            fields: form.request.fields.map((field) => field.id), enable: offer.enable } : null;
+        const choice = allow ? `allow:${allow.content_hash}:${allow.installation}:${allow.enable}` : 'save';
+        if (form.requestChoice !== choice) form.requestId = '';  // another action is another request
+        form.requestChoice = choice;
         if (!form.requestId) form.requestId = nonce();
         const attempt = { dialog: form.dialog, late: false, read: null };
         form.attempt = attempt;
@@ -552,7 +743,7 @@ export function createSecretRequestForms({ apiFetch, accept = () => {}, showToas
         setMessage(form, '');
         repaintCards(form);
         const call = Promise.resolve().then(() => apiClient.saveSecretToken({ request_id: form.requestId,
-            decision_id: decisionOf(form), values, observed }, transport)).then(
+            decision_id: decisionOf(form), values, observed, ...(allow ? { allow } : {}) }, transport)).then(
             (body) => ({ body, failure: null }),
             (error) => ({ body: error?.body && typeof error.body === 'object' ? error.body : null, failure: error || {} }),
         ).finally(() => { Object.keys(values).forEach((key) => { values[key] = ''; }); });

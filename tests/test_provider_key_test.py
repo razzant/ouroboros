@@ -10,6 +10,7 @@ import json
 import types
 
 import httpx
+from tests._ollama import install_http as install_http
 import pytest
 
 import ouroboros.gateway.models as provider_api
@@ -307,6 +308,10 @@ def test_compatible_discovery_and_probe_share_the_legacy_pair_never_a_mixed_one(
 
     status, body = _post({"provider_id": "openai-compatible"})
 
+    if not legacy_key:
+        assert status == 200 and body == {"ok": False, "error": "Provider is not configured"}
+        assert not calls
+        return
     assert status == 200 and body == {"ok": True}
     expected = (legacy_key, "https://legacy.example/v1")
     assert calls == [("catalog", *expected), ("probe", *expected)]
@@ -415,6 +420,43 @@ def test_provider_test_of_an_added_key_takes_a_model_its_own_server_serves():
     assert pick("openai-compatible", settings, "alpha") == "openai-compatible@alpha::only-alpha"
     assert pick("openai-compatible", settings, "gamma") == ""  # its own catalog decides
     assert pick("anthropic", settings, "k2") == "anthropic@k2::light"
+
+
+def test_draft_ollama_test_uses_native_window_without_saving_capabilities(monkeypatch, tmp_path, install_http):
+    from ouroboros import capability_evidence as ce, llm_ollama
+    from tests._ollama import TARGET, OllamaHTTP
+    from tests._usage_store_testing import attempt_rows_in_start_order
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    root = ce.canonical_evidence_root()
+    before = ce._read(root)
+    server = OllamaHTTP()
+    def handle(request):
+        assert request.url.host == "draft.lan" and request.headers["Authorization"] == "Bearer draft-key"
+        return server(request)
+    install_http(handle)
+    settings = {"OPENAI_COMPATIBLE_BASE_URL": "http://draft.lan/v1", "OPENAI_COMPATIBLE_API_KEY": "draft-key",
+                "OUROBOROS_MODEL": TARGET["requested_model"], "OUROBOROS_MODEL_CONTEXT_WINDOWS": {"main": 120000}}
+    assert provider_api._run_provider_test_with_settings("openai-compatible", settings) == {"ok": True}
+    (payload,) = server.posts
+    assert payload["options"]["num_ctx"] == 120000 and payload["truncate"] is False and payload["shift"] is False
+    kept = dict(ce._read(root))
+    (seen,) = kept.pop("ollama_addresses").values()  # the one thing a Test keeps: Ollama was read at this address
+    assert before == {} and not any(kept.values()) and (seen["type"], seen["version"]) == ("ollama", "0.40.16")
+    assert not llm_ollama._rejected
+    (row,) = attempt_rows_in_start_order(tmp_path)
+    assert row["source"] == "provider_test" and row["state"] == "settled"
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_legacy_compatible_test_requires_key_before_discovery_or_chat(install_http, monkeypatch, selected):
+    from tests._ollama import TARGET
+    install_http(lambda request: pytest.fail(f"unexpected {request.method} {request.url.path}"))
+    settings = {"OPENAI_BASE_URL": "http://draft.lan/v1"}
+    if selected:
+        settings["OUROBOROS_MODEL"] = TARGET["requested_model"]
+    monkeypatch.setattr(provider_api, "load_settings", lambda: settings)
+    assert _post({"provider_id": "openai-compatible"}) == (200, {"ok": False, "error": "Provider is not configured"})
 
 
 def test_catalog_is_used_only_for_compatible_discovery(monkeypatch):

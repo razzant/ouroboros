@@ -13,6 +13,7 @@ import { createSystemMessageActions } from './ui_helpers.js';
 import { tr } from './i18n.js';
 import { reasonCodesNote, taskPresentation } from './log_events.js';
 import { projectReference } from './project_reference.js';
+import { syncFoldStops } from './scroll_fade.js';
 import { outcomeTone } from './task_phase_chip.js';
 import { terminalTimeNote } from './utils.js';
 
@@ -44,42 +45,30 @@ export function appendProjectRow(addMessage, msg, text, opts) {
     });
 }
 
-// The fade says "there is more": compare with the seven-line footprint, never the extended
-// painted box. Otherwise answers between seven and nine lines alternate on every refresh.
+// The fade says "there is more": the body is clipped at the seven-line footprint and marked as a clipped fold
+// ([data-fold-clipped], the shared edge in ui.css), whatever else stands under it.
 // A row mounted while Chat is not the visible page has no layout box (clientHeight 0): it is left alone and
 // measured when Chat is shown; a resize re-measures, because the width decides the height. Answers refreshed in one
-// batch (layout_batch.js: the reading owner's write, a frame's re-measure) are measured together, then marked together,
-// then their heights read together before any margin is written: one layout serves each step for all of them.
+// batch (layout_batch.js: the reading owner's write, a frame's re-measure) are measured together, then marked together:
+// one layout serves each step for all of them.
+const measuredFolds = new WeakSet();  // answers measured at least once: a sleeping one keeps that fold
 export function refreshProjectAnswerFold(bubble) {
     if (!bubble?.classList.contains('project-answer')) return;
     measure(() => measureFold(bubble), (seen) => {
         if (!seen) return;
-        const { message, fold, folded } = seen;
+        const { message, folded } = seen;
+        measuredFolds.add(bubble);
         bubble.classList.toggle('is-folded', folded);
-        syncFold(bubble, message, folded);
-        // Compensate only the actual extension: a 180px answer borrows 12px, not the full 48px tail.
-        measure(() => (folded ? Math.max(0, parseFloat(getComputedStyle(message).height) - fold) : 0),
-            (tail) => message.style.setProperty('--project-answer-compensation', `${-tail}px`));
+        message.toggleAttribute('data-fold-clipped', folded);
+        // Folded answers offer no keyboard stops (pointer clicks still reach visible links); the Project
+        // reference leads to the complete answer. Shared stop owner preserves original/scroller tabindex.
+        syncFoldStops(message, folded);
     });
 }
 function measureFold(bubble) {
     const message = bubble.querySelector('.message');
     if (!message || !message.clientHeight) return null;
-    const fold = foldHeight(message);
-    return { message, fold, folded: message.scrollHeight > fold + 1 };
-}
-
-// Folded text offers no keyboard stops (pointer clicks still reach visible links): the Project
-// reference leads to the complete answer. The table enhancer respects the fold even
-// when it registers later; removing its tabindex lets it restore normal keyboard use.
-// Browsers also tab into overflow boxes without an explicit tabindex.
-const FOCUSABLE = 'a[href], button, input, select, textarea, summary, [tabindex], pre, .katex-display, .md-mermaid, .md-chart';
-function syncFold(bubble, message, collapsed) {
-    for (const node of message.querySelectorAll(collapsed ? FOCUSABLE : '[data-fold-stop], .md-table-wrap[tabindex="-1"]')) {
-        node.toggleAttribute('data-fold-stop', collapsed);
-        if (collapsed) node.setAttribute('tabindex', '-1');
-        else node.removeAttribute('tabindex');
-    }
+    return { message, folded: message.scrollHeight > foldHeight(message) + 1 };
 }
 
 // One set of window listeners for the app's lifetime, however many rows exist: a row holds
@@ -100,12 +89,32 @@ function refreshFoldsSoon() {
         queued = false;
         // A sleeping row ([data-laid], chat_row_sleep.js) keeps the fold it was measured with at this width: a row that
         // changes wakes, a new width wakes every row, and a feed that is not shown puts none to sleep. Measuring it
-        // would lay it out alone. A room kept away has no size to measure and keeps its folds until it is back. The rest
-        // are measured together, then marked together: one layout serves them all.
-        const due = [...document.querySelectorAll('.chat-bubble.project-answer')]
-            .filter((bubble) => !bubble.closest('[data-resizing], [data-laid], .chat-instance-panel[hidden]'));
+        // would lay it out alone. One that fell asleep before it was ever measured (a feed shown, its rows laid before
+        // this frame) has no fold yet and is measured once, or it would stay cut with no fade. A room kept away has no
+        // size to measure and keeps its folds until it is back. The rest are measured together, then marked together:
+        // one layout serves them all.
+        const due = [...(document.querySelectorAll?.('.chat-bubble.project-answer') || [])]
+            .filter((bubble) => !bubble.closest('[data-resizing], .chat-instance-panel[hidden]')
+                && !(measuredFolds.has(bubble) && bubble.closest('[data-laid]')));
         batch(() => due.forEach(refreshProjectAnswerFold));
     }));
+}
+// An answer's own box decides its fold: whatever changes its width (the window, a sidebar or panel handle, the drawer, a
+// feed whose width is still moving) is seen by observing the body itself, the moment the browser lays it out at that
+// width. A row the browser skips (far from the view while the width moves, or asleep, chat_row_sleep.js) is not laid
+// out and reports nothing; it is measured when it is laid out again, at the width it is shown at. Measured inside the
+// observer's callback, after layout, the reads cost no extra layout.
+let sizes = null;
+function observeFold(bubble) {
+    const message = bubble.querySelector?.('.message');
+    if (!message || typeof window === 'undefined' || typeof window.ResizeObserver !== 'function') return;
+    sizes ||= new window.ResizeObserver((entries) => batch(() => {
+        for (const { target } of entries) {
+            const answer = target.parentElement;
+            if (answer?.classList.contains('project-answer') && !answer.closest('.chat-instance-panel[hidden]')) refreshProjectAnswerFold(answer);
+        }
+    }));
+    sizes.observe(message);
 }
 function watchFolds() {
     if (watching || typeof window === 'undefined') return;
@@ -120,8 +129,12 @@ export function decorateProjectRow(bubble, { role = 'system', projectId = '', pr
     completionLimitation = '', limitation = completionLimitation, fold = role === 'assistant' } = {}) {
     if (!bubble || !projectId) return null;
     if (fold) {
-        bubble.classList.add('project-answer');  // measured when its markdown is written (chat.js enhanceMountedMarkdown)
+        // Measured with the answers around it a frame after it is laid out, and again when its markdown is written
+        // (chat.js enhanceMountedMarkdown): an answer whose markdown writes nothing late is measured all the same.
+        bubble.classList.add('project-answer');
         watchFolds();
+        refreshFoldsSoon();
+        observeFold(bubble);
     }
     const actions = createSystemMessageActions(projectReference({ id: projectId, name: projectName }));
     const message = bubble.querySelector('.message');

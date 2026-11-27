@@ -252,7 +252,7 @@ def _named_row(ctx, reference):
                  if row.task_id == reference["task_id"] and row.attempt == reference["attempt"]), None)
 
 
-@pytest.mark.parametrize("actor", ["own", "successor"])
+@pytest.mark.parametrize("actor", ["own", "successor", "separate_successor"])
 @pytest.mark.parametrize("history", ["small", "evicted_after", "evicted_by_author"])
 def test_a_ceiling_outcome_the_bounded_history_evicted_still_carries_the_authors_own_decision(candidate, monkeypatch, history, actor):  # noqa: F811
     """#2830, owner 9 Nov: after the last allowed review returned FAIL and the author fixed it, the next commit buys no
@@ -280,7 +280,8 @@ def test_a_ceiling_outcome_the_bounded_history_evicted_still_carries_the_authors
     if history == "evicted_after":
         _unrelated_paid_rows(ctx, 55)
     assert (_named_row(ctx, reference) is None) is (history == "evicted_after")
-    if actor == "successor":
+    author_root = ctx.drive_root
+    if actor != "own":
         write_task_result(ctx.drive_root, ctx.task_id, "completed")
         write_task_result(ctx.drive_root, "successor-task", "running")
         binding = {"successor_task_id": "successor-task"}
@@ -288,6 +289,10 @@ def test_a_ceiling_outcome_the_bounded_history_evicted_still_carries_the_authors
             "successor_task_id": "successor-task", "binding": binding, "binding_sha256": binding_sha(binding),
             "state": "admitted"}})
         ctx.task_id = "successor-task"
+        if actor == "separate_successor":
+            ctx.budget_drive_root = author_root
+            ctx.drive_root = author_root / "state/headless_tasks/successor-task/data"
+            ctx.drive_root.mkdir(parents=True)
     before = git.run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir)
     decided = {"disposition": "accepted", "rationale": "I read the FAIL, verified my fix and accept the current bytes."}
     message = ""
@@ -305,11 +310,15 @@ def test_a_ceiling_outcome_the_bounded_history_evicted_still_carries_the_authors
     assert decision["disposition"] == "accepted" and decision["decided_by_task"] == ctx.task_id
     assert decision["review_reference"] == reference
     assert load_record(ledger_root(ctx), paid_reference["review_record_id"])["verdict"] == paid_verdict
-    assert (_named_row(ctx, reference) is None) is (history != "small")
+    original = next((row for row in load_state(author_root).attempts if row.task_id == reference["task_id"]
+                     and row.attempt == reference["attempt"]), None)
+    assert (original is None) is (history == "evicted_after" or (history == "evicted_by_author" and actor != "separate_successor"))
     rows = load_state(ctx.drive_root).attempts
     [own] = [row for row in rows if row.task_id == ctx.task_id and row.status == "succeeded"]
     assert own.author_disposition["review_reference"] == reference, own.author_disposition
-    assert sum(row.paid for row in rows if row.task_id in {"inline-task", "successor-task"}) == 1, "no new paid wave"
+    paid = [row for root in {author_root, ctx.drive_root} for row in load_state(root).attempts
+            if row.paid and row.task_id in {reference["task_id"], ctx.task_id}]
+    assert [row.review_record_id for row in paid] == [paid_reference["review_record_id"]], "no new paid wave"
 
 
 def test_a_running_review_whose_hot_row_is_gone_is_never_taken_for_a_terminal_outcome(candidate, monkeypatch):  # noqa: F811

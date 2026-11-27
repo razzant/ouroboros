@@ -1,6 +1,6 @@
 // Main-screen Update affordance (P2): one compact pill. While an update attempt runs it names the
-// real stage; afterwards a failed or unconfirmed outcome stays on it until the owner hides it with the
-// close button beside it (owner 3A, #1818); a confirmed success never wears it (owner 1B): that record
+// real stage; afterwards a failed or unconfirmed outcome stays on it until the owner hides it with its
+// close button (owner 3A, #1818); a confirmed success never wears it (owner 1B): that record
 // lives in Dashboard -> Updates alone and cannot mask a newer version. Otherwise the pill appears when a
 // managed update is available (status is populated by the boot-time check-on-restart). The pill is a
 // pointer, not a second apply surface: clicking it opens Dashboard -> Updates, where the ONE apply flow
@@ -27,11 +27,26 @@ async function safe(fn) {
     }
 }
 
-// The capsule says one word (owner Q6=A; the concept of 21.11: «Обновить», no icon, no number): the versions and
-// commit hashes stay in Dashboard → Updates and in the capsule's title, where updatePillDetail puts them.
+// The capsule says one word (owner Q6=A; the concept of 21.11: «Обновить», no number): the versions and commit hashes
+// stay in Dashboard → Updates and in the capsule's title, where updatePillDetail puts them.
 export function updatePillText() {
     return 'Update';
 }
+
+// The capsule's look (owner 22.11: not the crimson; 24.11, «Рельс снаружи»): a neutral capsule holding the glyph of
+// what it says, beside its words, which are its name. The rail it stands in shows the glyph alone (style.css), so each
+// state the owner treats differently has its own: an update on offer the arrow up, its local caveat and a concluded
+// failure or uncertainty a warning (their tones are the capsule's), a stage the sync arrows, a needed restart, the
+// owner's step, the restart arrow (a reviewed resolution whose merge committed included), and a reviewed resolution
+// that stopped short of a conclusion (its gate blocked, its local work awaiting recovery, or its transaction gone from
+// the assisted phases) the bell: nothing runs and nothing concluded, so it is neither the stage's arrows nor an
+// outcome's warning, and like a stage it has no close. Pressed, it opens Dashboard → Updates, which says the state in
+// full.
+const PILL_GLYPHS = Object.freeze({
+    offer: ['arrow-circle-up', 'filled'], caveat: ['warning', 'filled'],
+    outcome: ['warning', 'filled'], stage: ['arrow-sync', 'filled'], restart: ['arrow-clockwise', 'regular'],
+    unresolved: ['alert', 'filled'],
+});
 
 export function updatePillDetail(status = {}) {
     const currentVersion = String(status.current_version || '');
@@ -183,13 +198,29 @@ export function preflightEvidenceRows(preflight) {
     for (const run of github.runs || []) {
         const covers = run.covered_shas?.length
             ? `\nThis run also covers: ${run.covered_shas.map((sha) => sha.slice(0, 8)).join(', ')}.` : '';
-        rows.push({ label: `${String(run.sha).slice(0, 8)} post-merge`,
-            value: `${run.conclusion || run.status || 'unknown'}${run.url ? ` ${run.url}` : ''}${covers}` });
+        // run_id is the identifier in the run's URL, not the sequential run number GitHub shows as #N, so the label says ID.
+        const exact = Number.isSafeInteger(run.run_id) && run.run_id > 0
+            && Number.isSafeInteger(run.attempt) && run.attempt > 0;
+        const identity = exact ? ` · run ID ${run.run_id}, attempt ${run.attempt}` : '';
+        const link = exact ? exactPostMergeAttemptUrl(run) : run.url;
+        // A kept observation of an attempt that had not settled says what was last seen, never what it is now.
+        const unsettled = run.retained === true && !run.conclusion && run.status && run.status !== 'completed';
+        const outcome = unsettled ? `final outcome unknown, last seen ${run.status}` : run.conclusion || run.status || 'unknown';
+        rows.push({ label: `${String(run.sha).slice(0, 8)} post-merge${identity}`,
+            value: `${outcome}${run.retained === true ? ' (previously observed)' : ''}${link ? ` ${link}` : ''}${covers}` });
     }
     if (github.missing_shas?.length) {
         rows.push({ label: 'No matching run observed', value: github.missing_shas.map((sha) => sha.slice(0, 8)).join(', ') });
     }
     return rows;
+}
+
+// The run URL supplies the existing GitHub repository; only the observed numeric identity selects the attempt.
+function exactPostMergeAttemptUrl(run) {
+    const match = typeof run.url === 'string' && run.url.match(
+        /^https:\/\/github\.com\/([A-Za-z0-9-]+\/[A-Za-z0-9._-]+)\/actions\/runs\/([1-9]\d*)(?:\/attempts\/[1-9]\d*)?$/);
+    if (!match || match[2] !== String(run.run_id)) return '';
+    return `https://github.com/${match[1]}/actions/runs/${run.run_id}/attempts/${run.attempt}`;
 }
 
 // The retained attempt's before/after samples as labelled rows of its Last attempt (owner 25.10: A). Only a number
@@ -294,10 +325,25 @@ const ASSISTED_PHASES = new Set(['materializing_assisted', 'assisted_resolution'
 // supervisor/update_merge.MARKER_CLEANUP_RETRY_PHASE: the transaction recorded its completion (a finished rollback
 // awaiting its restart included) and only cleanup is left, so an earlier unfinished report is history.
 const COMPLETION_RECORDED_PHASE = 'marker_cleanup_retry';
+// Every lane (an ordinary merge, a Replace, supervisor/update_merge.managed_assisted_postcommit) records this phase
+// with `pre_restart_smoke: pending` BEFORE its dependency and import check and `passed` after; a failed check rolls
+// the update back. ouroboros/server_restart._RESTARTABLE_UPDATE_PHASES admits the phase, so it alone proves nothing.
+const RESTART_READY_PHASE = 'pending_boot_smoke';
 
 /** Whether an update transaction phase is a reviewed resolution at work: the one reading for panel and record. */
 export function assistedUpdatePhase(phase) {
     return ASSISTED_PHASES.has(String(phase || ''));
+}
+
+/** The one reading, for the rail and Dashboard → Updates, of what an active transaction waits for before the ordinary
+ * restart: `ready` once its own check passed; `checking` until then (running, or stopped until the next start reruns
+ * it); `unknown` when it does not say (an older record or server); '' outside that phase or while its local work awaits
+ * recovery (`local_work_recovery`, when the restart defers to keep the files), which keeps its own reading. The apply's
+ * own `restart_required` answer is read beside this, never from it. */
+export function updateRestartReadiness(tx) {
+    if (!tx?.active || tx.phase !== RESTART_READY_PHASE || tx.local_work_recovery) return '';
+    const smoke = tx.pre_restart_smoke;
+    return smoke === 'passed' ? 'ready' : smoke === 'pending' ? 'checking' : 'unknown';
 }
 
 /** The still-active transaction this attempt is bound to (its `tx_attempt_id`), else null. */
@@ -399,25 +445,44 @@ export function updateAttemptView(progress, tx = null, { showRecoveryInstruction
         // Exact diagnostics stay in Details, including an older note's retry wording. The current action is said once:
         // here, unless the panel's own verdict already gives a recovery instruction.
         const retry = showRecoveryInstruction && unfinishedRecovery(progress, tx) ? RECOVERY_RETRY : '';
-        return { ...base, terminal: true, tone: outcome.tone, pill: named.pill, headline: named.headline,
+        return { ...base, terminal: true, tone: outcome.tone, pill: named.pill, headline: named.headline, says: 'outcome',
             restoreTarget: key === 'applied' ? String(progress.base_sha || '') : '',
             text: [attemptText({ ...progress, outcome: key }, Boolean(recovery)), retry, retention].filter(Boolean).join(' ') };
     }
     // Not concluded: this server's stage, a restart it needs, a reviewed resolution, or a later server's checks.
     const stage = String(progress.stage || '');
     const here = progress.active || progress.current_generation !== false;
-    const resolving = assistedUpdatePhase(boundUpdateTx(progress, tx)?.phase);
-    const [pill, headline] = progress.result === 'assisted_started'
-        // A resolver start whose transaction left the assisted phases (cleanup retry, stash recovery, a rollback or
-        // gate block) is not a resolution at work, and nothing here says how it ended.
-        ? (resolving ? ['Resolving update…', 'A reviewed resolution owns this update.']
-            : ['Update not concluded', 'This update has not concluded yet.'])
-        : progress.result === 'restart_required' && here
-            ? ['Restart needed', 'The update needs a restart to finish.']
-            : here
-                ? [PILL_STAGES[stage] || 'Updating…', UPDATE_STAGE_LABELS[stage] || 'Updating…']
-                : ['Confirming update…', 'Waiting for the restarted server to confirm the update…'];
-    return { ...base, terminal: false, tone: 'neutral', pill, headline, text: retention };
+    const assisted = progress.result === 'assisted_started';
+    const bound = boundUpdateTx(progress, tx);
+    // Local work awaiting recovery outranks the phase it left behind, as in Dashboard → Updates: no work goes on and the
+    // in-app restart defers, so it is neither the stage nor the restart.
+    const local = Boolean(bound?.local_work_recovery);
+    const resolving = assistedUpdatePhase(bound?.phase) && !local;
+    // A reviewed resolution whose merge committed needs the restart any update does once its own check passed. Its own
+    // transaction says so, whichever server recorded the start; the headline is the panel's own sentence, so
+    // Dashboard → Updates says it once. Until that check passes it is the check's stage, as an ordinary update's is.
+    const readiness = assisted ? updateRestartReadiness(bound) : '';
+    const ready = readiness === 'ready';
+    const checking = readiness === 'checking';
+    const restart = progress.result === 'restart_required' && Boolean(here);
+    const [pill, headline] = ready ? ['Restart needed', 'An update is waiting for a restart to finish.']
+        : checking ? [PILL_STAGES.checking, UPDATE_STAGE_LABELS.checking]
+        : assisted
+            // A resolver start whose transaction left the assisted phases without awaiting its restart (cleanup retry,
+            // local work to recover, a rollback or gate block, a check it does not record) is not a resolution at work,
+            // and nothing here says how it ended.
+            ? (resolving ? ['Resolving update…', 'A reviewed resolution owns this update.']
+                : ['Update not concluded', 'This update has not concluded yet.'])
+            : restart
+                ? ['Restart needed', 'The update needs a restart to finish.']
+                : here
+                    ? [PILL_STAGES[stage] || 'Updating…', UPDATE_STAGE_LABELS[stage] || 'Updating…']
+                    : ['Confirming update…', 'Waiting for the restarted server to confirm the update…'];
+    // The capsule's glyph follows these words (PILL_GLYPHS): work going on (its check included) is the stage, the
+    // restart the owner's step, and a resolution neither at work, nor awaiting its restart, nor concluded its own
+    // unresolved mark.
+    const says = ready || restart ? 'restart' : assisted && !resolving && !checking ? 'unresolved' : 'stage';
+    return { ...base, terminal: false, tone: 'neutral', pill, headline, text: retention, says };
 }
 
 /** A request that never reached Ouroboros in owner words (errorWords); the server's own words are kept as they are. */
@@ -580,7 +645,7 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
     let closeButton = null;
     let hideable = '';  // the terminal attempt the close button hides now; '' while it is not offered
     // The capsule and its close button: one notice whose end sits where the notice does (a hide on another page is
-    // no ending). The close is drawn inside the capsule's end, so no other control moves when it comes and goes.
+    // no ending). Both stand on the version's line, the close beside the capsule (style.css).
     function ensurePill() {
         let pill = document.getElementById('update-pill');
         if (!pill) {
@@ -598,7 +663,9 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
             });
             closeButton = document.createElement('button');
             closeButton.type = 'button';
-            closeButton.className = 'update-notice-close ui-hit-area';
+            // The shared neutral capsule (ui.css .btn.btn-default), sized by its tokens (style.css); its reach is the
+            // capsule family's.
+            closeButton.className = 'btn btn-default update-notice-close';
             closeButton.hidden = true;
             closeButton.setAttribute('aria-label', 'Hide this notice');
             closeButton.title = 'Hide this notice. The update record stays in Dashboard → Updates.';
@@ -608,16 +675,12 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
                 const held = document.activeElement === closeButton;
                 dismissUpdateAttempt(hideable);  // the event repaints this notice at once
                 // The control that ended the notice is gone: a keyboard reader lands on what is left of it — the
-                // capsule it unmasked, the row's own check when it unmasked none — else on the sidebar's last
-                // row, never on the page.
-                if (held) {
-                    const rows = document.body.querySelectorAll?.('#primary-sidebar [data-nav-page]') || [];
-                    (pill.hidden ? (checker && !checker.hidden ? checker : [...rows].pop()) : pill)?.focus?.({ preventScroll: true });
-                }
+                // capsule it unmasked, the row's own check when it unmasked none — else beside the row (landFocus).
+                if (held) landFocus(pill, checker);
             });
             ownedNotice.append(pill, closeButton);
-            // The row the page gives the version (pages.js renderNavFoot); an older page without it (v7.7.0's
-            // sidebar) keeps the capsule beside the version itself, where it always stood.
+            // The row the page gives the version (the column's foot: index.html, or pages.js mountNavRail); an older
+            // page without it (v7.7.0's sidebar) keeps the capsule beside the version itself, where it always stood.
             if (row) row.appendChild(ownedNotice);
             else if (version?.parentElement) version.parentElement.insertBefore(ownedNotice, version.nextSibling);
             else document.body.appendChild(ownedNotice);
@@ -625,11 +688,41 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
         return pill;
     }
 
-    // The version row (pages.js renderNavFoot): the version in its check, the check's answer and its words for readers.
+    // The capsule's glyph and words, written when what it says changes (PILL_GLYPHS): the translation overlay keeps
+    // rewriting the words it put in place, as it does every other authored text.
+    let pillSays = '';
+    function paintPill(pill, words, kind) {
+        if (pillSays === `${kind}:${words}` && pill.querySelector?.('.update-pill-words')) return;
+        pillSays = `${kind}:${words}`;
+        const [name, style] = PILL_GLYPHS[kind];
+        const glyph = Object.assign(document.createElement('span'), { className: 'update-pill-glyph' });
+        glyph.dataset.says = kind;
+        glyph.innerHTML = fluentIcon(name, 16, style);
+        const said = Object.assign(document.createElement('span'), { className: 'update-pill-words' });
+        said.textContent = words;
+        pill.replaceChildren(glyph, said);
+    }
+
+    // The version row (the column's foot): the version in its check, the check's answer and its words for readers.
     const version = document.getElementById('nav-version');
     const row = version?.closest?.('.sidebar-foot-meta') || null;
+
+    // Where a keyboard reader lands when the update control it held goes away, and only then: the first of `kept` that
+    // still shows (what is left of the notice or the row, in the order each caller names), else the rail's last
+    // destination, Settings: the version row is the column's foot after the Projects (owner 25.11), the rail its
+    // sibling. Never Main's row, which follows the rail in document order (owner 24.11, «Рельс снаружи»), and never the
+    // page. Every page this module mounts in holds the row in that foot: mountNavRail composes it for a retained
+    // v7.7.0 to v7.12 document as well (tests/test_ui_shell_legacy_browser.py), so no wider fallback is reachable,
+    // and a page with no version row, which none ships, gets no landing of ours.
+    function landFocus(...kept) {
+        const rail = row?.closest?.('.nav-rail')
+            || row?.parentElement?.querySelector?.('.nav-rail') || null;
+        const beside = [...(rail?.querySelectorAll?.('[data-nav-page]') || [])].pop();
+        const landing = [...kept, beside].find((node) => node?.isConnected && !node.hidden);
+        landing?.focus?.({ preventScroll: true });
+    }
     let checker = null;
-    let glyph = null;
+    let slot = null;
     let note = null;
     let said = null;
     // The channel epoch of this row's check in flight, or null. A check belongs to the selection the press named, so
@@ -654,15 +747,28 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
         checker.setAttribute('aria-describedby', 'nav-check-said');
         const word = Object.assign(document.createElement('span'), { id: 'nav-version-check-word', hidden: true });
         word.textContent = 'Check for updates';
-        glyph = Object.assign(document.createElement('span'), { className: 'nav-version-glyph' });
+        const glyph = Object.assign(document.createElement('span'), { className: 'nav-version-glyph' });
         glyph.innerHTML = fluentIcon('arrow-clockwise', 14, 'regular');
+        // The check's answer is a glyph (its words read, not drawn), never the dotted status sentence. It and the
+        // check's glyph share the one place after the version, on its line.
+        note = Object.assign(document.createElement('span'), { className: 'nav-check-note', hidden: true });
+        slot = Object.assign(document.createElement('span'), { className: 'nav-version-slot' });
+        slot.append(note, glyph);
         row.insertBefore(checker, version);
-        checker.append(word, version, glyph);
-        note = Object.assign(document.createElement('span'), { className: 'nav-check-note ui-status', hidden: true });
+        checker.append(word, version, slot);
         said = Object.assign(document.createElement('span'), { id: 'nav-check-said', className: 'nav-check-said' });
         said.setAttribute('role', 'status');
-        row.append(note, said);
+        row.append(said);
         checker.addEventListener('click', press);
+    }
+
+    // The check's tooltip, written when its authored words change: the translation overlay rewrites the title in
+    // place, so writing the same English again would fight it on every paint.
+    let checkerTitle = 'Check for updates';
+    function titleCheck(words) {
+        if (checkerTitle === words) return;
+        checkerTitle = words;
+        checker.title = words;
     }
 
     let saidWords = '';
@@ -685,27 +791,32 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
         if (plain && version.parentElement === checker) {
             const held = document.activeElement === checker;
             row.insertBefore(version, checker);
-            // The control that held focus is gone: a keyboard reader lands on the capsule, else on the last row —
-            // and only onto something visible, only because this control held the focus.
-            const rows = document.body.querySelectorAll?.('#primary-sidebar [data-nav-page]') || [];
-            const landing = capsule ? ensurePill() : [...rows].pop();
-            if (held && landing && !landing.hidden) landing.focus?.({ preventScroll: true });
+            // The control that held focus is going: a keyboard reader lands on the capsule that took its place, else
+            // beside the row (landFocus) — only because this control held the focus, never back onto itself.
+            if (held) landFocus(capsule ? ensurePill() : null);
         } else if (!plain && version.parentElement !== checker) {
-            checker.insertBefore(version, glyph);
+            checker.insertBefore(version, slot);
         }
         checker.hidden = plain;
         const busy = busyEpoch === channelEpoch;
         if (busy) checker.setAttribute('aria-busy', 'true');
         else checker.removeAttribute('aria-busy');
         const shown = !plain && !busy && ['current', 'failed'].includes(outcome?.kind) ? outcome : null;
+        const failed = shown?.kind === 'failed';
+        // A failure's reason is the tooltip of the check a pointer rests on while its warning stands (and, as ever, its
+        // description for readers); the check's own name returns with the failure's end.
+        titleCheck(failed ? checkFailure(shown.reason) : 'Check for updates');
         note.hidden = !shown;
         if (!shown) return;
-        const failed = shown.kind === 'failed';
         if (failed) note.dataset.tone = 'error';
         else delete note.dataset.tone;
-        note.textContent = failed ? 'Check failed' : 'Up to date';
-        if (!failed) note.insertAdjacentHTML?.('afterbegin', fluentIcon('checkmark', 14, 'regular'));
-        note.title = failed ? checkFailure(shown.reason) : '';
+        // Its glyph and its words: the tick or the warning stands in the version's glyph's place (the one line has no
+        // room for the words, which stay the version's description and the live region's, style.css).
+        note.textContent = '';
+        note.insertAdjacentHTML?.('afterbegin', failed ? fluentIcon('warning', 14) : fluentIcon('checkmark', 14, 'regular'));
+        const words = Object.assign(document.createElement('span'), { className: 'nav-check-words' });
+        words.textContent = failed ? 'Check failed' : 'Up to date';
+        note.append(words);
     }
 
     // A press runs the one check and nothing else (never a description, a preflight, an apply or a restart); a press
@@ -834,21 +945,19 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
         const available = status?.available === true && updatesOffered(status);
         const local = Boolean(!shown && available && (status.dirty || status.local_changes !== 'absent'));
         pill.classList.toggle('has-local', local);
-        // An update on offer is the one crimson capsule (the concept of 21.11); its caveat and an attempt keep theirs.
-        const offer = !shown && available && !local;
-        pill.classList.toggle('btn-primary', offer);
-        pill.classList.toggle('btn-default', !offer);
+        // An update on offer is a neutral capsule like every other state (owner 22.11); its caveat and an attempt keep
+        // their tones.
         hideable = shown && attempt.terminal ? attempt.id : '';
         if (closeButton) closeButton.hidden = !hideable;
         pill.classList.toggle('has-close', Boolean(hideable));
         if (shown) {
-            pill.textContent = attempt.pill;
+            paintPill(pill, attempt.pill, attempt.says);
             pill.title = [attempt.headline, attempt.text].filter(Boolean).join(' ');
             pill.dataset.tone = attempt.tone;
         } else {
             delete pill.dataset.tone;
             if (available) {
-                pill.textContent = updatePillText(status);
+                paintPill(pill, updatePillText(status), local ? 'caveat' : 'offer');
                 pill.title = updatePillDetail(status);
             }
         }
@@ -856,17 +965,11 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
         if (ownedNotice) ownedNotice.hidden = pill.hidden;
         renderCheck();
         // The pill that held the focus is going away: a keyboard reader lands on the row's own visible check, else
-        // the sidebar's last row — only because this element itself held the focus, and nowhere else.
-        if (pillHeld && pill.hidden) {
-            const rows = document.body.querySelectorAll?.('#primary-sidebar [data-nav-page]') || [];
-            (checker && !checker.hidden ? checker : [...rows].pop())?.focus?.({ preventScroll: true });
-        }
-        if (closeHeld && closeButton.hidden) {
-            // The × this reader held is gone — a new attempt took the notice over, or its record changed shape: land
-            // on what is left of the row (the capsule where it stood, the row's own check), never on the page.
-            const rows = document.body.querySelectorAll?.('#primary-sidebar [data-nav-page]') || [];
-            (pill.hidden ? (checker && !checker.hidden ? checker : [...rows].pop()) : pill)?.focus?.({ preventScroll: true });
-        }
+        // beside the row (landFocus) — only because this element itself held the focus, and nowhere else.
+        if (pillHeld && pill.hidden) landFocus(checker);
+        // The × this reader held is gone — a new attempt took the notice over, or its record changed shape: land on
+        // what is left of the row (the capsule where it stood, the row's own check), else beside it.
+        if (closeHeld && closeButton.hidden) landFocus(pill, checker);
         syncSaid();
     }
 
@@ -993,7 +1096,7 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws, readStatus = 
             ownedNotice?.remove();
             if (checker) {  // the version stays, as plain text where the page put it
                 row.insertBefore(version, checker);
-                [checker, note, said].forEach((node) => node.remove());
+                [checker, said].forEach((node) => node.remove());
             }
         },
     };

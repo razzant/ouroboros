@@ -40,24 +40,97 @@ def unavailable_cost_custody() -> CostCustody:
             "pending_invocation_ids": []}
 
 
-@contextmanager
-def project_retirement_lock(drive_root: Any, project_id: str):
-    """Cross-process lock for one project's settlement/retirement decision."""
-    from ouroboros.platform_layer import (
-        acquire_exclusive_file_lock, release_exclusive_file_lock,
-    )
+def _project_lock_path(drive_root, project_id, engine):
+    from ouroboros.execution_domain import registration_engine
 
-    digest = hashlib.sha256(str(project_id or "").encode("utf-8")).hexdigest()[:24]
-    lock_path = pathlib.Path(drive_root) / "state" / "delegate_project_retirements" / f"{digest}.lock"
-    fd = acquire_exclusive_file_lock(
-        lock_path, timeout_sec=20.0, stale_sec=120.0, owner_aware_stale=True,
-    )
+    route, _store = registration_engine(engine)
+    key = str(project_id or "")
+    if route is not None:
+        key = f"{route}\0{key}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+    return pathlib.Path(drive_root) / "state" / "delegate_project_retirements" / f"{digest}.lock"
+
+
+def _take_project_lock(path, timeout):
+    from ouroboros.platform_layer import acquire_exclusive_file_lock
+
+    return acquire_exclusive_file_lock(path, timeout_sec=timeout, stale_sec=120.0, owner_aware_stale=True)
+
+
+@contextmanager
+def project_retirement_lock(drive_root: Any, project_id: str, *, engine=None, timeout_sec=20.0):
+    """Cross-process lock for one project's settlement/retirement decision."""
+    from ouroboros.platform_layer import release_exclusive_file_lock
+
+    lock_path = _project_lock_path(drive_root, project_id, engine)
+    fd = _take_project_lock(lock_path, timeout_sec)
     if fd is None:
         raise TimeoutError("project retirement lock is unavailable")
     try:
         yield
     finally:
         release_exclusive_file_lock(lock_path, fd)
+
+
+def _preparation_store(engine):
+    from ouroboros.execution_domain import registration_engine
+
+    store = registration_engine(engine)[1]
+    return hashlib.sha256(store.encode("utf-8")).hexdigest()[:24] if store else "unbound"
+
+
+@contextmanager
+def project_preparation(drive, project_id, engine, invocation_id):
+    """A process-held use, installed while the project lock (or, for the start creating the registration, the
+    route's workspace lock that its retirers also read it under) is held; it is not a START. Each preparation owns its
+    own mark (a nonce beside the start's digest): two of one start never release each other's."""
+    import uuid
+
+    from ouroboros.platform_layer import release_exclusive_file_lock
+
+    folder = _project_lock_path(drive, project_id, engine).with_suffix(".preparing")
+    token = hashlib.sha256(invocation_id.encode("utf-8")).hexdigest()[:24]
+    path = folder / f"{_preparation_store(engine)}-{token}-{uuid.uuid4().hex[:16]}.lock"
+    fd = _take_project_lock(path, 0)
+    if fd is None:
+        raise TimeoutError("registration preparation could not be held")
+    try:
+        yield
+    finally:
+        release_exclusive_file_lock(path, fd)
+        # Remove an empty bucket under both locks that admit entries (project, then workspace; busy: left).
+        from ouroboros.delegate_workspace_hold import FOLDER
+
+        try:
+            with (project_retirement_lock(drive, project_id, engine=engine, timeout_sec=0),
+                  project_retirement_lock(drive, FOLDER, engine=engine, timeout_sec=0)):
+                folder.rmdir()
+        except OSError:
+            pass
+
+
+def project_preparing(drive, project_id, engine):
+    """Called under the project and workspace locks. A live or unreadable holder keeps only this registration."""
+    from ouroboros.platform_layer import release_exclusive_file_lock
+
+    folder = _project_lock_path(drive, project_id, engine).with_suffix(".preparing")
+    store = _preparation_store(engine)
+    try:
+        paths = tuple(folder.iterdir())
+    except FileNotFoundError:
+        return False
+    for path in paths:
+        if path.suffix != ".lock" or (store != "unbound" and path.name.split("-", 1)[0] not in (store, "unbound")):
+            continue
+        fd = _take_project_lock(path, 0)  # acquire after the preparer released or was proven dead
+        if fd is None:
+            return True
+        release_exclusive_file_lock(path, fd)
+    try:
+        folder.rmdir()
+    except OSError:
+        pass
+    return False
 
 
 def summary_of(detail: Dict[str, Any]) -> Dict[str, Any]:
@@ -183,11 +256,14 @@ def cost_coverage(snapshot, txn, root) -> dict:
     be collected and stays unrecorded only.
     """
     from ouroboros.delegate_custody import TERMINAL_STATES
+    from ouroboros.execution_domain import is_peer_ref
 
     root = pathlib.Path(root).resolve()
     ledger_roots = {"": root}
     missing = set()
     for rid, entry in sorted(snapshot["runs"].items()):
+        if is_peer_ref(entry.engine_ref):
+            continue  # paid and booked on the receiving Ouroboros, never on the sender's ledger or caps
         address = str(entry.ledger_root or "")
         if address not in ledger_roots:
             ledger_roots[address] = pathlib.Path(address).resolve()
@@ -201,11 +277,14 @@ def cost_coverage(snapshot, txn, root) -> dict:
     return {**snapshot, "unrecorded": missing,
             "closed_unrecorded": {rid for rid in missing if snapshot["runs"][rid].settled},
             "open": {rid for rid, entry in snapshot["runs"].items()
-                     if not entry.settled and entry.terminal_state not in TERMINAL_STATES}}
+                     if not is_peer_ref(entry.engine_ref)
+                     and not entry.settled and entry.terminal_state not in TERMINAL_STATES}}
 
 
 def with_cost_coverage(summary, joined, *, task_id="", root_task_id=""):
     """Project the already joined facts onto one bucket without rereading receipts."""
+    from ouroboros.execution_domain import is_peer_ref
+
     def selected(task, tree):
         return (not task_id or task == task_id) and (not root_task_id or (tree or task) == root_task_id)
 
@@ -215,7 +294,8 @@ def with_cost_coverage(summary, joined, *, task_id="", root_task_id=""):
         "unrecorded_run_ids": sorted(runs & joined["unrecorded"]),
         "closed_unrecorded_run_ids": sorted(runs & joined["closed_unrecorded"]),
         "pending_invocation_ids": sorted({str(p["invocation_id"]) for p in joined["pending"]
-                                          if selected(p.get("task_id"), p.get("root_task_id"))}),
+                                          if not is_peer_ref(p.get("engine_ref"))
+                                          and selected(p.get("task_id"), p.get("root_task_id"))}),
     }
     result = {**summary, "cost_custody": coverage}
     if cost_coverage_open(result):

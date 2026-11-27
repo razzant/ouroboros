@@ -135,6 +135,6 @@ test('a delegated child keeps its leaf dispatch effort visible while the coordin
         assert.match(facts, /<dt>Coordinator<\/dt><dd>codex=gpt-6-astra<\/dd>/);
         assert.doesNotMatch(facts, /<dt>Effort<\/dt>/, 'no duplicate effort row');
         // The executor's own sentence is the first row of the same details.
-        assert.match(facts, /^<div class="chat-live-fact"><dt>Executor<\/dt><dd>Delegated to your Claude Code account — 1 run settled \(1 ok\), \$0\.00 subscription<\/dd><\/div>/);
+        assert.match(facts, /^<div class="chat-live-fact"><dt>Executor<\/dt><dd>Delegated to your Claude Code account — 1 run settled \(1 ok\), \$0\.00 subscription — successful run model: claude-opus-5-5\[1m\]<\/dd><\/div>/);
     } finally { f.close(); }
 });

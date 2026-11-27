@@ -566,7 +566,8 @@ TITLE_BAND = """({band, allowed}) => {
             t.dispatchEvent(press);
             const messages = window.__chromeMessages.map(m => m.type);
             if (control) {
-                controls.add(control.id || control.querySelector('input')?.id || control.textContent.trim());
+                controls.add(control.matches('[data-shell-back]') ? 'back'
+                    : control.id || control.querySelector('input')?.id || control.textContent.trim());
                 if (messages.length || press.defaultPrevented) unexpected.push({x, y, messages, control: control.outerHTML});
             } else if (messages.join() === 'drag' && press.defaultPrevented) {
                 drags++;
@@ -594,11 +595,12 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
     try:
         boot(page, shell_ui)
         page.evaluate("window.__ouroWindowChrome({doc: performance.timeOrigin, top: 52, start: 78})")
-        page.locator(f'[data-nav-page="{page_name}"]').click()
-        page.locator(f'#page-{page_name}').wait_for(state='visible')
+        # Extensions opens through Settings' door (owner 24.11), so its band leads with the ordinary Back to Settings.
+        open_nav(page, page_name)
         settle(page)
         allowed = ('.app-page-lead .app-tab, .app-page-lead .files-crumb, .settings-search, '
                    '.app-page-header #log-filters button, .app-page-header #btn-clear-logs, '
+                   '.app-page-header [data-shell-back], '
                    '.app-page-toolbar :is(#skills-refresh, #skills-update-all, #files-refresh, '
                    '#files-new-file, #files-new-dir, #files-paste)')
         facts['band'] = page.evaluate(TITLE_BAND, {'band': 52, 'allowed': allowed})
@@ -611,7 +613,7 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
         elif page_name == 'settings':
             assert band['controls'] == ['settings-search'] and band['firstTabTop'] is None, facts
         elif page_name == 'skills':  # Extensions (#3921): its pages are rail rows below the band, no tab strip in it.
-            assert band['controls'] == ['skills-refresh'] and band['firstTabTop'] is None, facts
+            assert sorted(band['controls']) == ['back', 'skills-refresh'] and band['firstTabTop'] is None, facts
         else:
             assert band['controls'], facts
             if page_name != 'files':
@@ -665,29 +667,33 @@ MOVING = "n => document.querySelectorAll('#nav-projects-list .status-mark[data-s
 SIDEBAR_FACTS = """() => {
     const side = document.getElementById('primary-sidebar');
     const rows = [...side.querySelectorAll('#nav-projects-list > .nav-project-item')].filter((e) => !e.hidden);
-    const zone = document.getElementById('nav-projects').getBoundingClientRect();
-    const tools = side.querySelector('.nav-sections').getBoundingClientRect();
+    const box = (sel) => side.querySelector(sel)?.getBoundingClientRect();
+    const foot = box('.sidebar-foot-meta'), projects = box('#nav-projects');
+    const top = sel => { const r = box(sel); return r ? Math.round(r.top) : null; };
+    const edge = side.getBoundingClientRect().bottom - parseFloat(getComputedStyle(side).paddingBottom);
     return {rows: rows.map((e) => e.querySelector('[data-project-id]').dataset.projectId),
-            gapToTools: Math.round(tools.top - zone.bottom), toolsTop: Math.round(tools.top),
-            toolsBottom: Math.round(side.querySelector('.nav-system-rows').getBoundingClientRect().bottom),
-            footTop: Math.round(side.querySelector('.sidebar-foot-meta').getBoundingClientRect().top),
-            sidebarBottom: Math.round(side.getBoundingClientRect().bottom),
-            // The foot: how far the version row's bottom sits above the column's content edge (0 = on the edge), and
-            // whether the column itself scrolls (the short-window fallback, where the foot is pinned over it).
-            footGap: Math.round(side.getBoundingClientRect().bottom - parseFloat(getComputedStyle(side).paddingBottom)
-                - side.querySelector('.sidebar-foot-meta').getBoundingClientRect().bottom),
-            footBelowTools: side.querySelector('.sidebar-foot-meta').getBoundingClientRect().top
-                >= side.querySelector('[data-nav-page="settings"]').getBoundingClientRect().bottom - 0.5,
+            railTop: top('.nav-rail'), sectionsTop: top('.nav-rail [data-nav-page="circles"]'),
+            settingsTop: top('.nav-rail [data-nav-page="settings"]'),
+            versionTop: foot.top, versionHeight: foot.height, versionGap: edge - foot.bottom,
+            projectsHidden: side.querySelector('#nav-projects').hidden,
+            projectGap: projects.height ? foot.top - projects.bottom : null,
+            versionOutsideRail: !document.querySelector('.nav-rail').contains(document.querySelector('.sidebar-foot-meta')),
             columnScrolls: side.scrollHeight > side.clientHeight + 1,
-            retired: side.querySelectorAll('#nav-projects-toggle, #nav-projects-count, .nav-projects-facts').length,
+            retired: side.querySelectorAll('#nav-projects-toggle, #nav-projects-count, .nav-projects-facts, .sidebar-foot, .nav-card').length,
             moving: rows.filter(e => e.querySelector('.status-mark')?.dataset.shape === 'moving')
                 .map(e => e.dataset.navProjectId)};
 }"""
 
+# style.css: the column's row gap (--space-1, 4 px) plus the foot line's own margin above it (--sidebar-foot-gap =
+# max(--space-2, (--touch-target-min - --sidebar-foot-line) / 2) = max(8, (44 - 28) / 2) = 8 px). The version row
+# stands this far off the Projects list in every phase and at both documented sizes.
+SIDEBAR_FOOT_GAP = 12
 
-@pytest.mark.parametrize('width,height', [(1108, 680), (390, 844)])
-def test_collapsed_projects_keep_only_the_pinned_ones_and_the_tools_follow(shell_ui, tmp_path, width, height):
-    """Navigation now has no collapse: Find narrows the list; its pins lead and the sections stay at the foot."""
+
+@pytest.mark.parametrize('width,height,short_width,short_height', [(1108, 680, 1108, 480), (390, 844, 320, 568)])
+def test_filtering_projects_keeps_the_pins_rail_and_version_in_place(shell_ui, tmp_path, width, height,
+                                                                    short_width, short_height):
+    """The version has its own compact row before Projects arrive and with either a full or a sparse list."""
     page = seed_page(shell_ui, width, height)
     live = [PROJECTS[3]['id'], PROJECTS[7]['id']]
     pins = [PROJECTS[1]['id'], PROJECTS[7]['id']]
@@ -696,41 +702,60 @@ def test_collapsed_projects_keep_only_the_pinned_ones_and_the_tools_follow(shell
     for project in state['projects']:
         if project['id'] in pins:
             project['name'] = 'Matched pin: ' + project['name']
+    def defer_app(route):
+        route.fulfill(content_type='text/javascript', body='')
+
     try:
         page.route('**/api/state', lambda route: route.fulfill(json=state))
         page.route('**/api/projects*', lambda route: answer_projects(route, state['projects']))
+        # Load the shipped document but defer app.js for the measurement of its pre-Projects layout.
+        page.route('**/static/app.js', defer_app)
+        page.goto(shell_ui['url'] + '/')
+        facts['before_projects'] = page.evaluate(SIDEBAR_FACTS)
+        page.unroute('**/static/app.js', defer_app)
         boot(page, shell_ui)
-        page.wait_for_function(MOVING, arg=2, timeout=20_000)
         if width < 720:
             open_drawer(page)
-        facts['open'] = page.evaluate(SIDEBAR_FACTS)
+        facts['open'] = page.wait_for_function('() => { const s = (' + SIDEBAR_FACTS + ')();'
+                                              ' return s.moving.length === 2 && s; }', timeout=20_000).json_value()
         page.locator('.nav-find-input').fill('matched pin')
         page.wait_for_function('wanted => JSON.stringify((' + ROWS + ')()) === JSON.stringify(wanted)', arg=pins)
         settle(page)
         facts['filtered'] = page.evaluate(SIDEBAR_FACTS)
         setup_browser.capture(page, f'shell-sidebar-filtered-{width}-{shell_ui["engine"]}')
+        page.set_viewport_size({'width': short_width, 'height': short_height})
+        settle(page)
+        facts['short_filtered'] = page.evaluate(SIDEBAR_FACTS)
+        setup_browser.capture(page, f'shell-sidebar-sparse-{short_width}x{short_height}-{shell_ui["engine"]}')
+        page.set_viewport_size({'width': width, 'height': height})
         page.locator('.nav-find-clear').click()
         page.wait_for_function('n => (' + ROWS + ')().length === n', arg=len(PROJECTS))
         settle(page)
         facts['cleared'] = page.evaluate(SIDEBAR_FACTS)
     finally:
-        evidence(tmp_path, f'shell-sidebar-collapse-{width}-{shell_ui["engine"]}', facts)
+        evidence(tmp_path, f'shell-sidebar-filter-{width}-{shell_ui["engine"]}', facts)
         page.close()
     expected = pins + [p['id'] for p in PROJECTS if p['id'] not in pins]
     assert facts['open']['rows'] == facts['cleared']['rows'] == expected, facts
-    assert facts['filtered']['rows'] == pins, facts
+    assert facts['filtered']['rows'] == facts['short_filtered']['rows'] == pins, facts
     assert set(facts['open']['moving']) == set(facts['cleared']['moving']) == set(live), facts
     assert facts['filtered']['moving'] == [pins[1]], facts
-    # DESIGN Navigation: Projects take the free room; sections and the foot keep the bottom edge even for two hits.
-    for phase in ('open', 'filtered', 'cleared'):
+    before = facts['before_projects']
+    assert before['projectsHidden'] and before['rows'] == [], facts
+    assert before['versionTop'] == pytest.approx(facts['open']['versionTop'], abs=1), ('no first-paint jump', facts)
+    for phase in ('before_projects', 'open', 'filtered', 'short_filtered', 'cleared'):
         side = facts[phase]
-        assert side['retired'] == 0 and 0 <= side['gapToTools'] <= 24, (phase, facts)
-        assert 0 <= side['footTop'] - side['toolsBottom'] <= 24, (phase, facts)
-        assert abs(side['toolsTop'] - facts['open']['toolsTop']) <= 1, (phase, facts)
-        assert side['footBelowTools'], (phase, facts)
-        if not side['columnScrolls']:
-            # The version row ends inside the system card: its --space-2 (8px) padding, on the desk and in the drawer.
-            assert abs(side['footGap'] - 8) <= 1, (phase, facts)
+        assert side['retired'] == 0, (phase, facts)
+        if phase not in ('before_projects', 'short_filtered'):
+            for key in ('railTop', 'sectionsTop', 'settingsTop'):
+                assert abs(side[key] - facts['open'][key]) <= 1, (phase, key, facts)
+        assert side['versionOutsideRail'] and not side['columnScrolls'], (phase, facts)
+        assert side['versionHeight'] == pytest.approx(28, abs=0.5), (phase, 'one small row', facts)
+        assert abs(side['versionGap']) <= 1, (phase, 'row ends at the content edge', facts)
+        if phase != 'before_projects':
+            # The row meets the list on the design's own spacing, from both sides: a foot adrift at the column's
+            # bottom (the 112 px gap R2 let pass) fails the upper bound, a row crowding the last project the lower.
+            assert side['projectGap'] == pytest.approx(SIDEBAR_FOOT_GAP, abs=1), (phase, 'meets the list', facts)
 
 
 DOT_FACTS = """() => {
@@ -832,8 +857,11 @@ DRAG = """async ([handleSelector, steps, dx, out]) => {
     send('pointerup');
     await frame();
     const own = (box) => box.style.getPropertyValue('--drag-width');
-    return {before, seen, after: stored(), inline: [own(side), own(panel)],
-            shown: [Math.round(side.getBoundingClientRect().width), Math.round(panel.getBoundingClientRect().width)],
+    // What the rail adds beside the sidebar's column (style.css --nav-rail-extra): the width the handle owns is the
+    // column's, the box less that share.
+    const extra = parseFloat(getComputedStyle(side).getPropertyValue('--nav-rail-extra')) || 0;
+    return {before, seen, after: stored(), inline: [own(side), own(panel)], extra,
+            shown: [Math.round(side.getBoundingClientRect().width - extra), Math.round(panel.getBoundingClientRect().width)],
             content: innerWidth - side.getBoundingClientRect().right};
 }"""
 
@@ -880,11 +908,692 @@ def test_a_handle_drag_moves_its_box_and_the_room_follows_it_frame_by_frame(shel
     index = 0 if which == 'sidebar' else 1
     assert facts['after'][index] == f"{facts['shown'][index]}px" and facts['after'][1 - index] == facts['before'][1 - index], facts
     assert facts['inline'] == ['', ''], facts
+    assert facts['extra'] == 40, ('the rail adds its 40px beside the column the handle owns', facts)
     assert facts['saved'] == [{key: facts['shown'][index]}], ('the width shown is saved once', facts)
     if which == 'panel':
         assert 581 + 16 * 30 > facts['content'], facts
         assert max(f['panel'] for f in seen) <= facts['content'] + 0.5, ('it stops at the content area', facts)
         assert abs(facts['shown'][1] - facts['content']) <= 1, ('and keeps the width shown there', facts)
+
+
+# The real sidebar handle pressed and released in place, then dragged out and back by the same step, several times: what
+# each drag stored, and the column and the box after it.
+STILL_AND_BACK = """async ([step, rounds]) => {
+    const root = document.documentElement, side = document.getElementById('primary-sidebar');
+    const handle = side.querySelector(':scope > .resize-handle'), frame = () => new Promise(r => requestAnimationFrame(r));
+    const drag = async (dx) => {
+        const box = handle.getBoundingClientRect(), y = box.top + Math.min(200, box.height / 2);
+        let x = box.left + box.width / 2;
+        const send = type => handle.dispatchEvent(new PointerEvent(type, {bubbles: true, cancelable: true, clientX: x,
+            clientY: y, pointerId: 9, pointerType: 'mouse', isPrimary: true, button: 0, buttons: type === 'pointerup' ? 0 : 1}));
+        send('pointerdown');
+        if (dx) { x += dx; send('pointermove'); await frame(); }
+        send('pointerup');
+        await frame();
+        await frame();
+        return {stored: root.style.getPropertyValue('--sidebar-width'), box: side.getBoundingClientRect().width,
+                column: side.querySelector('.sidebar-head').getBoundingClientRect().width};
+    };
+    const seen = [await drag(0)];
+    for (let i = 0; i < rounds; i += 1) { seen.push(await drag(step)); seen.push(await drag(-step)); }
+    seen.push(await drag(0));
+    return seen;
+}"""
+
+
+def test_a_sidebar_drag_stores_its_column_and_repeats_without_growing(shell_ui, tmp_path):
+    """The rail stands beside the column and the room pays for it (owner 24.11): the handle owns the column's width, so
+    a press released in place stores the width it found, and drags out and back by the same step return to it however
+    many times, the box always the column and the rail's 40px (Neon's static review, 09a6e44d: a box measured whole
+    would add the rail at every drag)."""
+    page = seed_page(shell_ui, 1108, 680)
+    facts = {'engine': shell_ui['engine']}
+    saved = []
+
+    def preferences(route):
+        if route.request.method != 'GET':
+            saved.append(json.loads(route.request.post_data or '{}'))
+        route.fulfill(json={'sidebar_width': 282, 'project_seen_revision': {}})
+    try:
+        page.route('**/api/ui/preferences', preferences)
+        boot(page, shell_ui)
+        page.wait_for_function("() => getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width').trim() === '282px'",
+                               timeout=20_000)
+        facts['seen'] = page.evaluate(STILL_AND_BACK, [30, 3])
+        for _ in range(30):  # the save is debounced
+            if saved:
+                break
+            page.wait_for_timeout(100)
+        facts['saved'] = saved
+    finally:
+        evidence(tmp_path, f'shell-sidebar-drag-repeat-{shell_ui["engine"]}', facts)
+        page.close()
+    seen = facts['seen']
+    assert [f['stored'] for f in seen] == ['282px'] + ['312px', '282px'] * 3 + ['282px'], facts
+    for f in seen:
+        width = float(f['stored'][:-2])
+        assert abs(f['box'] - (width + 40)) <= 0.5 and abs(f['column'] - (width - 25)) <= 0.5, ('the box and its column', f)
+    assert facts['saved'] and facts['saved'][-1] == {'sidebar_width': 282}, ('the last width shown is saved', facts)
+
+
+SIDEBAR_SNAPSHOT = """() => {
+    const root = document.documentElement, side = document.getElementById('primary-sidebar');
+    const rawExtra = getComputedStyle(side).getPropertyValue('--nav-rail-extra').trim();
+    return {
+        stored: root.style.getPropertyValue('--sidebar-width'),
+        box: side.getBoundingClientRect().width,
+        column: side.querySelector('.sidebar-head').getBoundingClientRect().width,
+        content: document.getElementById('content').getBoundingClientRect().width,
+        rawExtra,
+        extraUnparsed: Number.isNaN(Number.parseFloat(rawExtra)),
+    };
+}"""
+
+NO_MOTION_DRAGS = """async () => {
+    const handle = document.querySelector('#primary-sidebar > .resize-handle');
+    const frame = () => new Promise(r => requestAnimationFrame(r));
+    const box = handle.getBoundingClientRect(), x = box.left + box.width / 2, y = box.top + Math.min(200, box.height / 2);
+    const send = (type) => handle.dispatchEvent(new PointerEvent(type, {bubbles: true, cancelable: true, clientX: x,
+        clientY: y, pointerId: 11, pointerType: 'mouse', isPrimary: true, button: 0, buttons: type === 'pointerup' ? 0 : 1}));
+    send('pointerdown');
+    send('pointerup');
+    await frame();
+    await frame();
+    send('pointerdown');
+    send('pointermove');
+    await frame();
+    send('pointerup');
+    await frame();
+    await frame();
+}"""
+
+
+@pytest.mark.parametrize('raw_calc', [False, True], ids=['registered', 'raw-calc'])
+def test_preferred_sidebar_width_survives_narrow_docked_boot_no_motion_and_raw_calc_drags(shell_ui, tmp_path, raw_calc):
+    """Booting at docked 720 px with a valid 400 px desktop preference keeps CSS's display clamp (400 px box, 320 px
+    room) without posting a narrower preference; no-motion press/release and window widening never mutate it and
+    widening recovers 400 px (440 px box); repeated real drags keep the column width accurately even when
+    --nav-rail-extra is an unregistered calc() expression."""
+    page = seed_page(shell_ui, 720, 680)
+    facts = {'engine': shell_ui['engine'], 'raw_calc': raw_calc}
+    saved = []
+
+    def preferences(route):
+        if route.request.method != 'GET':
+            saved.append(json.loads(route.request.post_data or '{}'))
+        route.fulfill(json={'sidebar_width': 400, 'project_seen_revision': {}})
+
+    try:
+        if raw_calc:
+            raw_css, removed = re.subn(
+                r'@property\s+--nav-rail-extra\s*\{[^}]*\}', '',
+                (setup_browser.WEB / 'style.css').read_text(encoding='utf-8'), count=1,
+            )
+            assert removed == 1, 'style.css must declare @property --nav-rail-extra for raw-calc testing'
+            page.route('**/static/style.css*', lambda route: route.fulfill(content_type='text/css', body=raw_css))
+        page.route('**/api/ui/preferences', preferences)
+        boot(page, shell_ui)
+        page.wait_for_function("() => getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width').trim() === '400px'",
+                               timeout=20_000)
+        page.wait_for_timeout(600)  # past the 400 ms persist debounce
+        facts['boot_720'] = page.evaluate(SIDEBAR_SNAPSHOT)
+        facts['saved_after_boot'] = list(saved)
+
+        page.evaluate(NO_MOTION_DRAGS)
+        page.wait_for_timeout(600)
+        facts['after_no_motion'] = page.evaluate(SIDEBAR_SNAPSHOT)
+        facts['saved_after_no_motion'] = list(saved)
+
+        page.set_viewport_size({'width': 1280, 'height': 680})
+        settle(page)
+        page.wait_for_timeout(600)
+        facts['widened_1280'] = page.evaluate(SIDEBAR_SNAPSHOT)
+        facts['saved_after_widen'] = list(saved)
+
+        facts['drags'] = page.evaluate(STILL_AND_BACK, [30, 2])
+        for _ in range(30):
+            if saved:
+                break
+            page.wait_for_timeout(100)
+        facts['saved_after_drags'] = list(saved)
+    finally:
+        tag = 'raw-calc' if raw_calc else 'registered'
+        evidence(tmp_path, f'shell-sidebar-pref-widen-{tag}-{shell_ui["engine"]}', facts)
+        page.close()
+    assert facts['boot_720']['extraUnparsed'] is raw_calc, facts
+    assert facts['boot_720']['stored'] == '400px' and facts['saved_after_boot'] == [], facts
+    assert abs(facts['boot_720']['box'] - 400) <= 1 and abs(facts['boot_720']['content'] - 320) <= 1, facts
+    assert facts['after_no_motion']['stored'] == '400px' and facts['saved_after_no_motion'] == [], facts
+    assert facts['widened_1280']['stored'] == '400px' and facts['saved_after_widen'] == [], facts
+    assert abs(facts['widened_1280']['box'] - 440) <= 0.5 and abs(facts['widened_1280']['column'] - 375) <= 0.5, facts
+    assert [f['stored'] for f in facts['drags']] == ['400px', '430px', '400px', '430px', '400px', '400px'], facts
+    for f in facts['drags']:
+        width = float(f['stored'][:-2])
+        assert abs(f['box'] - (width + 40)) <= 0.5 and abs(f['column'] - (width - 25)) <= 0.5, ('column + 40 px rail', f)
+    assert facts['saved_after_drags'] and facts['saved_after_drags'][-1] == {'sidebar_width': 400}, facts
+
+
+TG_INSET_INIT = """(() => {
+    const app = window.Telegram?.WebApp;
+    if (!app) return;
+    const handlers = {}, origOn = app.onEvent.bind(app);
+    app.onEvent = (name, fn) => ((handlers[name] ||= []).push(fn), origOn(name, fn));
+    window.__tgEmit = (name) => (handlers[name] || []).forEach(fn => fn());
+    app.isFullscreen = true;
+    app.safeAreaInset = {top: 0, bottom: 21, left: 47, right: 47};
+    app.contentSafeAreaInset = {top: 0, bottom: 0, left: 0, right: 0};
+})()"""
+
+DRAG_ONCE = """async (dx) => {
+    const root = document.documentElement, side = document.getElementById('primary-sidebar');
+    const handle = side.querySelector(':scope > .resize-handle'), frame = () => new Promise(r => requestAnimationFrame(r));
+    const b = handle.getBoundingClientRect(), y = b.top + Math.min(200, b.height / 2);
+    let x = b.left + b.width / 2;
+    const send = type => handle.dispatchEvent(new PointerEvent(type, {bubbles: true, cancelable: true, clientX: x,
+        clientY: y, pointerId: 12, pointerType: 'mouse', isPrimary: true, button: 0, buttons: type === 'pointerup' ? 0 : 1}));
+    const widths = () => ({sidebarWidth: side.getBoundingClientRect().width, contentWidth: document.getElementById('content').getBoundingClientRect().width});
+    send('pointerdown'); x += dx; send('pointermove'); await frame();
+    const during = {dragWidth: side.style.getPropertyValue('--drag-width'), ...widths()};
+    send('pointerup'); await frame(); await frame();
+    return {during, stored: root.style.getPropertyValue('--sidebar-width'), ...widths()};
+}"""
+
+
+def _route_sidebar_prefs(page, width, *, raw_calc=False):
+    saved = []
+    if raw_calc:
+        raw_css, removed = re.subn(r'@property\s+--nav-rail-extra\s*\{[^}]*\}', '',
+                                   (setup_browser.WEB / 'style.css').read_text(encoding='utf-8'), count=1)
+        assert removed == 1, 'style.css must declare @property --nav-rail-extra for raw-calc testing'
+        page.route('**/static/style.css*', lambda route: route.fulfill(content_type='text/css', body=raw_css))
+
+    def preferences(route):
+        if route.request.method != 'GET':
+            saved.append(json.loads(route.request.post_data or '{}'))
+        route.fulfill(json={'sidebar_width': width, 'project_seen_revision': {}})
+
+    page.route('**/api/ui/preferences', preferences)
+    return saved
+
+
+@pytest.mark.parametrize('raw_calc', [False, True], ids=['registered', 'raw-calc'])
+def test_telegram_paired_side_insets_cap_docked_sidebar_to_actual_app_width(shell_ui, tmp_path, raw_calc):
+    """844x390 Telegram fullscreen with paired 47 px insets caps 420 px sidebar to 430 px inside 750 px #app
+    (320 px room, zero inward pull/POST on capped drags), recovers 460 px on clear, and saves inward drags."""
+    page = seed_page(shell_ui, 844, 390, telegram=True)
+    page.add_init_script(TG_INSET_INIT)
+    facts, saved = {'engine': shell_ui['engine'], 'raw_calc': raw_calc}, _route_sidebar_prefs(page, 420, raw_calc=raw_calc)
+    snap = """() => {
+        const r = el => { const b = el.getBoundingClientRect(); return {left: b.left, right: b.right, width: b.width}; };
+        const side = document.getElementById('primary-sidebar'), rawExtra = getComputedStyle(side).getPropertyValue('--nav-rail-extra').trim();
+        return {layout: document.documentElement.dataset.layout || null, fullscreen: document.documentElement.dataset.telegramFullscreen || null,
+            stored: document.documentElement.style.getPropertyValue('--sidebar-width'), app: r(document.getElementById('app')),
+            sidebar: r(side), content: r(document.getElementById('content')), rawExtra, extraUnparsed: Number.isNaN(Number.parseFloat(rawExtra))};
+    }"""
+    set_insets = "insets => { window.Telegram.WebApp.safeAreaInset = insets; window.__tgEmit('safeAreaChanged'); }"
+    try:
+        boot(page, shell_ui)
+        page.wait_for_function("() => getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width').trim() === '420px'", timeout=20_000)
+        page.wait_for_timeout(600)
+        facts['boot_inset'], facts['saved_after_boot'] = page.evaluate(snap), list(saved)
+        page.evaluate(NO_MOTION_DRAGS)
+        page.wait_for_timeout(600)
+        facts['right_into_cap'] = page.evaluate(DRAG_ONCE, 80)
+        page.wait_for_timeout(600)
+        facts['saved_after_capped_gestures'] = list(saved)
+        page.evaluate(set_insets, {'top': 0, 'bottom': 0, 'left': 0, 'right': 0})
+        settle(page)
+        page.wait_for_timeout(600)
+        facts['cleared_insets'], facts['saved_after_clear'] = page.evaluate(snap), list(saved)
+        page.evaluate(set_insets, {'top': 0, 'bottom': 21, 'left': 47, 'right': 47})
+        settle(page)
+        facts['inward_drag'] = page.evaluate(DRAG_ONCE, -30)
+        for _ in range(30):
+            if saved:
+                break
+            page.wait_for_timeout(100)
+        facts['saved_after_inward'] = list(saved)
+    finally:
+        evidence(tmp_path, f'shell-telegram-inset-cap-{"raw-calc" if raw_calc else "registered"}-{shell_ui["engine"]}', facts)
+        page.close()
+    b, cap, clr, inw = facts['boot_inset'], facts['right_into_cap'], facts['cleared_insets'], facts['inward_drag']
+    assert b['extraUnparsed'] is raw_calc and b['layout'] == 'docked' and b['fullscreen'] == 'active', facts
+    assert b['stored'] == '420px' and facts['saved_after_boot'] == [], facts
+    assert abs(b['app']['left'] - 47) <= 1 and abs(b['app']['width'] - 750) <= 1, facts
+    assert abs(b['sidebar']['width'] - 430) <= 1 and b['content']['width'] >= 319.5 and abs(b['content']['width'] - 320) <= 1, facts
+    assert cap['during']['dragWidth'] == '390px' and cap['during']['sidebarWidth'] >= 429.5 and cap['during']['contentWidth'] >= 319.5, facts
+    assert cap['stored'] == '420px' and facts['saved_after_capped_gestures'] == [], facts
+    assert abs(clr['app']['width'] - 844) <= 1 and abs(clr['sidebar']['width'] - 460) <= 1 and abs(clr['content']['width'] - 384) <= 1, facts
+    assert clr['stored'] == '420px' and facts['saved_after_clear'] == [], facts
+    assert inw['stored'] == '360px' and abs(inw['sidebarWidth'] - 400) <= 1 and abs(inw['contentWidth'] - 350) <= 1, facts
+    assert facts['saved_after_inward'] and facts['saved_after_inward'][-1] == {'sidebar_width': 360}, facts
+
+
+def _route_call_mark_assets(page):
+    call_ui_dir = setup_browser.WEB.parent / 'skills' / 'live_conversation' / 'ui'
+
+    def serve_call_assets(route):
+        name = route.request.url.split('?', 1)[0].rsplit('/', 1)[-1]
+        if name not in ('call.css', 'call_mark.js'):
+            return route.fulfill(status=404, body='not found')
+        route.fulfill(content_type='text/css' if name.endswith('.css') else 'text/javascript',
+                      body=(call_ui_dir / name).read_text(encoding='utf-8'))
+
+    page.route('**/api/extensions/live_conversation/ui/test/*', serve_call_assets)
+
+
+def test_off_room_call_mark_stays_inside_capped_docked_sidebar_and_leaves_composer_controls_hittable(shell_ui, tmp_path):
+    """At desktop 720 px with saved sidebar_width=540 (sidebar capped at 400 px), an off-room .call-mark stays
+    inside the sidebar's column bounds without covering .nav-rail or composer controls, and follows settled widening."""
+    mount_js = """async () => {
+        await new Promise((ok, err) => document.head.append(Object.assign(document.createElement('link'),
+            {rel: 'stylesheet', href: '/api/extensions/live_conversation/ui/test/call.css', onload: ok, onerror: () => err(new Error('call.css'))})));
+        const { trackCallMark } = await import('/api/extensions/live_conversation/ui/test/call_mark.js');
+        const entry = trackCallMark({session: {active: true, liveSince: Date.now() - 12_000, end() {}},
+            label: () => 'Project 0: a descriptive project name', onScreen: () => false, reveal() {}, page: document.getElementById('page-chat')});
+        entry.changed();
+        window.__testCallMarkEntry = entry;
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    }"""
+    probe_js = """() => {
+        const r = el => { const b = el.getBoundingClientRect(); return {left: b.left, right: b.right, width: b.width}; };
+        const markEl = document.querySelector('.call-mark');
+        const hit = sel => {
+            const el = document.querySelector(sel);
+            if (!el) return {present: false};
+            const b = el.getBoundingClientRect(), h = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+            return {present: true, hitSelf: Boolean(h && (h === el || el.contains(h))),
+                hitCallMark: Boolean(h && markEl && (h === markEl || markEl.contains(h)))};
+        };
+        return {layout: document.documentElement.dataset.layout || null, stored: document.documentElement.style.getPropertyValue('--sidebar-width'),
+            sidebar: r(document.getElementById('primary-sidebar')), rail: r(document.querySelector('#primary-sidebar .nav-rail')),
+            content: r(document.getElementById('content')), mark: markEl && !markEl.hidden ? r(markEl) : null,
+            controls: {add: hit('#chat-plus'), model: hit('#chat-model-mode .chat-model-head'),
+                subagents: hit('#chat-subagents-mode .chat-subagents-head'),
+                railSettings: hit('#primary-sidebar .nav-rail [data-nav-page="settings"]'),
+                railDashboard: hit('#primary-sidebar .nav-rail [data-nav-page="dashboard"]'),
+                markOpen: hit('.call-mark .call-mark-open'), markEnd: hit('.call-mark .call-mark-end')}};
+    }"""
+
+    page = seed_page(shell_ui, 720, 680)
+    facts, saved = {'engine': shell_ui['engine']}, _route_sidebar_prefs(page, 540)
+    try:
+        _route_call_mark_assets(page)
+        boot(page, shell_ui)
+        page.wait_for_function("() => getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width').trim() === '540px'", timeout=20_000)
+        for sel in ('#chat-plus', '#chat-model-mode .chat-model-head', '#chat-subagents-mode .chat-subagents-head'):
+            page.wait_for_selector(sel)
+        page.evaluate(mount_js)
+        page.wait_for_timeout(600)
+        facts['desktop_720'], facts['desktop_saved'] = page.evaluate(probe_js), list(saved)
+        page.set_viewport_size({'width': 1280, 'height': 680})
+        settle(page)
+        facts['desktop_1280'], facts['desktop_saved_after_widen'] = page.evaluate(probe_js), list(saved)
+    finally:
+        evidence(tmp_path, f'shell-call-mark-geometry-{shell_ui["engine"]}', facts)
+        try:
+            page.evaluate('() => window.__testCallMarkEntry?.destroy?.()')
+        except Exception:  # noqa: BLE001 - best-effort cleanup before closing
+            pass
+        page.close()
+    d720, d1280 = facts['desktop_720'], facts['desktop_1280']
+    assert d720['layout'] == 'docked' and d720['stored'] == '540px' and facts['desktop_saved'] == [], facts
+    assert abs(d720['sidebar']['width'] - 400) <= 1 and abs(d720['content']['width'] - 320) <= 1, facts
+    assert d720['mark'] and d720['mark']['left'] >= d720['rail']['right'] - 0.5, facts
+    assert d720['mark']['right'] <= d720['sidebar']['right'] - 0.5 and d720['mark']['right'] <= d720['content']['left'] - 0.5, facts
+    assert abs(d720['mark']['width'] - 336) <= 1, facts
+    for key in ('add', 'model', 'subagents', 'railSettings', 'railDashboard', 'markOpen', 'markEnd'):
+        assert d720['controls'][key]['present'] and d720['controls'][key]['hitSelf'], (key, d720['controls'][key])
+    for key in ('add', 'model', 'subagents', 'railSettings', 'railDashboard'):
+        assert not d720['controls'][key]['hitCallMark'], (key, d720['controls'][key])
+    assert d1280['stored'] == '540px' and facts['desktop_saved_after_widen'] == [], facts
+    assert abs(d1280['sidebar']['width'] - 580) <= 1 and abs(d1280['mark']['width'] - 516) <= 1, facts
+    assert d1280['mark']['left'] >= d1280['rail']['right'] - 0.5 and d1280['mark']['right'] <= d1280['sidebar']['right'] - 0.5, facts
+
+
+def test_off_room_call_mark_keeps_last_project_row_and_menu_reachable_without_permanent_clearance(shell_ui, tmp_path):
+    """At 1100x646 with 10 projects (and in a 1100x480 short window where #primary-sidebar owns the one scroll),
+    an active docked off-room .call-mark dynamically reserves clearance in .nav-projects so the last project row and
+    its actions menu scroll cleanly above the badge and open via real pointer activation without hitting End call;
+    stack layout, hide and destroy reserve zero extra clearance."""
+    ten = PROJECTS[:10]
+    mount_js = """async () => {
+        await new Promise((ok, err) => document.head.append(Object.assign(document.createElement('link'),
+            {rel: 'stylesheet', href: '/api/extensions/live_conversation/ui/test/call.css', onload: ok, onerror: () => err(new Error('call.css'))})));
+        const { trackCallMark } = await import('/api/extensions/live_conversation/ui/test/call_mark.js');
+        const ctrl = {onScreen: false, ended: 0, revealed: 0};
+        ctrl.session = {active: true, liveSince: Date.now() - 12_000, end() { ctrl.ended += 1; }};
+        ctrl.entry = trackCallMark({session: ctrl.session, label: () => 'Project 0: a descriptive project name',
+            onScreen: () => ctrl.onScreen, reveal() { ctrl.revealed += 1; }, page: document.getElementById('page-chat')});
+        ctrl.entry.changed();
+        window.__testCallMark = ctrl;
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    }"""
+    synced_height_js = """() => {
+        const mark = document.querySelector('.call-mark');
+        if (!mark || mark.hidden) return false;
+        const actual = Math.ceil(mark.getBoundingClientRect().height);
+        const cssVar = Number.parseFloat(document.documentElement.style.getPropertyValue('--call-mark-height'));
+        return actual > 0 && Math.abs(cssVar - actual) <= 1;
+    }"""
+    foot_hits = """() => {
+        const foot = document.querySelector('.sidebar-foot-meta');
+        const mark = document.querySelector('.call-mark').getBoundingClientRect();
+        const side = foot.closest('#primary-sidebar');
+        return [...foot.querySelectorAll('button')].filter(el => el.getClientRects().length).map(el => {
+            const r = el.getBoundingClientRect(), pseudo = getComputedStyle(el, '::after');
+            const reach = parseFloat(pseudo.height) || r.height;
+            const edge = r.top - Math.max(0, reach - r.height) / 2;
+            const x = (r.left + r.right) / 2;
+            const at = y => Boolean(el.contains(document.elementFromPoint(x, y)));
+            return {id: el.id || 'close', reach, clear: edge - mark.bottom, x, y: edge + 1,
+                    hitTop: at(edge + 1), hitBody: at(r.top + 1), hitCenter: at((r.top + r.bottom) / 2),
+                    footBottom: side.getBoundingClientRect().bottom - foot.getBoundingClientRect().bottom};
+        });
+    }"""
+    probe_js = """() => {
+        const box = el => { const b = el.getBoundingClientRect();
+            return {top: b.top, bottom: b.bottom, left: b.left, right: b.right, width: b.width, height: b.height}; };
+        const side = document.getElementById('primary-sidebar');
+        const zone = document.getElementById('nav-projects');
+        const list = document.getElementById('nav-projects-list');
+        const markEl = document.querySelector('.call-mark');
+        const markVisible = Boolean(markEl && !markEl.hidden && markEl.getClientRects().length);
+        const item = list.querySelector('.nav-project-item[data-nav-project-id="gate-9"]');
+        const kebab = item?.querySelector('.nav-project-kebab') || null;
+        const hit = el => {
+            if (!el) return {present: false};
+            const b = el.getBoundingClientRect(), h = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+            return {present: true, hitSelf: Boolean(h && (h === el || el.contains(h))),
+                hitCallMark: Boolean(h && markEl && (h === markEl || markEl.contains(h))),
+                hit: h ? (h.tagName + (h.className ? '.' + String(h.className).trim().replace(/\\s+/g, '.') : '')) : null};
+        };
+        return {
+            layout: document.documentElement.dataset.layout || null,
+            rows: list.querySelectorAll('.nav-project-item').length,
+            heightVar: document.documentElement.style.getPropertyValue('--call-mark-height').trim(),
+            paddingBottom: Number.parseFloat(getComputedStyle(zone).paddingBottom) || 0,
+            scrollPaddingBottom: Number.parseFloat(getComputedStyle(side).scrollPaddingBottom) || 0,
+            listClientHeight: list.clientHeight,
+            listScrollHeight: list.scrollHeight,
+            listScrollTop: list.scrollTop,
+            sideClientHeight: side.clientHeight,
+            sideScrollHeight: side.scrollHeight,
+            sideScrollTop: side.scrollTop,
+            mark: markVisible ? box(markEl) : null,
+            lastItem: item ? box(item) : null,
+            lastKebab: kebab ? box(kebab) : null,
+            hitRow: hit(item?.querySelector('.nav-project-row')),
+            hitKebab: hit(kebab),
+            ended: window.__testCallMark?.ended ?? 0,
+            revealed: window.__testCallMark?.revealed ?? 0,
+        };
+    }"""
+
+    def open_and_check_last_menu(page):
+        last_item = page.locator('#nav-projects-list .nav-project-item[data-nav-project-id="gate-9"]')
+        last_kebab = last_item.locator('.nav-project-kebab')
+        last_item.hover()
+        last_kebab.click()
+        menu = page.locator('.project-row-menu[role="menu"]')
+        menu.wait_for(state='visible')
+        info = page.evaluate("""() => {
+            const menu = document.querySelector('.project-row-menu[role="menu"]');
+            const pin = menu?.querySelector('[data-prm="pin"]');
+            const mark = document.querySelector('.call-mark');
+            const b = pin?.getBoundingClientRect();
+            const h = b ? document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2) : null;
+            return {
+                label: menu?.getAttribute('aria-label') || '',
+                actions: [...(menu?.querySelectorAll('[data-prm]') || [])].map(el => el.dataset.prm),
+                pinHit: Boolean(h && pin && (h === pin || pin.contains(h))),
+                pinHitMark: Boolean(h && mark && (h === mark || mark.contains(h))),
+                ended: window.__testCallMark?.ended ?? 0,
+                revealed: window.__testCallMark?.revealed ?? 0,
+            };
+        }""")
+        page.keyboard.press('Escape')
+        menu.wait_for(state='detached')
+        return info
+
+    page = seed_page(shell_ui, 1100, 646)
+    page.route('**/api/projects', lambda route: route.fulfill(json={'projects': ten}))
+    page.route('**/api/state', lambda route: route.fulfill(json={
+        'supervisor_ready': True, 'active_chat_activities': [], 'projects': ten,
+        'project_chat_ids': [p['chat_id'] for p in ten]}))
+    facts = {'engine': shell_ui['engine']}
+    try:
+        _route_call_mark_assets(page)
+        boot(page, shell_ui)
+        facts['before_call'] = page.evaluate(probe_js)
+
+        page.evaluate(mount_js)
+        page.wait_for_function(synced_height_js, timeout=5_000)
+        settle(page)
+        facts['docked_scrollers'] = [row['node'] for row in sidebar_metrics(page)]
+        page.evaluate("() => { const el = document.getElementById('nav-projects-list'); el.scrollTop = el.scrollHeight; }")
+        settle(page)
+        facts['docked_scrolled'] = page.evaluate(probe_js)
+        facts['docked_menu'] = open_and_check_last_menu(page)
+
+        page.set_viewport_size({'width': 1100, 'height': 480})
+        page.wait_for_function(synced_height_js, timeout=5_000)
+        settle(page)
+        facts['short_scrollers'] = [row['node'] for row in sidebar_metrics(page)]
+        page.evaluate("() => { const el = document.getElementById('primary-sidebar'); el.scrollTop = el.scrollHeight; }")
+        settle(page)
+        facts['short_scrolled'] = page.evaluate(probe_js)
+        facts['short_menu'] = open_and_check_last_menu(page)
+
+        page.set_viewport_size({'width': 390, 'height': 844})
+        page.wait_for_function("() => document.documentElement.dataset.layout === 'stack'", timeout=5_000)
+        settle(page)
+        facts['stack_390'] = page.evaluate(probe_js)
+
+        page.set_viewport_size({'width': 1100, 'height': 646})
+        page.wait_for_function("() => document.documentElement.dataset.layout === 'docked'", timeout=5_000)
+        page.wait_for_function(synced_height_js, timeout=5_000)
+        settle(page)
+        facts['restored_docked'] = page.evaluate(probe_js)
+
+        page.evaluate("() => { window.__testCallMark.onScreen = true; window.__testCallMark.entry.changed(); }")
+        settle(page)
+        facts['after_hide'] = page.evaluate(probe_js)
+
+        page.evaluate("() => { window.__testCallMark.onScreen = false; window.__testCallMark.entry.changed(); }")
+        page.wait_for_function(synced_height_js, timeout=5_000)
+        settle(page)
+        page.evaluate("() => window.__testCallMark.entry.destroy()")
+        settle(page)
+        facts['after_destroy'] = page.evaluate(probe_js)
+    finally:
+        try:
+            page.evaluate('() => window.__testCallMark?.entry?.destroy?.()')
+        except Exception:  # noqa: BLE001 - best-effort cleanup before closing
+            pass
+        page.close()
+
+    # On a docked touch surface, hit the top of the expanded 44px area, not just its always-visible centre.
+    page = seed_page(shell_ui, 1100, 646, touch=True)
+    status = {'managed': True, 'available': False, 'checked_at': '2026-11-25T10:00:00Z', 'local_changes': 'absent'}
+    page.route('**/api/update/status*', lambda route: route.fulfill(json=status))
+    try:
+        _route_call_mark_assets(page)
+        boot(page, shell_ui)
+        page.locator('#nav-version-check').wait_for(state='visible')
+        page.evaluate(mount_js)
+        page.wait_for_function(synced_height_js, timeout=5_000)
+        settle(page)
+        facts['touch_check'] = page.evaluate(foot_hits)
+        setup_browser.capture(page, f'shell-call-mark-version-{shell_ui["engine"]}')
+
+        page.evaluate("document.documentElement.style.setProperty('--tg-safe-area-inset-bottom', '21px')")
+        status['update_progress'] = {'operation_id': 'footer-failed', 'generation': 'g', 'active': False,
+                                     'outcome': 'failed', 'error': 'Synthetic failure',
+                                     'started_at': '2026-11-25T10:01:00Z', 'outcome_at': '2026-11-25T10:02:00Z'}
+        page.evaluate("window.__ouroWs.emit('update_progress_changed', {})")
+        page.locator('.update-notice-close').wait_for(state='visible')
+        settle(page)
+        facts['inset_notice'] = page.evaluate(foot_hits)
+        setup_browser.capture(page, f'shell-call-mark-update-inset-{shell_ui["engine"]}')
+    finally:
+        evidence(tmp_path, f'shell-call-mark-clearance-{shell_ui["engine"]}', facts)
+        page.close()
+
+    assert [c['id'] for c in facts['touch_check']] == ['nav-version-check'], facts
+    assert [c['id'] for c in facts['inset_notice']] == ['update-pill', 'close'], facts
+    for target in facts['touch_check'] + facts['inset_notice']:
+        assert target['reach'] >= 44 and target['clear'] >= 0, target
+        assert target['hitTop'] and target['hitBody'] and target['hitCenter'], target
+    assert all(c['footBottom'] >= 21 for c in facts['inset_notice']), facts
+
+    before, docked, short, stack = facts['before_call'], facts['docked_scrolled'], facts['short_scrolled'], facts['stack_390']
+    assert before['rows'] == 10 and before['heightVar'] == '' and before['paddingBottom'] == 0, facts
+    assert facts['docked_scrollers'] == ['nav-projects-list'], facts
+    assert docked['mark'] and docked['paddingBottom'] >= docked['mark']['height'] + 6, facts
+    assert docked['listScrollTop'] > 0 and docked['sideScrollTop'] == 0, facts
+    assert docked['lastItem']['bottom'] <= docked['mark']['top'] - 6, facts
+    assert docked['lastKebab']['bottom'] <= docked['mark']['top'] - 6, facts
+    assert docked['hitRow']['hitSelf'] and not docked['hitRow']['hitCallMark'], facts
+    assert docked['hitKebab']['hitSelf'] and not docked['hitKebab']['hitCallMark'], facts
+    assert facts['docked_menu']['label'].startswith('Actions for Project 9: a descriptive project name'), facts
+    assert facts['docked_menu']['actions'] == ['pin', 'rename', 'folder', 'delete'], facts
+    assert facts['docked_menu']['pinHit'] and not facts['docked_menu']['pinHitMark'], facts
+    assert facts['docked_menu']['ended'] == 0 and facts['docked_menu']['revealed'] == 0, facts
+
+    assert facts['short_scrollers'] == ['primary-sidebar'], facts
+    assert short['mark'] and short['paddingBottom'] >= short['mark']['height'] + 6, facts
+    assert short['scrollPaddingBottom'] >= short['mark']['height'] + 43 and short['sideScrollTop'] > 0, facts
+    assert short['lastItem']['bottom'] <= short['mark']['top'] - 6, facts
+    assert short['lastKebab']['bottom'] <= short['mark']['top'] - 6, facts
+    assert short['hitKebab']['hitSelf'] and not short['hitKebab']['hitCallMark'], facts
+    assert facts['short_menu']['label'].startswith('Actions for Project 9: a descriptive project name'), facts
+    assert facts['short_menu']['pinHit'] and facts['short_menu']['ended'] == 0, facts
+
+    assert stack['layout'] == 'stack' and stack['mark'] and stack['mark']['top'] < 100, facts
+    assert stack['paddingBottom'] == 0 and stack['scrollPaddingBottom'] == 0, facts
+
+    restored = facts['restored_docked']
+    assert restored['mark'] and restored['paddingBottom'] >= restored['mark']['height'] + 6, facts
+    for cleared in (facts['after_hide'], facts['after_destroy']):
+        assert cleared['mark'] is None and cleared['heightVar'] == '', facts
+        assert cleared['paddingBottom'] == 0 and cleared['scrollPaddingBottom'] == 0, facts
+        assert abs(cleared['listClientHeight'] - before['listClientHeight']) <= 1, facts
+
+
+DRAWER_CLOSE_ORDER = """() => {
+    const side = document.getElementById('primary-sidebar');
+    const close = document.getElementById('nav-drawer-close');
+    const main = side?.querySelector('[data-nav-page="chat"]');
+    const projects = document.getElementById('nav-projects');
+    const follows = (a, b) => Boolean(a && b && (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING));
+    const focusables = [...side.querySelectorAll('button, input, a[href], [tabindex]:not([tabindex="-1"])')]
+        .filter((el) => !el.disabled && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden');
+    const first = focusables[0] || null;
+    return {
+        closeCount: document.querySelectorAll('#nav-drawer-close').length,
+        firstInRail: Boolean(side?.querySelector('.nav-rail > #nav-drawer-close:first-child')),
+        firstFocusable: first ? (first.id || first.dataset.navPage || first.className) : null,
+        beforeMain: follows(close, main),
+        beforeProjects: follows(close, projects),
+        landing: document.activeElement?.id || null,
+        visible: Boolean(close && getComputedStyle(close).display !== 'none' && close.getClientRects().length > 0),
+    };
+}"""
+
+
+def test_phone_drawer_close_leads_dom_and_focus_order_and_yields_to_telegram_fullscreen(shell_ui, tmp_path):
+    """The phone drawer's one #nav-drawer-close sits first in DOM/AT and keyboard Tab order, closes the drawer and
+    restores focus to its opener while keeping Escape and Back intact; in Telegram fullscreen CSS hides #nav-drawer-close
+    so Telegram's own native Back owns closing the drawer."""
+    page = seed_page(shell_ui, 390, 844)
+    tg_page = None
+    facts = {'engine': shell_ui['engine']}
+
+    def open_from_toggle():
+        toggle = page.locator('[data-mobile-nav-toggle]:visible').first
+        toggle.focus()
+        page.keyboard.press('Enter')
+        page.wait_for_function("() => window.__ouroLayers.top() === 'drawer'")
+        rest(page)
+
+    def closed_state():
+        wait_quietly(page, "() => !document.getElementById('primary-sidebar').classList.contains('open') && window.__ouroLayers.size() === 0")
+        wait_quietly(page, "() => Boolean(document.activeElement?.matches?.('[data-mobile-nav-toggle]'))")
+        return page.evaluate("""() => ({
+            open: document.getElementById('primary-sidebar').classList.contains('open'),
+            layers: window.__ouroLayers.ids(),
+            openerFocused: Boolean(document.activeElement?.matches?.('[data-mobile-nav-toggle]')),
+        })""")
+
+    try:
+        boot(page, shell_ui)
+        open_from_toggle()
+        facts['order'] = page.evaluate(DRAWER_CLOSE_ORDER)
+        if shell_ui['engine'] == 'chromium':
+            page.keyboard.press('Tab')
+            facts['first_tab'] = page.evaluate("() => document.activeElement?.id || null")
+            page.keyboard.press('Enter')
+            facts['after_key_close'] = closed_state()
+            open_from_toggle()
+        page.locator('#nav-drawer-close').click()
+        facts['after_click_close'] = closed_state()
+
+        open_from_toggle()
+        page.keyboard.press('Escape')
+        facts['after_escape'] = closed_state()
+
+        open_from_toggle()
+        wait_quietly(page, 'window.__ouroLayers?.historyArmed()')
+        press_back(page, 'history')
+        facts['after_back'] = closed_state()
+
+        tg_page = seed_page(shell_ui, 390, 844, telegram=True)
+        tg_page.add_init_script("""(() => {
+            if (!window.Telegram?.WebApp) return;
+            window.Telegram.WebApp.isFullscreen = true;
+            window.Telegram.WebApp.safeAreaInset = {top: 47, bottom: 34, left: 0, right: 0};
+            window.Telegram.WebApp.contentSafeAreaInset = {top: 44, bottom: 0, left: 0, right: 0};
+        })()""")
+        boot(tg_page, shell_ui)
+        open_drawer(tg_page)
+        settle(tg_page)
+        facts['telegram_open'] = tg_page.evaluate("""() => {
+            const close = document.getElementById('nav-drawer-close');
+            return {
+                fullscreen: document.documentElement.dataset.telegramFullscreen || null,
+                closeDisplay: close ? getComputedStyle(close).display : null,
+                closeRects: close ? close.getClientRects().length : -1,
+                telegramBack: window.Telegram?.WebApp?.BackButton?.isVisible ?? null,
+                open: document.getElementById('primary-sidebar').classList.contains('open'),
+            };
+        }""")
+        press_back(tg_page, 'telegram')
+        wait_quietly(tg_page, '() => window.__ouroLayers.size() === 0')
+        settle(tg_page)
+        facts['telegram_after_back'] = tg_page.evaluate("""() => ({
+            open: document.getElementById('primary-sidebar').classList.contains('open'),
+            layers: window.__ouroLayers.ids(),
+            telegramBack: window.Telegram?.WebApp?.BackButton?.isVisible ?? null,
+        })""")
+    finally:
+        evidence(tmp_path, f'shell-drawer-close-focus-{shell_ui["engine"]}', facts)
+        page.close()
+        if tg_page:
+            tg_page.close()
+    assert facts['order'] == {
+        'closeCount': 1, 'firstInRail': True, 'firstFocusable': 'nav-drawer-close',
+        'beforeMain': True, 'beforeProjects': True, 'landing': 'primary-sidebar', 'visible': True,
+    }, facts
+    if shell_ui['engine'] == 'chromium':
+        assert facts['first_tab'] == 'nav-drawer-close', facts
+        assert facts['after_key_close'] == {'open': False, 'layers': [], 'openerFocused': True}, facts
+    for step in ('after_click_close', 'after_escape', 'after_back'):
+        assert facts[step] == {'open': False, 'layers': [], 'openerFocused': True}, (step, facts)
+    assert facts['telegram_open'] == {
+        'fullscreen': 'active', 'closeDisplay': 'none', 'closeRects': 0, 'telegramBack': True, 'open': True,
+    }, facts
+    assert facts['telegram_after_back'] == {'open': False, 'layers': [], 'telegramBack': False}, facts
 
 
 def test_the_project_panel_sliding_in_never_widens_the_window(shell_ui, tmp_path):
@@ -912,12 +1621,14 @@ def test_the_project_panel_sliding_in_never_widens_the_window(shell_ui, tmp_path
     assert facts['scrollLeft'] == 0 and facts['sidebarLeft'] == 0, facts
 
 
-# What the panel shows: how many of its room's answers, and whether its loading row is up (chat_render_batch.js).
+# What the panel shows: how many of its room's answers, whether its loading row is up (chat_render_batch.js), and how
+# many rows of this browser's saved text of the room stand (chat_preview.js).
 PANEL_SHOWS = """(panel, answers) => ({
     rows: answers.filter(answer => [...panel.querySelectorAll('.chat-messages .chat-bubble')]
         .some(row => row.textContent.includes(answer))).length,
     loading: [...panel.querySelectorAll('.chat-load-older[aria-busy="true"]')]
-        .some(row => !row.hidden && row.getClientRects().length > 0)})"""
+        .some(row => !row.hidden && row.getClientRects().length > 0),
+    saved: panel.querySelectorAll('[data-saved-preview] .chat-bubble').length})"""
 # Seek the real slide: a busy runner must not turn missed compositor frames into a missing-motion failure. `setOff`
 # is the time from just before the open was asked to the slide's start: the panel's own wait begins after the ask.
 PANEL_FRAMES = """({project, opening, answers}) => { const panel = document.getElementById('project-panel');
@@ -943,12 +1654,14 @@ HISTORY_READS = """(() => { const real = window.fetch, waiting = [];
             : setTimeout(() => resolve(r), 150))); }; })()"""
 
 
-@pytest.mark.parametrize('read', ['slow', 'held'])
+@pytest.mark.parametrize('read', ['slow', 'held', 'saved'])
 def test_docked_the_project_panel_comes_in_with_its_room_and_goes_back_with_it(shell_ui, tmp_path, read):
     """Owner 20.10 (Q2 A): docked, the panel comes in from the window's right edge once its room has painted (or at
     its read's bound, with its loading row) and goes back there whole: samples along both real transitions show where
     it is and what it shows, from the edge to Main and back. A 150 ms read normally paints first, though a busy runner
-    may reach the bound first, which is the designed branch, not a defect; a held read always reaches the bound."""
+    may reach the bound first, which is the designed branch, not a defect; a held read always reaches the bound. A
+    room this browser kept the saved text of (owner 25.11, 2A) paints it at once: with its read held, the panel sets
+    off at once with those words (chat_preview.js, app.js arrivePanel)."""
     app_js = (setup_browser.WEB / 'app.js').read_text(encoding='utf-8')
     bound = int(re.search(r'PANEL_ARRIVAL_BOUND_MS = (\d+);', app_js).group(1))
     page = seed_page(shell_ui, 1143, 790)
@@ -956,14 +1669,23 @@ def test_docked_the_project_panel_comes_in_with_its_room_and_goes_back_with_it(s
     rows = [{'role': 'assistant', 'text': f'Answer {i}. ' + 'Ordinary context. ' * 8,
              'content': f'Answer {i}.', 'ts': f'2026-10-14T09:{i:02d}:00Z'} for i in range(6)]
     answers = [row['content'] for row in rows]  # A startup System bubble is not the room's history.
-    page.route('**/api/chat/history*', lambda route: route.fulfill(json={'messages': rows, 'progress': []}))
+    # The document proves its data profile (the shell fixture's meta): a read of another profile would never paint.
+    page.route('**/api/chat/history*', lambda route: route.fulfill(json={'messages': rows, 'progress': [],
+                                                                          'profile_scope': setup_browser.PREVIEW_SCOPE}))
     page.add_init_script(HISTORY_READS)
+    if read == 'saved':
+        room_key = json.dumps([setup_browser.PREVIEW_SCOPE, [PROJECTS[0]['chat_id'], PROJECTS[0]['id']]], separators=(',', ':'))
+        entry = json.dumps({'read': 1, 'rows': [{'id': 'chat:s1', 'role': 'assistant', 'text': 'Saved answer words',
+                                                 'speaker': 'Ouroboros'}]}, separators=(',', ':'))
+        page.add_init_script(f"""(() => {{ try {{ localStorage.setItem('ouroboros.chat-preview.v1', '{{"v":3}}');
+            localStorage.setItem({json.dumps('ouroboros.chat-preview.v1:' + room_key)}, {json.dumps(entry)}); }}
+            catch {{ /* storage refused: the case then fails on its saved rows */ }} }})()""")
     facts = {'engine': shell_ui['engine'], 'read': read, 'bound': bound}
     room = f"() => ({PANEL_SHOWS})(document.getElementById('project-panel'), {json.dumps(answers)})"
     try:
         boot(page, shell_ui)
         width = page.evaluate('innerWidth')
-        page.evaluate('hold => { window.__historyReads.hold = hold; }', read == 'held')
+        page.evaluate('hold => { window.__historyReads.hold = hold; }', read != 'slow')
         facts['opening'] = page.evaluate(PANEL_FRAMES, {'project': PROJECTS[0], 'opening': True, 'answers': answers})
         facts['held'] = page.evaluate('window.__historyReads.held()')
         page.evaluate('window.__historyReads.release()')
@@ -989,16 +1711,19 @@ def test_docked_the_project_panel_comes_in_with_its_room_and_goes_back_with_it(s
     leaving = closing + facts['closing']['live']
     # The slide's first sample is the panel as it set off: its room already painted, or not (then it waited the bound).
     painted = opening[1]['rows'] == len(answers)
-    if read == 'held':
+    if read != 'slow':
         assert facts['held'] >= 1 and not painted, ('its read was still held as it came in', facts)
-    if painted:
+    if read == 'saved':
+        assert facts['opening']['setOff'] < bound, ('with its saved text painted it sets off at once', facts['opening'])
+        assert all(f['saved'] == 1 and not f['rows'] for f in moving(arriving)), ('it comes in with that text', arriving)
+    elif painted:
         assert all(f['rows'] == len(answers) for f in moving(arriving)), ('it sets off with its room painted', arriving)
     else:
         assert facts['opening']['setOff'] >= bound, ('without its room it waits until the bound', facts['opening'])
         seen = ''.join('R' if f['rows'] == len(answers) else 'L' if f['loading'] and not f['rows'] else '?'
                        for f in moving(arriving))
         assert re.fullmatch('L+R*', seen), ('at the bound it comes in with its loading row, then its room', seen, arriving)
-    assert facts['room'] == {'rows': len(answers), 'loading': False}, ('its read lands in the room', facts['room'])
+    assert facts['room'] == {'rows': len(answers), 'loading': False, 'saved': 0}, ('its read lands in the room', facts['room'])
     assert len(moving(closing)) >= 3, ('the way back is seen moving', closing)
     assert all(f['rows'] == len(answers) for f in leaving if not f['hidden']), ('it goes back with its room', leaving)
 

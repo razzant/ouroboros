@@ -3,7 +3,9 @@
 // Layout is not measured here (no engine); the structure, the roles, the words-as-text and the toggle are.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { clampWithToggle, createRelayQuote, createReplyQuote, normalizeReplyRef, replySnippet } from '../modules/chat_reply_quote.js';
+import { clampWithToggle, createRelayQuote, createReplyQuote, normalizeReplyRef, quoteSignatureOf, releaseClampFade, replyQuoteSignature,
+    replySnippet } from '../modules/chat_reply_quote.js';
+import { applyPayload, CODE_PREFIX, pendingMisses, setMissTransport } from '../modules/i18n.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 function withDom(run) {
@@ -16,8 +18,11 @@ test('a sender selection names its source separately in the bubble and composer'
     for (const composer of [true, false]) {
         const panel = createReplyQuote({ address: 'row:1@a#1', role: 'assistant',
             excerpt: { text: 'North quay', start_utf16: 12 } }, { composer });
-        const main = panel.children[0];
-        const [head, words] = main.children;
+        const main = panel.querySelector('.chat-quote-main');
+        const head = main.querySelector('.chat-quote-head');
+        const words = panel.querySelector('.chat-quote-text');
+        assert.equal(main.tagName, 'BUTTON');
+        assert.equal(main.querySelector('.chat-quote-text'), null);
         assert.equal(head.children[0].textContent, 'Selected by sender · Source:');
         assert.equal(head.children[1].textContent, 'Ouroboros');
         assert.equal(words.textContent, 'North quay');
@@ -40,6 +45,25 @@ test('a reply quote is one jump button in the QUOTED author\'s voice, words set 
     assert.match(main.getAttribute('aria-label'), /^Reply to You, 00:37: /);
     main.click();
     assert.deepEqual(jumps, ['row:1@a#1']);
+}));
+
+test('a quoted row in another room names that room and ends its head with the arrow a press follows', () => withDom(() => {
+    const jumps = [];
+    const raw = { address: 'row:1@q#1', role: 'assistant', kind: 'question', snippet: 'Which report format?', ts: 't' };
+    const away = createReplyQuote({ ...raw, room_label: 'Main' }, { onJump: (ref) => jumps.push(ref.address), formatTime: fixedTime });
+    const [main] = away.children;
+    const head = main.children[0];
+    assert.deepEqual([...head.children].map((part) => part.className),
+        ['chat-quote-author', 'chat-quote-room', 'chat-quote-when', 'chat-quote-away']);
+    assert.equal(head.children[1].textContent, '· Main');
+    assert.equal(head.children[3].textContent, '↗');
+    assert.equal(head.children[3].getAttribute('aria-hidden'), 'true');
+    assert.equal(main.getAttribute('aria-label'), 'Reply to Ouroboros, opens in Main, 00:37: Which report format?');
+    main.click();
+    assert.deepEqual(jumps, ['row:1@q#1']);
+    // The same reference without a room is the ordinary quote: nothing names a room or leaves.
+    const here = createReplyQuote(raw, { formatTime: fixedTime }).children[0].children[0];
+    assert.deepEqual([...here.children].map((part) => part.className), ['chat-quote-author', 'chat-quote-when']);
 }));
 
 test('a recorded choice has owner ink and its jump keeps the system row identity', () => withDom(() => {
@@ -195,3 +219,116 @@ test('a quoted photo leads the panel with its thumbnail; only a safe upload URL 
 test('a snippet cut never ends in punctuation before its ellipsis', () => {
     assert.equal(replySnippet('Берём A: сохраняю нынешний пузырь. Старые и новые фразы', 36), 'Берём A: сохраняю нынешний пузырь…');
 });
+
+// The quote panel's one lifecycle: an expanded clamp wears the shared cue only while it hides text, and folding —
+// or the owner's own release (releaseClampFade) — drops it. The shared binding's mechanics and its disposal are
+// measured in scroll_fade.test.js.
+test('an expanded clamp wears the shared cue only while open, and the owner release drops it', () => withDom(() => {
+    const host = document.createElement('div');
+    const text = document.createElement('div');
+    const toggle = clampWithToggle(text, host, { fit: (_n, _t, _lines, onFit) => onFit(true), scrollRegion: 'Quotation' });
+    assert.equal(text.classList.contains('scroll-fade-y'), false, 'a folded clamp carries no cue');
+    toggle.click();  // open
+    assert.equal(text.dataset.expanded, '1');
+    assert.equal(text.classList.contains('scroll-fade-y'), true, 'the open quotation wears the cue');
+    toggle.click();  // fold
+    assert.equal(text.dataset.expanded, undefined);
+    assert.equal(text.classList.contains('scroll-fade-y'), false, 'folding releases the cue');
+    toggle.click();  // open again, then the owner removes the panel while it is open
+    assert.equal(text.classList.contains('scroll-fade-y'), true);
+    releaseClampFade(text);
+    assert.equal(text.classList.contains('scroll-fade-y'), false, 'the owner release drops the cue');
+}));
+
+test('derived_question marks only automatically derived question quotes and tracks their signature', () => withDom(() => {
+    const base = { address: 'row:1@q#1', role: 'assistant', kind: 'question', author_label: 'Ouroboros',
+        snippet: 'Which format should I ship?', room_label: 'Main', ts: '2026-11-23T10:00:00Z' };
+    const explicit = createReplyQuote(base, { formatTime: fixedTime });
+    assert.equal(explicit.dataset.derivedQuestion, undefined, 'an explicit Reply carries no derived-question mark');
+    assert.equal(normalizeReplyRef(base).derived_question, undefined);
+    assert.equal(quoteSignatureOf(explicit), '', 'an ordinary quote is not signed: only the derived one is reconciled');
+
+    const derived = createReplyQuote({ ...base, room_label_kind: 'main', derived_question: true }, { formatTime: fixedTime });
+    assert.equal(derived.dataset.derivedQuestion, '1');
+    assert.equal(derived.dataset.away, '1', 'cross-room derived question quote marks itself away for truncation rules');
+    assert.equal(derived.dataset.derived, undefined, 'distinct from assistant host-derived quotes');
+    assert.equal(quoteSignatureOf(derived), replyQuoteSignature({ ...base, room_label_kind: 'main', derived_question: true }));
+    assert.notEqual(quoteSignatureOf(derived), replyQuoteSignature({ ...base, derived_question: true }),
+        'host Main and a user project literally named Main have distinct signatures');
+    assert.notEqual(quoteSignatureOf(derived), replyQuoteSignature({ ...base, room_label: 'Archive', derived_question: true }));
+    assert.notEqual(quoteSignatureOf(derived), replyQuoteSignature({ ...base, room_label: '', derived_question: true }));
+    assert.notEqual(quoteSignatureOf(derived), replyQuoteSignature({ ...base, snippet: 'Other line', derived_question: true }));
+
+    const sameRoom = createReplyQuote({ ...base, room_label: '', derived_question: true }, { formatTime: fixedTime });
+    assert.equal(sameRoom.dataset.derivedQuestion, '1');
+    assert.equal(sameRoom.dataset.away, undefined, 'same-room derived question quote is not marked away');
+    assert.equal(explicit.dataset.away, undefined, 'ordinary quotes are never marked away');
+
+    const composer = createReplyQuote({ ...base, room_label_kind: 'main', derived_question: true }, { composer: true, formatTime: fixedTime });
+    assert.equal(composer.dataset.derivedQuestion, undefined, 'composer strips are never marked as derived questions');
+    assert.equal(composer.dataset.away, undefined, 'composer strips are never marked away');
+    assert.equal(quoteSignatureOf(composer), '');
+}));
+
+test('a normalized ref round-trips through normalizeReplyRef without losing its room, kind or thumbnail', () => {
+    const url = '/api/files/download?upload=0e3dabd5a6bf487ba054deef93921914_shot.png';
+    const raw = { address: 'row:1@q#1', role: 'assistant', kind: 'question', author_label: 'Ouroboros',
+        snippet: 'Which format?', room_label: 'Main', room_label_kind: 'main', ts: '2026-11-23T10:00:00Z',
+        derived_question: true,
+        attachment: { name: 'shot.png', kind: 'image', mime: 'image/png', available: true, url } };
+    const once = normalizeReplyRef(raw);
+    const twice = normalizeReplyRef(once);
+    assert.equal(twice.room, 'Main', 'the room a rename compares survives a restored staged reply or echo re-read');
+    assert.equal(twice.room_label_kind, 'main', 'the built-in room kind survives normalization round-trips');
+    assert.equal(twice.media?.url, url, 'the quoted photo keeps its thumbnail through the same re-reads');
+    assert.deepEqual(twice, once, 'every effective field of the automatically shown question is one shape');
+    assert.equal(normalizeReplyRef({ ...raw, room_label_kind: 'unknown' }).room_label_kind, undefined,
+        'unknown room_label_kind is ignored so it never translates as host chrome');
+});
+
+test('built-in Main and Project destination labels translate while identically spelled user projects stay verbatim', () => withDom(() => {
+    setMissTransport(() => Promise.resolve(null));
+    const EN = { language: '', english: true, revision: 0, entries: {} };
+    const RU = {
+        language: 'ru', english: false, revision: 3,
+        entries: {
+            Main: { text: 'Основной' },
+            [CODE_PREFIX + 'project.reference.generic']: { text: 'Проект' },
+            [CODE_PREFIX + 'chat.reply.reply_to']: { text: 'Ответ на' },
+            'opens in {room}': { text: 'открывается в {room}' },
+        },
+    };
+    const base = { address: 'row:1@q#1', role: 'assistant', kind: 'question', author_label: 'Ouroboros',
+        snippet: 'Which format?', ts: 't', derived_question: true };
+    try {
+        applyPayload(RU);
+        const cases = [
+            { input: { ...base, room_label: 'Main', room_label_kind: 'main' }, shown: 'Основной' },
+            { input: { ...base, room_label: 'Project', room_label_kind: 'project' }, shown: 'Проект' },
+            { input: { ...base, room_label: 'Main' }, shown: 'Main' },
+            { input: { ...base, room_label: 'Project' }, shown: 'Project' },
+            { input: { ...base, room_label: 'Weekly report' }, shown: 'Weekly report' },
+        ];
+        for (const { input, shown } of cases) {
+            const panel = createReplyQuote(input, { formatTime: fixedTime });
+            const main = panel.querySelector('.chat-quote-main');
+            assert.equal(panel.dataset.away, '1');
+            assert.equal(main.dataset.i18nAuthored, '', 'mixed chrome/authored quote stays outside the DOM overlay');
+            assert.equal(panel.querySelector('.chat-quote-room').textContent, `· ${shown}`);
+            assert.equal(main.getAttribute('aria-label'),
+                `Ответ на Ouroboros, открывается в ${shown}, 00:37: Which format?`,
+                'visible and accessible destination labels agree');
+        }
+        assert.deepEqual(pendingMisses(), [], 'user-supplied project names never register translation misses');
+        assert.notEqual(
+            replyQuoteSignature({ ...base, room_label: 'Project', room_label_kind: 'project' }),
+            replyQuoteSignature({ ...base, room_label: 'Project' }),
+        );
+        const ruAuthoredSig = replyQuoteSignature({ ...base, room_label: 'Main' });
+        applyPayload(EN);
+        assert.notEqual(ruAuthoredSig, replyQuoteSignature({ ...base, room_label: 'Main' }),
+            'language/dictionary changes invalidate derived quote signatures so chrome words re-render too');
+    } finally {
+        applyPayload(EN);
+    }
+}));

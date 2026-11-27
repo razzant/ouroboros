@@ -42,11 +42,13 @@ def test_install_skill_preserves_registry_404_and_429_status(tmp_path, monkeypat
     from ouroboros.marketplace import install as inst
     from ouroboros.marketplace.clawhub import ClawHubNotFoundError, ClawHubRateLimitError
 
-    monkeypatch.setattr(inst, "_registry_info", lambda slug: (_ for _ in ()).throw(ClawHubNotFoundError("nope")))
+    monkeypatch.setattr(inst, "_registry_info", lambda slug, *, registry_url=None: (
+        _ for _ in ()).throw(ClawHubNotFoundError("nope")))
     nf = inst.install_skill(tmp_path / "data", tmp_path / "repo", slug="ghost", auto_review=False)
     assert not nf.ok and nf.error_status == 404
 
-    monkeypatch.setattr(inst, "_registry_info", lambda slug: (_ for _ in ()).throw(ClawHubRateLimitError("https://clawhub", 30)))
+    monkeypatch.setattr(inst, "_registry_info", lambda slug, *, registry_url=None: (
+        _ for _ in ()).throw(ClawHubRateLimitError("https://clawhub", 30)))
     rl = inst.install_skill(tmp_path / "data", tmp_path / "repo", slug="busy", auto_review=False)
     assert not rl.ok and rl.error_status == 429
 

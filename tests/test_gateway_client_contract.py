@@ -31,12 +31,8 @@ from ouroboros.gateway.schema import (
     validate_ingress,
 )
 from tests._source_scan import parse
-from tests.test_gateway_parity import _js_typedef_fields
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-TWIN = REPO / "web" / "modules" / "client_contract_types.js"
-PLACE_TWIN = REPO / "web" / "modules" / "place_contract_types.js"
-RECALL_TWIN = REPO / "web" / "modules" / "recall_contract_types.js"  # the door's envelopes; no builtin consumer
 
 
 def _all_shapes() -> dict:
@@ -51,23 +47,69 @@ def _body_names(spec: str) -> list[str]:
     return names
 
 
-def test_every_client_envelope_has_a_field_identical_browser_twin():
-    from ouroboros.gateway import history_contracts
+def test_host_notice_is_nested_and_optional_in_live_history_and_search(tmp_path):
+    from ouroboros import host_notice
+    from ouroboros.gateway.contracts import ChatOutbound
+    from ouroboros.gateway.history_contracts import ChatHistoryMessage, ChatSearchCandidate
+    from ouroboros.gateway.reference_contracts import HostNotice, HostNoticeField
 
-    facade = TWIN.read_text(encoding="utf-8")
-    places = PLACE_TWIN.read_text(encoding="utf-8")
-    recall = RECALL_TWIN.read_text(encoding="utf-8")
-    text = facade + "\n" + places + "\n" + recall
-    for module in (client_contracts, history_contracts):
-        for name in module.__all__:
-            cls = getattr(module, name)
-            assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"client contract twins lack {name}"
-            assert _js_typedef_fields(text, name) == set(typing.get_type_hints(cls, include_extras=True)), name
-    for name in re.findall(r"@typedef \{Object\} (\w+)", places):
-        assert f"@typedef {{import('./place_contract_types.js').{name}}} {name}" in facade, name
-    index = (REPO / "web" / "modules" / "api_types.js").read_text(encoding="utf-8")
-    assert "./client_contract_types.js" in index.splitlines()[0]
-    assert "import('./client_contract_types.js').ServedUiState" in index
+    with TestClient(_contract_app(tmp_path)) as client:
+        response = client.get("/api/contract")
+    assert response.status_code == 200
+    document = response.json()
+    live = next(frame["outbound"] for frame in document["ws"]["messages"] if frame["type"] == "chat")
+    assert live == "ChatOutbound"
+    schemas = document["schemas"]
+    carriers = (
+        (ChatOutbound, schemas[live]),
+        (ChatHistoryMessage, schemas["ChatHistoryResponse"]["properties"]["messages"]["items"]),
+        (ChatSearchCandidate, schemas["ChatSearchResponse"]["properties"]["candidates"]["items"]),
+    )
+    assert typing.get_type_hints(HostNoticeField, include_extras=True)["notice"] is HostNotice
+    notice_schema = json_schema_for(HostNotice)
+    for cls, schema in carriers:
+        hints = typing.get_type_hints(cls, include_extras=True)
+        assert hints["notice"] is HostNotice, f"{cls.__name__}.notice must stay the nested HostNotice object"
+        assert schema["properties"]["notice"] == notice_schema, cls.__name__
+        assert "notice" not in schema.get("required", ()), cls.__name__
+        assert not {"template", "values"} & schema["properties"].keys(), cls.__name__
+    notice_hints = typing.get_type_hints(HostNotice, include_extras=True)
+    assert notice_hints["template"] is str and notice_hints["values"] == dict[str, str]
+    assert not notice_schema.get("required"), "every HostNotice field stays optional"
+    assert notice_schema["properties"]["template"] == {"type": "string"}
+    assert notice_schema["properties"]["values"] == {"type": "object"}
+    # The real shapes the wire carries: the variable phrase's own producer — the same call history.py makes for
+    # an omitted Project origin — fills the row's text with its values and carries the template (what gets
+    # translated) beside them (never translated); an older row's plain string carries neither, and the schema
+    # refuses a notice whose nested template is not a string.
+    said, carried = host_notice.phrase(
+        "origin_omission",
+        "{n} more archived Project start message(s) are not shown here; their full copies are kept.",
+        details="state/project_task_bindings.json (source_text)", n=2)
+    assert said == "2 more archived Project start message(s) are not shown here; their full copies are kept."
+    assert carried["notice"]["values"] == {"n": "2"}
+    assert carried["notice"]["template"] == ("{n} more archived Project start message(s) are not shown here; "
+                                              "their full copies are kept.")
+    emitted_keys = set(carried["notice"])
+    projected = host_notice.view({"text": said, **carried})
+    projected_keys = set(projected["notice"])
+    # Ingress accepts additional properties; check the actual producer and projection against the declared fields.
+    assert emitted_keys <= set(notice_hints) and not {"line", "phrase"} & emitted_keys, emitted_keys
+    assert projected_keys == emitted_keys | {"line", "phrase"} and projected_keys <= set(notice_hints), projected_keys
+    assert projected["notice"]["line"].startswith(projected["notice"]["phrase"]) and projected["notice"]["phrase"] == said
+    row = {"text": said, "role": "system", "ts": "2026-11-23T04:00:00Z", "is_progress": False,
+           "system_type": "origin_omission", "task_id": "", **projected}
+    assert not validate_ingress(row, ChatHistoryMessage), validate_ingress(row, ChatHistoryMessage)
+    assert validate_ingress({**row, "notice": {**projected["notice"], "template": 3}}, ChatHistoryMessage), (
+        "typed nested: a non-string template is refused on the nested object"
+    )
+    assert validate_ingress({**row, "notice": {**projected["notice"], "values": []}}, ChatHistoryMessage), (
+        "typed nested: values must be an object"
+    )
+    old = host_notice.notice("task_reaper_wedged", step="restart", details="worker slot 3, deadline")
+    assert not validate_ingress(old, HostNotice) and not {"template", "values"} & set(old), (
+        "an older row's notice, a plain string's, carries neither template nor values and still admits"
+    )
 
 
 def test_contract_exposes_calls_without_diagnostic_probe_frames():
@@ -252,7 +294,21 @@ def test_the_contract_is_served_derived_and_self_consistent(tmp_path):
     by_token = {f"{e['method']} {e['path']}": e for e in document["http"]}
     assert by_token["GET /onboarding"]["query"] == ["builtin"]
     assert by_token["GET /auth/login"]["query"] == ["next", "builtin"]
-    assert set(by_token["GET /auth/login"]["responses"]) == {"200"}
+    assert by_token["GET /auth/login"]["responses"] == {"200": {"content_type": "text/html", "schemas": []}}
+    auth_login = by_token["POST /auth/login"]
+    assert auth_login["request"] == {
+        "content_type": "application/json | application/x-www-form-urlencoded", "schemas": ["AuthLoginRequest"],
+    }
+    assert auth_login["responses"] == {
+        "200": {"content_type": "application/json", "schemas": ["AuthLoginResponse"]},
+        "303": {"content_type": "", "schemas": []},
+        "401": {"content_type": "application/json | text/html", "schemas": ["ErrorResponse"]},
+    }
+    assert document["schemas"]["AuthLoginRequest"]["required"] == ["password"]
+    assert document["schemas"]["AuthLoginResponse"]["required"] == ["next", "ok"]
+    assert document["schemas"]["AuthLoginResponse"]["properties"] == {
+        "next": {"type": "string"}, "ok": {"type": "boolean"},
+    }
     assert by_token["GET /api/onboarding/bootstrap"]["responses"]["200"]["schemas"] == ["OnboardingBootstrapResponse"]
     assert by_token["GET /api/tasks/{task_id}/events"]["responses"]["200"] == {
         "content_type": "text/event-stream", "schemas": ["TaskEvent"]}
@@ -261,7 +317,14 @@ def test_the_contract_is_served_derived_and_self_consistent(tmp_path):
     assert by_token["GET /api/tasks/{task_id}"]["path_params"] == ["task_id"]
     assert by_token["GET /api/extensions/{skill}/module/{entry:path}"]["path_params"] == ["skill", "entry"]
     assert all(entry["typed"] for entry in document["http"]), "every indexed route publishes its shapes"
-    assert by_token["POST /api/reset"]["responses"]["200"]["schemas"] == ["ResetResponse"]
+    assert by_token["GET /api/reset"]["responses"]["200"]["schemas"] == ["ResetResponse"]
+    reset = by_token["POST /api/reset/v1"]
+    assert reset["request"]["schemas"] == ["ResetRequest"]
+    assert reset["responses"]["200"]["schemas"] == ["ResetResponse"]
+    legacy = by_token["POST /api/reset"]["responses"]
+    assert {status: body["schemas"] for status, body in legacy.items()} == {
+        "400": ["ErrorResponse"], "409": ["ErrorResponse"],
+    }
     assert by_token["POST /api/claudexor/account-resets"]["headers"] == ["Idempotency-Key!"]
     login = by_token["POST /api/claudexor/login"]["responses"]
     assert login["200"]["schemas"] == ["ClaudexorLoginJobResponse"]
@@ -271,6 +334,27 @@ def test_the_contract_is_served_derived_and_self_consistent(tmp_path):
     assert "served_ui" in document["schemas"]["StateResponse"]["properties"]
     history = document["schemas"]["ChatHistoryResponse"]["properties"]["messages"]["items"]
     assert {"text", "role", "ts", "is_progress", "system_type", "task_id"} <= set(history["required"])
+
+
+def test_published_update_status_letter_matches_the_real_projection(tmp_path):
+    from ouroboros.gateway.management_contracts import UpdateLetter
+    from ouroboros.update_letter import project_letter
+
+    with TestClient(_contract_app(tmp_path)) as client:
+        reply = client.get("/api/contract")
+    assert reply.status_code == 200
+    document = reply.json()
+    entry = next(row for row in document["http"] if row["method"] == "GET" and row["path"] == "/api/update/status")
+    assert entry["responses"]["200"]["schemas"] == ["UpdateStatusResponse"]
+    shape = json_schema_for(UpdateLetter)
+    assert document["schemas"]["UpdateStatusResponse"]["properties"]["letter"]["anyOf"] == [shape, {"type": "null"}]
+
+    view = project_letter({"state": "ready", "text": "A new settings page", "revision": 1},
+                          head_sha="", latest_sha="")
+    assert view is not None and view["text"] == "A new settings page"
+    assert set(view) == set(shape["properties"])
+    assert not validate_ingress(view, UpdateLetter)
+    assert project_letter(None, head_sha="", latest_sha="") is None
 
 
 def test_contract_modules_name_typed_dicts_only():

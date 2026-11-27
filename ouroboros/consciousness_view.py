@@ -76,8 +76,7 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
     if requested_enabled is None:
         status, detail = "unknown", "The stored consciousness control is unknown: runtime state is unavailable or recovering."
     elif not requested_enabled:  # the places it already read (a Paused one does not hear either); unread, as Stop says
-        unread = "places_brief" in snapshot and snapshot["places_brief"] is None
-        heard = heard_sentence(None if unread else snapshot.get("places_brief") or [])
+        heard = heard_sentence(snapshot.get("places_brief"))
         status, detail = "disabled", (f"Panic turned it off. {heard}" if snapshot.get("stop_source") == "panic" else heard)
     elif not snapshot and supervisor_failed:
         status, detail = "stopped", "Cannot wake: Ouroboros did not finish starting. Restart Ouroboros."
@@ -122,9 +121,12 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
     else:
         wake_at = snapshot.get("next_wake_at")
         status, detail = "sleeping", f"Sleeping until {_clock_of(wake_at)}{_zone_of(wake_at)}."
-    return {**{key: value for key, value in snapshot.items() if key != "detail_note"},
+    drop = ("detail_note",) if requested_enabled is True else ("detail_note", "panic_choice_available")
+    return {**{key: value for key, value in snapshot.items() if key not in drop},
             "enabled": requested_enabled, "status": status, "detail": detail, **({"detail_note": note} if note else {}),
-            "position": position_words(requested_enabled, snapshot.get("places_brief")), "gloss": SWITCH_GLOSS}
+            "position": position_words(requested_enabled, snapshot.get("places_brief")),
+            "position_short": position_words(requested_enabled, snapshot.get("places_brief"), short=True),
+            "gloss": SWITCH_GLOSS}
 
 
 # ---- The switch's words (owner 15.11, decision 5A; SPEC §2.14). One switch, named Consciousness and glossed as what
@@ -141,13 +143,39 @@ _NAMED = 3  # places named before «and N more»; the dialog's details list ever
 
 
 ON_WITHOUT_PLACES = "Also on its own"  # an install with no place says nothing of places (SPEC §2.17)
+# Off, while a linked Ouroboros of my human's may start work here: whole on the Dashboard, short in a one-line row.
+# Off still lets its requests for work start; its other words wake nothing while Off, so its place is heard like any
+# other.
+LINKED_OFF_WORDS = ("Only when you write to it or your Ouroboroses ask for work", "Only when asked")
+UNKNOWN_OFF_WORDS = "Background wakes are off"
+UNKNOWN_ASSIGNMENTS = "Whether your Ouroboroses can start work here could not be read."
+LINKED_OFF_LINE = "Requests from your Ouroboroses still start work."  # its full line where Off is explained
 
 
-def position_words(enabled: Any, places=None) -> str:
+def letters_start_work(places) -> bool | None:
+    """A place view of a linked Ouroboros whose letters start work here now, as the state snapshot stamps it on
+    ``places_brief`` (``place_projection.starts_work_here``)."""
+    from ouroboros.place_projection import any_assignment_permission
+
+    if not isinstance(places, list):
+        return None
+    return any_assignment_permission(place.get("letters_start_work") for place in places
+                                     if isinstance(place, dict) and (place.get("connector") == "ouroboros"
+                                                                    or "letters_start_work" in place))
+
+
+def position_words(enabled: Any, places=None, *, short: bool = False) -> str:
     """The switch's position by meaning; ``""`` while the stored control is unknown (never Off). ``places`` is the
-    install's place read (``None``: not read): on, an install that holds no place at all is not told of places."""
+    install's place read (``None``: not read): on, an install that holds no place at all is not told of places; off,
+    one whose linked Ouroboros may start work here names it (``short``: the one-line row's words)."""
     if not isinstance(enabled, bool):
         return ""
+    if not enabled:
+        letters = letters_start_work(places)
+        if letters is True:
+            return LINKED_OFF_WORDS[1 if short else 0]
+        if letters is None:
+            return UNKNOWN_OFF_WORDS
     return ON_WITHOUT_PLACES if enabled and isinstance(places, list) and not places else POSITION_WORDS[enabled]
 
 
@@ -208,11 +236,15 @@ def heard_sentence(places) -> str:
     """What Off leaves in the places, said beside the position: ``places`` is one read of the place store (stored places
     or view rows), ``None`` when it could not be read. A Paused place does not hear either, so it is not counted."""
     if places is None:
-        return "Its places are heard, not answered."
+        return f"{UNKNOWN_ASSIGNMENTS} Its places are heard, not answered."
     hearing = [fact for fact in map(_place_fact, places) if fact["state"] != "paused"]
-    if not hearing:
-        return "Nothing wakes it between your messages."
-    return f"{_count(len(hearing), 'place')} {'is' if len(hearing) == 1 else 'are'} heard, not answered."
+    said = f"{_count(len(hearing), 'place')} {'is' if len(hearing) == 1 else 'are'} heard, not answered." if hearing else ""
+    letters = letters_start_work(places)
+    if letters is True:
+        return f"{LINKED_OFF_LINE} {said}".strip()
+    if letters is None:
+        return f"{UNKNOWN_ASSIGNMENTS} {said}".strip()
+    return said or "Nothing wakes it between your messages."
 
 
 def _running_line(running) -> str:
@@ -230,17 +262,22 @@ def _running_line(running) -> str:
 
 
 def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str = "", daily_usd=None,
-                   running=None) -> dict:
+                   running=None, letters: bool | None = False, after_panic: dict | None = None) -> dict:
     """What turning the switch ``to`` ("on" | "off") changes, said before it happens, from this install's facts:
     ``places`` (stored places or view rows; ``None`` unread), ``people`` (``recent_people``; ``None`` unread),
     ``circles`` (place id → its circle's name), ``autonomy`` and ``daily_usd`` (turning on), ``running`` (turning off:
     the state line's live wake and own tasks). ``{"to", "lines", "places"}``: one sentence a line and every place the
     turn concerns with its people, for the dialog's details (``None`` when the places could not be read: the app still
-    asks, with these lines). A fact absent says nothing."""
+    asks, with these lines). ``letters``: a linked Ouroboros's letters start work here, Off or not. ``after_panic``
+    (turning on; ``supervisor.panic_choice.preview_start``): this Start needs my human's desktop native confirmation.
+    The answer then says why, what the turn means for the work Panic stopped, and carries ``after_panic``.
+    A fact absent says nothing."""
     if to == "off":
         hearing = None if places is None else _ranked([p for p in places if _place_fact(p)["state"] != "paused"],
                                                       people, circles)
-        lines = ["Ouroboros will act only when you write to it."]
+        lines = ["Ouroboros will act only when you write to it or your Ouroboroses ask for work." if letters is True
+                 else ("Background wakes will stop. " + UNKNOWN_ASSIGNMENTS if letters is None
+                       else "Ouroboros will act only when you write to it.")]
         if hearing is None:
             lines.append("Its places will be heard, not answered; which ones could not be read.")
         elif hearing:
@@ -248,6 +285,10 @@ def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str 
                       _people_line(people)]
         lines += [_running_line(running), "Your chats, your tasks and the schedules you asked for keep working."]
         return {"to": "off", "lines": [line for line in lines if line], "places": hearing}
+    if after_panic and after_panic.get("why") == "held":
+        return {"to": "on", "lines": after_panic_lines(after_panic), "places": [],
+                "after_panic": {"why": "held", "choice": bool(after_panic.get("choice")),
+                                "held": after_panic.get("held"), "basis": str(after_panic.get("basis") or "")}}
     facts = _ranked(places or (), people, circles)
     active = [fact for fact in facts if fact["state"] == "active"]
     silent = [fact for fact in facts if fact["state"] == "silent"]
@@ -266,7 +307,51 @@ def switch_preview(to: str, places, *, people=None, circles=None, autonomy: str 
     if active or silent:
         lines.append("What arrived while it was off waits; at its first wake it sees what is unread there and decides what "
                      "to read and answer.")
-    return {"to": "on", "lines": lines, "places": None if places is None else active + silent}
+    preview = {"to": "on", "lines": lines, "places": None if places is None else active + silent}
+    if after_panic:
+        lines += after_panic_lines(after_panic)
+        preview["after_panic"] = {"why": str(after_panic["why"]), "choice": bool(after_panic.get("choice")),
+                                  "held": after_panic.get("held"), "basis": str(after_panic.get("basis") or "")}
+    return preview
+
+
+def after_panic_lines(shown: dict) -> list:
+    """What a desktop confirmation after Panic means, one sentence a line, from ``preview_start``'s facts."""
+    why, held = shown.get("why"), shown.get("held")
+    lines = ["Consciousness is already on; tasks stopped by Panic still wait for your decision in this run."
+             if why == "held" else
+             "Panic turned consciousness off: it stays off until you turn it on in the desktop app."
+             if why == "panic" else
+             "How consciousness was stopped could not be read: it stays off until you turn it on in the desktop app."]
+    if held is None and why == "panic":
+        lines.append("Nothing starts right now: whether Panic stopped any task could not be read, so this turn hands "
+                     "over no choice to resume tasks.")
+    elif held and shown.get("choice"):
+        lines += [f"Nothing starts right now: {_count(held, 'task')} stopped by Panic "
+                  f"{'stays' if held == 1 else 'stay'} stopped at this press.",
+                  f"On its later wakes Ouroboros may decide {'whether to resume it' if held == 1 else 'which of them to resume'}"
+                  ", even one the Panic was pressed for.",
+                  "A task you stopped or paused separately stays stopped, and deadlines, money and autonomy limits "
+                  "stay in force.",
+                  "Turning consciousness off, or restarting Ouroboros, ends that choice."]
+    elif held:
+        lines.append(f"Nothing starts right now: {_count(held, 'task')} stopped by Panic "
+                     f"{'stays' if held == 1 else 'stay'} stopped, and this {'action' if why == 'held' else 'turn'} "
+                     f"hands over no choice to resume {'it' if held == 1 else 'them'}.")
+    else:
+        lines.append("Nothing starts right now, and this turn hands over no choice to resume Panic-stopped tasks.")
+    return lines
+
+
+def panic_start_sentence(shown: dict | None) -> str:
+    """What a confirmed Start after Panic did about the work Panic stopped, after the switch's own words: "" for an
+    ordinary Start or when no such work was shown."""
+    held = len((shown or {}).get("holds") or ())
+    if not held:
+        return ""
+    tasks = _count(held, "task")
+    return (f" No task was started; on its wakes Ouroboros may now decide which of the {tasks} stopped by Panic to resume."
+            if shown.get("choice") else f" {tasks} stopped by Panic {'stays' if held == 1 else 'stay'} stopped.")
 
 
 def read_switch_preview(drive_root, to: str, running=None) -> dict:
@@ -275,11 +360,13 @@ def read_switch_preview(drive_root, to: str, running=None) -> dict:
     is the caller's state line. A read that fails says less, never a guess: no place list says «its places», no people
     count says nothing."""
     from ouroboros.place_arrivals import recent_people
+    from ouroboros.place_projection import letters_can_start_work
     from ouroboros.places import place_records
     from ouroboros.runtime_limits import get_consciousness_autonomy, get_consciousness_daily_usd
 
     try:
-        records = place_records(drive_root)
+        # A preview only reads: it projects an unimported legacy store in memory and never materializes the import.
+        records = place_records(drive_root, persist_import=False)
         places = list(records.places.values())
         circles = {p.place_id: str((records.circle_context(p.place_id) or {}).get("name") or "") for p in places}
     except Exception:
@@ -292,8 +379,14 @@ def read_switch_preview(drive_root, to: str, running=None) -> dict:
                                    services={p.place_id: p.provider for p in places})
         except Exception:
             log.warning("Recent people unreadable for the switch preview", exc_info=True)
+    offer = None
+    if to == "on":  # passive preview facts when a Panic or unknown stop stands; empty for an ordinary Start
+        from supervisor.panic_choice import preview_start
+
+        offer = preview_start(drive_root)
     return switch_preview(to, places, people=people, circles=circles, autonomy=get_consciousness_autonomy(),
-                          daily_usd=get_consciousness_daily_usd(), running=running)
+                          daily_usd=get_consciousness_daily_usd(), running=running, after_panic=offer,
+                          letters=letters_can_start_work(drive_root, records=records) if places is not None else None)
 
 
 def on_sentence(at: str, places, autonomy: str = "", daily_usd: Any = None, allowance: str = "") -> str:
@@ -337,12 +430,20 @@ QUIET = {
 }
 # A $0 allowance has no reset to wait for: only the owner's change opens it.
 ZERO_ALLOWANCE = "Its allowance is $0.00: nothing here starts a new wake until you raise it in Costs."
+# A linked Ouroboros's place: the switch and the allowance decide what wakes it there on its own, never the work a
+# letter of that Ouroboros assigns, which the link's own choices admit or refuse (``peer_links.effective_permissions``).
+ASSIGNMENT_NOTES = {
+    True: " A letter from the linked Ouroboros that assigns work is no wake: that work still starts here.",
+    False: " A letter from the linked Ouroboros that assigns work is refused here."}
 
 
-def place_quiet(state: str, *, switch: str, autonomy: str = "", allowance: str = "", limit_usd: Any = None) -> dict | None:
+def place_quiet(state: str, *, switch: str, autonomy: str = "", allowance: str = "", limit_usd: Any = None,
+                assignments: bool | None = None) -> dict | None:
     """``{cause, word, note, door}`` when a place that would speak is quiet for a cause beyond its own stored word, else
     ``None``. ``switch``: "on" | "off" | "panic" | "unknown" (no claim); ``allowance``: the window's status and
-    ``limit_usd`` its daily limit. A Paused place says Paused and a Silent one Silent: their own words already say it."""
+    ``limit_usd`` its daily limit. A Paused place says Paused and a Silent one Silent: their own words already say it.
+    ``assignments`` (a linked Ouroboros's place only; ``None`` elsewhere) is whether a letter of that Ouroboros that
+    assigns work starts work here now: an Off or spent-allowance note then says so apart, since neither governs it."""
     if state == "paused" or switch == "unknown":
         return None
     if switch in ("panic", "off"):
@@ -356,6 +457,8 @@ def place_quiet(state: str, *, switch: str, autonomy: str = "", allowance: str =
     word, note, door = QUIET[cause]
     if cause == "allowance" and isinstance(limit_usd, (int, float)) and limit_usd <= 0:
         note = ZERO_ALLOWANCE
+    if assignments is not None and cause in ("off", "allowance"):
+        note += ASSIGNMENT_NOTES[bool(assignments)]
     return {"cause": cause, "word": word, "door": door, "note": note}
 
 
@@ -368,19 +471,23 @@ def connect_note(switch: str) -> str:
 
 def first_run_words(autonomy: str = "act") -> dict:
     """The setup step's words, true for the autonomy the offer names (Advises answers nowhere): the gloss, the two
-    positions (an install being set up holds no place yet), what they mean, what a subscription alone pays with (said
-    once: the step's limits leave it out there) and where to change it later. ``choice`` is the on position a page
-    built before the step names (kept for such pages)."""
+    positions (an install being set up holds no place yet), the step's question, what each position does while the
+    owner is away, what a subscription alone pays with (said once, beside the allowance) and where to change it later;
+    ``summaryLead`` is Summary's lead, since this first setup's Start also begins the first conversation. ``meaning``
+    (their whole) and ``choice`` (the on position) are kept for pages built before the step said them."""
     places = ("reads and thinks in places you make Active; what it would say waits for you" if autonomy == "observe"
               else "answers in places you make Active")
+    # Start begins the first conversation either way (owner 21.11, 1C); on, the wakes go on before a reply.
+    lead = "What should Ouroboros do while you're away? Either way, Start begins your first conversation."
+    off_away = "When you're away, it works only on what you asked. Places you connect are heard, not answered."
+    on_away = ("When you're away, it also wakes on its own within its daily allowance, even before your first reply, "
+               f"and {places}.")
     return {"gloss": SWITCH_GLOSS + ".", "choice": POSITION_WORDS[True], "off": POSITION_WORDS[False],
-            "on": ON_WITHOUT_PLACES,
-            # Start begins the first conversation either way (owner 21.11, 1C); on, the wakes go on before a reply.
-            "meaning": ("Off: it works when you write to it, and places you connect are heard, not answered. On: it also "
-                        f"keeps waking on its own within its daily allowance, even before your first reply, and {places}. "
-                        "Either way, Start begins your first conversation."),
+            "on": ON_WITHOUT_PLACES, "lead": lead, "offAway": off_away, "onAway": on_away,
+            "meaning": f"{lead} Off: {off_away} On: {on_away}",
             "subscriptionCost": "On a subscription alone its wakes use the subscription's quota between your messages.",
-            "door": "Change it later in Dashboard › Consciousness; the allowance is in Dashboard › Costs."}
+            "door": "Change it later in Dashboard › Consciousness; the allowance is in Dashboard › Costs.",
+            "summaryLead": "Check your choices. Start Ouroboros saves them and begins your first conversation."}
 
 
 FIRST_RUN = first_run_words()
@@ -415,46 +522,37 @@ def held_sentence(wake: str, hold: Any) -> tuple:
     if cause == "owner":
         return f"Wake-up {wake} is on an explicit pause; its card shows who paused it and how to continue.", ""
     if cause in ALLOWANCE_HOLDS:
-        facts = [f"${float(ceiling):.2f}"] if type(ceiling) in (int, float) else []
+        from ouroboros.cost_projection import usd_text
+
+        # The ceiling it stopped at, which an earlier Resume may have moved: said as the number it is, never "at start".
+        facts = [usd_text(float(ceiling))] if type(ceiling) in (int, float) else []
         facts += ["the per-task cap too"] if cause == "allowance_and_cap" else []
         said = f" ({', '.join(facts)})" if facts else ""
-        return (f"Wake-up {wake} stopped at the allowance it had left when it started{said}.",
-                "Resume keeps that limit, so it pauses again while its known spend is at it, and a higher allowance "
-                "does not raise it. Stop now on its card ends it and frees the clock for its next check.")
+        if "resume_additional_usd" in hold:
+            return (f"Wake-up {wake} stopped at its allowance{said}.",
+                    "Resume checks what is left now; if there is room, it continues this wake without resetting its spend. "
+                    "Stop now on its card ends it and frees the clock for its next check.")
+        return (f"Wake-up {wake} stopped at its allowance{said}.",
+                "No spending estimate is available for Resume. Raising the limit alone resumes nothing. "
+                "Stop now on its card ends it and frees the clock for its next check.")
     # The limit it launched with, as far as its stamp names it (an older record names none).
     limit = {"per_task_cap": "the per-task cost cap", "launch_ceiling": "the spending limit"}.get(cause)
     said = f"paused at {limit} it started with" if limit else "paused or waiting in the queue"
     return f"Wake-up {wake} is {said}; its card shows why. The next wake-up follows it.", ""
 
 
-def _at_launch_ceiling(pause: dict, ceiling, basis: str) -> bool:
-    """A live budget pause at the graceful ceiling the wake launched with: its saved ceiling is that number under the
-    producer's own basis (a member's inherited one), or, on a row older than the saved ceiling, the rail alone."""
-    import math
-    from ouroboros.budget_pause import RAIL_GRACEFUL_CEILING, STATE_PAUSED, STATE_PAUSING
-
-    if (pause.get("state") not in (STATE_PAUSED, STATE_PAUSING) or pause.get("reason") != "budget"
-            or pause.get("rail") != RAIL_GRACEFUL_CEILING or ceiling is None):
-        return False
-    saved = pause.get("cost_ceiling")
-    if not isinstance(saved, dict):
-        return True
-    number = saved.get("ceiling_usd")
-    return (saved.get("basis") == basis and type(number) in (int, float)
-            and math.isclose(float(number), ceiling, rel_tol=0.0, abs_tol=1e-9))
-
-
 def hold_cause(metadata: dict, own: dict, members=()) -> dict:
     """``{"cause", "ceiling_usd"}``: what holds my own held wake, only as far as its records prove it (pure).
 
     ``own`` is the wake's pause row, ``members`` the pause rows of its paused tree members. The wake paused at the
-    ceiling it launched with (``root_cost_ceiling_usd``), or, child first, its tree's latch refused it while a member
+    carried ceiling (initial or renewed), or, child first, its tree's latch refused it while a member
     holding that inherited number paused at it: the launch stamp (``consciousness_wake.wake_task_metadata``) names
     ``allowance``, ``allowance_and_cap`` or ``per_task_cap``, and a record from before the stamp is only
     ``launch_ceiling``. Otherwise the pause's own reason or rail: ``owner``, ``sleep``, ``technical``,
     ``total_budget``, ``per_task_fence``. ``""`` proves nothing: no live pause, a Resume granted, a lifted allowance."""
     from ouroboros.budget_pause import (RAIL_DISPATCH_REFUSED, RAIL_GLOBAL_EXHAUSTED, REASON_AUTHORITY, REASON_OWNER,
                                         REASON_SLEEP, STATE_PAUSED, STATE_PAUSING)
+    from ouroboros.consciousness_allowance import at_wake_ceiling
     from ouroboros.task_pacing import recorded_producer_ceiling
 
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -469,9 +567,9 @@ def hold_cause(metadata: dict, own: dict, members=()) -> dict:
     lifted = isinstance(metadata.get("producer_allowance_lifted"), dict)
     ceiling = None if lifted else recorded_producer_ceiling({"metadata": metadata})
     refused_root = rail == RAIL_DISPATCH_REFUSED and own.get("scope") == "root"
-    tree = refused_root and any(_at_launch_ceiling(member, ceiling, "root_resolved_ceiling")
+    tree = refused_root and any(at_wake_ceiling(member, ceiling, "root_resolved_ceiling", legacy=True)
                                 for member in members if isinstance(member, dict))
-    if _at_launch_ceiling(own, ceiling, "producer_allowance") or tree:
+    if at_wake_ceiling(own, ceiling, "producer_allowance", legacy=True) or tree:
         return {"cause": _STAMPED_CAUSES.get(metadata.get("root_cost_ceiling_source"), "launch_ceiling"),
                 "ceiling_usd": ceiling}
     if rail == RAIL_GLOBAL_EXHAUSTED or rail == RAIL_DISPATCH_REFUSED and not refused_root:
@@ -479,13 +577,49 @@ def hold_cause(metadata: dict, own: dict, members=()) -> dict:
     return {"cause": "per_task_fence" if refused_root else "", "ceiling_usd": None}
 
 
-def held_wake_cause(drive_root, task_id: str) -> dict:
+def _resume_room(drive_root, task_id: str, metadata: dict, own: dict) -> dict:
+    """What an owner Resume of this stopped wake would add now, for display: the grant's own decision
+    (``allowance_resume_decision``) read with ``allow_stale`` inside a short wait, never from a window another read took;
+    an estimate that reserves and decides nothing. ``resume_additional_usd`` is the allowance's room under the tree's
+    caps (0.0 when either has none, null when it cannot be read); ``resume_available_usd`` what the total budget leaves
+    of it, named only when the decision names it. An empty total budget is a refusal of its own, not the allowance spent."""
+    from ouroboros.consciousness_allowance import allowance_resume_decision
+    from ouroboros.store import acquisition_budget
+
+    try:
+        with acquisition_budget(0.05):
+            quote = allowance_resume_decision(drive_root, {"id": task_id, "metadata": metadata}, own, allow_stale=True)
+    except Exception:
+        log.debug("The room a Resume would add to wake %s could not be read", task_id, exc_info=True)
+        quote = {}
+    error = quote.get("error")
+    if error in {"consciousness_allowance_exhausted", "root_hard_cap_exhausted",
+                 "independent_cap_exhausted", "work_cap_export_unverified",
+                 "work_cap_reconcile_pending"}:
+        return {"resume_additional_usd": 0.0}
+    if error == "budget_still_exhausted":
+        return {"resume_additional_usd": None, "resume_available_usd": 0.0}
+    additional, available = quote.get("additional_usd"), quote.get("available_now_usd")
+    if error or type(additional) not in (int, float):
+        return {"resume_additional_usd": None}
+    return {"resume_additional_usd": float(additional),
+            **({"resume_available_usd": float(available)} if type(available) in (int, float) else {})}
+
+
+def held_wake_cause(drive_root, task_id: str, *, window=None) -> dict:
     """``hold_cause`` of my held own wake from its records: its pool row's metadata (memory), its pause row and, only
     when its tree's latch refused it, its paused members' rows (one compact hot-facts read each, no task body). An
-    unreadable record proves nothing."""
+    unreadable record proves nothing, and only what it would have proven is lost: a pause the hot facts name as the
+    owner's, a sleep or a technical one stays that, and a money stop whose task record is unreadable falls back to the
+    launch stamp. ``window`` (the display's own read, given only while consciousness is on) asks for the room a Resume
+    would add now; the room is read afresh (``_resume_room``), never from that window."""
     from ouroboros.budget_pause import RAIL_DISPATCH_REFUSED, budget_pause_row
+    from ouroboros.consciousness_allowance import allowance_stopped, fenced_allowance_members, wake_ceiling_metadata
     from ouroboros.owner_pause import fence_closed
+    from ouroboros.store import acquisition_budget
     from ouroboros.store_hot_facts import controls
+    from ouroboros.task_results import load_task_result
+    from supervisor import queue as q
     from supervisor.consciousness_carriers import live_task_rows, paused_tree_members
 
     try:
@@ -495,18 +629,37 @@ def held_wake_cause(drive_root, task_id: str) -> dict:
         if fence_closed(fence) and task_id not in (fence.get("selected_members") or {}):
             return {"cause": "owner", "ceiling_usd": None}
         own = facts.get("budget_pause") or {}
-        members = ([budget_pause_row(root or drive_root, member) for member, root in paused_tree_members(task_id)]
-                   if own.get("rail") == RAIL_DISPATCH_REFUSED and own.get("scope") == "root" else [])
+        witnesses = []
+        members = []
+        if own.get("rail") == RAIL_DISPATCH_REFUSED and own.get("scope") == "root":
+            with q._queue_lock:
+                latch = (q.BUDGET_ROOT_FENCES.get(task_id) or {}).copy()
+            if latch and latch.get("cause") != "owner_pause":
+                witnesses = list(fenced_allowance_members(drive_root, task_id, latch.get("fence_id") or ""))
+            members = witnesses or [budget_pause_row(root or drive_root, member)
+                                    for member, root, _ in paused_tree_members(task_id)]
     except Exception:
         log.debug("The pause of held wake %s is unreadable; its cause stays unknown", task_id, exc_info=True)
         return {"cause": "", "ceiling_usd": None}
-    return hold_cause(metadata, own, members)
+    if own.get("reason") == "budget":  # only a money stop needs the record: the ceiling an earlier Resume may have moved
+        try:
+            with acquisition_budget(0.05):
+                metadata = wake_ceiling_metadata(load_task_result(drive_root, task_id, strict=True) or {}) or metadata
+        except Exception:
+            log.debug("The task record of held wake %s is unreadable; its launch stamp stands", task_id, exc_info=True)
+    result = hold_cause(metadata, own, members)
+    if window is not None and allowance_stopped(metadata, own, witnesses):
+        result.update(_resume_room(drive_root, task_id, metadata, own))
+    return result
 
 
-def off_sentence(places) -> str:
+def off_sentence(places, *, letters: bool | None = False) -> str:
     """The switch's first words as it turns consciousness off (owner 09.11, variant A; words 15.11, 5A). ``places`` is
-    one read of the place store, None when it could not be read; a Paused place does not hear either."""
-    said = "Consciousness off: Ouroboros acts only when you write to it."
+    one read of the place store, None when it could not be read; a Paused place does not hear either. ``letters``: a
+    linked Ouroboros's letters still start work here."""
+    said = ("Consciousness off: Ouroboros acts only when you write to it or your Ouroboroses ask for work." if letters is True
+            else ("Consciousness off. " + UNKNOWN_ASSIGNMENTS if letters is None
+                  else "Consciousness off: Ouroboros acts only when you write to it."))
     if places is None:
         return said + " Its places are heard, not answered."
     hearing = [fact for fact in map(_place_fact, places) if fact["state"] != "paused"]
@@ -564,7 +717,7 @@ def place_views(drive_root, allowance=None) -> list[dict]:
     from ouroboros.place_projection import place_view
     from ouroboros.places import place_records
 
-    records = place_records(drive_root)
+    records = place_records(drive_root, persist_import=False)
     facts = place_facts(drive_root, records.places.values(), full=False)
     return [place_view(drive_root, place, allowance=allowance, brief=True, records=records, facts=facts)
             for place in records.places.values()]

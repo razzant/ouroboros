@@ -246,11 +246,19 @@ EXECUTION_CLOSE_KEY = "execution_consumed"
 
 def execution_close(task: dict, meta: dict | None, now: float | None = None) -> dict:
     """``{EXECUTION_CLOSE_KEY: ...}`` for an ending attempt of a budgeted task, else ``{}``."""
-    from ouroboros.runtime_limits import explicit_execution_timeout_sec
+    from ouroboros.runtime_limits import resolve_task_execution_timeout_sec
+    from ouroboros.terminal_time import captured_task_attempt
 
-    if explicit_execution_timeout_sec(task) is None or not isinstance(meta, dict) or not meta:
+    if not isinstance(meta, dict) or not meta:
         return {}
-    attempt = int(meta.get("attempt") or task.get("_attempt") or 1)
+    effective = {**(meta.get("task") if isinstance(meta.get("task"), dict) else {}), **task}
+    if not effective.get("_execution_owner") and isinstance(effective.get("execution_owner"), dict) and effective["execution_owner"]:
+        effective["_execution_owner"] = effective["execution_owner"]
+    if resolve_task_execution_timeout_sec(effective) is None:
+        return {}
+    attempt = captured_task_attempt(effective, meta.get("attempt"))
+    if attempt is None:
+        return {}
     return {EXECUTION_CLOSE_KEY: {"sec": closed_execution_total(meta, now), "attempt": attempt}}
 
 
@@ -613,9 +621,10 @@ class TaskModelWait:
 
     @property
     def waits_allowed(self) -> bool:
-        """An inline Presence turn holds its conversation slot with no owner at the
-        computer: rotation and fallback still run, then a typed temporary refusal."""
-        return not self.task.get("_presence_turn")
+        """A correspondent's turn or a bounded program return does not open an owner's account-selection wait."""
+        from ouroboros.extension_late_result import restricted_return
+
+        return not self.task.get("_presence_turn") and not restricted_return(self.task)
 
     def mutate_row(self, wait_id: str, transform: Callable) -> dict:
         if self.row_mutator is not None:

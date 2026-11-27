@@ -50,6 +50,21 @@ def test_the_ceiling_is_a_direct_openai_route_fact():
     assert tool_schema_limit(OPENAI_MAIN, use_local=True) is None
 
 
+def test_reselecting_a_full_tool_set_keeps_previously_omitted_tail_at_its_normal_rank(monkeypatch):
+    from copy import deepcopy
+    from ouroboros.provider_models import PROVIDER_TOOL_SCHEMA_LIMITS
+    from ouroboros.window_learning import route_schema_trials
+
+    catalog = [_schema(name) for name in ('finish_task', 'maintain_harness', 'ordinary_work')]
+    monkeypatch.setitem(PROVIDER_TOOL_SCHEMA_LIMITS, 'openai', 2)
+    slot = SimpleNamespace(_route_left_out_tool_names={'maintain_harness'}, _actor_loaded_tool_names=set())
+    registry = SimpleNamespace(_ctx=slot, schemas=lambda: deepcopy(catalog), callable_rows=lambda _ns: [])
+    selected = route_schema_trials(registry, [], catalog[:1], 'nano', OPENAI_MAIN, False, reselect=True)
+    assert _names(selected('max').schemas) == ['finish_task', 'ordinary_work']
+    assert selected('max').left_out == ('maintain_harness',)
+    assert slot._route_left_out_tool_names == {'maintain_harness'}
+
+
 def test_a_catalog_within_the_ceiling_is_unchanged():
     at_ceiling = _catalog(128)
     kept, left_out = fit_tool_schemas_to_limit(at_ceiling, 128)
@@ -90,7 +105,9 @@ def test_main_fits_its_resident_list_in_place_and_names_what_it_left_out():
     assert "enable_tools" in str(notice)
     assert ctx.tools._ctx._route_left_out_tool_names == {left_out}
 
-    # The actor loads it again (enable_tools appends): it stays, another one goes, and one new notice names it.
+    # The actor loads it again (enable_tools appends and records the actor's choice, which the ceiling keeps):
+    # it stays, another one goes, and one new notice names it.
+    ctx.tools._ctx._actor_loaded_tool_names = {left_out}
     resident.append(_schema(left_out))
     rows = len(ctx.messages)
     loop_model_call._fit_route_tool_ceiling(ctx)

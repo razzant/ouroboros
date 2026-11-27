@@ -15,6 +15,7 @@ never reads live data.
 from __future__ import annotations
 
 import json
+import math
 import os
 
 import pytest
@@ -294,14 +295,19 @@ class Player:
     def _older(self, event):
         """One older page read at the reading edge: the passage read when it lands is held to stay."""
         hold = self.stand.hold('older')
+        feed = self.page.locator(self.feed(self.reader.room))
+        start = feed.evaluate('el => el.scrollTop')
+        step = 800
         x, y = self._box()
         self.page.mouse.move(x, y)
-        for _ in range(40):
+        # The same saved rows can wrap taller on another engine or font. Allow
+        # enough real wheel steps to reach the edge and send a gesture there.
+        for _ in range(max(40, math.ceil(start / step) + 2)):
             if hold['caught']:
                 break
-            self.page.mouse.wheel(0, -800)
+            self.page.mouse.wheel(0, -step)
             self.page.wait_for_timeout(80)
-        assert hold['caught'], 'the reading edge read no older page'
+        assert hold['caught'], f"the reading edge read no older page (scrollTop {start} to {feed.evaluate('el => el.scrollTop')})"
         self.rest(self.reader.room, held=True)
         self.reader.settle(self.reader.room, self.facts(self.reader.room))
         self.stand.release()

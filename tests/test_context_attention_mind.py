@@ -170,8 +170,10 @@ def test_memory_step_passes_the_actual_window_and_current_transcript(tmp_path, m
 
         def reproject_for_route(*, window_tokens, known_window, ratio, output_reserve, admitted,
                                 tool_schemas, start_mode, current_messages, refused_tokens, measured_input_tokens,
-                                reasoning_effort):
+                                reasoning_effort, tool_frames, unsent_start):
+            assert unsent_start is True  # no request of this fixture has been read (``start_unread``)
             assert measured_input_tokens is None  # this fixture has no prepared-input anchor
+            assert tool_frames is None  # no resident schemas: no route schema frame to price
             assert admitted is True  # a view under way is read at the line its own requests go out at
             assert reasoning_effort == "high"  # the round's effort: the request shape its measurement counted
             seen.append({"window": window_tokens, "known": known_window, "mode": start_mode,
@@ -322,6 +324,7 @@ def test_facts_refresh_for_changed_send_but_preserve_all_prior_rows(tmp_path, mo
     from copy import deepcopy
     from ouroboros import loop
     from ouroboros.loop_messages import append_context_facts
+    from ouroboros.loop_model_call import _presend_context_fit
 
     context = _ctx(tmp_path)
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit()]))
@@ -329,6 +332,8 @@ def test_facts_refresh_for_changed_send_but_preserve_all_prior_rows(tmp_path, mo
     assert not append_context_facts(context, money={})
 
     for change in ("body", "schemas", "route", "effort", "stale"):
+        with _presend_context_fit(context) as admit:  # the earlier row went out: it is sent history
+            assert admit(SimpleNamespace(physical_context=None))
         if change == "body":
             context.messages.append({"role": "user", "content": "A newly arrived owner correction."})
         elif change == "schemas":
@@ -359,3 +364,47 @@ def test_facts_largest_components_include_core_and_schemas(tmp_path, monkeypatch
     assert append_context_facts(context, money={})
     line = context.messages[-1]["content"]
     assert "core and books" in line and "tool schemas" in line and "unit:2:3:" in line
+
+
+def test_book_yields_are_offered_on_each_refused_view_after_the_passes(tmp_path, monkeypatch):
+    """A required handbook's yields follow the two passes, each offered on the view the last retry actually sent
+    (``loop_round_limits.book_yield_due``): a Max start the books rung lowered to Low reaches all three, one per further
+    refusal, while no request of it was read; a view without a required handbook, one a reply read, a delegated
+    child's, or a plan whose Low projection was never composed (the gate reads the plan's own ``low_projection``,
+    ``ContextFitPlan``'s composed field, never the projection callable alone) keeps the two passes as the whole
+    record (#3649, owner 23.11.2026, 1)."""
+    from ouroboros import loop, loop_model_call
+    from ouroboros.transcript_prefix import note_prefix_answer
+
+    for book, read, role, composed in ((40_000, False, None, True), (0, False, None, True), (40_000, True, None, True),
+                                         (40_000, False, "child", True), (40_000, False, None, False)):
+        context = _ctx(tmp_path)  # a Max start: no send recorded
+        context.context_fit_plan.core = SimpleNamespace(
+            compact_reference_docs=False, required_book_tokens=lambda mode, book=book: book * (mode == "low"))
+        context.context_fit_plan.projection = lambda _mode, role=role: SimpleNamespace(
+            calibration_ratio=1.0, memory_facts={"role": role} if role else {})
+        if composed:  # a first contact composed this Low view: the plan carries it as its own field
+            context.context_fit_plan.low_projection = context.context_fit_plan.projection("low")
+        if read:
+            note_prefix_answer(context.accumulated_usage, {"prompt_tokens": 9_000, "completion_tokens": 10}, "m", False)
+        monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit()]))
+        passes, sends = [], []
+
+        def apply(ctx, steps, *_a, **_kw):
+            passes.append(steps)
+            if steps == loop_model_call.REFUSAL_PASSES[1]:
+                ctx.active_context_mode = ctx.tools._ctx.active_context_mode = "low"  # the books rung lowered it
+            return True
+
+        def dispatch(ctx, _disposition, **_kwargs):
+            sends.append(ctx.active_context_mode)
+            ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"  # refused again
+            return None, 0.0
+
+        monkeypatch.setattr(loop_model_call, "_apply_refusal_pass", apply)
+        monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+        monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
+        assert loop_model_call._recover_context_overflow(context, _failed_capture(), 0.0)[0] is None
+        yields = loop_model_call.BOOK_YIELD_PASSES if book and not read and not role and composed else ()
+        assert passes == [*loop_model_call.REFUSAL_PASSES, *yields], (book, read, role, composed)
+        assert sends == ["max", "low", *(["low"] * len(yields))]

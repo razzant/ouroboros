@@ -29,9 +29,11 @@ from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ord
                                     form_counts, holding_room, Selection, supersedes, WorkPrices, restore,
                                     ORDINARY_STAGES, TELLING_STAGES, ROOM_STEPS)
 from ouroboros.memory_form_facts import holding_lines, telling_emergency, physical_floor
+from ouroboros.memory_view_work import PROGRAM_HISTORY_HEAD, has_program_history, model_room as model_room
 from ouroboros.chat_chain import parse_address
 from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
-from ouroboros.section_floor import PROTECTED, relocated_text, retain_section, section_views
+from ouroboros.section_floor import (PROTECTED, capture_system_projection, predicted_section, projection_fields,
+                                     relocated_text, render_governance, retain_section, section_views)
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +51,11 @@ _SHOWN += (("F8", "{} unsealed notes by label"), ("F8a", "{} aggregate note list
 # The forms a floor fact names (``view_facts``): a change to what a step's elements are or how they are listed raises
 # it, so a fact of other forms is read anew (``kept_level``). A fact without one names the forms before it, version 1.
 FORMS_VERSION = 2
+
+
+def program_history_head(snapshot):
+    # The room's existing size includes each selected line; reserve just the one new data envelope.
+    return PROGRAM_HISTORY_HEAD if snapshot and has_program_history(snapshot) else ""
 
 
 def tokens_of(chars: int) -> int:
@@ -75,11 +82,21 @@ class ViewFit:
 
     @cached_property
     def story(self) -> str:
-        return mv.render_story(self.snapshot, self.level)
+        from ouroboros.context_assembly_trace import RoomWitness
+
+        witness = RoomWitness(self.snapshot)
+        text = mv.render_story(self.snapshot, self.level, part=witness.part)
+        self.story_selection = witness.selections()
+        return text
 
     @cached_property
     def room(self) -> str:
-        return mv.render_room(self.snapshot, self.level, floor_note=self.note)
+        from ouroboros.context_assembly_trace import RoomWitness
+
+        witness = RoomWitness(self.snapshot)
+        text = mv.render_room(self.snapshot, self.level, floor_note=self.note, observe=witness.observe, part=witness.part)
+        self.room_pieces = witness.pieces
+        return text
 
     @cached_property
     def story_chars(self) -> int:
@@ -88,6 +105,20 @@ class ViewFit:
     @cached_property
     def room_chars(self) -> int:
         return mv.room_chars(self.snapshot, self.level, floor_note=self.note)
+
+    def model_parts(self, opening_address: str) -> Tuple[str, str]:
+        """The room a send carries: its system part and program data (``model_room``), drawn once per opening note."""
+        drawn = self.__dict__.setdefault("_model_parts", {})
+        if opening_address not in drawn:
+            from ouroboros.context_assembly_trace import RoomWitness
+
+            witness = RoomWitness(self.snapshot)
+            room, data = model_room(self.snapshot, self.level, floor_note=self.note,
+                                    opening_address=opening_address, observe=witness.observe, witness=witness.part)
+            drawn[opening_address] = (room, data, witness.pieces)
+        room, data, pieces = drawn[opening_address]
+        self.room_pieces = pieces
+        return room, data
 
 
 NO_VIEW = SimpleNamespace(story="", room="", facts={}, level=None, story_chars=0, room_chars=0)  # a frame with no memory
@@ -205,7 +236,9 @@ def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: I
     room; ``zero_need`` adds the tool schemas, ``need`` my memory in its ordinary forms (task lines collapsed, nothing
     cut): ``story`` (``unfolded``: its pages no part or account holds yet) and ``room``. ``parts`` read the host's
     sections by id as the request carries them (``addressed``: those sent in a shorter form), each part by whose it is
-    (``WHOSE``), in measured tokens before ``density``. Measures only: the start alone chooses the mode, and the mind
+    (``WHOSE``), in measured tokens before ``density``. The DESIGN slice riding the changing block's head is my
+    human's book: charged by the form the request carries (whole excerpt or its map), never as my knowledge, and
+    uncharged when the head carries no book. Measures only: the start alone chooses the mode, and the mind
     judges what to fold.
     """
     if allowance is None:
@@ -218,7 +251,9 @@ def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: I
     base = view_tokens(core.base_prompt) + view_tokens(core.bible_md)
     stable = sent(core.semi_stable_sections, "subagents", "always_on_skills")  # the stable block's skills and subagents
     skills = sent(core.dynamic_sections, "installed_skills")
-    mine = {"knowledge": view_tokens(core.dynamic_head_text), "source registry": sent(core.dynamic_sections, "registry"),
+    design = sent(core.dynamic_head_sections, "design_bible")  # my human's DESIGN slice by the form the request carries
+    mine = {"knowledge": view_tokens(core.dynamic_head_text) - design, "design bible": design,
+            "source registry": sent(core.dynamic_sections, "registry"),
             "scratchpad": sent(core.dynamic_sections, "scratchpad"), "held note heads": sent(core.dynamic_sections, "held_note:")}
     parts = {"books": max(0, sum(map(view_tokens, books)) - base),
              "core": max(0, base + view_tokens(core.semi_stable_text) - stable),
@@ -286,7 +321,7 @@ LOWERED_CAUSES = ("memory", "request", "route")  # ``lowered_cause``
 # Whose each part of a start's measure is (``measure_text``): core, the assignment and any other part stand alone.
 WHOSE = (("mine", ("knowledge", "source registry", "scratchpad", "held note heads")),
          ("what the request itself carries", ("connections", "runtime facts", "skills and subagents")),
-         ("my human's", ("books",)))
+         ("my human's", ("books", "design bible")))
 
 
 def gate_need(fact: Mapping[str, Any]) -> int:
@@ -366,11 +401,13 @@ def addressed_text(steps: Mapping[str, Any]) -> str:
     return ", ".join(text.format(steps[step]) for step, text in _SHOWN if steps.get(step))
 
 
-def measure_text(fact: Mapping[str, Any], *, parts: bool = False, pages: Optional[Mapping[str, Any]] = None) -> str:
+def measure_text(fact: Mapping[str, Any], *, parts: bool = False, pages: Optional[Mapping[str, Any]] = None,
+                 composition: str = "") -> str:
     """The host's measure of one start in the provable parts; the mind judges what they mean: the gate's need
     (``gate_need``: whole books, my memory at the gate's level, the work's room, the reply reserve) against the window,
     the ordinary need (my memory with no shortened form) under that name and the need with no memory; with ``parts``
-    the measure by whose part it is (``WHOSE``), else the tool schemas and the need without them too. ``pages``
+    the measure by whose part it is (``WHOSE``), else the tool schemas and the need without them too; ``composition``
+    names my memory at the gate's level by kind (``context_view_facts.telling_parts``). ``pages``
     (``unfolded_pages`` of the same snapshot) names how many unfolded pages there are and where they pile up."""
     window, gate = fact["window"], gate_need(fact)
     unfolded = pages_text(pages) if pages is not None else f"pages no part or account holds yet {fact['unfolded']:,}"
@@ -380,7 +417,8 @@ def measure_text(fact: Mapping[str, Any], *, parts: bool = False, pages: Optiona
         text += f"; tool schemas {fact['schemas']:,}; without them {fact['floor_need']:,}"
     if parts:
         named, grouped = dict(fact["parts"]), {name for _whose, names in WHOSE for name in names}
-        listed = {"mine": [f"my memory at the gate's level {fact.get('telling', fact['story'] + fact['room']):,}"],
+        kinds = f" ({composition})" if composition and fact.get("telling") else ""  # what keeps the books out, by kind
+        listed = {"mine": [f"my memory at the gate's level {fact.get('telling', fact['story'] + fact['room']):,}{kinds}"],
                   "what the request itself carries": [f"tool schemas {fact['schemas']:,}"], "my human's": []}
         for whose, names in WHOSE:
             listed[whose] += [f"{name} {named[name]:,}" for name in names if name in named]
@@ -421,13 +459,54 @@ def lowered_line(mode: str, lowered_from: str, fact: Optional[Mapping[str, Any]]
 
 def required_book_note(*, lowered: bool, book_tokens: int, free: Optional[int], work: int) -> str:
     """What a start says of this task's directly required handbook, appended after every ordinary choice (owner
-    1.11.2026): a Low its room lowered keeps that book whole, and a work room it leaves short is a fact, never a veto.
+    1.11.2026): a Low its room lowered keeps that book whole, and a work room left short at planning is a fact,
+    never a veto, without a present-tense remaining count that later map yields would make stale.
     ``book_tokens`` and ``free`` are calibrated; ``free`` is None when nothing measured the start's room."""
     lines = ["This task's directly required handbook stays whole beside these chapter maps."] if lowered else []
     if free is not None and free < work:
-        lines.append(f"Start room is smaller than requested: this task's directly required handbook takes "
-                     f"{book_tokens:,} tokens; about {max(0, free):,} of the {work:,} requested remain.")
+        lines.append(f"Start room at planning was smaller than the {work:,} tokens requested: "
+                     f"this task's directly required handbook takes {book_tokens:,} tokens.")
     return "\n".join(lines)
+
+
+def fit_required_book(shown, *, book, fixed, ratio, reserve, output_reserve, window, window_record, mode, work, lowered,
+                      note_window, admit, optional_map, opening_address, cold_return=False):
+    """Render the selected room as system and program data; price the book and note beside both.
+
+    A cold return preserves the read view for rebind; refuse early only if the book itself exceeds its admitted room.
+
+    Each retry takes the next yield from ``optional_map`` (optional attachments, then an unread integrating Low
+    start's book maps) until none remains or the fixed price stops shrinking. The book does not set the reply
+    allowance. Return the last frame's costs for a refusal; without a memory snapshot there is no floor receipt.
+    """
+    room, room_data = shown.model_parts(opening_address) if shown.level is not None else ("", "")
+    if not book:
+        return room, room_data, 0, None
+    # The fitted envelope already priced the program history header and its row shape.
+    data_chars = mv.json_chars(room_data) - mv.json_chars(PROGRAM_HISTORY_HEAD) if room_data else 0
+    story_tokens = view_tokens(shown.story)
+    while True:
+        ordinary = fixed + story_tokens + tokens_of(mv.json_chars(room) + data_chars)
+        price = math.ceil((ordinary + book) * ratio)
+        note = required_book_note(lowered=lowered, book_tokens=math.ceil(book * ratio), work=work,
+            free=window - reserve - price if note_window else None) if getattr(shown, "snapshot", None) else ""
+        presented = "\n\n".join(filter(None, (room, note)))
+        note_tokens = view_tokens("\n\n" + note) if note else 0
+        if not admit:
+            return presented, room_data, note_tokens, None
+        reply = context_budget.reply_allowance_tokens(caller_max_tokens=output_reserve, nano=mode == "nano",
+            owner_nano=False, input_tokens=math.ceil(ordinary * ratio), raw_input_tokens=ordinary,
+            window_tokens=window, window_record=window_record)
+        memory = story_tokens + tokens_of(mv.json_chars(presented) + data_chars)
+        held = max(reserve, reply)
+        input_room = (window_record.admitted if cold_return else window_record.input_room(reply)) if window_record else None
+        if math.ceil((book if cold_return else fixed + book + memory) * ratio) <= (
+                window - held if input_room is None else input_room):
+            return presented, room_data, note_tokens, None
+        smaller = None if cold_return else optional_map()
+        if smaller is None or smaller >= fixed:
+            return presented, room_data, note_tokens, {"fixed_tokens": fixed + book, "memory_tokens": memory, "reserve_tokens": held}
+        fixed = smaller
 
 
 @timed_section("fit.walk")
@@ -629,7 +708,7 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     authored restore with an advisory capacity deficit; dispatch fits it later.
     ``tool_names``: the schemas the next request sends, which its floor note reads; else those its start priced.
     """
-    from ouroboros.context_fit import _governance_blocks, _system_blocks, _request_tokens
+    from ouroboros.context_fit import _governance_blocks, _request_tokens
 
     if plan is None or getattr(plan, "core", None) is None or not plan.core.memory_view_json:
         raise ValueError("This actor has no captured memory view")
@@ -642,27 +721,33 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     names = tool_names if tool_names is not None else plan.start_schema_names(mode)  # None: no claim
     note = floor_note(level, window_tokens=old.get("window_tokens"), mode=mode, tool_names=names,
                       target_tokens=old.get("target_tokens"), budget_mode=plan.preferred_mode,
-                      lowered_from=switched.get("from"), max_room=max_room, snapshot=snapshot)
-    story, room = mv.render_story(snapshot, level), mv.render_room(snapshot, level, floor_note=note)
+                      lowered_from=switched.get("from"), max_room=max_room, snapshot=snapshot,
+                      preference=old.get("preference"))
     facts = view_facts(snapshot, level, window_tokens=old.get("window_tokens"), mode=mode,
                        allowances={"margin": old.get("allowance_tokens"), "physical": old.get("physical_allowance_tokens"),
                                    "budget": old.get("budget_allowance_tokens")},
                        target_tokens=old.get("target_tokens"), lowered_from=switched.get("from"))
-    facts.update({"max_room": max_room} if max_room else {})
+    facts.update({key: value for key in ("max_room", "first_contact_preference")  # the start's facts, carried as they are
+                  if (value := shown.memory_facts.get(key))})
     # Low's missed target was the start's: what its request took with no memory stays its fact (3A)
-    facts["floor"].update({"no_memory_tokens": old["no_memory_tokens"]} if "no_memory_tokens" in old else {})
+    facts["floor"].update({key: old[key] for key in ("no_memory_tokens", "preference") if key in old})
     governance = _governance_blocks(None, plan.core, mode="low" if mode == "nano" else mode)
     sections = (*plan.core.semi_stable_sections, *plan.core.dynamic_head_sections, *plan.core.dynamic_sections,
                 *(governance[0] if not isinstance(governance[0], str) else ()))
     receipts = shown.memory_facts.get("host_sections_addressed", ())
     if receipts:
         facts["host_sections_addressed"] = receipts
-    system = _system_blocks(plan.core, governance, story, room, mode, section_views(sections, receipts), mv.story_is_whole(level))
+    selected = ViewFit(snapshot, level, note, facts)
+    story = selected.story
+    room, data = selected.model_parts(plan.core.opening_program_address)
+    system, observation = capture_system_projection(plan.core, governance, story, room, mode,
+        section_views(sections, receipts), receipts, mv.story_is_whole(level), shown=selected,
+        facts=view_receipt(snapshot, story, room, facts, room_data=data))
     tokens = _request_tokens(system, shown.user_content_json or plan.user_content_json,
-                            current_messages=plan.messages_for(mode))
+                            current_messages=plan.messages_for(mode), room_data=data)
     projection = dataclasses.replace(shown, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
-        memory_facts=view_receipt(snapshot, story, room, facts), estimated_tokens=tokens,
-        calibrated_tokens=int(tokens * shown.calibration_ratio))
+        estimated_tokens=tokens, calibrated_tokens=int(tokens * shown.calibration_ratio),
+        room_data=data, **projection_fields(system, observation))
     return dataclasses.replace(plan, **{f"{mode}_projection": projection})
 
 
@@ -733,12 +818,15 @@ def memory_read_path(tool_names: Optional[Iterable[str]]) -> str:
 def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str, target_tokens: Optional[int] = None,
                lowered_from: Optional[str] = None, tool_names: Optional[Iterable[str]] = None,
                budget_mode: Optional[str] = None, max_room: Optional[Mapping[str, Any]] = None,
-               snapshot: Optional[mv.MemoryViewSnapshot] = None) -> str:
+               snapshot: Optional[mv.MemoryViewSnapshot] = None,
+               preference: Optional[Mapping[str, int]] = None) -> str:
     """Retained cuts, their final visible forms and the sources holding this room.
 
     The three bins distinguish my telling, host facts and emergencies; the global unread count is a
     separate window fact. Nano names the reader path whenever the tools it is rendered with lack memory_read, cut
     or not (``### Memory check``). The receipt is priced with every candidate and preserves a held view's frame.
+    ``preference``: the steps the window and the mode budget took before a first send's preference asked for more
+    (``render_view_for_mode``'s ``start_saving``), None when no such ask took a step; the window is named only for its own.
     """
     names = None if tool_names is None else tuple(tool_names)
     counts = dict(level.steps)
@@ -750,15 +838,18 @@ def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str,
         return f"### Memory check\nAddresses this view shows read with memory_read.\n{path}" if path else ""
     lines, name = ["### Physical floor"], mode.capitalize()  # a Low the window took from Max is Low (21.11)
     if asked:
+        own = asked if preference is None else set(preference) - set(_COLLAPSING)
         bounds = ([f"the window ({window_tokens} tokens)"]
-                  if window_tokens is not None else []) + (
-            [f"the {(budget_mode or mode).capitalize()} mode budget ({target_tokens} tokens)"] if level.by_budget else [])
+                  if window_tokens is not None and own else []) + (
+            [f"the {(budget_mode or mode).capitalize()} mode budget ({target_tokens} tokens)"] if level.by_budget else []) + (
+            ["this first send's smaller view, preferred after a comparable request was refused"]
+            if preference is not None else [])
         subject = " and ".join(bounds)
         def describe(kind):
             return ", ".join(f"{label}: {fact['lines']} lines/{fact['sources']} sources" for label, fact in forms.get(kind, {}).items()) or "none"
         shown = (f"my telling: {describe('retold')}; host facts: {describe('host')}; "
                  f"emergency without my telling: {describe('emergency')}" if forms else addressed_text(counts))
-        lines.append(f"{name} cuts for {subject}. Reduced forms — {shown}. Read sources with memory_read.")
+        lines.append(f"{name} cuts{' for ' + subject if subject else ''}. Reduced forms — {shown}. Read sources with memory_read.")
         if forms.get("window"):
             lines.append(f"Window emergency over unread words: {describe('window')}; not a failure of my telling.")
     if holding:
@@ -809,7 +900,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                          start_work: bool = False,
                          max_room: Optional[Mapping[str, Any]] = None, stated_window_tokens: Optional[int] = None,
                          shortest: bool = False, level: Optional[mv.FloorLevel] = None,
-                         report_nano_miss: bool = False) -> ViewFit:
+                         report_nano_miss: bool = False, start_saving: int = 0, telling_only: bool = False,
+                         telling_floor: bool = False, request_limit: Optional[int] = None) -> ViewFit:
     """One mode's projection, the floor decided once.
 
     The window counts only when known and fresh (``known_window``). An owner target binds
@@ -822,9 +914,12 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     and the fact name that budget in whatever mode the view is narrowed, hop after hop.
     ``shortest``: where this walk ends when only uncovered owner rows are left to address, with its
     completed receipt -- what a start's host walk judges beside the window (``_host_steps``).
-    ``level``: such a walk's level again, without walking, its receipt priced beside this request's host forms.
+    ``level`` prices an existing level without walking. ``telling_only`` prices ordinary forms from that level
+    if supplied, without taking another emergency form or uncovering owner words.
     A level is priced from the snapshot's pieces, never by drawing it; ``measure_text(story_chars, room_chars)`` prices
     the two memory texts of a whole request (by default their own tokens).
+    ``request_limit`` is a measured running input goal after crediting host forms and books. The optional
+    ``start_saving`` is separate advice: it folds to tellings only, after the ordinary view was chosen.
     """
     target, reserve = context_budget.context_mode_limits(mode, owner_mode, output_reserve, working_reserve_tokens=working_reserve_tokens)
     if kept is not None:
@@ -837,22 +932,26 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     if kept is not None and not start_work:
         allowances = {**allowances, "margin": allowances["physical"]}
     # Owner 15.11.2026 (3A, 4A): Low's target never takes memory below my shortest telling of the whole horizon and
-    # never takes this room, and a Max start keeping whole books never goes below it either; only the window's own
+    # never takes this room, and Max on the telling rung never goes below it either; only the window's own
     # start bound may. A miss of the target is its own fact. Nano's number still governs all memory (owner 11.10, 13.10).
     binds = kept is None and target is not None and owner_mode == "low" and (window is None or target < window)
     reports_miss = binds or (report_nano_miss and kept is None and mode == owner_mode == "nano"
                              and target is not None and (window is None or target < window))
     floor, keeps = ((TARGET_FLOOR, TARGET_KEEPS) if binds else (TELLING_STAGES, frozenset())  # the one order (4A)
-                    if mode == "max" and (kept is None or start_work) else (None, frozenset()))
+                    if telling_floor or mode == "max" and (kept is None or start_work) else (None, frozenset()))
     size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))
     room_bound = allowances["window"] if binds else allowances["margin"]  # a target's miss is its own fact, below
     uncovered = uncovered_owner_rows(snapshot)
     def total(level, note):  # the whole request with this view and its receipt, as the target counts it
         return math.ceil((non_memory_tokens + measure_text(mv.story_chars(snapshot, level),
                                                            mv.room_chars(snapshot, level, floor_note=note))) * ratio) + reserve
+    asked_at = None  # the level a first send's soft ask (``start_saving``) walks on from, so its own cuts are named
+    def softly(level):
+        return dict(asked_at.steps) if asked_at is not None and level.steps != asked_at.steps else None
     def receipt(level):
         note = floor_note(level, window_tokens=named, mode=mode, target_tokens=target, lowered_from=lowered_from,
-                          tool_names=tool_names, budget_mode=owner_mode, max_room=max_room, snapshot=snapshot)
+                          tool_names=tool_names, budget_mode=owner_mode, max_room=max_room, snapshot=snapshot,
+                          preference=softly(level))
         if reports_miss and (need := total(level, note)) > target:
             telling = " with my memory in its shortest tellings" if binds else ""
             note += (f"\n{mode.capitalize()}'s target ({target:,} tokens) is not met at this start: this request needs "
@@ -872,15 +971,25 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
         return measure_text(mv.story_chars(snapshot, level), mv.room_chars(snapshot, level, floor_note=receipt(level)))
     walk = dict(kept=kept or mv.FULL_VIEW, measure=measure, floor=floor, keeps=keeps,
                 floor_bound=allowances["window"] if binds else None)
-    if shortest and level is None:  # A saving no form can pay takes every form in walk order; no physical bound
+    if telling_only:  # TELLING_STAGES also prices openings and conversation forms that omit untold words.
+        level = fit_memory_view(snapshot, {}, kept=level or walk['kept'], measure=measure, floor=ORDINARY_STAGES, saving=math.inf)
+    elif shortest and level is None:  # A saving no form can pay takes every form in walk order; no physical bound
         # stops it before owner rows. The physical judgment of host forms never stops at a Max start's telling floor:
         # what the window cannot hold beside the books is the books' own step (``context_fit``), not an outline's.
         level = fit_memory_view(snapshot, {**allowances, "physical": None}, saving=math.inf,
                                 **{**walk, **({} if binds else {"floor": None, "keeps": frozenset()})})
     elif level is None:
+        if request_limit is not None:
+            saving = max(0, non_memory_tokens + measure(walk['kept']) - request_limit)
         level = fit_memory_view(snapshot, allowances, saving=saving, **walk)
+    if start_saving:
+        # Another chat's refusal is not physical pressure: only memory with an in-view telling can pay this ask.
+        asked_at = level
+        level = fit_memory_view(snapshot, {}, kept=level, saving=start_saving, measure=measure, floor=TELLING_STAGES,
+                                keeps=ROOM_STEPS if owner_mode == "low" else frozenset())
     facts = view_facts(snapshot, level, window_tokens=named, mode=mode, allowances=allowances,
                        target_tokens=target, lowered_from=lowered_from)
+    facts["floor"].update({"preference": soft} if (soft := softly(level)) is not None else {})
     bound, note = allowances["margin"], receipt(level)
     facts["floor"]["ordinary_unfit"] = bound is not None and measure(ordinary_level(snapshot)) > bound
     facts["floor"]["target_missed"] = reports_miss and total(level, note) > target
@@ -897,7 +1006,7 @@ def trace_facts(receipt: Mapping[str, Any]) -> Dict[str, Any]:
     return {key: receipt[key] for key in TRACE_FIELDS if key in receipt}
 
 
-def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: Mapping[str, Any]) -> Dict[str, Any]:
+def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: Mapping[str, Any], *, room_data="") -> Dict[str, Any]:
     """A projection's view fact: the floor fact plus the spec, the chronicle's state and block sizes.
 
     ``role``, ``room_id``, ``floor``, ``story_status`` and the start's ``max_room`` are what a task trace
@@ -905,14 +1014,39 @@ def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: 
     """
     return {**facts, "spec": dataclasses.asdict(snapshot.spec), "store_status": dict(snapshot.store_status),
             "legacy_frontier_status": snapshot.frontier.get("status"),
-            "blocks": {"story_tokens": view_tokens(story), "room_tokens": view_tokens(room),
+            "blocks": {"story_tokens": view_tokens(story), "room_tokens": view_tokens(room) + view_tokens(room_data),
                        "conversations": len(snapshot.conversations), "marks": len(snapshot.marks)}}
 
 
 # Host producers before the whole-or-outline sections, then the memory walk, all under the same
 # start budget. Running views narrow only under physical pressure or a refusal.
-HOST_STEPS = ("runtime", "review_pool", "review_continuity", "installed_skills",
-              "drive_state", "world", "subagents", "architecture_map", "development_map", "return_facts_words")
+HOST_STEPS = ("runtime", "review_pool", "review_continuity", "installed_skills", "drive_state",
+              "world", "subagents", "architecture_map", "development_map", "return_facts_words")
+# Optional reference sections keep their whole excerpt beside my shortest tellings until physical pressure.
+OPTIONAL_STEPS = ("design_bible",)
+
+
+def optional_excerpt_fits(bound, refused, before, measure, tellings):
+    """Price lawful tellings beside an optional excerpt in the same request before giving it up.
+
+    A start passes its own physical bound and a refusal may pass a saving; a measured running recovery passes
+    its full input goal, including its return room. Neither an owner's mode target alone nor a healthy view asks it.
+    """
+    if bound is None and refused <= 0:
+        return True
+    shown = tellings()
+    price = measure(shown.story_chars, shown.room_chars)
+    return (bound is None or price <= bound) and (refused <= 0 or measure(*before) - price >= refused)
+
+
+def untold_forms(snapshot, level):
+    """The forms of a walk's ``level`` outside the ordinary stages, each of which keeps my telling in view: they cut what
+    I have not told (the end of a reply of mine F2, a page to its opening F5). Only Nano's number, which governs all my
+    memory, takes them without the window."""
+    stages = _elements(snapshot).stages
+    return frozenset((step, ident) for step, ids in level.addressed for ident in ids
+                     if stages[step, ident] not in ORDINARY_STAGES)
+
 # Host forms only the window's own start bound takes: my WORLD map stays whole while that bound holds the request with
 # memory at its shortest forms, whatever soft frame the start has (memory audit 15.11.2026, F7); when the bound cannot
 # hold it, it still steps before memory.
@@ -922,6 +1056,12 @@ WINDOW_ONLY = ("world",)
 # and the books as the frame holds them, whatever a target or a selected Low asks; past it the words step first to their
 # readers, then the facts to their totals, before the books or a telling would (owner 15.11.2026, 4A: steps 3 and 4).
 TELLING_SPARED = ("return_facts", "return_facts_words")
+# The two books' detailed maps of a Low frame (``context_layout.book_map_section``). An integrating focus's unread Low
+# start spares them like ``TELLING_SPARED`` (#3649, the owner's "keep both maps whole"), against the window alone: no
+# target or desired work room shortens them; a cold return keeps the chapter lists it held, retaining the current
+# full map when a chapter changed (``replay_book_maps``). A directly required handbook's first request that cannot go out takes them in this
+# order, its own map first, after the optional maps (owner 23.11.2026, 1; ``yield_for_book``).
+BOOK_MAPS = ("development_map", "architecture_map")
 
 
 def _held_note_steps(sections, receipts, fits, *, form="summary"):
@@ -969,7 +1109,7 @@ def _held_note_steps(sections, receipts, fits, *, form="summary"):
 
 def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, root, task_id, allowance=None,
                 shortest=None, budget_mode=None, slack=0, bare=None, retain=None, window_bound=None, told=None,
-                held_least=None, held_bound=None):
+                held_least=None, held_bound=None, optional_fits=None, optional_walk=None, maps_told=None, listed=()):
     """First steps of mode_views, using the same physical allowance as memory.
 
     Producers own meaning; this walk selects only explicit smaller views. Retained
@@ -1000,6 +1140,8 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     ``window_bound``, the window's own start bound: neither an owner's target nor the start's own room shortens it.
     A ``TELLING_SPARED`` section steps only while the window cannot hold the request with memory at my shortest telling
     and the books as the frame holds them (``told``: ``max_room_lost``'s own test), so before the books or a telling.
+    Given ``maps_told`` (an integrating Low start's own test, which asks no work room), ``BOOK_MAPS`` are spared so too;
+    ``listed``, the chapter lists a cold return's accepted view showed (``replay_book_maps``), stand as shown.
     Held heads yield last (``_held_note_steps``). A map frame that holds them passes ``held_least(addressed,
     physical)``, the request beside these host forms with memory at its shortest forms (``shortest``'s measure, for a
     view already sent too), and ``held_bound``, the window's own bound for a head: a start's keeps its work room, a
@@ -1008,11 +1150,16 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     A head steps only when both hold: this walk left no outline untaken that the physical window still holds whole,
     and the request still exceeds ``held_bound``; then one at a time. So where a start misses its own bound while the
     physical window holds the whole index, neither yields: that start has less work room, as a start without heads
-    has there. A target, a soft frame or a requested saving shortens no head.
+    has there. A target, a soft frame or a requested saving shortens no head. Optional reference sections check
+    ``optional_fits`` beside lawful tellings and the physical bound or measured running goal. A refusal can have
+    no numeric limit; an unknown window without a refusal offers no reason to shorten them. Where Nano's budget frames the start,
+    price the whole excerpt also beside the map's own memory level and lawful tellings. Its existing cuts are not
+    new losses for the excerpt. If this fits the window but the whole-excerpt walk needs extra untold forms for the
+    target, the map is the budget's (``start_room``), not the window's.
     """
     from ouroboros.held_notes import HeldNoteSection
 
-    receipts = list(previous)
+    receipts = [*previous, *listed]
     physical = floor_allowances(window_tokens=window or None, output_reserve_tokens=reserve,
                                 non_memory_tokens=0, calibration_ratio=ratio)["physical"]
 
@@ -1023,7 +1170,28 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
             remaining = max(0, remaining - _held_note_steps(sections, receipts, fits))
         return receipts, remaining
 
+    def keeps(part, addressed):  # True whole, False the window's map, else the budget's (``start_room``)
+        whole = optional_fits(addressed)
+        if budget_mode != "nano" or optional_walk is None or part.operative_view is None:
+            return whole
+        shown = optional_walk(addressed)
+        cuts = untold_forms(shown.snapshot, shown.level)
+        if whole and not cuts:
+            return True
+        reader = predicted_section(part)["reader"] if root and task_id else ""
+        mapped = optional_walk({**addressed, part.section_id: relocated_text(part, reader, start_room=budget_mode)})
+        if not whole and not optional_fits(addressed, mapped.level):
+            return False
+        return budget_mode if cuts - untold_forms(mapped.snapshot, mapped.level) else True
+
     if measure is None or not window or not root or not task_id:
+        if optional_fits is not None:  # the only reference forms reachable without a measured window or a reader
+            addressed = section_views(sections, receipts)
+            for part in sections:
+                if part.section_id in OPTIONAL_STEPS and part.section_id not in addressed:
+                    if (whole := keeps(part, addressed)) is not True:
+                        saving = max(0, saving - _address_optional(part, receipts, addressed, root=root, task_id=task_id,
+                                                                   retain=retain, start_room=whole or False))
         return finish(saving)
     addressed = section_views(sections, receipts)
     candidates = [part for part in sections if part.section_id not in addressed
@@ -1052,16 +1220,24 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
             continue
         if (bound is None or current <= bound) and initial - current >= saving:
             break
+        if part.section_id in OPTIONAL_STEPS and optional_fits is not None:
+            if (whole := keeps(part, addressed)) is not True and _address_optional(
+                    part, receipts, addressed, root=root, task_id=task_id, retain=retain, start_room=whole or False):
+                current, fits = measure(addressed), None
+            continue
         if fits is None:
             sent_least = shortest(addressed, physical) if shortest else current  # memory at its shortest forms
             fits = sent_least <= physical
         if part.section_id in WHOLE_OR_OUTLINE_STEPS and fits and (soft or initial - current >= excess):
             outline_left = True
             continue  # an outline is a physical step, never a start-room or slack choice
-        spared = part.section_id in WINDOW_ONLY or part.section_id in TELLING_SPARED
+        mapped = maps_told is not None and part.section_id in BOOK_MAPS
+        telling = part.section_id in TELLING_SPARED or mapped
+        spared = part.section_id in WINDOW_ONLY or telling
         if part.section_id in WINDOW_ONLY and window_bound is not None and sent_least <= window_bound:
             continue  # the window's start bound holds it beside memory's shortest forms: no soft frame shortens it
-        if part.section_id in TELLING_SPARED and (told(addressed) if told else window_bound is None or current <= window_bound):
+        test = maps_told if mapped else told
+        if telling and (test(addressed) if test else window_bound is None or current <= window_bound):
             continue  # the window holds it beside my shortest telling and the books: neither yields to it
         try:
             row = (retain or retain_section)(part, root=root, task_id=task_id)
@@ -1069,7 +1245,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
             log.warning("Host section capture unavailable; keeping %s whole", part.section_id, exc_info=True)
             continue
         start_room = ((not spared and budget_mode or True) if soft and fits else False) \
-            if part.section_id not in TELLING_SPARED else False  # spared: the window's own room; told: the window's fact
+            if not telling else False  # spared: the window's own room; told: the window's fact
         short = relocated_text(part, row["reader"], start_room=start_room)
         saved = view_tokens(part.full_text) - view_tokens(short)
         if saved <= 0:
@@ -1078,6 +1254,133 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         receipts.append({**row, "tokens_saved": saved, **({"start_room": start_room} if start_room else {})})
         current, fits = measure(addressed), None
     return finish(max(0, saving - (initial - current)), outline_left)
+
+
+def _address_optional(part, receipts, addressed, *, root, task_id, retain=None, start_room=False):
+    """Take one optional attachment (or a required handbook's book map) to its map, its full text retained behind a
+    pointer; for an actor with no reader (``root`` empty) only its heading stays, named unavailable to this actor
+    (``relocated_text``). ``start_room``: the mode whose own budget took it, as every host step it paid carries it;
+    else the window's. Returns tokens saved."""
+    if part.operative_view is None or len(part.operative_view) >= len(part.full_text):
+        return 0
+    row = {"section_id": part.section_id, "source_ref": None, "reader": ""}
+    if root and task_id:
+        try:
+            row = (retain or retain_section)(part, root=root, task_id=task_id)
+        except (OSError, ValueError):
+            log.warning("Host section capture unavailable; keeping %s whole", part.section_id, exc_info=True)
+            return 0
+    short = relocated_text(part, row["reader"], start_room=start_room)
+    saved = view_tokens(part.full_text) - view_tokens(short)
+    if saved <= 0:
+        return 0
+    addressed[part.section_id] = short
+    receipts.append({**row, "tokens_saved": saved, **({"start_room": start_room} if start_room else {})})
+    return saved
+
+
+def optional_for_book(sections, receipts, *, root, task_id, retain=None):
+    """A start whose directly required handbook would not fit beside its view: each optional attachment takes its map
+    for the window, once, so the admission check runs again on a request no optional attachment holds whole."""
+    receipts, addressed = list(receipts), section_views(sections, receipts)
+    for part in sections:
+        if part.section_id in OPTIONAL_STEPS and part.section_id not in addressed:
+            _address_optional(part, receipts, addressed, root=root, task_id=task_id, retain=retain)
+    return receipts
+
+
+def yield_for_book(sections, receipts, core, *, retain=None, maps=False):
+    """A required handbook's first request that cannot go out: ``receipts`` with its next yield, or None when none is
+    left. Every optional attachment takes its map first (``optional_for_book``); then, with ``maps`` (an unread
+    integrating Low start), one ``BOOK_MAPS`` map at its chapter list beside its retained full text, the book's own first
+    (owner 23.11.2026, 1). Memory, mode, schemas, reserves and the book stay as chosen."""
+    root, task_id = core.section_root, core.section_task_id
+    stepped = optional_for_book(sections, receipts, root=root, task_id=task_id, retain=retain)
+    if len(stepped) > len(receipts):
+        return stepped
+    addressed = section_views(sections, stepped)
+    for name in BOOK_MAPS if maps and root and task_id else ():  # a map steps only beside a reader of its full text
+        part = next((part for part in sections if part.section_id == name), None)
+        if part is not None and name not in addressed and _address_optional(
+                part, stepped, addressed, root=root, task_id=task_id, retain=retain):
+            return stepped
+    return None
+
+
+def replay_book_maps(sections, saved, core, *, retain=None):
+    """The chapter lists a cold return's Low projection or accepted Low view held (``held_notes.restored_capture``).
+    An unchanged map reuses its verified retained source without writing; when chapter text changed (or its handle is
+    absent here), the current full map is retained behind a fresh reader so the short list points to the current map."""
+    from ouroboros.artifacts import read_actor_source_bytes
+
+    root, task_id = core.section_root, core.section_task_id
+    maps = {part.section_id: part for part in sections
+            if part.section_id in BOOK_MAPS and part.operative_view is not None and len(part.operative_view) < len(part.full_text)}
+    kept, seen = [], set()
+    for row in saved.get("book_maps", ()) if root and task_id else ():
+        name = row.get("section_id") if isinstance(row, Mapping) and not row.get("predicted") else None
+        if name not in maps or name in seen:
+            continue
+        part, expected, current = maps[name], predicted_section(maps[name]), None
+        if retain is None and (row.get("source_ref"), row.get("reader")) == (expected["source_ref"], expected["reader"]):
+            try:
+                read_actor_source_bytes(root, task_id, row["source_ref"])
+                current = {"section_id": name, "source_ref": row["source_ref"], "reader": row["reader"]}
+            except (OSError, ValueError):
+                current = None
+        if current is None:
+            try:
+                current = (retain or retain_section)(part, root=root, task_id=task_id)
+            except (OSError, ValueError):
+                log.warning("Book map replay capture unavailable; keeping %s whole", name, exc_info=True)
+                continue
+        start_room = row.get("start_room", False)
+        tokens = view_tokens(part.full_text) - view_tokens(relocated_text(part, current["reader"], start_room=start_room))
+        if tokens > 0:
+            seen.add(name)
+            kept.append({**current, "tokens_saved": tokens, **({"start_room": start_room} if start_room else {})})
+    return kept
+
+
+def step_book_map(plan: Any, mode: str, *, maps: Optional[bool] = None) -> Optional[Any]:
+    """``plan`` with its required handbook's next yield (``yield_for_book``) in ``mode``'s shown view, for an unread
+    start whose first request cannot go out (Low takes optional maps then ``BOOK_MAPS`` when ``maps`` holds; Nano
+    takes only optional maps such as DESIGN, never ARCH/DEV); None where nothing is left, the frame holds no captured
+    core, or its shown view is not this capture's rendering. Only the yielded section's text changes: memory, its
+    notes, mode, schemas and reserves stay as the start chose them."""
+    from ouroboros.context_fit import _governance_blocks, _request_tokens
+    from ouroboros.section_floor import render_sections
+
+    core = getattr(plan, "core", None)
+    if (core is None or mode not in ("low", "nano") or getattr(plan, f"{mode}_projection", None) is None
+            or not core.required_book_tokens(mode)):
+        return None
+    shown = plan.projection(mode)
+    governance = _governance_blocks(None, core, mode="low")
+    common = governance[0] if not isinstance(governance[0], str) else ()
+    rows = list(shown.memory_facts.get("host_sections_addressed", ()))
+    allow_maps = (mode == "low") if maps is None else bool(maps and mode == "low")
+    stepped = yield_for_book((*core.dynamic_head_sections, *common), rows, core, maps=allow_maps)
+    system = json.loads(shown.system_content_json)
+
+    def rendered(receipts):  # the common block and the head of the changing block, as this capture renders them
+        return (render_governance(governance, section_views(common, receipts))[0], render_sections(
+            core.dynamic_head_sections, core.dynamic_head_text, section_views(core.dynamic_head_sections, receipts)))
+
+    (common_text, head), (after, new_head) = rendered(rows), rendered(stepped or rows)
+    if (stepped is None or len(system) < 2 or system[0]["text"] != common_text
+            or not system[-1]["text"].startswith(head)):
+        return None
+    new = [{**system[0], "text": after}, *system[1:-1], {**system[-1], "text": new_head + system[-1]["text"][len(head):]}]
+    tail = json.loads(shown.continuation_messages_json) if shown.continuation_messages_json is not None else None
+    old, size = (_request_tokens(blocks, shown.user_content_json or plan.user_content_json, current_messages=tail,
+                                 supplementary_messages_json=core.supplementary_messages_json,
+                                 room_data=shown.room_data) for blocks in (system, new))
+    if size >= old:
+        return None
+    return dataclasses.replace(plan, **{f"{mode}_projection": dataclasses.replace(
+        shown, system_content_json=json.dumps(new, ensure_ascii=False, sort_keys=True), estimated_tokens=size,
+        calibrated_tokens=int(size * shown.calibration_ratio), memory_facts={**shown.memory_facts, "host_sections_addressed": stepped})})
 
 
 # --- a pairwise start fit of other memories in one captured frame ------------------------------------------------
@@ -1104,8 +1407,10 @@ def counterfactual_starts(plan: Any, snapshots: Mapping[str, mv.MemoryViewSnapsh
     view receipt, calibration, checkpoint or plan. When no view holds the whole input, the start's own rescue applies
     as production's (``context_input_selection.rescued_start``) to the deliveries this start captured, in its order
     (``rescued_inputs``); an arm on one says ``"input": "rescued"``. ``{"measured": False, "missing": [...]}`` names
-    inputs this plan lacks; each arm is ``{"mode", "max_room", "steps", "host"}``, ``{"refused": reason}`` when no
-    start view fits, or ``{"unmeasured": reason}`` (a further rescue this start never captured included)."""
+    inputs this plan lacks; each arm is ``{"mode", "max_room", "steps", "host"}`` (plus ``"local_admission_deferred":
+    True`` where a local route deferred required-handbook admission to its exact count), ``{"refused": reason}`` when no
+    start view fits, or ``{"unmeasured": reason}`` (a further rescue this start never captured included, and every
+    arm of a start a fresh chat's first-send preference shaped: its sizes are not this plan's, so no arm repeats it)."""
     from ouroboros import context_fit as cf
     from ouroboros.section_floor import predicted_section
 
@@ -1116,13 +1421,27 @@ def counterfactual_starts(plan: Any, snapshots: Mapping[str, mv.MemoryViewSnapsh
         ("its window record", record is not None)) if not held]
     if missing:
         return {"measured": False, "missing": missing}
+    if core.held_note_resume is not None:  # a cold return's held frame, receipts and listed maps are its own, never a fresh start's
+        core = dataclasses.replace(core, held_note_resume=None)
     schemas, ratio = json.loads(plan.start_tool_schemas_json), float(plan.max_projection.calibration_ratio)
     governance = {form: cf._governance_blocks(None, core, mode=form) for form in ("max", "low")}
     rescues, last = rescued_inputs(plan)
+    started, cause = plan.start or ("", "")
+    if not started:
+        started, cause = plan.initial_mode, start_cause(plan.projection(plan.initial_mode).memory_facts)
+    advised = cause in cf.FIRST_CONTACT_START.values()
+    physical_maps = started == "low" and bool(cause and not advised)
+    # The window can choose the maps while a separate first-send preference folds memory within them.
+    has_preference = advised or (
+        physical_maps and plan.projection("low").memory_facts.get("first_contact_preference") is True)
     arms: Dict[str, Any] = {}
     for name, snapshot in snapshots.items():
-        if not snapshot.active:
-            arms[name] = {"unmeasured": "memory capture unavailable: " + str(snapshot.store_status.get("state"))}
+        if started == "unknown":
+            arms[name] = {"unmeasured": "the original start did not survive its continuation"}
+            continue
+        if not snapshot.active or has_preference:
+            arms[name] = {"unmeasured": "its start took a first send's preference this fit does not repeat" if has_preference
+                          else "memory capture unavailable: " + str(snapshot.store_status.get("state"))}
             continue  # an unreadable journal is not an empty history that fits Max
         def fit(user_content_json: str, snapshot=snapshot) -> Tuple[Dict[str, Any], str]:
             return cf._view_projections(
@@ -1162,16 +1481,17 @@ def counterfactual_starts(plan: Any, snapshots: Mapping[str, mv.MemoryViewSnapsh
             arms[name] = {"unmeasured": str(exc) if isinstance(exc, _UncapturedRescue) else type(exc).__name__}
             continue
         facts = contents[mode][1]
+        deferred = plan.provider == "local" and record.usable is not None and bool(core.required_book_tokens(mode))
         arms[name] = {"mode": mode, "max_room": facts.get("max_room"), "steps": dict((facts.get("floor") or {}).get(
             "steps") or {}), "host": [(row["section_id"], row["tokens_saved"]) for row in facts.get(
-                "host_sections_addressed", ())], **({"input": "rescued"} if rescued else {})}
+                "host_sections_addressed", ())], **({"input": "rescued"} if rescued else {}),
+            **({"local_admission_deferred": True} if deferred else {})}
     frame = {"core": plan.core_sha256[:12], "preferred": plan.preferred_mode, "window": record.total_equivalent,
              "known": record.usable is not None, "reserve": plan.output_reserve_tokens, "ratio": ratio,
-             "schemas": len(schemas or ()), "started": plan.start[0] or plan.initial_mode,  # the start's own mode
-             "unmeasured": tuple(plan.start) == ("max", "unmeasured"),  # a Max start whose route named no window
-             # an owner's Max the window took to Low, temporarily, carries its cause (``start_cause``), whatever is chosen now
-             "maps": (plan.start[0] or plan.initial_mode) == "low" and bool(
-                 plan.start[1] if plan.start[0] else start_cause(plan.projection(plan.initial_mode).memory_facts))}
+             "schemas": len(schemas or ()), "started": started,  # the start's own mode
+             "unmeasured": (started, cause) == ("max", "unmeasured"),
+             "maps": physical_maps or (started == "low" and cause == cf.FIRST_CONTACT_START["maps"]),
+             "advised": advised}
     return {"measured": True, "frame": frame, "arms": arms}
 
 
@@ -1198,7 +1518,8 @@ def counterfactual_lines(fit: Mapping[str, Any]) -> List[str]:
     if not fit.get("measured"):
         return ["", head, "not measured: this task's plan does not hold " + "; ".join(fit.get("missing") or ()) + "."]
     f = fit["frame"]
-    started = (TEMPORARY_LOW if f.get("maps") else "Max, window not measured at the start" if f.get("unmeasured")
+    started = ("Max with chapter maps by first-send preference" if f.get("maps") and f.get("advised") else
+               TEMPORARY_LOW if f.get("maps") else "Max, window not measured at the start" if f.get("unmeasured")
                else f["started"])
     lines = ["", head, (
         f"frame: core {f['core']}, owner mode {f['preferred']}, window {f['window']:,}"
@@ -1217,7 +1538,11 @@ def counterfactual_lines(fit: Mapping[str, Any]) -> List[str]:
         steps = ", ".join(f"{step} {count}" for step, count in arm["steps"].items()) or "none"
         host = ", ".join(f"{section} ~{saved:,}" for section, saved in arm["host"])
         maps = arm["mode"] == "low" and f["preferred"] == "max"  # Low, temporarily, for the window: my human's Max
-        lines.append(f"- {name}: starts {TEMPORARY_LOW if maps else arm['mode'].capitalize()}"
+        mode_text = TEMPORARY_LOW if maps else arm["mode"].capitalize()
+        lead = (f"projected {mode_text} (local required-handbook admission deferred: actual admission and final "
+                "navigation are unknown until a matching exact local count)"
+                if arm.get("local_admission_deferred") else f"starts {mode_text}")
+        lines.append(f"- {name}: {lead}"
                      + (" on the input this start rescued" if arm.get("input") == "rescued" else "")
                      + (f"; Max room {'held' if room['cause'] == 'held' else 'lost, cause ' + lowered_cause(room)}: "
                         f"{measure_text(room)}" if room else "; no Max room measured")

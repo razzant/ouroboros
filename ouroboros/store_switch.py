@@ -41,11 +41,16 @@ import logging
 import os
 import pathlib
 import shutil
+import sqlite3
 import subprocess
 import threading
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import partial
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from ouroboros import evidence_packs, store, store_import, usage_store
+from ouroboros.git_selection import selected_git
 from ouroboros.store import EXPORTING, GENERATION_KEY, PUBLISHED, RETIRED, supervisor_row, utc_stamp as _stamp
 from ouroboros.usage_ledger import LEDGER_REL, UsageAccountingError
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
@@ -58,6 +63,26 @@ PROGRESS_REL = pathlib.Path("state/switch_progress.json")
 DOORS = ("ui_rollback", "vcs_rollback", "boot_smoke_rollback", "update_replace")
 _NOTICE_PHASES = ("refused", "switch_failed", "switch_not_performed")
 Owner = Callable[[Dict[str, Any]], Tuple[bool, str]]
+
+
+class UnappliedCheckout(NamedTuple):
+    """An ordinary failed outcome with the producer's proof no checkout step took effect."""
+
+    ok: bool
+    message: str
+    before_tree_effects = True
+
+
+class SwitchIntentPending(RuntimeError):
+    """``record_switch_intent`` refused before writing: the earlier intent stays its own door's."""
+
+
+class UnappliedSwitch(NamedTuple):
+    """The same switch result shape, preserving proof of refusal before tree effects."""
+
+    ok: bool
+    message: str
+    deferred: bool
 
 
 def _progress(root: pathlib.Path, phase: str, **facts: Any) -> None:
@@ -122,21 +147,38 @@ def report_outcomes(root: pathlib.Path, owner_chat_id: int) -> None:
 
 
 
-def record_switch_intent(root: Any, *, target_sha: str, target_ref: str, reason: str, door: str) -> Dict[str, Any]:
-    """The door's record of the switch it wants; write-once until consumed or refused."""
+def record_switch_intent(root: Any, *, target_sha: str, target_ref: str, reason: str, door: str,
+                         attempt_id: str = "") -> Dict[str, Any]:
+    """The door's record of the switch it wants; write-once until consumed or refused. A door's ``attempt_id`` (an
+    Update replace's) binds the seam's refusal record to that attempt (``refused_switch``)."""
     root = pathlib.Path(root)
     if door not in DOORS:
         raise ValueError(f"unknown switch door: {door}")
     if (root / INTENT_REL).exists():
-        raise RuntimeError(f"a switch intent is already recorded: {root / INTENT_REL}")
+        raise SwitchIntentPending(f"a switch intent is already recorded: {root / INTENT_REL}")
     intent = {"target_sha": str(target_sha), "target_ref": str(target_ref), "reason": str(reason), "door": door,
-              "requested_at": utc_now_iso()}
+              "requested_at": utc_now_iso(), **({"attempt_id": str(attempt_id)} if attempt_id else {})}
     atomic_write_json(root / INTENT_REL, intent, fsync=True)
     return intent
 
 
 def read_switch_intent(root: Any) -> Optional[Dict[str, Any]]:
     return read_json_dict(pathlib.Path(root) / INTENT_REL)
+
+
+def _refused_intent_path(root: pathlib.Path, attempt_id: Any) -> Optional[pathlib.Path]:
+    """The one name ``_refuse`` gives an intent naming ``attempt_id`` when it sets it aside unconsumed."""
+    attempt = str(attempt_id or "")
+    return root / INTENT_REL.with_name(f"{INTENT_REL.stem}.refused-{attempt}.json") if attempt.isalnum() else None
+
+
+def refused_switch(root: Any, door: str, attempt_id: Any) -> Optional[Dict[str, Any]]:
+    """The intent ``door`` recorded for ``attempt_id`` as ``_refuse`` set it aside, or ``None``. That atomic rename,
+    synced before any later write, happens only before an intent is consumed, so no switching owner ever received
+    it: the decisive record, whatever became of the progress row after it."""
+    path = _refused_intent_path(pathlib.Path(root), attempt_id)
+    intent = read_json_dict(path) if path is not None else None
+    return intent if isinstance(intent, dict) and (intent.get("door"), intent.get("attempt_id")) == (door, attempt_id) else None
 
 
 def _receipt(root: pathlib.Path, intent: Dict[str, Any]) -> Dict[str, Any]:
@@ -158,7 +200,7 @@ def _write_receipt(root: pathlib.Path, receipt: Dict[str, Any]) -> None:
 
 def target_file_bytes(repo_dir: Any, sha: str, rel: str) -> Optional[bytes]:
     """The bytes of ``rel`` in the target commit, ``None`` when the target lacks it."""
-    result = subprocess.run(["git", "cat-file", "-p", f"{sha}:{rel}"], cwd=str(repo_dir), capture_output=True,
+    result = subprocess.run([selected_git(), "cat-file", "-p", f"{sha}:{rel}"], cwd=str(repo_dir), capture_output=True,
                             env={**os.environ, "LC_ALL": "C", "LANG": "C"})
     return result.stdout if result.returncode == 0 else None
 
@@ -186,33 +228,111 @@ def lacks_wake_chain_reader(repo_dir: Any, target_sha: str) -> bool:
 _DEFERRING = ("facts", "dialogue", "threads")  # the needs only the seam meets, at the restart exit (every writer dead)
 
 
+def reset_profile_refusal(root: Any, repo_dir: Any, target_sha: str) -> str:
+    """Can the target finish a Reset that is still unfinished? A completed Reset set the old Project
+    shelves aside under a dot name no body reads as a room, so it never restricts a rollback."""
+    from ouroboros.launch_roots import RESETTING, read_witness
+
+    if read_witness(root)[0] != RESETTING:
+        return ""
+    initializer = target_file_bytes(repo_dir, target_sha, "supervisor/state_initialization.py") or b""
+    return ("" if b"def accept_runtime_reset(" in initializer
+            else "The target version cannot preserve the unfinished Reset.")
+
+
+class HistoryHandoff:
+    """The unchanged server may resume this transfer, not a same-door neighbour."""
+
+    _continue = None
+    checkout_confirmed = False
+
+    def prepare(self, root: pathlib.Path) -> str:
+        from ouroboros.gateway.history_reader import reader
+
+        token, refusal = reader.prepare_handoff(root.resolve())
+        self._continue = (partial(reader.continue_inline, token) if token is not None else
+                          lambda: no_switch_intent(root) and store.forget_handoffs())
+        return refusal
+
+    def resume_inline(self, *, restored=False) -> None:
+        if self._continue is not None and (self.checkout_confirmed or restored):
+            self._continue()
+
+
+_HISTORY_HANDOFF = ContextVar("history_handoff", default=None)
+
+
+@contextmanager
+def capture_history_handoff():
+    """Keep the attempt across synchronous restart wrappers with a two-value result."""
+    handoff = HistoryHandoff()
+    token = _HISTORY_HANDOFF.set(handoff)
+    try:
+        yield handoff
+    except BaseException:
+        # The checkout owner may have finished before a wrapper failed to arm exit.
+        handoff.resume_inline()
+        raise
+    finally:
+        _HISTORY_HANDOFF.reset(token)
+
+
+def current_history_handoff() -> HistoryHandoff:
+    return _HISTORY_HANDOFF.get() or HistoryHandoff()
+
+
 def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: str, reason: str, door: str,
-                    reset: Callable[[], Tuple[bool, str]]) -> Tuple[bool, str, bool]:
+                    reset: Callable[[], Tuple[bool, str]], handoff: Optional[HistoryHandoff] = None,
+                    attempt_id: str = "") -> Tuple[bool, str, bool]:
     """A door's one decision after its writers are stopped: a target WITHOUT the store, or one that cannot
     read a dialogue row held by reference, records the intent and moves nothing (the seam exports and
     switches at the restart exit the door requests next); any other runs the door's own reset now, after the
     accepted wake transitions are written in the form a target without their reader reads (best effort, its
     outcome logged: ``_export_wake_transitions``). Returns ``(ok, message, deferred)``."""
+    if refusal := reset_profile_refusal(root, repo_dir, target_sha):
+        return UnappliedSwitch(False, refusal, False)
     needs = switch_needs(repo_dir, target_sha)
     if any(needs.get(name) for name in _DEFERRING):
-        record_switch_intent(root, target_sha=target_sha, target_ref=target_ref, reason=reason, door=door)
+        record_switch_intent(root, target_sha=target_sha, target_ref=target_ref, reason=reason, door=door,
+                             attempt_id=attempt_id)
         return True, (f"authority switch to {target_sha[:12]} recorded: the facts are exported and the checkout "
                       "moves at the restart exit"), True
     if lacks_wake_chain_reader(repo_dir, target_sha):
         exported = _export_wake_transitions(pathlib.Path(root))
         log.info("Accepted wake transitions before the %s door's reset to %s: %s", door, target_sha[:12],
                  exported.get("status"))
-    refusal = _hand_off_stores(pathlib.Path(root))
-    if refusal:
-        store.forget_handoffs()
-        return False, f"switch refused: a store could not be handed off ({refusal})", False
+    root = pathlib.Path(root)
+    handoff = handoff if handoff is not None else current_history_handoff()
+    if refusal := handoff.prepare(root) or _hand_off_stores(root):
+        handoff.resume_inline(restored=True)  # the checkout never ran
+        return UnappliedSwitch(False, f"switch refused: a store could not be handed off ({refusal})", False)
     try:
-        ok, message = reset()
+        outcome = reset()
     except BaseException as exc:
-        if getattr(exc, "before_tree_effects", False):  # the reset changed nothing: this process keeps its stores
-            store.forget_handoffs()
+        if getattr(exc, "before_tree_effects", False):
+            handoff.resume_inline(restored=True)
         raise
+    ok, message = outcome
+    handoff.checkout_confirmed = ok
+    if not ok and getattr(outcome, "before_tree_effects", False):
+        handoff.resume_inline(restored=True)
+        return UnappliedSwitch(False, message, False)
     return ok, message, False
+
+
+def no_switch_intent(root: pathlib.Path) -> bool:
+    try:
+        return not (root / INTENT_REL).exists()
+    except OSError:
+        return False
+
+
+def inline_history_ready(root: pathlib.Path) -> bool:
+    """A confirmed continuing owner may have to wait for publication or a busy store."""
+    try:
+        return no_switch_intent(root) and store.store_ready(root)
+    except (OSError, sqlite3.OperationalError, store.StoreError):
+        return False
 
 
 def _export_wake_transitions(root: pathlib.Path) -> Dict[str, Any]:
@@ -230,16 +350,16 @@ def _export_wake_transitions(root: pathlib.Path) -> Dict[str, Any]:
 
 
 def _hand_off_stores(root: pathlib.Path) -> str:
-    """Every present store of the root and its retained drives leaves WAL before the door moves the
-    checkout (``store.hand_off``); the refusal text when one cannot."""
+    """Return the root and its retained drives to compatible journal and Project lock formats."""
     try:
-        from ouroboros import dialogue_store
+        from ouroboros import dialogue_store, project_registry_recovery
 
         for drive in (root, *store_import.descendant_drives(root)):
+            project_registry_recovery.hand_off(drive)
             store.hand_off(drive)
             dialogue_store.hand_off(drive)
         usage_store.hand_off(root)
-    except (OSError, store.StoreError, UsageAccountingError) as exc:
+    except (OSError, sqlite3.OperationalError, store.StoreError, UsageAccountingError) as exc:
         return f"{type(exc).__name__}: {exc}"
     return ""
 
@@ -298,8 +418,8 @@ def _unbound(recorded: str, intent: Dict[str, Any], what: str) -> Optional[Tuple
 
 def rev_parse(repo_dir: Any, ref: str) -> str:
     """The commit ``ref`` names in ``repo_dir``, ``""`` when it names none."""
-    result = subprocess.run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=str(repo_dir), capture_output=True,
-                            text=True, env={**os.environ, "LC_ALL": "C", "LANG": "C"})
+    result = subprocess.run([selected_git(), "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=str(repo_dir),
+                            capture_output=True, text=True, env={**os.environ, "LC_ALL": "C", "LANG": "C"})
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
@@ -426,8 +546,10 @@ def _refuse(root: pathlib.Path, intent: Dict[str, Any], receipt: Dict[str, Any],
     attempt moved them); progress retains the reason for the next startup owner notice."""
     restored = _abandon(root, receipt)
     store.forget_handoffs()  # this process keeps its stores
-    refused = root / INTENT_REL.with_name(f"{INTENT_REL.stem}.refused-{_stamp()}.json")
+    refused = (_refused_intent_path(root, intent.get("attempt_id"))
+               or root / INTENT_REL.with_name(f"{INTENT_REL.stem}.refused-{_stamp()}.json"))
     os.replace(root / INTENT_REL, refused)
+    store.fsync_directory(root / "state")  # an attempt's set-aside intent is its refusal record (``refused_switch``)
     _progress(root, "refused", intent=intent, reason=reason, restored=restored, intent_moved_to=refused.name, **facts)
     return {"status": "refused", "reason": reason, "restored": restored, **facts}
 
@@ -450,6 +572,8 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
         return _refuse(root, intent, receipt, "second_failure", attempts=receipt["attempts"])
     if blockers:
         return _refuse(root, intent, receipt, "quiescence_unconfirmed", blockers=list(blockers))
+    if refusal := reset_profile_refusal(root, repo_dir, intent["target_sha"]):
+        return _refuse(root, intent, receipt, refusal)
     needs, wake = switch_needs(repo_dir, intent["target_sha"]), lacks_wake_chain_reader(repo_dir, intent["target_sha"])
     roots, refusal = _roots(root) if needs["facts"] else ([], "")
     _progress(root, "preflight", needs=needs, attempt=receipt["attempts"])
@@ -687,7 +811,7 @@ def when_ready(root: Any, *steps: Callable[[], Any]) -> None:
     threading.Thread(target=lambda: [_step(step) for step in steps], daemon=True, name="store-ready-steps").start()
 
 
-def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
+def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any, *, restart_drained: bool = False) -> Dict[str, Any]:
     """The seam at the restart exit. ``cleanup`` is ``server._emergency_process_cleanup``'s
     census: ``worker_exits`` the pool's kill census (``supervisor.workers.last_worker_exit_census``),
     ``live_children`` the handles still alive after it, ``owned_stop`` ``stop_owned_work``'s
@@ -696,7 +820,27 @@ def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
     exit's own finalization (``shell_process.exit_finalization``); Panic still ends it. Never raises."""
     root = pathlib.Path(root)
     owner = None
-    if read_switch_intent(root) is None:
+    facts = cleanup if isinstance(cleanup, dict) else {}
+    stop = facts.get("owned_stop") if isinstance(facts.get("owned_stop"), dict) else {}
+    census = facts.get("worker_exits") if isinstance(facts.get("worker_exits"), dict) else None
+    blockers = [name for name, blocked in (
+        ("worker_exits_unconfirmed", census is None or bool(census.get("unconfirmed"))),
+        ("child_processes_alive", bool(facts.get("live_children"))),
+        ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
+    ) if blocked]
+    from supervisor.state_initialization import hand_off_runtime_reset
+
+    intent = read_switch_intent(root)
+    reset_blockers = blockers.copy()
+    if (not restart_drained or not isinstance(facts.get("live_children"), list) or census is None
+            or not isinstance(census.get("unconfirmed"), list) or not isinstance(stop.get("unconfirmed"), list)):
+        reset_blockers.append("shutdown_unconfirmed")
+    if intent:
+        reset_blockers.append("version_switch_pending")
+    reset = hand_off_runtime_reset(root, reset_blockers)
+    if reset and not intent:
+        return {"status": reset}
+    if intent is None:
         head = rev_parse(repo_dir, "HEAD")
         needs = switch_needs(repo_dir, head) if head else {}
         if not any(needs.get(name) for name in _DEFERRING):
@@ -708,14 +852,6 @@ def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
                                           reason="the checked-out tree cannot read the current stores")
         owner = lambda intent: (True, "the checkout already is the target")  # noqa: E731
     wait_ready(root)  # a boot-smoke rollback can arrive while this process still imports: the export reads a published store
-    facts = cleanup if isinstance(cleanup, dict) else {}
-    stop = facts.get("owned_stop") if isinstance(facts.get("owned_stop"), dict) else {}
-    census = facts.get("worker_exits") if isinstance(facts.get("worker_exits"), dict) else None
-    blockers = [name for name, blocked in (
-        ("worker_exits_unconfirmed", census is None or bool(census.get("unconfirmed"))),
-        ("child_processes_alive", bool(facts.get("live_children"))),
-        ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
-    ) if blocked]
     try:
         from ouroboros.tools.shell_process import exit_finalization
 

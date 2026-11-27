@@ -104,6 +104,234 @@ def tag_absent_run_read(response: Any, error: Any) -> None:
         log.debug("absent-run read was not tagged", exc_info=True)  # the refusal stands as raised
 
 
+def note_problem_provenance(response: Any, body: Any, error: Any) -> None:
+    """Record parsed-JSON and HTTP route provenance on a gateway refusal without failing
+    on an unattached ``httpx.Response`` or replacing an ordinary refusal."""
+    error._problem_parsed = isinstance(body, dict)
+    try:
+        req = response.request
+        url = getattr(req, "url", None) if req is not None else None
+        error._response_route = (
+            (str(req.method), str(url.path), bool(url.query))
+            if req is not None and url is not None else None
+        )
+    except Exception:
+        error._response_route = None
+
+
+# Exact (engine version, full 40-char build sha) pairs proved to emit ``POST /v2/runs``
+# 409 ``continuation_superseded`` strictly before run/job admission. Authority:
+# ``ouroboros/claudexor_runtime_pin.json`` (6.4.2 / 3b8b87982a9362a27d4731f3e411437c0e63041a;
+# 6.4.1 / d5a5c399bdc8ad40b95dde3add16b792e27d48d0, 6.4.0 / 87bd5757578754ee68285134adf1c026cfc81768 and
+# 6.3.0 / 0ff3df717c2e807fdbd3a233487e35d81993fdea remain proven historical producers).
+# No control-plane capability bit certifies arbitrary older, newer, or unhashed builds, so
+# unproven producers stay outside this rule and fall back to unknown/pending custody.
+# Maintenance: when advancing ``claudexor_runtime_pin.json``, verify that ``POST /v2/runs``
+# still rejects ``continuation_superseded`` strictly pre-admission and add the new
+# ``(version, build_sha)`` pair here (no new control-plane probe is required).
+PRE_ADMISSION_CONTINUATION_PRODUCERS: frozenset[Tuple[str, str]] = frozenset({
+    ("6.3.0", "0ff3df717c2e807fdbd3a233487e35d81993fdea"),
+    ("6.4.0", "87bd5757578754ee68285134adf1c026cfc81768"),
+    ("6.4.1", "d5a5c399bdc8ad40b95dde3add16b792e27d48d0"),
+    ("6.4.2", "3b8b87982a9362a27d4731f3e411437c0e63041a"),
+})
+
+
+def verified_pre_admission_producer(
+    gateway: Any, *, expected_generation: Any = None,
+) -> Optional[Tuple[str, str]]:
+    """Return ``(engine_version, engine_build_sha)`` only when THIS gateway's live
+    descriptor generation completed a normal (non-``recovery_only``) handshake proving
+    an allowlisted pre-admission ``continuation_superseded`` producer."""
+    from ouroboros.gateways import claudexor_metadata as metadata
+
+    generation = metadata.endpoint_generation(getattr(gateway, "_endpoint", None))
+    if generation is None or (expected_generation is not None and generation != expected_generation):
+        return None
+    identity = (
+        str(getattr(gateway, "engine_version", "") or ""),
+        str(getattr(gateway, "engine_build_sha", "") or ""),
+    )
+    if identity not in PRE_ADMISSION_CONTINUATION_PRODUCERS:
+        return None
+    return identity if metadata.remembered_engine(gateway) == identity else None
+
+
+@dataclass(frozen=True)
+class PreAdmissionContinuationRejection:
+    """Typed transport observation that a verified bound producer's direct ``POST /v2/runs``
+    answered 409 ``continuation_superseded`` before admission for this continuation request.
+
+    ``requested_predecessor_id`` is the ``continueFrom`` id sent on the wire; ``predecessor_run_id``
+    is the ``context.runId`` the engine reported. They match on direct run-id continuations; when
+    custody bound a queued predecessor by its ``jobId``, pinned Claudexor canonicalizes it to the
+    predecessor's ``runId`` before pre-admission checks, and core must prove that alias in the same
+    store before settling."""
+
+    route: Tuple[str, str]
+    status_code: int
+    code: str
+    predecessor_run_id: str
+    engine_head: str
+    store_id: str
+    idempotency_key: str
+    request_digest: str
+    endpoint_generation: Tuple[Any, ...] = ()
+    engine_ref: Tuple[Tuple[str, str], ...] = ()
+    engine_version: str = ""
+    engine_build_sha: str = ""
+    requested_predecessor_id: str = ""
+
+    @property
+    def predecessor_matched(self) -> bool:
+        return bool(self.predecessor_run_id) and self.requested_predecessor_id == self.predecessor_run_id
+
+    def verified_on(self, gateway: Any) -> bool:
+        """Whether this transport observation still holds for ``gateway``'s live descriptor
+        generation, verified allowlisted producer, and serving store identity."""
+        return (
+            self.route == ("POST", "/v2/runs")
+            and self.status_code == 409
+            and self.code == "continuation_superseded"
+            and bool(self.requested_predecessor_id)
+            and self.requested_predecessor_id == self.requested_predecessor_id.strip()
+            and bool(self.predecessor_run_id)
+            and self.predecessor_run_id == self.predecessor_run_id.strip()
+            and bool(self.engine_head)
+            and self.engine_head == self.engine_head.strip()
+            and bool(self.store_id)
+            and self.store_id == self.store_id.strip()
+            and bool(self.idempotency_key)
+            and self.idempotency_key not in (self.requested_predecessor_id, self.predecessor_run_id, self.engine_head)
+            and self.engine_head not in (self.requested_predecessor_id, self.predecessor_run_id)
+            and bool(self.endpoint_generation)
+            and verified_pre_admission_producer(gateway, expected_generation=self.endpoint_generation)
+            == (self.engine_version, self.engine_build_sha)
+            and str(getattr(gateway, "store_identity", "") or "") == self.store_id
+        )
+
+
+def canonical_request_digest(request: Any) -> str:
+    """Deterministic SHA-256 digest of a canonical JSON run-start request body."""
+    if not isinstance(request, dict) or not request:
+        return ""
+    try:
+        encoded = json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):
+        return ""
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def pre_admission_continuation_snapshot(gateway: Any, request: dict) -> Tuple[Optional[tuple], str]:
+    """Before a direct run POST, sample only a candidate for continuation proof.
+
+    One generation read guards the handshake's store field, as ``gateway.store_identity`` does.
+    The response still needs a fresh verified producer/store, and only custody knows this was the first send.
+    """
+    predecessor = request.get("continueFrom")
+    if (not isinstance(predecessor, str) or not predecessor or predecessor != predecessor.strip()
+            or request.get("_thread_id") or request.get("_use_thread")):
+        return None, ""
+    # A gateway without the optional proof metadata still uses the ordinary start path.
+    store = getattr(gateway, "_store_identity", "")
+    if not isinstance(store, str) or not store or (
+            getattr(gateway, "engine_version", ""),
+            getattr(gateway, "engine_build_sha", "")) not in PRE_ADMISSION_CONTINUATION_PRODUCERS:
+        return None, ""
+    from ouroboros.gateways import claudexor_metadata as metadata
+
+    generation = metadata.endpoint_generation(getattr(gateway, "_endpoint", None))
+    return generation, store if generation is not None else ""
+
+
+def tag_pre_admission_continuation_rejection(
+    gateway: Any,
+    error: Any,
+    *,
+    request: Any,
+    idempotency_key: str,
+    before_generation: Any,
+    before_store: str,
+) -> None:
+    """Attach ``pre_admission_continuation_rejection`` ONLY when a verified allowlisted
+    producer's direct ``POST /v2/runs`` returned a parsed JSON 409 ``continuation_superseded``
+    pre-admission problem for this exact continuation request on the same live descriptor
+    generation and store.
+
+    Preserves both the wire ``continueFrom`` id (``requested_predecessor_id``) and the
+    engine's reported ``context.runId`` (``predecessor_run_id``); when they differ (e.g.
+    ``jobId`` canonicalized to ``runId``), core must prove the same-store alias before settling.
+    Any malformed, non-JSON, ambiguous, thread-routed, admitted-job, unproven-producer,
+    or store-drifted response leaves ``error`` untagged so the start stays unknown.
+    """
+    if getattr(error, "_problem_parsed", False) is not True:
+        return
+    if getattr(error, "_response_route", None) != ("POST", "/v2/runs", False):
+        return
+    if int(getattr(error, "status_code", 0) or 0) != 409:
+        return
+    problem = getattr(error, "problem", None)
+    if not isinstance(problem, dict):
+        return
+    if getattr(error, "code", "") != "continuation_superseded" or problem.get("code") != "continuation_superseded":
+        return
+    if problem.get("retryable") is not False:
+        return
+    context = problem.get("context")
+    if not isinstance(context, dict):
+        return
+    if any(k in problem for k in ("jobId", "state", "handle", "runId")):
+        return
+    if any(k in context for k in ("jobId", "state", "handle")):
+        return
+    if not isinstance(request, dict) or request.get("_thread_id") or request.get("_use_thread"):
+        return
+    sent_pred = request.get("continueFrom")
+    if not isinstance(sent_pred, str) or not sent_pred or sent_pred != sent_pred.strip():
+        return
+    ctx_run, ctx_head, wire_key = context.get("runId"), context.get("head"), str(idempotency_key or "")
+    if (not isinstance(ctx_run, str) or not ctx_run or ctx_run != ctx_run.strip()
+            or not isinstance(ctx_head, str) or not ctx_head or ctx_head != ctx_head.strip()
+            or not wire_key or wire_key in (sent_pred, ctx_run, ctx_head)
+            or ctx_head in (ctx_run, sent_pred)):
+        return
+    if before_generation is None:
+        return
+    producer = verified_pre_admission_producer(gateway, expected_generation=before_generation)
+    after_store = str(getattr(gateway, "store_identity", "") or "")
+    if (producer is None
+            or not isinstance(before_store, str) or not before_store or before_store != before_store.strip()
+            or after_store != before_store):
+        return
+    for container in (problem, context):
+        if "storeId" in container and (not isinstance(container["storeId"], str) or container["storeId"] != before_store):
+            return
+    ref = getattr(gateway, "engine_ref", None)
+    frozen_ref: Tuple[Tuple[str, str], ...] = ()
+    if isinstance(ref, dict) and ref:
+        if ref.get("kind") == "work" and ref.get("store") != before_store:
+            return
+        frozen_ref = tuple(sorted((str(k), str(v)) for k, v in ref.items()))
+    digest = canonical_request_digest(request)
+    if not digest:
+        return
+    error.pre_admission_continuation_rejection = PreAdmissionContinuationRejection(
+        route=("POST", "/v2/runs"),
+        status_code=409,
+        code="continuation_superseded",
+        predecessor_run_id=ctx_run,
+        requested_predecessor_id=sent_pred,
+        engine_head=ctx_head,
+        store_id=before_store,
+        idempotency_key=wire_key,
+        request_digest=digest,
+        endpoint_generation=before_generation,
+        engine_ref=frozen_ref,
+        engine_version=producer[0],
+        engine_build_sha=producer[1],
+    )
+
+
 class ClaudexorObservationGateway:
     """The compact attention wait and the noncreating start lookup, as the owned HTTP client speaks them
     (mixed into the gateway)."""

@@ -376,21 +376,30 @@ lease.release()
             child.wait(timeout=10)
 
 
-@pytest.mark.parametrize("silent,promote", [(False, False), (True, False), (False, True)])
-def test_focus_ordinary_finish_traverses_reply_check(focus, monkeypatch, silent, promote):
+@pytest.mark.parametrize("silent,kind,door", [
+    (False, "focus", False), (True, "focus", False), (False, "promoted", False),
+    (False, "focus", True), (False, "promoted", True), (False, "scheduled", True)])
+def test_focus_ordinary_finish_traverses_reply_check(focus, monkeypatch, silent, kind, door):
+    """No door: a wordy finish is speech and meets the ``place_reply`` check, whose flag returns once. A declared door
+    (owner 21.11, 1A): the finish of every root bound to the place is its record; one that sent nothing returns once
+    with the record note and then stands, no check bought, and only the focus turn's wake ends quiet."""
     import queue
     from ouroboros import loop
     from ouroboros.tools.registry import ToolRegistry
     from ouroboros.presence_runner import build_presence_result_event
     root, _place, _admission, _event = focus
+    if door:
+        _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
     task = task_for(focus)
-    if promote:
+    if kind != "focus":
         from tests.test_place_reply_revision import promoted
         task = promoted(task)
+        if kind == "scheduled":
+            task["metadata"]["schedule_occurrence"] = {"schedule_id": "s-1", "occurrence_id": "o-1"}
     registry = ToolRegistry(repo_dir=root, drive_root=root)
     registry._ctx.task_metadata = task["metadata"]
     registry._ctx.task_contract = task["task_contract"]
-    registry._ctx.is_direct_chat = not promote
+    registry._ctx.is_direct_chat = kind == "focus"
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setattr("ouroboros.presence_context.confirmed_delivery_receipts", lambda _ctx: frozenset())
     checks, calls = [], []
@@ -415,6 +424,11 @@ def test_focus_ordinary_finish_traverses_reply_check(focus, monkeypatch, silent,
     if silent:
         assert len(calls) == 1 and not checks
         assert result["outcome"] == "silent" and result["text"] == ""
+    elif door:
+        assert len(calls) == 2 and not checks, "the record buys no place_reply check"
+        assert "[FOCUS_FINISH_IS_A_RECORD]" in json.dumps(calls[-1], ensure_ascii=False)
+        assert result["outcome"] == "silent" and result["text"] == ""
+        assert (usage.get("wake_silent") is True) is (kind == "focus"), "a root keeps the final its Project reads"
     else:
         assert len(calls) == 2 and len(checks) == 2
         assert any("Reconsider this reply" in str(row.get("content")) for row in calls[-1])
@@ -609,7 +623,7 @@ def test_focus_names_the_speakers_pages_by_exact_key_never_authority(focus):
         task = _build_task(replace(admitted, allowance={"status": "available", "remaining_usd": 2}), replace(
             event, actor={"platform_actor_id": "person", "display_name": "Pat Quill", **actor}), drive_root=root, staged_files=())
         rendered = frame_focus_content(task, "hello")
-        line = next(line for line in rendered.splitlines() if line.startswith("- the person (host facts): "))
+        line = next(line for line in rendered.splitlines() if line.startswith("- the sender (host facts): "))
         return task["metadata"]["focus"]["actor"], rendered, line, task
 
     def page(topic, *keys):
@@ -620,7 +634,7 @@ def test_focus_names_the_speakers_pages_by_exact_key_never_authority(focus):
     for authentication in ({}, {"authenticated": False}):
         actor, rendered, line, task = admit(**authentication)
         assert actor["key"] == key and not {"page", "pages", "archived_pages", "matched_by"} & actor.keys()
-        assert line == "- the person (host facts): " + json.dumps(actor, ensure_ascii=False) + (
+        assert line == "- the sender (host facts): " + json.dumps(actor, ensure_ascii=False) + (
             "; authenticated: no" if authentication else "")
         assert focus_frame_sources(task["metadata"], rendered) is not None
     page("people/pat", {"provider": "mail", "namespace": "", "id": "pat@example.org"}, key)
@@ -708,7 +722,8 @@ def test_a_refused_focus_reply_returns_destination_sends_and_silence(tmp_path):
     key = "chat:a:r:0"
     presence = {"place_id": "p1", "delivery_reporting_version": 1, "place": {"label": "Team chat"},
                 "event": {"conversation_key": key, "provider": "chat", "account_id": "a", "conversation_id": "r", "thread_id": ""}}
-    ctx = SimpleNamespace(drive_root=tmp_path, task_id="focus", task_metadata={"presence": presence, "focus": {"place_id": "p1"}},
+    ctx = SimpleNamespace(drive_root=tmp_path, task_id="focus",
+                          task_metadata={"presence": presence, "focus": {"place_id": "p1"}, "wake_cause": "focus"},
                           _place_message_calls=[{"tool": "ext_send", "at": "2026-11-06T02:18:50+00:00", "conversation_keys": [key],
                                                  "text": "queued"}])
     for row in ({"task_id": "focus", "direction": "in", "text": "hi"},
@@ -716,11 +731,19 @@ def test_a_refused_focus_reply_returns_destination_sends_and_silence(tmp_path):
                  "transport": {"conversation_key": key, "delivery": {"state": "delivered", "delivery_id": "d", "part_id": "0"}}}):
         append_jsonl(tmp_path / "logs" / "chat.jsonl", row)
     note = refusal_facts(ctx)
-    assert note.startswith("\n[FOCUS_REPLY_REFUSED] This answer was not posted.") and "in Team chat (route " in note
+    assert note.startswith("\n[FOCUS_REPLY_REFUSED] This answer was not posted.")
+    assert "A non-silent finish_task answer is posted as a new message in Team chat (route " in note  # its caller awaits
     assert '"conversation_id": "r"' in note and 'Confirmed sent there by this turn: "I replied".' in note
     assert 'Your own send calls there without a receipt yet: ext_send at 2026-11-06T02:18:50+00:00: "queued".' in note
     assert 'Silence is valid: finish_task(action="finish", silent=true) keeps the answer as your internal note' in note
     assert refusal_facts(SimpleNamespace(task_metadata={})) == ""  # no reply carrier: no destination, no note
+    handed = refusal_facts(SimpleNamespace(**{**vars(ctx), "task_metadata": {
+        key: value for key, value in ctx.task_metadata.items() if key != "wake_cause"}}))  # a root the turn handed off
+    assert ("If a connector follows this work, a non-silent finish_task answer is posted as a new message in Team chat"
+            in handed and "otherwise it stays this work's record and only a connector tool reaches them" in handed)
+    ctx.task_metadata = {**ctx.task_metadata, "schedule_occurrence": {"schedule_id": "s-1"}}  # no connector follows it
+    scheduled = refusal_facts(ctx)
+    assert "No connector reads this run's final in Team chat (route " in scheduled and "is posted as" not in scheduled
 
 
 # --- an order exists only where the mind cites my human's exact words and the host verifies their provenance -------
@@ -795,12 +818,13 @@ def test_focus_frame_folds_the_allowance_to_counts_behind_an_exact_reader(focus,
     assert task["metadata"]["focus_allowance"]["roots"] == allowance["roots"]
 
 
-def _publish_bridge_tools(monkeypatch, *declarations):
+def _publish_bridge_tools(monkeypatch, *declarations, plugin_api=None):
     """The focus's own connector ``bridge`` with these declared tools, in its registration order, as the dispatcher's
-    published registry holds them; their surface names."""
+    published registry holds them (``plugin_api``: its manifest's declared minimum); their surface names."""
     from ouroboros import extension_registry_state as registry
     from ouroboros.extension_surface_names import extension_surface_name
-    manifest = SimpleNamespace(raw_extra={"tools": list(declarations)})
+    manifest = SimpleNamespace(raw_extra={"tools": list(declarations)},
+                               **({"plugin_api": {"version": plugin_api, "capabilities": []}} if plugin_api else {}))
     bundle = registry._ExtensionRegistrations(generation_digest="g1", loaded_skill=SimpleNamespace(manifest=manifest))
     names = []
     for declaration in declarations:
@@ -810,38 +834,54 @@ def _publish_bridge_tools(monkeypatch, *declarations):
     return names
 
 
-def _publish_bridge_send(monkeypatch, **declaration):
+def _publish_bridge_send(monkeypatch, plugin_api=None, **declaration):
     """One declared tool ``send`` of the connector ``bridge``."""
-    return _publish_bridge_tools(monkeypatch, {"name": "send", **declaration})[0]
+    return _publish_bridge_tools(monkeypatch, {"name": "send", **declaration}, plugin_api=plugin_api)[0]
 
 
+# Mail's door (owner 21.11, 1A): the thread is the conversation and the recipients explicit write groups (``touches``).
+_MAIL_DOOR = {"effect": "message", "target": ["account_id", "conversation_id", "thread_id"], "conversation": "conversation_id",
+              "thread": "thread_id", "touches": [{"conversation": field, "effect": "write", "match": "exact_casefold"}
+                                                 for field in ("to", "cc", "bcc")]}
+
+
+@pytest.mark.parametrize("kind", ["focus", "promoted", "scheduled"])
 @pytest.mark.parametrize("declaration,records", [
     ({"effect": "message", "target": ["channel"], "conversation": "channel", "thread": "thread_ts"}, True),
     ({"effect": "message", "target": ["account_id", "chat_id"], "conversation": "chat_id"}, True),
+    (_MAIL_DOOR, True),
     ({"effect": "message", "target": ["url"], "conversation": "context_id", "thread": "task_id"}, False),  # a peer URL
     ({"effect": "message", "target": ["account_id", "to", "cc", "bcc"], "conversation": "conversation_id"}, False),  # mail
     ({"effect": "write", "target": ["channel"], "conversation": "channel"}, False),
 ])
-def test_speak_line_and_records_only_follow_the_connectors_declarations(focus, monkeypatch, declaration, records):
+def test_speak_line_and_records_only_follow_the_connectors_declarations(focus, monkeypatch, declaration, records, kind):
+    """One rule for every root bound to the place (owner 21.11, 1A): the focus turn, a root it handed off and a
+    schedule's run read the same declaration, never the wake that started them."""
     from ouroboros.place_reply import records_only, speak_line
     from ouroboros.presence_context import frame_focus_content
+    from tests.test_place_reply_revision import promoted
     root, place, admission, event = focus
-    name = _publish_bridge_send(monkeypatch, **declaration)
+    name = _publish_bridge_send(monkeypatch, plugin_api="2.5" if "touches" in declaration else None, **declaration)
     task = _build_task(replace(admission, allowance={"status": "available", "remaining_usd": 2}),
                        replace(event, thread_id="1712.5", conversation_key="chat:a:r:1712.5"), drive_root=root, staged_files=())
-    rendered, line = frame_focus_content(task, "hello"), speak_line(task["metadata"])
-    assert records_only(task["metadata"]) is records and line in rendered
+    metadata = task["metadata"] if kind == "focus" else promoted(task)["metadata"]
+    if kind == "scheduled":
+        metadata["schedule_occurrence"] = {"schedule_id": "s-1", "occurrence_id": "o-1"}
+    line = speak_line(metadata)
+    assert records_only(metadata) is records
+    if kind == "focus":
+        assert line in frame_focus_content(task, "hello")
     if records:
         thread = f", {declaration['thread']}=1712.5" if declaration.get("thread") else ""
         account = ", account_id=a" if "account_id" in declaration["target"] else ""
         assert line == (f"Words reach chat only when you send them, through {name} ({declaration['conversation']}=r{thread}{account}); "
                         "a send may ride in the same response as your finish. Your finish is your record, never posted.")
         # a Silent place or Advises autonomy keep the held draft, and the line says so
-        task["metadata"]["presence"]["place"]["state"] = "silent"
-        assert "(chat is Silent: a send is refused and your finish is held for your human, not posted)" in speak_line(task["metadata"])
-        task["metadata"]["presence"]["place"]["state"] = "active"
-        task["metadata"]["consciousness_autonomy"] = "observe"
-        assert "(autonomy is Advises: a send is refused and your finish is held for your human, not posted)" in speak_line(task["metadata"])
+        metadata["presence"]["place"]["state"] = "silent"
+        assert "(chat is Silent: a send is refused and your finish is held for your human, not posted)" in speak_line(metadata)
+        metadata["presence"]["place"]["state"] = "active"
+        metadata["consciousness_autonomy"] = "observe"
+        assert "(autonomy is Advises: a send is refused and your finish is held for your human, not posted)" in speak_line(metadata)
     else:
         assert line.startswith("Your non-silent finish is posted in chat as your words")
     assert "bridge" not in line.replace(name, ""), "no connector is named by the host; the tool's own name is"
@@ -920,6 +960,374 @@ def test_speak_line_lists_words_and_gesture_doors_and_a_gesture_door_must_name_i
         "id is the waking message; another message's exact id from this conversation is valid too.")
     task["metadata"]["presence"]["place"]["state"] = "silent"
     assert "(chat is Silent: a send or gesture is refused and your finish is held" in speak_line(task["metadata"])
+
+
+@pytest.mark.parametrize("kind", ["promoted", "scheduled"])
+@pytest.mark.parametrize("door", [True, False], ids=["door", "no_door"])
+def test_a_handed_off_or_scheduled_roots_finish_follows_its_connectors_declaration(focus, monkeypatch, kind, door):
+    """One rule at the common exit (owner 21.11, 1A): with a door a wordy finish that sent nothing returns once with
+    the record note and the next is the record (``silent``, no Safety bought); without one the final is speech under
+    the ``place_reply`` check. A Silent place holds either as one System row; neither ends the root's wake quiet."""
+    from ouroboros import dialogue_store
+    from ouroboros.place_reply import prepare_focus_reply
+    from tests.test_place_reply_revision import promoted
+    root, place, _admission, _event = focus
+    if door:
+        _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = promoted(task_for(focus))
+    if kind == "scheduled":
+        task["metadata"]["schedule_occurrence"] = {"schedule_id": "s-1", "occurrence_id": "o-1"}
+    checks = []
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda name, *_a, **_kw: checks.append(name) or (True, ""))
+
+    def run():
+        return SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                               _completion_riding_send=False)
+
+    active = run()
+    if door:
+        allowed, note = prepare_focus_reply(active, "Hello")
+        assert not allowed and note.startswith("[FOCUS_FINISH_IS_A_RECORD] This finish was not posted"), note
+        assert "Confirmed sent there by this run: " in note and "Your finish is your record" in note
+    assert prepare_focus_reply(active, "Hello") == (True, "")
+    assert active._presence_completion["outcome"] == ("silent" if door else "message")
+    assert checks == ([] if door else ["place_reply"]) and not getattr(active, "_focus_record_only", False)
+    p.edit_place(root, place.place_id, "set_state", author="owner", state="silent")
+    held = run()
+    for _ in range(2):
+        assert prepare_focus_reply(held, "Hello") == (True, "")
+    rows = [entry.row for entry in dialogue_store.iter_rows(root, "chat") if entry.row.get("held")]
+    assert [row["held_text"] for row in rows] == ["Hello"] and held._presence_completion["outcome"] == "silent"
+    assert checks == ([] if door else ["place_reply"]), "a held reply buys no check"
+
+
+@pytest.mark.parametrize("kind", ["focus", "promoted"])
+def test_only_the_focus_turns_record_owes_my_humans_reply_first(focus, monkeypatch, kind):
+    """R3 keeps its scope (owner 21.11, 1A): a focus turn's records-only finish is refused while my human's Main
+    message is unanswered, as a silent one is; a root it handed off is not (its words never went to my human) and keeps
+    its Project final, never ending quiet."""
+    from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL
+    from ouroboros.place_reply import prepare_focus_reply
+    from tests.test_place_reply_revision import promoted
+    root = focus[0]
+    _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = task_for(focus) if kind == "focus" else promoted(task_for(focus))
+    ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                          _completion_riding_send=True)
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    monkeypatch.setattr("ouroboros.loop_messages.owner_reply_owed", lambda _ctx: True)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_kw: pytest.fail("a record buys no check"))
+    if kind == "focus":
+        assert prepare_focus_reply(ctx, "Hello") == (False, OWNER_REPLY_OWED_REFUSAL)
+        assert not hasattr(ctx, "_presence_completion")
+    else:
+        assert prepare_focus_reply(ctx, "Hello") == (True, "")
+        assert ctx._presence_completion["outcome"] == "silent" and not getattr(ctx, "_focus_record_only", False)
+
+
+@pytest.mark.parametrize("named", [True, False], ids=["named", "unnamed"])
+@pytest.mark.parametrize("door", [True, False], ids=["door", "no_door"])
+def test_a_place_reactivated_during_a_selection_keeps_its_read_and_never_turns_a_door_finish_into_words(
+        focus, monkeypatch, door, named):
+    """A selection reads its place once (review round 2, Astra 4): the records decision, the record note and the hold
+    meet the same state. Silent at that read, the owner's reactivation before the hold changes nothing for this
+    selection: the draft is held for my human, unchecked and unposted, door or not. The pipeline's next selection reads
+    the place as it is: a door connector's finish stays its record, unchecked; a doorless one meets the ``place_reply``
+    check and is words. Retained bytes that never named their connector (``unnamed``) read the place's own (Astra 1)."""
+    from ouroboros import dialogue_store, place_reply
+    from ouroboros.presence_runner import build_presence_result_event
+    from tests.test_place_reply_revision import promoted
+    root, place, _admission, _event = focus
+    if door:
+        _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = promoted(task_for(focus))
+    if not named:
+        task["metadata"]["presence"].pop("transport_skill")
+    checks, holds = [], []
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda name, *_a, **_kw: checks.append(name) or (True, ""))
+    p.edit_place(root, place.place_id, "set_state", author="owner", state="silent")
+    real_hold = place_reply.reply_hold
+
+    def reactivated_then_hold(*args, **kwargs):
+        if not holds:
+            p.edit_place(root, place.place_id, "set_state", author="owner", state="active")
+        holds.append(True)
+        return real_hold(*args, **kwargs)
+
+    monkeypatch.setattr(place_reply, "reply_hold", reactivated_then_hold)
+    ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                          _completion_riding_send=False)
+    assert place_reply.prepare_focus_reply(ctx, "Hello") == (True, "")
+    assert p.get_place(root, place.place_id).state == "active", "the owner reactivated the place before the hold"
+    held = [entry.row for entry in dialogue_store.iter_rows(root, "chat") if entry.row.get("held")]
+    assert [row["held_text"] for row in held] == ["Hello"] and held[0]["text"] == "Reply held: chat is Silent"
+    assert ctx._presence_completion["outcome"] == "silent" and checks == [], "a held draft buys no check"
+    event = build_presence_result_event({**task, "metadata": task["metadata"]}, "Hello", ctx, terminal_origin="model_final")
+    assert (event["outcome"], event["text"]) == (("silent", "") if door else ("message", "Hello"))
+    assert checks == ([] if door else ["place_reply"])
+
+
+@pytest.mark.parametrize("named", [True, False], ids=["named", "unnamed"])
+@pytest.mark.parametrize("door", [True, False], ids=["door", "no_door"])
+def test_a_retained_legacy_binding_meets_its_place_at_a_new_selection(focus, monkeypatch, door, named):
+    """Pre-migration task bytes name the place only by its old ``binding_id``: a new selection resolves it through the
+    place store as ``reply_hold`` does, so a door connector's finish is its record (the live result builder included)
+    and a doorless one meets the ``place_reply`` check; a final stored before it is replayed as stored. Bytes that
+    never named their connector either (``unnamed``) read the resolved place's own (review round 2, Astra 1)."""
+    from ouroboros.place_reply import carrier_now, prepare_focus_reply, records_only, reply_carrier, riding_sends
+    from ouroboros.presence_runner import build_presence_result_event, presence_result_from_stored
+    from tests.test_place_reply_revision import promoted
+    root = focus[0]
+    name = _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel") if door else ""
+    task = promoted(task_for(focus))
+    presence = task["metadata"]["presence"]
+    presence["binding_id"] = presence.pop("place_id")
+    presence["event"]["conversation_key"] = "chat:a:r:0"  # the key a connector's event carries, thread part included
+    task["metadata"].pop("focus", None)  # pre-migration bytes carry no focus frame either
+    if not named:
+        presence.pop("transport_skill")
+    assert reply_carrier(task["metadata"]) == {} and records_only(task["metadata"]) is False  # metadata names no place
+    checks = []
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda name, *_a, **_kw: checks.append(name) or (True, ""))
+    ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                          _completion_riding_send=True)
+    assert prepare_focus_reply(ctx, "Hello") == (True, "")
+    assert ctx._presence_completion["outcome"] == ("silent" if door else "message")
+    assert checks == ([] if door else ["place_reply"])
+    built = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                            _completion_riding_send=True, _presence_selection_seq=0)
+    event = build_presence_result_event({**task, "metadata": task["metadata"]}, "Hello", built,
+                                        terminal_origin="model_final")
+    assert (event["outcome"], event["text"]) == (("silent", "") if door else ("message", "Hello"))
+    if door:  # the riding send and the record note read the same door
+        call = {"tool": name, "args": {"channel": "r"}, "is_error": False}
+        assert riding_sends(ctx, [call]) == [call], "a send through the door rides with the finish"
+        noted = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                                _completion_riding_send=False)
+        allowed, note = prepare_focus_reply(noted, "Hello")
+        assert not allowed and f"only when you send them, through {name} (" in note, note
+    stored = {"status": "completed", "terminal_origin": "model_final", "result": "Hello",
+              "metadata": {**task["metadata"], "presence_outcome": "message", "presence_result_text": "Hello"}}
+    replay = presence_result_from_stored(stored, task["id"])
+    assert (replay.outcome, replay.text) == ("message", "Hello"), "a final selected before the update is served as stored"
+    frozen = SimpleNamespace(task_metadata=task["metadata"], task_contract={"capability_ceiling": {}}, drive_root=root)
+    assert carrier_now(frozen) == {}, "a frozen-ceiling run keeps its forced declaration as its outward choice (owner Q4)"
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["place", "legacy_binding"])
+def test_a_refused_doorless_root_can_choose_the_silence_its_refusal_offers(focus, monkeypatch, legacy):
+    """Review round 2 (Astra 6): Safety refuses a doorless root's automatic reply and the refusal offers
+    ``finish_task(action="finish", silent=true)``; the finish door accepts that silence for a retained legacy binding as
+    for a place carrier, since both name the conversation the run answers (``carrier_now``). Review round 3 (Astra 3):
+    with the place store unreadable nothing resolves the legacy binding, so the door returns its typed refusal, as the
+    metadata-only check did, instead of raising out of the loop; a place carrier needs no read and keeps its silence."""
+    from ouroboros.place_reply import prepare_focus_reply, refusal_facts
+    from ouroboros.tools.control_runtime import completion_request
+    from ouroboros.tools.registry import ToolRegistry
+    from tests.test_place_reply_revision import promoted
+    root = focus[0]
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_kw: (False, "Synthetic refusal."))
+    task = promoted(task_for(focus))
+    if legacy:
+        presence = task["metadata"]["presence"]
+        presence["binding_id"] = presence.pop("place_id")
+        task["metadata"].pop("focus", None)
+    ctx = ToolRegistry(repo_dir=root, drive_root=root)._ctx
+    ctx.task_id, ctx.task_metadata, ctx.task_contract = task["id"], task["metadata"], task["task_contract"]
+    assert prepare_focus_reply(ctx, "Synthetic answer") == (False, "Synthetic refusal.")
+    assert 'finish_task(action="finish", silent=true)' in refusal_facts(ctx)
+    request, error = completion_request(ctx, {"action": "finish", "silent": True, "answer": "Private note."})
+    assert (error, request is not None) == ("", True)
+    p.places_path(root).write_text("{not json", encoding="utf-8")  # the store cannot be read (``places_unreadable``)
+    request, error = completion_request(ctx, {"action": "finish", "silent": True, "answer": "Private note."})
+    if legacy:
+        assert request is None and error.startswith("silent needs a finish that owes no one words"), error
+    else:
+        assert (error, request is not None) == ("", True)
+
+
+class _Death(BaseException):
+    """The worker dies right after a working save; nothing after it runs."""
+
+
+@pytest.mark.parametrize("saved", ["recorded_no_send", "older_checkpoint", "recorded_send", "older_checkpoint_sent"])
+def test_a_restart_after_a_door_roots_saved_answer_reads_the_record_note_first(focus, monkeypatch, saved):
+    """The worker dies right after a door connector's root saved its wordy answer (the ``candidate`` save precedes the
+    one return with the record note). The restored attempt reads that note first, from the saved send fact, and from
+    an older checkpoint without it by the honest fallback; a send recorded with that finish still rides once, with no
+    note. Either way the answer then stays the record and nothing is posted. A checkpoint from before the send fact
+    was saved (``older_checkpoint_sent``: its door send and finish in one response, no receipt yet) reads the fact
+    from its restored trace, so that send rides and is never sent twice (review round 2, Astra 2)."""
+    import queue
+    from ouroboros import loop, working_checkpoint as wc
+    from ouroboros.presence_runner import build_presence_result_event
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.registry import ToolEntry
+    from tests.test_place_reply_revision import promoted
+    from tests.test_working_checkpoint import _registry
+    root = focus[0]
+    door = _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = promoted(task_for(focus))
+    task["metadata"]["presence"]["event"]["conversation_key"] = "chat:a:r:0"  # as a connector's event carries it
+    write_task_result(root, task["id"], "running", metadata=task["metadata"], delegation_role="root",
+                      root_task_id=task["id"], chat_id=1)
+    asked, sent = [], []
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_kw: (True, ""))  # the send's own check passes
+    schema = {"name": door, "description": "Queue one provider send in this conversation.", "parameters": {
+        "type": "object", "properties": {"channel": {"type": "string"}, "text": {"type": "string"}}}}
+
+    def send_and_keep(text):  # the door send and the finish in one response; the provider's receipt is not in yet
+        return {"content": None, "tool_calls": [
+            {"id": f"send-{len(sent)}", "type": "function", "function": {"name": door, "arguments": json.dumps(
+                {"channel": "r", "text": text})}},
+            {"id": "keep", "type": "function", "function": {"name": "finish_task", "arguments": json.dumps(
+                {"action": "finish", "answer": text})}}]}
+
+    def attempt(number, answers, **facts):
+        registry = _registry(root, monkeypatch, task["id"], number)
+        registry._ctx.task_metadata, registry._ctx.task_contract = task["metadata"], task["task_contract"]
+        registry.register(ToolEntry(name=door, schema=schema, timeout_sec=30, safety_policy="skip",
+                                    handler=lambda _ctx, channel="", text="": sent.append(text) or '{"ok": true}'))
+        for key, value in facts.items():
+            setattr(registry._ctx, key, value)
+        replies = iter(answers)
+
+        def respond(_llm, messages, *_a, **_kw):
+            asked.append((number, json.dumps(messages, ensure_ascii=False)))
+            return next(replies), 0.0
+
+        monkeypatch.setattr(loop, "call_llm_with_retry", respond)
+        result = loop.run_llm_loop([{"role": "user", "content": "Look again"}], registry,
+                                   SimpleNamespace(default_model=lambda: "test-model"), root / "logs",
+                                   lambda *_a, **_kw: None, queue.Queue(), task_id=task["id"], drive_root=root)
+        return registry, result
+
+    real_save = wc.save_or_log
+
+    def save_then_die(limit_ctx, boundary):
+        result = real_save(limit_ctx, boundary)
+        if boundary == "candidate":
+            raise _Death()
+        return result
+
+    with monkeypatch.context() as dying:
+        dying.setattr(wc, "save_or_log", save_then_die)
+        with pytest.raises(_Death):
+            attempt(1, [send_and_keep("Hello") if saved == "older_checkpoint_sent" else {"content": "Hello", "tool_calls": []}])
+    state = wc.read_working(root, task["id"], 1)[1]
+    assert state["delivery"]["_completion_riding_send"] is (saved == "older_checkpoint_sent"), "the fact is saved beside it"
+    if saved != "recorded_no_send":
+        if saved in ("older_checkpoint", "older_checkpoint_sent"):
+            state["delivery"].pop("_completion_riding_send")  # a checkpoint written before the fact was saved
+        else:
+            state["delivery"]["_completion_riding_send"] = True  # that finish's door send rode and was recorded
+        wc.checkpoint_path(root, task["id"], 1).write_text(json.dumps(state), encoding="utf-8")
+    handoff = {"id": task["id"]}
+    assert wc.attach_recovery(root, handoff, source_task_id=task["id"], from_attempt=1, cause="worker_crash")
+    keep = {"content": None, "tool_calls": [{"id": "keep", "type": "function", "function": {
+        "name": "finish_task", "arguments": json.dumps({"action": "finish", "answer": "Hello"})}}]}
+    resend = saved == "older_checkpoint_sent"  # a model told of no send would send again (the duplicate)
+    registry, (text, usage, _trace) = attempt(2, [send_and_keep("Hello") if resend else keep],
+                                              working_recovery=handoff["_working_recovery"])
+    second = [words for number, words in asked if number == 2]
+    if saved in ("recorded_send", "older_checkpoint_sent"):
+        assert sent == (["Hello"] if resend else []), "its door send reached the person once"
+        assert second == [], "the recorded send rode with that finish: the restored answer is the record at once"
+    else:
+        assert len(second) == 1 and second[0].count("[FOCUS_FINISH_IS_A_RECORD]") == 1, "the note is read first"
+    event = build_presence_result_event(task, text, registry._ctx, terminal_origin=usage.get("terminal_origin", ""),
+                                        silent=usage.get("wake_silent") is True)
+    assert text == "Hello" and (event["outcome"], event["text"]) == ("silent", "")
+
+
+@pytest.mark.parametrize("saved", ["dispatch", "pending", "legacy_possible", "legacy_result", "other_conversation"])
+def test_a_restored_record_keeps_send_audience_and_does_not_invite_a_repeat(focus, monkeypatch, saved):
+    from ouroboros.owner_wait import continuation_state, restore_continuation_state
+    from ouroboros.place_guard import this_turn_sends
+    from ouroboros.place_reply import prepare_focus_reply
+    from tests.test_place_reply_revision import promoted
+    from tests.test_working_checkpoint import _registry
+
+    root = focus[0]
+    door = _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = promoted(task_for(focus))
+    task["metadata"]["presence"]["event"]["conversation_key"] = own = "chat:a:r:0"
+    other = "chat:a:r:other"
+    sent = {"tool": door, "at": "2026-01-01T00:00:00Z", "text": "Prior update",
+            "conversation_keys": [other if saved == "other_conversation" else own]}
+    earlier = _registry(root, monkeypatch, task["id"], 1)
+    earlier._ctx.task_metadata, earlier._ctx.task_contract = task["metadata"], task["task_contract"]
+    earlier._ctx._completion_riding_send = False
+    messages, trace = [], {"presence_no_send": {"sends": "possible"}} if saved == "legacy_possible" else {}
+    if saved in ("dispatch", "other_conversation"):
+        earlier._ctx._place_message_calls = [sent]
+    if saved == "legacy_result":
+        trace["tool_calls"] = [{"tool": door, "status": "timeout", "is_error": True}]
+    if saved == "pending":
+        messages.append({"role": "assistant", "content": None, "tool_calls": [{
+            "id": "synthetic", "type": "function", "function": {"name": door,
+                "arguments": json.dumps({"channel": "r", "text": "Prior update"})}}]})
+    state = json.loads(json.dumps(continuation_state(earlier._ctx, messages, trace, {}, 1, [], set())))
+    resumed = _registry(root, monkeypatch, task["id"], 2)
+    ctx = resumed._ctx
+    ctx.task_metadata, ctx.task_contract = task["metadata"], task["task_contract"]
+    restore_continuation_state(resumed, state, [], {}, {}, set())
+
+    own_sends = this_turn_sends(ctx, own)["calls_without_receipt"]
+    assert [row["text"] for row in own_sends] == ([sent["text"]] if saved == "dispatch" else [])
+    allowed, note = prepare_focus_reply(ctx, "Internal record")
+    assert not allowed
+    if saved == "other_conversation":
+        assert [row["text"] for row in this_turn_sends(ctx, other)["calls_without_receipt"]] == [sent["text"]]
+        assert sent["text"] not in note
+        assert "do not resend while its outcome is unknown" in note
+        assert "only if you know they were not sent here" in note
+    else:
+        assert "do not send it again while its outcome is unknown" in note
+        assert "Send these words explicitly" not in note
+    assert prepare_focus_reply(ctx, "Internal record") == (True, "")
+    assert ctx._presence_completion["quiet"] and ctx._presence_completion["outcome"] == "silent"
+
+
+def test_a_handed_off_roots_door_line_reads_the_place_as_it_is_now(focus, monkeypatch):
+    """A root carries its source event's snapshot of the place (Silent during a rehearsal) and the owner activated the
+    place since: its record note, shown only while the place reads Active, describes the place as it is now. The
+    FOCUS frame's line keeps the event's snapshot."""
+    from ouroboros.place_reply import place_state_now, prepare_focus_reply, speak_line
+    from tests.test_place_reply_revision import promoted
+    root = focus[0]
+    _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = promoted(task_for(focus))
+    task["metadata"]["presence"].setdefault("place", {})["state"] = "silent"
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                          _completion_riding_send=False)
+    allowed, note = prepare_focus_reply(ctx, "Hello")
+    assert not allowed and note.startswith("[FOCUS_FINISH_IS_A_RECORD]") and "is Silent" not in note
+    assert place_state_now(root, task["metadata"]) == "active"
+    assert "is Silent" in speak_line(task["metadata"]) and "is Silent" not in speak_line(task["metadata"], state="active")
+
+
+def test_a_door_roots_finish_after_its_run_ended_is_the_record_with_no_held_row(focus, monkeypatch):
+    """A handed-off root's run ended on a rail that kept its prose answer (``model_final``, nothing rode): no round
+    can read the record note any more, so the answer is the record, with no System row claiming a held reply."""
+    from ouroboros import dialogue_store
+    from ouroboros.presence_runner import build_presence_result_event
+    from tests.test_place_reply_revision import promoted
+    root = focus[0]
+    _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = promoted(task_for(focus))
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                          _completion_riding_send=False, _presence_selection_seq=0)
+    event = build_presence_result_event(task, "Hello", ctx, terminal_origin="model_final")
+    assert (event["outcome"], event["text"]) == ("silent", "")
+    held = [entry.row for entry in dialogue_store.iter_rows(root, "chat")
+            if "Reply held after finalization" in str(entry.row.get("text"))]
+    assert held == [], held
 
 
 # --- a place turn reads any project journal; writes and a child's reads stay forbidden (owner 06.11, 4=A) ----------
@@ -1117,3 +1525,45 @@ def test_a_routed_focus_says_why_on_every_root_child_and_continue_that_inherits_
     assert "focus_allowance" not in heir, "the allowance stays with the focus"
     plain = started(task_for(focus)["metadata"])
     assert "routed" not in plain["focus"] and "routed" not in place_origin(plain)
+
+
+def test_a_place_focus_keeps_its_inherited_silence_when_its_human_writes(focus, monkeypatch):
+    """A place-bound run's final is speech to its place, not a message to its human: a focus turn that selected silence,
+    met the one-shot facts and then read its human's words keeps the silence its prose inherits (outcome "silent"), as
+    on the base; only a run with no place binding turns that prose into a visible answer (``loop_delivery``)."""
+    import queue
+
+    import ouroboros.loop as loop
+    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.presence_runner import build_presence_result_event
+    from ouroboros.tools.registry import ToolRegistry
+    from tests.test_finish_silent_wake import call, finish
+
+    root = focus[0]
+    task = task_for(focus)
+    registry = ToolRegistry(repo_dir=root, drive_root=root)
+    registry._ctx.task_metadata, registry._ctx.task_contract = task["metadata"], task["task_contract"]
+    registry._ctx.is_direct_chat = True
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setattr("ouroboros.presence_context.confirmed_delivery_receipts", lambda _ctx: frozenset())
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_kw: (True, ""))
+    actual, steered = loop._maybe_inject_finalization_nudges, []
+
+    def steer(*args, **kwargs):
+        held = actual(*args, **kwargs)
+        if held and not steered:
+            steered.append(write_owner_message(root, "What about the appendix?", task["id"], msg_id="m3"))
+        return held
+    monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", steer)
+    responses = iter([call("write_file", {"path": "report.md", "content": "Report", "root": "user_files"}),
+                      finish("INTERNAL: a private note.", silent=True),
+                      {"role": "assistant", "content": "The appendix is attached."},
+                      finish("Fallback."), finish("Fallback.")])
+    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_kw: (next(responses), 0.0))
+    text, usage, _trace = loop.run_llm_loop([{"role": "user", "content": "Hello"}], registry,
+                                            SimpleNamespace(default_model=lambda: "test-model"), root / "logs",
+                                            lambda *_a, **_k: None, queue.Queue(), task_id=task["id"], drive_root=root)
+    result = build_presence_result_event(task, text, registry._ctx, terminal_origin=usage.get("terminal_origin"),
+                                         silent=usage.get("wake_silent") is True)
+    assert steered, "my human wrote while the facts held the silent selection"
+    assert usage.get("wake_silent") is True and result.get("outcome") == "silent", result

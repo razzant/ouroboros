@@ -307,15 +307,16 @@ def ensure(root: Any) -> pathlib.Path:
 
 
 @contextlib.contextmanager
-def transaction(root: Any, *, write: bool, wait_sec: float = WAIT_SEC) -> Iterator[sqlite3.Connection]:
-    """One transaction on the root's store (``store.connection`` + ``store.transaction``): the name
-    lock around a name-tier access, ``StoreBusy`` on contention, the cutover for a root whose
-    chain files were never cut over (its own files; unknown is never answered empty), an empty
-    in-memory schema for a read of a root that holds no dialogue at all."""
+def transaction(root: Any, *, write: bool, wait_sec: float = WAIT_SEC,
+                existing_only: bool = False) -> Iterator[sqlite3.Connection]:
+    """Lease the store under its tier's lock. Ordinary access cuts over legacy files and an empty read
+    uses memory. Existing-only access requires the file. Contention raises ``StoreBusy``."""
     wait_sec = store.bounded_wait(wait_sec)
     root = pathlib.Path(root)
     identity = store.file_identity(path(root))  # one stat: the presence and the file its header's tier is kept for
     if identity is None:
+        if existing_only:
+            raise StoreLost(f"Existing dialogue store is unavailable: {path(root)}")
         if write or holds_dialogue_files(root):
             ensure(root)
         else:
@@ -829,7 +830,7 @@ def dispatch_facts(root: Any, chat_id: Optional[int], client_message_id: str) ->
     recorded = json.loads(record["dispatch_input"] or "{}")
     return {"state": record["dispatch"], "process": str(recorded.get("process") or ""),
             "dispatcher": str(recorded.get("dispatcher") or ""),
-            **({"refused": str(recorded["refused"])} if recorded.get("refused") else {})}
+            **{key: str(recorded[key]) for key in ("refused", "delivery", "claim") if recorded.get(key)}}
 
 
 def dispatch_state(root: Any, chat_id: Optional[int], client_message_id: str) -> Optional[str]:
@@ -838,7 +839,7 @@ def dispatch_state(root: Any, chat_id: Optional[int], client_message_id: str) ->
 
 
 def _move_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *, states: Tuple[str, ...],
-                   process: str, read_reply: bool = False) -> tuple[bool, Optional[Dict[str, Any]]]:
+                   process: str, read_reply: bool = False, claim: str = "") -> tuple[bool, Optional[Dict[str, Any]]]:
     if not client_message_id or not present(root):
         return False, None
     # A pending retry takes the original reply snapshot in the same transaction as the claim. Select only the
@@ -848,25 +849,26 @@ def _move_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *,
     with transaction(root, write=True) as conn:
         cursor = conn.execute(
             "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='dispatched', "
-            "dispatch_input=json_set(coalesce(dispatch_input, '{}'), '$.process', ?) WHERE stream='chat' AND client_message_id=? "
+            "dispatch_input=json_patch(coalesce(dispatch_input, '{}'), ?) "
+            "WHERE stream='chat' AND client_message_id=? "
             f"AND chat_id IS ? AND direction='in' AND dispatch IN ({','.join('?' * len(states))}){returning}",
-            (process, client_message_id, chat_id, *states))
+            (json.dumps({"process": process, **({"claim": claim} if claim else {})}), client_message_id, chat_id, *states))
         rows = cursor.fetchall() if read_reply else []
         reply = json.loads(rows[0][0]) if len(rows) == 1 else None
         return cursor.rowcount == 1, reply if isinstance(reply, dict) else None
 
 
-def claim_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *, process: str = "") -> bool:
+def claim_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *, process: str = "", claim: str = "") -> bool:
     """Take the owed dispatch of an accepted row (pending -> dispatched): the durable "entered"
     mark, with the ``process`` (custody session) that takes it. Exactly one caller wins -- the
     acceptor, a same-id retry or the recovery."""
-    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process)[0]
+    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process, claim=claim)[0]
 
 
 def claim_dispatch_with_reply(root: Any, chat_id: Optional[int], client_message_id: str, *,
-                              process: str = "") -> tuple[bool, Optional[Dict[str, Any]]]:
+                              process: str = "", claim: str = "") -> tuple[bool, Optional[Dict[str, Any]]]:
     """The same one-winner claim plus its accepted Reply reference, when one was recorded."""
-    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process, read_reply=True)
+    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process, read_reply=True, claim=claim)
 
 
 def note_dispatched(root: Any, chat_id: Optional[int], client_message_id: str, *, process: str = "") -> bool:
@@ -875,7 +877,20 @@ def note_dispatched(root: Any, chat_id: Optional[int], client_message_id: str, *
     return _move_dispatch(root, chat_id, client_message_id, states=("none", "pending"), process=process)[0]
 
 
-def complete_dispatch(root: Any, chat_id: Optional[int], client_message_id: str) -> bool:
+def defer_dispatch(root: Any, chat_id: int, client_message_id: str, *, dispatcher: str, process: str, claim: str) -> bool:
+    """The same dispatcher proves it had no effect: return only its own claim, keeping the accepted input."""
+    with transaction(root, write=True) as conn:
+        cursor = conn.execute(
+            "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='pending', "
+            "dispatch_input=json_remove(dispatch_input, '$.process', '$.claim') "
+            "WHERE stream='chat' AND client_message_id=? AND chat_id=? AND direction='in' AND dispatch='dispatched' "
+            "AND json_extract(dispatch_input, '$.dispatcher')=? AND json_extract(dispatch_input, '$.process')=? "
+            "AND json_extract(dispatch_input, '$.claim')=?",
+            (client_message_id, chat_id, dispatcher, process, claim))
+        return cursor.rowcount == 1
+
+
+def complete_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *, delivery: str = "", claim: str = "") -> bool:
     """The handoff returned (dispatched -> completed; the recorded input shrinks to the dispatcher
     and the process); a callback that raised after entry leaves ``dispatched``, which is
     ambiguous and never replayed."""
@@ -883,13 +898,15 @@ def complete_dispatch(root: Any, chat_id: Optional[int], client_message_id: str)
         return False
     with transaction(root, write=True) as conn:
         cursor = conn.execute(
-            "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='completed', dispatch_input=CASE WHEN "
-            "json_extract(dispatch_input, '$.refused') IS NULL THEN json_object("
-            "'dispatcher', json_extract(dispatch_input, '$.dispatcher'), 'process', json_extract(dispatch_input, '$.process')) "
-            "ELSE json_object('dispatcher', json_extract(dispatch_input, '$.dispatcher'), 'process', "
-            "json_extract(dispatch_input, '$.process'), 'refused', json_extract(dispatch_input, '$.refused')) END "
-            "WHERE stream='chat' AND client_message_id=? AND chat_id IS ? AND direction='in' AND dispatch='dispatched'",
-            (client_message_id, chat_id))
+            "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='completed', dispatch_input=json_patch("
+            "json_object('dispatcher', json_extract(dispatch_input, '$.dispatcher'), "
+            "'process', json_extract(dispatch_input, '$.process')), "
+            "json_object('refused', json_extract(dispatch_input, '$.refused'), "
+            "'delivery', coalesce(nullif(?, ''), json_extract(dispatch_input, '$.delivery')), "
+            "'claim', json_extract(dispatch_input, '$.claim'))) "
+            "WHERE stream='chat' AND client_message_id=? AND chat_id IS ? AND direction='in' AND dispatch='dispatched' "
+            "AND (?='' OR json_extract(dispatch_input, '$.claim')=?)",
+            (delivery, client_message_id, chat_id, claim, claim))
         return cursor.rowcount == 1
 
 
@@ -1017,7 +1034,7 @@ def newest_owner_candidates(root: Any, *, before: int, limit: int) -> List[Row]:
 
 # The rooms my human reads: Main, Project rooms and owner transport chats; 0 is the hidden partition, negative ids
 # are A2A traffic and ``places.conversation_chat_id`` puts correspondents' place rooms at 2**40 and above.
-_OWNER_ROOMS = (1, (1 << 40) - 1)
+OWNER_ROOMS = (1, (1 << 40) - 1)
 # What I write to my human besides an untyped answer: send_user_message's rows, my questions, what the message bus
 # delivers for me (a photo, a video, a document with my caption, a links card), a living card I show (``show_card``)
 # and my retained words of a live call.
@@ -1029,13 +1046,13 @@ _BOTH_WROTE: set = set()  # stores (path, file identity) where both have written
 def owner_exchange(root: Any) -> Tuple[bool, bool]:
     """``(my human has written, I have written to them)`` in the rooms my human reads, in ONE statement of two
     existence probes over those rooms that stop at their first match: an untyped inbound row (``dialogue_inbound``;
-    my human's words, as ``newest_owner_candidates`` counts them) and an outbound row of mine, untyped (an answer)
+    except a host-stamped program message, including the old author format) and an outbound row of mine, untyped (an answer)
     or one of ``_MY_MESSAGE_KINDS`` (``dialogue_room``; host rows are System or other types). A store that cannot be
     read raises: the caller says unknown, never no; so does a negative answer while the store's history is still
     importing (``require_imported``'s probes, in the same read: a segment whose import commits meanwhile is in neither
     or both). Once both have written, this store is not asked again in this process (keyed by its file, so a Reset's
     new store is asked afresh)."""
-    low, high = _OWNER_ROOMS
+    low, high = OWNER_ROOMS
     kinds = ", ".join(f"'{kind}'" for kind in _MY_MESSAGE_KINDS)
     known = (str(path(root)), store.file_identity(path(root)))
     if known in _BOTH_WROTE:
@@ -1045,7 +1062,10 @@ def owner_exchange(root: Any) -> Tuple[bool, bool]:
     with transaction(root, write=False) as conn:
         theirs, mine = conn.execute(
             "SELECT EXISTS(SELECT 1 FROM dialogue INDEXED BY dialogue_inbound WHERE stream='chat' AND direction='in' "
-            "AND chat_id BETWEEN ? AND ? AND kind IS NULL), EXISTS(SELECT 1 FROM dialogue INDEXED BY dialogue_room "
+            "AND chat_id BETWEEN ? AND ? AND kind IS NULL "
+            "AND json_extract(body, '$.system_type') IS NOT 'agent_note_received' "
+            "AND json_extract(body, '$.declared_author.kind') IS NOT 'agent'), "
+            "EXISTS(SELECT 1 FROM dialogue INDEXED BY dialogue_room "
             "WHERE stream='chat' AND chat_id BETWEEN ? AND ? AND direction='out' "
             f"AND (kind IS NULL OR kind IN ({kinds})))",
             (low, high, low, high)).fetchone()
@@ -1212,6 +1232,23 @@ def room_candidates(root: Any, stream: str, chat_id: int, *, tasks: Iterable[str
         keys.extend((("task_id", task), ("parent_task_id", task), ("root_task_id", task)))
     keys.extend(("origin", origin) for origin in origins)
     return probe_rows(root, stream, keys, before=before, lower=lower, limit=limit)
+
+
+def first_room_row(root: Any, chat_id: int, client_message_id: str) -> Optional[Row]:
+    """The named physical row if it opens this room's known history. This optional witness never waits."""
+    if not present(root):
+        return None
+    with transaction(root, write=False, wait_sec=0) as conn:
+        row = conn.execute("SELECT seq, client_message_id FROM dialogue INDEXED BY dialogue_room "
+                           "WHERE stream='chat' AND chat_id=? ORDER BY seq LIMIT 1", (chat_id,)).fetchone()
+        if row is None or row["client_message_id"] != client_message_id or not _planned(conn, root) or conn.execute(
+            "SELECT 1 FROM import_ledger INDEXED BY ledger_state "
+            "WHERE stream='chat' AND state IN ('pending', 'mismatch') AND base<? LIMIT 1", (row["seq"],),
+        ).fetchone() or conn.execute("SELECT 1 FROM skipped WHERE stream='chat' AND seq<? LIMIT 1",
+                                    (row["seq"],)).fetchone():
+            return None
+        record = conn.execute(f"{_SELECT} WHERE stream='chat' AND seq=?", (row["seq"],)).fetchone()
+    return _row(record)
 
 
 def main_candidates(root: Any, stream: str, *, exclude_chats: Iterable[int], pinned_kinds: Iterable[str] = (),

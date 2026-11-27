@@ -116,7 +116,13 @@ def _migrate_consciousness_safety(raw: dict, *, lock_held: bool) -> dict:
 
     cfg._guard_live_settings_write()
     migrated = {**raw, key: normalize_safety_mode(raw.get("OUROBOROS_SAFETY_MODE", "full"))}
-    write_text_atomic(cfg.SETTINGS_PATH, cfg.serialize_settings(migrated))
+    try:
+        with cfg._settings_integrity.settings_publication_boundary(cfg.DATA_DIR):
+            write_text_atomic(cfg.SETTINGS_PATH, cfg.serialize_settings(migrated))
+    except cfg._settings_integrity.SettingsPublicationRefused:
+        # A proven unfinished Reset or an unproved profile: persist nothing and take no
+        # post-save action (no event); the upgrade retries on the next locked load.
+        return migrated
     append_jsonl(cfg.DATA_DIR / "logs" / "events.jsonl", {
         "type": "safety_settings_migration", "actor": "migration", "ts": utc_now_iso(),
         "key": key, "value": migrated[key],
@@ -135,6 +141,17 @@ def get_safety_mode(kind: str = "owner") -> str:
     key = "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE" if kind == "consciousness" else "OUROBOROS_SAFETY_MODE"
     default_val = str(cfg.SETTINGS_DEFAULTS[key])
     return cfg.normalize_safety_mode(cfg.runtime_setting(key, default_val) or default_val)
+
+
+def coverage_kind(metadata) -> str:
+    """Which coverage setting a call meets: work a linked Ouroboros's letter began (the host-stamped
+    ``peer_letter`` of its root and helpers, ``gateway/peer_letters_api``) meets my own life's, like the work a
+    place begins, though it stays ordinary queued work; everything else follows ``work_kind``."""
+    from ouroboros.consciousness_authority import work_kind
+
+    if isinstance(metadata, dict) and isinstance(metadata.get("peer_letter"), dict):
+        return "consciousness"
+    return work_kind(metadata)
 
 
 OWNER_RULES_KEY = "OUROBOROS_SAFETY_OWNER_RULES"

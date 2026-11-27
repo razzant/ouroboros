@@ -1,12 +1,12 @@
 """Host-owned places, circles, atomic revisioned choices and typed wake matching.
 
-The store is installation-local. Its first locked write imports legacy bindings
-once; connectors never rewrite an existing place when their declarations change.
+The installation's first locked import copies legacy bindings once. Admission
+can finish their outstanding wake defaults through ``places_migration``.
 Working folders are addresses, not capability fences. Missing state is empty;
 malformed state is a repair error and is never replaced with an empty store.
 
 Circles live in the same document beside the place rows (an ordered ``circles``
-list and ``place_choices`` by place id: its circle and its description), so one
+list and per-connection ``place_choices`` including the legacy wake witness), so one
 read resolves a place with the words it inherits and one lock writes both. A
 place row keeps its frozen keys: a body predating circles reads every place and
 ignores the circles (``PlaceRecords``).
@@ -17,7 +17,7 @@ import hashlib
 import json
 import re
 import uuid
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -62,14 +62,14 @@ def valid_wake_fact(fact: Any) -> bool:
     return isinstance(fact, str) and (fact in (*WAKE_FACTS, FACT_LEGACY_ADDRESSED) or is_wake_signal(fact))
 
 
-def declared_fact_labels(connector: str) -> dict[str, str]:
-    """``{fact: label}`` its live publication words itself (a signal, which only it can vouch for, or a core kind)."""
+def declared_fact_labels(place: Place) -> dict[str, str]:
+    """The live declarations for this place vouch for its signals and their labels."""
+    from ouroboros.extension_contributions import place_fact_labels
     from ouroboros.extension_registry_state import live_contribution_projection
+    from ouroboros.places_migration import matching_declarations
+    from ouroboros.telegram_owner_bot import declaring_place
 
-    return {fact["id"]: fact["label"] for row in live_contribution_projection()
-            if row.get("provides") == "place" and row.get("skill") == connector
-            for fact in row.get("facts", []) if isinstance(fact, dict)
-            and valid_wake_fact(fact.get("id")) and isinstance(fact.get("label"), str)}
+    return place_fact_labels(matching_declarations(declaring_place(place), live_contribution_projection()))
 
 
 class PlaceError(ValueError):
@@ -221,12 +221,16 @@ def _valid_circle(row: Any) -> bool:
 
 
 def _valid_choice(row: Any) -> bool:
-    """A place's circle (who placed it, when) and description (who wrote it, when), for one connection."""
+    """Check one connection's circle, authored description and, for a linked Ouroboros, the two facts my human set
+    at its door (``peer``: ``mine``, ``may_start``). Migration validates its own optional witness."""
+    peer = row.get("peer") if isinstance(row, dict) else None
     return (isinstance(row, dict) and type(row.get("connected_revision")) is int and row["connected_revision"] >= 0
             and all(isinstance(row.get(key, ""), str) for key in (
                 "circle_id", "placed_by", "placed_at", "description", "description_author", "description_at"))
             and (not row.get("circle_id") or row.get("placed_by") in AUTHORS)
-            and (not row.get("description") or row.get("description_author") in AUTHORS))
+            and (not row.get("description") or row.get("description_author") in AUTHORS)
+            and (peer is None or isinstance(peer, dict) and set(peer) == {"mine", "may_start"}
+                 and all(type(value) is bool for value in peer.values()) and row.get("peer_by") == AUTHOR_OWNER))
 
 
 def _read(drive_root: Any) -> dict:
@@ -245,41 +249,30 @@ def _read(drive_root: Any) -> dict:
 def paused_places_sentence(drive_root: Any) -> str:
     """Name current pauses, including legacy imports in memory, without writing."""
     try:
-        current = _read(drive_root)
-        migration_pending = not current.get("migration", {}).get("presence_bindings_v1")
-        current = _migrated_document(drive_root, current)
+        stored = _read(drive_root)
+        current = _migrated_document(drive_root, stored)
         rows = current["places"]
     except (PlaceError, OSError, ValueError):
         return "Paused places: unknown (place records could not be read)."
     labels = [row.get("label") or key for key, row in sorted(rows.items()) if row.get("state") == STATE_PAUSED]
     sentence = "Paused places (no writing there; tasks are not affected): " + ", ".join(labels) + "." if labels else ""
-    if migration_pending and current.get("migration", {}).get("problems"):
+    if current is not stored and current.get("migration", {}).get("problems"):
         sentence += " Paused legacy places: unknown (some old connections could not be read)."
     return sentence.strip()
 
 
 def _migrated_document(drive_root: Any, current: dict) -> dict:
     """Apply the legacy import in memory for both display and the durable migration."""
-    from ouroboros.places_migration import legacy_places
+    from ouroboros.places_migration import import_bindings, import_recorded
 
-    current = _document(current or None)
-    if current.get("migration", {}).get("presence_bindings_v1"):
-        return current
-    rows = dict(current["places"])
-    imported, problems = legacy_places(Path(drive_root))
-    known = {bid for row in rows.values() for bid in row.get("legacy_binding_ids", ())}
-    for place in imported:
-        if not known.intersection(place.legacy_binding_ids):
-            rows.setdefault(place.place_id, place_summary(place))
-    return {**current, "places": rows, "revision": current["revision"] + 1,
-            "migration": {"presence_bindings_v1": True, "at": utc_now_iso(), "problems": problems}}
+    return current if import_recorded(current) else import_bindings(Path(drive_root), current)
 
 
 def migrate_places(drive_root: Any) -> dict:
     """Atomically import each binding once; a failed import leaves all source bytes intact."""
     path = places_path(drive_root)
     try:
-        return update_json_locked(path, lambda current: _migrated_document(drive_root, current),
+        return update_json_locked(path, lambda current: _migrated_document(drive_root, _document(current or None)),
                                   strict_existing_dict=True, reject_existing_empty_dict=True)
     except PlaceError:
         raise
@@ -299,6 +292,8 @@ class PlaceRecords:
     places: Mapping[str, Place]
     circles: tuple[Mapping[str, Any], ...]
     choices: Mapping[str, Mapping[str, Any]]
+    migration: Mapping[str, Any] = field(default_factory=dict)
+    recorded: bool = True  # False: an import the store has not recorded yet, projected in memory by a read-only reader
 
     def circle(self, circle_id: str) -> Mapping[str, Any] | None:
         return next((row for row in self.circles if circle_id and row["circle_id"] == circle_id), None)
@@ -326,6 +321,11 @@ class PlaceRecords:
         return ({"text": choice["description"], "author": choice.get("description_author", ""),
                  "at": choice.get("description_at", "")} if choice.get("description") else None)
 
+    def peer(self, place_id: str) -> dict[str, bool] | None:
+        """A linked Ouroboros's two owner facts (``mine``, ``may_start``) for this connection, else None."""
+        peer = (self.choices.get(place_id) or {}).get("peer")
+        return dict(peer) if isinstance(peer, dict) else None
+
 
 def place_model_route(place: Place, circle: Mapping[str, Any] | None) -> tuple[str, str]:
     """The place's chosen model and scope; an empty value follows consciousness. Aliases stay stored choices."""
@@ -341,33 +341,34 @@ def _records(document: dict) -> PlaceRecords:
     rows = {key: _decode(value, connections.get(key)) for key, value in sorted(document["places"].items())}
     choices = {key: row for key, row in document.get("place_choices", {}).items()
                if key in rows and row["connected_revision"] == rows[key].connected_revision}
-    return PlaceRecords(document["revision"], rows, tuple(document.get("circles", ())), choices)
+    return PlaceRecords(document["revision"], rows, tuple(document.get("circles", ())), choices, document.get("migration", {}))
 
 
-def place_records(drive_root: Any) -> PlaceRecords:
-    """The places, circles and choices from one read (the legacy import runs first, as ``load_places``)."""
+def place_records(drive_root: Any, *, persist_import: bool = True) -> PlaceRecords:
+    """One snapshot. A display projects unimported legacy rows in memory, unrecorded (``PlaceRecords.recorded``)."""
+    from ouroboros.places_migration import import_recorded
     current = _read(drive_root)
-    if not current.get("migration", {}).get("presence_bindings_v1"):
-        current = migrate_places(drive_root)
-    return _records(current)
+    if not import_recorded(current) and not persist_import:
+        return replace(_records(_migrated_document(drive_root, current)), recorded=False)
+    return _records(current if import_recorded(current) else migrate_places(drive_root))
 
 
 def load_places(drive_root: Any) -> list[Place]:
     return list(place_records(drive_root).places.values())
 
 
-def migration_problems(drive_root: Any) -> list[dict]:
-    load_places(drive_root)
-    return list(_read(drive_root).get("migration", {}).get("problems", []))
+def migration_problems(drive_root: Any, records: PlaceRecords | None = None) -> list[dict]:
+    return list((records or place_records(drive_root, persist_import=False)).migration.get("problems", []))
 
 
 def place_room_index(drive_root: Any, place_id: str, *, details: bool = False) -> list[dict]:
     from ouroboros.place_arrivals import room_index
-    return room_index(drive_root, get_place(drive_root, place_id), details=details)
+    return room_index(drive_root, get_place(drive_root, place_id, persist_import=False), details=details)
 
 
-def get_place(drive_root: Any, place_id: str) -> Place:
-    for place in load_places(drive_root):
+def get_place(drive_root: Any, place_id: str, *, persist_import: bool = True) -> Place:
+    rows = load_places(drive_root) if persist_import else place_records(drive_root, persist_import=False).places.values()
+    for place in rows:
         if place.place_id == place_id:
             return place
     raise PlaceError("place_not_found", "place_id")
@@ -375,11 +376,15 @@ def get_place(drive_root: Any, place_id: str) -> Place:
 
 def resolve_place(drive_root: Any, *, connector: str, provider: str = "", account_id: str = "",
                   conversation_id: str = "", binding_id: str = "", thread_id: str = "",
-                  places: Iterable[Place] | None = None) -> Place | None:
-    """``places``: an already read set (``place_records``), else the store is read now."""
+                  places: Iterable[Place] | None = None, owner_bot: str = "") -> Place | None:
+    """``places``: an already read set (``place_records``), else the store is read now. ``owner_bot``: the owner's own
+    Telegram bot A; with it, an ``owner_bot`` place serves only A and an ordinary place never serves A, so the two
+    contributions of one connector never borrow each other's account or state (``_owner_bot_eligible``)."""
     candidates = []
     for place in (places_of_connector(drive_root, connector) if places is None
                   else [place for place in places if place.connector == connector]):
+        if not _owner_bot_eligible(place, owner_bot, [account_id] if account_id else []):
+            continue
         if binding_id and binding_id not in (place.place_id, *place.legacy_binding_ids):
             continue
         if provider and provider != place.provider:
@@ -416,7 +421,8 @@ def account_in_place_scope(place: Place, account_id: str) -> bool:
 
 
 def place_for_target(drive_root: Any, *, connector: str, targets: Mapping[str, list[str]], conversation: str = "",
-                     thread: str = "", provider: str = "", match: str = MATCH_SCOPE) -> tuple[Place | None, bool]:
+                     thread: str = "", provider: str = "", match: str = MATCH_SCOPE,
+                     owner_bot: str = "") -> tuple[Place | None, bool]:
     """Resolve declared target values against stored account/conversation ids.
 
     Multiple destinations must be checked separately by the dispatch caller. An unresolved value inside an account's
@@ -424,7 +430,17 @@ def place_for_target(drive_root: Any, *, connector: str, targets: Mapping[str, l
     target. ``match`` selects the matcher (``target_place``).
     """
     places = [place for place in places_of_connector(drive_root, connector) if not provider or place.provider == provider]
-    return target_place(places, targets=targets, conversation=conversation, thread=thread, match=match)
+    return target_place(places, targets=targets, conversation=conversation, thread=thread, match=match, owner_bot=owner_bot)
+
+
+def _owner_bot_eligible(place: Place, owner_bot: str, accounts: Iterable[str]) -> bool:
+    """An ``owner_bot`` place, by its stored role whichever bot holds the bridge's token today, serves only a lookup
+    naming the owner's own bot A now (``owner_bot``), and an ordinary place never serves A: the two contributions of
+    one connector keep separate accounts, states and confirmations, and a lookup naming no A (none today, or a caller
+    that names none) never lands in a place of the personal bridge. Other connectors have no such place."""
+    from ouroboros.telegram_owner_bot import is_owner_bot_place
+    want_owner = bool(owner_bot) and owner_bot in {str(account) for account in accounts if account}
+    return is_owner_bot_place(place) == want_owner
 
 
 def _named_rank(place: Place, accounts: set, conversations: set, threads: set, fold: bool) -> tuple | None:
@@ -440,7 +456,8 @@ def _named_rank(place: Place, accounts: set, conversations: set, threads: set, f
 
 
 def target_place(places: list[Place], *, targets: Mapping[str, list[str]],
-                 conversation: str = "", thread: str = "", match: str = MATCH_SCOPE) -> tuple[Place | None, bool]:
+                 conversation: str = "", thread: str = "", match: str = MATCH_SCOPE,
+                 owner_bot: str = "") -> tuple[Place | None, bool]:
     """Match outbound targets, including declared destinations, in the supplied scopes.
 
     Dispatch loads the connector's current places; a retained outbox also uses
@@ -451,6 +468,7 @@ def target_place(places: list[Place], *, targets: Mapping[str, list[str]],
     """
     if match not in MATCHES:
         raise ValueError(f"match is {' or '.join(MATCHES)}, not {match!r}")
+    places = [place for place in places if _owner_bot_eligible(place, owner_bot, targets.get("account_id", []))]
     if match != MATCH_SCOPE:
         fold = match == MATCH_EXACT_CASEFOLD
         conversations = {key.casefold() if fold else key for key in map(str, targets.get(conversation) or []) if key}
@@ -495,16 +513,18 @@ def target_place(places: list[Place], *, targets: Mapping[str, list[str]],
 
 
 def outbox_place(drive_root: Any, *, connector: str, provider: str, account_id: str,
-                 conversation_id: str, thread_id: str = "") -> Place | None:
-    """Current outbox scope; an opaque operation retains matching account holds."""
+                 conversation_id: str, thread_id: str = "", owner_bot: str = "") -> Place | None:
+    """Current outbox scope; an opaque operation retains matching account holds. ``owner_bot`` fences the owner's own
+    bot A from the connector's ordinary places (``_owner_bot_eligible``)."""
     if not conversation_id:
         restricted = next((p for p in places_of_connector(drive_root, connector)
                            if p.provider == provider and p.account_id in ("", "*", account_id)
+                           and _owner_bot_eligible(p, owner_bot, [account_id] if account_id else [])
                            and p.state in {STATE_SILENT, STATE_PAUSED}), None)
         if restricted is not None:
             return restricted
     return resolve_place(drive_root, connector=connector, provider=provider, account_id=account_id,
-                         conversation_id=conversation_id, thread_id=thread_id)
+                         conversation_id=conversation_id, thread_id=thread_id, owner_bot=owner_bot)
 
 
 def observed_facts(event: Any) -> tuple[str, ...]:
@@ -568,10 +588,22 @@ def counted_owner_accounts(places: Iterable[Place]) -> dict[str, tuple[OwnerAcco
 
 def confirmed_elsewhere(places: Iterable[Place], place: Place) -> list[tuple[Place, OwnerAccount]]:
     """``(other place, account)`` for each account another place of ``place``'s connector account confirms, scoped
-    to the account it was confirmed for (``counted_owner_accounts``); the sheet names where each was confirmed."""
-    return [(other, replace(account, account_id=account.account_id or other.account_id)) for other in places
-            if other.place_id != place.place_id and (other.connector, other.provider) == (place.connector, place.provider)
-            for account in other.owner_accounts]
+    to the account it was confirmed for (``counted_owner_accounts``); the sheet names where each was confirmed.
+    The owner's own bot (``owner_bot``) and the connector's ordinary bot never share confirmations across their
+    contributions: a legacy whole-account confirmation of the separate bot is not the personal bot's owner."""
+    from ouroboros.telegram_owner_bot import is_owner_bot_place
+    found = []
+    for other in places:
+        if other.place_id == place.place_id or (other.connector, other.provider) != (place.connector, place.provider):
+            continue
+        if is_owner_bot_place(other) != is_owner_bot_place(place):
+            continue  # A and B keep their own confirmations
+        for account in other.owner_accounts:
+            scoped = replace(account, account_id=account.account_id or other.account_id)
+            if is_owner_bot_place(place) and scoped.account_id not in ("", "*", place.account_id):
+                continue  # a personal-bot confirmation counts only for its own bot
+            found.append((other, scoped))
+    return found
 
 
 def place_rows(drive_root: Any) -> dict[str, Place]:
@@ -609,15 +641,17 @@ def forwarded_message(message: Any) -> bool:
 def owner_author(accounts: Mapping[str, Iterable[OwnerAccount]], place_id: str, actor: Any, account_id: str,
                  conversation_id: str = "", message: Any = None) -> bool:
     """A place message as my human's own words now: its actor is an account its place's connector account confirms
-    (``accounts``, one ``place_owner_accounts`` snapshot), the connector does not report it unauthenticated, and it is
-    not a message I posted as an account (its provider identity among ``accounts.sent``; never compared by its words,
-    so my human repeating my words is still my human). Provenance of the words, never whom they are for; who sent a
-    forward, never whose words it carries (``forwarded_message``)."""
+    (``accounts``, one ``place_owner_accounts`` snapshot), reported neither unauthenticated nor a program (``origin:
+    "machine"``, or a linked Ouroboros, ``kind: "ouroboros"``: facts that only lower authority), and not a message I
+    posted as an account (its provider identity
+    among ``accounts.sent``, never compared by its words: my human repeating my words is still my human). Provenance
+    of the words, never whom they are for; who sent a forward, never whose words it carries (``forwarded_message``)."""
     from ouroboros.own_sends import message_identity
 
     actor = actor if isinstance(actor, Mapping) else {}
     actor_id = str(actor.get("platform_actor_id") or actor.get("id") or "").strip()
-    return (actor.get("authenticated") is not False
+    return (actor.get("authenticated") is not False and actor.get("origin") != "machine"
+            and actor.get("kind") != "ouroboros"
             and owner_account_matches(accounts.get(place_id, ()), actor_id, str(account_id or ""))
             and message_identity(conversation_id, message) not in getattr(accounts, "sent", frozenset()))
 
@@ -685,8 +719,13 @@ def _transact(drive_root: Any, mutate: Any, author: str = "", by: Any = None) ->
     """One locked read-modify-write of the place document after the legacy import (same lock file): ``mutate(document)``
     returns the next document or None (nothing written); removed words are kept first (``place_words_history``)."""
     from ouroboros.place_words_history import keeping
+    from ouroboros.places_migration import after_place_write
+
+    def apply(before):
+        return after_place_write(before, mutate(before))
+
     load_places(drive_root)
-    update_json_locked(places_path(drive_root), keeping(drive_root, mutate, author, by),
+    update_json_locked(places_path(drive_root), keeping(drive_root, apply, author, by),
                        strict_existing_dict=True, reject_existing_empty_dict=True)
 
 
@@ -699,7 +738,7 @@ def _with_choices(document: dict, choices: dict) -> dict:
 
 def _write(drive_root: Any, place_id: str, change: Any, expected_revision: int | None = None,
            choose: Any = None, author: str = "", by: Any = None) -> Place | None:
-    """One place's change; ``choose(choice, document)`` changes its circle or description in the same transaction.
+    """One place's change; ``choose(choice, document)`` updates its connection choices in the same transaction.
     A changed choice is a change of the place: its revision moves (its connection's written revision with it), so a
     sheet holding the older revision meets a conflict instead of overwriting."""
     _expected(expected_revision)
@@ -775,7 +814,7 @@ def connect_place(drive_root: Any, *, connector: str, provider: str, label: str 
     return _write(drive_root, place_id, change, choose=choose)
 
 
-_CHOICE_ACTIONS = ("set_circle", "set_description")
+_CHOICE_ACTIONS = ("set_circle", "set_description", "set_peer")
 
 
 def _author(author: str) -> None:
@@ -793,9 +832,12 @@ def edit_place(drive_root: Any, place_id: str, action: str, *, author: str,
         raise PlaceError("place_owner_confirmation_required", "owner_accounts",
                          "Confirm this account from the owner's door or the place sheet.")
 
+    was: list[str] = []
+
     def change(old: Place | None) -> Place | None:
         if old is None:
             raise PlaceError("place_not_found", "place_id")
+        was[:] = [old.state]
         for name, args in changes:
             if name not in _CHOICE_ACTIONS:
                 old = _change_place(old, name, author, args)
@@ -803,15 +845,35 @@ def edit_place(drive_root: Any, place_id: str, action: str, *, author: str,
 
     def choose(choice: dict, document: dict) -> dict:
         for name, args in changes:
+            if name == "set_peer" and document["places"][place_id].get("connector") != "ouroboros":
+                raise PlaceError("place_peer_invalid", "peer", "place_peer_invalid: only a linked Ouroboros's place "
+                                 "holds mine and may_start; this place is another connector's.")
             if name in _CHOICE_ACTIONS:
                 choice = _change_choice(choice, name, author, args, document)
+            elif name in ("set_wakes", "add_wake", "remove_wake") and document["places"][place_id].get("legacy_binding_ids"):
+                choice = {k: v for k, v in choice.items() if k != "wake_import"}
+                choice["wakes_reviewed"] = True
         return choice
-    return _write(drive_root, place_id, change, expected_revision, choose, author, by)
+    place = _write(drive_root, place_id, change, expected_revision, choose, author, by)
+    if (author == AUTHOR_OWNER and place is not None and place.connector == "ouroboros" and was
+            and was[0] != STATE_ACTIVE and place.state == STATE_ACTIVE):  # my human made a link's place Active again
+        from ouroboros.peer_replies import resume_returned
+
+        resume_returned(drive_root, link_id=place.conversation_id)  # what that link is still owed goes now
+    return place
 
 
 def _change_choice(choice: dict, action: str, author: str, values: Mapping[str, Any], document: Mapping[str, Any]) -> dict:
     """A place's circle (``circle_id``, "" for none) or its description ("" clears it). The same circle or line saved
-    again keeps an owner's authorship: only my human's deliberate save makes an earlier one of mine theirs."""
+    again keeps an owner's authorship: only my human's deliberate save makes an earlier one of mine theirs.
+    ``set_peer`` (a linked Ouroboros's ``mine`` and ``may_start``) is my human's alone, at their door."""
+    if action == "set_peer":
+        if author != AUTHOR_OWNER:
+            raise PlaceError("place_peer_owner_only", "peer", "place_peer_owner_only: only your human sets these facts.")
+        peer = {key: values.get(key) for key in ("mine", "may_start")}
+        if any(type(value) is not bool for value in peer.values()):
+            raise PlaceError("place_peer_invalid", "peer", "place_peer_invalid: mine and may_start are booleans.")
+        return {**choice, "peer": peer, "peer_by": author, "peer_at": utc_now_iso()}
     key, by, at = (("circle_id", "placed_by", "placed_at") if action == "set_circle"
                    else ("description", "description_author", "description_at"))
     value = values.get(key, "")
@@ -963,14 +1025,14 @@ def _change_place(old: Place | None, action: str, author: str, values: dict) -> 
         if not isinstance(facts, list) or any(not valid_wake_fact(f) for f in facts):
             raise PlaceError("place_wake_invalid", "wakes")
         added_signals = {f for f in facts if is_wake_signal(f)} - {w.fact for w in old.wakes}
-        if added_signals and not added_signals <= declared_fact_labels(old.connector).keys():
+        if added_signals and not added_signals <= declared_fact_labels(old).keys():
             raise PlaceError("place_wake_undeclared", "wakes", "place_wake_undeclared: this connector has not declared that signal; turn it on or choose a listed kind.")
         return replace(old, wakes=tuple(next((w for w in old.wakes if w.fact == fact), WakeItem(fact, author)) for fact in dict.fromkeys(facts)))
     if action in {"add_wake", "remove_wake"}:
         fact = values.get("fact", "")
         if not valid_wake_fact(fact):
             raise PlaceError("place_wake_invalid", "fact")
-        if action == "add_wake" and is_wake_signal(fact) and fact not in declared_fact_labels(old.connector):
+        if action == "add_wake" and is_wake_signal(fact) and fact not in declared_fact_labels(old):
             raise PlaceError("place_wake_undeclared", "fact", "place_wake_undeclared: this connector has not declared that signal; turn it on or choose a listed kind.")
         items = tuple(w for w in old.wakes if w.fact != fact)
         if action == "add_wake":
@@ -989,6 +1051,9 @@ def _change_place(old: Place | None, action: str, author: str, values: dict) -> 
             raise PlaceError("place_note_invalid", "index")
         return replace(old, notes=old.notes[:index] + old.notes[index + 1:])
     if action in {"confirm_owner_account", "revoke_owner_account"}:
+        if action == "confirm_owner_account" and old.connector == "ouroboros":
+            raise PlaceError("place_account_invalid", "confirm_owner_account",
+                             "a linked Ouroboros is an agent, never an owner account")
         actor = values.get("platform_actor_id", "")
         account = values.get("account_id", old.account_id)
         if not isinstance(actor, str) or not actor.strip():

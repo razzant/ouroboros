@@ -21,8 +21,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from ouroboros._usage_response import (
-    _reported_token_count, cache_write_split, cache_write_total, nontext_counts, observed_processing_mode,
-    processing_receipt, provider_cost_value, text_token_counts,
+    _reported_token_count, cache_write_split, cache_write_total, chat_usage_receipt, nontext_counts, observed_processing_mode,
+    processing_receipt, provider_cost_value, provider_token_counts, text_token_counts,
 )
 
 
@@ -199,8 +199,18 @@ def frame_estimate_ttl(reservation, request, exc) -> Optional[str]:
     return ""
 
 
+def _provider_token_receipt(usage: Mapping[str, Any], reservation: Any, token_source: Any) -> dict | None:
+    """Read the response parser's pre-accounting witness, never the billing-shaped fallback.
+
+    Only a stream witness needs the attempt id it is bound to; without one the reservation's id is never read."""
+    if (stream := chat_usage_receipt(token_source)) is not None:
+        return stream.for_attempt(reservation.attempt_id)  # An empty stream witness is distinct from no usage frame.
+    raw = usage.get("_reported_token_usage")
+    return provider_token_counts(raw) if isinstance(raw, dict) else None
+
+
 def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost_optional,
-                      estimate_cache_ttl: Optional[str] = None) -> Dict[str, Any]:
+                      estimate_cache_ttl: Optional[str] = None, token_source: Any = None) -> Dict[str, Any]:
     """Normalize reported usage before the monetary transaction; no live pricing I/O."""
     normalized = dict(usage or {})
     evidence = copy.deepcopy(normalized.get("cost_evidence") or {})
@@ -279,6 +289,7 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
     if has_nontext_usage(normalized):
         evidence.setdefault("usage", copy.deepcopy({key: value for key, value in normalized.items()
                                                    if key != "cost_evidence"}))
+    token_receipt = _provider_token_receipt(normalized, reservation, token_source)
     return dict(
         cost_usd=cost,
         cost_final=bool(cost_final and cost is not None),
@@ -289,6 +300,7 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
         cached_tokens=cached_tokens,
         cache_write_tokens=cache_write_tokens,
         prompt_cache_ttl=reported_ttl,
+        **({"provider_token_receipt": token_receipt} if token_receipt is not None else {}),
         # ``response_provider``: the upstream that served the call, as the response named it (a cache is one
         # upstream's); ``cache_write_tokens_by_ttl``: the provider's own split of the writes by lifetime.
         **{key: copy.deepcopy(normalized[key]) for key in (

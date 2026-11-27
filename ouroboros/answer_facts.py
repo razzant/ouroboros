@@ -159,16 +159,19 @@ def living_card_input(row: Any, root: Any = None) -> dict:
 
 
 def late_quiz_input(ref: Mapping, block: dict, words_source: str = "owner_mailbox") -> dict:
-    """The corpus fact for one reading of a late answer, including an unavailable answer."""
+    """The corpus fact for one reading of a late answer, including an unavailable answer. A Reply's recorded files
+    (``attachments``: stored refs, or why one never arrived) ride beside the words; a file alone has no words."""
+    from ouroboros.chat_uploads import answer_evidence, stored_refs
     from ouroboros.owner_quiz import late_answer_owner_text
 
-    content = late_answer_owner_text(block)
-    if not content:
+    content, files = late_answer_owner_text(block), stored_refs(block.get("attachments"))
+    if not content and (block.get("answered_index") is not None or block.get("secret_request")
+                        or block.get("secret_outcome") or not answer_evidence(files)):
         return {"source": OWNER_CARD_INPUT, "content": "Quiz answer received. Its accepted answer is unavailable."}
     pressed = late_answer_owner_text({**block, "comment": ""})
     return {"source": answer_source(block, words_source), "content": content, "source_task_id": ref["task_id"],
             "quiz_id": ref["quiz_id"], **({"pressed": pressed} if pressed else {}),
-            "reply_to": answered_card_reply(block, ref["task_id"])}
+            "reply_to": answered_card_reply(block, ref["task_id"]), **({"attachments": files} if files else {})}
 
 
 def card_input(row: Any, root: Any, words_source: str = "owner_mailbox") -> dict:
@@ -220,7 +223,9 @@ def last_own_words(ctx: Any) -> str:
 
     last = ("", "")
     for item, ts, reference, _door in _dated_directives(ctx):
-        if not item.get("carried") and item.get("source") in OWNER_WORD_SOURCES:
+        # A file sent without a caption stays an arrival in the corpus; it is not words of theirs.
+        if (not item.get("carried") and item.get("source") in OWNER_WORD_SOURCES
+                and str(item.get("content") or "").strip()):
             last = (ts or _item_time(item), reference or row_ref(item))
     return f"[Host fact: their last own words in this work: {last[0]} ({last[1]})]" if all(last) else ""
 
@@ -254,19 +259,24 @@ def answered_card(block: Any, words: str) -> dict[str, Any] | None:
 
     from ouroboros.owner_quiz import STATE_ANSWERED, late_answer_owner_text
 
-    if not (isinstance(block, dict) and not block.get("secret_request") and block.get("state") == STATE_ANSWERED
-            and late_answer_owner_text(block) == words):
+    if not (isinstance(block, dict) and not block.get("secret_request") and not block.get("secret_outcome")
+            and block.get("state") == STATE_ANSWERED and late_answer_owner_text(block) == words):
         return None
     return {key: copy.deepcopy(block[key]) for key in CARD_FIELDS if key in block}
 
 
 def carded(row: dict[str, Any], source: Any, root: Any = None) -> dict[str, Any]:
     """``row`` with the card its words answer beside them (``answered_card_source(source)``) when that card records
-    exactly these words: the asking task, the card's id and the card a Continue successor reads."""
+    exactly these words: the asking task, the card's id, the card a Continue successor reads and the files a Telegram
+    Reply answered it with (the row's own, when it holds some)."""
+    from ouroboros.chat_uploads import stored_refs
+
     block, asker = answered_card_source(source, root)
     card = answered_card(block, row["content"])
     if card and all(isinstance(value, str) and value for value in (asker, card.get("quiz_id"))):
         row.update(source_task_id=asker, quiz_id=card["quiz_id"], card=card)
+        if files := stored_refs(block.get("attachments")):
+            row.setdefault("attachments", files)
     return row
 
 
@@ -314,10 +324,82 @@ def is_answered_card(reply: Any) -> bool:
     return isinstance(reply, Mapping) and str(reply.get("address") or "").startswith("quiz ")
 
 
+# A living card keeps one address while its author revises it, so a body joined to a submission by that address alone
+# (a helper's field, ``card_reference``; a quote rebuilt from it, ``owner_relay._pristine_form``) is a reference: its
+# text, a label in it included, may be another revision's or another press's. A submission's own snapshot
+# (``living_card_input``) and a quiz card (one record, ``answered_card_reply``) need no note.
+CARD_REFERENCE_NOTE = ("reference text kept at this card's address: it may come from a different revision of the card, "
+                       "and a label in it from another press; this submission's own fields are recorded separately "
+                       "(pressed_label, submitted_values)")
+
+
+def card_reference(fact: Mapping, body: Mapping) -> dict:
+    """The card one submission answers as a field's reader is shown it, rejoined from its ``answer_input`` (``fact``):
+    the body the field kept at its ``reply_address`` (none kept: its author and text stay empty, the address still names
+    the card) beside this submission's own card id, label and values as the fact holds them; ``{}`` without an address.
+    Only for showing, never stored: a row's identity covers its stored form (``owner_words._words_rows``,
+    ``owner_relay._pristine_form``). A reader reads it through ``card_reference_view``."""
+    if not (address := fact.get("reply_address")):
+        return {}
+    return {"address": address, "author": body.get("author") or "", "text": body.get("text") or "",
+            **{key: fact[key] for key in ("card_id", "pressed_label", "submitted_values") if key in fact}}
+
+
+def card_reference_view(target: Mapping) -> dict:
+    """A card joined by its address (``card_reference``) as its readers see it: a living card's (its ``card_id``) with
+    ``CARD_REFERENCE_NOTE`` beside the body it shows; a quiz card's, or one without a body, as it is."""
+    return {**target, "note": CARD_REFERENCE_NOTE} if target.get("card_id") and target.get("text") else dict(target)
+
+
+def merged_card_reply(shown: Any, later: Any) -> dict[str, Any] | None:
+    """When ``later`` is a fuller copy of the same living-card reply as ``shown`` (matching ``address`` and
+    ``card_id``) and supplies a missing body, return ``shown`` with just the missing body and provenance fields."""
+    shown = shown if isinstance(shown, Mapping) else {}
+    later = later if isinstance(later, Mapping) else {}
+    if (later.get("address") and shown.get("address") == later["address"]
+            and shown.get("card_id") and shown["card_id"] == later.get("card_id")
+            and later.get("text") and not shown.get("text")):
+        return {**shown, **{k: later[k] for k in ("author", "text", "note") if later.get(k) and not shown.get(k)}}
+    return None
+
+
+def qualify_reconstructed_card_reference(row: Any, kept: Mapping[str, dict[str, Any]]) -> None:
+    """Qualify a pre-update saved carried directive's card body in ``kept`` only from a matching already-delivered
+    reconstructed held row (``corpus_answer`` without direct card snapshot fields): no history lookup, and never
+    mark a direct snapshot, a context (``went_to``) row, or an unrelated legacy row."""
+    if not isinstance(row, Mapping):
+        return
+    carried = row.get("carried")
+    carried_answer = row.get("corpus_answer")
+    if ((isinstance(carried, Mapping) and carried.get("went_to"))
+            or not isinstance(carried_answer, Mapping) or not carried_answer
+            or row.get("kind") == "card_input"
+            or any(row.get(k) for k in ("card_press", "card_delivery", "late_answer"))):
+        return
+    from ouroboros.owner_relay import owner_row_address, owner_row_identity
+
+    digest = owner_row_identity(row)["row_sha256"]
+    listed = kept.get(f"row-sha256:{digest}")
+    if listed is None:
+        candidate = kept.get(owner_row_address(row))
+        if candidate is not None and not candidate.get("row_sha256"):
+            listed = candidate
+    reply = carried_answer.get("reply_to")
+    ref_card = card_reference_view(reply if isinstance(reply, Mapping) else {})
+    shown = (listed or {}).get("reply_to")
+    shown = shown if isinstance(shown, Mapping) else {}
+    if (listed is not None and listed.get("carried") and not listed.get("mail_kind")
+            and shown.get("text") and not shown.get("note") and ref_card.get("note")
+            and shown.get("address") == ref_card.get("address")
+            and shown.get("card_id") and shown["card_id"] == ref_card.get("card_id")):
+        listed["reply_to"] = {**shown, "note": ref_card["note"]}
+
+
 def retained_card_input(row: Mapping, root: Any) -> dict:
     """An accepted physical card row as an input. Only its own record can interpret the display text."""
     if item := card_input(row, root):
         return item
+    from ouroboros.chat_uploads import answer_evidence
     from ouroboros.owner_quiz import late_answer_owner_text
     from ouroboros.owner_relay import owner_text
 
@@ -327,7 +409,33 @@ def retained_card_input(row: Mapping, root: Any) -> dict:
                  and row.get("source") in (None, "", "owner_quiz_answer")
                  and row.get("direction") == "system" else owner_text(row))
         if (card := answered_card(block, words)) and card.get("quiz_id"):
-            return late_quiz_input({"task_id": asker, "quiz_id": card["quiz_id"]}, card, "owner_quiz_answer")
+            files = answer_evidence(block.get("attachments"))
+            return late_quiz_input({"task_id": asker, "quiz_id": card["quiz_id"]},
+                                   {**card, **({"attachments": files} if files else {})}, "owner_quiz_answer")
     if isinstance(block, Mapping) or row.get("type") == "quiz_answer":
         return {"source": OWNER_CARD_INPUT, "content": "Quiz answer received. Its accepted answer is unavailable."}
     return {}
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def same_form_citation(prior: Mapping, row: Mapping) -> bool:
+    """Attach a field citation only to its own identified submission, with the same recorded field boundaries."""
+    from ouroboros.chronicle_quotes import quote_in
+
+    target = _mapping(prior.get("reply_to"))
+    cited_target = _mapping(row.get("reply_to"))
+    if (row.get("source") != "owner_mailbox" or not target.get("card_id")
+            or target["card_id"] != cited_target.get("card_id")
+            or prior.get("source_task_id") != row.get("source_task_id")
+            or target.get("submitted_values") != cited_target.get("submitted_values")):
+        return False
+    if not (prior.get("msg_id") or prior.get("client_message_id")):
+        return False  # equal words without a delivery identity do not establish a submission
+    if any(prior.get(key) and row.get(key) and str(prior[key]) != str(row[key])
+           for key in ("msg_id", "client_message_id", "chat_id")):
+        return False
+    return isinstance(row["cited"], str) and isinstance(prior.get("content"), str) and quote_in(
+        row["cited"], word_spans(prior["content"], target))

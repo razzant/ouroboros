@@ -4,18 +4,18 @@ BIBLE/Architecture/Development ground identity/structure/procedure; DESIGN names
 
 ### Invariant: Full availability in reasoning flows
 
-Architecture, constitution and procedure flows receive applicable governance as first-class context: inline or complete navigable sources named by their registry row, never silently omitted or dependent on touched files.
+Architecture, constitution and procedure flows receive applicable governance as first-class context — inline or complete navigable sources per the registry, never silently omitted.
 
-**Review surfaces.** `tools/governance_context.py` supplies CODE/coupling briefs for change-review seats, preflight and deep self-review, by layer (`review_body_fact.layer_for`); the three body tiers and the universal core/foreign section: ARCHITECTURE §6 “Governance delivery”.
+**Review surfaces.** Briefs per layer (`tools/governance_context.py`, `review_body_fact.layer_for`), body tiers and the universal core/foreign section: ARCHITECTURE §6 "Governance delivery".
 
-**Plan review.** The body pack follows declared `affected_paths`, never prose or plan kind (P5): a body plan reaches the installed repository or a recognized copy, or is folderless research with explicit `context_requires_self_body_docs=true` plus `task_design_source` acceptance; Main/cwd or `[]` alone cannot qualify, and foreign or unknown roots get no Ouroboros governance and no maps. Required assembly failures are `PlanPacketError`; unattached evidence stays named; a participant continues only from its own retained delivery and reply, an unreadable source meaning a fresh send disclosed as `continued`, never a borrowed or invented transcript (ARCHITECTURE §6 “Plan construction and review”, `tools/plan_packet.py`).
+**Plan review.** Body governance follows declared `affected_paths`, never prose or plan kind (P5): a path into the installed repo or recognized copy, or folderless research with explicit `context_requires_self_body_docs=true` and accepted `task_design_source` — never Main/cwd or `[]` alone. Reviewers of a body plan must read BIBLE and ARCHITECTURE in full, regardless of the planner's context mode. Required assembly failures raise `PlanPacketError`; unattached evidence stays named; a repeat seat continues only from its own retained thread or delivery and reply (`continued=true`); an unreadable source means a fresh send recorded as `continued=false`, never a borrowed or invented transcript (ARCHITECTURE §6 "Plan construction and review", `tools/plan_packet.py`).
 
-**DESIGN navigation.** Own-body Main/API planners/consilia and declared children get canonical `docs/DESIGN.md` headings/ranges in `dynamic_head` after the stable prefix. Workspace provenance/`body_fact` select sources; the flag covers folderless self work. Foreign work is excluded. Sessions append prepared map/path/SHA to host instructions after root preparation; retained starts pin retries; canonical work orders unchanged. Plan/change CODE/coupling/preflight use installed governance. Web review keeps full DESIGN within its share, otherwise its bible and map. Missing sources are named. Select originals: maps add no gate, whole-book duty, rule text or reading proof. Tool-less packets need attached excerpts, naming omissions/uncertainty.
+**DESIGN delivery.** Authors get the bible before mutation in every mode; ARCHITECTURE §6 owns selection and fitting. Sessions on the work's folder use the same scoped reader after root preparation, pinning view/path/SHA from one read in start instructions, not the work order. Plans get headings; plan/CODE/coupling/preflight use installed governance. Web review fits DESIGN whole, else its bible or principles and a map; changed words elsewhere fit only those excerpts. Gaps and actual inline coverage are named. A map gives a packet no reader and proves no reading or application. No new gate or whole-book duty.
 
 The context-delivery registry:
 
 | Flow | BIBLE.md | ARCHITECTURE.md | DEVELOPMENT.md |
-|------|----------|-----------------|----------------|
+|---|---|---|---|
 | Main task context (`context.py`) | full tier-0 in every mode | full in Max; navigation in Low/Nano or for a child | Max: a stable block after the governance prefix for body/unknown work (`development_resident`), else its map; else as ARCHITECTURE; a task's requirement (`development_required`) adds it anywhere |
 | Change review, Part 1 (`tools/review.py`) | full (API preamble or retrieving task) | tier 3 navigation; packet rows also get sections naming touched files within the inline share | tier 2 within the share: the review protocol and chapters naming touched files |
 | ↳ `review_change` by layer (`review_body_fact.layer_for`) | body: as Part 1; core: `not_applicable`, the preamble names no constitution (`review_prompt_text.review_preamble("core")`) | body: as Part 1; core: `not_applicable`, the navigation indexes the subject's documents (`subject_root`) | body: as Part 1; core: the universal `Change Review Checklist` alone, with an empty-by-rule required-source manifest |
@@ -26,56 +26,54 @@ The context-delivery registry:
 | Plan review (`tools/plan_review.py`) | full for a body plan (`api_chat` inline, `agent_session` mandatory full read); otherwise none, no map | as BIBLE | not delivered or pointed at; the mind may attach it |
 | Deep self-review (`deep_self_review.py`) | full tier 1 on both deliveries | tier 3 navigation | tier 2 within the row's share (ARCHITECTURE §6 "Deep self-review") |
 
-`tools/scope_required_sources.py` sets minimum body reading, never its ceiling. Core manifests stay empty and staged diffs complete. Coverage changes no findings, quorum or permission and buys no repeat; the mind decides further reads. The window sizes delivery, never authority.
+`tools/scope_required_sources.py` sets a body reading floor, not a ceiling; core manifests stay empty and staged diffs complete. Reading coverage and window size never change review authority or buy another review: coverage is diagnostic, window size only shapes delivery, and the mind decides further reads (DEVELOPMENT §5 "Review pool and paid cycles"). `plan_ask.planning_roots` and `read_admission` bind planning roots and attachments (data roots: own stores only), so external plans never fall back to Ouroboros and user-managed skill paths only classify (`denied_path`, never self-modification or attachable evidence).
 
-`plan_ask.planning_roots` gives planning its subject and governance roots, `read_admission` admits attachments (of data roots only own task stores); external plans never fall back to reviewing Ouroboros. Exact user-managed installed-skill paths only classify: never self-modification or attachable evidence (`denied_path`).
+Review history keeps the operative contract, current author/critic statuses and open/deferred/pending facts explicit. Actor `review_notes` may shorten reasons or group exact historical decisions, keeping membership and lineage in the existing selected view (never grouping by age or terminal status), without granting verdicts or rewriting paid replays; producers project once with mirror refs, keep unknown legacy bodies (and recoverable ones at source gaps), recheck versions through publication, cold context, new packets and Continue, keep unchanged prefixes intact, carry all surviving accounts across continuations, and leave invalid optional transfers unshortened (`ouroboros/review_history_view.py`; ARCHITECTURE §6 "Review ledger record", "Plan construction and review").
 
-Review history keeps the operative contract, current author/critic statuses and open/deferred/pending facts explicit. Actor `review_notes` may shorten individual reasons or group exact historical decisions, retaining membership and lineage in the existing selected view. No grouping by age or terminal status. Producers project decisions once with mirror references; unknown legacy content stays full. Recheck versions through publication, cold context, new packets and Continue; source gaps preserve recoverable bodies. Invalid optional transfers leave their own attachments full. Unchanged views retain their prefix; all surviving accounts cross continuations. Notes grant no verdict and rewrite no paid replay. Enforcement: `ouroboros/review_history_view.py`. Plan objections: ARCHITECTURE §6 "Plan construction and review".
-
-**Context mode (Nano / Low / Max).** Use the Main row. Max binds Development to the active repository, keeping books until recovery's earlier steps fall short. Unknown windows send full. Preserve owner Low/Nano sizing, lower starts, tier-0 and P3. Targets cut no chosen read or owner words; rebinds re-cut no fitting sent view (`tests/test_context_economy_window.py`). Mechanism: ARCHITECTURE §6 “Context fitting, retry, and compaction”.
+**Context mode (Nano / Low / Max).** The Main row describes the acting agent's own context: Max binds Development to the active repo and drops books only after earlier recovery fails; unknown windows send full. Preserve owner Low/Nano sizing, lower starts, tier-0 and P3; targets cut no chosen read or owner words, and rebinds re-cut no fitting sent view (`tests/test_context_economy_window.py`; ARCHITECTURE §6 "Context fitting, retry, and compaction").
 
 ### Invariant: Exact premises with explicit source ownership
 
-Plan from the complete retained room — both speakers, options and answers exact (`dialogue_evidence.py`, `plan_dialogue.py`) — with no independent dialogue byte cap, never from the bounded post-consolidation reader or the owner-directive ledger (`review_evidence._accept_owner_directives`). JSONL records and chat line selectors split on physical LF only, never inside valid Unicode of a message. Enforcement: `ouroboros/plan_dialogue.py`.
+Plan from the complete retained room — both speakers, options and answers exact (`dialogue_evidence.py`, `ouroboros/tools/plan_dialogue.py`) — with no independent dialogue byte cap, never from the bounded post-consolidation reader or the owner-directive ledger (`review_evidence._accept_owner_directives`). JSONL records and chat line selectors split on physical LF only, never inside valid Unicode.
 
 ### Invariant: Compaction must earn its rewrite
 
-Treat the task's dated focus as data, not owner instructions. Strictly read its canonical result, distinguishing absence/failure; update same-round facts and remeasure (`tests/test_self_focus_context.py`).
+Treat dated focus as data, never owner instructions; read canonical results strictly, distinguishing absence from failure; update same-round facts and remeasure (`tests/test_self_focus_context.py`).
 
-Known-window no-result-room predictions and typed size refusals use two model-free recovery passes (ARCHITECTURE §6). No helper summarizer: `compact_context` without `working_note` is `authored_note_required`. Actor notes may fold completed working prose/tools without shrinking, preserving governing human words, recorded outward speech, newer arrivals and opaque protocol. Local notes keep positions unless selected for merging; exposure uses physical evidence, not call IDs. Test final sealed requests, cold restoration and both sides of dialogue: `tests/test_compaction.py`, `tests/test_main_authored_context.py`, `tests/test_context_source_view.py`, `tests/test_delivery_dialogue_context.py`.
+Known-window no-result-room predictions and typed size refusals run model-free recovery passes (ARCHITECTURE §6), with no helper summarizer: `compact_context` requires `working_note` (else `authored_note_required`). Actor notes may fold completed working prose/tools without shrinking while keeping governing human words, recorded outward speech, newer arrivals, opaque protocol and local note positions (unless merged); prove exposure from physical evidence, not call IDs. Test final sealed requests, cold restoration and both sides of dialogue: `tests/test_compaction.py`, `tests/test_main_authored_context.py`, `tests/test_context_source_view.py`, `tests/test_delivery_dialogue_context.py`.
 
 ### Invariant: No silent truncation
 
 When a core governance artifact does not fit the available budget:
 
-- Where the flow requires inline delivery, inability to fit is an assembly failure, not a smaller pack (BIBLE P3): a typed entry names the artifact and the reason, the review does not proceed on the remainder, and the disclosure accompanies the refusal rather than replacing it. Elsewhere the omission is named where the reader sees it (`Reference book source unavailable: …`, `⚠️ OMISSION NOTE`), never silent; a reviewer without ARCHITECTURE.md is not operating with full context.
-- Retain exact tool sources before projecting Main batches, without exemptions. Measure host cut reasons inside partial envelopes; preserve outcomes, ranges and source gaps. Producer pages stay outside this frame; read receipts count the consumer projection.
-- Book navigation (`context_layout.book_navigation`), heading maps and named pointers index available sources; they do not deliver source bodies. Low/Nano use them, never `[:N]` on a document.
-- Bound strings through `utils.truncate_review_artifact` (display previews) or `utils.truncate_within_limit` (a strict wire/prompt bound), never a hand-rolled `text[:cap] + marker`, which loses the anti-waste floor and can return a value longer than its input.
-- A list obeys the same rule: a `[:N]` slice carries the omitted count and, where downstream compares an identity, a durable hash or reference for the full set (`_outcome_receipts.receipt_identity_projection`). Bounding a set is allowed; hiding that it was bounded is the P1 violation.
+- Required inline delivery fails assembly rather than shipping a smaller pack (BIBLE P3): emit a typed refusal naming artifact and cause, and halt review; the disclosure accompanies the refusal rather than replacing it. Elsewhere disclose omissions in-band (`Reference book source unavailable: …`, `⚠️ OMISSION NOTE`), a missing ARCHITECTURE.md included.
+- Persist exact tool sources before projecting Main batches with no exemptions; record host cut reasons, outcomes, ranges and gaps inside partial envelopes; producer pages stay outside this frame and read receipts count consumer projections.
+- Book navigation (`context_layout.book_navigation`), heading maps and pointers index sources for Low/Nano without delivering bodies; never slice documents with `[:N]`.
+- Bound strings via `utils.truncate_review_artifact` (previews) or `utils.truncate_within_limit` (wire/prompt bounds), never hand-rolled `text[:cap] + marker`, which bypasses the anti-waste floor and can lengthen input.
+- Any list `[:N]` slice states its omitted count and, where identity is compared downstream, a durable full-set hash/ref (`_outcome_receipts.receipt_identity_projection`): bounding is allowed, hiding it violates P1.
 
 Enforcement: `tests/test_tool_result_delivery.py`, `tests/test_owner_facing_honesty.py`.
 
 ### Invariant: What a person reads whole stays whole
 
-Disclosed truncation (the `⚠️ OMISSION NOTE` marker) protects **LLM context budgets**; it never licenses cutting what a person reads whole.
+Disclosed truncation (`⚠️ OMISSION NOTE`) protects LLM context budgets, never human-read artifacts.
 
-- **Artifacts a person reads whole** (reviewer rationale, an answer) stay reachable in full, in details or via a durable copy (an observability `response_ref`): rationale is a cognitive artifact (BIBLE P1); cutting it beside an unreferenced copy is partial memory loss. A status, label or card line follows DESIGN principle 7. Terminal text asserts only recovery facts the round record carries, never a route mechanism the selected transport cannot perform.
-- **Model-bound projections** (review packs, context sections, tool-result transport) keep their disclosed-truncation budgets.
-- **A cut cheaper than its own marker is forbidden everywhere** (the shared primitive's floor).
+- **Human-read artifacts** (reviewer rationale, answers) stay reachable in full, in details or via durable `response_ref` (BIBLE P1: unreferenced cuts are partial memory loss). Status/label/card lines follow DESIGN principle 7; terminal text asserts only recorded round recovery facts, never unsupported transport mechanisms.
+- **Model-bound projections** (review packs, context sections, tool-result transport) keep disclosed-truncation budgets.
+- **A cut cheaper than its own marker is forbidden everywhere** (shared primitive floor).
 
 Enforcement: `tests/test_owner_facing_honesty.py`.
 
 ### Invariant: No "only if touched" gate for core artifacts
 
-Applicable body governance reaches review/reasoning independently of `touched_paths`; `build_touched_file_pack` serves changed files, not eligibility. Presence tests cover delivery; otherwise review-only.
+Applicable body governance reaches review/reasoning whatever the `touched_paths`; `build_touched_file_pack` serves changed files, not eligibility. Presence tests enforce delivery; else review-only.
 
 ### When adding a new reasoning flow
 
-A new flow that reasons about code structure, system architecture or engineering standards:
+A new flow reasoning about structure, architecture or standards must:
 
-1. Explicitly loads `ARCHITECTURE.md` (and BIBLE.md when constitutional reasoning applies).
-2. Logs a warning when the file is missing or unavailable — never skips silently; a required artifact that cannot fit fails assembly ("No silent truncation").
-3. Adds a test asserting the file is present in the assembled context/prompt. That test is the enforcing surface; CHECKLISTS item 22 (`context_building`, advisory) backstops the review.
+1. Explicitly load `ARCHITECTURE.md` (plus BIBLE.md for constitutional reasoning).
+2. Log a warning when it is missing/unavailable — never skip silently; an unfit required artifact fails assembly ("No silent truncation").
+3. Add a presence test on the assembled prompt/context (enforcing surface; CHECKLISTS item 22 `context_building`, advisory, backstops review).
 
 ---

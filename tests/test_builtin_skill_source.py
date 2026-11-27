@@ -4,8 +4,8 @@ Built-ins are an ordinary source: installing one writes the install record every
 installer writes (trusted by default), never a synthetic review verdict. A new install
 gets only what its starter selection ticks; an existing install keeps what it has.
 Built-ins ride app releases: a changed bundled version re-seeds an unmodified copy in
-place (state, the owner's enablement and unchanged-request grants kept) and never
-rewrites local changes; nothing resurrects a built-in the owner removed; a built-in the
+place (state and enablement kept, unchanged-request grants from the proven prior release) and
+never rewrites local changes; nothing resurrects a built-in the owner removed; a built-in the
 app stops bundling is uninstalled when nobody changed it and keeps running as its owner's
 copy when someone did.
 """
@@ -174,6 +174,22 @@ def test_startup_never_installs_a_built_in(env, monkeypatch):
 
 
 # --- re-seed in place on a changed bundled version ----------------------------------
+
+
+@pytest.mark.parametrize(("changes", "observed", "expected"), [
+    pytest.param({}, "1" * 64, "1" * 64, id="verified-prior-release"),
+    pytest.param({}, "", "", id="no-installed-payload"),
+    pytest.param({"source": {"id": "catalog", "kind": "hub"}}, "1" * 64, "", id="another-source"),
+    pytest.param({"entry": "other"}, "1" * 64, "", id="another-installation"),
+    pytest.param({"base_digest": ""}, "1" * 64, "", id="unconfirmed-base"),
+    pytest.param({}, "2" * 64, "", id="different-observed-digest"),
+])
+def test_builtin_grant_predecessor_classifies_only_bound_release_metadata(changes, observed, expected):
+    from ouroboros.skill_builtin import _builtin_predecessor_digest
+
+    record = {"source": {"id": "builtin", "kind": "builtin"}, "entry": "weather", "official": True,
+              "base_digest": "1" * 64, "release": {"path": "skills/weather", "digest": "1" * 64}}
+    assert _builtin_predecessor_digest("weather", {**record, **changes}, observed) == expected
 
 
 def _reseed(seed_dir, drive_root, log=None):
@@ -365,33 +381,30 @@ def test_version_reads_through_the_shared_parser(tmp_path, text, expected):
     assert _version(tmp_path / "missing") == ""
 
 
-def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypatch):
-    """The bundled ``SKILL.md`` version is the RESYNC KEY: a payload change shipped
-    without a bump never reaches an existing install. Re-pin this whenever
-    skills/telegram changes."""
-    monkeypatch.setenv("OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS", "true")
-    monkeypatch.setattr("ouroboros.config.SETTINGS_PATH", tmp_path / "settings.json")
-    seed_dir = pathlib.Path(__file__).resolve().parents[1] / "skills"
-    drive_root = tmp_path / "data"
-    installed = _write_skill(drive_root / "skills" / "native", "telegram", version="1.2.0")
-    (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
-    assert _reseed(seed_dir, drive_root) == 1
-    assert "version: 1.5.0\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
-    for path in ("plugin.py", "ui/icon.svg", "lib/telegram_api.py", "lib/telegram_connection.py",
-                 "lib/telegram_copies.py", "lib/telegram_health.py", "lib/telegram_i18n.py",
-                 "lib/telegram_media_handlers.py", "lib/telegram_mirror.py", "lib/telegram_notifier.py",
-                 "lib/telegram_outbox.py", "lib/telegram_owner_auth.py", "lib/telegram_panels.py",
-                 "lib/telegram_poll_binding.py", "lib/telegram_presence_bridge.py", "lib/telegram_quiz.py",
-                 "lib/telegram_secret_guard.py", "lib/telegram_share.py", "lib/telegram_state.py",
-                 "lib/presence/__init__.py", "lib/presence/custody.py", "lib/presence/custody_schema.py",
-                 "lib/presence/delivery.py", "lib/presence/discovery.py", "lib/presence/events.py",
-                 "lib/presence/file_access.py", "lib/presence/formatting.py", "lib/presence/host.py",
-                 "lib/presence/outbox_files.py",
-                 "lib/presence/outbox_worker.py", "lib/presence/runtime.py", "lib/presence/status.py",
-                 "lib/presence/tools.py", "lib/presence/transport.py", "scripts/cloudflare_tunnel.py",
-                 "scripts/companion.py", "scripts/sidecar.py", "scripts/sidecar_http.py",
-                 "scripts/telegram_settings.py"):
-        assert (installed / path).read_bytes() == (seed_dir / "telegram" / path).read_bytes()
+def test_bundled_telegram_reseed_delivers_the_current_version(env):
+    """Replace the old Telegram payload while preserving the owner's recorded Off."""
+    from ouroboros.skill_loader import compute_content_hash, save_enabled, skill_state_dir_path
+
+    old_seeds, drive_root = env
+    bundled = pathlib.Path(__file__).resolve().parents[1] / "skills" / "telegram"
+    old_quiz = _write_skill(old_seeds, "telegram", version="1.4.24") / "lib" / "telegram_quiz.py"
+    old_quiz.parent.mkdir()
+    old_quiz.write_bytes(b"# Synthetic previous quiz payload.\n")
+    assert _install("telegram", old_seeds, drive_root, turn_on_when_ready=True)["ok"]
+    installed = drive_root / "skills" / "native" / "telegram"
+    save_enabled(drive_root, "telegram", False, actor="owner_ui")
+    enabled_file = skill_state_dir_path(drive_root, "telegram") / "enabled.json"
+    owner_off = enabled_file.read_bytes()
+    assert json.loads(owner_off)["enabled"] is False
+
+    assert _reseed(bundled.parent, drive_root) == 1
+    assert enabled_file.read_bytes() == owner_off
+    for path in ("SKILL.md", "plugin.py", "lib/telegram_api.py", "lib/telegram_connection.py",
+                 "lib/telegram_copies.py", "lib/telegram_health.py", "lib/telegram_inbound.py",
+                 "lib/telegram_outbox.py", "lib/telegram_quiz.py", "lib/telegram_share.py", "lib/telegram_state.py",
+                 "scripts/cloudflare_tunnel.py", "scripts/companion.py", "scripts/sidecar.py"):
+        assert (installed / path).read_bytes() == (bundled / path).read_bytes(), path
+    assert compute_content_hash(installed) == compute_content_hash(bundled)
 
 
 @pytest.mark.parametrize("name,source,old_version", [
@@ -450,6 +463,13 @@ def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, o
      ('live_conversation', 'cf6f95cf4', '0.1.33'),
      # Retained Extensions forms need the new per-root Calls UI bindings after an app update.
      ('live_conversation', '085f41abafcee74a61c60e79824025e7e5d3a4e1', '0.1.34'),
+     # A native resume's serving catalog follows its declared tools: a 0.1.35 install is reseeded.
+     ('live_conversation', '33d5ea79b65e994f96ccd696117b8f565b3b1cc2', '0.1.35'),
+     ('gemini_live', '33d5ea79b65e994f96ccd696117b8f565b3b1cc2', '0.1.21'),
+     ('live_conversation', '201f5b62ce35bdb388c3e238bad261b27d3739a8', '0.1.36'),
+     # Docked call mark bounds and sidebar clearance ship in 0.1.38: a 0.1.37 install is reseeded too.
+     ('live_conversation', '7c9cc17a497514f1180174461bab61519b05e884', '0.1.37'),
+     ('live_conversation', 'dc9de859a7b72dad6c9ca720e11e9b62a50f12eb', '0.1.38'),
      ('unix_computer_use', 'e471e380e6de1e7f728e0fffbb4457667422ebf4', '0.6.0')])
 @pytest.mark.parametrize("edited", [False, True])
 def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(env, monkeypatch, name, previous_release,
@@ -470,7 +490,14 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
     state = drive / "state" / "skills" / name
     (state / "config.json").write_text('{"provider":"grok_realtime:grok"}\n', encoding="utf-8")
     retained = {path: (state / path).read_bytes() for path in ("enabled.json", "config.json")}
+    if name == 'gemini_live' and previous_version == '0.1.21':
+        retained['grants.json'] = b'{"granted_keys":["GEMINI_API_KEY"]}\n'
+        (state / 'grants.json').write_bytes(retained['grants.json'])
     previous_record = read_install_record(drive, name)
+    previous_ui = {
+        path: (installed / path).read_bytes() if (installed / path).exists() else None
+        for path in (("ui/call.css", "ui/call_mark.js") if name == "live_conversation" else ())
+    }
     if edited:
         with (installed / "plugin.py").open("a", encoding="utf-8") as stream:
             stream.write("\n# The owner's local change must survive an app update.\n")
@@ -481,16 +508,21 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
     if edited:
         assert compute_content_hash(installed) == previous_hash
         assert read_install_record(drive, name) == previous_record
+        for path, payload in previous_ui.items():
+            target = installed / path
+            assert (target.read_bytes() if target.exists() else None) == payload
+            if previous_version != '0.1.38' or path == 'ui/call.css':
+                assert payload != (repo / "skills" / name / path).read_bytes()
     else:
-        version = {'live_conversation': '0.1.35', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.21', 'openai_realtime': '0.1.10',
-                   'unix_computer_use': '0.9.0'}.get(name, '0.1.1')
+        version = {'live_conversation': '0.1.40', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.22', 'openai_realtime': '0.1.10',
+                   'unix_computer_use': '0.9.2'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)
         assert compute_content_hash(installed) != previous_hash
         # Pin the files that stayed stale on the stand, not just the manifest.
         paths = ["plugin.py"]
         if name == "live_conversation":
-            paths += ["driver.py", "ui/call_settings.js", "ui/index.js"]
+            paths += ["driver.py", "ui/call.css", "ui/call_mark.js", "ui/call_settings.js", "ui/index.js"]
         elif name == "openai_realtime":
             paths += ["live.py"]
         elif name == "unix_computer_use":
@@ -590,3 +622,38 @@ def test_conversion_without_seed_review_keeps_launcher_version_reseed(env, monke
     _write_skill(seed_dir, "weather", "2.0.0")
     assert skill_builtin.ensure_builtin_skills(drive) == 1
     assert "version: 2.0.0" in (installed / "SKILL.md").read_text(encoding="utf-8")
+
+
+def bundled_release_pairs(seed_root=None):
+    """Every bundled skill's ``{name: {"version", "content_hash"}}``: the manifest version reseeding compares and the
+    release digest an install records."""
+    from ouroboros.skill_builtin import _bundled_names, _version, bundled_skills_dir
+    from ouroboros.skill_loader import compute_content_hash
+
+    root = pathlib.Path(seed_root or bundled_skills_dir())
+    return {name: {"version": _version(root / name), "content_hash": compute_content_hash(root / name)}
+            for name in _bundled_names(root) or ()}
+
+
+def test_a_bundled_skill_payload_changes_only_with_its_version():
+    """An install reseeds a bundled skill only when its manifest version moves, so changed files under the same
+    version never reach installed copies. Every bundled skill is pinned to its recorded (version, digest) pair.
+    The digest is byte-exact over the payload (cache trees excluded); ``.gitattributes`` keeps text LF in every
+    checkout, so it does not depend on the OS. After a deliberate release, record the pairs from the repository root:
+
+    python -c "import json, pathlib; from tests.test_builtin_skill_source import bundled_release_pairs as p; pathlib.Path('tests/fixtures/builtin_skill_versions.json').write_text(json.dumps(p(pathlib.Path('skills')), indent=1, sort_keys=True) + '\\n', encoding='utf-8')"
+    """
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    recorded = json.loads((repo / "tests" / "fixtures" / "builtin_skill_versions.json").read_text(encoding="utf-8"))
+    current = bundled_release_pairs(repo / "skills")
+    problems = []
+    for name in sorted(current.keys() | recorded.keys()):
+        now, then = current.get(name), recorded.get(name)
+        if now == then:
+            continue
+        if now and then and now["version"] == then["version"]:
+            problems.append(f"the files of {name} changed and its manifest version did not: bump the version, "
+                            "then record the new pair")
+        else:
+            problems.append(f"record the new pair for {name}")
+    assert not problems, problems

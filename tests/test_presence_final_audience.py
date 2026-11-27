@@ -94,7 +94,9 @@ def test_a_promoted_place_root_names_its_retained_conversation(fired_context, mo
     assert route.replace('"', '\\"') in body and "unrecorded" not in body
     assert promoted["metadata"]["presence"]["event"]["origin"]["conversation_id"] == "*"
     assert '\\"*\\"' not in body  # the admitting filter's wildcard is not an address
-    for words in ("new speech there, even after earlier sends", "selecting it is not delivering it",
+    # Whether a connector follows this root is a condition the host states, never traces through the lineage.
+    for words in ("If a connector follows this work", "otherwise only a connector tool reaches the people there",
+                  "new speech there, even after earlier sends", "selecting it is not delivering it",
                   "not a private channel instead of the conversation", "does not discharge a reply someone is owed",
                   "not proof of who owns this work"):
         assert words in body, words
@@ -190,8 +192,14 @@ def test_place_guidance_now_reaches_scheduled_roots_never_inline_or_carrierless_
         assert GUIDANCE not in first_request(task)
 
 
-@pytest.mark.parametrize("route", ["routed", "unknown", "routeless", "inline"])
-def test_place_guidance_follows_the_computed_route_and_the_inline_fact(tmp_path, route):
+WORDS = "## Where your words go (host-authored facts)"
+DOOR_LINE = "Words reach chat only when you send them, through ext_8_r_bridge_send (conversation_id=k1)."
+
+
+@pytest.mark.parametrize("route", ["door", "no_door", "inline"])
+def test_place_guidance_and_audience_follow_the_connectors_declaration_and_the_inline_fact(tmp_path, route):
+    """A door connector's root hears where its words go and the place's guidance; a doorless root hears its
+    conversation as its final's audience and the guidance; an inline turn's FOCUS frame carries both instead."""
     from ouroboros import places as p
     from ouroboros.presence_context import build_presence_context_section
 
@@ -199,10 +207,30 @@ def test_place_guidance_follows_the_computed_route_and_the_inline_fact(tmp_path,
     p.edit_place(tmp_path, place.place_id, "add_note", author="owner", text="NOTE NOW")
     value = {"place_id": place.place_id, "event": {"provider": "chat", "account_id": "team", "conversation_id": "k1"}}
     section = build_presence_context_section(
-        tmp_path, value, "root-y", answers_conversation=route in {"routed", "unknown", "inline"},
-        unsettled="its source has not ended" if route == "unknown" else "",
-        routeless="it carries no place conversation" if route == "routeless" else "", inline=route == "inline")
-    assert (GUIDANCE in section) is (route in {"routed", "unknown"}), route
+        tmp_path, value, "root-y", answers_conversation=route in {"no_door", "inline"},
+        record_line=DOOR_LINE if route == "door" else "", inline=route == "inline")
+    assert (GUIDANCE in section) is (route != "inline"), route
+    if route != "inline":
+        assert (WORDS in section and DOOR_LINE in section) is (route == "door") and (HEADING in section) is (route == "no_door")
+
+
+def test_a_handed_off_root_of_a_door_connector_hears_where_its_words_go(fired_context, monkeypatch):
+    """Owner 21.11, 1A: the context of a root a focus handed off names its connector's doors (the speak line), never
+    an audience for its final, and keeps the place's guidance; a doorless one is the ``HEADING`` case above."""
+    from ouroboros.place_reply import speak_line
+    from tests.test_place_focus import _publish_bridge_send
+
+    root, _pending, first_request = fired_context
+    name = _publish_bridge_send(monkeypatch, effect="message", target=["conversation_id"], conversation="conversation_id",
+                                thread="thread_id")
+    registry, turn = _source_turn(root, THREAD)
+    promoted = _promote(root, monkeypatch, turn, registry)
+    promoted["metadata"]["presence"].setdefault("place", {})["state"] = "silent"  # the event's snapshot; Active now
+    rendered = first_request(promoted)
+    assert _section(rendered) == 0 and rendered.count(WORDS) == 1 and GUIDANCE in rendered
+    body = rendered.split(WORDS, 1)[1].split("##", 1)[0]
+    assert name in body and json.dumps(speak_line(promoted["metadata"], state="active"), ensure_ascii=False)[1:-1] in body
+    assert "is Silent" not in body, "the line reads the place as it is now, never the event's snapshot"
 
 
 def test_place_guidance_reads_the_canonical_root_and_names_an_absent_or_unreadable_place(tmp_path):

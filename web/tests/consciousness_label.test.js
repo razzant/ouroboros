@@ -8,7 +8,7 @@ import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { senderLabel } from '../modules/chat_activity.js';
 import { categorizeLogEvent, summarizeChatLiveEvent, taskTerminalSummary } from '../modules/log_events.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 // The flat fixture's querySelector does not descend; card internals need a
 // real descendant lookup (same patch as chat_activity_block.test.js).
@@ -26,7 +26,7 @@ const TASK = 'wake-a';
 function fixture(history = []) {
     const env = installDom(async (url) => ({ ok: true, json: async () =>
         String(url).startsWith('/api/chat/history')
-            ? { messages: history, window: { complete: true } }
+            ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } }
             : { active_direct_turns: [] } }));
     const handlers = new Map();
     let generation = 0;

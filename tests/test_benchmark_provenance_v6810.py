@@ -86,6 +86,7 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "request_invalid": (False, "gateway/skill_publish.py: unreadable publish-preflight body; HTTP 400 before any action, not a task terminal"),
     "secret_request_form_only": (False, "protected secret-form policy refuses an ordinary quiz answer; no execution or source is truncated"),
     "project_routing_fence_lookup_failed": (False, "gateway/tasks.py: Project authority unreadable before admission; HTTP 409, no running attempt truncated"),
+    "invalid_panic_selection": (False, "gateway/tasks.py: malformed Panic selection returns HTTP 400 before Resume is attempted; no task attempt is truncated"),
     "missing_resume_reason": (False, "gateway/tasks.py: a Resume that accepts an unknown delegated start risk without a written reason is refused with HTTP 400 before the task resumes; no execution is truncated"),
     "input_source_selection_unsupported": (False, "HTTP 400 before root-task admission; no execution was truncated"),
     "task_source_invalid": (False, "gateway/task_archive.py: source selector basename differs from the requested artifact; HTTP 400, not a task terminal or trial truncation"),
@@ -105,6 +106,7 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "artifact_unverified": (False, "gateway/task_archive.py: single-file drift or capture verification failure; HTTP refusal, not a task terminal"),
     "wrap_up_document_invalid": (False, "gateway/task_archive.py: the Wrap up document selector combined with relpath or source; HTTP 400, not a task terminal"),
     "wrap_up_document_unavailable": (False, "gateway/task_archive.py: no Wrap up receipt by that name and Stop, or its on-read document could not be written; HTTP 404/503, not a task terminal"),
+    "letter_words_invalid": (False, "gateway/task_archive.py: malformed letter-part name or extra selector; HTTP 400 on the read-only letter-words route, the task keeps running, never a task terminal"),
     "upload_unavailable": (False, "gateway/files.py: a chat attachment is missing or not a regular file; HTTP 404, not a task terminal"),
     "upload_unreadable": (False, "gateway/files.py: a chat attachment's confined read failed; HTTP 503, not a task terminal"),
     "history_source_unavailable": (False, "gateway/history_paging.py: readable recent projection with explicit source gap; no task attempt was truncated"),
@@ -120,6 +122,7 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "promotion_not_started": (False, "promotion_intent.py: boot reconciliation of a start_task intent proven never admitted; that separate work never ran (explicit retry), so nothing was truncated and it is never a trial root's code"),
     "migrating": (False, "gateway/_helpers.py: a write door (create, Cancel, Pause, Presence) answered 503 inside the boot import window of state/current.sqlite (retry); no task attempt was truncated"),
     "boot_changed": (False, "gateway/control.py: a command whose if_boot names an earlier boot.since reached a restarted server; HTTP 409 with accepted=false before anything was queued, never a task terminal"),
+    "reset_interrupted": (False, "gateway/onboarding_host.py and gateway/owner_settings.py: an unfinished Reset refuses this request with HTTP 409; not a task terminal"),
     "budget_pausing_no_extraction": (False, "review_verdict_extraction.py: Light verdict extraction refused while the task's exact budget pause is closing dispatch (#1196); the review row stays undispatched and the attempt is paused, not truncated"),
     "owner_pause": (False, "tools/skill_publish.py: publication tool returns its completed stages after owner Pause interrupts the formatter; the task is retained for Resume, not terminalized or scored"),
     "action_not_found": (False, "gateway/card_decision.py: a press names a control the card does not have now; HTTP 404 on the card ingress, never a task terminal"),
@@ -353,6 +356,22 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
         "skill_publish_github.py typed ambiguous remote effect; task receipt veto remains separate",
     ),
     "unexpected_publish_error": (False, "tools/skill_publish.py recoverable typed tool failure; never a task terminal"),
+    # #4123 expired-park Close: the 200 that names the PRESERVED result. The
+    # attempt had ended by itself (or this request released an answered root's
+    # late-work pause), so that result or answer STANDS; nothing was cut short.
+    "result_kept": (
+        False,
+        "gateway/task_close.py: an exact Close found the attempt already ended by itself, or released an answered "
+        "root's late-work pause, so that result or answer STANDS; a preserved result, never a truncation",
+    ),
+    # A late-result turn whose shared-execution custody could not be bound to
+    # its durable RUNNING row: the letter was kept and no turn started, so no
+    # execution was cut short.
+    "late_result_source_unavailable": (
+        False,
+        "extension_late_result.py: the late-result turn's shared execution custody could not be bound to its durable "
+        "RUNNING row, so the letter was kept without starting a turn; no execution was truncated",
+    ),
 }
 
 _REASON_CODE_LITERAL = re.compile(r"""reason_code(?:=|["']\s*:\s*)\s*["']([a-z0-9_]+)["']""")

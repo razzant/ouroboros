@@ -65,31 +65,62 @@ export function pinchMagnified(w = win()) {
     return Boolean(vv && layoutWidth && Number(vv.width) < layoutWidth - 1);
 }
 
-/** A window too short for the sidebar's zones pins its head and its foot (the sections, the version and the update)
- * over the one scroller (style.css). Their measured heights are the scroll margin of the rows there, so a row reached
- * with Tab or brought into view is never left under either bar. Their border boxes are watched: the macOS title band
- * and the safe area are their padding and can arrive after the first paint (a Telegram inset, a page zoom), which a
- * content box never reports. The column is watched too: where the head, one Project row and the foot no longer fit
- * in it, `data-bars-crowd` lets the head scroll away with the list (two pinned bars would cover every row). Returns
- * the disposer. */
+/** A window too short for the sidebar's zones pins its head over the one scroller (style.css); the rail stands beside
+ * the column, never over its rows. The head's measured height is the scroll margin of the rows there, so a row reached
+ * with Tab or brought into view is never left under it. Its border box is watched: the macOS title band and the safe
+ * area are its padding and can arrive after the first paint (a Telegram inset, a page zoom), which a content box never
+ * reports. The column is watched too: where the head and one Project row no longer fit in it with their clearance,
+ * `data-bars-crowd` lets the head scroll away with the list (a pinned head would cover every row). Independently, the
+ * rail and its groups are watched: where the rail's natural height (ignoring auto-margin stretch space on
+ * `.nav-rail-system`) passes the column's available content height, `data-rail-crowd` unpins the rail so its lower
+ * controls scroll cleanly into view. Main's card line in the head is written too (--sidebar-card-top), for the rail's
+ * first place under the macOS lights. Returns the disposer. */
 export function measurePinnedBars(sidebar, { Observer = globalThis.ResizeObserver } = {}) {
     const head = sidebar?.querySelector('.sidebar-head');
-    const foot = sidebar?.querySelector('.sidebar-foot');
-    if (!head || !foot || typeof Observer !== 'function') return () => {};
+    if (!head || typeof Observer !== 'function') return () => {};
+    const rail = sidebar.querySelector('.nav-rail');
+    const px = (value) => parseFloat(value) || 0;
     const write = () => {
-        const headH = head.getBoundingClientRect().height;
-        const footH = foot.getBoundingClientRect().height;
+        const view = sidebar.ownerDocument?.defaultView;
+        const sideStyle = view?.getComputedStyle?.(sidebar);
+        const headBox = head.getBoundingClientRect(), headH = headBox.height;
         sidebar.style.setProperty('--sidebar-head-h', `${headH}px`);
-        sidebar.style.setProperty('--sidebar-foot-h', `${footH}px`);
+        // Where Main's card starts in the head: under the macOS lights the rail's first place stands on its line,
+        // whether Find a project shares the lights' row or wraps under it (style.css). Written in the next frame and
+        // only when it moved, so the rail's change is never part of this observation's own layout pass.
+        const card = head.querySelector?.('.nav-row-main')?.getBoundingClientRect?.();
+        const cardTop = card ? `${card.top - headBox.top}px` : '';
+        if (cardTop && cardTop !== sidebar.style.getPropertyValue?.('--sidebar-card-top')) {
+            (view?.requestAnimationFrame || ((fn) => fn()))(() => sidebar.style.setProperty('--sidebar-card-top', cardTop));
+        }
         const row = sidebar.querySelector('.nav-project-row')?.getBoundingClientRect().height || 48;
-        const clearance = parseFloat(sidebar.ownerDocument?.defaultView?.getComputedStyle(sidebar).getPropertyValue('--space-4')) || 0;
+        const clearance = px(sideStyle?.getPropertyValue?.('--space-4'));
         const room = Number(sidebar.clientHeight) || 0;
-        sidebar.toggleAttribute?.('data-bars-crowd', room > 0 && headH + row + footH + 2 * clearance > room);
+        sidebar.toggleAttribute?.('data-bars-crowd', room > 0 && headH + row + 2 * clearance > room);
+        if (rail) {
+            const railStyle = view?.getComputedStyle?.(rail);
+            const railRoom = room - px(sideStyle?.paddingTop) - px(sideStyle?.paddingBottom);
+            let railNeed = px(railStyle?.paddingTop) + px(railStyle?.paddingBottom);
+            let visible = 0;
+            for (const child of rail.children || []) {
+                const height = child.getBoundingClientRect?.().height || 0;
+                if (!(height > 0)) continue;
+                const childStyle = view?.getComputedStyle?.(child);
+                const mt = child.classList?.contains?.('nav-rail-system') ? 0 : px(childStyle?.marginTop);
+                railNeed += height + mt + px(childStyle?.marginBottom);
+                visible += 1;
+            }
+            if (visible > 1) railNeed += (px(railStyle?.rowGap) || px(railStyle?.gap)) * (visible - 1);
+            sidebar.toggleAttribute?.('data-rail-crowd', railRoom > 0 && railNeed > railRoom);
+        }
     };
     const observer = new Observer(write);
     observer.observe(head, { box: 'border-box' });
-    observer.observe(foot, { box: 'border-box' });
     observer.observe(sidebar, { box: 'border-box' });
+    if (rail) {
+        observer.observe(rail, { box: 'border-box' });
+        for (const child of rail.children || []) observer.observe(child, { box: 'border-box' });
+    }
     write();
     return () => observer.disconnect();
 }

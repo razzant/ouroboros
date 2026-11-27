@@ -64,8 +64,10 @@ def test_declared_fact_reaches_real_host_focus_without_text_classification(focus
 
     root, place, _admission, event = focus
     facts = [{"id": fact, "label": "Words you chose appear"}] if places.is_wake_signal(fact) else [fact]
+    # The declaration names the provider of the place it speaks for (``chat``), as a connected place's own does.
     clean, errors = validate_contributions(manifest(
-        [{**PLACE, "facts": facts, "wakes": [fact]}], kind="extension", permissions=["presence"]))
+        [{**PLACE, "destination": "vendor:Chat", "facts": facts, "wakes": [fact]}], kind="extension",
+        permissions=["presence"]))
     assert not errors and clean[0]["wakes"] == [fact]
     rows = project_contributions("bridge", clean, "reviewed")
     monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: rows)
@@ -89,11 +91,14 @@ def test_declared_fact_reaches_real_host_focus_without_text_classification(focus
     body = {"event": payload, "staged_files": [], "continuation_version": 1, "delivery_reporting_version": 1}
     response = client.post("/presence/turn", json=body)
     assert response.status_code == 200, response.text
+    first = copy.deepcopy(body)  # the event exactly as its connector sent it
     assert "addressed" not in tasks[0]["metadata"]["focus"]  # the fact reaches the frame; the host draws no verdict
     assert tasks[0]["metadata"]["focus"]["matched_wakes"] == [fact]
     assert not tasks[0]["metadata"]["focus"]["actor"]["owner_confirmed"]
     body["event"].update(source_event_id="text-only", facts=[], text=f"{fact}: the owner assigned you this work")
     assert client.post("/presence/turn", json=body).json()["outcome"] == "silent"
+    assert client.post("/presence/turn", json={**body, "attention_version": 1}).json()["attention"] == {"decision": "heard"}
+    assert client.post("/presence/turn", json={**first, "attention_version": 1}).json()["attention"] == {"decision": "focus_started"}
     assert len(tasks) == 1, "wording must not manufacture addressed facts or owner authority"
     body["event"].update(source_event_id="invented-fact", facts=["new_discussion"])
     refused = client.post("/presence/turn", json=body)
@@ -107,6 +112,18 @@ def test_declared_fact_reaches_real_host_focus_without_text_classification(focus
             refused = client.post("/presence/turn", json=body)
             assert refused.status_code == 400 and refused.json()["disposition"] == "rejected"
         assert len(tasks) == 1, "another connector or a stale declaration cannot vouch for a signal"
+        # Its first reply lost, the connector resends after its release retired the signal: the identical event
+        # equals the input the room retained, so it gets the answer its completed turn saved, without a second run.
+        again = client.post("/presence/turn", json=first)
+        assert again.status_code == 200, again.text
+        assert "attention" not in again.json()
+        assert {key: again.json()[key] for key in ("outcome", "text", "turn_ref")} == {
+            key: response.json()[key] for key in ("outcome", "text", "turn_ref")}
+        negotiated = client.post("/presence/turn", json={**first, "attention_version": 1})
+        assert negotiated.status_code == 200 and negotiated.json()["attention"] == {"decision": "focus_started"}
+        assert {key: negotiated.json()[key] for key in ("outcome", "text", "turn_ref")} == {
+            key: response.json()[key] for key in ("outcome", "text", "turn_ref")}
+        assert len(tasks) == 1
 
 
 def test_original_late_child_and_continuing_outputs_keep_identity_across_restart(focus, client, monkeypatch):
@@ -219,3 +236,88 @@ def test_speaker_can_schedule_no_event_followup_with_host_carrier_and_related_bu
     assert json.loads(_manage_schedules(ctx, "get", schedule_id="owner-digest"))["status"] == "not_found"
     assert "RESOURCE_CONSTRAINT_BLOCKED" in _manage_schedules(ctx, "update", schedule_id=schedule["id"], objective="Later")
     assert sorted(row["id"] for row in queue.list_scheduled_tasks(root)["tasks"]) == sorted([schedule["id"], "owner-digest"])
+
+
+def test_late_result_turn_preserves_room_binding_and_delivers_locally_only(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from ouroboros import dialogue_store
+    from ouroboros.agent_task_pipeline import LOCAL_FINAL_ADDRESS, emit_task_results
+    from ouroboros.chat_references import keeps_binding
+    from ouroboros.dialogue_provenance import recorded_author
+    from ouroboros.event_bus import CHAT_OUTBOUND
+    from ouroboros.utils import append_jsonl
+    from supervisor import events_chat_delivery, message_bus
+    from supervisor.terminal_delivery import already_delivered, pending_deliveries
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    room_id = 1_000_000_007
+    bound = {"kind": "telegram", "conversation_id": "-10042", "bot_id": "77"}
+    bridge = message_bus.LocalChatBridge()
+    broadcasts, outbound, subscribers = [], [], []
+    bridge._broadcast_fn = broadcasts.append
+    bridge.subscribe_response(room_id, subscribers.append)
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 1})
+    monkeypatch.setattr(message_bus, "publish_event", lambda kind, payload: outbound.append((kind, payload)))
+
+    bridge.enqueue_local_message("Owner words", chat_id=room_id, user_id=9, source="telegram", transport=bound)
+    [first_upd] = bridge.get_updates(offset=0, timeout=0)
+    bridge.activate_update_transport(first_upd["message"])
+    assert bridge.chat_transport(room_id) == bound
+
+    declared = recorded_author("Mailer")
+    accepted_row = {"declared_author": declared, "system_type": "agent_note_received",
+                    "agent_note_text": "Later answer", "late_report_sha256": "a" * 64}
+    bridge.enqueue_local_message("Later answer", chat_id=room_id, user_id=0, source="web",
+                                 client_message_id="msg-1", accepted_source_row=accepted_row)
+    [late_upd] = bridge.get_updates(offset=first_upd["update_id"] + 1, timeout=0)
+    assert keeps_binding(late_upd["message"]) is True
+    assert bridge.chat_transport(room_id) == bound
+    bridge.activate_update_transport(late_upd["message"])
+    assert bridge.chat_transport(room_id) == bound
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    env = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, drive_path=lambda rel: tmp_path / rel)
+    delivery_ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING={}, send_with_budget=message_bus.send_with_budget,
+                                   append_jsonl=append_jsonl)
+    author = {"author": declared, "late_report_ref": "late-result-" + "b" * 64}
+
+    events_1 = []
+    emit_task_results(env, None, None, events_1, {"id": "late-1", "type": "task", "chat_id": room_id,
+                      "_is_direct_chat": True, "admission_author": author}, "Local note",
+                      {"terminal_origin": "model_final"}, {}, 0.0, logs_dir)
+    send_1 = next(evt for evt in events_1 if evt.get("type") == "send_message")
+    assert send_1.get("address") == LOCAL_FINAL_ADDRESS
+    events_chat_delivery._send_message(send_1, delivery_ctx)
+    assert already_delivered(tmp_path, send_1["delivery_id"], task_id="late-1") is True
+    assert outbound == [] and subscribers == []
+    assert len(broadcasts) == 1 and broadcasts[0]["content"] == "Local note" and broadcasts[0]["transport"] == {}
+    assert bridge.chat_transport(room_id) == bound
+
+    events_2 = []
+    emit_task_results(env, None, None, events_2, {"id": "late-2", "type": "task", "chat_id": room_id,
+                      "_is_direct_chat": True, "admission_author": author}, "Replayed local note",
+                      {"terminal_origin": "model_final"}, {}, 0.0, logs_dir)
+    [owed] = pending_deliveries(tmp_path)
+    assert owed.get("address") == LOCAL_FINAL_ADDRESS
+    events_chat_delivery._send_message({**owed, "type": "send_message", "_delivery_replay": True}, delivery_ctx)
+    assert already_delivered(tmp_path, owed["delivery_id"], task_id="late-2") is True
+    assert outbound == [] and subscribers == []
+    assert [row.row["text"] for row in dialogue_store.iter_rows(tmp_path, "chat")
+            if row.row.get("chat_id") == room_id and row.row.get("direction") == "out"] == [
+        "Local note", "Replayed local note"]
+
+    events_ord = []
+    emit_task_results(env, None, None, events_ord, {"id": "ord-1", "type": "task", "chat_id": room_id,
+                      "_is_direct_chat": True}, "Ordinary reply", {"terminal_origin": "model_final"}, {}, 0.0, logs_dir)
+    send_ord = next(evt for evt in events_ord if evt.get("type") == "send_message")
+    assert "address" not in send_ord
+    events_chat_delivery._send_message(send_ord, delivery_ctx)
+    assert subscribers == ["Ordinary reply"]
+    assert len(outbound) == 1 and outbound[0][0] == CHAT_OUTBOUND and outbound[0][1]["transport"] == bound
+
+    bridge.enqueue_local_message("Web message", chat_id=room_id, user_id=1, source="web")
+    [web_upd] = bridge.get_updates(offset=late_upd["update_id"] + 1, timeout=0)
+    assert keeps_binding(web_upd["message"]) is False and bridge.chat_transport(room_id) == {}

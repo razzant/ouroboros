@@ -269,9 +269,9 @@ def test_a_capture_reads_the_legacy_pointers_once_for_all_its_readers(tmp_path, 
 
     shared.world(tmp_path)
     store = ChronicleStore(tmp_path)
-    expected = store.legacy_pointer_rows()
-    calls, real = [], ChronicleStore.legacy_pointer_rows
-    monkeypatch.setattr(ChronicleStore, "legacy_pointer_rows", lambda self: calls.append(1) or real(self))
+    expected = mi.legacy_pointer_rows(store)
+    calls, real = [], mi.legacy_pointer_rows
+    monkeypatch.setattr(mi, "legacy_pointer_rows", lambda each: calls.append(1) or real(each))
     monkeypatch.setattr(mi, "_UNITS", {})  # the units are counted anew
     with capture(tmp_path):
         assert mi.legacy_units(store, tmp_path) and mi.legacy_pointers(store) == expected
@@ -478,6 +478,27 @@ def test_row_metadata_keeps_attribution_and_membership_without_the_text(tmp_path
                 if key not in {"subagent_task_id", "delegation_role"}}
     assert row_class(stripped, pos=7)["author"]["kind"] == "ouroboros"
     assert row_class(mi.row_meta(child), pos=7)["author"]["kind"] == "child"
+
+
+def test_row_metadata_sizes_and_compares_a_program_note_by_its_body():
+    from ouroboros import memory_inventory as inventory
+    from ouroboros.dialogue_provenance import recorded_author
+    from ouroboros.project_dialogue import _text_sha256
+
+    body = "The example comparison is ready."
+    note = {"chat_id": 1, "ts": "2026-11-23T07:10:00Z", "direction": "in", "role": "system",
+            "system_type": "agent_note_received", "text": "Program message received.",
+            "agent_note_text": body, "declared_author": recorded_author("Build agent"),
+            "client_message_id": "agent-note-example"}
+    meta = inventory.row_meta(note)
+    assert "text" not in meta and meta["text_chars"] == len(body)
+    assert meta["text_sha256"] == _text_sha256(body) != _text_sha256(note["text"])
+    assert "source_keys" not in meta  # a program's note is never an owner source a Project binding names
+    assert meta["declared_author"] == note["declared_author"]
+    owner = {"chat_id": 1, "ts": "2026-11-23T07:11:00Z", "direction": "in", "text": "ordinary owner words",
+             "client_message_id": "owner-example"}
+    owner_meta = inventory.row_meta(owner)
+    assert owner_meta["text_chars"] == len(owner["text"]) and owner_meta["source_keys"]  # the human path is unchanged
 
 
 def test_the_inventory_imports_no_model_client_and_reads_projects_lazily():

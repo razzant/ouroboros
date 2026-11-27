@@ -1,12 +1,8 @@
 /** Historical rows enrich the existing timeline without acquiring live authority. */
 import { foldWaitRow } from './task_checkpoints.js';
 import { childLineCause } from './log_events.js';
-
-export function compareHistoryPosition(left, right) {
-    if (!left || !right) return 0;
-    const stream = String(left.source || '').localeCompare(String(right.source || ''));
-    return stream || Number(left.offset) - Number(right.offset);
-}
+import { compareHistoryPosition } from './chat_timeline_order.js';
+export { compareHistoryPosition } from './chat_timeline_order.js';
 
 export function historyRowIds(row) {
     return [row.history_id, ...(row.review_group?.attempts || []).map(attempt => attempt.history_id)].filter(Boolean);
@@ -100,11 +96,13 @@ export function adoptsRetainedCopy(node, opts) {
 
 export function matchesHistoryBubble(node, opts, legacyKey, chatId) {
     const data = node.dataset;
+    const address = opts.reply?.row_address;
+    if (data.rowAddress && address && data.rowAddress !== address) return false;
     if (opts.originId && data.originId === opts.originId) return true;
     if (!opts.clientMessageId) return !data.historyId && data.messageKey === legacyKey;
     if (opts.originProjected || data.originProjected || data.clientMessageId !== opts.clientMessageId) return false;
     if (data.historyId && data.historyId !== opts.historyId) return false;
-    if (data.rowAddress && opts.reply?.row_address) return data.rowAddress === opts.reply.row_address;
+    if (data.rowAddress && address) return true;
     return ownerRowRoom({ row_address: data.rowAddress }, data.ownerChatId ?? chatId) === ownerRowRoom(opts.reply, chatId);
 }
 
@@ -112,8 +110,64 @@ export function matchesHistoryBubble(node, opts, legacyKey, chatId) {
 export function messagePlacementKey(opts, legacyKey) {
     if (opts.historyId) return `history:${opts.historyId}`;
     if (opts.originId) return `origin|${opts.originId}`;
-    const address = opts.reply?.role === 'user' && opts.reply.row_address;
+    const address = ['user', 'assistant'].includes(opts.reply?.role) && opts.reply.row_address;
     return address ? `row|${address}` : legacyKey;
+}
+
+/** Legacy delivery correlation; client ids are scoped to the room the owner wrote in. */
+export function buildMessageKey(role, text, timestamp, opts = {}) {
+    if (opts.clientMessageId) {
+        const room = role === 'user' && opts.ownerChatId !== opts.chatId ? `room:${opts.ownerChatId}|` : '';
+        return `${room}client|${opts.clientMessageId}`;
+    }
+    if (role !== 'user' && !opts.isProgress && opts.taskId) {
+        return [
+            'task',
+            role,
+            opts.systemType || '',
+            ...(opts.letterPartKey ? [opts.letterPartKey] : []),
+            opts.source || '',
+            opts.taskId,
+            text,
+        ].join('|');
+    }
+    if (!timestamp) return '';
+    return [
+        role,
+        opts.isProgress ? '1' : '0',
+        opts.systemType || '',
+        opts.source || '',
+        opts.senderLabel || '',
+        opts.senderSessionId || '',
+        opts.taskId || '',
+        timestamp,
+        text,
+    ].join('|');
+}
+
+/** The same stored fields label and identify a row. No node or read custody is acquired here. */
+export function messageIdentity(text, role, timestamp, isProgress, opts, chatId) {
+    const meta = Object.fromEntries([
+        'clientMessageId', 'senderLabel', 'senderSessionId', 'source', 'initiator',
+        'systemType', 'taskId', 'projectId', 'projectName', 'taskName', 'handoffId',
+        'originId', 'completionLimitation', 'deliveryId', 'letterPartKey',
+    ].map(key => [key, opts[key] || '']));
+    const ts = timestamp || new Date().toISOString();
+    meta.ownerChatId = ownerRowRoom(opts.reply, chatId);
+    const legacyKey = buildMessageKey(role, text, ts, { ...meta, isProgress, chatId });
+    return { meta, ts, legacyKey, messageKey: messagePlacementKey(opts, legacyKey),
+        deliveryKey: opts.deliveryId ? `delivery:${opts.deliveryId}` : '' };
+}
+
+export function priorHistoryBubble(bubbles, opts, keys, legacyKey, chatId) {
+    const address = opts.reply?.role === 'assistant' && !opts.originProjected && opts.reply.row_address;
+    if (address && (!keys || keys.address.has(address))) {
+        const exact = bubbles().find(({ dataset }) => !dataset.originProjected && dataset.rowAddress === address);
+        if (exact) return exact;
+    }
+    const mounted = !keys || keys.client.has(opts.clientMessageId)
+        || keys.origin.has(opts.originId) || keys.legacy.has(legacyKey);
+    return mounted ? bubbles().find(node => matchesHistoryBubble(node, opts, legacyKey, chatId)) : null;
 }
 
 /** Reuse a mounted node for its live echo without changing the attribution of a retained copy. */
@@ -121,11 +175,12 @@ export function livePriorBubble(bubbles, opts, keys, legacyKey, chatId) {
     if (opts.originId) return (!keys || keys.origin.has(opts.originId))
         ? bubbles().find(node => node.dataset.originId === opts.originId) : null;
     const row = opts.reply;
-    const address = row?.role === 'user' ? row.row_address : '';
+    const address = ['user', 'assistant'].includes(row?.role) ? row.row_address : '';
     const room = ownerRowRoom(row, chatId);
     if (keys && !address && !keys.legacy.has(legacyKey)) return null;
-    return bubbles().find(({ dataset: data }) => {
-        if (address && data.rowAddress) return data.rowAddress === address;
+    const nodes = bubbles();
+    return (address && nodes.find(({ dataset }) => dataset.rowAddress === address)) || nodes.find(({ dataset: data }) => {
+        if (address && data.rowAddress) return false;
         if (data.messageKey !== legacyKey) return false;
         if (row?.role !== 'user') return !data.originProjected;
         if (data.originProjected && (address || data.rowAddress)) return false;
@@ -136,28 +191,29 @@ export function livePriorBubble(bubbles, opts, keys, legacyKey, chatId) {
 /** During a page replay, every identity key a mounted bubble carries (a superset: keys are only added, `note`): a row
  * looks for its prior bubble only when one could be mounted, not by scanning the feed per row (O(rows²) a page). */
 export function createReplayKeys() {
-    const keys = { history: new Set(), client: new Set(), origin: new Set(), legacy: new Set() };
+    const keys = { history: new Set(), client: new Set(), origin: new Set(), legacy: new Set(), address: new Set() };
     keys.note = (node) => {
         if (!node) return;
         const nodes = node.classList?.contains('chat-bubble') ? [node] : [];
         for (const bubble of [...nodes, ...(node.querySelectorAll?.('.chat-bubble') || [])]) {
-            const { historyId, clientMessageId, originId, messageKey } = bubble.dataset || {};
+            const { historyId, clientMessageId, originId, messageKey, rowAddress } = bubble.dataset || {};
             if (historyId) keys.history.add(historyId);
             if (clientMessageId) keys.client.add(clientMessageId);
             if (originId) keys.origin.add(originId);
             if (messageKey) keys.legacy.add(messageKey);
+            if (rowAddress) keys.address.add(rowAddress);
         }
     };
     return keys;
 }
 
 export function stampHistoryNode(node, id, position) {
-    if (!node || !id) return;
+    if (!node || !id) return false;
     node.dataset.historyId = id;
-    if (position) {
-        node.dataset.historySource = position.source;
-        node.dataset.historyOffset = String(position.offset);
-    }
+    if (!position || (node.dataset.historySource === position.source && node.dataset.historyOffset === String(position.offset))) return false;
+    node.dataset.historySource = position.source;
+    node.dataset.historyOffset = String(position.offset);
+    return true;
 }
 
 // Cause facts only a frame that states them replaces: an absent key keeps the last stated value, an explicit
@@ -205,7 +261,103 @@ export function timelineReadFields(summary, previous = {}) {
         fullBody: [fullOutput, detail].filter(Boolean).join('\n\n') };
 }
 
-export function mergeHistoricalTimelineItem(record, summary, row, ts) {
+const HOST_ROW_ADDRESS_RE = /^row:-?\d+@[^#\s]*#\S+$/;
+
+function hasHostRowAddress(address) {
+    return typeof address === 'string' && HOST_ROW_ADDRESS_RE.test(address);
+}
+
+function sameDisplayedCardRowWords(item, summary) {
+    const itemHead = String(item?.headline || ''), nextHead = String(summary?.headline || '');
+    const itemBody = String(item?.body || ''), nextBody = String(summary?.body || '');
+    if (!(itemHead || itemBody) || !(nextHead || nextBody)) return false;
+    const itemFullHead = String(item?.fullHeadline || itemHead), nextFullHead = String(summary?.fullHeadline || nextHead);
+    const itemFullBody = String(item?.fullBody || itemBody), nextFullBody = String(summary?.fullBody || nextBody);
+    return itemHead === nextHead
+        && itemFullHead === nextFullHead
+        && itemBody === nextBody
+        && itemFullBody === nextFullBody
+        && String(item?.evidenceRef?.href || '') === String(summary?.evidenceRef?.href || '')
+        && String(item?.evidenceRef?.label || '') === String(summary?.evidenceRef?.label || '')
+        && Boolean(item?.truncated) === Boolean(summary?.truncated)
+        && String(item?.fullRef || '') === String(summary?.fullRef || '')
+        && (!summary?.phase || !item?.phase || item.phase === summary.phase);
+}
+
+function sameSystemCardRowRevision(item, summary) {
+    return Boolean(item && summary
+        && typeof item.dedupeKey === 'string' && item.dedupeKey.startsWith('cardrow|')
+        && summary.dedupeKey === item.dedupeKey
+        && !item.serviceStop && !summary.serviceStop
+        && item.replyRole === 'system' && summary.replyRole === 'system'
+        && Number.isSafeInteger(item.cardRowRevision) && Number.isSafeInteger(summary.cardRowRevision)
+        && summary.cardRowRevision === item.cardRowRevision
+        && sameDisplayedCardRowWords(item, summary));
+}
+
+/** An already displayed unaddressed System card-row projection adopts a genuine host-addressed row's physical identity
+ * only when exact receipt key, System authorship, safe-integer revision and displayed words agree. */
+export function adoptsCardRowAddress(item, summary) {
+    return Boolean(sameSystemCardRowRevision(item, summary)
+        && !item.replyAddress && hasHostRowAddress(summary.replyAddress));
+}
+
+function exactRowAnchorAddress(anchor) {
+    return anchor?.state === 'found' && typeof anchor.row_address === 'string' && anchor.row_address.startsWith('row:')
+        ? anchor.row_address : '';
+}
+
+/** `anchor` itself when it names one found row (what a read around that row answered), else null. */
+export const exactRowAnchor = (anchor) => (exactRowAnchorAddress(anchor) ? anchor : null);
+
+export function itemMatchesExactAnchor(item, anchor) {
+    const address = exactRowAnchorAddress(anchor);
+    if (!address || item?.replyAddress !== address) return false;
+    return !anchor.history_id || (item.sourceHistoryId || item.historyId) === String(anchor.history_id);
+}
+
+/** The anchor of an addressed work-card line already on screen, as `itemMatchesExactAnchor` reads it from the item:
+ * a Reply that lands on it without a read holds it as an exact row. Any other node is no anchor. The address is
+ * judged first, so a node is touched only once it can be this row's (an unaddressed `undefined` matches nothing). */
+export function mountedLineAnchor(address, node) {
+    const id = node?.dataset?.sourceHistoryId || node?.dataset?.historyId;
+    const anchor = exactRowAnchor({ state: 'found', row_address: address, ...(id ? { history_id: id } : {}) });
+    return anchor && node?.dataset?.rowAddress === address && node.matches?.('.chat-live-line')
+        && !node.closest?.('[data-portal="1"]') ? anchor : null;
+}
+
+/** Demote a protected `cardrow|` item in place so its keyed DOM node keeps focus and words while a newer revision lands. */
+export function detachAnchoredCardRow(item, cardRowKey) {
+    const id = item?.sourceHistoryId || item?.historyId || item?.replyAddress || item?.lineKey;
+    if (!id) return false;
+    item.dedupeKey = `anchored:${id}`;
+    item.anchoredCardRow = cardRowKey;
+    return true;
+}
+
+/** Drop temporary anchored revisions from only the cards known to hold one (zero scan on ordinary replay). */
+export function clearAnchoredCardRows(records, keepAddress = '') {
+    if (!records?.size) return [];
+    const affected = [];
+    for (const record of Array.from(records)) {
+        const removed = [], kept = [];
+        let hasAnchored = false;
+        for (const item of record.items || []) {
+            if (item.anchoredCardRow && (!keepAddress || item.replyAddress !== keepAddress)) removed.push(item);
+            else {
+                if (item.anchoredCardRow) hasAnchored = true;
+                kept.push(item);
+            }
+        }
+        if (!hasAnchored) records.delete(record);
+        if (!removed.length) continue;
+        record.items = kept;
+        affected.push({ record, removed });
+    }
+    return affected;
+}
+
+export function mergeHistoricalTimelineItem(record, summary, row, ts, { anchor = null, anchoredRecords = null } = {}) {
     if (summary.visible === false || !(summary.headline || summary.body)) return false;
     const identity = String(row?.history_id || '');
     if (!identity) return false;
@@ -222,10 +374,15 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
     // never a line of work, and a finished card takes nothing from it (live: closedPhase).
     const outcome = String(summary.dedupeKey || '').startsWith('task_done|');
     if (outcome && !summary.terminal && record.finished) return false;
+    const isCardRow = String(summary.dedupeKey || '').startsWith('cardrow|');
     const evolving = summary.terminal || outcome || String(summary.dedupeKey || '').startsWith('subagent-lifecycle:')
-        || String(summary.dedupeKey || '').startsWith('cardrow|');
+        || isCardRow;
     const activity = summary.activity ? { activity: summary.activity } : {};
-    const key = evolving ? summary.dedupeKey : `history:${identity}`;
+    const anchorAddress = isCardRow ? exactRowAnchorAddress(anchor) : '';
+    const matchesAnchor = Boolean(anchorAddress && String(row?.row_address || '') === anchorAddress
+        && summary.replyAddress === anchorAddress
+        && (!anchor.history_id || identity === String(anchor.history_id)));
+    let key = evolving ? summary.dedupeKey : `history:${identity}`;
     // A child's words and a thought keep their live occurrence alias beside the physical history
     // identity: history may precede live delivery, or adopt a line before it is redelivered.
     const occurrence = /^(subagent-line|reasoning):/.test(String(summary.dedupeKey || ''))
@@ -237,43 +394,81 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
         item = record.items.find((entry) => !entry.historyId
             && (entry.occurrenceKey ?? entry.dedupeKey) === summary.dedupeKey && entry.sourceTs === row.ts);
     }
+    let anchoredCardRow = '';
     if (item && evolving) {
         // Source revision advances independently of live content: an older
         // fallback can yield to its canonical current row without rolling back
         // content, while stale sources cannot redirect an already newer locator.
         const existingPosition = item.historyPosition;
-        const adoptedSource = !item.sourceHistoryId || Number.isSafeInteger(summary.cardRowRevision)
-            && (!Number.isSafeInteger(item.sourceHistoryRevision) || summary.cardRowRevision > item.sourceHistoryRevision);
-        if (adoptedSource) Object.assign(item, source);
         const incomingTime = Date.parse(row.ts), existingTime = Date.parse(item.sourceTs || '');
+        let rejected = false;
+        let carryReport = false;
+        let adoptAddress = false;
+        let keepAddress = false;
         if (Number.isSafeInteger(item.cardRowRevision)) {
             // Only a newer revision of this merge's review can enrich an equal receipt revision.
             const newerReview = summary.cardReview?.record_id && Number.isSafeInteger(summary.cardReview.revision)
                 && (!item.cardReview || summary.cardReview.record_id === item.cardReview.record_id
                     && summary.cardReview.revision > item.cardReview.revision);
+            adoptAddress = !newerReview && adoptsCardRowAddress(item, summary);
+            keepAddress = Boolean(newerReview && sameSystemCardRowRevision(item, summary)
+                && hasHostRowAddress(item.replyAddress) && !hasHostRowAddress(summary.replyAddress));
             if (!Number.isSafeInteger(summary.cardRowRevision) || summary.cardRowRevision < item.cardRowRevision
-                || summary.cardRowRevision === item.cardRowRevision && !newerReview) return adoptedSource;
+                || summary.cardRowRevision === item.cardRowRevision && !newerReview && !adoptAddress) rejected = true;
         } else if (!(outcome && summary.currentOutcome) && !Number.isSafeInteger(summary.cardRowRevision) && (incomingTime < existingTime || incomingTime === existingTime
                 && compareHistoryPosition(row.history_position, existingPosition) < 0)) {
             // An older row still brings the report a newer frame of the outcome alone never carried: the line takes
             // the report and keeps its newer cause (without a report its body and fullBody are that cause's words).
-            if (!(summary.childCause && summary.fullOutput && item.childCause && !item.fullOutput)) return adoptedSource;
-            Object.assign(item, timelineReadFields({ ...item, fullRef: summary.fullRef, fullField: summary.fullField, truncated: summary.truncated },
-                { ...item, childCause: summary.childCause, fullOutput: summary.fullOutput, outputPreview: summary.outputPreview }));
+            if (summary.childCause && summary.fullOutput && item.childCause && !item.fullOutput) carryReport = true;
+            else rejected = true;
+        }
+        // Explicit `around` navigation to an earlier System update keeps that exact row delivered on this
+        // bounded page beside the coalesced current status, preserving the anchored item's keyed DOM node.
+        if (rejected && matchesAnchor && item.replyAddress !== anchorAddress) {
+            anchoredCardRow = key;
+            key = `anchored:${identity}`;
+            item = record.items.find((entry) => entry.dedupeKey === key) || null;
+        } else if (!rejected && !carryReport && !adoptAddress && !keepAddress && anchorAddress
+            && itemMatchesExactAnchor(item, anchor)
+            && summary.replyAddress !== anchorAddress && detachAnchoredCardRow(item, key)) {
+            anchoredRecords?.add(record);
+            item = null;
+        }
+        if (item) {
+            const sameAddressedSource = Boolean(item.sourceHistoryId !== identity
+                && sameSystemCardRowRevision(item, summary)
+                && hasHostRowAddress(item.replyAddress) && summary.replyAddress === item.replyAddress);
+            const adoptedSource = !item.sourceHistoryId || adoptAddress || sameAddressedSource
+                || Number.isSafeInteger(summary.cardRowRevision)
+                && (!Number.isSafeInteger(item.sourceHistoryRevision) || summary.cardRowRevision > item.sourceHistoryRevision);
+            if (adoptedSource && !keepAddress) Object.assign(item, source);
+            if (adoptAddress) {
+                item.replyAddress = summary.replyAddress;
+                item.replyRole = summary.replyRole;
+                return true;
+            }
+            if (rejected) return adoptedSource;
+            if (carryReport) {
+                Object.assign(item, timelineReadFields({ ...item, fullRef: summary.fullRef, fullField: summary.fullField, truncated: summary.truncated },
+                    { ...item, childCause: summary.childCause, fullOutput: summary.fullOutput, outputPreview: summary.outputPreview }));
+                return true;
+            }
+            const update = { headline: summary.headline || item.headline,
+                cardRowRevision: summary.cardRowRevision,
+                replyAddress: keepAddress ? item.replyAddress : summary.replyAddress,
+                replyRole: keepAddress ? item.replyRole : summary.replyRole,
+                cardReview: summary.cardReview || null, evidenceRef: summary.evidenceRef || null,
+                fullHeadline: summary.fullHeadline || summary.headline || item.fullHeadline,
+                body: summary.body || '', fullBody: summary.fullBody || summary.body || '',
+                ...timelineReadFields(summary, item),
+                phase: summary.phase || item.phase,
+                sourceTs: keepAddress ? (item.sourceTs || row.ts) : (row.ts || item.sourceTs),
+                ts: keepAddress ? (item.ts || ts) : ts, ...(keepAddress ? {} : source) };
+            if (Object.entries(update).every(([k, value]) => k === 'historyPosition'
+                ? JSON.stringify(item[k]) === JSON.stringify(value) : item[k] === value)) return adoptedSource;
+            Object.assign(item, update);
             return true;
         }
-        const update = { headline: summary.headline || item.headline,
-            cardRowRevision: summary.cardRowRevision,
-            cardReview: summary.cardReview || null, evidenceRef: summary.evidenceRef || null,
-            fullHeadline: summary.fullHeadline || summary.headline || item.fullHeadline,
-            body: summary.body || '', fullBody: summary.fullBody || summary.body || '',
-            ...timelineReadFields(summary, item),
-            phase: summary.phase || item.phase, sourceTs: row.ts || item.sourceTs,
-            ts, ...source };
-        if (Object.entries(update).every(([key, value]) => key === 'historyPosition'
-            ? JSON.stringify(item[key]) === JSON.stringify(value) : item[key] === value)) return adoptedSource;
-        Object.assign(item, update);
-        return true;
     }
     if (item?.historyId === identity) return false;
     if (item) {
@@ -283,18 +478,28 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
         Object.assign(item, occurrence);
         item.count = 1;
         if (summary.evidenceRef && !item.evidenceRef) item.evidenceRef = summary.evidenceRef;
+        if (summary.replyAddress) {
+            item.replyAddress = summary.replyAddress;
+            item.replyRole = summary.replyRole;
+        }
     } else {
+        if (anchoredCardRow) anchoredRecords?.add(record);
         record.items.push({
             cardRowRevision: summary.cardRowRevision,
+            replyAddress: summary.replyAddress,
+            replyRole: summary.replyRole,
             cardReview: summary.cardReview || null,
             phase: summary.phase || 'working', headline: summary.headline || 'Update',
             fullHeadline: summary.fullHeadline || summary.headline || 'Update',
             body: summary.body || '', fullBody: summary.fullBody || summary.body || '',
             ...timelineReadFields(summary),
             evidenceRef: summary.evidenceRef || null,
-            ts: ts || '', sourceTs: row.ts || '', count: 1, dedupeKey: key, ...activity, ...occurrence,
+            ts: ts || '', sourceTs: row.ts || '', count: 1,
+            dedupeKey: key, ...activity, ...occurrence,
+            ...(anchoredCardRow ? { anchoredCardRow } : {}),
             ...(evolving ? source : { historyId: identity, historyPosition: row.history_position }),
-            lineKey: evolving && !String(key).startsWith('cardrow|') ? `terminal-${String(key).replace(/[^A-Za-z0-9_-]/g, '-')}`
+            lineKey: anchoredCardRow ? `anchored-${identity.replace(/[^A-Za-z0-9_-]/g, '-')}`
+                : evolving && !isCardRow ? `terminal-${String(key).replace(/[^A-Za-z0-9_-]/g, '-')}`
                 : `history-${identity.replace(/[^A-Za-z0-9_-]/g, '-')}`,
         });
     }
@@ -302,7 +507,7 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
     return true;
 }
 
-function sortBySource(record) {
+export function sortBySource(record) {
     record.items.sort((a, b) => {
         const first = Date.parse(a.sourceTs || ''), second = Date.parse(b.sourceTs || '');
         return (Number.isFinite(first) && Number.isFinite(second) ? first - second : 0)

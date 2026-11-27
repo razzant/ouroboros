@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 
 import { createChatInstance } from '../modules/chat.js';
 import { applyPayload, flushMisses, setMissTransport } from '../modules/i18n.js';
-import { TextStub, installDom as installHistoryDom } from './chat_dom_fixture.js';
+import { PREVIEW_SCOPE, TextStub, installDom as installHistoryDom } from './chat_dom_fixture.js';
 
 // Source pins below match across line breaks; normalize CRLF so a Windows
 // checkout (core.autocrlf) reads the same bytes the regexes were written for.
@@ -474,11 +474,13 @@ test('the mirrored answer replays from history exactly as it arrived live', asyn
     }
 });
 
-test('the fold is CSS over the complete answer: clamp always, fade only when folded, tokens only', () => {
+test('the fold is CSS over the complete answer: clamp always, the shared fade only when clipped, tokens only', () => {
     const block = styleSource.slice(styleSource.indexOf('"Project completion mirror"'));
     const rules = block.slice(0, block.indexOf('A block that exists only for open attention'));
     assert.match(rules, /\.chat-bubble\.project-answer > \.message \{ max-height: var\(--project-answer-fold\); overflow: hidden; \}/);
-    assert.match(rules, /\.chat-bubble\.project-answer\.is-folded > \.message \{[^}]*mask-image/);
+    // The fade is the shared clipped fold (ui.css [data-fold-clipped]), two lines deep; no local mask of its own.
+    assert.match(rules, /\.chat-bubble\.project-answer > \.message\[data-fold-clipped\] \{ --scroll-fade-edge: calc\(var\(--project-answer-line\) \* 2\); \}/);
+    assert.doesNotMatch(rules, /mask-image|--project-answer-tail|--project-answer-compensation/);
     // The Project is the route to the complete answer; the mirror never expands in place.
     assert.doesNotMatch(rules, /\.project-answer\.is-expanded/);
     assert.doesNotMatch(rules, /user-select|font-size: \d|#[0-9a-fA-F]{3,6}\b/);
@@ -787,7 +789,7 @@ for (const unfinished of [false, true]) test(`untyped System replay keeps markdo
         { role: 'system', markdown: true, text: 'Host notice line one\nline two', ts: '2026-09-03T00:00:01Z' },
     ].map(row => ({ ...row, chat_id: 2, task_id: 'notice-task', ...(unfinished ? { task_phase: 'unfinished' } : {}) }));
     const { prior, mount } = installHistoryDom(async url => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages, window: { complete: true } } : { active_direct_turns: [] } }));
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages, window: { complete: true } } : { active_direct_turns: [] } }));
     let instance;
     try {
         ({ instance } = makeInstance(mount));

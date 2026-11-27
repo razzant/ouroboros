@@ -12,11 +12,14 @@
 // work_status.js lays them on this menu); endpoints, stop policy, request-id
 // retry and verbatim refusals are shared.
 
-import { cancelTask, hurryTask, pauseTask, resumeTask } from './api_client.js';
+import { cancelTask, closeExpiredTask, hurryTask, pauseTask, resumeTask } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { haptic } from './haptics.js';
+import { formatUsd } from './storage_format.js';
 import { showToast } from './toast.js';
 import { fmt, tr, tx } from './i18n.js';
+import { bindScrollFade, restoreFocusWithoutReveal } from './scroll_fade.js';
+import { popupScrollBody } from './ui_interactions.js';
 
 export const ACTION_FINALIZE = 'finalize';
 export const ACTION_HURRY = 'hurry';
@@ -83,6 +86,49 @@ export function createTaskResumeButton(taskId, { canResume, onSettled = () => {}
         // Settling gives back the authority held now: a connection that dropped meanwhile has withdrawn it.
         try { await resumeTaskAction(taskId, { settle: onSettled }); }
         finally { button.disabled = !resumeEligible(taskId, canResume); }
+    });
+    return button;
+}
+
+export const deadlineExpiredWord = () => tr('task.status.deadline_expired', 'Deadline expired');
+
+export function closeExpiredOffer(offer, target) {
+    return offer?.action === 'close' && offer.target === target && /^[a-f0-9]{64}$/.test(offer.close_expired || '')
+        ? offer.close_expired : '';
+}
+
+export async function closeExpiredAction(taskId, token, { close = closeExpiredTask, toast = showToast, settle } = {}) {
+    if (!token || taskControlBusy(taskId)) return;
+    const release = holdControl(taskId);
+    try {
+        const ack = await close(taskId, token);
+        if (ack?.ok !== true) throw new Error(tx('Close was not confirmed.'));
+        toast(ack.cancel_state === 'pending' ? tx('Close requested. The saved work is still being checked.')
+            : ack.reason_code === 'result_kept' ? tx('The saved result was kept.')
+                : tx('Closed.'), 'info');
+    } catch (error) {
+        toast(error?.message || tx('Close was not confirmed.'), 'warn');
+    } finally {
+        try { await settle?.(); } finally { release(); }
+    }
+}
+
+// Optional and never urgent: the neutral capsule, like the Stop… beside it. `nameId` is the element that names the
+// exact task (its row's or message's own name), which the button is described by.
+export function createTaskCloseButton(taskId, { tokenNow, onSettled, nameId = '' } = {}) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-sm btn-default ui-hit-area';
+    button.dataset.closeExpiredRun = '1';
+    if (nameId) button.setAttribute('aria-describedby', nameId);
+    button.textContent = tr('task.control.close_expired', 'Close');
+    button.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        const token = tokenNow?.();
+        if (!token || taskControlBusy(taskId) || !button.isConnected) return;
+        button.disabled = true;
+        try { await closeExpiredAction(taskId, token, { settle: onSettled }); }
+        finally { button.disabled = !tokenNow?.() || taskControlBusy(taskId); }
     });
     return button;
 }
@@ -318,26 +364,86 @@ async function resumeWithoutUnknown(id, refusal, { resume, askOwner }) {
     if (!Array.isArray(named) || !named.length) throw refusal;
     const blockers = refusal.body.blockers || [];
     const starts = blockers.some((b) => b.kind === 'delegated_run' && b.choice_id);
+    // `read_only`: custody proved each earlier request read-only; whether it started is still unknown.
+    const readOnly = starts && blockers.every((b) => !(b.kind === 'delegated_run' && b.choice_id) || b.read_only === true);
     const facts = heldWorkFacts(blockers, Infinity);
-    const one = named.length === 1;
+    const one = named.length === 1;  // one decision in all: said in the singular, whatever it names
     const confirmed = await askOwner({
-        title: 'Resume without these results?',
-        body: starts ? `Resume the saved task ${id} without waiting for the listed results? The delegated work may `
-            + 'still be running, changing files or spending money. Resuming will not send these requests again. '
+        title: one ? 'Resume without this result?' : 'Resume without these results?',
+        body: starts ? `Resume the saved task ${id} without waiting for the listed ${one ? 'result' : 'results'}? `
+            + (readOnly ? `${one ? 'The earlier request was' : 'The earlier requests were'} read-only, without permission `
+                + `to change files; ${one ? 'its' : 'their'} work may still be running or spending money. `
+                : 'The delegated work may still be running, changing files or spending money. ')
+            + `Resuming will not send ${one ? 'this request' : 'these requests'} again. `
             + 'Your decision is recorded in the task history.'
             : `${facts.charAt(0).toUpperCase()}${facts.slice(1)}. If you resume, ${one ? 'this call is' : 'these calls are'} `
             + `never run again, whatever ${one ? 'it' : 'they'} changed outside stays as it is, `
             + 'and your decision is recorded on the task.',
-        details: { open: true, summary: `Inspect all ${named.length} ${one ? 'request' : 'requests'}`,
+        details: { open: true, summary: one ? 'Inspect the request' : `Inspect all ${named.length} requests`,
             rows: blockers.map((b) => ({ label: `Task ${b.task_id}`,
                 value: b.kind === 'delegated_run' && b.choice_id ? `Start request ${b.invocation_id}`
                     : `${heldWorkFacts([b])} (${b.operation_id || b.attempt_id || b.receipt_id})` })) },
         confirmLabel: 'Resume anyway',
     });
     return confirmed ? resume(id, { accept_unknown: named, reason: starts
-        ? 'The owner accepted that the listed starts may still be working or spending money.'
-        : 'The owner resumed without these results.' })
+        ? `The owner accepted that the listed ${one ? 'start' : 'starts'} may still be working or spending money.`
+        : `The owner resumed without ${one ? 'this result' : 'these results'}.` })
         : KEPT_PAUSED;
+}
+
+/** An accepted Resume in the words every Resume door says it with: a press's toast, a Panic selection's row. */
+export function resumeAcceptedWords(ack) {
+    // An answered root's late work (D10) continues in place; its answer stays delivered. A Continue whose earlier
+    // attempt's work still runs waits for it, as its Continue did: it starts by itself once that work settles.
+    const words = ack?.held ? `Resume accepted; it starts by itself when the earlier attempt's work finishes: ${
+        heldWorkFacts(ack.blockers) || 'earlier work is not proven settled'}.`
+        : ack?.tree_only ? 'Resumed. Ouroboros or you choose which subagents continue.'
+        : ack?.late_phase ? 'Resuming: the work left after the delivered answer continues.'
+        : 'Resuming: the task returns to the queue.';
+    // A consciousness wake held at its daily share goes on with the room this Resume gave it (`consciousness_resume`),
+    // and the total budget, its own limit beside the allowance, may leave less of it now (`available_now_usd`).
+    const more = ack?.consciousness_resume?.additional_usd;
+    if (typeof more !== 'number' || !Number.isFinite(more) || more < 0) return words;
+    const now = ack.consciousness_resume.available_now_usd;
+    const narrower = typeof now === 'number' && Number.isFinite(now) && now >= 0 && now < more
+        ? `; ${now > 0 ? formatUsd(now) : 'none'} of it is available now under the total budget` : '';
+    return `${words} ${more > 0 ? `It may spend up to ${formatUsd(more)} more of the consciousness allowance${narrower}.`
+        : 'The consciousness allowance gives it nothing more, so it may pause again.'}`;
+}
+
+/** A refused Resume: the server names it (replay_unsafe, fence missing, not budget-paused, a wake's money refusals:
+ *  `work_stop.resume_outcome`, the one owner of those words), said verbatim instead of a generic failure, and a held
+ *  Continue's observed blockers as facts (#1721). */
+export function resumeRefusalWords(exc) {
+    const facts = heldWorkFacts(exc?.body?.blockers);
+    const message = exc?.body?.cause && exc.body.message ? tx(exc.body.message) : exc?.body?.message;
+    return facts ? `Resume refused: ${facts}.${exc.body.action === 'wait_or_stop_the_previous_work'
+        ? ' Wait for that work or stop it.' : ''}` : message || `Resume refused: ${exc?.message || exc}`;
+}
+
+/**
+ * A Resume whose requests another door sends itself (the Panic selection, panic_recovery.js): from `run`'s start
+ * until `settle` (the read that reconciles its answers) has settled, its tasks are pending to every Resume door, as
+ * a press of `resumeTaskAction` keeps its own (`resumePending`). Each task's request lease (`taskControlBusy`, which a
+ * menu's Stop reads) ends with its own answer: `run` is handed `answered(taskId)` to say so, so another task's slow
+ * answer never holds that Stop. Never sends anything itself.
+ */
+export async function holdResumes(taskIds, run, settle = null) {
+    const ids = [...new Set((taskIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+    const leases = new Map(ids.map((id) => [id, holdControl(id)]));
+    const answered = (taskId) => {
+        const id = String(taskId || '').trim();
+        const release = leases.get(id);
+        if (!release) return;
+        leases.delete(id);
+        resumeReads.add(id);  // pending to every Resume door before its lease ends: no moment between the two
+        release();
+    };
+    try { return await run(answered); }
+    finally {
+        ids.forEach(answered);
+        try { await settle?.(); } finally { ids.forEach((id) => resumeReads.delete(id)); }
+    }
 }
 
 /**
@@ -360,23 +466,11 @@ export async function resumeTaskAction(taskId, { resume = resumeTask, toast = sh
         if (ack === KEPT_PAUSED) return;
         if (ack?.ok !== true) throw new Error('Resume acknowledgement is unknown; retry this action.');
         pauseRequestIds.delete(id);
-        // An answered root's late work (D10) continues in place; its answer stays delivered. A Continue whose earlier
-        // attempt's work still runs waits for it, as its Continue did: it starts by itself once that work settles.
-        toast(ack.held ? `Resume accepted; it starts by itself when the earlier attempt's work finishes: ${
-            heldWorkFacts(ack.blockers) || 'earlier work is not proven settled'}.`
-            : ack.tree_only ? 'Resumed. Ouroboros or you choose which subagents continue.'
-            : ack.late_phase ? 'Resuming: the work left after the delivered answer continues.'
-            : 'Resuming: the task returns to the queue.', 'info');
+        toast(resumeAcceptedWords(ack), 'info');
         announceMembershipGap(ack.membership_gaps, 'resume', toast);  // read from the Pause's current record
     } catch (exc) {
-        // The server names the refusal (replay_unsafe / fence missing /
-        // not budget-paused): show it verbatim instead of a generic failure,
-        // and a held Continue's observed blockers as facts (#1721).
         // Handled here, never rethrown: the menu callback is fire-and-forget.
-        const facts = heldWorkFacts(exc?.body?.blockers);
-        const message = exc?.body?.cause && exc.body.message ? tx(exc.body.message) : exc?.body?.message;
-        toast(facts ? `Resume refused: ${facts}.${exc.body.action === 'wait_or_stop_the_previous_work'
-            ? ' Wait for that work or stop it.' : ''}` : message || `Resume refused: ${exc?.message || exc}`, 'error');
+        toast(resumeRefusalWords(exc), 'error');
     } finally {
         release();
         resumeReads.add(id);
@@ -437,7 +531,7 @@ export function taskControlBusy(taskId) {
  * anywhere on this path. Resolves with the acknowledgement (duplicate=true is
  * the idempotent success shape); a typed refusal rejects.
  * @param {string} taskId
- * @returns {Promise<import('./api_types.js').TaskHurryResponse>}
+ * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::TaskHurryResponse`.
  */
 export async function requestHurry(taskId) {
     const id = String(taskId || '').trim();
@@ -474,7 +568,7 @@ export async function hurryTaskAction(taskId) {
  * Both surfaces cancel the task AND its live subtree (v6.82 semantics kept).
  * @param {string} taskId
  * @param {string} action
- * @returns {Promise<import('./api_types.js').TaskCancelResponse>}
+ * @returns {Promise<Object>} — Python contract: `ouroboros/gateway/contracts.py::TaskCancelResponse`.
  */
 const pendingStopActions = new Map();
 
@@ -530,6 +624,7 @@ let openMenu = null;
 let openTrigger = null;
 let stopMenuWatcher = null;
 let focusReturnTimer = null;
+let disposeMenuFade = null;
 
 const MENU_MARGIN = 8;
 const MENU_GAP = 4;
@@ -538,7 +633,7 @@ function clamp(value, minimum, maximum) {
     return Math.min(Math.max(value, minimum), Math.max(minimum, maximum));
 }
 
-function positionTaskControlMenu(anchor, menu) {
+function positionTaskControlMenu(anchor, menu, body) {
     if (!anchor?.isConnected || !menu?.isConnected) {
         closeTaskControlMenu();
         return false;
@@ -551,10 +646,8 @@ function positionTaskControlMenu(anchor, menu) {
     }
 
     const menuRect = menu.getBoundingClientRect();
-    // scrollHeight preserves the intrinsic item height if the viewport-level
-    // fallback max-height has already constrained the rendered border box.
-    const borderHeight = Math.max(0, menuRect.height - menu.clientHeight);
-    const naturalHeight = Math.max(menuRect.height, menu.scrollHeight + borderHeight);
+    const chrome = Math.max(0, menuRect.height - body.clientHeight);
+    const naturalHeight = body.scrollHeight + chrome;
     const spaceAbove = Math.max(0, anchorRect.top - MENU_GAP - MENU_MARGIN);
     const spaceBelow = Math.max(
         0,
@@ -584,7 +677,7 @@ function watchTaskControlMenu(anchor, menu) {
     const closeForViewportChange = (event) => {
         // A height-clamped portal is its own scrollport. Scrolling it does not
         // move the trigger, so keep it open; ancestor/page scroll may move it.
-        if (event.type === 'scroll' && event.target === menu) return;
+        if (event.type === 'scroll' && (event.target === menu || (event.target?.nodeType === 1 && menu.contains(event.target)))) return;
         // Nor does a scroller that does not hold the trigger: the chat feed re-anchoring behind a floating list
         // (a late history page, a refit) cannot have moved it.
         if (event.type === 'scroll' && event.target?.nodeType === 1 && !event.target.contains(anchor)) return;
@@ -626,25 +719,27 @@ function finishOutsidePointerFocusReturn(trigger) {
     clearPendingFocusReturn();
     focusReturnTimer = window.setTimeout(() => {
         focusReturnTimer = null;
-        if (!openMenu && trigger?.isConnected) trigger.focus();
+        if (!openMenu && trigger?.isConnected) restoreFocusWithoutReveal(trigger);
     }, 0);
 }
 
-export function closeTaskControlMenu() {
+export function closeTaskControlMenu({ returnFocus = false } = {}) {
     clearPendingFocusReturn();
     const menu = openMenu;
     const trigger = openTrigger;
-    const restoreFocus = Boolean(menu?.contains(document.activeElement));
+    const restoreFocus = menu && (returnFocus || menu.contains(document.activeElement));
     const stopWatching = stopMenuWatcher;
     stopMenuWatcher = null;
     stopWatching?.();
+    disposeMenuFade?.();
+    disposeMenuFade = null;
     menu?.remove();
     openMenu = null;
     trigger?.setAttribute?.('aria-expanded', 'false');
     openTrigger = null;
     document.removeEventListener('pointerdown', onOutsidePointer, true);
     document.removeEventListener('keydown', onMenuKeydown, true);
-    if (restoreFocus && trigger?.isConnected) trigger.focus();
+    if (restoreFocus && trigger?.isConnected) restoreFocusWithoutReveal(trigger);
 }
 
 function onOutsidePointer(event) {
@@ -715,6 +810,7 @@ export function openTaskControlMenu(anchor, {
     const menu = document.createElement('div');
     menu.className = 'task-control-menu';
     menu.setAttribute('role', 'menu');
+    const body = popupScrollBody(menu);
     for (const action of offered) {
         const item = document.createElement('button');
         item.type = 'button';
@@ -725,16 +821,19 @@ export function openTaskControlMenu(anchor, {
         if (busy) item.disabled = true;
         item.addEventListener('click', (event) => {
             event.stopPropagation();
-            closeTaskControlMenu();
+            // WebKit needn't give a pressed button focus. The action still hands this menu's focus back.
+            closeTaskControlMenu({ returnFocus: true });
             run(action);
         });
-        menu.appendChild(item);
+        body.appendChild(item);
     }
     document.body.appendChild(menu);
     openMenu = menu;
     openTrigger = anchor;
     stopMenuWatcher = watchTaskControlMenu(anchor, menu);
-    if (!positionTaskControlMenu(anchor, menu)) return null;
+    if (!positionTaskControlMenu(anchor, menu, body)) return null;
+    // A height-clamped menu scrolls its own items; the cue follows them (the portal is its own scrollport).
+    disposeMenuFade = bindScrollFade(body);
     // A11y: keyboard users land on the first actionable item on open.
     menu.querySelector('button:not(:disabled)')?.focus?.();
     document.addEventListener('pointerdown', onOutsidePointer, true);
@@ -747,13 +846,15 @@ export function openTaskControlMenu(anchor, {
  * the same request owners, never Resume (only a work's Resume control offers it). `stop` is the caller's own stop
  * path (a card keeps its optimistic chip); the Pause item reads its target from the anchor.
  */
-export function openTaskControls(anchor, taskId, { activity = null, cancelPending = false, canAct, stop }) {
+export function openTaskControls(anchor, taskId, { activity = null, cancelPending = false, actions = null, canAct, afterAction, stop }) {
     const id = String(taskId || '').trim();
     return openTaskControlMenu(anchor, {
+        actions,
         cancelPending,
         budgetPaused: activity?.phase === 'budget_paused',
         busy: taskControlBusy(id),
         canAct,
+        afterAction,
         onAction: (action) => (action === ACTION_HURRY ? hurryTaskAction(id) : stop(action)),
     });
 }

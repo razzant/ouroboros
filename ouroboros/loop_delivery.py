@@ -24,7 +24,7 @@ import queue
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from ouroboros import working_checkpoint
+from ouroboros import extension_late_result, working_checkpoint
 from ouroboros.config import get_context_mode
 from ouroboros.conversation_lease import follow_loop_admission
 from ouroboros.delivery_facts import FACTS_NOTED_CONTROL, note_delivery_facts as _note_delivery_facts
@@ -103,10 +103,9 @@ _DELIVERY_HOLD_CONTROLS = frozenset({
     _SKILL_ACTION_HOLD_CONTROL,
     _AUTHORING_HANDOVER_HOLD_CONTROL,
 })
-# After these host-shown rounds (an owner follow-up, a routeless final's note, one-shot finish facts:
-# ``delivery_facts``) the answer is fresh, owing no selection.
-ROUTELESS_NOTED_CONTROL = "routeless_final_noted"
-FRESH_ANSWER_CONTROLS = frozenset({"owner_revision_required", ROUTELESS_NOTED_CONTROL, FACTS_NOTED_CONTROL})
+# After these host-shown rounds (an owner follow-up, one-shot finish facts: ``delivery_facts``) the answer is
+# fresh, owing no selection.
+FRESH_ANSWER_CONTROLS = frozenset({"owner_revision_required", FACTS_NOTED_CONTROL})
 # The candidate degradations a normal exit derives from its own host suffixes (an unsettled child, an open plan).
 _SUFFIX_MARKS = frozenset({"host_child_status_suffix", "plan_review_advisory"})
 # Header of the host's own rendered control block; identifies the transcript's
@@ -679,7 +678,7 @@ def forced_completion_selection(parsed: Any, malformed: bool, candidate: Any, *,
     (``completion_request``), the same byte selection and the silence rule of
     ``consume_completion_request``; nothing is staged, executed or acknowledged here."""
     from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed
-    from ouroboros.place_reply import records_only_now
+    from ouroboros.place_reply import _focus_turn, records_only_now
     from ouroboros.tools.control_runtime import completion_request
 
     if malformed or not isinstance(parsed, dict) or getattr(parsed, "duplicate_keys", set()):
@@ -688,7 +687,8 @@ def forced_completion_selection(parsed: Any, malformed: bool, candidate: Any, *,
     if error:
         return None, None, "invalid_completion_request: " + error
     text, error = selected_completion_text(request, candidate, messages or [], held_sha256)
-    if not error and tool_ctx is not None and (request.get("wake_silent") or records_only_now(tool_ctx)) and owner_reply_owed(tool_ctx):
+    if not error and tool_ctx is not None and (request.get("wake_silent") or (  # R3: silence, or a focus's record
+            records_only_now(tool_ctx) and _focus_turn(getattr(tool_ctx, "task_metadata", None)))) and owner_reply_owed(tool_ctx):
         error = OWNER_REPLY_OWED_REFUSAL
     return (None, None, error) if error else (request, text, "")
 
@@ -762,8 +762,9 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
     text, error = selected_completion_text(request, candidate, ctx.messages, getattr(tool_ctx, "_completion_held_sha256", ""))
     from ouroboros.loop_completion_schema import legacy_selection_error
     error = legacy_selection_error(tool_ctx, request, text, calls) or error
-    from ouroboros.place_reply import records_only_now, riding_sends
-    if (request.get("wake_silent") or records_only_now(tool_ctx)) and owner_reply_owed(tool_ctx):
+    from ouroboros.place_reply import _focus_turn, records_only_now, riding_sends
+    if ((request.get("wake_silent") or (records_only_now(tool_ctx) and _focus_turn(getattr(tool_ctx, "task_metadata", None))))
+            and owner_reply_owed(tool_ctx)):  # R3: an explicit silence, or a focus's records-only finish
         if not (getattr(tool_ctx, "_schedule_door", None) and request.get("source") == "presence_finish"
                 and tools.get_schema_by_name("send_user_message") is None):
             error = OWNER_REPLY_OWED_REFUSAL
@@ -991,13 +992,14 @@ def _resolve_forced_delivery_control_body(
     tool_ctx: Any = None, native: bool = False,
 ) -> Tuple[str, bool, bool, bool, bool]:
     """Return text plus retained/degraded/consumed/replaced facts. ``native`` marks ``raw`` as the
-    arguments of the reply's one ``finish_task`` call: a completion request whatever its shape.
+    arguments of the reply's one ``finish_task`` call: a completion request whatever its shape, as is a body read with
+    the ``relay_replies`` envelope (the offered relay return: refused without its action, never prose).
     With ``tool_ctx`` the request's verdict is left on ``tool_ctx._forced_completion``."""
 
     if not isinstance(candidate, _loop().DeliveryCandidate):
         candidate = None
     parsed, duplicate_protocol_key, embedded_protocol = _parse_delivery_control_body(raw if isinstance(raw, str) else "")
-    if native or isinstance(parsed, dict) and "action" in parsed:
+    if native or isinstance(parsed, dict) and ("action" in parsed or "relay_replies" in envelope_keys):
         request, text, error = forced_completion_selection(
             parsed, duplicate_protocol_key or embedded_protocol, candidate, tool_ctx=tool_ctx,
             envelope_keys=envelope_keys, messages=messages, held_sha256=held_sha256)
@@ -1207,7 +1209,12 @@ def _prepare_delivery_candidate(content: Any, tools: ToolRegistry, limit_ctx: An
     _loop()._project_child_result_dispositions(limit_ctx, llm_trace)
     held = getattr(tools._ctx, "_delivery_candidate", None)
     quiet_held = not explicit and getattr(held, "quiet", False)  # replaced even by empty prose, never published
-    keep_quiet = quiet_held and noted(held)  # prose after one-shot facts inherits a silent selection (delivery_facts)
+    from ouroboros.dialogue_provenance import presence_caller_binding
+    from ouroboros.loop_messages import owner_reply_owed
+    # Prose after one-shot facts inherits a silent selection (delivery_facts), but not while my human's reply is owed:
+    # then it is a fresh visible answer (a place-bound run's final is speech to its place, so it keeps the silence).
+    keep_quiet = quiet_held and noted(held) and not (owner_reply_owed(tools._ctx)
+                                                     and presence_caller_binding(tools._ctx) is None)
     if resumed and quiet_held:
         return False, content  # a quiet selection lost with its execution id is chosen again
     fresh = control == "fresh" and (explicit or str(content or "").strip() or quiet_held)
@@ -1224,6 +1231,16 @@ def _prepare_delivery_candidate(content: Any, tools: ToolRegistry, limit_ctx: An
     return True, content
 
 
+def _restored_riding_send(ctx: Any, trace: Dict[str, Any]) -> bool | None:
+    """Read the restored selection's batch; an unknown past send is not a new one."""
+    from ouroboros.place_reply import restored_riding_send
+    selected = getattr(ctx, "_completion_selected", None)
+    if not isinstance(selected, dict):
+        return False
+    calls = (trace.get("tool_calls") or [])[int((selected.get("observation") or {}).get("tool_count") or 0):]
+    return restored_riding_send(ctx, calls)
+
+
 def _no_tool_final_answer(
     content: Any,
     limit_ctx: _RoundLimitContext,
@@ -1236,11 +1253,16 @@ def _no_tool_final_answer(
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """Run the no-tool finalization gates; ``None`` requests another model round."""
     messages = limit_ctx.messages
-    from ouroboros.loop_messages import transcript_growth_signature
-    before = transcript_growth_signature(messages)
+    from ouroboros.loop_messages import transcript_growth_signature, work_reply_finish_hold
+    before, response_start = transcript_growth_signature(messages), len(messages)
     origin = "resume" if resume_candidate else "selection" if explicit_candidate else "prose"
-    if origin == "prose":  # a tool-less response carries nothing that rides: a records-only place returns its note once
+    # A tool-less response carries nothing that rides. A restored answer whose checkpoint predates its saved send fact
+    # reads it again from its restored trace: a recorded send still rides once; otherwise a records-only place returns
+    # its note once.
+    if origin == "prose":
         tools._ctx._completion_riding_send = False
+    elif origin == "resume" and getattr(tools._ctx, "_completion_riding_send", None) is None:
+        tools._ctx._completion_riding_send = _restored_riding_send(tools._ctx, llm_trace)
 
     def held(reason: str, subreason: str = ""):
         if transcript_growth_signature(messages) != before:
@@ -1261,6 +1283,8 @@ def _no_tool_final_answer(
 
         stopping = ready and (getattr(tools._ctx, "_completion_selected", None) or {}).get("action") == "stop"
         if not stopping:
+            if ready and work_reply_finish_hold(tools, messages, str(content or "")):  # an open Reply is answered first
+                return held("work_reply_open")
             if ready and _loop()._enforce_plan_gate(
                 str(content or ""), messages, tools, llm_trace, emit_progress,
             ):
@@ -1441,6 +1465,9 @@ def _no_tool_final_answer(
             text, usage, forced_trace = _handle_direct_turn_hard_stop(limit_ctx)
             _loop()._merge_finalization_trace(llm_trace, forced_trace)
             return text, usage, llm_trace
+        if not stopping and (post_controls.get("agent_note") or extension_late_result.owed_letter(tools._ctx)):
+            solving_again()  # context only; never release an owner seal or change the owner corpus
+            return held("agent_note")
         from ouroboros.place_intake import reopen_for_place_mail
         if not stopping and reopen_for_place_mail(tools._ctx, post_controls):
             return held("place_mail")  # keep the answer; the accepted place context gets a model round
@@ -1469,74 +1496,47 @@ def _no_tool_final_answer(
     if isinstance(candidate, _loop().DeliveryCandidate):
         _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
         content = candidate.full_text
-    from ouroboros.place_reply import prepare_focus_reply, refusal_facts, routeless_note
+    from ouroboros.place_reply import accept_focus_completion, prepare_focus_reply, refusal_facts
     if stopping:
         request = tools._ctx._completion_selected
         record_stopped_completion(llm_trace, request, candidate)
         if not _seal_admission_before_delivery(tools, limit_ctx, llm_trace):
             return held("admission_seal")
     else:
-        note = routeless_note(tools._ctx, limit_ctx, llm_trace, str(content or ""), candidate, origin)
-        if note and _show_routeless_note(tools, limit_ctx, llm_trace, candidate, str(content), note, origin=origin):
-            solving_again()  # the mind reads the fact, then sends, stays quiet or keeps its words as the record
-            return None
         from ouroboros.delegate_resume import selected_answer_context
         selected, waited = selected_answer_context(limit_ctx)
         if waited and (out := owner_input()) is not False:  # my human may have written under the Pause
             return out
+    noted_before = getattr(tools._ctx, "_records_only_noted", False)
     allowed, refusal = prepare_focus_reply(tools._ctx, str(content or ""), quiet=bool(getattr(candidate, "quiet", False)))
     if not allowed:  # the flag returns with the host facts the mind decides on: destination, its own sends, silence
+        note = getattr(tools._ctx, "_records_only_noted", False) and not noted_before
+        # The words the note asks it to send, once: a selection is already its own row, and a drain's provisional row
+        # stays when mail arrived after it (``owner_input``).
+        kept = next((row for row in reversed(messages[response_start:]) if row.get("role") == "assistant"), {})
+        if note and str(content or "").strip() and not explicit_candidate and kept.get("content") != content:
+            messages.append({"role": "assistant", "content": content})
         messages.append({"role": "user", "content": refusal + refusal_facts(tools._ctx)})
-        _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+        if note:
+            _note_delivery_facts(tools, limit_ctx, llm_trace, line="")  # the record note is one-shot: the next answer stands
+        else:
+            _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
         solving_again()
         return held("focus_reply_refused")
-    if isinstance(getattr(tools._ctx, "_presence_completion", None), dict):  # Accept only at this common exit.
-        tools._ctx._presence_completion_accepted = True
-        limit_ctx.accumulated_usage["presence_completion_outcome"] = tools._ctx._presence_completion["outcome"]
-        limit_ctx.accumulated_usage["terminal_origin"] = _loop().TERMINAL_ORIGIN_MODEL_FINAL
-    if getattr(candidate, "quiet", False) or getattr(tools._ctx, "_focus_record_only", False):  # a wake's silent or records-only finish
+    accept_focus_completion(tools._ctx, limit_ctx.accumulated_usage, _loop().TERMINAL_ORIGIN_MODEL_FINAL)
+    if isinstance(letter := getattr(tools._ctx, "_letter_reply", None), dict):  # what this final gives a letter's sender
+        limit_ctx.accumulated_usage.update(peer_reply=letter, terminal_origin=_loop().TERMINAL_ORIGIN_MODEL_FINAL)
+    if getattr(candidate, "quiet", False) or getattr(tools._ctx, "_focus_record_only", False):  # a wake's silent or a focus's records-only finish
         limit_ctx.accumulated_usage.update(wake_silent=True, terminal_origin=_loop().TERMINAL_ORIGIN_MODEL_FINAL)
-    if summary := (getattr(tools._ctx, "_completion_selected", None) or {}).get("wake_summary"): limit_ctx.accumulated_usage["wake_summary"] = summary
-    if (getattr(tools._ctx, "_completion_selected", None) or {}).get("fold_read") is True: limit_ctx.accumulated_usage["fold_read"] = True
+    for key, value in (getattr(tools._ctx, "_completion_selected", None) or {}).items():
+        if (key in {"wake_summary", "about_work_task_id"} and value) or (key == "fold_read" and value is True):
+            limit_ctx.accumulated_usage[key] = value
     if getattr(tools._ctx, "_owner_message_sent", False): limit_ctx.accumulated_usage["owner_message_sent"] = True
     from ouroboros.swarm_receipt import retain_comparison
     retain_comparison(tools._ctx)
     accept_handover_selection(tools._ctx, llm_trace)
     tools._ctx._selected_answer_context = None if stopping else selected
     return _loop()._handle_text_response(str(content or ""), llm_trace, limit_ctx.accumulated_usage)
-
-
-def _show_routeless_note(tools: ToolRegistry, limit_ctx: Any, trace: dict, candidate: DeliveryCandidate,
-                         content: str, note: str, *, origin: str) -> bool:
-    """Return the final once beside its routeless fact (``place_reply.routeless_note``), first saved with its spent mark
-    at a ``ready`` boundary: a restart reads the note before any final is accepted again, never twice. A save that fails
-    or writes nothing shows nothing and this finish proceeds. Not a hold: it arms no control an earlier episode did not."""
-    from ouroboros.place_reply import NO_SEND_KEY, note_rows
-    ctx, messages, state, start = tools._ctx, limit_ctx.messages, trace[NO_SEND_KEY], len(limit_ctx.messages)
-    fields = ("_delivery_control_required", "_completion_selected", "_presence_completion")
-    before = (candidate.finalization_control, *(getattr(ctx, name, None) for name in fields))
-    messages.extend(note_rows(content, note, origin))  # the exact rows the money check priced
-    state["noted"], candidate.finalization_control = True, ROUTELESS_NOTED_CONTROL
-    ctx._delivery_control_required, ctx._completion_selected, ctx._presence_completion = candidate.control_episode_seen, None, None
-    _loop()._publish_delivery_candidate(tools, candidate, trace)
-    try:
-        saved = working_checkpoint.save_round(limit_ctx, "ready")
-    except Exception:
-        log.warning("Routeless final note of %s not saved", limit_ctx.task_id, exc_info=True)
-        saved = False
-    if saved:
-        working_checkpoint.flush_content_acks(ctx)
-    else:  # no durable state holds the note: it is not shown, and this finish proceeds as it was
-        del messages[start:]
-        state.pop("noted")
-        candidate.finalization_control = before[0]
-        for name, value in zip(fields, before[1:]):
-            setattr(ctx, name, value)
-        _loop()._publish_delivery_candidate(tools, candidate, trace)
-        return False
-    ctx._completion_pair_appended = ctx._completion_pair_private = True  # its rows are in; no hold notice follows
-    observe_completion_hold(tools, limit_ctx, origin, "routeless_final")
-    return True
 
 
 def finish_completed_stop(tools: ToolRegistry, ctx: Any, emit_progress: Any,

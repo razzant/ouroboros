@@ -18,13 +18,13 @@ from ouroboros.artifacts import read_actor_source_bytes
 from ouroboros.context_source_view import _EMERGENCY_LABELS, emergency_address_view
 from ouroboros.loop_messages import CONTEXT_FACTS_NAME
 from ouroboros.peer_roster import ROSTER_SNAPSHOT_NAME, ROSTER_UPDATE_NAME
-from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY, make_tool_result_record
+from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 from tests.test_context_reclaim_materializer import _request
 from tests.test_main_authored_context import main_loop as _main_loop
+from tests._context_source_fixtures import BODY, _observation, _tool
 
 main_loop = _main_loop
 
-BODY = "Exact producer bytes: Ж, e\u0301, emoji 🧠.\r\n" * 1000 + "CONSEQUENTIAL-TAIL\r\n"
 OWNER = "Keep the original contract until the replacement is verified."
 
 
@@ -39,26 +39,8 @@ def test_the_view_and_compaction_import_in_either_order_in_a_fresh_interpreter()
         assert done.returncode == 0, (first, done.stderr[-2000:])
 
 
-def _tool(call_id="reused", *, invocation=None, facts=None, text=BODY):
-    result = {"role": "tool", "tool_call_id": call_id, "content": text}
-    if invocation is not None:
-        result[TOOL_RESULT_RECORD_KEY] = make_tool_result_record(
-            {"invocation_id": invocation, "tool_call_id": call_id, "execution_id": "exec",
-             "round_id": "round", "task_attempt": 1,
-             "trace_ref": {"manifest_ref": {"path": f"trace/{invocation}.json", "sha256": "a" * 64}}},
-            text, facts=facts, source_ref={"path": f"source/{invocation}.txt"})
-    return [{"role": "assistant", "content": "", "tool_calls": [{
-        "id": call_id, "type": "function", "function": {"name": "run_command", "arguments": '{"cmd":["fixture"]}'}}]},
-        result]
-
-
 def _prefix():
     return [{"role": "system", "content": "Required core."}, {"role": "user", "content": "Inspect the result."}]
-
-
-def _observation(messages):
-    return {"messages": deepcopy(messages), "exposed_units": [
-        {"unit_id": u.unit_id, "raw_sha256": u.raw_sha256} for u in cc.context_units(messages, scope="dialogue")]}
 
 
 def _records(messages):
@@ -85,7 +67,9 @@ def _assert_exact_restore(tmp_path, original, request, receipt):
         unit = units[ref["unit_id"]]
         assert ref["raw_sha256"] == unit.raw_sha256
         source = json.loads(_visible(row).split("\n", 2)[2])
-        assert source == original[unit.start:unit.end + 1]
+        # The view shows the rows as a send does; their outcome records stay in the exact checkpoint above.
+        assert source == [{key: value for key, value in message.items() if key != TOOL_RESULT_RECORD_KEY}
+                          for message in original[unit.start:unit.end + 1]]
         assert row["role"] == "user" and not row.get("tool_calls")  # source, never live protocol replay
 
 
@@ -440,10 +424,14 @@ def test_main_emergency_measurement_uses_sealed_final_facts_without_mutating_liv
     assert measured and not any(is_live for is_live, _rows in measured)
     # What dispatch actually prepares includes the same new host facts and seal.
     seal_task_transcript(ctx.messages)
-    append_context_facts(ctx)
+    assert append_context_facts(ctx)
+    facts_rows = [row for row in ctx.messages if row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME]
+    assert facts_rows == [ctx.messages[-1]]
+    assert facts_rows[0]["content"] == ctx.accumulated_usage["_context_facts_line"]
     after = cc._context_tokens_for_messages(ctx.messages, 1.0)
     assert receipt.reclaimed_tokens == before - after
-    assert any(row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME for row in measured[-1][1])
+    last_trial_rows = next(rows for is_live, rows in reversed(measured) if not is_live)
+    assert any(row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME for row in last_trial_rows)
     # The applied pass keeps its round's record of the rows the first show did not count; a later
     # round's pass that changes nothing names nothing (C2 S3; Astra RV4).
     from types import SimpleNamespace

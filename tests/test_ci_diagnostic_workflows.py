@@ -35,6 +35,7 @@ UI_JOBS = ["scope", "ui-shard", "ui-manifest", "ui-smoke"]
 FULL_LANE = "${{ needs.scope.outputs.run_browser == 'true' }}"
 # The single-scenario PARTIAL DIAGNOSTIC is a job of the push wrapper, its only selector.
 PARTIAL = ("ui-browser-push.yml", "ui-diagnostic")
+BROWSER_CHECK_JOBS = ("check", "route", "route-trial")  # post-merge-browser.yml, the post-merge pilot
 
 
 def _workflow(name):
@@ -701,7 +702,7 @@ def test_unknown_or_shell_like_selection_cannot_execute_or_silently_run_full(tmp
 def test_every_added_outcome_reference_names_an_already_declared_step():
     pattern = re.compile(r"steps\.([A-Za-z_][A-Za-z0-9_]*)\.")
     for workflow, job in ((CANARY, "integration-test"), *(("ui-browser.yml", job) for job in UI_JOBS),
-                          PARTIAL):
+                          PARTIAL, *(("post-merge-browser.yml", job) for job in BROWSER_CHECK_JOBS)):
         known = set()
         for step in _workflow(workflow)["jobs"][job]["steps"]:
             references = pattern.findall(str(step))
@@ -1016,8 +1017,9 @@ def test_every_landed_test_producer_runs_under_the_owned_runner(job):
     assert len(producers) == 2
     for step_id, run in producers.items():
         label = step_id.removeprefix("tests_")
+        lane = "parallel" if label == "parallel" else "exclusive"
         assert run.startswith(f'python scripts/ci_retry.py --evidence-dir "${{{{ runner.temp }}}}/ci-evidence/{label}" '
-                              "--accepted tests/accepted_failures.json -- python scripts/run_tests.py tests/ -m "), run
+                              f"--accepted tests/accepted_failures.json -- python scripts/run_tests.py --lane-pass {lane} tests/ "), run
         assert f'--ci-evidence-dir="${{{{ runner.temp }}}}/ci-evidence/{label}"' in run
     assert node == ["python scripts/run_tests.py --node"]
 
@@ -1232,6 +1234,24 @@ def test_ui_browser_installs_bound_each_download_below_their_step_ceiling(browse
     job = _workflow(workflow)["jobs"][job]
     ceilings = [step.get("timeout-minutes", 0) for step in job["steps"]]
     assert sum(ceilings) < job["timeout-minutes"]  # the job ceiling never cancels the evidence steps first
+
+
+def test_the_post_merge_browser_check_bounds_its_install_and_every_step_below_its_job(browser_install):
+    """The pilot's install (post-merge-browser.yml) waits on the same mirrors with three-minute attempts: its three
+    bounded stages take at most 19.5 minutes and leave its ceiling eight more for dpkg; every step has a ceiling, and
+    each job's is above their sum plus ten minutes, so a step's own ceiling ends first and the evidence is uploaded."""
+    install = _steps("post-merge-browser.yml", "check")["install_browsers"]
+    assert install["run"] == ("python -I -S scripts/ci_browser_install.py --attempt-seconds 180 --pinned-node "
+                              "--pinned-chromium chromium webkit")
+    assert install["env"] == {"PLAYWRIGHT_BROWSERS_PATH": "${{ runner.temp }}/ui-browsers"}
+    attempt = float(install["run"].split("--attempt-seconds ")[1].split()[0])
+    bounded = 3 * browser_install.ATTEMPTS * (attempt + 3 * browser_install.STOP_GRACE_SEC)
+    assert bounded <= 20 * 60 and install["timeout-minutes"] * 60 - bounded >= 8 * 60
+    for name in BROWSER_CHECK_JOBS:
+        job = _workflow("post-merge-browser.yml")["jobs"][name]
+        ceilings = [step.get("timeout-minutes") for step in job["steps"]]
+        assert all(type(ceiling) is int and ceiling > 0 for ceiling in ceilings), name
+        assert job["timeout-minutes"] >= sum(ceilings) + 10, (name, job["timeout-minutes"], sum(ceilings))
 
 
 def test_every_ubuntu_browser_install_is_the_bounded_one():

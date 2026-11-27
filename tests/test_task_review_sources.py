@@ -287,13 +287,9 @@ def test_task_bound_saved_skill_export_matches_detail_and_bridge_prefix(tmp_path
 
 
 def test_history_contract_publishes_the_actual_response(tmp_path):
-    from pathlib import Path
-    from typing import get_type_hints
-
     from ouroboros.gateway import contracts
     from ouroboros.gateway.contracts import TaskReviewHistoryResponse
     from ouroboros.gateway.schema import contract_document, validate_ingress
-    from tests.test_gateway_parity import _js_typedef_fields
 
     saved_review(tmp_path)
     with client_for(tmp_path) as client:
@@ -301,8 +297,6 @@ def test_history_contract_publishes_the_actual_response(tmp_path):
     assert validate_ingress(response, TaskReviewHistoryResponse) == []
     assert "TaskReviewHistoryResponse" in contract_document()["schemas"]
     assert "TaskReviewHistoryResponse" in contracts.__all__
-    js = (Path(__file__).resolve().parents[1] / "web/modules/api_types.js").read_text()
-    assert _js_typedef_fields(js, "TaskReviewHistoryResponse") == set(get_type_hints(TaskReviewHistoryResponse))
 
 
 def test_saved_skill_download_through_real_launcher_and_http(tmp_path, monkeypatch):

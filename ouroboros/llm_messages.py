@@ -60,9 +60,11 @@ def project_wire_messages(messages, *, delivery_marks=False):
     Opaque strings and unknown provider fields are never interpreted or rewritten.
     """
     hidden = HOST_ONLY_MESSAGE_KEYS - (DELIVERY_MESSAGE_KEYS if delivery_marks else frozenset())
-    def project(value):
+
+    def project(value, parent=None):
         if isinstance(value, dict):
-            return {key: project(child) for key, child in value.items() if key not in hidden}
+            return {key: copy.deepcopy(child) if parent == "function" and key == "arguments" else project(child, key)
+                    for key, child in value.items() if key not in hidden}
         if isinstance(value, (list, tuple)):
             return [project(child) for child in value]
         return value
@@ -652,3 +654,23 @@ class _MessageShapingMixin:
         if cls._model_family(from_model) == cls._model_family(to_model):
             return prepared
         return cls._strip_openrouter_roundtrip_metadata(prepared)
+
+
+def shown_content(message: Dict[str, Any]) -> Any:
+    """A row's content as a reader outside its own route sees it (a source view, a renewed view's prose). An
+    assistant's history bytes that also hold its lane's reasoning show the lane's display text (``DISPLAY_KEY``, even
+    empty); its blocks show without those a route switch drops (``_strip_openrouter_roundtrip_metadata``: reasoning
+    blocks, a stray signature) and without a thought part (``thought`` true: display reasoning, as
+    ``extract_display_reasoning`` reads it), the others, an untyped part included, in their order. Any other content
+    stands as it is. The row, the exact source its replay and restore read, is never changed."""
+    content = message.get("content")
+    if message.get("role") != "assistant":
+        return content
+    display = message.get(DISPLAY_KEY)
+    if isinstance(display, dict):
+        return display["text"] if isinstance(display.get("text"), str) else ""
+    if not isinstance(content, list):
+        return content
+    projected = _MessageShapingMixin._strip_openrouter_roundtrip_metadata([{"role": "assistant", "content": content}])
+    blocks = projected[0]["content"]
+    return [block for block in blocks if not (isinstance(block, dict) and block.get("thought") is True)]

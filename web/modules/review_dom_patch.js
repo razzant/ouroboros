@@ -26,7 +26,7 @@ const shownNodes = (parent) => Array.from(parent?.childNodes || parent?.children
 
 function syncReviewAttributes(current, desired, preserve = new Set()) {
     for (const attr of Array.from(current.attributes || [])) {
-        if (!preserve.has(attr.name) && !desired.hasAttribute(attr.name)) {
+        if (!preserve.has(attr.name) && !desired.hasAttribute(attr.name) && !attr.name.startsWith('data-scroll-')) {
             current.removeAttribute(attr.name);
         }
     }

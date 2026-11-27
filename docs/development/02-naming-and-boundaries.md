@@ -1,365 +1,119 @@
 # Naming and boundaries
 
-This chapter owns the rules that keep the body legible from outside: naming and
-dependency direction, the CLI contract, cognitive quality and LLM-first affordances,
-where a fact may live in the two books, the anti-patterns behind real incidents,
-external facts and provider independence. Each rule names what enforces it or says
-that only review does, and points to ARCHITECTURE for mechanism.
+Rules keeping the body legible from outside: naming, dependency direction, CLI contract, cognitive quality, LLM-first affordances, book placement, incident anti-patterns, external wire facts and provider independence. Each rule names its enforcement or marks it review-only and cites ARCHITECTURE for mechanism.
 
-- Code, comments, docstrings, commit messages and product UI strings are English source
-  copy; a non-English owner reads the install's translation memory, never a repository
-  locale file (ARCHITECTURE §10 invariant 29).
-- PEP 8 names (`snake_case`, `PascalCase`, `UPPER_SNAKE_CASE`) that say the observable
-  responsibility and authority, not the implementation fashion; a function module over
-  a class with no lifecycle.
-- Contracts are typed shapes, not service objects; a manager needs lifecycle or mutable
-  state. Tools stay thin `{verb}_{noun}` functions (validate input, call the owner,
-  format a result); no universal `{Domain}Service`, `{Platform}Gateway` or class layer.
-- Dependency direction: UI/CLI → inbound gateway → domain owner; runtime policy →
-  host-owned contract → outbound adapter (ARCHITECTURE §1 "Gateway Boundary v1"). Provider- and
-  transport-specific decisions never flow back into core policy.
-- Chat authorship is stamped by the producer and survives persistence and replay; never
-  infer it from text or promote host-selected intermediate output to a model final
-  (`tests/test_terminal_provenance.py`).
+- English only in code, comments, docstrings, commits and UI strings; non-English installs use translation memory, never repo locale files (ARCHITECTURE §10 invariant 29).
+- PEP 8 names (`snake_case`, `PascalCase`, `UPPER_SNAKE_CASE`) matching observable authority. Prefer function modules over stateless classes: contracts are typed shapes, managers require lifecycle/mutable state, and tools stay thin `{verb}_{noun}` wrappers (validate input, call owner, format result)—no universal `{Domain}Service`, `{Platform}Gateway` or class layer.
+- Dependencies run UI/CLI → inbound gateway → domain owner, and runtime policy → host-owned contract → outbound adapter (ARCHITECTURE §1 "Gateway Boundary v1"); provider/transport details never enter core policy.
+- Producers stamp chat authorship before persistence and replay; never infer it from text or promote host-selected intermediate output to a model final (`tests/test_terminal_provenance.py`).
 
-Enforcement: CHECKLISTS item 11 `development_compliance` (a)/(b); the "Guard extracted
-transport imports stay out of core" step in `.github/workflows/ci.yml`; the rest is
-review-only.
+Enforcement: CHECKLISTS item 11 `development_compliance` (a)/(b); `.github/workflows/ci.yml` "Guard extracted transport imports stay out of core"; rest review-only.
 
 ### CLI and headless work
 
-- CLI commands parse, call the existing gateway/scheduler and render text or typed
-  JSON/JSONL/SSE; no second task state machine, scheduler or generic file manager
-  (ARCHITECTURE §1 "CLI / Headless Boundary").
-- An external workspace binding changes the contextual repository
-  (`ToolContext.active_repo_dir()`), never the system repository governance binds to;
-  every resource address goes through the one resolver guards and handlers use, and a
-  relative path is never sanitized before an outside address is refused.
-- Project focus changes the default target, not the tool surface: advisory, reviewed
-  commit, rollback, promotion, restart and runtime control keep their
-  system-repository contracts;
-  GitHub tools default to the focused folder's repository over ambient `GH_REPO`
-  (`ouroboros/tools/github.py`).
-- A process cwd decides relative paths, not the root task's write authority; semantic
-  permission is never reconstructed from command words or guessed effects
-  (ARCHITECTURE §6 "Safety and runtime mode"). No SSH or OS sandbox is promised.
-- Credential authority is never inferred from a directory name, nor owner input refused
-  on a suffix or word inside a file name (dotenv spellings are the one tail rule):
-  owner credential locations are the physical list
-  `credential_shapes.owner_credential_locations` (ARCHITECTURE §6 "Credential mutation
-  and diagnostic redaction").
+- CLI commands parse input, call the shared gateway/scheduler and emit text or typed JSON/JSONL/SSE—no second state machine, scheduler or file manager (ARCHITECTURE §1 "CLI / Headless Boundary").
+- External workspaces change `ToolContext.active_repo_dir()`, never governance's system repo; every path crosses the single guard/handler resolver, refusing outside relative paths before sanitizing.
+- Project focus sets only the default target (`ouroboros/tools/github.py` prefers it over ambient `GH_REPO`); advisory, reviewed commit, rollback, promotion, restart and runtime control keep system-repo contracts.
+- Process cwd resolves relative paths, never write authority; never infer permission from command words or guessed effects (ARCHITECTURE §6 "Safety and runtime mode"), nor promise an SSH/OS sandbox.
+- Credential authority comes solely from `credential_shapes.owner_credential_locations` (ARCHITECTURE §6 "Credential mutation and diagnostic redaction"), never directory names; never refuse owner input on filename suffixes or words (dotenv spellings are the sole tail rule).
 
-Enforcement: `tests/test_headless_cli.py`, `tests/test_external_workspace_access.py`;
-the no-second-scheduler rule is review-only. Mechanics: ARCHITECTURE §6 "Tool
-capability and execution".
+Enforcement: `tests/test_headless_cli.py`, `tests/test_external_workspace_access.py`; no-second-scheduler review-only; mechanics: ARCHITECTURE §6 "Tool capability and execution".
 
 ### Cognitive quality
 
-Never lower model quality, reasoning effort, output budget or context breadth as an
-incidental latency or cost optimization (BIBLE P1). An intentional narrowing is a
-recorded decision carried in plan, docs, tests and evidence, under the authority BIBLE
-P1 assigns. Review-only: CHECKLISTS items 10 and 7, whose named failure class is an
-accidental narrowing.
+Never lower model quality, reasoning effort, output budget or context breadth for latency or cost; intentional narrowing requires recorded plan, docs, tests and evidence under BIBLE P1. Review-only: CHECKLISTS items 10 and 7 (accidental narrowing).
 
 ### LLM-first affordances
 
-Never repair a semantic tool-choice failure with one more keyword hint in
-`prompts/SYSTEM.md`. A model mistake alone does not justify a new host contract:
-establish a missing capability or piece of information, or an independently valid
-requirement, then repair the schema or affordance at the point of need. Never freeze
-the model's reasoning, dialogue representation or collaboration strategy to make one
-incident testable: SYSTEM accretion overfits incidents, bloats the prefix and forks authority.
+Never fix semantic tool-choice mistakes with `prompts/SYSTEM.md` keyword hints or freeze reasoning, dialogue or collaboration for testability—SYSTEM accretion overfits incidents, bloats the prefix and forks authority. Prove a missing capability, info gap or independent requirement, then fix the schema or affordance at point of need.
 
-Whether, when and how often to tell the owner, retry, wait or substitute is the prompt's
-and model's judgment; a threshold, timer or counter standing in for it is the if-else
-selection BIBLE P5 forbids, whoever proposes it, while numbers still bound physical,
-safety, budget, transport and evidence expiry. A missing channel is a capability gap:
-`send_user_message(destination="main")` gives a registered Project root or a
-host-attested owner-origin root a Main voice; no chat number, Main's included, is owner
-proof.
+Notifying the owner, retrying, waiting or substituting is model/prompt judgment, never thresholds, timers or counters, whoever proposes them (BIBLE P5); numbers bound physical, safety, budget, transport and expiry limits only. `send_user_message(destination="main")` gives registered Project or host-attested owner-origin roots a Main channel; no chat id, Main's included, proves owner identity.
 
-`prompts/SYSTEM.md` is tier-0 for every Main and task profile in every context mode. It
-carries how Ouroboros decides: identity and tone, the decision loop, judgment across
-capabilities, prohibitions and safety invariants stated once, and the memory contract
-(ARCHITECTURE §6 "Durable memory and project focus"). A missing carrier stays a visible gap.
-How one capability works (parameters, recipes, statuses, costs, recovery steps, a surface's
-quirks) lives where its actor reads it before the choice it informs: the schema lead that
-survives the route's projection, the typed result or refusal at the moment of need, or host
-text rendered only while the capability is on (a Runtime field, a role note, the connection
-map, a task-contract field). A lead may say when its own tool fits; other host text, prose
-rendered from code included, states facts and an assigned role's duties, never which choice
-to make. SYSTEM.md is the last home: a clause about one capability stays only while the
-thinnest supported request (a Nano selection, a projection without parameter prose, a child
-without the books) would reach that choice without it, and the commit names the missing
-carrier. A new tool needs no SYSTEM.md mention; a removal names the line its reader still
-reads. Every prompt change reports its before/after byte size and what a behaviour check
-showed, or that none was run, in the commit or PR.
+`prompts/SYSTEM.md` (tier-0 across profiles/modes) holds how Ouroboros decides: identity/tone, decision loop, cross-capability judgment, once-stated prohibitions/safety invariants and the memory contract (ARCHITECTURE §6 "Durable memory and project focus"):
 
-Recoverable tool failures are evidence for the next model turn, not triggers for a
-host-authored recovery workflow: return a typed, redacted result naming the failed
-stage, the completed external effects and a repair hint, and let the model decide; host
-code owns deterministic integrity, authority boundaries and truthful receipts only.
-A value meaning what omission means, or a key outside the schema its handler names with one
-meaning, takes that meaning, disclosed in the result; a value asking for more, or a key with two
-readings, is refused typed by the earliest layer entitled to judge it, naming field, value and repair
-in one reply, as restated rules invite unchanged retries (`tools/arg_feedback`).
+- Put capability mechanics (parameters, recipes, statuses, costs, recovery, quirks) at the choice site: surviving schema leads (the only host text that may recommend its own tool), typed results/refusals, or conditional host text (code-rendered prose included, stating facts and role duties only, never which choice to make).
+- Keep a capability clause in `SYSTEM.md` only as last home while the thinnest supported request (Nano, parameter-prose-free projection, bookless child) cannot choose without it, leaving missing carriers visible and naming the gap in the commit. New tools need no mention; removals name the line readers still read. Every prompt change reports before/after byte size and behaviour-check outcome (or that none ran) in the commit or PR.
 
-A producer that knows its call failed publishes that fact typed
-(`tool_result._publish_tool_result`, or a first-line `⚠️ IDENTIFIER`): identifier-less
-`⚠️ prose` and bare `ERROR: ...` are recorded as a successful call in `tools.jsonl`, the
-outcome classifier and the result subject, hiding the failure from the next decision.
-A wrapper carries its inner producer's failure forward, and a
-supervising wake is acknowledged on the published `supervision_wake_id`, never on the
-tool's name (ARCHITECTURE §6 "Delegated subagents").
+Recoverable failures are next-turn evidence, never host recovery workflows: return a typed redacted failure naming stage, completed effects and repair hint (host owns deterministic integrity, authority boundaries and truthful receipts only). Values meaning omission, or single-meaning extra keys, take that path and disclose; values asking for more or ambiguous keys refuse typed at the earliest entitled layer, naming field, value and repair in one reply—restated rules invite unchanged retries (`tools/arg_feedback` docstring).
 
-Enforcement: CHECKLISTS item 14(a) scores the prompt-edit discipline;
-`tests/test_typed_tool_refusals.py` is the shrink-only source lint over returned
-literals in `ouroboros/tools/`, its per-file allowlist the disclosure of the
-identifier-less residual; the owner-judgment and recoverable-failure boundaries are
-review-only.
+Producers publish known failures typed (`tool_result._publish_tool_result` or leading `⚠️ IDENTIFIER`); identifier-less `⚠️ prose` or `ERROR: ...` records as success in `tools.jsonl`, outcome classifier and result subject, hiding failures. Wrappers preserve inner failures; supervising wakes ACK `supervision_wake_id`, never tool name (ARCHITECTURE §6 "Delegated subagents").
+
+Enforcement: CHECKLISTS item 14(a); `tests/test_typed_tool_refusals.py` (shrink-only lint over `ouroboros/tools/` literals; per-file allowlist discloses the identifier-less residual); owner-judgment and recoverable-failure rules review-only.
 
 ### Documentation contract
 
-`docs/ARCHITECTURE.md` is the present-tense map of the body in BIBLE P6's three layers:
-what exists and where, how it flows, why. `docs/DEVELOPMENT.md` is how the body is
-changed: one rule per change class, each naming its invariant's home (the home test or
-the product owner, never a test file per rule), gate or CI lane, or saying review-only. ARCHITECTURE, CHECKLISTS, BIBLE, DESIGN and `config.py` are pointed
-to, never restated; the ARCHITECTURE settings and endpoint tables are test-checked
-registries of those owners, not second authorities.
+`docs/ARCHITECTURE.md` is the present-tense BIBLE P6 map (what/where, flows, why); `docs/DEVELOPMENT.md` states one rule per change class, naming its invariant home (home test or owner, never one test file per rule), gate/CI lane or review-only. Cite ARCHITECTURE, CHECKLISTS, BIBLE, DESIGN and `config.py` instead of restating them; ARCHITECTURE's settings and endpoint tables are test-checked registries, not second authorities.
 
-Prose belongs in a book when needed to locate a mechanism, preserve an invariant
-other code relies on, or recover its WHY. A `§1` module-tree row is one line: address, capability, cross-module grep targets
-and `(§N)` pointer; the owning subsection keeps the rationale. Internal call/guard
-order, locks, fields, edge cases and typed refusals belong in code, docstrings or tests.
-Replace the touched node's description; keep release history in git and README.
-State a limitation once where it prevents a wrong action; other follow-ups are issues.
-Decision codes, chat-batch answers and reviewer-round labels belong in commits or PRs.
-An open limitation may cite `(issue #NNN)` once; probe dates and measurements belong
-only in "External facts: unknown is not no". Keep the chapter's H1 introduction,
-its compact Low/Nano view, correct when the chapter changes.
+Keep prose that locates mechanisms, preserves cross-code invariants or gives WHY: `§1` module-tree rows stay one line (address, capability, cross-module grep targets, `(§N)` pointer) while subsections hold rationales. Replace touched descriptions, keep chapter H1 intros (Low/Nano view) accurate, and place other material by kind:
 
-Track assets with a continuing purpose (product, contributors, verification, legal
-requirements, evidence for public claims). Plans, campaign backlog, review packets and
-run receipts belong in the external work area or durable task evidence, not the
-tracked tree; a test preserving their presence gives them no product role. Retire
-campaign tooling when its purpose ends. Name a new test module for the behaviour or
-owner it protects, not a round, batch, issue, PR or version. Review enforces this,
-without automatic deletion or filename matching. A test module is not imported by
-another test module; shared fixtures live in `tests/_*.py` helpers, which select their
-importers in the commit gate.
+- Code, docstrings, tests: internal call/guard order, locks, fields, edge cases, typed refusals.
+- Git/README: release history; commits/PRs: decision codes, batch answers, reviewer-round labels.
+- Issues: follow-ups; state a limitation once where it prevents wrong action (open ones may cite `(issue #NNN)`).
+- Probe dates and measurements: only where "External facts: unknown is not no" puts them.
 
-Both are reference books: an entrypoint plus one chapter file per subject under
-`docs/architecture/` or `docs/development/`. An entrypoint holds its H1, one introduction
-and the ordered `## Chapters` list, the one membership list, and no fact of its own (Low
-and Nano read it whole); every chapter carries one authored introduction under
-its H1 (an H1 followed straight by a subsection is refused); moved prose replaces the
-description at its destination; `.gitattributes` pins `docs/**/*.md` to LF so the
-digests and byte offsets in source refs and inventories stay stable; readers ask for a
-view, not a file (`load_governance_doc` composes, `context_layout.book_navigation`
-navigates, `reference_books.book_path_role` classifies,
-`tests/_governance_docs_shared.py` is the one reader tests use, because an entrypoint
-`read_text()` substring pin passes vacuously).
+Track only continuing-purpose assets (product, contributors, verification, legal, public-claim evidence); keep plans, backlogs, review packets and run receipts in the external work area or durable task evidence, not git (presence tests confer no product role) and retire finished campaign tooling. Name new test modules by behaviour or owner, never round, batch, issue, PR or version (review-enforced; no auto-delete or filename matching). Never cross-import test modules; share fixtures in `tests/_*.py`, which select importers in the commit gate.
 
-Enforcement: `tests/test_reference_book_validation.py` validates book shape; whether an
-entrypoint states a fact of its own is review judgment (CHECKLISTS `architecture_doc`). The shrink-only residue check (including Cyrillic) is
-`tests/test_docs_sync.py::test_resident_docs_residue_only_shrinks`.
+Each book pairs an entrypoint (H1, intro, flat ordered `## Chapters` list, no own facts since Low/Nano read it whole) with one chapter per subject under `docs/architecture/` or `docs/development/` (authored H1 intro required—H1 directly before a subsection fails). `.gitattributes` pins `docs/**/*.md` to LF for stable digests/offsets. Readers use `load_governance_doc`, `context_layout.book_navigation`, `reference_books.book_path_role` and `tests/_governance_docs_shared.py`, never `read_text()` (entrypoint substring pins pass vacuously). Enforcement: `tests/test_reference_book_validation.py`; review judges entrypoint facts (`architecture_doc`); `tests/test_docs_sync.py::test_resident_docs_residue_only_shrinks` (Cyrillic included).
 
-Size is pairwise: a change ends each composed book, entrypoint included,
-`BIBLE.md` and the prompts (`prompts/*.md` as one text) no larger than at its
-event base; what it adds is paid in the same text by a statement that leaves, never by a
-lost fact (03 "Paying down a size cap"). No other document is under this rule, DESIGN and
-PERSISTENCE included. With
-ordinary push/PR CI disabled (ARCHITECTURE §8), manual/tag runs lack a
-per-change base and skip this comparison. Local qualification supplies
-`OURO_SIZE_RATCHET_BASE_REF` explicitly; review checks the actual
-contribution. The owner's `book-growth` label can exempt it. Local surfaces
-never block: the edit tools, `plan_task`, the free
-`preflight_review(deterministic_only=True)` diagnostic and `codebase_health`
-report the balance as a fact.
+Pairwise size rule: changes leave composed books (entrypoint included), `BIBLE.md` and `prompts/*.md` (as one text) no larger than event base, paying additions in the same text by cutting obsolete or duplicated prose, never losing a fact (DEVELOPMENT 03 "Paying down a size cap"); no other doc, DESIGN and PERSISTENCE included, is covered. With push/PR CI disabled, manual/tag runs lack a per-change base and skip comparison (ARCHITECTURE §8); local checks pass `OURO_SIZE_RATCHET_BASE_REF`, review checks contribution, owner `book-growth` exempts, and edit tools, `plan_task`, `preflight_review(deterministic_only=True)` and `codebase_health` report balance without blocking.
 
 ### Generality and emergence (P13)
 
-Non-trivial changes patch cases, solve their class or build speculative frameworks.
-The first fossilizes, the third invents cases; aim for the second. The burden is
-symmetric: shared structure needs a
-demonstrated invariant (several real variants, or one already-stable boundary), an
-abstraction needs a real class, and an imagined consumer is not one. In doubt,
-generalize the meaning and the authority, keep the mechanism minimal and local, and let
-the next real case pay. Reviewer findings are evidence here, never policy. Review-only.
+Non-trivial changes patch cases, solve their class or build speculative frameworks: avoid the first (fossilizes) and third (invents cases). Shared structure needs a demonstrated invariant or stable boundary; imagined consumers are not a class. In doubt, generalize meaning and authority while keeping mechanism minimal and local until a second real consumer arrives. Reviewer findings are evidence, never policy. Review-only.
 
 ### Pricing and admission
 
-Never add hand-maintained model-price tables, inherited prefix tariffs or numeric
-fallback prices: they go stale silently and look authoritative. Preserve `cost=None`
-and `cost_final=false` when no live source answers the exact route; unknown price is
-neither free nor a model-admission veto, and a known exhausted budget stays enforceable
-(`tests/test_pricing.py`, `tests/test_budget_limits.py`; ARCHITECTURE §6 "Budget
-tracking"; its "External facts" row).
+Never add static model-price tables, prefix tariffs or numeric fallbacks—they go stale silently. Keep `cost=None` and `cost_final=false` until a live exact-route source answers; unknown price is neither free nor an admission veto, while known budget limits bind (`pricing.py`, `llm_pricing.py`, `tests/test_pricing.py`, `tests/test_budget_limits.py`; ARCHITECTURE §6 "Budget tracking").
 
 ### Anti-pattern: content-derived identity for host-minted records
 
-A host-minted record has its identity captured at ingress and passed downstream by
-value as a typed reference (`origin_message_ref`).
-Never re-derive it by searching logs or state for a row whose text hash, equality or
-prefix matches: text changes after ingress, so content lookup fails routinely.
-Content hashes stay legitimate as an
-integrity check on a known identity and as content-addressing where the content is the
-identity. Enforce the reference as a required typed argument at the consuming seam (a
-valid ref or a closed-enum absence reason; omission raises), so no call site can skip it
-(`bind_task_to_project(..., *, origin)`, `tests/test_projects_v6640.py`); for fuzzy
-entities use `semantic_dedup`, never string equality. An origin records provenance,
-not shared work identity: moving one task does not move siblings from the same
-message (ARCHITECTURE §6 "Project placement"; `tests/test_one_work_placement.py`).
+Capture host-minted record identity at ingress and pass it by value (`origin_message_ref`), never re-querying text hashes, equality or prefixes, which post-ingress edits break (content hashes remain valid for integrity checks or content-addressing only). Consuming seams require the typed ref or closed absence enum, raising on omission (`bind_task_to_project(..., *, origin)`, `tests/test_projects_v6640.py`); use `semantic_dedup` over string equality for fuzzy entities, but distinguish shared work identity from provenance: moving one task moves no siblings from its message (ARCHITECTURE §6 "Project placement"; `tests/test_one_work_placement.py`).
 
-One named exception: a verification receipt with no ingress point reconciles by one
-typed identity key, never across kinds, because per-component fallbacks are
-order-dependent, not an equivalence relation; keying fails safe
-(`ouroboros/_outcome_receipts.py`, `tests/test_v678_receipt_reconciliation.py`). Four
-rules generalize: whatever decides is what is reported, through one shared projection;
-a property of a closed set of kinds lives in the set, with a total lookup that raises
-on a kind that skipped it; one canonical identity derivation (canonicalize → render →
-bound) feeds comparison, hashing, counting and projection alike; a stored rendering
-changes only with a version, reasoned in both directions, because unknown must not
-clear a red. Review-only.
+Exception: ingress-less verification receipts reconcile by one typed `(kind, value)` key, never cross-kind, since per-component fallbacks are order-dependent, not an equivalence relation; keying fails safe (`ouroboros/_outcome_receipts.py`, `tests/test_v678_receipt_reconciliation.py`). Generalizing rules (review-only): report via the deciding projection; keep closed-kind properties in total lookups raising on gaps; drive comparison, hashing, counting and projection from one canonical derivation; version stored rendering changes and reason both ways, since unknown must not clear a red.
 
 ### Anti-pattern: an open default behind a closed exception list
 
-Never reconstruct a producer-owned classification inside a consumer through a second
-exception list: "on by default, except for these names" keeps the real rule in a list
-that can only go stale, while the host already
-carries that fact as a typed routing annotation. Derive presence from what the record
-holds (`web/modules/chat.js::blockVisible`), let the host name the special case from
-the one table it owns (`tool_capabilities.ROUTING_VERBS`, stamping `routing_action`,
-`routing_tool_calls` and `typed_routing_action`) and compose the owner sentence from
-its typed reason (`project_dialogue.routing_refusal_cause`), printed verbatim by the
-browser (ARCHITECTURE §3 "Chat and Projects"). A closed vocabulary that defines a rule
-at its owner is correct:
-`tool_capabilities.OBSERVE_WORLD_MUTATION_TOOLS` names the verbs that start work or
-change the world, so a new read tool reaches Observe by default (ARCHITECTURE §6
-"Background consciousness and Evolution").
+Never rebuild producer classification in consumers with "on by default except these names" lists, which go stale silently. Derive presence from what the record holds (`web/modules/chat.js::blockVisible`), stamp special verbs from the owner table (`tool_capabilities.ROUTING_VERBS` → `routing_action`, `routing_tool_calls`, `typed_routing_action`) and render typed reasons verbatim (`project_dialogue.routing_refusal_cause`; ARCHITECTURE §3 "Chat and Projects"). Owner-side closed vocabularies (`tool_capabilities.OBSERVE_WORLD_MUTATION_TOOLS`) remain valid because new read tools default cleanly to Observe (ARCHITECTURE §6 "Background consciousness and Evolution").
 
 ### Task-authored messages are never owner text
 
-Who is speaking through a routing act is one fact the host mints by value
-(`control_routing._routing_issuer`); never derive it again from a proxy (a routing
-contract only chat turns carry, an empty client id, the event's chat id, the conversation
-lane a consciousness wake-up also runs on) and never give the model an argument for it.
-A task's own words travel as `KIND_TASK_MESSAGE` with provenance `independent_task`,
-never as `KIND_OWNER_TEXT`; the value lands at three seams in one change
-(`owner_mailbox.TASK_MESSAGE_PROVENANCES`, `deliver_task_message`,
-`loop_round_limits`) and enters no owner corpus (`owner_source_sha256`, the result review's
-ask), because it would let a task author its own request
-(`tests/test_task_authored_messages.py`; ARCHITECTURE §6 "Owner routing verbs"). The converse holds: a host-held owner row stays my human's wherever the host carries it in a tree, by possession of its ingress row, never because a task's text says so; to a receiver it is not addressed to, it is context and precedence, never acceptance criteria or a reply debt; an addressed live task that cannot receive the exact row at its next input boundary is an incomplete implementation (`tests/test_helper_owner_words_flow.py`).
+Host code mints routing speaker identity by value (`control_routing._routing_issuer`); never re-derive it from chat-only contracts, empty client ids, chat ids or lanes, or expose it as a tool argument.
 
-A card's question, option labels and details are the asking task's text; a press without
-words is my human's act, never their words, while words typed beside it stay theirs
-verbatim (`tests/test_press_is_an_act.py`; ARCHITECTURE §6 "Owner routing verbs"). Every
-account (a working-view note, plan, brief, card label) carries its author and
-write time, or "not recorded", and never reaches a reader as a person's words (notes:
-`context_compaction.note_written`). A host frame states who, when and by what route, never
-how to read: what a person meant is theirs to settle. The rest is review-only.
+- Task speech uses `KIND_TASK_MESSAGE` (`independent_task`), never `KIND_OWNER_TEXT`, across `owner_mailbox.TASK_MESSAGE_PROVENANCES`, `deliver_task_message` and `loop_round_limits` and outside owner corpora (`owner_source_sha256`), blocking self-authored asks (`tests/test_task_authored_messages.py`; ARCHITECTURE §6 "Owner routing verbs").
+- Host-held owner rows stay my human's across the tree by ingress possession, never task text's say-so: context/precedence for non-addressed targets (never acceptance criteria or reply debt), delivered verbatim to addressed live tasks at their next input boundary (`tests/test_helper_owner_words_flow.py`).
+- Card questions, options and details belong to the asking task; wordless presses are acts, not owner words, while typed comments stay verbatim (`tests/test_press_is_an_act.py`). Accounts (notes, plans, briefs, labels) carry author and timestamp (or `"not recorded"`; `context_compaction.note_written`), never posing as a person's words; host frames state who/when/route without interpreting intent—what a person meant is theirs to settle. Rest review-only.
 
 ### The owner corpus archives inputs; the owner door's stamp is the only authority
 
-A task-authored objective copies only its retained owner corpus, never the draft. Other
-runs record their first user turn for the corpus and Safety, labelled by what the host
-knows (`loop_messages._initialize_owner_directives` names each label). `dialogue_provenance.run_origin`
-mints the stamp once from typed fields (`owner_ingress`): a turn the door stamped, never
-a lane, a client id or an inherited stamp; it is reserved on `/api/tasks` and schedule
-templates. No label decides what work was accepted; the contract and the owner's answers do.
+Task-authored objectives copy only the retained owner corpus, never drafts; other runs log their first user turn for the corpus and Safety, labelled by host facts (`loop_messages._initialize_owner_directives`). `dialogue_provenance.run_origin` stamps `owner_ingress` once from door-stamped turns—never lanes, client ids or inherited stamps—and that stamp is reserved on `/api/tasks` and schedule templates; accepted work follows the contract and owner answers, never labels.
 
 ### Anti-pattern: a chat id tested for truth
 
-A chat id is a value, not a boolean: `HIDDEN_CHAT_ID` (0) is a real destination, the
-hidden partition; absence is `None`; a negative id is synthetic A2A traffic.
-`if chat_id:` drops a partition-bound notice and re-routes hidden work to the owner's
-main chat. Use the two normalizers, never a third:
-`message_bus.notification_chat_route` for where a notice goes,
-`message_bus.coerce_chat_identity` for a row's address. Address a task once at
-admission (`log_addressing.ingress_chat_id`) and pass the value downstream; task type
-is never source provenance. Admission contract and partition: ARCHITECTURE §5 and §12.
-Enforcement: `tests/test_chat_id_truthiness_guard.py`, the source lint whose allowlist
-is where a deliberate exception states its reason.
+Chat ids are typed values, not booleans: `HIDDEN_CHAT_ID` (`0`) is the hidden partition, `None` is absence, negative ids are synthetic A2A traffic, so `if chat_id:` misroutes hidden notices to Main. Use only `message_bus.notification_chat_route` (routing) and `message_bus.coerce_chat_identity` (row addresses), stamping `log_addressing.ingress_chat_id` once at admission (never inferring provenance from task type; ARCHITECTURE §5, §12). Enforcement: `tests/test_chat_id_truthiness_guard.py` (allowlist states each exception's reason).
 
 ### External facts: unknown is not no
 
-Model/provider inputs, capacity, prices, ids and availability change independently.
+Inputs, capacity, prices, IDs and availability change independently. Use exact-route metadata, refusals, dated wire probes or explicit owner settings; never infer from names, prefixes, families or other routes. Unknown leaves inputs, tools and explicit requests intact. Disclose wire changes and preserve saved choices. Repair the refused attempt; durable absence requires scoped evidence. Identify Ouroboros's own transport limits to the model at the enforcing lane.
 
-1. Use exact-route metadata/refusals, dated probes beside provider-keyed wire
-   projections with recovery, or owner settings; never infer from names, prefixes,
-   families or another route's catalog.
-2. Unknown is not no: pass input, tools and explicit requests unchanged. Unevidenced
-   literals cannot drop input, refuse tools, rewrite saved choices or narrow requests.
-3. A refusal describes one request; repair that attempt. Durable absence needs scoped evidence.
-4. Declare our transport limits at their lane and name them to the model as Ouroboros's.
-5. Retained wire facts below keep source/date, exact scope and both stale risks;
-   requested, sent and provider-reported values remain distinct.
+Keep a wire exception's source, date if known, exact scope, evidence kind (live or docs-only), recheck and risks of stale support and stale absence at the code that enforces it. Read that record before editing. Distinguish requested, sent and provider-reported values. Provenance grants no runtime authority.
 
-Guards: `tests/test_image_capability_contract.py` preserves unseen models' images;
-`tests/test_model_name_invariance.py` checks name-independent unevidenced payloads
-(exceptions below); `tests/test_tristate_truthiness_guard.py` forbids truth-testing
-tri-state facts. Provenance grants no runtime authority; cited docstrings/contracts hold probes.
+Remember a cache-hint refusal only after the repaired call succeeds, for that route profile until expiry (`request_wire_recovery.py`). Direct Z.ai sends requested `medium` as `high` (`reasoning_effort_clamped`); success tests `high`, not `medium`. Omitting the tier on GLM-5.3 can bill at max.
 
-| Location | Fact | Evidence & re-probe | If stale |
-|---|---|---|---|
-| `ouroboros/tools/imagegen.py`; `ouroboros/gateways/image_api.py` | Image wire facts | [Dated sources](../IMAGE_GENERATION.md#direct-api-contracts); re-check each exact route | Stale positives refuse requests; negatives hide capability |
-| `ouroboros/opencode_go.py` | Go Chat URL: own User-Agent, `x-opencode-session` per conversation | [Go](https://opencode.ai/docs/console/go/#where-can-i-use-it), 2026-11-18, docs only; recheck a real tool exchange | A missing ID can refuse a send; a shared one can mix conversations |
-| `ouroboros/llm_attempt.py::supports_message_cache_control` | Cache markers OpenRouter accepts or translates (`anthropic/`, `google/gemini-`, `openai/`) | `openai/`: OpenRouter caching guide in docstring, no live probe; re-probe before widening | False positive invalidates a request; false negative loses the prompt cache |
-| `ouroboros/request_wire_recovery.py` | A compatible route refuses a cache hint | Its refusal after a repaired success, 14 days per route profile | A fixed server regains hints at expiry |
-| `ouroboros/provider_models.py::MINIMAX_FLASH_EFFORT_ALIASES`, `ANTHROPIC_THINKING_OFF_TYPES` | Direct MiniMax-M3.1-Flash: low/medium/high/xhigh/max; absent=max, none=400. Direct Sonnet 5.5: none=`between_tools`, `disabled`=400 | [MiniMax](https://platform.minimax.io/docs/api-reference/text-openai-api.md), 2026-11-01, no live send; [Anthropic](https://platform.claude.com/docs/en/build-with-claude/thinking) and a live 400, 2026-11-16; recheck before widening | Removed: none fails; stale: new tiers rewritten |
-| `ouroboros/llm_attempt.py::openai_family_model` | OpenAI's public API checks caches only at message ends without an explicit breakpoint | Docstring probe; before widening, re-probe `cached_tokens` across two conversations, never a substring such as `gpt` | Stale positive moves a prefix-caching family's boundary; stale negative pays cold prefixes |
-| `ouroboros/transcript_prefix.py` | Anthropic prefix binding (Opus 5.5/Fable 5.1/Sonnet 5.5/Haiku 5.5): signed reasoning is bound to system/tools/history; accounts created from 2026-08-31 return 400 on mismatch, older log unless opted in. A prefix change retires signed `anthropic-*` blocks on all routes/accounts (owner decision 2026-10-21) | [Anthropic migration guide, Breaking change 3](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide#breaking-changes); direct Opus 5.5 probe 2026-10-21 | Re-probe exact route/account before edits; excess trust causes 400s, excess retirement loses reasoning |
-| `llm_routing.openrouter_chat_routing`, `processing_transport_modes` | OpenRouter `anthropic/`: `provider.require_parameters`; Ultra on router Chat or direct Responses | Endpoint `supported_parameters` (undated; `tests/test_model_name_invariance.py`); tier guides dated in the latter function | Excess filtering narrows failover; missing filters drop/refuse fields. Stale tiers hide usable choices or send unsupported ones |
-| `ouroboros/reasoning_artifacts.py::SIGNED_PORTABLE` and its sealed classifier | Which families' sealed reasoning artifacts survive a same-model cross-provider replay; readable artifacts are portable by shape | Vouched roster and shape-first classifier, fail-closed on unreadable artifacts; extend only by fresh cross-provider replay of that family | False positive 400s the replayed turn (strip-and-retry is the net); false negative pins a portable transcript to one endpoint |
-| `ouroboros/provider_models.py::_ANTHROPIC_MODEL_ALIASES` / `migrate_model_value` | Direct-provider id spelling compatibility | Shipped mapping; a catalog confirms a current id, never a saved spelling's intent; retire an alias only through a documented window | Removing an alias breaks upgrades; guessing one silently reroutes |
-| `ouroboros/server_runtime.py::_SHIPPED_LEGACY_HEAVY_DEFAULTS`, `_SCOPE_REVIEW_PRIOR_DEFAULTS`, `_normalize_direct_scope_review_model` | Only the retired Heavy/scope keys classify exact former Ouroboros defaults; active slots keep saved ids; no retired-model list exists | Release history, under regression tests; a catalog shows availability, never intent | Over-broad classification overwrites an owner's choice; a retired model fails loudly at first call |
-| `ouroboros/pricing.py::get_pricing`; `ouroboros/llm_pricing.py::fetch_openrouter_pricing` / `fetch_cloudru_pricing` | Exact-route model tariffs | Live catalog fetch with nullable unknowns; provider-settled usage wins | A stale static price corrupts admission |
-| `ouroboros/llm_claudexor.py::cache_key_for_model` | Codex prefix reuse across conversations needs one `prompt_cache_key` + `session_id`; per-conversation turn states stay valid under it | Docstring measurement; re-measure cache reads and turn state across two conversations before changing the scope | Stale positive pays cold prefixes or breaks turn state |
-| `ouroboros/llm_openai_compatible.py` DeepSeek send projection | Thinking accepts only `auto`/`none` tool choice; required and named calls return 400 | Probe beside the projection and its transport tests; re-probe the exact endpoint when the dialect changes | Removed early, forced calls break; kept after a change, supported thinking is suppressed |
-| `ouroboros/gateways/search_api.py::QUERY_MAX_CHARS` | DeepSeek Search query: 1..128 Unicode characters | Dated guide in the docstring; no live send | Too low refuses valid queries; too high gets 400s |
-| `ouroboros/provider_models.py::ZAI_REASONING_EFFORT_ALIASES` (Z.ai send projection) | GLM-5.3 accepts only `low`/`high`/`max`, serves an absent tier at max, cannot disable thinking, takes forced tool_choice with thinking on; GLM-5.2 accepts the wider scale | Probe beside the projection and its tests; re-probe when the enum or a GLM release changes | Dropping the projection bills every call at max; a stale one rewrites tiers the provider accepts |
-| `ouroboros/provider_models.py::PROVIDER_TOOL_SCHEMA_LIMITS` | Tool-schema ceilings per execution provider; an absent provider declares no ceiling | One bounded send of ceiling + 1 schemas to the exact route (the provider canaries); change a number only on a documented limit or such a send | Too high, requests above the ceiling are refused; too low or invented, overflow schemas leave the request needlessly (still loadable) |
+Guards: `tests/test_image_capability_contract.py` keeps images for unseen models; `tests/test_model_name_invariance.py` checks name-independent payloads absent evidence; `tests/test_tristate_truthiness_guard.py` bans implicit truth tests on tri-state facts; withhold input only on confirmed absence (`is False`).
+
+Where to look under `ouroboros/`:
+
+- Requests: [image contracts](../IMAGE_GENERATION.md#direct-api-contracts) (`tools/imagegen.py`, `gateways/image_api.py`), DeepSeek Search query limits (`gateways/search_api.py`), schema ceilings (`provider_models.py`). A shared Go session ID mixes conversations (`opencode_go.py`).
+- Cost and turn state: cache boundaries (`llm_attempt.py`), shared Codex prefixes with per-conversation turn state (`llm_claudexor.py`), live tariffs for cost and budget accounting (`pricing.py`, `llm_pricing.py`).
+- Effort and history: tier maps (`provider_models.py`), forced calls that fail with thinking (`llm_openai_compatible.py`), prefix changes that retire signed reasoning (`transcript_prefix.py`), sealed cross-provider replay (`reasoning_artifacts.py`).
+- Routing and choices: filtering can narrow failover (`llm_routing.py`); stale Ultra support can hide or send a tier (`transport_custody.py`). ID aliases and migration of retired defaults must preserve saved choices (`provider_models.py`, `server_runtime.py`).
 
 ### Provider Independence
 
-One configured provider must suffice for the loop, commit review, scope, safety and
-context/memory. No hidden OpenRouter or second provider (SSOT for ARCHITECTURE and CHECKLISTS 11(h)).
+One configured provider suffices for loop, commit review, scope, safety and context/memory—no hidden OpenRouter or second provider (SSOT for ARCHITECTURE and CHECKLISTS item 11(h)). Tool schemas are provider contracts: validate the shipped registry against JSON Schema and its cross-provider subset, and run bounded Main canaries; bad arguments/schemas stay red (no prose parser, provider hop or unbounded retry); PR jobs stay secretless (ARCHITECTURE §8 "CI topology").
 
-Tool schemas are provider contracts. Validate the shipped registry against JSON Schema and its
-cross-provider subset; run bounded Main-transport canaries. PR jobs stay secretless;
-bad arguments/schemas stay red. No prose parser, provider hop or unbounded retry
-to make the contract green (ARCHITECTURE §8 "CI topology").
+A provider change covers credentials, readiness, exact model-id migration, Main/Light/Fallback and review-pool defaults (keeping explicit choices), canonical tool/reasoning/image/cache intent in `llm.py` with leaf wire projection/recovery, nullable pricing, honest capability gaps, review/scope routing, sourced context windows and direct/single-provider tests using real redacted `tests/fixtures/llm_wire/` streams (handmade fixtures prove no dialect). Local-only installs keep local routes; unauthored slots are proposed blank. Window size and reading coverage never change review authority (BIBLE P3; DEVELOPMENT §5).
 
-A provider change covers the route: credentials, readiness and exact model-id migration;
-Main/Light/Fallback and factory review-pool defaults preserving explicit choices;
-canonical tool/reasoning/image/cache intent in `llm.py`, wire projection and exact-route
-recovery in transport leaves; nullable pricing and honest capability gaps; review/scope
-routing and sourced context windows for sizing; direct- and single-provider regression tests.
-Record and replay the route's real, redacted stream in `tests/fixtures/llm_wire/`:
-a handmade fixture proves no dialect.
+Keep current model ids and defaults in code/config, not here: active consumers read `provider_models.ACTIVE_MODEL_SETTING_KEYS`; `LEGACY_MODEL_SETTING_KEYS` is migration-only; `OUROBOROS_MODEL_HEAVY` + `USE_LOCAL_HEAVY` only seed a configured API actor while the canonical list is absent, never an active slot, readiness signal, test probe or fallback. `-pro` is an OpenRouter slug, not an OpenAI model id (direct OpenAI uses plain Sol and its connection's API; model prefixes never authorize admission). Non-OpenRouter Chat routes send `reasoning_effort` (DeepSeek/Z.ai by provider-id projection); direct Anthropic and OpenAI Responses are the deliberate non-reconstructed transcript exceptions, with no synthesized effort-to-`budget_tokens` policy (ARCHITECTURE §7 "LLM output token budgets"). Missing optional features degrade explicitly without crashing or rerouting.
 
-Local-only installs keep their local route; an unauthored slot is proposed blank.
-Window size and reading coverage never change review authority (BIBLE P3;
-Review & Commit Protocol). Current model ids and defaults belong in code and
-config, not here: a new active consumer reads
-`provider_models.ACTIVE_MODEL_SETTING_KEYS`; `LEGACY_MODEL_SETTING_KEYS` is migration
-only, and `OUROBOROS_MODEL_HEAVY` with its paired `USE_LOCAL_HEAVY` only seeds a
-configured API actor while the canonical list is absent, never an active slot,
-readiness signal, test probe or fallback.
-
-Provider facts that bind routing: the `-pro` suffix is an OpenRouter routing slug, not
-an OpenAI model id, so a direct OpenAI slot uses the plain Sol id; direct OpenAI
-uses its connection's API, and a model-name prefix is never admission
-authority; each non-OpenRouter Chat route sends `reasoning_effort`, DeepSeek and Z.ai
-by provider-id projection; direct Anthropic and OpenAI Responses are the deliberate exceptions to a purely
-reconstructed provider transcript, and no effort-to-`budget_tokens` policy is
-synthesized (ARCHITECTURE §7 "LLM output token budgets"). A provider-specific optional
-feature may be unavailable elsewhere; the core loop degrades explicitly rather than
-crashing or rerouting.
-
-Canonical assistant history and tool schemas are function-shaped across providers,
-never a second stored transcript for a provider dialect. Static, semantics-preserving
-wire normalization precedes request-wire binding; every learned request-shape
-adaptation uses the one provider-neutral driver
-`ouroboros/request_wire_contract.py` (exact-route identity, closed action vocabulary,
-shared TTL; no provider prose or route switch); explicit `none` is never durable.
+Canonical history and tool schemas stay function-shaped, never a second stored transcript per dialect; static normalization precedes request-wire binding, and learned request-shape adaptation uses `ouroboros/request_wire_contract.py` (exact route, closed actions, shared TTL, no provider prose or route switches, explicit `none` never durable).

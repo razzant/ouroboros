@@ -6,7 +6,10 @@ from __future__ import annotations
 import itertools
 import json
 
+from tests._bound_registration import ROOT, BoundRegistry, binding, owner_facts
 from ouroboros import delegate_custody as custody
+from ouroboros import delegate_custody_current as current
+from ouroboros import delegate_registration_policy as policy
 from tests._store_shared import seed_result
 
 
@@ -18,12 +21,13 @@ def _finished_owner(root, task_id):
                                'status': 'completed'})
 
 def test_last_shared_project_sibling_retires_once_in_every_settlement_order(tmp_path):
-    class _Gateway:
+    class _Gateway(BoundRegistry):
         def __init__(self):
             self.removals = []
 
-        def remove_project(self, project_id):
+        def release_registered(self, project_id):
             self.removals.append(project_id)
+            return "released"
 
     run_ids = ("run-a", "run-b", "run-c")
     for case, order in enumerate(itertools.permutations(run_ids)):
@@ -35,7 +39,7 @@ def test_last_shared_project_sibling_retires_once_in_every_settlement_order(tmp_
                 run_id=run_id,
                 task_id=f"task-{run_id}",
                 project_id="shared-project",
-                project_owned=index == 0,
+                project_owned=index == 0, **owner_facts(),
                 ledger_root=str(root),
             ))
             custody.emit(root, custody.LEDGER_RECORDED, {"run_id": run_id})
@@ -64,15 +68,16 @@ def test_registration_sweep_defers_behind_a_live_unowned_sharer(tmp_path):
     every sweep tick for the sibling's whole lifetime."""
     dc = custody
 
-    class _Gateway:
+    class _Gateway(BoundRegistry):
         def __init__(self):
             self.removals = []
 
         def handshake(self, **_kw):
             return {}
 
-        def remove_project(self, pid):
+        def release_registered(self, pid):
             self.removals.append(pid)
+            return "released"
 
         def close(self):
             pass
@@ -80,7 +85,7 @@ def test_registration_sweep_defers_behind_a_live_unowned_sharer(tmp_path):
     gateway = _Gateway()
     dc.record_started(tmp_path, dc.RunCustody(
         run_id="run-a", task_id="t-a", route_id="r", model="m",
-        project_id="prj-shared", project_owned=True, ledger_root=str(tmp_path)))
+        project_id="prj-shared", project_owned=True, **owner_facts(), ledger_root=str(tmp_path)))
     dc.record_started(tmp_path, dc.RunCustody(
         run_id="run-b", task_id="t-b", route_id="r", model="m",
         project_id="prj-shared", project_owned=False, ledger_root=str(tmp_path)))
@@ -121,21 +126,28 @@ def _of(root, kind):
     return [row for row in _rows(root) if row.get("type") == kind]
 
 
-class _RefusingGateway:
+class _RefusingGateway(BoundRegistry):
     """DELETE answers with a typed refusal; ``on_remove`` runs before it (race hook)."""
 
     def __init__(self, exc=None, on_remove=None):
         self.exc, self.on_remove, self.removals = exc, on_remove, []
+        self.readbacks = []
+
+    def bound_registration(self, project_id, store_id, root, *, release=False):
+        if not release:
+            self.readbacks.append((project_id, store_id, root))
+        return super().bound_registration(project_id, store_id, root, release=release)
 
     def handshake(self, **_kw):
         return {}
 
-    def remove_project(self, project_id):
+    def release_registered(self, project_id):
         self.removals.append(project_id)
         if self.on_remove is not None:
             self.on_remove()
         if self.exc is not None:
             raise self.exc
+        return "released"
 
     def close(self):
         pass
@@ -152,7 +164,7 @@ def _start(root, run_id, *, owned, project_id="prj-kept", persistent=False):
     _finished_owner(root, f"t-{run_id}")
     custody.record_started(root, custody.RunCustody(
         run_id=run_id, task_id=f"t-{run_id}", route_id="r", model="m",
-        project_id=project_id, project_owned=owned, project_persistent=persistent,
+        project_id=project_id, project_owned=owned, **owner_facts(), project_persistent=persistent,
         ledger_root=str(root)))
 
 
@@ -225,41 +237,40 @@ def test_a_run_started_during_the_refused_delete_blocks_the_discharge(tmp_path):
     assert custody.owned_project_registrations(tmp_path) == []
 
 
-def test_any_other_refusal_stays_a_retryable_typed_failure(tmp_path):
+def test_only_a_recognized_conflict_clears_the_mark_any_other_answer_repeats_the_same_release(tmp_path):
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     refusals = [
-        ClaudexorUnavailable("project_busy", "project has live runs", status_code=409),
+        ClaudexorUnavailable("project_has_active_run", "project has live runs", status_code=409),
+        ClaudexorUnavailable("project_busy", "the release route did not name a definite refusal", status_code=409),
+        ClaudexorUnavailable("http_409", "unknown conflict", status_code=409),
         ClaudexorUnavailable("daemon_unreachable", "socket died", status_code=0),
         ClaudexorUnavailable("malformed_response", "non-JSON body", status_code=0),
         ClaudexorUnavailable("http_500", "project_has_threads", status_code=500),  # prose, not code
         RuntimeError("project_has_threads"),  # not even a typed refusal
     ]
-    _start(tmp_path, "run-a", owned=True)
-    _settle(tmp_path, "run-a")
-    gateway = _RefusingGateway()
-    for index, exc in enumerate(refusals, start=1):
-        gateway.exc = exc
+    for index, exc in enumerate(refusals):
+        root = tmp_path / str(index)
+        _start(root, "run-a", owned=True)
+        _settle(root, "run-a")
+        gateway = _RefusingGateway(exc)
         custody._CUSTODY.clear()
-        custody.retire_settled_registrations(tmp_path, gateway, live_task_ids=set())
-        assert len(gateway.removals) == index, "every failure is retried"
-        assert _of(tmp_path, custody.PROJECT_RETIRED) == [], f"no discharge for {exc!r}"
-        failed = _of(tmp_path, custody.PROJECT_RETIRE_FAILED)
-        assert len(failed) == index
-        row = failed[-1]
+        custody.retire_settled_registrations(root, gateway, live_task_ids=set())
+        assert gateway.removals == ["prj-kept"]
+        assert _of(root, custody.PROJECT_RETIRED) == []
+        [row] = _of(root, custody.PROJECT_RETIRE_FAILED)
         assert row["code"] == str(getattr(exc, "code", "") or "")
         assert row["status"] == int(getattr(exc, "status_code", 0) or 0)
         assert str(exc) in row["reason"], "the daemon's text still rides the row"
-    custody._CUSTODY.clear()
-    assert [c.run_id for c in custody.owned_project_registrations(tmp_path)] == ["run-a"]
-
-    # The daemon accepts at last: an ordinary retirement, not a kept project.
-    gateway.exc = None
-    custody.retire_settled_registrations(tmp_path, gateway, live_task_ids=set())
-    retired = _of(tmp_path, custody.PROJECT_RETIRED)
-    assert len(retired) == 1 and "project_kept" not in retired[0]
-    custody._CUSTODY.clear()
-    assert custody.owned_project_registrations(tmp_path) == []
+        custody._CUSTODY.clear()
+        assert [c.run_id for c in custody.owned_project_registrations(root)] == ["run-a"]
+        definite = row["code"] == "project_has_active_run"  # anything else may have been applied: still marked
+        assert current.removal_status(root, "prj-kept", policy.engine_facts(gateway))[0] == ("" if definite else "custody")
+        gateway.exc = None
+        custody.retire_settled_registrations(root, gateway, live_task_ids=set())
+        assert gateway.removals == ["prj-kept"] * 2 and not gateway.readbacks, "the same bound release, once more"
+        assert _of(root, custody.PROJECT_RETIRED)[0]["removal_outcome"] == "removed"
+        assert not custody.owned_project_registrations(root)
 
 
 def test_persistent_sharer_branch_unchanged_and_a_new_registration_is_owned_again(tmp_path):
@@ -274,7 +285,7 @@ def test_persistent_sharer_branch_unchanged_and_a_new_registration_is_owned_agai
     assert gateway.removals == []
     retired = _of(tmp_path, custody.PROJECT_RETIRED)
     assert len(retired) == 1
-    assert set(retired[0]) == {"ts", "type", "event_id", "run_id", "task_id", "project_id", "project_kept", "custody_ordinal"}
+    assert set(retired[0]) == {"ts", "type", "event_id", "run_id", "task_id", "project_id", "project_kept", "custody_ordinal", "daemon_store_id"}
     assert retired[0]["project_kept"] is True
 
     # A discharged project, then a NEW registration of the same root (same id):
@@ -300,3 +311,27 @@ def test_persistent_sharer_branch_unchanged_and_a_new_registration_is_owned_agai
     assert [row["run_id"] for row in _of(root, custody.PROJECT_RETIRED)] == ["run-a", "run-c"]
     custody._CUSTODY.clear()
     assert custody.owned_project_registrations(root) == []
+
+
+def test_the_owed_pass_does_not_reexamine_an_id_the_settled_pass_just_checked(tmp_path):
+    """One sweep, one examination per (route, store, id): the settled-owner pass answers for the ids it
+    just checked on this engine; every owed duty it did not reach stays the owed pass's own."""
+    gateway = _RefusingGateway(TimeoutError("unanswered release"))
+    other = ROOT + "-only"  # its own folder: one folder holds one unanswered release at a time
+    gateway.registered_root = lambda project_id: other if project_id == "prj-only" else ROOT
+    _start(tmp_path, "run-a", owned=True)
+    _settle(tmp_path, "run-a")
+    assert policy.owe_registration(tmp_path, "prj-kept", binding())
+    assert policy.owe_registration(tmp_path, "prj-only", binding(root=other))
+    custody._CUSTODY.clear()
+
+    custody.retire_settled_registrations(tmp_path, gateway, live_task_ids=set())
+    assert gateway.removals == ["prj-kept", "prj-only"], "each id attempted once, by the pass that owns it"
+    assert gateway.readbacks == [], "the owed pass did not reexamine prj-kept under the same lock"
+    assert sorted(row["project_id"] for row in current.owed_registrations(tmp_path)) == ["prj-kept", "prj-only"]
+    custody._CUSTODY.clear()
+
+    custody.retire_settled_registrations(tmp_path, gateway, live_task_ids=set())
+    assert gateway.removals == ["prj-kept", "prj-only"] * 2, "the same release again, still once per id per sweep"
+    assert gateway.readbacks == []
+    assert sorted(row["project_id"] for row in current.owed_registrations(tmp_path)) == ["prj-kept", "prj-only"]

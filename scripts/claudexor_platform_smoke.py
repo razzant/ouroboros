@@ -762,7 +762,18 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
         facts["daemon"] = f"{endpoint.host}:{endpoint.port}"
         gateway = cx.ClaudexorGateway(endpoint)
     root: Optional[pathlib.Path] = None
-    owned_project = ""
+    registration = None
+
+    def release_fixture_registration():
+        nonlocal registration
+        from ouroboros.gateways.claudexor_maintenance import bound_registration_supported
+
+        receipt, registration = registration, None  # an unanswered release must not be repeated in finally
+        if (receipt and receipt["created"] is True and receipt.get("registration_store_id")
+                and receipt.get("registration_root") and bound_registration_supported(gateway)):
+            gateway.bound_registration(receipt["id"], receipt["registration_store_id"], receipt["registration_root"],
+                                       release=True)
+
     run_ids: List[str] = []
     facts["run_ids"] = run_ids
     facts["attempts"] = []
@@ -811,8 +822,8 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             if k in request
         }
 
-        owned_project = gateway.register_project(str(root))
-        facts["project_id"] = owned_project
+        registration = gateway.project_registration_receipt(str(root))
+        facts["project_id"] = registration["id"]
 
         attempt = 1
         while True:
@@ -889,9 +900,7 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             attempt_facts["outcome"] = "mutated"
             break
         if owned_daemon is not None:
-            if owned_project:
-                gateway.remove_project(owned_project)
-                owned_project = ""
+            release_fixture_registration()
             gateway.close()
             gateway_closed = True
             from ouroboros.claudexor_daemon import owned_config_dir
@@ -923,11 +932,11 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
                     gateway.cancel_run(started_run_id, reason="smoke teardown")
                 except Exception:  # already terminal in the happy path
                     pass
-        if owned_project:
+        if registration:
             try:
-                gateway.remove_project(owned_project)
+                release_fixture_registration()
             except Exception as exc:
-                print(f"[smoke] could not retire project {owned_project}: {exc}", flush=True)
+                print(f"[smoke] could not retire project {facts.get('project_id')}: {exc}", flush=True)
         if not gateway_closed:
             gateway.close()
         if owned_daemon is not None:

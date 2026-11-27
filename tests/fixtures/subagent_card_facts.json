@@ -2,43 +2,64 @@
   {
     "name": "inherited local coordinator",
     "task": {"id": "child", "delegation_role": "subagent", "model": "local-model", "executor_route": "codex", "metadata": {"parent_cognitive_route": {"model": "local-model", "use_local_model": true, "chosen_by": "inherited"}}},
-    "facts": {"model": "local-model", "executor_route": "codex", "parent_cognitive_route": {"model": "local-model", "use_local_model": true, "chosen_by": "inherited"}, "use_local_model": true, "coordinator_route": "local-model (local)", "coordinator_billing": "unknown"},
+    "facts": {"model": "local-model", "executor_route": "codex", "parent_cognitive_route": {"model": "local-model", "use_local_model": true, "chosen_by": "inherited"}, "use_local_model": true, "coordinator_route": "local-model (local)", "coordinator_billing": "unknown", "coordinator_provenance": "inherited"},
     "provenance": "inherited",
-    "clause": "this subagent itself runs on local-model (local) (bills as unknown)"
+    "coordinator": {"route": "local-model (local)", "billing": "unknown"}
   },
   {
     "name": "child fallback without parent snapshot",
     "task": {"id": "child", "delegation_role": "subagent", "model": "openai/gpt-5", "executor_route": "codex", "effective_model_lane": "fallback"},
     "facts": {"model": "openai/gpt-5", "executor_route": "codex", "effective_model_lane": "fallback", "use_local_model": false, "coordinator_route": "openai/gpt-5", "coordinator_billing": "unknown"},
     "provenance": "",
-    "clause": "this subagent itself runs on openai/gpt-5 (bills as unknown)"
+    "coordinator": {"route": "gpt-5", "billing": "unknown"}
   },
   {
     "name": "recorded parent fallback",
     "task": {"id": "child", "delegation_role": "subagent", "model": "claudexor::codex=gpt-5", "executor_route": "codex", "parent_cognitive_route": {"model": "claudexor::codex=gpt-5", "source_role": "fallback", "chosen_by": "parent_fallback"}},
-    "facts": {"model": "claudexor::codex=gpt-5", "executor_route": "codex", "parent_cognitive_route": {"model": "claudexor::codex=gpt-5", "source_role": "fallback", "chosen_by": "parent_fallback"}, "use_local_model": false, "coordinator_route": "claudexor::codex=gpt-5", "coordinator_billing": "subscription"},
+    "facts": {"model": "claudexor::codex=gpt-5", "executor_route": "codex", "parent_cognitive_route": {"model": "claudexor::codex=gpt-5", "source_role": "fallback", "chosen_by": "parent_fallback"}, "use_local_model": false, "coordinator_route": "claudexor::codex=gpt-5", "coordinator_billing": "subscription", "coordinator_provenance": "parent's fallback"},
     "provenance": "parent's fallback",
-    "clause": "this subagent itself runs on claudexor::codex=gpt-5 (bills as subscription)"
+    "coordinator": {"route": "codex=gpt-5", "billing": "subscription"}
   },
   {
     "name": "chosen coordinator with observed zero",
     "task": {"id": "child", "delegation_role": "subagent", "model": "future-provider/reviewer", "cost_usd": 0, "executor_route": "codex", "parent_cognitive_route": {"model": "future-provider/reviewer", "chosen_by": "delegator", "selected_supervisor_snapshot": {"selected_subagent_id": "chosen-row"}}},
-    "facts": {"model": "future-provider/reviewer", "executor_route": "codex", "parent_cognitive_route": {"model": "future-provider/reviewer", "chosen_by": "delegator", "selected_supervisor_snapshot": {"selected_subagent_id": "chosen-row"}}, "use_local_model": false, "coordinator_route": "future-provider/reviewer", "coordinator_billing": "measured"},
+    "facts": {"model": "future-provider/reviewer", "executor_route": "codex", "parent_cognitive_route": {"model": "future-provider/reviewer", "chosen_by": "delegator", "selected_supervisor_snapshot": {"selected_subagent_id": "chosen-row"}}, "use_local_model": false, "coordinator_route": "future-provider/reviewer", "coordinator_billing": "measured", "coordinator_provenance": "chosen by the delegator (chosen-row)"},
     "provenance": "chosen by the delegator (chosen-row)",
-    "clause": "this subagent itself runs on future-provider/reviewer (bills as measured)"
+    "coordinator": {"route": "reviewer", "billing": "measured"}
   },
   {
     "name": "current remote route after local inheritance",
     "task": {"id": "child", "delegation_role": "subagent", "model": "openai/gpt-5", "use_local_model": false, "executor_route": "codex", "parent_cognitive_route": {"model": "local-model", "use_local_model": true, "chosen_by": "inherited"}},
-    "facts": {"model": "openai/gpt-5", "executor_route": "codex", "parent_cognitive_route": {"model": "local-model", "use_local_model": true, "chosen_by": "inherited"}, "use_local_model": false, "coordinator_route": "openai/gpt-5", "coordinator_billing": "unknown"},
+    "facts": {"model": "openai/gpt-5", "executor_route": "codex", "parent_cognitive_route": {"model": "local-model", "use_local_model": true, "chosen_by": "inherited"}, "use_local_model": false, "coordinator_route": "openai/gpt-5", "coordinator_billing": "unknown", "coordinator_provenance": "inherited"},
     "provenance": "inherited",
-    "clause": "this subagent itself runs on openai/gpt-5 (bills as unknown)"
+    "coordinator": {"route": "gpt-5", "billing": "unknown"}
+  },
+  {
+    "name": "inherited coordinator following its parent's role",
+    "task": {"id": "child", "delegation_role": "subagent", "model": "openai/gpt-6", "executor_route": "codex", "parent_cognitive_route": {"model": "openai/gpt-6", "use_local_model": false, "chosen_by": "inherited", "follows_role": "main"}},
+    "facts": {"model": "openai/gpt-6", "executor_route": "codex", "parent_cognitive_route": {"model": "openai/gpt-6", "use_local_model": false, "chosen_by": "inherited", "follows_role": "main"}, "use_local_model": false, "coordinator_route": "openai/gpt-6", "coordinator_billing": "unknown", "coordinator_provenance": "inherited (follows main)"},
+    "provenance": "inherited (follows main)",
+    "coordinator": {"route": "gpt-6", "billing": "unknown"}
+  },
+  {
+    "name": "parent's own switched route",
+    "task": {"id": "child", "delegation_role": "subagent", "model": "openai/gpt-6-sol", "executor_route": "codex", "parent_cognitive_route": {"model": "openai/gpt-6-sol", "use_local_model": false, "chosen_by": "parent_switch", "follows_role": ""}},
+    "facts": {"model": "openai/gpt-6-sol", "executor_route": "codex", "parent_cognitive_route": {"model": "openai/gpt-6-sol", "use_local_model": false, "chosen_by": "parent_switch", "follows_role": ""}, "use_local_model": false, "coordinator_route": "openai/gpt-6-sol", "coordinator_billing": "unknown", "coordinator_provenance": "parent's own choice"},
+    "provenance": "parent's own choice",
+    "coordinator": {"route": "gpt-6-sol", "billing": "unknown"}
   },
   {
     "name": "explicit recorded coordinator facts",
     "task": {"id": "child", "delegation_role": "subagent", "model": "old-model", "executor_route": "codex", "metadata": {"coordinator_route": "recorded-model", "coordinator_provenance": "inherited", "coordinator_billing": "measured", "use_local_model": true}},
     "facts": {"model": "old-model", "executor_route": "codex", "coordinator_route": "recorded-model (local)", "coordinator_provenance": "inherited", "coordinator_billing": "measured", "use_local_model": true},
     "provenance": "inherited",
-    "clause": "this subagent itself runs on recorded-model (local) (bills as measured)"
+    "coordinator": {"route": "recorded-model (local)", "billing": "measured"}
+  },
+  {
+    "name": "selected session row with its model and account pin",
+    "task": {"id": "child", "delegation_role": "subagent", "model": "openai/gpt-6-astra", "executor_route": "codex=gpt-5.5", "configured_subagent": {"schema": 1, "selected_subagent_id": "row", "config_fingerprint": "fp", "access": "workspace_write", "route": {"kind": "agent_session", "target_id": "codex=gpt-5.5", "credential_profile_id": "work-account"}}},
+    "facts": {"model": "openai/gpt-6-astra", "executor_route": "codex=gpt-5.5", "requested_executor_route": {"kind": "agent_session", "target_id": "codex=gpt-5.5"}, "use_local_model": false, "coordinator_route": "openai/gpt-6-astra", "coordinator_billing": "unknown"},
+    "provenance": "",
+    "coordinator": {"route": "gpt-6-astra", "billing": "unknown"}
   }
 ]

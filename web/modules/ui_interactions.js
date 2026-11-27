@@ -31,12 +31,21 @@ export function bindDialogFocus(dialog, {
     initialFocus,
     returnFocus = dialog.ownerDocument.activeElement,
     onEscape,
+    bodyRegion = '',
     preventScroll = false,
 } = {}) {
     const doc = dialog.ownerDocument;
     let disposed = false;
     const originalTabIndex = dialog.getAttribute('tabindex');
     if (originalTabIndex === null) dialog.tabIndex = -1;
+    // The dialog's one scrolling body (every shared dialog mounts it) fades where its words wait past an edge.
+    // The body keeps its own tabindex/role; the cue is decoration on the actual content, never the head or actions.
+    const body = dialog.querySelector?.('.ui-modal-body');
+    let disposeBodyFade = () => {};
+    if (body) {
+        body.classList.add('scroll-fade-y');
+        disposeBodyFade = bindScrollFade(body, { region: bodyRegion });
+    }
     const onKey = (event) => {
         if (disposed || !dialog.isConnected || event.defaultPrevented || event.isComposing
             || !dialog.contains(event.target)) return;
@@ -65,6 +74,7 @@ export function bindDialogFocus(dialog, {
         if (disposed) return;
         disposed = true;
         dialog.removeEventListener('keydown', onKey);
+        disposeBodyFade();
         const ownedFocus = dialog.contains(doc.activeElement) || doc.activeElement === doc.body;
         if (originalTabIndex === null) dialog.removeAttribute('tabindex');
         const target = typeof returnFocus === 'function' ? returnFocus() : returnFocus;
@@ -178,21 +188,6 @@ export function bindPopoverPosition(popup, { anchor, field, point, align = 'star
         const oy = point ? point.y - top : (below ? 0 : rect.height);
         popup.style.setProperty('--ui-popup-origin', `${clamp(ox, rect.width)}px ${clamp(oy, rect.height)}px`);
     }
-    // Popups are portalled to the document body, outside the faded scroller that owns their anchor. Their own
-    // bounded list still uses the shared edge decoration, so a menu never gets cut by its opener's mask.
-    const noFade = () => {};
-    let disposeFade = noFade;
-    let fadeFrame = null;
-    const maybeBindFade = () => {
-        fadeFrame = null;
-        if (disposed) return;
-        const scrollHeight = Number(popup.scrollHeight);
-        const clientHeight = Number(popup.clientHeight);
-        if (disposeFade !== noFade || !Number.isFinite(scrollHeight) || !Number.isFinite(clientHeight)
-            || scrollHeight <= clientHeight + 1) return;
-        popup.classList?.add?.('scroll-fade-y');
-        disposeFade = bindScrollFade(popup);
-    };
     const onScroll = (event) => {
         if (event.target?.nodeType && popup.contains(event.target)) return;
         if (onAnchorScroll) onAnchorScroll(event);
@@ -203,20 +198,27 @@ export function bindPopoverPosition(popup, { anchor, field, point, align = 'star
     win.visualViewport?.addEventListener('resize', reposition);
     win.visualViewport?.addEventListener('scroll', reposition);
     reposition();
-    maybeBindFade();
-    if (disposeFade === noFade && win.requestAnimationFrame) fadeFrame = win.requestAnimationFrame(maybeBindFade);
     return {
         reposition,
         destroy() {
             disposed = true;
-            if (fadeFrame !== null) win.cancelAnimationFrame?.(fadeFrame);
-            disposeFade();
             win.removeEventListener('scroll', onScroll, true);
             win.removeEventListener('resize', reposition);
             win.visualViewport?.removeEventListener('resize', reposition);
             win.visualViewport?.removeEventListener('scroll', reposition);
         },
     };
+}
+
+/** Separate a popup's scrollport from its painted, focus/ARIA-owning shell. Reopening a menu keeps its rows. */
+export function popupScrollBody(popup) {
+    const first = popup.firstElementChild;
+    if (first?.classList.contains('ui-popup-body')) return first;
+    const body = popup.ownerDocument.createElement('div');
+    body.className = 'ui-popup-body scroll-fade-y';
+    body.append(...popup.childNodes);
+    popup.append(body);
+    return body;
 }
 
 /** Commit the exact option pressed in a live list whose rows can move before release.
@@ -268,6 +270,7 @@ export function bindOptionPress(list, selector, choose) {
  */
 export function bindMenu(menu, { anchor, point, onClose, align = 'end', initialFocus = true } = {}) {
     const doc = menu.ownerDocument;
+    const disposeFade = bindScrollFade(popupScrollBody(menu));
     let disposed = false;
     const items = () => Array.from(menu.querySelectorAll('[role^="menuitem"]')).filter(available);
     const cleanup = () => {
@@ -276,6 +279,7 @@ export function bindMenu(menu, { anchor, point, onClose, align = 'end', initialF
         menu.removeEventListener('keydown', onKey);
         doc.defaultView.removeEventListener('blur', onBlur);
         position.destroy();
+        disposeFade();
     };
     function close({ restoreFocus = false, reason = 'action', focusTarget = anchor } = {}) {
         if (disposed) return;

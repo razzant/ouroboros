@@ -594,7 +594,7 @@ def _row_line(entry: Entry, author: Mapping[str, Any], texts: Mapping[str, Dict[
     row = texts.get(entry[0]["row_sha256"])
     if row is None:
         return _row_head(entry, author) + " (row unreadable by its address)"
-    return render_memory_row(entry[0], row, author=author, indent=INDENT)
+    return render_memory_row(entry[0], row, author=author, indent=INDENT, model_reply=True)
 
 
 def _spoken(entry: Entry, author: Mapping[str, Any], texts: Mapping[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -604,12 +604,13 @@ def _spoken(entry: Entry, author: Mapping[str, Any], texts: Mapping[str, Dict[st
     from ouroboros.memory_view_work import speech_facts
 
     row = texts.get(entry[0]["row_sha256"])
-    return {**speech_facts(row or entry[1], author), "owner_side": owner_speech(entry[1], author),
+    facts = speech_facts(row or entry[1], author)
+    return {**facts, "owner_side": owner_speech(entry[1], author),
             "ref": f"chat {entry[0]['chat_id']} / {entry[1].get('client_message_id') or ''}",
             "text_sha256": sha256_text(str(row.get("text") or "")) if row else "",
             "line": _row_line(entry, author, texts), "head": _row_head(entry, author), "kind": author.get("kind"),
-            "address": chat_chain.format_address(entry[0]), "ts": entry[1].get("ts"),
-            "chars": entry[1].get("text_chars", 0), "pos": entry[2]}
+            "address": chat_chain.format_address(entry[0]), "ts": entry[1].get("ts"), "pos": entry[2],
+            "chars": len(facts["program_words"]) if "program_words" in facts else entry[1].get("text_chars", 0)}
 
 
 def _typed_fact(meta: Mapping[str, Any]) -> str:
@@ -985,7 +986,7 @@ def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
         from ouroboros.memory_waiting import measure
 
         waiting = measure(marks, notes, [p for p in projects if "closed" not in p] if projects is not None else None,
-                          groups)
+                          groups, store.waiting_drafts())
     return room, groups, _capture_marks(store, spec, label, marks), waiting, marks
 
 
@@ -1250,7 +1251,7 @@ def _pages_line(status: Mapping[str, Any]) -> str:
 STORY_STEPS = ("F3", "F5l", "F5", "F5a", "F7")  # F7 affects only the story's human quotes
 
 
-def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) -> str:
+def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, part=_rendered) -> str:
     """Block B's tail, ``## My story``: the settled retellings, then the pages not yet folded, then the status.
 
     Every unfolded retold record is whole, then my parts and selected accounts, then the pages no
@@ -1263,7 +1264,7 @@ def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) ->
     """
     key = _story_key(level)
     counted("view_renders", key=("story", id(snapshot), key))
-    return _story_text(snapshot, dict(key))
+    return _story_text(snapshot, dict(key), part=part)
 
 
 def _story_key(level: FloorLevel) -> Tuple[Any, ...]:
@@ -1385,12 +1386,12 @@ def _late_reviews_text(marks: List[Dict[str, Any]], role: str, part=_rendered) -
 
 
 def _marks_text(marks: List[Dict[str, Any]], part=_rendered) -> str:
-    lines = part(["## Marks I keep in view", ""])
+    lines = part(["## Marks I keep in view", "Each mark ends with its id; I release marks with memory_mark(release_ids=['<id>', …], reason=…).", ""])
     for mark in marks:
         entry = [f"- [{mark['scope']}; {mark['room']}] " + _indented(mark["text"]).lstrip()
                      + f" — marked by {mark['by']} on {mark['date']}; target {mark['target']}; "
                      + (f"also shown after a task's first call matching {mark['anchor']}; " if mark.get("anchor") else "")
-                     + f"memory_mark(release_ids=['{mark['id']}'], reason=…)"]
+                     + f"id {mark['id']}"]
         if mark.get("quote"):
             entry.append(f"{INDENT}quote: " + _indented(mark["quote"]).lstrip())
         lines += part(entry, "mark", [mark])
@@ -1494,14 +1495,13 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]], part=_ren
     return "\n".join(lines)
 
 
-def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, floor_note: str = "") -> str:
+def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, floor_note: str = "", observe=None, part=_rendered) -> str:
     """Block C's memory middle: a helper's owner words, late reviews, marks, this room, then my other conversations.
-
-    ``level`` is the physical floor's (the empty level renders the full view); ``floor_note`` closes the block:
-    ``### Physical floor``, or ``### Memory check`` when it notes only a Nano view's reader path. Before the import
-    has completed the room is its heading and one line naming the reason and a reader working without the chronicle."""
+    ``part`` separates program data from selected forms; ``observe`` sees named pieces before join; ``floor_note`` closes the block.
+    Before import completes, the room names the reason and a chronicle-free reader."""
     counted("view_renders", key=("room", id(snapshot), level.addressed, floor_note))
-    texts = _room_parts(snapshot, dict(level.addressed), lambda _key, make: make())
+    draw = (lambda key, make: observe(key, make())) if observe is not None else lambda _key, make: make()
+    texts = _room_parts(snapshot, dict(level.addressed), draw, part=part)
     return "\n\n".join(part for part in (*texts, floor_note if snapshot.active else "") if part)
 
 

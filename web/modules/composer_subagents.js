@@ -60,7 +60,7 @@ export function subagentsView(mode, availability = 'available') {
  */
 export function createSubagentsChoice({ doc = globalThis.document, onChoose = () => {} } = {}) {
     const strip = doc.createElement('div');
-    strip.className = 'chat-context-strip chat-subagents-strip';
+    strip.className = 'chat-context-strip chat-subagents-strip scroll-fade-x';
     strip.setAttribute('role', 'radiogroup');
     strip.setAttribute('aria-label', 'Subagents');
     strip.dataset.scroll = 'none';

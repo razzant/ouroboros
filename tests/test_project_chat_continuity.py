@@ -259,13 +259,15 @@ def test_api_state_emits_combined_activities_field(tmp_path, monkeypatch):
 
 def test_active_chat_activity_contract_mirrors_direct_turn_shape():
     from ouroboros.gateway.contracts import ActiveChatActivity, ActiveDirectTurn, StateResponse
-    import pathlib
 
     fields = ActiveChatActivity.__annotations__
     additional_keys = {
         "required_question", "required_question_unavailable", "project_admission_hold", "pause_cause", "owner_wait",
         "status", "outcome_axes", "reason_code", "root_phase_checkpoint", "timeout_retry_from", "original_task_id",
         "finishing_reviews", "late_work", "can_resume", "cancelable", "cancel_origin", "delegated_runs_unreconciled",
+        # The exact Close offer an expired, parked work may be closed with (#4123):
+        # a Close grant, never Resume authority.
+        "close_expired",
         # An adopted answer's custody and origin, read beside the axes by the status fold.
         "finalization_recovery", "terminal_origin",
         # K8 census facts for every chat (project_id is already a direct-turn field).
@@ -280,12 +282,6 @@ def test_active_chat_activity_contract_mirrors_direct_turn_shape():
     for key in additional_keys:
         assert "NotRequired" in str(hints[key])
     assert "active_chat_activities" in StateResponse.__annotations__
-    api_types = (
-        pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js"
-    ).read_text(encoding="utf-8")
-    api_types += (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "task_activity_types.js").read_text(encoding="utf-8")
-    for needle in ("ActiveChatActivity", "active_chat_activities", "task_phase", *additional_keys):
-        assert needle in api_types, f"api_types.js mirror is missing {needle!r}"
 
 
 # ---------------------------------------------------------------------------

@@ -12,31 +12,108 @@ that address with that model reads it, and no other route does. Claudexor rebind
 built-in local model refuses before sending with its own counts; neither comes here. A refusal naming no number,
 or a number without units (Alibaba's "Range of input length should be [1, N]"), teaches no window here: the
 existing passes size those.
+Route schema trials also price a destination's permitted tool list and ceiling notice before selecting its view.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+from functools import cache
 from typing import Any
 
 
-def _nano_tools(ctx: Any) -> list:
-    """The schema list a request rebound into Nano sends: this actor's base (standing work set or live-call selectors),
-    plus every tool this task's history already called and every tool it loaded (``enable_tools``), where current
-    policy permits it, so each call in history keeps its schema and a loaded tool stays loaded (``continuation_tools``
-    keeps them the same way). Nothing else of the old envelope stays."""
+@dataclass
+class RouteSchemas:
+    """One possible send list and its own ceiling notice; no trial mutates the task slot."""
+
+    schemas: list
+    notice: list
+    left_out: tuple = ()
+
+    def price(self):
+        return self.schemas, self.notice
+
+    def adopt(self, slot, resident, messages, *, by):
+        from ouroboros.transcript_prefix import rewrite_view
+
+        if resident != self.schemas:
+            resident[:] = self.schemas
+            rewrite_view(slot, getattr(slot, "task_id", ""), by, scope="tools")
+        if self.left_out:
+            slot._route_left_out_tool_names = _earlier(slot) | set(self.left_out)
+        messages.extend(self.notice)
+
+
+def _earlier(slot):
+    return set(getattr(slot, "_route_left_out_tool_names", ()) or ())
+
+
+def fit_route_schemas(tools, messages, schemas, model, limit, *, loaded, history):
+    from ouroboros.context_fit import extract_plain_text_from_content
+    from ouroboros.tool_policy import fit_tool_schemas_to_limit, route_tool_limit_notice, usable_selectors
+
+    fitted, left_out = fit_tool_schemas_to_limit(schemas, limit, keep=loaded, protect=history)
+    if not left_out:
+        return RouteSchemas(fitted, [])
+    text = route_tool_limit_notice(model, limit, len(schemas), left_out,
+                                  selectors=usable_selectors(tools, fitted), schemas=schemas)
+    notice = [] if any(text in extract_plain_text_from_content(row.get("content"))
+                       for row in messages if row.get("role") == "user") else [{"role": "user", "content": text}]
+    return RouteSchemas(fitted, notice, left_out)
+
+
+def route_schema_trials(tools, messages, resident, mode, model, use_local, *, reselect=False):
+    """Resolve each tried mode from current authority and the destination's schema cap, once per selection.
+
+    A full return rebuilds what Nano did not carry. Between full views, a route change fits the resident list
+    and can restore known ceiling omissions, not replace a selected list with the entire registry.
+    A same-route memory pass keeps its shown list except when trying Nano. An absent envelope stays absent.
+    """
+    if not resident:
+        return None
     from ouroboros.continuation_tools import history_tool_names
+    from ouroboros.provider_models import tool_schema_limit
     from ouroboros.tool_policy import initial_tool_schemas, nano_standing
 
-    loaded = set(getattr(ctx.tools._ctx, "_actor_loaded_tool_names", ()) or ())
-    names = sorted(history_tool_names(ctx.messages) | loaded)
-    return initial_tool_schemas(ctx.tools, context_mode="nano", schema_names=names,
-                                standing=nano_standing(ctx.tools._ctx))
+    slot = tools._ctx
+    history = history_tool_names(messages)
+    loaded = set(getattr(slot, "_actor_loaded_tool_names", ()) or ())
+    earlier, limit = _earlier(slot), tool_schema_limit(model, use_local=use_local)
+    resident_names = {s["function"]["name"] for s in resident}
+
+    @cache
+    def selected(nano):
+        schemas = resident
+        if ((reselect and (mode == "nano" or earlier)) or (nano and mode != "nano")) and callable(getattr(tools, "schemas", None)):
+            names = history | loaded | (resident_names if mode == "nano" else set())
+            if not nano:
+                names |= resident_names | earlier  # includes the permitted on-demand schemas already resident
+            schemas = initial_tool_schemas(tools, context_mode="nano" if nano else "max",
+                                           schema_names=sorted(names), standing=nano_standing(slot))
+            if not nano and mode != "nano":
+                schemas = [schema for schema in schemas if schema["function"]["name"] in names]
+        return fit_route_schemas(tools, messages, schemas, model, limit, loaded=loaded, history=history)
+
+    return lambda target: selected(target == "nano")
 
 
-def learn_window_from_refusal(ctx: Any, loop: Any) -> bool:
-    """Record the refusal's stated window on the route and rebind the plan; True when the shown view changed.
+def fit_route_tool_ceiling(ctx):
+    """An ordinary round may receive an enlarged resident catalog from the preceding tool batch."""
+    from ouroboros.provider_models import tool_schema_limit
+
+    schemas, limit = ctx.tool_schemas, tool_schema_limit(ctx.active_model, use_local=ctx.active_use_local)
+    if limit is None or schemas is None or len(schemas) <= limit:
+        return False
+    trial = route_schema_trials(ctx.tools, ctx.messages, schemas, ctx.active_context_mode,
+                                ctx.active_model, ctx.active_use_local)(ctx.active_context_mode)
+    trial.adopt(ctx.tools._ctx, schemas, ctx.messages, by="route_tool_ceiling")
+    return True
+
+
+def learn_window_from_refusal(ctx: Any, loop: Any, candidate=None, round_id: str = "") -> bool:
+    """Record the refusal's window and rebind; a mode change may change schemas without changing the system row.
 
     ``ctx`` is the round's model-call context, ``loop`` the loop facade (``_rebind_context_fit_plan``)."""
-    from ouroboros.context_window import observation_scope, record_refusal
+    from ouroboros.context_window import observation_scope, observed_plan, planned_chat, record_refusal
     from ouroboros.size_refusal import for_usage, stamped
 
     usage, plan = ctx.accumulated_usage, ctx.context_fit_plan
@@ -53,15 +130,14 @@ def learn_window_from_refusal(ctx: Any, loop: Any) -> bool:
     scope = observation_scope(plan)
     if not scope:
         return False
-    record_refusal(usage, plan)
+    if observed_plan(plan, usage, candidate) is None:
+        return False  # the current round still reads the refusal, but the planned window cannot learn from this send
+    recorded = (record_refusal(usage, plan, candidate=candidate, round_id=round_id) if candidate is not None
+                else record_refusal(usage, plan))
+    if planned_chat(candidate) and not recorded:
+        return False
     shown, mode = (ctx.messages[0] if ctx.messages else None), ctx.active_context_mode
     ctx.context_fit_plan, ctx.active_context_mode = loop._rebind_context_fit_plan(
         plan, ctx.tools, ctx.messages, model=ctx.active_model, use_local=ctx.active_use_local, start_mode=mode,
         tool_schemas=ctx.tool_schemas, model_role=ctx.model_role or getattr(plan, "model_role", "") or "main")
-    if ctx.active_context_mode == "nano" and mode != "nano":
-        # At first contact the same set a start in Nano sends; mid-task also the schemas its history called.
-        from ouroboros.transcript_prefix import rewrite_view
-
-        ctx.tool_schemas[:] = _nano_tools(ctx)
-        rewrite_view(ctx.tools._ctx, ctx.task_id, "size_refusal_nano_tools", scope="tools")
-    return bool(ctx.messages) and ctx.messages[0] != shown
+    return ctx.active_context_mode != mode or (bool(ctx.messages) and ctx.messages[0] != shown)

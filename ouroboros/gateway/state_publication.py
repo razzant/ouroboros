@@ -23,13 +23,16 @@ mid-production makes the next probe differ: one more production, never a stale b
 ``dialogue`` one aggregate over the dialogue store's rooms (unread/activity facts, Main's revision);
 ``bindings`` ``projects_registry.bindings_revision`` (bindings and registry files: the census names Projects too);
 ``files``    the identities of ``state.json`` (and its last-good copy), ``settings.json`` and the
-             evolution campaign; ``checkout`` the runtime checkout's identity;
+             evolution campaign; ``places`` those of the place store and the link registry, which the
+             consciousness state line reads (a linked Ouroboros that may start work names the switch's Off);
+             ``checkout`` the runtime checkout's identity;
 ``live``     the in-memory census inputs no revision covers: the direct turns (``_direct_turns_source``,
              the one seam for their source), the post-task owners still running, the budget limit;
 ``presence`` the live Presence authors' witnesses (``conversation_lease.live_presence_roots``): who holds one,
              and whether every held one could be read (a released unreadable one makes the census whole again),
              and the cancel intents (``state/cancel_intents.json``): a recorded Stop a live turn has not taken yet
              is its work's ``stop_requested``, which no queue or store revision announces.
+``panic_recovery_ready`` whether task startup and saved queue custody were established before the census.
 
 A component that cannot prove itself unchanged (a bindings file written within the clock tick, a
 service file likewise) makes the key unequal to every other, so it is never reused. A store that
@@ -41,8 +44,8 @@ body; ``task_bindings`` follows the request's ``bindings_since``, compared with 
 as the last production read them: the in-memory value ``/api/health`` serves without a store read.
 
 Display only: no mutation authority is derived from a publication (every door re-reads its own);
-its generation and age ride the response headers. Residual: a fact that changes by clock passage
-alone (the consciousness "due" wording, the rolling 24 h allowance) refreshes at the next revision move.
+its generation and age ride the response headers. A parked deadline bounds reuse on the ordinary state poll;
+other clock-only wording (consciousness due, rolling allowance) refreshes at the next revision move.
 """
 from __future__ import annotations
 
@@ -75,6 +78,12 @@ class Publication:
     roots: frozenset = frozenset()  # other data roots this production read: the next probe stamps them too
     jobs: Dict[str, Any] = field(default_factory=dict)  # the store's named-job rows this production read
     member_run_activity: dict = field(default_factory=dict)  # addressed observer facts used by nested cards
+    panic_recovery_complete: bool = False  # complete census, measured after task and queue readiness
+    park_clock_range: tuple[float | None, float | None] = (None, None)
+
+    def covers_clock(self, now: float) -> bool:
+        lower, upper = self.park_clock_range
+        return (lower is None or lower <= now) and (upper is None or now < upper)
 
 
 def encode(value: Any) -> bytes:
@@ -118,9 +127,10 @@ def _failure(exc: BaseException) -> Tuple[str, str]:
 
 
 def _queue_revision() -> Tuple[Any, ...]:
-    """The queue's revision, the live ids, and each RUNNING row's model activity, sent attempt context and start
-    step (``turn_phase``, #2862: in-memory facts the documents omit). Read without Q: ``list()`` copies a dict or
-    list whole."""
+    """The queue's revision, the live ids, each RUNNING row's model activity, sent attempt context and start
+    step (``turn_phase``, #2862: in-memory facts the documents omit), and the admission reservations (id and token:
+    one withholds an expired park's Close offer, and its arrival or release moves no document). Read without Q:
+    ``list()``/``dict()`` copy a dict or list whole."""
     from supervisor import queue
     from supervisor.queue_publication import queue_revision
 
@@ -133,7 +143,8 @@ def _queue_revision() -> Tuple[Any, ...]:
                             meta, dict) else None, meta.get("lead") if isinstance(meta, dict) else None,
                             meta.get("_lead_request_id") if isinstance(meta, dict) else None], sort_keys=True, default=str),
                         str(meta.get("turn_phase") or "") if isinstance(meta, dict) else ""))
-    return (queue_revision(), tuple(pending), tuple(running))
+    reserved = tuple(sorted((str(tid), str(token)) for tid, token in dict(queue.ADMISSION_RESERVATIONS).items()))
+    return (queue_revision(), tuple(pending), tuple(running), reserved)
 
 
 def _store_revision(root: str) -> Any:
@@ -210,6 +221,14 @@ def _service_files() -> Tuple[Any, ...]:
             _evolution_campaign_path())
 
 
+def _place_files(drive_root: str) -> Tuple[Any, ...]:
+    """The place store and the link registry of ``drive_root`` (``places.places_path``, ``peer_links.registry_path``)."""
+    from ouroboros.peer_links import registry_path
+    from ouroboros.places import places_path
+
+    return places_path(drive_root), registry_path(drive_root)
+
+
 def _direct_turns_source() -> Tuple[list, bool]:
     """The direct turns the census starts from, with whether the read was complete: the one seam for their
     source (today the process registry; the conversation lane's RUNNING rows replace it)."""
@@ -266,6 +285,7 @@ def probe(drive_root: str, roots=frozenset(), *, direct: Optional[Tuple[list, bo
         ("dialogue", _dialogue_revision(str(drive_root))),
         ("bindings", _bindings_revision(str(drive_root))),
         ("files", _file_stamps(_service_files())),
+        ("places", _file_stamps(_place_files(str(drive_root)))),
         ("checkout", _git_checkout_identity(REPO_DIR)),
         ("live", json.dumps(direct_rows, sort_keys=True, default=str), complete, _post_task_owners(str(drive_root)),
          TOTAL_BUDGET_LIMIT),
@@ -274,6 +294,19 @@ def probe(drive_root: str, roots=frozenset(), *, direct: Optional[Tuple[list, bo
 
 
 # ---- the single-flight publisher -------------------------------------------------------------
+
+def _panic_queue_ready(drive_root: str, tasks_ready: bool) -> bool:
+    from supervisor import queue
+    from supervisor.queue_snapshot import saved_queue_unowned
+
+    # A providerless boot may finish its file recovery without adopting the supervisor queue.
+    if not tasks_ready or not queue.owns_live_queue(drive_root):
+        return False
+    try:
+        return not saved_queue_unowned(require_readable=True)
+    except (OSError, ValueError):
+        return False
+
 
 class Publisher:
     """One data root's held publication and its one refresh in flight."""
@@ -286,12 +319,14 @@ class Publisher:
         self._flight: Optional[Tuple[asyncio.AbstractEventLoop, asyncio.Future]] = None
         self.productions = 0  # bodies produced in this process (the reuse is observable)
 
-    def refresh(self, produce: Callable[..., Dict[str, Any]]) -> Publication:
+    def refresh(self, produce: Callable[..., Dict[str, Any]], *, tasks_ready: bool = False) -> Publication:
         """Probe, then reuse the held publication or produce a new one (the executor job)."""
         held = self.held
+        panic_ready = _panic_queue_ready(self.drive_root, tasks_ready)
         direct = _direct_turns_source()
-        key = probe(self.drive_root, held.roots if held else frozenset(), direct=direct)
-        if held is not None and held.key == key:
+        key = (*probe(self.drive_root, held.roots if held else frozenset(), direct=direct),
+               ("panic_recovery_ready", panic_ready))
+        if held is not None and held.key == key and held.covers_clock(time.time()):
             if not held.member_run_activity:
                 return held
             from ouroboros.delegate_feed import current_activities
@@ -307,16 +342,18 @@ class Publisher:
                 key=key, generation=self._generation, published_at=time.time(), body=encode(produced["fields"]),
                 bindings=encode(bindings), bindings_revision=str(produced.get("task_bindings_revision") or ""),
                 roots=frozenset(map(str, produced.get("roots") or ())) - {self.drive_root},
-                jobs=dict(produced.get("jobs") or {}), member_run_activity=produced.get("member_run_activity") or {})
+                jobs=dict(produced.get("jobs") or {}), member_run_activity=produced.get("member_run_activity") or {},
+                panic_recovery_complete=panic_ready and produced.get("panic_recovery_complete") is True,
+                park_clock_range=produced.get("park_clock_range", (None, None)))
             self.held = publication
         return publication
 
-    async def current(self, produce: Callable[..., Dict[str, Any]]) -> Publication:
+    async def current(self, produce: Callable[..., Dict[str, Any]], *, tasks_ready: bool = False) -> Publication:
         """The publication valid for the revision observed now: await the refresh in flight, else start one."""
         loop = asyncio.get_running_loop()
         flight = self._flight
         if flight is None or flight[0] is not loop or flight[1].done():
-            future = asyncio.ensure_future(asyncio.to_thread(self.refresh, produce))
+            future = asyncio.ensure_future(asyncio.to_thread(self.refresh, produce, tasks_ready=tasks_ready))
             self._flight = (loop, future)
             future.add_done_callback(_retrieve)
         else:
@@ -369,7 +406,7 @@ def _worker_counts() -> Tuple[int, int]:
         return 0, 0
 
 
-def live_fields(request: Any, jobs: Dict[str, Any]) -> Dict[str, Any]:
+def live_fields(request: Any, publication: Publication) -> Dict[str, Any]:
     """The process facts of ``StateResponse``, read per request without I/O: never part of the publication."""
     from ouroboros.config import get_context_mode, get_runtime_mode, get_safety_mode, get_skills_repo_path
     from ouroboros.gateway import state as gateway_state
@@ -379,13 +416,15 @@ def live_fields(request: Any, jobs: Dict[str, Any]) -> Dict[str, Any]:
     get_supervisor_error = gateway_state._state_attr(request, "get_supervisor_error")
     app_start = float(gateway_state._state_attr(request, "app_start", time.time()) or time.time())
     alive, total = _worker_counts()
+    boot = gateway_state._live_boot(request, publication.jobs)
     return {
         "uptime": int(time.time() - app_start),
         "workers_alive": alive,
         "workers_total": total,
         "supervisor_ready": bool(supervisor_ready.is_set()) if supervisor_ready else False,
         "supervisor_error": get_supervisor_error() if callable(get_supervisor_error) else None,
-        "boot": gateway_state._live_boot(request, jobs),  # the boot phases the header paints (Starting… → Online)
+        "boot": boot,
+        "panic_recovery_complete": publication.panic_recovery_complete and boot["tasks_ready"],
         "runtime_mode": get_runtime_mode(),
         "context_mode": get_context_mode(),
         # Frozen one-window compatibility field. Persistent auto-Low is retired.
@@ -469,6 +508,7 @@ def produced_fields(snap: Dict[str, Any]) -> Dict[str, Any]:
         "active_direct_turns": snap.get("active_direct_turns") or [],
         "active_chat_activities": snap.get("active_chat_activities") or [],
         "active_chat_activities_complete": snap.get("active_chat_activities_complete") is True,
+        "panic_recovery": snap.get("panic_recovery") or [],
         "current_questions": snap.get("current_questions") or [],
         "current_questions_complete": snap.get("current_questions_complete") is True,
         "current_questions_gaps": snap.get("current_questions_gaps") or [],

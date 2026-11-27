@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom, ElementStub, walkCard } from './chat_dom_fixture.js';
-import { PREVIEW_KEY } from '../modules/chat_preview.js';
+import { installDom, restoreDom, ElementStub, PREVIEW_SCOPE, walkCard } from './chat_dom_fixture.js';
+import { previewEntryKey, PREVIEW_FAMILY, PREVIEW_KEY } from '../modules/chat_preview.js';
+import { roomSocket } from '../modules/room_retire.js';
 
 const TS = '2026-09-12T12:00:00.000Z';
 const row = (id, text, extra = {}) => ({
@@ -17,16 +18,17 @@ const page = (messages, cursor = 'page:recent', next = null) => ({
 
 // `seed` runs on the fresh document before the room exists (this origin's saved preview); a response may be a promise
 // the test settles, or `{ httpStatus, body }` for a refused read.
-function fixture(t, initial = page([]), fetchPage = null, { seed = null } = {}) {
+function fixture(t, initial = page([]), fetchPage = null, { seed = null, canShowSavedProfile = () => true } = {}) {
     let response = initial, revision = 0;
-    const calls = [], handlers = new Map();
+    const calls = [], urls = [], handlers = new Map();
     const { prior, mount } = installDom(async (url, init) => {
         if (String(url).startsWith('/api/chat/history')) {
             const cursor = new URL(String(url), 'http://local').searchParams.get('cursor');
             calls.push(cursor);
+            urls.push(new URL(String(url), 'http://local'));
             const data = cursor && fetchPage ? await fetchPage(cursor, init) : await response;
             if (data?.httpStatus) return { ok: false, status: data.httpStatus, json: async () => data.body };
-            return { ok: true, json: async () => data };
+            return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, ...data }) };
         }
         return { ok: true, json: async () => ({ active_direct_turns: [] }) };
     });
@@ -34,8 +36,9 @@ function fixture(t, initial = page([]), fetchPage = null, { seed = null } = {}) 
     const priorSocket = globalThis.WebSocket;
     globalThis.WebSocket = { OPEN: 1 };
     const instance = createChatInstance({
-        ws: { on(type, handler) { handlers.set(type, handler); return () => handlers.delete(type); },
-            isConnected: () => true, send() {} },
+        // The room's view of the page socket, as app.js gives Main and every Project (a bare page socket hid #4149's gap).
+        ws: roomSocket({ on(type, handler) { handlers.set(type, handler); return () => handlers.delete(type); },
+            isConnected: () => true, canShowSavedProfile, send() {} }),
         state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
         updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
             isCurrent: () => true, apply() {} },
@@ -44,13 +47,16 @@ function fixture(t, initial = page([]), fetchPage = null, { seed = null } = {}) 
     t.after(() => { instance.destroy(); restoreDom(prior); globalThis.WebSocket = priorSocket; });
     const messages = globalThis.document.byId.get('chat-messages');
     return {
-        instance, calls, messages,
+        instance, calls, urls, messages,
         bubbles: () => messages.children.filter((node) => node.classList.contains('chat-bubble')
             && !node.classList.contains('typing-bubble') && node.dataset.ephemeral !== '1'),
         emit: (message) => handlers.get('chat')({ chat_id: 2, ...message }),
         emitLog: (data) => handlers.get('log')({ chat_id: 2, data }),
+        emitQuizState: (message) => handlers.get('quiz_state')(message),
         reconnect: (flags = {}) => handlers.get('open')({ previouslyConnected: true, ...flags }),
         disconnect: () => handlers.get('close')(),
+        // The current socket's first frame names its serving profile (ws.js `connection_profile`).
+        proveProfile: () => handlers.get('connection_profile')({ type: 'connection_profile', profile_scope: PREVIEW_SCOPE }),
         respond: next => { response = next; },
         async refresh(next = response) {
             response = next;
@@ -112,10 +118,12 @@ function recordRenderedMarkup(t) {
     return markup;
 }
 
-// This room's rows in this origin's saved preview (chat_preview.js): Project chat 2, no appearance scope.
-const PREVIEW_ROOM = JSON.stringify(['', [2, '']]);
-const savedTexts = () => (JSON.parse(localStorage.getItem(PREVIEW_KEY) || '{"rooms":[]}').rooms
-    .find((entry) => entry.key === PREVIEW_ROOM)?.rows || []).map((item) => item.text);
+// This room's rows in this origin's saved preview (chat_preview.js): Project chat 2 under the document's proven profile.
+const PREVIEW_ROOM = previewEntryKey(PREVIEW_SCOPE, [2, '']);
+const savedRows = () => JSON.parse(localStorage.getItem(PREVIEW_ROOM) || '{"rows":[]}').rows;
+const savedTexts = () => savedRows().map((item) => item.text);
+// Every key of the saved preview this origin holds (the record and each room's entry), as stored.
+const savedStore = () => JSON.stringify([...localStorage.values].filter(([key]) => key.startsWith(PREVIEW_FAMILY)));
 const settle = async (check = () => false) => {
     for (let n = 0; n < 80 && !check(); n += 1) await new Promise((resolve) => setTimeout(resolve, 0));
 };
@@ -382,10 +390,10 @@ for (const systemType of ['reminder', 'skill_notice']) for (const historyFirst o
             assert.equal(original.dataset.historyId, 'chat:100');
             assert.equal(original.dataset.historySource, 'chat:rotation-1');
             assert.equal(original.dataset.historyOffset, '100');
-            const saved = localStorage.getItem(PREVIEW_KEY);
+            const saved = savedStore();
             assert.deepEqual(savedTexts(), [message.text], 'the saved preview holds the newest read\'s row');
             f.emit(live);
-            assert.equal(localStorage.getItem(PREVIEW_KEY), saved, 'a late live copy is not saved again');
+            assert.equal(savedStore(), saved, 'a late live copy is not saved again');
             await f.refresh(page([message]));
         }
         assert.equal(f.bubbles().length, 1);
@@ -415,7 +423,7 @@ test('repeated physical history identity updates the routing annotation on the s
     assert.notEqual(note.textContent, 'Choosing the right destination…');
     assert.match(note.textContent, /Investigation/);
     const annotationText = note.textContent, metadata = { ...bubble.dataset };
-    const saved = localStorage.getItem(PREVIEW_KEY);
+    const saved = savedStore();
     f.emit({ role: message.role, content: message.text, ts: message.ts,
         client_message_id: message.client_message_id, source: message.source,
         sender_session_id: message.sender_session_id });
@@ -424,7 +432,7 @@ test('repeated physical history identity updates the routing annotation on the s
     assert.equal(bubble.querySelector('.msg-routing-annotation'), note);
     assert.equal(note.textContent, annotationText, 'the live echo cannot clear the saved routing receipt');
     assert.deepEqual(bubble.dataset, metadata);
-    assert.equal(localStorage.getItem(PREVIEW_KEY), saved);
+    assert.equal(savedStore(), saved);
 });
 
 test('a live echo preserves the projected saved-context note and origin metadata', async t => {
@@ -441,7 +449,7 @@ test('a live echo preserves the projected saved-context note and origin metadata
     assert.equal(original.dataset.originId, origin.origin_id);
     assert.equal(original.dataset.originProjected, '1');
     const metadata = { ...original.dataset }, noteText = note.textContent;
-    const saved = localStorage.getItem(PREVIEW_KEY);
+    const saved = savedStore();
     f.emit({ role: origin.role, content: origin.text, ts: origin.ts,
         source: origin.source, sender_session_id: origin.sender_session_id });
     assert.equal(f.bubbles().length, 1);
@@ -449,7 +457,7 @@ test('a live echo preserves the projected saved-context note and origin metadata
     assert.equal(original.querySelector('.saved-project-context'), note);
     assert.equal(note.textContent, noteText);
     assert.deepEqual(original.dataset, metadata);
-    assert.equal(localStorage.getItem(PREVIEW_KEY), saved);
+    assert.equal(savedStore(), saved);
 });
 
 test('an opening with its stored address keeps one bubble when the original arrives live', async t => {
@@ -639,6 +647,20 @@ test('history query construction remains portable when URLSearchParams.size is u
     }
     assert.match(requested, /chat_id=2/);
     assert.match(requested, /cursor=c/);
+});
+
+test('a scoped document can load history with its generation proof without waiting for a socket', async () => {
+    const { apiClient } = await import('../modules/api_client.js');
+    const priorFetch = globalThis.fetch, priorDoc = globalThis.document;
+    const scope = 'a'.repeat(16);
+    try {
+        globalThis.document = { querySelector: () => ({ content: scope }) };
+        globalThis.fetch = async () => ({ ok: true, json: async () => ({ messages: [], profile_scope: scope }) });
+        assert.equal((await apiClient.chatHistory({ chatId: 1 })).profile_scope, scope);
+    } finally {
+        globalThis.fetch = priorFetch;
+        globalThis.document = priorDoc;
+    }
 });
 
 
@@ -1018,14 +1040,14 @@ test('only an admitted newest read writes the saved preview; ↓\'s latest page 
     await settle(() => f.calls.length > 4 && savedTexts().length === 2);
     assert.deepEqual(f.calls.slice(4), [null]);
     assert.deepEqual(savedTexts(), ['Newest saved message', 'Arrived while reading']);
-    const before = localStorage.getItem(PREVIEW_KEY);
+    const before = savedStore();
     // A newest window that could not read the conversation stream keeps the record; so does a refused read.
     await f.refresh({ ...page([]), window: { complete: false, truncated_by: ['chat_source_unavailable'] } });
-    assert.equal(localStorage.getItem(PREVIEW_KEY), before);
+    assert.equal(savedStore(), before);
     f.respond({ httpStatus: 503, body: { messages: [], error: 'history_source_unavailable',
         reason_code: 'history_source_unavailable', has_more: true, next_cursor: null } });
     await f.instance.refreshHistory({ revision: 90 });
-    assert.equal(localStorage.getItem(PREVIEW_KEY), before);
+    assert.equal(savedStore(), before);
     // A bounded window that is merely incomplete is still the room's newest text.
     await f.refresh({ ...page([row('chat:960', 'Bounded newest')]), window: { complete: false, truncated_by: ['quota'] } });
     assert.deepEqual(savedTexts(), ['Bounded newest']);
@@ -1046,7 +1068,10 @@ test('a newest read answered after its room left writes nothing', async (t) => {
     assert.equal(f.bubbles().some((node) => node.innerHTML.includes('Answered after')), false);
 });
 
-const seedPreview = (rows) => () => localStorage.setItem(PREVIEW_KEY, JSON.stringify({ v: 2, rooms: [{ key: PREVIEW_ROOM, rows }] }));
+const seedPreview = (rows) => () => {
+    localStorage.setItem(PREVIEW_KEY, '{"v":3}');
+    localStorage.setItem(PREVIEW_ROOM, JSON.stringify({ read: 1, rows }));
+};
 const SAVED_ROWS = [{ id: 'chat:5', role: 'user', text: 'Saved question', speaker: 'You' },
     { id: 'chat:6', role: 'assistant', text: 'Saved <b>answer</b>\nsecond line', speaker: 'Ouroboros' }];
 const previewNode = (f) => f.messages.children.find((node) => node.dataset.savedPreview === 'true');
@@ -1066,6 +1091,7 @@ test('a warm opening paints the saved text before its first read, grants it noth
         assert.equal(shown.querySelectorAll(selector).length, 0, `no ${selector}: no action, link or history identity`);
     }
     assert.equal(f.instance.hasPaintedHistory(), false);
+    assert.equal(f.instance.hasPaintedWords(), true, 'the docked panel comes in with the saved text (app.js)');
     assert.equal(f.messages.dataset.historyHydrated, undefined);
     // The reader never moved: whatever the painted text did to the layout, the first canonical read opens at the newest
     // message.
@@ -1080,6 +1106,169 @@ test('a warm opening paints the saved text before its first read, grants it noth
     assert.deepEqual(savedTexts(), ['Canonical answer', 'Fresh answer']);
 });
 
+test('matching history paints even while the room cannot show saved text', async (t) => {
+    const read = held();
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => false });
+    await settle(() => f.calls.length === 1);
+    assert.deepEqual(f.calls, [null]);
+    assert.equal(previewNode(f), undefined, 'a room can fetch history without preview eligibility');
+    assert.equal(f.instance.hasPaintedHistory(), false);
+    read.release(page([row('chat:10', 'Matching history')]));
+    await settle(() => f.instance.hasPaintedHistory());
+    assert.equal(f.instance.hasPaintedHistory(), true);
+    assert.deepEqual(f.bubbles().map(node => node.dataset.historyId), ['chat:10']);
+});
+
+// Opus F4 (#4211): after a disconnect only the current socket proves the profile (ws.js canShowSavedProfile), and an
+// opening shows its saved text once. A room opened in that gap paints it when the proof arrives, once, unless a
+// canonical read landed first.
+test('an opening held back by the socket\'s missing proof paints its saved text when the proof arrives', async (t) => {
+    const read = held();
+    let proven = false;
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => proven });
+    await settle(() => f.calls.length === 1);
+    assert.equal(previewNode(f), undefined, 'this socket has not proven the profile yet');
+    assert.equal(f.instance.hasPaintedWords(), false);
+    proven = true;
+    f.proveProfile();
+    assert.equal(previewNode(f)?.children[0].textContent, 'Saved text preview · updating', 'painted while the read is out');
+    assert.equal(f.instance.hasPaintedWords(), true);
+    assert.equal(f.instance.hasPaintedHistory(), false);
+    read.release(page([row('chat:6', 'Canonical answer')]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    assert.equal(previewNode(f), undefined, 'the canonical page replaces it');
+    f.proveProfile();  // a later socket's proof
+    assert.equal(previewNode(f), undefined, 'once, and never over canonical history');
+});
+
+// Astra 7, neon 3: the opening's first read failed before the proof came (Retry stands); the copy painted then says
+// it is not current, never that it is updating.
+test('saved text painted on the proof after the first read failed says it is not current', async (t) => {
+    const read = held();
+    let proven = false;
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => proven });
+    await settle(() => f.calls.length === 1);
+    read.release({ httpStatus: 500, body: { error: 'Internal error' } });
+    const retry = () => f.messages.querySelector('.chat-load-older')?.querySelector('.chat-load-older-btn');
+    await settle(() => retry()?.textContent === 'Retry loading messages');
+    assert.equal(retry()?.textContent, 'Retry loading messages', 'the failed read offers Retry');
+    proven = true;
+    f.proveProfile();
+    assert.equal(previewNode(f)?.children[0].textContent, 'Saved text preview · not current');
+});
+
+// Astra 9: a room away hears no socket frame (room_retire.js roomSocket), the proof too. An opening that left before
+// its read landed and comes back once the page's socket proved the profile spends its one attempt on that return.
+test('an opening away when the proof came paints its saved text on its return, once', async (t) => {
+    const read = held();
+    let proven = false;
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => proven });
+    await settle(() => f.calls.length === 1);
+    assert.equal(previewNode(f), undefined, 'this socket has not proven the profile yet');
+    f.instance.leave();  // room_retire.js `leave`: the room leaves, its socket view pauses
+    f.instance.ws.pause();
+    proven = true;  // the page's socket proves the profile; the room away hears nothing of it
+    read.release(page([row('chat:6', 'Answered after the room left')]));
+    await settle();
+    assert.equal(previewNode(f), undefined, 'a room away paints nothing');
+    const back = held();
+    f.respond(back.promise);
+    f.instance.stay();  // room_retire.js `show`: back, its socket view resumes and the room reads what it missed
+    f.instance.ws.resume();
+    await settle(() => f.calls.length === 2);
+    assert.equal(previewNode(f)?.children[0].textContent, 'Saved text preview · updating', 'painted as its return reads');
+    assert.equal(f.instance.hasPaintedWords(), true);
+    back.release(page([row('chat:7', 'Canonical answer')]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    assert.equal(previewNode(f), undefined, 'the canonical page replaces it');
+    f.proveProfile();
+    assert.equal(previewNode(f), undefined, 'once');
+});
+
+// Astra 9: the return paints where the proof came as the room comes back on screen, before the preferences its return
+// asks for or the read that follows them; holding the preferences holds nothing of it.
+test('an opening away when the proof came paints its saved text as it comes back, before its preferences answer', async (t) => {
+    const read = held();
+    let proven = false;
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => proven });
+    await settle(() => f.calls.length === 1);
+    f.instance.leave();
+    f.instance.ws.pause();
+    proven = true;  // the page's socket proves the profile; the room away hears nothing of it
+    read.release(page([row('chat:6', 'Answered after the room left')]));
+    await settle();
+    const prefs = held(), host = globalThis.fetch, asked = [];
+    globalThis.fetch = (url, init) => (String(url).startsWith('/api/ui/preferences')
+        ? (asked.push(url), prefs.promise.then(() => host(url, init))) : host(url, init));
+    const back = held();
+    f.respond(back.promise);
+    f.instance.stay();
+    f.instance.ws.resume();
+    assert.equal(asked.length, 1, 'its return asks for the preferences, held here');
+    assert.equal(previewNode(f)?.children[0].textContent, 'Saved text preview · updating', 'painted as it comes back');
+    assert.equal(f.calls.length, 1, 'before its return reads');
+    prefs.release();
+    await settle(() => f.calls.length === 2);
+    assert.equal(f.calls.length, 2, 'the return reads once the preferences answer');
+    back.release(page([row('chat:7', 'Canonical answer')]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    assert.equal(previewNode(f), undefined, 'the canonical page replaces it');
+});
+
+test('a proof after the canonical read paints no saved text over it', async (t) => {
+    let proven = false;
+    const f = fixture(t, page([row('chat:6', 'Canonical answer')]), null,
+        { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => proven });
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    proven = true;
+    f.proveProfile();
+    assert.equal(previewNode(f), undefined, 'the canonical page stands alone');
+    assert.deepEqual(f.bubbles().map(node => node.dataset.historyId), ['chat:6']);
+});
+
+// The paint its caller names (app.js: a Project's opening, its Retry) says so on the read it makes; any other is the
+// read receipt's own (history_attribution.py).
+test('a paint whose caller names its action says so on its read; one that names none is a receipt\'s', async (t) => {
+    const f = fixture(t, page([row('chat:1', 'Answer')]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    const reason = () => f.urls.at(-1).searchParams.get('reason');
+    const reads = f.urls.length;
+    await f.instance.refreshHistory({ revision: 1, why: { reason: 'retry' } });
+    assert.equal(f.urls.length, reads + 1);
+    assert.equal(reason(), 'retry');
+    await f.instance.refreshHistory({ revision: 2 });
+    assert.equal(reason(), 'read_receipt');
+});
+
+test('the opening\'s one retry is spent on the first proof, even one that still refused', async (t) => {
+    const read = held();
+    let permits = false;
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => permits });
+    await settle(() => f.calls.length === 1);
+    f.proveProfile();  // a proof that still does not permit it (another profile's, say)
+    permits = true;
+    f.proveProfile();
+    assert.equal(previewNode(f), undefined, 'once');
+    read.release(page([]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+});
+
+test('a confirmed different history profile retires painted text without erasing the saved room', async (t) => {
+    const read = held();
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS) });
+    await settle(() => f.calls.length === 1);
+    assert.ok(previewNode(f), 'the currently eligible document shows its own saved preview');
+    const saved = savedStore();
+    const otherScope = PREVIEW_SCOPE === '0'.repeat(16) ? '1'.repeat(16) : '0'.repeat(16);
+    read.release({ ...page([]), profile_scope: otherScope });
+    await settle(() => !previewNode(f));
+    assert.equal(previewNode(f), undefined);
+    assert.equal(f.instance.hasPaintedHistory(), false);
+    assert.equal(savedStore(), saved);
+    await f.refresh(page([row('chat:20', 'Current history')]));
+    assert.deepEqual(f.bubbles().map(node => node.dataset.historyId), ['chat:20']);
+});
+
 for (const status of [500, 401]) test(`a warm opening whose first read fails with ${status} ${status === 401 ? 'discards the saved text at once' : 'keeps it, not current, beside Retry'}`, async (t) => {
     const f = fixture(t, { httpStatus: status, body: { error: 'Controlled history failure' } }, null,
         { seed: seedPreview(SAVED_ROWS) });
@@ -1089,7 +1278,7 @@ for (const status of [500, 401]) test(`a warm opening whose first read fails wit
     assert.equal(f.instance.hasPaintedHistory(), false);
     if (status === 401) {
         assert.equal(previewNode(f), undefined);
-        assert.equal(localStorage.getItem(PREVIEW_KEY), null, 'a refused session keeps no conversation text');
+        assert.equal(savedStore(), '[]', 'a refused session keeps no conversation text');
         return;
     }
     assert.equal(previewNode(f).children[0].textContent, 'Saved text preview · not current');
@@ -1120,8 +1309,8 @@ for (const [read, status] of [['older', 401], ['older', 403], ['latest', 401], [
             await settle(() => f.calls.length > 4);
             assert.deepEqual(f.calls, [null, 'before:1', 'before:2', 'before:3', null]);
         }
-        await settle(() => localStorage.getItem(PREVIEW_KEY) === null);
-        if (status < 500) assert.equal(localStorage.getItem(PREVIEW_KEY), null, 'a refused session keeps no conversation text');
+        await settle(() => savedStore() === '[]');
+        if (status < 500) assert.equal(savedStore(), '[]', 'a refused session keeps no conversation text');
         else assert.deepEqual(savedTexts(), ['Newest saved message'], 'a failed page erases nothing');
     });
 }
@@ -1139,7 +1328,7 @@ test('the saved preview keeps the feed\'s order: an accepted delayed arrival lan
     await f.refresh();
     await f.refresh();
     assert.deepEqual(f.calls, [null, 'after:recent'], 'the arrivals read, not a newest page, brought the row');
-    const saved = () => JSON.parse(localStorage.getItem(PREVIEW_KEY)).rooms[0].rows.map((item) => item.id);
+    const saved = () => savedRows().map((item) => item.id);
     assert.deepEqual(f.bubbles().map((node) => node.dataset.historyId), ['chat:1', 'chat:3', 'chat:2']);
     assert.deepEqual(saved(), ['chat:1', 'chat:3', 'chat:2'], 'reopening must not reorder the accepted conversation');
 });
@@ -1150,7 +1339,7 @@ test('a newest window listing a delayed row after newer ones is saved in the ord
     const f = fixture(t, page(rows));
     await f.refresh();
     assert.deepEqual(f.bubbles().map((node) => node.dataset.historyId), ['chat:1', 'chat:3', 'chat:2']);
-    assert.deepEqual(JSON.parse(localStorage.getItem(PREVIEW_KEY)).rooms[0].rows.map((item) => item.id), ['chat:1', 'chat:3', 'chat:2']);
+    assert.deepEqual(savedRows().map((item) => item.id), ['chat:1', 'chat:3', 'chat:2']);
 });
 
 // Equal times: the feed (insertTimelineNode) breaks the tie by stream position, comparing the source as text, so after a
@@ -1165,7 +1354,7 @@ test('equal times: a newest window is saved in the order the feed draws it, by s
     await f.refresh();
     const canonical = f.bubbles().map((node) => node.dataset.historyId);
     assert.deepEqual(canonical, ['chat:0', 'chat:20', 'chat:500'], 'the feed orders the tie by position');
-    assert.deepEqual(JSON.parse(localStorage.getItem(PREVIEW_KEY)).rooms[0].rows.map((item) => item.id), canonical);
+    assert.deepEqual(savedRows().map((item) => item.id), canonical);
 });
 
 test('equal times: an accepted arrival is saved where the feed places it', async (t) => {
@@ -1178,7 +1367,7 @@ test('equal times: an accepted arrival is saved where the feed places it', async
     assert.deepEqual(f.calls, [null, 'after:recent'], 'the arrivals read brought the row');
     const canonical = f.bubbles().map((node) => node.dataset.historyId);
     assert.deepEqual(canonical, ['chat:1', 'chat:0', 'chat:500']);
-    assert.deepEqual(JSON.parse(localStorage.getItem(PREVIEW_KEY)).rooms[0].rows.map((item) => item.id), canonical);
+    assert.deepEqual(savedRows().map((item) => item.id), canonical);
 });
 
 test('a newest read refused while the Project registry cannot be read keeps the feed and says so', async (t) => {
@@ -2158,4 +2347,391 @@ test('a repeated physical down returns again after passive focus scrolling witho
     await drain();
     assert.equal(returned, true, 'every physical press moves immediately');
     assert.equal(f.calls.length, before, 'both presses share the one pending fetch');
+});
+
+
+// The archive door uses the same edge as a normal history failure; no read until its owner opens it.
+const REGISTRY_REFUSAL = { httpStatus: 503, body: { reason_code: 'history_source_unavailable',
+    project_registry: 'unavailable', detail: 'Project registry unavailable' } };
+
+function archiveRoom(t, initial, { asPanel = false, older = null, archive = null, onReadingLatest } = {}) {
+    let response = initial;
+    const calls = [], handlers = new Map();
+    const { prior, mount } = installDom(async (url, init = {}) => {
+        const address = new URL(String(url), 'http://local');
+        calls.push(address);
+        let body = {};
+        if (address.pathname === '/api/chat/history') body = await (address.searchParams.has('cursor') && older ? older() : response);
+        if (address.pathname === '/api/chat/archive') body = await archive?.(init);
+        if (body?.httpStatus) return { ok: false, status: body.httpStatus, json: async () => body.body };
+        return { ok: true, json: async () => address.pathname === '/api/chat/history'
+            ? { profile_scope: PREVIEW_SCOPE, ...body } : body };
+    });
+    const doc = globalThis.document;
+    const styleOf = globalThis.getComputedStyle;
+    doc.defaultView = Object.assign(globalThis.window, { getComputedStyle: node => ({ ...styleOf(node), visibility: 'visible' }) });
+    const priorSocket = globalThis.WebSocket;
+    globalThis.WebSocket = { OPEN: 1 };
+    const instance = createChatInstance({
+        ws: { on(type, handler) { handlers.set(type, handler); return () => handlers.delete(type); }, isConnected: () => true, send() {} },
+        state: { activePage: 'chat', projectChatIds: new Set(asPanel ? [2] : []), unreadCount: 0 },
+        updateUnreadBadge() {}, idPrefix: 'chat', mountEl: mount, chatId: asPanel ? 2 : 1, asPanel, onReadingLatest,
+        stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
+            isCurrent: () => true, apply() {}, fail() {}, latest: () => null },
+    });
+    t.after(() => { instance.destroy(); restoreDom(prior); globalThis.WebSocket = priorSocket; });
+    const edge = () => doc.byId.get('chat-messages').querySelector('.chat-load-older');
+    const dispatch = async (node) => { for (const handler of node.listeners.get('click')) await handler({ target: node }); };
+    return { instance, calls, edge, dispatch,
+        respond: next => { response = next; },
+        door: () => edge()?.querySelector('.chat-archive-door'),
+        reader: () => doc.body.children.find(node => node.classList.contains('room-archive')),
+        note: () => [instance.page, edge()].flatMap(node => node?.querySelectorAll('.chat-load-older-note') || [])
+            .map(node => node.textContent).join(' '),
+        restored: () => instance.page.querySelector('.chat-page-note')?.querySelector('.chat-registry-restored')?.textContent,
+        reconnect: () => handlers.get('open')({ previouslyConnected: true }),
+        disconnect: () => handlers.get('close')(),
+    };
+}
+
+test('a typed Main refusal explains the lost project list and offers the archive beside Retry without reading it', async (t) => {
+    const f = archiveRoom(t, REGISTRY_REFUSAL);
+    await f.instance.refreshHistory({ revision: 1 });
+    const retry = f.edge().querySelector('.chat-load-older-btn');
+    assert.match(f.note(), /The project list can’t be read, so Main’s saved history isn’t shown\./);
+    assert.equal(retry.textContent, 'Retry loading messages');
+    assert.equal(retry.nextElementSibling, f.door());
+    assert.equal(f.door().textContent, 'Read saved messages');
+    assert.equal(f.door().hidden, false);
+    assert.equal(f.calls.some(url => url.pathname === '/api/chat/archive'), false);
+    assert.equal(f.restored(), undefined);
+});
+
+for (const [title, pageOrRefusal, asPanel, note, restored] of [
+    ['another refusal', { httpStatus: 503, body: { reason_code: 'history_source_unavailable', detail: 'store busy' } },
+        false, /Some saved history could not be loaded\./],
+    ['a Project', REGISTRY_REFUSAL, true], ['healthy Main', page([]), false],
+    ['restored Main', { ...page([]), project_registry: 'restored' }, false, null, 'Project list restored from its saved copy.'],
+    ['restored Project', { ...page([]), project_registry: 'restored' }, true],
+]) {
+    test(`${title} keeps the ordinary history edge without an archive door`, async (t) => {
+        const f = archiveRoom(t, pageOrRefusal, { asPanel });
+        await f.instance.refreshHistory({ revision: 1 });
+        if (note) assert.match(f.note(), note);
+        assert.ok(f.door() == null);
+        assert.equal(f.restored(), restored);
+    });
+}
+
+test('Load more history and reconnect route a new registry refusal to Main’s archive door', async (t) => {
+    const f = archiveRoom(t, page([row('chat:1', 'painted')], 'page:recent', 'older-1'), { older: () => REGISTRY_REFUSAL });
+    await f.instance.refreshHistory({ revision: 1 });
+    assert.ok(f.door() == null);
+    await f.dispatch(f.edge().querySelector('.chat-load-older-btn'));
+    assert.equal(f.calls.some(url => url.searchParams.get('cursor') === 'older-1'), true);
+    assert.equal(f.door().hidden, false, 'Load more encountered the typed refusal');
+    f.disconnect();
+    f.respond(page([row('chat:2', 'fresh')], 'page:new'));
+    f.reconnect();
+    await drain();
+    assert.ok(f.door().hidden, 'a successful ordinary read retires the archive offer from the older page');
+    assert.doesNotMatch(f.note(), /project list can’t be read/);
+    f.disconnect();
+    f.respond(REGISTRY_REFUSAL);
+    const callsBefore = f.calls.length;
+    f.reconnect();
+    await drain();
+    assert.equal(f.calls.slice(callsBefore).some(url => url.pathname === '/api/chat/history' && !url.searchParams.has('cursor')), true);
+    assert.equal(f.door().hidden, false, 'reconnect encountered the typed refusal');
+});
+
+for (const action of ['closeTransient', 'destroy']) {
+    test(`${action} closes Main’s archive, cancels its read and drops late responses`, async (t) => {
+        let release, signal;
+        const f = archiveRoom(t, REGISTRY_REFUSAL, { archive: init => {
+            signal = init.signal;
+            return new Promise(resolve => { release = resolve; });
+        } });
+        await f.instance.refreshHistory({ revision: 1 });
+        await f.dispatch(f.door());
+        const reader = f.reader();
+        assert.ok(reader && signal && !signal.aborted);
+        f.instance[action]();
+        assert.equal(f.reader(), undefined);
+        assert.equal(signal.aborted, true);
+        release({ state: 'available', room: 'main', rooms: [], has_more: false, next_cursor: null,
+            messages: [{ id: 'archive:chat:1', role: 'user', text: 'late', ts: '' }] });
+        await drain();
+        assert.equal(reader.querySelectorAll('.room-archive-row').length, 0);
+    });
+}
+
+test('a successful Main history response under the archive carries no read receipt until Main is shown again', async (t) => {
+    const f = archiveRoom(t, REGISTRY_REFUSAL, { archive: () => ({ state: 'available', room: 'main', rooms: [], messages: [] }) });
+    await f.instance.refreshHistory({ revision: 1 });
+    await f.dispatch(f.door());
+    assert.equal(f.instance.archiveOpen(), true);
+    f.respond(page([row('chat:1', 'new standalone message')]));
+    const covered = await f.instance.refreshHistory({ revision: 2 });
+    assert.equal(f.instance.hasPaintedHistory(), true, 'the live history did update underneath');
+    assert.equal(covered.painted, false, 'that hidden paint is not a reading receipt');
+    f.instance.closeTransient();
+    assert.equal(f.instance.archiveOpen(), false);
+    assert.equal((await f.instance.refreshHistory({ revision: 2 })).painted, true);
+});
+
+
+const workCardHistory = row('progress:901', 'Working in this Project', { task_id: 'reply-work', is_progress: true, narration: true });
+const workReplyHistory = row('chat:902', 'A reply from the Main portal', {
+    role: 'user', chat_id: 1, client_message_id: 'reply-902', row_address: 'row:1@t#reply902',
+    sender_session_id: 'same-tab', ingress_accepted: true,
+    reply_to: { address: 'task:reply-work', role: 'assistant', kind: 'work_card', snippet: 'Working', work_task_id: 'reply-work' },
+});
+
+// The owner's Reply to a work card is the feed's own chronological bubble (owner 23.11: one Reply, the work answers
+// under it in the same feed) — never tucked inside the card's collapsed Details. The work's answer is a standard
+// relay_reply row drawn as the feed's bubble quoting the owner message. Both appear once, live and on replay.
+const userReplies = (f) => [...f.messages.querySelectorAll('.chat-bubble.user[data-client-message-id]')];
+
+test('a live Main work reply from the same tab appears once in the open Project feed before history, and replay keeps its node', async t => {
+    const f = fixture(t, page([workCardHistory]), null, { seed: () => sessionStorage.setItem('ouro_chat_session_id', 'same-tab') });
+    await f.refresh();
+    walkCard(f.messages, workCardHistory.task_id);
+    const echo = { ...workReplyHistory, content: workReplyHistory.text, also_rooms: [2] };
+    const reads = f.calls.length;
+    f.emit(echo);
+    assert.equal(f.calls.length, reads, 'the live transport paints without a history read');
+    const shown = userReplies(f);
+    assert.equal(shown.length, 1);
+    const [bubble] = shown;
+    assert.equal(bubble.parentElement, f.messages, 'the reply is the feed\'s own node, not the card\'s Details');
+    assert.equal(bubble.dataset.rowAddress, workReplyHistory.row_address);
+    f.emit(echo);
+    await f.refresh(page([workCardHistory, workReplyHistory]));
+    f.emit(echo);
+    assert.deepEqual(userReplies(f), [bubble]);
+    assert.equal(bubble.dataset.historyId, workReplyHistory.history_id);
+    assert.equal(bubble.parentElement, f.messages);
+});
+
+test('a late older Reply is inserted before the newer Reply in the feed', async t => {
+    const f = fixture(t, page([workCardHistory, workReplyHistory]));
+    await f.refresh();
+    const [newer] = userReplies(f);
+    const older = { ...workReplyHistory, ts: '2026-01-01T00:00:00Z', history_id: 'chat:899',
+        client_message_id: 'reply-899', row_address: 'row:1@t#reply899', text: 'An older reply' };
+    f.emit({ ...older, content: older.text, also_rooms: [2] });
+    assert.deepEqual(userReplies(f).map(node => node.dataset.clientMessageId), ['reply-899', 'reply-902']);
+    assert.equal(userReplies(f)[1], newer);
+    await f.refresh(page([older, workCardHistory, workReplyHistory]));
+    assert.deepEqual(userReplies(f).map(node => node.dataset.clientMessageId), ['reply-899', 'reply-902']);
+});
+
+test('a work-reply arrival lights New activity on replay, without moving the reader or repeating the row', async t => {
+    const initial = [...presentRows(900), workCardHistory];
+    const f = fixture(t, page(initial));
+    await f.refresh();
+    walkCard(f.messages, workCardHistory.task_id);
+    readUp(f);
+    // Independent scroll geometry: a new feed row does not change this reader's distance from the live edge.
+    Object.defineProperty(f.messages, 'scrollHeight', { configurable: true, get: () => 1500, set() {} });
+    f.messages.scrollTop = 400;
+    assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message');
+    await f.refresh(page([...initial, workReplyHistory]));
+    assert.equal(latestButton().getAttribute('aria-label'), 'New activity — scroll to latest message');
+    assert.equal(f.messages.scrollTop, 400);
+    const shown = userReplies(f);
+    assert.equal(shown.length, 1);
+    const [bubble] = shown;
+    assert.equal(bubble.parentElement, f.messages);
+    await f.refresh(page([...initial, workReplyHistory]));
+    assert.deepEqual(userReplies(f), [bubble]);
+    assert.equal(f.messages.scrollTop, 400);
+});
+
+const localWorkReply = row('chat:910', 'Please check the search', {
+    role: 'user', chat_id: 2, client_message_id: 'reply-910', row_address: 'row:2@t#reply910',
+    sender_session_id: 'same-tab', ingress_accepted: true,
+    reply_to: { address: 'task:reply-work', role: 'assistant', kind: 'work_card', snippet: 'Working', work_task_id: 'reply-work' },
+});
+const workAnswer = row('chat:911', 'Checked — the search is fine', {
+    role: 'assistant', system_type: 'relay_reply', task_id: 'reply-work', row_address: 'row:2@t#answer911',
+    reply_to: { address: 'row:2@t#reply910', role: 'user', kind: 'message', snippet: 'Please check the search', target_home: 'room' },
+    reply_to_relay: 'relay:reply-work',
+});
+
+test('the addressed work answers with a visible relay_reply under the owner reply, once, live and on replay', async t => {
+    const f = fixture(t, page([workCardHistory, localWorkReply]));
+    await f.refresh();
+    const [replyBubble] = userReplies(f);
+    assert.equal(replyBubble.parentElement, f.messages);
+    f.emit({ ...workAnswer, content: workAnswer.text });
+    const answerOf = () => [...f.messages.querySelectorAll('.chat-bubble.assistant')]
+        .find(node => node.dataset.rowAddress === workAnswer.row_address);
+    const answer = answerOf();
+    assert.ok(answer, 'the work answer is drawn');
+    assert.equal(answer.parentElement, f.messages, 'the answer is the feed\'s node, not tucked in the card');
+    const quote = answer.querySelector('.chat-quote');
+    assert.ok(quote, 'the answer carries the quote of the owner message');
+    assert.equal(quote.dataset.address, localWorkReply.row_address);
+    const kids = [...f.messages.children];
+    assert.ok(kids.indexOf(replyBubble) < kids.indexOf(answer), 'the answer stands after the owner reply');
+    const count = f.messages.querySelectorAll('.chat-bubble.assistant').length;
+    await f.refresh(page([workCardHistory, localWorkReply, workAnswer]));
+    assert.equal(answerOf(), answer, 'replay keeps the one answer node');
+    assert.equal(f.messages.querySelectorAll('.chat-bubble.assistant').length, count, 'no second answer');
+});
+
+test('authoritative history reconciles only derived_question quotes on mounted bubbles while preserving explicit Reply, focus and reading place', async t => {
+    const f = fixture(t, page([]));
+    const derived = (extra = {}) => ({
+        address: 'row:1@q#1', role: 'assistant', kind: 'question', author_label: 'Ouroboros',
+        snippet: 'Which report format?', room_label: 'Main', ts: TS, derived_question: true, ...extra,
+    });
+    const quoteOf = (bubble) => bubble.children.find(child => child.classList.contains('chat-quote')) || null;
+
+    // 1. Live shared frame arrives without reply_to (e.g. also_rooms broadcast): bubble mounts with no quote.
+    f.emit({
+        role: 'user', content: 'Yes, PDF', ts: TS, row_address: 'row:2@a#1',
+        client_message_id: 'cm-late-1', also_rooms: [1],
+    });
+    const mounted = f.bubbles().find(node => node.dataset.clientMessageId === 'cm-late-1');
+    assert.ok(mounted);
+    assert.equal(quoteOf(mounted), null);
+
+    // Also mount an explicit owner Reply bubble and an extra older bubble so we can verify reading position stability.
+    const explicitRow = row('chat:49', 'Explicit reply text', {
+        role: 'user', row_address: 'row:2@a#0',
+        reply_to: { address: 'row:2@q#0', role: 'assistant', snippet: 'Owner explicit target', ts: TS },
+    });
+    const lateRow = (extra = {}) => row('chat:50', 'Yes, PDF', {
+        role: 'user', row_address: 'row:2@a#1', client_message_id: 'cm-late-1', ...extra,
+    });
+
+    // 2. Authoritative history refresh adds the derived_question quote onto the same mounted bubble.
+    await f.refresh(page([explicitRow, lateRow({ reply_to: derived() })]));
+    assert.equal(f.bubbles().filter(node => node.dataset.clientMessageId === 'cm-late-1').length, 1);
+    const firstQuote = quoteOf(mounted);
+    assert.ok(firstQuote);
+    assert.equal(firstQuote.dataset.derivedQuestion, '1');
+    assert.match(firstQuote.querySelector('.chat-quote-room').textContent, /Main/);
+    const explicitBubble = f.bubbles().find(node => node.dataset.historyId === 'chat:49');
+    const explicitQuote = quoteOf(explicitBubble);
+    assert.ok(explicitQuote);
+    assert.equal(explicitQuote.dataset.derivedQuestion, undefined);
+
+    // 3. Duplicate live frame without reply_to must NOT remove the derived question quote.
+    f.emit({
+        role: 'user', content: 'Yes, PDF', ts: TS, row_address: 'row:2@a#1',
+        client_message_id: 'cm-late-1', also_rooms: [1],
+    });
+    assert.equal(quoteOf(mounted), firstQuote);
+
+    // 4. Unchanged history refresh keeps the exact same quote DOM node and focus on its button.
+    const firstBtn = firstQuote.querySelector('.chat-quote-main');
+    firstBtn.focus();
+    assert.equal(globalThis.document.activeElement, firstBtn);
+    await f.refresh(page([explicitRow, lateRow({ reply_to: derived() })]));
+    assert.equal(quoteOf(mounted), firstQuote);
+    assert.equal(globalThis.document.activeElement, firstBtn);
+
+    // 5. History refresh with changed room_label updates the derived quote in place and keeps focus + reading place.
+    f.messages.scrollTop = 120;
+    for (const handler of f.messages.listeners.get('wheel')) handler({ type: 'wheel', deltaY: -40 });
+    for (const handler of f.messages.listeners.get('scroll')) handler({});
+    const savedScroll = f.messages.scrollTop;
+    await f.refresh(page([explicitRow, lateRow({ reply_to: derived({ room_label: 'Project Alpha' }) })]));
+    const secondQuote = quoteOf(mounted);
+    assert.notEqual(secondQuote, firstQuote);
+    assert.match(secondQuote.querySelector('.chat-quote-room').textContent, /Project Alpha/);
+    assert.equal(globalThis.document.activeElement, secondQuote.querySelector('.chat-quote-main'));
+    assert.equal(f.messages.scrollTop, savedScroll, 'reading place stays steady while derived quote updates');
+
+    // 6. Authoritative history refresh without reply_to removes only the derived quote (moving focus to bubble),
+    //    and leaves the explicit owner Reply untouched even when its row carries no reply_to.
+    await f.refresh(page([
+        row('chat:49', 'Explicit reply text', { role: 'user', row_address: 'row:2@a#0' }),
+        lateRow(),
+    ]));
+    assert.equal(quoteOf(mounted), null);
+    assert.equal(globalThis.document.activeElement, mounted);
+    assert.equal(quoteOf(explicitBubble), explicitQuote, 'explicit Reply is never removed by history reconciliation');
+    assert.equal(f.messages.scrollTop, savedScroll, 'reading place stays steady when derived quote disappears');
+});
+
+test('retained origin_projected bubble reconciles its derived_question quote across refresh and canonical adoption', async t => {
+    const f = fixture(t, page([]));
+    const derived = (roomLabel) => ({
+        address: 'row:1@q#7', role: 'assistant', kind: 'question', author_label: 'Ouroboros',
+        snippet: 'Continue with migration?', room_label: roomLabel, ts: TS, derived_question: true,
+    });
+    const quoteOf = (bubble) => bubble.children.find(child => child.classList.contains('chat-quote')) || null;
+
+    // Retained origin_projected copy arrives without a history_id and with a derived question quote.
+    await f.refresh(page([{
+        role: 'user', text: 'Go ahead', ts: TS, origin_projected: true, origin_id: 'origin-late-7',
+        row_address: 'row:2@a#7', reply_to: derived('Main'),
+    }]));
+    const bubble = f.bubbles().find(node => node.dataset.originId === 'origin-late-7');
+    assert.ok(bubble);
+    assert.match(quoteOf(bubble).querySelector('.chat-quote-room').textContent, /Main/);
+
+    // Subsequent history read updates the origin_projected copy's derived quote in place.
+    await f.refresh(page([{
+        role: 'user', text: 'Go ahead', ts: TS, origin_projected: true, origin_id: 'origin-late-7',
+        row_address: 'row:2@a#7', reply_to: derived('HQ'),
+    }]));
+    assert.match(quoteOf(bubble).querySelector('.chat-quote-room').textContent, /HQ/);
+
+    // Canonical history row adopts the retained copy and removes the stale derived quote when source is gone.
+    await f.refresh(page([row('chat:70', 'Go ahead', {
+        role: 'user', origin_id: 'origin-late-7', row_address: 'row:2@a#7',
+    })]));
+    assert.equal(bubble.dataset.historyId, 'chat:70');
+    assert.equal(bubble.dataset.originProjected, undefined);
+    assert.equal(quoteOf(bubble), null);
+});
+
+test('an open question\'s owed delivery follows the order of a live frame and the history read that names it', async t => {
+    const owed = { kind: 'answer', state: 'owed' };
+    const quiz = (extra) => ({ quiz_id: 'q-60', state: 'answered', answered_index: 0, ...extra });
+    // As the server sends them: the question's row and its saved answer replayed beside the page, each with the
+    // question's current delivery, or none.
+    const rows = (extra = {}) => page([
+        row('chat:60', 'Merge now?', { msg_type: 'quiz', task_id: 'root-q', quiz: { ...quiz(extra), options: [{ label: 'Yes' }, { label: 'No' }] } }),
+        { role: 'system', text: '', is_progress: false, system_type: 'quiz_answer', task_id: 'root-q', ts: TS, quiz: quiz(extra) },
+    ]);
+    const f = fixture(t, rows({ question_delivery: owed }));
+    await f.refresh();
+    const card = f.messages.children.flatMap((node) => node.children || [])
+        .find((node) => node.classList?.contains('chat-quiz-card') && node.dataset.quizId === 'q-60');
+    const status = () => card.querySelector('.chat-quiz-status-text').textContent;
+    const liveOwed = () => f.emitQuizState({ type: 'quiz_state', quiz_id: 'q-60', task_id: 'root-q', state: 'answered',
+        answered_index: 0, question_delivery: owed });
+    const pending = 'Answer recorded · delivery pending';
+    assert.equal(status(), pending);
+    // A history read is no live frame: its replayed answer stated the owed delivery as of its own read, and a later
+    // read whose record names none drops it (the answer row's address proves recording, never receipt).
+    await f.refresh(rows());
+    assert.equal(status(), 'You answered');
+    // 1. A live frame states the debt again; a read asked for after it finds none: that older fact goes too.
+    liveOwed();
+    assert.equal(status(), pending);
+    const stated = Date.now();
+    while (Date.now() <= stated) await new Promise((resolve) => setTimeout(resolve, 1));
+    await f.refresh(rows());
+    assert.equal(status(), 'You answered');
+    // 2. A read already asked for when the live frame came answers later without it: the newer fact stays.
+    let answer;
+    const late = new Promise((resolve) => { answer = resolve; });
+    const asked = f.calls.length;
+    const reading = f.refresh(late);
+    await settle(() => f.calls.length > asked);
+    liveOwed();
+    assert.equal(status(), pending);
+    answer(rows());
+    await reading;
+    assert.equal(status(), pending, 'the late snapshot clears no delivery stated after its read began');
+    assert.equal(f.messages.children.flatMap((node) => node.children || [])
+        .filter((node) => node.classList?.contains('chat-quiz-card')).length, 1, 'one open card throughout');
 });

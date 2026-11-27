@@ -193,6 +193,7 @@ def reconcile_task_runs(drive_root: Any, task_id: str, *,
     if not mine:
         return []
     from ouroboros.delegate_custody_current import open_held_runs, task_snapshot
+    from ouroboros.execution_domain import registration_engine
 
     view = task_snapshot(drive_root, mine)  # one read; pending starts remain the admitted sweep's duty
     if run_ids is not None:
@@ -203,11 +204,11 @@ def reconcile_task_runs(drive_root: Any, task_id: str, *,
     # Also the registration retry lane for the task's OWN settled-but-owned
     # runs in retire-eligible projects (a one-shot process may never see a
     # sweep tick); deferred registrations stay with the periodic sweep. A
-    # project with ANY unsettled run is live; unsettled runs are held rows.
+    # registration with ANY unsettled run on its engine is live; unsettled runs are held rows.
     owned = [r for r in view["runs"].values() if r.project_owned and r.project_id and r.settled]
-    live = ({r.project_id for r in open_held_runs(drive_root).values() if r.project_id and r.run_id and not r.settled}
-            if owned else set())
-    owed = [r for r in owned if r.project_id not in live]
+    live = ({(registration_engine(r), r.project_id) for r in open_held_runs(drive_root).values()
+             if r.project_id and r.run_id and not r.settled} if owned else set())
+    owed = [r for r in owned if (registration_engine(r), r.project_id) not in live]
     if not held and not owed:
         return named  # pending invocations alone open no transport: the sweep or their panel owns them
     return [*named, *_reconcile_each(drive_root, held, gateway_factory or attach_only_gateway,
@@ -289,6 +290,39 @@ def reconcile_orphaned_runs(
                            watched=watched, observe_pending=observe_pending)
 
 
+def observe_review_pending_starts(drive_root: Any) -> List[Dict[str, Any]]:
+    """Read the accepted work behind this profile's REVIEW-owned pending starts and bind each once (#3294).
+
+    The one Reset case the orphan sweep deliberately leaves alone (#1006): a review start whose POST the
+    engine may have accepted and whose START_REQUESTED row outlived its worker. The sweep leaves review
+    starts to their panel, and a panel is a RECOVERED seat's own rejoin
+    (``review_session_custody.rejoin_recorded_review``); the Reset's profile-work check runs once this
+    generation's own stops are confirmed, so no seat ever recovers and the start would stay pending
+    forever — holding the Reset as ``delegated_starts_unknown`` with nobody left to resolve it. This pass
+    is that resolution and only that: the SAME noncreating read the panel itself and the sweep's watched
+    lane use (``_observe_pending_invocation`` → ``delegate_accepted.recover``), grouped per engine,
+    attach-only. Nothing is POSTed, replayed, cancelled or settled here; no run, registration or pending
+    row of any other surface is touched (``_reconcile_engine`` with no runs, no pending and no
+    registrations: the watched observe lane alone). A miss, an unreachable engine, a foreign store, a
+    typed refusal or an unreadable request writes nothing: the start stays pending and the Reset stays
+    interrupted. A positively bound run is stopped by the caller's normal owner Stop (``stop_tree_runs``:
+    the one verdict that speaks for a review panel's run), never here.
+    """
+    records = [record for record in pending_invocations(drive_root)
+               if _custody().review_owned_source(record.get("source"))]
+    if not records:
+        return []
+    from ouroboros.execution_domain import engine_factory, engine_groups
+
+    outcomes: List[Dict[str, Any]] = []
+    for ref, (bound,) in engine_groups(records):
+        outcomes.extend(_reconcile_engine(
+            drive_root, [], engine_factory(ref, attach_only_gateway), None, [],
+            deliberate_terminal="", live_task_ids=None, recoverable_handles=(),
+            replay_pending=None, watched=bound, observe_pending=lambda: True))
+    return outcomes
+
+
 def _reconcile_each(drive_root: Any, runs: List[RunCustody],
                     gateway_factory: Callable[[], Any],
                     pending: Optional[List[Dict[str, Any]]] = None,
@@ -320,23 +354,28 @@ def _reconcile_each(drive_root: Any, runs: List[RunCustody],
     # Registration duty is real work only for a retire-ELIGIBLE project:
     # a deferred one must not spin the daemon up.
     from ouroboros.delegate_continuation import still_continuable
-    from ouroboros.delegate_custody_current import held_runs
-    from ouroboros.execution_domain import engine_factory, engine_groups
+    from ouroboros.delegate_custody_current import held_runs, owed_registrations
+    from ouroboros.execution_domain import engine_factory, engine_groups, registration_engine
 
-    # Owned registrations and unsettled runs are HELD rows: one indexed read.
+    # Owned registrations and unsettled runs are HELD rows: one indexed read. A registration is a
+    # project id on one engine: the same id on another engine is another registration.
     snapshot = list(held_runs(drive_root).values())
+    owed_rows = owed_registrations(drive_root)  # creations no run row owns, retired like an owned one
+    owed_keys = {(registration_engine(row), str(row.get("project_id") or "")) for row in owed_rows}
     # Only a still-owned registration can be retired, so only its rows are asked
     # (each ask reads task results); one continuable row keeps the whole project.
-    owned = {row.project_id for row in snapshot if row.project_owned and row.project_id}
+    owned = {(registration_engine(row), row.project_id) for row in snapshot if row.project_owned and row.project_id} | owed_keys
     unsettled_projects: set = set()
     for row in snapshot:
-        if (row.project_id in owned and row.project_id not in unsettled_projects and row.run_id
+        key = (registration_engine(row), row.project_id)
+        if (key in owned and key not in unsettled_projects and row.run_id
                 and (not row.settled or still_continuable(
                     drive_root, row, live_task_ids, recoverable_handles=recoverable_handles))):
-            unsettled_projects.add(row.project_id)
-    registrations = [row for row in snapshot
-                     if row.project_owned and row.project_id
-                     and row.project_id not in unsettled_projects]
+            unsettled_projects.add(key)
+    registrations = [*(row for row in snapshot if row.project_owned and row.project_id
+                       and (registration_engine(row), row.project_id) not in unsettled_projects),
+                     *(row for row in owed_rows
+                       if (registration_engine(row), str(row.get("project_id") or "")) not in unsettled_projects)]
     outcomes: List[Dict[str, Any]] = []
     for ref, (bound_runs, bound_pending, bound_registrations, bound_watched) in engine_groups(
             runs, pending or [], registrations, watched or []):
@@ -518,6 +557,12 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
         # No row per pass: the pending request row stays the durable fact while that store is not served.
         return {"invocation_id": invocation_id, "task_id": task_id, "action": "invocation_retained",
                 "reason": "invocation_store_unproven", "detail": unproven, "lookup": looked["lookup"]}
+    from ouroboros.delegate_registration_policy import registration_held
+
+    with registration_held(drive_root, gateway, record) as refusal:
+        if refusal:
+            return {"invocation_id": invocation_id, "task_id": task_id, "action": "invocation_retained",
+                    "lookup": looked["lookup"], **refusal}
     request = dict(body)
 
     def submit():
@@ -597,24 +642,27 @@ def recovered_custody(drive_root: Any, gateway: Any, record: Dict[str, Any], run
     execution = body.get("execution") if isinstance(body.get("execution"), dict) else {}
     scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
     from ouroboros.delegate_plan import plan_facts
-    from ouroboros.execution_domain import is_work_ref, recorded_ref
+    from ouroboros.execution_domain import is_peer_ref, is_work_ref, recorded_ref
 
     # The engine this invocation was bound to before its POST (this pass reached it there): the recovered row
     # keeps it, with the store that engine proved, as a fresh start's row does; else a later pass would ask the
-    # owned engine about a work run and take its 404 for the run's absence.
+    # owned engine about a work or peer run and take its 404 for the run's absence.
     bound = recorded_ref(record)
-    engine = dict(bound) if is_work_ref(bound) else {}
-    if engine and not engine.get("store"):
+    peer = is_peer_ref(bound)
+    engine = dict(bound) if (is_work_ref(bound) or peer) else {}
+    if is_work_ref(engine) and not engine.get("store"):
         proven = getattr(gateway, "engine_ref", None)
         if is_work_ref(proven) and proven.get("descriptor") == engine.get("descriptor") and proven.get("store"):
             engine["store"] = str(proven["store"])
+    access = str(body.get("access") or ("readonly" if peer else ""))
+    delegated = True if peer else bool(execution.get("delegated"))
     custody = _custody().RunCustody(
         engine_ref=engine,
         run_id=run_id, task_id=task_id, daemon_store_id=str(daemon_store_id or ""),
         window_started_at=str(record.get("requested_at") or ""),
         max_seconds=int(record.get("max_seconds") or body.get("maxSeconds") or 0),
         **plan_facts(record),
-        route_id=str(record["route"] or body.get("primaryHarness") or ""),
+        route_id=str(record["route"] or ("peer" if peer else body.get("primaryHarness") or "")),
         model=str(body.get("model") or ""),
         profile_id=str(body.get("credentialProfileId") or ""),
         effort=body.get("effort"),
@@ -624,8 +672,8 @@ def recovered_custody(drive_root: Any, gateway: Any, record: Dict[str, Any], run
         project_persistent=_record_persistent(record),
         root_task_id=str(record.get("root_task_id") or ""),
         parent_task_id=str(record.get("parent_task_id") or ""),
-        category=str(record.get("category") or "subagent"),
-        source=str(record.get("source") or "delegated_subagent"),
+        category=str(record.get("category") or ("peer" if peer else "subagent")),
+        source=str(record.get("source") or ("peer_letter" if peer else "delegated_subagent")),
         **{key: str(record.get(key) or "") for key in REVIEW_ATTRIBUTION_KEYS},
         # The sweep runs against the canonical root; a recovered run's ledger row
         # belongs there like every other (P34R.1).
@@ -656,16 +704,16 @@ def recovered_custody(drive_root: Any, gateway: Any, record: Dict[str, Any], run
         resource_ref=record.get("resource_ref") if isinstance(record.get("resource_ref"), dict) else {},
         # The GRANTED shape on the recovered OBJECT too, not only the row (gate
         # fix 8c): the memo must answer the same lookups the replay does.
-        access=str(body.get("access") or ""),
+        access=access,
         mode=str(body.get("mode") or ""),
         isolation=str(execution.get("isolation") or ""),
-        delegated=bool(execution.get("delegated")))
+        delegated=delegated)
     return custody, {
         # The stored invocation is the single source of a recovered run's facts — the same
         # doctrine the explicit retry path follows.
-        "effort": str(body.get("effort") or ""), "access": str(body.get("access") or ""),
+        "effort": str(body.get("effort") or ""), "access": access,
         "mode": str(body.get("mode") or ""), "isolation": str(execution.get("isolation") or ""),
-        "delegated": bool(execution.get("delegated")), "root": str(scope.get("root") or ""),
+        "delegated": delegated, "root": str(scope.get("root") or ""),
         "recovered_from_pending_invocation": True,
         "max_seconds": custody.max_seconds,
     }
@@ -740,6 +788,7 @@ def _reconcile_collection(drive_root: Any, gateway: Any, custody: RunCustody, *,
 def _reconcile_one(drive_root: Any, gateway: Any, custody: RunCustody, *,
                    deliberate_terminal: str = "", owner_stop=None) -> Dict[str, Any]:
     from ouroboros.delegate_resume import observe_bound_state, recovered_cancel_detail
+    from ouroboros.execution_domain import is_peer_ref, recorded_ref
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.task_results import STATUS_CANCELLED, STATUS_INTERRUPTED
 
@@ -775,6 +824,15 @@ def _reconcile_one(drive_root: Any, gateway: Any, custody: RunCustody, *,
         if _custody().daemon_says_absent(exc, gateway=gateway, run=custody):
             _custody().close_absent_run(drive_root, gateway, custody, "reconcile_absent", absence=exc)
             result = {"run_id": custody.run_id, "task_id": custody.task_id, "action": "absent"}
+        elif (getattr(exc, "code", "") == "peer_link_unavailable" and is_peer_ref(recorded_ref(custody))
+              and not recovered and (claimed_verdict_cancels or _owner_terminal_is_deliberate(
+                  drive_root, custody.task_id, cancellation_only=review_owned))):
+            # A linked Ouroboros's letter whose place is Paused here: its content waits, its Stop does not
+            # (``cancel_and_verify`` reads it back for that Stop alone, ``delegate_resume.stop_read_run``). A
+            # lookup-only start was answered above: only a recorded cancellation stops it, never a Pause here.
+            cancelled = _custody().cancel_and_verify(drive_root, gateway, custody, "owner_task_gone")
+            result = {"run_id": custody.run_id, "task_id": custody.task_id, "action": "cancelled",
+                      "outcome": cancelled["outcome"], **_custody().output_disposition(custody)}
         else:
             _custody().record_containment_fault(drive_root, custody, "reconcile_unreadable", f"{exc.code}: {exc}")
             result = {"run_id": custody.run_id, "task_id": custody.task_id, "action": "unreadable"}

@@ -1,37 +1,29 @@
 // Agent login cards — the host-neutral controller + view (phase 2 seam).
 //
-// «Красота-сначала»: the login card is LINK-FIRST — the engine disclosures the
-// sign-in URL (and a one-time code for the codex device flow) through the job
-// snapshot's transient overlay, and the card renders "Open sign-in link" +
-// copy affordances + a live state line. A job that also accepts user input
-// (the claude OAuth paste-code, disclosure flow `oauth_url_input`) shows an
-// ALWAYS-VISIBLE code entry: claude's CLI only asks for the code when the
-// browser cannot reach its localhost callback (e.g. another device), so the
-// field cannot depend on a prompt this UI cannot observe — the input is
-// OPTIONAL by design (the callback may complete on its own). The copy-paste
-// `claudexor setup attach …` command survives ONLY as a collapsed Advanced
-// affordance for engines that predate the disclosure modes or jobs whose link
-// never arrives — never the primary UI. No terminal panel exists in this UI,
-// and none may be added. Shape selection keys on the disclosure's typed FLOW
-// (url-only `oauth_url`/`chatgpt` vs `oauth_url_input`; 3.3.7 final
-// contract) — no harness-name branches, no boolean sidecar.
+// «Красота-сначала»: the card is LINK-FIRST — the engine disclosures the sign-in URL (and a one-time
+// code for the codex device flow) through the job snapshot's transient overlay; "Open sign-in link" +
+// copy affordances + a live state line render first. A job that also accepts user input (the claude
+// OAuth paste-code, disclosure flow `oauth_url_input`) shows an ALWAYS-VISIBLE code entry: claude's CLI
+// only asks for the code when the browser cannot reach its localhost callback, so the input is
+// OPTIONAL by design — the callback may complete on its own. The copy-paste `claudexor setup attach …`
+// command survives ONLY as a collapsed Advanced affordance for engines that predate the disclosure
+// modes or jobs whose link never arrives — never the primary UI; no terminal panel exists here, and
+// none may be added. Shape selection keys on the disclosure's typed FLOW (url-only `oauth_url`/
+// `chatgpt` vs `oauth_url_input`; 3.3.7 final contract) — no harness-name branches, no boolean sidecar.
 //
-// Shared by the Providers tab and the onboarding wizard, so both inherit every fix.
-// Start, Retry and Close run through one ordered queue; a new login begins only
-// once release of the previous job is proven (`loginReleaseProven`) — a 2xx cancel
-// alone is not proof.
-//
-// Full mode adds paste-code input and the delayed Advanced fallback. Compact
-// mode exposes any available attach command directly; an explicit external
-// terminal continuation is direct in both. Both report authentication only.
-//
-// Pure helpers up top are node-tested without a DOM.
+// Shared by the Providers tab and the onboarding wizard, so both inherit every fix. Start, Retry and
+// Close run through one ordered queue; a new login begins only once release of the previous job is
+// proven (`loginReleaseProven`) — a 2xx cancel alone is not proof. Full mode adds paste-code input and
+// the delayed Advanced fallback; compact mode exposes any available attach command directly; an
+// explicit external terminal continuation is direct in both. Both report authentication only. Pure
+// helpers up top are node-tested without a DOM.
 
 import { restoreFocusWithoutReveal } from './scroll_fade.js';
 import { apiFetch } from './api_client.js';
 import { harnessAccountIdentityMarkup } from './harness_presentation.js';
 import {
     accountLoginConfirmed,
+    accountRows,
     claudexorPreparationLine,
     claudexorStatus,
     familyLabel,
@@ -39,6 +31,7 @@ import {
 import { copyTextWithToast, openExternalViaHostBridge } from './ui_helpers.js';
 import { showToast } from './toast.js';
 import { escapeHtmlAttr as escapeHtml, safeExternalHrefAttr } from './utils.js';
+import { normalizeProfileName, profileNameSubmission } from './harness_profile_names.js';
 
 const JOB_POLL_MS = 3000;
 export const JOB_POLL_MAX_DELAY_MS = 30000;
@@ -47,16 +40,11 @@ export const JOB_POLL_GIVE_UP_FAILURES = 10;
 export const LOGIN_CARD_FULL = 'full';
 export const LOGIN_CARD_COMPACT = 'compact';
 export const SIGN_IN_SCOPE_NOTE = 'Sign-in does not verify main-chat support or agent execution.';
-// Volatile-word masks of a standing card (paintCard): control characters, spelled as escapes (see start()'s note).
+// Volatile-word masks of a standing card (paintCard): control characters, spelled as escapes (see begin()'s note).
 const SLOT_MASKS = { deviceCode: '\u0001device-code\u0002', state: '\u0001state-line\u0002' };
 
-export const TERMINAL_TRANSPORT_ERROR_CODES = Object.freeze([
-    'terminal_transport_unavailable',
-    'terminal_transport_unsupported',
-    'terminal_transport_probe_failed',
-    'terminal_transport_failed',
-]);
-const TERMINAL_TRANSPORT_ERRORS = new Set(TERMINAL_TRANSPORT_ERROR_CODES);
+const TERMINAL_TRANSPORT_ERRORS = new Set(['terminal_transport_unavailable', 'terminal_transport_unsupported',
+    'terminal_transport_probe_failed', 'terminal_transport_failed']);
 
 // ---------------------------------------------------------------------------
 // Pure helpers.
@@ -76,38 +64,11 @@ export function nextJobPollDelay(consecutiveFailures) {
     };
 }
 
-export function normalizeProfileName(raw) {
-    // The ENGINE's registration contract is the authority: a profile id must
-    // match ^[a-z0-9][a-z0-9_-]{0,63}$ (Claudexor profile-registration slug).
-    // Lowercase, map every other character to '-', strip separators the slug
-    // may not START with, cap at the engine's 64, and return '' for anything
-    // that still cannot satisfy the contract (e.g. a name with no ASCII
-    // alphanumerics at all) — an empty result makes the dialog/card ask again
-    // instead of submitting a name the engine would refuse. Lives with the
-    // login card; `harness_accounts.js` re-exports the established path.
-    const mapped = String(raw || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
-    const slug = mapped.replace(/^[-_]+/, '').slice(0, 64);
-    return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(slug) ? slug : '';
-}
-
-export function profileNameSubmission(raw) {
-    // The same loop-until-stable rule `promptProfileName` (Add account)
-    // applies: a submitted name STARTS a login only when it already IS its
-    // normalized form; otherwise the normalized spelling is handed back,
-    // editable, with a note — never rewritten silently. Pure for node tests.
-    const typed = String(raw || '').trim();
-    const normalized = normalizeProfileName(typed);
-    if (!normalized) {
-        return { profile: '', normalized: '',
-            note: 'Enter a name that starts with a lowercase letter or digit — '
-                + 'letters, digits, "-" and "_", at most 64 characters.' };
-    }
-    if (normalized !== typed) {
-        return { profile: '', normalized,
-            note: `"${typed}" will be saved as "${normalized}" — edit the name or press the button again to continue.` };
-    }
-    return { profile: normalized, normalized, note: '' };
-}
+// The profile-name contract (the engine's registration slug and the
+// loop-until-stable submission form) lives in harness_profile_names.js — the
+// job-lifecycle module does not own naming. Re-exported here so this module's
+// established import path stays valid.
+export { normalizeProfileName, profileNameSubmission };
 
 export function attachShellLabel(shell) {
     if (shell === 'powershell') return 'PowerShell';
@@ -489,30 +450,27 @@ export function loginCardHtml(active, nowMs = Date.now(), { mode = LOGIN_CARD_FU
             bits.push('<button type="button" class="btn btn-primary" data-login-retry>Try again</button>');
         }
     } else if (face === 'name') {
-        // The engine refused to CREATE the default login and said why — its
-        // sentence is the honest source of the reason and is shown verbatim.
-        // The card turns that dead end into the action the refusal asks for:
-        // name an account (same validation the Add-account dialog runs) and
-        // start the NAMED login through the same standard flow.
-        bits.push(`<div class="settings-inline-note" data-tone="error" data-login-engine-said>${escapeHtml(active.needsProfile.message)}</div>`);
+        // The engine's typed refusal of the default login is this family's ordinary first step, not
+        // an error: name an account (the Add-account dialog's validation) and start the NAMED login
+        // through the same standard flow. The engine's own sentence stays verbatim under Details.
+        bits.push(`<div class="settings-inline-note" data-login-name-lead>${escapeHtml(active.needsProfile.familyLabel || active.harness)} keeps each account under its own name.</div>`);
         bits.push(`
             <div class="harness-code-entry" data-profile-name-entry>
-                <label for="harness-profile-name-input">Name for the ${escapeHtml(active.needsProfile.familyLabel || active.harness)} account (e.g. work, backup). Lowercase letters, digits, "-" and "_" — anything else becomes "-".</label>
+                <label for="harness-profile-name-input">Account name</label>
                 <div class="harness-code-entry-row">
                     <input class="ui-control" type="text" id="harness-profile-name-input" data-profile-name-input autocomplete="off" spellcheck="false"
-                        placeholder="account name">
+                        placeholder="e.g. work">
                     <button type="button" class="btn btn-primary" data-profile-name-submit>Add account &amp; connect</button>
                 </div>
                 ${active.profileNameNote ? `<div class="settings-inline-status" data-tone="muted" data-profile-name-note>${escapeHtml(active.profileNameNote)}</div>` : ''}
             </div>
+            <details class="harness-advanced" data-login-engine-said><summary>Details</summary><p>${escapeHtml(active.needsProfile.message)}</p></details>
         `);
     } else if (face === 'device') {
-        // LINK-FIRST: the prominent action is opening the disclosed sign-in
-        // URL, with an explicit copy affordance (the macOS-app card pattern).
-        // That link is now a PRIMARY click target built from engine-supplied
-        // text, so it goes through the house helper: http/https only, escaped
-        // by the helper itself. Anything else — javascript:, data:, a
-        // malformed string — yields '' and renders NO clickable link at all.
+        // LINK-FIRST: the prominent action is opening the disclosed sign-in URL, with an explicit copy
+        // affordance. That link is a PRIMARY click target built from engine-supplied text, so it goes
+        // through the house helper: http/https only, escaped by the helper itself. Anything else —
+        // javascript:, data:, a malformed string — yields '' and renders NO clickable link at all.
         const href = safeExternalHrefAttr(disclosure.url);
         bits.push(href ? `
             <div class="harness-signin-actions">
@@ -545,7 +503,7 @@ export function loginCardHtml(active, nowMs = Date.now(), { mode = LOGIN_CARD_FU
     // underneath "Signed in.".
     if (face !== 'error' && face !== 'name' && !active.verdict && !active.confirming) {
         const line = active.preparingRuntime
-            ? claudexorPreparationLine(statusPayload)
+            ? claudexorPreparationLine(statusPayload, active)
             : loginStatusLine(active.envelope || {});
         if (line) bits.push(`<div class="settings-inline-status" data-tone="muted" data-login-state>${slotMask ? SLOT_MASKS.state : escapeHtml(line)}</div>`);
     }
@@ -709,7 +667,12 @@ export function preserveCardFocus(host, swap, doc = typeof document === 'undefin
  * @param {string} [options.mode]          'full' | 'compact'
  * @param {Function} [options.fetchImpl]   transport
  * @param {Function} [options.onSettled]   called after a verdict lands / the card closes
- * @returns {object} controller with start/close/render/dispose/detach
+ * @param {Function} [options.installing]  (harness) → a missing program's name: the sign-in installs it first, or ''
+ * @param {Function} [options.signInWithheld] (harness) → the sentence that says a NEW sign-in must not start
+ *   here (a program a current read finds absent and cannot install), or '': asked before every create, below.
+ * @param {Function} [options.notify]      (sentence) a refusal said beside a sign-in that keeps running (a toast)
+ * @param {Function} [options.onAnswer]    (harness) after each create answered (it may have installed the program)
+ * @returns {object} controller with start/addAccount/close/render/dispose/detach
  *
  * LIFECYCLE CONTRACT (public — two sibling branches mount this):
  *   * `close()` and `dispose()` resolve to a typed custody result:
@@ -722,8 +685,10 @@ export function preserveCardFocus(host, swap, doc = typeof document === 'undefin
  *   * `detach()` is the narrow synchronous local exit: it starts no lifecycle
  *     request, clears timers/holds/host/active state, and permanently fences
  *     this controller. It does not turn retained/unknown custody into proof.
- *   * `start()` COALESCES duplicate starts for the same harness/profile onto
- *     one promise, so a double-click cannot create-then-cancel-then-create.
+ *   * `start(harness, profileId)` signs in a saved account the press chose ('' = the family's default sign-in),
+ *     `addAccount(harness, name)` the account the owner has just named. Both COALESCE duplicate starts for the
+ *     same account onto one promise (a double-click cannot create-then-cancel-then-create) and refuse a withheld
+ *     program or a saved account proven removed before any request and again before the create: no create, no DELETE.
  */
 export function createLoginCardController({
     host,
@@ -734,6 +699,9 @@ export function createLoginCardController({
     now = () => Date.now(),
     preservePlace = paint => paint(),
     onSettled = () => {},
+    installing = () => '', onAnswer = () => {},
+    signInWithheld = () => '', notify = (sentence) => showToast(sentence, 'warn'),
+    refuseDisabled = false,
 } = {}) {
     const getHost = typeof host === 'function' ? host : () => host;
     const getDoc = typeof doc === 'function' ? doc : () => doc;
@@ -745,8 +713,19 @@ export function createLoginCardController({
         releaseHold: null,
         disposed: false,
         detachedStatus: null,
+        roster: null,   // the LAST ANSWERED roster: harness\u0000profile -> disabled; null = unknown
     };
     let painted = {};   // the card node, job and markup of the last paint
+
+    // The roster the owner was LAST TOLD, kept while the card lives (the failed-read seam): one
+    // snapshot of the last ANSWERED accounts read, so a later failed read cannot make a removed
+    // or switched-off account look present again. `null` = unknown, an empty map = proven empty.
+    // A named add never consults it — `start(existing)` vs `add(new)` is the split below.
+    function captureRoster() {
+        if (!store?.accountsKnown) return;
+        ctl.roster = new Map(accountRows(store.snapshot || null).filter((row) => row.profile_id)
+            .map((row) => [`${row.harness}\u0000${row.profile_id}`, row.enabled === false]));
+    }
 
     function holdStatusPolling() {
         // A live login job keeps the shared status poll awake even when the
@@ -786,7 +765,7 @@ export function createLoginCardController({
     // cannot by itself make the store poll — it rides whatever reads the
     // visible surfaces and the login hold cause.
     const releasePhaseFollow = store?.subscribe
-        ? store.subscribe(() => { if (ctl.active?.preparingRuntime) render(); })
+        ? store.subscribe(() => { captureRoster(); if (ctl.active?.preparingRuntime) render(); })
         : () => {};
 
     function render() {
@@ -827,7 +806,7 @@ export function createLoginCardController({
     // where they differ, so a caret never moves), the job's volatile words — one-time code, state line — into
     // the leaves the last full paint mounted, so a poll landing inside a press detaches nothing.
     function writeInPlace(hostEl, active, statusPayload) {
-        const line = active.preparingRuntime ? claudexorPreparationLine(statusPayload)
+        const line = active.preparingRuntime ? claudexorPreparationLine(statusPayload, active)
             : loginStatusLine(active.envelope || {});
         for (const [selector, prop, text] of [['[data-login-code-input]', 'value', active.inputValue],
             ['[data-profile-name-input]', 'value', active.profileNameValue],
@@ -876,19 +855,19 @@ export function createLoginCardController({
             }).catch((error) => showToast(`Could not open sign-in link: ${error?.message || error}`, 'error'));
         });
         hostEl.querySelector('[data-login-retry]')?.addEventListener('click', () => {
-            // NO preemptive stopJobPolling() here: if the C7 guard inside
-            // start refuses (cancel unproven, job still live), the old poll
+            // NO preemptive stopJobPolling() here: if _startLocked refuses (the
+            // C7 cancel unproven, or a refusal: the job still live), the old poll
             // must stay armed — it is the recovery path that clears the
             // transient note and settles the real verdict. _startLocked stops
             // polling itself once the previous job is terminal or provably
             // cancelled.
-            start(active.harness, active.profile, active.transport);
+            begin(active.harness, active.profile, active.transport, undefined, active.named);
         });
         hostEl.querySelector('[data-login-external-terminal]')?.addEventListener('click', () => {
             // This is a NEW job through the same serialized release/custody
             // guard as every other start. Never mutate the active job into a
             // different transport and never auto-fallback.
-            start(active.harness, active.profile, 'client_pty');
+            begin(active.harness, active.profile, 'client_pty', undefined, active.named);
         });
         // Copy is a STEP of signing in here, so a non-secure origin or a
         // desktop shell without the async clipboard must not leave a dead
@@ -1172,7 +1151,14 @@ export function createLoginCardController({
             render();
             return;
         }
-        start(active.harness, answer.profile, active.transport);
+        // A NAMED create is refused against the captured roster's switched-off account: the engine signs a disabled idempotently (credential_profile_exists) — "Signed in", Continue locked.
+        const off = ctl.roster?.get(`${active.harness}\u0000${answer.profile}`) === true;
+        if (off) {
+            active.profileNameNote = `"${answer.profile}" is switched off here. Switch the account on before signing it in.`;
+            render();
+            return;
+        }
+        addAccount(active.harness, answer.profile, active.transport);
     }
 
     async function submitCodeFromCard(active) {
@@ -1218,23 +1204,22 @@ export function createLoginCardController({
         render();
     }
 
-    function start(harness, profile, transport = '', answer = paint => paint()) {
+    // The public pair (LIFECYCLE CONTRACT above); a card's own Retry and external terminal repeat its intent (`named`).
+    const start = (harness, profile, transport, answer) => begin(harness, profile, transport, answer, false);
+    const addAccount = (harness, name, transport, answer) => begin(harness, name, transport, answer, true);
+
+    function begin(harness, profile, transport = '', answer = paint => paint(), named = false) {
         if (!harness || ctl.disposed) return Promise.resolve();
-        // Duplicate starts are COALESCED, not merely serialized. The queue
-        // guaranteed order, and order made an ordinary double-click into
-        // create → cancel → create: the second start ran the C7 guard against
-        // the job the first one had just installed, DELETEd it, and created
-        // another — so the device link the owner was reading was invalidated
-        // the moment it appeared. While a start for the same account is still
-        // settling, every caller shares its promise.
-        // The separator is spelled as a source escape rather than written as a
-        // literal NUL byte: one raw NUL makes every ordinary search tool
-        // classify this 53 KB module as binary, and `grep` then answers with
-        // SILENCE instead of "no match", so a reviewer looking for a symbol
-        // in here concludes it does not exist. Same key, same collisions.
-        const key = `${harness}\u0000${profile || ''}\u0000${transport || ''}`;
-        // A repeated command shares the one operation but is still a command: the latest
-        // caller's view answers it, at once if the opening card already stands.
+        // Duplicate starts are COALESCED, not merely serialized: the queue guaranteed order, and order
+        // made an ordinary double-click into create → cancel → create — the second start ran the C7
+        // guard against the job the first one had just installed, DELETEd it, and created another,
+        // invalidating the device link the owner was reading. While a start for the same account is
+        // still settling, every caller shares its promise. The separator is spelled as a source escape
+        // rather than a literal NUL byte: one raw NUL makes ordinary search tools classify this module
+        // as binary and answer with SILENCE instead of "no match". Same key, same collisions.
+        const key = `${harness}\u0000${profile || ''}\u0000${transport || ''}\u0000${named ? 'named' : ''}`;
+        // A repeated command shares the one operation but is still a command: the latest caller's
+        // view answers it, at once if the opening card already stands.
         const shared = ctl.pendingStart;
         if (shared && shared.key === key) {
             if (shared.answered) answer(render);
@@ -1242,7 +1227,7 @@ export function createLoginCardController({
             return shared.promise;
         }
         const pending = { key, answer, answered: false };
-        pending.promise = withLoginTransition(() => _startLocked(harness, profile, transport, (paint) => {
+        pending.promise = withLoginTransition(() => _startLocked(harness, profile, transport, named, (paint) => {
             pending.answered = true;
             pending.answer(paint);
         }));
@@ -1256,61 +1241,85 @@ export function createLoginCardController({
         return pending.promise;
     }
 
+    // One shape for every card this controller opens: a create then fills in its job, a refusal its sentence.
+    const freshCard = (harness, profile, transport, named, fields) => ({
+        harness, profile, transport, named, jobId: '', envelope: null, absent: false, custodyStatus: '',
+        attachCommand: '', attachShell: '', setupLoginSource: '', error: '', problemCode: '', requiredActions: [],
+        startedAtMs: now(), engineDegraded: false, inputValue: '', inputBusy: false, inputSent: false,
+        inputError: '', inputNote: '', needsProfile: null, profileNameValue: '', profileNameNote: '',
+        verdict: null, confirming: false, advancedOpen: false, preparingRuntime: false, closing: false,
+        installing: String(installing(harness) || ''), ...fields,
+    });
+
     // `answer` wraps the one paint that answers this command: the opening card, or the open
     // sign-in that could not be released. Every later paint is an ordinary repaint.
-    async function _startLocked(harness, profile, transport, answer) {
-        // Re-read after the queue wait: a shutdown may have been queued ahead of
-        // this start, and a disposed controller must not create a job nobody
-        // will ever poll or cancel.
+    async function _startLocked(harness, profile, transport, named, answer) {
+        // Re-read after the queue wait: a shutdown may have been queued ahead of this start, and a
+        // disposed controller must not create a job nobody will ever poll or cancel.
         if (ctl.disposed) return;
-        // A new card is a new custody story: the remembered verdict belonged
-        // to the card the queued close detached, not to this one.
+        // A new card is a new custody story: the remembered verdict belonged to the card the
+        // queued close detached, not to this one.
         ctl.detachedStatus = null;
-        // C7 (plan roast, accepted): a NEW login may start only once release of
-        // the previous job is PROVEN (loginReleaseProven): a terminal snapshot
-        // whose reason is not termination_unconfirmed, a reconciliation that
-        // found the setup empty, or a job proven absent. A terminal
-        // termination_unconfirmed snapshot keeps the job fenced, and a 2xx
-        // cancel response alone is NOT proof of release — a second job beside a
-        // possibly-live one races the daemon and orphans the old job
-        // server-side. Centralized HERE so every entry point (Connect, Add
-        // account, Retry) inherits the guard.
+        captureRoster();
         const prev = ctl.active;
-        if (prev && prev.jobId
-            && !loginReleaseProven(prev.envelope, { absent: Boolean(prev.absent) })) {
-            const cancelled = await cancelUnreleased(prev);
-            if (!cancelled) return;
-            const { result } = cancelled;
-            if (result.status === LOGIN_CUSTODY_RETAINED) {
-                showRecovery(prev, result);
+        let held = Boolean(prev?.jobId) && !loginReleaseProven(prev.envelope, { absent: Boolean(prev.absent) });
+        // The LIFECYCLE CONTRACT's refusals: one local decision before any cancel and on the create's threshold (a
+        // DELETE sent stands as answered); a running sign-in keeps its card. Both membership and the switched-off
+        // flag read the ONE captured roster above, so a later failed read keeps the proof it already answered.
+        const rosterKey = `${harness}\u0000${profile}`;
+        const listed = () => ctl.roster === null || ctl.roster.has(rosterKey);
+        const disabled = () => ctl.roster?.get(rosterKey) === true;
+        const gone = () => !named && Boolean(profile) && !listed();
+        const refusal = () => String(signInWithheld(harness, profile) || '')
+            || (gone() ? 'This account is no longer saved here. Add it again as a new account to sign it in.' : '')
+            || (refuseDisabled && disabled()
+                ? `"${profile}" is switched off here. Switch the account on before signing it in.` : '');
+        let sentence = refusal();
+        // C7 (plan roast, accepted): a NEW login may start only once release of the previous job is
+        // PROVEN (loginReleaseProven): a terminal snapshot whose reason is not termination_unconfirmed,
+        // a reconciliation that found the setup empty, or a job proven absent. A terminal
+        // termination_unconfirmed snapshot keeps the job fenced, and a 2xx cancel response alone is
+        // NOT proof of release — a second job beside a possibly-live one races the daemon and orphans
+        // the old job server-side. Centralized HERE so every entry point (Connect, Add account, Retry)
+        // inherits the guard.
+        if (held && !sentence) {
+            const result = (await cancelUnreleased(prev))?.result;
+            if (!result) return;
+            if (result.status !== LOGIN_CUSTODY_RELEASED) {
+                if (result.status === LOGIN_CUSTODY_RETAINED) showRecovery(prev, result);
+                if (result.status === LOGIN_CUSTODY_UNKNOWN) {
+                    prev.custodyStatus = LOGIN_CUSTODY_UNKNOWN;
+                    prev.error = 'Could not cancel the active sign-in — it may still be running. '
+                        + 'Retry from its card, or dismiss it first.';
+                }
                 answer(render);
                 return;
             }
-            if (result.status === LOGIN_CUSTODY_UNKNOWN) {
+            held = false;
+            sentence = refusal();
+        }
+        if (sentence) {
+            if (held) notify(sentence);
+            else if (prev && cardCustody(prev).status === LOGIN_CUSTODY_UNKNOWN) {
+                // A lost create POST keeps custody unknown: the refusal must not fabricate release.
+                prev.error = prev.error ? `${prev.error} ${sentence}` : sentence;
                 prev.custodyStatus = LOGIN_CUSTODY_UNKNOWN;
-                prev.error = 'Could not cancel the active sign-in — it may still be running. '
-                    + 'Retry from its card, or dismiss it first.';
-                answer(render);
-                return;
             }
+            else {
+                stopAllPolling();
+                ctl.active = freshCard(harness, profile, transport, named,
+                    { absent: true, custodyStatus: LOGIN_CUSTODY_RELEASED, error: sentence, gone: gone() });
+            }
+            answer(render);
+            return;
         }
         stopJobPolling();
         holdStatusPolling();
-        // One start shape for every harness: the in-app flow is asked for and the
-        // server/engine decide the hosting (loginFlow rides only for codex).
+        // One start shape for every harness: the in-app flow is asked for; the server decides the hosting.
         const body = { harness, login_flow: 'device_auth' };
         if (profile) body.profile_id = profile;
         if (transport === 'client_pty') body.transport = transport;
-        ctl.active = {
-            harness, profile, transport, jobId: '', envelope: null, absent: false, custodyStatus: '',
-            attachCommand: '', attachShell: '', setupLoginSource: '', error: '',
-            problemCode: '', requiredActions: [],
-            startedAtMs: now(), engineDegraded: false,
-            inputValue: '', inputBusy: false, inputSent: false, inputError: '', inputNote: '',
-            needsProfile: null, profileNameValue: '', profileNameNote: '',
-            verdict: null, confirming: false, advancedOpen: false, preparingRuntime: true,
-            closing: false,
-        };
+        ctl.active = freshCard(harness, profile, transport, named, { preparingRuntime: true });
         const active = ctl.active;
         answer(render);
         try {
@@ -1318,7 +1327,7 @@ export function createLoginCardController({
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
-            });
+            }).finally(() => onAnswer(harness));
             const data = await resp.json().catch(() => null);
             if (ctl.active !== active) return;
             if (!resp.ok) {
@@ -1355,17 +1364,15 @@ export function createLoginCardController({
                 }
                 throw new Error(data?.error || `HTTP ${resp.status}`);
             }
-            // A 2xx is not a created job. Without a job id there is nothing to
-            // poll, nothing to cancel and nothing to report: the card used to
-            // accept such an answer and sit "Starting the sign-in…" forever,
-            // with no error and no way out. Fail here instead, where the error
-            // face and its Try again already exist.
+            // A 2xx is not a created job. Without a job id there is nothing to poll, cancel or
+            // report: the card used to accept such an answer and sit "Starting the sign-in…"
+            // forever, with no error and no way out. Fail here instead, where the error face and
+            // its Try again already exist.
             const jobId = String(data?.job_id || '');
             if (!jobId) throw new Error('the sign-in service returned no job id');
-            // Adopted BEFORE the body validation: a nonempty id names a job
-            // the daemon may be running regardless of how malformed the rest
-            // of the answer is, and a queued close must be able to DELETE it —
-            // the no-job detach is only for creates that produced no id.
+            // Adopted BEFORE the body validation: a nonempty id names a job the daemon may be running
+            // regardless of how malformed the rest of the answer is, and a queued close must be able to
+            // DELETE it — the no-job detach is only for creates that produced no id.
             active.jobId = jobId;
             if (!hasJobState(data)) throw new Error('the sign-in service returned no job');
             active.preparingRuntime = false;
@@ -1400,13 +1407,11 @@ export function createLoginCardController({
 
     function startJobPolling() {
         stopJobPolling();
-        // #125: a setTimeout CHAIN, not an interval — the next tick is armed only
-        // after the previous round-trip settled, so overlapping polls (and the
-        // out-of-order snapshot that overwrote a terminal one) are structurally
-        // impossible; the pollResponseApplies ordering guard still stands for a
-        // card closed/reopened mid-flight. Failures back off exponentially and
-        // after 10 CONSECUTIVE failures the chain stops with an honest
-        // "unconfirmed" verdict instead of hammering a dead daemon forever.
+        // #125: a setTimeout CHAIN, not an interval — the next tick is armed only after the previous
+        // round-trip settled, so overlapping polls (and the out-of-order snapshot that overwrote a
+        // terminal one) are structurally impossible; pollResponseApplies still guards a card closed
+        // and reopened mid-flight. Failures back off exponentially, and after 10 CONSECUTIVE failures
+        // the chain stops with an honest "unconfirmed" verdict instead of hammering a dead daemon.
         let consecutiveFailures = 0;
         const schedule = (delayMs) => { ctl.jobTimer = setTimeout(tick, delayMs); };
         const tick = async () => {
@@ -1461,13 +1466,11 @@ export function createLoginCardController({
             consecutiveFailures = readOk ? 0 : consecutiveFailures + 1;
             if (envelope) active.envelope = envelope;
             if (readOk && active.error) {
-                // A successful job read re-establishes the true state: the
-                // cancel-failure note (a Dismiss whose DELETE the daemon never
-                // confirmed) is TRANSIENT and must not mask a live/terminal face
-                // forever — a recovered daemon + succeeded login used to leave the
-                // card stuck on the cancel-error face while the account row said
-                // connected. Fatal START errors never reach this line: a job that
-                // failed to create has no jobId and is never polled.
+                // A successful job read re-establishes the true state: the cancel-failure note (a Dismiss
+                // whose DELETE the daemon never confirmed) is TRANSIENT and must not mask a live/terminal
+                // face forever — a recovered daemon + succeeded login used to leave the card stuck on the
+                // cancel-error face while the account row said connected. Fatal START errors never
+                // reach this line: a job that failed to create has no jobId and is never polled.
                 active.error = '';
                 active.custodyStatus = '';
             }
@@ -1581,6 +1584,7 @@ export function createLoginCardController({
 
     return {
         start,
+        addAccount,
         close,
         reconcile,
         render,
@@ -1592,6 +1596,5 @@ export function createLoginCardController({
         submitProfileName: () => submitProfileNameFromCard(ctl.active),
         get active() { return ctl.active; },
         get disposed() { return ctl.disposed; },
-        get mode() { return mode; },
     };
 }

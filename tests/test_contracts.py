@@ -374,20 +374,13 @@ def test_api_v1_shim_removed_and_gateway_declares_core_ws_message_types():
 
 
 def test_gateway_declares_task_named_outbound():
-    """v6.40: the proactive card-naming broadcast is a frozen WS message envelope, in
-    WS_MESSAGE_TYPES, with a JSDoc mirror in the frontend contract surface (ABI extension
-    contract per ARCHITECTURE)."""
-    import pathlib
-
+    """The proactive card-naming broadcast is declared in the frozen WS envelope and registry."""
     from ouroboros.gateway.contracts import WS_MESSAGE_TYPES
     from ouroboros.gateway import contracts as api_v1
 
     assert hasattr(api_v1, "TaskNamedOutbound"), "gateway.contracts missing TaskNamedOutbound"
     assert set(api_v1.TaskNamedOutbound.__annotations__) >= {"type", "task_id", "suggested_name"}
     assert "task_named" in WS_MESSAGE_TYPES
-    api_types = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js"
-    txt = api_types.read_text(encoding="utf-8")
-    assert "TaskNamedOutbound" in txt and "task_named" in txt
 
 
 def _dict_literal_keys(node: ast.Dict) -> tuple[set[str], list[str]]:
@@ -636,14 +629,6 @@ def test_chat_outbound_declares_progress_meta_keys_used_by_runtime(tmp_path):
         "progress_meta emits keys not declared in ChatOutbound: "
         f"{sorted(progress_keys - declared)}"
     )
-
-    js_types = (REPO_ROOT / "web" / "modules" / "api_types.js").read_text(encoding="utf-8")
-    missing_js = [
-        key
-        for key in sorted(progress_keys)
-        if not re.search(rf"@property \{{[^}}]+=\}} {re.escape(key)}\b", js_types)
-    ]
-    assert not missing_js, f"api_types.js ChatOutbound missing progress_meta keys: {missing_js}"
 
 
 def test_chat_outbound_review_projection_is_frozen_optional_abi():
@@ -1369,7 +1354,7 @@ def test_plugin_api_surface_is_frozen():
 def test_plugin_api_version_matches_documented_surface():
     from ouroboros.contracts.plugin_api import PLUGIN_API_VERSION, VALID_EXTENSION_PERMISSIONS
 
-    assert PLUGIN_API_VERSION == "2.6"
+    assert PLUGIN_API_VERSION == "2.7"
     assert "presence" in VALID_EXTENSION_PERMISSIONS
     # Additive (owner A4=A, 2026-10-03): a granted skill may leave the owner a signed System row.
     assert "notify_owner" in VALID_EXTENSION_PERMISSIONS

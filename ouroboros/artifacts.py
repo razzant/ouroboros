@@ -13,7 +13,7 @@ import shutil
 from contextlib import nullcontext, suppress
 from datetime import datetime, timezone
 from hashlib import sha256
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
 from ouroboros.artifact_storage import clone_file, temporary_sibling
 from ouroboros.utils import atomic_write_json, file_identity, read_json_dict, update_json_locked, write_bytes_atomic
@@ -245,6 +245,7 @@ def stage_task_attachments(
             for ordinal, item in enumerate(declared)
         ]
 
+    from ouroboros.chat_uploads import DELIVERY_FAILURES
     manifest = _StagedAttachmentManifest()
     for ordinal, raw_item in enumerate(declared):
         if isinstance(raw_item, dict):
@@ -252,11 +253,14 @@ def stage_task_attachments(
         else:
             raw_path = str(raw_item or "").strip()
         label = _display_label(raw_item, raw_path, ordinal)
-        # A ref whose bytes are known gone or held by another store names that reason, never a vague path.
+        # A ref whose bytes are known gone, held by another store or never received names that reason, never a
+        # vague path; media a transport never received keeps the type, size and cap it reported.
         known = raw_item.get("unavailable") if isinstance(raw_item, dict) else None
-        known = known if known in ("missing", "outside_store") else ""
+        known = known if known in ("missing", "outside_store", *DELIVERY_FAILURES) else ""
         if not raw_path:
-            manifest.append(_rejected(ordinal, label, known or "invalid_path"))
+            said = raw_item if known in DELIVERY_FAILURES else {}
+            manifest.append({**_rejected(ordinal, label, known or "invalid_path"),
+                             **{key: said[key] for key in ("mime", "size", "limit_bytes") if key in said}})
             continue
         try:
             source = pathlib.Path(raw_path).expanduser().resolve(strict=False)
@@ -358,6 +362,7 @@ def render_attachment_lines(attachments: Any) -> str:
     manifest returned by ``stage_task_attachments``.  Legacy staged-only rows
     remain readable; new rows carry ordinal/status/reason and rejected rows are
     rendered without source paths or secret contents."""
+    from ouroboros.chat_uploads import DELIVERY_FAILURES, delivery_failure_line
     ref = attachments.get("attachment_manifest_ref") if isinstance(attachments, dict) else None
     if isinstance(attachments, dict):
         attachments = attachments.get("attachment_manifest")
@@ -377,6 +382,9 @@ def render_attachment_lines(attachments: Any) -> str:
         label = str(item.get("label") or f"attachment {ordinal + 1}").strip()
         if status == "rejected":
             reason = str(item.get("reason") or "staging_failed").strip()
+            if reason in DELIVERY_FAILURES:  # nothing was received: no bytes to read, only what the transport said
+                lines.append(delivery_failure_line(label, reason, ordinal, item))
+                continue
             lines.append(f"- {label}: rejected (reason={reason}, ordinal={ordinal})" + (f" rule: {rule}" if (rule := str(item.get("rule") or "").strip()) else ""))
             continue
         relpath = str(item.get("relpath") or "").strip()
@@ -484,7 +492,10 @@ def attachment_manifest_all_rejected(manifest: Any) -> bool:
     Partial staging is the default (В25c, capinv-447): good rows ride, rejected
     rows are disclosed. A fully-rejected set is different — the task would start
     with NONE of the material it declared it needs — so the flagless ingresses
-    (UI chat, presence, promote) stay atomic for exactly that case."""
+    (UI chat, presence, promote) stay atomic for exactly that case. Media a
+    transport never received is no refused material: a set of only such facts
+    starts the work, which reads why beside the sender's words."""
+    from ouroboros.chat_uploads import DELIVERY_FAILURES
 
     return bool(
         isinstance(manifest, list) and manifest
@@ -492,6 +503,7 @@ def attachment_manifest_all_rejected(manifest: Any) -> bool:
             isinstance(item, dict) and str(item.get("status") or "staged") == "rejected"
             for item in manifest
         )
+        and not all(item.get("reason") in DELIVERY_FAILURES for item in manifest)
     )
 
 
@@ -816,6 +828,7 @@ def store_actor_source_bytes(
 
 def read_actor_source_bytes(
     drive_root: Union[pathlib.Path, str], task_id: str, ref: Any, *, retained: bool = True, anchor: Any = None,
+    admit_target: Optional[Callable[[pathlib.Path, pathlib.Path], None]] = None,
 ) -> bytes:
     """Verify a task source: loose, packed, then (unless disabled) retained; errors stay explicit."""
 
@@ -833,7 +846,8 @@ def read_actor_source_bytes(
     if anchor is not None:  # placement readers below receive the configured anchor
         spellings = root_spellings(anchor)
         root, placement = spellings[0], physical_path(spellings, placement.absolute())
-        target = task_artifact_dir_path(placement, task_id, create=False).joinpath(*rel.parts)
+        base = task_artifact_dir_path(placement, task_id, create=False)
+        target = base.joinpath(*rel.parts)
     else:  # Existing internal callers retain their placement-cache and scope/error contracts.
         base = task_artifact_dir_path(placement, task_id, create=False).resolve(strict=False)
         target = base.joinpath(*rel.parts)
@@ -842,6 +856,8 @@ def read_actor_source_bytes(
         target = target.resolve(strict=False)
         if not target.is_relative_to(base):
             raise ValueError("actor source ref escapes its task artifact root")
+    if admit_target is not None:
+        admit_target(base, target)
     from ouroboros.evidence_packs import handle_bytes
     from ouroboros.payload_release_state import check_source_release
     try:
@@ -858,7 +874,7 @@ def read_actor_source_bytes(
         if not retained:
             raise
         from ouroboros.source_retention import read_retained_task_source
-        raw = read_retained_task_source(placement, task_id, ref, anchor=anchor)
+        raw = read_retained_task_source(placement, task_id, ref, anchor=anchor, admit_target=admit_target)
         check_source_release(placement, task_id, parts, anchor=anchor)
         return raw  # the alternate placement verified the same ref before returning
     try:

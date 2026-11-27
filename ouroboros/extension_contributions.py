@@ -129,9 +129,21 @@ def project_contributions(skill: str, entries: list[dict], revision: str, label:
     return rows
 
 
+def place_fact_labels(declarations) -> dict[str, str]:
+    """Manifest words only; the first authored label for an id wins."""
+    from ouroboros.places import valid_wake_fact
+
+    labels: dict[str, str] = {}
+    for row in declarations:
+        for fact in row.get("facts", ()):
+            if isinstance(fact, dict) and valid_wake_fact(fact.get("id")) and isinstance(fact.get("label"), str):
+                labels.setdefault(fact["id"], fact["label"])
+    return labels
+
+
 def project_place_status(row: dict) -> dict:
     """Expose the manifest's labels without executing its status source."""
-    return {**row, "labels": {fact["id"]: fact["label"] for fact in row.get("facts", []) if isinstance(fact, dict)}}
+    return {**row, "labels": place_fact_labels((row,))}
 
 
 def live_place_declarations() -> list[dict]:
@@ -139,3 +151,23 @@ def live_place_declarations() -> list[dict]:
     from ouroboros.extension_registry_state import live_contribution_projection
 
     return [project_place_status(row) for row in live_contribution_projection() if row.get("provides") == "place"]
+
+
+def place_declarations_for_retry(root, place) -> list[dict]:
+    """An eligible release's place entries, for retry only. Its publication settles even entries dropped at staging."""
+    from ouroboros.extension_liveness import runtime_state_for_loaded_skill
+    from ouroboros.extension_registry_state import published_skill_contributions
+    from ouroboros.places_migration import matching_declarations
+    from ouroboros.skill_loader import find_skill
+
+    connector = place.connector
+    skill = find_skill(root, connector)
+    if not skill or not skill.manifest.contributes:
+        return []
+    state = runtime_state_for_loaded_skill(skill, root)
+    if not state["desired_live"] or state["reason"] != "ready":
+        return []
+    entries = published_skill_contributions(connector, skill.content_hash, skill.skill_dir)
+    if entries is None:
+        entries, _ = validate_contributions(skill.manifest, skill_dir=skill.skill_dir)
+    return matching_declarations(place, ({**row, "skill": connector} for row in entries if row.get("provides") == "place"))

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
 import { apiClient, updateStrategyForPlan } from '../modules/api_client.js';
-import { updatePillDetail, updatePillText, verifiedUpdatePlan } from '../modules/update_status.js';
+import { updateAttemptView, updatePillDetail, updatePillText, verifiedUpdatePlan } from '../modules/update_status.js';
 import {
     applyFailureText,
     updateVerdict,
@@ -299,7 +299,7 @@ test('all successful restart paths share one lifecycle entry', () => {
 
 
 test('pending local-work recovery never offers the refused in-app Restart', () => {
-    const ordinary = { update_tx: { active: true, phase: 'pending_boot_smoke' } };
+    const ordinary = { update_tx: { active: true, phase: 'pending_boot_smoke', pre_restart_smoke: 'passed' } };
     assert.equal(updateVerdict(ordinary).action.id, 'restart');
     const pending = { update_tx: { ...ordinary.update_tx, local_work_recovery: true } };
     for (const phase of ['', 'restarting', 'restart_needed', 'restart_required']) {
@@ -308,5 +308,48 @@ test('pending local-work recovery never offers the refused in-app Restart', () =
         assert.match(view.hint, /Quit and reopen/);
         assert.match(view.hint, /restart the server process/);
         assert.match(view.hint, /stash is retained/);
+    }
+});
+
+test('the in-app Restart follows the attempt\'s own check or its own receipt, never the phase alone', () => {
+    // pending_boot_smoke is what the restart admits (server_restart._RESTARTABLE_UPDATE_PHASES), and every lane records it
+    // before its dependency and import check: the phase proves nothing until that attempt's check passed.
+    const tx = (smoke, extra = {}) => ({ active: true, phase: 'pending_boot_smoke', attempt_id: 'tx-1',
+        ...(smoke ? { pre_restart_smoke: smoke } : {}), ...extra });
+    const verdict = (data) => updateVerdict({ managed: true, ...data }, '');
+    assert.deepEqual(verdict({ update_tx: tx('passed') }).action, { id: 'restart', label: 'Restart now' });
+    const checking = verdict({ update_tx: tx('pending') });
+    assert.deepEqual([checking.headline, checking.action], ['Checking the update and dependencies…',
+        { id: 'check', label: 'Check again' }]);
+    // An older record or server that does not say how the check went is not made ready.
+    assert.equal(verdict({ update_tx: tx('') }).action, null);
+    // A passed check carried into another phase is no readiness there.
+    for (const phase of ['applying_replace', 'gate_blocked', 'marker_cleanup_retry', 'rolling_back', 'committing_assisted']) {
+        assert.notEqual(verdict({ update_tx: tx('passed', { phase }) }).action?.id, 'restart', phase);
+    }
+    // The apply's own answer that it could not request the restart stays this server's continuation: a store-less Replace
+    // defers its check to the next start, so its transaction stays `pending`; an older record that never says how its
+    // check went is ready on that receipt too, never on its phase.
+    const receipt = { operation_id: 'op-1', current_generation: true, active: false, result: 'restart_required',
+        restart_required: true, error: '', tx_attempt_id: 'tx-1' };
+    for (const smoke of ['pending', '']) {
+        const deferred = verdict({ update_tx: tx(smoke), update_progress: receipt });
+        assert.deepEqual([deferred.state, deferred.action], ['restart_required', { id: 'restart', label: 'Restart now' }],
+            smoke || 'unsaid');
+        // An earlier server's receipt is not this server's restart: the transaction's own reading stands.
+        const earlier = verdict({ update_tx: tx(smoke), update_progress: { ...receipt, current_generation: false } });
+        assert.notEqual(earlier.action?.id, 'restart', `${smoke || 'unsaid'}, earlier server`);
+    }
+    // A check an earlier server's executor started and never finished (its process ended, its record unconcluded and
+    // bound, as gateway/update_progress serves it): neither surface offers the restart; the next start reruns the check.
+    const interrupted = { operation_id: 'op-2', generation: 'server-a', current_generation: false, active: false,
+        stage: 'checking', result: '', outcome: '', tx_attempt_id: 'tx-1' };
+    assert.notEqual(verdict({ update_tx: tx('pending'), update_progress: interrupted }).action?.id, 'restart');
+    assert.deepEqual([updateAttemptView(interrupted, tx('pending')).pill, updateAttemptView(interrupted, tx('pending')).says],
+        ['Confirming update…', 'stage']);
+    // The post-boot readiness event alone settles a restart while the boot owns this phase, whatever the check said.
+    for (const smoke of ['pending', 'passed', '']) {
+        assert.equal(restartStatusCanSettle({ update_tx: tx(smoke) }), false, smoke || 'unsaid');
+        assert.equal(restartStatusCanSettle({ update_tx: tx(smoke) }, { afterBootNotice: true }), true, smoke || 'unsaid');
     }
 });

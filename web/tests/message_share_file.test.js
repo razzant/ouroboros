@@ -80,7 +80,8 @@ test('a chart’s data table keeps every value: points by series, x, y and r; a 
     const floating = renderChartDataTable({ type: 'bar', data: { labels: ['Mon'], datasets: [{ label: 'Range', data: [[1, 5]] }] } }, 'chart', false);
     assert.deepEqual(rows(floating), [['Mon', '1 – 5']]);
     assert.equal(renderChartDataTable({ data: { labels: ['Museum', 'Cafe'], datasets: [{ label: 'Euro', data: [24, null] }] } }, 'Budget', true),
-        '<details class="widget-chart-data" open><summary>View Budget data</summary><div class="widget-table-wrap"><table class="widget-table">'
+        '<details class="widget-chart-data" open><summary>View Budget data</summary>'
+        + '<div class="widget-table-wrap scroll-fade-x" data-widget-scroll-region="Budget"><table class="widget-table">'
         + '<thead><tr><th>Label</th><th>Euro</th></tr></thead><tbody><tr><th scope="row">Museum</th><td data-label="Euro">24</td></tr>'
         + '<tr><th scope="row">Cafe</th><td data-label="Euro">—</td></tr></tbody></table></div></details>', 'labelled numbers read as before');
     assert.doesNotMatch(renderChartDataTable({ data: { labels: [], datasets: [] } }, 'chart', false), /Series/, 'an empty chart keeps its labelled head');

@@ -28,9 +28,10 @@
    diagnose; the hold releases only when a fresh check finds the writers
    settled (an explicit Resume, a reconciliation at a tree member's terminal, or
    the body cadence's re-check while the hold stands) and no newer
-   Stop/Pause/Restart hold has replaced it. An explicit Resume of the Continue a
-   later stop holds returns it to this hold while all its writers observably run;
-   an unknown outcome still refuses (``events_budget.resume_into_writer_wait``).
+   Stop/Pause/Restart hold has replaced it. Explicit Resume of a paused Continue
+   returns it here while its earlier writers observably run. An unknown start
+   still holds it unless the owner chooses that exact start after proof of
+   read-only access; the old request then stays lookup-only.
    A damaged old record no link ties to the tree is no writer: the admission and its answer name it
    (``membership_gaps``).
 
@@ -42,8 +43,10 @@ from __future__ import annotations
 
 import logging
 import pathlib
+from functools import partial
 from typing import Any, Dict, List, Optional
 
+from ouroboros.owner_continue import WORK_CHAIN_MAX_HOPS as _WORK_CHAIN_MAX_HOPS
 from ouroboros.project_naming import CONTINUE_TITLE_PREFIX
 from ouroboros.task_store import patch_document
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -191,9 +194,162 @@ def accept_local_choice(q, root, tree, members, ids, decision):
     return outcome["accepted"]
 
 
-# Integrity bound only: a recorded chain is a handful of Continues; a corrupted one
-# must never make one admission walk its edges without limit.
-_WORK_CHAIN_MAX_HOPS = 64
+class ContinueRefusal(ValueError):
+    """A typed reason a Continue family cannot name or join a room now; ``project_placement.NAMING_REFUSALS`` words it."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _live_predecessor_hint(task_id: str) -> str:
+    """The predecessor ``task_id``'s live queue row names, "" when none; Q's memory only, for a row with no result yet."""
+    try:
+        import supervisor.queue as queue_mod
+
+        with queue_mod._queue_lock:
+            for row in [*queue_mod.PENDING, (queue_mod.RUNNING.get(task_id) or {}).get("task")]:
+                if isinstance(row, dict) and str(row.get("id") or "") == task_id:
+                    meta = (row.get("metadata") or {}).get("continuation")
+                    return str((meta or {}).get("predecessor_task_id") or "") if isinstance(meta, dict) else ""
+    except Exception:
+        log.debug("Live Continue facts unavailable for %s", task_id, exc_info=True)
+    return ""
+
+
+def _publication_unconfirmed(drive_root: Any, members: Any) -> bool:
+    """Whether the published queue snapshot (one read, no lock) still holds a member's row under ``_continuation_prepared``.
+
+    Q's memory runs ahead of the document between the marker's removal and the publication that confirms it, and a
+    failed barrier leaves the marker in the document, so only the published bytes tell a durable admission from a local
+    publication still pending, at first admission and at the same nonce's replay alike. An unreadable document is
+    unknown, never confirmed; a missing one holds no marker."""
+    from ouroboros.queue_observation import load_queue_document
+
+    document = load_queue_document(drive_root)
+    return bool(document.get("_snapshot_invalid")) or any(
+        isinstance(row, dict) and isinstance(row.get("task"), dict) and row["task"].get("_continuation_prepared")
+        and str(row["task"].get("id") or row.get("id") or "") in members
+        for lane in ("pending", "running") for row in document.get(lane) or ())
+
+
+def _root_result(drive_root: Any, task_id: str) -> Dict[str, Any]:
+    """A root episode's stored result, ``{}`` when it has none; a row of another task or of a child proves no lineage."""
+    from ouroboros.task_results import load_task_result
+
+    row = load_task_result(drive_root, task_id, strict=True) or {}
+    if row and (row.get("task_id") != task_id or row.get("parent_task_id")):
+        raise ValueError("unverified Continue root")
+    return row
+
+
+def _durable_admission(parent: Dict[str, Any], child: Dict[str, Any], predecessor: str) -> Optional[Dict[str, Any]]:
+    """The child's recorded admission when it matches the parent's claim; None while it records none."""
+    from ouroboros.owner_continue import continued_by_binding
+
+    claim = continued_by_binding(parent)
+    admission = _recorded_admission(child, predecessor, str(claim.get("action_nonce") or ""))
+    if admission is None:
+        return None
+    if not claim or admission.get("binding") != claim:
+        raise ValueError("unverified Continue admission")
+    return admission
+
+
+def continuation_ancestry(drive_root: Any, task_id: str) -> tuple[str, ...]:
+    """``task_id`` and the roots it continues, nearest first: what an account that follows a Continue chain reads.
+
+    Backward only, to the origin: one stored result an episode, never a look at any other root, no family bound
+    (a cycle ends it). An episode's admission receipt (its own, else the one kept under its ``metadata``) names the
+    predecessor and must match that predecessor's hash-bound ``continued_by`` claim (``_durable_admission``, the
+    proof ``verified_work_episodes`` rests on); an older episode with no receipt is joined only by a claim that
+    names it and is marked admitted, never by one merely prepared. A hop that cannot be proved (an unreadable
+    result, a claim naming another task, a mismatched receipt) ends the walk at the last proved episode.
+    """
+    from ouroboros.owner_continue import continued_by_binding
+
+    chain = [str(task_id or "")]
+    try:
+        row = _root_result(drive_root, chain[0])
+        while True:
+            hint = (row.get("metadata") or {}).get("continuation") if isinstance(row.get("metadata"), dict) else None
+            hint = hint if isinstance(hint, dict) else {}
+            receipt = row.get("continuation_admission") or hint.get("admission")
+            named = receipt.get("binding") if isinstance(receipt, dict) else hint
+            predecessor = named.get("predecessor_task_id") if isinstance(named, dict) else None
+            if not isinstance(predecessor, str) or not predecessor or predecessor in chain:
+                break
+            parent = _root_result(drive_root, predecessor)
+            claim = continued_by_binding(parent)
+            if claim.get("successor_task_id") != chain[-1] or claim.get("predecessor_task_id", predecessor) != predecessor:
+                break
+            if (_durable_admission(parent, {"continuation_admission": receipt}, predecessor) is None if receipt
+                    else (parent.get("continued_by") or {}).get("state") != "admitted"):
+                break
+            chain.append(predecessor)
+            row = parent
+    except Exception:
+        log.debug("Continue ancestry of %s ends at %s", task_id, chain[-1], exc_info=True)
+    return tuple(chain)
+
+
+def verified_work_episodes(drive_root: Any, task_id: str) -> tuple[str, ...]:
+    """This episode and its verified Continue family, first root first, for placement (not a display guess).
+
+    A member is proved by its own durable ``continuation_admission`` matching its predecessor's hash-bound claim,
+    confirmed by the published queue snapshot (``_publication_unconfirmed``); the claim's best-effort ``state`` mark
+    (``mark_claim_admitted``) may lag and proves nothing either way. Raises ``ContinueRefusal`` while a member's
+    publication is unconfirmed or a successor's claim is recorded but its admission is not (``continuation_pending``),
+    and for a family past the integrity bound; any other unproven lineage is a plain ``ValueError``. A caller's
+    ``metadata`` only says where to look; the claim decides: an API root names a predecessor only by its caller's words,
+    so it stays an origin unless that predecessor's own claim names it. Still unproven, and left an origin: an API
+    Continue whose receipt and whose predecessor's claim are both unreadable.
+    """
+    from ouroboros.owner_continue import continued_by_binding
+
+    read, durable = partial(_root_result, drive_root), _durable_admission
+    rows = {task_id: read(task_id)}
+    first, last = task_id, task_id
+    while "continuation_admission" in rows[first]:
+        admission = rows[first]["continuation_admission"]
+        binding = admission.get("binding") if isinstance(admission, dict) else None
+        predecessor = binding.get("predecessor_task_id") if isinstance(binding, dict) else None
+        if not isinstance(predecessor, str) or not predecessor or predecessor in rows:
+            raise ValueError("unverified Continue ancestry")
+        if len(rows) >= _WORK_CHAIN_MAX_HOPS:
+            raise ContinueRefusal("continuation_family_too_long")
+        rows[predecessor] = read(predecessor)
+        if durable(rows[predecessor], rows[first], predecessor) is None:
+            raise ValueError("unverified Continue admission")
+        first = predecessor
+    metadata = rows[first].get("metadata") if isinstance(rows[first].get("metadata"), dict) else {}
+    annotation = metadata.get("continuation")
+    hint = (str(annotation.get("predecessor_task_id") or "") if isinstance(annotation, dict) else "") or (
+        "" if rows[first] else _live_predecessor_hint(first))
+    if hint and hint != first and hint not in rows:
+        try:
+            named = continued_by_binding(read(hint)).get("successor_task_id") == first
+        except (ValueError, OSError, StoreError):
+            named = False  # an unreadable record names nothing
+        if named:  # its trusted claim names this episode, whose own receipt is not recorded (yet)
+            raise ContinueRefusal("continuation_pending")
+    if (annotation and not rows[first].get("api_admission")) or (hint and not rows[first]):
+        raise ValueError("legacy Continue ancestry has no admission proof")
+    while successor := continued_by_binding(rows[last]).get("successor_task_id"):
+        if successor in rows:
+            raise ValueError("unverified Continue successor")
+        child = read(successor)
+        if durable(rows[last], child, last) is None:
+            if (rows[last].get("continued_by") or {}).get("state") == "admitted":
+                raise ValueError("unverified Continue admission")
+            break  # claimed, not yet admitted: no member of this work
+        if len(rows) >= _WORK_CHAIN_MAX_HOPS:  # only a durable member counts toward the bound
+            raise ContinueRefusal("continuation_family_too_long")
+        rows[successor], last = child, successor
+    if len(rows) > 1 and _publication_unconfirmed(drive_root, rows):
+        raise ContinueRefusal("continuation_pending")
+    # Dict insertion is [clicked, nearest predecessor, ..., first, nearest successor, ...].
+    return (first, *(tid for tid in rows if tid != first))
 
 
 def _work_name(record: Dict[str, Any]) -> str:
@@ -565,6 +721,7 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
                                   **({"start": sources["start"]} if sources.get("start") else {}),
                                   **({"wake": sources["wake"]} if sources.get("wake") else {}),
                                   **({"api": sources["api"]} if sources.get("api") else {}),
+                                  **({"note": sources["note"]} if sources.get("note") else {}),
                                   "later": sources.get("later") or [],
                                   **({"confirmed_place": sources["confirmed_place"]} if sources.get("confirmed_place") else {}),
                                   "held_owner_messages": sources.get("held_owner_messages") or {},
@@ -647,11 +804,9 @@ def _billing_group(q: Any, predecessor: str, result: Dict[str, Any]) -> Dict[str
 def _group_money_spent(q: Any, billing: Dict[str, Any]) -> bool:
     """Whether the whole work's known spend reached its cap. An author's stop is ended by no money rail, so its row
     cannot say; the offer stays a row read, and an unreadable ledger raises into the caller's billing refusal."""
-    from ouroboros.usage_accounting import usage_projection
+    from ouroboros.usage_admission import group_money_spent
 
-    limit = billing.get("billing_group_limit_usd")
-    return limit is not None and usage_projection(
-        q.DRIVE_ROOT, billing_group_id=billing["billing_group_id"])["settled_usd"] >= float(limit)
+    return group_money_spent(q.DRIVE_ROOT, billing)
 
 
 def _prepare_project_room(q: Any, predecessor: str, task: Dict[str, Any]) -> Dict[str, Any]:
@@ -691,6 +846,7 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str, declared_
         continuation_room, declared_inputs, execution_carry, owner_sources, recorded_task_type, successor_id, valid_nonce,
     )
     from ouroboros.task_results import STATUS_SCHEDULED, load_task_result, validate_task_id, write_task_result
+    from ouroboros.extension_late_result import restricted_return
 
     from supervisor import queue as q
     predecessor = validate_task_id(predecessor_task_id)
@@ -715,7 +871,7 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str, declared_
                    if claim.get("state") == "bound" else {})}
     if claim and recorded_task_type(result) == "deep_self_review":  # an older bound claim never creates one now
         return {"ok": False, "error": "deep_review_restart_required", "cause": "deep_self_review"}
-    verdict = continuation_eligibility(result, predecessor) if not claim else {
+    verdict = continuation_eligibility(result, predecessor) if not claim or restricted_return(result) else {
         "eligible": True, "cause": str((claim.get("binding") or {}).get("cause") or ""), "refusal": ""}
     if not verdict["eligible"]:
         return {"ok": False, "error": verdict["refusal"], "cause": verdict["cause"]}
@@ -886,7 +1042,9 @@ def release_settled_continuations(tree_root: str) -> List[str]:
     are observed settled, the selection's answer is the row's latest Resume
     attempt (``work_stop.resume_asked``): a refusal for any other reason is
     said in its own words in place of the wait's, dated, while the wait and
-    this re-check go on; the release that follows replaces it. This is the
+    this re-check go on; the release that follows replaces it. While writers
+    remain, a published change to the same hold's evidence lets the work
+    card reflect their present blockers without reading custody itself. This is the
     host's own act wherever it runs, a door's Resume of the predecessor
     included (``budget_resume.resume_late_phase``): that door asked about
     another task, so nothing here is its author, lifts an allowance for it or
@@ -894,7 +1052,9 @@ def release_settled_continuations(tree_root: str) -> List[str]:
     """
     from ouroboros.control_actor import host_control
     from ouroboros.work_stop import resume_asked, resume_outcome
-    from supervisor.events_budget import budget_hold_fact, observe_held_budget_selection, select_held_budget_row
+    from supervisor.events_budget import (
+        BUDGET_HOLD_KEY, budget_hold_fact, observe_held_budget_selection, select_held_budget_row,
+    )
 
     from supervisor import queue as q
     released: List[str] = []
@@ -909,9 +1069,19 @@ def release_settled_continuations(tree_root: str) -> List[str]:
             with q._queue_lock:
                 task = next((row for row in q.PENDING if str(row.get("id") or "") == task_id), None)
                 hold = budget_hold_fact(task)
-                if task is None or not writer_wait(task):
+                if (task is None or not hold or not writer_wait(task)
+                        or held_continuation_predecessors([task]) != [tree_root]):
                     continue
                 outcome = select_held_budget_row(q, task, hold, selected_by="reconciliation", observation=observation)
+                blockers = outcome.get("blockers")
+                # Only this refusal follows selection's successful same-row, same-hold and control checks.
+                if (outcome.get("error") == "predecessor_writers_unsettled" and blockers
+                        and hold.get("root_task_id") == task_id and hold.get("predecessor_task_id") == tree_root
+                        and blockers != hold.get("blockers")):
+                    task[BUDGET_HOLD_KEY] = {**hold, "blockers": blockers}
+                    if q.publish_queue_snapshot(reason="continuation_writer_evidence_changed") is not True:
+                        task[BUDGET_HOLD_KEY] = hold
+                        q.publish_queue_snapshot(reason="continuation_writer_evidence_withdrawn")
             if outcome.get("ok"):
                 released.append(task_id)
             if answered is not None:  # its writers settled: why it starts, or why it does not

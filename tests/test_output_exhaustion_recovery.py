@@ -16,7 +16,8 @@ from ouroboros.context_budget import bound_host_row
 from ouroboros.llm import LLMClient
 from tests.test_context_fit_v664 import _plan
 from tests.test_context_source_view import BODY, _tool, _observation
-from tests.test_output_exhaustion import _loop_kwargs, _events, _incident_reply, _ScriptedLLM, no_sleep as no_sleep
+from tests.test_output_exhaustion import (NOTE, _loop_kwargs, _events, _incident_reply, _note_tool, _ScriptedLLM,
+                                         no_sleep as no_sleep)
 from tests.test_transport_b_stream_deadlines import isolated as isolated, chunk, sse
 
 PRIMARY = "openai-compatible::primary-fixture"
@@ -606,18 +607,373 @@ def test_stop_finished_text_stays_the_plain_final_whatever_it_quotes(tmp_path, m
     assert recovery.UNFINISHED_KEY not in usage and "forced_finalization" not in trace and not trace["tool_calls"]
 
 
-def test_a_whole_finish_task_under_an_outer_length_cut_keeps_its_waiver(tmp_path, monkeypatch, isolated, endpoint):
-    """A typed completion call is a typed call, not callless text: no informed turn is bought and the request
-    selects its answer as before (the forced rail's disclosed-cut waiver: tests/test_forced_completion_request.py)."""
+def test_a_whole_finish_task_in_a_length_cut_reply_waits_for_the_next_round(tmp_path, monkeypatch, isolated, endpoint):
+    """A typed completion call is a typed call of its reply, so an output-limit cut starts it no more than any
+    other call (#4028): its result says NOT STARTED, no informed turn is bought, and the next ordinary reply's
+    request selects the answer. The forced rail keeps its disclosed-cut waiver (tests/test_forced_completion_request.py)."""
     answer = "Wrap-up: both counts are 12."
     call = {"id": "final", "type": "function", "function": {
         "name": "finish_task", "arguments": json.dumps({"action": "finish", "answer": answer})}}
-    client, sent = endpoint([("", "length", [call])], stream=False)
+    client, sent = endpoint([("", "length", [call]), ("", "tool_calls", [dict(call, id="final-again")])], stream=False)
     kw, _notes = configured_loop(tmp_path, monkeypatch, client)
     text, usage, trace = loop.run_llm_loop(**kw)
-    assert (text, len(sent)) == (answer, 1)
+    assert (text, len(sent)) == (answer, 2) and _cut_notices(sent[1]["messages"]) == []
+    [refused] = [row for row in sent[1]["messages"] if row.get("role") == "tool"]
+    assert refused["tool_call_id"] == "final" and "NOT STARTED" in refused["content"]
+    assert "(finish_reason=length)" in refused["content"]
     assert recovery.UNFINISHED_KEY not in usage and "forced_finalization" not in trace
     assert [(row["tool"], bool(row.get("is_error"))) for row in trace["tool_calls"]] == [("finish_task", False)]
+
+
+NOTE_VALUE = "line one\nline two"
+OPENROUTER_FIXTURE = "fixture-vendor/note-model"
+
+
+def _no_network(monkeypatch):
+    import socket
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("network is not available to this test")
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket, "create_connection", refuse)
+
+
+def _note_loop(tmp_path, monkeypatch, client, route="openai-compatible"):
+    """The real loop on a named Chat route with the harmless note tool; the model endpoint stays the scripted one."""
+    kw, _notes = configured_loop(tmp_path, monkeypatch, client)
+    if route == "openrouter":
+        monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-not-live")
+        monkeypatch.setenv("OUROBOROS_MODEL", OPENROUTER_FIXTURE)
+        ctx = kw["tools"]._ctx
+        ctx.task_model_override = OPENROUTER_FIXTURE
+        ctx.context_fit_plan = replace(ctx.context_fit_plan, model=OPENROUTER_FIXTURE)
+    return kw, _note_tool(kw["tools"])
+
+
+@pytest.mark.parametrize("route", ["openai-compatible", "openrouter"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_note_with_literal_line_breaks_runs_once_with_exactly_that_value(tmp_path, monkeypatch, isolated, endpoint,
+                                                                          stream, route):
+    """#4028 through the real adapter: a whole call whose one defect is a literal line break inside a string value
+    runs once with exactly that value. Safety and the handler read the same arguments, the pre-effect checkpoint and
+    the next request carry them escaped under the same call id, and the raw response record keeps the bytes as
+    received, named by one repair event."""
+    from ouroboros import safety, working_checkpoint
+    from ouroboros.observability import read_call_payload
+
+    _no_network(monkeypatch)
+    raw = '{"note": "' + NOTE_VALUE + '"}'
+    working = '{"note": "line one\\nline two"}'
+    call = {"id": "note-1", "type": "function", "function": {"name": NOTE, "arguments": raw}}
+    client, sent = endpoint([("", "tool_calls", [call]), "answer"], stream=stream)
+    kw, saved = _note_loop(tmp_path, monkeypatch, client, route)
+    checked, checkpointed = [], []
+    real_check, real_save = safety.check_safety, working_checkpoint.save_before_effects
+    monkeypatch.setattr(safety, "check_safety", lambda name, args, **kwargs: (
+        checked.append((name, dict(args))), real_check(name, args, **kwargs))[1])
+
+    def save_before_effects(limit_ctx):
+        real_save(limit_ctx)
+        state = working_checkpoint.read_working(tmp_path, kw["task_id"], 1)[1]
+        checkpointed.append([row for row in state["messages"] if row.get("tool_calls")][-1]["tool_calls"])
+    monkeypatch.setattr(working_checkpoint, "save_before_effects", save_before_effects)
+    text, _usage, _trace = loop.run_llm_loop(**kw)
+    assert (text, saved, len(sent)) == ("done", [NOTE_VALUE], 2)
+    assert {body["model"] for body in sent} == {OPENROUTER_FIXTURE if route == "openrouter" else "primary-fixture"}
+    assert checked == [(NOTE, {"note": NOTE_VALUE})]
+    assert [[(item["id"], item["function"]["arguments"]) for item in calls] for calls in checkpointed] == [
+        [("note-1", working)]]
+    [assistant] = [row for row in sent[1]["messages"] if row.get("tool_calls")]
+    assert [(item["id"], item["function"]["arguments"]) for item in assistant["tool_calls"]] == [("note-1", working)]
+    [event] = _events(tmp_path, "tool_arguments_repaired")
+    assert (event["tool_call_id"], event["tool"], event["escaped_characters"]) == ("note-1", NOTE, 1)
+    records = kw["drive_logs"].parent  # the call records' root is the loop's logs' parent, as in production
+    _manifest, payload, _ref = read_call_payload(records, task_id=kw["task_id"], call_id=f"{event['llm_call_id']}_response")
+    assert payload["message"]["tool_calls"][0]["function"]["arguments"] == raw
+
+
+@pytest.mark.parametrize(("arguments", "runs", "repaired"), [
+    ('{"note": "line one\\nline two"}', [NOTE_VALUE], False),  # strict JSON runs as before, untouched
+    ('{"note": "line one\nline two"', [], False),  # a missing brace: never completed, the parser's error
+    ('{"title": "line one\nline two"}', [], True),  # repaired, then its missing required field still refuses
+])
+def test_arguments_the_repair_does_not_complete_keep_their_ordinary_path(tmp_path, monkeypatch, isolated, endpoint,
+                                                                         arguments, runs, repaired):
+    """Negative controls through the real adapter: the repair never adds a brace or a field, so cut arguments stay
+    TOOL_ARG_ERROR and the handler's own signature still refuses a missing required field after a repair."""
+    _no_network(monkeypatch)
+    call = {"id": "note-1", "type": "function", "function": {"name": NOTE, "arguments": arguments}}
+    client, sent = endpoint([("", "tool_calls", [call]), "answer"], stream=False)
+    kw, saved = _note_loop(tmp_path, monkeypatch, client)
+    text, _usage, _trace = loop.run_llm_loop(**kw)
+    assert (text, saved, len(sent)) == ("done", runs, 2)
+    [result] = [row["content"] for row in sent[1]["messages"] if row.get("role") == "tool"]
+    assert ("TOOL_ARG_ERROR" in result) is not bool(runs)
+    assert bool(_events(tmp_path, "tool_arguments_repaired")) is repaired
+
+
+def test_a_null_finish_keeps_the_arguments_as_received(tmp_path, monkeypatch, isolated, endpoint):
+    """Through the real adapter: a reply that states no finish (``finish_reason`` null) is no stated whole reply, so
+    its literal line break is not repaired; the call takes its ordinary path and fails as before."""
+    _no_network(monkeypatch)
+    call = {"id": "note-1", "type": "function", "function": {"name": NOTE, "arguments": '{"note": "' + NOTE_VALUE + '"}'}}
+    client, sent = endpoint([("", None, [call]), "answer"], stream=False)
+    kw, saved = _note_loop(tmp_path, monkeypatch, client)
+    text, _usage, _trace = loop.run_llm_loop(**kw)
+    assert (text, saved, len(sent)) == ("done", [], 2) and not _events(tmp_path, "tool_arguments_repaired")
+    [assistant] = [row for row in sent[1]["messages"] if row.get("tool_calls")]
+    assert assistant["tool_calls"][0]["function"]["arguments"] == '{"note": "' + NOTE_VALUE + '"}'
+    [result] = [row["content"] for row in sent[1]["messages"] if row.get("role") == "tool"]
+    assert "TOOL_ARG_ERROR" in result
+
+
+@pytest.mark.parametrize(("finishes", "runs"), [
+    (("tool_calls", "length"), []),
+    (("content_filter", "length"), []),
+    (("refusal", "length"), []),
+    (("stop", "length"), []),  # a natural stop that names calls, as a named tool choice ends
+    (("tool_calls", "stop"), ["first"]),
+])
+def test_a_stream_that_also_states_its_output_limit_starts_no_call(tmp_path, monkeypatch, isolated, endpoint,
+                                                                   finishes, runs):
+    """Through the real stream adapter: frames of one choice that state any first finish (including a refusal) and
+    then a recognized output limit keep the first finish unchanged in diagnostics while starting zero calls and
+    answering each NOT STARTED; another conflict keeps the first finish as before and the whole first call runs."""
+    from ouroboros.llm_stream import LATER_OUTPUT_LIMIT_USAGE_KEY
+    from ouroboros.observability import read_call_payload
+
+    _no_network(monkeypatch)
+    calls = [{"index": 0, "id": "note-1", "type": "function", "function": {"name": NOTE, "arguments": '{"note": "first"}'}},
+             {"index": 1, "id": "note-2", "type": "function", "function": {"name": NOTE, "arguments": '{"note": "sec'}}]
+    usage = {"prompt_tokens": 100, "completion_tokens": 50, "cost": 0}
+
+    def conflicting(request):
+        body = json.loads(request.content)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse(
+            chunk({"role": "assistant", "content": "", "tool_calls": calls}, finishes[0], model=body["model"]),
+            chunk({}, finishes[1], usage=usage, model=body["model"])))
+    client, sent = endpoint([conflicting, "answer"], stream=True)
+    kw, saved = _note_loop(tmp_path, monkeypatch, client)
+    text, loop_usage, trace = loop.run_llm_loop(**kw)
+    assert (text, saved, len(sent)) == ("done", runs, 2)
+    first_call_id = loop_usage["llm_call_refs"][0]["llm_call_id"]
+    _manifest, recorded, _ref = read_call_payload(
+        kw["drive_logs"].parent, task_id=kw["task_id"], call_id=f"{first_call_id}_response")
+    assert recorded["usage"]["response_finish_reason"] == finishes[0]
+    assert LATER_OUTPUT_LIMIT_USAGE_KEY not in recorded["usage"]
+    results = [row["content"] for row in sent[1]["messages"] if row.get("role") == "tool"]
+    assert [row["tool_call_id"] for row in sent[1]["messages"] if row.get("role") == "tool"] == ["note-1", "note-2"]
+    if runs:
+        assert "TOOL_ARG_ERROR" in results[1]
+        return
+    assert all("NOT STARTED" in result and "(finish_reason=length)" in result for result in results)
+    assert trace["tool_calls"] == []
+
+
+def test_a_callless_stream_keeps_its_first_finish_beside_a_later_limit(tmp_path, monkeypatch, isolated, endpoint):
+    """The control: a callless reply whose stream names ``stop`` and then its output limit keeps ``stop`` and its old
+    meaning for every reader. The ordinary final is delivered at once: no cut notice and no informed turn."""
+    _no_network(monkeypatch)
+    usage = {"prompt_tokens": 100, "completion_tokens": 50, "cost": 0}
+
+    def conflicting(request):
+        body = json.loads(request.content)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse(
+            chunk({"role": "assistant", "content": "Both notes are written."}, "stop", model=body["model"]),
+            chunk({}, "length", usage=usage, model=body["model"])))
+    client, sent = endpoint([conflicting], stream=True)
+    kw, saved = _note_loop(tmp_path, monkeypatch, client)
+    text, usage, trace = loop.run_llm_loop(**kw)
+    assert (text, saved, len(sent), trace["tool_calls"]) == ("Both notes are written.", [], 1, [])
+    assert recovery.UNFINISHED_KEY not in usage and "reason_code" not in usage
+
+
+def test_spoofed_usage_stream_receipt_cannot_trigger_cut_admission(tmp_path, monkeypatch, isolated, endpoint):
+    """Through the real non-streaming adapter: a provider usage extension or spoofed top-level ``_stream_receipt``
+    claiming ``later_output_limits`` or ``_chat_later_output_limit`` never blocks a completed tool call (R2-4)."""
+    from ouroboros.llm_stream import LATER_OUTPUT_LIMIT_USAGE_KEY
+
+    _no_network(monkeypatch)
+    call = {"id": "note-1", "type": "function", "function": {"name": NOTE, "arguments": '{"note": "ran"}'}}
+
+    def spoofed_nonstream(request):
+        body = json.loads(request.content)
+        return httpx.Response(200, json={
+            "id": "gen-spoof", "object": "chat.completion", "model": body["model"],
+            "choices": [{"index": 0, "finish_reason": "tool_calls",
+                         "message": {"role": "assistant", "content": "", "tool_calls": [call]}}],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 10, "cost": 0,
+                      "stream_receipt": {"later_output_limits": {"0": "length"}},
+                      LATER_OUTPUT_LIMIT_USAGE_KEY: "length"},
+            "_stream_receipt": {"later_output_limits": {"0": "length"}},
+        })
+    client, sent = endpoint([spoofed_nonstream, "answer"], stream=False)
+    kw, saved = _note_loop(tmp_path, monkeypatch, client)
+    text, _usage, trace = loop.run_llm_loop(**kw)
+    assert (text, saved, len(sent)) == ("done", ["ran"], 2)
+    assert [(row["tool"], bool(row.get("is_error"))) for row in trace["tool_calls"]] == [(NOTE, False)]
+
+
+@pytest.mark.parametrize("new_id", [False, True])
+def test_two_textless_fragment_cuts_remember_exhausted_state_across_restart(tmp_path, monkeypatch, isolated, endpoint, new_id):
+    """Two textless fragment-only cuts followed by a crash before terminal publication must persist the known
+    exhausted state even though ``messages`` and ``round_idx`` did not change after the pending save (R2-1b)."""
+    from ouroboros import working_checkpoint as wc
+
+    _no_network(monkeypatch)
+    frag = [{"id": "frag-1", "type": "function", "function": None}]
+    client, sent = endpoint([("", "length", frag), ("", "length", frag), "answer"], stream=False, fallbacks="")
+    kw, _ = persistent_loop(tmp_path, monkeypatch, client)
+    _note_tool(kw["tools"])
+    returned, returned_usage, returned_trace = loop.run_llm_loop(**kw)
+    assert len(sent) == 2 and returned_usage["reason_code"] == recovery.REASON
+    assert returned_trace["output_recovery"]["finishes"] == ["length", "length"]
+    assert not returned_trace["output_recovery"].get("interrupted")
+
+    _, state = wc.read_working(tmp_path, kw["task_id"], 1)
+    saved_record = state["usage"][recovery.UNFINISHED_KEY]
+    assert (saved_record["stage"], saved_record["finishes"]) == ("exhausted", ["length", "length"])
+    assert "pending" not in saved_record
+    # No notice follows the second cut: its omitted fragments' raw reply is saved with the end, with no other send.
+    second_reply = {"raw_reply": returned_usage["llm_call_refs"][1]["response_ref"]}
+    assert saved_record["omitted_fragments"] == returned_trace["output_recovery"]["omitted_fragments"] == second_reply
+
+    text, usage, trace = _resume(tmp_path, monkeypatch, client, kw, new_id)
+    assert len(sent) == 2, "must not buy a third send"
+    assert (text, usage["reason_code"], usage["execution_status"]) == (returned, recovery.REASON, "infra_failed")
+    assert trace["output_recovery"]["finishes"] == ["length", "length"]
+    assert not trace["output_recovery"].get("interrupted")
+    assert "unconfirmed" not in str(usage.get("terminal_host_notice") or "").lower()
+
+
+@pytest.mark.parametrize("cut_kind", ["whole_batch", "fragment_only"])
+@pytest.mark.parametrize("new_id", [False, True])
+def test_cut_batch_restart_keeps_spent_round_and_no_tool_budget_tail(tmp_path, monkeypatch, isolated, endpoint,
+                                                                     cut_kind, new_id):
+    """Both a cut batch with whole calls (``intermediate_reply``) and a first fragment-only cut (``unfinished_reply``)
+    save ``post_batch`` with ``budget_tail='no_tool'``, the batch before its narration reaches the progress callback,
+    so a worker lost inside that callback erases no non-start. After such a crash, recovery preserves the
+    already-spent round (``MAX_ROUNDS=1`` buys zero extra ordinary calls), runs the normal no-tool budget tail
+    (never tool tail), reclassifies zero calls as UNKNOWN, and matches live pause round numbering in
+    ``complete_pause_from_working`` (#4028)."""
+    import copy
+    from ouroboros import budget_pause as bp, working_checkpoint as wc
+    from tests.test_stream_timeout_recovery import WorkerLost
+
+    _no_network(monkeypatch)
+    if cut_kind == "whole_batch":
+        calls = [{"id": "note-1", "type": "function", "function": {"name": NOTE, "arguments": '{"note": "first"}'}},
+                 {"id": "note-2", "type": "function", "function": {"name": NOTE, "arguments": '{"note": "sec'}}]
+        first_reply = ("Saving both notes.", "length", calls)
+    else:
+        calls = [{"id": "frag-1", "type": "function", "function": None}]
+        first_reply = ("Partial before fragment cut.", "length", calls)
+    client, sent = endpoint([first_reply, "answer", "answer"], stream=False, fallbacks="")
+    kw, _ = persistent_loop(tmp_path, monkeypatch, client)
+    saved_notes = _note_tool(kw["tools"])
+    real_hook = recovery.unfinished_reply
+
+    def lose_after_cut(*args, **kwargs):
+        if (handled := real_hook(*args, **kwargs)) is None:
+            raise WorkerLost()
+        return handled
+
+    def lose_in_narration(_text, **meta):
+        if meta.get("narration"):
+            raise WorkerLost()
+
+    with monkeypatch.context() as crash:
+        if cut_kind == "whole_batch":
+            kw["emit_progress"] = lose_in_narration
+        else:
+            crash.setattr(recovery, "unfinished_reply", lose_after_cut)
+        with pytest.raises(WorkerLost):
+            loop.run_llm_loop(**kw)
+    assert len(sent) == 1 and saved_notes == []
+    ckpt_path = wc.checkpoint_path(tmp_path, kw["task_id"], 1)
+    raw_ckpt = ckpt_path.read_bytes()
+    _, state = wc.read_working(tmp_path, kw["task_id"], 1)
+    assert state["working"]["boundary"] == "post_batch" and state["working"]["budget_tail"] == "no_tool"
+    assert state["working"]["pending_tool_call_ids"] == [] and state["round_idx"] == 1
+    if cut_kind == "fragment_only":
+        assert state["usage"][recovery.UNFINISHED_KEY]["stage"] == "informed"
+
+    # Restart under MAX_ROUNDS=1: round 1 was already spent, so zero extra ordinary call is bought and no UNKNOWN row.
+    monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "1")
+    target = kw["task_id"] + "-successor" if new_id else kw["task_id"]
+    task_round = {"id": target}
+    assert wc.attach_recovery(tmp_path, task_round, source_task_id=kw["task_id"], from_attempt=1, cause="worker_crash")
+    resumed_kw, _ = persistent_loop(tmp_path, monkeypatch, client, target=target, handoff=task_round["_working_recovery"])
+    _note_tool(resumed_kw["tools"])
+    round_limits = []
+    monkeypatch.setattr(loop, "_handle_round_limit", lambda limit_ctx: (
+        round_limits.append((limit_ctx.round_idx, copy.deepcopy(limit_ctx.messages))),
+        ("round limit reached", limit_ctx.accumulated_usage, {}))[1])
+    text, _usage, _trace = loop.run_llm_loop(**resumed_kw)
+    assert text == "round limit reached" and len(sent) == 1 and len(round_limits) == 1
+    assert round_limits[0][0] == 2
+    tool_rows = [row["content"] for row in round_limits[0][1] if row.get("role") == "tool"]
+    if cut_kind == "whole_batch":
+        assert len(tool_rows) == 2 and all("NOT STARTED" in row and "UNKNOWN" not in row for row in tool_rows)
+    else:
+        assert tool_rows == []
+
+    # Restart under normal rounds runs _finish_no_tool_round_budget (not _finish_tool_tail).
+    ckpt_path.write_bytes(raw_ckpt)
+    monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "20")
+    task_budget = {"id": target + "-b" if new_id else kw["task_id"]}
+    assert wc.attach_recovery(tmp_path, task_budget, source_task_id=kw["task_id"], from_attempt=1, cause="worker_crash")
+    resumed_b, _ = persistent_loop(tmp_path, monkeypatch, client, target=task_budget["id"],
+                                   handoff=task_budget["_working_recovery"])
+    _note_tool(resumed_b["tools"])
+    tails = []
+    real_no_tool = loop._finish_no_tool_round_budget
+    monkeypatch.setattr(loop, "_finish_tool_tail", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("tool tail ran")))
+    monkeypatch.setattr(loop, "_finish_no_tool_round_budget", lambda limit_ctx, *a, **k: (
+        tails.append((limit_ctx.round_idx, limit_ctx.budget_tail)), real_no_tool(limit_ctx, *a, **k))[1])
+    text_b, _usage_b, _trace_b = loop.run_llm_loop(**resumed_b)
+    assert text_b == "done" and tails == [(2, "no_tool")] and len(sent) == 2
+    if cut_kind == "whole_batch":
+        from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
+        wire_tools = [row for row in sent[1]["messages"] if row.get("role") == "tool"]
+        assert len(wire_tools) == 2 and all(TOOL_RESULT_RECORD_KEY not in row for row in wire_tools)
+
+    # Pause completion over the dead worker's post_batch matches live no-tool pause round_idx (2).
+    ckpt_path.write_bytes(raw_ckpt)
+    seed = {"pause_id": "p-cut", "state": bp.STATE_PAUSING, "reason": "budget", "rail": "test", "scope": "task"}
+    bp.set_budget_pause(tmp_path, kw["task_id"], seed)
+    completed = wc.complete_pause_from_working(tmp_path, kw["task_id"], seed, 1)
+    assert completed["resume_point"]["round_idx"] == 2 and completed["resume_point"]["budget_tail"] == "no_tool"
+
+
+def test_genuine_pre_effect_recovery_still_closes_unknown_and_runs_tool_tail(tmp_path, monkeypatch, isolated, endpoint):
+    """Control for R2-3: genuine pending ``pre_effect`` recovery is unchanged (closes unanswered calls as UNKNOWN
+    and rejoins ``_finish_tool_tail``)."""
+    from ouroboros import working_checkpoint as wc
+    from tests.test_stream_timeout_recovery import WorkerLost
+
+    _no_network(monkeypatch)
+    calls = [{"id": "note-1", "type": "function", "function": {"name": NOTE, "arguments": '{"note": "first"}'}}]
+    client, sent = endpoint([("", "tool_calls", calls), "answer"], stream=False, fallbacks="")
+    kw, _ = persistent_loop(tmp_path, monkeypatch, client)
+    _note_tool(kw["tools"])
+    real_save = wc.save_before_effects
+    with monkeypatch.context() as crash:
+        crash.setattr(wc, "save_before_effects", lambda limit_ctx: (real_save(limit_ctx), (_ for _ in ()).throw(WorkerLost())))
+        with pytest.raises(WorkerLost):
+            loop.run_llm_loop(**kw)
+    task = {"id": kw["task_id"]}
+    assert wc.attach_recovery(tmp_path, task, source_task_id=kw["task_id"], from_attempt=1, cause="worker_crash")
+    resumed, _ = persistent_loop(tmp_path, monkeypatch, client, target=kw["task_id"], handoff=task["_working_recovery"])
+    _note_tool(resumed["tools"])
+    tool_tails = []
+    real_tool_tail = loop._finish_tool_tail
+    monkeypatch.setattr(loop, "_finish_tool_tail", lambda limit_ctx, *a, **k: (
+        tool_tails.append(limit_ctx.round_idx), real_tool_tail(limit_ctx, *a, **k))[1])
+    text, _usage, _trace = loop.run_llm_loop(**resumed)
+    assert text == "done" and tool_tails == [1]
+    tool_rows = [row["content"] for row in sent[1]["messages"] if row.get("role") == "tool"]
+    assert len(tool_rows) == 1 and "UNKNOWN" in tool_rows[0]
 
 
 @pytest.mark.parametrize("new_id", [False, True])
@@ -701,7 +1057,7 @@ def test_work_lost_right_after_a_typed_cut_keeps_it_and_its_owed_turn(
     record = state["usage"].get(recovery.UNFINISHED_KEY) or {}
     assert (record.get("stage"), record.get("finishes"), "pending" in record) == ("informed", [finish], False)
     [kept], [notice] = _kept_at(state["messages"], words), _cut_notices(state["messages"])
-    assert kept + 1 == notice and state["working"]["boundary"] == "ready", "a ready state repeats its logical round"
+    assert kept + 1 == notice and state["working"]["boundary"] == "post_batch" and state["working"]["budget_tail"] == "no_tool"
     assert state["messages"][kept] == exact
     text, usage, trace = _resume(tmp_path, monkeypatch, client, kw, new_id)
     assert len(sent) == 2, "the owed turn is sent once and the cut reply is not generated again"

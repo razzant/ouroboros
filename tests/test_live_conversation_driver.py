@@ -8,6 +8,7 @@ import pytest
 from ouroboros import call_protocol as cp
 from ouroboros.contracts.live_conversation import LiveConfig, LiveEvent, LiveOptions, Respond, Video
 from ouroboros.contracts.realtime import CatalogModel, RealtimeSetupError
+from tests._live_wire import Batch
 
 
 class Hub:
@@ -40,13 +41,6 @@ class Session:
     async def send(self, command): self.sent.append(command)
     def final_captions(self): return []
     def emit(self, kind, **data): self.events.put_nowait([LiveEvent(kind, data)])
-
-
-class Batch(list):
-    """The additive ToolBatch port shape; trunk owns its contract class."""
-    def __init__(self, rows=(), *, silent=()):
-        super().__init__(rows)
-        self.silent = tuple(silent)
 
 
 class Host:

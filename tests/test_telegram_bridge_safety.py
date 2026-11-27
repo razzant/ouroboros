@@ -119,13 +119,13 @@ def test_existing_corrupt_settings_refuse_owner_rebinding(tmp_path, monkeypatch)
 
 def test_slash_messages_are_not_injected(tmp_path, monkeypatch):
     plugin = _load_plugin(tmp_path)
+    monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "en")
     # Explicitly strict (the default is now full_access); strict must still block slashes.
-    (tmp_path / "settings.json").write_text(
-        json.dumps({"TELEGRAM_MAX_UPDATES_PER_POLL": 20, "TELEGRAM_COMMAND_MODE": "strict", "TELEGRAM_CHAT_ID": "42"}),
-        encoding="utf-8",
-    )
+    (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_MAX_UPDATES_PER_POLL": 20, "TELEGRAM_COMMAND_MODE": "strict"}), encoding="utf-8")
     FakeTelegramClient.updates = [
-        {"update_id": 1, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "/restart"}}
+        {"update_id": mid, "message": {"message_id": mid, "chat": {"id": 42, "type": "private"},
+                                       "from": {"id": 42}, "text": command}}
+        for mid, command in enumerate(("/restart", "/help"), start=1)
     ]
     monkeypatch.setattr(plugin, "TelegramClient", FakeTelegramClient)
     injected = []
@@ -143,7 +143,10 @@ def test_slash_messages_are_not_injected(tmp_path, monkeypatch):
         pass
 
     assert injected == []
-    assert FakeTelegramClient.instances[-1].sent
+    refused, help_reply = FakeTelegramClient.instances[-1].sent
+    for chat_id, text in (refused, help_reply):
+        assert chat_id == 42 and "Telegram skill's settings" in text
+    assert "strict mode" in refused[1] and "full_access" in help_reply[1]
 
 
 def test_full_access_injects_raw_slash_commands(tmp_path, monkeypatch):
@@ -185,46 +188,34 @@ def test_full_access_first_chat_pins_silently_and_forwards(tmp_path, monkeypatch
         json.dumps({"TELEGRAM_MAX_UPDATES_PER_POLL": 20, "TELEGRAM_COMMAND_MODE": "full_access"}),
         encoding="utf-8",
     )
-    # Unbound first DM must NEVER auto-pin or forward without explicit owner confirmation.
     FakeTelegramClient.updates = [
         {"update_id": 1, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "/panic", "date": int(plugin._POLL_GENERATION_STARTED) + 1}}
     ]
     monkeypatch.setattr(plugin, "TelegramClient", FakeTelegramClient)
     injected = []
-
-    async def fake_inject(api, payload):
-        injected.append(payload)
-
-    monkeypatch.setattr(plugin, "_inject", fake_inject)
+    monkeypatch.setattr(plugin, "_inject", lambda api, payload: injected.append(payload))
 
     async def stop_sleep(_delay):
         raise asyncio.CancelledError
 
     monkeypatch.setattr(plugin.asyncio, "sleep", stop_sleep)
-    api = FakeApi(tmp_path)
+    poller = plugin._make_poller(FakeApi(tmp_path))
+
     try:
-        asyncio.run(plugin._make_poller(api)())
+        asyncio.run(poller())
     except asyncio.CancelledError:
         pass
 
-    settings = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
-    assert "TELEGRAM_CHAT_ID" not in settings
-    assert injected == []
-
-    # With an explicit Ouroboros-issued one-time pairing code, owner chat 42 binds and subsequent /panic forwards.
-    code = plugin.issue_owner_pairing_code(api)["code"]
-    FakeTelegramClient.updates = [
-        {"update_id": 2, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": f"/pair {code}", "date": int(plugin._POLL_GENERATION_STARTED) + 2}},
-        {"update_id": 3, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "/panic", "date": int(plugin._POLL_GENERATION_STARTED) + 3}},
-    ]
-    try:
-        asyncio.run(plugin._make_poller(api)())
-    except asyncio.CancelledError:
-        pass
-
+    # First chat is pinned (inbound filter), but pinning is SILENT: the message
+    # flows straight through and the raw slash is forwarded. The single
+    # "send the command again" confirmation is owned by the core owner-external
+    # TOFU (server._process_bridge_updates), not duplicated by the skill.
     settings = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
     assert settings["TELEGRAM_CHAT_ID"] == "42"
-    assert [item["text"] for item in injected] == ["/panic"]
+    assert len(injected) == 1
+    assert injected[0]["text"] == "/panic"
+    # The skill did not emit its own registration prompt.
+    assert all("registered" not in str(s).lower() for s in FakeTelegramClient.instances[-1].sent)
 
 
 def test_poller_caps_update_batch_and_adds_transport(tmp_path, monkeypatch):
@@ -308,7 +299,7 @@ def test_poller_isolates_updates_notifies_only_authorized_owner_and_saves_highes
         "offset": 4, "base": "https://api.telegram.org", "bot": "", "handled": {"https://api.telegram.org": []},
     }
     client = FakeTelegramClient.instances[-1]
-    notices = [item for item in client.sent if item[0] == 42 and "Could not deliver" in item[1]]
+    notices = [item for item in client.sent if item[0] == 42 and "Could not confirm" in item[1]]
     assert len(notices) == 1
     assert any("ValueError" in message for _, message, _ in api.logs)
     assert any("RuntimeError" in message for _, message, _ in api.logs)
@@ -656,12 +647,14 @@ def test_required_media_subscription_failure_stops_skill_registration(tmp_path, 
 
 
 def test_strict_mode_with_no_pin_binds_first_chat_and_rejects_others(tmp_path, monkeypatch):
-    # Without explicit owner confirmation or a one-time Ouroboros pairing code, NO stranger DM may bind or inject.
+    # Security regression (inject_chat_minimization): in strict/safe mode with no
+    # TELEGRAM_CHAT_ID, TOFU binding must pin the FIRST chat and reject all others
+    # — arbitrary chats must NOT reach _inject.
     plugin = _load_plugin(tmp_path)
     (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_MAX_UPDATES_PER_POLL": 20, "TELEGRAM_COMMAND_MODE": "strict"}), encoding="utf-8")
     FakeTelegramClient.updates = [
-        {"update_id": 1, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "hello from stranger"}},
-        {"update_id": 2, "message": {"chat": {"id": 99, "type": "private"}, "from": {"id": 99}, "text": "intruder"}},
+        {"update_id": 1, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "hello from owner"}},
+        {"update_id": 2, "message": {"chat": {"id": 99, "type": "private"}, "from": {"id": 42}, "text": "intruder"}},
     ]
     monkeypatch.setattr(plugin, "TelegramClient", FakeTelegramClient)
     injected = []
@@ -675,29 +668,15 @@ def test_strict_mode_with_no_pin_binds_first_chat_and_rejects_others(tmp_path, m
         raise asyncio.CancelledError
 
     monkeypatch.setattr(plugin.asyncio, "sleep", stop_sleep)
-    api = FakeApi(tmp_path)
+
     try:
-        asyncio.run(plugin._make_poller(api)())
+        asyncio.run(plugin._make_poller(FakeApi(tmp_path))())
     except asyncio.CancelledError:
         pass
 
-    assert injected == []
-    settings = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
-    assert "TELEGRAM_CHAT_ID" not in settings
-
-    # Redeeming a one-time Ouroboros pairing code binds chat 42 and still rejects chat 99.
-    code = plugin.issue_owner_pairing_code(api)["code"]
-    FakeTelegramClient.updates = [
-        {"update_id": 3, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": f"/pair {code}"}},
-        {"update_id": 4, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "hello from owner"}},
-        {"update_id": 5, "message": {"chat": {"id": 99, "type": "private"}, "from": {"id": 42}, "text": "intruder"}},
-    ]
-    try:
-        asyncio.run(plugin._make_poller(api)())
-    except asyncio.CancelledError:
-        pass
-
+    # Only the first (bound) chat's plain text injects; the intruder is rejected.
     assert [item["chat_id"] for item in injected] == [42]
+    # The first chat is pinned via TOFU even in strict mode.
     settings = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
     assert settings["TELEGRAM_CHAT_ID"] == "42"
 
@@ -726,11 +705,9 @@ def test_ambient_env_chat_id_is_ignored(tmp_path, monkeypatch):
     except asyncio.CancelledError:
         pass
 
-    # Neither ambient env TELEGRAM_CHAT_ID nor first-DM TOFU may authorize or auto-pin an unbound install.
-    assert injected == []
-    assert not (tmp_path / "settings.json").exists() or "TELEGRAM_CHAT_ID" not in json.loads(
-        (tmp_path / "settings.json").read_text(encoding="utf-8")
-    )
+    assert [item["chat_id"] for item in injected] == [99]
+    settings = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    assert settings["TELEGRAM_CHAT_ID"] == "99"
 
 
 def test_markdown_to_telegram_html_placeholder_ordering(tmp_path):

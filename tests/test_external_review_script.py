@@ -343,12 +343,12 @@ def test_contributor_packet_is_the_pre_move_packet(tmp_path, monkeypatch):
         "production_triad_quorum_plus_authoritative_scope", "production_pool_quorum_plus_coupling")
     # ... and every receipt names the one pool surface; a seat's configured row carries
     # its explicit delivery (the pre-move lane rows left it implicit).
-    lane_surfaces = {"triad", "scope"}
-
     def one_pool(value):
         if isinstance(value, dict):
             out = {key: one_pool(item) for key, item in value.items()}
-            if out.get("surface") in lane_surfaces:
+            if out.get("bound_at") == "panel_complete_custody_replay":  # this golden explicitly retired its project
+                out["registration_discharged"] = True
+            if out.get("surface") in {"triad", "scope"}:
                 out["surface"] = "pool"
             if "configured" in out and isinstance(out["configured"], dict) and "delivery" not in out["configured"]:
                 out["configured"]["delivery"] = "native" if out["configured"].get("slot_id") == "s1" else "packet"
@@ -1411,7 +1411,7 @@ def test_contributor_receipts_bind_session_and_api_execution(tmp_path):
         "delegated_run_id": "run-1", "custody_durable": True,
         "settlement": {
             "settled": True, "ledger_recorded": True,
-            "project_retired": True, "project_persistent": False,
+            "project_retired": True, "project_persistent": False, "registration_discharged": True,
             "bound_at": "panel_complete_custody_replay",
         },
         "output_conformance": "passed", "verdict_method": "schema",

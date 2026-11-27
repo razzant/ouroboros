@@ -3,21 +3,27 @@
 ``GET /api/chat/history`` projects the dialogue store's stored chat and progress rows
 (``state/dialog.sqlite``) plus a few synthesized ones (``gateway/history.py``); ``GET /api/chat/search``
 reads a room's saved messages for a word search (``gateway/chat_search.py``); ``GET /api/recall`` is the
-neighbour door over the words reader (``gateway/recall.py``; its JSDoc twins are
-``web/modules/recall_contract_types.js``). The JSDoc twin of the rest is ``web/modules/client_contract_types.js``.
+neighbour door over the words reader (``gateway/recall.py``).
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Union
 
-from ouroboros.gateway.attachment_contracts import ChatAttachmentView
+from ouroboros.gateway.attachment_contracts import ChatAttachmentView, QuizAnswerFile
 from ouroboros.gateway.reference_contracts import ChatReplyReference, HostNoticeField
 
 try:
     from typing import Literal, Required, TypedDict
 except ImportError:  # pragma: no cover - Python 3.10 compatibility.
     from typing_extensions import Literal, Required, TypedDict
+
+
+class RequestedExecutorRoute(TypedDict):
+    """The executor a subagent selected as a card shows it: no local connection name, not the launch address."""
+
+    kind: Literal["api_model", "agent_session"]
+    target_id: str
 
 
 class ChatHistoryPosition(TypedDict):
@@ -54,7 +60,8 @@ class PresenceContact(TypedDict, total=False):
 class ChatHistoryQuiz(TypedDict, total=False):
     """The question card of a ``msg_type: "quiz"`` row (the question itself is the row's ``text``).
     ``state`` is the durable lifecycle merged at read time: open, answered, closed,
-    expired_terminal or superseded. ``answered_index`` and ``comment`` are the recorded answer,
+    expired_terminal or superseded. ``answered_index``, ``comment`` and ``attachments`` (the files a Telegram
+    Reply answered with: ``chat_uploads.answer_files``, never a link) are the recorded answer,
     ``answer_row_address`` its own row, which the card shows (DESIGN "Replies")."""
 
     quiz_id: Required[str]
@@ -68,6 +75,7 @@ class ChatHistoryQuiz(TypedDict, total=False):
     host_facts: str
     answered_index: int
     comment: str
+    attachments: List[QuizAnswerFile]
     answer_row_address: str
     owner_wait_state: str
     owner_wait_resume_reason: str
@@ -110,6 +118,7 @@ class PlaceHistoryFacts(TypedDict, total=False):
     kind: Required[Literal['message', 'notice', 'delivery']]
     delivery_state: Literal['authored', 'accepted', 'delivered', 'failed', 'uncertain']
     attention: PlaceHistoryAttention
+    actor_origin: Literal['machine']  # an incoming program, as recorded by the connector; absent carries no origin claim
     owner_confirmed: bool  # current stored account confirmation, never inferred from role=user
     facts: List[str]  # a heard row's declared event facts ([] when none were declared)
     identity: Dict[str, Any]  # captured incoming rows: the connector's declared identity at that moment
@@ -124,6 +133,7 @@ class PlaceHistoryFacts(TypedDict, total=False):
     non_text: List[Dict[str, str]]  # the connector's {kind, description} beside the words (kind state_change: a change), never speech
 
 
+# `ts` is the publication time.
 class HistoricalTerminal(TypedDict, total=False):
     """Facts frozen on one published ending. Its publication time and observed end time are separate."""
 
@@ -144,7 +154,71 @@ class HistoricalTerminal(TypedDict, total=False):
     schedule_report_only: bool
 
 
-class ChatHistoryMessage(HostNoticeField, total=False):
+class DeclaredAuthor(TypedDict, total=False):
+    """An agent's note's author as the host recorded it (``dialogue_provenance.recorded_author``): the label it declared,
+    never verified (``basis: "self_declared"``); ``link_key`` with ``key_id`` is reserved for a host-attested key."""
+
+    kind: Required[Literal["agent"]]
+    label: Required[str]
+    basis: Required[Literal["self_declared", "link_key"]]
+    key_id: str
+
+
+class AgentNoteFields(TypedDict, total=False):
+    """The program's author and optional letter id, on both the live echo and its history row."""
+
+    declared_author: DeclaredAuthor  # an agent's note in Main: never the owner's words
+    late_report_id: str  # the letter's display id, not the host return reference
+
+
+class PeerLetterPart(TypedDict, total=False):
+    """A question about a letter, or this side's answer to it, on the letter's card (``place_projection._said``): its
+    words whole within the letter protocol's bound (``chars`` only past it, ``text`` then null); a question whose words
+    the receiver holds now has ``held`` and no words, and ``delivery_state`` ``reserved`` when an answer to it is
+    reserved there, its delivery not proven. An ``answered`` part exists only after its delivery was confirmed."""
+
+    question_id: Required[str]
+    text: Required[Optional[str]]
+    held: str
+    delivery_state: Literal["reserved"]
+    chars: int
+
+
+class PeerLetterCardFact(TypedDict, total=False):
+    """``peer_letter_card`` (``place_projection.letter_card_fact``): one letter's card on a progress row of the work that
+    wrote it, the same fact live and on replay; its parts are keyed ``(task_id, letter_id, part, question_id)`` with
+    ``part`` letter, question, answered or answer. Words of the letter or of a given answer past what the card carries
+    are null beside their length (``text_chars``, ``answer_chars``) and read whole at ``GET
+    /api/tasks/{task_id}/artifacts/{letter_id}.letter.txt`` or ``.answer.txt`` ``?letter={letter_id}``; ``error_chars``
+    marks a failure reason cut to its first part; ``stop`` a Stop not confirmed (a confirmed one is ``cancelled``)."""
+
+    letter_id: Required[str]
+    place_id: Required[str]
+    to: Required[str]
+    to_seed: Required[str]
+    text: Required[Optional[str]]
+    title: Required[str]
+    ceiling_usd: Required[Optional[float]]
+    spent_usd: Required[Optional[float]]
+    spent_final: Required[bool]
+    state: Required[Literal["accepted_running", "needs_input", "waiting_owner", "done", "failed", "cancelled",
+                            "refused", "not_sent", "unconfirmed", "unknown"]]
+    text_chars: int
+    phase: str  # queued and running distinguish what the receiver reported after acceptance
+    refusal_code: str  # typed refusal at the receiver or why the letter was not sent from here
+    error: str
+    error_chars: int
+    at: str  # ISO timestamp of the letter as recorded on its first fact
+    question: PeerLetterPart
+    answered: PeerLetterPart
+    stop: Literal["requested", "refused", "unverified"]
+    reply: Literal["given", "none", "held", "unknown"]
+    held: str  # the receiver's hold code when reply is held
+    answer: Optional[str]
+    answer_chars: int
+
+
+class ChatHistoryMessage(HostNoticeField, AgentNoteFields, total=False):
     """One ``GET /api/chat/history`` row. Every row has the six required keys; a stored row also
     has ``history_id`` and ``history_position``. Live frames call ``text`` ``content``.
 
@@ -164,10 +238,11 @@ class ChatHistoryMessage(HostNoticeField, total=False):
     presence_contact: PresenceContact
     place_history: PlaceHistoryFacts
     wait_ended_at: str
+    kind: str  # room_echo for a program's message saved in its recipient's room
     row_address: str
     reply_excerpt_disabled: bool
     reply_author_label: str  # whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
-    row_client_message_id: str  # a row's own saved name (outgoing rows; host-fact ingress such as a call's opening)
+    row_client_message_id: str  # a row's own saved name (outgoing rows; host-fact ingress such as a call's opening); on an outgoing row, the same as its client_message_id
     reply_to: ChatReplyReference
     relay: Dict[str, Any]
     reply_to_relay: str
@@ -176,19 +251,21 @@ class ChatHistoryMessage(HostNoticeField, total=False):
     history_position: ChatHistoryPosition
     markdown: bool
     source: str
-    sender_label: str
+    sender_label: str  # an agent's note: its rendered identity (``agent "<label>" (declared, not verified)``)
     sender_session_id: str
     subagents_mode: Literal["swarm"]  # Effective room mode at owner-message acceptance.
     client_message_id: str  # correlation id; owner rows have role=user, quiz publications also use it
     ingress_accepted: bool
     ingress_dispatched: bool
     ingress_pending: bool
-    attachments: List[ChatAttachmentView]
+    # ChatAttachmentView on owner rows; QuizAnswerFile on project_question_pointer.
+    attachments: List[Union[ChatAttachmentView, QuizAnswerFile]]
     text_placeholder: bool
     chat_annotation: Dict[str, Any]  # the routing outcome shown on an owner message
     origin_id: str
     source_row_address: str  # the physical original of a retained copy, even outside this store
     origin_projected: bool  # a Project's start message rebuilt from its binding's own copy
+    # retained card input, not bubble text.
     opening_input_kind: Literal["owner_press", "owner_card_input", "owner_quiz_answer", "owner_mailbox"]
     chat_id: int  # on that copy: the room its original was written in (its receipt's room)
     msg_type: Literal["document", "photo", "video", "links", "quiz", "card"]
@@ -217,6 +294,7 @@ class ChatHistoryMessage(HostNoticeField, total=False):
     outcome_axes: Dict[str, Any]
     _result_text_present: bool
     delegated_runs_unreconciled: List[str]
+    peer_letter_card: PeerLetterCardFact  # a letter's card, a progress row of its own (never the task's carrier)
     review_projection: Dict[str, Any]
     wake_summary: str
     suggested_name: str
@@ -318,7 +396,13 @@ class ChatHistoryResponse(TypedDict, total=False):
     regardless of timestamp and recur across pages. An error answer (400 history_cursor_invalid or
     history_around_invalid, 409 history_view_changed or history_delta_reset, 503 history_source_unavailable
     or migrating) keeps this shape with no rows, ``has_more`` true and the cursor that was sent as ``next_cursor``;
-    a 503 history_source_unavailable may name the store's cause in ``detail``."""
+    a 503 history_source_unavailable may name the store's cause in ``detail``, and a 409 history_delta_reset names
+    there why it refused (``history_paging.DELTA_RESET_DETAILS``), with ``stream`` when one stream did. ``project_registry`` is Main's
+    alone: ``"unavailable"`` on its refusal while the registry cannot tell its rows from a Project's (its read-only
+    archive is ``GET /api/chat/archive``), ``"restored"`` on a successful newest page after the registry came back
+    from its saved copy; an absent field says neither. A newest read's 503 other than Main's refusal names
+    ``ordinary_room`` (the room read) and ``profile_scope`` when that room is still one of this profile's ordinary rooms
+    (``room_archive.ordinary_room``); no other answer carries them, and without them nothing about the room is confirmed."""
 
     messages: Required[List[ChatHistoryMessage]]
     has_more: Required[bool]
@@ -331,7 +415,12 @@ class ChatHistoryResponse(TypedDict, total=False):
     error: str
     anchor: ChatHistoryAnchor  # an ``around`` read only
     reason_code: str
-    detail: str  # a 503 history_source_unavailable: the store's cause, when it has one
+    detail: str  # a 503 history_source_unavailable: the store's cause, when it has one; a 409 history_delta_reset: why
+    stream: Literal["chat", "progress"]  # a 409 history_delta_reset met in one stream: that stream
+    project_registry: Literal["unavailable", "restored"]  # Main only: its refusal, or the list back from its copy
+    ordinary_room: int  # a newest read's 503: the room read, still one of this profile's ordinary rooms
+    profile_scope: str  # the serving generation's frozen data-profile scope, on a successful page or beside
+                        # ``ordinary_room``; the browser binds a delayed body to it before consuming it (#3294)
 
 
 class ChatSearchAttachment(TypedDict):
@@ -353,24 +442,27 @@ class ChatSearchLink(TypedDict):
 
 class ChatSearchQuestion(TypedDict, total=False):
     """A question row's card as its words are drawn (the question is the row's ``text``): the offered answers'
-    labels and details (``QuizOption`` rows, or a legacy row's labels with ``option_details``), the stake and the
-    owner's own words (``comment``) once the card is settled as answered."""
+    labels and details (``QuizOption`` rows, or a legacy row's labels with ``option_details``), the stake, the
+    owner's own words (``comment``) and recorded answer files (``attachments``, ``chat_uploads.answer_files``)
+    once the card is settled as answered."""
 
     quiz_id: Required[str]
     options: List[Any]
     option_details: List[str]
     stake: str
     comment: str
+    attachments: List[QuizAnswerFile]
 
 
-class ChatSearchCandidate(HostNoticeField, total=False):
+class ChatSearchCandidate(HostNoticeField, AgentNoteFields, total=False):
     """One saved message of the room as the fields the room's renderer draws its words from: the text history
     gives it (``system_type``, ``markdown``, ``narration``, ``source`` and the owner's ``attachments`` names choose
-    how) or a host notice's line (``notice``; its details are not searched), a photo, video or file's ``caption`` and a file's ``filename``, a links row's ``title`` and ``actions``, a
+    how) or a host notice's line (``notice``; its details, template and values are not searched), a photo, video or file's ``caption`` and a file's ``filename``, a links row's ``title`` and ``actions``, a
     question's ``quiz``, a Project lifecycle row's answer and ending (``completion_answer``, ``project_id``,
-    ``project_name``, ``task_name``, ``completion_notice``). Whether its words contain the query is the client's
-    reading of those words. ``history_id`` and ``row_address`` are the row's identity in ``GET /api/chat/history``, whose
-    ``around=<row_address>`` reads the page around it; ``role`` is its author as history names it."""
+    ``project_name``, ``task_name``, ``completion_notice``). An agent's note carries its literal body as ``text`` under
+    its ``declared_author`` (``role`` ``user``), as history shows it, never the neutral receipt fact. Whether its words
+    contain the query is the client's reading of those words. ``history_id`` and ``row_address`` are the row's identity in
+    ``GET /api/chat/history``, whose ``around=<row_address>`` reads the page around it; ``role`` is its author as history names it."""
 
     history_id: Required[str]
     row_address: Required[str]
@@ -503,10 +595,54 @@ class RecallRowResponse(TypedDict):
     notes: List[str]
 
 
+class ChatArchiveRoom(TypedDict, total=False):
+    """A room the archive reads: ``main``, or a historical Project room the saved records name (``project_id``,
+    ``name``; ``evidence`` lists the kinds that name it: ``registry``, ``binding``, ``marker``, ``main_record``)."""
+
+    room: Required[str]
+    name: Required[str]
+    chat_id: int
+    project_id: str
+    evidence: List[str]
+
+
+class ChatArchiveMessage(TypedDict, total=False):
+    """Speaker, saved words, time, pinned notice kind and attachment names. A handoff names its destination;
+    a completion notice includes its stored label, status and any detail. ``id`` is a key within this read-only
+    archive, not an address for replies, continuations, moves or links."""
+
+    id: Required[str]
+    role: Required[Literal["user", "assistant", "system"]]
+    text: Required[str]
+    ts: Required[str]
+    kind: Literal["project_started", "project_handoff", "project_completion_summary"]
+    attachments: List[str]
+
+
+class ChatArchiveResponse(TypedDict, total=False):
+    """``GET /api/chat/archive?room=&before=``: while Main's history refuses for the Project registry, one page of
+    a room's rows that positive evidence places there, oldest first; ``before=<next_cursor>`` continues older,
+    and a page may hold none and still continue. ``complete`` is always false: rows whose room is not proven are
+    not shown, and ``limits`` names what the read could not include (``placement_unproven``,
+    ``bindings_unavailable``, ``rooms_withheld_unverified``, ``legacy_origins_limited``, ``importing``),
+    never a count. ``state: "not_needed"`` alone: the registry reads,
+    so Main's history answers."""
+
+    state: Required[Literal["available", "not_needed"]]
+    room: str
+    rooms: List[ChatArchiveRoom]
+    messages: List[ChatArchiveMessage]
+    has_more: bool
+    next_cursor: Optional[str]
+    complete: bool
+    limits: List[str]
+
+
 __all__ = [
     "ChatHistoryPosition", "PresenceContact", "PlaceHistoryAttention", "PlaceHistoryImport", "PlaceHistoryReaction", "PlaceHistoryFacts",
     "ChatHistoryQuiz", "ChatHistoryCard", "HistoricalTerminal", "ChatHistoryMessage",
     "ChatHistoryCoverage", "ChatHistoryWindow", "ChatHistoryAnchor", "ChatHistoryResponse",
     "ChatSearchAttachment", "ChatSearchLink", "ChatSearchQuestion", "ChatSearchCandidate", "ChatSearchSpan",
     "ChatSearchResponse", "RecallReader", "RecallField", "RecallRow", "RecallSearchResponse", "RecallRowResponse",
+    "ChatArchiveRoom", "ChatArchiveMessage", "ChatArchiveResponse",
 ]

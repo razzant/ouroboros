@@ -1,12 +1,9 @@
 """Private settings authority shared by the Telegram extension and companion."""
 from __future__ import annotations
 
-import ipaddress
 import json
 import logging
 import os
-import re
-import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Optional
 
@@ -49,28 +46,25 @@ class TelegramSettingsError(RuntimeError):
 
 def _settings_path(state_dir: Path) -> Path:
     root = Path(state_dir).expanduser()
-    try:
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if path_is_link_or_reparse(root) or not root.is_dir():
-            raise TelegramSettingsError("Telegram state must be a real directory.")
-        root = root.resolve(strict=True)
-        path = root / _SETTINGS_NAME
-        if path_is_link_or_reparse(path):
-            raise TelegramSettingsError("Telegram settings are an unsafe link.")
-        return path
-    except OSError as exc:
-        raise TelegramSettingsError("Could not access Telegram state directory.") from exc
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path_is_link_or_reparse(root) or not root.is_dir():
+        raise TelegramSettingsError("Telegram state must be a real directory.")
+    root = root.resolve(strict=True)
+    path = root / _SETTINGS_NAME
+    if path_is_link_or_reparse(path):
+        raise TelegramSettingsError("Telegram settings are an unsafe link.")
+    return path
 
 
 def load_settings(state_dir: Path) -> dict[str, Any]:
     path = _settings_path(state_dir)
     try:
-        st = path.stat()
+        path.stat()
     except FileNotFoundError:
         return {}
     except OSError as exc:
         raise TelegramSettingsError("Could not read Telegram settings.") from exc
-    if not stat.S_ISREG(st.st_mode):
+    if not path.is_file():
         raise TelegramSettingsError("Telegram settings are invalid.")
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -120,34 +114,25 @@ def telegram_proxy(state_dir: Path) -> str | None:
     return validate_telegram_proxy(load_settings(state_dir).get("TELEGRAM_PROXY"))
 
 
-def _is_loopback_host(host: str) -> bool:
-    clean = str(host or "").strip().lower().rstrip(".")
-    if clean == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(clean).is_loopback
-    except ValueError:
-        return False
-
-
 def validate_telegram_api_base(value: Any) -> str:
     """Parse TELEGRAM_API_BASE (self-hosted Bot API server) without credentials.
 
-    Accepts https://host[:port] for any host and http://host[:port] ONLY for
-    loopback hosts (127.0.0.1, ::1, localhost), with no path beyond an optional
-    trailing slash. Remote plaintext HTTP is rejected so the bot token, updates,
-    and owner identities never traverse a network unencrypted.
+    Accepts http/https scheme://host[:port] with no path beyond an optional
+    trailing slash; anything else is rejected so the token-bearing URL is
+    never silently assembled from a malformed base. The returned string is a
+    canonical origin (scheme://host[:port]) rebuilt from the parsed URL: no
+    fragment/query ever survives, not even an empty "#" delimiter that would
+    otherwise swallow the /bot<token>/... suffix during string concatenation.
     """
     text = str(value or "").strip().rstrip("/")
     if not text:
         return "https://api.telegram.org"
     if "#" in text or "?" in text:
         raise ValueError(
-            "TELEGRAM_API_BASE must be https://host[:port] (or http:// on loopback only) "
-            "with no path, query, fragment or credentials."
+            "TELEGRAM_API_BASE must be http(s)://host[:port] with no path, "
+            "query, fragment or credentials."
         )
     canonical: Optional[str] = None
-    remote_http = False
     try:
         url = httpx.URL(text)
         valid = (
@@ -160,28 +145,20 @@ def validate_telegram_api_base(value: Any) -> str:
         )
         if valid:
             host = url.host or ""
-            if url.scheme == "http" and not _is_loopback_host(host):
-                valid = False
-                remote_http = True
-            else:
-                # httpx.URL.host returns IPv6 literals WITHOUT brackets; rebuild
-                # the origin with them so http://[::1]:8081 round-trips through
-                # settings persistence and client revalidation.
-                bracketed = f"[{host}]" if ":" in host else host
-                origin = f"{url.scheme}://{bracketed}"
-                if url.port is not None:
-                    origin += f":{url.port}"
-                canonical = origin
+            # httpx.URL.host returns IPv6 literals WITHOUT brackets; rebuild
+            # the origin with them so http://[::1]:8081 round-trips through
+            # settings persistence and client revalidation.
+            bracketed = f"[{host}]" if ":" in host else host
+            origin = f"{url.scheme}://{bracketed}"
+            if url.port is not None:
+                origin += f":{url.port}"
+            canonical = origin
     except Exception:
         valid = False
-    if remote_http:
-        raise ValueError(
-            "TELEGRAM_API_BASE must use https:// for remote hosts (http:// is allowed on loopback only)."
-        )
     if not valid:
         raise ValueError(
-            "TELEGRAM_API_BASE must be https://host[:port] (or http:// on loopback only) "
-            "with no path, query, fragment or credentials."
+            "TELEGRAM_API_BASE must be http(s)://host[:port] with no path, "
+            "query, fragment or credentials."
         )
     return canonical or "https://api.telegram.org"
 
@@ -252,12 +229,7 @@ def miniapp_enabled(state_dir: Path) -> bool:
     return raw in _TRUE
 
 
-from contextlib import contextmanager
-
-
-@contextmanager
-def settings_lock(state_dir: Path):
-    """Cross-process exclusive lock guarding Telegram settings and owner pairing transitions."""
+def merge_settings(state_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
     path = _settings_path(state_dir)
     lock_path = path.with_name(_LOCK_NAME)
     if path_is_link_or_reparse(lock_path):
@@ -266,14 +238,6 @@ def settings_lock(state_dir: Path):
         fd = acquire_file_lock(lock_path, timeout_sec=2.0)
     except Exception as exc:
         raise TelegramSettingsError("Telegram settings are busy.") from exc
-    try:
-        yield path
-    finally:
-        release_file_lock(fd)
-
-
-def merge_settings_unlocked(state_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
-    path = _settings_path(state_dir)
     tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     try:
         current = load_settings(path.parent)
@@ -286,29 +250,19 @@ def merge_settings_unlocked(state_dir: Path, patch: dict[str, Any]) -> dict[str,
             pass
         os.replace(tmp, path)
         return current
-    except (OSError, UnicodeEncodeError) as exc:
+    except OSError as exc:
         raise TelegramSettingsError("Could not persist Telegram settings.") from exc
     finally:
+        release_file_lock(fd)
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
 
 
-def merge_settings(state_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
-    with settings_lock(state_dir):
-        if "TELEGRAM_CHAT_ID" in patch:
-            pairing_path = _settings_path(state_dir).parent / "owner_pairing.json"
-            try:
-                pairing_path.unlink(missing_ok=True)
-            except OSError as exc:
-                raise TelegramSettingsError("Could not invalidate pending owner pairing challenge.") from exc
-        return merge_settings_unlocked(state_dir, patch)
-
-
 def request_may_change_owner(request: Any) -> bool:
     headers = getattr(request, "headers", {})
-    if any(str(k).lower() == MINIAPP_MARKER_HEADER.lower() and str(v or "").strip() for k, v in headers.items()):
+    if str(headers.get(MINIAPP_MARKER_HEADER, "")).strip():
         return False
     client = getattr(request, "client", None)
     host = str(getattr(client, "host", "") or "").strip()
@@ -317,31 +271,14 @@ def request_may_change_owner(request: Any) -> bool:
 
 # The exact keys the declarative Settings form owns: POST accepts only these and
 # the GET that hydrates the form returns only non-secret fields. The bot token
-# belongs to Secrets; the proxy is a masked, write-only skill setting.
+# belongs to Settings → Accounts and keys; the proxy is a masked, write-only skill setting.
 _SETTINGS_FORM_KEYS = (
-    "TELEGRAM_CHAT_ID", "TELEGRAM_MAX_UPDATES_PER_POLL", "TELEGRAM_OWNER_CHAT_MODE",
-    "TELEGRAM_MIRROR_MODE", "TELEGRAM_MIRROR_QUIZZES",
+    "TELEGRAM_CHAT_ID", "TELEGRAM_MAX_UPDATES_PER_POLL", "TELEGRAM_MIRROR_MODE",
     "TELEGRAM_COMMAND_MODE", "TELEGRAM_SILENT_MODE",
     "TELEGRAM_SUBAGENT_CARDS", "TELEGRAM_MIRROR_PROGRESS", "TELEGRAM_NOTIFY_TASKS",
     "TELEGRAM_NOTIFY_BUDGET", "TELEGRAM_MINIAPP_ENABLED", "TELEGRAM_PROXY",
     "TELEGRAM_API_BASE", "TELEGRAM_API_FILES_DIR",
-    "words", "management_group_id",
 )
-_VALID_OWNER_CHAT_MODES = frozenset({"direct", "presence"})
-_VALID_MIRROR_MODES = frozenset({"all", "main", "telegram_only", "control_only"})
-_VALID_TOGGLES = frozenset({"on", "off"})
-
-
-def normalize_words(raw: Any) -> list[str]:
-    """Normalize Presence wake-signal words from a newline string or list of strings."""
-    if isinstance(raw, str):
-        items = raw.splitlines()
-    elif isinstance(raw, list) and all(isinstance(item, str) for item in raw):
-        items = raw
-    else:
-        raise ValueError("words must be a string or list of strings")
-    return [item.strip() for item in items if item.strip()]
-
 
 def make_settings_save(api):
     async def _settings_save(request):
@@ -353,14 +290,8 @@ def make_settings_save(api):
                 stored = load_settings(Path(api.get_state_dir()))
             except TelegramSettingsError as exc:
                 return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
-            values: dict[str, str] = {}
-            for key in _SETTINGS_FORM_KEYS:
-                if key not in stored or key == "TELEGRAM_PROXY":
-                    continue
-                if key == "words" and isinstance(stored[key], list):
-                    values[key] = "\n".join(str(item) for item in stored[key])
-                else:
-                    values[key] = str(stored[key])
+            values = {key: str(stored[key]) for key in _SETTINGS_FORM_KEYS
+                      if key in stored and key != "TELEGRAM_PROXY"}
             if "TELEGRAM_PROXY" in stored:
                 values["telegram_proxy_status"] = "Configured" if stored["TELEGRAM_PROXY"] else "Not configured"
             return JSONResponse(values)
@@ -377,38 +308,6 @@ def make_settings_save(api):
                 status_code=400,
             )
         payload = {key: data.get(key) for key in _SETTINGS_FORM_KEYS if key in data}
-        if "binding_id" in data:
-            binding_id = str(data.get("binding_id") or "").strip()
-            if re.fullmatch(r"[0-9a-f]{32}", binding_id) is None:
-                err = "binding_id must be 32 lowercase hex characters"
-                return JSONResponse({"ok": False, "message": err, "error": err}, status_code=400)
-            payload["binding_id"] = binding_id
-        # Validate Presence and mode-routing fields strictly before persistence.
-        try:
-            if "TELEGRAM_OWNER_CHAT_MODE" in payload:
-                val = str(payload["TELEGRAM_OWNER_CHAT_MODE"] or "direct").strip().lower()
-                if val not in _VALID_OWNER_CHAT_MODES:
-                    raise ValueError("TELEGRAM_OWNER_CHAT_MODE must be 'direct' or 'presence'.")
-                payload["TELEGRAM_OWNER_CHAT_MODE"] = val
-            if "TELEGRAM_MIRROR_MODE" in payload:
-                val = str(payload["TELEGRAM_MIRROR_MODE"] or "all").strip().lower()
-                if val not in _VALID_MIRROR_MODES:
-                    raise ValueError("TELEGRAM_MIRROR_MODE must be one of: all, main, telegram_only, control_only.")
-                payload["TELEGRAM_MIRROR_MODE"] = val
-            if "TELEGRAM_MIRROR_QUIZZES" in payload:
-                val = str(payload["TELEGRAM_MIRROR_QUIZZES"] or "on").strip().lower()
-                if val not in _VALID_TOGGLES:
-                    raise ValueError("TELEGRAM_MIRROR_QUIZZES must be 'on' or 'off'.")
-                payload["TELEGRAM_MIRROR_QUIZZES"] = val
-            if "words" in payload:
-                payload["words"] = normalize_words(payload["words"])
-            if "management_group_id" in payload:
-                group_id = str(payload["management_group_id"] or "").strip()
-                if group_id and re.fullmatch(r"-[0-9]+", group_id) is None:
-                    raise ValueError("management_group_id must be a numeric Telegram group ID.")
-                payload["management_group_id"] = group_id
-        except ValueError as exc:
-            return JSONResponse({"ok": False, "message": str(exc), "error": str(exc)}, status_code=400)
         # Password fields intentionally hydrate empty. An untouched field must
         # preserve its saved value; removal is a separate, explicit form action.
         if data.get("clear_telegram_proxy") is True:
@@ -452,20 +351,12 @@ def make_settings_save(api):
             if "TELEGRAM_CHAT_ID" in payload:
                 payload.pop("TELEGRAM_CHAT_ID", None)
                 owner_ignored = True
-            if "binding_id" in payload:
-                payload.pop("binding_id", None)
-                owner_ignored = True
             # The saved server supplies every update and the sender IDs the owner check
             # trusts, so changing it is owner binding too; an unchanged value passes quietly.
             if "TELEGRAM_API_BASE" in payload:
                 server_ignored |= validate_telegram_api_base(payload.pop("TELEGRAM_API_BASE")) != saved_server
             if "TELEGRAM_API_FILES_DIR" in payload:
                 server_ignored |= payload.pop("TELEGRAM_API_FILES_DIR") != saved_files_dir
-            # When using an unencrypted http:// Bot API server, changing the proxy can MITM
-            # updates and forge owner sender IDs, so it requires local owner authorization too.
-            if saved_server.lower().startswith("http://") and "TELEGRAM_PROXY" in payload:
-                saved_proxy = str(stored.get("TELEGRAM_PROXY") or "").strip()
-                server_ignored |= str(payload.pop("TELEGRAM_PROXY") or "").strip() != saved_proxy
         try:
             merge_settings(Path(api.get_state_dir()), payload)
         except TelegramSettingsError as exc:
@@ -486,8 +377,8 @@ def make_settings_save(api):
         if owner_ignored:
             message += " Owner binding was left unchanged."
         if server_ignored:
-            message += (" The Bot API server settings were left unchanged: change them from the Settings"
-                        " page on the computer running Ouroboros.")
+            message += (" The Bot API server changes require local access. Open the Telegram skill's settings"
+                        " on the computer running Ouroboros.")
         return JSONResponse({"ok": True, "owner_ignored": owner_ignored, "server_ignored": server_ignored,
                              "message": message})
     return _settings_save
@@ -524,12 +415,10 @@ __all__ = [
     "TelegramSettingsObserver",
     "load_settings",
     "merge_settings",
-    "merge_settings_unlocked",
     "make_settings_save",
     "miniapp_enabled",
     "owner_chat_id",
     "request_may_change_owner",
-    "settings_lock",
     "telegram_api_base",
     "telegram_files_dir",
     "telegram_proxy",

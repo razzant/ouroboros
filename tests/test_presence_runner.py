@@ -567,7 +567,7 @@ def test_previous_turn_reports_the_fate_of_its_deferred_work(tmp_path):
     previous = captured[-1]["metadata"]["presence"]["previous_turn"]
     assert previous["work_result"] == "" and previous["work_record"].endswith(" …(truncated)")
     section = build_presence_context_section(tmp_path, captured[-1]["metadata"]["presence"])
-    assert "completed silently; the host recorded an undelivered result: \"Salvaged: xxx" in section
+    assert "completed without posting its final here; its record: \"Salvaged: xxx" in section
 
 
 @pytest.mark.parametrize("status", ["completed", "failed"])

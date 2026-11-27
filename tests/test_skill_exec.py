@@ -10,10 +10,14 @@ from __future__ import annotations
 from tests import _dialogue as dialogue_test
 
 import asyncio
+import codecs
 import json
-import shlex
+import os
 import pathlib
+import shlex
 import shutil
+import subprocess
+import sys
 import threading
 from unittest.mock import patch
 
@@ -125,6 +129,110 @@ def _mark_reviewed(drive_root: pathlib.Path, skill_dir: pathlib.Path, name: str)
         name,
         SkillReviewState(status="pass", content_hash=compute_content_hash(skill_dir)),
     )
+
+
+_CODEC_FACTS_SOURCE = (
+    "import locale, sys\n"
+    "print('stdout_encoding', sys.stdout.encoding)\n"
+    "print('file_encoding', locale.getpreferredencoding(False))\n"
+)
+
+
+def _codec_facts(lines: list[str]) -> dict[str, str]:
+    """One interpreter's own codecs as canonical names (``utf-8``, ``cp1251``, ``iso8859-1`` …).
+
+    ``stdout_encoding`` is what that interpreter encodes its streams with; ``file_encoding`` is the
+    codec ``open()`` uses without an explicit ``encoding``. Read from the interpreter itself, so a
+    test states the relation between two runs instead of assuming one machine's code page.
+    """
+    return {key: codecs.lookup(value).name for key, value in (line.split(" ", 1) for line in lines)}
+
+
+@pytest.mark.parametrize("locale_name, grant_legacy_encoding", [
+    pytest.param(None, True, id="granted-cp1251"),
+    *([pytest.param(None, False, id="windows-default")] if os.name == "nt" else [
+        pytest.param("ru_RU.CP1251", False, id="ru_RU.CP1251"),
+        pytest.param("en_US.ISO8859-1", False, id="en_US.ISO8859-1"),
+    ]),
+])
+def test_python_skill_stdio_preserves_cyrillic_on_the_real_path(tmp_path, monkeypatch, locale_name, grant_legacy_encoding):
+    from ouroboros import config
+    from ouroboros.marketplace.isolated_deps import augment_env_for_skill_deps
+    from ouroboros.skill_loader import save_skill_grants
+
+    ctx = _make_ctx(tmp_path)
+    skills_root = tmp_path / "skills"
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    # Use the same real interpreter in the bare pipe probe and in the skill executor.
+    monkeypatch.setattr(skill_exec_mod, "_resolve_runtime_binary", lambda _runtime: (sys.executable, ""))
+    manifest = _valid_script_manifest("alpha")
+    encoding_key = "PYTHONIOENCODING"
+    if grant_legacy_encoding:
+        settings_path = tmp_path / "settings.json"
+        settings_path.write_text(json.dumps({encoding_key: "cp1251"}), encoding="utf-8")
+        monkeypatch.setattr(config, "SETTINGS_PATH", settings_path)
+        manifest = manifest.replace("scripts:\n", f"env_from_settings: [{encoding_key}]\nscripts:\n")
+
+    stdout_line, stderr_line = "Марка — Количество", "Предупреждение — проверка"
+    skill_dir = _build_skill(skills_root, "alpha", manifest=manifest, script_body=(
+        f"import sys\nprint({stdout_line!r})\nprint({stderr_line!r}, file=sys.stderr)\n"
+        + _CODEC_FACTS_SOURCE
+    ))
+    _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "alpha")
+    if grant_legacy_encoding:
+        save_skill_grants(ctx.drive_root, "alpha", [encoding_key], content_hash=compute_content_hash(skill_dir),
+                          requested_keys=[encoding_key])
+    if locale_name is not None:
+        monkeypatch.setenv("LC_ALL", locale_name)
+        monkeypatch.setenv("LANG", locale_name)
+        monkeypatch.delenv("LC_CTYPE", raising=False)
+    env = skill_exec_mod._scrub_env([], skill_exec_mod.skill_state_dir(ctx.drive_root, "alpha"), "alpha")
+    env = augment_env_for_skill_deps(env, skill_dir)
+    env.pop(encoding_key, None)  # the bare reference carries neither the host's nor a granted value
+    bare = subprocess.run([sys.executable, "-c", _CODEC_FACTS_SOURCE], cwd=skill_dir,
+                          env=env, capture_output=True, check=True, timeout=15)
+    bare_facts = _codec_facts(bare.stdout.decode("ascii").splitlines())
+    if locale_name is not None and bare_facts["stdout_encoding"] == "utf-8":
+        pytest.skip(f"{locale_name} still gives bare Python UTF-8 on this machine")
+
+    raw = skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py")
+    assert raw.lstrip().startswith("{"), raw
+    payload = json.loads(raw)
+    assert payload["exit_code"] == 0, payload["stderr"]
+    lines = payload["stdout"].splitlines()
+    assert lines[0] == stdout_line, payload["stdout"]
+    assert payload["stderr"].splitlines() == [stderr_line]
+    # The policy the host owns: the child's streams are UTF-8 whatever its locale gives it, while the
+    # codec its own interpreter reports for files opened without an explicit encoding is unchanged
+    # (UTF-8 mode, which would switch that codec too, is never forced on the child).
+    assert len(lines) == 3, payload["stdout"]
+    assert _codec_facts(lines[1:]) == {"stdout_encoding": "utf-8",
+                                       "file_encoding": bare_facts["file_encoding"]}
+
+
+@pytest.mark.parametrize("runtime, is_python", [("python", True), ("python3", True), ("node", False)])
+def test_skill_exec_applies_python_stdio_policy_only_to_python(tmp_path, monkeypatch, runtime, is_python):
+    ctx = _make_ctx(tmp_path)
+    skills_root = tmp_path / "skills"
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    skill_dir = _build_skill(skills_root, "alpha", manifest=_valid_script_manifest("alpha", runtime=runtime))
+    _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "alpha")
+    monkeypatch.setattr(skill_exec_mod, "_resolve_runtime_binary", lambda _runtime: (sys.executable, ""))
+    environments = []
+
+    def capture_env(_cmd, *, env, **_kwargs):
+        environments.append(env)
+        return 0, b"", b"", {}
+
+    monkeypatch.setattr(skill_exec_mod, "_run_skill_subprocess", capture_env)
+    result = json.loads(skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py"))
+
+    assert result["exit_code"] == 0
+    assert len(environments) == 1
+    if is_python:
+        assert environments[0]["PYTHONIOENCODING"] == "utf-8:backslashreplace"
+    else:
+        assert "PYTHONIOENCODING" not in environments[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1013,9 +1121,9 @@ def test_skill_exec_refuses_missing_manifest_permission_grant(tmp_path, monkeypa
 
 
 def test_grant_refusals_name_the_earlier_version_the_grant_belongs_to(tmp_path, monkeypatch):
-    """Audit 08.11 item 1: after the payload changed, the execution refusal and the toggle refusal say the
-    owner's grant belongs to an earlier version of the files; the toggle keeps its one sentence and carries
-    the fact in ``detail``."""
+    """Audit 08.11 item 1: when a grant of earlier files does not cover the current ones, the execution refusal and
+    the toggle refusal say the owner's grant belongs to an earlier version of the files; the toggle keeps its one
+    sentence and carries the fact in ``detail``."""
     from ouroboros.skill_loader import save_skill_grants
 
     skills_root = tmp_path / "skills"
@@ -1039,7 +1147,6 @@ def test_grant_refusals_name_the_earlier_version_the_grant_belongs_to(tmp_path, 
     _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "alpha")
     save_skill_grants(ctx.drive_root, "alpha", [], content_hash="earlier-bytes", requested_keys=[],
                       granted_permissions=["inject_chat"], requested_permissions=["inject_chat"])
-
     ran = skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py")
     assert ran.startswith("⚠️ SKILL_EXEC_GRANT_REQUIRED") and "review gate already permits" in ran
     assert "inject_chat was granted to an earlier version of this skill's files" in ran
@@ -1050,6 +1157,36 @@ def test_grant_refusals_name_the_earlier_version_the_grant_belongs_to(tmp_path, 
     assert toggled.startswith("⚠️ SKILL_TOGGLE_ERROR") and '"code": "grants"' in toggled, toggled
     assert '"error": "Grant it the keys and permissions it asks for first."' in toggled
     assert '"detail": "inject_chat was granted to an earlier version of this skill\'s files' in toggled
+    save_skill_grants(ctx.drive_root, "alpha", [], content_hash=compute_content_hash(skill_dir), requested_keys=[],
+                      granted_permissions=["inject_chat"], requested_permissions=["inject_chat"])
+    save_enabled(ctx.drive_root, "alpha", True)
+    ran = json.loads(skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py"))
+    assert ran["exit_code"] == 0
+
+
+def test_a_run_names_the_saved_key_it_did_not_pass(tmp_path, monkeypatch):
+    """F2: a key saved in Settings and not granted (B″) stops nothing; the run result says it was not passed, and says
+    nothing once the owner grants it."""
+    from ouroboros import config
+    from ouroboros.skill_loader import save_skill_grants
+
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"LATER_KEY": "saved later"}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", settings_path)
+    skills_root = tmp_path / "skills"
+    manifest = _valid_script_manifest("alpha").replace("timeout_sec: 30\n", "timeout_sec: 30\nenv_from_settings: [LATER_KEY]\n")
+    skill_dir = _build_skill(skills_root, "alpha", manifest=manifest,
+                             script_body="import os\nprint('LATER_KEY' in os.environ)\n")
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "alpha")
+    ran = json.loads(skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py"))
+    assert ran["stdout"].strip() == "False"
+    assert ran["not_passed"] == "key LATER_KEY is saved in Settings but not granted to this skill; it was not passed"
+    save_skill_grants(ctx.drive_root, "alpha", ["LATER_KEY"], content_hash=compute_content_hash(skill_dir),
+                      requested_keys=["LATER_KEY"])
+    ran = json.loads(skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py"))
+    assert ran["stdout"].strip() == "True" and "not_passed" not in ran
 
 
 def test_toggle_skill_reports_missing_manifest_permission_grant(tmp_path, monkeypatch):

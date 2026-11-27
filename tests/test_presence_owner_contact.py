@@ -617,3 +617,42 @@ def test_main_question_keeps_its_address_after_project_binding_in_frontend_consu
             chatThreadAccepts(frame, false, project, known), chatThreadAccepts(frame, false, project + 1, known)]));
     """], input=json.dumps([frame, project["chat_id"]]), text=True, capture_output=True, timeout=15, check=True)
     assert json.loads(probe.stdout) == [True, True, False]
+
+
+def test_private_start_uploads_canonicalize_aliased_data_root(contact_runtime):
+    """Producer and admission refusal agree on private-start upload paths when trusted drive_root is aliased."""
+    import asyncio
+    from pathlib import Path
+
+    from ouroboros.chat_uploads import claim_refs, store_upload
+    from ouroboros.owner_relay import held_owner_messages
+    from ouroboros.presence_owner_contact import DESTINATION_OWNER, private_start_refusal, private_start_source
+
+    r, seen = contact_runtime, {}
+    alias_root = r.root / ".." / r.root.name
+    _path, ref = store_upload(b"private,data\n", "report.csv", data_dir=r.root)
+    claim_refs([ref], r.root)
+
+    def during(ctx, _task, _agent):
+        assert _ask(ctx).startswith("OK:")
+        qid, = quiz_states(r.root, ctx.task_id)
+        flush_owner_events(r.root, ctx.pending_events)
+        r.pump()
+        body = {"decision_id": f"quiz:{ctx.task_id}:{qid}", "request_id": "owner-upload", "comment": "Use attached report."}
+        status, receipt = asyncio.run(td.answer_decision(r.root, body, attachments=[ref]))
+        assert status == 200, receipt
+        _drain_incoming_messages([], queue.Queue(), r.root, ctx.task_id, None, set(), owner_ctx=ctx)
+        [handle] = held_owner_messages(ctx)
+        fields, _verified = private_start_source(ctx, handle)
+        seen.update(handle=handle, fields=fields)
+
+    assert _run(r, during).outcome == "silent"
+    fields = seen["fields"]
+    assert fields["attachment_uploads"] == [{
+        **fields["attachment_uploads"][0],
+        "path": str(Path(r.root).resolve(strict=False) / "uploads" / ref["upload"]),
+        "inherited": True,
+    }]
+    evt = {"destination": DESTINATION_OWNER, "owner_quote": seen["handle"], **fields}
+    assert private_start_refusal(r.root, evt) == ""
+    assert private_start_refusal(alias_root, evt) == ""

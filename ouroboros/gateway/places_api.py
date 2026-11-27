@@ -12,7 +12,7 @@ from ouroboros.store import StoreError
 
 
 def update_place(root, place_id: str, body: dict) -> dict:
-    allowed = {"state", "wakes", "add_note", "remove_note", "working_folder", "model",
+    allowed = {"state", "wakes", "add_note", "remove_note", "working_folder", "model", "peer",
                "confirm_owner_account", "revoke_owner_account", "circle_id", "description", "expected_revision"}
     if not isinstance(body, dict) or not body or set(body) - allowed:
         raise PlaceError("place_update_invalid")
@@ -25,7 +25,9 @@ def update_place(root, place_id: str, body: dict) -> dict:
     for field, value in body.items():
         if field == "expected_revision":
             continue
-        if field == "confirm_owner_account":
+        if field == "peer":  # a linked Ouroboros's two facts, {mine, may_start}: written here, by my human, only
+            actions.append(("set_peer", value if isinstance(value, dict) and set(value) <= {"mine", "may_start"} else {}))
+        elif field == "confirm_owner_account":
             if not isinstance(value, dict) or set(value) - {"platform_actor_id", "label", "account_id"}:
                 raise PlaceError("place_account_invalid")
             actions.append((field, value))
@@ -42,7 +44,8 @@ async def api_places(request):
     place_id = str(request.path_params.get("place_id") or "")
     try:
         if request.method == "GET":
-            return JSONResponse(await asyncio.to_thread(places_view, root))
+            # The owner's list read: it alone names each linked place's work (places_view owner_reading).
+            return JSONResponse(await asyncio.to_thread(places_view, root, owner_reading=True))
         if request.method == "DELETE":
             raw = await request.body()
             body = await request.json() if raw else {}
@@ -55,7 +58,8 @@ async def api_places(request):
         if place_id:
             return JSONResponse(await run_sync_to_completion(update_place, root, place_id, body))
         first_keys = {"note", "description", "circle_id"}  # what an Add says about the new place
-        if not isinstance(body, dict) or set(body) - {"connector", "account_id", "conversation_id", "label", *first_keys}:
+        if not isinstance(body, dict) or set(body) - {"connector", "account_id", "conversation_id", "label",
+                                                     "contribution_id", *first_keys}:
             raise PlaceError("place_connect_invalid")
         if not isinstance(body.get("connector"), str):
             raise PlaceError("place_connect_invalid", "connector")
@@ -124,11 +128,10 @@ async def api_place_rooms(request):
         place_id = str(request.path_params['place_id'])
         def read():
             from ouroboros import dialogue_store
-            from ouroboros.places import get_place
             root = request_drive_root(request)
-            get_place(root, place_id)  # An unknown Place never creates a dialogue store.
+            rooms = place_room_index(root, place_id, details=True)  # Resolve the place before reading coverage.
             coverage = dialogue_store.range_coverage(root, 'chat')
-            return {'place_id': place_id, 'rooms': place_room_index(root, place_id, details=True),
+            return {'place_id': place_id, 'rooms': rooms,
                     'coverage': {'discovery': 'arrivals', 'importing': bool(coverage['pending']),
                                  'gaps': bool(coverage['mismatch'] or coverage['gaps'])}}
         return JSONResponse(await asyncio.to_thread(read), headers={'Cache-Control': 'no-store'})

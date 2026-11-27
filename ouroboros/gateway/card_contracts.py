@@ -3,7 +3,7 @@
 ``card`` frames are stored as ``msg_type: "card"`` history rows carrying the same ``card``
 identity (``ChatHistoryCard``); the body, revision and presses are read from
 ``GET /api/cards/{card_id}``. Presses use ``POST /api/decisions`` (``card:`` family,
-``gateway/decision_contracts.py``). The JSDoc twin is ``web/modules/client_contract_types.js``.
+``gateway/decision_contracts.py``).
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ class CardSubmissionSummary(TypedDict):
     reason_code: NotRequired[str]
 
 
+# `kind` is the inherited row kind; the card's own kind is `card.kind`.
 class CardOutbound(ChatReferenceFields):
     """Outbound living card in Ouroboros's message; its history row is ``msg_type: "card"``
     with the same ``card``. ``fallback_text`` is the card's plain version."""
@@ -45,7 +46,6 @@ class CardOutbound(ChatReferenceFields):
     ts: str
     chat_id: NotRequired[int]
     task_id: NotRequired[str]
-    project_thread: NotRequired[bool]
 
 
 class CardStateOutbound(TypedDict):

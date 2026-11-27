@@ -1,6 +1,7 @@
 """Fresh pre-POST interruptions retire only their own disposable registration."""
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 import json
 
 import pytest
@@ -11,6 +12,7 @@ from ouroboros.llm_attempt import PhysicalDispatchInterrupted
 from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.task_results import write_task_result
 from ouroboros.tools import delegate
+from tests._bound_registration import StartRegistry, enable_start_registry
 from tests._delegated_transport_shared import (
     _LiveRunStub, _nanny_ctx, _select_transport_access,
     _owned_gateway_uses_each_test_transport as _owned_gateway_fixture,
@@ -25,7 +27,17 @@ _owned_gateway_uses_each_test_transport = _owned_gateway_fixture
 fake_route = _fake_route
 
 
-class ToolGateway(_LiveRunStub):
+@pytest.fixture(autouse=True)
+def bound_review_registry(monkeypatch):
+    enable_start_registry(monkeypatch, FakeGateway)
+
+
+def legacy_retry_store(monkeypatch):
+    for gateway in (FakeGateway, ToolGateway):
+        monkeypatch.setattr(gateway, "store_identity", "")
+
+
+class ToolGateway(StartRegistry, _LiveRunStub):
     def __init__(self, *, shared=False):
         super().__init__()
         self.shared = shared
@@ -38,9 +50,6 @@ class ToolGateway(_LiveRunStub):
     def register_project(self, root):
         self.registrations.append(root)
         return "proj-new"
-
-    def remove_project(self, project_id):
-        self.removals.append(project_id)
 
     def start_run(self, request, *, idempotency_key=""):
         self.start_requests.append((request, idempotency_key))
@@ -113,7 +122,9 @@ def test_interrupted_unsent_claim_retires_fresh_registration(start_case, tmp_pat
     assert len(events) == 1 and gateway().start_requests == []
     assert gateway().removals == ["proj-new"]
     row = failures(tmp_path)[-1]
-    assert row["definite"] is True and row["project_retired"] is True
+    assert row["definite"] is True
+    [release] = [r for r in custody.custody_rows(tmp_path) if r["type"] == custody.PROJECT_RETIRED]
+    assert release["project_id"] == row["project_id"] and release["removal_outcome"] == "removed"
     assert row["invocation_id"] == events[0]["invocation_id"]
 
 
@@ -133,6 +144,7 @@ def test_preclaim_exception_keeps_shared_registration(start_case, tmp_path, monk
 
 
 def test_recovered_unknown_start_is_not_retired_by_new_preclaim_error(start_case, tmp_path, monkeypatch):
+    legacy_retry_store(monkeypatch)
     start, gateway, _shared, fail, state = start_case
     fail(gateway_module.ClaudexorUnavailable("daemon_unreachable", "POST response lost"))
     try:
@@ -188,6 +200,7 @@ def test_pause_before_callable_reports_only_a_fresh_start_as_unrun(start_case, t
     start, gateway, _shared, fail, state = start_case
     original = None
     if recovering:
+        legacy_retry_store(monkeypatch)
         fail(gateway_module.ClaudexorUnavailable("daemon_unreachable", "POST response lost"))
         start()
         original = custody.invocation_record(tmp_path, state["pending_invocation_id"])
@@ -211,7 +224,12 @@ def test_pause_before_callable_reports_only_a_fresh_start_as_unrun(start_case, t
         assert record["project_id"] == original["project_id"] == "proj-new"
         assert payload["project_retention_reason"] == "start_outcome_unknown_run_may_exist"
     else:
+        from ouroboros.delegate_custody_current import owed_registrations
+
         assert "pending_invocation_id" not in payload and record["state"] == "failed_definite"
+        assert payload["project_retired"] is True and not owed_registrations(tmp_path)
+        retired, = (r for r in custody.custody_rows(tmp_path) if r.get("type") == custody.PROJECT_RETIRED)
+        assert retired["removal_outcome"] == "removed"
 
 
 @pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
@@ -239,7 +257,9 @@ def test_unowned_claim_wait_expiry_retires_without_post(start_case, tmp_path, mo
     assert len(events) == 1 and gateway().start_requests == []
     assert gateway().removals == ["proj-new"]
     row = failures(tmp_path)[-1]
-    assert row["definite"] is True and row["project_retired"] is True
+    assert row["definite"] is True
+    [release] = [r for r in custody.custody_rows(tmp_path) if r["type"] == custody.PROJECT_RETIRED]
+    assert release["project_id"] == row["project_id"] and release["removal_outcome"] == "removed"
 
 
 def test_untyped_transport_failure_keeps_possible_run_registration(start_case, tmp_path):
@@ -303,6 +323,7 @@ def test_review_preclaim_control_cleans_only_fresh_registration(tmp_path, monkey
             prompt="review this", root="/tmp/fake-repo", custody_drive=tmp_path, invocation=invocation)
 
     if recovering:
+        legacy_retry_store(monkeypatch)
         FakeGateway.start_error = gateway_module.ClaudexorUnavailable("daemon_unreachable", "lost response")
         with pytest.raises(gateway_module.ClaudexorUnavailable):
             start()
@@ -327,3 +348,184 @@ def test_review_preclaim_control_cleans_only_fresh_registration(tmp_path, monkey
     if recovering:
         assert state["pending_invocation_id"] == token
         assert custody.invocation_record(tmp_path, token)["request"] == saved
+
+
+@pytest.mark.parametrize("fence", [{"state": owner_pause.FENCE_PAUSED, "reason": "owner_pause"},
+                                   {"state": "unknown", "reason": "owner_pause_authority_unreadable"}])
+def test_only_a_read_pause_is_a_held_launch(fence, tmp_path, monkeypatch):
+    monkeypatch.setattr(owner_pause, "member_fence", lambda *_a, **_k: dict(fence))
+    with pytest.raises(owner_pause.OwnerPauseRefused) as caught:
+        owner_pause._validate_launch(SimpleNamespace(task_id="t-b", root_task_id="t-b", drive_root=tmp_path))
+    assert type(caught.value) is owner_pause.OwnerPauseRefused, "callers keep the refusal type they already read"
+    assert caught.value.held is owner_pause.fence_closed(fence)
+    assert str(caught.value) == fence["reason"]
+
+
+@pytest.mark.parametrize("refusal", [owner_pause.OwnerPauseRefused("owner_pause", held=True),
+                                     owner_pause.OwnerPauseRefused("owner_pause_authority_unreadable")])
+def test_a_fenced_replay_of_an_ordinary_lost_start_stays_lost(tmp_path, monkeypatch, fake_route, refusal):
+    """Only a selected continuation's send is held for Resume: an ordinary recovered start keeps its old refusal,
+    its key and bytes, and its seat's custody stays lost (never re-posted), whether the Pause was read or not."""
+    from ouroboros import review_custody, review_execution
+
+    legacy_retry_store(monkeypatch)
+    state = {}
+    invocation = review_execution.SessionInvocation(
+        task_id="t-b", surface="scope_review", slot_id="scope_slot_1", timeout_sec=30,
+        retry_state=state, owner_deadline_at="2099-01-01T00:00:00+00:00")
+
+    def start():
+        return review_execution.run_delegated_review_session(
+            prompt="review this", root="/tmp/fake-repo", custody_drive=tmp_path, invocation=invocation)
+
+    FakeGateway.start_error = gateway_module.ClaudexorUnavailable("daemon_unreachable", "lost response")
+    with pytest.raises(gateway_module.ClaudexorUnavailable):
+        start()
+    token = state["pending_invocation_id"]
+    saved = custody.invocation_record(tmp_path, token)["request"]
+    monkeypatch.setattr(review_execution, "run_operation", lambda *_a, **_k: (_ for _ in ()).throw(refusal))
+    with pytest.raises(review_execution.ReviewRouteUnavailable) as caught:
+        start()
+    assert caught.value.held_before_send is False and FakeGateway.instances[-1].start_requests == []
+    assert review_custody._worker_exception_operation_state(caught.value, state) == "custody_lost"
+    record = custody.invocation_record(tmp_path, token)
+    assert record["state"] == "pending" and record["request"] == saved and state["pending_invocation_id"] == token
+
+
+
+
+
+def _deciding_operation(**facts):
+    """The bound review operation of a selected continuation: the deciding task owns its controls."""
+    author = SimpleNamespace(task_id="deciding-task", root_task_id="deciding-task", drive_root=facts.pop("root"))
+    return SimpleNamespace(continuation_author=author, continuation_pause_seen=facts.get("paused", False),
+                           control_state=facts.get("state", ""), control=lambda: facts.get("control"))
+
+
+@pytest.mark.parametrize("case", ["budget_pause", "owner_pause_at_launch", "pause_and_stop", "wave_task_fenced"])
+def test_a_paused_replay_of_a_start_whose_post_was_entered_keeps_its_key_and_stays_unknown(tmp_path, monkeypatch,
+                                                                                            fake_route, case):
+    """A continuation start whose first POST was entered (its handoff marked) and lost its reply: the deciding task's
+    budget pause, or its read Pause at launch, refuses the replay before any POST and keeps its key and bytes pending,
+    but its fate stays unknown (lost, re-sent only by an explicit choice's exact replay). A coinciding Stop ends it as
+    Stop. The wave task's own fence does not decide whether the deciding task may send."""
+    from ouroboros import budget_pause, review_custody, review_execution
+    from ouroboros.review_continuation import PREFIX
+    from ouroboros.review_operation import bind_review_operation
+
+    legacy_retry_store(monkeypatch)
+    state = {}
+    invocation = review_execution.SessionInvocation(
+        task_id="wave-task", surface="scope_review", slot_id="scope_slot_1", timeout_sec=30, retry_state=state,
+        owner_deadline_at="2099-01-01T00:00:00+00:00", operation_id=f"{PREFIX}synthetic")
+
+    def start():
+        return review_execution.run_delegated_review_session(
+            prompt="review this", root="/tmp/fake-repo", custody_drive=tmp_path, invocation=invocation)
+
+    FakeGateway.start_error = gateway_module.ClaudexorUnavailable("daemon_unreachable", "lost response")
+    with pytest.raises(gateway_module.ClaudexorUnavailable):
+        start()
+    token = state["pending_invocation_id"]
+    saved = custody.invocation_record(tmp_path, token)["request"]
+    assert custody.invocation_record(tmp_path, token)["handoff"] == "entered", "its first POST was entered"
+    paused = {"wave_task_fenced": "wave-task", "owner_pause_at_launch": ""}.get(case, "deciding-task")
+    monkeypatch.setattr(budget_pause, "dispatch_fenced", lambda task: bool(paused) and task == paused)
+    if case == "owner_pause_at_launch":
+        monkeypatch.setattr(review_execution, "run_operation", lambda *_a, **_k: (_ for _ in ()).throw(
+            owner_pause.OwnerPauseRefused("owner_pause", held=True)))
+    operation = _deciding_operation(root=tmp_path, **({"control": "cancelled"} if case == "pause_and_stop" else {}))
+    with bind_review_operation(operation):
+        if case == "wave_task_fenced":
+            FakeGateway.start_error = gateway_module.ClaudexorUnavailable("daemon_unreachable", "lost again")
+            with pytest.raises(gateway_module.ClaudexorUnavailable):
+                start()
+            assert FakeGateway.instances[-1].start_keys == [token], "the same recorded start, sent by the deciding task"
+        else:
+            with pytest.raises(review_execution.ReviewRouteUnavailable) as caught:
+                start()
+            code = {"budget_pause": "budget_pausing_no_send", "owner_pause_at_launch": "owner_pause",
+                    "pause_and_stop": "review_continuation_author_fenced"}[case]
+            assert (caught.value.code, caught.value.held_before_send) == (code, False)
+            assert FakeGateway.instances[-1].start_requests == []
+            assert review_custody._worker_exception_operation_state(caught.value, state) == "custody_lost"
+    record = custody.invocation_record(tmp_path, token)
+    assert record["state"] == "pending" and record["request"] == saved and state["pending_invocation_id"] == token
+
+
+def _selected_start(root, token="selected-token", **facts):
+    """One newly selected Continue's recorded START (synthetic), as its choice writes it (``handoff``: unsent)."""
+    from ouroboros.review_continuation import PREFIX
+
+    assert custody.emit(root, custody.START_REQUESTED, {
+        "invocation_id": token, "task_id": "wave-task", "root_task_id": "wave-task", "surface": "scope_review",
+        "slot_id": "scope_slot_1", "operation_id": f"{PREFIX}synthetic", "request": {"prompt": "continue"},
+        **({"handoff": "unsent"} | facts)})
+    return SimpleNamespace(operation_id=f"{PREFIX}synthetic", task_id="wave-task", surface="scope_review",
+                           slot_id="scope_slot_1", retry_state={"pending_invocation_id": token})
+
+
+@pytest.mark.parametrize("control", ["budget_pause", "owner_pause", "stop", "durable_stop", "unknown",
+                                     "pause_and_window_closed", "pause_and_budget_reached",
+                                     "pause_after_a_handoff", "pause_on_an_older_start"])
+def test_a_pause_holds_a_continuation_send_only_while_its_start_was_never_handed_off(tmp_path, monkeypatch, control):
+    """At the send callback, on one synthetic selected START: the deciding task's read Pause or entering budget pause
+    holds it for Resume (in flight, key kept) while its record still says it was never handed off. Its Stop, durable or
+    latched, an unreadable control, a closed window and a reached budget fence refuse as themselves even when a pause
+    coincides. After one admitted send marked the handoff, or on a START recorded without the fact, a pause holds
+    nothing: its fate stays unknown."""
+    from ouroboros import budget_pause, review_custody
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.review_execution import ReviewRouteUnavailable
+    from ouroboros.review_operation import bind_review_operation
+    from ouroboros.review_session_custody import continuation_send_admitted
+    from ouroboros.tools import review_helpers
+
+    invocation = _selected_start(tmp_path, **({"handoff": None} if control == "pause_on_an_older_start" else {}))
+    pausing = {"on": control in {"budget_pause", "pause_and_window_closed", "pause_and_budget_reached",
+                                 "pause_after_a_handoff", "pause_on_an_older_start"}}
+    monkeypatch.setattr(budget_pause, "dispatch_fenced", lambda task: pausing["on"] and task == "deciding-task")
+    if control == "pause_after_a_handoff":  # an earlier admitted send marked it, then its POST lost its reply
+        pausing["on"] = False
+        with bind_review_operation(_deciding_operation(root=tmp_path)):
+            continuation_send_admitted(invocation, None, {"prompt": "continue"}, "fake-model", tmp_path)
+        assert custody.invocation_record(tmp_path, "selected-token")["handoff"] == "entered"
+        pausing["on"] = True
+    if control == "durable_stop":
+        request_cancel(tmp_path, "deciding-task", reason="owner Stop")
+    if control == "pause_and_budget_reached":
+        monkeypatch.setattr(review_helpers, "review_wave_budget_gate", lambda *_a, **_k: {
+            "binding_axis": "root", "limit_usd": 1.0, "known_usd": 1.0})
+    facts = {"owner_pause": {"paused": True}, "stop": {"control": "cancelled"}, "unknown": {"state": "unknown"}}.get(control, {})
+    end = -1.0 if control == "pause_and_window_closed" else None
+    with bind_review_operation(_deciding_operation(root=tmp_path, **facts)), \
+            pytest.raises(ReviewRouteUnavailable) as caught:
+        continuation_send_admitted(invocation, end, {"prompt": "continue"}, "fake-model", tmp_path)
+    held = control in {"budget_pause", "owner_pause"}
+    assert caught.value.held_before_send is held
+    assert caught.value.code == {
+        "stop": "review_continuation_author_fenced", "durable_stop": "review_continuation_author_fenced",
+        "unknown": "review_continuation_author_fenced", "pause_and_window_closed": "continuation_window_ended",
+        "pause_and_budget_reached": "continuation_budget_insufficient"}.get(control, "review_continuation_author_paused")
+    assert review_custody._worker_exception_operation_state(
+        caught.value, {"pending_invocation_id": "selected-token"}) == ("in_flight" if held else "custody_lost")
+    record = custody.invocation_record(tmp_path, "selected-token")
+    assert record["state"] == "pending" and record["request"] == {"prompt": "continue"}
+    assert record.get("handoff") == {"pause_after_a_handoff": "entered", "pause_on_an_older_start": None}.get(control, "unsent")
+
+
+def test_a_handoff_mark_that_did_not_land_sends_nothing_and_claims_nothing(tmp_path, monkeypatch):
+    """The mark precedes the transport call: when it does not land, the send is refused before any POST, unknown (not
+    held), and the record keeps the fact it had."""
+    from ouroboros.review_execution import ReviewRouteUnavailable
+    from ouroboros.review_operation import bind_review_operation
+    from ouroboros.review_session_custody import continuation_send_admitted
+
+    invocation = _selected_start(tmp_path)
+    real = custody.emit
+    monkeypatch.setattr(custody, "emit", lambda root, kind, payload, **kw: False if kind == custody.START_HANDOFF
+                        else real(root, kind, payload, **kw))
+    with bind_review_operation(_deciding_operation(root=tmp_path)), pytest.raises(ReviewRouteUnavailable) as caught:
+        continuation_send_admitted(invocation, None, {"prompt": "continue"}, "fake-model", tmp_path)
+    assert (caught.value.code, caught.value.held_before_send) == ("review_continuation_handoff_unrecorded", False)
+    assert custody.invocation_record(tmp_path, "selected-token")["handoff"] == "unsent"

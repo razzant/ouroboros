@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 
 import pytest
 
@@ -114,7 +115,31 @@ def test_main_receives_terminal_reference_then_finishes_without_second_panel(sub
     assert json.loads(skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py"))["exit_code"] == 0
 
 
-def test_exec_schema_states_the_author_path_its_gate_permits(subject, monkeypatch):
+def test_current_terminal_reference_wins_over_prior_verdict(subject):
+    from ouroboros import review_ledger
+
+    ctx, directory, binding = subject
+    review_ledger.write_record(ctx.drive_root, {
+        "record_id": "rl-prior-skill", "surface": "skill", "state": "settled",
+        "subject": {"skill": "demo", "tree_sha": compute_content_hash(directory)},
+        "verdict": {"aggregate": "FAIL"},
+    })
+    (directory / "scripts/hello.py").write_text("print('revised')\n", encoding="utf-8")
+    reference = _unavailable(subject)
+    save_review_state(ctx.drive_root, "demo", SkillReviewState(status="pending", content_hash=reference["content_hash"]))
+    result = skill_exec._handle_review_skill(ctx, skill="demo", _resolved_binding=binding,
+        author_disposition="accepted", author_rationale="Checked the revised script locally.",
+        review_reference=reference)
+    assert "Author finish recorded" in result
+    review = load_skill(directory, ctx.drive_root).review
+    basis = review.author_disposition["review_reference"]
+    assert (basis["basis"], basis["job_id"], basis["content_hash"]) == (
+        "unavailable", reference["job_id"], reference["content_hash"])
+    assert review.status == "pending" and review.gate_for(reference["content_hash"])["executable_review"]
+    assert review_ledger.load_record(ctx.drive_root, "rl-prior-skill")["verdict"]["aggregate"] == "FAIL"
+
+
+def test_exec_schema_states_the_author_path_its_gate_permits(subject):
     """skill_exec's description is the gate it obeys: outside Cyber Pro a qualified
     author acceptance runs the current bytes while the reviewer status is still
     pending, and enablement, grants and dependencies stay separate conditions."""
@@ -124,11 +149,15 @@ def test_exec_schema_states_the_author_path_its_gate_permits(subject, monkeypatc
     gate = loaded.review.gate_for(loaded.content_hash)
     assert (loaded.review.status, gate["executable_review"], gate["blocking_reason"]) == (
         "pending", True, "author_accepted_advisory")
-    description = skill_exec._EXEC_SCHEMA["description"]
-    assert "fresh executable review verdict" not in description
-    assert "qualified author acceptance" in description and "still be pending" in description
-    assert "Advisory" not in description and "Blocking" not in description
-    assert all(term in description for term in ("must be enabled", "grants", "dependencies", "Cyber Pro"))
+    assert skill_exec._EXEC_SCHEMA["name"] == "skill_exec"
+    description = " ".join(re.sub(r"[`*]|(?<!\w)_+|_+(?!\w)", "", skill_exec._EXEC_SCHEMA["description"]).casefold().split())
+    assert all(concept in description for concept in ("enabled", "grants", "dependencies", "cyber pro"))
+    assert re.search(
+        r"\breview_gate must permit\b[^.;()]*\bor (?:a )?qualified author acceptance"
+        r" of (?:these |the )?exact bytes\s*\(\s*(?:the )?review(?:er)? status may"
+        r"(?: then)?(?: still)? be pending(?: or stale)?\s*\)", description,
+    )
+    assert "review_enforcement" not in description
     save_enabled(ctx.drive_root, "demo", True)
     result = json.loads(skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py"))
     assert result["exit_code"] == 0

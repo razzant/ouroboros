@@ -179,10 +179,14 @@ def test_the_model_has_no_argument_that_could_widen_the_profile():
     # `attachment_paths`/`attachment_import` only select this task's own retained inputs (exact manifest
     # relpaths) to attach as engine documents and whether to reuse their import; never a path or access.
     # `input_files` selects already-readable files; its entries contain no permission or scope override.
+    # `knowledge_notes` only SELECTS notes this task may already read (knowledge_read
+    # addresses, `{topic, scope?}`): an unknown or unreadable note refuses before
+    # anything is queued or sent, and the choice grants no new access.
     assert properties == {
         "prompt", "subagent_id", "max_seconds", "retry_of", "continue_from", "continue_carrier", "root",
         "bucket", "skill_name", "directory_strategy", "scope_paths", "access", "effort", "mode",
         "override_plan_readiness", "workspace", "attachment_paths", "attachment_import", "input_files",
+        "knowledge_notes",
     }
     item = entry.schema["parameters"]["properties"]["input_files"]["items"]
     plain, ranged = item["anyOf"]

@@ -157,3 +157,26 @@ test('words saved for Main\'s turn say saved and never its name; a Project room\
         assert.equal(note(room).children[0].textContent, 'Passed on to «Audit» in', 'another Project keeps its reference');
     } finally { env.restore(); }
 });
+
+test('an unconfirmed write says so; a handled paused/ended fallback is a normal turn, never a refusal', () => {
+    const env = installDomDouble();
+    try {
+        const bubble = owner(env);
+        // An unverifiable mailbox write is neither saved nor refused: the line must not claim it landed.
+        renderRoutingAnnotation(bubble, { action: 'mailbox_delivery', status: 'unconfirmed', target: 't-1' }, 1);
+        assert.equal(note(bubble).textContent, 'Delivery not confirmed');
+        assert.equal(note(bubble).classList.contains('has-reference'), false);
+        // The host's own cause names what is unknown: the message, never a task start (`mailbox_write_unconfirmed`).
+        const cause = 'Not confirmed: the message may not have reached the task';
+        renderRoutingAnnotation(bubble, { action: 'mailbox_delivery', status: 'unconfirmed', target: 't-1',
+            reason: 'mailbox_write_unconfirmed', cause }, 1);
+        assert.equal(note(bubble).textContent, cause, 'the stamped sentence outranks the generic status line');
+        assert.ok(!note(bubble).textContent.includes('start'));
+        // A known closed/paused work falls back to the room's own admission: an ordinary turn receipt, no "Not delivered".
+        renderRoutingAnnotation(bubble, { action: 'promote_chat_to_task', status: 'scheduled', target: 't-2', target_label: 'Audit' }, 1);
+        assert.equal(note(bubble).textContent, 'Started task · Audit');
+        assert.ok(!note(bubble).textContent.includes('Not delivered'), 'a handled fallback is not a refusal');
+        // Only the host's own refused cause may say not delivered; the module never invents one for a delivered write.
+        assert.ok(!routingAnnotationText({ action: 'mailbox_delivery', status: 'delivered', target: 't-1' }, 1).includes('Not delivered'));
+    } finally { env.restore(); }
+});

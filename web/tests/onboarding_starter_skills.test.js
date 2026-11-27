@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-import { createStarterSkillsStep, needsText, normalizeStarterGroups } from '../modules/onboarding_starter_skills.js';
+import { createStarterSkillsStep, needsText, normalizeStarterGroups, starterDraftHasKey } from '../modules/onboarding_starter_skills.js';
 import { checkIdentity, normalizeConnection, pairingCode } from '../modules/onboarding_connection_card.js';
 import { qrSvg } from '../modules/qr_svg.js';
 import { applyPayload, setMissTransport } from '../modules/i18n.js';
@@ -224,11 +224,11 @@ test('a step the server does not offer shows no ticks; Summary keeps where skill
     assert.match(text(back.innerHTML), /^Skills \d+ will install · Change/);
 });
 
-function pollingStep(read) {
+function pollingStep(read, draftHasKey) {
     let time = 0;
     let id = 0;
     const timers = new Map();
-    const step = createStarterSkillsStep({ read, now: () => time,
+    const step = createStarterSkillsStep({ read, draftHasKey, now: () => time,
         setTimer(fn, ms) { timers.set(++id, { fn, ms }); return id; }, clearTimer(key) { timers.delete(key); } });
     return { step, timers, advance(ms) { time += ms; }, async tick() {
         const [key, timer] = [...timers][0];
@@ -280,6 +280,81 @@ test('a read that changes nothing rewrites nothing', async () => {
     await poll.tick();
     assert.equal(host.innerHTML, 'kept');
     assert.match(painted, /data-arrive/);
+});
+
+test('an untouched draft voice default follows Accounts, but late lists keep explicit ticks', async () => {
+    const id = 'builtin/test_voice';
+    const voice = { id, name: 'Test voice', builtin: true, recommended: false, default_with_keys: { TEST_VOICE_KEY: false } };
+    const untilHub = freshOffer();
+    untilHub.groups[0].items.push(voice);
+    const ready = structuredClone(STARTER);
+    ready.groups[0].items.push(voice);
+    let calls = 0, typed = false;
+    const poll = pollingStep(async () => ++calls === 1 ? untilHub : ready, () => typed);
+    await poll.step.loading;
+    let host = fakeHost();
+    poll.step.mount(host);
+    assert.doesNotMatch(rowOf(host.innerHTML, id), / checked/);
+    assert.equal('starter_skills' in poll.step.payload(), false, 'untouched incomplete list leaves defaults to the host');
+    poll.step.mount(null);  // Back to Accounts, supply the key, return to Skills
+    typed = true;
+    host = fakeHost();
+    poll.step.mount(host);
+    assert.match(rowOf(host.innerHTML, id), / checked/);
+    changeBox(host, id, false);
+    await poll.tick();
+    assert.ok(!poll.step.payload().starter_skills.includes(id), 'the manually cleared checkbox survives the refresh');
+    assert.ok(poll.step.payload().starter_skills.includes('ouroboros/duckduckgo'), 'other late recommended rows still join');
+    changeBox(host, id, true);
+    typed = false;
+    poll.step.mount(fakeHost());
+    assert.ok(poll.step.payload().starter_skills.includes(id), 'a manual tick survives clearing the key');
+});
+
+test('the OpenAI voice checkbox follows matching saved or newly entered key presence', async () => {
+    const id = 'builtin/openai_realtime', key = 'OPENAI_API_KEY', marker = '***set***';
+    const fields = [{ settingKey: key, stateKey: 'openaiKey' }];
+    const dedicated = { compatibleBaseUrl: 'https://dedicated.example.invalid/v1' };
+    const legacy = { legacyCompatibleBaseUrl: 'https://legacy.example.invalid/v1' };
+    const cases = [
+        ['unavailable draft field keeps the saved fact', {}, true, true],
+        ['configured marker keeps a matching saved key', { openaiKey: marker }, true, true],
+        ['older marker does not supply a missing key', { openaiKey: 'stub...' }, false, false],
+        ['blank draft clears a saved key', { openaiKey: ' ' }, true, false],
+        ['a direct draft key can coexist with a compatible connection', { ...dedicated, openaiKey: 'fixture-key' }, false, true],
+        ['a legacy address keeps the OpenAI voice default off', { ...legacy, openaiKey: 'fixture-key' }, false, false],
+        ['the dedicated address does not erase legacy ownership', { ...dedicated, ...legacy, openaiKey: 'fixture-key' }, false, false],
+    ];
+    for (const [label, draft, saved, expected] of cases) {
+        const voice = { id, name: 'OpenAI voice', builtin: true, recommended: saved, default_with_keys: { [key]: saved } };
+        const step = createStarterSkillsStep({
+            read: async () => ({ groups: [{ category: 'builtin', items: [voice] }] }),
+            draftHasKey: (settingKey) => starterDraftHasKey(settingKey, draft, fields, marker),
+        });
+        await step.loading;
+        const host = fakeHost();
+        step.mount(host);
+        assert.equal(rowOf(host.innerHTML, id).includes(' checked'), expected, label);
+        assert.deepEqual(step.payload().starter_skills, expected ? [id] : [], label);
+    }
+});
+
+test('an unconfirmed voice declaration stays unticked even with a draft key', async () => {
+    const id = 'ouroboros/fixture-voice';
+    const before = freshOffer(), after = structuredClone(STARTER);
+    before.groups[0].items.push({ id, name: 'Fixture voice', recommended: true, default_with_keys: { TEST_VOICE_KEY: true } });
+    after.groups[0].items.push({ id, name: 'Fixture voice', recommended: false, default_with_keys: {} });
+    let calls = 0;
+    const poll = pollingStep(async () => ++calls === 1 ? before : after, () => true);
+    await poll.step.loading;
+    const host = fakeHost();
+    poll.step.mount(host);
+    assert.ok(poll.step.snapshot().ticked.includes(id));
+    await poll.tick();
+    assert.ok(!poll.step.payload().starter_skills.includes(id));
+    changeBox(host, id, true);
+    poll.step.mount(fakeHost());
+    assert.ok(poll.step.payload().starter_skills.includes(id), 'an unsupported default does not block a manual tick');
 });
 
 test('Untick all also leaves newly discovered recommended rows unticked', async () => {

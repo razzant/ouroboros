@@ -43,12 +43,34 @@ class WorkspaceRootError(ValueError):
     """A workspace_root that is missing, overlapping, or has invalid Git geometry."""
 
 
-def has_git_metadata(root: pathlib.Path) -> bool:
-    """Match Git's ancestor search, including an explicitly selected ceiling."""
-    ceilings = {pathlib.Path(p).resolve() for p in
-                os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep) if p}
+def has_git_metadata(root: pathlib.Path, *, mount_boundary: Optional[pathlib.Path] = None) -> bool:
+    """Match Git's ancestor search. ``GIT_CEILING_DIRECTORIES`` reads as Git's setup.c
+    (``canonicalize_ceiling_entry``) does: only absolute entries count; an entry before an empty
+    one is resolved (dropped if it cannot be), one after it is compared literally in Git's own
+    ``/`` spelling. A ceiling is excluded with its ancestors and only as a strict ancestor of
+    ``root``. A ``mount_boundary`` Git reported stops the search separately, at the strict ancestor
+    that is the same physical directory (``workspace_copies.same_directory``): Git names that folder
+    physically, so another spelling of it (a case alias) stops the search too."""
+    from ouroboros.workspace_copies import same_directory
+
+    resolved: set = set()
+    literal: set = set()
+    after_empty = False
+    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
+        if not entry:
+            after_empty = True
+        elif not os.path.isabs(entry):
+            continue
+        elif after_empty:  # Git drops one trailing slash and nothing else ("//", ".", ".." stay)
+            literal.add(entry[:-1] if len(entry) > 1 and entry.endswith("/") else entry)
+        else:
+            try:  # strict, as Git drops an entry it cannot resolve (a missing end names no ancestor)
+                resolved.add(pathlib.Path(entry).resolve(strict=True))
+            except (OSError, RuntimeError):
+                continue
     for parent in (root, *root.parents):
-        if parent != root and parent in ceilings:
+        if parent != root and (parent in resolved or parent.as_posix() in literal or (
+                mount_boundary is not None and same_directory(parent, mount_boundary))):
             break
         if (parent / ".git").exists() or (parent / ".git").is_symlink():
             return True
@@ -136,17 +158,26 @@ def kept_path(path: pathlib.Path) -> pathlib.Path:
     return path
 
 
-def protected_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> str:
-    """Which of Ouroboros's own roots ``root`` (resolved) is inside or around, else ``""``: its system repo or
-    data drive, compared case-folded as tool access compares them, and as one physical folder however spelled
-    (``kept_path``: case, Unicode form, firmlink). Attach applies it before ``init_git`` writes anything."""
+def folders_overlap(folder: pathlib.Path, target: pathlib.Path) -> bool:
+    """Whether two paths name one folder or hold one another, in either direction: resolved,
+    compared case-folded as tool access compares spellings, and as one physical folder however
+    the volume keeps it (``kept_path``: case, Unicode form, firmlink). This is the geometry
+    ``protected_overlap`` applies to Ouroboros's own roots, as one predicate for any pair; a
+    spelling that agrees is never read as proof of an alias the volume does not confirm."""
     from ouroboros.tool_access import paths_overlap_casefold
 
-    kept = kept_path(root)
+    left = pathlib.Path(folder).expanduser().resolve(strict=False)
+    right = pathlib.Path(target).expanduser().resolve(strict=False)
+    kept, guard = kept_path(left), kept_path(right)
+    return paths_overlap_casefold(left, right) or kept.is_relative_to(guard) or guard.is_relative_to(kept)
+
+
+def protected_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> str:
+    """Which of Ouroboros's own roots ``root`` (resolved) is inside or around, else ``""``: its system repo or
+    data drive, by the one two-way geometry this module owns (``folders_overlap``: case-folded
+    spellings and the volume's kept spelling). Attach applies it before ``init_git`` writes anything."""
     for value, label in ((system_repo_dir, "Ouroboros system repo"), (drive_root, "Ouroboros data drive")):
-        protected = pathlib.Path(value).resolve(strict=False)
-        guard = kept_path(protected)
-        if paths_overlap_casefold(root, protected) or kept.is_relative_to(guard) or guard.is_relative_to(kept):
+        if folders_overlap(root, value):
             return label
     return ""
 
@@ -473,3 +504,39 @@ def bounded_workspace_preflight(workspace_root: Any, *, timeout_sec: float = 8.0
             "error": f"preflight exceeded {timeout_sec:.0f}s cap at admission; snapshot skipped (disclosed)",
         }
     return dict(result["summary"])
+
+
+def compose_task_text(
+    description: str,
+    *,
+    workspace_root: Optional[pathlib.Path],
+    workspace_mode: str,
+    memory_mode: str,
+    workspace_preflight: dict[str, Any],
+    attachments: Any,
+) -> str:
+    """The text of a task the HTTP door admits (``gateway.tasks``): its description, then the
+    ``[HEADLESS_WORKSPACE]`` block (``compose_workspace_block``; folded into a block the description
+    already carries) and its ``[ATTACHMENTS]`` lines (``artifacts.render_attachment_lines``)."""
+    from ouroboros.artifacts import render_attachment_lines
+
+    parts = [description]
+    if workspace_root is not None:
+        # SSOT block (v6.58.0): the same [HEADLESS_WORKSPACE] guidance the promote
+        # path embeds, so the two admission surfaces render identical context.
+        workspace_lines = compose_workspace_block(
+            workspace_root=workspace_root,
+            workspace_mode=workspace_mode,
+            memory_mode=memory_mode,
+            workspace_preflight=workspace_preflight,
+        )
+        if "[HEADLESS_WORKSPACE]" in description and "[END_HEADLESS_WORKSPACE]" in description:
+            marker = "[END_HEADLESS_WORKSPACE]"
+            idx = description.rfind(marker)
+            parts = [description[:idx].rstrip(), "\n", workspace_lines, description[idx:]]
+        else:
+            parts.append(f"\n\n[HEADLESS_WORKSPACE]\n{workspace_lines}[END_HEADLESS_WORKSPACE]")
+    rendered = render_attachment_lines(attachments)
+    if rendered:
+        parts.append(f"\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]")
+    return "".join(parts)

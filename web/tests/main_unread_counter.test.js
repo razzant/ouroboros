@@ -8,7 +8,6 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 import * as readAhead from '../modules/read_ahead.js';
-import { forgetProjectPreviews } from '../modules/chat_preview.js';
 import { IDLE_SUMMARY, pictureOwner } from '../modules/project_activity.js';
 import { markView, paintStatusMark } from '../modules/status_mark.js';
 
@@ -67,14 +66,18 @@ function harness({ revision = null, seen = null, loaded = true, page = 'files', 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 // A view opened with `?observer=1` (DESIGN "Unread"): its own instance of read_ahead.js, in the observer mode.
-async function observerView() {
+async function observerView(t) {
     const view = await import('../modules/read_ahead.js?observer-main');
-    view.captureObserverMode({ href: 'http://127.0.0.1:8765/?observer=1' }, { state: null, replaceState() {} });
+    const setMode = (flag) => view.captureObserverMode({ href: `http://example.test/?observer=${flag}` },
+        { state: null, replaceState() {} });
+    // Distinct module instances still share a tab's storage, including in Node with Web Storage enabled.
+    t.after(() => setMode(0));
+    setMode(1);
     return view;
 }
 
-test('an observer view writes no Main cursor, not even a first one; the revision stays offered', async () => {
-    const view = await observerView();
+test('an observer view writes no Main cursor, not even a first one; the revision stays offered', async (t) => {
+    const view = await observerView(t);
     const first = harness({ revision: 161, seen: null, view, answer: (body) => ({ main_seen_revision: body.main_seen_revision }) });
     first.api.observeMainRevision(161);
     await flush();
@@ -226,6 +229,23 @@ test('Main is read only by a paint made while it is on screen; a Project over it
     assert.deepEqual([opened.paints, opened.writes], [[5], []], 'the paint ends under the Project: the read is withheld');
 });
 
+test('a Main paint already in flight earns no cursor credit if the archive covers it before the write', async () => {
+    const f = paintHarness({ hold: true });
+    let archive = false;
+    f.context.mainChat.archiveOpen = () => archive;
+    const reading = f.context.read();
+    archive = true;
+    f.release();
+    await reading;
+    await f.context.read();
+    assert.deepEqual([f.paints, f.writes], [[5], []], 'covered Main neither posts the old receipt nor starts a new one');
+    archive = false;
+    const visible = f.context.read();
+    f.release();
+    await visible;
+    assert.deepEqual([f.paints, f.writes], [[5, 5], [5]], 'the same revision is creditable on a visible paint');
+});
+
 test('the shared cursor only moves forward, and a write keeps what the server answers', async () => {
     const h = harness({ revision: 10, seen: 6, answer: () => ({ main_seen_revision: 8 }) });
     assert.equal(h.api.mergeMainSeenRevision({ main_seen_revision: 4 }), false, 'a stale answer never revives a read number');
@@ -252,7 +272,7 @@ function listHarness({ host = {}, beyond = [], seen = {}, main = [90, 90] } = {}
     const toggle = { attrs: {}, querySelector: (selector) => (selector === '.status-mark' ? mark : null),
         setAttribute(name, value) { this.attrs[name] = value; } };
     const context = vm.createContext({
-        ...readAhead, markView, paintStatusMark, IDLE_SUMMARY, pictureOwner, forgetProjectPreviews, beyond, paints,
+        ...readAhead, markView, paintStatusMark, IDLE_SUMMARY, pictureOwner, beyond, paints,
         navState: { activeProjectId: null },
         state: { mainVisibleRevision: main[0], mainSeenRevision: main[1], mainSeenLoaded: true, activePage: 'files',
             projectSeenRevision: seen },
@@ -516,12 +536,17 @@ test('a window shown again brings Main back as a window, which keeps its place, 
     const enter = h.context.enterMain;
     h.context.enterMain = (how) => { hows.push(how); enter(how); };
     h.context.document.hidden = true;
+    const suspensions = [];
+    const suspend = h.context.rooms.suspend;
+    h.context.rooms.suspend = (room, windowHidden) => { suspensions.push(windowHidden); suspend(room); };
     vm.runInContext(liftBlock("document.addEventListener('visibilitychange'"), Object.assign(h.context, {
         document: Object.assign(h.context.document, { addEventListener: (type, listener) => { h.context.shown = listener; } }),
         projectInstances: new Map(),
     }));
     h.context.shown();
     assert.equal(h.context.mainChat.ws.paused, true, 'hidden, Main is away');
+    h.context.syncNavigationState();  // projects-list repaint while still hidden
+    assert.deepEqual(suspensions, [true], 'a repaint does not end the existing window suspension');
     h.context.document.hidden = false;
     h.context.shown();
     assert.deepEqual([hows, h.claims], [['window'], [['resume', true]]], 'shown again: a window return, as left');

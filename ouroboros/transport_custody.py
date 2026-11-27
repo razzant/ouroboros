@@ -55,12 +55,17 @@ def physical_attempt_tracker() -> Any:
     return _ATTEMPT_TRACKER.get()
 
 
-def report_attempt_end(capture: Any, error: Any) -> None:
-    """Hand the bound tracker one attempt's end, as ``_record_attempt_capture`` records it; the capture taken before
-    dispatch (``reserved``, no error) is not an end."""
+def report_attempt_end(capture: Any, error: Any, response_payload: Any = None) -> None:
+    """Report one attempt's end; a reserved capture without error is not an end.
+
+    Its optional observer sees the already retained wire dict, before another send can replace this capture.
+    Neither the existing tracker's claim nor the attempt's settlement depends on that observation.
+    """
     tracker = _ATTEMPT_TRACKER.get()
     if tracker is not None and (error is not None or capture.state != "reserved"):
         tracker.attempt_ended(capture, error)
+        if isinstance(response_payload, dict) and (observe := getattr(tracker, "returned_body_refusal", None)) is not None:
+            observe(capture, response_payload)
 
 
 class ProviderNotDispatched(RuntimeError):
@@ -77,7 +82,8 @@ class ProcessingNotStarted(RuntimeError):
     def __init__(self, error: BaseException, *, reason: str):
         super().__init__(str(error))
         self.processing_reason = reason
-        for name in ("body", "code", "type", "status_code", "response", "stream_usage", "response_body_error"):
+        for name in ("body", "code", "type", "status_code", "response", "stream_usage", "response_body_error",
+                     "_chat_usage_receipt"):
             if hasattr(error, name):
                 setattr(self, name, getattr(error, name))
 
@@ -491,7 +497,7 @@ def provider_reported_cost_only(target: Mapping[str, Any]) -> bool:
 
 
 # The OpenRouter ``provider`` fields the host itself sends as filters (``openrouter_chat_routing``:
-# ``require_parameters``, recorded in DEVELOPMENT "External facts"; ``allow_fallbacks``, ``_OR_PROVIDER_PRESETS``).
+# ``require_parameters``, its evidence in that docstring; ``allow_fallbacks``, ``_OR_PROVIDER_PRESETS``).
 _FILTER_ROUTING = frozenset({"require_parameters", "allow_fallbacks"})
 
 

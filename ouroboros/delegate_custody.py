@@ -15,7 +15,7 @@ import logging
 import os
 import pathlib
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple  # noqa: F401
 
@@ -44,6 +44,7 @@ START_STATE_OBSERVED = "delegate_run_start_state_observed"
 START_UNSENT = "delegate_run_start_handoff_refused"
 STARTED = "delegate_run_started"
 START_FAILED = "delegate_run_start_failed"
+START_HANDOFF = "delegate_run_start_handoff_entered"  # a selected review Continue's START may have left (one way)
 TERMINAL_OBSERVED = "delegate_run_terminal_observed"
 INTERACTIONS_OBSERVED = "delegate_run_interactions_observed"
 LEDGER_RECORDED = "delegate_run_ledger_recorded"
@@ -56,6 +57,7 @@ CLOSED_ABSENT = "delegate_run_closed_absent"
 STORE_BOUND = "delegate_run_store_bound"
 PROJECT_RETIRED = "delegate_run_project_retired"
 PROJECT_RETIRE_FAILED = "delegate_run_project_retire_failed"
+REGISTRATION_OWED = "delegate_run_registration_owed"  # a creation no run row owns (delegate_registration_policy)
 CANCEL_HANDOFF = "delegate_run_cancel_handoff"
 CANCEL_OUTCOME = "delegate_run_cancel_outcome"
 UNCONFINED = "delegate_run_unconfined"
@@ -234,6 +236,7 @@ class RunCustody:
     # rejects ("rejected") the captured patch — only then may the snapshot be removed —
     # or a successor continues in the snapshot (``SUPERSEDED``: its capture is the one).
     patch_captured: bool = False
+    patch_manifest_sha: str = ""  # the exact manifest the receipt named; empty on older rows
     patch_disposed: str = ""
     # #1651: the PATCH_DISPOSED row's own facts, so readers never replay the chain: the task that recorded
     # it ("" = not recorded, as on rows reduced before this field) and a reject over a result proven lost.
@@ -244,6 +247,7 @@ class RunCustody:
     # row), so any later disposition over this run is ambiguous until inspected.
     patch_apply_pending: bool = False
     patch_apply_key: str = ""  # Existing apply intent's engine idempotency key.
+    patch_apply_by: str = ""  # The task that wrote that intent and its verdict ("" on older rows).
     # Facts the readers used to re-read from the chain, now reduced onto the row: the
     # STARTED row's clock (``run_timing``), the SETTLED receipt's disclosed spend, engine
     # model and applied access (``task_execution_evidence``), the open containment
@@ -263,6 +267,20 @@ class RunCustody:
     request_event: Dict[str, Any] = field(default_factory=dict)
     billing_group: Dict[str, Any] = field(default_factory=dict)
     _recovered_cancel = ""  # Serialized only on a lookup-only run that actually had a control handoff.
+    registration_outcome: str = ""
+    project_resolution: Dict[str, Any] = field(default_factory=dict)
+
+    def restrict_registration_owner(self) -> None:
+        from ouroboros.execution_domain import registration_engine
+        if self.project_resolution and registration_engine(self.project_resolution) != registration_engine(self):
+            self.project_owned = False
+
+    def registration_settlement(self) -> Dict[str, Any]:
+        """An adopter never owed a removal; only a recorded retirement can report one."""
+        outcome = self.registration_outcome
+        return {"project_retired": not self.project_owned and not self.project_persistent and outcome in
+                ("retired", "removed", "absent"), "project_persistent": self.project_persistent,
+                **({"removal_outcome": outcome} if outcome and outcome != "retired" else {})}
 
     @property
     def window_origin(self) -> str:
@@ -329,7 +347,7 @@ def emit(drive_root: Any, kind: str, payload: Dict[str, Any], *, propagate_conte
     return written
 
 def daemon_says_absent(exc: Any, *, gateway: Any = None, run: Optional[RunCustody] = None) -> bool:
-    """A run's 404 proves absence in its owning store; project cleanup uses raw HTTP.
+    """A run's 404 proves absence in its owning store.
 
     A run bound to a store is absent only when the 404 itself names that store (the
     ``context.storeId`` of ``GET /v2/runs/:id``): another store, or none (a control, answer or
@@ -342,8 +360,10 @@ def daemon_says_absent(exc: Any, *, gateway: Any = None, run: Optional[RunCustod
 
 
 def _absence_provable(run: RunCustody, absence: Any, gateway: Any = None) -> bool:
-    from ouroboros.execution_domain import same_engine
-
+    from ouroboros.execution_domain import is_peer_ref, recorded_ref, same_engine
+    if is_peer_ref(recorded_ref(run)):  # the link's own server (``same_engine``: its place and link) names the letter
+        return (not run.terminal_source and same_engine(gateway, run)
+                and (getattr(absence, "refusal_code", "") or getattr(absence, "code", "")) == "letter_not_found")
     return not run.terminal_source and same_engine(gateway, run) and (
         not run.daemon_store_id or run.daemon_store_id == _answering_store(absence))
 
@@ -371,18 +391,7 @@ def bind_daemon_store(drive_root: Any, gateway: Any, entry: RunCustody) -> None:
         if emit(drive_root, STORE_BOUND, {"run_id": entry.run_id, "task_id": entry.task_id,
                 "invocation_id": entry.invocation_id, "daemon_store_id": identity}):
             entry.daemon_store_id = identity
-
-PROJECT_HAS_THREADS = "project_has_threads"  # the engine's typed refusal of a project DELETE
-
-def daemon_keeps_project(exc: Any) -> bool:
-    """True when the daemon ANSWERED that it keeps the project: it still holds threads
-    on it. The twin of ``daemon_says_absent`` — a definite fact from a reachable daemon,
-    and a PERMANENT one for the host (Ouroboros creates sticky review threads scoped to
-    the project root and the gateway has no thread delete), so retrying it on a timer
-    costs a daemon round trip per sweep forever. The CODE decides, never the message —
-    a transient, a 5xx or an unreadable body is a failure to find out, still retryable.
-    """
-    return str(getattr(exc, "code", "") or "") == PROJECT_HAS_THREADS
+            entry.restrict_registration_owner()
 
 def custody_log_unreadable(drive_root: Any) -> bool:
     """Whether the custody event log EXISTS but cannot be opened (GR6-4).
@@ -569,8 +578,9 @@ def _merge_started_into(entry: RunCustody, previous: RunCustody) -> None:
         setattr(entry, attr, copy.deepcopy(getattr(previous, attr)))
     entry.output_reader_receipts = previous.output_reader_receipts
     entry.daemon_store_id = previous.daemon_store_id or entry.daemon_store_id
-    entry.patch_apply_key = previous.patch_apply_key
+    entry.patch_apply_key, entry.patch_apply_by = previous.patch_apply_key, previous.patch_apply_by
     entry.project_owned = previous.project_owned and entry.project_owned
+    entry.registration_outcome = previous.registration_outcome
     entry.project_persistent = previous.project_persistent or entry.project_persistent
     for attr in _STARTED_FIRST_WINS_FACTS:
         prior = getattr(previous, attr)
@@ -610,10 +620,23 @@ def _supersede(state: Dict[str, RunCustody], entry: RunCustody) -> None:
 
 
 def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
-    run_id = str(row.get("run_id") or "")
+    run_id, kind = str(row.get("run_id") or ""), str(row.get("type") or "")
+    if kind == PROJECT_RETIRED:
+        # Recorded on SUCCESS too: without it a pre-ledger retirement replays as owned after a restart.
+        # Ends ownership on its own engine only; a run-less row stays the policy's, that engine's own.
+        from ouroboros.execution_domain import registration_engine
+
+        owner = state.get(run_id) if run_id else row
+        project_id = str(row.get("project_id") or getattr(owner, "project_id", "") or "")
+        for sibling in state.values() if owner is not None else ():
+            if sibling is owner or (project_id and sibling.project_id == project_id
+                                    and registration_engine(sibling) == registration_engine(owner)):
+                if sibling.project_owned or not sibling.registration_outcome:
+                    sibling.registration_outcome = "kept" if row.get("project_kept") else str(row.get("removal_outcome") or "retired")
+                sibling.project_owned = False
+        return
     if not run_id:
         return
-    kind = str(row.get("type") or "")
     if kind == STARTED:
         ref = row.get("resource_ref")
         source_request = row.get("work_order_source_request")
@@ -643,6 +666,7 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
         if previous is not None:
             _merge_started_into(entry, previous)
             entry.request_event, entry.billing_group = previous.request_event, previous.billing_group
+        entry.restrict_registration_owner()
         state[run_id] = entry
         _supersede(state, entry)
         return
@@ -663,6 +687,7 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
     if kind == STORE_BOUND and not custody.daemon_store_id:
         if row.get("task_id") == custody.task_id and row.get("invocation_id") == custody.invocation_id:
             custody.daemon_store_id = str(row.get("daemon_store_id") or "")
+            custody.restrict_registration_owner()
     if kind in (TERMINAL_OBSERVED, INTERACTIONS_OBSERVED):
         seq = row.get("observation_seq")
         if not isinstance(seq, int) or isinstance(seq, bool) or seq < custody.observation_seq:
@@ -691,13 +716,6 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
         custody.containment_disclosed = True
     elif kind == SETTLED_UNREAD:
         custody.unread_disclosed = True
-    elif kind == PROJECT_RETIRED:
-        # Recorded on SUCCESS too: without it, a retirement before a failed ledger write replays as owned after a
-        # restart, and the retry would keep failing on an already-removed project.
-        project_id = str(row.get("project_id") or custody.project_id or "")
-        for sibling in state.values():
-            if sibling is custody or (project_id and sibling.project_id == project_id):
-                sibling.project_owned = False
     elif kind == OUTPUT_SPILLED:
         if row.get("staged") and str(row.get("artifact") or ""):
             custody.output_artifact = str(row.get("artifact") or "")
@@ -723,7 +741,7 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
                 pair for pair in custody.output_reader_receipts if pair[0] != reader
             ) + ((reader, ack_sha),)
     elif kind == PATCH_CAPTURED:
-        custody.patch_captured = True
+        custody.patch_captured, custody.patch_manifest_sha = True, str(row.get("manifest_sha256") or "")
     elif kind in (NAMED_EVIDENCE_RETAINED, COLLECTION_ATTEMPTED):
         if isinstance(row.get("outcome"), dict):
             setattr(custody, "named_evidence" if kind == NAMED_EVIDENCE_RETAINED else "collection_attempt",
@@ -734,6 +752,7 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
     elif kind == PATCH_APPLY_STARTED:
         custody.patch_apply_pending = True
         custody.patch_apply_key = str(row.get("apply_idempotency_key") or "")
+        custody.patch_apply_by = str(row.get("applied_by_task_id") or "")
     elif kind == PATCH_APPLY_RESOLVED:
         custody.patch_apply_pending = False
     elif kind == SOURCE_RANGE_VERIFIED:
@@ -777,7 +796,7 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
         # the leak shape); no ledger row exists and none ever will.
         custody.settled = True
         custody.containment_fault = {}
-    elif kind == CONTAINMENT_FAULT:
+    elif kind == CONTAINMENT_FAULT and not (row.get("yields") is True and custody.containment_fault):
         custody.containment_fault = dict(row)
     elif kind == CONTAINMENT_RESOLVED:
         if not row.get("expected_reason") or row["expected_reason"] == custody.containment_fault.get("reason"):
@@ -879,7 +898,7 @@ def record_patch_captured(drive_root: Any, custody: RunCustody, **payload: Any) 
         "snapshot_id": custody.snapshot_id, **payload,
     })
     if recorded:
-        custody.patch_captured = True
+        custody.patch_captured, custody.patch_manifest_sha = True, str(payload.get("manifest_sha256") or "")
     return recorded
 
 
@@ -890,16 +909,15 @@ def record_patch_disposed(drive_root: Any, custody: RunCustody, *, disposition: 
     This is the row that releases the execution snapshot for cleanup: until it
     lands, the snapshot and the captured patch persist as conflict material.
     """
-    custody.patch_disposed = str(disposition or "")
-    custody.patch_disposed_by = str(payload.get("disposed_by_task_id") or "")
-    custody.patch_result_lost = bool(payload.get("result_lost"))
-    custody.patch_apply_pending = False  # a disposition completes the intent story
-    return emit(drive_root, PATCH_DISPOSED, {
+    row = {
         "run_id": custody.run_id, "task_id": custody.task_id,
         "root_task_id": custody.root_task_id, "parent_task_id": custody.parent_task_id,
         "snapshot_id": custody.snapshot_id, "disposition": str(disposition or ""),
         **payload,
-    })
+    }
+    if recorded := emit(drive_root, PATCH_DISPOSED, row):
+        _apply({custody.run_id: custody}, {**row, "type": PATCH_DISPOSED})
+    return recorded
 
 
 def record_patch_apply_started(drive_root: Any, custody: RunCustody, **payload: Any) -> bool:
@@ -910,13 +928,9 @@ def record_patch_apply_started(drive_root: Any, custody: RunCustody, **payload: 
     where a modified tree replays as "never applied" — the false-rejection class
     this row exists to close. Same doctrine as ``record_start_requested``.
     """
-    landed = emit(drive_root, PATCH_APPLY_STARTED, {
-        "run_id": custody.run_id, "task_id": custody.task_id,
-        "snapshot_id": custody.snapshot_id, **payload,
-    })
-    if landed:
-        custody.patch_apply_pending = True
-        custody.patch_apply_key = str(payload.get("apply_idempotency_key") or "")
+    row = {"run_id": custody.run_id, "task_id": custody.task_id, "snapshot_id": custody.snapshot_id, **payload}
+    if landed := emit(drive_root, PATCH_APPLY_STARTED, row):
+        _apply({custody.run_id: custody}, {**row, "type": PATCH_APPLY_STARTED})  # the one reducer, as replay
     return landed
 
 
@@ -1009,34 +1023,40 @@ from ouroboros.delegate_pending import replay_store_unproven  # noqa: E402, F401
 from ouroboros.delegate_accepted import bind_started  # noqa: E402, F401 -- every STARTED writer of an invocation
 
 
-def record_start_requested(drive_root: Any, **payload: Any) -> bool:
+def record_start_requested(drive_root: Any, *, gateway: Any = None, registration_resolution=None, **payload: Any) -> bool:
     """Durably name the resources a start is about to bind, BEFORE the POST.
 
     Returns whether the row LANDED; without it the caller must not POST:
     a worker crash before ``record_started`` would leave the run unfindable.
+    With the start's ``gateway`` the row lands while its registration is held; a refusal raises typed.
 
     The full replay envelope goes to raw CAS before its event reference. Use
     ``write_blob``, never a redacted ``persist_call`` projection: request values
     must retain the engine's canonical JSON digest on an idempotent retry. Held
     heads (``held_heads``) ride it by address and revision (``delegate_pending.stored_request``).
     """
-    body, heads = payload.get("request"), payload.pop("held_heads", None)
-    if isinstance(body, dict) and body:
-        from ouroboros.delegate_pending import request_shape, stored_request
-        from ouroboros.observability import write_blob
-
-        try:
-            stored, held = stored_request(drive_root, body, heads)
-            ref = write_blob(pathlib.Path(drive_root), stored, kind="json")
-        except Exception:
-            log.warning("delegate custody request body could not be stored", exc_info=True)
-            return False
-        payload = {key: value for key, value in payload.items() if key != "request"}
-        payload.update(request_ref=ref, request_shape=request_shape(body), prompt_chars=len(str(body.get("prompt") or "")),
-                       **held)
+    from ouroboros.delegate_registration_policy import checked_registration
     from ouroboros.owner_pause import admit_delegated_start
 
-    return admit_delegated_start(drive_root, payload)
+    with (checked_registration(drive_root, gateway, payload, registration_resolution) if gateway is not None
+          else nullcontext()):
+        body, heads = payload.get("request"), payload.pop("held_heads", None)
+        if isinstance(body, dict) and body:
+            from ouroboros.delegate_pending import request_shape, stored_request
+            from ouroboros.delegate_workspace_hold import start_workspace
+            from ouroboros.observability import write_blob
+
+            try:
+                stored, held = stored_request(drive_root, body, heads)
+                ref = write_blob(pathlib.Path(drive_root), stored, kind="json")
+            except Exception:
+                log.warning("delegate custody request body could not be stored", exc_info=True)
+                return False
+            payload = {key: value for key, value in payload.items() if key != "request"}
+            payload.update(request_ref=ref, request_shape=request_shape(body), prompt_chars=len(str(body.get("prompt") or "")),
+                           registration_workspace=payload.get("registration_workspace") or start_workspace(
+                               body, payload.get("execution_root")), **held)  # a thread's folder rides as given
+        return admit_delegated_start(drive_root, payload)
 
 
 def record_started(drive_root: Any, custody: RunCustody,
@@ -1066,6 +1086,7 @@ def record_started(drive_root: Any, custody: RunCustody,
             (custody.task_id, custody.invocation_id) and (not previous.daemon_store_id or not custody.daemon_store_id
                                                          or previous.daemon_store_id == custody.daemon_store_id)):
         _merge_started_into(custody, previous)
+    custody.restrict_registration_owner()
     _CUSTODY[custody.run_id] = custody
     if not publish:
         return False
@@ -1123,105 +1144,98 @@ def is_terminal(detail: Dict[str, Any]) -> bool:
 
 
 def retire_project(drive_root: Any, gateway: Any, custody: RunCustody, *, live_task_ids=None,
-                   recoverable_handles=()) -> None:
-    """Serialize the replay-to-retirement decision for one shared project."""
-    with project_retirement_lock(drive_root, custody.project_id):
-        _retire_project_locked(drive_root, gateway, custody, live_task_ids=live_task_ids,
-                               recoverable_handles=recoverable_handles)
+                   recoverable_handles=()) -> str:
+    """Serialize the replay-to-retirement decision: ``removed``, ``kept``, or "" while the duty stays."""
+    from ouroboros.delegate_registration_policy import KEPT, PROJECT_HAS_THREADS, RETIRED
+
+    with project_retirement_lock(drive_root, custody.project_id, engine=custody):
+        retired, reason = retire_registration_locked(drive_root, gateway, custody, live_task_ids=live_task_ids,
+                                                      recoverable_handles=recoverable_handles)
+    if retired:
+        return RETIRED
+    return KEPT if reason in ("persistent_registration", "registration_unproven", PROJECT_HAS_THREADS) else ""
 
 
-def _project_runs(drive_root: Any, custody: RunCustody) -> Optional[List[RunCustody]]:
-    """This project's runs (one indexed read); ``None`` when the store cannot answer."""
-    from ouroboros.delegate_custody_current import runs as current_runs
-    from ouroboros.store import StoreError
-
-    try:
-        state = current_runs(drive_root, "project_id=?", (str(custody.project_id or ""),))
-    except StoreError:
-        log.warning("Retirement deferred: custody rows unavailable", exc_info=True)
-        return None
-    if custody.run_id and custody.run_id not in state:
-        log.warning("Retirement deferred: run %s not in replay", custody.run_id)
-        return None
-    return [run for run in state.values() if run.run_id]
-
-
-def _release_registration(drive_root: Any, custody: RunCustody, **facts: Any) -> None:
-    """Our custody over the registration ends: the memo (every sibling, exactly as
+def _release_registration(drive_root: Any, custody: RunCustody, **facts: Any) -> bool:
+    """Our custody over the registration ends: the memo (every sibling on its engine, exactly as
     the replay clears them) and the durable row, ``facts`` naming why it was kept."""
-    custody.project_owned = False
-    for sibling in _CUSTODY.values():
-        if sibling.project_id == custody.project_id:
+    from ouroboros.execution_domain import registration_engine
+
+    project_id, engine = custody.project_id, registration_engine(custody)
+    if not emit(drive_root, PROJECT_RETIRED, {"run_id": custody.run_id, "task_id": custody.task_id,
+            "project_id": project_id, **({"daemon_store_id": custody.daemon_store_id} if custody.daemon_store_id else {}),
+            **({"engine_ref": dict(custody.engine_ref)} if custody.engine_ref else {}), **facts}):
+        return False
+    for sibling in (custody, *_CUSTODY.values()):
+        if sibling.project_id == project_id and registration_engine(sibling) == engine:
+            if sibling.project_owned or not sibling.registration_outcome:
+                sibling.registration_outcome = "kept" if facts.get("project_kept") else str(facts.get("removal_outcome") or "retired")
             sibling.project_owned = False
-    emit(drive_root, PROJECT_RETIRED, {"run_id": custody.run_id, "task_id": custody.task_id,
-                                       "project_id": custody.project_id, **facts})
+    return True
 
 
-def _retire_project_locked(drive_root: Any, gateway: Any, custody: RunCustody, *, live_task_ids=None,
-                           recoverable_handles=()) -> None:
-    if custody.project_persistent:
-        custody.project_owned = False
-        emit(drive_root, PROJECT_RETIRED, {"run_id": custody.run_id, "task_id": custody.task_id,
-                                           "project_id": custody.project_id, "project_kept": True})
-        return
-    if not custody.project_id:
-        return
+def retire_registration_locked(drive_root: Any, gateway: Any, custody: RunCustody, *,
+                               live_task_ids=None, recoverable_handles=()) -> Tuple[bool, str]:
+    """Decide once under the project lock, for a durable duty or the unsent start that just created it."""
+    from ouroboros.delegate_custody_current import mark_removal, removal_status, run
+    from ouroboros.delegate_registration_policy import PROJECT_HAS_THREADS, REGISTRATION_IN_USE, engine_facts, registration_use, remove_custody_registration, settled_thread_refusal
+    from ouroboros.execution_domain import registration_engine
+
+    engine = engine_facts(gateway)
+    if not custody.project_id or registration_engine(engine) != registration_engine(custody):
+        return False, "registration_store_changed"
     try:
-        rows = _project_runs(drive_root, custody)
-        if rows is None or not any(run.project_owned for run in rows):
-            return
-        if any(run.project_persistent for run in rows):
-            # #362: ANY persistent sharer makes the project a durable user
-            # identity — a non-persistent creator must not delete it either.
-            custody.project_owned = False
-            emit(drive_root, PROJECT_RETIRED, {"run_id": custody.run_id, "task_id": custody.task_id,
-                                               "project_id": custody.project_id, "project_kept": True})
-            return
-        if any(not run.settled and run.run_id != custody.run_id for run in rows):
-            return
-        from ouroboros.delegate_continuation import still_continuable
-        if any(still_continuable(drive_root, run, live_task_ids, recoverable_handles=recoverable_handles)
-               for run in rows):
-            return
+        use = registration_use(drive_root, custody, live_task_ids=live_task_ids,
+                               recoverable_handles=recoverable_handles)
     except Exception:
-        log.warning("Retirement deferred: replay failed for %s",
-                    custody.run_id, exc_info=True)
-        return
-    from ouroboros.execution_domain import same_engine
-    if not same_engine(gateway, custody):
-        return  # the registration lives on the run's own engine: that engine's pass retires it
-    try:
-        gateway.remove_project(custody.project_id)
-    except Exception as exc:
-        if not daemon_says_absent(exc):
-            log.warning("Failed to retire delegated project %s", custody.project_id, exc_info=True)
-            # The daemon's typed refusal rides the row beside its text: "failed"
-            # without the WHY made every retire loop a forensic dig, and the CODE
-            # is what tells a permanent refusal from one worth retrying.
-            refusal = {"code": str(getattr(exc, "code", "") or ""),
-                       "status": int(getattr(exc, "status_code", 0) or 0)}
-            if daemon_keeps_project(exc):
-                # Discharge only when EVERY run of the project is settled per a
-                # complete view read NOW, under the retirement lock and right
-                # before the discharge row is appended: STARTED appends take no
-                # lock, so a PROJECT_RETIRED replayed after a sibling's STARTED
-                # would strip that sibling's ownership. Nothing proven means no.
-                try:
-                    settled_rows = _project_runs(drive_root, custody)
-                except Exception:
-                    log.warning("Discharge deferred: replay failed for %s", custody.run_id, exc_info=True)
-                    settled_rows = None
-                if settled_rows and all(run.settled for run in settled_rows):
-                    # The #362 vocabulary — our custody ends, the engine keeps the
-                    # project — under the engine's own code; never a deletion claim.
-                    _release_registration(drive_root, custody, project_kept=True,
-                                          reason=PROJECT_HAS_THREADS, **refusal)
-                    return
-            emit(drive_root, PROJECT_RETIRE_FAILED, {"run_id": custody.run_id, "task_id": custody.task_id,
-                                                     "project_id": custody.project_id,
-                                                     "reason": str(exc)[:500], **refusal})
-            return
-    _release_registration(drive_root, custody)
+        log.warning("Retirement deferred: custody unread for project %s", custody.project_id, exc_info=True)
+        use = None
+    if use is None or not use.owned:
+        return False, "retirement_owed"
+    if use.in_use and not use.persistent:
+        return False, REGISTRATION_IN_USE
+    kept = "persistent_registration" if use.persistent else ""
+    facts = {"project_kept": True} if kept else {}
+    if kept and (pending := removal_status(drive_root, custody.project_id, engine)[0]):
+        if pending != "custody_kept":
+            return False, REGISTRATION_IN_USE
+        facts["removal_lane"] = ""
+    if not kept:
+        try:
+            outcome, detail = remove_custody_registration(drive_root, gateway, custody.project_id, engine, use,
+                live_task_ids=live_task_ids, recoverable_handles=recoverable_handles)
+            if outcome == "held":
+                return False, detail
+            if outcome == "kept":
+                kept = detail
+                facts = {"project_kept": True, "reason": kept}
+            else:
+                facts = {"removal_outcome": outcome, "removal_lane": ""}
+        except Exception as exc:
+            refusal = {"code": str(getattr(exc, "code", "") or ""), "status": int(getattr(exc, "status_code", 0) or 0)}
+            if settled_thread_refusal(drive_root, custody, exc):
+                kept = PROJECT_HAS_THREADS
+                facts = {"project_kept": True, "reason": kept, "removal_lane": "", **refusal}
+            else:
+                log.warning("Retirement of project %s deferred: %s", custody.project_id, exc)
+                if refusal["code"] != "registration_unconfirmed":
+                    emit(drive_root, PROJECT_RETIRE_FAILED, {"run_id": custody.run_id, "task_id": custody.task_id,
+                         "project_id": custody.project_id, "reason": str(exc)[:500], **refusal})
+                return False, "retirement_owed"
+    reason = kept or ("gone_after_unknown" if facts.get("removal_outcome") == "gone_after_unknown" else "")
+    retired = not reason
+    if not _release_registration(drive_root, custody, **facts):
+        # A late store binding may move the duty: clear the verified old intent only with no exact owner left.
+        fresh = run(drive_root, custody.run_id) if custody.run_id else None
+        if (fresh and registration_engine(fresh) != registration_engine(custody)
+                and "removal_lane" in facts):
+            from ouroboros.delegate_custody_current import registration_snapshot
+            rows, _, owed = registration_snapshot(drive_root, custody.project_id, custody)
+            if not owed and not any(r.project_owned and registration_engine(r) == registration_engine(custody)
+                                    for r in rows.values()):
+                mark_removal(drive_root, custody.project_id, engine, "")
+        return False, "retirement_owed"
+    return retired, reason
 
 
 def close_absent_run(drive_root: Any, gateway: Any, custody: RunCustody, reason: str, *, absence: Any) -> None:
@@ -1273,8 +1287,7 @@ def settle_run(drive_root: Any, gateway: Any, custody: RunCustody, detail: Dict[
         retire_project(drive_root, gateway, custody)
     if not already_settled and custody.settled:
         resolve_containment_fault(drive_root, custody, "settled_terminal")
-    result.update(project_retired=not custody.project_owned and not custody.project_persistent,
-                  project_persistent=custody.project_persistent)
+    result.update(custody.registration_settlement())
     return result
 
 
@@ -1375,8 +1388,8 @@ def record_containment_fault(drive_root: Any, custody: RunCustody, reason: str,
     author for this row: an unverified cancel and a breached containment produce the
     same incident shape, so a reader never has to know which path wrote it.
 
-    The reducer keeps the incident on the run's row (the surface the health invariant
-    reads) until a resolution clears it; the chain row is the forensic record.
+    The reducer keeps the incident on the run's row (the surface the health invariant reads) until a resolution
+    clears it, and a row its writer marks ``yields`` never replaces one standing; the chain row is the forensic record.
     ``detail`` is the incident's EVIDENCE, and a durable incident whose evidence was
     silently cut is half an incident: the bound goes through the shared
     disclosed-truncation contract (marker + original length), never a bare slice
@@ -1399,7 +1412,7 @@ def resolve_containment_fault(drive_root: Any, custody: RunCustody, reason: str,
 
 def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason: str, *, owner_stop=None) -> Dict[str, Any]:
     """Cancel once and verify terminality or absence in the owning store."""
-    from ouroboros.delegate_resume import prepare_recovered_cancel, recovered_cancel_detail
+    from ouroboros.delegate_resume import prepare_recovered_cancel, recovered_cancel_detail, stop_read_run
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.transport_custody import is_pre_dispatch_transport_failure
 
@@ -1427,7 +1440,7 @@ def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason
         control_error = f"{exc.code}: {exc}"
         unsent = recovered and not exc.status_code and is_pre_dispatch_transport_failure(exc)
     try:
-        detail = gateway.get_run(custody.run_id)
+        detail = stop_read_run(gateway, custody.run_id)
     except ClaudexorUnavailable as exc:
         if daemon_says_absent(exc, gateway=gateway, run=custody):
             close_absent_run(drive_root, gateway, custody, "get_run_absent", absence=exc)
@@ -1436,7 +1449,7 @@ def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason
                        fault_reason="cancel_unreachable" if control_error else "cancel_unverified",
                        detail=control_error or f"{exc.code}: {exc}", control_owed=unsent)
     state = str(summary_of(detail).get("state") or "")
-    if names_another_run(detail, custody.run_id) or recovered and not recovered_cancel_detail(gateway, custody, detail):
+    if names_another_run(detail, custody.run_id) or recovered and not recovered_cancel_detail(gateway, custody, detail, for_stop=True):
         return outcome(CANCEL_CONTAINMENT_FAULT, fault_reason="cancel_unverified",
                        detail="read-back did not verify the same run and store", control_owed=unsent)
     if state in TERMINAL_STATES:
@@ -1489,33 +1502,23 @@ def owned_project_registrations(drive_root: Any, state: Optional[Dict[str, RunCu
 
 def retire_settled_registrations(drive_root: Any, gateway: Any, *, live_task_ids=None,
                                  recoverable_handles=()) -> None:
-    """Retire projects every sharer has settled; a LIVE sharer (owned or not
-    - only the creator carries the registration, but any live sibling makes
-    the daemon refuse) defers the attempt. Idempotent, fail-soft."""
-    from ouroboros.delegate_custody_current import held_runs, runs as current_runs
+    """Retire settled projects of this engine, then owed registrations once unused. Idempotent, fail-soft."""
+    from ouroboros.delegate_registration_policy import engine_facts, retire_owed
+    from ouroboros.execution_domain import registration_engine
 
-    by_project: Dict[str, List[RunCustody]] = {}
-    for row in held_runs(drive_root).values():  # owned registrations and unsettled runs are held rows
-        if row.project_id and row.run_id:
-            by_project.setdefault(row.project_id, []).append(row)
-    for project_id, rows in by_project.items():
-        owned = [row for row in rows if row.project_owned]
-        if not owned or any(not row.settled for row in rows):
-            continue  # nothing registered here, or a live sharer defers
-        from ouroboros.delegate_continuation import still_continuable
-        # Every sharer of the project, settled non-owners included: one indexed read.
-        rows = list(current_runs(drive_root, "project_id=?", (str(project_id or ""),)).values())
-        if any(not row.settled for row in rows):
-            continue
-        if (not any(row.project_persistent for row in rows)
-                and any(still_continuable(drive_root, row, live_task_ids, recoverable_handles=recoverable_handles)
-                        for row in rows)):
-            continue  # still continuable: the registration waits until it is not
+    serving = registration_engine(engine_facts(gateway))
+    by_project = {}
+    for row in sorted(owned_project_registrations(drive_root), key=lambda row: row.run_id):
+        if row.settled and registration_engine(row) == serving:
+            by_project.setdefault(row.project_id, row)
+    for project_id, owner in by_project.items():
         try:
-            retire_project(drive_root, gateway, min(owned, key=lambda row: row.run_id), live_task_ids=live_task_ids,
+            retire_project(drive_root, gateway, owner, live_task_ids=live_task_ids,
                            recoverable_handles=recoverable_handles)
         except Exception:
             log.warning("Registration sweep failed for project %s", project_id, exc_info=True)
+    retire_owed(drive_root, gateway, live_task_ids=live_task_ids,
+                recoverable_handles=recoverable_handles, examined=by_project)
 
 
 __all__ = [

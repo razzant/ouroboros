@@ -31,6 +31,7 @@ from tests.test_llm_claudexor import setup as gateway_fixture
 from tests.test_model_wait import live_wait as wait_fixture
 from tests.test_subscription_main_wait import main_call as main_call_fixture
 from tests.test_tool_result_delivery import _ctx, _deliver, _row, _source_ref, _view_json
+from tests._context_fit_fixtures import _built, _rebind, _refusal_ctx
 
 # The production send: the real loop, rebind, LLMClient, Claudexor serializer and physical ledger before a fake gateway.
 setup, live_wait, main_call = gateway_fixture, wait_fixture, main_call_fixture
@@ -228,27 +229,54 @@ def _wire(monkeypatch, messages):
     return [m for m in payload["messages"] if m["role"] == "system"]
 
 
-def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="asserted", usage=None, facts=None,
-            holds_reply=False):
-    import ouroboros.context
-    from ouroboros import context_fit
-    from ouroboros.loop_model_call import _rebind_context_fit_plan
-    from ouroboros.tools.registry import ToolRegistry
+@pytest.mark.parametrize('book_chars,excess,expected,deeper', [
+    (240_000, -1_000, 'max', False), (240_000, 5_000, 'max', False),
+    (240_000, 45_000, 'low', False), (240_000, 98_000, 'low', True), (0, 98_000, 'max', True),
+], ids=['fitting', 'tellings-pay', 'maps-pay', 'remainder-after-maps', 'nothing-from-maps'])
+def test_a_max_rebind_charges_tellings_then_maps_at_the_admitted_line(tmp_path, monkeypatch, book_chars, excess, expected, deeper):
+    from ouroboros import context_fit as cf, memory_floor as mf, memory_view as mv
+    from ouroboros.memory_forms import stage_of
+    from tests._memory_view_synthetic import pages, room, said, snapshot
 
-    root.mkdir(parents=True, exist_ok=True)
-    registry = ToolRegistry(repo_dir=root, drive_root=root)
-    registry._ctx._accumulated_usage = usage
-    # A declared window's RouteFacts (its units). ``holds_reply``: a total known to hold the reply too (a local
-    # server's one buffer), read less the whole reserve; any other stated total is read less the reply floor.
-    evidence = SimpleNamespace(route_fp=f"r-{window}", status=status, stale=status != "asserted", window_tokens=window,
-                               route_facts=facts or {}, source="local_health" if holds_reply else "metadata",
-                               ts=utc_now_iso())  # a serving statement is dated, as its read is
-    monkeypatch.setattr(ouroboros.context, "_context_fit_route", lambda *_a, **_kw: ({"model": "m2", "provider": "p"}, evidence))
-    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: ratio)
-    rebound, mode = _rebind_context_fit_plan(plan, registry, messages, model="m2", use_local=False, start_mode="low",
-                                             tool_schemas=[])
-    events = [json.loads(line) for line in (root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-    return rebound, mode, [e for e in events if e.get("checkpoint_kind") == "context_fit_route_rebound"][-1]
+    core, build = _built(tmp_path / 'w', monkeypatch, books=book_chars, ratio=1)
+    initial = build(1_000_000)
+    owner = said(1, 'human', 'Keep my requirement verbatim; this is governing.', owner_side=True, immune=True)
+    story = [{**page, **({'lead_rule': True} if i < 16 else {})} for i, page in enumerate(pages(48, 12_000))]
+    memory = snapshot(story=story, room_facts=room(lane1=[owner]))
+    core = dataclasses.replace(core, memory_view_json=mv.snapshot_json(memory))
+    books = {m: cf._governance_blocks(None, core, mode=m) for m in ('max', 'low')}
+    view, _ = cf._view_projections(core, books, initial.user_content_json, preferred='max', tool_schemas=[],
+        window_tokens=0, known_window=False, output_reserve=initial.output_reserve_tokens, ratio=1)
+    plan = dataclasses.replace(initial, core=core, max_projection=dataclasses.replace(initial.max_projection,
+        system_content_json=json.dumps(view['max'][0]), memory_facts=view['max'][1]))
+    messages = [*plan.messages_for('max'), {'role': 'user', 'content': 'Owner append, beyond the captured memory.'}]
+    tail = copy.deepcopy(messages[1:])
+    raw = cf.estimate_context_prompt_tokens(messages, [])
+    window = raw + 8_192 - excess
+    rebound, mode, event = _rebind(monkeypatch, tmp_path / 'tight', plan, messages, window=window, start_mode='max')
+
+    assert mode == expected and rebound.preferred_mode == 'max' and rebound.start == plan.start
+    assert event['effective_mode'] == expected and event['view_kept'] is (excess < 0)
+    assert messages[1:] == tail
+    if excess < 0:
+        assert messages[0] == plan.max_projection.system_message()
+        return
+    free = window - 8_192 - cf.estimate_context_prompt_tokens(messages, [])
+    room_needed = math.ceil(window / RECLAIM_LOW_WATER_DIVISOR)
+    assert free >= room_needed
+    facts = rebound.projection(mode).memory_facts
+    assert facts['floor']['target_tokens'] is None and not facts['floor']['by_budget']
+    level = mf.kept_level(memory, facts)
+    deep = [ident for step, ids in level.addressed for ident in ids
+            if stage_of(memory, step, ident) not in mf.TELLING_STAGES]
+    assert bool(deep) is deeper
+    assert owner['line'] in mv.render_room(memory, level)
+    if expected == 'low' and not deeper:  # maps pay most of the goal; do not adopt the discarded Max trial's 16 cuts
+        assert 0 < sum(dict(level.steps).values()) < 16
+        assert free < room_needed + 3_100  # one 12k-char record's step, rounded on the actual envelope
+    if deeper:
+        older = sorted({ident for ident in deep if ident.startswith('page-')})
+        assert 0 < len(older) < 32 and older == [f'page-{i:03}' for i in range(16, 16 + len(older))]
 
 
 def _long_tail(plan):
@@ -259,8 +287,60 @@ def _long_tail(plan):
 
 
 
+def _short_book_plan(monkeypatch, story, *, development_md="", required=False):
+    from ouroboros import capability_evidence as ce, context_fit as cf, memory_view as mv
+    from tests._memory_view_synthetic import room, snapshot
+
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    memory = snapshot(story=story, room_facts=room("1"))
+    return cf.build_context_fit_plan(None, cf.ContextCore(
+        "Core", "BIBLE", "", development_md, "Identity", "Facts", '"Assignment"', bool(development_md),
+        memory_view_json=mv.snapshot_json(memory), development_required=required), {"id": "short-books", "chat_id": 1},
+        preferred_mode="max", tool_schemas=[], route_resolver=lambda *_a, **_kw: (
+            {"model": "original", "provider": "p"}, ce.CapabilityEvidence(1_000_000, "confirmed", "metadata", "home")))
+
+
+def test_an_unrestricted_rebind_can_restore_detail_spent_only_in_the_telling_trial(tmp_path, monkeypatch):
+    from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS as HEADROOM
+    from ouroboros.context_fit import estimate_context_prompt_tokens as price
+    from tests._memory_view_synthetic import pages
+
+    short = [{**page, "lead_rule": True} for page in pages(2, 8_000)]
+    long = {**pages(1, 0)[0], "id": "long-page", "text": "Untold record. " + "Unretold evidence " * 4_000}
+    plan = _short_book_plan(monkeypatch, [*short, long])
+    messages = [*plan.messages_for("max"), OWNER]
+    raw = price(messages, [])
+    window = raw + HEADROOM - 8_000  # even both tellings together cannot pay the excess
+    tail = copy.deepcopy(messages[1:])
+    rebound, mode, _event = _rebind(monkeypatch, tmp_path / "tight", plan, messages, window=window, start_mode="max")
+    cuts = {ident for _step, ident in _addressed(rebound, mode)}
+    after = price(messages, [])
+    print({"before": raw, "after": after, "admitted": window - HEADROOM, "cuts": sorted(cuts)})
+    assert mode == "max" and messages[1:] == tail
+    assert long["id"] in cuts and {page["id"] for page in short}.isdisjoint(cuts)
+    assert window - HEADROOM - after >= math.ceil(window / RECLAIM_LOW_WATER_DIVISOR)
+
+
+def test_nano_cannot_buy_room_by_leaving_its_required_handbook_off_the_scale(tmp_path, monkeypatch):
+    from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS as HEADROOM
+    from ouroboros.context_fit import estimate_context_prompt_tokens as price
+    from tests._memory_view_synthetic import pages
+
+    # Max already holds this subject's whole DEVELOPMENT. Compact modes add it back beside both maps.
+    plan = _short_book_plan(monkeypatch, pages(1, 800), required=True,
+                            development_md="# Development\n\n## Review\n\n" + "Required handbook. " * 12_000)
+    messages = [*plan.messages_for("max"), OWNER]
+    raw = price(messages, [])
+    window = raw + HEADROOM - 4_000  # not the additive charge of a handbook (Max already carried it)
+    assert plan.core.required_book_tokens("max") == 0 < plan.core.required_book_tokens("nano")
+    rebound, mode, _event = _rebind(monkeypatch, tmp_path / "tight", plan, messages, window=window, start_mode="max")
+    sizes = {m: price(rebound.reproject_transcript(messages, m), []) for m in ("max", "nano")}
+    print({"before": raw, "candidates": sizes, "admitted": window - HEADROOM, "selected": mode})
+    assert mode == "max" and sizes["max"] < sizes["nano"]
+    assert "Required handbook." in rebound.projection(mode).system_content_json and messages[-1] == OWNER
+
+
 def test_a_rebind_keeps_the_sent_view_on_a_smaller_fitting_window_and_unfolds_nothing(tmp_path, monkeypatch):
-    from tests.test_memory_view_modes import _built
 
     _core, plan = _built(tmp_path / "w", monkeypatch)
     low = plan(1_000_000, preferred="low", tool_schemas=[])
@@ -285,7 +365,6 @@ def test_a_rebind_narrows_a_view_the_window_cannot_hold_from_its_own_level_and_t
     hold is written again anyway, so with its excess it is asked a wall's slack, one eighth of the window, and not
     left at the window's very edge, where the next tool result would meet the same wall (owner, 30 Sep 2026: a fold
     returns to the room line). Nothing unfolds, no owner target is applied again, and the tail is never touched."""
-    from tests.test_memory_view_modes import _built
 
     _core, plan = _built(tmp_path / "w", monkeypatch)
     low = plan(1_000_000, preferred="low", tool_schemas=[])
@@ -316,7 +395,6 @@ def test_a_rebind_uses_only_the_exact_routes_accepted_lower_bound(tmp_path, monk
     """Acceptance keeps the window known, raises its lower bound and never crosses accounts."""
     from ouroboros.context_anchor import record_input_anchor
     from ouroboros import capability_evidence as ce
-    from tests.test_memory_view_modes import _built
 
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path / "evidence")
     _core, plan = _built(tmp_path / "w", monkeypatch)
@@ -355,7 +433,6 @@ def test_a_rebind_keeps_a_view_exactly_when_the_rounds_carried_input_fits_it(tmp
     estimator window (raw, as the round) and an unknown window change nothing."""
     from ouroboros import capability_evidence as ce, loop
     from ouroboros.context_anchor import record_input_anchor
-    from tests.test_memory_view_modes import _built
 
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path / "evidence")
     _core, plan = _built(tmp_path / "w", monkeypatch)
@@ -404,7 +481,7 @@ def test_a_route_handover_fits_the_view_in_the_effort_its_next_send_carries(tmp_
                                                                            after, provider, rebinds, kept):
     """A route handover fits the view in the effort its next send carries. Using the old effort cuts a fitting
     high -> none view, while none -> high can leave an oversized request. Effort alone rebinds only when it opens
-    direct OpenAI's longer custom ladder (context_fit._request_shapes); other effort changes leave the route's
+    direct OpenAI's longer custom ladder (context_measurement._request_shapes); other effort changes leave the route's
     question, shown view and seams untouched. Each case ends with the round's own measurement inside the window."""
     from ouroboros import capability_evidence as ce
     from ouroboros import context, loop_routes, route_choice
@@ -419,7 +496,9 @@ def test_a_route_handover_fits_the_view_in_the_effort_its_next_send_carries(tmp_
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path / "evidence")
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     monkeypatch.setattr(route_choice, "round_route", lambda *_a, **_kw: None)  # no Settings follow
-    snap = syn.snapshot(room_facts=syn.room("1"), conversations=[], story=syn.pages(10, 2_000))
+    # Isolate the wire-shape handover from the separate book decision: the authored tellings can pay its slack.
+    snap = syn.snapshot(room_facts=syn.room("1"), conversations=[],
+                        story=[{**page, "lead_rule": True} for page in syn.pages(10, 12_000)])
     core = cf.ContextCore("Core", "BIBLE", "# Architecture\n\n" + "Whole source book. " * 2_000, "", "Identity", "Facts",
                           json.dumps("Assignment. " + "Retained evidence. " * 14_000), False,
                           memory_view_json=mv.snapshot_json(snap))
@@ -462,7 +541,6 @@ def test_a_held_low_view_steps_down_to_nano_only_where_nano_makes_room(tmp_path,
     total that holds the reply, Nano's smaller reply reserve is real room and the view steps down. On a total nothing
     has proved, Low and Nano are admitted to the same input: stepping down would cost the mode (and its reply
     allowance) for no room, so the view stays Low and the round's own passes take bodies (review round 2)."""
-    from tests.test_memory_view_modes import _built
 
     _core, plan = _built(tmp_path / "w", monkeypatch)
     low = plan(1_000_000, preferred="low", tool_schemas=[])
@@ -478,7 +556,6 @@ def test_a_held_low_view_steps_down_to_nano_only_where_nano_makes_room(tmp_path,
 def test_only_a_main_reading_keeps_low_where_nano_admits_no_more(tmp_path, monkeypatch):
     """The guard above reads Main's admitted frame. A caller with a frame of its own (voice: a working reserve above
     both modes' reply reserves, so Nano admits no more input than Low) steps the held view down as it always did."""
-    from tests.test_memory_view_modes import _built
 
     _core, plan = _built(tmp_path / "w", monkeypatch)
     low = dataclasses.replace(plan(1_000_000, preferred="low", tool_schemas=[]), working_reserve_tokens=70_000)
@@ -505,7 +582,6 @@ def test_a_cold_restore_sends_the_new_capture_at_its_own_level_not_refolded_to_t
     from ouroboros import context_fit
     from ouroboros.owner_wait import resume_native_loop
     from ouroboros.tools.registry import ToolRegistry
-    from tests.test_memory_view_modes import _built
 
     _core, plan = _built(tmp_path / "w", monkeypatch)
     fresh = plan(1_000_000, preferred=owner, tool_schemas=[])  # the restarted task's new capture
@@ -545,7 +621,6 @@ def test_a_cold_restore_keeps_the_tasks_own_start_not_the_restore_fit(tmp_path, 
     from ouroboros.context_measurement import mode_cause
     from ouroboros.owner_wait import resume_native_loop
     from ouroboros.tools.registry import ToolRegistry
-    from tests.test_memory_view_modes import _built
 
     _core, plan = _built(tmp_path / "w", monkeypatch)
     started = plan(1_000_000, tool_schemas=[])  # the source task's own start
@@ -851,6 +926,8 @@ def test_an_account_reprepare_that_selects_nano_narrows_the_shown_low_view_and_k
     assert ctx.accumulated_usage["_context_capacity_deficit_tokens"] == 0
     assert ctx.messages[0] == after.projection("nano").system_message() and ctx.messages[1:len(tail) + 1] == tail
     assert prepared.kwargs["messages"][0]["content"] == ctx.messages[0]["content"]
+    assert prepared.kwargs["tools"] == ctx.tool_schemas
+    assert "github_read" not in {row["function"]["name"] for row in prepared.kwargs["tools"]}
     # Narrowed from the shown level: every address stays one and no whole text of one comes back.
     assert addressed <= _addressed(after, "nano") and not _unfolded(after, addressed, ctx.messages[0])
     floor = after.projection("nano").memory_facts["floor"]
@@ -894,13 +971,13 @@ def test_a_second_narrowing_in_nano_still_names_what_the_low_budget_took(main_ca
         assert ("context_fit_route_rebound", False) in kinds
     else:  # the same route refuses the request by 5,000 tokens
         window, fit = 100_000, loop._measure_round_main_fit(ctx, automatic_pass_used=False)
-        # The move to Nano already took its work room from memory's detail (every form it had on this small
-        # window), so the floor's memory step has nothing left to give and says so; the pass's other steps pay.
-        assert _coarsen_memory_view(ctx, fit, saving=5_000) is False
+        # The first move could pay from the schemas rather than exhausting the memory. A new refusal can take
+        # more of the latter, but not relabel what the old Low budget took.
+        assert _coarsen_memory_view(ctx, fit, saving=5_000) is True
     after = ctx.context_fit_plan
     floor = after.projection("nano").memory_facts["floor"]
     assert ctx.active_context_mode == "nano" and ctx.messages[0] == after.projection("nano").system_message()
-    assert (addressed < _addressed(after, "nano")) is (second == "tighter_account")
+    assert addressed < _addressed(after, "nano")
     assert not _unfolded(after, addressed, ctx.messages[0])
     assert floor["by_budget"] == by_budget and floor["target_tokens"] == OWNER_LOW_TARGET_TOKENS
     sent = json.dumps(ctx.messages[0], ensure_ascii=False)
@@ -994,17 +1071,152 @@ def test_an_owner_max_task_in_task_local_low_rebinds_a_fallback_and_its_return_f
 
 # --- the floor's memory step still narrows when the estimate fits -----------------------------------
 
-def _refusal_ctx(tmp_path, plan):
-    from ouroboros import memory_floor as mf
 
-    shown = mf.trace_facts(plan.projection("max").memory_facts)  # as the task's start records the view it sends
-    tool_ctx = SimpleNamespace(context_fit_plan=plan, messages=None, memory_view_facts=shown,
-                               _execution_trace={VIEW_TRACE_KEY: dict(shown)})
-    ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode="max", messages=plan.messages_for("max"),
-                          tool_schemas=[], tools=SimpleNamespace(_ctx=tool_ctx), task_id="t", round_idx=1,
-                          event_queue=None, drive_logs=tmp_path)
-    tool_ctx.messages = ctx.messages
-    return ctx
+
+@pytest.mark.parametrize("entry", ["input-rebind", "total-refusal-floor"])
+def test_a_running_nano_rescue_prices_and_publishes_one_permitted_schema_set(tmp_path, monkeypatch, entry):
+    from ouroboros import capability_evidence as ce, context, context_fit as cf, loop
+    from ouroboros.context_window import WindowLimit, WindowRecord
+    from ouroboros.loop_round_limits import _coarsen_memory_view
+    from ouroboros.transcript_prefix import SCOPED_SANCTION_ATTR
+    from tests._memory_view_synthetic import pages
+
+    def tool(name, description="Fixture tool."):
+        return {"type": "function", "function": {"name": name, "description": description}}
+
+    needed = [tool(name) for name in ("finish_task", "called_in_history", "loaded_before_wall")]
+    full = [*needed, tool("unneeded_catalog", "Unneeded ordinary schema. " * 4_000)]
+    plan = _short_book_plan(monkeypatch, pages(1, 2_000))
+    ctx = _refusal_ctx(tmp_path, dataclasses.replace(plan, initial_mode="low"))
+    ctx.active_context_mode = "low"
+    ctx.messages[:] = plan.messages_for("low")
+    ctx.messages.extend([{"role": "assistant", "content": None, "tool_calls": [{"id": "prior", "type": "function",
+        "function": {"name": "called_in_history", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "prior", "content": "Attributable tool output"}, OWNER])
+    tail = copy.deepcopy(ctx.messages[1:])
+    ctx.tools.schemas = lambda: copy.deepcopy(full)
+    ctx.tools._ctx.drive_logs = lambda: tmp_path / "logs"
+    ctx.tools._ctx._actor_loaded_tool_names = {"loaded_before_wall"}
+    ctx.tools._ctx.active_model = plan.model
+    ctx.tools._ctx.primary_route = {"model": plan.model, "use_local": False, "role": "main"}
+    ctx.tool_schemas[:] = copy.deepcopy(full)
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    monkeypatch.setattr(ce, "resolve_main_token_density", lambda *_a, **_kw: (1.0, "cold_estimate"))
+    events = []
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: events.append(_a[-1]))
+    before = cf.estimate_context_prompt_tokens(ctx.messages, ctx.tool_schemas)
+    if entry == "input-rebind":  # reserve changes cannot help under an input cap
+        width = before // 2
+        evidence = ce.CapabilityEvidence(width, "confirmed", "metadata", "fixture", window_kind="input")
+        monkeypatch.setattr(context, "_context_fit_route", lambda *_a, **_kw: (
+            {"model": "other", "provider": "p"}, evidence))
+        ctx.context_fit_plan, ctx.active_context_mode = loop._rebind_context_fit_plan(ctx.context_fit_plan,
+            ctx.tools, ctx.messages, model="other", use_local=False, start_mode="low", tool_schemas=ctx.tool_schemas)
+    else:  # a proved total pays the reply reserve; even the old code would pick Nano, but never drop the fat schema
+        width = plan.output_reserve_tokens + before // 2
+        limit = WindowLimit(width, "total", "local_health", utc_now_iso())
+        window = WindowRecord("home", total=limit, reserve=plan.output_reserve_tokens, declared=(limit,))
+        ctx.context_fit_plan = dataclasses.replace(ctx.context_fit_plan, provider="local", window_record=window, window_tokens=width)
+        fit = cf.measure_main_fit(ctx.context_fit_plan, ctx.messages, ctx.tool_schemas, profile="task_local_low",
+                                  rendered_mode="low", round_id="e:round:1")
+        assert fit.predicted_capacity_miss and _coarsen_memory_view(ctx, fit, telling_floor=True)
+    after = cf.measure_main_fit(ctx.context_fit_plan, ctx.messages, ctx.tool_schemas, profile="task_local_nano",
+                                rendered_mode=ctx.active_context_mode, round_id="e:round:1").measurement
+    print({"entry": entry, "before": before, "after": after.raw_input_tokens,
+           "mode": ctx.active_context_mode, "schemas": [s["function"]["name"] for s in ctx.tool_schemas]})
+    assert ctx.active_context_mode == ctx.tools._ctx.active_context_mode == "nano"
+    assert ctx.tool_schemas == needed and ctx.messages[1:] == tail
+    assert after.capacity_deficit_tokens == 0
+    assert set(getattr(ctx.tools._ctx, SCOPED_SANCTION_ATTR, ())) == {"system", "tools"}
+    assert len([row for row in events if row["checkpoint_kind"] in {
+        "context_fit_route_rebound", "context_memory_coarsened"}]) == 1
+    if entry == "input-rebind":
+        loaded, refreshed = tool("loaded_on_nano"), tool("unneeded_catalog", "Changed while Nano was acting.")
+        ctx.tool_schemas.append(loaded)
+        ctx.tools._ctx._actor_loaded_tool_names.add("loaded_on_nano")
+        ctx.tools.schemas = lambda: [needed[0], needed[1], loaded, refreshed]  # one earlier choice was revoked
+        ctx.tools._ctx.active_model = "other"
+        monkeypatch.setattr(context, "_context_fit_route", lambda task, **kw: (
+            {"model": task["model"], "provider": "p"}, ce.CapabilityEvidence(500_000, "confirmed", "metadata", "home")))
+        back, mode = loop._rebind_context_fit_plan(ctx.context_fit_plan, ctx.tools, ctx.messages, model=plan.model,
+            use_local=False, start_mode="nano", tool_schemas=ctx.tool_schemas)
+        assert mode == "low" and ctx.messages[0] == plan.projection("low").system_message()
+        assert ctx.tool_schemas == [needed[0], needed[1], loaded, refreshed]
+        assert ctx.messages[1:] == tail and back.model == plan.model
+
+
+def test_a_running_nano_keeps_its_eighth_on_an_input_cap(tmp_path, monkeypatch):
+    from ouroboros import capability_evidence as ce, context, context_fit as cf, loop
+    from ouroboros.provider_models import PROVIDER_TOOL_SCHEMA_LIMITS
+    from tests._memory_view_synthetic import pages
+
+    plan = _short_book_plan(monkeypatch, [{**page, "lead_rule": True} for page in pages(6, 16_000)])
+    plan = dataclasses.replace(plan, initial_mode="low")
+    ctx = _refusal_ctx(tmp_path, plan)
+    rows = [*plan.messages_for("low"), OWNER]
+    compact = [{"type": "function", "function": {"name": "finish_task", "description": "Finish."}}]
+    fat = {"type": "function", "function": {"name": "fat_default", "description": "d" * 140_000}}
+    tail = {"type": "function", "function": {"name": "ordinary_tail", "description": "Do other work."}}
+    schemas = [*compact, fat, tail]
+    raw = cf.estimate_context_prompt_tokens(plan.reproject_transcript(rows, "nano"), compact)
+    width = raw + 800  # a Nano fits whole but owes slack; Low cannot fit even without memory
+    monkeypatch.setitem(PROVIDER_TOOL_SCHEMA_LIMITS, "openai", 2)  # discarded Low alone would omit ordinary_tail
+    model = "openai::narrow"
+    monkeypatch.setattr(context, "_context_fit_route", lambda *_a, **_kw: (
+        {"model": model, "provider": "openai"}, ce.CapabilityEvidence(width, "confirmed", "metadata", "small", window_kind="input")))
+    ctx.tools.schemas = lambda: copy.deepcopy(schemas)
+    ctx.tools.callable_rows = lambda *_: []
+    ctx.tools._ctx.drive_logs = lambda: tmp_path / "logs"
+    rebound, mode = loop._rebind_context_fit_plan(plan, ctx.tools, rows, model=model, use_local=False,
+                                                 start_mode="low", tool_schemas=schemas)
+    assert mode == "nano" and schemas == compact
+    assert OWNER in rows and not any("Not loaded for now:" in str(row.get("content")) for row in rows)
+    assert not getattr(ctx.tools._ctx, "_route_left_out_tool_names", None)
+    free = width - cf.estimate_context_prompt_tokens(rows, schemas)
+    assert free >= math.ceil(width / RECLAIM_LOW_WATER_DIVISOR), (width, raw, free, rebound.projection(mode).memory_facts)
+
+
+def test_memory_floor_prices_the_refreshed_facts_before_spending_the_return_eighth(tmp_path, monkeypatch):
+    from ouroboros import capability_evidence as ce, loop
+    from ouroboros.context_fit import estimate_context_prompt_tokens
+    from ouroboros.context_window import WindowLimit, WindowRecord
+    from ouroboros.loop_round_limits import _coarsen_memory_view
+    from tests._memory_view_synthetic import pages
+
+    width, reserve = 120_000, 65_536
+    slack = math.ceil(width / RECLAIM_LOW_WATER_DIVISOR)
+    limit = WindowLimit(width, 'input', 'refusal')
+    start = _short_book_plan(monkeypatch, pages(2, 2_000))
+    start = dataclasses.replace(start, window_record=WindowRecord('test', input=limit, declared=(limit,), reserve=reserve),
+                                window_tokens=width + reserve, status='confirmed', stale=False)
+    ctx = _refusal_ctx(tmp_path, start)
+    ctx.active_model, ctx.active_effort, ctx.accumulated_usage = start.model, '', {}
+    monkeypatch.setattr(ce, 'canonical_evidence_root', lambda: tmp_path)
+    monkeypatch.setattr(ce, 'resolve_main_token_density', lambda *_a, **_kw: (1.0, 'cold_estimate'))
+    monkeypatch.setattr(loop, '_emit_checkpoint_event', lambda *_a, **_kw: None)
+    sample = {'role': 'user', 'content': 'Refreshed facts on the selected frame. ' * 95}
+    def append_facts(call):
+        call.messages.append(sample)
+        return True
+    monkeypatch.setattr('ouroboros.loop_messages.append_context_facts', append_facts)
+    seen = []
+
+    def project(plan, **kwargs):
+        wanted = kwargs['slack_tokens']
+        seen.append(wanted)
+        bare_rows = [{'role': 'system', 'content': ''}, *ctx.messages[1:]]
+        empty_price = estimate_context_prompt_tokens(bare_rows, [])
+        payload = 's' * (4 * (width - wanted - empty_price))
+        selected = dataclasses.replace(plan.max_projection, system_content_json=json.dumps(payload))
+        return dataclasses.replace(plan, max_projection=selected)
+
+    # The floor offers two precisely priced authored forms; the ordinary estimator prices the real transcript.
+    monkeypatch.setattr(type(start), 'reproject_for_route', project)
+    fit = loop._measure_round_main_fit(ctx, automatic_pass_used=False)
+    assert _coarsen_memory_view(ctx, fit, saving=0, slack=slack, telling_floor=True)
+    assert len(seen) == 2 and seen[0] == slack < seen[1]
+    assert sample not in ctx.messages  # only the selected send's own facts are later appended
+    assert width - estimate_context_prompt_tokens([*ctx.messages, sample], []) >= slack
 
 
 def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, monkeypatch):
@@ -1013,7 +1225,6 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
     from ouroboros.context_fit import measure_main_fit
     from ouroboros.loop_round_limits import _coarsen_memory_view
     from ouroboros.memory_view import snapshot_from_json
-    from tests.test_memory_view_modes import _built
 
     core, plan = _built(tmp_path / "w", monkeypatch, books=0)
     built = plan(10_000_000)  # a startup view with every element whole
@@ -1056,19 +1267,74 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
     assert tool_ctx.memory_view_facts is kept and trace[VIEW_TRACE_KEY] == kept
 
 
+def test_a_fold_that_only_shortens_the_program_data_row_still_narrows_the_view(tmp_path, monkeypatch):
+    """A request holds memory twice: the system text and the one program data row after the assignment. A view whose
+    data row is shorter narrows it though its system text reads the same (the plan counts it so: ``narrowed``); the
+    same view again narrows nothing. The shorter row is the chosen opening form of one harmless note, its author kept."""
+    from ouroboros import capability_evidence as ce, context_fit as cf, loop, memory_view as mv
+    from ouroboros.chat_chain import row_address
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, PROGRAM_HISTORY_KIND
+    from ouroboros.dialogue_provenance import recorded_author, row_author
+    from ouroboros.loop_round_limits import _coarsen_memory_view
+    from ouroboros.memory_floor import select_view
+    from ouroboros.memory_inventory import row_meta
+    from tests import _memory_view_synthetic as syn
+
+    words = " ".join(["The shelf holds four books."] * 20)  # one harmless note, longer than its opening
+    row = {"chat_id": 1, "direction": "in", "role": "system", "ts": "2026-01-02T09:00:00+00:00",
+           "system_type": "agent_note_received", "text": "Program message received.",
+           "declared_author": recorded_author("Example librarian"), "agent_note_text": words}
+    addr = row_address(row)
+    note = mv._spoken((addr, row_meta(row), 1), row_author(row), {addr["row_sha256"]: row})
+    owner = {**syn.spoken(2, "human", 55), "owner_side": True}
+    core = cf.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", json.dumps("How many books?"), False,
+                          memory_view_json=mv.snapshot_json(syn.snapshot(room_facts=syn.room(lane1=[note, owner]))))
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    monkeypatch.setattr(ce, "resolve_main_token_density", lambda *_a, **_kw: (1.0, "cold_estimate"))
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
+    shown = cf.build_context_fit_plan(None, core, {"id": "library"}, preferred_mode="max", tool_schemas=[],
+        route_resolver=lambda *_a, **_kw: ({"provider": "fixture", "model": "fixture"},
+            SimpleNamespace(route_fp="", status="confirmed", stale=False, window_tokens=500_000)))
+    whole_data = shown.max_projection.room_data
+    opened_data = select_view(shown, "max", [f"F7p:{note['address']}"]).max_projection.room_data
+    assert shown.initial_mode == "max" and words in whole_data and words not in opened_data
+    assert "Example librarian" in opened_data and len(opened_data) < len(whole_data)
+    ctx = _refusal_ctx(tmp_path, shown)
+    fit = cf.measure_main_fit(shown, ctx.messages, [], profile="owner_max", rendered_mode="max", round_id="e:round:1")
+    # A real step also rewrites the floor's receipt, so today the system text moves with the data; the guard must not rest on it.
+    monkeypatch.setattr(type(shown), "reproject_for_route", lambda self, **_kw: dataclasses.replace(
+        self, max_projection=dataclasses.replace(self.max_projection, room_data=opened_data)))
+
+    def data_rows():
+        return [item["content"] for item in ctx.messages if item.get(HOST_CONTEXT_KIND_KEY) == PROGRAM_HISTORY_KIND]
+
+    priced = cf.estimate_context_prompt_tokens(ctx.messages, [])
+    assert data_rows() == [whole_data]
+    assert _coarsen_memory_view(ctx, fit) is True
+    assert data_rows() == [opened_data] and ctx.messages[0] == shown.max_projection.system_message()
+    assert ctx.context_fit_plan.projection("max").room_data == opened_data
+    assert cf.estimate_context_prompt_tokens(ctx.messages, []) < priced
+    assert _coarsen_memory_view(ctx, fit) is False  # the same view again narrows nothing
+
+
 def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_books(main_call, monkeypatch, tmp_path):
     """06.11, the other side of the low fold below: when memory's detail can pay what the owner's words passed the
     window's send ceiling by (20,000 past the stated number less the reply floor), memory alone narrows and Max
     keeps its whole books (29.10)."""
     from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
     from ouroboros import memory_floor as mf
+    from ouroboros.context_fit import bounded_prompt_tokens_for_payload
+    from ouroboros.memory_forms import stage_of
     from ouroboros.memory_view import snapshot_json
+    from ouroboros.send_clock import CLOCK_NOTE_PREFIX
     from ouroboros.tool_policy import initial_tool_schemas
     from tests import _memory_view_synthetic as syn
 
     # A memory whose detail holds more than the pass must shed: the reply reserve the wall restores, the 20,000 and
     # the return-after-fold eighth.
-    memory = syn.snapshot(room_facts=syn.room("1", legacy=23, legacy_chars=8_400, lane2=19), story=syn.pages(40, 20_000),
+    tellings = [{**page, "lead_rule": True} for page in syn.pages(40, 20_000)]
+    memory = syn.snapshot(room_facts=syn.room("1", legacy=23, legacy_chars=8_400, lane2=19), story=tellings,
                           conversations=[syn.conversation(i) for i in range(12)], mark_count=12)
     ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
                                                          view=snapshot_json(memory), books=120_000)
@@ -1079,28 +1345,55 @@ def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_books(ma
     words = "Owner, while you worked: keep the old API alive. "
     owner = {"role": "user", "content": words * math.ceil((window - full - NANO_MIN_HEADROOM_TOKENS + 20_000) * 4 / len(words))}
     ctx.messages[:] = [*built.messages_for("max"), owner]
-    gateway.results = [_answer(ROUTE, {"role": "assistant", "content": "Kept."})]
-    gateway.dispatch = ["response_received"]
+    (ctx.drive_root / 'fixture.txt').write_text('This next tool reply fits in the room returned by the first pass.')
+    read = {"id": "short-read", "type": "function", "function": {"name": "read_file", "arguments": json.dumps(
+        {"path": "fixture.txt"})}}
+    gateway.results = [_answer(ROUTE, {"role": "assistant", "content": "Checking.", "tool_calls": [read]}),
+                       _answer(ROUTE, {"role": "assistant", "content": "Kept."})]
+    gateway.dispatch = ["response_received"] * 2
     tools._ctx.memory_view_facts = mf.trace_facts(built.projection("max").memory_facts)
     text, _usage, _trace = _run(ctx, tools, events, built)
     rows = _drained(events)
-    assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "max"
+    assert text == "Kept." and len(gateway.creates) == 2 and tools._ctx.active_context_mode == "max"
     assert [row.get("effective_mode") for row in rows if row.get("checkpoint_kind") == "context_memory_coarsened"] == ["max"]
     assert "context_fit_low_retry" not in [row.get("checkpoint_kind") for row in rows]
+    first, second = [payload for payload, _ in gateway.uploads]
+    assert first['tools'] == second['tools']
+    held, next_rows = ([m for m in sent['messages'] if not str(m['content']).startswith(CLOCK_NOTE_PREFIX)]
+                       for sent in (first, second))
+    # OpenAI-family transport marks the latest user/tool row for cache; the logical prefix stays untouched.
+    assert [{k: v for k, v in row.items() if k != 'cache_control'} for row in held] == [
+        {k: v for k, v in row.items() if k != 'cache_control'} for row in next_rows[:len(held)]]
+    assert window - NANO_MIN_HEADROOM_TOKENS - bounded_prompt_tokens_for_payload(first, 0) >= math.ceil(
+        window / RECLAIM_LOW_WATER_DIVISOR)
+    level = mf.kept_level(memory, tools._ctx.memory_view_facts)
+    assert all(stage_of(memory, step, ident) in mf.TELLING_STAGES for step, ids in level.addressed for ident in ids)
 
 
-def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
-        main_call, monkeypatch, tmp_path):
-    """The production pre-send passes preserve continuity: narrow Max's memory before lowering its books,
-    keep those addresses in Low instead of resurrecting the startup view, and send every owner word."""
+@pytest.mark.parametrize('maps_only', [False, True], ids=['maps-and-tellings', 'maps-alone'])
+def test_a_presend_low_fold_publishes_only_the_necessary_concessions(main_call, monkeypatch, tmp_path, maps_only):
+    """The production pre-send floor sends the owner tail intact and names what it actually shortened."""
     from ouroboros import context_fit, memory_floor as mf
     from ouroboros.memory_inventory import shortage_from_trace
     from ouroboros.memory_view import snapshot_from_json, snapshot_json
     from ouroboros.tool_policy import initial_tool_schemas
     from tests import _memory_view_synthetic as syn
+    from ouroboros import loop_model_call
+    from ouroboros.context_window import _start_form
 
+    attempts = []
+    attach = loop_model_call.with_attempt_prefix
+
+    def inspect_prefix(*args, **kwargs):
+        physical = attach(*args, **kwargs)
+        if physical is not None:
+            attempts.append(physical)
+        return physical
+
+    monkeypatch.setattr(loop_model_call, 'with_attempt_prefix', inspect_prefix)
     ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
-                                                         view=snapshot_json(syn.actor("main")), books=400_000)
+                                                         view=snapshot_json(syn.actor("main")),
+                                                         books=800_000 if maps_only else 400_000)
     roomy = plan(10_000_000)
     full = roomy.projected_tokens_with_tools("max", initial_tool_schemas(tools, context_mode="max"))
     # A window that holds Max with all of my memory and both working margins.
@@ -1126,10 +1419,19 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     rows = _drained(events)
     kinds = [row.get("checkpoint_kind") for row in rows]
     assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "low"
-    # Memory folded first and, unable to make room, its own floor lowered the books in that same pass.
+    # The Max trial did not make enough room; the same pass uses maps. Its checkpoint says what reached the wire.
+    checkpoint = 'context_fit_low_retry' if maps_only else 'context_memory_coarsened'
     assert [(row.get("effective_mode"), row.get("books")) for row in rows  # a Low for the window is Low (21.11)
-            if row.get("checkpoint_kind") == "context_memory_coarsened"] == [("low", "maps")]
-    assert "context_fit_low_retry" not in kinds
+            if row.get("checkpoint_kind") == checkpoint] == [("low", "maps")]
+    assert ('context_memory_coarsened' if maps_only else 'context_fit_low_retry') not in kinds
+    assert _start_form(attempts[-1]) == 'maps'
+    origins = attempts[-1].prefix['origins']
+    assert ('memory_coarsened' in origins) is not maps_only and origins.count('low_retry') == 1
+    from ouroboros.transcript_prefix import message_digest
+    assert {message_digest(first[1]), message_digest(owner)} <= {message_digest(row) for row in low}
+    if maps_only:
+        assert tools._ctx.memory_view_facts['floor']['runs'] == built.max_projection.memory_facts['floor']['runs']
+        return
 
     def shows(sent, whole):
         return json.dumps(whole, ensure_ascii=False)[1:-1] in json.dumps(sent, ensure_ascii=False)
@@ -1146,8 +1448,6 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     assert "F1" in folded and folded - {"F1"}
     # Max sends [books, handbook, story, rooms notice, turns...]; Low [book navigation, story, rooms notice, turns...].
     assert len(json.dumps(low[0])) < len(json.dumps(first[0]))
-    from ouroboros.transcript_prefix import message_digest
-    assert {message_digest(first[1]), message_digest(owner)} <= {message_digest(row) for row in low}
     note = low[2]["content"]
     assert f"Low cuts for the window ({window} tokens)." in note  # Low, temporarily, for the window (owner 21.11)
     assert "does not hold all of my memory" not in note and "cannot hold" not in note

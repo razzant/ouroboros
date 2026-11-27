@@ -91,7 +91,8 @@ def test_a_late_result_block_keeps_its_same_commit_instruction():
     assert outcome["message"].startswith(instruction) and "4 execution-receipt mismatch(es)" in outcome["message"]
 
 
-def test_shared_project_receipts_bind_final_retirement_after_all_slots_settle(tmp_path):
+@pytest.mark.parametrize("outcome", ["", "removed", "gone_after_unknown", "kept"])
+def test_shared_project_receipts_bind_final_retirement_after_all_slots_settle(tmp_path, outcome):
     from ouroboros import delegate_custody as custody
     from ouroboros.observability import persist_call
     from scripts.contributor_review_evidence import bind_execution_receipts
@@ -154,7 +155,8 @@ def test_shared_project_receipts_bind_final_retirement_after_all_slots_settle(tm
     for index in (1, 2):
         custody.emit(tmp_path, custody.LEDGER_RECORDED, {"run_id": f"run-{index}"})
         custody.emit(tmp_path, custody.SETTLED, {"run_id": f"run-{index}"})
-    custody.emit(tmp_path, custody.PROJECT_RETIRED, {"run_id": "run-1"})
+    facts = {"project_kept": True} if outcome == "kept" else {"removal_outcome": outcome} if outcome else {}
+    custody.emit(tmp_path, custody.PROJECT_RETIRED, {"run_id": "run-1", **facts})
     custody._CUSTODY.clear()
 
     receipts, mismatches, _ = bind_execution_receipts(
@@ -162,8 +164,11 @@ def test_shared_project_receipts_bind_final_retirement_after_all_slots_settle(tm
     )
 
     assert mismatches == []
-    assert [row["observed"]["settlement"]["project_retired"]
-            for row in receipts] == [True, True]
+    for row in receipts:
+        settlement = row["observed"]["settlement"]
+        assert settlement["registration_discharged"] is True
+        assert settlement["project_retired"] is (outcome in ("", "removed"))
+        assert settlement.get("removal_outcome", "") == outcome
     assert all(
         row["observed"]["settlement"]["bound_at"]
         == "panel_complete_custody_replay"

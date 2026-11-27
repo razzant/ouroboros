@@ -69,6 +69,11 @@ class _ExtensionRegistrations:
     # ordinary responses do not.
     active_call_work: int = 0
 
+    @property
+    def published_granted_keys(self) -> frozenset[str]:
+        """Use the original load's API, not a later companion recovery."""
+        return self.api_instances[0]._granted_upper if self.api_instances else frozenset()
+
 
 @dataclass
 class _StagedSupervisedTask:
@@ -179,6 +184,9 @@ class _PluginAPIConfig:
     # ("" -> the loader's negotiation default for grandfathered payloads).
     plugin_api_generation: str = ""
     loaded_skill: Any = None
+    # A passive catalog/discovery read shows the token but never claims the bot for the connector's reader; only a
+    # read that feeds a running child (which will poll) claims. The owner's own bot is never claimed either way.
+    claim_bot_on_read: bool = True
 
 
 # Lock-guarded registries; per-surface maps keep unload proportional to one extension.
@@ -252,20 +260,15 @@ def extension_generation_digest(skill_name: str) -> str:
 def live_extension_fingerprint() -> str:
     """Digest of WHAT this process has live, comparable across processes.
 
-    ``generation_digest`` is minted fresh per publication, so it can never be
-    compared between processes: the server and a task worker importing the very
-    same payload mint different digests. What IS identical on both sides is the
-    payload identity each loaded — exactly the triple ``live_loaded`` compares
-    (skill name, content hash, resolved skill dir) — so the fingerprint is taken
-    over that. An EMPTY registry has a definite digest of its own, which is what
-    lets a reader tell "the publisher has nothing live" apart from "nothing was
-    ever published" (the absent-marker case, which reads as ``""``).
+    ``generation_digest`` names this process's publication only. Across processes,
+    compare the payload identity and the granted names attached to the load.
+    The empty registry has a digest, unlike an absent marker.
     """
     with _lock:
-        rows = sorted(
-            (name, str(bundle.content_hash or ""), str(bundle.skill_dir or ""))
-            for name, bundle in _extensions.items()
-        )
+        rows = [
+            (name, str(bundle.content_hash or ""), str(bundle.skill_dir or ""), sorted(bundle.published_granted_keys))
+            for name, bundle in sorted(_extensions.items())
+        ]
     payload = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
@@ -346,6 +349,31 @@ def live_contribution_projection() -> List[Dict[str, Any]]:
             entry for name, bundle in sorted(_extensions.items())
             if name not in _unloading for entry in bundle.contributions
         ])
+
+
+def published_widget_titles() -> Dict[str, tuple[str, str, List[str]]]:
+    """``{skill: (skill_dir, revision, titles)}``, read under one lock: the headers of the widget tabs each
+    publication this process holds registered, with the resolved folder and revision it loaded them from (maybe
+    older than the folder's bytes while a call holds it). A name unloading or holding no tab is absent; a caller
+    binds the titles to a folder (and a release) itself, never to the name alone."""
+    with _lock:
+        out: Dict[str, tuple[str, str, List[str]]] = {}
+        for name, bundle in _extensions.items():
+            titles = [str((_ui_tabs.get(key) or {}).get("title") or "").strip() for key in bundle.ui_tabs]
+            if name not in _unloading and bundle.skill_dir and any(titles):
+                out[name] = (str(bundle.skill_dir), str(bundle.content_hash or ""), [t for t in titles if t])
+        return out
+
+
+def published_skill_contributions(skill_name: str, revision: str, skill_dir: pathlib.Path) -> Optional[List[Dict[str, Any]]]:
+    """This installed release's visible entries. An empty publication is final; None means it is not visible."""
+    directory = str(skill_dir.resolve())
+    with _lock:
+        bundle = _extensions.get(skill_name)
+        if (bundle is None or skill_name in _unloading
+                or bundle.content_hash != revision or bundle.skill_dir != directory):
+            return None
+        return copy.deepcopy(bundle.contributions)
 
 
 def live_host_asset(skill_name: str, revision: str, path: str) -> Optional[bytes]:

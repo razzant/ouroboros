@@ -4,11 +4,12 @@ import { mountVersionList } from './update_versions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
-import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, checkFailureReason, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, updateOverReview, updateTarget, applyTitle, verifiedUpdatePlan } from './update_status.js';
+import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, checkFailureReason, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, updateOverReview, updateRestartReadiness, updateTarget, applyTitle, verifiedUpdatePlan } from './update_status.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { updateEffectsText } from './update_effects.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { mountTabSettings } from './dashboard.js';
+import { bindScrollFade, restoreFocusWithoutReveal, syncFoldStops } from './scroll_fade.js';
 
 // Known non-state warnings are folded into their verdict states; everything
 // else is surfaced verbatim so a backend warning class can never vanish.
@@ -218,13 +219,26 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
                     : { id: 'check', label: 'Check again' },
             };
         }
-        if (txPhase === 'pending_boot_smoke') {
+        // The phase alone proves nothing (update_status.js updateRestartReadiness): the restart is offered once this
+        // attempt's own check before it passed; until then the check is the update's stage, as an ordinary update's is,
+        // and a transaction that does not say keeps the plain active-transaction reading below.
+        const readiness = updateRestartReadiness(data.update_tx);
+        if (readiness === 'ready') {
             return {
                 ...base,
                 state: 'resolving', tone: 'warn',
                 headline: 'An update is waiting for a restart to finish.',
                 hint: 'Restart Ouroboros to run the post-update checks and complete it.',
                 action: { id: 'restart', label: 'Restart now' },
+            };
+        }
+        if (readiness === 'checking') {
+            return {
+                ...base,
+                state: 'resolving', tone: 'neutral',
+                headline: UPDATE_STAGE_LABELS.checking,
+                hint: 'The update finishes with a restart once these checks pass.',
+                action: { id: 'check', label: 'Check again' },
             };
         }
         if (txPhase === 'gate_blocked' || txPhase === 'marker_cleanup_retry') {
@@ -715,7 +729,7 @@ export function initUpdates({ mount, state, ws }) {
                     <div class="updates-letter-note" id="updates-letter-note-line" hidden><span id="updates-letter-note" role="status" aria-live="polite"></span> <span id="updates-letter-task"></span></div>
                     <p class="ui-status updates-letter-over" id="updates-letter-over" data-tone="warn" hidden></p>
                     <div class="updates-letter-body ui-rich-content" id="updates-letter-body"></div>
-                    <button type="button" class="btn btn-ghost btn-sm ui-list-more" id="updates-letter-more" hidden>Read all</button>
+                    <button type="button" class="btn btn-ghost btn-sm ui-list-more" id="updates-letter-more" aria-expanded="false" aria-controls="updates-letter-body" hidden>Read all</button>
                     <details class="ui-disclosure updates-letter-details" id="updates-letter-details">
                         <summary>Details</summary>
                         <p id="updates-letter-provenance"></p>
@@ -735,10 +749,10 @@ export function initUpdates({ mount, state, ws }) {
                     </div>
                     <p class="updates-branch" id="updates-current"></p>
                     <h4 class="updates-subhead">Restore an earlier version</h4>
-                    <div id="updates-commits" class="updates-restore-list"></div>
+                    <div id="updates-commits" class="updates-restore-list scroll-fade-y"></div>
                     <button type="button" class="btn btn-ghost btn-sm ui-list-more" id="updates-commits-more" hidden></button>
                     <h4 class="updates-subhead">Official releases</h4>
-                    <div id="updates-official-tags" class="updates-restore-list"></div>
+                    <div id="updates-official-tags" class="updates-restore-list scroll-fade-y"></div>
                 </details>
             </section>
             <div class="dashboard-settings-cards" data-updates-settings></div>
@@ -777,6 +791,10 @@ export function initUpdates({ mount, state, ws }) {
     const commitsDiv = page.querySelector('#updates-commits');
     const commitsMore = page.querySelector('#updates-commits-more');
     const officialTagsDiv = page.querySelector('#updates-official-tags');
+    // Both Recovery lists are panel-lifetime vertical scrollers; Official releases has no focusable rows inside,
+    // so it becomes a named keyboard scroll region whenever it overflows.
+    bindScrollFade(commitsDiv);
+    bindScrollFade(officialTagsDiv, { region: 'Official releases' });
     const letterSection = page.querySelector('#updates-letter');
     const letterLabel = page.querySelector('#updates-letter-label');
     const letterMeta = page.querySelector('#updates-letter-meta');
@@ -796,10 +814,10 @@ export function initUpdates({ mount, state, ws }) {
     let letterRequestNotice = null; // this press's refusal or uncertainty
     let unrefreshedReceipt = null; // a confirmed reply stands until a successful status read
     let letterDisposer = null, letterKey = null;
-    // "Read all" offers the rest only when the clamped body hides some. A body in a hidden tab or page measures 0 x 0,
-    // which says nothing, so that measure stays owed until the body has a height (its tab or the Dashboard shown, or
-    // the next render). A new width refolds a folded text, so it owes the measure again.
-    let letterMeasureOwed = false;
+    // "Read all" and data-fold-clipped share one measured condition driven by observing the body and its
+    // direct children: visibility, column/viewport resizes, and late child growth all re-measure natively.
+    let letterMeasureFrame = null;
+    const letterSizes = typeof ResizeObserver === 'function' ? new ResizeObserver(() => scheduleLetterMeasure()) : null;
     let letterDoor = '';
     let latestStatus = null;
     let phase = 'loading';
@@ -817,6 +835,11 @@ export function initUpdates({ mount, state, ws }) {
     // resources (Chart instances, mermaid timers, a click handler). Release
     // them BEFORE the innerHTML that would orphan them.
     function releaseLetterBody() {
+        letterSizes?.disconnect();
+        if (letterMeasureFrame !== null) {
+            cancelAnimationFrame(letterMeasureFrame);
+            letterMeasureFrame = null;
+        }
         if (letterDisposer) {
             letterDisposer();
             letterDisposer = null;
@@ -825,10 +848,50 @@ export function initUpdates({ mount, state, ws }) {
         }
     }
 
+    function observeLetterSize() {
+        if (!letterSizes) return;
+        letterSizes.disconnect();
+        letterSizes.observe(letterBody);
+        for (const child of letterBody.children) letterSizes.observe(child);
+    }
+
+    // Keep visible/straddling blocks and full-text accessibility/selection live while taking only
+    // fully out-of-view fragments out of sequential keyboard order via the shared fold-stop owner. A control the
+    // keyboard holds that a reflow newly folds away hands its focus to Read all without moving the reading place: Enter
+    // never follows a link nobody can see, and opening the text frees the order again.
+    function syncLetterStops(clipped) {
+        const limit = clipped ? letterBody.getBoundingClientRect().bottom : 0;
+        const held = clipped && letterBody.contains(document.activeElement) ? document.activeElement : null;
+        const wasStopped = Boolean(held?.closest('[data-fold-stop]'));
+        syncFoldStops(letterBody, clipped, (el) => el.getBoundingClientRect().top >= limit - 1);
+        if (held && !wasStopped && held.closest('[data-fold-stop]')) restoreFocusWithoutReveal(letterMore);
+    }
+
+    function resetLetterFold() {
+        letterBody.classList.remove('is-open');
+        letterBody.removeAttribute('data-fold-clipped');
+        syncLetterStops(false);
+        letterMore.textContent = 'Read all';
+        letterMore.setAttribute('aria-expanded', 'false');
+        letterMore.hidden = true;
+    }
+
+    function scheduleLetterMeasure() {
+        if (letterMeasureFrame !== null || letterBody.hidden || letterBody.classList.contains('is-open')) return;
+        letterMeasureFrame = requestAnimationFrame(() => {
+            letterMeasureFrame = null;
+            measureLetter();
+        });
+    }
+
     function measureLetter() {
-        if (!letterMeasureOwed || letterBody.hidden || !letterBody.clientHeight) return;
-        letterMeasureOwed = false;
-        letterMore.hidden = letterBody.scrollHeight <= letterBody.clientHeight + 1;
+        if (letterBody.hidden || letterBody.classList.contains('is-open') || !letterBody.clientHeight) return;
+        const clipped = letterBody.scrollHeight > letterBody.clientHeight + 1;
+        letterBody.toggleAttribute('data-fold-clipped', clipped);
+        letterMore.hidden = !clipped;
+        letterMore.textContent = 'Read all';
+        letterMore.setAttribute('aria-expanded', 'false');
+        syncLetterStops(clipped);
     }
 
     /** The letter is a fact: no control the markdown pipeline adds may survive in it. */
@@ -876,8 +939,8 @@ export function initUpdates({ mount, state, ws }) {
             if (letterKey !== null) {
                 releaseLetterBody();
                 letterBody.innerHTML = '';
+                resetLetterFold();
                 letterKey = null;
-                letterMeasureOwed = false;
             }
             letterSection.hidden = true;
             return;
@@ -941,21 +1004,16 @@ export function initUpdates({ mount, state, ws }) {
             ? `${letterRefreshError ? 'Last check failed' : 'Last failure'}${failedAt ? ` on ${failedAt}` : ''}${failedRange}: ${lastFailure}` : '';
         letterError.hidden = !lastFailure;
         const nextKey = letterContentKey(view);
-        if (nextKey === letterKey) {
-            if (letterMeasureOwed) requestAnimationFrame(measureLetter);
-            return;
-        }
+        if (nextKey === letterKey) return;
         releaseLetterBody();
         letterKey = nextKey;
         letterBody.hidden = !view.markdown;
         // A new text opens at its first part; "Read all" offers the rest only when there is more than that part.
-        letterBody.classList.remove('is-open');
-        letterMore.textContent = 'Read all';
-        letterMore.hidden = true;
+        resetLetterFold();
         mountChatMarkdown(letterBody, view.markdown || '');
-        letterMeasureOwed = Boolean(view.markdown);
         if (!view.markdown) return;
-        requestAnimationFrame(measureLetter);
+        observeLetterSize();
+        scheduleLetterMeasure();
         // No anchored scroll to protect on this page, so markdown's deferred
         // writes (highlight, latex, mermaid, charts) run directly.
         // The authored body keeps no controls of its own. The shared
@@ -967,6 +1025,8 @@ export function initUpdates({ mount, state, ws }) {
             onDomWrite: (mutate) => {
                 mutate();
                 stripLetterControls();
+                observeLetterSize();
+                scheduleLetterMeasure();
             },
         });
         stripLetterControls();
@@ -1456,7 +1516,15 @@ export function initUpdates({ mount, state, ws }) {
         rollback({ target: attemptRestore.dataset.target, label: 'the version before this update' });
     });
     letterMore.addEventListener('click', () => {
-        letterMore.textContent = letterBody.classList.toggle('is-open') ? 'Show less' : 'Read all';
+        const open = letterBody.classList.toggle('is-open');
+        letterMore.textContent = open ? 'Show less' : 'Read all';
+        letterMore.setAttribute('aria-expanded', String(open));
+        if (open) {
+            letterBody.removeAttribute('data-fold-clipped');
+            syncLetterStops(false);
+        } else {
+            measureLetter();
+        }
     });
     page.querySelector('#updates-promote').addEventListener('click', async () => {
         const confirmedPromote = await openConfirmDialog({
@@ -1492,21 +1560,7 @@ export function initUpdates({ mount, state, ws }) {
     bindAppVersionRender({ getStatus: () => latestStatus, render });  // same lifetime as the panel
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
         if (event.detail?.tab !== 'updates' || state.activePage !== 'dashboard') return;
-        requestAnimationFrame(measureLetter);
         loadStatus({ fetchRemote: false });
         versions.load();
     });
-    // The sidebar's return to the Dashboard announces only the page (app.js showPage); its selected tab stays.
-    window.addEventListener('ouro:page-shown', (event) => {
-        if (event.detail?.page === 'dashboard') requestAnimationFrame(measureLetter);
-    });
-    // A narrower window or interface size folds more of a text that fitted; an open text keeps its Show less.
-    window.addEventListener('resize', () => {
-        if (letterBody.classList.contains('is-open')) return;
-        letterMeasureOwed = true;
-        requestAnimationFrame(measureLetter);
-    });
-    // An owed measure is taken when the body gets a box, whichever door showed it: its page opened from the
-    // Dashboard's list by the row already chosen changes no tab and announces nothing (dashboard.js openLevel).
-    if (typeof ResizeObserver === 'function') new ResizeObserver(() => measureLetter()).observe(letterBody);
 }

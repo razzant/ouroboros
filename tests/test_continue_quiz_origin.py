@@ -177,8 +177,17 @@ def _run_interrupted_by_restart(tmp_path, monkeypatch, queue, workers, bridge, r
     OuroborosAgent._persist_running_record(types.SimpleNamespace(env=types.SimpleNamespace(drive_root=tmp_path)),
                                            dict(restored))
     if own_card:  # a later answer to the root's own card, delivered while it reads
+        from ouroboros.owner_quiz import quiz_states
+
         _ask(bridge, tmp_path, restored["id"], "q-root", ROOT_QUESTION, ["2025", "2026"])
         _answer(tmp_path, restored["id"], "q-root", "req-root", option_index=1)
+        # The answer is really read before the Restart, by the run's own consumer: the live acknowledgement and
+        # the receipt on the question are what let Continue carry it as read history instead of leaving it unread.
+        drained = _drain(tmp_path, restored["id"], restored["metadata"], restored["text"])
+        own = [row for row in drained._owner_directives
+               if row.get("source_task_id") == restored["id"] and row.get("quiz_id") == "q-root"]
+        assert [(row["source"], row["content"]) for row in own] == [("owner_press", "2. 2026")]
+        assert quiz_states(tmp_path, restored["id"])["q-root"]["delivery"]["read_at"]
     monkeypatch.setattr(workers, "WORKERS", {})  # the worker slot is gone; the door settles the row
     _pool_events(workers, monkeypatch)
     _restart_door(tmp_path, monkeypatch, workers)
@@ -397,7 +406,16 @@ def test_a_start_card_that_does_not_resolve_refuses_by_name(tmp_path, monkeypatc
             first["source_task_id"] = "other-task"
 
     if damage == "card_missing":
+        from ouroboros import dialogue_store
+
         _mutate_projection(tmp_path, WAKE, lambda quizzes: quizzes.pop("q-start"))
+        # Both carriers of the card go, never one: the projection row above and the canonical ``quiz_answer``
+        # history row, which ``owner_source._recorded_answered_quiz`` would otherwise still resolve for the
+        # carried answer. Exactly the synthetic row, inside ``tmp_path``.
+        with dialogue_store.transaction(tmp_path, write=True) as conn:
+            cut = conn.execute("DELETE FROM dialogue WHERE stream='chat' AND client_message_id=?",
+                               (f"quiz_answer:{WAKE}:q-start",))
+            assert cut.rowcount == 1, "exactly the synthetic canonical answer row"
     elif damage == "card_unanswered":
         _mutate_projection(tmp_path, WAKE, lambda quizzes: quizzes["q-start"].update(state="expired_terminal"))
     else:
@@ -503,8 +521,10 @@ def test_an_owner_turn_root_keeps_its_original_and_the_words_it_started_with(tmp
     assert ack["ok"] is True, ack
     successor = next(task for task in workers.PENDING if task["id"] == ack["successor_task_id"])
     assert f"Owner's original instruction (verbatim):\n{words}" in successor["text"]
-    assert "Other owner words in that task's record" in successor["text"]
-    assert "Only public data, please" in successor["text"] and "began without an owner message" not in successor["text"]
+    # A mail row its start recorded without its writer's kind is listed, by a heading that claims no author for it.
+    assert "Later inputs in that task's record (in order):" in successor["text"]
+    assert ("Mail of an unrecorded kind (my human's words or the host's record of an act of theirs): "
+            "Only public data, please") in successor["text"] and "began without an owner message" not in successor["text"]
     assert "start" not in successor["metadata"]["continuation"]["owner_sources"], "the chain shape is unchanged"
     assert [(row["source"], row["content"]) for row in successor["metadata"]["owner_corpus"]] == [
         ("origin_message", words), ("owner_mailbox", "Only public data, please")]
@@ -639,8 +659,11 @@ def test_a_drafted_start_keeps_an_owner_mailbox_image_by_reference_through_resta
     projection = _owner_content_projection(recorded["content"])
     assert SHOT_WORDS in projection and str(original) in projection
     assert recorded["words"] == SHOT_WORDS, "the delivered text beside its rendering"
-    row = {"source": "owner_mailbox", "content": projection, "msg_id": "owner-shot-1803",  # no chat row is held for
-           "client_message_id": "owner-shot", "received": recorded["received"], "words": SHOT_WORDS}  # it: when its mail was written
+    # No chat row is held for it, so ``received`` is when its mail was written. ``mail_kind`` is the kind its writer
+    # recorded (``write_owner_message``'s default, plain owner text), kept beside the words, never read from them.
+    row = {"source": "owner_mailbox", "content": projection, "msg_id": "owner-shot-1803",
+           "client_message_id": "owner-shot", "received": recorded["received"], "words": SHOT_WORDS,
+           "mail_kind": "owner_text"}
     assert root["metadata"]["origin_message_absent"] is True and row in root["metadata"]["owner_corpus"]
     _run_interrupted_by_restart(tmp_path, monkeypatch, queue, workers, bridge, root, own_card=False)
     stored = load_task_result(tmp_path, root["id"])

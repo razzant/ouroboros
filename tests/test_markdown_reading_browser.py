@@ -107,8 +107,10 @@ def compact_wide_table(runs):
 
 
 COMPACT_WIDE = compact_wide_table(8)
+COMPACT_LINE = "const report = " + "measured_dependency_" * 12 + "END_OF_REPORT"
 SKILL_REVIEW = (
     f"# Skill review: demo\n\nReviewers: alpha\n\n## Findings\n\n```c++\n{FENCE_BODY}\n```\n\n"
+    f"```text\n{COMPACT_LINE}\n```\n\n"
     f"### Evidence\n\n{COMPACT_NARROW}\n\n#### Timings\n\n{COMPACT_WIDE}\n"
 )
 ROWS = [
@@ -214,6 +216,90 @@ def open_chat(ui, width, height=900):
     return page
 
 
+def test_early_reply_adoption_preserves_enhanced_words_and_enables_code_copy(reading_ui):
+    page = open_chat(reading_ui, 420)
+    linked_table = WIDE_TABLE.replace("Requests", "[Requests](https://example.com/requests)")
+    page.evaluate(r"""async (text) => {
+        const {createEarlyTextBubbles, createTextBubbles} = await import('/static/modules/chat_text_bubble.js');
+        const {bindCompactMarkdown, enhanceChatMarkdown} = await import('/static/modules/chat_markdown.js');
+        const feed = document.querySelector('#chat-messages');
+        bindCompactMarkdown(feed);
+        const draw = createTextBubbles({chatMedia: {attachCopyControl() {}}, replies: {decorate() {}}, feed});
+        const rows = createEarlyTextBubbles(feed, draw, node => feed.append(node), node => node.remove());
+        const saved = {ts: '2026-09-28T10:00:10Z', meta: {}, opts: {historyId: 'copy-and-table-fixture'}};
+        rows.show([{address: 'fixture', text, ts: saved.ts}]);
+        const bubble = rows.get('fixture');
+        bubble.id = 'early-fence-fixture';
+        window.adoptFixture = () => {
+            const link = bubble.querySelector('td a');
+            const selected = link.firstChild;
+            link.focus({preventScroll: true});
+            const range = document.createRange(); range.selectNodeContents(link);
+            getSelection().removeAllRanges(); getSelection().addRange(range);
+            draw(text, 'assistant', {...saved, existing: bubble});
+            enhanceChatMarkdown(bubble);
+            return {
+                link: link === bubble.querySelector('td a'), focus: link === document.activeElement,
+                selection: getSelection().anchorNode === selected || getSelection().anchorNode === link,
+            };
+        };
+    }""", linked_table + "\n\n```text\ncopy only the saved fence\n```")
+    reply = page.locator("#early-fence-fixture")
+    reply.locator('.md-table-wrap[role="region"][tabindex="0"]').wait_for(timeout=5_000)
+    copy = reply.locator(".md-code-copy")
+    assert copy.evaluate("node => getComputedStyle(node).display") == "none"
+    copy.evaluate("node => node.click()")
+    assert page.evaluate("window.__copied") is None
+    assert page.evaluate("window.adoptFixture()") == {"link": True, "focus": True, "selection": True}
+    assert copy.evaluate("node => getComputedStyle(node).display") != "none"
+    copy.click(timeout=3_000)
+    page.wait_for_function("window.__copied !== null", timeout=3_000)
+    expected = reply.locator('pre > code').text_content()
+    assert expected.strip() == "copy only the saved fence"
+    assert page.evaluate("window.__copied") == expected
+    assert reading_ui["foreign"] == []
+
+
+def test_formula_waits_for_retained_room_selection_then_gets_scroll_region(reading_ui):
+    page = open_chat(reading_ui, 780)
+    page.evaluate(r"""async () => {
+        const {enhanceChatMarkdown} = await import('/static/modules/chat_markdown.js');
+        const {createRoomRetirement} = await import('/static/modules/room_retire.js');
+        const page = document.createElement('section');
+        const bubble = document.createElement('div');
+        bubble.className = 'chat-bubble assistant'; bubble.id = 'retained-math-fixture';
+        const msg = document.createElement('div');
+        msg.className = 'message ui-rich-content';
+        const authored = 'Keep these selected words beside $$' + 'abcdefghijklmnop+'.repeat(12) + 'q$$';
+        msg.textContent = authored; bubble.append(msg); page.append(bubble);
+        document.querySelector('#chat-messages').append(page);
+        const selection = getSelection();
+        const pick = (node, from, to) => {
+            const range = document.createRange(); range.setStart(node, from); range.setEnd(node, to);
+            selection.removeAllRanges(); selection.addRange(range);
+        };
+        const node = msg.firstChild;
+        pick(node, 5, 25);
+        const inst = {page};
+        const rooms = createRoomRetirement({instances: new Map([['math', inst]])});
+        rooms.rememberSelection(inst); page.inert = true;
+        const outside = document.querySelector('#chat-messages .chat-bubble .sender').firstChild;
+        pick(outside, 0, 1);
+        enhanceChatMarkdown(bubble, {keptSelection: () => !!inst.keptRanges});
+        window.restoreFixture = () => {
+            page.inert = false; rooms.restoreSelection(inst);
+            return node.isConnected && selection.toString() === authored.slice(5, 25);
+        };
+    }""")
+    reply = page.locator("#retained-math-fixture")
+    assert reply.locator(".katex-display").count() == 0
+    assert page.evaluate("window.restoreFixture()")
+    page.evaluate("getSelection().removeAllRanges()")
+    formula = reply.locator('.katex-display[role="region"][tabindex="0"][data-scroll-end]')
+    formula.wait_for(timeout=5_000)
+    assert formula.get_attribute("aria-label") == "Scrollable formula"
+
+
 def mount_project_panel(page):
     """A real secondary chat instance in the Project panel (440px at this viewport)."""
     page.evaluate("""async () => {
@@ -248,6 +334,7 @@ MEASURE = """(root) => {
     const hr = message.querySelector('hr');
     const tables = [...column.querySelectorAll('.message.ui-rich-content .md-table-wrap')].map((wrap) => ({
         head: wrap.querySelector('th').textContent,
+        fadeClass: wrap.classList.contains('scroll-fade-x'),
         size: parseFloat(style(wrap.querySelector('table')).fontSize),
         overflow: wrap.scrollWidth - wrap.clientWidth,
         region: wrap.getAttribute('role'), label: wrap.getAttribute('aria-label'),
@@ -316,7 +403,7 @@ def assert_reading(metrics, *, narrow):
     assert set(tables) >= {"Option", "Region", "Metric", "Source"}, tables
     for table in tables.values():
         # A rich answer's table reads at the answer's own size, never shrunk to fit.
-        assert table["size"] == body, table
+        assert table["fadeClass"] and table["size"] == body, table
         assert table["whiteSpace"] == "normal" and table["valign"] == "top", table
         assert "tabular-nums" in table["numeric"], table
         scrolls = table["overflow"] > 1
@@ -515,7 +602,9 @@ def test_compact_consumers_show_the_same_code(reading_ui):
     review.locator("[data-skill-review-toggle]").click()
     full = review.locator(".skill-review-full")
     full.wait_for(state="visible")
-    assert full.locator("pre > code").evaluate("el => [el.textContent, el.children.length]") == [FENCE_BODY + "\n", 0]
+    assert full.locator("pre > code").evaluate_all("nodes => nodes.map(el => [el.textContent, el.children.length])") == [
+        [FENCE_BODY + "\n", 0], [COMPACT_LINE + "\n", 0],
+    ]
     assert full.locator("pre em, pre strong, pre .md-li, pre .md-h1, pre a, pre table").count() == 0
     review.scroll_into_view_if_needed()
     capture(page, f"reading-skill-review-{engine}")
@@ -618,8 +707,8 @@ def test_compact_image_reference_is_its_address_alone(reading_ui):
 
 
 def assert_column_bound(page, column):
-    """`createChatInstance` binds its own column's Markdown tables (chat.js); the test adds no binding."""
-    assert page.evaluate("(column) => document.querySelector(column).hasAttribute('data-md-tables')", column), column
+    """`createChatInstance` binds its own column's compact Markdown (chat.js); the test adds no binding."""
+    assert page.evaluate("(column) => document.querySelector(column).hasAttribute('data-md-compact')", column), column
 
 
 COMPACT = """(column) => {
@@ -630,6 +719,7 @@ COMPACT = """(column) => {
     const label = (el) => ({size: parseFloat(style(el).fontSize), weight: Number(style(el).fontWeight)});
     const table = (wrap) => ({
         head: wrap.querySelector('th').textContent,
+        fadeClass: wrap.classList.contains('scroll-fade-x'),
         size: parseFloat(style(wrap.querySelector('table')).fontSize),
         overflow: wrap.scrollWidth - wrap.clientWidth,
         region: wrap.getAttribute('role'), label: wrap.getAttribute('aria-label'), tabindex: wrap.getAttribute('tabindex'),
@@ -675,7 +765,7 @@ def assert_compact(metrics):
     assert set(tables) == {"Check", "Signal"} and len(metrics["rowTables"]) == 1, metrics
     for table in metrics["reviewTables"] + metrics["rowTables"]:
         # Compact tables keep --type-body; none is shrunk to fit.
-        assert table["size"] == 14, table
+        assert table["fadeClass"] and table["size"] == 14, table
         scrolls = table["overflow"] > 1
         assert (table["region"], table["tabindex"], table["edges"]) == (
             ("region", "0", [False, True]) if scrolls else (None, None, [False, False])), table
@@ -767,6 +857,35 @@ def test_compact_surfaces_keep_their_density_and_scroll_tables_by_keyboard(readi
     wait_compact_regions(page, column)
     settle_tables(page, column)
     assert_compact(page.evaluate(COMPACT, column))
+    fitted_code, wide_code = review.locator('.skill-review-full pre').all()
+    assert fitted_code.evaluate("el => el.scrollWidth - el.clientWidth") <= 1
+    assert fitted_code.get_attribute('tabindex') is None
+    assert fitted_code.get_attribute('data-scroll-end') is None
+    assert wide_code.text_content() == COMPACT_LINE + '\n'
+    assert wide_code.evaluate("""el => {
+        const mask = node => getComputedStyle(node).maskImage;
+        return el.scrollWidth > el.clientWidth && el.hasAttribute('data-scroll-end') && mask(el) !== 'none'
+            && mask(el.parentElement) === 'none' && getComputedStyle(el.parentElement).backgroundColor !== 'rgba(0, 0, 0, 0)';
+    }""")
+    assert wide_code.get_attribute('aria-label') == 'Scrollable code'
+    wide_code.scroll_into_view_if_needed()
+    capture(page, f'compact-code-desktop-{engine}')
+    review.locator('[data-skill-review-toggle]').focus()
+    full = review.locator('.skill-review-full')
+    page.keyboard.press('Tab')
+    assert full.evaluate('el => document.activeElement === el')
+    assert full.evaluate("el => el.getAttribute('role') === 'region' && el.scrollHeight > el.clientHeight")
+    page.keyboard.press('ArrowDown', delay=300)
+    page.wait_for_function("el => el.scrollTop > 0 && el.hasAttribute('data-scroll-above')", arg=full.element_handle())
+    page.keyboard.press('Tab')
+    assert wide_code.evaluate('el => document.activeElement === el')
+    page.keyboard.press('ArrowRight', delay=300)
+    page.wait_for_function("el => el.scrollLeft > 0 && el.hasAttribute('data-scroll-start')", arg=wide_code.element_handle())
+    # The scroller's actual direction is used, not a direction inferred from the chat.
+    wide_code.evaluate("el => { el.dir = 'rtl'; el.scrollLeft = 0; el.dispatchEvent(new Event('scroll')); }")
+    page.wait_for_function("el => el.hasAttribute('data-scroll-rtl') && el.hasAttribute('data-scroll-end')", arg=wide_code.element_handle())
+    page.keyboard.press('ArrowLeft', delay=300)
+    page.wait_for_function("el => el.scrollLeft < 0 && el.hasAttribute('data-scroll-start')", arg=wide_code.element_handle())
     wide = review.locator(".md-table-wrap", has_text="Latency ms")
     wide.focus()
     assert wide.evaluate("el => document.activeElement === el")
@@ -790,7 +909,7 @@ def test_compact_surfaces_keep_their_density_and_scroll_tables_by_keyboard(readi
     page.evaluate("(column) => { window.readingColumn = document.querySelector(column); }", panel_column)
     page.evaluate("window.readingPanel.destroy()")
     # destroy() releases the column's binding with the page (destroyChatMarkdown).
-    assert page.evaluate("() => !readingColumn.isConnected && !readingColumn.hasAttribute('data-md-tables')")
+    assert page.evaluate("() => !readingColumn.isConnected && !readingColumn.hasAttribute('data-md-compact')")
 
     page = open_chat(ui, 390, 844)
     assert_column_bound(page, column)
@@ -802,3 +921,269 @@ def test_compact_surfaces_keep_their_density_and_scroll_tables_by_keyboard(readi
     review.locator(".md-table-wrap", has_text="Check").scroll_into_view_if_needed()
     capture(page, f"compact-phone390-skill-review-{engine}")
     assert not ui["foreign"], ui["foreign"]
+
+
+WIDE_RICH_MD = "\n\n".join([
+    "```js\nconst wideCodeLine = '" + ("alpha_beta_gamma_" * 12) + "';\n```",
+    "$$" + " + ".join(f"x_{{{i}}}^{{(k)}}" for i in range(1, 26)) + "$$",
+    "```mermaid\ngraph LR\n  A[Responsive] --> B[Fits column]\n```",
+    '```mermaid\n%%{init: {"flowchart": {"useMaxWidth": false}}}%%\ngraph LR\n  '
+    + " --> ".join(f"Stage_{i}[Step {i} verification node]" for i in range(1, 8)) + "\n```",
+    "```chart\n{\"broken\": " + ("\"wrapped word \" " * 12) + "\n```",
+])
+CHART_SOURCE = json.dumps({
+    'type': 'bar',
+    'data': {'labels': [f'Sample {i}' for i in range(32)], 'datasets': [
+        {'label': 'long_metric_id_' * 12, 'data': list(range(32))},
+    ]},
+}, indent=2)
+
+
+def test_rich_horizontal_blocks_rtl_folded_and_render_only_edges(reading_ui):
+    page = open_chat(reading_ui, 390, 844)
+    seen = page.evaluate("""async ([richMd, wideTable, chartSource]) => {
+        const {mountChatMarkdown, enhanceChatMarkdown} = await import('/static/modules/chat_markdown.js');
+        const {refreshProjectAnswerFold} = await import('/static/modules/project_answer.js');
+        const {openSkillDetailSheet} = await import('/static/modules/skill_detail_sheet.js');
+        const col = document.querySelector('#chat-messages');
+        const waitFrames = (n = 4) => new Promise((r) => {
+            const step = (k) => k ? requestAnimationFrame(() => step(k - 1)) : r();
+            step(n);
+        });
+        const edge = (el) => ({
+            fadeX: el.classList.contains('scroll-fade-x'),
+            overflow: el.scrollWidth - el.clientWidth,
+            role: el.getAttribute('role'), label: el.getAttribute('aria-label'),
+            tab: el.getAttribute('tabindex'),
+            edges: [el.hasAttribute('data-scroll-start'), el.hasAttribute('data-scroll-end'), el.hasAttribute('data-scroll-rtl')],
+        });
+        const unmasked = (el) => !el.classList.contains('scroll-fade-x')
+            && ['none', ''].includes(getComputedStyle(el).webkitMaskImage || getComputedStyle(el).maskImage || '');
+
+        // 1. Enhanced rich blocks + RTL table: inner scrollers carry .scroll-fade-x; trays/Copy/chart-error stay unmasked.
+        const host = document.createElement('div');
+        host.className = 'chat-bubble assistant';
+        const msg = document.createElement('div');
+        msg.className = 'message';
+        host.append(msg); col.append(host);
+        mountChatMarkdown(msg, richMd);
+        const rtlHolder = document.createElement('div');
+        rtlHolder.dir = 'rtl';
+        mountChatMarkdown(rtlHolder, wideTable);
+        msg.append(...rtlHolder.childNodes);
+        msg.lastElementChild.dir = 'rtl';
+        const disposeRich = enhanceChatMarkdown(msg);
+        const deadline = performance.now() + 8000;
+        while (msg.querySelectorAll('.md-mermaid-scroll').length < 2 && performance.now() < deadline) await waitFrames(2);
+        await waitFrames(4);
+
+        const pre = msg.querySelector('.md-code-block > pre');
+        const math = msg.querySelector('.katex-display');
+        const [fitMermaid, mermaidScroll] = [...msg.querySelectorAll('.md-mermaid-scroll')];
+        const rtlWrap = msg.querySelector('.md-table-wrap[dir="rtl"]');
+        const chartErr = msg.querySelector('.md-chart-error');
+        const rtlBefore = edge(rtlWrap);
+        rtlWrap.scrollLeft = -120;
+        rtlWrap.dispatchEvent(new Event('scroll'));
+        await waitFrames(2);
+        const rtlScrolled = edge(rtlWrap);
+
+        // 2. Folded Project mirror: both wide and short blocks keep tabindex="-1" (short geometry never strips fold-stop).
+        const foldBubble = document.createElement('div');
+        foldBubble.className = 'chat-bubble assistant project-answer';
+        const foldMsg = document.createElement('div');
+        foldMsg.className = 'message';
+        foldBubble.append(foldMsg); col.append(foldBubble);
+        mountChatMarkdown(foldMsg, Array.from({length: 14}, (_, i) => `Line ${i}`).join('\\n\\n')
+            + '\\n\\n```txt\\nshort\\n```\\n\\n```txt\\n' + 'wide_token_'.repeat(18) + '\\n```');
+        refreshProjectAnswerFold(foldBubble);
+        await waitFrames(3);
+        const disposeFold = enhanceChatMarkdown(foldMsg);
+        await waitFrames(4);
+        const [shortFoldPre, wideFoldPre] = [...foldMsg.querySelectorAll('.md-code-block > pre')];
+        const foldTabs = [foldBubble.classList.contains('is-folded'), shortFoldPre.getAttribute('tabindex'),
+            shortFoldPre.hasAttribute('data-fold-stop'), wideFoldPre.getAttribute('tabindex')];
+
+        const chartMd = '\\n\\n```chart\\n' + chartSource + '\\n```';
+        // 3. Read the same valid chart through an actual chart mount and the real About sheet.
+        // The sheet shares Place History's render-only path: it exposes source and never charts it.
+        const graph = document.createElement('div');
+        col.append(graph);
+        mountChatMarkdown(graph, chartMd);
+        const disposeGraph = enhanceChatMarkdown(graph);
+        openSkillDetailSheet({item: {name: 'Throughput', source_id: 'builtin'},
+            readDetail: async () => ({about: wideTable + '\\n\\n' + richMd + chartMd})});
+        await waitFrames(4);
+        const ro = document.querySelector('.skills-sheet-about');
+        const source = [...ro.querySelectorAll('.md-chart')].at(-1);
+        const range = document.createRange();
+        range.selectNodeContents(source);
+        const text = range.getBoundingClientRect();
+        const box = source.getBoundingClientRect();
+        const canvas = graph.querySelector('canvas');
+        const active = canvas?.parentElement;
+        const roState = {
+            marked: ro.hasAttribute('data-md-rendered'),
+            table: edge(ro.querySelector('.md-table-wrap')),
+            code: edge(ro.querySelector('.md-code-block > pre')),
+            mermaidSvg: ro.querySelectorAll('.md-mermaid svg, .md-chart canvas').length,
+            mermaidOverflow: ro.querySelector('.md-mermaid').scrollWidth - ro.querySelector('.md-mermaid').clientWidth,
+            mermaidUnmasked: unmasked(ro.querySelector('.md-mermaid')) && unmasked(ro.querySelector('.md-chart')),
+            sourceText: range.toString(), sourceHeight: box.height, sourceScrollHeight: source.scrollHeight,
+            sourceClientHeight: source.clientHeight, sourceOverflowX: source.scrollWidth - source.clientWidth,
+            sourceFits: text.top >= box.top && text.bottom <= box.bottom && text.right <= box.right + 1,
+            chart: active && {processed: active.dataset.processed, height: active.clientHeight,
+                overflow: getComputedStyle(active).overflow, canvasHeight: canvas.clientHeight},
+        };
+        window.readingSkillAbout = ro;
+        const result = {
+            code: edge(pre), math: edge(math), fitDiagram: edge(fitMermaid), diagram: edge(mermaidScroll),
+            traysUnmasked: unmasked(msg.querySelector('.md-code-block'))
+                && unmasked(msg.querySelector('[data-code-copy]'))
+                && [...msg.querySelectorAll('.md-mermaid')].every(unmasked)
+                && unmasked(chartErr),
+            chartWrap: getComputedStyle(chartErr).whiteSpace,
+            rtlBefore, rtlScrolled, foldTabs, roState,
+        };
+        disposeRich(); disposeFold(); disposeGraph();
+        host.remove(); foldBubble.remove(); graph.remove();
+        return result;
+    }""", [WIDE_RICH_MD, WIDE_TABLE, CHART_SOURCE])
+
+    for key, label in (("code", "Scrollable code"), ("math", "Scrollable formula"), ("diagram", "Scrollable diagram")):
+        block = seen[key]
+        assert block["fadeX"] and block["overflow"] > 1, (key, block)
+        assert (block["role"], block["label"], block["tab"], block["edges"]) == ("region", label, "0", [False, True, False]), block
+    short_diagram = seen["fitDiagram"]
+    short_overflows = short_diagram["overflow"] > 1
+    assert short_diagram["role"] == ("region" if short_overflows else None), short_diagram
+    assert short_diagram["edges"] == [False, short_overflows, False], short_diagram
+    assert seen["traysUnmasked"] and seen["chartWrap"] == "pre-wrap", seen
+    assert seen["rtlBefore"]["fadeX"] and seen["rtlBefore"]["overflow"] > 1, seen["rtlBefore"]
+    assert seen["rtlBefore"]["edges"] == [False, True, True] and seen["rtlScrolled"]["edges"][0] and seen["rtlScrolled"]["edges"][2], seen
+    assert seen["foldTabs"] == [True, "-1", True, "-1"], seen["foldTabs"]
+    ro = seen["roState"]
+    assert ro["marked"] and ro["mermaidSvg"] == 0 and ro["mermaidOverflow"] <= 1 and ro["mermaidUnmasked"], ro
+    assert ro["table"]["role"] == "region" and ro["code"]["role"] == "region", ro
+    assert ro["sourceText"].rstrip('\n') == CHART_SOURCE
+    assert ro["sourceFits"] and ro["sourceOverflowX"] <= 1, ro
+    assert ro["sourceHeight"] > 480 and ro["sourceScrollHeight"] <= ro["sourceClientHeight"] + 1, ro
+    assert ro["chart"]["processed"] == "true" and ro["chart"]["overflow"] == "hidden", ro
+    assert 0 < ro["chart"]["canvasHeight"] <= ro["chart"]["height"] < ro["sourceHeight"], ro
+    body = page.locator('.skills-detail-sheet [data-sheet-body]')
+    body.evaluate('el => { el.scrollTop = el.scrollHeight; }')
+    capture(page, f"skill-about-chart-end-phone390-{reading_ui['engine']}")
+    page.locator('.skills-detail-sheet [data-sheet-close]').click()
+    assert page.evaluate('() => !readingSkillAbout.isConnected && !readingSkillAbout.hasAttribute("data-md-rendered")')
+
+
+LINK_TABLE = "\n".join([
+    "| Signal | " + " | ".join(f"Month {n}" for n in range(1, 9)) + " | Source |",
+    "| --- | " + " | ".join("---:" for _ in range(8)) + " | --- |",
+    "| [first](https://example.com/first) | " + " | ".join(f"{120_000 + n * 3_457:,}.25" for n in range(8))
+    + " | [report](https://example.com/report) |",
+])
+LINK_EDGE = """() => {
+    const wrap = document.querySelector('[data-link-case] .md-table-wrap');
+    const link = wrap.querySelectorAll('a.md-link')[1];
+    const w = wrap.getBoundingClientRect(), l = link.getBoundingClientRect();
+    const fade = parseFloat(getComputedStyle(wrap).getPropertyValue('--scroll-fade-inline-edge')) || 24;
+    return {scrollLeft: wrap.scrollLeft, end: wrap.hasAttribute('data-scroll-end'),
+            under: l.right > w.right - fade,
+            clear: !wrap.hasAttribute('data-scroll-end') || l.right <= w.right - fade + 1};
+}"""
+
+
+def test_table_link_tab_clears_the_horizontal_fade(reading_ui):
+    page = open_chat(reading_ui, 390, 844)
+    page.evaluate("""async (md) => {
+        const {mountChatMarkdown, enhanceChatMarkdown} = await import('/static/modules/chat_markdown.js');
+        const host = document.createElement('div');
+        host.className = 'chat-bubble assistant';
+        host.dataset.linkCase = '1';
+        const msg = document.createElement('div');
+        msg.className = 'message';
+        host.append(msg);
+        document.querySelector('#chat-messages').append(host);
+        mountChatMarkdown(msg, md);
+        window.__linkDispose = enhanceChatMarkdown(msg);
+    }""", LINK_TABLE)
+    wrap = page.locator('[data-link-case] .md-table-wrap')
+    page.wait_for_function("el => el.getAttribute('role') === 'region'", arg=wrap.element_handle())
+    before = page.evaluate(LINK_EDGE)
+    assert before["under"] and before["end"], before
+    # Explicit tab stops keep the descendant links reachable by keyboard in both engines for this synthetic case.
+    page.evaluate("() => document.querySelectorAll('[data-link-case] a.md-link').forEach((a) => { a.tabIndex = 0; })")
+    wrap.locator('a.md-link').first.focus()
+    page.keyboard.press('Tab')
+    page.wait_for_function("() => document.activeElement === document.querySelectorAll('[data-link-case] a.md-link')[1]")
+    page.wait_for_function("""() => {
+        const wrap = document.querySelector('[data-link-case] .md-table-wrap');
+        const link = wrap.querySelectorAll('a.md-link')[1];
+        const fade = parseFloat(getComputedStyle(wrap).getPropertyValue('--scroll-fade-inline-edge')) || 24;
+        return !wrap.hasAttribute('data-scroll-end')
+            || link.getBoundingClientRect().right <= wrap.getBoundingClientRect().right - fade + 1;
+    }""")
+    after = page.evaluate(LINK_EDGE)
+    assert after["scrollLeft"] > before["scrollLeft"], (before, after)
+    assert after["clear"], (before, after)
+    capture(page, f"markdown-link-tab-{reading_ui['engine']}")
+    page.evaluate("() => { window.__linkDispose(); document.querySelector('[data-link-case]').remove(); }")
+    assert not reading_ui["foreign"], reading_ui["foreign"]
+
+
+CODE_BODY = f"```\n{COMPACT_LINE}\n```"
+PATCH_CODE_TO_TABLE = """(body) => new Promise((resolve) => {
+    const frames = (n, then) => (n ? requestAnimationFrame(() => frames(n - 1, then)) : then());
+    const card = document.querySelector('[data-code-to-table]');
+    const kept = card.querySelector('.chat-live-line-body');
+    const before = {codeRegion: card.querySelector('.md-compact-code')?.getAttribute('role'), kept: Boolean(kept)};
+    const {record, renderer} = window.codeToTable;
+    record.items[0].body = body;
+    renderer.renderLiveCardTimeline(record);
+    frames(3, () => {
+        const wrap = card.querySelector('.md-table-wrap');
+        resolve({before, bodySame: card.querySelector('.chat-live-line-body') === kept, connected: kept?.isConnected,
+            region: wrap?.getAttribute('role'), label: wrap?.getAttribute('aria-label'),
+            tabindex: wrap?.getAttribute('tabindex'),
+            edges: wrap ? [wrap.hasAttribute('data-scroll-start'), wrap.hasAttribute('data-scroll-end')] : null,
+            codeGone: !card.querySelector('.md-compact-code')});
+    });
+})"""
+
+
+def test_keyed_timeline_code_to_table_reuses_the_outer_div(reading_ui):
+    page = open_chat(reading_ui, 1280)
+    column = "#chat-messages"
+    assert_column_bound(page, column)
+    page.evaluate("""async ([column, body]) => {
+        const {buildTimelineItemHtml} = await import('/static/modules/chat_activity.js');
+        const {createLiveCardTimelineRenderer} = await import('/static/modules/chat_render_batch.js');
+        const card = document.createElement('div');
+        card.className = 'chat-live-card';
+        card.dataset.codeToTable = '1';
+        card.dataset.expanded = '1';
+        const timelineEl = document.createElement('div');
+        timelineEl.className = 'chat-live-timeline';
+        card.append(timelineEl);
+        document.querySelector(column).append(card);
+        const record = {root: card, timelineEl, expandedLineKeys: new Set(), groupId: 'code-to-table', items: [
+            {phase: 'done', headline: 'Timings', body, lineKey: 'timings'}]};
+        const renderer = createLiveCardTimelineRenderer({withStableViewport: (fn) => fn(), buildTimelineItemHtml});
+        renderer.renderLiveCardTimeline(record);
+        window.codeToTable = {record, renderer};
+    }""", [column, CODE_BODY])
+    page.wait_for_function("() => document.querySelector('[data-code-to-table] .md-compact-code')"
+                           "?.getAttribute('role') === 'region'")
+    seen = page.evaluate(PATCH_CODE_TO_TABLE, TIMELINE_BODY)
+    assert seen == {
+        "before": {"codeRegion": "region", "kept": True},
+        "bodySame": True, "connected": True,
+        "region": "region", "label": "Scrollable table", "tabindex": "0",
+        "edges": [False, True], "codeGone": True,
+    }, seen
+    wrap = page.locator(f"{column} [data-code-to-table] .md-table-wrap")
+    wrap.focus()
+    page.keyboard.press("ArrowRight", delay=300)
+    page.wait_for_function("el => el.scrollLeft > 0 && el.hasAttribute('data-scroll-start')", arg=wrap.element_handle())
+    capture(page, f"markdown-keyed-code-to-table-{reading_ui['engine']}")

@@ -37,6 +37,7 @@ EXCEPTIONS = {
     ("ouroboros/tools/control_runtime.py", "_send_user_message", "envelope"): (1, "The model authors this nonterminal reply; proactive_message is not a System voice."),
     ("ouroboros/presence_owner_contact.py", "send_main_message", "envelope"): (1, "The model authors the private Main report; the host source signature attributes it without changing its voice."),
     ("ouroboros/owner_relay.py", "publish_relay", "call"): (1, "One relay row, drawn as a note card: the teller's own note and summary under the owner's host-held quoted words; no host-authored text."),
+    ("ouroboros/peer_replies.py", "_send_claimed.attempt", "call"): (1, "One wire POST of the letter's model-authored words to the linked Ouroboros (PeerGateway.send_message, kind='message'); the receiving side delivers them into its place conversation under its own provenance, never a local chat row."),
 }
 
 
@@ -165,7 +166,7 @@ HOST_ROW_CLASSES = {
     "body_adoption": ("card_row", 1),  # the authorizing task's settled adoption; a task-unbound one stays restart_notice
     "budget_notice": ("runtime_state", 1),
     "cancel_receipt": ("owner_act_receipt", 2),
-    "command_reply": ("owner_act_receipt", 2),
+    "command_reply": ("owner_act_receipt", 3),  # bridge slash commands, startup /restart, post-Panic start (panic_choice._run_launcher_start)
     "consciousness_notice": ("runtime_state", 1),
     "context_mode_changed": ("owner_act_receipt", 1),  # a room's context mode switched: old → new in that room
     "deep_self_review_queued": ("owner_act_receipt", 1),

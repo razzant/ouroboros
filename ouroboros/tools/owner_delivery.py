@@ -96,13 +96,15 @@ def _retain_dialogue(ctx: Any, evt: dict, mode: str) -> None:
     if not words:
         return
     # A place's local room is the Ouroboros side of the place, not my human's conversation; a frame landing in
-    # Main or a Project room is, as for any work there (``delivery_audience``). Unreadable proves neither.
-    if presence_caller_binding(ctx) is not None and not private_contact and not _lands_with_my_human(ctx, evt):
+    # a conversation my human reads is, as for any work there (``delivery_audience``). Unreadable proves neither.
+    bound = presence_caller_binding(ctx) is not None
+    if bound and not private_contact and not lands_with_my_human(ctx, evt):
         return
-    if mode == "live" and kind == "send_message":
+    if mode == "live" and kind == "send_message" and (bound or lands_with_my_human(ctx, evt)):
         from ouroboros.loop_messages import owner_input_revision
 
-        # The owner rows admitted so far now have a live reply (loop_messages.owner_reply_owed).
+        # The owner rows admitted so far now have a live reply (loop_messages.owner_reply_owed): only a text that
+        # lands where my human reads it (a reply stored in the hidden task record answers no one there).
         ctx._owner_reply_revision = owner_input_revision(ctx)
     # Card labels, details and declared assumptions remain exact too. Binary
     # attachments and host-composed card facts are not addressed model prose.
@@ -280,16 +282,23 @@ def _resolved_room(ctx: Any, evt: Dict[str, Any]) -> tuple[Any, Any]:
     return chat, (None if is_a2a_chat_id(chat) else project_thread_name(root, chat))
 
 
-def _lands_with_my_human(ctx: Any, evt: Dict[str, Any]) -> bool:
-    """Whether a frame lands in Main or a Project room: the rooms ``delivery_audience`` names as my human's."""
+def lands_with_my_human(ctx: Any, evt: Dict[str, Any]) -> bool:
+    """Whether a frame lands in a conversation its human reads, as ``delivery_audience`` names them: a Project room;
+    Main; or, for a run with no place binding, any other room number in the range of the rooms my human reads
+    (``dialogue_store.OWNER_ROOMS``: an owner transport chat such as a bridge's), so never the hidden task record,
+    a peer chat or a correspondent's place room. A place's local room is not one; a destination that is no room
+    number, unknown or unreadable answers False."""
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from ouroboros.dialogue_provenance import presence_caller_binding
+    from ouroboros.dialogue_store import OWNER_ROOMS
 
     try:
         chat, name = _resolved_room(ctx, evt)
     except Exception:
         log.debug("delivery room unread for task %s", evt.get("task_id"), exc_info=True)
         return False
-    return name is not None or chat == WEB_UI_CHAT_ID
+    return name is not None or type(chat) is int and (chat == WEB_UI_CHAT_ID or (
+        OWNER_ROOMS[0] <= chat <= OWNER_ROOMS[1] and presence_caller_binding(ctx) is None))
 
 
 def delivery_audience(ctx: Any, evt: Dict[str, Any]) -> tuple[str, bool]:
@@ -446,19 +455,16 @@ def _named_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) -> str:
                 else f"OK: {noun} queued for delivery to owner.")
     if not place_bound:
         return f"OK: {noun} {state} {room}."
-    from ouroboros.presence_context import ROUTED, ROUTELESS, UNKNOWN, final_route
-    from ouroboros.tool_access import canonical_data_root
+    from ouroboros.place_reply import final_followed, final_is_speech
 
-    try:  # the context's and the forced final's reader, read again now: a source may have published since
-        route, _why = final_route(canonical_data_root(ctx), getattr(ctx, "task_metadata", None),
-                                  getattr(ctx, "task_id", ""))
-    except Exception:
-        route = UNKNOWN
-    path = {ROUTED: "Your final answer has a route there (place state and Safety still apply); a connector tool "
-                    "sends separately.",
-            ROUTELESS: "From this run only a connector tool reaches it.",
-            UNKNOWN: "Whether your final answer reaches it is not settled yet; a connector tool sends there "
-                     "separately."}[route]
+    # The forced final's and the context's fact: a connector's door makes the final a record (owner 21.11, 1A), and
+    # a root the place's turn handed off speaks only if its connector follows that work.
+    metadata = getattr(ctx, "task_metadata", None)
+    path = ("Your final answer has a route there (place state and Safety still apply); a connector tool sends "
+            "separately." if final_followed(metadata) else
+            "If a connector follows this work, your final answer has a route there (place state and Safety still "
+            "apply); otherwise only a connector tool reaches it." if final_is_speech(metadata)
+            else "From this run only a connector tool reaches it.")
     return f"OK: {noun} {state} {room} (Ouroboros side, not the place conversation). {path}"
 
 

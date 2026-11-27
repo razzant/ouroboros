@@ -74,6 +74,9 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OPENAI_BASE_URL": "",
     "OPENAI_COMPATIBLE_API_KEY": "",
     "OPENAI_COMPATIBLE_BASE_URL": "",
+    # The owner's consent to send to a private compatible server that names no program: a write saves the id of
+    # the endpoint it covers, a base URL given at launch is read as that id (``llm_ollama_guard.consent_token``).
+    "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED": "",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY": "",
     "CLOUDRU_FOUNDATION_MODELS_BASE_URL": "https://foundation-models.api.cloud.ru/v1",
     "GIGACHAT_CREDENTIALS": "",
@@ -84,7 +87,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "GIGACHAT_VERIFY_SSL_CERTS": "true",
     "GIGACHAT_PROFANITY_CHECK": "",
     # PEM file with CA certificates ADDED to the default trust bundle for every
-    # first-party provider call (net_transport.extra_ca_bundle); "" = defaults only.
+    # first-party provider call and HTTPS MCP connection (net_transport); "" = defaults only.
     "OUROBOROS_EXTRA_CA_BUNDLE": "",
     "ANTHROPIC_API_KEY": "",
     "MINIMAX_API_KEY": "",
@@ -238,8 +241,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_ONBOARDING_COMPLETED_AT": "",
     "OUROBOROS_ONBOARDING_ATTEMPT_ID": "",
     "OUROBOROS_ONBOARDING_CONSCIOUSNESS": "",
-    # Auto-grant reviewed-skill requests by default; grants stay bound to the
-    # reviewed content hash and editing a skill still invalidates them.
+    # Auto-grant manifest requests when recording acceptance through a grant-issuing lifecycle action.
     "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true",
     # Trust of the built-in source while no source list is saved (its derived row): true installs the bundled
     # skills with basis trusted (exact bytes only; any edit leaves the release), false reviews them like a

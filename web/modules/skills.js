@@ -15,22 +15,23 @@ import {
     renderInstalledSkillCard,
     renderRequirementNotice,
 } from './skill_card_renderer.js';
-import { createSkillBrowse } from './skill_browse.js';
+import { createSkillBrowse, installedHere, offeredUpdate } from './skill_browse.js';
 import { createSkillSources, unconfirmedHubRows } from './skill_sources_view.js';
 import { openSkillDetailSheet } from './skill_detail_sheet.js';
+import { readSignInStatus, SIGN_IN_STATUS_EVENT } from './skill_sign_in.js';
 import { getContributions } from './contributions.js';
 import { getHostModules } from './host_modules.js';
 import {
     connectSkillTools, openCompareDialog, openOfficialExplanation, openPublishDestinationDialog, openSkipReviewDialog, openUpdateDialog,
     updateWithoutReview,
 } from './skill_dialogs.js';
-import { manifestUnread, opensDetail, plural, popularityText, repoLabel, routeExternalLink, skillTitle, versionText } from './skill_presentation.js';
+import { manifestUnread, nameMatch, opensDetail, plural, popularityText, repoLabel, routeExternalLink, skillNames, skillOfferChanged, skillTitle, versionText } from './skill_presentation.js';
 import { runSkillPublishFlow } from './skill_publish_flow.js';
 import { installedTime } from './ui_helpers.js';
 import { readConnectedServers } from './mcp_settings.js';
 import { bindScrollFade } from './scroll_fade.js';
 import {
-    boundedText, emitSkillLifecycle, escapeHtmlAttr as escapeHtml, grantReady, renderSkillRepairPrompt,
+    blockingGrantItems, boundedText, emitSkillLifecycle, escapeHtmlAttr as escapeHtml, grantBlocks, renderSkillRepairPrompt,
     reviewTone, reviewReady,
 } from './utils.js';
 
@@ -56,7 +57,7 @@ export function skillsViewsTemplate() {
     return `
             <div class="skills-search-chrome" data-chrome-pane="installed">
                 <input type="search" class="ui-control skills-search" id="skills-installed-search" placeholder="Find an installed skill" aria-label="Find an installed skill" autocomplete="off">
-                <div class="skills-filter-strip" id="skills-installed-filters" role="group" aria-label="Show" data-scroll-x></div>
+                <div class="skills-filter-strip scroll-fade-x" id="skills-installed-filters" role="group" aria-label="Show" data-scroll-x></div>
             </div>
             <div class="skills-search-chrome" data-chrome-pane="browse" id="skills-browse-chrome" hidden></div>
             <div class="skills-scroll scroll-fade-y">
@@ -272,10 +273,10 @@ export function matchesInstalledFilter(skill, filter, model = installedSkillMode
 }
 
 /** «All 62 · Needs you 10 · Updates 12 · Off 41 · Made here 43», as facts of the loaded list. */
-export function installedFilterCounts(skills, pageModules = {}) {
+export function installedFilterCounts(skills, pageModules = {}, signIn = null) {
     const counts = Object.fromEntries(INSTALLED_FILTERS.map(([key]) => [key, 0]));
     for (const skill of skills) {
-        const model = installedSkillModel(skill, { pageModules });
+        const model = installedSkillModel(skill, { pageModules, signIn });
         for (const [key] of INSTALLED_FILTERS) if (matchesInstalledFilter(skill, key, model)) counts[key] += 1;
     }
     return counts;
@@ -411,6 +412,7 @@ export function initSkills(ctx = {}) {
     let openRequest = 0;
     let filterEmptySentence = FILTER_EMPTY;  // the English last written, so a translated line is not rewritten each paint
     let snapshot = null;   // { rawSkills, live, queue, githubTokenConfigured }
+    let signIn = null, signInRead = 0, signInAccepted = 0;
     let installedFailed = false;
     let activeMenu = null;
     let sheet = null;
@@ -439,10 +441,11 @@ export function initSkills(ctx = {}) {
     // ---- shared reads (Browse and Sources reuse them) -------------------------------------------
     const cache = { sources: null, sourcesValue: null, sourcesError: null, sourcesProblem: '', sourceSuggestions: [], catalog: null, catalogValue: null };
     const sourceSnapshot = () => ({ rows: cache.sourcesValue, error: cache.sourcesError, problem: cache.sourcesProblem });
-    // Browse says how an entry installs from its catalog entry, conditionally, never from this list: a read that
-    // settles after its cards, a sheet or a dialog opened changes none of their words.
+    // Browse says how an entry installs from the shown catalog, not this list. The list can establish that the
+    // source of an open offer was removed, in which case the sheet keeps its identity but withdraws its actions.
     function paintSourceFacts() {
         if (visible && activeTab === 'sources') sourcesView.repaint();
+        browse.repaintSheet();
         section.paintAnswers();
     }
     const store = {
@@ -529,24 +532,50 @@ export function initSkills(ctx = {}) {
         && !card.lifecycle_name_level && snapshot.listingTick <= (failureTick(card.lifecycle_job_id) ?? -Infinity) && listedReadyOn(listed, facts);
     const installedByName = () => (snapshot?.rawSkills ? new Map(projected().map((skill) => [skill.name, skill])) : null);
     const cardRowKey = (card) => card.dataset.skillRow || card.dataset.skill;
-    // The catalog entry an installed skill came from (its author, full text), when the catalog was read.
-    const catalogEntry = (skill) => (cache.catalogValue?.items || [])
-        .find((item) => item.source_id === skill?.install?.source?.id && item.name === skill?.name) || null;
+    // The catalog entry an installed skill came from (its author, full text), when the catalog was read. The
+    // listing's `catalog_id` (`<source_id>/<name>`) is its own confirmation: a present id names that entry, null
+    // says no entry is confirmed (a source re-bound elsewhere lends no details), and a listing without the field
+    // keeps the source-and-name contract.
+    const catalogEntry = (skill) => {
+        const items = cache.catalogValue?.items || [];
+        if (skill && skill.catalog_id !== undefined) return skill.catalog_id ? items.find((item) => item.id === skill.catalog_id) || null : null;
+        return items.find((item) => item.source_id === skill?.install?.source?.id && item.name === skill?.name) || null;
+    };
+    // The full entry's address under the same rule; null reads nothing. A registry install has no entry to read back.
+    const catalogDetailAddress = (skill) => {
+        const origin = skill?.install?.source;
+        if (origin?.kind === 'registry') return null;
+        if (skill?.catalog_id === undefined) return origin?.id ? [origin.id, skill.name] : null;
+        const [sourceId, ...name] = String(skill.catalog_id || '').split('/');
+        return sourceId && name.length ? [sourceId, name.join('/')] : null;
+    };
     const pageModuleFacts = () => {
         const contributions = getContributions();
         const host = getHostModules();
         const facts = host?.pageModuleFacts?.() || { faults: contributions?.faults?.() || [], held: [] };
         return { ...facts, startHeldModule: (key) => host?.startHeldModule?.(key) === true };
     };
-    const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageModuleFacts(),
+    const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageModuleFacts(), signIn,
         contributionVisibility: (name) => contributions?.visibilityForSkill?.(name) || [] });
+    // Listing and sheet accept a single status view; a late earlier read cannot replace a newer accepted one.
+    async function reloadSignIn({ signal } = {}) {
+        const read = ++signInRead;
+        const data = await readSignInStatus({ signal });
+        if (destroyed || signal?.aborted) return null;
+        if (read < signInAccepted) return signIn;
+        signInAccepted = read;
+        signIn = data;
+        window.dispatchEvent(new CustomEvent(SIGN_IN_STATUS_EVENT, { detail: data }));
+        if (snapshot) paintInstalled();
+        return data;
+    }
 
     // What the section's list says about these views, from reads already made (never a read of its own).
     function sectionFacts() {
         return {
             installed: snapshot?.rawSkills ? snapshot.rawSkills.length : null,
             installedFailed,
-            needs: snapshot?.rawSkills ? installedFilterCounts(projected(), pageModuleFacts()).needs : 0,
+            needs: snapshot?.rawSkills ? installedFilterCounts(projected(), pageModuleFacts(), signIn).needs : 0,
             working: inFlightCount(lifecycleEventsFromQueue(snapshot?.queue)),
             sources: Array.isArray(cache.sourcesValue) ? cache.sourcesValue.length : null,
             sourcesFailed: Boolean(cache.sourcesError),
@@ -555,7 +584,7 @@ export function initSkills(ctx = {}) {
 
     // ---- Installed view -------------------------------------------------------------------------
     function paintFilters(skills) {
-        const counts = skills ? installedFilterCounts(skills, pageModuleFacts()) : null;
+        const counts = skills ? installedFilterCounts(skills, pageModuleFacts(), signIn) : null;
         filtersEl.innerHTML = INSTALLED_FILTERS.map(([key, label]) => {
             const count = counts ? counts[key] : null;
             const hide = key !== 'all' && count === 0 && filter !== key;
@@ -571,8 +600,8 @@ export function initSkills(ctx = {}) {
         let members = 0;
         for (const card of container.querySelectorAll(':scope > .skills-card')) {
             const skill = byRow.get(cardRowKey(card));
-            const member = !skill || matchesInstalledFilter(skill, filter, installedSkillModel(skill, { pageModules }));
-            const ok = member && (!skill || !query
+            const member = !skill || matchesInstalledFilter(skill, filter, installedSkillModel(skill, { pageModules, signIn }));
+            const ok = member && (!skill || !query || nameMatch(query, skillNames(skill)) < 3
                 || [skill.name, skill.description].some((text) => String(text || '').toLowerCase().includes(query)));
             card.hidden = !ok;
             if (member) members += 1;
@@ -725,6 +754,8 @@ export function initSkills(ctx = {}) {
             if (snapshot === next) paintInstalled();
             showReads();
         }, () => { if (current()) { optional.state = 'failed'; showReads(); } });
+        // Skills' service sign-ins (the card's meta line and tray); an unread status shows none and keeps the last one.
+        void reloadSignIn({ signal: controller.signal }).catch(() => {});
         apiClient.skillLifecycleQueue({ signal: controller.signal }).then((data) => {
             if (!current()) return;
             const ok = Array.isArray(data?.events) || (data?.active && typeof data.active === 'object');
@@ -846,10 +877,10 @@ export function initSkills(ctx = {}) {
     }
 
     // ---- owner actions on installed skills ------------------------------------------------------
-    async function currentSkill(name) {
+    async function currentSkill(name, browseItem = null) {
         const { skills } = await fetchSkills();
         const skill = skills.find((item) => item.name === name);
-        if (!skill) throw new Error('Skill not found in the current list. Refresh and try again.');
+        if (!skill || (browseItem && !installedHere(browseItem, skill))) throw new Error('Skill not found in the current list. Refresh and try again.');
         return skill;
     }
 
@@ -877,38 +908,39 @@ export function initSkills(ctx = {}) {
     }
 
     // A slow owner action answers its running job: the toast is the job's own message, the card follows the queue.
-    function stillWorking(name, result) {
+    // `say` is the press's own notice (toast.js `modalNotice`): a press in Browse's detail sheet is answered in the sheet.
+    function stillWorking(name, result, say = showToast) {
         if (!result?.pending) return false;
-        showToast(`${name}: ${result.message || 'still working…'} It finishes in the background; you can leave this page.`, 'muted');
+        say(`${name}: ${result.message || 'still working…'} It finishes in the background; you can leave this page.`, 'muted');
         readInstalled({ quiet: true });
         return true;
     }
 
     const missingGrantItems = (grants) => [...(grants.missing_keys || grants.requested_keys || []), ...(grants.missing_permissions || grants.requested_permissions || [])];
 
-    async function toggleSkillEnabled(name, wantsEnabled) {
+    async function toggleSkillEnabled(name, wantsEnabled, say = showToast) {
         const result = await postWithFeedback(`/api/skills/${encodeURIComponent(name)}/toggle`, { enabled: wantsEnabled });
-        if (stillWorking(name, result)) return result;
+        if (stillWorking(name, result, say)) return result;
         const failed = result.extension_action === 'extension_load_error';
-        showToast(`${name} ${wantsEnabled ? 'is on' : 'is off'}${failed ? ' — it couldn’t start' : ''}`, failed ? 'warn' : 'ok');
+        say(`${name} ${wantsEnabled ? 'is on' : 'is off'}${failed ? ' — it couldn’t start' : ''}`, failed ? 'warn' : 'ok');
         emitSkillLifecycle(wantsEnabled ? 'enable' : 'disable', name, result);
         return result;
     }
 
     // The server's typed refusal says why a skill cannot turn on; nothing is pre-judged here.
-    async function turnOn(name) {
-        const skill = await currentSkill(name);
-        if (!grantReady(skill)) {
-            const granted = await requestMissingKeyGrants(name, missingGrantItems(skill.grants || {}), skill.content_hash, true);
-            if (stillWorking(name, granted)) return granted;  // its single job also owns the requested Enable
+    async function turnOn(name, browseItem = null, say = showToast) {
+        const skill = await currentSkill(name, browseItem);
+        if (grantBlocks(skill)) {  // only access the host says stops it asks for a grant first
+            const granted = await requestMissingKeyGrants(name, blockingGrantItems(skill.grants || {}), skill.content_hash, true);
+            if (stillWorking(name, granted, say)) return granted;  // its single job also owns the requested Enable
             if (granted?.setup_error) throw new Error(`Access granted, but ${granted.setup_error}`);
             if (granted?.enabled === true) {
-                showToast(`${name} is on`, 'ok');
+                say(`${name} is on`, 'ok');
                 emitSkillLifecycle('enable', name, granted);
                 return granted;
             }
         }
-        return toggleSkillEnabled(name, true);
+        return toggleSkillEnabled(name, true, say);
     }
 
     /** A new review of the current bytes, or (`body`: `SkillReviewRequest`) the continuation of a stopped one. */
@@ -929,8 +961,8 @@ export function initSkills(ctx = {}) {
         }
     }
 
-    async function attest(name) {
-        const skill = await currentSkill(name);
+    async function attest(name, browseItem = null, say = showToast) {
+        const skill = await currentSkill(name, browseItem);
         if (!skill.content_hash) throw new Error('Skill revision is unavailable. Refresh and retry.');
         const blocked = skill.review_status === 'blockers' && !reviewReady(skill);
         // The author is the catalog entry's (the host's cache, never the network).
@@ -940,10 +972,11 @@ export function initSkills(ctx = {}) {
             permissions: skill.permissions || [], label: blocked ? 'Turn on anyway' : 'Skip review',
         });
         if (ok !== true) return false;
+        if (browseItem) await currentSkill(name, browseItem);
         // Skip review skips only the model review: the deterministic file check still runs server-side.
         const result = await postWithFeedback(`/api/owner/skills/${encodeURIComponent(name)}/attest-review`, { expected_content_hash: skill.content_hash });
-        if (stillWorking(name, result)) return true;
-        showToast(`${name}: ${blocked ? 'turned on anyway' : 'review skipped'}. Your choice is recorded.`, 'warn');
+        if (stillWorking(name, result, say)) return true;
+        say(`${name}: ${blocked ? 'turned on anyway' : 'review skipped'}. Your choice is recorded.`, 'warn');
         emitSkillLifecycle('attest_review', name, result);
         return true;
     }
@@ -976,16 +1009,16 @@ export function initSkills(ctx = {}) {
         return true;
     }
 
-    async function updateSkill(name, skipReview = false) {
-        const skill = await currentSkill(name);
+    async function updateSkill(name, skipReview = false, browseItem = null, say = showToast) {
+        const skill = await currentSkill(name, browseItem);
         if (skipReview) {
             const result = await updateWithoutReview(skill);
             if (!result) return false;
-            showToast(`${name}: updating to ${skill.install.update_rejected.version} without review`, 'warn');
+            say(`${name}: updating to ${skill.install.update_rejected.version} without review`, 'warn');
             emitSkillLifecycle('update', name, result);
             return true;
         }
-        const update = skill.install?.update_available;
+        const update = browseItem ? offeredUpdate(browseItem, skill) : skill.install?.update_available;
         if (!update?.digest) throw new Error('No update is waiting for this skill.');
         let mode = 'replace';
         // A copy changed here, or one whose original is unknown, asks what to keep (SPEC §7, A03).
@@ -996,6 +1029,12 @@ export function initSkills(ctx = {}) {
                 baseKnown: skill.install.base_known !== false, editedByOwner: skill.review_gate?.blocking_reason === 'owner_edit',
             });
             if (!mode) return false;
+            if (browseItem) {
+                const latest = await currentSkill(name, browseItem);
+                if (!offeredUpdate(browseItem, latest)) {
+                    throw new Error('No update is waiting for this skill.');
+                }
+            }
         }
         // The host refuses when the candidate or the local files changed since this card was read.
         const result = await skillSourcesApi.updateSkill(name, mode, update.digest, skill.content_hash || '');
@@ -1003,7 +1042,7 @@ export function initSkills(ctx = {}) {
             ? 'Ouroboros is merging your changes into the update without the original version — see chat'
             : 'Ouroboros is updating it and keeping your changes — see chat';
         const words = { replace: `updating to ${versionText(update.version)}`, merge, keep: `you keep your version; ${versionText(update.version) || 'this version'} isn’t offered again` };
-        showToast(`${name}: ${words[mode] || 'updated'}`, 'ok');
+        say(`${name}: ${words[mode] || 'updated'}`, 'ok');
         emitSkillLifecycle('update', name, result);
         return true;
     }
@@ -1091,20 +1130,28 @@ export function initSkills(ctx = {}) {
         const key = card ? cardRowKey(card) : name;
         const skill = projected().find((row) => installedSkillRowKey(row) === key);
         if (!skill || !opensDetail(skill)) return;
-        const catalogItem = catalogEntry(skill);
-        const item = catalogItem || {
-            id: `installed/${name}`, source_id: skill.install?.source?.id || '', source_name: installedSourceLabel(skill),
-            name, title: skillTitle(skill), description: skill.description || '', version: skill.version,
-            official: Boolean(skill.install?.official), signals: null,
-            category: skill.category || [],
-        };
-        sheet?.close();
         // What it can use is this loaded row's parsed manifest and grants, never the catalog's entry; a pending install, or
         // a folder whose manifest was not read, declares nothing we may state.
         const access = skill.lifecycle_virtual || manifestUnread(skill) ? null
             : { permissions: skill.permissions || [], needs_keys: skill.grants?.requested_keys || [] };
-        // The source's entry has the full text; a registry install has no entry to read back.
-        const origin = skill.install?.source;
+        const entry = catalogDetailAddress(skill);
+        const expected = { id: entry?.join('/'), source_key: skill.source_key, version: skill.version,
+            digest: skill.content_hash || (skill.install?.modified === false ? skill.install.release?.digest : '') || '' };
+        // The catalog address is not a release pin. Borrow its optional prose only for the installed files that were
+        // clicked. Legacy listings without a source key or digest can still use matching address and version.
+        const matchesRelease = (offer) => Boolean(access && expected.id && offer?.id === expected.id
+            && !skillOfferChanged(expected, offer)
+            && (expected.source_key === undefined || (expected.source_key && offer.source_key === expected.source_key))
+            && (expected.digest ? offer.digest === expected.digest : (expected.source_key === undefined
+                && skill.install?.modified !== true && expected.version && offer.version === expected.version)));
+        const cached = catalogEntry(skill);
+        const item = {
+            ...(matchesRelease(cached) ? cached : {}), id: expected.id || `installed/${name}`,
+            source_id: entry?.[0] || skill.install?.source?.id || '', source_name: installedSourceLabel(skill),
+            name, title: skillTitle(skill), description: skill.description || '', version: skill.version, digest: expected.digest,
+            official: Boolean(skill.install?.official), category: skill.category || [],
+        };
+        sheet?.close();
         // A queue-only install's title may be replaced while its preview is open, so closing returns to the title this row
         // key has then (shown, never a hidden card or another key's); the job's own id says when it stops being this one.
         const pendingKey = skill.lifecycle_virtual ? installedSkillRowKey(skill) : '';
@@ -1112,13 +1159,15 @@ export function initSkills(ctx = {}) {
         const titleOf = () => Array.from(container.querySelectorAll(':scope > .skills-card'))
             .find((listed) => cardRowKey(listed) === pendingKey && !listed.hidden)?.querySelector('.skills-card-name') || null;
         sheet = openSkillDetailSheet({
-            item, installed: skill, returnFocus: pendingKey ? titleOf : opener, access,
-            readDetail: origin?.id && origin.kind !== 'registry' ? ({ signal } = {}) => skillSourcesApi.item(origin.id, name, { signal }) : null,
+            item, installed: skill, returnFocus: pendingKey ? titleOf : opener, access, signIn: { status: signIn, reload: reloadSignIn, open: opener },
+            readDetail: entry ? ({ signal } = {}) => skillSourcesApi.item(...entry, { signal }) : null,
+            acceptDetail: (detail) => matchesRelease(detail?.item),
         });
         sheetPending = job ? { key: pendingKey, job } : null;
     }
 
-    /** One installed-skill action by name (cards, the menu, Browse and the sheet share it). */
+    /** One installed-skill action by name (cards, the menu, Browse and the sheet share it); `options.notice` answers a
+     *  press made in a detail sheet there. */
     async function runInstalledAction(name, action, options = {}) {
         if (action === 'toggle_contribution') {
             const key = String(options.contributionKey || '');
@@ -1179,15 +1228,15 @@ export function initSkills(ctx = {}) {
             });
             return true;
         }
-        if (action === 'attest_review') return attest(name);
+        if (action === 'attest_review') return attest(name, options.browseItem, options.notice);
         if (action === 'repair') return repair(name);
-        if (action === 'update') return updateSkill(name);
-        if (action === 'update_without_review') return updateSkill(name, true);
+        if (action === 'update') return updateSkill(name, false, options.browseItem, options.notice);
+        if (action === 'update_without_review') return updateSkill(name, true, null, options.notice);
         if (action === 'uninstall') return uninstall(name);
         if (action === 'delete') return deleteLocal(name, options.payloadRoot);
         if (action === 'submit_hub') return publish(name);
         if (action === 'forget_publication') return forgetPublication(name);
-        if (action === 'turn_on') return turnOn(name);
+        if (action === 'turn_on') return turnOn(name, options.browseItem, options.notice);
         if (action === 'connect_tools') {
             const result = await connectSkillTools(await currentSkill(name));
             if (stillWorking(name, result)) return true;  // not confirmed yet: the card follows its job
@@ -1366,7 +1415,7 @@ export function initSkills(ctx = {}) {
                 const changed = await runInstalledAction(name, action, options);
                 if (changed !== false) await readInstalled({ quiet: true });
             } catch (err) {
-                if (!err.cancelled) showToast(`${name}: ${err.message || err}`, 'danger');
+                if (!err.cancelled) (options?.notice || showToast)(`${name}: ${err.message || err}`, 'danger');
             }
         },
         confirmFirstStart: async (sourceId, canOpen = () => true) => {
@@ -1511,7 +1560,7 @@ export function initSkills(ctx = {}) {
     window.addEventListener('ouro:open-skills', onOpenSkills);
     paintFilters(null);
 
-    // `open` and `pressedAgain` are the app's doors to the section (app.js `openExtensions`, the sidebar's row).
+    // `open` and `pressedAgain` are the app's doors to the section (app.js `openExtensions`, Settings' door).
     return { open: section.open, capture: section.capture, pressedAgain: section.pressedAgain, destroy() {
         destroyed = true;
         clearListingTimers();

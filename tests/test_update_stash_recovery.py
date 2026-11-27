@@ -63,6 +63,31 @@ def _events(tmp_path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
 
 
+@pytest.mark.parametrize("phase", ["boot_preapply", "rollback"])
+def test_boot_recovery_retires_this_generations_reader_before_the_git_write(tmp_path, monkeypatch, phase):
+    from ouroboros.gateway import history_reader
+
+    repo, _tx = _fixture(tmp_path, monkeypatch, phase)
+    root = tmp_path / "data"
+    reader = history_reader.HistoryReader()
+    reader.bind(root)
+    monkeypatch.setattr(history_reader, "reader", reader)
+    capture = git_ops.git_capture
+    writes = []
+
+    def observe(cmd, *args, **kwargs):
+        if cmd[1] in {"checkout", "reset", "clean"} or cmd[:3] == ["git", "stash", "apply"]:
+            assert reader._stopped and reader._failure == "checkout_changing"
+            writes.append(cmd[1])
+        return capture(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "git_capture", observe)
+    result = update_merge.finalize_managed_update_on_boot(supervisor_ready=True)
+    assert "stash" in writes and ("reset" in writes) is (phase == "rollback"), (writes, result)
+    assert (repo / "a.txt").read_text(encoding="utf-8") == "owner work\n"
+    assert not reader.live_children()
+
+
 @pytest.mark.parametrize("consumer", ["rollback", "boot_preapply", "gateway_unwind"])
 def test_each_consumer_retains_failed_marker_and_replay_preserves_later_edits(tmp_path, monkeypatch, consumer):
     repo, tx = _fixture(tmp_path, monkeypatch, consumer)
@@ -429,6 +454,111 @@ def test_gateway_rollback_disclosure_uses_the_actual_stash_note_consumer(monkeyp
     body = json.loads(response.body)
     assert body["rolled_back"] is ok
     assert body["stash_note"] == note == body["rollback"]
+
+
+@pytest.mark.parametrize("strategy,ok,ready,deferred", [
+    ("replace", True, True, False), ("replace", True, False, False),
+    ("replace", True, True, True), ("replace", False, True, False), ("normal", True, True, False),
+])
+def test_only_verified_replace_rollback_reopens_history(tmp_path, monkeypatch, strategy, ok, ready, deferred):
+    from ouroboros import store_switch
+    from ouroboros.gateway import history_reader
+
+    reader = history_reader.HistoryReader()
+    root = tmp_path.resolve()
+    reader.bind(root)
+    monkeypatch.setattr(history_reader, "reader", reader)
+    handoff = store_switch.HistoryHandoff()
+    assert handoff.prepare(root) == ""
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(store_switch.store, "store_ready", lambda _root: ready)
+    monkeypatch.setattr(store_switch.store, "forget_handoffs", lambda: None)
+    if deferred:
+        intent = tmp_path / store_switch.INTENT_REL
+        intent.parent.mkdir(parents=True, exist_ok=True)
+        intent.write_text("{}")
+    monkeypatch.setattr(update_merge, "rollback_managed_update", lambda reason: (ok, "fixture"))
+    monkeypatch.setattr(update_merge, "active_update_tx", lambda: {"strategy": strategy})
+    monkeypatch.setattr(update_merge, "write_update_tx", lambda _tx: None)
+    monkeypatch.setattr(update_merge, "mark_update_tx_gate_blocked", lambda *a: None)
+    monkeypatch.setattr(control, "_respawn_workers_after_failed_update", lambda: None)
+    owned = handoff if strategy == "replace" else None
+    assert control._rollback_fenced_update("test", "smoke failed", handoff=owned).status_code == (409 if ok else 500)
+    if owned and ok and ready and not deferred:
+        assert reader._server_read(root, lambda: "history") == "history"
+    else:
+        with pytest.raises(history_reader.ReaderSwitching):
+            reader._server_read(root, lambda: pytest.fail("the reader still owes its fence"))
+    assert reader._stopped and reader._thread is None  # use fallback; do not launch again in the same generation
+
+
+@pytest.mark.parametrize(("door", "proven", "pending"), [
+    ("restart_recovery", True, False), ("restart_recovery", False, False),
+    ("restart_recovery", True, True), ("boot_smoke", True, False), ("boot_smoke", False, False),
+    ("boot_smoke_raised", True, False), ("boot_smoke_raised", False, False),
+])
+def test_continuing_checkout_door_restores_history_only_on_proven_refusal(tmp_path, monkeypatch, door, proven, pending):
+    import asyncio
+    from types import SimpleNamespace
+
+    from ouroboros import store, store_switch
+    from ouroboros.gateway import history_reader
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from supervisor import git_ops_reset
+    from tests._dialogue import confirm_first_use, import_all
+
+    repo, tx = _fixture(tmp_path, monkeypatch, "boot_finalize")
+    root = tmp_path / "data"
+    confirm_first_use(root)
+    import_all(root)
+    monkeypatch.setattr(git_ops, "current_drive_root", lambda: root)
+    monkeypatch.setattr(git_ops, "BRANCH_STABLE", tx["pre_update_branch"])
+    monkeypatch.setattr(store_switch, "switch_needs", lambda *_: {})
+    monkeypatch.setattr(store_switch, "lacks_wake_chain_reader", lambda *_: False)
+    reader = history_reader.HistoryReader()
+    reader.bind(root)
+    monkeypatch.setattr(history_reader, "reader", reader)
+    get = make_chat_history_endpoint(root)
+    assert asyncio.run(get(SimpleNamespace(query_params={}))).status_code == 200
+    head = _git(repo, "rev-parse", "HEAD").stdout
+    marker = root / store_switch.INTENT_REL
+
+    def refuse_tree(*_a, **_kw):
+        with pytest.raises(history_reader.ReaderSwitching):
+            reader._server_read(root.resolve(), lambda: pytest.fail("Git's operation owns the fence"))
+        if pending:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("{}", encoding="utf-8")
+        exc = git_ops_reset.IndexLockRefusal(128, ["git", "checkout"], stderr="fixture index.lock busy")
+        exc.before_tree_effects = proven
+        raise exc
+
+    def clear_launcher():
+        with pytest.raises(history_reader.ReaderSwitching):
+            reader._server_read(root.resolve(), lambda: pytest.fail("Git's operation owns the fence"))
+        if door == "boot_smoke_raised":
+            raise OSError("fixture launcher marker unavailable")
+        return False
+
+    if door == "restart_recovery":
+        monkeypatch.setattr(git_ops, "checkout_and_reset", refuse_tree)
+        ok, note = git_ops_reset._recovery_checkout("fixture", store_switch.HistoryHandoff())
+        assert "fixture index.lock busy" in note
+    else:
+        if not proven:  # Even an early refusal of the new call cannot prove an older attempt did nothing.
+            update_merge.write_update_tx({**tx, "phase": "rolling_back"})
+        monkeypatch.setattr(git_ops, "_clear_update_intent", clear_launcher)
+        ok, note, shape = update_merge._boot_smoke_rollback(tx, "fixture")
+        assert shape == {}
+        assert ("fixture launcher marker unavailable" if door.endswith("raised") else "could not clear update intent") in note
+    assert ok is False and reader._stopped and reader._thread is None
+    assert not pending or marker.exists()
+    assert _git(repo, "rev-parse", "HEAD").stdout == head
+    try:
+        response = asyncio.run(get(SimpleNamespace(query_params={})))
+        assert response.status_code == (200 if proven and not pending else 503)
+    finally:
+        store.forget_handoffs()  # this test process serves only disposable isolated roots
 
 
 @pytest.mark.parametrize("restore_status", [None, "applying", "preserved"])

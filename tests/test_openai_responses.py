@@ -35,6 +35,7 @@ from ouroboros.openai_responses_custody import (
     RESPONSES_CONSUMED_KEY,
     RESPONSES_RECEIPT_KEY,
     responses_tool_unit_active,
+    visible_text,
 )
 from ouroboros.request_wire_contract import canonical_sha256
 from ouroboros.usage_accounting import PhysicalAttemptCapture
@@ -236,6 +237,38 @@ def test_completed_commentary_is_healthy_intermediate_progress():
     assert usage_reply_usability(final_usage, final_message) == "usable"
 
 
+_TITLE_REPLIES = [
+    ((REASONING, _message("I will weigh two names.", "commentary", ident="m1"),
+      _message("Harbor map", "final_answer", ident="m2")), "Harbor map"),
+    ((_message("Harbor map", "final_answer"),), "Harbor map"),
+    ((_message("Harbor map"),), "Harbor map"),  # a model that marks no phase: its text is its answer
+    ((_message("I will weigh two names.", "commentary"),), ""),  # progress, never a title
+    ((_message("Harbor map", "final_answer", ident="m1"), _message("Checking once more.", "commentary", ident="m2")), ""),
+    ((REASONING, REFUSAL), ""),
+]
+
+
+@pytest.mark.parametrize(("items", "title"), _TITLE_REPLIES)
+def test_a_responses_reply_names_a_project_only_by_its_final_answer(items, title):
+    from ouroboros.project_naming import visible_model_title
+
+    message, usage = _normalize(_body(*items))
+    assert visible_model_title(message, usage) == title
+    assert message["content"] == visible_text(items), "the conversation, log and accounting text is unchanged"
+
+
+def test_the_light_namer_round_trips_responses_replies_to_the_selected_title(monkeypatch):
+    from ouroboros import project_naming
+
+    client = LLMClient(api_key="k")
+    monkeypatch.setattr(project_naming, "_light_naming_model", lambda: f"openai::{MODEL}")
+    sends = _install(monkeypatch, client, [_body(*items) for items, _title in _TITLE_REPLIES])
+    got = [project_naming.llm_project_name("Name the harbor map", llm_client=client, use_local=False, single_attempt=True)
+           for _items, _title in _TITLE_REPLIES]
+    assert got == [title for _items, title in _TITLE_REPLIES]
+    assert len(sends) == len(_TITLE_REPLIES), "one physical send per naming call"
+
+
 @pytest.mark.parametrize(("items", "finish"), [
     ((REASONING, REFUSAL), "refusal"),
     ((REASONING, _message("Let me check first.", "commentary"), REFUSAL), "refusal"),  # never intermediate progress
@@ -286,11 +319,13 @@ def test_unknown_items_and_server_transformations_are_disclosed():
 
 def test_provider_usage_cannot_spoof_host_terminal_facts():
     completion, _facts = completion_view(_body(_message("Done.")))
-    completion["usage"]["response_status"] = "incomplete"
+    completion["usage"].update(response_status="incomplete", capacity_input_tokens=123,
+                               reported_model="wrong model", route_notice="wrong route")
     message, usage = LLMClient(api_key="k")._normalize_remote_response(
         {"choices": completion["choices"], "usage": completion["usage"]},
         {**_target(), "api_surface": "chat_completions"}, skip_cost_fetch=True)
     assert "response_status" not in usage and usage_reply_usability(usage, message) == "usable"
+    assert {"capacity_input_tokens", "reported_model", "route_notice"}.isdisjoint(usage)
 
 
 # --- custody -------------------------------------------------------------------------------------------

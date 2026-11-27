@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ouroboros.config import runtime_setting
+from ouroboros.config import NETWORK_WAIT_BACKOFF_MAX_SEC, get_finalization_grace_sec, runtime_setting  # noqa: F401 - get_finalization_grace_sec: legacy monkeypatch seam
 
 import contextlib
 import hashlib
@@ -16,9 +16,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import logging
 
 from ouroboros import model_concurrency, working_checkpoint
-from ouroboros.llm_observability import persist_observed_call, host_step, round_receipt, emit_main_call_state as _emit_main_llm_call_state
+from ouroboros.llm_observability import (
+    SendRefusals, _remember_llm_call as _remember_llm_call, emit_main_call_state as _emit_main_llm_call_state,
+    host_step, persist_observed_call, record_main_request, record_main_response, round_receipt,
+)
 from ouroboros.context_timing import timed
-from ouroboros.config import get_finalization_grace_sec, NETWORK_WAIT_BACKOFF_MAX_SEC  # noqa: F401 - legacy monkeypatch seam
 from ouroboros.deadline_utils import (
     owner_deadline_exhausted,
     main_transport_timeout_sec as _main_transport_timeout,
@@ -33,6 +35,7 @@ from ouroboros.llm_substitution import same_route_refusal, stamp_substitutions
 from ouroboros.model_wait import (
     OWNER_WORDS_WAITING, ModelWaitInterrupted, current_model_wait, model_wait_reason, propagate_model_control,
 )
+from ouroboros.llm_stream import LATER_OUTPUT_LIMIT_USAGE_KEY
 from ouroboros.openai_chat_dispatch import CUSTOM_RECEIPTS_USAGE_KEY, pop_custom_validation_receipts
 from ouroboros.llm_attempt import PROVIDER_POLICY_REFUSAL, _is_provider_policy_refusal, is_size_refusal, single_physical_send, track_physical_attempts
 from ouroboros.observability import mark_last_answer, new_call_id, new_execution_id, persist_call
@@ -323,7 +326,7 @@ def _record_and_emit_empty_response(
     *, usage, msg, accumulated_usage, event_queue, drive_logs, task_id, execution_id,
     round_id, llm_call_id, round_idx, attempt, model, task_type, content, tool_calls,
     request_ref, response_ref, transient_budget, context_fit_event_fields,
-    task_attempt=None,
+    task_attempt=None, attempts=None,
 ) -> tuple:
     """Classify an empty / no-tool-call response, log + emit its events, and stamp
     accumulated_usage (last error / execution_status / reason_code / F1 cooldown kind).
@@ -332,6 +335,8 @@ def _record_and_emit_empty_response(
     finish_reason = response_finish_reason(usage, msg)[1]
     body_error = usage.get("provider_error") if isinstance(usage, dict) and isinstance(usage.get("provider_error"), dict) else {}
     event_type, is_provider_glitch, permanent = _classify_empty_response(usage, msg)
+    body_ids = (usage.get("ledger_attempt_ids") or ()) if event_type == "remote_context_overflow" else ()
+    refused_send = attempts.close(None, accumulated_usage, refused_body_ids=body_ids) if attempts is not None else None
     exhausted = event_type == "llm_empty_response" and permanent  # the classifier's output exhaustion
     refused = event_type == "provider_content_refusal"
     words = note_content_refusal(accumulated_usage, usage, msg) if refused else {}  # its own words, for its round's row
@@ -348,7 +353,8 @@ def _record_and_emit_empty_response(
               # naming only the MODEL cannot attribute a same-model provider incident.
               "response_provider": usage.get("response_provider"),
               "provider_error_kind": body_error.get("kind"),
-              **words, **context_fit_event_fields},
+              **words, **context_fit_event_fields, **({"refused_send": refused_send,
+                 "physical_attempt_id": refused_send["physical_attempt_id"]} if refused_send else {})},
         task_type=task_type,
         details={"content": content, "tool_calls": tool_calls,
                  "request_ref": request_ref, "response_ref": response_ref},
@@ -373,6 +379,10 @@ def _record_and_emit_empty_response(
     stamp_owner_provider_message(accumulated_usage, {"message": words.get("provider_message")} if refused else body_error)  # its own sentence
     failure = accumulated_usage["_last_llm_failure"] = accumulated_usage.get("_last_llm_call_meta", {})
     failure.update(failure_code=kind, error=accumulated_usage["_last_llm_error"])
+    finish = str(finish_reason or "").strip().lower()
+    failure.pop("size_finish", None)
+    if event_type == "remote_context_overflow" and not body_error and finish in _STRUCTURED_CONTEXT_OVERFLOW_CODES:
+        failure["size_finish"] = finish  # this empty reply's own size finish (``context_window.record_start_refusal``)
     _save_timeout_repeat(accumulated_usage, failed=True)
     return event_type, is_provider_glitch, permanent
 
@@ -503,6 +513,7 @@ class _LlmErrorContext:
     use_local: Optional[bool] = None  # the asked route's locality, for its failure row
     configured_api_child: bool = False  # its parent chose this exact API actor (``TIMEOUT_REPEAT_KEY``)
     prior_attempt_id: Optional[str] = None  # the attempt last captured before this call began (``_own_capture``)
+    refused_send: Optional[Dict[str, Any]] = None  # the two counts of the refused send this error names (``SendRefusals.close``)
 
 
 @dataclass(frozen=True)
@@ -723,6 +734,7 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
     if isinstance(exc, ProcessingNotStarted):
         return LlmErrorClassification("provider_error", False, _exception_status_code(exc))
     if getattr(exc, "stream_rejected", False): return LlmErrorClassification("provider_error", False)  # complete wire judged unusable: a local verdict, never a same-model repeat
+    if str(getattr(exc, "code", "")).startswith("ollama_") and hasattr(exc, "retryable"): return LlmErrorClassification(exc.kind, exc.retryable, _exception_status_code(exc), exc.code)  # native Ollama verdicts (llm_ollama_wire) type their own repeat
     if getattr(exc, "code", "") == "model_outcome_unknown":
         return LlmErrorClassification("provider_outcome_unknown", False)
     if codex_content_policy_denial(exc):
@@ -826,24 +838,6 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
     return LlmErrorClassification("provider_error", True, status_code, provider_code)
 
 
-def _remember_llm_call(
-    usage: Dict[str, Any], *, call_ids: Dict[str, Any], model: str, display_model: str, provider: str,
-    request_ref: Dict[str, Any], response_ref: Dict[str, Any],
-    reported_model: Any = None, use_local: Optional[bool] = None,
-    requested_profile: Optional[str] = None, observed_route: Optional[Dict[str, Any]] = None,
-) -> None:
-    call_meta = {"ts": utc_now_iso(), **call_ids,
-        "model": model, "resolved_model": display_model, "provider": provider,
-        "reported_model": reported_model.strip() if isinstance(reported_model, str) and reported_model.strip() else None,
-        "use_local": use_local,
-        "request_ref": request_ref.get("manifest_ref") if request_ref else None,
-        "response_ref": response_ref.get("manifest_ref") if response_ref else None,
-        "requested_profile": requested_profile, "observed_route": dict(observed_route or {}),
-    }
-    usage["_last_llm_call_meta"] = call_meta
-    usage.setdefault("llm_call_refs", []).append(call_meta)
-
-
 def _uncount_transport_death(accumulated_usage: Dict[str, Any]) -> None:
     """A granted repeat that never left the host is no repeat: take it back off the round record."""
     record = accumulated_usage.get(TRANSPORT_DEATHS_KEY) or {}
@@ -897,12 +891,13 @@ def _record_llm_call_error(
             "route": dict(getattr(error, "route", {}) or {}), "outcome": "unknown",
             "request_ref": ctx.request_ref.get("manifest_ref") if ctx.request_ref else None,
             **({"processing_refusal_conflict": True} if tier_conflict else {}),
+            **({"retain_partial_reply": True} if getattr(error, "retain_partial_reply", False) else {}),
             **({"same_operation_recoverable": True} if getattr(error, "same_operation_recoverable", False) else {}),
         }
         # Only an explicit low-level repeat budget repeats here; each running turn's
         # new generation belongs to the round's recovery (its continuation and the configured routes).
         if (
-            not tier_conflict and is_retryable_transport_death(error)
+            not tier_conflict and not getattr(error, "retain_partial_reply", False) and is_retryable_transport_death(error)
             and repeats < ctx.transport_death_retries and ctx.attempt < ctx.transient_budget - 1
         ):
             backoff = _TRANSPORT_DEATH_BACKOFF_SEC[min(repeats + 1, len(_TRANSPORT_DEATH_BACKOFF_SEC)) - 1]
@@ -939,6 +934,7 @@ def _record_llm_call_error(
         **custody_fields, **({"operation_id": str(error.operation_id)} if getattr(error, "operation_id", "") else {}),
         **(ctx.context_fit_event_fields or {}), "ledger_attempt_ids": list(getattr(error, "ledger_attempt_ids", None) or []),
         "request_ref": ctx.request_ref.get("manifest_ref") if ctx.request_ref else None,
+        **({"refused_send": ctx.refused_send} if ctx.refused_send else {}),
     }
     if not append_jsonl(ctx.drive_logs / "events.jsonl", error_event) or not has_log_sink():
         emit_log_event(ctx.event_queue, error_event, log_label="LLM call error")
@@ -1154,6 +1150,9 @@ def _record_round_cache_facts(
     accumulated_usage["_last_round_cache_usage"] = {  # also this accepted call's own money, as its producer stated it
         "round": round_idx, "model": model, "provider": provider, "billing": (usage.get("cost_evidence") or {}).get("billing"),
         **{key: usage.get(key) for key in ("prompt_tokens", "cached_tokens", "cache_write_tokens", "cost", "cost_final")},
+        **({"capacity_input_tokens": usage["capacity_input_tokens"]} if usage.get("capacity_input_tokens") is not None else {}),
+        # The native load statement it was dispatched under, a pair (what it binds: context_anchor.record_input_anchor).
+        **({"ollama_load_statement": list(pair)} if isinstance(pair := usage.get("ollama_load_statement"), (list, tuple)) and len(pair) == 2 else {}),
         "finished_at": time.time(), **served_account_fields(usage, earlier, provider, model),  # wall clock: survives a restart
         REPORTED_TOKENS_KEY: reported}  # cache routing reads the billing-shaped counters above; route facts these
     settle_rewrite_reread(accumulated_usage)  # this answer measures the history change it carried
@@ -1174,9 +1173,12 @@ def _prepare_main_messages(
     deadline_ts: Optional[float] = None,
     model_role: str = "main",
     model_account_override: Optional[str] = None,
+    local_consideration: bool = False,
 ) -> List[Dict[str, Any]]:
     from ouroboros import vision_routing
 
+    if local_consideration:
+        return vision_routing._rewrite(messages, lambda _: "[Image omitted from local letter consideration.]")
     try:
         return vision_routing.prepare_messages_for_send(
             messages,
@@ -1203,6 +1205,11 @@ def _send_main_candidate(
     predicate = candidate_predicate if candidate_predicate is not None else physical_fit_predicate
     if candidate_predicate is not None and physical_fit_predicate is not None:
         predicate = lambda request: candidate_predicate(request) is not False and physical_fit_predicate(request) is not False
+    if physical_context is not None:
+        from ouroboros.context_assembly_trace import bind_contribution_input
+
+        physical_context = bind_contribution_input(physical_context, kwargs, canonical_messages,
+                                                  getattr(current_model_wait(), 'tool_context', None))
     binding = (contextlib.nullcontext() if physical_context is None and predicate is None else
                bind_physical_attempt_context(physical_context, candidate_predicate=predicate))
     # Main's clock line per physical send; the consumed one joins ``canonical_messages``.
@@ -1210,7 +1217,8 @@ def _send_main_candidate(
         return llm.chat(**kwargs)
 
 
-def _take_response_facts(usage: Dict[str, Any], msg: Dict[str, Any], accumulated_usage: Dict[str, Any]) -> None:
+def _take_response_facts(usage: Dict[str, Any], msg: Dict[str, Any], accumulated_usage: Dict[str, Any]) -> str:
+    """Move one response's facts from its usage to the round; returns the Chat adapter's later output limit."""
     model_facts = usage.get("claudexor") or {}
     accumulated_usage["_model_route"] = dict(model_facts.get("route") or {})
     accumulated_usage["_model_substitutions"] = model_facts.get("substituted") or []
@@ -1219,10 +1227,13 @@ def _take_response_facts(usage: Dict[str, Any], msg: Dict[str, Any], accumulated
                   "_last_llm_provider_fields", "_last_llm_provider_answer", "_last_llm_provider_message_cut", "_last_llm_resource_refusal",
                   "_last_llm_output_exhausted", "_last_llm_attempt_custody", "_last_llm_size_refusal"):
         accumulated_usage.pop(stale, None)
-    receipts = pop_custom_validation_receipts(usage, msg.get("tool_calls") or [])
+    from ouroboros.loop_transport import take_route_facts
+    take_route_facts(usage, accumulated_usage)
+    receipts = pop_custom_validation_receipts(usage, msg["tool_calls"] if isinstance(msg.get("tool_calls"), list) else [])
     accumulated_usage.pop(CUSTOM_RECEIPTS_USAGE_KEY, None)
     if receipts:
         accumulated_usage[CUSTOM_RECEIPTS_USAGE_KEY] = receipts
+    return usage.pop(LATER_OUTPUT_LIMIT_USAGE_KEY, "")
 
 
 def _own_capture(capture: Any, prior_attempt_id: Optional[str]) -> Any:
@@ -1249,8 +1260,10 @@ def _handle_main_llm_call_exception(
 
 def _replace_response_meta(
     target: Optional[Dict[str, Any]], usage: Optional[Dict[str, Any]] = None, msg: Optional[Dict[str, Any]] = None,
+    *, later_output_limit: str = "",
 ) -> None:
-    """Replace one caller-owned, attempt-local response fact projection."""
+    """Replace one caller-owned, attempt-local response fact projection: the first finish every reader keeps and, for
+    ordinary call admission alone, the Chat adapter's later output limit and Claudexor's stateless completion."""
     if target is None:
         return
     target.clear()
@@ -1258,9 +1271,13 @@ def _replace_response_meta(
         return
     finish_present, finish_reason = response_finish_reason(usage, msg)
     target.update(finish_reason_present=finish_present, finish_reason=finish_reason,
-                  tool_call_count=len(msg.get("tool_calls") or []))
+                  tool_call_count=len(msg["tool_calls"]) if isinstance(msg.get("tool_calls"), list) else 0)
     if usage.get("response_status") is not None:  # a provider-stated terminal (Responses); a Chat reply states none
         target["response_status"] = usage["response_status"]
+    if (later := later_output_limit.strip()).lower() in OUTPUT_LIMIT_FINISH_REASONS:
+        target["later_output_limit"] = later
+    if usage.get("provider") == "claudexor" and (usage.get("claudexor") or {}).get("stateless_completed") is True:
+        target["stateless_completed"] = True  # only the Claudexor adapter writes that provider label
 
 
 def forced_response_parts(
@@ -1287,6 +1304,11 @@ def _emit_llm_operation(
     )
 
 
+def _admit_letter(letter, request, candidate, reservation) -> None:
+    if not letter.admit(request, candidate, reservation):
+        raise PhysicalAttemptPreconditionFailed("letter input was not admitted", attempt_id=reservation.attempt_id)
+
+
 def call_llm_with_retry(
     llm: LLMClient, messages: List[Dict[str, Any]], model: str,
     tools: Optional[List[Dict[str, Any]]], effort: str, max_retries: int,
@@ -1305,12 +1327,14 @@ def call_llm_with_retry(
     processing_preference: Optional[str] = None, physical_send_claim: Optional[Callable[[Any], None]] = None,
     send_clock_policy: Any = None, max_tokens: int = MAIN_LOOP_MAX_TOKENS, configured_api_child: bool = False,
     physical_fit_predicate: Optional[Callable[[Any], Any]] = None,  # every send; candidate_predicate is first-attempt-only
+    local_consideration: bool = False, letter_send: Any = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[float]]:
     """Call one model with bounded retries and deadline-aware transport.
 
     ``max_tokens`` is the LOGICAL caller ceiling (the strict-shrink retry passes the failed
     attempt's sent allowance); the sent value lives on the physical candidate."""
     from ouroboros.model_slots import resolve_processing_preference
+    from ouroboros.physical_attempt_context import with_wire_admission
     processing_preference = resolve_processing_preference(model_role, override=processing_preference)
     _replace_response_meta(response_meta_out)
     drive_root = pathlib.Path(drive_logs).parent
@@ -1324,14 +1348,18 @@ def call_llm_with_retry(
     if record and not record.get("state") and record.get("round_id") != round_id:
         accumulated_usage.pop(TIMEOUT_REPEAT_KEY, None)  # legacy, unrelated round
     context_fit_event_fields = _context_fit_event_fields(accumulated_usage) if physical_context is not None else {}
-    transient_budget = _attempt_loop_budget(max_retries, attempt_cap)
+    transient_budget = 1 if local_consideration else _attempt_loop_budget(max_retries, attempt_cap)
     if task_attempt is not None:
         accumulated_usage["_task_attempt"] = task_attempt
     task_attempt = accumulated_usage.get("_task_attempt")
     owner = current_model_wait()
     activity_attempt = task_attempt if task_attempt is not None or not owner or owner.task_id != task_id else owner.attempt
     response_cache_bypass_requested, send_messages = False, None
+    from ouroboros.loop_transport import note_route_caution
+    route_caution = (None, False, "")  # a failed send's caution, whether it was withheld and its route; noted when no answer came
     for attempt in range(transient_budget):
+        letter = letter_send if attempt == 0 else None
+        account = (letter.route.get("credential_profile_id") or model_account_override) if letter else model_account_override
         for stale in ("_last_llm_failure", "_acting_route_failure"): accumulated_usage.pop(stale, None)  # a pre-send refusal cannot borrow the previous attempt
         if _deadline_not_dispatched(
             deadline_ts, accumulated_usage, drive_logs,
@@ -1343,15 +1371,25 @@ def call_llm_with_retry(
         prior = getattr(last_physical_attempt_capture(), "attempt_id", None)  # never this call's context
         call_ids = {"llm_call_id": llm_call_id, "execution_id": execution_id, "round_id": round_id,
                     "round": round_idx, "attempt": attempt + 1}  # this physical call in every record of it below
+        # This call's physical sends, its own retries included: each refused one's two counts, logged and told once.
+        attempts = SendRefusals(physical_send_claim, drive_logs, event_queue, {"task_id": task_id, **call_ids, **_scope_lineage(), "model": model}, usage=accumulated_usage)
+
+        def observed_dispatch(capture, tracker=attempts, identity=call_identity):
+            _emit_main_llm_call_state(event_queue, identity, "dispatched", capture=capture)
+            tracker.dispatched(capture)
+
         request_ref: Dict[str, Any] = {}
         try:
             _emit_llm_operation(event_queue, task_id, llm_call_id, "started", task_attempt, execution_id, round_id)
-            if send_messages is None or TIMEOUT_REPEAT_KEY not in accumulated_usage:  # a timeout repeat resends the projection it timed out on (#1886)
+            if send_messages is None or TIMEOUT_REPEAT_KEY not in accumulated_usage or (letter_send and attempt == 1):
                 send_messages = initial_messages if attempt == 0 and initial_messages is not None else _prepare_main_messages(
-                    messages, model=model, model_role=model_role, model_account_override=model_account_override,
+                    messages, model=model, model_role=model_role, model_account_override=account,
                     llm=llm, accumulated_usage=accumulated_usage, drive_root=drive_root, task_id=task_id,
                     event_queue=event_queue, use_local=use_local, task_attempt=task_attempt, deadline_ts=deadline_ts,
+                    **({"local_consideration": True} if local_consideration else {}),
                 )
+            if letter and letter.frame:
+                send_messages = [*send_messages, {"role": "user", "content": letter.frame}]
             if (accumulated_usage.get(ROUND_STARTED_KEY) or {}).get("round_id") != round_id:
                 accumulated_usage[ROUND_STARTED_KEY] = {"round_id": round_id, "at": time.monotonic()}
             _emit_live_log(event_queue, {
@@ -1365,7 +1403,7 @@ def call_llm_with_retry(
                 "model_operation_observer": lambda fact, identity=call_identity, prior=prior: _emit_main_llm_call_state(
                     event_queue, identity, "observed", fact.get("model_activity"),
                     _own_capture(last_physical_attempt_capture(), prior)),  # sent: its own attempt's fact
-                "model_account_override": model_account_override,
+                "model_account_override": account,
                 "processing_preference": processing_preference,
                 "reasoning_effort": effort,
                 "max_tokens": max_tokens,
@@ -1373,32 +1411,18 @@ def call_llm_with_retry(
                                          bypass_response_cache=response_cache_bypass_requested),
                 "caller_deadline_ts": (None if deadline_ts is None
                     else float(deadline_ts) - float(transport_reserve_sec or 0.0)),
+                **({"caller_dispatch_deadline_ts": letter.dispatch_deadline()} if letter else {}),
                 "use_local": use_local,
                 "timeout": _main_transport_timeout(model, deadline_ts, reserve_sec=transport_reserve_sec),
             }
             host_step("model_call")  # the round's own facts, fit and send copy, before its first record
-            request_ref = persist_observed_call(
-                drive_root, task_id=task_id, call_id=f"{llm_call_id}_request", call_type="llm_request",
-                payload={
-                    "messages": messages,
-                    "send_messages": send_messages,  # shares its equal elements with ``messages`` (stored once)
-                    "tools": tools or [],
-                    "model": model,
-                    "reasoning_effort": effort,
-                    "max_tokens": max_tokens,  # the logical caller ceiling; the sent allowance is the physical candidate's
-                    "use_local": bool(use_local),
-                    "allow_server_web_search": bool(allow_server_web_search),
-                    "response_cache_bypass_requested": response_cache_bypass_requested,
-                },
-                manifest={
-                    "first_request_at": accumulated_usage.setdefault("first_request_at", utc_now_iso()),
-                    **call_ids,
-                    "model": model,
-                    "reasoning_effort": effort,
-                    "response_cache_bypass_requested": response_cache_bypass_requested,
-                    **context_fit_event_fields,
-                },
-                writer=persist_call,
+            request_ref = record_main_request(
+                drive_root, task_id=task_id, llm_call_id=llm_call_id,
+                messages=messages, send_messages=send_messages, tools=tools, model=model, effort=effort,
+                max_tokens=max_tokens, use_local=use_local, allow_server_web_search=allow_server_web_search,
+                response_cache_bypass_requested=response_cache_bypass_requested, accumulated_usage=accumulated_usage,
+                call_ids=call_ids, context_fit_event_fields=context_fit_event_fields,
+                persist=persist_observed_call, writer=persist_call, now=utc_now_iso,
             )
             host_step("request_record")
             if _deadline_not_dispatched(
@@ -1411,50 +1435,37 @@ def call_llm_with_retry(
                 return None, None
             _emit_main_llm_call_state(event_queue, call_identity, "started")
             repeat = TIMEOUT_REPEAT_KEY in accumulated_usage
-            if repeat: kwargs["wait_for_resources"] = False
-            strict = single_physical_send(lambda reservation: _claim_timeout_repeat(accumulated_usage, call_ids, reservation)) if repeat else contextlib.nullcontext()
+            if repeat or letter: kwargs["wait_for_resources"] = False
+            strict = (single_physical_send(lambda reservation: _claim_timeout_repeat(accumulated_usage, call_ids, reservation)) if repeat
+                      else single_physical_send(lambda _reservation: None) if letter else contextlib.nullcontext())
             physical_context = refresh_attempt_prefix(physical_context, accumulated_usage, model, use_local)  # a retry after its own answer
-            with strict, track_physical_attempts(physical_send_claim), observe_dispatch(
-                    lambda capture, identity=call_identity: _emit_main_llm_call_state(event_queue, identity, "dispatched", capture=capture)):
+            attempts.prepared_messages(send_messages)
+            wire = (lambda request, candidate, reservation: _admit_letter(letter, request, candidate, reservation)) if letter else None
+            with strict, with_wire_admission(wire), track_physical_attempts(attempts), observe_dispatch(observed_dispatch):
                 msg, usage = _send_main_candidate(
                     llm, kwargs, model=model, use_local=use_local, deadline_ts=deadline_ts,
                     physical_context=physical_context, candidate_predicate=candidate_predicate if attempt == 0 else None,
                     physical_fit_predicate=physical_fit_predicate, send_clock_policy=send_clock_policy, canonical_messages=messages)
+            physical = _own_capture(last_physical_attempt_capture(), prior)
+            included = letter.observe(physical, usage) if letter else None
             mark_last_answer(accumulated_usage)
             host_route = usage.get("model_role_route") or {}
             model, use_local = host_route.get("model", model), host_route.get("use_local", use_local)
             note_prefix_answer(accumulated_usage, usage, model, use_local)  # a reply that read its input moves its route's base
             physical_context = accumulated_usage.pop(REBOUND_PHYSICAL_CONTEXT_KEY, physical_context)
             context_fit_event_fields = _context_fit_event_fields(accumulated_usage) if physical_context is not None else {}
-            _take_response_facts(usage, msg, accumulated_usage)
+            later_output_limit = _take_response_facts(usage, msg, accumulated_usage)
             cost, display_model, provider, cost_estimated = _normalize_usage_cost(usage, model=model, use_local=use_local)
             accumulated_usage["_observed_route"] = observed_route_stamp(usage)
             add_usage(accumulated_usage, usage)
             fold_retrieval_usage(accumulated_usage, usage)
-            response_ref = persist_observed_call(
-                drive_root,
-                task_id=task_id,
-                call_id=f"{llm_call_id}_response",
-                call_type="llm_response",
-                payload={
-                    "message": msg,
-                    "usage": usage,
-                },
-                manifest={
-                    "first_answer_at": accumulated_usage.setdefault("first_answer_at", utc_now_iso()),
-                    **call_ids,
-                    "model": model,
-                    "resolved_model": display_model,
-                    "provider": provider,
-                },
-                writer=persist_call,
-            )
-            _remember_llm_call(
-                accumulated_usage, call_ids={**call_ids, "physical_attempt_id": (usage.get("ledger_attempt_ids") or [None])[-1]}, model=model,
-                display_model=display_model, provider=provider, request_ref=request_ref,
-                response_ref=response_ref, reported_model=usage.get("resolved_model"), use_local=bool(use_local),
-                requested_profile=(usage.get("claudexor") or {}).get("requested_profile", host_route.get("credential_profile_id", model_account_override)),
-                observed_route=(usage.get("claudexor") or {}).get("route"),
+            response_ref = record_main_response(
+                drive_root, task_id=task_id, llm_call_id=llm_call_id,
+                msg=msg, usage=usage, accumulated_usage=accumulated_usage, call_ids=call_ids,
+                model=model, display_model=display_model, provider=provider, use_local=use_local,
+                request_ref=request_ref, physical=physical, host_route=host_route,
+                model_account_override=model_account_override,
+                persist=persist_observed_call, writer=persist_call, now=utc_now_iso,
             )
             category = task_type if task_type in ("evolution", "consciousness", "review", "summarize") else "task"
             emit_llm_usage_event(
@@ -1465,8 +1476,12 @@ def call_llm_with_retry(
             )
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
+            if local_consideration and not included:
+                attempts.close(None, accumulated_usage)
+                _emit_main_llm_call_state(event_queue, call_identity, "failed", capture=physical)
+                return None, cost  # the reply is retained above, but cannot act for the original room
             if task_type == "presence": accumulated_usage["_presence_pre_dispatch_only"] = False  # a response reached the model
-            _replace_response_meta(response_meta_out, usage, msg)
+            _replace_response_meta(response_meta_out, usage, msg, later_output_limit=later_output_limit)
             # A provider-stated terminal that is no result reads as a reply without usable output (``reply_usability``).
             if usage_reply_usability(usage, msg) == "unusable" or (not tool_calls and (not content or not content.strip())):
                 event_type, is_provider_glitch, permanent = _record_and_emit_empty_response(
@@ -1476,7 +1491,7 @@ def call_llm_with_retry(
                     round_idx=round_idx, attempt=attempt, model=model, task_type=task_type,
                     content=content, tool_calls=tool_calls, request_ref=request_ref,
                     response_ref=response_ref, transient_budget=transient_budget,
-                    context_fit_event_fields=context_fit_event_fields, task_attempt=task_attempt)
+                    context_fit_event_fields=context_fit_event_fields, task_attempt=task_attempt, attempts=attempts)
                 _emit_main_llm_call_state(event_queue, call_identity, "failed")
                 if not permanent and attempt < transient_budget - 1 and accumulated_usage.keys().isdisjoint((TRANSPORT_DEATHS_KEY, TIMEOUT_REPEAT_KEY)):
                     if _sleep_within_deadline(min(2.0 ** attempt, _TRANSIENT_BACKOFF_CAP_SEC), deadline_ts):
@@ -1492,6 +1507,7 @@ def call_llm_with_retry(
                 if _empty_response_wall_spent(is_provider_glitch, permanent, usage):
                     accumulated_usage[RETRY_WALL_EXHAUSTED_KEY] = True
                 return None, cost
+            attempts.close(None, accumulated_usage)  # a refusal outlived by its own retry still has one row and fact
             for stale in ("execution_status", "result_status", "reason_code", RETRY_WALL_EXHAUSTED_KEY, RETRY_ATTEMPTS_SPENT_KEY,
                           TRANSPORT_DEATHS_KEY, TIMEOUT_REPEAT_KEY, "_pending_transport_outcome"):
                 accumulated_usage.pop(stale, None)  # a USABLE response closes the round's repeat records
@@ -1524,17 +1540,30 @@ def call_llm_with_retry(
                     "record_contract_version", "reasoning_effort", "cost_usd", "prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens",
                     "prompt_cache_ttl", "effort", "effort_resolution", "request_wire", "claudexor", "duration_ms") if key in _round_event},
                 "response_kind": "tool_calls" if tool_calls else "message",
-                "tool_call_count": len(tool_calls), "rounds": accumulated_usage["rounds"],
+                "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0, "rounds": accumulated_usage["rounds"],
                 "has_text": bool(content and str(content).strip()),
             })
             append_jsonl(drive_logs / "events.jsonl", _round_event)
             _emit_main_llm_call_state(event_queue, call_identity, "finished",
                                       capture=_own_capture(last_physical_attempt_capture(), prior))
             return msg, cost
-        except UsageAccountingError:
+        except UsageAccountingError as e:  # a known pre-send refusal keeps the letter; any other end retires it
+            if letter: letter.settle(_own_capture(physical_attempt_capture_from_exception(e), prior))
+            attempts.close(None, accumulated_usage)
             _emit_main_llm_call_state(event_queue, call_identity, "failed")
             raise  # Monetary/ledger rails are not provider failures.
         except Exception as e:
+            if getattr(e, "route_caution_used", None):  # an earlier send of the call went on that route
+                note_route_caution(accumulated_usage, e.route_caution_used[0], route=e.route_caution_used[1])
+            if getattr(e, "route_caution", None):
+                route_caution = (e.route_caution, bool(getattr(e, "route_withheld", False)), getattr(e, "route_caution_key", ""))
+            if letter:
+                capture = _own_capture(physical_attempt_capture_from_exception(e), prior)
+                if letter.settle(capture) and not local_consideration:  # provably unsent: the plain request goes
+                    attempts.close(e, accumulated_usage)
+                    _emit_main_llm_call_state(event_queue, call_identity, "failed", capture=capture)
+                    raise PhysicalAttemptPreconditionFailed("optional letter send was not started",
+                                                          attempt_id=capture.attempt_id) from e
             host_route = getattr(e, "model_role_route", {}) or {}
             model, use_local = host_route.get("model", model), host_route.get("use_local", use_local)
             if isinstance(getattr(e, "route", None), dict):  # a failed operation's route may name no model: the one it asked
@@ -1555,9 +1584,10 @@ def call_llm_with_retry(
                     stop_retry_check=stop_retry_check, owner_input_check=owner_input_check,
                     configured_api_child=configured_api_child,
                     requested_profile=host_route.get("credential_profile_id", model_account_override),
-                    prior_attempt_id=prior,
+                    prior_attempt_id=prior, refused_send=attempts.close(e, accumulated_usage),
                 ),
                 call_identity,
             ):
                 break
+    note_route_caution(accumulated_usage, route_caution[0], withheld=route_caution[1], route=route_caution[2])
     return None, 0.0

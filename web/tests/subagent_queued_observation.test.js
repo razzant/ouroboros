@@ -9,7 +9,7 @@ import test, { after } from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { desiredLiveCardPhase, frameObservesPhase, observeChildPhase } from '../modules/task_phase_chip.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 import { projection, room, work } from './work_fixture.js';
 
 const TS = '2026-11-18T12:00:00Z';
@@ -89,7 +89,7 @@ ElementStub.prototype.querySelector = function (selector) {
 
 function fixture(history = [], chatId = 1) {
     const env = installDom(async (url) => ({ ok: true, json: async () => (String(url).startsWith('/api/chat/history')
-        ? { messages: history, window: { complete: true } }
+        ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } }
         : { active_direct_turns: [] }) }));
     const handlers = new Map();
     let generation = 0;

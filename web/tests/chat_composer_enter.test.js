@@ -5,16 +5,16 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { WS } from '../modules/ws.js';
-import { ElementStub, installDom, restoreDom } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, roomKey } from './chat_dom_fixture.js';
 
 function composer({ chatId = 1, projectId = '', transport = null, reply = null } = {}) {
     const env = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages: [], window: { complete: true } }
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: [], window: { complete: true } }
             : { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true } }));
     env.prior.WebSocket = globalThis.WebSocket;
     globalThis.WebSocket = { OPEN: 1, CONNECTING: 0 };  // constants only; no native socket can open
     const frames = [];
-    if (reply) sessionStorage.setItem(chatId === 1 ? 'ouro_chat_reply' : `ouro_chat_reply:${chatId}`, JSON.stringify(reply));
+    if (reply) sessionStorage.setItem(roomKey('ouro_chat_reply', chatId), JSON.stringify(reply));
     let generation = 0;
     const instance = createChatInstance({
         ws: transport || { on: () => () => {}, isConnected: () => true,
@@ -110,7 +110,7 @@ test('production WS interception reaches the composer without a chat bubble or s
         assert.equal(c.input.value, '/panic');
         await Promise.resolve();
         assert.equal(c.input.value, '', 'bridge acceptance consumes only the sent command');
-        assert.equal(sessionStorage.getItem('ouro_chat_draft'), null);
+        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft')), null);
         assert.equal(c.byId('messages').querySelectorAll('.chat-bubble.user').length, 0);
         assert.deepEqual(ws._pendingMessages, []);
     } finally {
@@ -143,18 +143,20 @@ for (const door of ['socket', 'bridge']) for (const newer of [false, true]) {
             const files = c.byId('file-input');
             files.files = [{ name: 'kept.txt', type: 'text/plain' }];
             for (const fn of files.listeners.get('change')) fn({ target: files });
-            const keptReply = sessionStorage.getItem('ouro_chat_reply:7');
+            const keptReply = sessionStorage.getItem(roomKey('ouro_chat_reply', 7));
             assert.ok(keptReply);
             c.draft(' /PaNiC  ');
             c.press();
             assert.equal(c.input.value, ' /PaNiC  ', 'unknown keeps the exact draft');
-            assert.equal(sessionStorage.getItem('ouro_chat_draft:7'), ' /PaNiC  ');
+            assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft', 7)), ' /PaNiC  ');
             if (newer) c.draft('my next message');
             accept();
             await Promise.resolve();
             assert.equal(c.input.value, newer ? 'my next message' : '');
-            assert.equal(sessionStorage.getItem('ouro_chat_draft:7'), newer ? 'my next message' : null);
-            assert.equal(sessionStorage.getItem('ouro_chat_reply:7'), keptReply);
+            assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft', 7)), null);
+            assert.equal(JSON.parse(sessionStorage.getItem(roomKey('ouro_chat_text_v1', 7)))?.text ?? null,
+                newer ? 'my next message' : null);
+            assert.equal(sessionStorage.getItem(roomKey('ouro_chat_reply', 7)), keptReply);
             assert.equal(c.instance.hasPendingWork(), true, 'the staged file remains');
             assert.equal(c.byId('messages').querySelectorAll('.chat-bubble.user').length, 0);
             assert.equal(sent.length, door === 'socket' ? 1 : 0);
@@ -177,7 +179,7 @@ test('unconfirmed typed Panic retains its saved draft after socket close', async
         socket.dispatchEvent(new Event('close'));
         await Promise.resolve();
         assert.equal(c.input.value, '/panic');
-        assert.equal(sessionStorage.getItem('ouro_chat_draft'), '/panic');
+        assert.equal(sessionStorage.getItem(roomKey('ouro_chat_draft')), '/panic');
         assert.deepEqual(ws._pendingMessages, []);
     } finally { c.close(); }
 });
@@ -187,7 +189,7 @@ test('unconfirmed typed Panic retains its saved draft after socket close', async
 test('Send waits for a pending effort-range save; a refused save keeps the draft', async () => {
     const pending = [];
     const env = installDom(async (url) => {
-        if (String(url).startsWith('/api/chat/history')) return { ok: true, json: async () => ({ messages: [], window: { complete: true } }) };
+        if (String(url).startsWith('/api/chat/history')) return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: [], window: { complete: true } }) };
         if (String(url) === '/api/owner/effort-range') return new Promise((resolve) => pending.push(resolve));
         return { ok: true, json: async () => ({ active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true }) };
     });
@@ -273,7 +275,7 @@ function deferredSaveRoom({ savedReply = null, uploads = null, status = 'sent', 
     const pending = [];
     const deleted = [];
     const env = installDom(async (url, options) => {
-        if (String(url).startsWith('/api/chat/history')) return { ok: true, json: async () => ({ messages: [], window: { complete: true } }) };
+        if (String(url).startsWith('/api/chat/history')) return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: [], window: { complete: true } }) };
         if (String(url) === '/api/owner/effort-range') return new Promise((resolve) => pending.push(resolve));
         if (uploads && String(url).startsWith('/api/chat/upload')) {
             if (options?.method === 'DELETE') { deleted.push(JSON.parse(options.body).filename); return { ok: true, json: async () => ({}) }; }
@@ -283,8 +285,8 @@ function deferredSaveRoom({ savedReply = null, uploads = null, status = 'sent', 
         return { ok: true, json: async () => ({ active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true }) };
     });
     globalThis.sessionStorage.setItem('ouro_chat_session_id', 'session-me');
-    if (savedReply) globalThis.sessionStorage.setItem('ouro_chat_reply', JSON.stringify(savedReply));
-    if (kept) globalThis.sessionStorage.setItem('ouro_chat_unconfirmed', kept);  // a reload: this tab's kept copies
+    if (savedReply) globalThis.sessionStorage.setItem(roomKey('ouro_chat_reply'), JSON.stringify(savedReply));
+    if (kept) globalThis.sessionStorage.setItem(roomKey('ouro_chat_unconfirmed'), kept);  // a reload: this tab's kept copies
     const handlers = new Map();
     const frames = [];
     let generation = 0;
@@ -315,7 +317,7 @@ function deferredSaveRoom({ savedReply = null, uploads = null, status = 'sent', 
     return {
         frames, input, press, settle, deleted, instance,
         fire(type, payload) { for (const fn of handlers.get(type) || []) fn(payload); },
-        kept: () => JSON.parse(globalThis.sessionStorage.getItem('ouro_chat_unconfirmed') || '[]'),
+        kept: () => JSON.parse(globalThis.sessionStorage.getItem(roomKey('ouro_chat_unconfirmed')) || '[]'),
         bubble: (id) => document.byId.get('chat-messages').children
             .find((node) => node.classList.contains('chat-bubble') && node.dataset.clientMessageId === id),
         notes: (node) => pendingNotes(node).map((note) => note.textContent),
@@ -454,7 +456,7 @@ test('a sent selected reply frees the field: the next message starts empty and a
         assert.equal(f.frames[0].reply_to, reply.address);
         assert.deepEqual(f.frames[0].reply_excerpt, reply.excerpt);
         assert.equal(f.input.value, '', 'the socket took the frame: the field is free');
-        assert.equal(globalThis.sessionStorage.getItem('ouro_chat_reply'), null, 'the quote left with its message');
+        assert.equal(globalThis.sessionStorage.getItem(roomKey('ouro_chat_reply')), null, 'the quote left with its message');
         assert.equal(f.kept().at(-1).frame.client_message_id, 'cm-1', 'the words and quote wait in their bubble');
         assert.deepEqual(f.kept().at(-1).frame.reply_excerpt, reply.excerpt);
         f.press();
@@ -481,7 +483,7 @@ test('a selected reply queued offline frees the field, says so on its own bubble
         await f.settle();
         assert.equal(f.frames.length, 1, 'the Send went to the socket queue');
         assert.equal(f.input.value, '', 'the queue took the frame: the field is free');
-        assert.equal(globalThis.sessionStorage.getItem('ouro_chat_reply'), null);
+        assert.equal(globalThis.sessionStorage.getItem(roomKey('ouro_chat_reply')), null);
         const bubble = f.bubble('cm-1');
         assert.ok(bubble.classList.contains('pending'));
         assert.equal(f.notes(bubble).length, 1, 'the bubble itself says where the message is');
@@ -519,7 +521,7 @@ test('a late saved row of a sent selected reply leaves the newer draft alone, wi
         assert.equal(f.kept().length, 1, 'accepted, its dispatch still owed: the frame waits');
         f.echo(1, { ingress_dispatched: true, reply_to: { address: reply.address, excerpt: reply.excerpt } });
         assert.equal(f.input.value, 'A newer thought.', 'the newer draft is not consumed');
-        assert.equal(globalThis.sessionStorage.getItem('ouro_chat_reply'), null, 'the sent quote does not come back');
+        assert.equal(globalThis.sessionStorage.getItem(roomKey('ouro_chat_reply')), null, 'the sent quote does not come back');
         assert.deepEqual(f.kept(), []);
         assert.equal(f.frames.length, 1, 'nothing is sent again');
     } finally { f.close(); }
@@ -539,7 +541,7 @@ test('after a reload, Send again resends the same id, quote and files, and Send 
         [sent] = first.frames;
         assert.equal(sent.attachments[0].filename, stored);
         assert.equal(first.input.value, '');
-        kept = globalThis.sessionStorage.getItem('ouro_chat_unconfirmed');
+        kept = globalThis.sessionStorage.getItem(roomKey('ouro_chat_unconfirmed'));
     } finally { first.close(); }
     const f = deferredSaveRoom({ kept });  // the reload: the tab's kept copy, and a first history read without it saved
     try {
@@ -551,7 +553,7 @@ test('after a reload, Send again resends the same id, quote and files, and Send 
         bubble.querySelector('[data-unconfirmed-action="send_as_new"]').click();
         assert.equal(f.frames.length, 0, 'preparing sends nothing');
         assert.equal(f.input.value, 'With the plan.');
-        assert.deepEqual(JSON.parse(globalThis.sessionStorage.getItem('ouro_chat_reply')).excerpt, reply.excerpt,
+        assert.deepEqual(JSON.parse(globalThis.sessionStorage.getItem(roomKey('ouro_chat_reply'))).excerpt, reply.excerpt,
             'Send as new keeps the selected passage');
         bubble.querySelector('[data-unconfirmed-action="retry"]').click();
         const again = f.frames.at(-1);
@@ -571,7 +573,7 @@ test('after a reload, Send again resends the same id, quote and files, and Send 
     } finally { f.close(); }
 });
 
-test('a badge kept in the newer draft keeps its own upload ref, not the removed badge\'s', async () => {
+for (const newerText of [false, true]) test(`a kept badge keeps its upload after ${newerText ? 'a text edit' : 'a staging-only edit'}`, async () => {
     const reply = { address: 'row:1@a#1', role: 'assistant', excerpt: { start_utf16: 3, text: 'star atlas' } };
     const names = [];
     const f = deferredSaveRoom({ savedReply: reply, uploads: () => {
@@ -585,17 +587,21 @@ test('a badge kept in the newer draft keeps its own upload ref, not the removed 
         f.type('with both files');
         f.beginSave();
         f.press();
-        // The owner drops the first badge and edits the words while the send waits on the room's
+        // The owner drops the first badge while the send waits on the room's
         // save; the submitted message still goes out with the files it snapshotted, and the kept
         // badge must take its own ref — never the removed one's by position.
         f.removeBadge(0);
-        f.type('a newer draft');
+        if (newerText) f.type('a newer draft');
         f.resolveSave(true);
         await f.settle();
         assert.equal(f.frames.length, 1);
         assert.equal(f.frames[0].attachments.length, 2, 'Send fixes the files before waiting');
-        assert.equal(f.input.value, 'a newer draft', 'the newer draft is not consumed');
-        const keptVersion = JSON.parse(globalThis.sessionStorage.getItem('ouro_chat_draft_version') || 'null');
+        const remaining = newerText ? 'a newer draft' : 'with both files';
+        assert.equal(f.input.value, remaining, 'the newer draft is not consumed');
+        const selected = localStorage.getItem(roomKey('ouro_chat_text_v1'));
+        assert.equal(localStorage.getItem(`${roomKey('ouro_chat_text_v1')}:edit:${selected}`), remaining,
+            'the retained words are still the cold draft');
+        const keptVersion = JSON.parse(globalThis.sessionStorage.getItem(roomKey('ouro_chat_draft_version')) || 'null');
         assert.deepEqual(keptVersion?.uploads?.map((item) => item.filename), [names[1]],
             'the kept badge keeps its own completed upload and so survives a reload');
     } finally { f.close(); }

@@ -65,15 +65,20 @@ def _owner_answer_routes() -> list[BaseRoute]:
 
 def _room_reading_routes(data_dir: pathlib.Path) -> list[BaseRoute]:
     """A room's saved messages as the owner's UI reads them from the dialogue store: its history pages
-    (``/api/chat/history``) and the search of their words (``/api/chat/search``); and the neighbour door, the
-    words reader over every room for a program on this computer (``/api/recall``)."""
+    (``/api/chat/history``), the search of their words (``/api/chat/search``), the neighbour door, the
+    words reader over every room for a program on this computer (``/api/recall``), and, while Main's history
+    refuses for the Project registry, the read-only archive of what evidence places (``/api/chat/archive``)."""
+    from ouroboros.gateway.chat_archive import make_chat_archive_endpoint
     from ouroboros.gateway.chat_search import make_chat_search_endpoint
     from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.gateway.history_attribution import recorded
     from ouroboros.gateway.recall import make_recall_endpoint
 
-    return [Route("/api/chat/history", endpoint=make_chat_history_endpoint(data_dir)),
+    # Each history GET is counted with why its client made it (history_attribution: in memory, telemetry only).
+    return [Route("/api/chat/history", endpoint=recorded(make_chat_history_endpoint(data_dir))),
             Route("/api/chat/search", endpoint=make_chat_search_endpoint(data_dir)),
-            Route("/api/recall", endpoint=make_recall_endpoint(data_dir), methods=["GET"])]
+            Route("/api/recall", endpoint=make_recall_endpoint(data_dir), methods=["GET"]),
+            Route("/api/chat/archive", endpoint=make_chat_archive_endpoint(data_dir))]
 
 
 def _setup_routes() -> list[BaseRoute]:
@@ -160,6 +165,7 @@ def collect_routes(
     from ouroboros.gateway.harness_maintenance import harness_maintenance_routes
     from ouroboros.gateway.settings import api_review_pool
     from ouroboros.gateway.mcp import mcp_routes
+    from ouroboros.gateway.sign_in import sign_in_routes
     from ouroboros.gateway.models import (
         api_local_model_install_runtime,
         api_local_model_start,
@@ -223,6 +229,7 @@ def collect_routes(
     )
     from ouroboros.gateway.settings_secrets import api_settings_secret
     from ouroboros.gateway.places_api import places_routes
+    from ouroboros.gateway.peer_letters_api import peer_letter_routes
     from ouroboros.gateway.ws import ws_endpoint
     from ouroboros.gateway.call_ws import call_routes
     settings_handlers = settings_handlers or {}
@@ -264,6 +271,7 @@ def collect_routes(
         ),
         Route("/api/owner/skills/{skill}/attest-review", endpoint=api_owner_skill_attest_review, methods=["POST"]),
         *places_routes(),
+        *peer_letter_routes(),
         *skill_setup_routes(),
         Route("/api/marketplace/clawhub/search", endpoint=api_marketplace_search, methods=["GET"]),
         Route("/api/marketplace/clawhub/installed", endpoint=api_marketplace_installed, methods=["GET"]),
@@ -323,7 +331,8 @@ def collect_routes(
         Route("/api/schedules/{schedule_id}/action", endpoint=api_schedules_action, methods=["POST"]),
         Route("/api/schedules/{schedule_id}", endpoint=api_schedules_delete, methods=["DELETE"]),
         Route("/api/command", endpoint=api_command, methods=["POST"]),
-        Route("/api/reset", endpoint=api_reset, methods=["POST"]),
+        Route("/api/reset", endpoint=api_reset, methods=["GET", "POST"]),
+        Route("/api/reset/v1", endpoint=api_reset, methods=["POST"]),
         Route("/api/git/log", endpoint=api_git_log),
         Route("/api/git/rollback", endpoint=api_git_rollback, methods=["POST"]),
         Route("/api/git/promote", endpoint=api_git_promote, methods=["POST"]),
@@ -352,6 +361,7 @@ def collect_routes(
             methods=["POST"],
         ),
         *mcp_routes(),
+        *sign_in_routes(),
         # Agent accounts (D30): thin proxies of the owned Claudexor daemon's
         # own account surface; zero auth logic on this side.
         Route("/api/review-pool", endpoint=api_review_pool, methods=["GET"]),

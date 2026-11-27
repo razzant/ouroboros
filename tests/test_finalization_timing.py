@@ -182,7 +182,11 @@ def test_selected_answer_crosses_pause_and_restart_without_a_replacement_round(t
         install_exact_budget_pause(supervisor, tid, budget_pause.exact_pause_marker(pause)["checkpoint"])
 
     with monkeypatch.context() as boot:
-        boot.setattr("ouroboros.place_reply.routeless_note", pause_after_answer)
+        from ouroboros import delegate_resume  # the call right after the selection reads the owner Pause
+
+        read_selected = delegate_resume.selected_answer_context
+        boot.setattr(delegate_resume, "selected_answer_context",
+                     lambda *args, **kwargs: pause_after_answer() or read_selected(*args, **kwargs))
         if carrier == "warm_restart":
             boot.setattr("ouroboros.review_pause.live_detached_operations", lambda _: [{"operation_id": "critic"}])
             with pytest.raises(WorkerExited):

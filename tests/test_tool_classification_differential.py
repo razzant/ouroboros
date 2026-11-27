@@ -564,6 +564,16 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     "INTEGRATE_NATIVE_CAPTURE": (True, "integration_blocked"),
     "INTEGRATE_NATIVE_CAPTURE_UNAVAILABLE": (True, "integration_blocked"),
     "INTEGRATE_RESULT_UNREADABLE": (True, "integration_blocked"),
+    # The delegated Git lane's own refusals: an unreceipted disposition
+    # (INTEGRATE_DISPOSITION_UNWRITTEN) and an incomplete, unreversed staging
+    # (INTEGRATE_APPLIED_UNSTAGED) are the INTEGRATE_ family's texts. The retired
+    # pair recorded (True, integration_blocked) for both identifiers, and their
+    # typed publications restore that exact answer instead of the generic provider
+    # failure, so the bare text and the native pair are asserted live here.
+    "INTEGRATE_DISPOSITION_UNWRITTEN": (True, "integration_blocked"),
+    "INTEGRATE_APPLIED_UNSTAGED": (True, "integration_blocked"),
+    "native:INTEGRATION_BLOCKED:INTEGRATE_DISPOSITION_UNWRITTEN": (True, "integration_blocked"),
+    "native:INTEGRATION_BLOCKED:INTEGRATE_APPLIED_UNSTAGED": (True, "integration_blocked"),
     # The harvest puts every identifier first. A standalone capture failure
     # is an error; the actual successful-write suffix is pinned separately.
     "OUTPUT_CAPTURE_FAILED": (True, "error"),
@@ -826,7 +836,7 @@ def test_undelivered_send_frames_publish_the_current_producer_contract(tmp_path,
 
     LOCAL_ROOM_UNAVAILABLE: an inline Presence turn's local-room frame with no live queue, worker sink or
     supervisor bus (owner_delivery `_no_consumer`). PEER_DELIVERY_UNSUPPORTED: a non-text frame for an unbound
-    peer, where text still goes. Real Place turns and their receipt words: tests/test_presence_final_route.py
+    peer, where text still goes. Real Place turns and their receipt words: tests/test_presence_send_receipts.py
     and tests/test_owner_live_delivery.py.
     """
     from queue import Queue

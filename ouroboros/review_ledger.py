@@ -484,11 +484,6 @@ def _rotate_index_if_needed(drive_root: Any) -> None:
         write_text_atomic(path, "".join(json_dumps_utf8(row, ensure_ascii=False) + "\n" for row in rows))
 
 
-def _newest_rows(paths: Iterable[pathlib.Path], gap_reasons: set[str] | None) -> Iterator[Dict[str, Any]]:
-    for path in paths:
-        yield from reversed(list(iter_jsonl_objects(path, gap_reasons=gap_reasons)))
-
-
 def archived_segments_exist(drive_root: Any) -> bool:
     """Whether rotated index segments exist beside the hot index (a directory listing, no row read)."""
     return bool(_index_segments(drive_root))
@@ -525,7 +520,7 @@ def _index_rows(drive_root: Any, *, task_id: str = "", surface: str = "", limit:
     seen: Dict[str, int] = {}
     out: List[Dict[str, Any]] = []
     paths = [index_path(drive_root)] + ([] if hot_only else [*reversed(_index_segments(drive_root))])
-    for row in _newest_rows(paths, gap_reasons):
+    for row in (r for p in paths for r in reversed(list(iter_jsonl_objects(p, gap_reasons=gap_reasons)))):
         record_id = str(row.get("record_id") or "")
         if not record_id or (task_id and task_id not in (row.get("task_id"), row.get("root_task_id"))):
             continue
@@ -591,10 +586,9 @@ def _preflight_heads(drive_root: Any) -> Dict[str, Any]:
         return data
     rows = recent_records(drive_root, limit=50, hot_only=True, surface="preflight")
     data = {"heads": {}, "complete": len(rows) < 50 and not archived_segments_exist(drive_root)}
-    for row in rows:
+    for row in (row for row in rows if (row.get("verdict") or {}).get("aggregate") != VERDICT_NOT_DISPATCHED):
         record_id = str(row.get("record_id") or "")
-        record = load_record(drive_root, record_id)
-        root = str(((record or {}).get("subject") or {}).get("root") or "")
+        root = str(((load_record(drive_root, record_id) or {}).get("subject") or {}).get("root") or "")
         if not root:
             data["complete"] = False
             continue
@@ -604,9 +598,10 @@ def _preflight_heads(drive_root: Any) -> Dict[str, Any]:
 
 
 def _keep_preflight_head(drive_root: Any, payload: Dict[str, Any]) -> None:
-    """Publish under the ledger lock; pruning retains incomplete coverage."""
+    """Publish under the ledger lock; pruning retains incomplete coverage. A look that was not dispatched is no look."""
     path = ledger_dir(drive_root) / PREFLIGHT_HEADS_NAME
-    root = str((payload.get("subject") or {}).get("root") or "") if payload.get("surface") == "preflight" else ""
+    looked = payload.get("surface") == "preflight" and (payload.get("verdict") or {}).get("aggregate") != VERDICT_NOT_DISPATCHED
+    root = str((payload.get("subject") or {}).get("root") or "") if looked else ""
     if path.exists() and not root:
         return
     try:
@@ -782,12 +777,8 @@ def panel_not_reached(rows: List[Dict[str, Any]], *, lost_is_terminal: bool = Fa
             and not awaiting(row)]
 
 
-def _answer(seat: Dict[str, Any], part: str) -> Dict[str, Any]:
-    return dict((seat.get("answers") or {}).get(part) or {})
-
-
 def _part_verdict(seat: Dict[str, Any], part: str) -> str:
-    answer = _answer(seat, part)
+    answer = (seat.get("answers") or {}).get(part) or {}
     if str(answer.get("status") or "") != ANSWER_RESPONDED:
         return ""
     return str(answer.get("verdict") or "").upper()
@@ -1455,55 +1446,64 @@ def seat_open(seat: Dict[str, Any]) -> bool:
     return str(seat.get("status") or "") == "pending" or str(seat.get("operation_state") or "") in _OPEN_SEAT_STATES
 
 
-def settle_from_collected(drive_root: Any, record_id: str, raws: Iterable[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Settle a pending record from its seats' collected answers when its author no longer waits
-    for it (``review_pause``: a left or unwaited wave, collected at $0 from its recorded
-    assignments). ``raws`` are parsed seat rows (``triad_review.parse_seat_answers`` →
-    ``ReviewActorRecord.to_dict``) keyed by ``slot_id``; only seats the record still holds open
-    take an answer, the dispatch provenance stays, their FAIL items (``seat_findings``) join
-    the ones already recorded, and the verdict is reduced over the assigned seats. A seat still in flight keeps the record pending. ``None`` when no
-    such record exists; a settled record is returned as it is."""
-    from ouroboros.reviewer_slot_config import collected_slot_execution  # what ran, by the collected operation's own saved usage
-    by_slot = {str(raw.get("slot_id") or ""): raw for raw in raws if isinstance(raw, dict)}
+def open_additional_seats(record: Optional[Dict[str, Any]]) -> bool:
+    """Whether a settled mixed record still holds an open additional adviser (never advisers-only or refused)."""
+    rows = [r for r in (record or {}).get("rows") or () if isinstance(r, dict)]
+    return (bool(record) and record.get("state") == STATE_SETTLED and not record.get("dispatch_refusal")
+            and any(not r.get("additional") for r in rows) and not any(seat_open(r) for r in rows if not r.get("additional"))
+            and any(r.get("additional") and seat_open(r) for r in rows))
 
+def settle_from_collected(drive_root: Any, record_id: str, raws: Iterable[Dict[str, Any]], *,
+                          accept: Optional[Callable[[Dict[str, Any], Dict[str, Any], Dict[str, Any]], bool]] = None) -> Optional[Dict[str, Any]]:
+    """Settle a pending record from collected answers (``review_pause``), or close an open additional adviser on a
+    settled mixed record with matching nonempty operation/wave identity (keeping counted answers, verdict, both
+    questions, author decision and settled state). ``None`` when absent; unchanged records return as they are."""
+    from ouroboros.reviewer_slot_config import collected_slot_execution
+    by_slot = {str(raw.get("slot_id") or ""): raw for raw in raws if isinstance(raw, dict)}
     def _mutate(prior: Dict[str, Any]) -> Dict[str, Any]:
-        if prior.get("state") != STATE_PENDING:
+        settled_mixed = open_additional_seats(prior)
+        if prior.get("state") != STATE_PENDING and not settled_mixed:
             raise RecordUnchanged()
-        task_id = str(prior.get("task_id") or "")
-        # The record's own severity policy (a skill wave's checklist rule) decides a late answer's
-        # critical findings exactly as it decided the dispatching attempt's.
-        policy = ((prior.get("brief") or {}).get("checklist") or {}).get("severity_policy")
-        rows, applied = [], []
+        task_id, policy = str(prior.get("task_id") or ""), ((prior.get("brief") or {}).get("checklist") or {}).get("severity_policy")
+        wave = str(prior.get("review_wave_id") or (prior.get("fingerprints") or {}).get("retry_key") or "")
+        rows, applied, closed_verdicts = [], [], {}
         for row in prior.get("rows") or []:
-            seat = json.loads(json.dumps(row, default=str))
-            raw = by_slot.get(str(seat.get("seat_id") or ""))
-            if (raw is not None and seat_open(seat) and (not seat.get("operation_id") or seat["operation_id"] == raw.get("operation_id")
-                    or not raw.get("operation_id") and not seat.get("superseded_operation_ids"))):
-                if not raw.get("outcome") and isinstance(policy, dict) and isinstance(raw.get("answers"), dict):
-                    raw = {**raw, "answers": {part: apply_severity_policy(answer, policy)
-                                              for part, answer in raw["answers"].items()}}
-                seat["source_refs"] = []  # the collected reply's own refs; the merge keeps dispatch and history
-                _apply_raw(seat, raw)
-                _apply_execution(seat, collected_slot_execution(seat, raw, surface=str(prior.get("surface") or ""), record_id=record_id), "")
-                applied.append(raw)
-                _retain_seat_text(drive_root, task_id, record_id, seat)
-                seat.update(_settled_sources(row, seat))
+            seat, sid = json.loads(json.dumps(row, default=str)), str(row.get("seat_id") or "")
+            raw = by_slot.get(sid)
+            if raw is not None and seat_open(seat):
+                op, raw_op = str(seat.get("operation_id") or ""), str(raw.get("operation_id") or "")
+                out = raw.get("outcome") if isinstance(raw.get("outcome"), dict) else {}
+                st, op_st = str(out.get("status") or raw.get("status") or ""), str(raw.get("operation_state") or "")
+                ok = (bool(seat.get("additional")) and bool(op) and op == raw_op and bool(st) and st != "pending"
+                      and op_st not in _OPEN_SEAT_STATES and (not raw.get("late_result_pending") or op_st == "custody_lost")
+                      and str(out.get("operation_id") or op) == op and str(out.get("slot_id") or sid) == sid
+                      and not (raw.get("review_wave_id") and wave and str(raw["review_wave_id"]) != wave)
+                      if settled_mixed else (not op or op == raw_op or (not raw_op and not seat.get("superseded_operation_ids"))))
+                if ok and (accept is None or accept(prior, seat, raw)):
+                    if not out and isinstance(policy, dict) and isinstance(raw.get("answers"), dict):
+                        raw = {**raw, "answers": {p: apply_severity_policy(a, policy) for p, a in raw["answers"].items()}}
+                    seat["source_refs"] = []
+                    _apply_raw(seat, raw)
+                    _apply_execution(seat, collected_slot_execution(seat, raw, surface=str(prior.get("surface") or ""), record_id=record_id), "")
+                    applied.append({**raw, "answers": seat["answers"]} if out.get("answers") and not raw.get("answers") else raw)
+                    closed_verdicts[sid] = row_verdict(seat)
+                    _retain_seat_text(drive_root, task_id, record_id, seat)
+                    seat.update(_settled_sources(row, seat))
             seat.pop("raw_text", None)
             rows.append(seat)
         still_open = any(seat_open(seat) for seat in rows)
-        verdict = reduce_verdict(rows, dispatch_refusal=prior.get("dispatch_refusal"),
-                                 pending=any(seat_open(seat) for seat in rows if not seat.get("additional")))
+        if not applied and (still_open or settled_mixed):
+            raise RecordUnchanged()
         before = dict(prior.get("verdict") or {})
-        found = dict(zip(HEAVY_VERDICT_FIELDS, seat_findings(
-            applied, {str(seat.get("seat_id") or "") for seat in rows if seat.get("additional")})))
-        verdict.update({key: _merge_evidence(before.get(key) or [], found[key]) for key in HEAVY_VERDICT_FIELDS},
-                       **{key: list(before.get(key) or []) for key in ("degraded_reasons", "wave_failures")})
-        settled = {"rows": rows, "verdict": verdict, "state": STATE_PENDING if still_open else STATE_SETTLED,
-                   "cost": record_cost(rows)}
-
-        return {**prior, **settled, "panel": {**dict(prior.get("panel") or {}),
-                                            "not_reached": panel_not_reached(rows, lost_is_terminal=not still_open)}}
-
+        found = dict(zip(HEAVY_VERDICT_FIELDS, seat_findings(applied, {str(s.get("seat_id") or "") for s in rows if s.get("additional")})))
+        if settled_mixed:
+            verdict = {**before, "per_row": {**dict(before.get("per_row") or {}), **closed_verdicts},
+                       "additional_findings": _merge_evidence(before.get("additional_findings") or [], found["additional_findings"])}
+        else:
+            verdict = reduce_verdict(rows, dispatch_refusal=prior.get("dispatch_refusal"), pending=any(seat_open(seat) for seat in rows if not seat.get("additional")))
+            verdict.update({key: _merge_evidence(before.get(key) or [], found[key]) for key in HEAVY_VERDICT_FIELDS}, **{key: list(before.get(key) or []) for key in ("degraded_reasons", "wave_failures")})
+        return {**prior, "rows": rows, "verdict": verdict, "state": STATE_SETTLED if settled_mixed or not still_open else STATE_PENDING,
+                "cost": record_cost(rows), "panel": {**dict(prior.get("panel") or {}), "not_reached": panel_not_reached(rows, lost_is_terminal=not still_open)}}
     return revise_record(drive_root, record_id, _mutate)
 
 
@@ -1594,7 +1594,7 @@ __all__ = [
     "mark_provenance_unknown", "new_record_id", "normalize_model_name", "note_author_decision",
     "note_commit_landing", "panel_facts", "read_source", "read_selected_source", "task_record_page",
     "recent_records", "record_path", "record_sources_resolvable", "reduce_verdict", "retain_text_source", "reuse_key_digest",
-    "revise_record", "row_verdict", "rows_from_plan", "seat_findings", "seat_open", "settle_from_collected",
+    "revise_record", "row_verdict", "rows_from_plan", "seat_findings", "seat_open", "open_additional_seats", "settle_from_collected",
     "seat_text_source", "settle_pending_payload", "single_question_part",
     "CouplingOutcome", "coupling_outcome", "seat_parts", "source_ref_resolvable", "write_record",
 ]

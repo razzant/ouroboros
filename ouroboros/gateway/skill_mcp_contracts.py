@@ -1,6 +1,6 @@
 """Connect tools of a skill (``GET|POST /api/skills/{skill}/mcp-connect``): its own module beside ``contracts.py``.
 
-Descriptive TypedDicts, the twin of ``web/modules/skill_mcp_types.js``. The producer is ``ouroboros/skill_mcp.py``
+Descriptive TypedDicts. The producer is ``ouroboros/skill_mcp.py``
 behind ``gateway.extensions.api_skill_mcp_connect`` (the confirm runs through ``skill_lifecycle_actions``). The
 preview writes nothing; the confirm carries the preview's two source identities and the collateral consent, and answers
 its settled ``SkillMcpConnectResponse`` or, asked with ``Prefer: respond-async``, ``SkillMcpConnectPending``."""
@@ -53,6 +53,7 @@ class SkillMcpConnectPreviewResponse(TypedDict):
     changed: NotRequired[bool]
     conflict: NotRequired[bool]
     settings_digest: NotRequired[str]
+    grant_note: NotRequired[str]  # saved keys not supplied by the skill; the server's own settings are independent
     code: NotRequired[str]
     error: NotRequired[str]
     saved: NotRequired[bool]

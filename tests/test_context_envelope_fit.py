@@ -87,3 +87,67 @@ def test_a_route_reprojection_counts_the_shown_request_as_its_round_does(monkeyp
     assert (carried > canonical) is bool(effort)  # the reasoning shape is longer, and it is the one measured
     assert plan.projected_tokens_with_tools(mode, tools, **shape) == cf.estimate_context_prompt_tokens(
         plan.messages_for(mode), tools, **shape)
+
+
+@pytest.mark.parametrize("kind", ["agent_note", "place_machine", "late_result"])
+def test_program_note_history_keeps_literal_words_as_data(kind):
+    from ouroboros.chat_chain import row_address
+    from ouroboros.context import build_user_content
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, PROGRAM_HISTORY_KIND
+    from ouroboros.dialogue_provenance import recorded_author, row_author
+    from ouroboros.memory_floor import select_view
+    from ouroboros.memory_inventory import row_meta
+
+    words = "На полке четыре книги.\n  Две из них синие."
+    author = recorded_author("Example librarian")
+    row = {"chat_id": 1, "direction": "in", "role": "system", "ts": "2026-01-02T09:00:00+00:00",
+           "system_type": "agent_note_received", "text": "Program message received.",
+           "declared_author": author, "agent_note_text": words}
+    if kind == "place_machine":
+        row = {"chat_id": 1, "direction": "in", "source": "presence", "ts": row["ts"], "text": words,
+               "transport": {"actor": {"id": "library", "origin": "machine", "display_name": "Example librarian"}}}
+    elif kind == "late_result":
+        row["late_report_sha256"] = "b" * 64
+    addr = row_address(row)
+    note = mv._spoken((addr, row_meta(row), 1), row_author(row), {addr["row_sha256"]: row})
+    owner = {**syn.spoken(2, "human", 55), "owner_side": True}
+    snap = syn.snapshot(room_facts=syn.room(lane1=[note, owner]))
+
+    def fit(content, opening=""):
+        core = cf.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", json.dumps(content), False,
+                              memory_view_json=mv.snapshot_json(snap), opening_program_address=opening)
+        return cf.build_context_fit_plan(None, core, {"id": "library"}, preferred_mode="max", tool_schemas=[],
+            route_resolver=lambda *a, **kw: ({"provider": "fixture", "model": "fixture"},
+                SimpleNamespace(route_fp="", status="confirmed", stale=False, window_tokens=500_000)))
+
+    later = fit("Сколько книг на полке?")  # no current note, so history must supply the body
+    for mode in ("max", "low", "nano"):
+        rows = later.messages_for(mode)
+        system = cf.extract_plain_text_from_content(rows[0]["content"])
+        assert all(line.strip() not in system for line in words.splitlines())
+        assert "Example librarian" not in system
+        assert owner["line"] in system
+        if kind == "late_result":
+            assert note["address"] in system and not any(item.get(HOST_CONTEXT_KIND_KEY) == PROGRAM_HISTORY_KIND for item in rows)
+            continue
+        data, = [item for item in rows if item.get(HOST_CONTEXT_KIND_KEY) == PROGRAM_HISTORY_KIND]
+        assert data["role"] == "user" and words in data["content"]
+        assert note["address"] in data["content"] and "Example librarian" in data["content"]
+        tail = {"role": "assistant", "content": "Четыре."}
+        assert later.reproject_transcript([*rows, tail], mode) == [*rows, tail]
+    assert not note["owner_side"]
+    if kind == "late_result":
+        return
+
+    reduced = select_view(later, "max", [f"F7p:bare:{note['address']}"]).messages_for("max")
+    assert note["address"] in cf.extract_plain_text_from_content(reduced[0]["content"])
+    assert all(item.get(HOST_CONTEXT_KIND_KEY) != PROGRAM_HISTORY_KIND for item in reduced)
+    restored = later.reproject_transcript(reduced, "max")
+    assert words in restored[2]["content"] and restored[1] == reduced[1]
+
+    first = build_user_content({"text": words, "admission_author": {"author": author, "row_address": note["address"]}})
+    arriving = fit(first, opening=note["address"]).messages_for("max")
+    assert arriving[1]["role"] == "user" and arriving[1]["content"].endswith(words)
+    assert all(item.get(HOST_CONTEXT_KIND_KEY) != PROGRAM_HISTORY_KIND for item in arriving)
+    system = cf.extract_plain_text_from_content(arriving[0]["content"])
+    assert all(line.strip() not in system for line in words.splitlines())

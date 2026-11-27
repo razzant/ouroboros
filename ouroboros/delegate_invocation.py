@@ -24,6 +24,9 @@ EVENTS = "custody_event_ordinals"
 ORDINAL = "custody_append_ordinal"
 COMPLETE = "custody_invocations_complete"
 LEGACY_GAP = "legacy_gap"
+# A newly selected review Continue's START is recorded ``unsent``; START_HANDOFF, written right before its first
+# transport call, moves it to ``entered`` and never back. No ``handoff`` (any other start, an older row) is unknown.
+HANDOFF_UNSENT, HANDOFF_ENTERED = "unsent", "entered"
 
 
 def operation_key(operation_id: str, slot_id: str) -> str:
@@ -51,6 +54,7 @@ def advance(record: dict, event: dict, ordinal: int) -> dict:
 
     record = dict(record or {"state": "pending", "run_id": ""})
     kind = event.get("type")
+    record = _handoff(record, event)
     if kind == START_REQUESTED and not record.get("request"):
         record.update(request=dict(event), request_ordinal=ordinal)
     elif kind == START_RISK_ACCEPTED and record.get("request") and record["state"] == "pending":
@@ -60,7 +64,21 @@ def advance(record: dict, event: dict, ordinal: int) -> dict:
     elif kind == STARTED:
         record.update(state="started", run_id=str(event.get("run_id") or ""), started_ordinal=ordinal)
     elif kind in (START_UNSENT, START_FAILED) and event.get("definite") is True and record["state"] != "started":
-        record["state"] = "failed_definite"
+        if not (kind == START_FAILED and event.get("pre_admission_rejected") is True
+                and (record["state"] != "pending" or not record.get("request") or record.get("resume_decisions"))):
+            record["state"] = "failed_definite"
+    return record
+
+
+def _handoff(record: dict, event: dict) -> dict:
+    """The one-way handoff fact (``HANDOFF_UNSENT``): only the FIRST request may open it, any START_HANDOFF closes it."""
+    from ouroboros.delegate_custody import START_HANDOFF, START_REQUESTED
+
+    if event.get("type") == START_HANDOFF:
+        return {**record, "handoff": HANDOFF_ENTERED}
+    if (event.get("type") == START_REQUESTED and not record.get("request") and "handoff" not in record
+            and event.get("handoff") == HANDOFF_UNSENT):
+        return {**record, "handoff": HANDOFF_UNSENT}
     return record
 
 
@@ -100,15 +118,19 @@ def decision_facts(record):
     return {"resume_decisions": copy.deepcopy(record["resume_decisions"])} if record.get("resume_decisions") else {}
 
 
+def handoff_facts(record):
+    return {"handoff": record["handoff"]} if record.get("handoff") in (HANDOFF_UNSENT, HANDOFF_ENTERED) else {}
+
+
 def reduce_event(txn, event: dict, ordinal: int) -> Optional[dict]:
-    from ouroboros.delegate_custody import START_REQUESTED, STARTED, START_FAILED, START_UNSENT, START_RISK_ACCEPTED
+    from ouroboros.delegate_custody import START_REQUESTED, STARTED, START_FAILED, START_UNSENT, START_RISK_ACCEPTED, START_HANDOFF
 
     iid, kind = str(event.get("invocation_id") or ""), event.get("type")
     if kind == START_REQUESTED:
         key = operation_key(str(event.get("operation_id") or ""), str(event.get("slot_id") or ""))
         if txn.get_row(OPERATIONS, key) is None:
             txn.put_row(OPERATIONS, key, {"invocation_id": iid, "request_ordinal": ordinal})
-    if not iid or kind not in (START_REQUESTED, STARTED, START_FAILED, START_UNSENT, START_RISK_ACCEPTED):
+    if not iid or kind not in (START_REQUESTED, STARTED, START_FAILED, START_UNSENT, START_RISK_ACCEPTED, START_HANDOFF):
         return None
     record = txn.get_row(INVOCATIONS, iid)
     if record is None:
@@ -120,9 +142,10 @@ def reduce_event(txn, event: dict, ordinal: int) -> Optional[dict]:
     return record
 
 
-def _read(txn, invocation_id: str) -> Optional[dict]:
+def _read(txn, invocation_id: str, *, bound: Optional[dict] = None) -> Optional[dict]:
     record = txn.get_row(INVOCATIONS, invocation_id)
-    bound = bound_runs(txn, invocation_id)
+    if bound is None:
+        bound = bound_runs(txn, invocation_id)
     # A rollback writer knows neither the invocation row nor the new run fact.
     # Its addressed rows remain usable only when the legacy path can prove the answer.
     if (record is None or any(facts.get("started_ts") and not facts.get("_invocation_started_ordinal")
@@ -135,6 +158,22 @@ def _read(txn, invocation_id: str) -> Optional[dict]:
     return record
 
 
+def snapshot(root, invocation_ids):
+    """First request and bound runs of only these invocations, in one current custody read.
+
+    No request bodies, sibling history or proof cache. A missing or legacy-gap row stays in the
+    result so a carried address cannot mistake it for closed custody.
+    """
+    from ouroboros import store
+
+    with store.open_store(root, write=False) as txn:
+        result = {}
+        for iid in invocation_ids:
+            bound = bound_runs(txn, iid)
+            result[iid] = (_read(txn, iid, bound=bound), bound)
+        return result
+
+
 def _answer(root, record: Optional[dict], request_facts) -> Optional[dict]:
     if record is None:
         return None
@@ -142,7 +181,7 @@ def _answer(root, record: Optional[dict], request_facts) -> Optional[dict]:
         return {"state": LEGACY_GAP, "run_id": "", "reason": record["reason"]}
     if not record.get("request"):
         return None  # A complete modern fold without REQUESTED has no invocation.
-    return {**request_facts(root, record["request"]), **decision_facts(record),
+    return {**request_facts(root, record["request"]), **decision_facts(record), **handoff_facts(record),
             "state": record["state"], "run_id": record["run_id"]}
 
 
@@ -192,6 +231,7 @@ def invocation_record(drive_root: Any, invocation_id: str, *,
     insufficient stored evidence returns ``legacy_gap``, never an absent run.
     """
     from ouroboros.delegate_custody import START_REQUESTED, STARTED, START_FAILED, START_UNSENT, START_RISK_ACCEPTED, _unique_rows
+    from ouroboros.delegate_custody import START_HANDOFF
 
     target = str(invocation_id or "").strip()
     if not target:
@@ -201,22 +241,27 @@ def invocation_record(drive_root: Any, invocation_id: str, *,
 
         return invocation(drive_root, target, _request_facts)
     found: Optional[Dict[str, Any]] = None
-    state, run_id = "pending", ""
+    state, run_id, handoff = "pending", "", ""
     for row in _unique_rows(rows):
         if str(row.get("invocation_id") or "") != target:
             continue
         kind = str(row.get("type") or "")
-        if kind == START_REQUESTED and found is None:
+        if kind == START_HANDOFF:
+            handoff = HANDOFF_ENTERED
+        elif kind == START_REQUESTED and found is None:
             found = _request_facts(drive_root, row)
+            handoff = handoff or (HANDOFF_UNSENT if row.get("handoff") == HANDOFF_UNSENT else "")
         elif kind == START_RISK_ACCEPTED and found is not None and state == "pending":
             found.setdefault("resume_decisions", {})[row["resuming_task_id"]] = row["decision"]
         elif kind == STARTED:
             state, run_id = "started", str(row.get("run_id") or "")
         elif kind in (START_UNSENT, START_FAILED) and row.get("definite") is True and state != "started":
-            state = "failed_definite"
+            if not (kind == START_FAILED and row.get("pre_admission_rejected") is True
+                    and (state != "pending" or found is None or found.get("resume_decisions"))):
+                state = "failed_definite"
     if found is None:
         return None
-    return {**found, "state": state, "run_id": run_id}
+    return {**found, **({"handoff": handoff} if handoff else {}), "state": state, "run_id": run_id}
 
 
 def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
@@ -231,6 +276,7 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
         "request": request_body(drive_root, row),
         "route": str(row.get("route") or ""),
         "project_id": str(row.get("project_id") or ""),
+        **({"project_resolution": row["project_resolution"]} if "project_resolution" in row else {}),
         "project_owned": bool(row.get("project_owned")),
         # Absence is a fact: legacy rows fall back to the stored request.
         **({"project_persistent": bool(row["project_persistent"])}
@@ -247,6 +293,9 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
         # target the original attempt bound — never a re-derivation.
         "snapshot_id": str(row.get("snapshot_id") or ""),
         "execution_root": str(row.get("execution_root") or ""),
+        # The start's one workspace fact as recorded (a thread's folder included); absent on an older row.
+        **({"registration_workspace": row["registration_workspace"]}
+           if isinstance(row.get("registration_workspace"), str) else {}),
         "execution_binding_fingerprint": str(row.get("execution_binding_fingerprint") or ""),
         "baseline_sha": str(row.get("baseline_sha") or ""),
         "target_root": str(row.get("target_root") or ""),
@@ -254,7 +303,7 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
         # Continuation lineage and the same-tree capture identity replay too.
         **{key: str(row.get(key) or "") for key in ("continuation_of", "capture_id", "snapshot_task_id")},
         **{key: copy.deepcopy(row[key]) for key in ("execution_mode", "effective_access", "thread_id", "authority_ceiling", "promotion",
-                                                  "input_files",  # the selected inputs' source map
+                                                  "input_files", "named_notes",  # the selected inputs' source map, notes sent
                                                   "review_subject_restore") if key in row},  # a released review checkout
         # A copy: the source rows may be the shared, read-only custody memo.
         "resource_ref": copy.deepcopy(row.get("resource_ref")) if isinstance(row.get("resource_ref"), dict) else {},

@@ -150,7 +150,12 @@ def test_logs_long_filter_word_never_crowds_its_neighbours_or_clear():
     assert "flex: 1;" in _block(css, ".logs-kinds {")
     strip = _block(css, ".app-tab-strip {")
     assert "flex-wrap: nowrap;" in strip and "overflow-x: auto;" in strip and "min-width: 0;" in strip
-    assert 'class="logs-kinds app-tab-strip"' in _read("web/modules/logs.js")
+    rail = re.search(
+        r'<div\b(?=[^>]*\sid="log-filters")[^>]*\sclass="([^"]*)"',
+        _read("web/modules/logs.js"),
+    )
+    assert rail is not None
+    assert {"logs-kinds", "app-tab-strip", "scroll-fade-x"} <= set(rail.group(1).split())
     alone = _block(css, SECTION_PAGE_ALONE)
     assert 'html[data-layout="stack"] #page-dashboard .logs-kinds { grid-area: 2 / 1 / auto / -1;' in alone
     assert 'html[data-layout="stack"] #page-dashboard .logs-clear-list { grid-area: 1 / 3; }' in alone

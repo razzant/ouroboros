@@ -16,30 +16,36 @@ import logging
 import math
 import pathlib
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Iterable, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Iterable, Callable, Dict, List, Mapping, Optional, Tuple
 
 from ouroboros.context_measurement import (
     ContextProfile as ContextProfile, MeasurementBasis as MeasurementBasis,
     MainFitMeasurement as MainFitMeasurement, MainFitDisposition as MainFitDisposition,
     measure_main_fit as measure_main_fit, reclaim_low_water_margin as reclaim_low_water_margin,
-    BOOK_NOTE_KEY, required_book_addition,
+    bounded_prompt_tokens_for_payload as bounded_prompt_tokens_for_payload,
+    effort_lengthens_request as effort_lengthens_request, estimate_context_prompt_tokens as estimate_context_prompt_tokens,
+    messages_carry_native_images as messages_carry_native_images, payload_prompt_rows as payload_prompt_rows,
+    tool_schema_tokens as tool_schema_tokens, FIRST_CONTACT_START as FIRST_CONTACT_START, _custom_ladder,
+    BOOK_NOTE_KEY, required_book_addition, _physical_context_for_fit as _physical_context_for_fit,
 )
-if TYPE_CHECKING:
-    from ouroboros.physical_attempt_context import PhysicalAttemptContext
 
 from ouroboros.context_layout import reference_doc_sections, whole_development_book
-from ouroboros.section_floor import (HostSection, render_governance, rendered_texts, section_views,
-                                     _governance_blocks as _section_governance, _system_blocks)
+from ouroboros.section_floor import (HostSection, _governance_blocks as _section_governance, _system_blocks,
+    capture_system_projection, projection_fields, render_governance, rendered_texts, section_views, with_program_history)
 from ouroboros.reference_books import ReferenceBook
 from ouroboros import context_budget
+from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
 from ouroboros.context_window import WindowRecord, resolve_window, route_observation_scope
 from ouroboros.tool_result_delivery import project_tool_result_batch  # noqa: F401
-from ouroboros.utils import estimate_tokens
 from ouroboros.context_timing import adopt, another_pass, apart, counted, timed, timed_section
 
 log = logging.getLogger(__name__)
+
+_Schemas = Optional[List[Dict[str, Any]] | Callable[[], List[Dict[str, Any]]]]
+_ToolFrames = Optional[Callable[[str], Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]]]
+DENSITY_VIEW_KINDS = {"consciousness": "own_wake", "presence": "focus", "integrator": "owner_turn"}  # role -> witness view
 
 
 def extract_plain_text_from_content(content: Any) -> str:
@@ -68,8 +74,10 @@ class ContextFitProjection:
     # The memory view's fact of this projection (``memory_floor.view_receipt``): role,
     # room, floor steps and boundaries, block sizes; empty without a view.
     memory_facts: Mapping[str, Any] = field(default_factory=dict)
+    assembly_witnesses: tuple = ()  # host side only; never a message field
     # A route rebind may measure the actual shortened transcript, not the initial tail.
     continuation_messages_json: Optional[str] = None
+    room_data: str = ""
 
     def system_message(self) -> Dict[str, Any]:
         from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
@@ -119,10 +127,30 @@ class ContextFitPlan:
     start_tool_schemas_json: Optional[str] = None  # what the start fit priced (``null``: none); None: not captured
     start_nano_base: Optional[Tuple[str, ...]] = None  # a live call's own Nano tools, priced by its start
     start_reasoning_effort: str = ""  # effort paired with this frame's provider for next-start pricing; ``start`` keeps history
-    # The start fit's own mode and why it is below the owner's (``memory_floor.start_cause``): every reprojection
-    # and route rebind keeps it, while ``initial_mode`` follows the current selection. ("", ""): not a built start;
+    # The start fit's own mode and cause (physical, or a first-contact preference): every reprojection and
+    # route rebind keeps it while ``initial_mode`` follows the current selection. ("", ""): not a built start;
     # ``UNKNOWN_START``: a restored task whose continuation did not carry its start (``restored_start``).
     start: Tuple[str, str] = ("", "")
+    # A fresh direct chat's start-hint scope as its fit read it ("": not such a plan, e.g. a root, wake or restore),
+    # and the ordinary projections a hint replaced (three modes, selection and start), until a dispatch of the hinted
+    # view (``loop_routes._FirstContactHint``) or a rebind to another scope (``loop_routes.first_contact_route``).
+    first_contact: str = ""
+    first_contact_normal: Optional[Tuple[ContextFitProjection, ContextFitProjection, ContextFitProjection,
+                                         str, Tuple[str, str]]] = field(default=None, compare=False)
+
+    def first_contact_spent(self) -> "ContextFitPlan":
+        """After its first physical send a hint answers to that send's own outcome; no ordinary form stays to restore."""
+        return replace(self, first_contact_normal=None) if self.first_contact_normal is not None else self
+
+    def ordinary_first_contact(self) -> "ContextFitPlan":
+        """The view this plan would have sent without the start hint (another scope dispatches it)."""
+        if self.first_contact_normal is None:
+            return self
+        max_projection, low_projection, nano_projection, initial_mode, start = self.first_contact_normal
+        return replace(self, max_projection=max_projection, low_projection=low_projection, nano_projection=nano_projection,
+                       initial_mode=initial_mode, start=start, first_contact_normal=None)
+
+    requested_load_window: Optional[int] = None  # the selected physical load, including Auto (0)
 
     def start_schema_names(self, mode: str) -> Optional[Tuple[str, ...]]:
         """The schema names the start priced, selected for ``mode`` as the start selected them (a live call's own
@@ -140,7 +168,10 @@ class ContextFitPlan:
                             measured_input_tokens: Optional[int] = None, start_work: bool = False,
                             slack_tokens: int = 0, room_if_narrowed: bool = False,
                             admitted: bool = False, reasoning_effort: str = "",
-                            restoring_held: bool = False) -> "ContextFitPlan":
+                            restoring_held: bool = False, telling_floor: bool = False,
+                            books_must_save: bool = False,
+                            nano_tools: _Schemas = None, low_tools: _Schemas = None,
+                            tool_frames: _ToolFrames = None, unsent_start: bool = False) -> "ContextFitPlan":
         """Fit shown bytes; the prepared envelope's raw estimate includes its signed size difference.
 
         The measurement belongs to this candidate, includes tools and excludes the reply; withholding an image can shrink it.
@@ -154,12 +185,15 @@ class ContextFitPlan:
         is sized (voice; a work's first start is ``_build_context_fit_plan``).
         ``room_if_narrowed`` (Main's rebind): a view that must narrow for the window is written again anyway, so with
         its excess it asks a wall's slack (``REFUSAL_PASSES``), one eighth, which memory detail and ordinary host
-        forms pay; the mode and a whole-or-outline section pay the measured excess alone. A view that fits is never
+        forms pay; a whole-or-outline section pays the measured excess alone. ``telling_floor`` tries whole books
+        beside tellings before maps or deeper forms, against the measured saving including slack. A view that fits is never
         touched, at a restore and on a place that holds no copy of it too: nothing is taken on the guess that the
         work will reach its wall (owner, 30 Sep 2026). ``start_work`` is a first send's own room and Max decision (voice).
+        ``books_must_save``: on the measured books rung, reject a map frame that does not shrink the same held view.
+        ``low_tools`` and ``nano_tools`` are the caller's alternative schema sets, read lazily. A ``tool_frames``
+        caller supplies each mode's fitted schemas and their notice rows together; only it adopts the selected pair.
+        ``unsent_start``: no request of this work was read yet (``loop_round_limits.start_unread``): a start's map sparing.
         """
-        from dataclasses import replace
-
         ratio = 1.0 if self.window_basis == "estimator" else ratio
         reserve_args = ({"working_reserve_tokens": self.working_reserve_tokens}
                         if self.working_reserve_tokens is not None else {})
@@ -183,25 +217,24 @@ class ContextFitPlan:
                      if current_messages is not None else None)
         if self.core is not None:
             from ouroboros import memory_floor
-            from ouroboros.context_budget import context_mode_limits
             from ouroboros.held_notes import HeldNoteSection
             from ouroboros.memory_view import snapshot_from_json
             from ouroboros.tool_policy import select_tool_schemas
 
             shown = self.projection(start)
-            names = [schema["function"]["name"] for schema in tool_schemas or []]
-            sent = select_tool_schemas(tool_schemas or [], context_mode=start, schema_names=names).schemas
-            raw = _request_tokens(json.loads(shown.system_content_json), shown.user_content_json or self.user_content_json,
-                                  supplementary_messages_json=self.core.supplementary_messages_json,
-                                  current_messages=current_messages, tools=list(sent), provider=self.provider,
-                                  reasoning_effort=reasoning_effort)
+            schemas, extra = tool_frames(start) if tool_frames else (tool_schemas or [], [])
+            names = [schema["function"]["name"] for schema in schemas]
+            sent = select_tool_schemas(schemas, context_mode=start, schema_names=names).schemas
+            rows = _request_rows(json.loads(shown.system_content_json), shown.user_content_json or self.user_content_json,
+                                 self.core.supplementary_messages_json, current_messages, room_data=shown.room_data)
+            raw = estimate_context_prompt_tokens([*rows, *extra] if extra else rows, list(sent),
+                                                 provider=self.provider, reasoning_effort=reasoning_effort)
             overhead = int(measured_input_tokens) - raw if measured_input_tokens is not None else 0
-            request = math.ceil((raw + overhead) * ratio)
-            request += context_mode_limits(start, self.preferred_mode, output_reserve, **reserve_args)[1]
+            book = required_book_addition(self, start)  # nothing narrows to pay for this book
+            request = math.ceil((raw + overhead) * ratio) + reserve - math.ceil(book * ratio)
             room = math.ceil((own.boundary if own else window_tokens) / context_budget.RECLAIM_LOW_WATER_DIVISOR
                              ) if known_window and window_tokens else 0
             request += room if start_work else 0
-            request -= math.ceil(required_book_addition(self, start) * ratio)  # nothing narrows to pay for the book
             measured, units = (request - frame if known_window and frame else 0), max(ratio, 0.01)
             if room_if_narrowed and measured > 0:  # narrowing writes the start anyway: a wall's slack with it
                 refused_tokens, slack_tokens = max(int(refused_tokens or 0), measured), max(slack_tokens, room)
@@ -229,8 +262,21 @@ class ContextFitPlan:
                     kept_sections=None if refit else {mode: self.projection(mode).memory_facts.get("host_sections_addressed", ())
                                    for mode in memory_floor.MODES},
                     saving=None if refit else {start: math.ceil(deficit / units)},
-                    slack=0 if refit else math.ceil(deficit / units) - math.ceil(excess / units))
-                held_cost = contents[start][1].get("held_note_request_tokens")
+                    slack=0 if refit else math.ceil(deficit / units) - math.ceil(excess / units),
+                    books_must_save=books_must_save, nano_tools=nano_tools, low_tools=low_tools, tool_frames=tool_frames,
+                    running_limit=(raw + overhead - book - math.ceil(deficit / units)
+                                   if telling_floor and deficit > 0 and not refit else None), unsent_start=unsent_start)
+                held_cost = contents[start][1].get("held_note_request_tokens") if contents else None
+                if books_must_save and not contents:
+                    select_mode = None  # a rejected trial does not select a mode or publish a view
+        elif books_must_save and select_mode:
+            # Without a captured core, the only comparable change is between the two stored views: system rows and data.
+            def stored_price(mode):
+                return _request_tokens(json.loads(self.projection(mode).system_content_json), self.user_content_json,
+                    current_messages=current_messages, tools=tool_schemas, provider=self.provider, reasoning_effort=reasoning_effort,
+                    room_data=self.projection(mode).room_data)
+            if stored_price(select_mode) >= stored_price(start):
+                select_mode = None
 
         def narrowed(projection: ContextFitProjection) -> bool:
             # Unchanged levels keep their bytes unless pressure requires a different receipt; equal counts
@@ -242,30 +288,34 @@ class ContextFitPlan:
                     != contents[projection.mode][1].get("host_sections_addressed")
                     # Under measured pressure, a shorter receipt can pay the excess without another floor step.
                     or ((deficit > 0 or refit) and projection.mode == start
-                        and json.loads(projection.system_content_json) != contents[projection.mode][0]))
+                        and (json.loads(projection.system_content_json) != contents[projection.mode][0]
+                             or projection.room_data != contents[projection.mode][2])))
 
         def project(projection: Optional[ContextFitProjection]) -> Optional[ContextFitProjection]:
             if projection is not None and projection.mode in contents and narrowed(projection):
-                system, facts = contents[projection.mode]  # the start's Max room outlives a narrowing, as a selection's
+                system, facts, data = contents[projection.mode]
                 number = (projection.memory_facts.get("floor") or {}).get("no_memory_tokens")  # so does Low's miss (3A)
                 if number is not None and isinstance(facts.get("floor"), dict):
                     facts = {**facts, "floor": {**facts["floor"], "no_memory_tokens": number}}
                 projection = replace(projection, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
-                                     memory_facts={**facts, **{key: value for key, value in projection.memory_facts.items()
-                                                               if key == "max_room"}}, continuation_messages_json=tail_json,
+                                     **projection_fields(system, facts | {key: projection.memory_facts[key]
+                                         for key in ("max_room", "first_contact_preference") if key in projection.memory_facts}),
+                                     continuation_messages_json=tail_json, room_data=data,
                                      estimated_tokens=_request_tokens(system, projection.user_content_json or self.user_content_json,
                                          supplementary_messages_json=self.core.supplementary_messages_json,
-                                         current_messages=current_messages))
+                                         current_messages=current_messages, room_data=data))
             elif projection is not None and current_messages is not None:
                 projection = replace(projection, continuation_messages_json=tail_json,
                     estimated_tokens=_request_tokens(json.loads(projection.system_content_json),
-                        projection.user_content_json or self.user_content_json, current_messages=current_messages))
+                        projection.user_content_json or self.user_content_json, current_messages=current_messages,
+                        room_data=projection.room_data))
             if projection is not None and projection.mode == start and held_cost is not None:
                 projection = replace(projection, memory_facts={**projection.memory_facts,
                                                                "held_note_request_tokens": held_cost})
             calibrated = int(int(projection.estimated_tokens or 0) * ratio) if projection is not None else 0
             return projection and replace(projection, calibrated_tokens=calibrated, calibration_ratio=ratio)
 
+        # An unsent hint's ordinary form stays beside it until a send spends it or a route rebind moves the scope.
         return replace(self, initial_mode=start if contents else select_mode or start, window_tokens=window_tokens,
                        window_record=record,
                        output_reserve_tokens=output_reserve,
@@ -279,28 +329,22 @@ class ContextFitPlan:
 
     def messages_for(self, mode: str) -> List[Dict[str, Any]]:
         projection = self.projection(mode)
-        if projection.continuation_messages_json is not None:
-            return [projection.system_message(), *json.loads(projection.continuation_messages_json)]
-        return [
-            projection.system_message(),
+        tail = json.loads(projection.continuation_messages_json) if projection.continuation_messages_json is not None else [
             {"role": "user", "content": json.loads(projection.user_content_json or self.user_content_json)},
             *json.loads(self.core.supplementary_messages_json if self.core is not None else "[]"),
         ]
+        return [projection.system_message(), *with_program_history(tail, projection.room_data)]
 
     def reproject_transcript(
         self,
         messages: List[Dict[str, Any]],
         mode: str,
     ) -> List[Dict[str, Any]]:
-        """Replace only the captured system view; preserve every dialogue/tool turn."""
+        """Replace the captured memory frame, not its dialogue/tool tail."""
         if not messages:
             return self.messages_for(mode)
-        rebuilt = list(messages)
-        if str(rebuilt[0].get("role") or "") == "system":
-            rebuilt[0] = self.projection(mode).system_message()
-        else:
-            rebuilt.insert(0, self.projection(mode).system_message())
-        return rebuilt
+        projection = self.projection(mode)
+        return [projection.system_message(), *with_program_history(_request_tail(messages), projection.room_data)]
 
     def projected_tokens_with_tools(
         self,
@@ -337,8 +381,8 @@ class ContextCore:
     memory_view_json: str = ""
     # That capture's journal boundary (``MemoryViewSnapshot.chronicle_sequence``), beside the view and not hashed.
     memory_view_sequence: Optional[int] = None
-    # Captured source rows follow the assignment, outside the immutable system view.
     supplementary_messages_json: str = "[]"
+    opening_program_address: str = ""  # the same canonical note already has the assignment's data role
     semi_stable_sections: Tuple[HostSection, ...] = ()
     dynamic_head_sections: Tuple[HostSection, ...] = ()
     dynamic_sections: Tuple[HostSection, ...] = ()
@@ -351,14 +395,17 @@ class ContextCore:
     development_required: bool = False
     # Repo-relative path, raw digest, normalized character count and digest.
     base_prompt_source: Optional[Tuple[str, str, int, str]] = None
+    bible_source: Optional[Tuple[str, str, int, str]] = None
+    initial_attachment_facts: Mapping[str, Any] = field(default_factory=dict, compare=False)
     held_note_resume: Optional[Mapping[str, Any]] = None
 
     def required_book_tokens(self, mode: str) -> int:
         """What the directly required handbook adds to the ordinary view of ``mode``, 0 when that view holds it.
 
         Compact views keep their chapter map beside it; Max for another subject carries the map in the book's
-        place. It counts against the window only: every owner target, automatic narrowing and rescue is sized
-        without it. A missing source adds nothing: the capture discloses the gap instead of a partial book.
+        place. The window charges it; owner targets, memory or transcript narrowing and rescues are sized without it.
+        Only a first request that cannot go out with it yields maps for it (``memory_floor.yield_for_book``). A missing
+        source adds nothing: the capture discloses the gap instead of a partial book.
         """
         full = mode == "max" and not self.compact_reference_docs
         if not self.development_required or not self.development_md.strip() or (full and self.docs_need_development):
@@ -452,157 +499,6 @@ def seal_task_transcript(messages: List[Dict[str, Any]], min_prefix_tokens: int 
         boundary["cache_control"] = {"type": "ephemeral"}
 
 
-def _compact_json(value: Any) -> str:
-    """The request estimator's one serialization (``estimate_context_prompt_tokens``): compact, keys sorted."""
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-
-
-def _custom_ladder(provider: str, reasoning_effort: str) -> bool:
-    """Whether a send on ``provider`` at ``reasoning_effort`` may take direct OpenAI reasoning's custom ladder."""
-    return (str(provider or "").strip().lower() == "openai"
-            and str(reasoning_effort or "").strip().lower() not in {"", "none"})
-
-
-def effort_lengthens_request(provider: str, before: str, after: str) -> bool:
-    """Whether a send's move from effort ``before`` to ``after`` can lengthen the request a fit priced: only opening
-    the custom ladder adds a shape beside the canonical one (``_request_shapes``); any other move keeps or drops it."""
-    return _custom_ladder(provider, after) and not _custom_ladder(provider, before)
-
-
-def _request_shapes(messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]], provider: str,
-                    reasoning_effort: str) -> Tuple[Tuple[Any, Any], ...]:
-    """Every ``(messages, tools)`` shape this route may send: direct OpenAI reasoning adds its custom ladder.
-    Other routes read canonical data without borrowing the public helper's owned deep copies."""
-    if _custom_ladder(provider, reasoning_effort):
-        from ouroboros.openai_chat_dispatch import direct_openai_context_projections
-
-        return direct_openai_context_projections(messages, tools, provider=provider, reasoning_effort=reasoning_effort)
-    return ((messages, [dict(item) for item in tools or []]),)
-
-
-def tool_schema_tokens(tools: Optional[List[Dict[str, Any]]], *, provider: str = "", reasoning_effort: str = "") -> int:
-    """chars/4 estimate of the TOOL-SCHEMA segment of a prompt: the ``tools`` member as the request estimator
-    serializes it, in its longest shape for this provider and effort (``_request_shapes``).
-
-    One seam for every consumer that has to account for the schemas: they are sent
-    on the wire beside ``messages``, so any measure built from the transcript alone
-    silently omits them (~148K chars / ~37K tokens on the submarine traces — enough
-    to make an emergency-compaction trigger fire a whole tool envelope late). The
-    density witness calibrates the compact count (``MAIN_DENSITY_BASIS``); separator
-    spaces priced the same schemas about 3% above it (15.11.2026).
-    """
-    if not tools:
-        return 0
-    return max(estimate_tokens(_compact_json(shape)) for _rows, shape in _request_shapes([], tools, provider, reasoning_effort))
-
-
-def payload_prompt_rows(prompt_payload: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
-    """A physical request's input as estimator rows: Chat/Messages ``messages`` or Responses ``input`` items
-    (a bare string input is one user row), a top-level ``system``/``instructions`` leading; None without either."""
-    rows = prompt_payload.get("messages")
-    if not isinstance(rows, list):
-        rows = prompt_payload.get("input")
-        rows = [{"role": "user", "content": rows}] if isinstance(rows, str) else rows
-    if not isinstance(rows, list):
-        return None
-    system = prompt_payload.get("system") or prompt_payload.get("instructions")
-    return [{"role": "system", "content": system}, *rows] if isinstance(system, (str, list)) and system else list(rows)
-
-
-def bounded_prompt_tokens_for_payload(prompt_payload: Dict[str, Any], fallback_chars: int) -> int:
-    """The density witness's basis (``capability_evidence.MAIN_DENSITY_BASIS``): the
-    fit estimator's own token count for a request payload (``payload_prompt_rows``
-    + tools, images at the proxy, a top-level ``system`` — the Messages API's separate
-    field — counted as a leading system message), or ``fallback_chars // 4``
-    when there is no input list. Kept beside the estimator so the two can
-    never diverge; ``estimate_message_chars`` dropped tool_call objects and made
-    density ~1.4x high on the tool-heavy shape, and an uncounted ``system``
-    over-sized the direct-Anthropic reply by its whole length (measure_main_fit
-    and the send finalizer multiply THIS quantity)."""
-    try:
-        rows = payload_prompt_rows(prompt_payload)
-        if rows is not None:
-            return int(estimate_context_prompt_tokens(
-                rows, prompt_payload.get("tools") or prompt_payload.get("functions")))
-    except Exception:
-        pass
-    return max(0, int(fallback_chars) // 4)
-
-
-def messages_carry_native_images(messages: Any) -> bool:
-    """Whether a message carries an image part the proxy bounds instead of pricing."""
-    for message in messages or []:
-        content = message.get("content") if isinstance(message, dict) else None
-        if isinstance(content, list) and any(
-            isinstance(part, dict) and str(part.get("type") or "") in {"image", "image_url"}
-            for part in content
-        ):
-            return True
-    return False
-
-
-def estimate_context_prompt_tokens(
-    messages: List[Dict[str, Any]],
-    tools: Optional[List[Dict[str, Any]]] = None,
-    *,
-    provider: str = "",
-    reasoning_effort: str = "",
-    chars: bool = False,
-) -> int:
-    """Estimate the complete inspectable context shape with bounded images (``chars``: its JSON characters)."""
-    from ouroboros.anthropic_native_custody import (
-        context_custody_proxy,
-        custody_private_key,
-    )
-    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, IMAGE_BLOCK_CHAR_EQUIVALENT
-
-    def project(value: Any) -> Any:
-        if isinstance(value, dict):
-            if any(custody_private_key(key) for key in value):
-                value = context_custody_proxy(value)
-            # A realtime engine's own wire shapes are images too: OpenAI's ``input_image`` and Gemini's
-            # ``inlineData`` (28.10: four screenshots in a Gemini renewal counted as 309k tokens of base64).
-            media = value.get("inlineData")
-            if (str(value.get("type") or "") in {"image", "image_url", "input_image"}
-                    or (isinstance(media, dict) and str(media.get("mimeType") or "").startswith("image/"))):
-                return {
-                    "type": str(value.get("type") or "image"),
-                    "image_token_proxy": "#" * IMAGE_BLOCK_CHAR_EQUIVALENT,
-                }
-            return {
-                str(key): project(item)
-                for key, item in value.items()
-                if str(key) != "_context_capsule"
-            }
-        if isinstance(value, list):
-            return [project(item) for item in value]
-        return value
-
-    from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
-    from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
-
-    from ouroboros.llm_messages import DISPLAY_KEY, HOST_ONLY_MESSAGE_KEYS, STABLE_PREFIX_BLOCKS_KEY
-
-    # These top-level host receipts remain canonical but are absent from sends (the leading system message's stable
-    # block count included: every send copy pops it, so the density witness never counted it).
-    # Do not strip same-named keys inside native payloads or user/tool arguments.
-    hidden = {HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY,
-              TOOL_RESULT_RECORD_KEY, STABLE_PREFIX_BLOCKS_KEY, DISPLAY_KEY}
-    messages = [{key: value for key, value in message.items() if key not in hidden} for message in messages]
-    messages = [{**message, "content": [
-        {key: value for key, value in block.items() if key not in HOST_ONLY_MESSAGE_KEYS}
-        if isinstance(block, dict) else block for block in message["content"]]}
-        if isinstance(message.get("content"), list) else message for message in messages]
-
-    def serialized(projected_messages: Any, projected_tools: Any) -> str:
-        text = _compact_json({"messages": project(projected_messages), "tools": projected_tools})
-        counted("request_serializations", key=hash(text))
-        return text
-
-    longest = max(len(serialized(*shape)) for shape in _request_shapes(messages, tools, provider, reasoning_effort))
-    return longest if chars else max(1, (longest + 3) // 4)
-
-
 def _route_calibration_ratio(
     drive_root: Optional[pathlib.Path],
     route_fp: str,
@@ -658,6 +554,8 @@ def _context_route(task: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]
                                                          credential_profile_id=account)["credential_profile_id"])
     from ouroboros.response_limits import bind_context_route
     bind_context_route(route, settings)
+    from ouroboros.server_window import bind_native_load
+    bind_native_load(route, task.get("load_window_binding") or {}, settings, role)
     return route, settings
 
 
@@ -693,8 +591,10 @@ def resolve_context_fit_route(
         route["options"] = {**route["options"], **{key: getattr(evidence, key) for key in (
             "source_id", "credential_profile_id", "account_fingerprint")}}
         route["window_observation_fp"] = route_observation_scope(route, settings, target=route.get("_resolved_target"))
-    window = int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, route["model_role"],
-                                   settings=settings))
+    target = route.get("_resolved_target") or {}
+    window = route.get("bound_role_window") if target.get("requested_load_window") is not None else None
+    if window is None:
+        window = int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, route["model_role"], settings=settings))
     return route, with_role_window(evidence, window)
 
 
@@ -763,6 +663,10 @@ class RouteQuestion:
                 return self.answer
         return timed("fit.route", self.resolver, {**task, "route_start_read": True}, allow_fetch=allow_fetch)
 
+    def peek(self) -> Optional[Tuple[Dict[str, Any], Any]]:
+        """The answer already arrived for the asked route, else None: never waits, consumes the key or adopts work."""
+        return self.answer if self.key is not None and self.asked.is_set() and self.error is None and self.asked_key == self.key else None
+
     def again(self, task: Dict[str, Any], *, failed: bool = False) -> Tuple[Dict[str, Any], Any]:
         """The same question at the fit's usual point (the horizon guard, or a start whose route named no window). When
         the early answer came from a read that failed, or the fit names its first answer failed (``failed``), the
@@ -773,14 +677,14 @@ class RouteQuestion:
         return timed("fit.route", self.resolver, {**task, "route_read_again": True} if failed else task, allow_fetch=True)
 
 
-def narrowed_by_window(contents: Mapping[str, Tuple[Any, Mapping[str, Any]]], mode: str, preferred: str,
+def narrowed_by_window(contents: Mapping[str, Tuple[Any, Mapping[str, Any], str]], mode: str, preferred: str,
                        state: Any, delivered: Mapping[str, Any]) -> bool:
     """Whether a start shows less memory than the selected view because of its window: a mode below the owner's, a
     rescued input, host forms or any step of the walk the window took, collapsed task lines (F1) included. Cuts the
     owner's own mode budget took are no narrowing of the window's, but only while that budget is below the window: a
-    window at or below the mode's target sets the start bound itself. Under the budget, only the window's physical
-    fold of this room's uncovered owner rows is the window's; it needs ordinary memory above the budget and takes F7
-    (``memory_floor.fit_memory_view``). An unknown window narrows nothing."""
+    window at or below the mode's target sets the start bound itself. Under the budget only the window's own steps count:
+    the physical fold of this room's uncovered owner rows (F7, needing ordinary memory above the budget) and a host form
+    without ``start_room``, which the budget's steps carry (``memory_floor._host_steps``). An unknown window narrows nothing."""
     if not state.known_window:
         return False
     if delivered or mode != preferred:
@@ -794,7 +698,7 @@ def narrowed_by_window(contents: Mapping[str, Tuple[Any, Mapping[str, Any]]], mo
     owners = budget and not (floor.get("ordinary_unfit") and steps.get("F7"))  # no physical fold: the budget cut alone
     host = facts.get("host_sections_addressed") or ()
     return (bool(cut and not (floor.get("by_budget") and owners))
-            or bool(host and not budget) or any(row.get("held_note_form") for row in host))
+            or any(not budget or not row.get("start_room") or row.get("held_note_form") for row in host))
 
 
 def _failed_route_evidence(task: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
@@ -827,24 +731,38 @@ def main_output_reserve_tokens(*, use_local: bool, evidence=None) -> int:
     return ResponseLimit(**(getattr(evidence, "response_limit", {}) or {})).ceiling(requested)
 
 
+def route_window(route: Dict[str, Any], evidence: Any, preferred: str) -> Tuple[int, Any, str, bool, WindowRecord]:
+    """One route answer's ``(output reserve, working reserve, window basis, bound, window record)`` for every frame."""
+    # Keep the fit projection tied to the physical dispatch contract instead of duplicating its output reservation.
+    output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local")), evidence=evidence)
+    route_facts = getattr(evidence, "route_facts", {}) or {}
+    working_reserve = route_facts.get("working_reserve_tokens")
+    reserve = context_budget.context_mode_limits(preferred, preferred, output_reserve,
+                                                working_reserve_tokens=working_reserve)[1]
+    scope = route.get("window_observation_fp", evidence.route_fp)
+    bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
+    return output_reserve, working_reserve, str(route_facts.get("basis") or ""), bound, resolve_window(
+        evidence, reserve, bound=bound, observation_fp=scope, load=(route.get("_resolved_target") or {}).get("requested_load_window"))
+
+
 def _request_tail(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return messages[1:] if messages and messages[0].get("role") == "system" else messages
 
 
 def _request_rows(system_content: List[Dict[str, Any]], user_content_json: str, supplementary_messages_json: str = "[]",
-                  current_messages: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+                  current_messages: Optional[List[Dict[str, Any]]] = None, *, room_data: str = "") -> List[Dict[str, Any]]:
     tail = (_request_tail(current_messages) if current_messages is not None else
             [{"role": "user", "content": json.loads(user_content_json)}, *json.loads(supplementary_messages_json)])
-    return [{"role": "system", "content": system_content}, *tail]
+    return [{"role": "system", "content": system_content}, *with_program_history(tail, room_data)]
 
 
 def _request_tokens(system_content: List[Dict[str, Any]], user_content_json: str, *,
                     supplementary_messages_json: str = "[]", current_messages: Optional[List[Dict[str, Any]]] = None,
                     chars: bool = False, tools: Optional[List[Dict[str, Any]]] = None, provider: str = "",
-                    reasoning_effort: str = "") -> int:
+                    reasoning_effort: str = "", room_data: str = "") -> int:
     """The request estimator's one count of this view: its messages and, given ``tools``, their schemas."""
     return estimate_context_prompt_tokens(_request_rows(system_content, user_content_json, supplementary_messages_json,
-                                                        current_messages), tools, provider=provider,
+                                                        current_messages, room_data=room_data), tools, provider=provider,
                                           reasoning_effort=reasoning_effort, chars=chars)
 
 
@@ -854,7 +772,8 @@ class MinimumViewUnfit(ValueError):
 
     def __init__(self, message: str, *, fixed_tokens: int, memory_tokens: int,
                  reserve_tokens: int, window_tokens: int, ratio: float, work_room_tokens: int = 0,
-                 required_book_tokens: int = 0):
+                 required_book_tokens: int = 0, memory_measured: bool = True, parts: Iterable[Tuple[str, int]] = ()):
+        self.memory_measured, self.parts = memory_measured, tuple(parts)  # False: no memory priced (never a measured 0)
         # Retain the fitter's exact rounding: fixed + memory is calibrated once.
         self.raw_input_tokens = fixed_tokens + memory_tokens
         self.measurement_density = ratio
@@ -868,11 +787,154 @@ class MinimumViewUnfit(ValueError):
         self.work_room_deficit_tokens = max(0, self.fixed_input_tokens + reserve_tokens + work_room_tokens - window_tokens)
         # Set only when the ordinary view fits and this task's required handbook alone does not: never a rescue's.
         self.required_book_tokens = math.ceil(required_book_tokens * ratio)
-        super().__init__(f"{message}: fixed input={self.fixed_input_tokens}, memory view={self.memory_view_tokens}, "
+        super().__init__(f"{message}: fixed input={self.fixed_input_tokens}, memory view={self.memory_view_tokens if memory_measured else 'not measured'}, "
                          f"reply/working reserve={reserve_tokens}, window={window_tokens}, "
                          f"deficit={self.deficit_tokens}, work room={work_room_tokens}, "
                          f"fixed/work-room deficit={self.work_room_deficit_tokens} tokens"
                          + (f", required handbook={self.required_book_tokens}" if required_book_tokens else ""))
+
+
+def _wire_measure(core, governance, sections, form, user, current, *, provider, effort, sized, overhead, required, tool_frames,
+                  snapshot):
+    """Price a walk by deltas; a mode decision with a required handbook compares the complete rendered requests.
+
+    A walk prices each selected program line with the room beside the one data envelope it reserves; a complete
+    request draws that room as the system part and program data a send carries, once per fit (``ViewFit.model_parts``)."""
+    from functools import cache
+    from ouroboros import memory_floor as floor
+    from ouroboros.memory_view import json_chars
+
+    full = {m: {part.section_id: part.full_text for part in parts} for m, parts in sections.items()}
+    shapes, escaped = {}, cache(json_chars)
+    head = floor.program_history_head(snapshot)  # the envelope alone: its lines are already the room's
+
+    def rows_for(mode, system, data):
+        rows = _request_rows(system, user, core.supplementary_messages_json, current, room_data=data)
+        return [*rows, *tool_frames(mode)[1]] if tool_frames else rows
+
+    def measure(mode, sent, addressed, story=0, room=0):
+        key = (mode, sent.chosen, bool(story), bool(room))
+        if key not in shapes:  # one letter per nonempty text holds the wire separators and blocks
+            rows = rows_for(mode, _system_blocks(core, governance[form[mode]], "s" if story else "",
+                                                "r" if room else "", mode=mode, addressed={}), head)
+            schemas = list(sent.schemas)
+            whole = sized[2] if sized is not None and sized[:2] == (rows, schemas) else None
+            if whole is None:
+                counted("request_forms")
+                whole = estimate_context_prompt_tokens(rows, schemas, provider=provider, reasoning_effort=effort, chars=True)
+            shapes[key] = whole - bool(story) - bool(room)
+        forms = sum(escaped(short) - escaped(full[mode][name]) for name, short in addressed.items())
+        return max(1, (shapes[key] + forms + story + room + 3) // 4) + overhead
+
+    def complete_price(mode, sent, forms, fit):
+        if required is None:
+            return measure(mode, sent, forms, fit.story_chars, fit.room_chars)
+        whole_core, whole_governance = required
+        room, data = fit.model_parts(whole_core.opening_program_address) if fit.level is not None else ("", "")
+        system = _system_blocks(whole_core, whole_governance[form[mode]], fit.story, room, mode, forms)
+        return overhead + estimate_context_prompt_tokens(rows_for(mode, system, data), list(sent.schemas),
+                                                         provider=provider, reasoning_effort=effort)
+
+    return measure, complete_price
+
+
+def _max_start_room(snapshot, texts, books, *, fixed, ratio, schemas, forms, window, reserve, work, allowances,
+                    memory_price):
+    """Price Max's ordinary start and, if it misses, the telling that decides whether books hold."""
+    from ouroboros import memory_floor as floor
+
+    def need_at(level_of):
+        view, price = memory_price(level_of(snapshot) if snapshot else None)
+        return view, math.ceil(price * ratio) + reserve + work
+
+    ordinary, need = need_at(floor.ordinary_level)
+    fact = floor.max_room_fact(snapshot, texts, books, story=floor.tokens_of(ordinary.story_chars), addressed=forms,
+        fixed=fixed, ratio=ratio, schemas=schemas, window=window, reserve=reserve, work=work, allowance=allowances['margin'])
+    if fact:
+        fact.update(need=need, story=floor.tokens_of(ordinary.story_chars), room=floor.tokens_of(ordinary.room_chars))
+        if need > window:
+            told, telling_need = need_at(floor.telling_level)
+            fact.update(telling_need=telling_need, telling=floor.memory_tokens(told))
+    return fact
+
+
+def _final_view(shown, snapshot, core, mode, room_fact, *, fixed, ratio, window, reserve, output_reserve, window_record,
+                start_room, require_admission, work, optional_map, cold_return=False):
+    """Draw the selected room as system text and program data; then add the required handbook.
+
+    A start yields maps for it (``optional_map``) or names its refusal. ``require_admission`` is off on a local
+    route: its sender counts the sealed request exactly, an estimate here cannot.
+    """
+    from ouroboros import memory_floor as floor
+
+    story, facts = shown.story, shown.facts
+    book = core.required_book_tokens(mode)
+    room, room_data, note, unfit = floor.fit_required_book(shown, book=book, fixed=fixed, ratio=ratio, reserve=reserve,
+        output_reserve=output_reserve, window=window, window_record=window_record, mode=mode, work=work() if book else 0,
+        lowered=bool(room_fact) and mode == "low", note_window=start_room, admit=require_admission,
+        optional_map=optional_map, opening_address=core.opening_program_address, cold_return=cold_return)
+    if unfit is not None:
+        raise MinimumViewUnfit("This task's directly required handbook cannot fit beside its ordinary view",
+            window_tokens=window, ratio=ratio, required_book_tokens=book, **unfit)
+    if note:
+        facts = {**facts, BOOK_NOTE_KEY: note}
+    if book and room_fact:
+        room_fact = {**room_fact, "book_required": True}
+    receipt = floor.view_receipt(snapshot, story, room, floor.with_max_room(
+        facts, room_fact, mode, required_book=math.ceil(book * ratio)), room_data=room_data) if snapshot else {}
+    return story, room, room_data, receipt
+
+
+def _frame_choices(tool_schemas, *, resident, nano_base, low_tools, nano_tools, tool_frames,
+                   window_record, window_tokens, admitted, preferred, output_reserve, working_reserve_tokens):
+    """Resolve per-frame tools and admissible window before pricing any memory; alternative tools stay lazy."""
+    from functools import cache
+    from ouroboros.tool_policy import select_tool_schemas
+
+    names = [schema["function"]["name"] for schema in tool_schemas or []] if resident else nano_base
+
+    @cache
+    def tools_for(mode):
+        if tool_frames:
+            return select_tool_schemas(tool_frames(mode)[0], context_mode="low")
+        alternative = nano_tools if mode == "nano" else low_tools if mode == "low" else None
+        if alternative is not None:
+            return select_tool_schemas(alternative() if callable(alternative) else alternative, context_mode="low")
+        return select_tool_schemas(tool_schemas or [], context_mode=mode, schema_names=names,
+                                   standing=resident or nano_base is None)
+
+    @cache
+    def limits(mode):
+        target, reserve = context_budget.context_mode_limits(mode, preferred, output_reserve,
+                                                            working_reserve_tokens=working_reserve_tokens)
+        record = replace(window_record, reserve=reserve) if window_record else None
+        window = ((record.admitted_equivalent if admitted else record.total_equivalent)
+                  if record and record.usable is not None else window_tokens)
+        return target, reserve, window, record
+
+    return tools_for, limits
+
+
+def _wire_room(raw, complete, *, mode, preferred, reserve, window, record, admitted, output_reserve, ratio):
+    """Compare wire frames after the reply is priced; an input-only limit does not pay for that reply."""
+    reply = context_budget.reply_allowance_tokens(caller_max_tokens=output_reserve, nano=mode == "nano",
+        owner_nano=preferred == "nano", input_tokens=math.ceil(raw * ratio), raw_input_tokens=raw,
+        window_tokens=window, window_record=record)
+    room = record.input_room(reply, under_way=admitted) if record else None
+    return (window - max(reserve, reply) if room is None else room) - math.ceil(complete * ratio)
+
+
+def _integrating(core: ContextCore, role: Any) -> bool:
+    """A view of a focus that integrates (BIBLE P1): no compact books, no delegated child's or nanny's ``role``."""
+    return not core.compact_reference_docs and role not in DELEGATED_FOCUS_ROLES
+
+
+def _mode_host_receipts(selected: str, form_mode: str, rows: Iterable[Mapping[str, Any]],
+                        low_maps: Iterable[Mapping[str, Any]], book_maps: Iterable[str]) -> list:
+    if form_mode != "low":
+        return [row for row in rows if not row.get("held_note_form") and row.get("section_id") not in book_maps]
+    seen = {row.get("section_id") for row in rows} if selected == "low" else None
+    return [*rows, *(row for row in low_maps if row.get("section_id") not in seen)] if seen is not None else list(rows)
 
 
 def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...]], user_content_json: str, *, preferred: str,
@@ -885,80 +947,55 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                       envelope_overhead_tokens: int = 0, start_work: bool = False, slack: int = 0, retain: Any = None,
                       admitted: bool = False, provider: str = "", reasoning_effort: str = "",
                       sized: Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]] = None,
-                      nano_base: Optional[Tuple[str, ...]] = None,
-                      ) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
+                      nano_base: Optional[Tuple[str, ...]] = None, start_saving: int = 0,
+                      running_limit: Optional[int] = None, books_must_save: bool = False,
+                      nano_tools: _Schemas = None, low_tools: _Schemas = None, tool_frames: _ToolFrames = None,
+                      unsent_start: bool = False) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict, str]], str]:
     """Select books once, choose memory in one walk. Unsent book forms share the selected memory, not another budget.
 
-    Every automatic choice reads the ordinary view of this capture; a directly required handbook joins it last with
-    its own note, so neither costs a form, mode or schema (owner 1.11.2026). At a fresh start on a known window the
-    ordinary estimate, the book, its note and the reply the ordinary view keeps must fit, else the named refusal.
-    ``retain``: how a host step captures its section (default ``section_floor.retain_section``).
-    ``nano_base``: the Nano tools a live call sends (its feature's, beside the selectors), priced instead of the
-    standing work set; ``resident`` prices exactly the tools given.
-    Each mode's frame is the record's ``total_equivalent`` (a start keeps the whole reply reserve), or with
-    ``admitted`` its admitted line (``WindowRecord.admitted``: a view the work holds, in whatever mode it is fitted again).
-    A request is the estimator's one count of its messages and schemas in this ``provider``'s and effort's longest
-    shape; ``sized`` is the start's whole request as its density was sized, ``(rows, schemas, characters)``.
+    Required DEVELOPMENT joins the ordinary fit last; wire admission still charges it. ``retain`` overrides the
+    host section capture. ``nano_base`` supplies a call's own standing tools; ``resident`` prices the tools given.
+    ``admitted`` selects the running rather than start line of ``WindowRecord``. ``sized`` carries a start's priced
+    ``(rows, schemas, characters)`` for the same provider/effort shape. ``unsent_start``: a start's ``BOOK_MAPS`` policy.
     """
-    from dataclasses import replace
-    from functools import cache
     from ouroboros import memory_floor as floor
     from ouroboros.held_notes import HeldNoteSection, can_replay_frame, frame_key
-    from ouroboros.memory_view import FULL_VIEW, json_chars, room_chars, snapshot_from_json, story_chars
-    from ouroboros.tool_policy import select_tool_schemas
+    from ouroboros.memory_view import FULL_VIEW, room_chars, snapshot_from_json, story_chars
 
+    shown_mode = start or preferred
+    mode = select or shown_mode
+    running = (running_limit is not None and mode == preferred == "max" and not core.compact_reference_docs
+               and kept is not None and not start_work)
     whole_core, whole_governance = core, governance
     if core.development_required:
         core = replace(core, development_required=False)
         governance = {name: _governance_blocks(None, core, mode=name) for name in governance}
-    mode = select or start or preferred
     form = {m: "low" if core.compact_reference_docs or m == "nano" else m for m in floor.MODES}
     snapshot = snapshot_from_json(core.memory_view_json) if core.memory_view_json else None
     held_heads = any(isinstance(part, HeldNoteSection) for part in core.dynamic_sections)
-    saved = core.held_note_resume or {}
-    saved_frame = saved.get("frame")
+    cold_resume, saved = core.held_note_resume is not None, core.held_note_resume or {}
     saved_rows = {row["section_id"]: row for row in saved.get("receipts", ())}
-    names = [schema["function"]["name"] for schema in tool_schemas or []] if resident else nano_base
-    standing = resident or nano_base is None
-
-    sections = {m: (*core.semi_stable_sections, *core.dynamic_sections,
-                    *core.dynamic_head_sections,
-                    *(governance[form[m]][0] if not isinstance(governance[form[m]][0], str) else ()))
-                for m in form}
-    previous = tuple((kept_sections or {}).get(start or preferred, ()))
+    tools_for, limits = _frame_choices(tool_schemas, resident=resident, nano_base=nano_base, low_tools=low_tools,
+        nano_tools=nano_tools, tool_frames=tool_frames, window_record=window_record, window_tokens=window_tokens,
+        admitted=admitted, preferred=preferred, output_reserve=output_reserve, working_reserve_tokens=working_reserve_tokens)
+    sections = {m: (*core.semi_stable_sections, *core.dynamic_sections, *core.dynamic_head_sections,
+                    *(governance[form[m]][0] if not isinstance(governance[form[m]][0], str) else ())) for m in form}
+    integrating = _integrating(core, snapshot.spec.role if snapshot else None)
+    spares = (kept is None or start_work or unsent_start) and integrating
+    can_yield_maps = ((kept is None and not cold_resume) or start_work or unsent_start) and integrating
+    book_maps = floor.replay_book_maps(sections["low"], saved if kept is None else {}, core, retain=retain)
+    low_maps = book_maps if kept is None else [r for r in (kept_sections or {}).get("low", ()) if r.get("section_id") in floor.BOOK_MAPS]
+    saved_frame = saved.get("frame") if len(book_maps) == len(saved.get("book_maps", ())) else None  # a list now detailed: refit
+    previous = tuple((kept_sections or {}).get(shown_mode, ()))
     receipts, room_fact = list(previous), None  # room_fact: the start's Max room, named by a view lowered from Max
-    def host_receipts(selected, rows):
-        return rows if form[selected] == "low" else [row for row in rows if not row.get("held_note_form")]
 
-    held = (kept or {}).get(start or preferred) or FULL_VIEW
+    held = (kept or {}).get(shown_mode) or FULL_VIEW
     whole_memory = (story_chars(snapshot), room_chars(snapshot)) if snapshot and held_heads else (0, 0)
     story_before, room_before = (story_chars(snapshot, held), room_chars(snapshot, held)) if snapshot else (0, 0)
 
-    @cache
-    def tools_for(selected):
-        return select_tool_schemas(tool_schemas or [], context_mode=selected, schema_names=names, standing=standing)
-
-    # One serialization per request shape, its schemas inside; a host section's shorter form and a memory text then add
-    # or take only their own characters (JSON escapes per character, and these texts are embedded verbatim).
-    shapes, text_chars = {}, {}
-    def escaped(text):
-        if text not in text_chars:
-            text_chars[text] = json_chars(text)
-        return text_chars[text]
-    def measure(selected, sent, addressed, story=0, room=0):  # ``story``, ``room``: the memory texts' characters
-        key = (selected, sent.chosen, bool(story), bool(room))
-        if key not in shapes:  # one-letter memory texts hold the shape; only presence changes separators and blocks
-            rows = _request_rows(_system_blocks(core, governance[form[selected]], "s" if story else "", "r" if room else "",
-                mode=selected, addressed={}), user_content_json, core.supplementary_messages_json, current_messages)
-            whole = sized[2] if sized is not None and sized[:2] == (rows, list(sent.schemas)) else None  # sized once
-            if whole is None:
-                counted("request_forms")
-                whole = estimate_context_prompt_tokens(rows, list(sent.schemas), provider=provider,
-                                                       reasoning_effort=reasoning_effort, chars=True)
-            shapes[key] = whole - bool(story) - bool(room)
-        full = {part.section_id: part.full_text for part in sections[selected]}
-        forms = sum(escaped(short) - escaped(full[name]) for name, short in addressed.items())
-        return max(1, (shapes[key] + forms + story + room + 3) // 4) + envelope_overhead_tokens
+    measure, complete_price = _wire_measure(core, governance, sections, form, user_content_json, current_messages,
+        provider=provider, effort=reasoning_effort, sized=sized, overhead=envelope_overhead_tokens, tool_frames=tool_frames,
+        required=(whole_core, whole_governance) if whole_core.development_required else None, snapshot=snapshot)
 
     def request_cost(selected, sent):
         return measure(selected, sent, {}, *whole_memory) - envelope_overhead_tokens
@@ -972,15 +1009,24 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     if not (select or start) and saved_frame and saved_frame[0] in floor.MODES:
         restored_mode = saved_frame[0]
-        _, reserve = context_budget.context_mode_limits(restored_mode, preferred, output_reserve,
-                                                        working_reserve_tokens=working_reserve_tokens)
+        _, reserve, _, _ = limits(restored_mode)
         if restores_frame(restored_mode, tools_for(restored_mode), reserve):
             mode = restored_mode
-    asked = (saving or {}).get(start or preferred, 0)  # the shown request's saving, in estimator tokens
-    original_fixed = measure(start or preferred, tools_for(mode), section_views(sections[start or preferred], previous))
-    original_reserve = context_budget.context_mode_limits(mode, preferred, output_reserve, working_reserve_tokens=working_reserve_tokens)[1]
-    def owed(fixed, reserve):  # what a frame still owes of it once its books, host forms and reserve paid their part
-        return max(0, asked - (original_fixed - fixed) - math.floor((original_reserve - reserve) / max(ratio, 0.01)))
+    asked = (saving or {}).get(shown_mode, 0)  # the shown request's saving, in estimator tokens
+    original_fixed = measure(shown_mode, tools_for(shown_mode), section_views(sections[shown_mode], previous))
+    _, original_reserve, original_window, _ = limits(shown_mode)
+    original_input = original_window - original_reserve
+
+    def credit(window, reserve):
+        # Compare admissible input, not the reply reserves: an input-only cap gives no credit.
+        return math.floor((window - reserve - original_input) / max(ratio, 0.01)) if known_window else 0
+
+    def owed(fixed, window, reserve):
+        return max(0, asked - (original_fixed - fixed) - credit(window, reserve))
+
+    def running_goal(window, reserve):
+        return running_limit + credit(window, reserve) if running else None
+
     def view(selected, sent, addressed, window, boundary, fixed=None, **walk):  # one frame's memory beside host forms
         fixed = measure(selected, sent, addressed) if fixed is None else fixed
         return floor.render_view_for_mode(snapshot, mode=selected, owner_mode=preferred, window_tokens=window, **walk,
@@ -996,8 +1042,20 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     stated: Dict[str, Optional[int]] = {}  # each walked mode's window in the start's frame (``frame`` fills it)
 
+    def books_save(level, window, boundary):
+        # Only the frame changes. A new memory/host concession may not disguise a book switch that costs tokens.
+        def price(selected):
+            sent = tools_for(selected)
+            forms = section_views(sections[selected], _mode_host_receipts(selected, form[selected], previous, low_maps, floor.BOOK_MAPS))
+            same = view(selected, sent, forms, window, boundary, kept=held, level=level) if snapshot else floor.NO_VIEW
+            return complete_price(selected, sent, forms, same)
+        return price("low") < price("max")
+
+    if books_must_save and not books_save(held, window_tokens, window_record.boundary if window_record else None):
+        return {}, shown_mode
+
     def telling_fits(selected, sent, forms, window, boundary, reserve, *, start_room):
-        shown = view(selected, sent, forms, window, boundary, level=floor.telling_level(snapshot))
+        shown = view(selected, sent, forms, window, boundary, level=floor.telling_level(snapshot)) if snapshot else floor.NO_VIEW
         work = (math.ceil(min(boundary or window, window) / context_budget.RECLAIM_LOW_WATER_DIVISOR)
                 * snapshot.spec.work_room_levels if start_room else 0)
         price = measure(selected, sent, forms, shown.story_chars, shown.room_chars)
@@ -1005,50 +1063,56 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     def frame(selected):
         nonlocal receipts
-        prior = host_receipts(selected, previous)
+        prior = _mode_host_receipts(selected, form[selected], previous, low_maps, floor.BOOK_MAPS)
         available = sections[selected]
         sent = tools_for(selected)
-        target, reserve = context_budget.context_mode_limits(selected, preferred, output_reserve,
-                                                            working_reserve_tokens=working_reserve_tokens)
+        target, reserve, window, record = limits(selected)
         replay = restores_frame(selected, sent, reserve)
         if replay:
-            prior = list(saved_rows.values())
+            prior = _mode_host_receipts(selected, form[selected], saved_rows.values(), low_maps, floor.BOOK_MAPS)
             if "knowledge_index" not in saved_rows:
                 available = tuple(part for part in available if part.section_id != "knowledge_index")
-        record = replace(window_record, reserve=reserve) if window_record else None
-        window = ((record.admitted_equivalent if admitted else record.total_equivalent)
-                  if record and record.usable is not None else window_tokens)
         stated[selected] = record.total_equivalent if record and record.usable is not None else None
         boundary = record.boundary if record else None
         levels = snapshot.spec.work_room_levels if snapshot else work_room_levels
         host_allowances = floor.floor_allowances(window_tokens=window if known_window else None,
             output_reserve_tokens=reserve, non_memory_tokens=0, target_tokens=target if kept is None else None,
             calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)
-        held = [None]  # the frame's one shortest level: a host step's receipt re-prices it, a miss walks again
-        sent_view = {} if kept is None else {"kept": kept.get(start or preferred)}  # a view already sent walks on from its level
+        least_level = [None]  # reprice this frame's shortest level after each host step, walk again on a miss
+        sent_view = {} if kept is None else {"kept": held}  # a view already sent walks on from its level
         def shortest(forms, physical):  # what a start sends once its own walk took each form before uncovered owner rows
-            shown = held[0] and view(selected, sent, forms, window, boundary, level=held[0], **sent_view)
+            shown = least_level[0] and view(selected, sent, forms, window, boundary, level=least_level[0], **sent_view)
             price = shown and measure(selected, sent, forms, shown.story_chars, shown.room_chars)
             if price is None or price > physical:  # no walk yet, or its level no longer fits beside these host forms
                 shown = view(selected, sent, forms, window, boundary, shortest=True, **sent_view)
-                held[0], price = floor.kept_level(snapshot, shown.facts), measure(selected, sent, forms, shown.story_chars, shown.room_chars)
+                least_level[0] = shown.level
+                price = measure(selected, sent, forms, shown.story_chars, shown.room_chars)
             return price
-        def told(forms):  # ``max_room_lost``'s own test beside these host forms: memory at my shortest telling, the
-            return telling_fits(selected, sent, forms, window, boundary, reserve, start_room=kept is None)
+        def told(forms, start_room=kept is None):  # ``max_room_lost``'s own test beside these host forms: memory at my
+            return telling_fits(selected, sent, forms, window, boundary, reserve, start_room=start_room)  # shortest telling
+        goal = running_goal(window, reserve)
+        host_saving = owed(measure(selected, sent, section_views(sections[selected], prior)), window, reserve) if asked else 0
         receipts, _ = floor._host_steps(available, prior,  # every frame starts from what was shown
+            optional_fits=lambda forms, level=None: floor.optional_excerpt_fits(
+                goal if running else host_allowances['window' if kept is None or start_work else 'physical'],
+                0 if running else owed(measure(selected, sent, forms), window, reserve) - slack, (story_before, room_before),
+                lambda *memory: measure(selected, sent, forms, *memory),
+                lambda: view(selected, sent, forms, window, boundary, telling_only=not running, telling_floor=running,
+                             request_limit=goal, level=level, **sent_view) if snapshot else floor.NO_VIEW),
             measure=lambda addressed: measure(selected, sent, addressed, story_before, room_before),
             shortest=shortest if snapshot and kept is None else None,  # a held view was sent: it keeps its steps
             told=told if snapshot and known_window else None,
             # Held heads yield last, to the window alone (voice setup is a start even with a prepared view).
             held_least=shortest if held_heads and snapshot and known_window and form[selected] == "low" and not replay else None,
             held_bound=host_allowances["window" if kept is None or start_work else "physical"],
-            window=window if known_window else None, reserve=reserve, ratio=ratio, slack=slack,
-            saving=owed(measure(selected, sent, section_views(sections[selected], prior)), reserve) if asked else 0,
+            window=window if known_window else None, reserve=reserve, ratio=ratio, saving=host_saving,
+            slack=max(slack, slack + host_saving - asked) if running else slack,  # a trial's growth buys no host outline
             root=core.section_root, task_id=core.section_task_id, bare=lambda forms: measure(selected, sent, forms),
             allowance=host_allowances["margin" if kept is None or start_work else "physical"],
             budget_mode=selected if kept is None and target and target < window else None,
-            window_bound=host_allowances["window"],  # the window's own start bound, whatever target frames the start
-            **({"retain": retain} if retain is not None else {}))
+            window_bound=host_allowances["window"], retain=retain,  # the window's own start bound, whatever target frames the start
+            optional_walk=(lambda forms: view(selected, sent, forms, window, boundary)) if snapshot else None,
+            maps_told=(lambda forms: told(forms, False)) if spares and selected == "low" else None)
         fixed = measure(selected, sent, section_views(sections[selected], receipts))
         allowances = floor.floor_allowances(window_tokens=window if known_window else None,
             output_reserve_tokens=reserve, non_memory_tokens=fixed, target_tokens=target if kept is None else None,
@@ -1061,28 +1125,16 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * (
             snapshot.spec.work_room_levels if snapshot else work_room_levels)
 
-    # Max's measure prices the clean-start guard's minimum ordinary memory, its books gate my shortest telling of the
-    # whole horizon (owner 15.11.2026, 4A: memory yields to my tellings before the books), each in this request with
-    # its receipt, schemas, reserve and work room.
-    ordinary_measures = {}
-    def ordinary_need(level_of=floor.ordinary_level):
-        if (mode, level_of) in ordinary_measures:
-            return ordinary_measures[mode, level_of]
+    if (kept is None or start_work) and mode == "max":
         forms = section_views(sections[mode], receipts)
-        minimum = view(mode, sent, forms, window, boundary, level=level_of(snapshot)) if snapshot else floor.NO_VIEW
-        price = measure(mode, sent, forms, minimum.story_chars, minimum.room_chars)
-        ordinary_measures[mode, level_of] = minimum, math.ceil(price * ratio) + reserve + work()
-        return ordinary_measures[mode, level_of]
-    minimum, need = ordinary_need() if (kept is None or start_work) and mode == "max" else (floor.NO_VIEW, 0)
-    room_fact = floor.max_room_fact(snapshot, rendered_texts(core, forms := section_views(sections[mode], receipts)),
-        render_governance(governance[form[mode]], forms), story=floor.tokens_of(minimum.story_chars), addressed=forms,
-        fixed=fixed, ratio=ratio, schemas=tool_schema_tokens(list(sent.schemas), provider=provider, reasoning_effort=reasoning_effort),
-        window=window, reserve=reserve, work=work(), allowance=allowances["margin"]) if (kept is None or start_work) and mode == "max" else None
-    if room_fact:  # the gate weighs my shortest telling: its need and that memory are printed for every cause
-        told, telling_need = ordinary_need(floor.telling_level) if need > window else (None, 0)
-        room_fact.update(need=need, story=floor.tokens_of(minimum.story_chars), room=floor.tokens_of(minimum.room_chars),
-                         **({"telling_need": telling_need, "telling": floor.memory_tokens(told)} if told else {}))
-    running_max_needs_maps = (mode == "max" and form[mode] == "max" and known_window and snapshot
+        def memory_price(level):
+            shown = view(mode, sent, forms, window, boundary, level=level) if snapshot else floor.NO_VIEW
+            return shown, measure(mode, sent, forms, shown.story_chars, shown.room_chars)
+        room_fact = _max_start_room(snapshot, rendered_texts(core, forms), render_governance(governance[form[mode]], forms),
+            fixed=fixed, ratio=ratio, forms=forms, window=window, reserve=reserve, work=work(), allowances=allowances,
+            schemas=tool_schema_tokens(list(sent.schemas), provider=provider, reasoning_effort=reasoning_effort),
+            memory_price=memory_price)
+    running_max_needs_maps = (not running and mode == "max" and form[mode] == "max" and known_window and snapshot
                               and kept is not None and not start_work and held_heads
                               and not telling_fits(mode, sent, section_views(sections[mode], receipts),
                                                    window, boundary, reserve, start_room=False))
@@ -1090,90 +1142,99 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         mode = "low"
         sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
 
-    def render(forms=None, *, level=None):  # this frame's memory with its floor receipt
+    running_shown = None
+    def render(forms=None, *, level=None, telling_floor=False):
         if not snapshot:
             return floor.NO_VIEW
         forms = section_views(sections[mode], receipts) if forms is None else forms
         price = measure(mode, sent, forms)
-        return view(mode, sent, forms, window, boundary, saving=owed(price, reserve), fixed=price,
-                    kept=None if kept is None else kept.get(start or preferred), level=level)
+        return view(mode, sent, forms, window, boundary, saving=owed(price, window, reserve), fixed=price,
+                    kept=None if kept is None else held, level=level,
+                    start_saving=start_saving, telling_floor=telling_floor, request_limit=running_goal(window, reserve))
 
     def spare(fit, forms):
-        price = measure(mode, sent, forms, fit.story_chars, fit.room_chars)
-        return window - reserve - math.ceil(price * ratio)
+        return window - reserve - math.ceil(measure(mode, sent, forms, fit.story_chars, fit.room_chars) * ratio)
+
+    def wire_room(fit):
+        forms = section_views(sections[mode], receipts)
+        return _wire_room(measure(mode, sent, forms, fit.story_chars, fit.room_chars), complete_price(mode, sent, forms, fit),
+            mode=mode, preferred=preferred, reserve=reserve, window=window, record=limits(mode)[3], admitted=admitted,
+            output_reserve=output_reserve, ratio=ratio)
 
     def overflows(fit=floor.NO_VIEW):  # the known window cannot hold this frame's request beside this memory view
-        if held_heads:
+        if running or held_heads:
             return known_window and spare(fit, section_views(sections[mode], receipts)) < 0
         memory = floor.tokens_of(fit.story_chars) + floor.tokens_of(fit.room_chars)
         return known_window and math.ceil((fixed + memory) * ratio) + reserve > window
 
-    # Books step down on the frame's own completed view. Max keeps whole books beside
-    # ordinary memory and the work room; the same ordinary Nano is the last physical rescue for every
-    # Main route, a view already shown included. A frame whose core alone cannot fit steps down unrendered. A frame
-    # is judged by its pieces' prices: a frame the fit walks away from is never drawn whole.
-    low = stays = None
+    def misses_running_goal(fit):
+        forms = section_views(sections[mode], receipts)
+        return overflows(fit) or measure(mode, sent, forms, fit.story_chars, fit.room_chars) > running_goal(window, reserve)
+
+    if running:
+        running_shown = render(telling_floor=True)
+        if misses_running_goal(running_shown):
+            if books_save(running_shown.level, window, boundary):
+                mode = "low"
+                sent, fixed, reserve, window, boundary, allowances = timed("fit.frame_low", frame, mode)
+                # Walk Low from the held level, not from the discarded Max trial's tellings.
+                running_shown = render(telling_floor=True)
+            if misses_running_goal(running_shown):
+                # An unsent trial cannot pin cuts: the unrestricted walk may give some back after a later saving.
+                running_shown = render()
+
+    # Step down on the frame's own price, without drawing it whole. Nano is the last physical rescue, even mid-run.
+    last = stays = None
     while True:
-        # A view a Main work holds keeps Low where Nano admits no more input and is no smaller: no head held, decided before Nano is drawn.
-        stays = low is not None and not held_heads and window - reserve <= low[3] - low[2] and fixed >= low[1]
-        shown = floor.NO_VIEW if stays or (mode != "nano" and overflows()) else render()
-        books_lost = (kept is None or start_work) and mode == "max" and bool(room_fact) and floor.max_room_lost(room_fact)
-        if mode == "nano" or not (books_lost or overflows(shown)):
+        # A held view stays where Nano can buy no room. Without heads this can be decided before drawing Nano (a cold Nano too).
+        stays = (last is not None and not (held_heads or whole_core.development_required)
+                 and window - reserve <= last[3] - last[2] and fixed >= last[1])
+        shown = floor.NO_VIEW if stays or (mode != "nano" or kept is None and not cold_resume and current_messages is None and not held_heads) and overflows() else running_shown or render()
+        if mode == "nano" or not overflows(shown):
             break
-        if mode == "low" and kept is not None and admitted:
-            low_view = render() if shown is floor.NO_VIEW else shown
-            low = (sent, fixed, reserve, window, boundary, allowances, receipts, low_view,
-                   spare(low_view, section_views(sections[mode], receipts)))
-        mode = "low" if mode == "max" else "nano"
+        # A live trial still has to reselect tools and measure its chosen wire reserve.
+        if (running or mode == "low") and kept is not None and admitted:
+            prior_view = (running_shown or render()) if shown is floor.NO_VIEW else shown
+            last = (sent, fixed, reserve, window, boundary, allowances, receipts, prior_view, wire_room(prior_view), mode)
+        mode, running_shown = ("low" if mode == "max" and not running else "nano"), None
         sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
     if held_heads and mode == "nano" and overflows(shown):
         emergency_level = shown.level
-
-        def emergency_fits(forms):
-            return spare(render(forms, level=emergency_level), forms) >= 0
-
-        if floor._held_note_steps(sections[mode], receipts, emergency_fits, form="reader"):
+        if floor._held_note_steps(sections[mode], receipts, form="reader",
+                                  fits=lambda forms: spare(render(forms, level=emergency_level), forms) >= 0):
             fixed = measure(mode, sent, section_views(sections[mode], receipts))
             shown = render()
             if overflows(shown):
                 shown = render(level=emergency_level)
-    if low is not None and (stays or held_heads and spare(shown, section_views(sections[mode], receipts)) <= low[-1]):
-        mode = "low"  # decided above, or with held heads: Nano's full price leaves no more room than Low's
-        sent, fixed, reserve, window, boundary, allowances, receipts, shown, _ = low
-    if kept is None and current_messages is None and overflows(shown):  # a cold restore still reconciles its saved tools
-        core_alone = overflows()
+    compare_wire = held_heads or running or whole_core.development_required or nano_tools is not None or tool_frames is not None
+    if last is not None and (stays or compare_wire and wire_room(shown) <= last[-2]):
+        sent, fixed, reserve, window, boundary, allowances, receipts, shown, _, mode = last
+    if kept is None and not cold_resume and current_messages is None and overflows(shown):  # a cold restore still reconciles its saved tools
+        core_alone = overflows()  # then a Nano frame without held heads rendered no memory (the loop's cold skip)
+        from ouroboros.context_view_facts import refusal_parts  # names what the refused request holds
         raise MinimumViewUnfit("Core, assignment, resident control tools and work room cannot fit" if core_alone
                                else "Protected owner words and the minimum view cannot fit the usable input",
                                fixed_tokens=fixed, memory_tokens=floor.tokens_of(shown.story_chars) + floor.tokens_of(shown.room_chars),
-                               reserve_tokens=reserve, window_tokens=window, ratio=ratio,
-                               work_room_tokens=work() if core_alone else 0)
-    story, room, facts = shown.story, shown.room, shown.facts  # the one view this start delivers: drawn here
-    book = whole_core.required_book_tokens(mode)
-    ordinary = book and fixed + floor.view_tokens(story) + floor.view_tokens(room)  # the ordinary admission's estimate
-    note = floor.required_book_note(lowered=bool(room_fact) and mode == "low", book_tokens=math.ceil(book * ratio), work=work(),
-        free=window - reserve - math.ceil((ordinary + book) * ratio) if known_window and (kept is None or start_work) else None
-    ) if book and snapshot else ""
-    if note:  # its own cost, like the book's, stays outside every later automatic choice (``required_book_tokens``)
-        room, facts = "\n\n".join(filter(None, (room, note))), {**facts, BOOK_NOTE_KEY: floor.view_tokens("\n\n" + note)}
-    receipt = floor.view_receipt(snapshot, story, room, floor.with_max_room(facts, room_fact and (
-        {**room_fact, "book_required": True} if book else room_fact), mode, required_book=math.ceil(book * ratio))) if snapshot else {}
-    if book and kept is None and known_window and current_messages is None:
-        reply = context_budget.reply_allowance_tokens(caller_max_tokens=output_reserve, nano=mode == "nano", owner_nano=False,
-                                                      input_tokens=math.ceil(ordinary * ratio), raw_input_tokens=ordinary, window_tokens=window)
-        memory = floor.view_tokens(story) + floor.view_tokens(room)
-        if math.ceil((fixed + book + memory) * ratio) + max(reserve, reply) > window:
-            raise MinimumViewUnfit("This task's directly required handbook cannot fit beside its ordinary view",
-                                   fixed_tokens=fixed + book, memory_tokens=memory, reserve_tokens=max(reserve, reply),
-                                   window_tokens=window, ratio=ratio, required_book_tokens=book)
+                               reserve_tokens=reserve, window_tokens=window, ratio=ratio, memory_measured=held_heads or not core_alone,
+                               work_room_tokens=work() if core_alone else 0, parts=refusal_parts(core, sections[mode], receipts, sent.schemas, shown, user_content_json, mode=mode, provider=provider, reasoning_effort=reasoning_effort))
+    def optional_map():  # the required handbook's next yield: optional maps, then an unread Low start's book maps
+        nonlocal receipts
+        receipts = floor.yield_for_book(sections[mode], receipts, core, retain=retain, maps=can_yield_maps and mode == "low") or receipts
+        return measure(mode, sent, section_views(sections[mode], receipts))
+    story, room, room_data, receipt = _final_view(shown, snapshot, whole_core, mode, room_fact, fixed=fixed, ratio=ratio,
+        window=window, reserve=reserve, output_reserve=output_reserve, work=work, window_record=limits(mode)[3], optional_map=optional_map,
+        start_room=known_window and (kept is None or start_work), cold_return=cold_resume,
+        require_admission=kept is None and known_window and current_messages is None and provider != "local")
     counted("view_texts_kept", 2 if snapshot else 0)  # the story and the room text this fit delivers
     whole = shown.level is None or floor.mv.story_is_whole(shown.level)  # the delivered level's own fact: no render
     contents = {}
     for m in floor.MODES:
-        rows = host_receipts(m, receipts)
-        system = _system_blocks(whole_core, whole_governance[form[m]], story, room, m,
-                                section_views(sections[m], rows), whole)
+        rows = _mode_host_receipts(m, form[m], receipts, low_maps, floor.BOOK_MAPS)
         facts = {**receipt, "held_note_request_tokens": request_cost(mode, sent)} if held_heads and m == mode else receipt
-        contents[m] = system, {**facts, "host_sections_addressed": rows} if rows else facts
+        system, observation = capture_system_projection(whole_core, whole_governance[form[m]], story, room, m,
+            section_views(sections[m], rows), rows, whole, shown=shown,
+            facts={**facts, "host_sections_addressed": rows} if rows else facts)
+        contents[m] = (system, observation, room_data)
     return contents, mode
 
 
@@ -1181,20 +1242,20 @@ def _whole_request(core, governance, mode, current_messages=None):
     """Uncut selected request for a route's comparable density witness, before any floor step: the request with
     one-letter memory texts and the characters the whole story and room add beyond those letters."""
     from ouroboros.memory_view import room_chars, snapshot_from_json, story_chars
+    from ouroboros.memory_floor import program_history_head
 
     snapshot = snapshot_from_json(core.memory_view_json) if core.memory_view_json else None
     story, room = (story_chars(snapshot), room_chars(snapshot)) if snapshot else (0, 0)
     form = "low" if core.compact_reference_docs or mode == "nano" else mode
     blocks = governance[form] if governance is not None else _governance_blocks(None, core, mode=form)
     messages = _request_rows(_system_blocks(core, blocks, "s" if story else "", "r" if room else "", mode),
-                             core.user_content_json, core.supplementary_messages_json, current_messages)
+                             core.user_content_json, core.supplementary_messages_json, current_messages,
+                             room_data=program_history_head(snapshot))
     return messages, story + room - bool(story) - bool(room)
 
 
 def _held_request_cost(core, mode, schemas, current_messages, *, provider, reasoning_effort):
     """Price the uncut ordinary view even when a fitting rebind keeps the shown system row."""
-    from dataclasses import replace
-
     if core.development_required:
         core = replace(core, development_required=False)
     rows, memory = _whole_request(core, None, mode, current_messages)
@@ -1203,7 +1264,7 @@ def _held_request_cost(core, mode, schemas, current_messages, *, provider, reaso
 
 
 # ``memory_floor.start_cause``; ``unmeasured``: a Max start whose route named no window, never a held Max (F1 #10)
-START_CAUSES = ("", "memory", "request", "route", "window", "unmeasured")
+START_CAUSES = ("", "memory", "request", "route", "window", "unmeasured", *FIRST_CONTACT_START.values())
 UNKNOWN_START = ("unknown", "")  # a restored task's start its continuation did not carry: never the restore's fit
 
 
@@ -1220,9 +1281,79 @@ def carried_start(carried: Any) -> Tuple[str, str]:
 def restored_start(plan: Any, carried: Any) -> Any:
     """``plan`` holding a continuation's carried start (``carried_start``): a cold restore's new fit is this process's
     capture, never the task's start, so an uncarried one stays unknown through every later checkpoint and rebind."""
-    from dataclasses import replace
-
     return replace(plan, start=carried_start(carried)) if isinstance(plan, ContextFitPlan) else plan
+
+
+def _prefer_first_contact(core, preferred, normal, forms, target, tool_schemas, limits):
+    """Choose among legal first-send frames, never put a soft hint into WindowRecord or a floor allowance.
+
+    The start keeps its own book choice (Max, or the Low a known window or the owner chose): ordinary memory folding
+    pays what the ordinary view exceeds below the refused size of that wire (``first_contact_limits``); a directly
+    required handbook and its note are no memory's debt, nor the books' (the ordinary size decides on maps), though
+    every physical comparison counts them. A proven maps rung of an owner Max is taken only below the refused Max
+    size, from the folded tellings when kept. Any chosen frame must also save the ordinary view's reclaim margin.
+    The note names the planned connection, even if a later route keeps the shown view. Unchanged returns ``normal``."""
+    from ouroboros.context_measurement import BOOK_NOTE_KEY
+    from ouroboros.context_window import text_chat_rows
+    from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
+    from ouroboros.llm_openai_compatible import _OpenAICompatibleLaneMixin, _project_openai_family_system
+    from ouroboros.tool_policy import select_tool_schemas
+
+    def raw(contents, mode):
+        system, _facts, data = contents[mode]
+        rows = _request_rows(system, core.user_content_json, core.supplementary_messages_json, room_data=data)
+        if not text_chat_rows(rows):
+            return 0
+        rows[0][STABLE_PREFIX_BLOCKS_KEY] = max(1, len(system) - 1)
+        schemas = list(select_tool_schemas(tool_schemas or [], context_mode=mode).schemas)
+        return bounded_prompt_tokens_for_payload({"messages": _project_openai_family_system(dict(target), rows),
+                                                  "tools": schemas}, 0) if schemas else 0
+
+    def noted(contents, mode, maps=False):
+        system, facts, data = contents[mode]
+        tail = {**system[-1], "text": system[-1]["text"] + (
+            "\n\n### First-send composition\nAn earlier request was refused on the connection this first send was "
+            f"composed for, so this view is smaller than its ordinary form{' and uses chapter maps' if maps else ''}. "
+            "The refusal stated no window.")}
+        facts = {**facts, "first_contact_preference": "maps" if maps else True}
+        if room := normal[0][mode][1].get("max_room"):
+            facts["max_room"] = {**room, "cause": "first_contact", "cuts": []} if maps else room
+        return {**contents, mode: ([*system[:-1], tail], facts, data)}
+
+    def safe(size):
+        return size - max(1, reclaim_low_water_margin(None, size))
+
+    def ordinary(size, contents, mode):
+        return size - core.required_book_tokens(mode) - int(contents[mode][1].get(BOOK_NOTE_KEY) or 0)
+
+    contents, initial = normal
+    max_wire, before_maps, any_form = limits
+    refused = max_wire if initial == "max" else any_form
+    if (initial not in {"max", "low"} or not refused
+            or target["provider"] == "openrouter" and _OpenAICompatibleLaneMixin._openrouter_main_web_search_tool()):
+        return normal
+    goal = safe(min(refused, before_maps or refused)) if initial == "max" else safe(refused)
+    if (whole := raw(contents, initial)) <= goal:
+        return normal
+    ordinary_whole = ordinary(whole, contents, initial)
+    reclaim = safe(ordinary_whole)  # the ordinary request pays its own margin, not the required book's
+    selected, size = contents, whole
+    if (saving := ordinary_whole - goal) > 0:
+        try:
+            folded, mode = forms(start_saving=saving)
+        except MinimumViewUnfit:  # the optional fold and its own receipt must not refuse an otherwise legal start
+            folded, mode = normal
+        if mode == initial and folded[mode][1].get("floor", {}).get("runs") != contents[mode][1].get("floor", {}).get("runs"):
+            candidate = noted(folded, mode)
+            if 0 < (smaller := raw(candidate, mode)) and ordinary(smaller, candidate, mode) <= reclaim:
+                selected, size = candidate, smaller
+    if (initial == preferred == "max" and before_maps and ordinary(size, selected, initial) > safe(before_maps)
+            and not core.compact_reference_docs):
+        maps = noted(selected, "low", maps=True)  # the same floor level; only the prepared governance frame changes
+        maps_size = raw(maps, "low")
+        if 0 < maps_size < min(size, max(refused, before_maps)) and ordinary(maps_size, maps, "low") <= reclaim:
+            return maps, "low"
+    return normal if selected is contents else (selected, initial)
 
 
 @timed_section("fit")
@@ -1238,7 +1369,7 @@ def build_context_fit_plan(
     nano_base: Optional[Tuple[str, ...]] = None,
 ) -> ContextFitPlan:
     """Capture route facts, choose books and fit one start view, measured in the shape the route's provider and the
-    first send's ``reasoning_effort`` give the request (``_request_shapes``); ``nano_base``: a live call's own Nano
+    first send's ``reasoning_effort`` give the request (``context_measurement._request_shapes``); ``nano_base``: a live call's own Nano
     tools (``_view_projections``)."""
     preferred = str(preferred_mode or "max").strip().lower()
     if preferred not in {"low", "max", "nano"}:
@@ -1253,10 +1384,12 @@ def build_context_fit_plan(
 
     view_task = {**task, "metadata": task.get("metadata") or meta}
     role = view_role(view_task)
-    view_kind = {"consciousness": "own_wake", "presence": "focus", "integrator": "owner_turn"}.get(role, role)
+    view_kind = DENSITY_VIEW_KINDS.get(role, role)
     # Select density before the single start walk, comparing the whole captured request at the size that can be sent.
     restored = core.held_note_resume or {}
     current_messages = restored.get("messages")
+    fresh_chat = (bool(task.get("_is_direct_chat")) and view_kind == "owner_turn" and preferred in {"max", "low"}
+                  and not restored and not getattr(route_resolver, "route_fields", None) and nano_base is None)
     if (saved_schemas := restored.get("tool_schemas")) is not None:
         tool_schemas = saved_schemas
         nano_base = tuple(schema["function"]["name"] for schema in tool_schemas)
@@ -1266,9 +1399,13 @@ def build_context_fit_plan(
     counted("request_forms")
     levels, sized = start_room(view_task, role), {}
 
+    from ouroboros.llm_ollama import OllamaUpgradeRequired
+
     def answer(ask: Callable[[], Tuple[Dict[str, Any], Any]]) -> Tuple[Dict[str, Any], Any]:
         try:  # a child probes its own route too: its parent's warm evidence is no fact about it
             return ask()
+        except OllamaUpgradeRequired:
+            raise
         except Exception:
             log.debug("Context-fit route evidence unavailable; preserving Max", exc_info=True)
             # A cold start asks about its next send; the original task may name another route.
@@ -1276,17 +1413,8 @@ def build_context_fit_plan(
 
     def frame(route: Dict[str, Any], evidence: Any) -> SimpleNamespace:
         """What the start walk reads of one route answer: reserves, the window record, the density and the request's
-        shape (``_request_shapes``: its provider matters only where it opens the custom ladder)."""
-        # Keep the fit projection tied to the physical dispatch contract instead of duplicating its output reservation.
-        output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local")), evidence=evidence)
-        route_facts = getattr(evidence, "route_facts", {}) or {}
-        working_reserve = route_facts.get("working_reserve_tokens")
-        window_basis = str(route_facts.get("basis") or "")
-        reserve = context_budget.context_mode_limits(preferred, preferred, output_reserve,
-                                                    working_reserve_tokens=working_reserve)[1]
-        scope = route.get("window_observation_fp", evidence.route_fp)
-        bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
-        window_record = resolve_window(evidence, reserve, bound=bound, observation_fp=scope)
+        shape (``context_measurement._request_shapes``: its provider matters only where it opens the custom ladder)."""
+        output_reserve, working_reserve, window_basis, bound, window_record = route_window(route, evidence, preferred)
         provider = str(route.get("provider") or "")
         if provider not in sized:  # the whole request measured once per provider, however many answers are framed
             sized[provider] = estimate_context_prompt_tokens(rows, schemas, provider=provider,
@@ -1301,24 +1429,27 @@ def build_context_fit_plan(
                                walked=(limits, window_record.usable is not None, output_reserve, working_reserve, ratio,
                                        _custom_ladder(provider, reasoning_effort)))
 
-    def walk(state: SimpleNamespace) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str, Dict[str, Any]]:
+    def project(state, user_content_json, **options):
         provider = str(state.route.get("provider") or "")
-        view_args = dict(
-            preferred=preferred, tool_schemas=tool_schemas, window_tokens=state.window_record.total_equivalent,
-            known_window=state.known_window, output_reserve=state.output_reserve, window_record=state.window_record,
-            working_reserve_tokens=state.working_reserve, provider=provider, reasoning_effort=reasoning_effort,
-            sized=(rows, schemas, sized[provider]), nano_base=nano_base, current_messages=current_messages)
-
-        def fit(user_content_json: str) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
-            return _view_projections(core, governance, user_content_json, **view_args, ratio=state.ratio,
-                                     work_room_levels=levels)
         try:
-            return (*fit(core.user_content_json), {})
+            return _view_projections(core, governance, user_content_json,
+                preferred=preferred, tool_schemas=tool_schemas, window_tokens=state.window_record.total_equivalent,
+                known_window=state.known_window, output_reserve=state.output_reserve, window_record=state.window_record,
+                working_reserve_tokens=state.working_reserve, provider=provider, reasoning_effort=reasoning_effort,
+                sized=(rows, schemas, sized[provider]), nano_base=nano_base, current_messages=current_messages,
+                ratio=state.ratio, work_room_levels=levels, **options)
+        except MinimumViewUnfit as unfit:  # the refusal names the serving program it would have gone to
+            unfit.server_program = ((state.route.get("_resolved_target") or {}).get("ollama_record") or {}).get("protocol")
+            raise
+
+    def walk(state):
+        try:
+            return (*project(state, core.user_content_json), {})
         except MinimumViewUnfit as unfit:
             # Physical rescue only (owner 2026-10-13, #1527): an exact source replaces the whole input only when no view
             # of the known window holds it, a wake's bound projection first (``context_input_selection.rescued_start``).
             from ouroboros.context_input_selection import rescued_start
-            return rescued_start(env, task, core.user_content_json, unfit, preferred, fit)
+            return rescued_start(env, task, core.user_content_json, unfit, preferred, lambda text: project(state, text))
 
     early = isinstance(route_resolver, RouteQuestion)  # it times its own wait (``fit.route_wait``) and read
     state = frame(*answer(lambda: route_resolver(task, allow_fetch=True) if early else timed(
@@ -1338,8 +1469,7 @@ def build_context_fit_plan(
         # before its first send (F1 #10): that answer is used, a window then known walked like any answer, one that read
         # the route without a window (an account, a reply limit) too; only a failed one (``status`` failed, as a raised
         # ask is) keeps the first; no bound is guessed. A first answer whose read failed, live or as the probe's
-        # ten-minute record of that failure (``status`` failed), is read anew, never answered from that record; a route
-        # with no metadata source (``unprobeable``, no failed read) is not read again.
+        # ten-minute failure record, forces a new probe. Without a failed read, the resolver's cache policy still applies.
         failed = not state.known_window and "failed" in (getattr(state.evidence, "status", ""),
                                                          getattr(state.evidence, "read", ""))
         with another_pass():  # a repeat by design, not work done again (``context_health`` names only the latter)
@@ -1350,6 +1480,22 @@ def build_context_fit_plan(
                     contents, initial_mode, delivered = walk(late)
                 state = late
     route, evidence, window_record, known_window = state.route, state.evidence, state.window_record, state.known_window
+    # Only the ordinary walk can trigger the guard; the soft hint reads the final binding, even when no rewalk was needed.
+    normal, first_contact = None, ""
+    if fresh_chat and not delivered and not _custom_ladder(str(route.get("provider") or ""), reasoning_effort):
+        from ouroboros.context_input_selection import opening_owner_turn
+        from ouroboros.context_window import first_contact_limits, first_contact_route_scope
+
+        first_contact, cap = first_contact_route_scope(route)
+        target = route.get("_resolved_target")
+        if (first_contact and schemas and core.memory_view_json and cap == state.output_reserve
+                and (limits := first_contact_limits(target, cap, scope=first_contact))[2] and opening_owner_turn(env, core, task)):
+            ordinary = contents, initial_mode
+            chosen = _prefer_first_contact(core, preferred, ordinary, lambda **options: project(state, core.user_content_json, **options),
+                                           target, tool_schemas, limits)
+            if chosen is not ordinary:
+                normal = ordinary
+                contents, initial_mode = chosen
     output_reserve, working_reserve, window_basis, ratio = (state.output_reserve, state.working_reserve,
                                                             state.window_basis, state.ratio)
     bound = state.bound
@@ -1358,16 +1504,16 @@ def build_context_fit_plan(
                  if current_messages is not None else None)
 
     @timed_section("fit.projections")
-    def _projection(mode: str) -> ContextFitProjection:
-        system_content, memory_facts = contents[mode]
+    def _projection(mode: str, source=None) -> ContextFitProjection:
+        system_content, memory_facts, data = (contents if source is None else source)[mode]
         system_content_json = json.dumps(system_content, ensure_ascii=False, sort_keys=True)
         user_projection = delivered.get(mode)
-        form = (system_content_json, user_projection)
+        form = (system_content_json, user_projection, data)
         if form not in estimates:
             counted("request_forms")
             estimates[form] = _request_tokens(system_content, user_projection or core.user_content_json,
                                               supplementary_messages_json=core.supplementary_messages_json,
-                                              current_messages=current_messages)
+                                              current_messages=current_messages, room_data=data)
         estimated = estimates[form]
         return ContextFitProjection(
             mode=mode,
@@ -1376,13 +1522,22 @@ def build_context_fit_plan(
             calibrated_tokens=int(estimated * ratio),
             calibration_ratio=ratio,
             user_content_json=user_projection,
-            memory_facts=memory_facts,
-            continuation_messages_json=tail_json,
+            **projection_fields(system_content, memory_facts),
+            continuation_messages_json=tail_json, room_data=data,
         )
 
-    max_projection = _projection("max")
-    low_projection = _projection("low")
-    nano_projection = _projection("nano")
+    max_projection, low_projection, nano_projection = (_projection(mode) for mode in ("max", "low", "nano"))
+    from ouroboros.memory_floor import start_cause
+
+    def started(source, mode: str) -> Tuple[str, str]:
+        facts = source[mode][1]
+        # A further advisory fold in a physically lowered view did not take its whole books.
+        physical = start_cause(facts) if mode != preferred and facts.get("first_contact_preference") != "maps" else ""
+        return mode, physical or FIRST_CONTACT_START.get(facts.get("first_contact_preference"), "") or (
+            "unmeasured" if mode == "max" and not known_window else "")
+
+    normal_start = (*(_projection(mode, normal[0]) for mode in ("max", "low", "nano")), normal[1], started(*normal)
+                    ) if normal is not None else None
 
     core_payload = json.dumps(
         {
@@ -1410,8 +1565,6 @@ def build_context_fit_plan(
         ensure_ascii=False,
         sort_keys=True,
     )
-    from ouroboros.memory_floor import start_cause
-
     return ContextFitPlan(
         view_kind=view_kind,
         core_sha256=hashlib.sha256(core_payload.encode("utf-8")).hexdigest(),
@@ -1435,34 +1588,10 @@ def build_context_fit_plan(
         evidence_source=window_record.source, window_record=window_record, window_witness_bound=bound,
         route_base_url=str(route.get("base_url") or ""), account_pin=str(route.get("account_pin") or ""),
         window_evidence=window_evidence(evidence, window_record),
+        requested_load_window=window_record.load,  # the load its record was resolved for, never another scope's
         core=core, start_tool_schemas_json=json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True),
         start_nano_base=nano_base,
         start_reasoning_effort=reasoning_effort,
-        start=(initial_mode, "unmeasured" if initial_mode == "max" and not known_window
-               else "" if initial_mode == preferred else start_cause(contents[initial_mode][1])),
-    )
-
-
-def _physical_context_for_fit(disposition: Any, plan: Any = None) -> PhysicalAttemptContext:
-    from ouroboros.usage_accounting import PhysicalAttemptContext
-
-    measurement = disposition.measurement
-    return PhysicalAttemptContext(
-        view_kind=measurement.view_kind,
-        profile=measurement.profile,
-        rendered_mode=measurement.rendered_mode,
-        measurement_basis=measurement.measurement_basis,
-        route_fp=measurement.route_fp,
-        round_id=measurement.round_id,
-        target_total_tokens=measurement.target_total_tokens,
-        capacity_total_tokens=measurement.capacity_total_tokens,
-        context_target_miss=disposition.action == "send_target_miss",
-        automatic_pass_used=disposition.automatic_pass_used,
-        measurement_density=measurement.measurement_density,
-        response_reserve_tokens=measurement.response_reserve_tokens,
-        window_witness_bound=getattr(measurement, "window_witness_bound", False),
-        window_observation_fp=measurement.window_observation_fp,
-        required_book_tokens=measurement.required_book_tokens, preferred_mode=measurement.preferred_mode,
-        mode_cause=measurement.mode_cause, no_memory_tokens=measurement.no_memory_tokens,
-        base_prompt_source=getattr(getattr(plan, "core", None), "base_prompt_source", None),
+        start=started(contents, initial_mode), first_contact=first_contact,
+        first_contact_normal=normal_start,
     )

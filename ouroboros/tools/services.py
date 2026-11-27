@@ -755,7 +755,7 @@ def _start_service(
             cwd_source=binding.source,
             skill_name=binding.skill_name,
             before_outputs=before_outputs,
-            keep_alive=keep_alive,
+            keep_alive=False,  # kept only once custody holds its launch (below, after spawn_supervised returns)
             env=env,
             secret_values=secret_values,
             drive_root=str(ctx.drive_root),
@@ -813,6 +813,7 @@ def _start_service(
         log_fh.close()
         return redact_known_values(f"⚠️ SERVICE_START_ERROR: {type(exc).__name__}: {exc}", secret_values)
     record = published[0]  # a stop during its registration may already have retired it
+    record.keep_alive = keep_alive  # handed over: its ledger row and the installation's ownership set name it
     kept_note = declare_kept(ctx, kept, launch=(ctx.drive_root, task_id, proc.pid, scope_marker))
     try:
         system_root = pathlib.Path(
@@ -1207,6 +1208,8 @@ def stop_task_services(ctx: ToolContext) -> List[Dict[str, Any]]:
     ``service_teardown=keep``) are NOT stopped: they are reported with
     ``lifecycle="kept"`` so the caller can surface pid/port metadata to
     whoever inherits responsibility for them (benchmark verifier, the owner).
+    A launch custody never took over (``spawn_supervised`` raised) is no kept
+    service: its own stop ends what is left of it.
     """
     task_id = str(getattr(ctx, "task_id", "") or "manual")
     keep_all = task_service_teardown(ctx) == "keep"
@@ -1220,7 +1223,7 @@ def stop_task_services(ctx: ToolContext) -> List[Dict[str, Any]]:
         name = key.split(":", 1)[1]
         with _LOCK:
             record = _SERVICES.get(key)
-        if record is not None and (keep_all or record.keep_alive):
+        if record is not None and (record.keep_alive or (keep_all and hasattr(record.proc, "_ouroboros_custody"))):
             payload = _status_payload(record)
             payload["lifecycle"] = "kept"
             results.append(payload)
@@ -1243,7 +1246,9 @@ def stop_task_services(ctx: ToolContext) -> List[Dict[str, Any]]:
             from ouroboros.workspace_executor import _services_snapshot as _executor_snapshot
 
             for record in _executor_snapshot():
-                if str(getattr(record, "task_id", "")) == task_id:
+                local = getattr(record, "local_proc", None)  # a local launch is kept once custody holds it
+                if str(getattr(record, "task_id", "")) == task_id and (
+                        local is None or hasattr(local, "_ouroboros_custody")):
                     results.append({
                         "service_id": getattr(record, "service_id", ""),
                         "name": getattr(record, "name", ""),

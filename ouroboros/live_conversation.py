@@ -20,7 +20,8 @@ from dataclasses import replace
 
 from ouroboros.contracts.live_conversation import LiveConfig, LiveOptions
 from ouroboros.contracts.realtime import RealtimeSetupError, canonical_json
-from ouroboros.realtime_setup import _LoopWork, loaded_provider, rows_for_engine
+from ouroboros.realtime_setup import (CALL_ENDED_UNSTARTED, _LoopWork, call_ending, loaded_provider, rows_for_engine,
+                                      session_refusal_notice)
 from ouroboros.realtime_session import joined
 from ouroboros.realtime_turn import RealtimeTurn
 
@@ -104,13 +105,13 @@ class LiveConversationTurn(RealtimeTurn):
         self.route, self._generation = provider["route"], provider["extension_generation"]
         self.native_model = self.catalog_model.id
         self.model = self.route.model_prefix + self.native_model
-        self.spec = replace(spec, model=self.native_model)
+        self.spec, self.engine = replace(spec, model=self.native_model), provider["catalog"].label  # its owner-facing name
         # The call's first owner-visible chat row: the cue plus one owner-facing "Engine:" sentence that the
         # room's call card shows as its engine line (owner's choice 27.10). The model's own senses reach it
         # through the call instructions (skills/live_conversation/driver.py).
         self.opening = (("This call is now live: the other side can hear you." if spec.opened_by == "skill"
                          else "The owner has just opened this call and can hear you now.")
-                        + f" Engine: {provider['catalog'].label}, {self.catalog_model.label or self.native_model}; "
+                        + f" Engine: {self.engine}, {self.catalog_model.label or self.native_model}; "
                         + ("sees the shared screen." if self.catalog_model.vision else "no screen vision."))
         self.request = {"kind": "live_conversation", "feature": feature["key"], "provider": self.provider,
                         "model": self.native_model, "call_id": spec.call_id}
@@ -188,7 +189,7 @@ class LiveConversationTurn(RealtimeTurn):
                         # A typed stop or failure already unwinding remains the primary reason.
 
         reason, status, detail = "finished", "ok", ""
-        failure = None
+        failure = notice = None
         try:
             presence = (task.get("metadata") or {}).get("presence") or {}
             admitted_presence = (self.spec.opened_by == "skill"
@@ -227,6 +228,11 @@ class LiveConversationTurn(RealtimeTurn):
                               for frame in frames],
                 }).value
                 detail = "An unexpected error ended the call."
+            if (reason == "context_capacity" and not (host is not None and host._session_opened)
+                    and hub is not None and hub.ended_by_owner):  # the owner's End came first: it stays the owner's
+                reason, status, detail = "finished", "ok", ""
+            elif reason == "context_capacity" and host is not None and (notice := session_refusal_notice(host)):
+                detail = notice["text"]  # never opened: the refusal's one line, not "Call ended"
             if host is not None:
                 if failure is not None:
                     host.trace["failure"] = failure
@@ -240,8 +246,10 @@ class LiveConversationTurn(RealtimeTurn):
             finally:
                 with self._lock:
                     self._closed = True
-                try:
-                    close_hub(self.spec.call_id, reason, detail=detail)
+                opened = host is not None and host._session_opened
+                try:  # an End before any session opened has no transcript: every sheet reads it as unstarted
+                    close_hub(self.spec.call_id, reason, detail=CALL_ENDED_UNSTARTED if reason == "finished" and not opened
+                              else detail, **({"action": "settings"} if notice else {}))
                     if host is not None:
                         host.observe("host", canonical_json({"type": "call.input_audio",
                             **hub.input_audio_evidence()}))
@@ -250,15 +258,9 @@ class LiveConversationTurn(RealtimeTurn):
                         host.wire.close()  # the call's last records are on disk before it reports finished
                     self.publish({"type": "conversation_finished", "chat_id": self.spec.chat_id,
                                   "call_id": self.spec.call_id, "task_id": ctx.task_id, "reason": reason})
-        if reason == "not_connected":  # nobody joined: one short notice, no transcript to point at
-            words = f"The call did not start: {detail.rstrip('.')}."
-        else:
-            words = ("Call ended. Its transcript is in this room." if status in ("ok", "cancelled") or not detail
-                     else f"Call ended: {detail.rstrip('.')}. Its transcript is in this room.")
-        return words, {
-            "terminal_origin": "host_notice", "execution_status": status, "reason_code": reason,
-            **({"failure": failure} if failure is not None else {}),
-        }, host.trace if host is not None else {"reasoning_notes": [], "tool_calls": []}
+        words, usage = call_ending(reason, status, detail, notice, opened=opened)
+        return words, {**usage, **({"failure": failure} if failure is not None else {})}, (
+            host.trace if host is not None else {"reasoning_notes": [], "tool_calls": []})
 
 
 class WireJournal:
@@ -384,8 +386,7 @@ class ConversationHost:
         collisions = self.call_tools.keys() & {schema["function"]["name"] for schema in tools.schemas()}
         if collisions:
             raise RealtimeSetupError("tool_collision", "Call tools collide with ordinary tools: " + ", ".join(sorted(collisions)))
-        self.schemas.extend({"type": "function", "function": {"name": tool.name, "description": tool.description,
-            "parameters": dict(tool.parameters)}} for tool in self.call_tools.values())
+        self.schemas.extend(self._feature_tool_schemas())
         self.schemas, _ = _setup_dynamic_tools(tools, self.schemas, messages, context_mode=self.plan.initial_mode)
         # A call starts with its frame's tools, so it names the rest in its own manifest row;
         # a text turn reads them in the connections map.
@@ -438,21 +439,30 @@ class ConversationHost:
         with _active_hosts_lock:
             _active_hosts.add(self)
 
-    def _reselect_tools(self, mode):
-        """Follow a lower fitted mode, retaining tools explicitly loaded this call."""
-        from ouroboros.loop import _setup_dynamic_tools
-        from ouroboros.tool_policy import initial_tool_schemas
-        from ouroboros.tools.tool_discovery import update_resident_notice
+    def _feature_tool_schemas(self):
+        return [{"type": "function", "function": {"name": tool.name, "description": tool.description,
+                 "parameters": dict(tool.parameters)}} for tool in self.call_tools.values()]
 
-        enabled = set(self.ctx._actor_loaded_tool_names)
-        selected = initial_tool_schemas(self.tools, context_mode=mode, standing=False,
-                                        schema_names=self.turn.feature.get("initial_tools", ()))
-        names = {schema["function"]["name"] for schema in selected}
-        selected.extend(schema for schema in self.schemas
-                        if schema["function"]["name"] in (enabled | self.call_tools.keys()) - names)
-        self.schemas[:] = selected
-        _, rebound = _setup_dynamic_tools(self.tools, self.schemas, self.messages, context_mode=mode)
-        update_resident_notice(self.tools, self.schemas, self.messages)
+    def _tool_schemas_for_mode(self, mode):
+        from ouroboros.tool_policy import initial_tool_schemas
+
+        names = sorted(set(self.turn.feature.get("initial_tools", ())) | self.ctx._actor_loaded_tool_names)
+        return [*initial_tool_schemas(self.tools, context_mode=mode, standing=False, schema_names=names),
+                *self._feature_tool_schemas()]
+
+    def _reselect_tools(self, mode, *, selected=None):
+        """Bind fitted schemas, retaining tools explicitly loaded this call."""
+        from ouroboros.loop import _setup_dynamic_tools
+        from ouroboros.tools.tool_discovery import bind_resident_schemas, update_resident_notice
+
+        enabled = {name for name in self.ctx._actor_loaded_tool_names if self.tools.get_schema_by_name(name) is not None}
+        if selected is None:
+            self.schemas[:] = ConversationHost._tool_schemas_for_mode(self, mode)
+            _, rebound = _setup_dynamic_tools(self.tools, self.schemas, self.messages, context_mode=mode)
+            update_resident_notice(self.tools, self.schemas, self.messages)
+        else:  # the selected wire already carries its notices
+            self.schemas[:] = selected
+            self.ctx._actor_loaded_tool_names = rebound = bind_resident_schemas(self.tools, self.schemas)
         rebound.update(enabled)
         self._schemas_mode = mode
         self._context_changed()
@@ -813,6 +823,10 @@ class ConversationHost:
         await drain_exposure(self)  # the answer that carried this call belongs to the view it binds
         async with self._tools_lock:
             record_request(self, call)
+
+    async def restore_serving_catalog(self, rejected, delivered, revision):
+        from ouroboros.live_tool_lane import restore_serving_catalog
+        return await restore_serving_catalog(self, rejected, delivered, revision)
 
     async def tool_batch(self, calls):
         """Serialize ordinary and feature tools on the effect lane; history stays writable meanwhile."""

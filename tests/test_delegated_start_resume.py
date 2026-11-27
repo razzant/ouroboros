@@ -737,7 +737,11 @@ def test_saved_answer_resumes_at_delivery_without_another_model_call(tmp_path, m
     answer = "Here is the completed work."
     with monkeypatch.context() as first:
         if door in {"lookup", "read"}:
-            first.setattr("ouroboros.place_reply.routeless_note", lookup_before_finish)
+            from ouroboros import delegate_resume  # the call right after the selection reads the owner Pause
+
+            read_selected = delegate_resume.selected_answer_context
+            first.setattr(delegate_resume, "selected_answer_context",
+                          lambda *args, **kwargs: lookup_before_finish() or read_selected(*args, **kwargs))
             first.setattr("ouroboros.place_reply.prepare_focus_reply",
                           lambda *_a, **_k: pytest.fail("selected beside a running writer"))
         elif door == "cleanup":
@@ -1177,3 +1181,39 @@ def test_failed_observation_keeps_bound_job_and_foreign_terminal_cannot_settle_i
         engine.bind_run(job, "succeeded")
         assert custody.settle_run(tmp_path, gateway, bound.custody, engine._detail(job))["settled"]
         assert len(_rows(tmp_path, custody.LEDGER_RECORDED, run_id=job)) == 1
+
+
+def test_cli_daemon_recovered_store_and_detail_checks_preserved():
+    """Daemon/work-engine recovered store-identity verification stays strict: empty storeId is never authorization."""
+    from types import SimpleNamespace
+    from ouroboros import delegate_resume
+
+    owned_gw = SimpleNamespace(engine_ref=None, store_identity="store-alpha")
+    owned_empty_gw = SimpleNamespace(engine_ref=None, store_identity="")
+    work_ref = {"kind": "work", "descriptor": "/tmp/work-engine.json", "store": "store-work"}
+    work_gw = SimpleNamespace(engine_ref=dict(work_ref), store_identity="store-work")
+
+    unbound_cli = custody.RunCustody(run_id="run-1", task_id="t-1", invocation_id="inv-1", daemon_store_id="")
+    bound_cli = custody.RunCustody(run_id="run-1", task_id="t-1", invocation_id="inv-1", daemon_store_id="store-alpha")
+    bound_work = custody.RunCustody(run_id="run-2", task_id="t-1", invocation_id="inv-2",
+                                    daemon_store_id="store-work", engine_ref=dict(work_ref))
+    detail_ok = {"runId": "run-1", "storeId": "store-alpha", "summary": {"runId": "run-1", "state": "running"}}
+    detail_silent_store = {"runId": "run-1", "summary": {"runId": "run-1", "state": "running"}}
+    detail_foreign_store = {"runId": "run-1", "storeId": "store-other", "summary": {"runId": "run-1", "state": "running"}}
+    detail_other_run = {"runId": "run-other", "storeId": "store-alpha", "summary": {"runId": "run-other", "state": "running"}}
+
+    assert delegate_resume.recovered_cancel_store(owned_empty_gw, unbound_cli) is False
+    assert delegate_resume.recovered_cancel_detail(owned_empty_gw, unbound_cli, detail_silent_store) is False
+    assert delegate_resume.recovered_cancel_store(owned_gw, unbound_cli) is False
+    assert delegate_resume.recovered_cancel_store(owned_empty_gw, bound_cli) is False
+    assert delegate_resume.recovered_cancel_store(owned_gw, bound_cli) is True
+    assert delegate_resume.recovered_cancel_detail(owned_gw, bound_cli, detail_ok) is True
+    assert delegate_resume.recovered_cancel_detail(owned_gw, bound_cli, detail_silent_store) is True
+    assert delegate_resume.recovered_cancel_detail(owned_gw, bound_cli, detail_foreign_store) is False
+    assert delegate_resume.recovered_cancel_detail(owned_gw, bound_cli, detail_other_run) is False
+    assert delegate_resume.recovered_cancel_store(work_gw, bound_cli) is False
+
+    work_detail = {"runId": "run-2", "storeId": "store-work", "summary": {"runId": "run-2", "state": "running"}}
+    assert delegate_resume.recovered_cancel_store(work_gw, bound_work) is True
+    assert delegate_resume.recovered_cancel_detail(work_gw, bound_work, work_detail) is True
+    assert delegate_resume.recovered_cancel_store(owned_gw, bound_work) is False

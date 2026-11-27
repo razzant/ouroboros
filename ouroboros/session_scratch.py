@@ -1,7 +1,7 @@
 """Session scratch custody: who holds each recorded scratch directory, why, and since when.
 
 A writable session's short scratch (``workspace_preflight._session_scratch``, an ``obs-*`` directory
-under ``test_environment.session_scratch_parent()``) is owned through one ownership record,
+under one of ``scratch_parents()``, or a full in-place run's ``.obs-*`` child of the physical home) is owned through one ownership record,
 ``session_scratch_owners/<key>/scratch.json``, kept beside its holder: a task's drive for the
 scratch its snapshot or in-place starts reuse, a reviewer seat's home for the seat's own. The
 holder's end releases the scratch, through the custody trash, whose remover deletes it off the
@@ -11,10 +11,8 @@ hold, ``producer_retained``, in its own trash entry until the marker is gone; a 
 declared outputs there no complete capture consumed hold it the same way (``kept_service_capture_owed``),
 and so does a finished child's own scratch while its parent line still waits on its result (``parent_hold``);
 new records name an ``obs-*`` container with an ordinary nonce marker beside its empty ``w/`` workspace.
-The exact recorded address and marker identify it across reboot or whole-folder restoration, not device/inode;
-restored contents inherit its holder and cleanup. Legacy records keep their original device/inode check and
-are never upgraded. Unverified identity is held, never repaired. This module owns allocation and identity;
-``workspace_preflight`` serializes preparation and runs the custody pass over finished tasks.
+This module owns identity and shared directory checks (allocation: ``session_scratch_allocation``, called directly by ``workspace_preflight._session_scratch``); ``workspace_preflight`` serializes preparation and runs the
+custody pass over finished tasks.
 """
 from __future__ import annotations
 
@@ -23,8 +21,8 @@ import json
 import logging
 import os
 import pathlib
+import re
 import stat
-import tempfile
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -52,7 +50,7 @@ HOLDERS = ("task", "seat", "trash", "staging")
 
 
 def scratch_parents() -> Tuple[pathlib.Path, ...]:
-    """The parents a recorded scratch may sit under: the session parent, and the host's default
+    """The parents a recorded scratch may sit under: the session parent and the host's default
     temp parent that records made before ``session_scratch_parent`` existed still name."""
     from ouroboros.test_environment import default_temp_parent, session_scratch_parent
 
@@ -66,6 +64,33 @@ def scratch_parents() -> Tuple[pathlib.Path, ...]:
 
 def _overlaps(path: pathlib.Path, execution: pathlib.Path) -> bool:
     return path == execution or path in execution.parents or execution in path.parents
+
+
+def _owned_directory(base: Any, parts: Tuple[str, ...], execution: pathlib.Path) -> pathlib.Path:
+    """``base``/``parts`` as real directories, each made empty when missing and never reached through
+    a link, outside every Git working tree and apart from the execution tree, or ``ValueError``."""
+    from ouroboros.test_environment import git_ancestor
+
+    if not str(base or "").strip():
+        raise ValueError("no host root to hold it")
+    path = pathlib.Path(base).resolve()  # the host's own root is trusted; nothing below it may be a link
+    path.mkdir(parents=True, exist_ok=True)
+    for part in parts:
+        if pathlib.Path(part).name != part or part in ("", ".", ".."):
+            raise ValueError(f"unsafe folder name {part!r}")
+        path = path / part
+        try:
+            os.mkdir(path)
+        except FileExistsError:
+            pass
+        if not stat.S_ISDIR(os.lstat(path).st_mode):  # a link, even to a folder, is never granted
+            raise ValueError(f"{path} is not a real directory")
+    ancestor = git_ancestor(path)
+    if ancestor is not None:
+        raise ValueError(f"{path} is inside the Git working tree {ancestor}")
+    if _overlaps(path, execution):
+        raise ValueError(f"{path} overlaps the execution tree {execution}")
+    return path
 
 
 def work_session_scratch(execution: pathlib.Path) -> pathlib.Path:
@@ -156,6 +181,25 @@ def _marker_matches(path: pathlib.Path, nonce: str) -> str:
         return f"unreadable ({type(exc).__name__})"
 
 
+def private_home_child(path: pathlib.Path) -> bool:
+    """Exactly ``<current physical home>/.obs-<8 chars>`` as ``mkdtemp`` names it. The current home is read each time
+    (a changed HOME holds the record), and ``/`` is never a parent a record may name."""
+    from ouroboros.test_environment import PRIVATE_SCRATCH_PREFIX, private_scratch_home
+
+    if re.fullmatch(re.escape(PRIVATE_SCRATCH_PREFIX) + "[a-z0-9_]{8}", path.name) is None:
+        return False
+    home = private_scratch_home()
+    return home is not None and home != home.parent and path.parent == home
+
+
+def _container_named(path: pathlib.Path, version: int) -> bool:
+    """A home child (``private_home_child``) of schema 2 only, else an ``obs-*`` child of a fixed parent (any schema):
+    a legacy device/inode record never names the home, and the home is no generic parent."""
+    if version == 2 and private_home_child(path):  # first: an unrelated shared-parent lookup cannot obstruct it
+        return True
+    return path.parent in scratch_parents() and path.name.startswith("obs-")
+
+
 def _recorded_scratch(record: pathlib.Path, row: Dict[str, Any]) -> pathlib.Path:
     if not isinstance(row["path"], str):
         raise ValueError(f"{record} records no scratch path")
@@ -170,7 +214,7 @@ def _recorded_scratch(record: pathlib.Path, row: Dict[str, Any]) -> pathlib.Path
             raise ValueError(f"{record} records no scratch nonce")
     elif not (isinstance(recorded, list) and len(recorded) == 2 and all(type(part) is int for part in recorded)):
         raise ValueError(f"{record} records no scratch path and device/inode identity")
-    if path.parent not in scratch_parents() or not path.name.startswith("obs-"):
+    if not _container_named(path, version):
         raise ValueError(f"{record} does not name a session scratch directory")
     seen = work_domain.lstat(path)  # a missing temporary directory is a gap, never silently re-created
     if not stat.S_ISDIR(seen.st_mode) or (version == 2 and getattr(seen, "st_file_attributes", 0) & 0x400):
@@ -203,8 +247,8 @@ def recorded_scratch(record: pathlib.Path) -> pathlib.Path:
     return _recorded_scratch(record, _scratch_record(record))
 
 
-def _workspace(container: pathlib.Path) -> pathlib.Path:
-    """The empty workspace on allocation, or the same real workspace on reuse; no link/junction is granted."""
+def _workspace(container: pathlib.Path, mode: int = 0o777) -> pathlib.Path:
+    """The empty workspace on allocation (MODE, less the umask), or the same real workspace on reuse; no link/junction is granted."""
     path = container / SCRATCH_WORKSPACE
     try:
         seen = work_domain.lstat(path)
@@ -212,71 +256,13 @@ def _workspace(container: pathlib.Path) -> pathlib.Path:
         if work_domain.is_work(path):
             work_domain.make_dir(path)
         else:
-            path.mkdir()
+            path.mkdir(mode=mode)
+            if mode != 0o777:
+                path.chmod(mode)  # the umask may only clear bits of a private mode; make it exact
         seen = work_domain.lstat(path)
     if not stat.S_ISDIR(seen.st_mode) or getattr(seen, "st_file_attributes", 0) & 0x400:
         raise ValueError(f"{path} is not a real scratch workspace")
     return path
-
-
-def prepare_session_scratch(record: pathlib.Path, execution: pathlib.Path) -> pathlib.Path:
-    """Under the caller's preparation lock: reuse its recorded workspace or allocate a schema-2 container.
-
-    Publish only after container -> marker -> empty workspace. Failed preparation rolls back only those
-    known names of this fresh, ungranted allocation, never a previous container. A missing legacy directory
-    may allocate anew, but a mismatch never upgrades or adopts it. Restoration with the same nonce at the
-    same address deliberately inherits the old holder and cleanup, including files added after restoration.
-    """
-    from ouroboros.test_environment import git_ancestor, new_scratch_identity, session_scratch_parent, write_scratch_marker
-    from ouroboros.utils import atomic_write_json
-    from ouroboros.workspace_preflight import _owned_directory
-
-    if os.path.lexists(record):
-        row = _scratch_record(record)
-        try:
-            path = _recorded_scratch(record, row)
-        except FileNotFoundError:
-            pass  # OS aging may have removed it; a literal retry never prepares again
-        else:
-            if git_ancestor(path) is not None or _overlaps(path, execution):
-                raise ValueError(f"{path} overlaps a Git working tree or the execution root")
-            return _workspace(path) if row.get("schema_version") == 2 else path
-    managed = work_domain.managed()
-    parent = pathlib.Path(work_domain.staging_path("scratch")) if managed else session_scratch_parent().resolve()
-    if not managed and git_ancestor(parent) is not None:
-        raise ValueError(f"{parent} is inside a Git working tree")
-    path = work_session_scratch(execution) if managed else pathlib.Path(tempfile.mkdtemp(prefix="obs-", dir=parent))
-    row = new_scratch_identity(path)
-    marker, nonce = path / SCRATCH_MARKER, row["nonce"]
-    try:
-        if managed:
-            # A work user may differ from the service UID. This new, non-secret marker must be readable
-            # through the service's confined open too, without a work-domain cat/link fallback.
-            work_domain.write_file(marker, (nonce + "\n").encode("ascii"), mode=0o644)
-        else:
-            _owned_directory(parent, (path.name,), execution)
-            write_scratch_marker(path, nonce)
-        workspace = _workspace(path)
-        if managed and (problem := _marker_matches(path, nonce)):
-            raise ValueError(f"new scratch marker is not readable by its owner: {problem}")
-        atomic_write_json(record, row, fsync=True)
-    except work_domain.WorkDomainUnsettled:
-        raise  # its writer may still be using this new container; custody must settle it, not a rollback
-    except Exception:
-        # No session received this new allocation: remove only our two known children, then the empty container.
-        if managed:
-            if work_domain.kind(path / SCRATCH_WORKSPACE) == "dir":
-                work_domain.remove_empty_dir(path / SCRATCH_WORKSPACE)
-            work_domain.remove(marker)
-            work_domain.remove_empty_dir(path)
-        else:
-            with contextlib.suppress(FileNotFoundError):
-                (path / SCRATCH_WORKSPACE).rmdir()
-            with contextlib.suppress(FileNotFoundError):
-                marker.unlink()
-            path.rmdir()
-        raise
-    return workspace
 
 
 def identity_hold(record: pathlib.Path, exc: ScratchIdentityMismatch) -> Dict[str, Any]:
@@ -404,8 +390,7 @@ def release_session_scratch(drive: pathlib.Path, *, owed: Any = (), task_id: str
     ``task_id``, whatever holds it, so its handoff entry carries its own task (a seat-keyed one's does
     not). The caller keeps each as a visible hold, never deleting its record with the entry; the other records are still
     released. An unreadable or malformed record, a foreign, linked or non-directory path, or an
-    incomplete removal is ``OSError``: the entry and its pointer wait for the next pass. No temp-root
-    scan, arbitrary symlink following or independent sweeper."""
+    incomplete removal is ``OSError``: the entry and its pointer wait for the next pass; no temp-root scan, link following or independent sweeper."""
     from ouroboros.force_remove import force_rmtree
     from ouroboros.workspace_preflight import SEAT_SCRATCH_KEY_PREFIX
 
@@ -971,7 +956,6 @@ __all__ = [
     "identity_hold",
     "owner_records",
     "parent_hold",
-    "prepare_session_scratch",
     "recorded_scratch",
     "release_finalized",
     "release_seat_scratch",

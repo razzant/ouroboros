@@ -67,6 +67,11 @@ if [ ! -f "ripgrep-standalone/bin/rg" ]; then
     bash scripts/download_ripgrep_standalone.sh
 fi
 
+# The pinned Git the app runs only where the computer has no working Git; always re-verified and proven here.
+# The .deb/.rpm drop it again: they depend on the distribution's git.
+echo "--- Verifying and staging the pinned Git ---"
+"$PORTABLE_PYTHON" scripts/download_git_standalone.py
+
 echo "--- Verifying bundled Betterleaks runtime ---"
 "$PORTABLE_PYTHON" -m ouroboros.betterleaks_runtime install \
     --build-output betterleaks-standalone
@@ -118,6 +123,10 @@ echo "--- Building embedded managed repo bundle ---"
 
 echo "--- Running PyInstaller ---"
 "$BUILD_PYTHON" -m PyInstaller Ouroboros.spec --clean --noconfirm
+"$PORTABLE_PYTHON" scripts/download_git_standalone.py --check dist/Ouroboros/_internal/git-standalone
+# The Git source archive (GPLv2) the release publishes beside the tarball: the pinned bytes or a failed build.
+GIT_SOURCES_PREVIOUS_TAG="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+"$PORTABLE_PYTHON" scripts/download_git_standalone.py --sources dist --previous-tag="$GIT_SOURCES_PREVIOUS_TAG"
 
 # The native shell is independent of Playwright's WebKit browser-tool runtime.
 if [ "$GTK_MODE" = 1 ]; then

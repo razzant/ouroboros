@@ -666,6 +666,9 @@ SUBAGENT_INTENT_FIELDS: tuple[str, ...] = (
     ORIGINAL_INPUTS_FACT,
     # A parent's widening of its child's memory view by field (``schedule_subagent(memory_view=…)``); the child's start checks it.
     "memory_view",
+    # The first actual session start defaults to saved ``knowledge_notes``; later new starts send
+    # only explicitly selected notes. API children's first input lists addresses only.
+    "knowledge_notes",
     # The parent's resolved resource intent is required to preserve folderless scratch versus an explicit folder
     # through schedule admission; it is an authority fact, not a dispatch-derived decision.
     "resource_intent",
@@ -1140,8 +1143,8 @@ def envelope_from_task(
     """
     usage = usage or {}
     evidence = _execution_evidence_for_task(task, status)
-    # Unreadable custody log: zero counts are UNKNOWN — no substrate claim, no
-    # reduction amendment (docs/JSDoc contract; omission keeps the enum closed).
+    # Unreadable custody log: zero counts are UNKNOWN (delegate_evidence.py).
+    # Leave the substrate and reduction unclaimed; see ChatOutbound.execution_evidence.
     claimable = evidence is not None and not evidence.get("evidence_read_failed")
     substrate = actual_substrate(evidence) if claimable else ""
     capability_delta = task.get("capability_delta") if isinstance(task.get("capability_delta"), dict) else {}

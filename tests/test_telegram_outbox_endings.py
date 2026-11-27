@@ -93,7 +93,7 @@ def test_a_stopped_operations_copy_outlives_the_bound_while_its_stop_is_saved(tm
     data = tmp_path / "data"
 
     async def scenario():
-        async with _Origin(close_after=1) as first:
+        async with _Origin(close_after=1) as first, _Origin() as second:
             bridge = _bridge(data, first.base)
             await bridge.publish("chat.outbound", {**_ONLY, "text": _LONG})  # part 1 arrives; part 2 waits
             [record] = bridge.records()
@@ -111,7 +111,7 @@ def test_a_stopped_operations_copy_outlives_the_bound_while_its_stop_is_saved(tm
                 await write(item)
 
             monkeypatch.setattr(bridge.outbox, "_write", paused)
-        async with _Origin(port=first.port) as second:
+            bridge.serve(second.base)
             bridge.start()
             bridge.now += 60
             bridge.outbox.wake()
@@ -140,7 +140,7 @@ def test_an_end_the_process_never_decided_is_decided_at_the_next_start(tmp_path,
     data = tmp_path / "data"
 
     async def scenario():
-        async with _Origin(close_after=1) as first:
+        async with _Origin(close_after=1) as first, _Origin() as second:
             bridge = _bridge(data, first.base)
             await bridge.publish("chat.outbound", {**_ONLY, "text": _LONG})
             [record] = bridge.records()
@@ -156,7 +156,7 @@ def test_an_end_the_process_never_decided_is_decided_at_the_next_start(tmp_path,
                 return classify(data_dir, topic, event)
 
             monkeypatch.setattr(module.copies, "classify", paused)
-        async with _Origin(port=first.port) as second:
+            bridge.serve(second.base)
             bridge.start()
             bridge.now += 60
             bridge.outbox.wake()
@@ -454,8 +454,7 @@ def test_a_documents_reference_is_kept_when_its_task_file_goes_and_said_as_such(
     async def scenario():
         produce = _Producer(monkeypatch, data)
         document = produce.document(_blob(40_000, 90), captured=True, filename="report.pdf", caption=caption)
-        closed = _closed_base()
-        bridge = _bridge(data, closed)
+        bridge = _bridge(data, _closed_base())
         await bridge.publish(*document)
         [record] = bridge.records()
         saved = json.loads(bridge.outbox._payload_path(record).read_bytes())
@@ -464,7 +463,8 @@ def test_a_documents_reference_is_kept_when_its_task_file_goes_and_said_as_such(
 
         (task_artifact_dir_path(data, "work-1") / "report.pdf").unlink()  # the canonical file goes while it waits
         bridge.now += 24 * 3600 + 1
-        async with _Origin(port=closed) as late:
+        async with _Origin() as late:
+            bridge.serve(late.base)
             await bridge.drain()
         assert late.requests == []
         assert (record["state"], record["reason"], record["copy"], record.get("held")) == (

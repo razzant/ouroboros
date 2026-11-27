@@ -16,7 +16,7 @@ import os
 import pathlib
 import threading
 import uuid
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 from ouroboros.consciousness_authority import apply_consciousness_authority
 from ouroboros.contracts.task_contract import build_task_contract, normalize_allowed_resources
 from ouroboros.dialogue_provenance import presence_metadata_binding, presence_metadata_relation
@@ -753,6 +753,24 @@ def _remove_withdrawn(data, root, cutoff_epoch, *, reads=None):
     return removals
 
 
+def own_time_waits(record: Dict[str, Any], root, reading: Optional[Dict[str, bool]] = None) -> bool:
+    """A due row declared the mind's own (``writer_origin``) waits, unconsumed, while Off or Panic holds own time.
+
+    ``reading``: one switch reading shared by a pass's first look; the decisions that consume (a note's commit,
+    an occurrence's admission) pass none and read the switch fresh."""
+    from ouroboros.consciousness_authority import is_declared_own
+    from supervisor.consciousness_carriers import autonomous_work_enabled
+
+    origin = record.get("writer_origin")
+    if not is_declared_own(origin):
+        return False
+    if reading is None:
+        return not autonomous_work_enabled({"metadata": origin}, root)
+    if "on" not in reading:
+        reading["on"] = autonomous_work_enabled({"metadata": origin}, root)
+    return not reading["on"]
+
+
 def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
     """Admit due cron/once schedules through the occurrence protocol.
 
@@ -799,6 +817,7 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
     outcomes = _scan_outcomes(root, snapshot, reads=reads)
     claims: List[Dict[str, Any]] = []
     due_notes: List[Dict[str, Any]] = []
+    own_reading: Dict[str, bool] = {}  # one switch reading for this pass's first look
     with schedule_transaction(root):
         if stop is not None and stop():
             return
@@ -858,6 +877,8 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
                     if occurrences.contention(exc):
                         continue
                     raise
+                if verdict == "prepare" and own_time_waits(record, root, own_reading):
+                    continue  # an unadmitted declared claim is neither prepared nor rewritten while own time is off
                 changed = changed or verdict not in {"live", "retry"}
                 if verdict == "reconsider":
                     # Unstarted work follows the current authored timing/control.
@@ -923,12 +944,14 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
                 continue  # unknown queue state never licenses a duplicate firing
             if view.get("hold") or view["wait"] or record.get("followup_hold"):
                 continue
+            if own_time_waits(record, root, own_reading):
+                continue  # the mind's own schedule stays due, unconsumed, until the switch is on again
             if notes.is_note(record):
                 # Notes publish here, unlike task claims whose admission rechecks
                 # controls later. Their final control fence must therefore be here.
                 with control_guard(root, record):
                     view = refresh_policy(root, data, record)
-                    if view.get("hold") or view["wait"] or record.get("followup_hold"):
+                    if view.get("hold") or view["wait"] or record.get("followup_hold") or own_time_waits(record, root):
                         continue
                     note, note_changed = notes.consume(record, due_at, now)
                     due_notes.extend([note] if note else [])

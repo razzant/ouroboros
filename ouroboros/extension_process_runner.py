@@ -44,7 +44,7 @@ from ouroboros.tools.process_facts import publish_process_facts
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.shell import _kill_process_group
 from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
-from ouroboros.tools.skill_exec import _scrub_env
+from ouroboros.tools.skill_exec import PYTHON_STDIO_ENCODING, _scrub_env
 from ouroboros.usage_accounting import current_usage_scope, record_unmetered_external_dispatch
 from ouroboros.utils import sanitize_tool_result_for_log
 
@@ -269,6 +269,7 @@ def _write_private_bytes(path: pathlib.Path, data: bytes) -> None:
 
 
 def _tool_context_payload(ctx: ToolContext) -> Dict[str, Any]:
+    callback = getattr(ctx, "call_ref", "")
     return {
         "task_id": str(ctx.task_id or ""),
         "current_chat_id": ctx.current_chat_id,
@@ -282,12 +283,14 @@ def _tool_context_payload(ctx: ToolContext) -> Dict[str, Any]:
         "task_depth": int(ctx.task_depth or 0),
         # A managed task's call whose row cannot be read has unknown Stop; a standalone call has no task.
         "task_lifecycle_bound": getattr(ctx, "task_lifecycle_bound", False) is True,
+        **({"call_ref": callback} if callback else {}),
         "task_metadata": _json_safe(dict(ctx.task_metadata or {})),
         "task_contract": _json_safe(dict(getattr(ctx, "task_contract", {}) or {})),
     }
 
 
 def _apply_tool_context_payload(ctx: ToolContext, payload: Dict[str, Any]) -> ToolContext:
+    ctx._child_call_ref = str(payload.get("call_ref") or "")
     ctx.task_id = str(payload.get("task_id") or "") or None
     raw_chat_id = payload.get("current_chat_id")
     ctx.current_chat_id = raw_chat_id if isinstance(raw_chat_id, int) else None
@@ -327,7 +330,8 @@ def _child_env(
     granted_keys: List[str],
     host_access: bool = True,
 ) -> Dict[str, str]:
-    env = _scrub_env(env_allowlist, skill_state_dir(drive_root, skill_name), skill_name, granted_keys=granted_keys)
+    env = _scrub_env(env_allowlist, skill_state_dir(drive_root, skill_name), skill_name, granted_keys=granted_keys,
+                     drive_root=drive_root)
     from ouroboros.config import resolve_app_root
     from ouroboros.launch_roots import BASIS_ENV
     from ouroboros.node_runtime import forward_playwright_node
@@ -359,6 +363,7 @@ def _child_env(
         pythonpath = os.pathsep.join([pythonpath, env["PYTHONPATH"]])
     env["PYTHONPATH"] = pythonpath
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = PYTHON_STDIO_ENCODING
     return {**env, **_host_service_access(drive_root, skill_name, skill_dir)} if host_access else env
 
 
@@ -758,14 +763,16 @@ def _base_env_for_skill(skill: Any, drive_root: pathlib.Path, repo_dir: pathlib.
                       env_allowlist=[], granted_keys=[], host_access=host_access)
 
 
-def _readable_settings(skill: Any, drive_root: pathlib.Path, settings: Dict[str, Any], grants: Dict[str, Any]) -> dict:
-    """What the skill's PluginAPI lets it read of ``settings``: its allowlist, under its grants and ``read_settings``."""
+def _readable_settings(skill: Any, drive_root: pathlib.Path, settings: Dict[str, Any], grants: Dict[str, Any],
+                       *, claim: bool = True) -> dict:
+    """What the skill's PluginAPI lets it read of ``settings``: its allowlist, under its grants and ``read_settings``.
+    ``drive_root`` reaches the one-reader arbitration; ``claim`` false for a passive discovery read."""
     from ouroboros.extension_plugin_api import PluginAPIImpl, _PluginAPIConfig
 
     api = PluginAPIImpl(_PluginAPIConfig(
         skill_name=skill.name, permissions=skill.manifest.permissions, env_allowlist=skill.manifest.env_from_settings,
         state_dir=skill_state_dir(drive_root, skill.name), settings_reader=lambda: settings,
-        granted_keys=grants.get("granted_keys") or [],
+        granted_keys=grants.get("granted_keys") or [], drive_root=drive_root, claim_bot_on_read=claim,
     ))
     return api.get_settings(skill.manifest.env_from_settings)
 
@@ -811,12 +818,13 @@ def _catalog_context(skill, drive_root, repo_dir, settings_reader=None):
     registration input) and the fixed settings it reads: the declared keys, else all its PluginAPI may read."""
     from ouroboros.extension_import_staging import catalog_identity, declared_catalog_inputs
     from ouroboros.settings_integrity import skill_settings
+    from ouroboros.skill_grant_follow import declared_catalog_settings, registration_view
 
     env = _base_env_for_skill(skill, pathlib.Path(drive_root), pathlib.Path(repo_dir), host_access=False)
     declaration, current = declared_catalog_inputs(skill), skill_settings(settings_reader)
     grants = grant_status_for_skill(drive_root, skill)
-    settings = ({k: current[k] for k in declaration["settings"] if k in current} if declaration is not None
-                else _readable_settings(skill, pathlib.Path(drive_root), current, grants))
+    settings = (declared_catalog_settings(declaration["settings"], current, grants) if declaration is not None
+                else registration_view(_readable_settings(skill, pathlib.Path(drive_root), current, grants, claim=False)))
     return catalog_identity(skill, settings, env, grants), env, settings
 
 

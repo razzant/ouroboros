@@ -25,8 +25,11 @@ import uuid
 import threading
 from contextlib import ExitStack, contextmanager
 
+from supervisor.cancel_publication import PEER_CANCEL_SOURCE
+
 STOP_SOURCES = frozenset({"http_single", "http_cascade", "http_graceful",
-                          "owner", "owner_stop", "agent_tool", "owner_restart"})
+                          "owner", "owner_stop", "agent_tool", "owner_restart",
+                          PEER_CANCEL_SOURCE})  # a linked Ouroboros's cancel of its letter (gateway/peer_letters_api)
 HOST_FIELDS = ("followup_origin", "followup_relation", "followup_hold",
                "followup_released", "followup_wait")
 _CONTROL_DEPTH = threading.local()
@@ -452,7 +455,8 @@ def normalize_template(record):
     for key in RESERVED_TEMPLATE_FIELDS:
         template.pop(key, None)
     metadata = template.get("metadata") or {}
-    template["metadata"] = {k: v for k, v in metadata.items() if k not in RESERVED_TEMPLATE_FIELDS}
+    template["metadata"] = {k: v for k, v in metadata.items()  # only the host writer's origin declares own work
+                            if k not in RESERVED_TEMPLATE_FIELDS and k != "own_declared"}
     return template
 
 
@@ -473,7 +477,7 @@ def task_binding(root, record):
 
 
 def restore_followup(root, data, current, *, expected_hold_id, resolved, actor, task_id, reason,
-                     writer_kind="consciousness", writer_metadata=None):
+                     writer_kind="consciousness", writer_metadata=None, agent=False):
     """Release precisely a durable, observed generation; never enable other holds."""
     from supervisor import queue_schedules as store
     with control_guard(root, current):
@@ -509,7 +513,7 @@ def restore_followup(root, data, current, *, expected_hold_id, resolved, actor, 
             after["followup_origin"], after["followup_relation"] = resolved
         from ouroboros.consciousness_authority import stamp_schedule_writer
         stamp_schedule_writer(after, writer_kind, writer_metadata,  # a restore of the same work
-                              started_root=relation_kind(after) == "independent", same_work=True)
+                              started_root=relation_kind(after) == "independent", same_work=True, agent=agent)
         after["followup_released"] = {**(after.get("followup_released") or {}), **hold.get("controls", {})}
         after.pop("followup_hold", None)
         after["followup_wait"] = policy_view(root, data, after)["wait"]
@@ -517,7 +521,8 @@ def restore_followup(root, data, current, *, expected_hold_id, resolved, actor, 
         current.update(after)
         store._write_scheduled_tasks(data, root)
         recorded = store._audit_schedule_mutation(phase="outcome", result="hold_released", before=before, after=after, **audit)
-        return {"ok": recorded, "changed": True,
+        from supervisor.schedule_lifecycle import _declared_fact
+        return {"ok": recorded, "changed": True, **_declared_fact(current),
                 "status": "hold_released" if recorded else "changed_audit_incomplete",
                 "schedule_id": current["id"], "schedule": store._audit_row(current),
                 "running_or_queued": store._schedule_running_or_queued(current["id"], root),

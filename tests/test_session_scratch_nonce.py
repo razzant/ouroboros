@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import owner_keep, task_custody, utils, work_domain
+from ouroboros import owner_keep, session_scratch_allocation, task_custody, utils, work_domain
 from ouroboros import session_scratch as scratch
 from ouroboros.workspace_preflight import release_finished_scratch
 from tests._store_shared import seed_result
@@ -518,7 +518,7 @@ def test_a_real_timeout_exception_keeps_the_writer_uncertainty_through_effect_an
     else:
         error = work_domain.WorkDomainUnsettled
     with pytest.raises(error) as raised:
-        scratch.prepare_session_scratch(record, execution)
+        session_scratch_allocation.prepare_session_scratch(record, execution)
     assert len([launch for launch in launches if launch.proc.timed_out]) == 1
     if not settled:
         observed = raised.value.result  # the CompletedProcess every writer of this error carries (query_code reads it)
@@ -563,7 +563,7 @@ def test_new_managed_nonce_is_confined_readable_with_restrictive_umask_and_no_pr
     previous = os.umask(0o077)
     try:
         record = tmp_path / "owner" / "scratch.json"
-        workspace = scratch.prepare_session_scratch(record, tmp_path / "execution")
+        workspace = session_scratch_allocation.prepare_session_scratch(record, tmp_path / "execution")
     finally:
         os.umask(previous)
     container = workspace.parent

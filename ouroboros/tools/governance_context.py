@@ -7,12 +7,16 @@ carry inline and which it reaches through a navigation map. Three tiers:
 1. **Rules, always inline.** The surface's applicable ``docs/CHECKLISTS.md``
    section (supplied by the caller, which owns its own section name), the
    shared section every reviewer of this repository's code applies
-   (:data:`SHARED_CHECKLIST_SECTION`, loaded here), ``BIBLE.md`` whole and
-   ``docs/CHECKLISTS_ARCHIVE.md`` whole. This tier is byte-stable across
-   commits, so the caller puts it in its cache-marked prefix.
+   (:data:`SHARED_CHECKLIST_SECTION`, loaded here), ``BIBLE.md`` whole,
+   ``docs/CHECKLISTS_ARCHIVE.md`` whole and the installed key-invariants chapter
+   (:data:`BODY_INVARIANTS_CHAPTER`) whole, for packet and retrieving rows alike,
+   so a proposal is judged by the installed text even where it edits that chapter.
+   This tier is byte-stable across commits, so the caller puts it in its
+   cache-marked prefix.
 2. **Rules by change class, within a budget share.** ``docs/DESIGN.md`` when the
    change touches ``web/`` (its design bible alone when the whole book does not fit
-   the share), its design bible alone for changed words elsewhere;
+   the share), its design bible alone for changed words elsewhere, and its numbered
+   principles alone where the share cannot hold the whole bible;
    the review-and-commit protocol chapter always; and
    every DEVELOPMENT chapter whose text mentions a touched file NAME. Bounded by
    :data:`~ouroboros.runtime_limits.REVIEW_GOVERNANCE_INLINE_SHARE` of the
@@ -20,9 +24,10 @@ carry inline and which it reaches through a navigation map. Three tiers:
    inlined, every body reviewer receives its generated heading map.
 3. **Map, never whole.** ``docs/ARCHITECTURE.md`` arrives as book navigation for
    every delivery. A PACKET reviewer (a row with no tools of its own)
-   additionally receives the top-level sections whose text mentions a touched
-   file name, from the same budget; a RETRIEVING row gets the navigation and
-   reads what it needs with its own ``read_file``.
+   additionally receives, from the same budget, the top-level sections and the
+   opening blocks (text before a chapter's first subheading; of a code listing,
+   only its lines) whose text mentions a touched file name; a RETRIEVING row gets
+   the navigation and reads what it needs with its own ``read_file``.
 
 Every document that is not inlined is NAMED in the returned manifest and in the
 navigation text, never silently dropped (BIBLE P1), and the manifest is the
@@ -74,10 +79,23 @@ CHECKLISTS_PATH = "docs/CHECKLISTS.md"
 SHARED_CHECKLIST_SECTION = "Shared Contract Ownership"
 CHECKLISTS_ARCHIVE_PATH = "docs/CHECKLISTS_ARCHIVE.md"
 DESIGN_PATH = "docs/DESIGN.md"
+_DESIGN_BIBLE_PATH = f"{DESIGN_PATH}#Design bible"
+_DESIGN_PRINCIPLES_PATH = f"{_DESIGN_BIBLE_PATH} principles"
+_DESIGN_REVIEW_MAP = {
+    DESIGN_PATH: "Navigation only: no DESIGN rules are inlined as governance.",
+    _DESIGN_BIBLE_PATH: "Inlined above: the whole design bible section; the rest is indexed only.",
+    _DESIGN_PRINCIPLES_PATH: "Inlined above: the design bible's opening and numbered principles only.",
+}
 DEVELOPMENT_BOOK_ID = "development"
 ARCHITECTURE_BOOK_ID = "architecture"
 # Always relevant: it is the protocol the reviewer is executing right now.
 REVIEW_PROTOCOL_CHAPTER = "docs/development/05-review-and-commit-protocol.md"
+# The body's cross-cutting invariants: one numbered list before the chapter's first subheading, so a section
+# selector never reaches it. Every body reviewer gets the installed chapter whole in tier 1, as it gets BIBLE.
+BODY_INVARIANTS_CHAPTER = "docs/architecture/10-key-invariants.md"
+# The body navigation's line when it could not be read (review-contract words, ``navigation_material``).
+_INVARIANTS_UNAVAILABLE = (f"`{BODY_INVARIANTS_CHAPTER}` (the body's cross-cutting invariants) is UNAVAILABLE at this "
+                           "governance root and was not delivered; state the uncertainty that leaves.")
 
 PACKET_DELIVERY = "packet"
 RETRIEVING_DELIVERY = "retrieving"
@@ -89,7 +107,7 @@ SKILL_LAYER = "skill"
 GOVERNANCE_LAYERS = (CORE_LAYER, BODY_LAYER, SKILL_LAYER)
 # The skill layer's tier 2 (owner 21.10 F1): read in full by every skill reviewer.
 SKILL_REQUIRED_CHAPTERS = (
-    "docs/architecture/10-key-invariants.md",
+    BODY_INVARIANTS_CHAPTER,
     "docs/architecture/12-host-service-companions-and-chat-ids.md",
     "docs/architecture/13-external-skills-layer.md",
     "docs/development/03-module-size-and-complexity.md",
@@ -127,8 +145,8 @@ NAVIGATION_WORDS = {
         PACKET_DELIVERY: (
             "## Governance navigation (index of sources not inlined)",
             "The supplied rules and selected sections are the governance evidence this packet delivers. This row "
-            "has no repository tools: the map below identifies sources and ranges that were NOT delivered, not "
-            "additional evidence. State any resulting uncertainty; do not claim to have read the named sources."),
+            "has no repository tools: any ranges only indexed below were NOT delivered as governance. "
+            "State the uncertainty that remains after reading the supplied evidence."),
         RETRIEVING_DELIVERY: (
             "## Governance navigation (read on demand)",
             "The rules above are the ones this change activates. Available sources below remain complete on disk "
@@ -187,8 +205,9 @@ def _normalize(path: Any) -> str:
     return str(path or "").replace("\\", "/").lstrip("./")
 
 
-def _touched_names(touched_paths: Optional[Iterable[Any]]) -> tuple[tuple[str, ...], ...]:
-    """One name group per touched file: its repo-relative path and its basename.
+def _touched_names(touched_paths: Optional[Iterable[Any]]) -> tuple[tuple[re.Pattern, ...], ...]:
+    """One group per touched file: its repo-relative path and its basename, each compiled once as a token
+    matcher (a broad change matches hundreds of names against every candidate text).
 
     Directory prefixes are deliberately absent — ``web/`` or ``ouroboros/``
     would match nearly every chapter and so select nothing."""
@@ -200,11 +219,12 @@ def _touched_names(touched_paths: Optional[Iterable[Any]]) -> tuple[tuple[str, .
             continue
         seen.add(rel)
         base = rel.rsplit("/", 1)[-1]
-        groups.append((rel,) if base == rel else (rel, base))
+        groups.append(tuple(re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])")
+                            for name in ((rel,) if base == rel else (rel, base))))
     return tuple(groups)
 
 
-def _mentions(text: str, groups: Iterable[tuple[str, ...]]) -> tuple[int, int]:
+def _mentions(text: str, groups: Iterable[tuple[re.Pattern, ...]]) -> tuple[int, int]:
     """``(touched files mentioned, mentions)`` of those files in ``text``.
 
     A name matches only as its own token: ``git.py`` inside ``review_git.py`` is
@@ -213,9 +233,7 @@ def _mentions(text: str, groups: Iterable[tuple[str, ...]]) -> tuple[int, int]:
     beside its own basename is one mention, not two."""
     files = mentions = 0
     for group in groups:
-        found = max(
-            len(re.findall(rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])", text))
-            for name in group)
+        found = max(len(pattern.findall(text)) for pattern in group)
         if found:
             files += 1
             mentions += found
@@ -278,6 +296,30 @@ def _top_sections(source) -> tuple:
     return tuple(heading for heading in source.headings if heading.level == top)
 
 
+def _opening_units(source) -> list:
+    """Everything between a chapter's H1 and its first subheading (all of a chapter without one) as selectable
+    ``(start_byte, text, is_code)`` units: each outermost paragraph, list and code block, and any other text
+    between them (a table), so nothing a chapter says before its first subheading is beyond selection."""
+    heads = source.headings
+    start = heads[0].span.end_byte if heads and heads[0].level == 1 else 0
+    end = next((heading.span.start_byte for heading in heads if heading.level > 1), len(source.raw))
+    code = {(span.start_byte, span.end_byte) for span in source.code_blocks}
+    units, at = [], start
+    for span in sorted((*source.paragraphs, *source.lists, *source.code_blocks),
+                       key=lambda span: (span.start_byte, -span.end_byte)):
+        if span.start_byte < at or span.end_byte > end:  # nested in a unit already taken, or past the opening
+            continue
+        units.append((at, source.raw[at:span.start_byte].decode("utf-8"), False))
+        units.append((span.start_byte, source.text_at(span), (span.start_byte, span.end_byte) in code))
+        at = span.end_byte
+    units.append((at, source.raw[at:end].decode("utf-8"), False))
+    # A code block's span is its content: its fence lines fall in the text between units and are no unit.
+    units = [(offset, text if is_code else "\n".join(line for line in text.splitlines()
+                                                     if not re.match(r"\s*(```|~~~)", line)), is_code)
+             for offset, text, is_code in units]
+    return [(offset, text.strip(), is_code) for offset, text, is_code in units if text.strip()]
+
+
 def _book_navigation(repo_dir: Path, book_id: str, book, load_doc, *, instructions: bool = True) -> str:
     from ouroboros.context_layout import book_navigation, generate_doc_nav_map
     from ouroboros.reference_books import BOOK_ENTRYPOINTS
@@ -331,13 +373,18 @@ def _checklist_pointer(rules: bool, shared: bool) -> str:
 def navigation_material(layer: str, delivery: str) -> list:
     """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): a layer's governance navigation
     as its renderer composes it for ``delivery``, over placeholders (the subject's documents, the sources a skill
-    owes). The documents it names, their maps and the guides' own text are not here."""
+    owes). The documents it names, their headings and the guides' own text are not here."""
+    from ouroboros.context_layout import design_navigation
     from ouroboros.tools.review_helpers import GOVERNANCE_OMISSION
 
     words = NAVIGATION_WORDS.get(layer, {})
     if layer != CORE_LAYER:
         pointers = [_checklist_pointer(rules, shared) for rules in (True, False) for shared in (True, False)]
         omissions = [text.format(rel_path="⟨path⟩", path="⟨path⟩", error="⟨error⟩") for text in GOVERNANCE_OMISSION.values()]
+        if layer == BODY_LAYER:
+            pointers.extend(design_navigation("", source="⟨source⟩", disclosure=note)
+                            for note in _DESIGN_REVIEW_MAP.values())
+            pointers.append(_INVARIANTS_UNAVAILABLE)
         return [*(text.format(required="⟨required⟩") for text in words.get(delivery, ())), *omissions,
                 *(pointers if layer == BODY_LAYER else ())]
     heading, with_rules, without_rules, subject_words = words["every"]
@@ -598,6 +645,24 @@ def governance_context(
         tier1.append((path, text))
         inline_texts[path] = text
         rows.append(_row(path, 1, "inline", len(text), "tier 1: every reviewer carries it"))
+    packet = str(delivery or PACKET_DELIVERY) == PACKET_DELIVERY
+    # Read alone, not through the book: a broken sibling chapter must not take the invariants with it. Exact
+    # bytes, as book sources keep them, so a caller suppressing a duplicate compares like with like.
+    try:
+        invariants = (root / BODY_INVARIANTS_CHAPTER).read_bytes().decode("utf-8")
+        unavailable = "" if invariants.strip() else "the source is empty"
+    except (OSError, UnicodeDecodeError) as exc:
+        invariants, unavailable = "", f"{type(exc).__name__}: {exc}"
+    if unavailable:
+        rows.append(_row(BODY_INVARIANTS_CHAPTER, 1, "navigation", 0,
+                         f"the body's cross-cutting invariants are unavailable here ({unavailable})"))
+        invariants_pointer = _INVARIANTS_UNAVAILABLE
+    else:  # inline for every delivery: a session may not reach the installed tree, and a proposal may edit it
+        tier1.append((BODY_INVARIANTS_CHAPTER, invariants))
+        inline_texts[BODY_INVARIANTS_CHAPTER] = invariants
+        rows.append(_row(BODY_INVARIANTS_CHAPTER, 1, "inline", len(invariants),
+                         "tier 1: the installed body's cross-cutting invariants, whole for every body reviewer"))
+        invariants_pointer = ""
 
     # --- the change-class budget: ONE share for tier 2 and tier 3 together,
     # rules by change class drawing first, architecture sections from the rest.
@@ -645,17 +710,29 @@ def governance_context(
     chapter_text = {chapter.source_path: chapter.text for chapter in dev_chapters}
     chapter_text[DESIGN_PATH] = design_text
     design_missing = design_text.startswith("[⚠️ OMISSION") or not design_text.strip()
-    # The design bible alone: its opening lines and numbered principles. The seed and
-    # component recipes follow the principles inside the same Markdown section: stop
-    # where the numbered list ends, not at H2.
-    bible_path = f"{DESIGN_PATH}#Design bible"
-    bible = None if design_missing else re.search(
-        r"(?ms)^## Design bible\b.*?^1\. .*?(?=^(?!\d+\. )\S|\Z)", design_text)
+    # The design bible alone: its whole section, principles, seed table and recipes, the
+    # very slice its author carries (``context_layout.design_bible_section``).
+    from ouroboros.context_layout import design_bible_section, design_navigation
+
+    bible_path, principles_path = _DESIGN_BIBLE_PATH, _DESIGN_PRINCIPLES_PATH
+    bible = None if design_missing else design_bible_section(design_text)
+    principles = None
     if bible:
-        last = re.findall(r"(?m)^(\d+)\. ", bible[0])[-1]
-        bible_title = f"{bible_path} (excerpt: principles 1–{last})"
-        chapter_text[bible_path] = bible[0].strip()
-    bible_absent = "design bible excerpt unavailable; inspect the named source"
+        bible_title = f"{bible_path} (excerpt: the whole section)"
+        chapter_text[bible_path] = bible
+        # A share too small for the whole section still carries its opening and numbered principles, the slice
+        # reviewers had before (RV1), cut from that same section and labelled as only that.
+        listed = re.search(r"(?ms)\A.*?^1\. .*?(?=^(?!\d+\. )\S|\Z)", bible)
+        if listed and listed[0].strip() != bible:
+            last = re.findall(r"(?m)^(\d+)\. ", listed[0])[-1]
+            principles = f"{bible_path} (excerpt: principles 1–{last} only)"
+            chapter_text[principles_path] = listed[0].strip()
+    bible_absent = "design bible excerpt unavailable; the source has no design bible section"
+
+    def _admit_bible(reason: str) -> None:  # the whole section, else its principles alone
+        if not _admit(bible_path, bible_title, chapter_text[bible_path], 2, reason) and principles:
+            _admit(principles_path, principles, chapter_text[principles_path], 2,
+                   f"{reason}; the whole section does not fit the inline share, its principles only")
     if design_missing:
         rows.append(_row(DESIGN_PATH, 2, "navigation", 0,
                          design_text or "DESIGN source is empty; content not delivered"))
@@ -669,63 +746,74 @@ def governance_context(
         else:
             rows.append(_row(bible_path, 2, "navigation", 0, bible_absent))
         rows.append(_row(DESIGN_PATH, 2, "navigation", len(design_text),
-                         "full DESIGN remains on demand; only its bible is selected for source words"))
+                         "heading map for the whole book; only its bible is eligible for changed source words"))
     else:
         rows.append(_row(DESIGN_PATH, 2, "navigation", len(design_text),
                          "heading map only; no frontend path or changed source words"))
 
     for order, path, title, reason in sorted(candidates):
-        if _admit(path, title, chapter_text.get(path, ""), 2, reason) or path != DESIGN_PATH:
-            continue
-        # The whole book does not fit this reviewer's share. Its principles are what a
-        # change under web/ is judged by, so they are carried before any chapter chosen
-        # by a file name; the heading map still indexes the rest.
-        if bible:
-            _admit(bible_path, bible_title, chapter_text[bible_path], 2,
-                   "a touched path is under web/ and the whole book does not fit the inline share; "
-                   "design bible excerpt")
-        else:
-            rows.append(_row(bible_path, 2, "navigation", 0, bible_absent))
+        if path == bible_path:
+            _admit_bible(reason)
+        elif not _admit(path, title, chapter_text.get(path, ""), 2, reason) and path == DESIGN_PATH:
+            # The whole book does not fit this reviewer's share. Its bible is what a
+            # change under web/ is judged by, so it is carried before any chapter chosen
+            # by a file name; the heading map still indexes the rest.
+            if bible:
+                _admit_bible("a touched path is under web/ and the whole book does not fit the inline share; "
+                             "design bible excerpt")
+            else:
+                rows.append(_row(bible_path, 2, "navigation", 0, bible_absent))
 
     # --- tier 3: the map, never whole -------------------------------------
     arch_book, arch_problem = _load_book(root, ARCHITECTURE_BOOK_ID)
     arch_chapters = _book_sources(arch_book)
-    packet = str(delivery or PACKET_DELIVERY) == PACKET_DELIVERY
     arch_reason = "the map is delivered as navigation, never whole; " + (
         "the sections that name a touched file are selected below" if packet
         else "this reviewer reads sections on demand with its own tools")
     rows.append(_row("docs/ARCHITECTURE.md", 3, "navigation", 0, arch_reason if arch_chapters
                      else arch_problem or "no chaptered membership: navigation only"))
     sections: list[tuple[tuple, str, str, str]] = []
+    any_name = re.compile("|".join(pattern.pattern for group in names for pattern in group)) if names else None
     for chapter in arch_chapters:
+        if chapter.source_path == BODY_INVARIANTS_CHAPTER:  # tier 1 above, whole
+            continue
         rows.append(_row(chapter.source_path, 3, "navigation", len(chapter.text),
                          "the map is never inlined whole; chapter navigation above"))
         if not packet or not names:
             continue
-        for heading in _top_sections(chapter):
-            body = chapter.text_at(heading.section)
+        units = [(start, f"opening block {number}", text, is_code)
+                 for number, (start, text, is_code) in enumerate(_opening_units(chapter), 1)]
+        units += [(heading.span.start_byte, heading.title, chapter.text_at(heading.section), False)
+                  for heading in _top_sections(chapter)]
+        for start, title, body, is_code in units:
+            if is_code:  # a listing (the module tree) gives its lines that name a touched file, not all of itself
+                body = "\n".join(line for line in body.splitlines() if any_name.search(line))
+                title += " (excerpt: its lines naming a touched file)"
             files, mentions = _mentions(body, names)
             if not files:
                 continue
-            path = f"{chapter.source_path}#{heading.title}"
-            sections.append(((-files * 1000 - mentions, chapter.source_path, heading.span.start_byte),
+            path = f"{chapter.source_path}#{title}"
+            # Authored prose first: a listing's lines name many files, so by count alone they would displace
+            # the sections that explain those files; they take what share is left.
+            sections.append(((is_code, -files * 1000 - mentions, chapter.source_path, start),
                              path, path, f"mentions {files} touched file(s), {mentions} time(s)"))
             chapter_text[path] = body
     for order, path, title, reason in sorted(sections):
         _admit(path, title, chapter_text.get(path, ""), 3, reason)
 
     # --- navigation -------------------------------------------------------
-    pointers = [_checklist_pointer(bool(checklist_text.strip()), shared_inline)]
+    pointers = [_checklist_pointer(bool(checklist_text.strip()), shared_inline), invariants_pointer]
     design_map = ""
     if DESIGN_PATH not in inline_texts:
-        from ouroboros.context_layout import design_navigation
-
+        delivered = next((row["path"] for row in rows if row["disposition"] == "inline"
+                          and row["path"] in (bible_path, principles_path)), DESIGN_PATH)
         design_map = design_navigation(
-            None if design_missing else design_text, source=str(root / DESIGN_PATH))
+            None if design_missing else design_text, source=str(root / DESIGN_PATH),
+            disclosure=_DESIGN_REVIEW_MAP[delivered])
     nav_heading, nav_words = NAVIGATION_WORDS[BODY_LAYER][PACKET_DELIVERY if packet else RETRIEVING_DELIVERY]
     navigation = _join([
         nav_heading, nav_words,
-        "\n".join(pointers),
+        "\n".join(pointer for pointer in pointers if pointer),
         design_map,
         _book_navigation(root, DEVELOPMENT_BOOK_ID, dev_book, load_governance_doc, instructions=not packet),
         _book_navigation(root, ARCHITECTURE_BOOK_ID, arch_book, load_governance_doc, instructions=not packet),

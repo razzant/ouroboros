@@ -6,6 +6,7 @@
 import { extensionRoutePath, extensionRoutePrefix, fetchJson, jsonPost, readStateJson, withinRequestLifetime } from './api_client.js';
 import { tr } from './i18n.js';
 import { errorWords } from './ui_primitives.js';
+import { peerPlaceFacts } from './peer_links_api.js';
 
 /** A read or write that never reached Ouroboros in owner words (errorWords); a server's answer keeps its own words. */
 export const failureText = (error) => (error instanceof TypeError && error.response === undefined
@@ -25,6 +26,14 @@ const amount = (value) => {
     if (value === null || value === undefined || value === '') return null;
     const number = Number(value);
     return Number.isFinite(number) ? number : null;
+};
+// `live_wake_hold.resume_additional_usd` (the allowance's room a Resume would add) and `resume_available_usd` (what the
+// total budget leaves of it now): absent stays undefined (never a guessed zero), an unreadable or negative amount is
+// unknown (null).
+const holdAmount = (hold, key) => {
+    if (!hold || !Object.hasOwn(hold, key)) return undefined;
+    const value = amount(hold[key]);
+    return value !== null && value >= 0 ? value : null;
 };
 const placeReadiness = (value) => object(value) && text(value.text)
     ? { text: text(value.text), tone: text(value.tone) || 'muted' } : null;
@@ -55,6 +64,25 @@ export function normalizeIcon(raw) {
     return icon ? { ...icon } : null;
 }
 
+/** Stable key distinguishing multiple place contributions of one connector skill (`telegram-bot:owner_bot` vs `telegram-bot:place`). */
+export const connectorKey = (item) => {
+    const name = text(item?.connector);
+    const contrib = text(item?.contributionId ?? item?.contribution_id);
+    return name && contrib ? `${name}:${contrib}` : name;
+};
+
+/** The owner's own Telegram bot, the one exact pair a contribution id names: another connector may reuse the word. */
+export const isOwnerBotPair = (row) => row?.connector === 'telegram-bot' && text(row.contributionId ?? row.contribution_id) === 'owner_bot';
+
+/** Match a connector projection row to a saved PlaceSummary without collapsing legacy B (`""`/`"place"`) into A (`"owner_bot"`). */
+export function connectorMatchesPlace(connector, place) {
+    if (!connector || !place || connector.connector !== place.connector) return false;
+    const cId = text(connector.contributionId ?? connector.contribution_id);
+    const pId = text(place.contributionId ?? place.contribution_id);
+    if (cId && pId) return cId === pId;
+    return !isOwnerBotPair(connector) && !isOwnerBotPair(place);
+}
+
 /** One PlaceSummary (contract §2) in the browser's names. */
 export function normalizePlace(raw) {
     const place = object(raw) || {};
@@ -62,6 +90,7 @@ export function normalizePlace(raw) {
     return {
         id: text(place.place_id),
         connector,
+        contributionId: text(place.contribution_id),
         rooms: list(place.rooms).map((room) => ({ chatId: count(room?.room_chat_id) })),
         provider: text(place.provider),
         accountId: text(place.account_id),
@@ -78,6 +107,9 @@ export function normalizePlace(raw) {
         wakes: list(place.wakes).map((item) => ({ fact: text(item?.fact), author: text(item?.author) }))
             .filter((item) => item.fact),
         wakeSuggestions: [...new Set(list(place.wake_suggestions).map(text).filter(Boolean))],
+        wakeReview: ['pending', 'ambiguous'].includes(place.wake_review) ? place.wake_review : null,
+        // Declared signals a save refuses until the connector is on: listed, never offered to check.
+        unpublishedSignals: [...new Set(list(place.unpublished_signals).map(text).filter(Boolean))],
         notes: list(place.notes).map((note) => ({
             id: text(note?.note_id), text: text(note?.text), author: text(note?.author), at: text(note?.at),
         })).filter((note) => note.text),
@@ -115,6 +147,9 @@ export function normalizePlace(raw) {
             placedBy: text(place.circle.placed_by), placedAt: text(place.circle.placed_at) } : null,
         description: object(place.description) && text(place.description.text) ? { text: text(place.description.text),
             author: text(place.description.author), at: text(place.description.at) } : null,
+        // Another Ouroboros of the owner's: its two stored facts, what is in effect now and its link
+        // (peer_links_api.js); none elsewhere.
+        ...peerPlaceFacts(place),
     };
 }
 
@@ -132,9 +167,12 @@ export function normalizeConnector(raw) {
     const name = text(connector.connector);
     return {
         connector: name,
+        contributionId: text(connector.contribution_id),
         label: text(connector.label) || name,
         icon: normalizeIcon(connector.icon),
         destination: text(connector.destination),
+        connectMode: connector.connect_mode === 'exact' ? 'exact' : connector.connect_mode === 'any' ? 'any' : '',
+        scope: text(connector.scope),
         wakes: [...new Set(list(connector.wakes).map((item) => text(object(item) ? item.fact : item)).filter(Boolean))],
         connected: connector.connected === true,
         readiness: placeReadiness(connector.readiness),
@@ -150,7 +188,7 @@ export function normalizePlacesResponse(raw) {
     const connectors = list(data.connectors).map(normalizeConnector).filter((connector) => connector.connector);
     return {
         places: list(data.places).map(normalizePlace).filter((place) => place.id).map((place) => ({ ...place,
-            serviceLabel: connectors.find((connector) => connector.connector === place.connector)?.label || place.provider })),
+            serviceLabel: connectors.find((connector) => connectorMatchesPlace(connector, place))?.label || place.provider })),
         connectors,
         // Where a new place lands, true for the switch as it stands (consciousness_view.connect_note); '' when unsaid.
         connectNote: text(data.connect_note),
@@ -197,12 +235,15 @@ export function normalizeConsciousness(raw, { enabled } = {}) {
     const known = typeof enabled === 'boolean' ? enabled : typeof bg.enabled === 'boolean' ? bg.enabled : null;
     return {
         enabled: known,
+        panicChoiceAvailable: known === true && bg.panic_choice_available === true,
         status: text(bg.status),
         detail: text(bg.detail),
         // The switch's position by meaning and its gloss, in the host's words (consciousness_view.position_words).
         position: text(bg.position),
+        // The same position in a one-line row's words (a linked Ouroboros makes the whole longer); absent: the whole.
+        positionShort: text(bg.position_short),
         gloss: text(bg.gloss),
-        // What follows from that state, said beneath it (a held wake's allowance: what Resume keeps, what ends it).
+        // What follows from that state, said beneath it (a held wake's allowance: what Resume does, what ends it).
         detailNote: text(bg.detail_note),
         coverage: bg.recent_wakes === undefined ? '' : text(bg.recent_wakes_coverage),
         level: text(bg.level),
@@ -215,6 +256,11 @@ export function normalizeConsciousness(raw, { enabled } = {}) {
         // What holds that wake, as far as its records prove it (consciousness_view.hold_cause; '' proves nothing).
         holdCause: text(object(bg.live_wake_hold)?.cause),
         holdCeilingUsd: amount(object(bg.live_wake_hold)?.ceiling_usd),
+        // What an explicit Resume of a wake held at its daily share may add now (an estimate until the press): a number,
+        // null when the host cannot tell, undefined when it does not say. The
+        // total budget is its own limit beside the allowance: what it leaves of that room now is `holdAvailableUsd`.
+        holdAdditionalUsd: holdAmount(object(bg.live_wake_hold), 'resume_additional_usd'),
+        holdAvailableUsd: holdAmount(object(bg.live_wake_hold), 'resume_available_usd'),
         spentUsd: amount(bg.spent_24h_usd),
         dailyUsd: amount(bg.daily_usd),
         unknownUnmetered: count(bg.unknown_unmetered) || 0,
@@ -270,7 +316,20 @@ export async function readSwitchPreview(to, { lifetimeMs = SWITCH_PREVIEW_LIFETI
     const places = data.places === null ? null : data.places.map((row) => ({ id: text(row?.place_id), label: text(row?.label),
         state: text(row?.state), people: count(row?.people), atLeast: row?.people_capped === true })).filter((row) => row.id.trim() || row.label.trim());
     if (places && places.length < data.places.length) throw new Error('The switch preview named a place it could not read.');
-    return { lines: data.lines.map(text).filter(Boolean), places };
+    // `after_panic`: after Panic the host's lines say what turning consciousness on (or handing over remaining
+    // Panic-stopped tasks in this run when consciousness is already on) means; only the desktop shell's native
+    // confirmation can submit it.
+    let afterPanic = null;
+    if (data.after_panic !== undefined && data.after_panic !== null) {
+        if (!object(data.after_panic) || !['panic', 'unknown', 'held'].includes(data.after_panic.why)
+            || typeof data.after_panic.choice !== 'boolean'
+            || !(data.after_panic.held === null || (Number.isSafeInteger(data.after_panic.held) && data.after_panic.held >= 0))) {
+            throw new Error('The switch preview could not be read.');
+        }
+        const basis = typeof data.after_panic.basis === 'string' && /^[0-9a-f]{32}$/.test(data.after_panic.basis) ? data.after_panic.basis : '';
+        afterPanic = { why: data.after_panic.why, choice: data.after_panic.choice, held: data.after_panic.held, basis };
+    }
+    return { lines: data.lines.map(text).filter(Boolean), places, afterPanic };
 }
 
 /** The status the Dashboard falls back to when the full snapshot cannot be read: `/api/state`. */
@@ -300,7 +359,13 @@ export async function readPlaceConnector(connector, init = {}) {
     const data = await fetchJson(statusPath, { ...init, cache: 'no-store' }, { rejectOkFalse: true });
     if (!object(data) || data.error) throw new Error(tr('places.status.unavailable', 'The connector status could not be read.'));
     if (account && Object.hasOwn(data, 'account_id') && data.account_id !== account) {
-        throw new Error(tr('places.status.account_mismatch', 'The connector returned a different account.'));
+        // Only `telegram-bot` + `owner_bot` reports a typed reason when its paired bot changed or is unconfirmed; pass that
+        // through so the sheet shows "Paired Telegram bot changed" instead of a generic read failure. Every other
+        // connector, whatever it names its contribution, keeps the strict mismatch refusal.
+        const ownerFeedOff = data.reason === 'feed_off' && data.enabled === false && data.account_id === '';
+        if (!isOwnerBotPair(connector) || (data.reason !== 'account_mismatch' && data.reason !== 'identity_unconfirmed' && !ownerFeedOff)) {
+            throw new Error(tr('places.status.account_mismatch', 'The connector returned a different account.'));
+        }
     }
     return data;
 }
@@ -333,17 +398,21 @@ function placeAnswer(data) {
 }
 
 /** Connect a place from an installed connector's declaration; no id is typed. An Add's `note`, `description` and
- *  `circleId` land with a new place in the same write; a place connected already answers 409 `place_exists`. */
-export async function connectPlace({ connector, accountId = '', conversationId = '', label = '', note = '',
-    description = '', circleId = '' }) {
+ *  `circleId` land with a new place in the same write; a place connected already answers 409 `place_exists`.
+ *  An explicit `contributionId` is always sent (it names one of several declarations); callers omit it when the connector
+ *  has a single declaration, so older cores still accept ordinary writes. */
+export async function connectPlace({ connector, contributionId = '', accountId = '', conversationId = '', label = '',
+    note = '', description = '', circleId = '' }, { signal } = {}) {
     const body = { connector };
+    if (contributionId) body.contribution_id = contributionId;
     if (accountId) body.account_id = accountId;
     if (conversationId) body.conversation_id = conversationId;
     if (label) body.label = label;
     if (note) body.note = note;
     if (description) body.description = description;
     if (circleId) body.circle_id = circleId;
-    return placeAnswer(await jsonPost('/api/places', body));
+    return placeAnswer(await fetchJson('/api/places', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body), signal }, { requireBody: true }));
 }
 
 /**

@@ -250,6 +250,150 @@ def test_decision_route_is_rate_limited_per_skill(tmp_path, monkeypatch):
     assert statuses == [200, 200, 429]
 
 
+def test_decision_relay_keeps_only_the_recorded_winners_copy_of_a_reply_file(tmp_path, monkeypatch):
+    """A Reply's file rides the bundled bridge's decision relay: stored like any owner upload, kept only while the
+    recorded winner names it. A redelivered update or another request with the same bytes keeps no copy."""
+    import ouroboros.chat_references as references
+    import ouroboros.gateway.task_decision as td
+    import supervisor.queue as q
+    from ouroboros.owner_quiz import quiz_states, record_asked, record_publication
+
+    record_asked(tmp_path, "task-1", quiz_id="q1", question="Which screen?", options=["A", "B"], assumption="A")
+    record_publication(tmp_path, "task-1", "q1", 1)
+    monkeypatch.setattr(references, "bundled_bridge", lambda root: True)
+    monkeypatch.setattr(td, "_live_root_task", lambda task_id, **_: ({"id": task_id, "chat_id": 1}, ""))
+    monkeypatch.setattr(q, "_task_drive_for_task", lambda task, task_id: tmp_path, raising=False)
+    client = _client(tmp_path, FakeBridge())
+
+    def post(request_id, source):
+        return client.post("/chat/decision", headers={"X-Skill-Token": "token"}, json={
+            "request_id": request_id, "decision_id": "quiz:task-1:q1", "comment": "this one",
+            "attachments": [{"path": str(source), "name": "shot.png", "mime": "image/png"}]})
+
+    first = post("tg:9:m:42:7", _skill_file(tmp_path, "a", b"\x89PNG\r\n\x1a\nfirst"))
+    assert first.status_code == 200, first.json()
+    assert [(item["name"], item["kind"]) for item in first.json()["attachments"]] == [("shot.png", "image")]
+    kept = sorted((tmp_path / "uploads").iterdir())
+    assert len(kept) == 1 and kept[0].read_bytes() == b"\x89PNG\r\n\x1a\nfirst"
+    assert quiz_states(tmp_path, "task-1")["q1"]["attachments"][0]["upload"] == kept[0].name
+    rejoin = client.post("/chat/decision", headers={"X-Skill-Token": "token"},
+                         json={"request_id": "tg:9:m:42:7", "decision_id": "quiz:task-1:q1", "rejoin": True})
+    assert rejoin.status_code == 200 and rejoin.json()["duplicate"] is True  # the bridge's read before a new download
+    assert post("tg:9:m:42:7", _skill_file(tmp_path, "b", b"\x89PNG\r\n\x1a\nfirst")).json()["duplicate"] is True
+    assert post("tg:9:m:42:8", _skill_file(tmp_path, "c", b"\x89PNG\r\n\x1a\nfirst")).status_code == 409
+    assert sorted((tmp_path / "uploads").iterdir()) == kept, "a replay or a losing request keeps no copy"
+
+    monkeypatch.setattr(references, "bundled_bridge", lambda root: False)  # any other skill: the field is refused
+    refused = post("tg:9:m:42:9", _skill_file(tmp_path, "d"))
+    assert refused.status_code == 400 and refused.json()["reason_code"] == "unexpected_fields"
+    assert client.post("/chat/decision", headers={"X-Skill-Token": "token"}, json={
+        "request_id": "tg:9:m:42:7", "decision_id": "quiz:task-1:q1", "rejoin": True}).status_code == 400
+    assert sorted((tmp_path / "uploads").iterdir()) == kept
+
+
+def _answer_relay(tmp_path, monkeypatch):
+    import ouroboros.chat_references as references
+    import ouroboros.gateway.task_decision as td
+    import supervisor.queue as q
+    from ouroboros.owner_quiz import record_asked, record_publication
+
+    record_asked(tmp_path, "task-1", quiz_id="q1", question="Which screen?", options=["A", "B"], assumption="A")
+    record_publication(tmp_path, "task-1", "q1", 1)
+    monkeypatch.setattr(references, "bundled_bridge", lambda root: True)
+    monkeypatch.setattr(td, "_live_root_task", lambda task_id, **_: ({"id": task_id, "chat_id": 1}, ""))
+    monkeypatch.setattr(q, "_task_drive_for_task", lambda task, task_id: tmp_path, raising=False)
+    client = _client(tmp_path, FakeBridge())
+    return lambda body: client.post("/chat/decision", headers={"X-Skill-Token": "token"}, json=body)
+
+
+def test_decision_relay_records_a_caption_with_a_file_the_bridge_never_received(tmp_path, monkeypatch):
+    """The bundled bridge's Reply whose video was over its download limit: the caption and the typed fact are the one
+    answer; nothing is uploaded."""
+    from ouroboros.owner_quiz import quiz_states
+
+    post = _answer_relay(tmp_path, monkeypatch)
+    fact = {"name": "clip.mp4", "mime": "video/mp4", "size": 30_000_000, "unavailable": "too_large",
+            "limit_bytes": 10_485_760}
+
+    answered = post({"request_id": "tg:9:m:42:7", "decision_id": "quiz:task-1:q1", "comment": "see the clip",
+                     "attachments": [fact]})
+
+    assert answered.status_code == 200, answered.json()
+    assert answered.json()["comment"] == "see the clip"
+    assert [(ref["name"], ref["unavailable"]) for ref in answered.json()["attachments"]] == [("clip.mp4", "too_large")]
+    recorded = quiz_states(tmp_path, "task-1")["q1"]
+    assert recorded["comment"] == "see the clip" and not recorded["attachments"][0].get("upload")
+    assert not (tmp_path / "uploads").exists() or not list((tmp_path / "uploads").iterdir())
+
+
+def test_rejoin_reads_the_recorded_winner_from_history_after_the_projection_let_it_go(tmp_path, monkeypatch):
+    """A settled answer can leave the bounded question projection; its canonical history row still names the winner,
+    so the bridge's rejoin and the copy settlement read it, and another request is a definite loser."""
+    from ouroboros.gateway.task_decision import answer_holds_uploads
+    from ouroboros.owner_quiz import _mutate_projection, quiz_states
+
+    post = _answer_relay(tmp_path, monkeypatch)
+    source = _skill_file(tmp_path, "a", b"\x89PNG\r\n\x1a\nfirst")
+    assert post({"request_id": "tg:9:m:42:7", "decision_id": "quiz:task-1:q1",
+                 "attachments": [{"path": str(source), "name": "shot.png", "mime": "image/png"}]}).status_code == 200
+    recorded = quiz_states(tmp_path, "task-1")["q1"]
+    assert (recorded.get("delivery") or {}).get("history_at"), "the winner's history row was written"
+    _mutate_projection(tmp_path, "task-1", lambda quizzes: quizzes.pop("q1"))  # as the cap evicts a settled answer
+    assert "q1" not in quiz_states(tmp_path, "task-1")
+
+    rejoin = post({"request_id": "tg:9:m:42:7", "decision_id": "quiz:task-1:q1", "rejoin": True})
+    other = post({"request_id": "tg:9:m:42:8", "decision_id": "quiz:task-1:q1", "rejoin": True})
+
+    assert rejoin.status_code == 200 and rejoin.json()["duplicate"] is True
+    assert [ref["name"] for ref in rejoin.json()["attachments"]] == ["shot.png"]
+    assert other.status_code == 404 and other.json()["state"] == "answered"
+    assert answer_holds_uploads(tmp_path, {"decision_id": "quiz:task-1:q1"}, recorded["attachments"])
+
+
+def test_a_redelivered_reply_overlapping_the_first_before_its_answer_is_written_makes_one_answer(tmp_path, monkeypatch):
+    """Telegram can deliver the same update again while the first attempt's answer is not yet written: both reach the
+    host under the one request id. The record names ONE winner with its own file; the other replays that answer and
+    keeps no copy. Nothing stands between them: no queue, journal or reservation."""
+    import ouroboros.chat_references as references
+    import ouroboros.gateway.task_decision as td
+    import ouroboros.owner_quiz as owner_quiz
+    import supervisor.queue as q
+    from ouroboros.owner_quiz import quiz_states, record_asked, record_publication
+
+    record_asked(tmp_path, "task-1", quiz_id="q1", question="Which screen?", options=["A", "B"], assumption="A")
+    record_publication(tmp_path, "task-1", "q1", 1)
+    monkeypatch.setattr(references, "bundled_bridge", lambda root: True)
+    monkeypatch.setattr(td, "_live_root_task", lambda task_id, **_: ({"id": task_id, "chat_id": 1}, ""))
+    monkeypatch.setattr(q, "_task_drive_for_task", lambda task, task_id: tmp_path, raising=False)
+    client = _client(tmp_path, FakeBridge())
+
+    def post(source):
+        return client.post("/chat/decision", headers={"X-Skill-Token": "token"}, json={
+            "request_id": "tg:9:m:42:7", "decision_id": "quiz:task-1:q1", "comment": "this one",
+            "attachments": [{"path": str(source), "name": "shot.png", "mime": "image/png"}]})
+
+    real, overlapping = owner_quiz.record_answered, []
+
+    def racing(*args, **kwargs):
+        if not overlapping:  # the first attempt is about to write: the redelivery runs to its end first
+            overlapping.append(None)  # marked before it runs, so its own write is the ordinary one
+            overlapping[0] = post(_skill_file(tmp_path, "b", b"\x89PNG\r\n\x1a\nsecond"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(owner_quiz, "record_answered", racing)
+
+    first = post(_skill_file(tmp_path, "a", b"\x89PNG\r\n\x1a\nfirst"))
+
+    (second,) = overlapping
+    assert second.status_code == 200 and second.json()["duplicate"] is False, "the redelivery wrote the answer"
+    assert first.status_code == 200 and first.json()["duplicate"] is True, "the first attempt replays that one answer"
+    recorded = quiz_states(tmp_path, "task-1")["q1"]
+    assert recorded["state"] == "answered" and recorded["request_id"] == "tg:9:m:42:7"
+    (winner,) = sorted((tmp_path / "uploads").iterdir())
+    assert winner.read_bytes() == b"\x89PNG\r\n\x1a\nsecond" and [ref["upload"] for ref in recorded["attachments"]] == [winner.name]
+    assert first.json()["attachments"] == second.json()["attachments"], "both receipts state the one winner's file"
+
+
 # --- the two empty-message gates ---------------------------------------------
 
 

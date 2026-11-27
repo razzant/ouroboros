@@ -44,10 +44,11 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 
 from ouroboros import chat_chain, memory_inventory
 from ouroboros.chronicle_import import row_lineage
-from ouroboros.chronicle_store import ChronicleStore, PublishResult, source_time_span
+from ouroboros.chronicle_quotes import SPEAKERS
+from ouroboros.chronicle_store import ChronicleStore, PublishResult
 from ouroboros.consolidator import LIGHT_ANSWER_CEILING_TOKENS
-from ouroboros.dialogue_provenance import (memory_row_header, recorded_finality, render_memory_row, render_row_text,
-                                           row_class)
+from ouroboros.dialogue_provenance import (memory_row_header, program_source, recorded_finality, render_memory_row,
+                                           render_row_text, row_class)
 from ouroboros.memory_floor import crowded_by_memory
 from ouroboros.memory_inventory import VIEW_TRACE_KEY, OpenSegment, ShortageFact, shortage_from_trace
 from ouroboros.utils import extract_trailing_json_object, utc_now_iso
@@ -64,7 +65,7 @@ CONFLICT_REASONS = frozenset({"revision_conflict", "already_sealed", "already_fo
 
 _PAGE = ("You are a helper drafting one memory page for Ouroboros from the rows below. You are not Ouroboros "
          "and did not live these events: write in the third person and attribute every statement to whoever "
-         "made it — the owner or another person, Ouroboros, a child task, the host.\n"
+         "made it — the owner or another person, a program, Ouroboros, a child task, the host.\n"
          "Cover only the rows supplied; say nothing of what is not here. A row shown only as an address was "
          "not read: name it if it matters, never guess its words.\n")
 _PART = ("You are a helper drafting one memory part for Ouroboros: one account that folds the records below, "
@@ -85,12 +86,12 @@ _COMMON = ("A task's outcome is its host stamp: never call a task done, accepted
            "says so.\n"
            "Keep what a later reader needs: what was asked and by whom, what was decided or refused, what was "
            "done and how it ended, what stays open.\n"
-           "Quote the words of people and of Ouroboros only through the quotes field; in the text, say it in "
+           "Quote the words of people, programs and Ouroboros only through the quotes field; in the text, say it in "
            "your own words.\n")
 _QUOTES = ("Quote the decisive words — what was asked, decided, promised or refused — exactly in quotes.\n"
            "Each quote is an exact substring of one supplied row, with that row's address (row:…) and its "
-           "speaker: the author class written first in the row's brackets — human, ouroboros, child, host, "
-           "helper or unattributed.\n"
+           "speaker: the author class written first in the row's brackets (allowed: "
+           + ", ".join(sorted(SPEAKERS)) + ").\n"
            "A quote is copied character for character, markdown included (**, _, `).\n")
 _NO_QUOTES = "No chat rows are supplied here, so leave quotes empty.\n"
 _MEMBER_QUOTES = ("No chat rows are supplied here: quote only by copying a quote shown under a record below exactly, "
@@ -199,7 +200,7 @@ def _stream_start(record: Mapping[str, Any]) -> float:
 def _unfolded_run(store: ChronicleStore, room: str, kind: str) -> List[str]:
     """The room's acting, unfolded records of one kind in story order (the order a part's members keep)."""
     if kind == "legacy":
-        return [p["node_id"] for p in store.legacy_pointer_rows()
+        return [p["node_id"] for p in memory_inventory.legacy_pointer_rows(store)
                 if p["kind"] == "legacy" and str(p["room_id"]) == room and not p["folded_into"]]
     return [r["id"] for r in store.pages_of_room(room) if r["kind"] == kind and not r["folded_into"]]
 
@@ -234,7 +235,7 @@ def _narrative_units(store: ChronicleStore, pointer_records: Tuple[str, ...]) ->
 
 def _legacy_units(root: pathlib.Path, store: ChronicleStore) -> Iterator[FallbackUnit]:
     """Unfolded legacy units of blocks 1-22 with established rows: block, then their first unsealed row."""
-    spans = {p["node_id"]: memory_inventory._exact_range(p) for p in store.legacy_pointer_rows()}
+    spans = {p["node_id"]: memory_inventory._exact_range(p) for p in memory_inventory.legacy_pointer_rows(store)}
     units = [unit for unit in memory_inventory.legacy_units(store, root)
              if not unit.folded and unit.raw == "exact" and type(unit.block) is int and unit.block >= 1
              and unit.uncovered and spans.get(unit.record_id)]
@@ -449,6 +450,7 @@ class _Row:
     task: str
     line: str  # its verbatim text line; "" for a task's host/child row (its task line stands for it)
     pointer: str  # its address line: only my own spoken words may become one (people's words never do)
+    address_only: bool = False  # a restricted result is supplied by address and never covered
 
 
 def _rows(root: pathlib.Path, read_rows: List[Tuple[Dict[str, Any], Dict[str, Any]]],
@@ -461,11 +463,17 @@ def _rows(root: pathlib.Path, read_rows: List[Tuple[Dict[str, Any], Dict[str, An
             pos = chat_chain.stream_position_of(root, address)
         cls = row_class(row, pos=pos, **lineage)
         author = {"label": f"{cls['author'].get('kind')}: {cls['author'].get('label')}"}
+        if program_source(row) == "late_result":
+            items.append(_Row((address, row, pos), "", render_memory_row(address, row, author=author, model_reply=True),
+                              "", address_only=True))
+            continue
         task = str(row.get("task_id") or "")
         spoken = cls["lane"] == 1
-        line = render_memory_row(address, row, author=author, indent=INDENT) if spoken or not task else ""
-        pointer = (f"{memory_row_header(address, row, author=author)} (words, {len(render_row_text(row))} chars — "
-                   "read by address)") if spoken and cls["author"].get("kind") != "human" else ""
+        line = render_memory_row(address, row, author=author, indent=INDENT, model_reply=True) if spoken or not task else ""
+        pointer = ""
+        if spoken and cls["author"].get("kind") not in {"human", "agent"}:
+            chars = len(render_row_text(row, model_reply=True))
+            pointer = f"{memory_row_header(address, row, author=author)} (words, {chars} chars — read by address)"
         if cls["author"].get("kind") == "place_fact":
             pointer = f"{memory_row_header(address, row, author=author)} (reaction — read by address)"
         items.append(_Row((address, row, pos), task, line, pointer))
@@ -566,17 +574,22 @@ def _floor(items: List[_Row], budget: Optional[int], measure: Callable[[str], in
     return n, {index for index in addressed if index < n}, refs
 
 
-def _trimmed(covers: Dict[str, Any], kept: List[_Row]) -> Dict[str, Any]:
-    """The covers of the rows read: never a row given only by address, never a mind note.
+def _trimmed(root: pathlib.Path, covers: Dict[str, Any], kept: List[_Row]) -> Optional[Tuple[Dict[str, Any], List[_Row]]]:
+    """``(covers, kept)`` of the rows Light was given, or None: never a row given only by address, never a mind note,
+    never a row of running work (``memory_coverage.bound_delegated``, the one predicate delegated writers share). A
+    finished task's host/child rows count as given through that task's stamp line (its outcome), not their bodies.
 
     The helper's input holds no note of the mind, so its draft seals none; a note stays
     open and in the view until a page of the mind covers it.
     """
-    shas = [item.entry[0]["row_sha256"] for item in kept]
-    return {**covers, "rows": shas, "note_ids": [], "first": kept[0].entry[0], "last": kept[-1].entry[0],
-            "count": len(kept), "task_ids": list(dict.fromkeys(item.task for item in kept if item.task)),
-            "ts_span": source_time_span(item.entry[1].get("ts") for item in kept),
-            "stream_span": [kept[0].entry[2], kept[-1].entry[2]]}
+    from ouroboros.memory_coverage import NotShown, bound_delegated
+
+    try:
+        covers, entries, _left = bound_delegated(root, None, covers.get("room_id"), covers, [item.entry for item in kept])
+    except NotShown:
+        return None
+    held = {entry[0]["row_sha256"] for entry in entries}
+    return covers, [item for item in kept if item.entry[0]["row_sha256"] in held]
 
 
 def _page_input(root: pathlib.Path, store: ChronicleStore, unit: FallbackUnit, budget: Optional[int],
@@ -602,20 +615,24 @@ def _page_input(root: pathlib.Path, store: ChronicleStore, unit: FallbackUnit, b
     stamps = {entry["task_id"]: entry for entry in full["tasks"]}
     n, addressed, refs = _floor(items, budget, measure,
                                 lambda k, a, r: _compose(head, label, items, k, a, owners, r, stamps, tail))
-    kept = [item for index, item in enumerate(items[:n]) if index not in addressed]
+    kept = [item for index, item in enumerate(items[:n]) if index not in addressed and not item.address_only]
     if not kept:
         return None
     covers = read["covers"]
     if n < len(items):
         covers = page_covers(root, unit.room_id, from_addr=items[0].entry[0], to_addr=items[n - 1].entry[0])["covers"]
-    covers = _trimmed(covers, kept)
+    trimmed = _trimmed(root, covers, kept)
+    if trimmed is None:
+        return None
+    covers, kept = trimmed
     stamp = host_stamp(root, covers["task_ids"], rows=[(item.entry[0], item.entry[1]) for item in kept])
     prompt = _compose(head, label, items, n, addressed, owners, refs,
                       {entry["task_id"]: entry for entry in stamp["tasks"]}, tail)
     return WriterInput(prompt, hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                        measure(prompt) if budget is not None else None, covers=covers,
                        positions={item.entry[0]["row_sha256"]: item.entry[2] for item in items},
-                       addressed_rows=tuple(chat_chain.format_address(items[i].entry[0]) for i in sorted(addressed)),
+                       addressed_rows=tuple(chat_chain.format_address(item.entry[0]) for i, item in enumerate(items[:n])
+                                            if i in addressed or item.address_only),
                        stamp=stamp, fitted_to=items[n - 1].entry[0])
 
 
@@ -707,7 +724,7 @@ class FallbackRun:
     usage: Dict[str, Any] = field(default_factory=dict)
     errors: List[Dict[str, Any]] = field(default_factory=list)
     input_tokens: Optional[int] = None
-    effect: str = ""  # a published draft, measured: what it folded, its characters before and after
+    effect: str = ""  # a published draft part's receipt: what it folds by room, its own and its members' words
 
 
 def _parse(text: str, *, part: bool = False) -> Optional[Dict[str, Any]]:
@@ -817,9 +834,10 @@ def run_fallback_draft(env: Any, task: Mapping[str, Any], llm: Any, drive_logs: 
             if result.ok:
                 run.outcome, run.record_id = "published", str((result.record or {}).get("id") or "")
                 if unit.kind == "part":
-                    from ouroboros.tools.chronicle import _fold_effect
+                    from ouroboros.memory_fold_receipt import fold_receipt, part_lines
 
-                    run.effect = _fold_effect(store, "a helper draft folded", draft.member_ids, answer["text"])
+                    run.effect = fold_receipt(result.record, lambda: part_lines(store, result.record,
+                                                                                "a helper draft folded"))
                 phase = "receipt_clear_failed"
                 _set_refusal(store, unit.key, None)
             elif result.reason in CONFLICT_REASONS:

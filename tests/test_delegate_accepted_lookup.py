@@ -117,6 +117,37 @@ def test_an_explicit_retry_reads_its_accepted_start_before_route_health_and_send
     assert len(engine.creates) == 1 and len(engine.lookups) == 1
 
 
+def test_accepted_lookup_keeps_the_original_named_note_receipt_after_an_edit(tmp_path, monkeypatch):
+    from hashlib import sha256
+
+    from ouroboros.knowledge import resolve_knowledge_address
+    from ouroboros.subagent_runtime import exact_start
+    from ouroboros.subagents import DelegationRoute
+    from tests._delegated_transport_shared import _transport_snapshot
+
+    registry, engine = _delegating(tmp_path, monkeypatch)
+    address = resolve_knowledge_address(tmp_path, "witness-note", "global")
+    address.path.parent.mkdir(parents=True, exist_ok=True)
+    # Exercise a Windows-authored note on every platform, without text-mode translation.
+    original = "# A synthetic note\r\n\r\nWhole old text.\r\n"
+    address.path.write_bytes(original.encode("utf-8"))
+    engine.lose = 1
+    lost = json.loads(exact_start(registry._ctx, "Read the note.", {
+        "snapshot": _transport_snapshot(DelegationRoute("some-route", "weak-model"), "readonly"),
+        "knowledge_notes": [{"topic": "witness-note"}],
+    }).text)
+    token = lost["pending_invocation_id"]
+    address.path.write_bytes(b"# Edited later\n")
+    c._CUSTODY.clear()
+    accepted = _start(registry, retry_of=token)
+    revision = sha256(original.encode()).hexdigest()
+    assert accepted["recovered_without_start"] and accepted["named_notes"] == {"sent": [{
+        "topic": "witness-note", "scope": "global", "revision": revision, "chars": len(original)}]}
+    assert f"witness-note (global)@{revision[:12]}" in accepted["note"]
+    assert len(engine.creates) == len(engine.lookups) == 1
+    assert engine.lookups[0][2] == engine.creates[0][2] and original in engine.lookups[0][2]["instructions"]
+
+
 @pytest.mark.parametrize("selected", [True, False], ids=["selected", "lineage"])
 def test_an_accepted_retry_names_its_recorded_selection_and_lineage_only_where_copies_could_be(
         tmp_path, monkeypatch, selected):
@@ -129,9 +160,11 @@ def test_an_accepted_retry_names_its_recorded_selection_and_lineage_only_where_c
     registry, engine = _delegating(tmp_path, monkeypatch)
     ctx = registry._ctx
     ctx.task_metadata["resource_intent"] = {"kind": "explicit_none"}  # Project work without a folder
-    # The scripted engine knows one root; the start's own scratch scope registers as a new project (``None``: an
-    # answer without ``created``, so no engine trait is learned for the tests after this one).
-    monkeypatch.setattr(_REAL_GATEWAY, "project_registration", lambda _self, _root: ("prj-scratch", None))
+    # The scripted engine knows one root; the start's own scratch scope registers as a new project. The start reads the
+    # registration through its receipt; this one is an engine answer carrying only an id (no ``created``, root or
+    # store), so no engine trait is learned for the tests after this one.
+    monkeypatch.setattr(_REAL_GATEWAY, "project_registration_receipt", lambda _self, _root: {
+        "id": "prj-scratch", "created": None, "registration_root": None, "registration_store_id": None})
     drive = tmp_path / "task_drives" / ctx.task_id
     drive.mkdir(parents=True, exist_ok=True)
     (drive / "one.md").write_text("known", encoding="utf-8")
@@ -171,7 +204,8 @@ def test_an_accepted_retry_decides_its_lineage_line_from_its_own_recorded_reques
         ctx.task_metadata["resource_intent"] = {"kind": "explicit_none"}
     else:
         ctx.workspace_root, ctx.workspace_mode = str(folder), "external"
-    monkeypatch.setattr(_REAL_GATEWAY, "project_registration", lambda _self, _root: ("prj-scratch", None))
+    monkeypatch.setattr(_REAL_GATEWAY, "project_registration_receipt", lambda _self, _root: {
+        "id": "prj-scratch", "created": None, "registration_root": None, "registration_store_id": None})
     drive = tmp_path / "task_drives" / ctx.task_id
     drive.mkdir(parents=True, exist_ok=True)
     (drive / "brief.md").write_text("first attempt", encoding="utf-8")

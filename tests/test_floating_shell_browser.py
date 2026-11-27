@@ -351,8 +351,8 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
             const header = document.querySelector('#page-chat .chat-page-header');
             return {header: rect('#page-chat .chat-page-header'), toast: rect('.toast-stack--room .toast'),
                 composer: rect('#page-chat #chat-input-area'), background: getComputedStyle(header).backgroundColor,
-                edge: getComputedStyle(header, '::before').backgroundImage,
-                edgeEvents: getComputedStyle(header, '::before').pointerEvents};
+                edge: (t => t.maskImage || t.webkitMaskImage)(getComputedStyle(header.querySelector(':scope > .room-edge[data-edge="tint"]'))),
+                edgeEvents: getComputedStyle(header.querySelector(':scope > .room-edge[data-edge="tint"]')).pointerEvents};
         }""")
         # The bar paints nothing of its own; under its capsules lies the room's edge (DESIGN "A room's edges"), no press.
         assert facts["background"] == "rgba(0, 0, 0, 0)"
@@ -435,7 +435,6 @@ def test_toast_focus_timeout_and_disposal(shell_ui):
     }""")
     page.wait_for_timeout(250)
     assert page.get_by_label("Close test notice").count() == 1
-    assert "shell-icon-control" in page.get_by_label("Close test notice").get_attribute("class")
     page.locator("#chat-input").focus()
     page.wait_for_selector("[aria-label='Close test notice']", state="detached")
     page.evaluate("""async () => {

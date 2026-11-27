@@ -44,6 +44,7 @@ import logging
 import pathlib
 import time
 import uuid
+from contextlib import nullcontext
 from typing import Any, Dict, List
 
 from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
@@ -92,6 +93,14 @@ def _pool():
 def conversation_row(meta: Any) -> bool:
     """A RUNNING row the conversation lane admitted (its carrier may be awaited, a worker or inline)."""
     return isinstance(meta, dict) and meta.get("lane") == LANE_CONVERSATION
+
+
+def awaiting_presence_row(meta: Any) -> bool:
+    """Under Q: a lane Presence row this Host admitted (``admit_turn``) still awaiting its carrier (#3149)."""
+    from ouroboros.task_carrier import execution_owner
+
+    return (conversation_row(meta) and meta.get("worker_id") is None
+            and execution_owner(meta.get("task")).get("kind") == "presence")
 
 
 def lane_carriers(pool: Any = None) -> list:
@@ -309,7 +318,7 @@ def admit_turn(task: Dict[str, Any], *, chat_id: int, client_message_id: str = "
     task_id = str(task["id"])
     task.setdefault("root_task_id", task_id)
     origin = "presence" if task.get("_presence_turn") else "direct"
-    task["_execution_owner"] = {**execution_owner_record(pool.DRIVE_ROOT, task, origin),
+    task["_execution_owner"] = {**execution_owner_record(task.get("drive_root") or pool.DRIVE_ROOT, task, origin),
                                 "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER}
     task[PREPARE_KEY] = {
         "admitted_at": now, "quiet": bool(quiet), "reply_expected": bool(reply_expected),
@@ -366,21 +375,22 @@ def readmit_after_crash(task: Dict[str, Any], prior: Dict[str, Any]) -> Dict[str
 
 
 def resumes_on_lane(task: Any) -> bool:
-    """A queued row this lane carries again: my human's own Main or room turn, returned by a stop door, a Resume
+    """A queued row this lane carries again: an owner or agent-note room turn, returned by a stop door, a Resume
     or its own sleep (owner choice of 9 November 2026: the conversation path survives every permitted return).
 
     The facts the host stamped, as ``conversation_lease.owner_conversation_key`` reads them for Main: the direct
-    origin with the owner door's ingress (``dialogue_provenance.run_origin``: a wake or the auto-resume has none),
+    origin with the owner door's ingress or the host's admission author (neither a wake nor an auto-resume),
     this lane as its recorded carrier, any executor but a live call's. A Presence turn, a turn the mind sent to the
     pool (``detached_at``) and pooled work keep their project slot."""
-    from ouroboros.dialogue_provenance import is_presence_task, run_origin
+    from ouroboros.dialogue_provenance import admission_note, is_presence_task, run_origin
     from ouroboros.task_carrier import EXECUTOR_INLINE_CALL, carrier_executor, execution_kind, execution_owner
 
     if not isinstance(task, dict):
         return False
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     return bool(execution_kind(task) == "direct" and execution_owner(task).get("lane") == LANE_CONVERSATION
-                and carrier_executor(task) != EXECUTOR_INLINE_CALL and run_origin(task)["owner_ingress"]
+                and carrier_executor(task) != EXECUTOR_INLINE_CALL
+                and (run_origin(task)["owner_ingress"] or admission_note(task))
                 and not is_presence_task(task) and not (task.get("detached_at") or metadata.get("detached_at")))
 
 
@@ -388,13 +398,13 @@ def saved_carrier(task: Dict[str, Any], drive_root: Any) -> Dict[str, Any]:
     """The carrier record a saved queued row lacks, from the same task's own result; else ``{}``. Never raises.
 
     A release before #2870 saved PENDING rows without ``_execution_owner``: my human's returned turn waiting in the
-    queue then came back pooled. Only the row's own facts qualify it (direct, the owner door's ingress, never
-    Presence or detached), and only a positive record restores it: this task's conversation-lane direct carrier,
+    queue then came back pooled. Only the row's own facts qualify it (direct, the owner door's ingress or its own
+    admitted agent note, never Presence or detached), and only a positive record restores it: this task's conversation-lane direct carrier,
     undetached and not terminal, for the attempt the row carries (its saved work's or seed's, else its own; a first
     direct launch records 0 for 1, unmarked). No label or source is read as a carrier."""
     import pathlib
 
-    from ouroboros.dialogue_provenance import is_presence_task, run_origin
+    from ouroboros.dialogue_provenance import admission_note, is_presence_task, run_origin
     from ouroboros.task_carrier import EXECUTORS
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED, load_task_result
     from supervisor.task_admission import SEED_RETURN
@@ -402,7 +412,8 @@ def saved_carrier(task: Dict[str, Any], drive_root: Any) -> Dict[str, Any]:
     task_id = str(task.get("id") or "")
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     if ("_execution_owner" in task or task.get("_is_direct_chat") is not True or not task_id or is_presence_task(task)
-            or task.get("detached_at") or metadata.get("detached_at") or not run_origin(task)["owner_ingress"]):
+            or task.get("detached_at") or metadata.get("detached_at")
+            or not (run_origin(task)["owner_ingress"] or admission_note(task))):
         return {}
     source = next((v for v in (task.get("_working_recovery"), task.get(SEED_RETURN)) if isinstance(v, dict)), None)
     saved = task.get("_attempt") if source is None else source.get("from_attempt")
@@ -528,15 +539,16 @@ def reconcile_conversation_lane() -> None:
     beside it: an awaiting turn then takes the degraded executor too.
     """
     from supervisor.worker_pool_lifecycle import (
-        _spawn_worker_slot, request_worker_quiescence, retire_quiescent_worker, worker_ready,
+        _spawn_worker_slot, pool_member_count, request_worker_quiescence, retire_quiescent_worker, worker_ready,
     )
 
     pool = _pool()
-    if not armed() or not pool.WORKERS:
-        return
+    with _queue_lock:
+        if not armed() or not pool_member_count(pool.WORKERS):
+            return
     publish_awaiting_rows()
     with _queue_lock:
-        if not armed() or not pool.WORKERS:
+        if not armed() or not pool_member_count(pool.WORKERS):
             return
         # A marker window forbids a spawn, never a waiting turn's carrier (a spare that finished booting)
         # or its degraded executor: the turns are looked at first, the window decides growth below.
@@ -559,7 +571,7 @@ def reconcile_conversation_lane() -> None:
             quiet = [w for w in idle if w.quiescence_confirmed]
             for slot in quiet[1:]:
                 retire_quiescent_worker(slot)
-        next_id = max(pool.WORKERS, default=-1) + 1
+        next_id = max(0, max(pool.WORKERS, default=-1) + 1)  # a Host pseudo-slot's negative wid is no pool address (#3149)
     for wid in range(next_id, next_id + missing):
         try:
             if not _spawn_worker_slot(wid, lane=LANE_CONVERSATION):
@@ -605,15 +617,15 @@ def reconcile_under_project_fence() -> None:
         log.exception("Conversation lane reconcile under the project fence failed")
 
 
-def lane_turn_rows() -> List[Dict[str, Any]]:
-    """``active_direct_turns`` rows for the lane's RUNNING turns (the registry's shape), by value.
+def lane_turn_rows(*, queue_held: bool = False) -> List[Dict[str, Any]]:
+    """Copy the lane's RUNNING turns. History can use its already-admitted Q lease.
 
     ``phase`` is ``preparing`` until a carrier holds the turn, then ``working``;
     ``turn_phase`` follows the carrier's own start facts (``direct_turn_phase``
     frames) and ``model_activity`` its observed call, both frame-fed.
     """
     rows: List[Dict[str, Any]] = []
-    with _queue_lock:
+    with nullcontext() if queue_held else _queue_lock:
         snapshot = [(tid, meta) for tid, meta in _pool().RUNNING.items() if conversation_row(meta)]
         for tid, meta in snapshot:
             task = meta.get("task") if isinstance(meta.get("task"), dict) else {}

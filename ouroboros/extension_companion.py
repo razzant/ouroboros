@@ -8,7 +8,6 @@ import os
 import pathlib
 import socket
 import subprocess
-import sys
 import threading
 import time
 import uuid
@@ -29,6 +28,7 @@ from ouroboros.platform_layer import (
     terminate_job,
     terminate_process_tree,
 )
+from ouroboros.platform_layer import direct_python_command as _interpreter_command
 from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS
 from ouroboros.usage_accounting import record_unmetered_external_dispatch
 from ouroboros.utils import atomic_write_json, utc_now_iso
@@ -55,19 +55,6 @@ def _companion_base_env(descriptor_env=None) -> Dict[str, str]:
     env = overlay_env(env, descriptor_env)
     forward_playwright_node(env)  # refresh a saved automatic selection after the manifest's case-aware overlay
     return env
-
-
-def _interpreter_command(command: List[str], *, windows: bool = IS_WINDOWS, executable: str = sys.executable,
-                         base: str = getattr(sys, "_base_executable", "") or sys.executable,
-                         ) -> tuple[List[str], Dict[str, str]]:
-    """The companion as the started process itself. A Windows venv's ``python.exe`` is a redirector that runs
-    the base interpreter as its CHILD: the supervisor's PID, Job and kill would hold the redirector, not the
-    companion. As ``multiprocessing`` does (bpo-35797), start the base interpreter and name the venv in
-    ``__PYVENV_LAUNCHER__``: the same venv interpreter, one process."""
-    if (windows and command and os.path.normcase(command[0]) == os.path.normcase(executable)
-            and os.path.normcase(base) != os.path.normcase(executable)):
-        return [base, *command[1:]], {"__PYVENV_LAUNCHER__": executable}
-    return list(command), {}
 
 
 def _drain_companion_pipe(pipe, cap: int, buf: bytearray, overflow_flag: Dict[str, bool], label: str) -> None:
@@ -866,7 +853,7 @@ __all__ = [
 def companion_spawn_env(
     spec: Dict[str, Any], token: str, *, env_allow: Any, granted_upper: Any,
     skill: str, skill_dir: Optional[pathlib.Path], state_dir: pathlib.Path,
-    settings: Optional[Dict[str, Any]] = None,
+    settings: Optional[Dict[str, Any]] = None, drive_root: Optional[pathlib.Path] = None,
 ) -> Dict[str, str]:
     """The env one staged companion is spawned with (fix-round-6).
 
@@ -898,7 +885,7 @@ def companion_spawn_env(
     manifest_env = {str(key): str(value) for key, value in (spec.get("env") or {}).items()
                     if str(key).upper() not in reserved}
     env = overlay_env(_scrub_env(list(env_allow), state_dir, skill, granted_keys=list(granted_upper),
-                                 settings=settings), manifest_env)
+                                 settings=settings, drive_root=drive_root), manifest_env)
     from ouroboros.node_runtime import keep_explicit_driver_node
 
     keep_explicit_driver_node(env, manifest_env)  # the manifest's driver Node is its own, even one equal to ours

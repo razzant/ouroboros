@@ -1,4 +1,4 @@
-import { renderPageHeader } from './page_header.js';
+import { bindPageHeader, renderPageHeader } from './page_header.js';
 import {
     classifyWidgetJobStatus,
     isRetryableWidgetError,
@@ -8,7 +8,6 @@ import {
 } from './widget_job.js';
 import { getPath } from './widget_chart.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
-import { bindContextReport } from './context_report_host.js';
 import { boardFrameGeometry, mountModuleWidget, mountRouteIframeWidget, setFrameHeight } from './widget_module.js';
 import { SHELL_ICONS } from './page_icons.js';
 import {
@@ -28,6 +27,8 @@ import {
     syncWidgetCardControls,
     syncWidgetCardMore,
     WIDGET_START_MODES,
+    widgetCodeHoldKey,
+    widgetStartsOnShow,
     withWidgetStartMode,
 } from './widget_card.js';
 import {
@@ -45,8 +46,9 @@ import { collectSafeFieldValues, downloadViaHostBridge } from './ui_helpers.js';
 import { getContributions } from './contributions.js';
 import { mountPinnedCard, setCardPinned } from './card_components.js';
 import { getHolds, HELD_LINES, settleAfterFrameLoad } from './holds.js';
+import { bindScrollFade } from './scroll_fade.js';
 import {
-    filenameFromWidgetUrl, indexComponentTree, patchWidgetChildren, renderComponent, syncWidgetCharts,
+    createWidgetScrollFades, filenameFromWidgetUrl, indexComponentTree, patchWidgetChildren, renderComponent, syncWidgetCharts,
 } from './widget_render.js';
 
 export {
@@ -59,17 +61,11 @@ export {
 function pageTemplate() {
     return `
         <section class="page app-page-glass" id="page-widgets">
-            ${renderPageHeader({
-                page: 'widgets',
-            })}
+            ${renderPageHeader({ page: 'widgets', named: false })}
             <div class="widgets-scroll">
                 <div id="widgets-list-error" class="skills-load-error" hidden><span data-widget-list-error></span> <button type="button" class="btn btn-default btn-sm" data-widget-list-retry>Retry</button></div>
                 <div id="widgets-list" class="widgets-list"></div>
                 <div class="widgets-arrange-status ui-status" data-tone="neutral" data-widget-arrange-status role="status" aria-live="polite"></div>
-                <div class="widgets-context-tools">
-                    <button type="button" class="btn btn-default" data-context-report aria-expanded="false" aria-controls="widgets-context-report">Beautiful Context</button>
-                    <section id="widgets-context-report" class="ui-card widgets-context-report" data-context-report-mount hidden></section>
-                </div>
             </div>
         </section>
     `;
@@ -91,7 +87,7 @@ function renderCardHtml(tab, contributionVisibility = null) {
         <article class="ui-card widgets-card${spanClass}" data-widget-key="${escapeHtml(widgetKey(tab))}"${framed}>
             <div class="widgets-card-head">
                 <div class="widgets-card-title">
-                    <strong>${escapeHtml(title)}</strong>
+                    <strong data-i18n-authored>${escapeHtml(title)}</strong>
                     ${subtitle}
                 </div>
                 <div class="widgets-card-controls">
@@ -115,7 +111,7 @@ function renderCardHtml(tab, contributionVisibility = null) {
 // Full paint — only for a list that has no cards yet.
 function renderShell(host, tabs, contributionVisibility = null) {
     if (!tabs.length) {
-        host.innerHTML = '<div class="muted">No live widgets yet. Review and enable an extension skill that registers a UI tab.</div>';
+        host.innerHTML = '<div class="muted">No optional widgets yet. Enable a skill with a widget in Extensions to add one.</div>';
         return;
     }
     host.innerHTML = tabs.map((tab) => renderCardHtml(tab, contributionVisibility)).join('');
@@ -137,14 +133,16 @@ const widgetMounting = new Map();
 const widgetMountControllers = new Set();
 const widgetMessageHandlers = new Set();
 const widgetSessionState = new Map();
+/** A placement that left its page's list keeps no declarative session state for its return (the eviction
+ *  `patchWidgetCards` makes for a board card); call it after the mount's disposer wrote its last snapshot. */
+export const forgetWidgetSessionState = (key) => { widgetSessionState.delete(key); };
 // The start ledger (holds.js) keeps two facts for a framed card on this device:
 // the owner's Stop (`board:<key>`, until Start or a launch-policy change to Auto /
 // Keep running) and a start of its code the page did not outlive
-// (`widget:<skill>:<tab_id>` at its revision). Either shows the facade instead
+// (`widgetCodeHoldKey`, at its revision). Either shows the facade instead
 // of starting the card by itself.
 const holds = getHolds();
 const stopHoldKey = (tab) => `board:${widgetKey(tab)}`;
-const codeHoldKey = (tab) => `widget:${tab.skill}:${tab.tab_id}`;
 let widgetsWsBridgeBound = false;
 // What the page knows of each framed card's geometry in this page session: the content height its frame last
 // reported (`natural`, at the card's revision; forgotten when the card leaves the list), so a remount — returning to
@@ -220,6 +218,7 @@ export async function mountDeclarativeWidget(mount, tab, render, { input = null 
     const controllers = new Set();
     const chartInstances = new Map();
     const chartShapes = new Map();
+    const scrollFades = createWidgetScrollFades(mount);
     const eventSources = new Map();
     const activePolls = new Set();
     const activeJobs = new Set();
@@ -289,6 +288,7 @@ export async function mountDeclarativeWidget(mount, tab, render, { input = null 
         });
         disposed = true;
         unsubscribeTheme();
+        scrollFades.dispose();
         controllers.forEach((controller) => controller.abort());
         controllers.clear();
         chartInstances.forEach((chart) => chart.destroy());
@@ -572,6 +572,7 @@ export async function mountDeclarativeWidget(mount, tab, render, { input = null 
         desired.innerHTML = components.map((component, idx) => renderComponent(renderContext, component, view, `components.${idx}`)).join('');
         patchWidgetChildren(mount, desired.content);
         syncWidgetCharts(mount, chartInstances, chartShapes);
+        scrollFades.sync();
         visibleKeys.forEach((key) => {
             const component = componentSpec(key);
             if (!component) return;
@@ -715,23 +716,39 @@ export async function mountDeclarativeWidget(mount, tab, render, { input = null 
     return dispose;
 }
 
-async function mountTab(card, tab, mountSignal = null, board = null) {
-    const mount = card.querySelector('[data-widget-mount]');
+/** The one dispatch of a tab into `mount` by its render kind, for the board's cards and Costs' placements (costs_widgets.js):
+ *  its disposer, or nothing. `board` is a framed card's frame policy (widget_module.js), `messageHandlers` the page's
+ *  WebSocket handler set, `key` the session key a declarative mount keeps its state under (the tab's own when empty). */
+export async function mountTabInto(mount, tab, { signal = null, messageHandlers = widgetMessageHandlers, board = null, key = '' } = {}) {
     const render = tab.render || {};
-    if (!mount) return;
     if (render.kind === 'iframe' && render.route) {
-        return mountRouteIframeWidget(mount, tab, render, mountSignal, null, widgetMessageHandlers, board);
+        return mountRouteIframeWidget(mount, tab, render, signal, null, messageHandlers, board);
     }
     // A kept living card is Ouroboros's, not a skill's: no route, its presses go to the card's decisions.
     if (tab.pinned_card) return mountPinnedCard(mount, tab);
     if (render.kind === 'declarative') {
-        return mountDeclarativeWidget(mount, tab, render);
+        return mountDeclarativeWidget(mount, key ? { ...tab, key } : tab, render);
     }
     if (render.kind === 'module' && render.entry) {
-        return mountModuleWidget(mount, tab, render, mountSignal, widgetMessageHandlers, null, board);
+        return mountModuleWidget(mount, tab, render, signal, messageHandlers, null, board);
     }
     mount.innerHTML = `<div class="muted">Widget render kind <code>${escapeHtml(render.kind || 'unknown')}</code> is not supported yet.</div>`;
     return null;
+}
+
+async function mountTab(card, tab, mountSignal = null, board = null) {
+    const mount = card.querySelector('[data-widget-mount]');
+    if (!mount) return;
+    const disposeWidget = await mountTabInto(mount, tab, { signal: mountSignal, board });
+    const render = tab.render || {};
+    if (typeof disposeWidget === 'function' && !(render.kind === 'iframe' && render.route) && (tab.pinned_card || render.kind === 'declarative')) {
+        // The board keeps its crisp edges (DESIGN "Widgets board"): no class, no mask on the card's own body, however
+        // far an owner height cuts it. The binding alone names the body while it actually scrolls — the keyboard's
+        // stop into the one scroller the host gives a host-drawn card — and drops the name again once it fits.
+        const disposeFade = bindScrollFade(mount, { region: tab.title || tab.tab_id || tab.skill });
+        return () => { disposeFade(); disposeWidget(); };
+    }
+    return disposeWidget;
 }
 
 // A framed disposer settles asynchronously (dispose → child ack, ≤ 1 s); track
@@ -859,7 +876,7 @@ async function mountTabOnce(card, tab, key, isCurrent) {
     // load and one host second clear it.
     let settle = () => {};
     const framed = isFramedWidget(tab) && !tab.pinned_card;
-    const starting = () => { settle = holds.starting(codeHoldKey(tab), tab.revision); };
+    const starting = () => { settle = holds.starting(widgetCodeHoldKey(tab), tab.revision); };
     const board = framed ? boardFrameOf(tab, starting) : null;
     if (framed && !board) starting();
     try {
@@ -887,8 +904,7 @@ export function initWidgets(ctx = {}) {
     const page = document.createElement('div');
     page.innerHTML = pageTemplate();
     document.getElementById('content').appendChild(page.firstElementChild);
-    const closeReport = bindContextReport(document.querySelector('[data-context-report]'),
-        document.querySelector('[data-context-report-mount]'));
+    const disposeBar = bindPageHeader(document.querySelector('#page-widgets > .app-page-header'));  // its name on the desk's band
     const list = document.getElementById('widgets-list');
     const listError = document.getElementById('widgets-list-error');
     const retryButton = listError.querySelector('[data-widget-list-retry]');
@@ -907,15 +923,17 @@ export function initWidgets(ctx = {}) {
     let activeSync = 0;
     let listDirty = false;
     let uiPreferences = { widget_order: [], widget_size: {}, widget_start_mode: {}, nested_subagents_expanded: false };
+    let stopLifecycleFacts = null;
     if (ctx.ws && !widgetsWsBridgeBound) {
         widgetsWsBridgeBound = true;
         ctx.ws.on('message', (msg) => {
             widgetMessageHandlers.forEach((handler) => handler(msg));
         });
-        // List reconcile triggers besides page entry: a skill lifecycle change, and
-        // every (re)connect — events may have been missed while offline, or the
-        // server restarted with the same SHA (no SPA reload then). No polling.
-        ctx.ws.on('extension_lifecycle', reconcileWidgetList);
+        // List reconcile triggers besides page entry: a skill lifecycle change as the page's one store hears it
+        // (contributions.js: `extension_lifecycle`, and the end of any lifecycle job, whoever started it: a Browse
+        // install that turns a skill on sends no `extension_lifecycle`), and every (re)connect — events may have been
+        // missed while offline, or the server restarted with the same SHA (no SPA reload then). No polling.
+        stopLifecycleFacts = contributions?.onLifecycle?.(reconcileWidgetList);
         ctx.ws.on('open', reconcileWidgetList);
     }
 
@@ -1058,6 +1076,9 @@ export function initWidgets(ctx = {}) {
         } else {
             relayout();
         }
+        // A frame kept running while Widgets was hidden may have changed with no box to measure in, and below the fold
+        // nothing in it says the page is back: its bounds go to it again, so that it measures anew.
+        keptRunning().forEach((key) => frameRefits.get(key)?.({ shown: true }));
         await syncWidgets(generation);
     }
 
@@ -1208,8 +1229,7 @@ export function initWidgets(ctx = {}) {
     // Framed card, effective policy `auto` or `retain` (both start on show; only
     // `retain` survives leaving), and the ledger holds neither the owner's Stop
     // nor a start of this revision the page did not outlive (nor `?hold=all`).
-    const startsOnShow = (tab) => effectiveStartMode(tab, uiPreferences) !== 'manual'
-        && !holds.reason(stopHoldKey(tab)) && !holds.reason(codeHoldKey(tab), tab.revision);
+    const startsOnShow = (tab) => widgetStartsOnShow(tab, uiPreferences, holds, stopHoldKey(tab));
 
     // Mount one card and keep its head controls truthful: the facade stands in
     // while it starts (idempotent — never over a settling frame), a failed mount
@@ -1246,7 +1266,7 @@ export function initWidgets(ctx = {}) {
         renderWidgetFacade(card.querySelector('[data-widget-mount]'), tab, isBoardFrame(tab) ? facadeHeight(tab) : 0);
         fitCard(key);
         syncWidgetCardControls(card, 'stopped', mode);
-        setWidgetCardNote(card, HELD_LINES[holds.reason(codeHoldKey(tab), tab.revision)] || '');
+        setWidgetCardNote(card, HELD_LINES[holds.reason(widgetCodeHoldKey(tab), tab.revision)] || '');
     }
 
     async function stopWidgetByOwner(card, tab) {
@@ -1258,7 +1278,7 @@ export function initWidgets(ctx = {}) {
 
     async function startWidgetByOwner(card, tab) {
         holds.release(stopHoldKey(tab));
-        holds.release(codeHoldKey(tab));
+        holds.release(widgetCodeHoldKey(tab));
         await startWidget(card, tab, isCurrentFor(renderGeneration));
     }
 
@@ -1314,14 +1334,15 @@ export function initWidgets(ctx = {}) {
             const dialog = card?.querySelector('.skills-card-menu-dialog') || (card?.querySelector('[data-widget-menu-trigger][aria-expanded="true"]')
                 ? document.querySelector('body > .skills-card-menu-dialog[open]') : null);
             if (!dialog) continue;
-            const current = dialog.querySelector(':scope > [data-widget-contributions]');
+            // Once opened, its groups stand in the menu's scrolling body, not on the shell (ui_interactions.js popupScrollBody).
+            const current = dialog.querySelector('[data-widget-contributions]');
             const html = renderWidgetContributionGroup(contributionVisibility(tab.skill));
             if ((current?.outerHTML || '') === html) continue;
             const focusedKey = current?.contains(document.activeElement) ? document.activeElement.dataset.widgetContributionKey : '';
             const fresh = html ? Object.assign(document.createElement('template'), { innerHTML: html }).content.firstElementChild : null;
             if (current && fresh) current.replaceWith(fresh);
             else if (current) current.remove();
-            else if (fresh) dialog.querySelector(':scope > [role="group"][aria-label="Size"]')?.before(fresh);
+            else if (fresh) dialog.querySelector('[role="group"][aria-label="Size"]')?.before(fresh);
             if (focusedKey) fresh?.querySelector(`[data-widget-contribution-key="${CSS.escape(focusedKey)}"]`)?.focus();
         }
     }
@@ -1368,12 +1389,14 @@ export function initWidgets(ctx = {}) {
         });
     });
     window.addEventListener('pagehide', (event) => {
-        closeReport();
         listRequests.abortAll();
         if (event.persisted) return;
         cardMenus.destroy();
         widths.dispose();
+        disposeBar();
         stopContributionFacts?.();
+        stopLifecycleFacts?.();
+        for (const tab of lastTabs || []) if (!isBoardFrame(tab)) disposeWidgetByKey(widgetKey(tab));
         bodiesObserver.disconnect();
         BODY_SIZED.forEach((type) => list.removeEventListener(type, refitBodies, true));
         if (bodiesFrame) cancelAnimationFrame(bodiesFrame);
@@ -1395,7 +1418,6 @@ export function initWidgets(ctx = {}) {
         if (event.detail?.page === 'widgets') {
             render();
         } else {
-            closeReport();
             // A card carried or an edge dragged when the owner left goes back: the release saves nothing.
             cardMenus.close();
             cancelWidgetCardCarry(list);

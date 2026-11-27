@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { NodeStub, turn } from './chat_decision_fixture.js';
-import { createSecretRequestForms, readerLine, secretRequestOf } from '../modules/secret_hitl.js';
+import { allowLines, createSecretRequestForms, readerLine, secretRequestOf } from '../modules/secret_hitl.js';
 
 const CANARY = 'zq7-CANARY-Ωlj3~p0+kx/2';
 const REQUEST = { plugin_name: 'telegram', fields: [{ id: 'botToken', setting_key: 'TELEGRAM_BOT_TOKEN' }] };
@@ -77,9 +77,10 @@ test('the card names fields and keys; the form opens only from it and reads stat
         assert.equal(input(fx).type, 'password');
         assert.equal(input(fx).autocomplete, 'off');
         assert.equal(fx.reveals[0].input, input(fx), 'Show/Hide is the Settings reveal over this local draft');
-        assert.equal(q(fx.host, 'secret-request-readers-title').textContent, 'Skills that read this key:');
+        assert.equal(q(fx.host, 'secret-request-readers-title').textContent, 'Skills that request this setting:');
         assert.deepEqual(fx.host.querySelectorAll('secret-request-reader').map((row) => row.textContent),
-            ['telegram · enabled · its grant covers it', 'mailer · disabled · needs TELEGRAM_BOT_TOKEN granted in Skills']);
+            ['telegram · enabled · asks for TELEGRAM_BOT_TOKEN · allowed to read it',
+                'mailer · disabled · asks for TELEGRAM_BOT_TOKEN · not allowed yet']);
         assert.equal(ok(fx).textContent, 'Save');
         assert.equal(ok(fx).disabled, true);
         type(input(fx), CANARY);
@@ -104,9 +105,10 @@ test('Save posts the values once with what the form showed, then empties the con
         assert.ok(posts[0].request_id);
         assert.equal(fx.host.children.length, 0, 'the form closed');
         assert.equal(fx.accepted.at(-1).state, 'answered');
-        assert.match(q(fx.card, 'chat-secret-status').textContent, /^Saved to Settings: botToken\. Access and enablement are unchanged\./);
-        assert.deepEqual(fx.card.querySelectorAll('chat-secret-reader').map((row) => row.textContent)[1],
-            'mailer · disabled · needs TELEGRAM_BOT_TOKEN granted in Skills');
+        assert.match(q(fx.card, 'chat-secret-status').textContent, /^Saved to Settings: botToken\./);
+        assert.match(q(fx.card, 'chat-secret-status').textContent, /did not grant access/);
+        assert.equal(fx.card.querySelectorAll('chat-secret-reader').map((row) => row.textContent)[1],
+            'mailer · was off · requested TELEGRAM_BOT_TOKEN · was not allowed to read it');
         assert.equal(q(fx.card, 'chat-secret-actions'), null, 'a settled card has no actions');
         assert.equal(fx.stored.length, 0);
         assert.ok(!everything(fx.host).includes(CANARY) && !everything(fx.card).includes(CANARY));
@@ -114,19 +116,19 @@ test('Save posts the values once with what the form showed, then empties the con
     } finally { fx.restore(); }
 });
 
-test('a set key is Replace with the enabled readers warned, never a silent Save', async () => {
+test('a set key is Replace: other skills keep their permissions, the allowed readers are named', async () => {
     const fx = setup({ statusBody: status(true), save: () => reply(200, saved('secret_replaced')) });
     try {
         await opened(fx);
         assert.equal(q(fx.host, 'secret-request-key').textContent, 'Saved in Settings as TELEGRAM_BOT_TOKEN · a value is set (hidden)');
         assert.equal(ok(fx).textContent, 'Replace');
-        assert.match(q(fx.host, 'secret-request-warning').textContent,
-            /^Replace overwrites the saved value\. Enabled skills that read it \(telegram\) may use the new value on their next call; some keep the old one until you disable and re-enable them in Skills\.$/);
+        assert.equal(q(fx.host, 'secret-request-warning').textContent, 'Replace overwrites the saved value. Other skills’ '
+            + 'permissions stay the same; those already allowed to read it (telegram) may get the new value.');
         type(input(fx), CANARY);
         ok(fx).click();
         await turn();
         assert.deepEqual(fx.calls.at(-1).observed, { botToken: true });
-        assert.match(q(fx.card, 'chat-secret-status').textContent, /^Replaced in Settings: botToken\. Enabled skills may use it at their next call; some keep the old value until disabled and re-enabled\./);
+        assert.match(q(fx.card, 'chat-secret-status').textContent, /^Replaced in Settings: botToken\..*did not grant access/);
     } finally { fx.restore(); }
 });
 
@@ -354,7 +356,7 @@ test('a saved card says its readers could not be read, never that none read the 
         const unknown = saved().secret_outcome;
         delete unknown.consumers;
         fx.forms.sync(fx.card, 'answered', { secret_outcome: { ...unknown, consumers_unknown: true } });
-        assert.deepEqual(readers(), ['Which skills read this key could not be read.']);
+        assert.match(readers()[0], /requested these keys at the time could not be established/);
         fx.forms.sync(fx.card, 'answered', { secret_outcome: { ...unknown, consumers: [] } });
         assert.deepEqual(readers(), []);
     } finally { fx.restore(); }
@@ -373,12 +375,14 @@ test("the form's Show and Hide speak the installed language: the overlay never w
     } finally { applyPayload(prior); flushMisses(); fx.restore(); }
 });
 
-test('readers keep enabled and grant facts apart', () => {
-    assert.equal(readerLine({ name: 'a', enabled: false, reads: ['K'], granted: ['K'] }), 'a · disabled · its grant covers it');
-    assert.equal(readerLine({ name: 'b', enabled: true, reads: ['K'], granted: [] }),
-        'b · enabled · needs K granted in Skills; after saving, this enabled skill cannot run until the keys are granted');
-    assert.equal(readerLine({ name: 'c', enabled: true, reads: ['K'], unsupported: true }), 'c · enabled · this skill type receives no Settings keys');
-    assert.equal(readerLine({ name: 'd', enabled: true, reads: ['K'], grant_unknown: true }), 'd · enabled · its grant could not be read');
+test('a reader line keeps the switch, the request and the granted right apart', () => {
+    assert.equal(readerLine({ name: 'a', enabled: false, reads: ['K'], granted: ['K'] }), 'a · disabled · asks for K · allowed to read it');
+    // Grant facts only (RV1 A11): no claim about whether the enabled skill runs, which the card cannot keep current.
+    const partial = readerLine({ name: 'b', enabled: true, reads: ['FIRST', 'NEXT', 'LAST'], granted: ['FIRST'] });
+    assert.equal(partial, 'b · enabled · asks for FIRST, NEXT, LAST · allowed to read FIRST, not NEXT, LAST');
+    assert.doesNotMatch(partial, /can.t run|runs/);
+    assert.equal(readerLine({ name: 'c', enabled: true, reads: ['K'], unsupported: true }), 'c · enabled · asks for K · this skill type receives no Settings keys');
+    assert.equal(readerLine({ name: 'd', enabled: true, reads: ['K'], grant_unknown: true }), 'd · enabled · asks for K · its access could not be read');
 });
 
 // A stalled fetch or response body must release the owner, never trap them: the wait is bounded by
@@ -688,3 +692,164 @@ test('a late save after dismissal keeps the composer focus', async () => {
         assert.equal(globalThis.document.activeElement, composer);
     } finally { fx.restore(); }
 });
+
+
+// ---- Save and allow: one explicit extended action beside Save, for the request's own skill only.
+const SKILL = { name: 'telegram', available: true, content_hash: 'sha256:files-shown', installation: 'inst-shown',
+    admitted: true, supported: true, granted: [], waiting: [], switch: 'unset' };
+const OTHERS = [{ name: 'telegram', enabled: false, reads: ['TELEGRAM_BOT_TOKEN'], granted: [] },
+    { name: 'mailer', enabled: true, reads: ['TELEGRAM_BOT_TOKEN'], granted: ['TELEGRAM_BOT_TOKEN'] }];
+const allowButton = (fx) => q(fx.host, 'secret-request-allow');
+const note = (fx) => q(fx.host, 'secret-request-allow-note').textContent;
+const outcomeLines = (fx) => fx.card.querySelectorAll('chat-secret-outcome-line').map((row) => row.textContent);
+const allowed = (allow) => ({ ...saved(), secret_outcome: { ...saved().secret_outcome, allow: {
+    skill: 'telegram', fields: ['botToken'], keys: ['TELEGRAM_BOT_TOKEN'], content_hash: SKILL.content_hash,
+    enable: true, at: 't', ...allow } } });
+
+test('a status naming the skill offers Save and allow beside Save; Enter and Save never send it', async () => {
+    const fx = setup({ statusBody: status(false, { skill: { ...SKILL, switch: 'on' }, consumers: OTHERS }) });
+    try {
+        await opened(fx);
+        assert.equal(allowButton(fx).hidden, false);
+        assert.equal(q(fx.host, 'secret-request-allow-label').textContent, 'Save and allow telegram');
+        assert.equal(ok(fx).dataset.primary, '', 'Save keeps the one primary slot');
+        assert.equal(allowButton(fx).dataset.primary, undefined);
+        assert.match(note(fx), /TELEGRAM_BOT_TOKEN.*telegram/);
+        assert.ok(fx.host.querySelectorAll('secret-request-reader').map((row) => row.textContent)
+            .includes('mailer · enabled · asks for TELEGRAM_BOT_TOKEN · allowed to read it'), 'who already reads it is named');
+        assert.equal(allowButton(fx).disabled, true, 'nothing typed yet');
+        type(input(fx), CANARY);
+        assert.equal(allowButton(fx).disabled, false);
+        input(fx).listeners.get('keydown')?.({ key: 'Enter', preventDefault() {} });
+        await turn();
+        const [post] = fx.calls.filter((body) => !body.action);
+        assert.equal('allow' in post, false, 'Enter is the plain Save');
+        assert.match(q(fx.card, 'chat-secret-status').textContent, /did not grant access/);
+        assert.deepEqual(outcomeLines(fx), []);
+    } finally { fx.restore(); }
+});
+
+test('Save, allow and turn on sends the shown files and fields; the card says save, access and switch apart', async () => {
+    let sent = null;
+    const fx = setup({ statusBody: status(false, { skill: SKILL }),
+        save: (body) => { sent = body; return reply(200, allowed({ state: 'granted', granted_keys: ['TELEGRAM_BOT_TOKEN'], enabled: true })); } });
+    try {
+        await opened(fx);
+        assert.equal(q(fx.host, 'secret-request-allow-label').textContent, 'Save, allow and turn on telegram');
+        assert.match(note(fx), /TELEGRAM_BOT_TOKEN.*telegram/);
+        type(input(fx), CANARY);
+        allowButton(fx).click();
+        await turn();
+        assert.deepEqual(sent.allow, { content_hash: 'sha256:files-shown', installation: 'inst-shown', fields: ['botToken'], enable: true });
+        assert.deepEqual(sent.values, { botToken: CANARY });
+        assert.equal(fx.host.children.length, 0, 'the form closed');
+        assert.equal(q(fx.card, 'chat-secret-status').textContent, 'Saved to Settings: botToken.');
+        assert.match(outcomeLines(fx)[0], /Granted TELEGRAM_BOT_TOKEN to telegram/);
+        assert.match(outcomeLines(fx)[1], /telegram was on/);
+        assert.ok(!everything(fx.card).includes(CANARY));
+    } finally { fx.restore(); }
+});
+
+test('an older server without skill facts, or a skill that already reads the key, offers Save alone', async () => {
+    for (const extra of [{}, { skill: { ...SKILL, granted: ['TELEGRAM_BOT_TOKEN'] } }, { skill: { ...SKILL, supported: false } },
+        { skill: { ...SKILL, installation: '' } }, { skill: { name: 'telegram', available: false } }]) {
+        const fx = setup({ statusBody: status(false, extra) });
+        try {
+            await opened(fx);
+            assert.equal(allowButton(fx).hidden, true, JSON.stringify(extra));
+            assert.equal(note(fx), '');
+        } finally { fx.restore(); }
+    }
+    const fx = setup({ statusBody: status(false, { skill: { ...SKILL, admitted: false, waiting: ['TELEGRAM_BOT_TOKEN'] } }) });
+    try {
+        await opened(fx);
+        assert.equal(allowButton(fx).hidden, true);
+        assert.match(note(fx), /telegram.*these exact files.*explicitly accepted/);
+    } finally { fx.restore(); }
+});
+
+test('files not reviewed yet: the note and the card say the consent waits; an Off is never turned on', async () => {
+    const fx = setup({ statusBody: status(true, { skill: { ...SKILL, admitted: false } }),
+        save: () => reply(200, allowed({ state: 'deferred', reason: 'not_admitted', enabled: false, enable_reason: 'deferred' })) });
+    try {
+        await opened(fx);
+        assert.equal(q(fx.host, 'secret-request-allow-label').textContent, 'Replace, allow and turn on telegram');
+        assert.match(note(fx), /these exact files.*explicitly accepted.*does not approve/);
+        assert.doesNotMatch(note(fx), /Other skills’ permissions/, 'the Replace warning, not the note, says other skills keep theirs');
+        assert.match(q(fx.host, 'secret-request-warning').textContent, /Other skills’ permissions stay the same/);
+        type(input(fx), CANARY);
+        allowButton(fx).click();
+        await turn();
+        assert.equal(fx.accepted.at(-1).secret_outcome.allow.state, 'deferred');
+        assert.deepEqual(fx.calls.at(-1).allow.fields, ['botToken']);
+        assert.match(outcomeLines(fx)[0], /TELEGRAM_BOT_TOKEN.*exact files.*explicitly accepted/);
+        assert.match(outcomeLines(fx)[1], /Turn-on waits.*Off/);
+        assert.match(fx.card.querySelectorAll('chat-secret-reader')[1].textContent, /mailer.*was not allowed/);
+    } finally { fx.restore(); }
+    const off = setup({ statusBody: status(false, { skill: { ...SKILL, switch: 'off' } }) });
+    try {
+        await opened(off);
+        assert.equal(q(off.host, 'secret-request-allow-label').textContent, 'Save and allow telegram');
+        assert.match(note(off), /telegram stays off; it was turned off\.$/);
+    } finally { off.restore(); }
+});
+
+test('a refused, unknown or pending allow is never shown as access, nor a failed turn-on as on', () => {
+    const base = { skill: 'telegram', keys: ['TELEGRAM_BOT_TOKEN'], enable: true };
+    const lines = (fields) => allowLines({ ...base, ...fields });
+    const denied = lines({ state: 'refused', reason: 'skill_changed', enabled: false, enable_reason: 'not_allowed' });
+    assert.deepEqual(denied.map(({ tone }) => tone), ['warn', 'warn']);
+    assert.match(denied[0].text, /files changed/);
+    assert.match(denied[1].text, /access was not granted/);
+    assert.ok(lines({ state: 'unknown', enabled: null, enable_reason: 'unknown' }).every(({ text, tone }) => tone === 'warn' && /unknown/.test(text)));
+    for (const state of ['requested', 'running']) assert.deepEqual(lines({ state }).map(({ tone }) => tone), ['neutral']);
+    assert.match(lines({ enable: false, state: 'refused', reason: 'installation_ended' })[0].text, /installation.*ended/);
+    const notStarted = lines({ enable: false, state: 'refused', reason: 'not_started' })[0].text;
+    assert.match(notStarted, /grant step did not start/);  // neutral: a restart or a lane that never started its job
+    assert.doesNotMatch(notStarted, /restart/i);
+    assert.match(lines({ enable: false, state: 'refused', reason: 'update_rolled_back' })[0].text, /rolled back/);
+    const partial = lines({ state: 'granted', keys: ['FIRST', 'NEXT'], granted_keys: ['FIRST'], enabled: false, enable_reason: 'conflict' });
+    assert.match(partial[0].text, /Granted FIRST to telegram/);
+    assert.doesNotMatch(partial[0].text, /NEXT/);
+    assert.match(partial[1].text, /not turned on/);
+    assert.match(lines({ state: 'granted', granted_keys: ['TELEGRAM_BOT_TOKEN'], enabled: false, enable_reason: 'owner_off' })[1].text, /stayed off/);
+    assert.deepEqual(allowLines(undefined), []);
+});
+
+for (const [name, current, notice] of [
+    ['files changed since the form read them: nothing saved, the draft stays, the next allow names the new files',
+        { ...SKILL, content_hash: 'sha256:files-now' }, /files or installation changed/i],
+    ['same files after reinstall: the form names the new installation before another allow',
+        { ...SKILL, installation: 'inst-now' }, /different installation/i],
+]) {
+    test(name, async () => {
+        const bodies = [];
+        const fx = setup({ statusBody: status(false, { skill: SKILL }), save: (body) => {
+            bodies.push(body);
+            return bodies.length === 1
+                ? reply(409, { ok: false, saved: false, reason_code: 'secret_allow_stale', decision_id: DECISION, state: 'open',
+                    keys: [{ id: 'botToken', setting_key: 'TELEGRAM_BOT_TOKEN', configured: false }], consumers: READERS,
+                    skill: current })
+                : reply(200, allowed({ state: 'granted', enabled: true }));
+        } });
+        try {
+            const revision = (skill) => skill.content_hash.replace(/^sha256:/, '').slice(0, 12);
+            await opened(fx);
+            assert.ok(note(fx).includes(SKILL.installation) && note(fx).includes(revision(SKILL)));
+            assert.equal(q(fx.host, 'secret-request-allow-label').textContent, 'Save, allow and turn on telegram');
+            type(input(fx), CANARY);
+            allowButton(fx).click();
+            await turn();
+            assert.match(q(fx.host, 'secret-request-error').textContent, notice);
+            assert.ok(note(fx).includes(current.installation) && note(fx).includes(revision(current)));
+            assert.ok(!note(fx).includes(current.installation === SKILL.installation ? revision(SKILL) : SKILL.installation));
+            assert.equal(input(fx).value, CANARY, 'the draft stays');
+            assert.equal(bodies.length, 1, 'nothing is retried automatically');
+            allowButton(fx).click();
+            await turn();
+            assert.deepEqual(bodies[1].allow, { content_hash: current.content_hash, installation: current.installation,
+                fields: ['botToken'], enable: true });
+            assert.notEqual(bodies[1].request_id, bodies[0].request_id, 'another recipient or revision is a new request');
+        } finally { fx.restore(); }
+    });
+}

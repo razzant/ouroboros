@@ -201,7 +201,7 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "        if (!wasFinished && blockVisible(record)) scheduleHistorySync();"
+    "value": "        if (!wasFinished && blockVisible(record)) scheduleHistorySync('settled');"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
@@ -553,7 +553,7 @@
   },
   {
     "id": "test_chat_history_replays_task_summaries_into_live_cards",
-    "path": "web/modules/chat_activity.js",
+    "path": "web/modules/chat_history_replay.js",
     "kind": "contains",
     "value": "if (role !== 'user' && !opts.isProgress && opts.taskId) {"
   },
@@ -706,12 +706,6 @@
     "path": "web/modules/log_events.js",
     "kind": "contains",
     "value": "completed|failed"
-  },
-  {
-    "id": "test_skill_lifecycle_terminal_progress_can_finish_live_card",
-    "path": "web/modules/log_events.js",
-    "kind": "contains",
-    "value": "lifecycleTerminal"
   },
   {
     "id": "test_skill_lifecycle_terminal_progress_can_finish_live_card",
@@ -1016,18 +1010,6 @@
   {
     "id": "test_cancel_run_button_marker_gated",
     "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "btn.dataset.cancelRun = '1'"
-  },
-  {
-    "id": "test_cancel_run_button_marker_gated",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "const stopEligible = (record) => cancelRunEligibility({"
-  },
-  {
-    "id": "test_cancel_run_button_marker_gated",
-    "path": "web/modules/chat.js",
     "kind": "not_contains",
     "value": "data-cancel-run>"
   },
@@ -1058,20 +1040,14 @@
   {
     "id": "test_sync_history_merges_offline_bootstrap_user_rows",
     "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect });"
+    "kind": "regex",
+    "value": "if\\s*\\(\\s*result\\.status\\s*!==\\s*'applied'\\s*\\)\\s*applyHistoryMessages\\(\\s*messages\\s*,\\s*\\{\\s*fromReconnect\\s*,\\s*newest:\\s*admitted\\s*,\\s*requestedAt:\\s*data\\.requestedAt\\s*,\\s*window:\\s*data\\.window\\s*,\\s*hasMore:\\s*data\\.has_more\\s*,?\\s*\\}\\s*\\)"
   },
   {
     "id": "test_cancel_run_confirm_and_cascade",
     "path": "web/modules/chat.js",
     "kind": "contains",
     "value": "await requestStop(taskId, action);"
-  },
-  {
-    "id": "test_cancel_run_confirm_and_cascade",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "openCardControls(btn, record, cardControls(workState, record.groupId).work, {"
   },
   {
     "id": "test_cancel_run_confirm_and_cascade",

@@ -186,6 +186,27 @@ export function grantReady(entity) {
     return !entity?.grants || entity.grants.all_granted !== false;
 }
 
+/** The host's answer whether missing access stops the skill (a pending key does not by itself);
+ * an older host without the field answers by `all_granted`. */
+export function grantBlocks(entity) {
+    const grants = entity?.grants;
+    return !!grants && (typeof grants.blocked === 'boolean' ? grants.blocked : grants.all_granted === false);
+}
+
+/** What Enable asks the owner to grant first: pending keys and permissions stay a voluntary Grant access;
+ * an older host without `blocked` asks for everything missing. */
+export function blockingGrantItems(grants = {}) {
+    const keys = grants.missing_keys || grants.requested_keys || [];
+    const permissions = grants.missing_permissions || grants.requested_permissions || [];
+    if (typeof grants.blocked !== 'boolean') return [...keys, ...permissions];
+    const pendingKeys = Array.isArray(grants.pending_keys) ? grants.pending_keys : [];
+    const pendingPermissions = Array.isArray(grants.pending_permissions) ? grants.pending_permissions : [];
+    return [
+        ...keys.filter((key) => !pendingKeys.includes(key)),
+        ...permissions.filter((perm) => !pendingPermissions.includes(perm)),
+    ];
+}
+
 export function isRateLimitError(message) {
     const text = String(message || '').toLowerCase();
     return text.includes('rate limit') || text.includes('too many requests') || text.includes('http 429');
@@ -632,7 +653,9 @@ const MARKDOWN_LINK = /(!?)\[([^\]]+)\]\([ \t]*((?:[^()\s]|\([^()\s]*\))+)(?:[ \
 export function renderMarkdown(text, { inlineHeadingBreaks = false } = {}) {
     let html = escapeHtmlText(text);
     const code = codeStash(html);
-    html = html.replace(MARKDOWN_FENCED_CODE, (_, body) => code.token(`<pre><code>${body}</code></pre>`));
+    html = html.replace(MARKDOWN_FENCED_CODE, (_, body) => code.token(
+        `<div class="md-code-block"><pre class="md-compact-code scroll-fade-x"><code>${body}</code></pre></div>`,
+    ));
     // One pass for both span forms: a double-backtick span may contain backticks.
     html = html.replace(CODE_SPAN, (match, _tick, body) => code.holds(body)
         ? match : code.token(`<code class="inline-code">${body}</code>`));
@@ -678,7 +701,7 @@ export function renderMarkdown(text, { inlineHeadingBreaks = false } = {}) {
         t += '<tbody>';
         for (let i = headIdx + 1; i < rows.length; i++) t += parseRow(rows[i], 'td');
         t += '</tbody></table>';
-        return '<div class="md-table-wrap">' + t + '</div>';
+        return '<div class="md-table-wrap scroll-fade-x">' + t + '</div>';
     });
     return code.restore(html);
 }

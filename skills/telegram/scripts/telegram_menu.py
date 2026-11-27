@@ -256,23 +256,12 @@ class TelegramMenuManager:
             raise TelegramMenuRejectedError(f"Telegram API rejected {method}.")
         return body.get("result")
 
-    def _verify_me_identity(self, bot: Any) -> None:
-        expected_bot_id = self._token.split(":", 1)[0].strip()
-        raw_bot_id = bot.get("id") if isinstance(bot, dict) else None
-        if expected_bot_id.isdigit():
-            if type(raw_bot_id) is not int or raw_bot_id <= 0 or str(raw_bot_id) != expected_bot_id:
-                raise TelegramMenuRejectedError("Telegram getMe bot identity does not match token.")
-
     async def _identify(self, *, request_timeout_sec: float | None = None) -> None:
         if not self.bot:
-            # Ledger identity follows getMe's reported bot id (never token text); strict token-prefix
-            # verification runs in verify_private_owner() before exposing a private owner Mini App.
-            bot = await self._call("getMe", {}, request_timeout_sec=request_timeout_sec)
-            self.bot = _bot_identity(bot)
+            self.bot = _bot_identity(await self._call("getMe", {}, request_timeout_sec=request_timeout_sec))
 
     async def verify_private_owner(self) -> str:
         bot = await self._call("getMe", {})
-        self._verify_me_identity(bot)
         self.bot = _bot_identity(bot)
         chat = await self._call("getChat", {"chat_id": self.chat_id})
         if not isinstance(chat, dict) or str(chat.get("type") or "") != "private":

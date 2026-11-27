@@ -67,15 +67,14 @@ def _keeps_saved_queue(path: Any, *held: Any, require_readable: bool = False) ->
     generation's saved queue (any publication during the boot: a stop, Update or Rollback, a boot
     without a provider); an empty or partial write would erase saved Pauses it carries, and Resume
     would then find nothing to resume."""
-    key, publication = str(pathlib.Path(path).absolute()), _queue().QUEUE_PUBLICATION
-    if _queue().PRIOR_DIRECT_ROOTS.get("retry_pausing_envelopes"):
-        return True
-    if _RESTORING.get(key, threading.get_ident()) != threading.get_ident():
-        return True
-    if key in _RESTORED or (publication is not None and str(pathlib.Path(publication[0]).absolute()) == key):
-        return False
-    if any(held):
-        return False
+    decision = _saved_queue_decision(path)
+    if decision is not None:
+        return decision
+    return not any(held) and snapshot_names_work(path, require_readable=require_readable)
+
+
+def snapshot_names_work(path: Any, *, require_readable: bool = False) -> bool:
+    """The on-disk part of the custody decision, independent of the observer process."""
     try:
         saved = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -88,6 +87,22 @@ def _keeps_saved_queue(path: Any, *held: Any, require_readable: bool = False) ->
             isinstance(saved.get(lane), list) for lane in ("pending", "running"))):
         raise ValueError("could not establish the saved pending and running queues")
     return isinstance(saved, dict) and bool(saved.get("pending") or saved.get("running"))
+
+
+def _saved_queue_decision(path: Any) -> bool | None:
+    key, publication = str(pathlib.Path(path).absolute()), _queue().QUEUE_PUBLICATION
+    if _queue().PRIOR_DIRECT_ROOTS.get("retry_pausing_envelopes"):
+        return True
+    if _RESTORING.get(key, threading.get_ident()) != threading.get_ident():
+        return True
+    if key in _RESTORED or (publication is not None and str(pathlib.Path(publication[0]).absolute()) == key):
+        return False
+    return None
+
+
+def saved_queue_decision() -> bool | None:
+    """Serving-process knowledge alone; None leaves the decision to the saved document."""
+    return _saved_queue_decision(_queue().QUEUE_SNAPSHOT_PATH)
 
 
 def saved_queue_unowned(*, require_readable: bool = False) -> bool:
@@ -154,7 +169,8 @@ _PENDING_FIELDS = (
     'capability_delta', 'task_group_id', 'task_group', 'subagent_envelope',
     'configured_subagent', 'memory_mode', 'drive_root', 'parent_cognitive_route',
     'subagent_availability', 'child_drive_root', 'budget_drive_root', 'task_constraint',
-    'predecessor_authority_source', 'metadata', 'origin_message_ref', 'origin_message_text',
+    'predecessor_authority_source', 'metadata', 'origin_message_ref', 'origin_message_text', 'admission_author',
+    '_skip_post_task_synthesis',
     'image_source_ref', 'image_mime', 'image_caption',
     'attachment_manifest', 'attachment_images', 'attachments',
     '_attempt', 'review_reason', 'review_source_task_id', '_budget_pause', '_park_confirmation',

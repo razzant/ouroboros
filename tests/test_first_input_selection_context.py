@@ -275,8 +275,9 @@ def test_declared_tool_descriptions_leave_exchange_strategy_to_assignment():
     assert "assignment defines" in selection
     assert "prescribes no exchange sequence or transport" in selection
     assert "forward_to_worker" not in selection
-    # The field carries the one cue for choosing the selector; the tool description no
-    # longer repeats the selector paragraph (one SSOT, fewer cached-prefix bytes).
+    # The field carries the full selection contract; the lead carries only the short cue
+    # (custom projections drop parameter prose) without repeating the paragraph or exchange strategy.
     assert "for an independent first position" in selection
     assert "input_sources=declared" not in schema["description"]
+    assert "forward_to_worker" not in schema["description"]
     assert "Retain the first position via forward_to_worker before" not in schema["description"]

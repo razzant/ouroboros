@@ -532,6 +532,56 @@ def _reported_token_usage(usage: Dict[str, Any]) -> Dict[str, Any]:
     return reported
 
 
+def provider_token_counts(raw: Dict[str, Any]) -> dict:
+    """Bound the report's counters using this raw witness, not accounting projections."""
+    written, invalid = cache_write_total(raw, cache_write_split(raw))
+    return {key: value for key, value in {
+        "prompt_tokens": _reported_token_count(raw, "prompt_tokens"),
+        "input_tokens": _reported_token_count(raw, "input_tokens"),
+        "completion_tokens": _reported_token_count(raw, "completion_tokens", "output_tokens"),
+        "cached_tokens": cache_read_count(raw),
+        "cache_write_tokens": None if invalid else written,
+    }.items() if value is not None and value <= 2**53 - 1}
+
+
+class ChatUsageReceipt:
+    """Attempt-bound counters of one Chat or native Messages SSE stream. None means no actual usage object arrived."""
+
+    def __init__(self, attempt_id: str):
+        self.attempt_id = attempt_id
+        self.counts: dict | None = None
+
+    def observe(self, usage: Any) -> None:
+        if isinstance(usage, dict):
+            if self.counts is None:
+                self.counts = {}
+            self.counts.update(provider_token_counts(_reported_token_usage(usage)))
+
+    def observe_frame(self, frame: Any) -> None:
+        """One wire frame's usage objects in order: an error's own detail first, so the frame's own object wins."""
+        if isinstance(frame, dict):
+            if isinstance(frame.get("error"), dict):
+                self.observe(frame["error"].get("usage"))
+            self.observe(frame.get("usage"))
+
+    def for_attempt(self, attempt_id: str) -> dict | None:
+        return self.counts if self.attempt_id == attempt_id else None
+
+
+def chat_usage_receipt(source: Any) -> ChatUsageReceipt | None:
+    """Read a typed host observation, never an extension field from a provider body."""
+    receipt = getattr(source, "_chat_usage_receipt", None)
+    if receipt is None and isinstance(source, BaseException):
+        receipt = getattr(getattr(source, "response", None), "_chat_usage_receipt", None)
+    return receipt if isinstance(receipt, ChatUsageReceipt) else None
+
+
+def chat_usage_fields(source: Any, attempt_id: str) -> dict:
+    receipt = chat_usage_receipt(source)
+    counts = receipt.for_attempt(attempt_id) if receipt is not None else None
+    return {"provider_token_receipt": counts} if counts is not None else {}
+
+
 _MEDIA_DETAIL_FIELDS = frozenset(_TOKEN_DETAIL_FIELDS) | {
     "input_token_details", "output_token_details", "cached_tokens_details",
     "promptTokensDetails", "responseTokensDetails", "response_tokens_details", "cacheTokensDetails", "cache_tokens_details",
@@ -598,7 +648,8 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD, provider: str
             payload = None
     usage: Any = payload.get("usage") if isinstance(payload, dict) else getattr(response, "usage", None)
     usage = _plain(usage)
-    if not isinstance(usage, dict):
+    witnessed_usage = isinstance(usage, dict)
+    if not witnessed_usage:
         usage = {}
     native_cache_read = _reported_token_count(usage, "cache_read_input_tokens")
     cache_read = cache_read_count(usage)
@@ -630,7 +681,8 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD, provider: str
     # Tariff validation needs the counts as reported, before normalization reads a malformed one as unknown.
     # Keep only token fields; never accept a provider-supplied witness under this internal key.
     reported = _reported_token_usage(usage)
-    normalized["_reported_token_usage"] = copy.deepcopy(reported)
+    if witnessed_usage:
+        normalized["_reported_token_usage"] = copy.deepcopy(reported)
     # Candidate facts and validated engine reports come from their host owners,
     # never arbitrary extensions inside a provider's token-usage block.
     normalized.pop("effort", None)
@@ -777,6 +829,8 @@ class AnswerObject:
     codes: Tuple[str, ...]
     message: str = ""
     inline: bool = False  # embedded JSON after non-SSE prose in a string
+    via: str = ""  # parent field carrying this object; blank at the answer's root
+    error_text: Tuple[Tuple[str, str], ...] = ()  # normalized non-message error carriers, not sibling diagnostics
 
 
 @dataclass(frozen=True)
@@ -811,6 +865,22 @@ class ProviderAnswer:
             if i > root and not obj.history and obj.parent in selected:
                 selected.append(i)
         return selected
+
+    def direct_error(self, index: int, *, raw_text: bool = False) -> bool:
+        """Direct body or its bare JSON/SSE error forward, never a cited or diagnostic object."""
+        path = []
+        while index > 0:
+            obj = self.objects[index]
+            if obj.history or obj.inline or obj.parent < 0:
+                return False
+            path.append(obj.via)
+            index = obj.parent
+        # Plain ``metadata.raw`` text sits on the metadata object; its decoded JSON would be a child.
+        if raw_text:
+            if not path or path[0] != "metadata":
+                return False
+            path = path[1:]
+        return path in ([], [""], ["error", ""], ["raw", "metadata"], ["error", "raw", "metadata"])
 
     def facts(self, quoted: Tuple[str, str] = ("", ""), **recognition: Any) -> Dict[str, Any]:
         """This answer for the owner line and the mind that continues, sanitized: the quoted ``speaker`` and
@@ -883,13 +953,13 @@ def provider_answer(source: Any) -> ProviderAnswer:
             for key, value in node.items())
 
     def walk(node: Any, speaker: str, history: bool, lists_are_history: bool, parent: int = -1,
-             inline: bool = False) -> None:
+             inline: bool = False, via: str = "") -> None:
         left[0] -= 1
         if left[0] <= 0:
             return
         if isinstance(node, list):
             for item in node:
-                walk(item, speaker, history or lists_are_history, lists_are_history, parent, inline)
+                walk(item, speaker, history or lists_are_history, lists_are_history, parent, inline, "[]")
             return
         if isinstance(node, str):
             node = {"": node}
@@ -898,7 +968,7 @@ def provider_answer(source: Any) -> ProviderAnswer:
         index, said_start, code_start = len(objects), len(said), len(codes)
         if isinstance(node.get("provider_name"), str) and node["provider_name"].strip():
             speaker = node["provider_name"].strip()
-        inner, message = [], ""
+        inner, error_text, message = [], [], ""
         for key, value in sorted(node.items(), key=lambda item: item[0] != "message"):  # its message leads
             if key in _ANSWER_CODE_KEYS:
                 if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip():
@@ -907,16 +977,18 @@ def provider_answer(source: Any) -> ProviderAnswer:
                 documents, words = opened(value)
                 if key == "message":
                     message = words
+                elif words and key in ("", "detail", "raw"):
+                    error_text.append((key, words))
                 if " " in words or (words and key == "message"):  # a ``message`` is a sentence even as one word
                     said.append((speaker, words, history))
-                inner.extend((document, None, embedded) for document, embedded in documents)
+                inner.extend((document, None, embedded, key) for document, embedded in documents)
             elif isinstance(value, (dict, list)):
-                inner.append((value, lists_are_history, inline))
+                inner.append((value, lists_are_history, inline, key))
         objects.append(AnswerObject(node, parent, speaker, history,
                                     tuple(row[1] for row in said[said_start:]),
-                                    tuple(row[1] for row in codes[code_start:]), message, inline))
-        for value, rule, embedded in inner:  # an opened document applies the history rule to itself
-            walk(value, speaker, history, states(value) if rule is None else rule, index, inline or embedded)
+                                    tuple(row[1] for row in codes[code_start:]), message, inline, via, tuple(error_text)))
+        for value, rule, embedded, key in inner:  # an opened document applies the history rule to itself
+            walk(value, speaker, history, states(value) if rule is None else rule, index, inline or embedded, key)
 
     def read(payload: Any) -> Optional[int]:
         top = payload["error"] if isinstance(payload, dict) and isinstance(payload.get("error"), (dict, str)) else payload
@@ -953,6 +1025,8 @@ def refusal_failure_payload(error: BaseException) -> Any:
             except Exception:
                 pass  # Some SDKs have already released or never loaded the response body.
         return body
+    if getattr(error, "adapter_typed_body", False):
+        return envelope  # a native adapter's typed reading of this same envelope (``llm_ollama._http_error``): no conflict
     if isinstance(body, dict) and "error" not in envelope and "usage" in envelope and "code" not in envelope:
         envelope = {"error": body.get("error", body), **envelope}
     if body and body != envelope and body != envelope.get("error") and not (
@@ -1093,7 +1167,7 @@ def priced_failure_usage(error: BaseException, payload: Any, provider: str):
             return None
     body = reports[selected][0]
     usage, _, _ = usage_from_response(body, payload=body, provider=provider, provider_reported_cost_only=True)
-    # Reports are newest first; the complete price and each cumulative counter are independent facts.
+    # Reports are newest first; the complete price and each accounting counter are independent facts.
     latest = {}
     for index, (report, _, raw) in enumerate(reports):
         if isinstance(raw, dict) and raw:

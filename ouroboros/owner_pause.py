@@ -82,7 +82,12 @@ NOT_STARTED_TEXT = ("⚠️ OWNER_PAUSE_NOT_STARTED: NOT STARTED — a Pause of 
 
 
 class OwnerPauseRefused(Exception):
-    """Pause authority refused fence installation or a new launch."""
+    """Pause authority refused fence installation or a new launch. ``held``: the owner's positively read, closed
+    Pause fence held this launch and nothing was submitted; an unreadable fence or another refusal is not held."""
+
+    def __init__(self, *args: Any, held: bool = False) -> None:
+        super().__init__(*args)
+        self.held = bool(held)
 
 
 class LaunchBusy(OwnerPauseRefused):
@@ -170,6 +175,29 @@ def root_stopped(root_drive: Any, root_task_id: str) -> bool:
         return owner_stopped(load_task_result(root_drive, root_task_id, strict=True))
     except Exception:
         return False
+
+
+def answered_phase_work(root, task_id, row, *, txn=None):
+    """An answered actor's (upkeep, review), shared by Pause and late-start publication.
+
+    The latter sees the pointers in its write snapshot without probing a controller process.
+    Neither caller reads the actor's row again to see its own pointers.
+    """
+    from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight, post_task_synthesis_is_open
+    from ouroboros.review_operation import task_has_live_review_operation
+    from ouroboros.task_results import load_task_result
+
+    def load(tid):
+        if tid == task_id:
+            return row
+        return (txn.load(tid) if txn is not None else load_task_result(root, tid, strict=True)) or {}
+
+    checkpoint = row.get("root_phase_checkpoint")
+    upkeep = (isinstance(checkpoint, dict) and post_task_synthesis_is_open(checkpoint.get("post_task_synthesis"))
+              or post_task_synthesis_in_flight(root, task_id))
+    review = bool(row) and task_has_live_review_operation(root, task_id, result_loader=load,
+                                                         probe_controller=txn is None)
+    return upkeep, review
 
 
 def paused_gap(root_drive: Any, task_id: str) -> Dict[str, Any]:
@@ -575,19 +603,23 @@ def interrupted_member_resume(root_drive: Any, root_task_id: str, task_id: str, 
 
 
 def complete_consumed_member_resume(root_drive: Any, root_task_id: str, task_id: str, consumed: Dict[str, str],
-                                    publish: Any, withdraw: Any) -> str:
+                                    publish: Any, withdraw: Any, *, locked_tree: tuple[pathlib.Path, str] | None = None) -> str:
     """Release one owner-selected member on its consumed Resume's fence; ``""`` or why not.
 
     The caller holds the queue lock, so the launch lock is never awaited: a busy
-    tree refuses. Under it the queue selection is published first (``publish``),
+    tree refuses. A conditional Panic selection already holds its exact tree's
+    launch lock and passes its scope. The queue selection is published first (``publish``),
     while this member's launch is still fenced, so a failed snapshot leaves the
     fence untouched; then ``select_member_resume`` re-checks the grant and fence and
     releases the member. A failed release withdraws the selection; a process lost
     in between leaves the member fenced, so nothing starts, and restore treats the
     row like any other selected, undispatched one.
     """
+    from contextlib import nullcontext
+
     try:
-        with launch_lock(root_drive, root_task_id, wait=False):
+        with (nullcontext() if locked_tree == (pathlib.Path(root_drive), root_task_id)
+              else launch_lock(root_drive, root_task_id, wait=False)):
             if not publish():
                 return "snapshot_not_persisted"
             try:
@@ -613,6 +645,7 @@ def admit_delegated_start(drive_root: Any, payload: Dict[str, Any]) -> bool:
     from types import SimpleNamespace
     from ouroboros._usage_wait import retry_presend
     from ouroboros.delegate_custody import emit, START_REQUESTED
+    from ouroboros.delegate_workspace_hold import start_fence
     from ouroboros.model_wait import current_model_wait
     from ouroboros.usage_admission import task_billing_fields
     from ouroboros.utils import utc_now_iso
@@ -644,7 +677,7 @@ def admit_delegated_start(drive_root: Any, payload: Dict[str, Any]) -> bool:
                 from ouroboros.llm_attempt import PhysicalDispatchInterrupted
                 raise PhysicalDispatchInterrupted(reason)
         retrying = True
-        with launch_admission(source, wait=False):
+        with start_fence(drive_root, payload), launch_admission(source, wait=False):  # links and claim: one fence
             return emit(drive_root, START_REQUESTED, payload, propagate_contention=True)
 
     return retry_presend(claim_once, check=False)  # The POST remains outside this unsent claim.
@@ -867,8 +900,8 @@ def _validate_launch(source: Any, root_resume=None):
                 and grant.get("grant_id") == root_resume.get("grant_id")
                 and grant.get("authority") == "explicit_resume"
                 and not grant.get("revoked_at") and not grant.get("consumed_at"))
-        if not allowed:
-            raise OwnerPauseRefused(str(fence.get("reason") or "owner_pause"))
+        if not allowed:  # only a positively read Pause holds; an unreadable fence stays a plain refusal
+            raise OwnerPauseRefused(str(fence.get("reason") or "owner_pause"), held=fence_closed(fence))
     from ouroboros.budget_pause import STATE_PAUSING, STATE_PAUSED, STATE_RESUME_GRANTED
 
     if root_drive and task_id:

@@ -236,3 +236,114 @@ def test_the_stand_matches_a_pair_by_what_each_control_is_and_counts_reach_a_rai
     # Under a finger the row a scrolling rail shows in part is not small, the one a wrapper cuts for good still is.
     assert seen["small"] == ["a#inline", "a#listed", "button#bare", "button#clipped", "button#clipped-2", "button#masked",
                              "button#short"], seen
+
+
+DOOR_PROBE = r"""
+import contextlib, http.server, importlib.util, json, sys, threading
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("look_door_stand", sys.argv[1])
+stand = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(stand)
+row = json.loads(sys.argv[2])
+draft = Path(sys.argv[3]) / "door_draft"
+(draft / "modules").mkdir(parents=True, exist_ok=True)
+(draft / "modules" / "pages.js").write_text(
+    "export const PAGES = [\n"
+    "  { id: 'chat', label: 'Main', icon: 'chat', zone: 'head', init: 'initMain' },\n"
+    "  { id: 'skills', label: 'Extensions', icon: 'skills', zone: 'door', door: 'settings', init: 'initSkills' },\n"
+    "  { id: 'settings', label: 'Settings', icon: 'settings', zone: 'foot', init: 'initSettings' },\n"
+    "];\n",
+    encoding="utf-8",
+)
+(draft / "index.html").write_text('''<!doctype html><html><body>
+<nav><button data-nav-page="chat">Main</button><button data-nav-page="settings">Settings</button></nav>
+<main class="page active" id="page-chat">Main</main>
+<main class="page" id="page-settings" hidden>
+  <header class="app-page-header"><button type="button" data-shell-back>Back</button></header>
+  <div id="settings-door-rail" hidden><button type="button" data-settings-open="page:skills">Extensions</button></div>
+  <div id="settings-subpage">Models</div>
+</main>
+<main class="page" id="page-skills" hidden>Extensions</main>
+<script>
+const show = (id) => {
+  for (const el of document.querySelectorAll('.page')) { const on = el.id === `page-${id}`; el.classList.toggle('active', on); el.hidden = !on; }
+};
+document.querySelector('[data-nav-page="chat"]').addEventListener('click', () => show('chat'));
+document.querySelector('[data-nav-page="settings"]').addEventListener('click', () => show('settings'));
+document.querySelector('#page-settings [data-shell-back]').addEventListener('click', (e) => {
+  e.currentTarget.hidden = true;
+  document.getElementById('settings-subpage').hidden = true;
+  document.getElementById('settings-door-rail').hidden = false;
+});
+document.querySelector('[data-settings-open="page:skills"]').addEventListener('click', () => show('skills'));
+</script></body></html>''', encoding="utf-8")
+older_html = '''<!doctype html><html><body>
+<nav><button data-nav-page="chat">Main</button><button data-nav-page="skills">Extensions</button><button data-nav-page="settings">Settings</button></nav>
+<main class="page active" id="page-chat">Main</main>
+<main class="page" id="page-skills" hidden>Extensions</main>
+<main class="page" id="page-settings" hidden>Settings</main>
+<script>
+for (const btn of document.querySelectorAll('[data-nav-page]')) {
+  btn.addEventListener('click', () => {
+    const id = btn.dataset.navPage;
+    for (const el of document.querySelectorAll('.page')) { const on = el.id === `page-${id}`; el.classList.toggle('active', on); el.hidden = !on; }
+  });
+}
+</script></body></html>'''
+
+@contextlib.contextmanager
+def legacy_server():
+    body = older_html.encode("utf-8")
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = self.path.split("?", 1)[0]
+            if path in ("/", "/index.html"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+        def do_HEAD(self):
+            path = self.path.split("?", 1)[0]
+            self.send_response(200 if path in ("/", "/index.html") else 404)
+            self.end_headers()
+        def log_message(self, *args):
+            pass
+    class Server(http.server.ThreadingHTTPServer):
+        daemon_threads = True
+    srv = Server(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}"
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+        srv.server_close()
+
+with legacy_server() as url:
+    with stand.Stand(engine=row["engine"], executable_path=row.get("executable_path"), sandbox=row.get("sandbox", True),
+                     launch_args=row.get("args") or (), fallback=False, keep_intercepted=False, out=sys.argv[3],
+                     web_root=str(draft), url=url, twin=True, width=390, height=844, scale=1, touch=True) as s:
+        s.open(wait_ms=50)
+        places = s.places()
+        dom_nav = s.page.evaluate("() => [...document.querySelectorAll('[data-nav-page]')].map((n) => n.dataset.navPage)")
+        pair = s.nav("skills", wait_ms=50)
+        s.nav("chat", wait_ms=50)
+        s.page.evaluate("() => { const d = document.querySelector('[data-settings-open=\"page:skills\"]'); if (d) d.remove(); }")
+        missing = s.nav("skills", wait_ms=50)
+print(json.dumps({"places": places, "dom_nav": dom_nav, "pair": list(pair), "missing": list(missing)}))
+"""
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_the_stand_discovers_door_places_from_registry_and_backs_out_of_subpages(tmp_path, monkeypatch, engine):
+    seen = _probe(monkeypatch, engine, DOOR_PROBE, tmp_path)
+    assert seen["places"] == ["chat", "skills", "settings"], seen
+    assert seen["dom_nav"] == ["chat", "settings"], "no fake hidden [data-nav-page='skills'] row"
+    assert seen["pair"] == ["", ""], seen
+    assert seen["missing"][0] == "cannot be pressed", seen

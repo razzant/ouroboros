@@ -1,10 +1,8 @@
 """Project decisions are reversible; accepted new work reopens without changing routing authority."""
 import ast
 import json
-import pathlib
 import queue
 from types import SimpleNamespace
-import typing
 
 import pytest
 from starlette.applications import Starlette
@@ -12,12 +10,10 @@ from starlette.testclient import TestClient
 
 from ouroboros import dialogue_store as ds, projects_registry as registry
 from ouroboros.gateway.client_contracts import ProjectUpdateRequest
-from ouroboros.gateway.contracts import ProjectClosure, ProjectEntry
 from ouroboros.gateway.router import collect_routes
 from ouroboros.gateway.schema import validate_ingress
 from ouroboros.tools.control import _close_project, _list_projects, get_tools
 from supervisor import message_ingress, terminal_delivery
-from tests.test_gateway_parity import _js_typedef_fields, _js_typedef_properties
 
 CLOSED = {"at": "2026-10-01T10:00:00Z", "by": "ouroboros:one", "note": "The work is finished."}
 
@@ -275,7 +271,7 @@ def test_list_projects_still_answers_no_projects_for_a_provably_empty_registry(t
     app.state.drive_root = tmp_path
     with TestClient(app) as client:
         assert "No matching projects" in _list_projects(context(tmp_path))
-        assert client.get("/api/projects?all=1").json() == {"projects": []}
+        assert client.get("/api/projects?all=1").json() == {"projects": [], "complete": True}
         path.parent.mkdir(exist_ok=True)
         path.write_text('{"projects": []}')
         assert "No matching projects" in _list_projects(context(tmp_path), closed=True)
@@ -336,7 +332,7 @@ def test_skipped_project_beside_tombstone_does_not_prove_empty_sidebar(room, unr
 
         path.write_text(json.dumps({**data, "projects": [gone, unreadable, healthy]}))
         response = client.get("/api/projects?all=1")
-        assert response.status_code == 200
+        assert response.status_code == 200 and response.json()["complete"] is False, "the skipped room is unknown"
         assert [row["id"] for row in response.json()["projects"]] == [healthy["id"]]
 
     reads, snapshot = [], project_admission._registry_snapshot
@@ -413,10 +409,6 @@ def test_owner_update_and_client_contracts_agree(room):
         assert "closed" not in client.post("/api/projects/alpha/update", json={"closed": False}).json()["project"]
     assert validate_ingress({"closed": False}, ProjectUpdateRequest) == []
     assert validate_ingress({"closed": "false"}, ProjectUpdateRequest)
-    web = pathlib.Path(__file__).resolve().parents[1] / "web/modules"
-    assert _js_typedef_fields((web / "api_types.js").read_text(), "ProjectClosure") == set(typing.get_type_hints(ProjectClosure))
-    assert _js_typedef_fields((web / "api_types.js").read_text(), "ProjectEntry") == set(typing.get_type_hints(ProjectEntry))
-    assert ("boolean=", "closed") in _js_typedef_properties((web / "client_contract_types.js").read_text(), "ProjectUpdateRequest")
 
 
 @pytest.mark.parametrize("order", ["before", "after"])

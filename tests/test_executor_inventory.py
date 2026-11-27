@@ -89,6 +89,8 @@ INVENTORY: Dict[Site, Row] = {
     # The server's doors: they admit, and the body runs in a carrier.
     ("ouroboros/server_owner_routing.py", "_route_owner_message", "handle_chat_direct"): Row(
         ADMISSION, "from the intake's own stack; a live call keeps a thread of its own, whose door is run_inline_turn below"),
+    ("ouroboros/server_owner_routing.py", "_late_result_handoff", "handle_chat_direct"): Row(
+        ADMISSION, "from the intake's own stack; a late connector reply's local consideration turn runs in a carrier"),
     ("server.py", "_run_supervisor", "handle_chat_direct"): Row(ADMISSION, "the routing context's door"),
     ("supervisor/worker_chat_lane.py", "auto_resume_after_restart", "handle_chat_direct"): Row(ADMISSION, "the turn after a planned restart"),
     ("ouroboros/consciousness.py", "BackgroundConsciousness._launch", "handle_wake_direct"): Row(

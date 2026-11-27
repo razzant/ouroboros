@@ -102,6 +102,22 @@ def trust_gap(name: Any, skill_dir: Any, content_hash: Any) -> str:
     return "" if content_hash and content_hash == row.content_hash else "changed"
 
 
+def admission_refusal(loaded: Any) -> str:
+    """Why this skill's current bytes may not act for the owner now, "" when they may: ``not_installed``; ``not_reviewed`` (the
+    review gate admits no execution of these exact bytes in the current mode: a verdict, an acceptance or Cyber Pro's own judgment,
+    as ``skill_review_gate`` decides); ``disabled`` (the effective switch); ``not_trusted`` (an execution domain does not run this
+    package, ``trust_gap``). The one answer the Host Service's token check and a service sign-in's start and return read."""
+    if loaded is None:
+        return "not_installed"
+    if not loaded.review.gate_for(loaded.content_hash)["executable_review"]:
+        return "not_reviewed"
+    if not loaded.enabled:
+        return "disabled"
+    if loaded.manifest.is_extension() and trust_gap(loaded.name, loaded.skill_dir, loaded.content_hash):
+        return "not_trusted"
+    return ""
+
+
 def trust_state(skill: Any) -> Optional[dict]:
     """How an extension's code stands under an execution domain, for Skills: ``{"state": "trusted"}`` or
     ``{"state": "untrusted", "reason", "detail"}``, ``administered`` naming whether its doors refuse every change but
@@ -310,8 +326,9 @@ def _liveness_gap(state: dict) -> dict:
     if reason in _REVIEW_REASONS:
         return _gap("review", "It needs a review or your attestation of these exact bytes.")
     if reason == "missing_grants":
-        grants = state.get("grant_status") or {}
-        missing = [*(grants.get("missing_keys") or []), *(grants.get("missing_permissions") or [])]
+        from ouroboros.skill_grant_follow import blocking_lists
+
+        missing = [item for group in blocking_lists(state.get("grant_status") or {}) for item in group]
         return _gap("grants", "It needs your grant" + (f" for {', '.join(missing)}." if missing else "."))
     if reason == "skill_conflict":
         names = ", ".join((state.get("conflict") or {}).get("skills") or [])
@@ -332,6 +349,18 @@ def _undeclared(row: Any, manifest: Any) -> list:
     never reach it, so the requirement is unmet for Settings, the carrier and the queue alike."""
     declared = {str(key).upper() for key in (getattr(manifest, "env_from_settings", None) or [])}
     return [key for key, _value in row.settings if key not in declared]
+
+
+def _fixed_grant_gap(
+    row: Any, published: frozenset[str], grants: Optional[dict],
+) -> Optional[tuple[str, list[str]]]:
+    """Policy-fixed settings need both current permission (when read) and the local publication's permission."""
+    keys = {key for key, _value in row.settings}
+    if keys and grants is not None and (missing := keys.difference(grants.get("granted_keys") or ())):
+        return "grants", sorted(missing)
+    if missing := keys - published:
+        return "not_loaded", sorted(missing)
+    return None
 
 
 def requirement_state(drive_root: Any, row: Any, *, skills: Optional[list] = None) -> dict:
@@ -361,7 +390,24 @@ def requirement_state(drive_root: Any, row: Any, *, skills: Optional[list] = Non
     if undeclared := _undeclared(row, skill.manifest):
         return {**base, **_gap("settings_undeclared", f"It does not read {', '.join(undeclared)}, which your "
                                                       "organization sets for it (env_from_settings).")}
-    return {**base, **_liveness_gap(runtime_state_for_loaded_skill(skill, root, skills=skills))}
+    state = runtime_state_for_loaded_skill(skill, root, skills=skills)
+    gap = _liveness_gap(state)
+    if gap["state"] == "met" and row.settings:
+        from ouroboros.extension_registry_state import _extensions, _lock
+
+        expected_dir = str(skill.skill_dir.resolve())
+        with _lock:
+            bundle = _extensions.get(row.name)
+            published = (bundle.published_granted_keys if bundle is not None
+                         and (bundle.content_hash, bundle.skill_dir) == (row.content_hash, expected_dir)
+                         else frozenset())
+        if fixed_gap := _fixed_grant_gap(row, published, state.get("grant_status") or {}):
+            reason, keys = fixed_gap
+            names = ", ".join(keys)
+            detail = (f"It needs your grant for {names}." if reason == "grants"
+                      else f"The grant for {names} has not reached this process yet.")
+            gap = _gap(reason, detail)
+    return {**base, **gap}
 
 
 def state_rows(drive_root: Any, *, skills: Optional[list] = None) -> list:
@@ -379,31 +425,37 @@ def state_rows(drive_root: Any, *, skills: Optional[list] = None) -> list:
 
 
 def _live_gaps(drive_root: Any, *, refresh: bool) -> list:
-    """Required extensions not live in this process as pinned. ``refresh`` also rereads the small authority
-    controls (switch, review, grants, health) of a live one, as published widgets do, without rehashing."""
+    """Required extensions not ready as pinned. Only ``refresh`` reads current control files of a live one."""
     from ouroboros.extension_registry_state import _extensions, _lock
 
+    rows = required_extensions()
     with _lock:
-        live = {name: (bundle.content_hash, bundle.skill_dir, bundle.loaded_skill) for name, bundle in _extensions.items()}
-        peers = [bundle.loaded_skill for bundle in _extensions.values() if bundle.loaded_skill is not None]
+        live = {row.name: (bundle.content_hash, bundle.skill_dir, bundle.loaded_skill, bundle.published_granted_keys)
+                for row in rows if (bundle := _extensions.get(row.name)) is not None}
+        peers = [bundle.loaded_skill for bundle in _extensions.values() if bundle.loaded_skill is not None] if refresh else []
     gaps = []
-    for row in required_extensions():
-        content_hash, skill_dir, skill = live.get(row.name, ("", "", None))
-        if content_hash != row.content_hash or _real(skill_dir or "/nonexistent") != _real(row.path):
+    for row in rows:
+        content_hash, skill_dir, skill, published = live.get(row.name, ("", "", None, frozenset()))
+        if (content_hash != row.content_hash or _real(skill_dir or "/nonexistent") != _real(row.path)
+                or (skill is not None and _undeclared(row, skill.manifest))):
             gaps.append(row)
-        elif skill is not None and _undeclared(row, skill.manifest):
-            gaps.append(row)
-        elif refresh and skill is not None:
+            continue
+        grants = None
+        if refresh and skill is not None:
             from ouroboros.extension_liveness import _published_skill_readiness
 
             state = _published_skill_readiness(skill, pathlib.Path(drive_root), peers)
             if not (state.get("desired_live") and state.get("live_loaded")):
                 gaps.append(row)
+                continue
+            grants = state.get("grant_status") or {}
+        if _fixed_grant_gap(row, published, grants):
+            gaps.append(row)
     return gaps
 
 
 def queue_held() -> bool:
-    """Whether the queue keeps ordinary work waiting: ``hold`` and a required extension not live in this (the
+    """Whether the queue keeps ordinary work waiting: ``hold`` and a required extension not ready in this (the
     server) process. An in-memory read for the assignment pass; each carrier still checks itself at the start."""
     return when_unmet() == "hold" and bool(_live_gaps(None, refresh=False))
 
@@ -419,7 +471,8 @@ def _report(drive_root: Any, mode: str, rows: Iterable[dict]) -> None:
     rows = list(rows)
     policy = current()
     signature = (os.getpid(), policy.digest if policy is not None else "", mode,
-                 tuple((row["name"], row["reason"]) for row in rows))
+                 tuple((row["name"], row["reason"], row["detail"] if row["reason"] in
+                        {"grants", "not_loaded", "settings_undeclared"} else "") for row in rows))
     with _REPORT_LOCK:
         if _REPORTED.get("signature") == signature:
             return
@@ -427,7 +480,7 @@ def _report(drive_root: Any, mode: str, rows: Iterable[dict]) -> None:
     from ouroboros.utils import append_jsonl, utc_now_iso
 
     if rows:
-        log.warning("Deployment requirement not running in this process (%s): %s", mode,
+        log.warning("Deployment requirement not ready in this process (%s): %s", mode,
                     "; ".join(f"{row['name']}: {row['detail']}" for row in rows))
     try:
         append_jsonl(pathlib.Path(drive_root) / "logs" / "events.jsonl", {
@@ -447,7 +500,7 @@ def _data_root(drive_root: Any) -> pathlib.Path:
 
 
 def unmet_here(drive_root: Any = None) -> list:
-    """The requirement rows this process does not run as pinned (each with its gap); [] when all run."""
+    """The requirement rows not ready in this process (each with its gap); [] when all are ready."""
     root = _data_root(drive_root)
     gaps = _live_gaps(root, refresh=True)
     if not gaps:
@@ -476,9 +529,9 @@ def hold_text(drive_root: Any = None) -> str:
     """The owner's sentence for work this process did not start (no secret, no value)."""
     rows = unmet_here(drive_root)
     one = len(rows) == 1
-    gaps = " ".join(f"{row['name']}: {row['detail']}" for row in rows) or "A required extension is not running."
+    gaps = " ".join(f"{row['name']}: {row['detail']}" for row in rows) or "A required extension is not ready."
     return (f"🔒 Not started: your organization requires {'an extension skill that isn’t' if one else 'extension skills that aren’t'} "
-            f"running in this process. {gaps} Nothing ran; start it again once {'it runs' if one else 'they run'}. "
+            f"ready in this process. {gaps} Nothing ran; start it again once {'it is ready' if one else 'they are ready'}. "
             "Stop, Panic, Settings and Extensions stay available.")
 
 

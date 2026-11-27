@@ -1,0 +1,674 @@
+"""Where a Presence-bound run's words land, told truthfully: the send family's receipts, the forced contract, the pooled frame.
+
+One rule decides a final's fate (owner 21.11, 1A): where the place's connector declares an in-conversation message door
+the final is the run's record, elsewhere it is speech there; a schedule's run and a run without a place conversation are
+followed by no connector (``place_reply.final_is_speech``). Real Place admission and focus construction, the real
+``start_task`` producer, supervisor promote admission, the real scheduler, the real worker body, ``dispatch_event`` and
+``GET /presence/work``; only the model is scripted. Synthetic data; nothing leaves the process and no connector runs.
+"""
+from __future__ import annotations
+
+import base64
+import copy
+import json
+import pathlib
+import queue as queue_module
+import types
+
+import pytest
+
+from ouroboros.dialogue_provenance import presence_root_carrier
+from ouroboros.place_reply import final_is_speech
+from ouroboros.presence_owner_contact import flush_owner_events
+from ouroboros.tools.owner_delivery import UNDELIVERED, deliver_owner_event
+from tests.test_place_conversation_work import (
+    HEADERS, SILENT, call, dispatched, event_of, finish, promote, publish, run_root,
+)
+from tests.test_place_conversation_work import host as host  # fixture
+from tests.test_place_focus import _publish_bridge_send
+from tests.test_presence_final_audience import HEADING, THREAD, _promote, _source_turn
+from tests.test_presence_promises import _due_promise
+from tests.test_presence_promises import fired_context as fired_context  # fixture
+from tests.test_presence_project_activity import root as root  # fixture
+
+pytestmark = [pytest.mark.usefixtures("provider_catalog_offline")]
+
+FINAL = "Nightly check: two of the three services are degraded."
+LOCAL_ROOM = 'the local room of place "'
+NOT_THERE = "(Ouroboros side, not the place conversation)"
+SAYS_ANSWER = "Your final answer has a route there"
+SAYS_IF_FOLLOWED = "If a connector follows this work, your final answer has a route there"
+SAYS_TOOL_ONLY = "From this run only a connector tool reaches it."
+
+
+def _door(monkeypatch):
+    """The place's connector ``bridge`` declares an in-conversation message door (the Slack/Telegram shape)."""
+    _publish_bridge_send(monkeypatch, effect="message", target=["conversation_id"], conversation="conversation_id",
+                         thread="thread_id")
+
+
+def _registry_for(root, task):
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    ctx = ToolContext(repo_dir=root, drive_root=root, task_id=task["id"], task_metadata=dict(task["metadata"]),
+                      task_contract=task.get("task_contract") or {}, current_chat_id=task["chat_id"])
+    registry = ToolRegistry(repo_dir=root, drive_root=root)
+    registry.set_context(ctx)
+    return registry
+
+
+def _rendered(first_request, task):
+    return first_request({"type": "task", "text": "Compile it", **task})
+
+
+def _fired(root, pending, registry, objective="Check back on the report"):
+    from supervisor.queue import check_scheduled_tasks
+
+    _due_promise(registry, objective)
+    check_scheduled_tasks()
+    return next(task for task in pending if (task.get("metadata") or {}).get("schedule_occurrence"))
+
+
+def _forced(root, task):
+    from ouroboros.loop_forced_finalization import _presence_forced_contract
+
+    tools = types.SimpleNamespace(task_contract={"capability_ceiling": {}}, drive_root=root, task_id=task["id"],
+                                  task_metadata=task["metadata"])
+    return _presence_forced_contract(types.SimpleNamespace(task_id=task["id"], messages=[], tools=None), tools)
+
+
+@pytest.mark.parametrize("door", [False, True], ids=["no_door", "door"])
+def test_the_forced_final_contract_names_the_finals_fate_by_the_connectors_declaration(fired_context, monkeypatch, door):
+    """The frozen layer's one forced call: a record where the connector declares a door; without one the place's turn
+    answers its conversation and a root it handed off does only if its connector follows that work; no round is
+    added."""
+    root, _pending, _first_request = fired_context
+    monkeypatch.setattr("ouroboros.presence_context.presence_send_facts", lambda *_a: "none")
+    if door:
+        _door(monkeypatch)
+    registry, turn = _source_turn(root, THREAD)
+    first = _promote(root, monkeypatch, turn, registry)
+    for contract, turns in ((_forced(root, turn), True), (_forced(root, first), False)):
+        assert contract.count("[PRESENCE_DELIVERY]") == 1 and '"presence_finish"' in contract  # the one call, no new round
+        assert ("This task answers a Presence conversation" in contract) is (turns and not door)
+        assert ("if a connector follows this work" in contract) is (not turns and not door), contract
+        assert ("no connector reads its final there" in contract) is door and "not settled" not in contract
+
+
+def test_a_scheduled_root_keeps_its_published_contract_in_the_forced_final_too(fired_context, monkeypatch):
+    import ouroboros.loop as loop
+    from ouroboros.loop_forced_finalization import _prepare_forced_prompt, _presence_forced_armed
+    from ouroboros.presence_runner import build_presence_result_event
+    from ouroboros.task_finalization import schedule_report_run
+    from tests.test_schedule_report_door import admit, ceiling, run_metadata
+
+    root, pending, first_request = fired_context
+    registry, _turn = _source_turn(root, THREAD)
+    fired = _fired(root, pending, registry)
+    monkeypatch.setattr("ouroboros.presence_context.presence_send_facts", lambda *_a: "none")
+    assert "capability_ceiling" not in fired["task_contract"]
+    assert schedule_report_run(fired) is False
+    assert final_is_speech(fired["metadata"]) is False  # no connector follows a schedule's run
+    told = _rendered(first_request, fired)
+    assert "This run started from a schedule, not from a new message" in told
+    assert "nothing it finishes with is sent to the conversation by itself" in told and HEADING not in told
+
+    tools = _registry_for(root, fired)
+    trace = {"tool_calls": [], "reasoning_notes": []}
+    limit = loop._RoundLimitContext(
+        [{"role": "system", "content": told}, {"role": "user", "content": fired["text"]}],
+        types.SimpleNamespace(), "test-model", "medium", 1, root / "logs", fired["id"], 2,
+        None, {}, "", False, 10, drive_root=root, incoming_messages=None, owner_msg_seen=set(),
+    )
+    loop._finalize_limit_ctx(limit, tools, trace)
+    tail = _prepare_forced_prompt(limit, "[ROUND_LIMIT]", trace)
+    assert _presence_forced_armed(tools._ctx) is False
+    assert "This run started from a schedule, not from a new message" in limit.messages[0]["content"]
+    assert "[PRESENCE_DELIVERY]" not in tail and '"presence_finish"' not in tail
+    assert "a finish_task call or the same request as one JSON object" in tail
+    loop._replace_delivery_candidate(tools, limit, trace, FINAL, control="replace")
+    modern_text, modern_usage, _ = loop._handle_round_limit(limit)
+    assert modern_text == FINAL and not modern_usage.get("wake_silent")
+
+    # Contrast with a real old frozen-ceiling scheduled run: still disarmed at forced exit, and held quiet.
+    admit(root, "legacy-sched")
+    legacy = {"id": "legacy-sched", "chat_id": fired["chat_id"], "text": fired["text"],
+              "metadata": run_metadata("legacy-sched"), "task_contract": {"capability_ceiling": ceiling()}}
+    legacy_tools = _registry_for(root, legacy)
+    legacy_trace = {"tool_calls": [], "reasoning_notes": []}
+    legacy_limit = loop._RoundLimitContext(
+        [{"role": "user", "content": legacy["text"]}], types.SimpleNamespace(), "test-model", "medium",
+        1, root / "logs", legacy["id"], 2, None, {}, "", False, 10,
+        drive_root=root, incoming_messages=None, owner_msg_seen=set(),
+    )
+    loop._finalize_limit_ctx(legacy_limit, legacy_tools, legacy_trace)
+    legacy_tail = _prepare_forced_prompt(legacy_limit, "[ROUND_LIMIT]", legacy_trace)
+    assert schedule_report_run(legacy) is True and _presence_forced_armed(legacy_tools._ctx) is False
+    assert "[PRESENCE_DELIVERY]" not in legacy_tail and '"presence_finish"' not in legacy_tail
+    loop._replace_delivery_candidate(legacy_tools, legacy_limit, legacy_trace, FINAL, control="replace")
+    legacy_text, legacy_usage, _ = loop._handle_round_limit(legacy_limit)
+    assert legacy_text == FINAL and legacy_usage.get("wake_silent") is True
+    legacy_event = build_presence_result_event(legacy, FINAL, legacy_tools._ctx,
+                                               terminal_origin="model_final", silent=True)
+    assert (legacy_event["outcome"], legacy_event["text"], legacy_event["message"]) == ("silent", "", "")
+
+
+# --- receipts: one seam, the actual audience and the same reader ------------------------------------------------
+
+
+def _family(ctx, tmp_path):
+    from ouroboros.tools.cards import _show_card
+    from ouroboros.tools.control_runtime import _send_user_message
+    from ouroboros.tools.core_artifacts import _send_file, _send_links, _send_photo, _send_video
+
+    image, video, doc = tmp_path / "a.png", tmp_path / "a.mp4", tmp_path / "a.txt"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 4096)
+    video.write_bytes(b"0" * 64)
+    doc.write_text("a report", encoding="utf-8")
+    return {
+        "send_user_message": lambda: _send_user_message(ctx, "A word."),
+        "send_photo": lambda: _send_photo(ctx, image_base64=base64.b64encode(image.read_bytes()).decode()),
+        "send_video": lambda: _send_video(ctx, file_path=str(video)),
+        "send_file": lambda: _send_file(ctx, file_path=str(doc)),
+        "send_links": lambda: _send_links(ctx, links=[{"label": "Docs", "url": "https://example.test/x"}]),
+        "show_card": lambda: _show_card(ctx, title="Status", fallback_text="All green",
+                                        components=[{"type": "metric", "label": "Up", "value": "9"}]),
+    }
+
+
+def _words(name, receipt):
+    """A card's receipt is its identity plus the family's words."""
+    return json.loads(receipt)["delivery"] if name == "show_card" else receipt
+
+
+def _turn_ctx(root, *, event_queue):
+    registry, turn = _source_turn(root, THREAD)
+    ctx = registry._ctx
+    ctx.event_queue, ctx.pending_events = event_queue, []
+    return ctx, turn
+
+
+class _Refusing:
+    def put_nowait(self, _event):
+        raise OSError("the live queue refused")
+
+
+def test_an_inline_place_turn_is_told_its_local_room_for_the_whole_family_with_its_route(fired_context, tmp_path):
+    root, _pending, _first_request = fired_context
+    live = queue_module.Queue()
+    ctx, turn = _turn_ctx(root, event_queue=live)
+    for name, send in _family(ctx, tmp_path).items():
+        receipt = _words(name, send())
+        assert "accepted for delivery to " + LOCAL_ROOM in receipt, name
+        assert "not the place conversation" in receipt and SAYS_ANSWER in receipt, name
+        assert "owner chat" not in receipt and "shown" not in receipt, name
+    assert live.qsize() == 6 and not ctx.pending_events
+    assert {frame["chat_id"] for frame in list(live.queue)} == {turn["chat_id"]}
+
+
+@pytest.mark.parametrize("door", [False, True], ids=["no_door", "door"])
+def test_each_runs_receipt_names_its_finals_fate_by_the_connectors_declaration(fired_context, monkeypatch, door):
+    """Owner 21.11, 1A: where the connector declares a door a run's final is its record, so only a connector tool
+    reaches the place. Without one the turn's final has a route there, and a root it handed off has one only if its
+    connector follows that work: the host does not trace the lineage, and no connector ever polls the second root.
+    A schedule's run is followed by no connector."""
+    from ouroboros.tools.control_runtime import _send_user_message
+
+    root, pending, _first_request = fired_context
+    if door:
+        _door(monkeypatch)
+    registry, turn = _source_turn(root, THREAD)
+    first = _promote(root, monkeypatch, turn, registry)
+    second = _promote(root, monkeypatch, turn, registry)
+    fired = _fired(root, pending, _registry_for(root, first))
+    for task, speech in ((turn, SAYS_ANSWER), (first, SAYS_IF_FOLLOWED), (second, SAYS_IF_FOLLOWED), (fired, None)):
+        ctx = _registry_for(root, task)._ctx
+        ctx.event_queue, ctx.pending_events = queue_module.Queue(), []
+        receipt = _send_user_message(ctx, "Working on it.")
+        assert LOCAL_ROOM in receipt and NOT_THERE in receipt, task["id"]
+        says = SAYS_TOOL_ONLY if door or speech is None else speech
+        assert [fate for fate in (SAYS_ANSWER, SAYS_IF_FOLLOWED, SAYS_TOOL_ONLY) if fate in receipt] == [says], (
+            task["id"], receipt)
+
+
+def test_a_project_bound_root_names_its_project_for_the_whole_family(fired_context, monkeypatch, tmp_path):
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    root, _pending, _first_request = fired_context
+    registry, turn = _source_turn(root, THREAD)
+    first = _promote(root, monkeypatch, turn, registry)
+    project = create_project(root, "launch", name="Launch")
+    bind_task_to_project(root, first["id"], project["id"], project["chat_id"], origin={"absent": "system"})
+    ctx = _registry_for(root, first)._ctx
+    ctx.event_queue, ctx.pending_events = queue_module.Queue(), []
+    for name, send in _family(ctx, tmp_path).items():
+        receipt = _words(name, send())
+        assert 'Project room "Launch"' in receipt and "not the place conversation" in receipt, name
+        assert "owner chat" not in receipt and "Main" not in receipt and "local room" not in receipt, name
+
+
+def test_ordinary_project_and_main_receipts_name_only_acceptance(tmp_path):
+    from tests.test_main_notice import _ctx, _project
+
+    ctx = _ctx(tmp_path, _project(tmp_path), event_queue=queue_module.Queue())
+    family = _family(ctx, tmp_path)
+    assert family["send_file"]().split("\n")[0] == "OK: file 'a.txt' accepted for delivery to Project room \"Launch\"."
+    assert family["send_user_message"]() == 'OK: message accepted for delivery to Project room "Launch".'
+    assert json.loads(family["show_card"]())["delivery"] == 'OK: card accepted for delivery to Project room "Launch".'
+    plain = _ctx(tmp_path / "other", 1, event_queue=queue_module.Queue())
+    family = _family(plain, tmp_path)
+    assert family["send_user_message"]() == "OK: message accepted for delivery to owner chat."
+    assert family["send_file"]().split("\n")[0] == "OK: file 'a.txt' accepted for delivery to owner chat."
+    assert json.loads(family["show_card"]())["delivery"] == "OK: card accepted for delivery to owner chat."
+
+
+@pytest.mark.parametrize("reader", ["_load_bindings", "project_thread_name"])
+def test_unreadable_delivery_audience_never_guesses_owner_chat(tmp_path, monkeypatch, reader):
+    from ouroboros import projects_registry
+    from tests.test_main_notice import _ctx, _project
+
+    chat = _project(tmp_path)
+    ctx = _ctx(tmp_path, chat, event_queue=queue_module.Queue())
+    family = _family(ctx, tmp_path)
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("registry temporarily unavailable")
+
+    with monkeypatch.context() as failure:
+        failure.setattr(projects_registry, reader, unavailable)
+        for name, send in family.items():
+            receipt = _words(name, send())
+            assert "accepted for delivery" in receipt and "destination unavailable" in receipt, name
+            assert "owner chat" not in receipt and "shown" not in receipt, name
+    assert ctx.event_queue.qsize() == 6 and not ctx.pending_events
+    assert {frame["chat_id"] for frame in list(ctx.event_queue.queue)} == {chat}
+    assert 'Project room "Launch"' in family["send_user_message"]()
+
+
+def test_hidden_delivery_is_not_described_as_an_owner_visible_chat(tmp_path):
+    from tests.test_main_notice import _ctx
+
+    ctx = _ctx(tmp_path, 0, event_queue=queue_module.Queue())
+    for name, send in _family(ctx, tmp_path).items():
+        receipt = _words(name, send())
+        assert "accepted for delivery to the hidden task record" in receipt, name
+        assert "not an owner-visible chat" in receipt and "owner chat" not in receipt, name
+    assert ctx.event_queue.qsize() == 6
+    assert {frame["chat_id"] for frame in list(ctx.event_queue.queue)} == {0}
+
+
+@pytest.mark.parametrize("room_count", [10, 1000])
+def test_receipts_and_bus_share_unchanged_room_labels_without_listing_projects(tmp_path, monkeypatch, room_count):
+    from ouroboros import projects_registry as projects
+    from ouroboros.tools.control_runtime import _send_user_message
+    from tests.test_main_notice import _ctx, _project
+
+    chat = _project(tmp_path)
+    data = projects._load(tmp_path)
+    data["projects"].extend({"id": f"other-{i}", "name": f"Other {i}", "chat_id": 2_000_000_000 + i,
+                             "lifecycle": "tombstoned"} for i in range(room_count))
+    projects._save(tmp_path, data)
+    ctx = _ctx(tmp_path, chat, event_queue=queue_module.Queue())
+    original, reads = projects.display_registry_snapshot, []
+
+    def snapshot(root):
+        reads.append(root)
+        return original(root)
+
+    def no_listing(*_args, **_kwargs):
+        raise AssertionError("a receipt must not list/sort every Project")
+
+    monkeypatch.setattr(projects, "display_registry_snapshot", snapshot)
+    monkeypatch.setattr(projects, "list_reserved_projects", no_listing)
+    for _ in range(20):
+        assert 'Project room "Launch"' in _send_user_message(ctx, "Progress")
+        frame = ctx.event_queue.get_nowait()
+        projects.stamp_project_thread(tmp_path, frame)
+        assert frame["project_thread"] is True
+    assert reads == [tmp_path]
+    projects.update_project(tmp_path, "launch", name="Renamed")
+    assert 'Project room "Renamed"' in _send_user_message(ctx, "Progress")
+    assert reads == [tmp_path, tmp_path]
+
+
+def test_room_label_cache_keeps_source_failure_and_ambiguous_names_unknown(tmp_path):
+    from ouroboros import projects_registry as projects
+    from ouroboros.tools.control_runtime import _send_user_message
+    from tests.test_main_notice import _ctx, _project
+
+    chat = _project(tmp_path)
+    ctx = _ctx(tmp_path, chat, event_queue=queue_module.Queue())
+    assert 'Project room "Launch"' in _send_user_message(ctx, "Progress")
+    path = projects._registry_path(tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text('{"projects": [], "projects": []}', encoding="utf-8")
+    assert "destination unavailable" in _send_user_message(ctx, "Progress")
+    path.unlink()  # the committed witness remains: this is not a new empty install
+    assert "destination unavailable" in _send_user_message(ctx, "Progress")
+    # A writer never re-creates a lost registry; reconciliation restores this root's own from its committed witness.
+    projects.reconcile_projects(tmp_path)
+    assert 'Project room "Launch"' in _send_user_message(ctx, "Progress")
+    data["projects"].append({"id": "duplicate-chat", "chat_id": chat, "name": "Other"})
+    projects._save(tmp_path, data)
+    assert "destination unavailable" in _send_user_message(ctx, "Progress")
+    assert chat in projects.project_thread_chat_ids(tmp_path)  # membership still known
+    other = _ctx(tmp_path / "empty-install", 1, event_queue=queue_module.Queue())
+    assert _send_user_message(other, "Progress") == "OK: message accepted for delivery to owner chat."
+
+
+@pytest.mark.parametrize("event_queue", [None, _Refusing()], ids=["no_queue", "refused"])
+def test_an_inline_turn_with_no_consumer_is_told_nothing_was_delivered(fired_context, tmp_path, event_queue):
+    from ouroboros.tools.control_runtime import _send_user_message
+
+    root, _pending, _first_request = fired_context
+    ctx, _turn = _turn_ctx(root, event_queue=event_queue)
+    family = _family(ctx, tmp_path)
+    for name, send in family.items():
+        receipt = _words(name, send())
+        assert "LOCAL_ROOM_UNAVAILABLE" in receipt and "not delivered" in receipt and LOCAL_ROOM in receipt, name
+    assert not ctx.pending_events and not getattr(ctx, "_owner_message_sent", False)
+    assert _send_user_message(ctx, "Again.").startswith("⚠️")
+
+
+def test_a_refused_live_send_leaves_at_the_turns_end_through_the_carriers_sink_once_and_in_order(fired_context, monkeypatch, tmp_path):
+    from ouroboros.tools.control_runtime import _send_user_message
+
+    root, _pending, _first_request = fired_context
+    monkeypatch.setattr("ouroboros.utils.in_worker_process", lambda: True)
+    ctx, turn = _turn_ctx(root, event_queue=_Refusing())
+    for words in ("First.", "Second."):
+        receipt = _send_user_message(ctx, words)
+        assert "queued for delivery to " + LOCAL_ROOM in receipt
+    final = {"type": "send_message", "chat_id": turn["chat_id"], "text": "the final", "task_id": turn["id"]}
+    result = {"type": "presence_result", "task_id": turn["id"], "text": "the final"}
+    events = [*ctx.pending_events, final, result]
+    received: list = []
+    flush_owner_events(root, events, sink=received.extend)
+    assert [row["text"] for row in received] == ["First.", "Second."]  # never the final, never the result frame
+    assert events == [final, result]
+    flush_owner_events(root, events, sink=received.extend)
+    assert len(received) == 2
+
+
+def test_a_buffered_local_row_reaches_the_attached_bus_and_a_lost_bus_never_fails_the_turn(fired_context, monkeypatch):
+    from ouroboros.tools.control_runtime import _send_user_message
+    from supervisor import workers
+
+    root, _pending, _first_request = fired_context
+    bus = queue_module.Queue()
+    monkeypatch.setattr(workers, "_EVENT_Q", bus)
+    ctx, _turn = _turn_ctx(root, event_queue=None)
+    assert "queued for delivery to " + LOCAL_ROOM in _send_user_message(ctx, "A word.")
+    events = list(ctx.pending_events)
+    flush_owner_events(root, events)
+    frame = bus.get_nowait()
+    assert frame["text"] == "A word." and frame["system_type"] == "proactive_message" and not events
+
+    monkeypatch.setattr(workers, "_EVENT_Q", None)
+    kept = [dict(frame)]
+    flush_owner_events(root, kept)  # logged and left; the turn's answer is not held hostage to it
+    assert kept == [frame]
+
+
+def test_private_main_contact_is_not_a_local_row_and_keeps_its_custody_without_a_consumer(fired_context):
+    from ouroboros.tools.owner_delivery import local_room_frame
+
+    root, _pending, _first_request = fired_context
+    ctx, turn = _turn_ctx(root, event_queue=None)
+    frame = {"type": "send_message", "chat_id": 1, "text": "private", "task_id": turn["id"],
+             "system_type": "main_notice", "progress_meta": {"presence_contact": {"task_id": turn["id"]}}}
+    assert not local_room_frame(frame)
+    assert deliver_owner_event(ctx, frame) == "deferred" and ctx.pending_events == [frame]
+    assert UNDELIVERED != "deferred" and ctx._owner_message_sent is True
+
+
+def test_presence_main_contact_stamps_before_snapshot_and_outbox_registration(tmp_path, monkeypatch):
+    from ouroboros import presence_owner_contact
+
+    captured = {}
+    ctx = types.SimpleNamespace(task_id="wake-contact", task_metadata={"initiator": "consciousness"},
+                                current_chat_id=1, drive_root=tmp_path, pending_events=[])
+
+    def fake_patch(_root, _task_id, updater):
+        captured["stored"] = copy.deepcopy(updater({"owner_contacts": {}}))
+
+    monkeypatch.setattr("ouroboros.task_store.patch_document", fake_patch)
+    monkeypatch.setattr("supervisor.terminal_delivery.register_pending_delivery",
+                        lambda _root, event: captured.setdefault("registered", copy.deepcopy(event)) or True)
+    monkeypatch.setattr("ouroboros.tools.owner_delivery.deliver_owner_event",
+                        lambda _ctx, event: captured.setdefault("delivered", copy.deepcopy(event)) or "deferred")
+
+    result = presence_owner_contact.send_main_message(ctx, "wake contact", {"task_id": "source"}, "req-1")
+    assert "Main message" in result
+    stored = next(iter(captured["stored"]["owner_contacts"].values()))["event"]
+    assert stored["progress_meta"]["initiator"] == "consciousness"
+    assert captured["registered"]["progress_meta"]["initiator"] == "consciousness"
+    assert captured["delivered"]["progress_meta"]["initiator"] == "consciousness"
+
+
+# --- the pooled frame: declared, content free ---------------------------------------------------------------------
+
+
+def _ledger(root):
+    ctx = types.SimpleNamespace(DRIVE_ROOT=root, RUNNING={}, WORKERS={}, PENDING=[], rows=[])
+    ctx.append_jsonl = lambda path, row: ctx.rows.append((pathlib.Path(path).name, dict(row)))
+    return ctx
+
+
+def test_every_frame_of_a_pooled_root_has_a_handler_and_its_final_reaches_no_log(host):
+    from supervisor.event_taxonomy import TELEMETRY_ONLY, disposition_for
+    from supervisor.events import EVENT_HANDLERS, dispatch_event
+
+    world = host()
+    task = promote(world, event=event_of(world, "the-promoter"))
+    publish(world)
+    box = run_root(world, dispatched(world, task), finish(FINAL))
+    box["thread"].join(120)
+    assert not box["thread"].is_alive() and "error" not in box, box.get("error")
+    frames = []
+    while not box["out"].empty():
+        frames.append(box["out"].get_nowait())
+    assert not [frame.get("type") for frame in frames if frame.get("type") not in EVENT_HANDLERS]
+    assert not [frame for frame in frames if frame.get("type") == "send_message" and FINAL in str(frame.get("text"))]
+
+    frame = next(row for row in frames if row.get("type") == "presence_result")
+    assert frame["text"] == FINAL  # the inline runner's copy stays whole; the absorption is the supervisor's
+    assert disposition_for("presence_result").tier == TELEMETRY_ONLY
+    ledger = _ledger(world.data)
+    dispatch_event(dict(frame), ledger)
+    [(name, row)] = ledger.rows
+    assert name == "events.jsonl" and row["type"] == "presence_result" and row["task_id"] == task["id"]
+    assert row["outcome"] == "message" and row["output_ref"] == frame["output_ref"] and row["text_chars"] == len(FINAL)
+    assert FINAL not in json.dumps(row)
+
+    # One final, read by its reference: a repeated poll returns the same output to deduplicate on.
+    views = [world.client.get(f"/presence/work/{task['id']}", headers=HEADERS,
+                              params={"binding_id": world.place.place_id}).json() for _ in range(2)]
+    assert views[0]["text"] == FINAL and views[0]["output_ref"] == frame["output_ref"]
+    assert views[0] == views[1]
+
+
+def test_intentional_silence_stays_silent_and_a_tool_send_is_not_repeated_by_the_frame(host):
+    world = host()
+    task = promote(world, event=event_of(world, "the-quiet"))
+    box = run_root(world, dispatched(world, task),
+                   call(("send_user_message", {"text": "Local note."})), SILENT)
+    box["thread"].join(120)
+    assert not box["thread"].is_alive() and "error" not in box, box.get("error")
+    frames = []
+    while not box["out"].empty():
+        frames.append(box["out"].get_nowait())
+    notes = [frame for frame in frames if frame.get("type") == "send_message" and frame.get("text") == "Local note."]
+    assert len(notes) == 1 and notes[0]["system_type"] == "proactive_message"
+    frame = next(row for row in frames if row.get("type") == "presence_result")
+    assert frame["outcome"] == "silent" and frame["text"] == ""
+
+
+def test_a_silent_place_holds_a_promoted_roots_final(host):
+    from ouroboros import places
+
+    world = host()
+    task = promote(world, event=event_of(world, "the-silenced"))
+    places.edit_place(world.data, world.place.place_id, "set_state", author="owner", state="silent")
+    box = run_root(world, dispatched(world, task), finish(FINAL))
+    box["thread"].join(120)
+    assert not box["thread"].is_alive() and "error" not in box, box.get("error")
+    view = world.client.get(f"/presence/work/{task['id']}", headers=HEADERS,
+                            params={"binding_id": world.place.place_id}).json()
+    assert view["status"] == "completed" and view["outcome"] == "silent" and view["text"] == ""
+
+
+@pytest.mark.parametrize("frame,error", [
+    ({"type": "no_such_event", "task_id": "t1", "text": "a private final", "nested": {"message": "private too"}}, ""),
+    ({"task_id": "t1", "text": "a private final"}, "missing event.type"),
+    (["a private final"], "event is not dict"),
+])
+def test_a_frame_nobody_answers_leaves_its_shape_never_its_body(tmp_path, frame, error):
+    from supervisor.events import dispatch_event
+
+    ledger = _ledger(tmp_path)
+    dispatch_event(frame, ledger)
+    [(name, row)] = ledger.rows
+    assert name == "supervisor.jsonl" and "event_repr" not in row and "private" not in json.dumps(row)
+    assert row["type"] == ("unknown_worker_event" if not error else "invalid_worker_event")
+    assert row.get("error", "") == error
+    if isinstance(frame, dict):
+        assert row["task_id"] == "t1" and "text" in row["event_keys"]
+
+
+# --- Continue of a handed-off root (A01): the successor has no place conversation ---------------------------------
+
+
+def _continued(world):
+    """A handed-off root ended by a provider failure, then the real Continue admission."""
+    from ouroboros.owner_continue import continuation_offer
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.continuation_admission import admit_continuation
+    from tests.worker_pool_support import affirm_ready
+
+    task = promote(world, event=event_of(world, "the-handed-off"))
+    dispatched(world, task)
+    world.queue.RUNNING.pop(task["id"], None)
+    write_task_result(world.data, task["id"], "failed", reason_code="provider_unavailable",
+                      # ``promote``'s bare producer context has no task id for the author stamp a real turn writes.
+                      metadata={**task["metadata"], "objective_author": {"kind": "task", "task_id": "the-turn"}},
+                      description="Check the three services",
+                      result="The model provider was unavailable.")
+    offer = continuation_offer(load_task_result(world.data, task["id"]), task["id"])
+    assert offer["eligible"] is True, offer
+    affirm_ready(world.workers.WORKERS[1])
+    ack = admit_continuation(task["id"], action_nonce="nonce-1234567890")
+    assert ack["ok"] is True, ack
+    return task, next(row for row in world.queue.PENDING if row["id"] == ack["successor_task_id"])
+
+
+def _work(world, work_ref):
+    return world.client.get(f"/presence/work/{work_ref}", headers=HEADERS, params={"binding_id": world.place.place_id})
+
+
+def test_a_continued_handoff_speaks_nowhere_and_its_private_answer_is_not_served_by_the_old_reference(host):
+    """A01's residual, pinned: a successor has no speaker carrier, so nothing it finishes with is speech today."""
+    from ouroboros.place_reply import reply_carrier
+    from ouroboros.task_results import write_task_result
+
+    world = host()
+    task, successor = _continued(world)
+    metadata = successor["metadata"]
+    assert "presence" not in metadata and reply_carrier(metadata) == {}
+    assert metadata["presence_binding_authority"] == {"binding_id": task["metadata"]["presence"]["binding_id"]}
+    assert final_is_speech(metadata) is False  # its receipts say only a connector tool reaches the place
+    assert presence_root_carrier(metadata) == {"presence_binding_authority": metadata["presence_binding_authority"]}
+
+    write_task_result(world.data, successor["id"], "completed", metadata=metadata, result="An owner-side private report.")
+    view = _work(world, task["id"])
+    assert view.status_code == 200 and view.json()["status"] == "failed"
+    assert "private report" not in json.dumps(view.json())
+    assert _work(world, successor["id"]).status_code == 404  # no connector's work: it answers its owner's room
+
+
+@pytest.mark.parametrize("failed_row", [None, "First.", "Second."], ids=["healthy", "first_refused", "second_refused"])
+def test_saved_turn_flush_preserves_order_through_the_worker_drain(root, monkeypatch, failed_row):
+    """A scripted author, real saved-turn carrier/finalization and worker drain; only the bus fails once."""
+    from ouroboros import presence_carrier
+    from ouroboros.presence_runner import _read_previous_turn, build_presence_result_event
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.tools.control_runtime import _send_user_message
+    from supervisor.worker_process import run_worker_task
+    from tests.test_presence_moved_lifecycle import _seed_and_built
+    from tests.test_presence_project_activity import PROJECT, _move
+    from tests.test_presence_runner import _event
+
+    _seed, built = _seed_and_built(root)
+    tid = built["id"]
+    write_task_result(root, tid, "scheduled", metadata=built["metadata"], chat_id=built["chat_id"],
+                      _is_direct_chat=True, source="presence", task_contract=built["task_contract"], result="Task paused.")
+    _move(root, tid, PROJECT)
+    monkeypatch.setattr("ouroboros.utils.in_worker_process", lambda: True)
+    seen, frames, attempts = {}, [], []
+
+    class Author:
+        def handle_task(self, task):
+            ctx = _registry_for(root, task)._ctx
+            ctx.model_wait_context = types.SimpleNamespace(control_reason=lambda: None)
+            state = presence_carrier.reenter(ctx)
+            assert state and state.lease.held()
+            ctx.event_queue = _Refusing()  # producer buffers in send order for the carrier's end
+            for words in ("First.", "Second.", "Third."):
+                assert "queued for delivery" in _send_user_message(ctx, words)
+            frame = build_presence_result_event(task, FINAL, ctx, terminal_origin="model_final")
+            write_task_result(root, tid, "completed", metadata=task["metadata"], result=FINAL,
+                              terminal_origin="model_final")
+            seen["events"] = [*ctx.pending_events, frame, {"type": "task_done", "task_id": tid, "status": "completed"}]
+            return seen["events"]
+
+    def put(frame):
+        if frame.get("system_type") == "proactive_message":
+            words = frame["text"]
+            attempts.append(words)
+            if words == failed_row and attempts.count(words) == 1:
+                raise OSError("scripted single enqueue refusal")
+        frames.append(dict(frame))
+
+    monkeypatch.setattr("ouroboros.agent.make_agent", lambda **_kw: Author())
+    resumed = {**built, "_attempt": 1, "_budget_pause_resume": {"grant_id": "g", "pause_id": "p"},
+               "_execution_owner": {"kind": "pooled", "lane": "project"}}
+    run_worker_task(types.SimpleNamespace(_event_queue=None, owner_wait_callback=None), resumed,
+                    wid=91, out_q=types.SimpleNamespace(put=put), repo_dir=str(root), drive_root=str(root))
+    words = [frame["text"] for frame in frames if frame.get("system_type") == "proactive_message"]
+    previous = _read_previous_turn(root, _event().conversation_key)
+    print(json.dumps({"failed_row": failed_row, "attempts": attempts, "delivered": words,
+                      "final": previous.get("message"), "returned": [row["type"] for row in seen["events"]]}))
+    assert load_task_result(root, tid)["status"] == "completed" and previous["message"] == FINAL
+    assert frames[-1]["type"] == "task_done" and not any(row["type"] == "presence_result" for row in frames)
+    assert words == ["First.", "Second.", "Third."]
+    assert [row.get("text") for row in seen["events"] if row.get("system_type") == "proactive_message"] == (
+        [] if failed_row is None else ["First.", "Second.", "Third."][["First.", "Second."].index(failed_row):])
+
+
+@pytest.mark.parametrize("name", ["send_user_message", "send_photo", "show_card"])
+def test_main_receipts_claim_only_queue_acceptance(tmp_path, name):
+    from tests.test_main_notice import _ctx
+
+    bus = queue_module.Queue()
+    ctx = _ctx(tmp_path, 1, event_queue=bus)
+    receipt = _family(ctx, tmp_path)[name]()
+    print(json.dumps({"tool": name, "receipt": receipt, "undrained_frames": bus.qsize()}))
+    assert bus.qsize() == 1 and not ctx.pending_events
+    if name == "show_card":
+        card = json.loads(receipt)
+        assert card["card_id"] == bus.queue[0]["card_id"] and card["revision"] == 1
+        assert "shown" not in card
+    words = _words(name, receipt)
+    assert "accepted for delivery to" in words and "sent" not in words
+
+
+def test_main_notice_receipt_claims_only_queue_acceptance(tmp_path):
+    from ouroboros.tools.control_runtime import _send_user_message
+    from tests.test_main_notice import _ctx, _project
+
+    bus = queue_module.Queue()
+    ctx = _ctx(tmp_path, _project(tmp_path), event_queue=bus)
+    receipt = _send_user_message(ctx, "A notice.", destination="main")
+    print(json.dumps({"receipt": receipt, "undrained_frames": bus.qsize()}))
+    assert bus.qsize() == 1 and bus.queue[0]["chat_id"] == 1
+    assert "accepted for delivery to the main chat" in receipt and "sent" not in receipt

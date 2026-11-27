@@ -19,7 +19,7 @@
  */
 import { taskModel } from './api_client.js';
 import { renderLiveCardMeta } from './chat_activity.js';
-import { clampWithToggle } from './chat_reply_quote.js';
+import { clampWithToggle, releaseClampFade } from './chat_reply_quote.js';
 import { observeLayout } from './capsule.js';
 import { fmt, tr, translateString } from './i18n.js';
 import { isCoarsePointer, isStackLayout } from './layout.js';
@@ -29,7 +29,7 @@ import { sourceMark } from './model_source_mark.js';
 import { receiptWords, resolvedTier, routeTiers, servedWords, tierNamed, tierWord } from './processing_choice.js';
 import { modelWaitReasonLabel, modelWaitRoleLabel } from './model_wait.js';
 import { controlIcon } from './page_icons.js';
-import { showToast } from './toast.js';
+import { modalNotice, showToast } from './toast.js';
 import { bindPopoverPosition } from './ui_interactions.js';
 import { describeRoute, normalizeRoute, routeKey, sameRoute, shortName } from './chat_model_routes.js';
 
@@ -469,6 +469,7 @@ export function openCardModel(record) {
         if (busy || closed) return;
         busy = true;
         again = null;
+        const say = modalNotice(sheet?.el, deps.toast);  // named at the press: a tier's answer stands in the sheet it leaves open
         refusal.hidden = true;
         sheet?.el.setAttribute('aria-busy', 'true');
         sheet?.paint();
@@ -480,7 +481,7 @@ export function openCardModel(record) {
             const kept = before.said.said.short;
             if (action === 'processing') {
                 const words = tier ? fmt('{tier} for this work.', { tier: tierWord(tier) }) : tr('model.tier.default_work', 'Default tier for this work.');
-                deps.toast(`${words} ${APPLIED_WORDS[reply?.applied] || ''}`.trim(), 'ok');
+                say(`${words} ${APPLIED_WORDS[reply?.applied] || ''}`.trim(), 'ok');
                 // The answer's own tier stands on the card until the next state body says it again.
                 adoptAnswer(record, state, before, { processing: reply?.processing });
                 return;
@@ -531,6 +532,7 @@ export function openCardModel(record) {
             headKey = nextHead;
             unwatchHead();
             unwatchHead = () => {};
+            releaseClampFade(title.querySelector('.card-model-pop-line'));
             const words = nodeOf(doc, 'span', 'card-model-pop-words', heading);
             title.replaceChildren(words);
             if (said.cited) {
@@ -544,6 +546,7 @@ export function openCardModel(record) {
                 // The published words stay intact, including whitespace and case. Only CSS clips them.
                 const cut = () => line.scrollHeight > line.clientHeight + 1;
                 const toggle = clampWithToggle(line, title, {
+                    scrollRegion: tr('model.cited.scroll_region', 'Quoted model choice'),
                     fit: (_node, _text, _lines, onFit) => onFit(cut()),
                     onDomWrite: (write) => {
                         const changed = write();
@@ -613,6 +616,7 @@ export function openCardModel(record) {
         retry.removeEventListener('click', onRetry);
         unsubscribe();
         unwatchHead();
+        releaseClampFade(title.querySelector('.card-model-pop-line'));
         sheet?.close({ focus: false });
         if (openPopover === handle) openPopover = null;
         if (state.pressable) state.fact.setAttribute('aria-expanded', 'false');
@@ -644,7 +648,10 @@ export function openCardModel(record) {
             // The Main row is the way to follow Main: its facts say what a press does, or that the work already does.
             mainFacts: () => (follows() ? tr('model.row.follows_main', 'this work follows Main') : tr('model.row.will_follow_main', 'this work will follow Main')),
             onRoute: pick,
-            onPin: (route, pinned) => store.setPinned(route, pinned).catch((error) => deps.toast(error?.message || 'Could not change the pinned models.', 'error')),
+            onPin: (route, pinned) => {
+                const pinSay = modalNotice(sheet?.el, deps.toast);
+                return store.setPinned(route, pinned).catch((error) => pinSay(error?.message || 'Could not change the pinned models.', 'error'));
+            },
         },
         tier: { onChoose: (tier) => run('processing', null, undefined, tier), view: tierView,
             mainRoute: () => { const { follows, route } = next(); return follows ? route : null; } },

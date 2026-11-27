@@ -25,6 +25,8 @@ from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Sequen
 from ouroboros.context_budget import (
     HOST_CONTEXT_KIND_KEY,
     HOST_TEXT_SHA_KEY,
+    PROGRAM_HISTORY_KIND,
+    REPLY_SOURCE_SHA_KEY,
     ContextReclaimReceipt,
     ContextReclaimRequest,
     ReclaimStatus,
@@ -50,6 +52,8 @@ _CAPSULE_CONTRACT_DIGEST = "98d43b93d717fc52dbc84e872923b2469de2b54ead0527189160
 _LEGACY_CAPSULE_CONTRACT_DIGEST = "6bd892aa2479a9c8b65036b0c18e53ccc076cb5bf5a0d87e351ea38182fa3402"
 _MIN_CAPSULE_BYTES = 512
 _SHA256_HEX = frozenset("0123456789abcdef")
+# Reasoning fields a send keeps only for their own route; a switch drops them (``sanitize_reasoning_on_model_switch``).
+_ROUTE_REASONING_KEYS = frozenset({"reasoning", "reasoning_details", "reasoning_content", "response_id"})
 # A note's one label, written once with it and dated by ``written_at`` in its metadata: when the mind wrote the note,
 # the ``compact_context`` call its queued request records, not the later boundary that applies it (a caller without that
 # time dates the note when it writes it). A note written before notes carried their time keeps its old bytes
@@ -140,6 +144,17 @@ def _unique_refs(values: Sequence[Any]) -> Tuple[Dict[str, Any], ...]:
             seen.add(identity)
             result.append(normalized)
     return tuple(result)
+
+
+def _visible_row(message: Mapping[str, Any]) -> Dict[str, Any]:
+    """A row's fields as its source text shows them. Host row metadata (an outcome record, provenance stamps) and the
+    reasoning a send keeps only for its route stay with the raw row for identity, checkpoints, outcome reads and replay:
+    its fields (``_ROUTE_REASONING_KEYS``) and what ``shown_content`` omits from an assistant's content (a lane's plan,
+    reasoning blocks, thought parts, signatures). Only row keys and blocks are read; nested names are data."""
+    from ouroboros.llm_messages import HOST_ONLY_MESSAGE_KEYS, shown_content
+    hidden = HOST_ONLY_MESSAGE_KEYS | _ROUTE_REASONING_KEYS | {REPLY_SOURCE_SHA_KEY}
+    row, shown = {key: value for key, value in message.items() if key not in hidden}, shown_content(message)
+    return row if shown is None and "content" not in message else {**row, "content": shown}
 
 
 def _summary_projection(value: Any) -> Any:
@@ -257,7 +272,7 @@ def _unit_from_slice(
     raw_messages = list(messages[start:end + 1])
     raw_bytes = _canonical_bytes(raw_messages)
     try:
-        source_text = _canonical_json(_summary_projection(raw_messages))
+        source_text = _canonical_json(_summary_projection([_visible_row(message) for message in raw_messages]))
     except _UnsafeVisual:
         return None
     raw_sha = _sha256(raw_bytes)
@@ -362,9 +377,9 @@ def _atomic_units(
 # key marks a host-typed row (acceptance observation, review feedback, native
 # continuation, custody) that stays raw: typed meaning never gets flattened to prose.
 _PLAIN_ROW_KEYS = frozenset({"role", "content", "name", "cache_control", HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY})
-# A Responses reply's receipt rides every assistant row; folding the row retires its native replay with it.
-_ASSISTANT_PROSE_KEYS = _PLAIN_ROW_KEYS | {"reasoning_content", "reasoning_details", "refusal", "annotations",
-                                          *RESPONSES_PRIVATE_KEYS}
+# A Responses receipt rides every assistant row, as may its route's reasoning; folding the row retires both with it.
+_ASSISTANT_PROSE_KEYS = _PLAIN_ROW_KEYS | {"reasoning", "reasoning_content", "reasoning_details", "refusal",
+                                          "annotations", *RESPONSES_PRIVATE_KEYS}
 UnitScope = Literal["tool", "dialogue"]
 UnitKind = Literal["capsule", "tool", "assistant", "user"]
 
@@ -382,19 +397,20 @@ def _plain_text(content: Any) -> Optional[str]:
 
 
 def _is_dialogue_prose_row(message: Any) -> bool:
-    """A completed single prose row: the assistant's own reply or a host prose row. Never a
-    row with tool protocol, native or non-text blocks, or host-typed keys. ``role=user`` is
-    not authorship: owner words are excluded by callers through typed provenance."""
-    if not isinstance(message, Mapping):
+    """A completed single prose row whose source text shows words (``_visible_row``; a lane's display projection stands
+    for its bytes): the assistant's own reply or a host prose row. Never a row with tool protocol, native or non-text
+    blocks, or host-typed keys. ``role=user`` is not authorship: callers exclude owner words by typed provenance."""
+    from ouroboros.llm_messages import DISPLAY_KEY
+    if not isinstance(message, Mapping) or message.get(HOST_CONTEXT_KIND_KEY) == PROGRAM_HISTORY_KIND:
         return False
     role = str(message.get("role") or "")
-    allowed = _ASSISTANT_PROSE_KEYS if role == "assistant" else _PLAIN_ROW_KEYS if role == "user" else frozenset()
+    allowed = {"assistant": _ASSISTANT_PROSE_KEYS | {DISPLAY_KEY}, "user": _PLAIN_ROW_KEYS}.get(role, frozenset())
     if _review_source_ref(message):
         allowed = allowed | {REVIEW_HISTORY_MESSAGE_KEY}
     if any(key not in allowed for key in message) or message.get("tool_calls") or message.get("function_call"):
         return False
-    text = _plain_text(message.get("content"))
-    return text is not None and bool(text.strip())
+    shown = _plain_text(message.get("content")) is not None and _plain_text(_visible_row(message).get("content"))
+    return bool(shown and shown.strip())  # text bytes that show words: a lane's plan alone, or "", is no prose
 
 
 def _review_source_ref(message: Mapping[str, Any]) -> Optional[dict]:

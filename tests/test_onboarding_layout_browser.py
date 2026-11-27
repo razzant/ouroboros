@@ -184,6 +184,45 @@ def test_one_update_line_keeps_the_accounts_step_in_the_setup_window(wizard, the
     assert any("checkLatest=true" in url and "harness=codex" in url for url in asked), asked
 
 
+# A family whose program the running engine lacks (owner's choice A, 26.11.2026): its row says so, and its one press
+# installs the program and connects; Antigravity's next step is a name for the account. Fictitious values.
+ABSENT_AGY = {**OLD_PROGRAM, "harness": "agy", "selection": dict.fromkeys(OLD_PROGRAM["selection"]),
+              "newest": {"status": "not_read", "source": None}, "updateAvailable": "cannot_tell"}
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_a_missing_program_installs_and_connects_from_its_row_in_the_setup_window(wizard, theme, tmp_path):
+    from playwright.sync_api import expect
+    evidence = diagnostic_directory(tmp_path / "frames", "missing-program", publish=True)
+    page, logins = wizard["page"], []
+    page.route("**/api/claudexor/maintenance/harnesses**", lambda route: route.fulfill(
+        json={"observedAt": "2026-11-26T00:00:00Z", "harnesses": [ABSENT_AGY, {**ABSENT_AGY, "harness": "opencode"}]}))
+
+    def login(route):
+        logins.append(route.request.post_data_json)
+        route.fulfill(status=400, json={"error": "Antigravity keeps no default account; add a named one.",
+                                        "code": "credential_profile_required", "required_actions": ["add_named_account"]})
+
+    page.route("**/api/claudexor/login**", login)
+    page = _open(wizard, SETUP_WINDOW, theme)
+    row = page.locator('[data-agent-family="agy"]')
+    expect(row.locator(".agent-family-status")).to_have_text("Not installed where Claudexor runs")
+    expect(row.locator("[data-agent-connect]")).to_have_text("Install & connect")
+    # The engine's other programs: one line under the rows, each its own Install, which installs and promises no sign-in.
+    more = page.locator(".agent-other-programs")
+    expect(more).to_contain_text("More programs:")
+    expect(more.locator('[data-program="opencode"] [data-program-action="install"]')).to_have_text("Install")
+    page.screenshot(path=str(evidence / f"row-{theme}.png"), animations="disabled")
+    facts = _facts(page)
+    assert facts["overflow"] == 0, facts
+    assert all(item["inView"] and item["uncovered"] for item in facts["rows"] + facts["connects"])
+    _assert_way_forward(facts)
+    row.locator("[data-agent-connect]").click()
+    expect(page.locator("#agents-login-host [data-profile-name-entry]")).to_be_visible()
+    assert logins == [{"harness": "agy", "login_flow": "device_auth"}]
+    page.screenshot(path=str(evidence / f"name-{theme}.png"), animations="disabled")
+
+
 @pytest.mark.parametrize("size", [SETUP_WINDOW, PHONE], ids=["setup-window", "phone"])
 def test_a_failed_sign_in_and_the_update_offer_share_the_viewport(wizard, size, tmp_path):
     evidence = diagnostic_directory(tmp_path / "frames", "program-line", publish=True)
@@ -206,16 +245,57 @@ def test_a_failed_sign_in_and_the_update_offer_share_the_viewport(wizard, size, 
     _assert_way_forward(_facts(page))
 
 
-def test_a_stopped_engine_shows_no_program_line_and_no_warning(wizard, tmp_path):
-    asked = []
-    _serve_programs(wizard["page"], asked)
-    wizard["fixture"]["status"]["daemon"] = {"state": "stale"}
+def test_a_stopped_engine_is_asked_nothing_until_the_owner_starts_it_to_list_programs(wizard, tmp_path):
+    """Claudexor installed and idle: the rows keep Connect, one line says what Connect does for a missing program, and
+    its press says before it is pressed that it starts the agent daemon; a refused start leaves it. Fictitious values."""
+    from playwright.sync_api import expect
+    evidence = diagnostic_directory(tmp_path / "frames", "program-line", publish=True)
+    page, asked, woke = wizard["page"], [], []
+    status = wizard["fixture"]["status"]
+    # The engine nobody has woken, as the backend answers it: `stale` AND every facet `not_read` — `daemonAnswered`
+    # counts one `ok` facet as an answering engine, so the reads the fixture ships for a running daemon would draw the
+    # step as if the programs were known. The fixture's own running reads are kept for the successful wake below, the
+    # one act that serves them; the refused first wake leaves the status untouched.
+    running_reads = dict(status["reads"])
+    status["reads"] = {facet: "not_read" for facet in status["reads"]}
+    status["daemon"] = {"state": "stale", "runtime": {"state": "ready"}}
+
+    def inventory(route):
+        asked.append(route.request.url)
+        route.fulfill(json={"observedAt": "2026-11-26T00:00:00Z", "harnesses": [ABSENT_AGY, {**ABSENT_AGY, "harness": "opencode"}]})
+
+    def wake(route):
+        woke.append(route.request.method)
+        if len(woke) == 1:
+            route.fulfill(status=503, json={"error": "fixture_unavailable: The engine could not start."})
+            return
+        status["daemon"] = {"state": "running", "engine_version": "fixture", "runtime": {"state": "ready"}}
+        status["reads"] = dict(running_reads)
+        route.fulfill(json=status)
+
+    page.route("**/api/claudexor/maintenance/harnesses**", inventory)
+    page.route("**/api/claudexor/wake", wake)
     page = _open(wizard, SETUP_WINDOW)
-    page.wait_for_timeout(500)
-    page.screenshot(path=str(diagnostic_directory(tmp_path / "frames", "program-line", publish=True) / "stopped-engine.png"), animations="disabled")
+    line = page.locator("[data-programs-unknown]")
+    expect(line).to_contain_text("If a program is missing, Connect tries to install it first.")
+    expect(line.locator('[data-program-action="find"]')).to_have_text("Show programs to install (starts the agent daemon)")
+    page.screenshot(path=str(evidence / "stopped-engine.png"), animations="disabled")
+    assert _in_view(page, '[data-programs-unknown] [data-program-action="find"]')
     assert page.locator(".harness-model-program").count() == 0
-    assert "Program inspection" not in page.locator("#agents-accounts").inner_text()
-    assert asked == [], "a stopped engine is never asked about its programs"
+    assert "Not installed" not in page.locator("#agents-accounts").inner_text()
+    assert asked == [] and woke == [], "showing the step asks and starts nothing"
+    _assert_way_forward(_facts(page))
+    line.locator('[data-program-action="find"]').click()
+    expect(line).to_contain_text("Could not start the agent daemon: fixture_unavailable: The engine could not start.")
+    page.screenshot(path=str(evidence / "stopped-engine-refused.png"), animations="disabled")
+    line.locator('[data-program-action="find"]').click()
+    row = page.locator('[data-agent-family="agy"]')
+    expect(row.locator(".agent-family-status")).to_have_text("Not installed where Claudexor runs")
+    expect(row.locator("[data-agent-connect]")).to_have_text("Install & connect")
+    expect(page.locator('.agent-other-programs [data-program="opencode"] [data-program-action="install"]')).to_have_text("Install")
+    expect(page.locator("[data-programs-unknown]")).to_have_count(0)
+    page.screenshot(path=str(evidence / "stopped-engine-started.png"), animations="disabled")
+    assert woke == ["POST", "POST"] and asked, (woke, asked)
 
 
 @pytest.mark.parametrize("size", [SETUP_WINDOW, PHONE], ids=["setup-window", "phone"])
@@ -556,16 +636,26 @@ def test_late_save_states_keep_their_actions_beside_a_wrapped_reason(wizard, siz
     assert page.locator("#next-btn").inner_text() == "Retry save"
     assert facts["reason"]["inView"] and "unknown" in facts["reasonText"]
     assert page.locator("#check-save-btn").bounding_box()["y"] + 1 >= facts["reason"]["y"]
+    reason = page.locator(".wizard-error")
+    assert reason.locator('[role="status"]').count() == 1
+    assert reason.get_attribute("tabindex") is None and reason.get_attribute("data-scroll-below") is None
 
     page.click("#next-btn")  # refused, with a long error: all of it readable above Back and Retry
     page.wait_for_function("() => document.querySelector('.wizard-error').textContent.includes('refused')")
     page.wait_for_function("() => Math.abs(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--wizard-footer-height')) - document.querySelector('.wizard-footer').getBoundingClientRect().height) < 1")
     facts = _facts(page)
-    page.screenshot(path=str(evidence / f"{size[0]}-refused.png"), animations="disabled")
     _assert_way_forward(facts)
     # However long it is, the reason scrolls in place: the actions and the step keep the window.
     assert facts["reason"]["inView"] and 16 < facts["reason"]["h"] <= size[1] * 0.4 + 1, facts["reason"]
     assert facts["footer"]["h"] < size[1] * 0.7, facts["footer"]
+    page.locator(".wizard-error[data-scroll-below]:not([data-scroll-above])").wait_for()
+    assert reason.get_attribute("tabindex") == "0"
+    assert reason.locator('[role="status"]').inner_text().startswith("This save was refused:")
+    assert "linear-gradient" in reason.evaluate("el => getComputedStyle(el).maskImage")
+    page.screenshot(path=str(evidence / f"{size[0]}-refused.png"), animations="disabled")
+    reason.evaluate("el => { el.scrollTop = el.scrollHeight; }")
+    page.locator(".wizard-error[data-scroll-above]:not([data-scroll-below])").wait_for()
+    _assert_way_forward(_facts(page))
 
     page.click("#next-btn")  # saved, and this tab cannot restart: no footer, no clearance left behind
     expect(page.locator(".step-title")).to_have_text("Setup saved — restart to apply it")

@@ -1,0 +1,150 @@
+{
+  "git_version": "2.56.1",
+  "git_commit": "03b41523c576f26ad34085378717a0c1b287470f",
+  "releases": "https://github.com/razzant/ouroboros/releases",
+  "artifacts": {
+    "darwin-arm64": {
+      "layout": "dugite",
+      "url": "https://github.com/desktop/dugite-native/releases/download/v2.56.1/dugite-native-v2.56.1-238326e-macOS-arm64.tar.gz",
+      "size_bytes": 63505330,
+      "sha256": "a882ec6882416b57d212a22bac845ae27944f96cf73453a864f6a12c17863a79",
+      "version_output": "git version 2.56.1"
+    },
+    "darwin-x64": {
+      "layout": "dugite",
+      "url": "https://github.com/desktop/dugite-native/releases/download/v2.56.1/dugite-native-v2.56.1-238326e-macOS-x64.tar.gz",
+      "size_bytes": 67474588,
+      "sha256": "3fdb0c2f102fe0273d64b5d5fb77315c19f2b4648a154593723cb9ed98f2bc7d",
+      "version_output": "git version 2.56.1"
+    },
+    "linux-arm64": {
+      "layout": "dugite",
+      "url": "https://github.com/desktop/dugite-native/releases/download/v2.56.1/dugite-native-v2.56.1-238326e-ubuntu-arm64.tar.gz",
+      "size_bytes": 25267157,
+      "sha256": "8626f036e1235f5b209d8331c368d85a9790988fb21a443e5f61662a178abcb6",
+      "version_output": "git version 2.56.1"
+    },
+    "linux-x64": {
+      "layout": "dugite",
+      "url": "https://github.com/desktop/dugite-native/releases/download/v2.56.1/dugite-native-v2.56.1-238326e-ubuntu-x64.tar.gz",
+      "size_bytes": 67476577,
+      "sha256": "e5bc3e8e80b57a5bcd8da18d59b23f5b39533d19019ac1d50b0bd34f051d111d",
+      "version_output": "git version 2.56.1"
+    },
+    "win32-x64": {
+      "layout": "mingit",
+      "url": "https://github.com/git-for-windows/git/releases/download/v2.56.1.windows.1/MinGit-2.56.1-64-bit.zip",
+      "size_bytes": 39849768,
+      "sha256": "4a92850b6e917da4fd010669b614b55dccf5b0ec333a534cc4be4700dfefdafd",
+      "version_output": "git version 2.56.1.windows.1"
+    }
+  },
+  "sources": {
+    "dugite": {
+      "archive": "git-sources-macos-linux-2.56.1.tar",
+      "label": "macOS and Linux",
+      "release": true,
+      "size_bytes": 8714240,
+      "sha256": "ab12dbc57ccd27644e1948d427642bf108d8e2f60c0be056ecd4450a217c1cb9",
+      "links": [
+        "Git 2.56.1: https://www.kernel.org/pub/software/scm/git/git-2.56.1.tar.xz (8494608 bytes, SHA-256 f0b0bf89264b9bd2e1c640363e7529643989da76281600473c50745cd34a607f), commit 03b41523c576f26ad34085378717a0c1b287470f",
+        "Build recipe (dugite-native 238326e93b097bb31e138a75dbec433d789ef7a2, script/build-macos.sh and script/build-ubuntu.sh): https://github.com/desktop/dugite-native/tree/238326e93b097bb31e138a75dbec433d789ef7a2"
+      ],
+      "files": [
+        {"name": "git-2.56.1.tar.xz", "url": "https://www.kernel.org/pub/software/scm/git/git-2.56.1.tar.xz", "size_bytes": 8494608, "sha256": "f0b0bf89264b9bd2e1c640363e7529643989da76281600473c50745cd34a607f"},
+        {"name": "dugite-native/.gitattributes", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/.gitattributes", "size_bytes": 29, "sha256": "13cb7f5e12dd469dc5c88afcf0cd035abe6cd1fc2f30afe224991e66b4262222"},
+        {"name": "dugite-native/.github/CODEOWNERS", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/.github/CODEOWNERS", "size_bytes": 396, "sha256": "ca64bc7ceb16163f421176d233963651113dd13a183bbfdc4b87b7069080b5e3"},
+        {"name": "dugite-native/.github/workflows/ci.yml", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/.github/workflows/ci.yml", "size_bytes": 6230, "sha256": "947a508f74fd7424e813c95b41f9c14a8ed6f91ff73c43239844aadd33c8c872"},
+        {"name": "dugite-native/.github/workflows/release.yml", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/.github/workflows/release.yml", "size_bytes": 3578, "sha256": "25cb233581b5f15342df6a7b4c25a2390498e820f7a7b7f3b0d9a40a2e6a47e7"},
+        {"name": "dugite-native/.github/workflows/update-dependencies.yml", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/.github/workflows/update-dependencies.yml", "size_bytes": 3681, "sha256": "b7eb13962b41cd768cf47317120bb6985d5c5ff18242f4202f4de1fbfa1ef110"},
+        {"name": "dugite-native/.gitignore", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/.gitignore", "size_bytes": 100, "sha256": "b10220a4f245ecccf9c12b2e9cfd73a0f9e0f474de658ddf2f26d6c63baa71eb"},
+        {"name": "dugite-native/.gitmodules", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/.gitmodules", "size_bytes": 68, "sha256": "4ad3b0539045e367e7385a4b7ed2827f6900138a0ad2ba5a32174d0de0c0e89c"},
+        {"name": "dugite-native/.nvmrc", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/.nvmrc", "size_bytes": 3, "sha256": "f14b4987904bcb5814e4459a057ed4d20f58a633152288a761214dcd28780b56"},
+        {"name": "dugite-native/.prettierignore", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/.prettierignore", "size_bytes": 5, "sha256": "8c1285484156f7bb4e103d7d3783ca5d13638ba8fe6984744c68f7a3472e6726"},
+        {"name": "dugite-native/.prettierrc.yml", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/.prettierrc.yml", "size_bytes": 102, "sha256": "fd50398e3c203bb06a174329479d1dd4d3f6751494944e87d5db62eccd62f5ec"},
+        {"name": "dugite-native/.vscode/settings.json", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/.vscode/settings.json", "size_bytes": 34, "sha256": "67da40d959aa7f6fad667f1a85c2bd3a673cc99173913a2ffe19857bc5c970c4"},
+        {"name": "dugite-native/CODE_OF_CONDUCT.md", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/CODE_OF_CONDUCT.md", "size_bytes": 3268, "sha256": "091a010a5c90fd40a0600a287b7e71cc246528275d7629fa4a45f1ef3a4c5490"},
+        {"name": "dugite-native/CONTRIBUTING.md", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/CONTRIBUTING.md", "size_bytes": 1760, "sha256": "7fb15667884c8b2a2dff19e3e9d9cb153122a09e9f8f36b107cd14c9dd15088a"},
+        {"name": "dugite-native/LICENSE.md", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/LICENSE.md", "size_bytes": 18046, "sha256": "db296f2f7f35bca3a174efb0eb392b3b17bd94b341851429a3dff411b1c2fc73"},
+        {"name": "dugite-native/README.md", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/README.md", "size_bytes": 1518, "sha256": "d905dcf8b0c881c00547b65fda1302cef7dfffdebe6fe3b989db0083d6bc055c"},
+        {"name": "dugite-native/dependencies.json", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/dependencies.json", "size_bytes": 5103, "sha256": "5e5c0e01bbb5ff6174270e176998ea569bf939ef5f826d91d705adf4da388d0a"},
+        {"name": "dugite-native/docs/README.md", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/docs/README.md", "size_bytes": 351, "sha256": "f380773bfb82266392bbc34d51e215d72acdd13879b21c5092b3cf5628da68f9"},
+        {"name": "dugite-native/docs/adding-new-components.md", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/docs/adding-new-components.md", "size_bytes": 1991, "sha256": "09823dee371e944377ceb4a2b1f75580343864ebcd393009f831dc7395284b99"},
+        {"name": "dugite-native/docs/making-changes.md", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/docs/making-changes.md", "size_bytes": 2015, "sha256": "3970ef625a1cdd6ea69a1a7e611742aab76890adc73570cee10d0f149a5851f9"},
+        {"name": "dugite-native/docs/overview.md", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/docs/overview.md", "size_bytes": 1327, "sha256": "8e789c229598a488aa299e01db10ce0ca66bdf69e806298336cc7124103fa454"},
+        {"name": "dugite-native/docs/releases.md", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/docs/releases.md", "size_bytes": 1142, "sha256": "3839a3916001ec01ef6821f2a50c4e27f41fbfc70e58938dadef96b8288395a0"},
+        {"name": "dugite-native/docs/setup.md", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/docs/setup.md", "size_bytes": 2297, "sha256": "da16cf14fc53e98b634f0a43046276cdd935e9f99efbc76ba265506a9f6ef59b"},
+        {"name": "dugite-native/docs/updating-dependencies.md", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/docs/updating-dependencies.md", "size_bytes": 2361, "sha256": "09781464208f3806ad5a305a865786cd4bbba3237bde0cbbdfc03508705512a4"},
+        {"name": "dugite-native/package-lock.json", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/package-lock.json", "size_bytes": 61683, "sha256": "da413174faa0b583fc2e275beec0dec07ddffe9120f000f87d2877e494409188"},
+        {"name": "dugite-native/package.json", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/package.json", "size_bytes": 1246, "sha256": "d6cf1845845c3b2af3bc5d6f3c04dcd311f5a040cdb50aa759988e0e332f3e22"},
+        {"name": "dugite-native/resources/posix.gitconfig", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/resources/posix.gitconfig", "size_bytes": 630, "sha256": "f37eb06cf8567109e92f5fe8db2f59ac16a93264970a5481696cbb8f1ee70e20"},
+        {"name": "dugite-native/script/build-macos.sh", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/build-macos.sh", "size_bytes": 5800, "sha256": "8b9872e478b8fc78a78a4dfbfcbac7bb8febc3bbe748f247634beecdf78efa52"},
+        {"name": "dugite-native/script/build-ubuntu.sh", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/build-ubuntu.sh", "size_bytes": 6354, "sha256": "c7c24e8f6d03c4cdd8c6f6730051adcdd82b62c23be78d1aef03c790cbc91fba"},
+        {"name": "dugite-native/script/build-win32.sh", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/build-win32.sh", "size_bytes": 6201, "sha256": "bdbccab045a7f698914d475669c3cd1b0037b9de4889fb896c47dd3d1c0aa642"},
+        {"name": "dugite-native/script/build.sh", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/build.sh", "size_bytes": 735, "sha256": "6ed665f579a0f5d91467854843769791d4539045581cf011c63b968a8952a76a"},
+        {"name": "dugite-native/script/check-static-linking.sh", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/check-static-linking.sh", "size_bytes": 1359, "sha256": "c37c416d068779549cfd5314236b250827621e5aa614ec90b6afcd4bb21159f2"},
+        {"name": "dugite-native/script/compute-checksum.sh", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/compute-checksum.sh", "size_bytes": 440, "sha256": "16f0fae6fb10b6bffbb59fe98302217b87cbefdfa175bbc8ca9bfeff126f1474"},
+        {"name": "dugite-native/script/fetch-asset-checksum.ts", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/fetch-asset-checksum.ts", "size_bytes": 494, "sha256": "71a2d3fbd0ad1d9ef2687701ae73566854101492a59f7eb80ab28048f1e2892b"},
+        {"name": "dugite-native/script/generate-release-notes.mts", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/generate-release-notes.mts", "size_bytes": 5328, "sha256": "0c9613c73401893cd1573c5e2e9fa9cde482e4685e539858cbb734be221a6333"},
+        {"name": "dugite-native/script/generate-release-pr-contents.mjs", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/generate-release-pr-contents.mjs", "size_bytes": 2873, "sha256": "2b39b16720fde2c556ff670f1562f2e0b3290a4fdac71ccdf0e78bd5a3fe23d5"},
+        {"name": "dugite-native/script/lib/coerce-version.ts", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/lib/coerce-version.ts", "size_bytes": 279, "sha256": "c417388d9d48d1c5a5c016bd8aeb0805d76fed8e8cd7aa50edec5fe93dfcec66"},
+        {"name": "dugite-native/script/lib/dependencies.ts", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/lib/dependencies.ts", "size_bytes": 2657, "sha256": "2717c4671d68840c26dbca294211e02e1927e6a06a0e2c4aa152f7daa390807d"},
+        {"name": "dugite-native/script/package.sh", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/package.sh", "size_bytes": 2852, "sha256": "56df9d38702cc15b1905ec17b1f73eadb1501ae9db92c4fa1b5b1f309226396c"},
+        {"name": "dugite-native/script/update-git-credential-manager.ts", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/update-git-credential-manager.ts", "size_bytes": 2681, "sha256": "f6fc0de7ea4d47cc6619cde8c43ea69199ef915d75637a4a8d4c600fef32732c"},
+        {"name": "dugite-native/script/update-git-lfs.ts", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/update-git-lfs.ts", "size_bytes": 3629, "sha256": "c8ab28ddbd924ebd6b31b04a8726e8183fccdd46706c56bc501a2c1f78f4d397"},
+        {"name": "dugite-native/script/update-git.ts", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/update-git.ts", "size_bytes": 5724, "sha256": "2e5378fc08bb3507433ba08b3102b2527709851b74de6ef4a479e0bd1d4cf04f"},
+        {"name": "dugite-native/script/verify-lfs-contents.sh", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/script/verify-lfs-contents.sh", "size_bytes": 886, "sha256": "6fe9b405b1ce4a2d6f25f63013d29988d1bf88c26f0f4553c10f189e5ddb67a5"},
+        {"name": "dugite-native/test/macos.sh", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/test/macos.sh", "size_bytes": 217, "sha256": "2982fd7a1b54f5df2b8c15a01da6e0e030b92a59c7a4e71d02aa0de1effa4f5d"},
+        {"name": "dugite-native/test/ubuntu.sh", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/test/ubuntu.sh", "size_bytes": 218, "sha256": "84b617ac2c615478c7723dfb06babf8cd5ba1045dd1368a8a7e07e762f5104e3"},
+        {"name": "dugite-native/test/win32.sh", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/test/win32.sh", "size_bytes": 217, "sha256": "954e2d3e88d9651bdb1b513ed7196257324efe593aa7f244e314069c84be7f21"},
+        {"name": "dugite-native/tsconfig.json", "url": "https://raw.githubusercontent.com/desktop/dugite-native/238326e93b097bb31e138a75dbec433d789ef7a2/tsconfig.json", "size_bytes": 149, "sha256": "9e7069298a7685a2ed5e3226047ce1e2b86466f3abc9866b9cc1b627ce234274"}
+      ]
+    },
+    "mingit": {
+      "archive": "git-sources-windows-2.56.1.windows.1.tar",
+      "label": "Windows",
+      "release": true,
+      "note": "Source packages for the programs, libraries and scripts shipped in the pruned MinGit payload, plus its package-version manifest. Packages contributing only license texts are excluded.",
+      "size_bytes": 378931200,
+      "sha256": "f667f4486827bc8bafcd266801dbfbc004107b3b110cf3a99d20f9930ed77786",
+      "links": [
+        "Git for Windows 2.56.1.windows.1: https://github.com/git-for-windows/git/tree/v2.56.1.windows.1",
+        "Every other bundled package at the version etc/package-versions.txt names: https://github.com/git-for-windows/MINGW-packages and https://github.com/git-for-windows/MSYS2-packages (upstream MSYS2: https://github.com/msys2/MINGW-packages and https://github.com/msys2/MSYS2-packages)"
+      ],
+      "files": [
+        {"name": "git-for-windows/bash-5.3.015-2.src.tar.gz", "url": "https://github.com/git-for-windows/pacman-repo/releases/download/2026-08-20T13-55-07.365148200Z/bash-5.3.015-2.src.tar.gz", "size_bytes": 11373772, "sha256": "817a480aa08f0f112af9496a9335d3a48f4c479ef5e1b1740df6dcc76670d94a", "packages": ["bash"]},
+        {"name": "git-for-windows/mingw-w64-curl-8.23.0-1.src.tar.gz", "url": "https://github.com/git-for-windows/pacman-repo/releases/download/2026-10-15T16-10-28.300057100Z/mingw-w64-curl-8.23.0-1.src.tar.gz", "size_bytes": 3461322, "sha256": "9ce76c7fd71c214d216cb546dfa5fda8fd6ff43a2e274bc0ee34f85ae2d4e309", "packages": ["mingw-w64-ucrt-x86_64-curl-winssl"]},
+        {"name": "git-for-windows/mingw-w64-git-2.56.1.1-1.src.tar.gz", "url": "https://github.com/git-for-windows/pacman-repo/releases/download/2026-11-10T19-59-24.481979800Z/mingw-w64-git-2.56.1.1-1.src.tar.gz", "size_bytes": 13074447, "sha256": "2a0769d21e3e3cec9216ddca920fe7d7efe274e7d1c14882003a2ce7d674c7b4", "packages": ["mingw-w64-ucrt-x86_64-git", "mingw-w64-ucrt-x86_64-git-credential-wincred", "mingw-w64-ucrt-x86_64-git-for-windows-addons", "mingw-w64-ucrt-x86_64-git-subtree"]},
+        {"name": "git-for-windows/mingw-w64-git-extra-1.1.715.85f886165-1.src.tar.gz", "url": "https://github.com/git-for-windows/pacman-repo/releases/download/2026-09-10T22-57-20.747747200Z/mingw-w64-git-extra-1.1.715.85f886165-1.src.tar.gz", "size_bytes": 54126, "sha256": "a17b18ebe09ba357c798f8963497fd8086e4cc8a5f889e9a351a614d038cf331", "packages": ["mingw-w64-ucrt-x86_64-git-extra"]},
+        {"name": "git-for-windows/msys2-runtime-3.6.10-4.src.tar.gz", "url": "https://github.com/git-for-windows/pacman-repo/releases/download/2026-09-28T10-53-27.205004700Z/msys2-runtime-3.6.10-4.src.tar.gz", "size_bytes": 147910549, "sha256": "3dae788aee6bf5244f124aa7e0a04328e6585d92ed1826bb510f23aefbc40a1e", "packages": ["msys2-runtime"]},
+        {"name": "git-for-windows/package-versions-2.56.1-MinGit.txt", "url": "https://github.com/git-for-windows/git/releases/download/v2.56.1.windows.1/package-versions-2.56.1-MinGit.txt", "size_bytes": 2134, "sha256": "2d03bb928c4589af6ef057e9d7b41fd3057428eefd671212e59df10ef4bc03c3"},
+        {"name": "msys2/coreutils-8.32-5.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/coreutils-8.32-5.src.tar.zst", "size_bytes": 5561991, "sha256": "2b8689413bc50367a9995adf50ea84cd3caaff0ec68a8f32d8328842c3f83835", "packages": ["coreutils"]},
+        {"name": "msys2/dash-0.5.13.5-1.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/dash-0.5.13.5-1.src.tar.zst", "size_bytes": 262843, "sha256": "fd6a1d82f3eb628b16d4405ce36812c2828063864cbd79c556b54a728c908fef", "packages": ["dash"]},
+        {"name": "msys2/diffutils-3.12-1.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/diffutils-3.12-1.src.tar.zst", "size_bytes": 1941123, "sha256": "474c4a3528a2afbb8d9608c65ad1bdbbd81ff42c143a438d7d56272a61b1bfac", "packages": ["diffutils"]},
+        {"name": "msys2/filesystem-2026.10.17-1.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/filesystem-2026.10.17-1.src.tar.zst", "size_bytes": 93240, "sha256": "969d2c0e10fa824ab0524c11cfe2c389891d44ef83b709ee86d9ec12dd75df81", "packages": ["filesystem"]},
+        {"name": "msys2/findutils-4.11.0-2.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/findutils-4.11.0-2.src.tar.zst", "size_bytes": 2454027, "sha256": "92edf442f61f8873318811a688ba327a0d2878a63a9ed21992b5cce12b0ae146", "packages": ["findutils"]},
+        {"name": "msys2/gawk-5.4.1-1.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/gawk-5.4.1-1.src.tar.zst", "size_bytes": 6693723, "sha256": "d8b8cdd6cbf72431c02cb26cf92174aca5b6f1b7791aaf29fa3a11d205a66b39", "packages": ["gawk"]},
+        {"name": "msys2/gcc-16.2.0-1.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/gcc-16.2.0-1.src.tar.zst", "size_bytes": 107239619, "sha256": "19c927f27da78aad25a449a4e6e3bfe8650541cc09ac2e701a4ec4d7e61137b9", "packages": ["gcc-libs"]},
+        {"name": "msys2/gettext-0.22.5-1.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/gettext-0.22.5-1.src.tar.zst", "size_bytes": 21732949, "sha256": "e07a0b3e6716aae86dc0edd2dcdc8864731d56051345592b53659a3840ccfbd8", "packages": ["libintl"]},
+        {"name": "msys2/gmp-6.3.0-2.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/gmp-6.3.0-2.src.tar.zst", "size_bytes": 2096699, "sha256": "02356ca25ce362edb883ce7c060050de2cec5f2b1227a1c56ef7c0a0f99ff667", "packages": ["gmp"]},
+        {"name": "msys2/grep-1~3.0-7.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/grep-1~3.0-7.src.tar.zst", "size_bytes": 1378706, "sha256": "acba43b9b2c3eb393f9a75d02a1eca34fa23d959541150a7ac4ffbafce3cae4e", "packages": ["grep"]},
+        {"name": "msys2/libiconv-1.19-1.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/libiconv-1.19-1.src.tar.zst", "size_bytes": 5133707, "sha256": "5a8bcd3242e2be94fffd9f03fadcda8d9fd64047430050c5cbd214cd3bf7f0a7", "packages": ["libiconv"]},
+        {"name": "msys2/mingw-w64-brotli-1.2.1-1.src.tar.zst", "url": "https://repo.msys2.org/mingw/sources/mingw-w64-brotli-1.2.1-1.src.tar.zst", "size_bytes": 645162, "sha256": "3dfc69b88a111ef4809928e81d4cb650ea9c7ba5da4ebd1bf28d6effdeeb6bd6", "packages": ["mingw-w64-ucrt-x86_64-brotli"]},
+        {"name": "msys2/mingw-w64-gettext-1.0-1.src.tar.zst", "url": "https://repo.msys2.org/mingw/sources/mingw-w64-gettext-1.0-1.src.tar.zst", "size_bytes": 10267655, "sha256": "cca0d0c8f60353faccc5ad40405240014e4a7ccc8b1c6ca9f4626aef3097d26e", "packages": ["mingw-w64-ucrt-x86_64-gettext-runtime"]},
+        {"name": "msys2/mingw-w64-libiconv-1.19-1.src.tar.zst", "url": "https://repo.msys2.org/mingw/sources/mingw-w64-libiconv-1.19-1.src.tar.zst", "size_bytes": 5131029, "sha256": "74428280c17094da5b702c29b2e1a0abae59556ea5dfdd65705cc8ccc1e000fb", "packages": ["mingw-w64-ucrt-x86_64-libiconv"]},
+        {"name": "msys2/mingw-w64-libidn2-2.3.8-4.src.tar.zst", "url": "https://repo.msys2.org/mingw/sources/mingw-w64-libidn2-2.3.8-4.src.tar.zst", "size_bytes": 2147337, "sha256": "cd83e8514fbeb6a4499299b88691b9b9ecc3114cca1e2be4f6c54aab6ae9ddd0", "packages": ["mingw-w64-ucrt-x86_64-libidn2"]},
+        {"name": "msys2/mingw-w64-libpsl-0.21.5-3.src.tar.zst", "url": "https://repo.msys2.org/mingw/sources/mingw-w64-libpsl-0.21.5-3.src.tar.zst", "size_bytes": 6829368, "sha256": "102b4ab4c60322162e808c5c81f545438c346c659e8fb63e0851066f07a0e76b", "packages": ["mingw-w64-ucrt-x86_64-libpsl"]},
+        {"name": "msys2/mingw-w64-libssh2-1.11.1-2.src.tar.zst", "url": "https://repo.msys2.org/mingw/sources/mingw-w64-libssh2-1.11.1-2.src.tar.zst", "size_bytes": 1094498, "sha256": "bb78f8354441190221ece18a96c09f631fe02648f5dd7d1e247ae8d00a9fea5f", "packages": ["mingw-w64-ucrt-x86_64-libssh2-wincng"]},
+        {"name": "msys2/mingw-w64-libunistring-1.4.2-1.src.tar.zst", "url": "https://repo.msys2.org/mingw/sources/mingw-w64-libunistring-1.4.2-1.src.tar.zst", "size_bytes": 4770800, "sha256": "a5bafb360d5c13c5c52ef071d5a8288ce2345346b902f20ed6e9322766ec60eb", "packages": ["mingw-w64-ucrt-x86_64-libunistring"]},
+        {"name": "msys2/mingw-w64-pcre2-10.49-1.src.tar.zst", "url": "https://repo.msys2.org/mingw/sources/mingw-w64-pcre2-10.49-1.src.tar.zst", "size_bytes": 2183818, "sha256": "b02f0d5070b7d7f6db5c8ba9b009f28c1a07b9b52aaf7964dc0c8b098e4088d1", "packages": ["mingw-w64-ucrt-x86_64-pcre2"]},
+        {"name": "msys2/mingw-w64-zlib-1.3.2-3.src.tar.zst", "url": "https://repo.msys2.org/mingw/sources/mingw-w64-zlib-1.3.2-3.src.tar.zst", "size_bytes": 1326411, "sha256": "4b7839ab2826d3e3d27fe46150d2180a1f561f4d03c9e82aeb4b056180561f00", "packages": ["mingw-w64-ucrt-x86_64-zlib"]},
+        {"name": "msys2/mingw-w64-zstd-1.5.7-2.src.tar.zst", "url": "https://repo.msys2.org/mingw/sources/mingw-w64-zstd-1.5.7-2.src.tar.zst", "size_bytes": 2402010, "sha256": "306797282df799e95d550e6d0bb4b0a7b848027b8e13893a24236e060837c217", "packages": ["mingw-w64-ucrt-x86_64-zstd"]},
+        {"name": "msys2/mpfr-4.2.2-1.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/mpfr-4.2.2-1.src.tar.zst", "size_bytes": 1507563, "sha256": "e0c56e3af3819471e74dd37e32660e4eb8f58761c4d214dabd2d62f57c548869", "packages": ["mpfr"]},
+        {"name": "msys2/ncurses-6.6-2.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/ncurses-6.6-2.src.tar.zst", "size_bytes": 3785750, "sha256": "f5df12bd297e6b6930e2aa68e8014347b2193592645d93acce6774e05cbf15e6", "packages": ["ncurses"]},
+        {"name": "msys2/pcre-8.45-5.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/pcre-8.45-5.src.tar.zst", "size_bytes": 1577595, "sha256": "f7104aa31f29655689b404ead9923332e2fa6aadfe97c060d0dfc02f4661d6b5", "packages": ["libpcre"]},
+        {"name": "msys2/readline-8.3.006-1.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/readline-8.3.006-1.src.tar.zst", "size_bytes": 3357587, "sha256": "9ddb3eb989f6ad7d696ce5a2d92322b33a20056b293e3c4fc4f6cc568a320640", "packages": ["libreadline"]},
+        {"name": "msys2/sed-4.9-1.src.tar.zst", "url": "https://repo.msys2.org/msys/sources/sed-4.9-1.src.tar.zst", "size_bytes": 1399712, "sha256": "a9686da7c1f3cb2ba7ae5f20f30d9ef38f7bba993f9c777b43bd13c7fbd7cc58", "packages": ["sed"]}
+      ]
+    }
+  }
+}

@@ -1,4 +1,4 @@
-"""What the Telegram bridge is configured with and what actually runs: one status for Settings › Telegram.
+"""What the Telegram bridge is configured with and what actually runs, shown in the Telegram skill's settings.
 
 The bridge's state is the poller's record for the exact token generation in force (lib/telegram_token.py), so a
 saved token is configuration, never "ready" or "refused", until the poller tried that token in this load; the
@@ -22,7 +22,6 @@ from starlette.responses import JSONResponse
 
 from ..scripts.telegram_settings import TelegramSettingsError
 from .miniapp_registration import _read_status
-from .telegram_mirror import VALID_MIRROR_MODES
 from .telegram_outbox import outbox_for
 from .telegram_state import _load_settings, _state_file
 from .telegram_token import accepted_token, binding_for
@@ -59,7 +58,7 @@ def _bridge_status(api) -> dict[str, Any]:
     if command_mode not in _VALID_COMMAND_MODES:
         command_mode = _COMMAND_MODE_STRICT
     mirror_mode = str(settings.get("TELEGRAM_MIRROR_MODE") or "all").strip().lower()
-    if mirror_mode not in VALID_MIRROR_MODES:
+    if mirror_mode not in {"all", "telegram_only"}:
         mirror_mode = "all"
     reason_code = ""
     # The poller's record for this exact generation: a replaced token's refusal or wait never speaks for this one.
@@ -114,6 +113,8 @@ def _save_bridge_status(api, state: str, reason_code: str = "", bot: str = "", g
 def poll_failure_reason(exc: BaseException, revalidating: bool) -> str:
     """The degraded reason a retried poll failure records: a webhook or another poller holds the token (409),
     a validation still waits for the network, or Telegram stopped answering a working bridge."""
+    if type(exc).__name__ == "TelegramBotInUse":  # lib/telegram_group_wiring.py: the connector reads it here
+        return "telegram_bot_in_use"
     if getattr(exc, "status_code", None) == 409:
         return "telegram_conflict"
     return "telegram_startup_deferred" if revalidating else "telegram_unreachable"
@@ -144,26 +145,29 @@ def _make_status(api):
 
 _TOKEN_WORDS = {
     "configured": "Saved",
-    "missing": "Not set (Settings → Secrets)",
+    "missing": "Not set (Settings → Accounts and keys)",
     "unknown": "Can't read saved settings now",
 }
 _KEPT_TOKEN = "; the current token stays in use"
 _BRIDGE_WORDS = {
     "ready": "Connected",
-    "waiting_owner": "Connected; set Owner Chat ID in Settings → Extensions → Telegram (or confirm pairing from Ouroboros)",
+    "waiting_owner": "Connected; send the bot a private message to bind its owner",
     "connecting": "Connecting with the saved token…",
     "missing_token": "Waiting for a bot token",
     "settings_unknown": "Waiting: saved settings can't be read",
 }
 # What stopped or slowed the bridge, by the reason it recorded, in the owner's words: a refused token, a
 # setting below, the network and an internal failure each name their own next step. Never the raw code.
-_TOKEN_REFUSED = "Stopped: Telegram refused this token; save a new one in Secrets"
+_TOKEN_REFUSED = "Stopped: Telegram refused this token; save a new one in Settings → Accounts and keys"
 _REASON_WORDS = {
     "telegram_rejected": _TOKEN_REFUSED,
     "telegram_startup_failed": _TOKEN_REFUSED,
     "settings_invalid": "Stopped: fix the Telegram settings below and save",
     "connection_settings_invalid": "Stopped: the proxy or Bot API server below is invalid",
     "telegram_conflict": "Waiting: a webhook or another copy uses this token",
+    # Only a restart moves a bot between its two readers; this bridge's saved token then keeps it (telegram_owner_bot).
+    "telegram_bot_in_use": ("Waiting: the Telegram Bot connector is already reading this bot. Restart Ouroboros "
+                            "to read it here, or save another bot"),
     "telegram_startup_deferred": "Can't reach Telegram yet; retrying",
     "telegram_unreachable": "Can't reach Telegram now; retrying",
 }
@@ -176,7 +180,7 @@ _MINIAPP_WORDS = {
     "ready": "Ready",
     "disabled": "Off; the text bridge stays on",
     "waiting_token": "Waiting for a bot token",
-    "waiting_owner": "Waiting: set Owner Chat ID in Settings → Extensions → Telegram (or confirm pairing from Ouroboros)",
+    "waiting_owner": "Waiting: send the bot a private message to bind its owner",
     "starting": "Starting",
     "verifying": "Checking its public link",
     "syncing_menu": "Setting the bot's menu button",
@@ -202,7 +206,7 @@ _MINIAPP_REASONS = {
 
 
 def connection_components() -> list[dict[str, Any]]:
-    """The Connection form of Settings › Telegram: read-only fields ``_connection_fields`` fills."""
+    """The Connection form in the Telegram skill's settings, filled by ``_connection_fields``."""
     return [
         {"type": "markdown", "text": "Connection: the saved token and what actually runs now."},
         {
@@ -448,7 +452,7 @@ def register_connection(api) -> None:
 
 
 def _connection_fields(api) -> Dict[str, Any]:
-    """What is configured and what actually runs, as the Settings › Telegram Connection form shows it."""
+    """The current configuration and observed status for the Telegram skill's Connection form."""
     bridge = _bridge_status(api)
     mini_app = _read_status(api)
     binding = binding_for(api)
@@ -461,7 +465,10 @@ def _connection_fields(api) -> Dict[str, Any]:
     # Never the raw state: a state this module does not know shows the companion's sentence alone.
     mini_words = _MINIAPP_WORDS.get(mini_state) or (f"{lead}: {sentence}" if lead and sentence else lead
                                                      or sentence or "Unknown")
-    if cause := _MINIAPP_REASONS.get(str(mini_app.get("reason_code") or "")):
+    reason = str(mini_app.get("reason_code") or "")
+    if reason == "public_host_absent" and sentence:
+        mini_words = sentence  # The companion says whether it is rechecking or has begun reconnecting.
+    elif cause := _MINIAPP_REASONS.get(reason):
         at = int(mini_app.get("next_retry_at_epoch") or 0)
         mini_words = cause + (f"; next automatic attempt planned for {_when(at, time.time())}" if at else "")
     if binding.companion in {"retained", "stop_unconfirmed"}:

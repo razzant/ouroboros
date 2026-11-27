@@ -26,7 +26,7 @@ export function filesPageTemplate() {
         })}
         <div class="app-page-tabs files-band">
                 <div class="files-browser-header">
-                    <div id="files-breadcrumb" class="files-breadcrumb"></div>
+                    <div id="files-breadcrumb" class="files-breadcrumb scroll-fade-x"></div>
                     <div class="files-browser-actions">
                         <button class="btn btn-default" id="files-paste" title="Paste copied or moved item" hidden>Paste</button>
                         <button class="btn btn-default" id="files-new-file" title="Create file">+ File</button>
@@ -85,6 +85,9 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     const previewPathEl = page.querySelector('#files-preview-path');
     const previewMetaEl = page.querySelector('#files-preview-meta');
     const previewContentEl = page.querySelector('#files-preview-content');
+    // A read-only text is a scrollport with nothing to focus, which WebKit gives no keyboard entry: while it overflows
+    // it is a named region (the shared binder). The editor is its own stop; an image, a PDF and a note keep theirs.
+    let previewFade = bindScrollFade(previewContentEl);
     const previewStatusEl = page.querySelector('#files-preview-status');
     const contextMenuEl = page.querySelector('#files-context-menu');
     let contextMenuBinding = null;
@@ -238,21 +241,17 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             : 'Paste';
     }
 
-    function setPreview({ path, meta, content, html, node }) {
+    function setPreview({ path, meta, html, node, readOnly = false }) {
+        previewFade();
+        previewFade = bindScrollFade(previewContentEl, readOnly ? { region: 'File contents' } : undefined);
         showStatus('');
         previewPathEl.textContent = path || '';
         previewMetaEl.textContent = meta || '';
         // Nothing chosen: the header has nothing to say and takes no room.
         previewHeaderEl.hidden = !path && !meta;
-        if (node) {
-            previewContentEl.replaceChildren(node);
-            return;
-        }
-        if (typeof html === 'string') {
-            previewContentEl.innerHTML = html;
-            return;
-        }
-        previewContentEl.textContent = content || '';
+        if (node) previewContentEl.replaceChildren(node);
+        else if (typeof html === 'string') previewContentEl.innerHTML = html;
+        else previewContentEl.replaceChildren();
     }
 
     function renderEditor(content, options = {}) {
@@ -492,7 +491,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         if (!layers) return;
         if (open) layers.push({ id: FILE_LAYER, el: previewEl, page: true, modal: false, focus: false, opener: null,
             back: { label: state.path === '.' ? 'Files' : state.path.split('/').filter(Boolean).at(-1) || 'Files',
-                title: state.path === '.' ? 'Files' : `Files › ${state.path}` }, onClose: closeFile });
+                title: state.path === '.' ? 'Files' : `Files › ${state.path}`, literal: [state.path] }, onClose: closeFile });
         else layers.remove(FILE_LAYER);
     }
 
@@ -642,6 +641,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
                     ? metaLine(formatBytes(data.size), 'editable')
                     : metaLine(formatBytes(data.size), 'preview truncated', 'read-only'),
                 node: editable ? renderEditor(data.content || '', { isNew: false }) : document.createTextNode(data.content || ''),
+                readOnly: !editable,
             });
         }
         showPane('file', previewEl);
@@ -686,7 +686,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             state.selectedPath = path;
             state.selectedType = type;
             updateEditorActions();
-            setPreview({ path: path || state.rootPath, meta: message, content: '' });
+            setPreview({ path: path || state.rootPath, meta: message });
             // What changed is in the folder: its list says so, with the message over it on a narrow page.
             showPane('list');
         }

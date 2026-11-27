@@ -735,6 +735,44 @@ def card_row_projection(drive_root: Any, receipt: Dict[str, Any]) -> Dict[str, A
     return {"text": card_row_text(receipt, later_review=later), "late_evidence": later}
 
 
+def project_history_rows(drive_root: Any, rows: List[Dict[str, Any]], receipts_of: Callable[[str], Any],
+                         exact_row: str = "") -> None:
+    """A history page shows each receipt's current truth on its newest physical row there. Words that row did not
+    record (the current truth, or the note that it is unavailable) drop its address, so nothing quotes them as that row.
+    The row an exact read lands on (``exact_row``, its history id) keeps its bytes and address: when it is the newest
+    and already says the current words, or none are known, nothing else changes; otherwise the next newest row carries
+    them. Older revisions keep their recorded words."""
+    groups: Dict[Tuple[str, str], List[Tuple[int, int, Dict[str, Any]]]] = {}
+    for index, row in enumerate(rows):
+        row_id, revision = str(row.get("card_row_id") or ""), row.get("card_row_revision")
+        if row.get("card_row") == "reviews" and row_id.startswith("merge-receipt:") and row.get("task_id"):
+            groups.setdefault((str(row["task_id"]), row_id), []).append(
+                (revision if type(revision) is int else -1, index, row))
+    for (task_id, row_id), found in groups.items():
+        newest_first = [entry[2] for entry in sorted(found, key=lambda entry: entry[:2], reverse=True)]
+        newest = newest_first[0]
+        try:
+            receipt = next(r for r in receipts_of(task_id) or []
+                           if isinstance(r, dict) and row_id == f"merge-receipt:{r.get('receipt_id')}")
+            revision = receipt.get("revision", 0)
+            if type(revision) is not int or revision < int(newest.get("card_row_revision") or 0):
+                raise ValueError("canonical receipt revision unavailable")
+            current = {**card_row_projection(drive_root, receipt), "card_row_revision": revision}
+        except (StopIteration, KeyError, TypeError, ValueError, AttributeError):
+            current = None
+        others = [row for row in newest_first if not (exact_row and row.get("history_id") == exact_row)]
+        if not others or (others[0] is not newest and (current is None or current["text"] == newest.get("text"))):
+            continue
+        carrier = others[0]
+        recorded = carrier.get("text")
+        if current is None:
+            carrier["text"] += "\nCurrent merge receipt unavailable; showing recorded event."
+        else:
+            carrier.update(current)
+        if carrier["text"] != recorded:
+            carrier.pop("row_address", None)
+
+
 def _later_review(drive_root: Any, receipt: Dict[str, Any]) -> Dict[str, Any]:
     """The named record's newer revision and, on FAIL, an exact saved reviewer report for the existing reader."""
     frozen = (receipt.get("review") or {}).get("record") or {}

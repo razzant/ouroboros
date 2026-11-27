@@ -6,9 +6,11 @@ import { rowsOf } from './settings_rows.js';
 import { statusMarkHtml } from './status_mark.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { readConsciousness, readConsciousnessFromState } from './consciousness_api.js';
-import { allowanceHold, allowanceText, modelRouteWords } from './consciousness_words.js';
+import { allowanceHold, allowanceText, modelRouteWords, wakeResumeRoomWords } from './consciousness_words.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { mountCostPeriod } from './cost_period.js';
+import { mountCostProjectDays } from './cost_project_days.js';
+import { mountCostsWidgets } from './costs_widgets.js';
 import { READ_OK, STATUS_READ_LIFETIME_MS, accountRows, facetReadState } from './claudexor_status_store.js';
 import { humanizeResetAt, quotaSummary } from './harness_accounts.js';
 import { controlIcon, fluentIcon } from './page_icons.js';
@@ -152,6 +154,13 @@ export function roomTimeText(iso, { now = Date.now(), timeZone } = {}) {
 }
 
 const NEW_STARTS = 'new wake-ups, replies in places and its own tasks';
+const STOP_NOW = 'Stop now on its card ends it and frees the clock for its next check.';
+
+function resumeWords(snapshot) {
+    const room = wakeResumeRoomWords(snapshot);
+    return room ? `${room}; raising the limit alone resumes nothing.`
+        : 'No spending estimate is available for Resume. Raising the limit alone resumes nothing.';
+}
 
 /** The consciousness allowance under its field, from the consciousness snapshot (consciousness_api.js): the spend line
  *  is the clock's own window (`allowanceText`, the Shade's and the Dashboard's words), never a sum of the tables, and
@@ -181,12 +190,12 @@ export function allowancePresentation(snapshot, { now = Date.now(), timeZone } =
     }
     const wake = snapshot.liveWakeTaskId;
     if (allowanceHold(snapshot)) {
+        // Its ceiling is where the wake stopped, which an earlier Resume may have moved; the room estimate's absence
+        // (an older host, or a pause still settling) does not make it what the wake had left when it started.
         const facts = [snapshot.holdCeilingUsd !== null ? formatUsd(snapshot.holdCeilingUsd) : '',
             snapshot.holdCause === 'allowance_and_cap' ? 'the per-task cap too' : ''].filter(Boolean);
-        lines.push({ wake, tone: 'warn', text: `The consciousness wake-up is paused at the allowance it had left when it started`
-            + `${facts.length ? ` (${facts.join(', ')})` : ''}.`,
-        note: 'Resume keeps that limit, so it pauses again while its known spend is at it; room returning or a higher '
-            + 'limit does not raise it. Stop now on its card ends it and frees the clock for its next check.' });
+        lines.push({ wake, tone: 'warn', text: `The consciousness wake-up is paused at its allowance${facts.length ? ` (${facts.join(', ')})` : ''}.`,
+            note: `${resumeWords(snapshot)} ${STOP_NOW}` });
     } else if (snapshot.liveWakeHeld && snapshot.holdCause === 'per_task_cap') {
         lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is paused at the per-task cost cap it started with; its card shows why.' });
     } else if (snapshot.liveWakeHeld && snapshot.holdCause === 'launch_ceiling') {
@@ -227,8 +236,8 @@ const ALLOWANCE_NOTE = 'Known spend of its wake-ups, its replies in places and t
     + 'confirmed and estimated prices count, calls without a price add nothing to it, and calls still open may add more. '
     + `When it is reached, ${NEW_STARTS} wait until older spending leaves the 24 hours. A wake-up may spend at most `
     + 'what was left of this limit when it started (and no more than the per-task cap); there it pauses. A higher limit '
-    + 'does not raise what it was given and Resume keeps it, so a wake-up whose known spend is still at it pauses again. '
-    + 'Stop now on its card ends it, and the clock\'s next check starts a new wake-up if there is room. At $0 '
+    + 'alone neither raises what it was given nor resumes it; what Resume on its card would do is said beside the paused '
+    + 'wake-up. Stop now on its card ends it, and the clock\'s next check starts a new wake-up if there is room. At $0 '
     + 'consciousness may not spend.';
 
 /** The Subscriptions block's doors, from the passive quota read (`GET /api/claudexor/status?view=quota`: the roster and
@@ -340,11 +349,16 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
             <p class="dashboard-settings-lead">Quotas of your accounts. They are not dollars, and no limit above counts them.</p>
             <div data-costs-subscriptions><p class="dashboard-settings-lead">Reading…</p></div>
         </section>
+        <div class="costs-widgets" data-costs-widgets></div>
+        <div id="costs-rooms"></div>
         <div id="costs-period"></div>
         <div class="costs-tables">${TABLES.map(tableCardHtml).join('')}</div>
     `;
     mount.appendChild(page);
     const periodCard = mountCostPeriod(page.querySelector('#costs-period'));  // its own read: the period governs that card alone
+    const roomsCard = mountCostProjectDays(page.querySelector('#costs-rooms'));  // its own read: one room, day by day
+    // The widgets their authors place on Costs (the Quotas widget's bars, history and pace), each the board's own frame.
+    const placed = mountCostsWidgets(page.querySelector('[data-costs-widgets]'), { ws });
     const budgetCard = page.querySelector('.costs-budget');
     // The rows are drawn once and never redrawn: a refresh of the tab repaints the spend, the tables and the allowance's
     // facts around them, and `limits.paint()` only writes a fresh value into a field the owner is not in.
@@ -561,8 +575,10 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     }
 
     // The period card reads through the same gate; `ifIdle` leaves a read it has out alone.
-    const loadPeriod = (options) => { if (pageDrawn()) periodCard.reload(options); };
-    page.querySelector('#btn-refresh-costs').addEventListener('click', () => { loadCosts(); loadAllowance(); loadSubscriptions(); loadPeriod(); });
+    const loadPeriod = (options) => { if (pageDrawn()) { periodCard.reload(options); roomsCard.reload(options); } };
+    page.querySelector('#btn-refresh-costs').addEventListener('click', () => {
+        loadCosts(); loadAllowance(); loadSubscriptions(); loadPeriod(); if (pageDrawn()) placed.refresh();
+    });
     // Each door opens its Settings page, which leads back here.
     page.querySelector('.costs-subscriptions').addEventListener('click', (event) => {
         const path = event.target.closest?.('[data-costs-account]')?.dataset.costsAccount;
@@ -600,6 +616,8 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         reads.clear();
         out.forEach((control) => control.abort());
         periodCard.leave();
+        roomsCard.leave();
+        placed.leave();
         returned = false;
     };
     // A showing: the page is drawn anew (opened, its tab chosen, the window widened, the Dashboard returned to), so it reads
@@ -613,6 +631,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
             if (!reads.has(kind)) load();
         }
         loadPeriod({ ifIdle: true });
+        if (pageDrawn()) placed.show();
     }
     const listeners = [];
     const listen = (type, handler) => { window.addEventListener(type, handler); listeners.push([type, handler]); };
@@ -633,7 +652,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     const offReconnect = ws?.on?.('open', (event) => {
         if (event?.previouslyConnected && state.activePage === 'dashboard' && !document.hidden) loadLimits();
     });
-    listen('ouro:language-changed', paintGaps);
+    listen('ouro:language-changed', () => { paintGaps(); roomsCard.repaint(); });
     listen('ouro:settings-updated', (event) => {
         const { source, page: home, row } = event.detail || {};
         if (source !== 'settings-row' || home !== LIMITS_PAGE) { refreshCostsPanel(); return; }
@@ -641,5 +660,5 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         if (row === 'TOTAL_BUDGET') loadCosts();
         if (row === ALLOWANCE_KEY) loadAllowance();
     });
-    return { destroy() { offReconnect?.(); offNotes(); listeners.forEach(([type, handler]) => window.removeEventListener(type, handler)); clearTimeout(allowanceExpiry); leaveCosts(); } };
+    return { destroy() { offReconnect?.(); offNotes(); listeners.forEach(([type, handler]) => window.removeEventListener(type, handler)); clearTimeout(allowanceExpiry); leaveCosts(); placed.destroy(); } };
 }

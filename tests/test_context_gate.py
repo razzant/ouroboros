@@ -23,9 +23,12 @@ def test_workflow_filters_cover_the_lane_and_request_builders():
                  "tests/fixtures/size_refusals/manifest.json", "tests/_window_history.py",
                  "tests/_first_contact_server.py", "scripts/context_gate.py", "ouroboros/deployment_policy.py",
                  "ouroboros/gateway/settings.py", "ouroboros/pricing.py", "tests/fixtures/llm_golden/aux_routes.json",
-                 "docs/inventories/FACADE_INVENTORY.md",
+                 "docs/inventories/UI_CONTROL_TEXT_INVENTORY.md", "docs/architecture/11-frozen-contracts-v1.md",
+                 "ouroboros/code_intelligence_architecture.py", "scripts/regenerate_inventories.py",
                  # the call start's seam (tests/test_live_call_start_fit.py): the agent hands nano_base to the fit
-                 "ouroboros/agent.py", "ouroboros/live_conversation.py"):
+                 "ouroboros/agent.py", "ouroboros/live_conversation.py",
+                 "ouroboros/llm_ollama.py", "ouroboros/llm_ollama_wire.py", "ouroboros/llm_ollama_policy.py",
+                 "ouroboros/llm_ollama_guard.py", "tests/_ollama.py", "tests/test_local_tool_parsing.py"):
         assert any(fnmatchcase(path, pattern) for pattern in paths), path
     assert not any(fnmatchcase("web/styles.css", pattern) for pattern in paths)
     assert workflow["permissions"] == {"contents": "read"}
@@ -61,7 +64,9 @@ def test_local_gate_preserves_failure_exit_and_uses_existing_retry(tmp_path, mon
 
 def test_context_gate_has_recovery_homes():
     assert {
-        "tests/test_window_projection.py", "tests/test_required_development_book.py",
+        "tests/test_local_tool_parsing.py", "tests/test_llm_ollama.py", "tests/test_llm_ollama_wire.py",
+        "tests/test_llm_ollama_policy.py", "tests/test_llm_ollama_refusal.py", "tests/test_llm_ollama_composition.py",
+        "tests/test_llm_ollama_gateway.py", "tests/test_window_projection.py", "tests/test_required_development_book.py",
         "tests/test_context_economy_window.py::test_a_chosen_read_on_an_unknown_window_stays_whole_after_an_unmeasured_engine_refusal",
         "tests/test_context_economy_window.py::test_an_account_reprepare_that_selects_nano_narrows_the_shown_low_view_and_keeps_its_provenance",
         "tests/test_context_economy_window.py::test_a_fallback_and_its_return_resend_the_shown_history_byte_for_byte_on_the_wire",

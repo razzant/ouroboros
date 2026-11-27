@@ -249,9 +249,12 @@ def test_unproven_or_owner_stopped_restart_never_assigns(prepared, monkeypatch, 
     if fault == "panic":
         from ouroboros.work_stop import current_stop
         assert current_stop(case.host.pending[0])["door"] == "panic"
-        assert current_stop(case.host.pending[0])["release"] == "resume"
+        assert current_stop(case.host.pending[0])["cause"] == "panic"
+        assert current_stop(case.host.pending[0])["release"] == "owner"
         # The installation input is no longer needed by the adoption decision.
         (case.host.root / "state/panic_stop.flag").unlink()
+        assert queue.resume_budget_paused_task(case.host.pending[0]["id"])["error"] == "panic_requires_owner_resume"
+        assert current_stop(case.host.pending[0])["release"] == "owner"
     assert recovery.pre_adopt_planned_handoffs(case.host.root, case.host.pending) == set()
     sent = worker(case.host, monkeypatch)
     workers.assign_tasks()

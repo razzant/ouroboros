@@ -4,9 +4,11 @@
     python scripts/run_tests.py                  full battery (node lane + every default-lane test)
     python scripts/run_tests.py --selected --base HEAD  commit/PR floor + affected tests, with both lanes
     python scripts/run_tests.py --selected --keep-going ...  the same, but a red lane does not skip the next
+    python scripts/run_tests.py --selected --each-commit ...  also what each first-parent commit since --base changed
     python scripts/run_tests.py --node            only the complete Node lane (CI runs it as its own step)
-    python scripts/run_tests.py --evidence-dir DIR  pytest diagnostics in DIR/<phase>, passed by argv
+    python scripts/run_tests.py --evidence-dir DIR  pytest diagnostics in DIR/<phase>, passed by argv; with --node, DIR/node.json
     python scripts/run_tests.py tests/test_x.py  focused run; every argument is forwarded to pytest
+    python scripts/run_tests.py --lane-pass parallel|exclusive PATHS ...  one CI pass over explicit test targets
 
 A bare call always means the FULL battery — it never skips a test on the
 strength of an earlier run. It runs the two passes of `ouroboros.preflight_runner`
@@ -21,7 +23,11 @@ durable logs/source/diagnostics in <checkout>/../.test-evidence by default, wher
 tests/ci_evidence.py): the table the xdist groups are ordered by, longest first.
 Ctrl-C reaches each phase's runner, allowing pytest JUnit/results export before escalation.
 Marker exclusions/xdist flags come from the gate's SSOT
-(`LANE_EXCLUSION_EXPR`, `PARALLEL_PASS_FLAGS`); conftest isolates test roots.
+(`LANE_EXCLUSION_EXPR`, `PARALLEL_PASS_FLAGS`), including CI's `--lane-pass`.
+That form takes test targets (or ci_retry's targets-only @file) and the existing
+CI output and shard options, not arbitrary pytest switches. The @file path is
+relative to the caller; its test targets are still relative to the checkout.
+Conftest isolates test roots.
 """
 from __future__ import annotations
 
@@ -29,6 +35,7 @@ import argparse
 import json
 import os
 import pathlib
+import platform
 import shlex
 import subprocess
 import sys
@@ -40,10 +47,19 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 _PYTEST_EXIT_NO_TESTS = 5
+# What a deferral that could not select the other changes records in selection.json as `selection_problem`: fixed text, so no
+# exception and no path reaches the public evidence. The floor and the Node lane still run.
+_DEFER_FALLBACK = ("the deferral could not select the other changes (their scan failed or they escalate for a cause this leg "
+                   "does not name): this leg ran only the contract floor, the Node lane and the author's extra tests")
 # xdist's worker identity of a session this script may be started FROM (a test of the runner under
 # `-n`): inherited, it would make the battery's own controller take itself for a worker.
 _OUTER_WORKER_KEYS = ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_TESTRUNUID", "PYTEST_XDIST_WORKER_COUNT")
 _INTERRUPT_EXPORT_SEC, _INTERRUPT_TERM_SEC = 7, 2  # busy xdist workers already spend ~5 s in teardown
+# In a pass's evidence directory while its producer (tests/ci_evidence.py) has put no new journal there: the
+# results.json and events.jsonl an earlier session left describe no current one. Spelled once, here, where a
+# selected run sets it aside with an attempt's files; the producer and its readers take it from this file
+# (tests/ci_verdicts.py), which is why this module's top level stays stdlib imports and definitions.
+SESSION_UNAVAILABLE = "evidence-session-unavailable"
 
 
 def _cpu_default() -> int:
@@ -69,6 +85,27 @@ def _pass_slots(argv: list[str], workers: int) -> int:
     return 1
 
 
+def _github_identity() -> dict:
+    """The commit, run and attempt this invocation runs under, spelled as tests/ci_evidence.py `_identity` writes them
+    (empty strings outside Actions). selection.json carries it: a pass that lost its public journal and export still
+    leaves its private inventory here, and this record alone says which run wrote it."""
+    return {name: os.environ.get("GITHUB_" + name.upper(), "") for name in ("sha", "run_id", "run_attempt")}
+
+
+def _system() -> str:
+    """linux, windows or the host's lowercase name, as tests/ci_verdicts.py `platform_name` spells a session's system
+    (spelled out here: this module's top level stays stdlib, and a fixture checkout may lack that file)."""
+    value = platform.system().lower()
+    return "linux" if value.startswith("linux") else "windows" if value.startswith(("win", "cygwin")) else value
+
+
+def _fold(current: int, code: int) -> int:
+    """The status a battery reports once another lane ended with ``code``. The first abnormal status (neither 0 nor the
+    exactly-1 of a normal test red) stands, and a normal red never hides a later abnormal one; ``--keep-going`` still
+    never hides an earlier red. An empty pass's 5 is no error: the caller has turned it into 0 before."""
+    return current if current not in (0, 1) else code or current
+
+
 def point_at_durations() -> None:
     """Name the owner's durations table for this battery: beside the evidence parent (`.test-evidence/`), unless
     the caller named one. Every session of the battery reads it for its weights and folds its whole files' seconds
@@ -91,16 +128,54 @@ def recorded_durations() -> tuple[dict | None, str]:
     return table, source if " " in source else f"run {source}"  # CI names a run id, a session names itself
 
 
-def battery_commands() -> list[tuple[str, list[str]]]:
-    """The gate's two passes; the xdist pass's groups go longest-first by the table named out loud."""
+def lane_pass_args(lane: str) -> list[str]:
+    """One default pass's selection and execution flags, shared by CI and the battery."""
     from ouroboros.preflight_runner import EXCLUSIVE_MARKER, LANE_EXCLUSION_EXPR, PARALLEL_PASS_FLAGS, SERIAL_PASS_FLAGS
 
+    if lane == "parallel":
+        return ["-m", f"not {EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *PARALLEL_PASS_FLAGS]
+    return ["-m", f"{EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *SERIAL_PASS_FLAGS]
+
+
+def _lane_target_args(parser: argparse.ArgumentParser, args: list[str], caller_dir: pathlib.Path) -> list[str]:
+    """Validate the lane inputs and give pytest the same retry file we read."""
+    args = args.copy()
+    targets = False
+    for index, arg in enumerate(args):
+        if arg in ("-q", "--tb=short"):
+            continue
+        name, equals, value = arg.partition("=")
+        if equals and value and name in ("--ci-evidence-dir", "--default-suite-shard"):
+            continue
+        if not arg or arg.startswith("-"):
+            parser.error("--lane-pass accepts test targets, -q, --tb=short, --ci-evidence-dir=DIR "
+                         "and --default-suite-shard=K/N")
+        if arg.startswith("@"):
+            # Keep the file as one argv entry: Windows cannot carry a long retry
+            # list inline. Rebase only the file path, not the tests listed in it.
+            path = pathlib.Path(arg[1:])
+            if not path.is_absolute():
+                path = caller_dir / path
+                args[index] = f"@{path}"
+            try:
+                lines = path.read_text(encoding="ascii").splitlines()
+            except (OSError, UnicodeError):
+                parser.error("--lane-pass could not read the retry target file")
+            if any(not line or line.lstrip().startswith(("-", "@")) for line in lines):
+                parser.error("--lane-pass requires test targets only in the retry file")
+            targets = targets or bool(lines)
+        else:
+            targets = True
+    if not targets:
+        parser.error("--lane-pass requires at least one test target")
+    return args
+
+
+def battery_commands() -> list[tuple[str, list[str]]]:
+    """The gate's two passes; the xdist pass's groups go longest-first by the table named out loud."""
     base = [sys.executable, "-m", "pytest", "tests/"]
     print(f"=== xdist groups ordered by {recorded_durations()[1]}", flush=True)
-    return [
-        ("parallel", [*base, "-m", f"not {EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *PARALLEL_PASS_FLAGS]),
-        ("serial", [*base, "-m", f"{EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *SERIAL_PASS_FLAGS]),
-    ]
+    return [("parallel", [*base, *lane_pass_args("parallel")]), ("serial", [*base, *lane_pass_args("exclusive")])]
 
 
 def _run(label: str, argv, cwd: pathlib.Path, node: str = "") -> int:
@@ -157,8 +232,9 @@ def _run(label: str, argv, cwd: pathlib.Path, node: str = "") -> int:
         finally:
             container.close()
             lease.close()
-    if diagnostic and code in (0, _PYTEST_EXIT_NO_TESTS):
-        code = 1
+    if diagnostic and code in (0, 1, _PYTEST_EXIT_NO_TESTS):
+        # Exit 1 alone means a test failed. Pytest also records its own exit; Node does not.
+        code = 2 if code == 1 or label == "node" else 1
     print(f"=== {label}: exit {code} in {time.monotonic() - started:.0f}s", flush=True)
     return code
 
@@ -222,14 +298,80 @@ def _node_lane() -> tuple[int, str]:
                                           f"--test-concurrency={admitted.workers}", *files], REPO / WEB_DIR, node), node
 
 
+def _node_only(evidence: pathlib.Path | None) -> int:
+    """`--node`: the Node lane's exit status and, with `--evidence-dir`, its terminal result as `node.json`.
+
+    An exit 1 alone does not say whose it is: a runner that predates the receipt returns it for a lane that never ran, and
+    any launcher that crashes does too. scripts/post_merge_check.py therefore trusts a 0 or 1 only beside this receipt. It is
+    written after the lane and its cleanup ended, only for a Node that exited 0 or 1; one an earlier run left is removed
+    before the lane starts, and a record that cannot be kept ends the run as the launcher's failure: exit 2.
+    """
+    receipt = None if evidence is None else evidence / "node.json"
+    try:
+        if receipt is not None:
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.unlink(missing_ok=True)  # only a result written after this lane ends may stand
+    except OSError as exc:
+        print(f"=== node: {receipt.parent} cannot hold its result: {exc}", file=sys.stderr, flush=True)
+        return 2
+    code, node = _node_lane()
+    code = 2 if code == 1 and not node else code
+    if receipt is not None and node and code in (0, 1):
+        from tests.ci_verdicts import write_json
+
+        try:
+            write_json(receipt, {"exit": code})
+        except OSError as exc:
+            print(f"=== node: its result could not be recorded: {exc}", file=sys.stderr, flush=True)
+            return 2
+    return code
+
+
+def _retain_selected_evidence(root: pathlib.Path) -> None:
+    """Park the previous battery's fixed files together before any lane can replace them.
+
+    The shared suffix pairs private inventory and selection with each pass's public export and
+    journal. No archived file takes a current filename, even when the new run skips a pass.
+    """
+    from uuid import uuid4
+
+    labels = ("parallel", "serial")
+    paths = [root / "selection.json", *(root / f"inventory-{label}.jsonl" for label in labels),
+             *(root / label / name for label in labels for name in ("results.json", "events.jsonl", SESSION_UNAVAILABLE))]
+    previous = [path for path in paths if path.is_symlink() or path.is_file()]
+    if not previous:
+        return
+    while True:
+        suffix = ".previous-" + uuid4().hex
+        destinations = [path.with_stem(path.stem + suffix) for path in previous]
+        if not any(map(os.path.lexists, destinations)):
+            break
+    moved = []
+    try:
+        for path, destination in zip(previous, destinations):
+            path.rename(destination)
+            moved.append((path, destination))
+    except OSError:
+        for path, destination in reversed(moved):
+            destination.rename(path)
+        raise
+    print(f"=== selected: earlier evidence kept with suffix {suffix}", flush=True)
+
+
 def _selected(args, evidence) -> int:
     from ouroboros.preflight_inventory import inventory_problem, launch_args, read_inventory, selection_passes
     from ouroboros.preflight_probe import probe_dir, record_admission, write_worker_probe
     from ouroboros.test_selection import select_tests
 
+    if evidence is not None:
+        try:
+            _retain_selected_evidence(evidence)
+        except OSError as exc:
+            print(f"could not retain previous selected evidence: {exc}", file=sys.stderr)
+            return 2
     try:
         selection = select_tests(REPO, base=args.base or "HEAD", extra_tests=args.extra_test,
-                                 full_tests=args.full_tests, test_reason=args.test_reason)
+                                 full_tests=args.full_tests, test_reason=args.test_reason, each_commit=args.each_commit)
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         print(f"selection failed: {exc}", file=sys.stderr)
         return 2
@@ -238,19 +380,29 @@ def _selected(args, evidence) -> int:
     # Retained diagnostics; process ownership belongs to _run, as in the full CLI.
     root = evidence or pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-selected-"))
     root.mkdir(parents=True, exist_ok=True)
-    record = selection.record()
+    # What binds this invocation's files to the run (see `_github_identity`); the deferral below keeps it.
+    identity = {"github": _github_identity(), "system": _system()}
+    record = {**selection.record(), **identity}
     record["inventory"] = {}
     record["outcomes"] = {"parallel": "skipped", "serial": "skipped"}
     output = root / "selection.json"
     output.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(f"=== selection evidence: {output}", flush=True)
     if args.defer_full and selection.tier == "full":
-        selection = _defer_full(selection)
-        record = {**selection.record(), "inventory": {}, "outcomes": record["outcomes"], "deferred_full": True}
+        fell_back = []
+        selection = _defer_full(selection, fell_back)
+        record = {**selection.record(), **identity, "inventory": {}, "outcomes": record["outcomes"], "deferred_full": True,
+                  **({"selection_problem": fell_back[0]} if fell_back else {})}
         output.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     code, node = _node_lane()
     carried = [node] if node else []  # the passes run the Node the lane ran
     record["node"] = "success" if code == 0 else "failure"
+    if code and (not node or code != 1):
+        record["node_problem"] = f"the complete Node lane did not run to completion (runner exit {code})"
+    # The typed Node outcome is written before the warm: a warm interrupted or stopped on its way (its memory
+    # wait, its walk) exits the run before the passes write the record again, and the observed Node result
+    # must not die with it.
+    output.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     if code == 0 or args.keep_going:
         _warm_bytecode(selection.files, root)
     red = code  # with --keep-going a later lane runs on, but never hides an earlier red
@@ -266,24 +418,26 @@ def _selected(args, evidence) -> int:
                 command = lambda admitted, command=command: record_admission(root, admitted) or command  # noqa: E731
             code = _run(spec.label, command, REPO, *carried)
             inventory, problem = read_inventory(root, spec.label)
+            if inventory.get("exitcode") is not None and inventory["exitcode"] != code and not inventory.get("problem"):
+                problem = inventory["problem"] = f"runner exit {code} disagrees with pytest exit {inventory['exitcode']}"
             record["inventory"][spec.label] = inventory
             record["outcomes"][spec.label] = "success" if code in (0, _PYTEST_EXIT_NO_TESTS) and not problem else "failure"
             output.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-            if code not in (0, _PYTEST_EXIT_NO_TESTS):
-                red = red or code
-                if not args.keep_going:
-                    break
-                continue
-            code = int(bool(problem))
-            if problem:
-                print(f"inventory failed: {problem}", file=sys.stderr)
-                red = red or code
+            if problem and (inventory.get("problem") or code in (0, _PYTEST_EXIT_NO_TESTS)):
+                print(f"{spec.label} inventory failed: {problem}", file=sys.stderr)
+            if code in (0, _PYTEST_EXIT_NO_TESTS):
+                code = int(bool(problem))
+            if code:
+                red = _fold(red, code)  # a later abnormal status is never hidden by an earlier normal red
                 if not args.keep_going:
                     break
         code = red or code
-        if code == 0 and (problem := inventory_problem(selection, record["inventory"])):
-            print(problem, file=sys.stderr)
-            code = 1
+        # A test failure and a missing floor can coexist. Check the floor only against readable collections.
+        if code == 0 or (args.keep_going and all(row.get("collection_reports") for row in record["inventory"].values())):
+            if problem := inventory_problem(selection, record["inventory"]):
+                record["floor_problem"] = problem
+                print(problem, file=sys.stderr)
+                code = code or 1
         completed = True
     finally:
         if previous is None:
@@ -300,40 +454,61 @@ def _selected(args, evidence) -> int:
     return code
 
 
-def _defer_full(selection):
+def _defer_full(selection, fell_back=None):
     """A full escalation this leg cannot finish (Windows runs full in eight landed shards).
 
-    The leg still runs the contract floor, the Node lane and what the changes that did not
-    escalate select by themselves (changed test modules, direct importers, widening), and
-    says what it left to the landed matrix.
+    The leg still runs the contract floor, the Node lane, the author's extra tests and what the changes that did
+    not escalate select by themselves (changed test modules, direct importers, widening), and says what it left
+    to the landed matrix. The selector names a changed helper (one that pytest configuration loads, or that
+    nothing imports) only while nothing else already forces full, so an answer that is still full is read for
+    the causes it names, those changes are set aside and the selector is asked again; an answer that names none
+    leaves only the floor and the extra tests. That fallback is no selection: with a list as ``fell_back`` it gets
+    ``_DEFER_FALLBACK``, which the caller records in selection.json as ``selection_problem``.
     """
     import dataclasses
 
     from ouroboros.test_selection import FLOOR_TESTS, select_from_paths
 
     escalating = ("verification apparatus changed", "body cutover/recovery changed")
-    why = "; ".join(f"{path}: {reason}" for path, reason in selection.reasons
-                    if reason in escalating or reason.startswith("author requested full"))
-    rest = [path for path in selection.changed if (path, escalating[0]) not in selection.reasons
-            and (path, escalating[1]) not in selection.reasons]
+
+    def forcing(reasons):  # the (changed path, reason) pairs the selector recorded as forcing full
+        return [(path, reason) for path, reason in reasons
+                if reason in escalating or reason.startswith("author requested full")]
+
+    named, problems, files = forcing(selection.reasons), [], ()
+    aside = {path for path, _reason in named}
+    rest = [path for path in selection.changed if path not in aside]
     try:
-        chosen = select_from_paths(REPO, rest, base=selection.base, extra_tests=selection.extra_tests,
-                                   test_reason=selection.test_reason) if rest else None
-        files = chosen.files if chosen is not None and chosen.tier != "full" else ()
-        if chosen is not None and chosen.tier == "full":  # an escalation not named above: the floor alone
-            why = f"{why}; the other changes escalate too ({'; '.join(r for _p, r in chosen.reasons)})"
-    except (ValueError, OSError, subprocess.SubprocessError) as exc:  # the floor still runs
-        files, why = (), f"{why}; the other changes could not be selected: {exc}"
+        while rest:  # a pass that goes on sets at least one more path aside, so this ends
+            chosen = select_from_paths(REPO, rest, base=selection.base, extra_tests=selection.extra_tests,
+                                       test_reason=selection.test_reason)
+            if chosen.tier != "full":
+                files = chosen.files
+                break
+            more = [(path, reason) for path, reason in forcing(chosen.reasons) if path in rest]
+            if not more:  # an escalation this leg cannot name: the floor and the extra tests only
+                problems.append(f"the other changes escalate too ({'; '.join(r for _p, r in chosen.reasons)})")
+                break
+            named += more
+            aside.update(path for path, _reason in more)
+            rest = [path for path in rest if path not in aside]
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:  # the floor and the extra tests still run
+        problems.append(f"the other changes could not be selected: {exc}")
+    why = "; ".join([*(f"{path}: {reason}" for path, reason in named), *problems])
+    extra = set(selection.extra_tests) - set(FLOOR_TESTS)  # the author's widening is kept whatever else was chosen
+    widened = f", plus {len(extra)} extra test module(s) named by the author" if extra else ""
     note = (f"full scope deferred to the landed matrix; this leg runs the contract floor, the Node lane and "
-            f"{len(set(files) - set(FLOOR_TESTS))} module(s) the other changes select ({why})")
+            f"{len(set(files) - set(FLOOR_TESTS) - extra)} module(s) the other changes select{widened} ({why})")
     print(f"=== {note}", flush=True)
     if destination := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(destination, "a", encoding="utf-8") as stream:
             stream.write(f"**{note}**\n")
-    return dataclasses.replace(selection, tier="selected", files=tuple(sorted(set(FLOOR_TESTS) | set(files))))
+    if fell_back is not None and problems:  # the scan failed or the escalation went unnamed: only the floor and the extras run
+        fell_back.append(_DEFER_FALLBACK)
+    return dataclasses.replace(selection, tier="selected", files=tuple(sorted(set(FLOOR_TESTS) | set(files) | extra)))
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, caller_dir: pathlib.Path | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--selected", action="store_true", help="floor + affected tests and complete Node lane")
     parser.add_argument("--base", help="Git base for --selected; defaults to HEAD")
@@ -341,13 +516,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--full-tests", action="store_true", help="widen --selected to the full battery")
     parser.add_argument("--test-reason", default="", help="reason for authored widening")
     parser.add_argument("--defer-full", action="store_true",
-                        help="with --selected: on a full escalation run only the floor and Node lane, and say so")
+                        help="with --selected: on a full escalation run the contract floor, the Node lane, the "
+                             "--extra-test modules and what the changes that do not escalate select by themselves, "
+                             "and say what is left to the landed matrix")
     parser.add_argument("--keep-going", action="store_true",
                         help="with --selected: a red lane does not skip the next one (the post-merge check "
                              "wants every failure of the run, not the first)")
+    parser.add_argument("--each-commit", action="store_true",
+                        help="with --selected: also select what each first-parent commit since --base changed, "
+                             "which their net diff hides once a later commit reverts it (the post-merge window)")
     parser.add_argument("--node", action="store_true", help="only the complete Node lane, owned like every pass")
+    parser.add_argument("--lane-pass", choices=("parallel", "exclusive"),
+                        help="one CI pass over test targets; keeps the gate's -m, process and timeout policy")
     parser.add_argument("--evidence-dir", type=pathlib.Path,
-                        help="write pytest diagnostics under DIR/<phase>; never inherited by nested pytest",
+                        help="write pytest diagnostics under DIR/<phase> (never inherited by nested pytest); with --node, "
+                             "the terminal DIR/node.json",
                         metavar="DIR")
     args, pytest_args = parser.parse_known_args(argv)
     evidence = args.evidence_dir.resolve() if args.evidence_dir is not None else None
@@ -359,16 +542,19 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     point_at_durations()
     if not args.selected and (args.base or args.extra_test or args.full_tests or args.test_reason or args.defer_full
-                              or args.keep_going):
-        parser.error("--base, --defer-full, --keep-going and widening options require --selected")
+                              or args.keep_going or args.each_commit):
+        parser.error("--base, --defer-full, --keep-going, --each-commit and widening options require --selected")
     if args.node:
-        if args.selected or pytest_args:
+        if args.selected or pytest_args or args.lane_pass:
             parser.error("--node runs only the Node lane")
-        return _node_lane()[0]
+        return _node_only(evidence if args.evidence_dir is not None else None)
     if args.selected:
-        if pytest_args:
-            parser.error("--selected cannot be combined with arbitrary pytest arguments")
+        if pytest_args or args.lane_pass:
+            parser.error("--selected cannot be combined with --lane-pass or arbitrary pytest arguments")
         return _selected(args, evidence)
+    if args.lane_pass:
+        pytest_args = _lane_target_args(parser, pytest_args, caller_dir or pathlib.Path.cwd())
+        pytest_args = [*lane_pass_args(args.lane_pass), *pytest_args]
     if pytest_args:
         if evidence is not None:
             pytest_args = ["--ci-evidence-dir", str(evidence / "focused"), *pytest_args]
@@ -401,9 +587,13 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     # CLI execution always acquires a real outer owner. A merely present temp
     # variable cannot prove one exists; in-process main() remains a plain helper.
-    bootstrap = "import runpy,sys; raise SystemExit(runpy.run_path(sys.argv[1])['main'](sys.argv[2:]))"
+    # safe_test starts its command in REPO. Carry the caller's cwd separately.
+    bootstrap = (
+        "import pathlib,runpy,sys; "
+        "raise SystemExit(runpy.run_path(sys.argv[1])['main'](sys.argv[3:], caller_dir=pathlib.Path(sys.argv[2])))"
+    )
     owner = [sys.executable, "-I", "-S", str(REPO / "scripts/safe_test.py"), "--",
-             sys.executable, "-c", bootstrap, str(pathlib.Path(__file__).resolve()), *sys.argv[1:]]
+             sys.executable, "-c", bootstrap, str(pathlib.Path(__file__).resolve()), os.getcwd(), *sys.argv[1:]]
     if os.name == "nt":
         sys.exit(subprocess.call(owner))  # Windows exec is a new process; keep the waiting parent.
     os.execv(sys.executable, owner)  # POSIX: the signalled PID is the owner itself.

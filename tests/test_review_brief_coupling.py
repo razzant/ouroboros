@@ -650,3 +650,29 @@ def test_expired_evidence_is_re_sourced_instead_of_wedging_the_process(monkeypat
     assert resolved.stale is False, "an expired record must be RE-SOURCED, not read as expired"
     assert resolved.window_tokens == 1_050_000
     assert sw.scope_window(model).sizing_window(sw.SCOPE_SIZING_FALLBACK_WINDOW) == 1_050_000
+
+
+@pytest.mark.parametrize("delegated", [True, False], ids=["session", "native"])
+def test_a_retrieving_body_brief_carries_the_installed_key_invariants_not_the_proposal(tmp_path, monkeypatch, delegated):
+    """A retrieving seat, a session confined to the proposal's tree included, gets chapter 10 as it gets BIBLE:
+    the installed text inline in its brief, so a proposal that rewrites the chapter is not judged by its own
+    rules; an ordinary change gets the same chapter."""
+    import pathlib
+
+    from ouroboros.tools import review_brief_coupling as brief_module
+
+    installed_root = pathlib.Path(__file__).resolve().parents[1]
+    chapter = "docs/architecture/10-key-invariants.md"
+    installed = (installed_root / chapter).read_bytes().decode("utf-8")
+    monkeypatch.setattr(brief_module, "first_send_bound", lambda *_: 2_000_000)
+    for touched, proposed in ((("x.txt",), None), ((chapter,), "# 10. Proposed replacement\n\nOnly this.\n")):
+        subject = _staged_repo(tmp_path / f"candidate-{len(touched[0])}")
+        if proposed:
+            (subject / chapter).parent.mkdir(parents=True)
+            (subject / chapter).write_text(proposed, encoding="utf-8", newline="\n")
+        task, manifest = brief_module.build_retrieving_brief(subject, brief_module.BriefInputs(
+            commit_message="review proposal", governance_repo_dir=installed_root, diff_text="+one change",
+            required_sources=[], touched_paths=touched, delegated=delegated, checklist_section="change checklist"))
+        assert f"## {chapter}\n\n{installed}" in task  # the installed bytes, under the chapter's own heading
+        row = next(row for row in manifest["governance_manifest"] if row["path"] == chapter)
+        assert (row["tier"], row["disposition"]) == (1, "inline")

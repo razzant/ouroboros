@@ -44,8 +44,9 @@ No admission reads either.
 from __future__ import annotations
 
 import datetime as _dt
+import math
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from ouroboros._usage_rows import Bucket, _summary, row_ts_epoch, summary_delta
 from ouroboros.runtime_limits import get_consciousness_daily_usd
@@ -57,20 +58,30 @@ MONEY_ROW_KINDS = frozenset({"attempt", "subscription_session", "external_unmete
 WINDOW_SEC = 24 * 3600
 ROOT_HORIZON_SEC = 48 * 3600  # a root is discovered by a consciousness row this recent
 STATUS_AVAILABLE, STATUS_EXHAUSTED, STATUS_UNKNOWN = "available", "exhausted", "allowance_unknown"
+RESUMED_ALLOWANCE_KEY = "consciousness_allowance_resume"  # the exact grant, last consumed by this own wake
 _MONEY_KIND = "COALESCE(NULLIF(kind, ''), 'attempt') IN ('attempt', 'subscription_session', 'external_unmetered')"
 # The rows that name a consciousness root: root discovery and the forecast's root horizons read exactly these.
 _ROOT_ROWS = ("category IN ('consciousness', 'consciousness_task') "
               f"AND ts_last_epoch >= ? AND root_task_id != '' AND {_MONEY_KIND}")
 
 
-def _window_rows(txn: Any, now_ts: float, *, horizons: bool = False) -> tuple:
+def _window_rows(txn: Any, now_ts: float, *, horizons: bool = False, extra_roots: Sequence[str] = ()) -> tuple:
     """(roots, their 24 h money rows captured per root for ``decode_attempts``, root causes, and with ``horizons``
-    each root's newest category row time), addressed selections in one read."""
+    each root's newest category row time), addressed selections in one read.
+
+    ``extra_roots`` adds explicit consciousness roots (e.g. a long-running wake whose own
+    category rows aged past ``ROOT_HORIZON_SEC``) deduplicated against discovered roots so
+    their fresh 24 h descendant/helper spend is counted once and never missed or double-counted.
+    """
     discovered = list(txn.conn.execute(
         "SELECT DISTINCT root_task_id, category, json_extract(extra, '$.consciousness_cause') AS cause "
         f"FROM attempts WHERE {_ROOT_ROWS}", (now_ts - ROOT_HORIZON_SEC,)))
     defaults = {record[0]: record[2] or ("own" if record[1] == "consciousness" else "started")
                 for record in discovered}
+    for raw in extra_roots:
+        root_id = str(raw or "").strip()
+        if root_id and root_id not in defaults:
+            defaults[root_id] = "own"
     causes = {root: root_cause(txn, root) or fallback for root, fallback in defaults.items()}
     roots = sorted(causes)
     rows = [txn.attempt_rows(f"root_task_id = ? AND ts_last_epoch >= ? AND {_MONEY_KIND}", (root, now_ts - WINDOW_SEC))
@@ -78,6 +89,14 @@ def _window_rows(txn: Any, now_ts: float, *, horizons: bool = False) -> tuple:
     newest = dict(txn.conn.execute(f"SELECT root_task_id, MAX(ts_last_epoch) FROM attempts WHERE {_ROOT_ROWS} "
                                    "GROUP BY root_task_id", (now_ts - ROOT_HORIZON_SEC,))) if horizons else {}
     return roots, rows, causes, newest
+
+
+def _decode_window(captured: Sequence[Any]) -> list:
+    """Decode captured attempt batches into ``(ts_epoch, row)`` pairs after the store read closes."""
+    from ouroboros import usage_store
+
+    rows = [row for part in captured for row in usage_store.decode_attempts(part)]
+    return [(ts, row) for ts, row in ((row_ts_epoch(row), row) for row in rows) if ts is not None]
 
 
 def room_after(window: list, newest: Dict[str, float], limit: float) -> tuple:
@@ -124,12 +143,11 @@ def allowance_window(
         with usage_store.read(root, allow_stale=allow_stale) as txn:
             roots, captured, root_causes, newest = _window_rows(txn, now_ts, horizons=forecast)
         degraded = usage_store.integrity_degraded(root)
-        rows = [row for part in captured for row in usage_store.decode_attempts(part)]
+        window = _decode_window(captured)
     except Exception as exc:  # noqa: BLE001 — every read failure is the one typed outcome
         return {"status": STATUS_UNKNOWN, "error": f"{type(exc).__name__}: {exc}",
                 "limit_usd": limit, "settled_usd": None, "accounted_usd": None, "remaining_usd": None,
                 "resets_at": "", "spend_by_cause": None}
-    window = [(ts, row) for ts, row in ((row_ts_epoch(row), row) for row in rows) if ts is not None]
     summary = _summary([row for _ts, row in window])
     by_cause: dict = {}
     for _ts, row in window:
@@ -177,3 +195,154 @@ def allowance_window(
 
 def _iso(ts: float) -> str:
     return _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc).isoformat()
+
+
+def resumed_allowance(record: dict) -> dict:
+    """Read the wake's last consumed grant projection, never an unconsumed pause grant."""
+    from ouroboros.consciousness_authority import is_own_clock_wake
+
+    if not is_own_clock_wake(record.get("metadata")):
+        return {}
+    value = record.get(RESUMED_ALLOWANCE_KEY)
+    return value if isinstance(value, dict) else {}
+
+
+def wake_ceiling_metadata(record: dict) -> dict:
+    """The fields that explain the wake's current, not necessarily initial, producer ceiling."""
+    metadata = record.get("metadata") or {}
+    renewal = resumed_allowance(record)
+    if not renewal:
+        return metadata
+    return {**metadata, "root_cost_ceiling_usd": renewal.get("ceiling_usd"),
+            "root_cost_ceiling_source": renewal.get("source")}
+
+
+def at_wake_ceiling(pause: dict, ceiling, basis: str, *, legacy=False) -> bool:
+    from ouroboros.budget_pause import RAIL_GRACEFUL_CEILING, STATE_PAUSED, STATE_PAUSING
+
+    if (pause.get("state") not in ({STATE_PAUSED, STATE_PAUSING} if legacy else {STATE_PAUSED})
+            or pause.get("reason") != "budget" or pause.get("rail") != RAIL_GRACEFUL_CEILING or ceiling is None):
+        return False
+    saved = pause.get("cost_ceiling")
+    if not isinstance(saved, dict):
+        return legacy  # useful in a description; not proof to expand money
+    number = saved.get("ceiling_usd")
+    return (saved.get("basis") == basis and type(number) in (int, float)
+            and math.isclose(float(number), ceiling, rel_tol=0.0, abs_tol=1e-9))
+
+
+def allowance_stopped(metadata: dict, pause: dict, members=()) -> bool:
+    """Positive proof that the paused own wake exhausted its producer allowance, not a profile or cap alone.
+
+    If a child paused first, the caller supplies only the live members of this exact root fence.
+    """
+    from ouroboros.budget_pause import RAIL_DISPATCH_REFUSED, STATE_PAUSED
+    from ouroboros.consciousness_authority import is_own_clock_wake
+    from ouroboros.task_pacing import recorded_producer_ceiling
+
+    if not (is_own_clock_wake(metadata) and metadata.get("root_cost_ceiling_source") in {"allowance", "both"}
+            and pause.get("state") == STATE_PAUSED and pause.get("reason") == "budget"
+            and pause.get("exact_continuation") is True and pause.get("source_ref")):
+        return False
+    ceiling = recorded_producer_ceiling({"metadata": metadata})
+    return at_wake_ceiling(pause, ceiling, "producer_allowance") or (
+        pause.get("rail") == RAIL_DISPATCH_REFUSED and pause.get("scope") == "root"
+        and any(at_wake_ceiling(member, ceiling, "root_resolved_ceiling") for member in members))
+
+
+def fenced_allowance_members(drive_root, task_id, fence_id):
+    """A bounded address read, only when a child may own this wake's current allowance stop."""
+    from ouroboros.budget_pause import budget_pause_row
+    from supervisor.consciousness_carriers import paused_tree_members
+
+    for member_id, root, pause_id in paused_tree_members(task_id, fence_id=fence_id):
+        pause = budget_pause_row(root or drive_root, member_id)
+        if pause.get("pause_id") == pause_id and pause.get("root_task_id") == task_id:
+            yield pause
+
+
+def allowance_resume_decision(
+    drive_root,
+    task,
+    pause,
+    *,
+    now: Optional[float] = None,
+    allow_stale: bool = False,
+) -> dict:
+    """One wake's durable additional room, cumulative ceiling and live ``available_now_usd`` from one
+    coherent ``usage_store.read`` snapshot (group spend, hard caps, global wallet, 24 h window with this
+    root counted once even past ``ROOT_HORIZON_SEC``). Global wallet exhaustion still refuses
+    ``budget_still_exhausted``; a positive narrower wallet caps only ``available_now_usd``, never freezing
+    the durable allowance ceiling. Displays pass ``allow_stale=True``; Resume uses the default strict read.
+    Never hold this read across queue locks."""
+    from ouroboros import usage_store
+    from ouroboros.settings_setup_contract import resolve_total_budget_usd
+    from ouroboros.usage_admission import _task_money_snapshot_in_txn, task_billing_fields
+
+    unknown = {"error": "consciousness_allowance_unknown"}
+    try:
+        if not isinstance(task, dict) or not isinstance(pause, dict):
+            return unknown
+        task_id = str(task.get("id") or task.get("task_id") or "").strip()
+        root_id = str(task.get("root_task_id") or task_id).strip()
+        if not root_id:
+            return unknown
+        now_ts = time.time() if now is None else float(now)
+        limit = float(get_consciousness_daily_usd())
+        global_limit = resolve_total_budget_usd()
+        if not math.isfinite(now_ts) or not math.isfinite(limit):
+            return unknown
+        if global_limit is not None and (type(global_limit) not in (int, float) or not math.isfinite(float(global_limit))):
+            return unknown
+        root = _drive_root(drive_root)
+        # Durable lineage precedes the usage store; all money totals come from ONE read transaction.
+        fields = task_billing_fields(task, root_id, None, root, allow_stale=allow_stale)
+        with usage_store.read(root, allow_stale=allow_stale) as txn:
+            money = _task_money_snapshot_in_txn(txn, fields, root_id)
+            global_summary = txn.summary()
+            _roots, captured, _causes, _newest = _window_rows(txn, now_ts, extra_roots=(root_id,))
+        if usage_store.integrity_degraded(root) or not money:
+            return unknown
+        window_known = float(_summary([row for _ts, row in _decode_window(captured)])["settled_usd"])
+        if not math.isfinite(window_known) or window_known < 0:
+            return unknown
+        room = round(max(0.0, limit - window_known), 6)
+        if window_known >= limit or room <= 1e-9:
+            return {"error": "consciousness_allowance_exhausted"}
+        spent = money["settled_usd"]
+        if type(spent) not in (int, float) or not math.isfinite(spent) or spent < 0:
+            return unknown
+        hard_room = money["remaining_known_usd"]
+        saved_cap = (pause.get("cost_ceiling") or {}).get("root_cap_usd")
+        if any(type(value) not in (int, float) or not math.isfinite(value)
+               for value in (hard_room, saved_cap) if value is not None):
+            return unknown
+        # The snapshot's room is measured under the caps in force now — a lawfully raised work cap
+        # included (``raised_cap``) and every recorded independent root fence (``_observed_root_limit``).
+        # The root cap saved in the pause is the same cap as it stood when the pause was written:
+        # after a lawful raise it is not an independent limit and must not freeze the wake below
+        # the raised cap. It still guards a pause whose live caps the snapshot could not read.
+        if hard_room is None and saved_cap is not None:
+            hard_room = saved_cap - spent
+        if hard_room is not None and hard_room <= 1e-9:
+            from ouroboros.pause_notices import cap_exhausted_error
+            return {"error": cap_exhausted_error(money)}
+        global_settled = global_summary.get("settled_usd")
+        if type(global_settled) not in (int, float) or not math.isfinite(global_settled) or global_settled < 0:
+            return unknown
+        wallet = (float("inf") if global_limit is None
+                  else round(max(0.0, max(0.0, float(global_limit)) - float(global_settled)), 6))
+        if wallet <= 1e-9:
+            return {"error": "budget_still_exhausted"}
+        additional = float(room) if hard_room is None else min(float(room), float(hard_room))
+        ceiling = round(spent + additional, 6) if additional >= 1e-6 else spent + additional
+        available_now = min(additional, float(wallet))
+        if not all(math.isfinite(v) for v in (additional, ceiling, available_now)) or additional <= 1e-9 or available_now <= 1e-9:
+            return unknown
+        source = ("allowance" if hard_room is None
+                  else "both" if math.isclose(room, hard_room, rel_tol=0.0, abs_tol=1e-9)
+                  else "allowance" if room < hard_room else "per_task_cap")
+        return {"additional_usd": additional, "ceiling_usd": ceiling, "available_now_usd": available_now,
+                "source": source, "window_limit_usd": limit}
+    except (OSError, ValueError, TypeError, RuntimeError, KeyError):
+        return unknown

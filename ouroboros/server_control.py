@@ -6,18 +6,10 @@ import contextlib
 import os
 import json
 import pathlib
-import re
 import sys
 from typing import Any
 
 from ouroboros.platform_layer import IS_WINDOWS
-
-_PANIC_EXACT_RE = re.compile(r"^/panic(?:@[A-Za-z0-9_]+)?(?:\s|$)", re.IGNORECASE)
-
-
-def is_exact_panic_command(text: Any) -> bool:
-    """True ONLY for exact ``/panic`` or ``/panic@<bot>`` at token boundary (rejects ``/panicking``)."""
-    return bool(_PANIC_EXACT_RE.match(str(text or "").strip()))
 
 # The successor this generation spawned, published before custody I/O so Panic can stop it.
 _restart_successors: list = []
@@ -37,13 +29,40 @@ def external_owner_binding(state: dict) -> tuple[bool, Any, tuple[int, int]]:
     return user_known and chat_known, owner, pair
 
 
+def restart_consumer_is_live(state: Any) -> bool:
+    """Only the started restart coordinator may accept a Reset, never a bare callback."""
+    is_alive = getattr(getattr(state, "restart_consumer", None), "is_alive", None)
+    if not callable(is_alive):
+        return False
+    try:
+        return bool(is_alive())
+    except Exception:
+        return False
+
+
+def request_owner_restart(state: Any, *, require_consumer: bool = False) -> bool:
+    """Schedule an owner-initiated restart (Reset, Rollback, or Apply Update).
+
+    Unlike an agent restart through the supervisor, this re-reads the runtime mode
+    from settings instead of re-pinning the inherited boot baseline. True means the
+    callback was called, not that restart completed; Reset also needs a live coordinator.
+    """
+    if require_consumer and not restart_consumer_is_live(state):
+        return False
+    callback = getattr(state, "request_restart", None)
+    if callable(callback):
+        callback(owner=True)
+        return True
+    return False
+
+
 def dispatch_accepted_restart(bridge, text: str, *, callback=None, **message) -> None:
     """Schedule accepted Restart after its transport captured the canonical receipt."""
     import logging
     import threading
 
     callback = callback or getattr(bridge, "startup_owner_command", None)
-    if (message.get("task_metadata") or {}).get("literal_text") or text.strip().lower() != "/restart" or not callable(callback):
+    if text.strip().lower() != "/restart" or not callable(callback):
         bridge.enqueue_local_message(text, **message)
         return
     from ouroboros.task_finalization import host_operation_reply_kwargs
@@ -101,8 +120,8 @@ class PanicIngress:
     def invalidate_owner(self) -> None:
         self._owner = [False, None]
 
-    def request(self, text: str, *, source="web", user_id=0, chat_id=0, evidence=None, literal_text: bool = False) -> bool:
-        if literal_text or self._stop is None or not is_exact_panic_command(text):
+    def request(self, text: str, *, source="web", user_id=0, chat_id=0, evidence=None) -> bool:
+        if self._stop is None or not str(text).strip().lower().startswith("/panic"):
             return False
         pair = self._owner[1]
         if source != "web" and (pair is None or pair != (user_id, chat_id)):
@@ -133,14 +152,12 @@ class PanicIngress:
 
 
 def request_panic(bridge, text: str, *, startup_owner_command=None, evidence=None,
-                  source="web", user_id=0, chat_id=0, literal_text: bool = False) -> bool:
+                  source="web", user_id=0, chat_id=0) -> bool:
     """Accept an emergency through its owner, never ordinary command admission.
 
     Only authenticated web ingress may use the startup callback. External
     senders need the bridge's positively bound owner pair even during startup.
     """
-    if literal_text:
-        return False
     panic = getattr(bridge, "panic", None)
     identity = {"source": source, "user_id": user_id, "chat_id": chat_id}
     if panic is not None and panic.request(text, evidence=evidence, **identity):
@@ -149,6 +166,17 @@ def request_panic(bridge, text: str, *, startup_owner_command=None, evidence=Non
         return False
     action = startup_owner_command(text, send_kwargs={"broadcast": False})
     return action is not None and PanicIngress(action).request(text, evidence=evidence)
+
+
+def restart_arguments(environ) -> tuple[str, ...]:
+    """The restart transport's actual argument selection, also used by Reset."""
+    try:
+        saved = json.loads(environ.get("OUROBOROS_SERVER_REEXEC_ARGV_JSON", "") or "[]")
+        if isinstance(saved, list) and saved and all(isinstance(item, str) and item for item in saved):
+            return tuple(saved)
+    except Exception:
+        pass
+    return tuple(sys.argv)
 
 
 def restart_current_process(
@@ -196,14 +224,7 @@ def restart_current_process(
         from ouroboros.config import BOOT_RUNTIME_MODE_ENV_KEY
 
         env.pop(BOOT_RUNTIME_MODE_ENV_KEY, None)
-    raw_argv = sys.argv
-    try:
-        saved = json.loads(os.environ.get("OUROBOROS_SERVER_REEXEC_ARGV_JSON", "") or "[]")
-        if isinstance(saved, list) and saved and all(isinstance(item, str) and item for item in saved):
-            raw_argv = saved
-    except Exception:
-        raw_argv = sys.argv
-    argv = [sys.executable, *raw_argv]
+    argv = [sys.executable, *restart_arguments(env)]
     handoff_context = contextlib.nullcontext((None, {}))
     if IS_WINDOWS:
         # Windows has no process-image replacement. Its C runtime emulates exec by
@@ -401,8 +422,10 @@ def execute_panic_stop(
             if not settle:
                 request_threads.append(thread)
 
+        from ouroboros.gateway.history_reader import reader as history_reader
         from ouroboros.startup_historical_audit import audit
 
+        attempt("room-history-reader", history_reader.stop, native=True)
         attempt("startup-audit", audit.stop, native=True)
         from ouroboros.maintenance import child as maintenance_child
 
@@ -451,6 +474,11 @@ def execute_panic_stop(
         attempt("services", lambda: kill_all_services(data_dir, request_only=True))
         attempt("companions", lambda: panic_kill_all(request_only=True))
         attempt("restart-successor", stop_restart_successor)
+        from ouroboros.launch_custody import panic_stop_kept
+
+        # A kept launch whose worker retired: no worker tree or Popen here reaches it, and on
+        # macOS a platform binary hides its markers from the census below.
+        attempt("kept-services", lambda: panic_stop_kept(data_dir))
         # One more bounded request attempt: every live member of the installation scope
         # (marker, recorded task groups, the engine's recorded runs) by re-measured identity,
         # excluding this server, its launcher and pid 1; a restart successor carries the

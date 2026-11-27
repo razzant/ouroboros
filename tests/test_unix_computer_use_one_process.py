@@ -904,3 +904,80 @@ def test_wait_rereads_transient_child_error_without_claiming_absence():
     out = native.wait_for_text(lambda: next(views), "loaded", deadline=0.5, now=clock,
                                pause=lambda seconds: setattr(clock, "t", clock.t + seconds))
     assert out["until_text"] == {"status": "matched", "reads": 2, "node_id": 2, "field": "value"}
+
+
+@pytest.mark.parametrize("outcome, window, loads, answer", [
+    (TIMEOUT, 39, True, (39, "matched")),  # unknown press; its window, named by ID, shows the text on its third read
+    (0, 39, False, (39, "not_observed")),  # completed press; its window never shows it, only the other one does
+    (0, None, False, (40, "matched")),  # completed press; with no window key the newly focused window answers
+], ids=["unknown-press-id-delayed-match", "completed-press-id-whole-negative", "completed-press-no-window-other"])
+def test_ordered_desktop_batch_reads_after_one_action_without_reclassifying_it(tmp_path, monkeypatch, outcome, window,
+                                                                               loads, answer):
+    """A model response, real batch/registry/skill handlers, fake OS: waiting reads repeat, the input never does.
+    After the action returns and before the read starts, focus moves to window 40 of the same app, which already
+    shows the awaited text. When both calls name window 39 by the ID known before acting, the read waits on it alone;
+    without a window key the read takes the newly focused window. A matched read leaves an unknown press unknown.
+    This is composition evidence, not an agent speed measurement or a native desktop test.
+    """
+    from ouroboros.loop_tool_execution import execute_tool_batch
+    from ouroboros.tool_capabilities import call_segments
+    from ouroboros.tools.registry import ToolEntry, ToolRegistry
+
+    nodes, reads = deck(), []
+    nodes["field"]["value"] = "Loading"
+    nodes["other"] = {"role": "AXWindow", "title": "Inspector", "window_id": 40, "children": ["other_line"]}
+    nodes["other_line"] = {"role": "AXStaticText", "value": "Loaded result 731"}
+    ax = FakeAX(nodes, windows=["win", "other"], focused="win", perform=lambda _el, _action: outcome)
+    multi = ax.multi
+
+    def delayed(el, attrs):  # window 39's walks after the press; with loads it shows the result from the third
+        if ax.performed and el == "win" and attrs == native._WALK_ATTRS:
+            reads.append(el)
+            if loads and len(reads) == 3:
+                nodes["field"]["value"] = "Loaded result 731"
+        return multi(el, attrs)
+
+    ax.multi = delayed
+    real_tree, clock = native.op_tree, Clock()  # the wait's time passes only in its pauses: no wall-clock race
+    monkeypatch.setattr(native, "op_tree", lambda *a, started=None, **k: real_tree(
+        *a, **k, now=clock, pause=lambda seconds: setattr(clock, "t", clock.t + seconds)))
+
+    def helper(args, _state):
+        if args[0] == "element":
+            return native.op_element(args[1], ax=ax, front=lambda: app_dict(SAFARI), settle=lambda _s: None)
+        assert args[0] == "observe"
+        ax.focused = "other"  # after the action returned, before the read begins
+        return native.op_observe(args[1], ax=ax)
+
+    _module, api, state = mac(tmp_path / "skill", monkeypatch, helper=helper)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    from tests._extension_dispatch_harness import supervisor
+    supervisor(monkeypatch)  # only the physical Safety-model call is a fixture; never contact a provider
+    names = ["fixture_desktop_act", "fixture_desktop_read"]
+    for name, short in zip(names, ("element_act", "ax_tree")):
+        handler = api.tools[short]
+        registry.register(ToolEntry(name=name, schema={"name": name, "parameters": api.meta[short]["schema"]},
+                                   handler=lambda _ctx, _handler=handler, **args: _handler(**args)))
+    # The production extension names take the same serial path, never an inert-read parallel segment.
+    assert call_segments(["ext_19_r_unix_computer_use_element_act", "ext_19_r_unix_computer_use_ax_tree"]) == [[0], [1]]
+    named = {} if window is None else {"window": window}  # no window: the key is absent, not empty
+    args = [{"app": "Keynote", "do": "press", "select": {"identifier": "toolbar.play"}, **named},
+            {"app": "Keynote", **named, "include_web": True,  # whole reads: absent text is not_observed
+             "until_text": "Loaded result 731", "timeout_ms": 1000}]
+    calls = [{"id": str(i), "type": "function", "function": {"name": name, "arguments": json.dumps(value)}}
+             for i, (name, value) in enumerate(zip(names, args))]
+    logs = tmp_path / "logs"
+    logs.mkdir(exist_ok=True)
+    rows, control = execute_tool_batch(calls, registry, logs, "desktop-composition", None, {})
+    assert control is None and len(rows) == 2, rows
+    assert all(str(row["result"]).startswith("{") for row in rows), [row["result"] for row in rows]
+    first, last = [json.loads(row["result"]) for row in rows]
+    assert (first["dispatched"], first["action_outcome"]) == (True, "unknown" if outcome else "completed"), first
+    assert (last["window_id"], last["until_text"]["status"]) == answer, last
+    if window is None:  # window 39 was never read again: the first read of window 40 matched
+        assert reads == [] and last["until_text"]["reads"] == 1, (reads, last)
+    else:  # every read was window 39's, past window 40's text: until the third one, or the whole timeout
+        assert last["until_text"]["reads"] == len(reads) >= 2 and (len(reads) == 3 or not loads), (reads, last)
+    assert any(row.get("value") == "Loaded result 731" for row in last["nodes"]) is (answer[1] == "matched"), last
+    assert ax.performed == [("play", "AXPress")] and first["window"]["window_id"] == 39 and ax.balanced(), first
+    assert [item[0] for item in state["helper"]] == ["element", "observe"]

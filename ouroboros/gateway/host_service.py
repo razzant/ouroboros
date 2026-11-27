@@ -25,7 +25,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ouroboros.contracts.chat_id_policy import A2A_CHAT_ID_MAX, A2A_CHAT_ID_MIN, is_a2a_chat_id
-from ouroboros.deployment_extensions import trust_gap
+from ouroboros.deployment_extensions import admission_refusal
 from ouroboros.event_bus import get_global_event_bus
 from ouroboros.config import WS_RELAY_BURST, WS_RELAY_REFILL_PER_SEC
 from ouroboros.gateway._helpers import run_sync_to_completion
@@ -56,6 +56,15 @@ NOTIFY_VERSION = 1
 
 class HostServiceAuthError(Exception):
     """Raised when a skill token cannot be authenticated."""
+
+
+# The words of ``deployment_extensions.admission_refusal``, which a service sign-in reads too.
+_ADMISSION_WORDS = {
+    "not_installed": "skill {name!r} is not installed",
+    "not_reviewed": "skill {name!r} has no current executable review authority",
+    "disabled": "skill {name!r} is disabled",
+    "not_trusted": "skill {name!r} is not code this deployment's service runs",
+}
 
 
 class _RateLimiter:
@@ -304,14 +313,9 @@ class HostServiceContext:
 
     def _assert_active_token(self, skill_name: str, token_payload: Dict[str, Any]) -> None:
         loaded = find_skill(self.data_dir, skill_name)
-        if loaded is None:
-            raise HostServiceAuthError(f"skill {skill_name!r} is not installed")
-        if not loaded.review.gate_for(loaded.content_hash)["executable_review"]:
-            raise HostServiceAuthError(f"skill {skill_name!r} has no current executable review authority")
-        if not loaded.enabled:  # the effective switch (``deployment_extensions``), as the loader reads it
-            raise HostServiceAuthError(f"skill {skill_name!r} is disabled")
-        if loaded.manifest.is_extension() and trust_gap(loaded.name, loaded.skill_dir, loaded.content_hash):
-            raise HostServiceAuthError(f"skill {skill_name!r} is not code this deployment's service runs")
+        refusal = admission_refusal(loaded)  # one answer with a service sign-in's start and return
+        if refusal:
+            raise HostServiceAuthError(_ADMISSION_WORDS[refusal].format(name=skill_name))
         if str(token_payload.get("content_hash") or "") != str(loaded.content_hash or ""):
             raise HostServiceAuthError(f"skill {skill_name!r} token is stale")
 
@@ -443,6 +447,10 @@ async def _api_identity(request: Request) -> JSONResponse:
     from ouroboros.presence_owner_contact import MAIN_CONTACT_VERSION
     from ouroboros.presence_recovery import WORK_OUTPUT_VERSION
     from ouroboros.place_guard import PLACE_BINDING_VERSION
+    from ouroboros.gateway.host_sign_in import SIGN_IN_HANDOVER_VERSION, SIGN_IN_VERSION
+    from ouroboros.gateway.host_telegram_feed import TELEGRAM_GROUP_FEED_VERSION, TELEGRAM_GROUP_POLL_CLAIM_VERSION
+    from ouroboros.place_intake import ATTENTION_VERSION
+    from ouroboros.extension_late_result import VERSION as LATE_RESULT_VERSION
 
     return JSONResponse({"ok": True, "name": name, "description": description,
                          "presence_delivery_version": DELIVERY_VERSION, "places_version": 1,
@@ -458,8 +466,13 @@ async def _api_identity(request: Request) -> JSONResponse:
                          "presence_reaction_context": 1,
                          "presence_change_context": 1,
                          "presence_identity": 1,
+                         "presence_attention_version": ATTENTION_VERSION,
+                         "late_result_version": LATE_RESULT_VERSION,
                          "presence_place_binding_version": PLACE_BINDING_VERSION,
-                         "notify_version": NOTIFY_VERSION})
+                         "notify_version": NOTIFY_VERSION, "sign_in_version": SIGN_IN_VERSION,
+                         "sign_in_handover_version": SIGN_IN_HANDOVER_VERSION,
+                         "telegram_group_feed": TELEGRAM_GROUP_FEED_VERSION,
+                         "telegram_group_poll_claim": TELEGRAM_GROUP_POLL_CLAIM_VERSION})
 
 
 async def _api_tool_schemas(request: Request) -> JSONResponse:
@@ -509,9 +522,9 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
         panic_text = str(payload.get("text") or payload.get("image_caption") or "")
+        is_panic = panic_text.strip().lower().startswith("/panic")
         from ouroboros.panic_source import source_evidence
-        from ouroboros.server_control import is_exact_panic_command, request_panic
-        is_panic = (not payload.get("literal_text")) and is_exact_panic_command(panic_text)
+        from ouroboros.server_control import request_panic
         if is_panic and request_panic(
             ctx.bridge_getter(), panic_text, source=f"skill:{skill_name}",
             user_id=int(payload.get("user_id") or 0), chat_id=int(payload.get("chat_id") or 0),
@@ -583,7 +596,7 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                 except ValueError as exc:
                     return _json_error(str(exc), 400)
                 # Reuse the accepted byte-proven kinds; same_message still checks every incoming digest/name.
-                logged = text.strip() or image_caption.strip() or chat_uploads.attachment_placeholder(
+                logged = chat_uploads.local_message_words(f"skill:{skill_name}", text, image_caption) or chat_uploads.attachment_placeholder(
                     inline_image, {"chat_attachments": inbound.get("attachments"), "chat_attachment_uploads": incoming})
                 if (not chat_uploads.same_message(inbound, logged, incoming)
                         or not await asyncio.to_thread(same_reply, ctx.data_dir, inbound.get("reply_to") or {}, requested_reply)):
@@ -631,8 +644,8 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
             return _json_error(str(exc), 400)
         if control and client_message_id:  # a correlated operation is its accepted owner row; a press writes none
             return _json_error("ui_control cannot name a client_message_id: a press is not an owner message", 400)
-        if control: metadata["ui_control"] = control
-        if payload.get("literal_text"): metadata["literal_text"] = True
+        if control:
+            metadata["ui_control"] = control
         bridge = ctx.bridge_getter()
         response_event: asyncio.Event = asyncio.Event()
         response_holder: dict[str, str] = {}
@@ -772,20 +785,37 @@ def _skill_state_path(ctx: HostServiceContext, skill_name: str, raw: Any, field:
 
 
 def _confined_inject_sources(
-    ctx: HostServiceContext, skill_name: str, value: Any,
-) -> list[tuple[pathlib.Path, str, str]]:
+    ctx: HostServiceContext, skill_name: str, payload: dict, *, owner_answer: bool = False,
+) -> list[tuple[Optional[pathlib.Path], str, Any]]:
     """``(source, name, mime)`` per ``{path, name?, mime?}``; each a regular file under the
-    calling skill's OWN state root (the ``staged_files`` confinement, ``_skill_state_path``)."""
+    calling skill's OWN state root (the ``staged_files`` confinement, ``_skill_state_path``).
+    A pathless ``{name, unavailable, ...}`` is media the skill never received: ``(None, name, its
+    row ref)`` (``chat_uploads.delivery_ref``); nothing is read for it. ``owner_answer``: the
+    caller already proved the bundled bridge's own decision relay, which carries no message fields."""
+    value = payload.get("attachments")
     if value in (None, []):
         return []
     if not isinstance(value, list):
         raise ValueError("attachments must be a list of {path, name?, mime?}")
     if len(value) > _INJECT_ATTACHMENT_MAX:
         raise ValueError(f"attachments: at most {_INJECT_ATTACHMENT_MAX} files per message")
-    sources: list[tuple[pathlib.Path, str, str]] = []
+    sources: list[tuple[Optional[pathlib.Path], str, Any]] = []
     for index, item in enumerate(value):
         if not isinstance(item, dict):
             raise ValueError(f"attachments[{index}] must be an object")
+        if "unavailable" in item:
+            from ouroboros.chat_references import exact_reply_ingress
+
+            chat_id, user_id = int(payload.get("chat_id") or 0), int(payload.get("user_id") or 0)
+            if not owner_answer and (chat_id <= 0 or user_id != chat_id or payload.get("ui_control") or not exact_reply_ingress(
+                    ctx.data_dir, f"skill:{skill_name}", chat_id, payload.get("client_message_id"), payload.get("transport"))):
+                raise ValueError("pathless attachment facts require the bundled Telegram owner's message")
+            try:
+                fact = chat_uploads.delivery_ref(item)
+            except ValueError as exc:
+                raise ValueError(f"attachments[{index}] {exc}") from None
+            sources.append((None, fact["name"], fact))
+            continue
         source = _skill_state_path(ctx, skill_name, item.get("path"), f"attachments[{index}]")
         if not source.is_file():
             raise ValueError(f"attachments[{index}] is not a regular file")
@@ -801,14 +831,17 @@ def _inject_identity(
     measured from the sources, so a regenerated stored name never changes it; and whether
     the inline bytes are a proven image (what the placeholder text says)."""
     data, inline_image = _inline_image_bytes(payload)
-    entries = [chat_uploads.bytes_identity(data, chat_uploads.inline_image_name(data))] if data else []
-    entries += [chat_uploads.source_identity(source, name)
-                for source, name, _mime in _confined_inject_sources(ctx, skill_name, payload.get("attachments"))]
-    return [{"sha256": sha256, "name": name} for sha256, name in entries], inline_image
+    def identity(pair: list[str]) -> dict:
+        return dict(zip(("sha256", "name"), pair))
+
+    entries = [identity(chat_uploads.bytes_identity(data, chat_uploads.inline_image_name(data)))] if data else []
+    entries += [identity(chat_uploads.source_identity(source, name)) if source is not None else mime
+                for source, name, mime in _confined_inject_sources(ctx, skill_name, payload)]
+    return entries, inline_image
 
 
 def _inject_attachment_uploads(
-    ctx: HostServiceContext, skill_name: str, payload: Dict[str, Any], cleanup: ExitStack,
+    ctx: HostServiceContext, skill_name: str, payload: Dict[str, Any], cleanup: ExitStack, *, owner_answer: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
     """Copy a skill's inbound files (#668) and its inline photo into the shared upload store.
 
@@ -821,13 +854,14 @@ def _inject_attachment_uploads(
     photo, so later explicit readers retain its pixels. Every lane drops the inline
     copy once uploads stage. Inline bytes that prove no image are no photo: they are
     staged as an ordinary file and never reach vision under the transport's label.
-    Each spec carries its ref's measured identity, which staging verifies while copying.
+    Each spec carries its ref's measured identity, which staging verifies while copying; a fact
+    of media never received records its ref and a pathless spec that staging names by its reason.
     Each new destination belongs to the request cleanup stack until its message is
     accepted; partial batches and cancelled copy waits therefore cannot orphan earlier copies.
     """
     refs: list[dict[str, Any]] = []
     specs: list[dict[str, Any]] = []
-    sources = _confined_inject_sources(ctx, skill_name, payload.get("attachments"))
+    sources = _confined_inject_sources(ctx, skill_name, payload, owner_answer=owner_answer)
 
     def park(source: Any, name: str, mime: str = "") -> None:
         stored, ref = store_upload(source, name, data_dir=ctx.data_dir)
@@ -840,6 +874,11 @@ def _inject_attachment_uploads(
     if data:  # parked first: a proven image's ref is refs[0]
         park(data, chat_uploads.inline_image_name(data))
     for source, name, mime in sources:
+        if source is None:
+            refs.append(mime)
+            specs.append({"label": name, **{key: mime[key] for key in ("mime", "size", "unavailable", "limit_bytes")
+                                            if key in mime}})
+            continue
         park(source, name, mime)
     return specs, refs, refs[0]["mime"] if image else ""
 
@@ -869,6 +908,7 @@ from ouroboros.gateway.host_service_places import (  # noqa: E402
     _api_presence_work as _api_presence_work,
     _api_presence_place as _api_presence_place,
     _presence_work_view as _presence_work_view,
+    host_service_context,
 )
 
 
@@ -879,6 +919,11 @@ async def _api_chat_decision(request: Request) -> JSONResponse:
     idempotent per ``request_id``, first answer wins, typed 404/409 refusals.
     ``inject_chat`` is the owner grant that already lets this skill speak as the
     owner's chat input; answering the owner's own quiz needs nothing more (#472).
+    Only the bundled bridge's Reply may carry ``attachments`` (its one ``/chat/inject`` item: a parked
+    file or the fact of media it never received): stored as any owner upload, recorded with that
+    request's winner alone. A new copy is removed only once the record is read and names it not;
+    unknown keeps it. The bridge's ``rejoin`` reads whether its own request is the recorded answer
+    (``task_decision.rejoin_decision``) before it receives a Reply's file again.
     """
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
@@ -891,15 +936,57 @@ async def _api_chat_decision(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         return _json_error("invalid json", 400)
-    from ouroboros.gateway.task_decision import answer_decision
+    from ouroboros.chat_references import TELEGRAM_SOURCE, bundled_bridge
+    from ouroboros.gateway.task_decision import answer_decision, rejoin_decision
 
+    source, copies, refs, decided = f"skill:{skill_name}", ExitStack(), None, False
+    # Any other skill keeps these fields, which the ingress refuses as before.
+    bridge = (isinstance(body, dict) and ("attachments" in body or body.get("rejoin") is True)
+              and source == TELEGRAM_SOURCE and bundled_bridge(ctx.data_dir))
     try:
-        status, payload = await answer_decision(ctx.data_dir, body, source=f"skill:{skill_name}", request=request)
+        if bridge and body.get("rejoin") is True:
+            status, payload = await run_sync_to_completion(rejoin_decision, ctx.data_dir, body)
+        else:
+            if bridge:
+                body = dict(body)
+                try:
+                    _specs, refs, _image = await run_sync_to_completion(
+                        _inject_attachment_uploads, ctx, skill_name, {"attachments": body.pop("attachments")}, copies,
+                        owner_answer=True)
+                except ValueError as exc:
+                    return _json_error(str(exc), 400)
+            try:  # an ordinary answer's call stays as it was
+                status, payload = await answer_decision(ctx.data_dir, body, source=source, request=request,
+                                                        **({"attachments": refs} if refs is not None else {}))
+            finally:  # even after a raise or cancellation here, the record alone decides the copies' fate
+                if refs:
+                    decided = True
+                    await run_sync_to_completion(_settle_answer_copies, ctx.data_dir, body, refs, copies)
     except Exception as exc:
         log.debug("Host service decision relay failed", exc_info=True)
         return _json_error(str(exc), 500)
+    finally:
+        if not decided:  # no answer was attempted with them: nothing can name these copies
+            try:
+                copies.close()
+            except OSError:
+                log.warning("Could not remove an unrecorded answer file", exc_info=True)
     payload.setdefault("ok", status < 400)
     return JSONResponse(payload, status_code=status)
+
+
+def _settle_answer_copies(root: pathlib.Path, body: Dict[str, Any], refs: list, copies: ExitStack) -> None:
+    """Keep the copies the recorded winner names, or an unreadable record may name; remove them only after the
+    record was read and names none (``task_decision.answer_holds_uploads``). Readback and removal run as one unit."""
+    from ouroboros.gateway.task_decision import answer_holds_uploads
+
+    if answer_holds_uploads(root, body, refs):
+        copies.pop_all()
+        return
+    try:
+        copies.close()
+    except OSError:
+        log.warning("Could not remove an unrecorded answer file", exc_info=True)
 
 
 async def _api_ui_language(request: Request) -> JSONResponse:
@@ -1409,10 +1496,15 @@ def create_host_service_app(
     # host_notify imports this module's helpers; mounted here, imported lazily.
     from ouroboros.gateway.host_notify import _api_notify
     from ouroboros.gateway.host_call import host_call_routes
+    from ouroboros.gateway.host_sign_in import host_sign_in_routes
+    from ouroboros.gateway.host_late_result import api_late_result
+    from ouroboros.gateway.host_telegram_feed import host_telegram_feed_routes
 
     app = Starlette(
         routes=[
             *host_call_routes(),
+            *host_sign_in_routes(),
+            *host_telegram_feed_routes(),
             Route("/identity", _api_identity, methods=["GET"]),
             Route("/tools/schemas", _api_tool_schemas, methods=["GET"]),
             Route("/chat/allocate-internal", _api_allocate_internal, methods=["POST"]),
@@ -1426,18 +1518,16 @@ def create_host_service_app(
             Route("/presence/delivery", _api_presence_delivery, methods=["POST"]),
             Route("/presence/history", _api_presence_history, methods=["POST"]),
             Route("/presence/work/{work_ref}", _api_presence_work, methods=["GET", "POST"]),
+            Route("/late_result", api_late_result, methods=["POST"]),
             Route("/ui/ws-message", _api_ws_message, methods=["POST"]),
             Route("/notify", _api_notify, methods=["POST"]),
             WebSocketRoute("/events", _ws_events),
         ]
     )
-    app.state.host_service_context = HostServiceContext(
-        pathlib.Path(data_dir),
-        bridge_getter=bridge_getter,
-        tool_schemas_getter=tool_schemas_getter,
-        ws_broadcaster_getter=ws_broadcaster_getter,
-        presence_runner=presence_runner,
-    )
+    # The data root's one context: a linked Ouroboros's messages share it, also one that came before this service.
+    app.state.host_service_context = host_service_context(
+        data_dir, bridge_getter=bridge_getter, tool_schemas_getter=tool_schemas_getter,
+        ws_broadcaster_getter=ws_broadcaster_getter, presence_runner=presence_runner)
     return app
 
 

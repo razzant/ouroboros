@@ -101,6 +101,9 @@ def test_tool_set_matches(registry):
 
 EXPECTED_TOOLS = [
     "continue_in_background", "pause_task", "resume_task", "continue_task",
+    # The conversational work-cap operation (#4267): one started work's whole cap,
+    # amended by its owner's words — first-class, so the registry contract names it.
+    "set_task_cost_cap",
     "browse_page", "browser_action", "showSecretHitl",
     "preflight_review", "review_change", "review_status",
     "compact_context", "set_tool_timeout", "request_restart", "prepare_self_change",
@@ -119,6 +122,8 @@ EXPECTED_TOOLS = [
     "wait_task", "wait_tasks", "await_messages", "tree_note", "tree_read",
     "delegate_start", "delegate_wait", "delegate_cancel", "delegate_answer",
     "delegate_message",
+    # A linked Ouroboros: a work letter, an ordinary message, and a letter root's question to its sender.
+    "delegate_to_ouroboros", "message_ouroboros", "ask_sender",
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
     "send_photo", "send_video", "send_file", "send_links", "show_card", "search_code", "query_code", "query_data", "escalate",

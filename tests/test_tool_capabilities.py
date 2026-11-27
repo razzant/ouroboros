@@ -91,6 +91,9 @@ def test_top_level_workspace_focus_has_tool_and_schema_parity(tmp_path, monkeypa
 
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
     monkeypatch.setattr(search, "_available_web_search_backends", lambda: ["ddgs"])
+    import ouroboros.peer_links as peer_links
+
+    monkeypatch.setattr(peer_links, "has_outgoing_link", lambda root: True)  # a confirmed link, as the gates above
     system_repo = tmp_path / "system"
     project = tmp_path / "project"
     external = tmp_path / "external"
@@ -763,9 +766,8 @@ def test_burst_absorb_clause_states_the_prefix_write_cost():
     registry = ToolRegistry(repo_dir=tmp, drive_root=tmp)
     descriptions = {s["function"]["name"]: s["function"]["description"] for s in initial_tool_schemas(registry)}
     description = descriptions["schedule_subagent"]
-    assert "Children scheduled in one round run concurrently" in description
-    assert ("on cache-write-priced routes each sibling started before the first responds pays a full "
-            "prefix write") in description
+    assert "Same-round starts run concurrently" in description
+    assert "Cold parallel starts may cost a full prefix write if priced, either input" in description
     assert "With mode=any_terminal it returns as soon as the FIRST child finishes" in descriptions["wait_tasks"]
 
 

@@ -220,7 +220,9 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # workspace_write session confined to a private snapshot of its own write
     # root, and explicitly integrates the captured diff (C1).
     "delegate_start", "delegate_wait", "delegate_cancel", "delegate_answer",
-    "delegate_message",
+    # A letter to my human's linked Ouroboros starts work there under that installation's own authority, which no
+    # read-only ceiling here can narrow: acting children only (gateways/peer.py).
+    "delegate_message", "delegate_to_ouroboros", "message_ouroboros",
     "integrate_delegated_patch",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
     "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames", "read_archive",
@@ -592,11 +594,14 @@ def routing_action_for_tool(name: object) -> str:
 # set (``FOREGROUND_MUTATIVE_TOOLS``: publication and the file editors) joins it
 # at the authority module.
 OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
-    "pause_task", "resume_task", "continue_task",
+    "pause_task", "resume_task", "continue_task", "set_task_cost_cap",
     "maintain_harness", "free_storage", "propose_payload_release",
     # starting or steering work (tell_task stays: the nanny of a running campaign)
     "start_task", "schedule_subagent", "schedule_followup", "plan_task",
     "move_to_project", "close_project", "manage_project_folder", "delegate_start", "initiate_presence",
+    # words or work that leave for my human's linked Ouroboros: a letter, a message, and a letter root's question
+    # to its sender (ask_sender: shown to that root alone, its class is still what it does)
+    "delegate_to_ouroboros", "message_ouroboros", "ask_sender",
     "cancel_task", "resume_child_task", "override_delegation_constraint", "request_deep_self_review",
     "set_task_retention",
     # writing files, running processes, integrating patches

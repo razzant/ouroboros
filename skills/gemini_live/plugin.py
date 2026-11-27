@@ -26,9 +26,9 @@ ROUTE = RealtimeRoute('gemini_live', ENDPOINT, 'google::')
 # Start with the catalog window; only this process's observed drops teach a span.
 # No call text, keys or context selection lives in this map.
 HELD_AUDIO_SPANS = {}
-# Only reconnecting sessions leave a capsule, consumed by the next connection.
+# Only reconnecting sessions leave a capsule. Prune and claim it once in open().
 # Google's handles expire two hours after termination (session-management docs,
-# read 2026-10-21). Prune on construction; no timer, disk state or socket is kept.
+# read 2026-10-21). No timer, disk state or socket is kept.
 RESUMPTIONS = {}
 RESUME_FIELDS = ('response', 'item', 'response_complete', 'native_response', 'completed_responses', 'last_done',
                  'text', 'calls', 'seen_calls', 'tool_results', 'caption_offsets',
@@ -241,13 +241,16 @@ class GeminiSession(JsonSession):
         self.resume_handle = options.resume_handle
         self.resume_revision = 0
         self.tool_response_revision = None
-        self.resume_requested = bool(options.resume_handle)
+        self.resume_requested = False  # an unopened wire candidate owns no replay state
+
+    def _claim_resumption(self):
+        """Transfer local replay state once, before the opened wire can replay any event."""
         now = time.monotonic()
         for key, (expiry, _) in tuple(RESUMPTIONS.items()):
             if expiry <= now:
                 del RESUMPTIONS[key]
-        saved = RESUMPTIONS.pop((selected.model, options.resume_handle), None) if options.resume_handle else None
-        if saved:
+        self.resume_requested = bool(self.resume_handle)
+        if self.resume_requested and (saved := RESUMPTIONS.pop((self.selected.model, self.resume_handle), None)):
             for name, value in saved[1].items():
                 setattr(self, name, value)
 
@@ -281,6 +284,7 @@ class GeminiSession(JsonSession):
 
     async def open(self):
         await self.connect_wire()
+        self._claim_resumption()
         await self.write(self.events[0])
         handshake = []
         while True:

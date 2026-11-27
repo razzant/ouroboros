@@ -404,7 +404,7 @@ def test_a_reused_verdict_names_the_rows_of_my_human_its_seats_were_not_sent_by_
     sends: list[dict] = []
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends))
     ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "drive", task_id="task-reuse")
-    ctx._owner_directives = [{"source": "owner_mailbox", "content": "да", "msg_id": "m-12", "received": "2026-11-05T10:00:00+00:00"}]
+    ctx._owner_directives = [{"source": "owner_mailbox", "mail_kind": "owner_text", "content": "да", "msg_id": "m-12", "received": "2026-11-05T10:00:00+00:00"}]
     ask = dict(root="system_repo", surface="change", goal=GOAL, scope=SCOPE, subject="index")
     first = run_review_change(ctx, **ask)
     assert first["reused"] is False and "owner_words_since_review" not in first and len(sends) == 3
@@ -413,7 +413,7 @@ def test_a_reused_verdict_names_the_rows_of_my_human_its_seats_were_not_sent_by_
     assert briefs and all(ref["status"] == "retained" for ref in briefs)
     same = run_review_change(ctx, **ask)
     assert same["reused"] is True and "owner_words_since_review" not in same and len(sends) == 3
-    ctx._owner_directives.append({"source": "owner_mailbox", "content": "да", "msg_id": "m-1"})
+    ctx._owner_directives.append({"source": "owner_mailbox", "mail_kind": "owner_text", "content": "да", "msg_id": "m-1"})
     later = run_review_change(ctx, **ask)
     assert later["reused"] is True and later["record_id"] == first["record_id"] and len(sends) == 3
     assert later["owner_words_since_review"]["rows"] == ["[owner · owner_mailbox of task task-reuse · msg m-1]\nда"]

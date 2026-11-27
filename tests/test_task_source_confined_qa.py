@@ -359,3 +359,60 @@ def test_a_confined_handle_opens_only_its_own_sidecar_names(tmp_path, monkeypatc
     assert packs.handle_bytes(root, "wanted", ref["path"], anchor=anchor) == raw
     assert packs.handle_info(root, "wanted", ref["path"].replace("record-", "absent-"), anchor=anchor) is None
     assert {name for name in opened if name.endswith(".members.json")} == {packs.sidecar_name("wanted", 1)}, opened
+
+
+def test_retained_placement_distinguishes_unreadable_from_confirmed_absence(tmp_path, monkeypatch):
+    """Trigger 2 (#2901): ordinary optional callers keep the fail-soft contract (``strict=False``), while
+    ``strict=True`` raises on unreadable stores or directories and returns ``False``/empty on confirmed absence,
+    links, or readable non-matching rows."""
+    import errno
+    from ouroboros import source_retention, task_store
+    from ouroboros.store import StoreBusy
+    from tests.test_task_download_confinement import _junction_or_link
+
+    anchor, drive, origin, successor = _occupied_origin_drive(tmp_path, "legacy", False)
+    write_task_result(anchor, successor, "completed", child_drive_root=str(drive), timeout_retry_from=origin,
+                      original_task_id=origin)
+    # Confirmed nonmatch: origin drive exists and its store is readable, but successor has no row there.
+    assert source_retention.retained_child_root(anchor, drive, successor, strict=True) is False
+    assert source_retention.retained_task_roots(anchor, successor, strict=True) == []
+
+    real_read = task_store.read_document
+
+    def busy_child(root, task_id, *args, **kwargs):
+        if task_id == successor and root.resolve(strict=False) == drive.resolve(strict=False):
+            raise StoreBusy("child store busy", reason="contention")
+        return real_read(root, task_id, *args, **kwargs)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(task_store, "read_document", busy_child)
+        # Ordinary optional contract stays fail-soft.
+        assert source_retention.retained_child_root(anchor, drive, successor) is False
+        assert source_retention.retained_task_roots(anchor, successor) == []
+        # Strict placement discovery distinguishes unreadable from confirmed absence.
+        with pytest.raises(StoreBusy):
+            source_retention.retained_child_root(anchor, drive, successor, strict=True)
+        with pytest.raises(StoreBusy):
+            source_retention.retained_task_roots(anchor, successor, strict=True)
+
+    # Non-absence OSError on an existing directory raises in strict mode, stays fail-soft in default mode.
+    def eio_dir(*_a, **_k):
+        raise OSError(errno.EIO, "unreadable directory")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(confined_files, "confined_directory", eio_dir)
+        assert source_retention.retained_child_root(anchor, drive, successor) is False
+        with pytest.raises(OSError) as exc_info:
+            source_retention.retained_child_root(anchor, drive, successor, strict=True)
+        assert exc_info.value.errno == errno.EIO
+
+    # Symlink/junction and missing directory remain confirmed nonmatch even in strict mode.
+    elsewhere = anchor / "task_drives" / "elsewhere"
+    elsewhere.mkdir(parents=True, exist_ok=True)
+    drive.rmdir()
+    _junction_or_link(drive, elsewhere)
+    assert source_retention.retained_child_root(anchor, drive, successor, strict=True) is False
+    assert source_retention.retained_task_roots(anchor, successor, strict=True) == []
+    drive.unlink()
+    assert source_retention.retained_child_root(anchor, drive, successor, strict=True) is False
+    assert source_retention.retained_task_roots(anchor, successor, strict=True) == []

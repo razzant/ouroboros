@@ -18,8 +18,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import upgrade_notices as notices
+from ouroboros import memory_inventory, upgrade_notices as notices
 from ouroboros.chronicle_store import ChronicleStore
+from ouroboros.memory_inventory import legacy_pointer_rows
 from ouroboros.utils import jsonl_generation_signature
 
 NOTICE = "legacy_memory_notice"
@@ -162,7 +163,7 @@ def test_an_activated_journal_without_legacy_pieces_hears_nothing(boot, journal)
         (boot.root / "logs" / "chat.jsonl").write_text(json.dumps(_rows()[0]) + "\n", encoding="utf-8")
     store = ChronicleStore(boot.root)
     assert store.ensure_activated()["kind"] == "activation"
-    assert all(p["legacy_type"] in ("gap", "cursor_gap") for p in store.legacy_pointer_rows())
+    assert all(p["legacy_type"] in ("gap", "cursor_gap") for p in legacy_pointer_rows(store))
     boot.run()
     assert boot.rows() == [] and notices.LEGACY_MEMORY_NOTICE_KEY not in boot.state.load_state()
 
@@ -221,14 +222,14 @@ def test_an_unreadable_journal_leaves_only_this_notice_owed(boot, monkeypatch):
                         lambda: {"OUROBOROS_MAX_ROUNDS": 150, "OUROBOROS_TASK_ABS_CEILING_SEC": "unlimited"})
     monkeypatch.delenv("OUROBOROS_MAX_ROUNDS", raising=False)
     monkeypatch.delenv("OUROBOROS_TASK_ABS_CEILING_SEC", raising=False)
-    real_pointers, broken = ChronicleStore.legacy_pointer_rows, [True]
+    real_pointers, broken = memory_inventory.legacy_pointer_rows, [True]
 
-    def pointers(self):
+    def pointers(store):
         if broken:
             raise ValueError("chronicle authority shortened")
-        return real_pointers(self)
+        return real_pointers(store)
 
-    monkeypatch.setattr(ChronicleStore, "legacy_pointer_rows", pointers)
+    monkeypatch.setattr(memory_inventory, "legacy_pointer_rows", pointers)
     boot.run()
     sent = [row.get("type") for row in dialogue_test.log_rows(boot.root / "logs" / "chat.jsonl")
             if row.get("direction") == "system"]

@@ -64,14 +64,33 @@ def is_worker_slot(slot: Any) -> bool:
     return getattr(slot, "executor", EXECUTOR_WORKER) not in INLINE_EXECUTORS
 
 
+def provides_pool(wid: int) -> bool:
+    """Whether the slot at this address is pool capacity: boot owns the nonnegative ones; a Host
+    thread's negative pseudo-slot (``inline_carrier._HOST_SLOT_IDS``, #3149) runs its own turn
+    and is none. Availability, membership and census share it."""
+    return wid >= 0
+
+
+def _table_items(pool: Any = None) -> list:
+    """A lock-consistent ``(wid, slot)`` snapshot for live ``WORKERS``; a passed snapshot as-is."""
+    live = _pool().WORKERS
+    if pool is None or pool is live:
+        with _queue_lock:
+            return list((live if pool is None else pool).items())
+    return list(pool.items())
+
+
+def pool_member_count(pool: Any = None) -> int:
+    """How many ``WORKERS`` entries belong to the pool (``provides_pool``): negative Host slots are none."""
+    return sum(1 for wid, _ in _table_items(pool) if provides_pool(wid))
+
+
 def project_slots(pool: Any = None) -> list:
-    pool = _pool().WORKERS if pool is None else pool
-    return [slot for slot in pool.values() if is_project_slot(slot)]
+    return [slot for _, slot in _table_items(pool) if is_project_slot(slot)]
 
 
 def lane_slots(pool: Any = None) -> list:
-    pool = _pool().WORKERS if pool is None else pool
-    return [slot for slot in pool.values() if is_lane_slot(slot)]
+    return [slot for _, slot in _table_items(pool) if is_lane_slot(slot)]
 
 
 def idle_project_slots(pool: Any = None) -> list:
@@ -97,13 +116,21 @@ def pool_slot_counts(pool: Any = None, running: Any = None) -> Dict[str, Any]:
     wait or warm sleep, a live in-slot wait: ``pool_admission.waits_on_its_process``). The booting/reaping/
     retiring flags overlap (a fresh slot is booting and reaping until its readiness row);
     ``assignable_idle_workers`` is what dispatch could use this instant. Conversation carriers are another
-    lane, outside the cap, counted apart. No queue, filesystem or admission work; ``worker_ready`` asks
+    lane, outside the cap, counted apart; a Host thread's negative pseudo-slot is no carrier
+    (``provides_pool``, #3149). No queue, filesystem or admission work; ``worker_ready`` asks
     each slot's ``Process`` whether it is alive.
     """
     from ouroboros.runtime_limits import get_max_workers
 
-    slots, running = _pool().WORKERS if pool is None else pool, _pool().RUNNING if running is None else running
-    projects, carriers, now = project_slots(slots), lane_slots(slots), time.time()
+    live = _pool()
+    if pool is None or pool is live.WORKERS or running is None or running is live.RUNNING:
+        with _queue_lock:
+            slots = dict(_table_items(pool))
+            running = dict(live.RUNNING if running is None else running)
+    else:
+        slots = dict(pool)
+    projects, now = project_slots(slots), time.time()
+    carriers = [slot for wid, slot in slots.items() if is_lane_slot(slot) and provides_pool(wid)]
     busy = [slot for slot in projects if getattr(slot, "busy_task_id", None) is not None]
     waiting = sum(not pool_admission.acting(slot, running.get(slot.busy_task_id), now) for slot in busy)
     return {
@@ -652,16 +679,16 @@ def _release_booting_slot(
     })
 
 
-def kill_worker_tree(pid: int, *, keep_services: bool = False, panic_process=None):
+def kill_worker_tree(pid: int, *, keep_services: bool = False, kept: Any = None, panic_process=None):
     """The ONE worker process-tree kill, for every teardown and backstop.
 
     A worker's tree is not the worker's property: the installation's daemon roots (``daemon``-scope
     custody rows — the shared Claudexor daemon when a task worker was the first to need it) outlive
     every worker and server generation, so they and their descendants are spared. ``keep_services``
     additionally spares the deliberately kept session services a verifier still needs when ONE task
-    is cancelled or timed out; a generation change ends those services with the generation, so the
-    pool paths leave it off. The platform helper applies the same retained-subtree contract on every
-    OS.
+    is cancelled or timed out, or an idle worker retires (``kept``: the leaders its caller already
+    read); a generation change ends those services with the generation, so the pool paths leave it
+    off. The platform helper applies the same retained-subtree contract on every OS.
     """
     from ouroboros.platform_layer import kill_pid_tree, request_process_tree_kill
     if panic_process is not None:
@@ -675,7 +702,7 @@ def kill_worker_tree(pid: int, *, keep_services: bool = False, panic_process=Non
 
     spared = _q._retained_daemon_pids()
     if keep_services:
-        spared |= _q._kept_service_pids()
+        spared |= _q._kept_service_pids() if kept is None else set(kept)
     kill_pid_tree(pid, exclude_pids=spared)
 
 
@@ -940,7 +967,7 @@ def _replacement_waits(wid: int, slot: Any, reading: Any, ready_attempt: int = 1
     with _queue_lock:
         if _pool().WORKERS.get(wid) is not slot or project_fenced(slot) or slot.proc.is_alive():
             return True
-        last = len(_pool().WORKERS) == 1
+        last = provides_pool(wid) and pool_member_count() == 1
         kept = last or (critical and ready_attempt > 1)
         if kept:
             slot.booting = slot.reaping = slot.retiring = False
@@ -988,7 +1015,8 @@ def retire_or_replace_worker(wid: int, slot: Any, *, reading: Any = None) -> str
 
     Growth needs a member (an empty pool is stopped); a fence forgets and starts nothing. Serializer held, not Q."""
     with _queue_lock:
-        last = len(_pool().WORKERS) == 1 and _pool().WORKERS.get(wid) is slot and not slot.proc.is_alive()
+        last = (provides_pool(wid) and pool_member_count() == 1
+                and _pool().WORKERS.get(wid) is slot and not slot.proc.is_alive())
         fenced = project_fenced(slot)
     if not last:
         return "retired" if retire_worker(wid, slot) else ""
@@ -1064,9 +1092,21 @@ def _idle_retirement_current(job: dict, slot: Any) -> bool:
                 and not project_fenced(slot))
 
 
+def _return_idle_worker(job: dict, slot: Any, why: str) -> None:
+    """Withdraw a retirement no signal began: the slot is assignable again and must confirm quiescence anew."""
+    with _queue_lock:
+        if _idle_retirement_current(job, slot):
+            slot.retiring = slot.reaping = False
+            slot.quiescence_token, slot.quiescence_confirmed = "", False
+    log.warning("Idle worker %s stays in the pool: %s", slot.wid, why)
+
+
 def reap_idle_worker(job: dict) -> None:
-    """Kill only the reserved acknowledged actor, then forget only confirmed death (an enabled
-    pool's last member is replaced). The first stop's bounded join sees an ordinary exit now; one row records it.
+    """Kill only the reserved acknowledged actor, sparing its kept services, then forget only confirmed
+    death (an enabled pool's last member is replaced). The first stop's bounded join sees an ordinary exit
+    now; one row records it. Retirement is discretionary: when custody cannot name every kept service
+    before the first signal (``launch_custody.kept_service_spare``), the worker returns to the pool
+    instead, until a later retirement reads it whole; a begun stop keeps its spare.
 
     The lifecycle serializer guards membership, never a native wait: the slot is reserved under Q
     (``retiring``), so the kill and join run without it and assignment keeps its turn; the
@@ -1078,7 +1118,15 @@ def reap_idle_worker(job: dict) -> None:
     if not _idle_retirement_current(job, slot):
         return
     if slot.proc.is_alive():
-        kill_worker_tree(_slot_pid(slot), keep_services=True)
+        if "kept" not in job:  # decided once, before the first signal; a cancel/timeout kill never waits on it
+            from ouroboros.launch_custody import kept_service_spare
+
+            kept = kept_service_spare(job["drive_root"])
+            if kept.blind:
+                _return_idle_worker(job, slot, kept.blind)
+                return
+            job["kept"] = kept.pids
+        kill_worker_tree(_slot_pid(slot), keep_services=True, kept=job["kept"])
         # Each health-tick re-drive repeats one bounded tree kill, then joins without waiting.
         slot.proc.join(timeout=2 if job.pop("first_stop", False) else 0)
     if slot.proc.is_alive():
@@ -1114,7 +1162,8 @@ def reconcile_worker_capacity(residual_demand, reading: Any = None) -> None:
     # replenished and its awaiting turns dispatched whatever the project fence says.
     reconcile_conversation_lane()
     with _queue_lock:
-        if not _pool().WORKERS or _pool()._WORKER_POOL_DISABLED_REASON:
+        members = pool_member_count()
+        if not members or _pool()._WORKER_POOL_DISABLED_REASON:
             return
         demand = residual_demand()
         if demand is None or (_pool().repo_writer_admission_closed() and not demand):
@@ -1126,7 +1175,7 @@ def reconcile_worker_capacity(residual_demand, reading: Any = None) -> None:
         missing = min(max(0, wanted - len(idle) - usable_booting()), admissible_starts(reading))
         # An empty table stops growth: a pool whose lane spare is absent keeps its last
         # idle slot, as it did before the lane existed.
-        keep = wanted if len(_pool().WORKERS) > len(idle) else max(1, wanted)
+        keep = wanted if members > len(idle) else max(1, wanted)
         # Ask all surplus candidates: a resident with late duties is not the spare.
         if len(idle) > keep:
             for slot in idle:
@@ -1135,7 +1184,7 @@ def reconcile_worker_capacity(residual_demand, reading: Any = None) -> None:
             # Retire only acknowledged surplus; growth never creates a project spare during work.
             for slot in quiet[keep:]:
                 retire_quiescent_worker(slot)
-        next_id = max(_pool().WORKERS, default=-1) + 1
+        next_id = max(0, max(_pool().WORKERS, default=-1) + 1)  # a Host pseudo-slot's negative wid is no pool address (#3149)
     for wid in range(next_id, next_id + missing):
         # Starts run without Q. The serializer excludes Stop/update/exhaustion teardown;
         # the readiness owner can still fence the pool while this start is in flight.
@@ -1229,18 +1278,19 @@ def _worker_pool_execution_state(pool: Any = None) -> Dict[str, Any]:
     readiness parks since the last successful ``worker_ready`` stop growth when they outnumber
     live ready project processes (``pool_admission``); with no healthy slot left nothing can run.
     """
-    table = _pool().WORKERS if pool is None else pool
-    projects = project_slots(table)
     with _queue_lock:
+        table = _pool().WORKERS if pool is None else pool
+        projects = project_slots(table)
+        has_pool = pool_member_count(table) > 0  # a lone Host thread surviving a failed spawn is no pool (#3149)
         disabled_reason = str(_pool()._WORKER_POOL_DISABLED_REASON or "")
         healthy = any(not getattr(w, "readiness_exhausted", False) for w in projects)
         if not disabled_reason and not healthy and pool_admission.parked(projects):
             disabled_reason = "worker_readiness_exhausted"
-    available = len(table) > 0 and not disabled_reason
+    available = has_pool and not disabled_reason
     return {
         "available": available,
         "reason_code": "" if available else "worker_pool_unavailable",
-        "disabled_reason": disabled_reason or ("no_workers" if not table else ""),
+        "disabled_reason": disabled_reason or ("no_workers" if not has_pool else ""),
         "worker_count": len(projects),
     }
 

@@ -80,7 +80,9 @@ _SCOPE_REVIEW_PRIOR_DEFAULTS = frozenset({
 # No table here declares an external model "retired": a saved model id is the owner's
 # choice and stays as written, and a model a provider really withdrew answers with that
 # provider's own error. Only equality with one of OUR former shipped defaults migrates
-# (the sets above), because only then is the value ours rather than the owner's.
+# (the sets above), because only then is the value ours rather than the owner's. Their
+# source is release history, under regression tests; a catalog shows availability, never
+# intent. If stale: over-broad classification overwrites an owner's choice.
 
 
 def _truthy_setting(value) -> bool:
@@ -294,18 +296,19 @@ def authored_model_slots(document) -> set[str]:
 def provider_slot_proposals(settings: dict) -> dict:
     """What an UNAUTHORED Main/Light/Fallbacks slot takes, from the configured access.
 
-    One exclusive direct provider: its own defaults. A local-only install: blank Light (it
-    follows Main) and blank Fallbacks (no chain onto the same runtime) — the setup contract's
-    ``local`` profile proposes the same — except a lane routed local while Main is not, whose
-    shipped id is then a route the install runs (for Fallbacks the only chain entry). Otherwise
-    the shipped defaults. Each proposal names its kind's ``proposal_connection`` (the built-in key
-    first, else the only named one). Several named ones and no built-in: the key the owner's Main
-    names; before that choice the shipped spelling, which no key here runs, while Settings asks for
-    it (``main_connection_choice``). A proposal never replaces a saved value (DEVELOPMENT: Provider
-    Independence).
+    One exclusive direct provider: its own defaults. Multiple direct providers without
+    OpenRouter (or a compatible endpoint), or a local-only install: blank Light (it follows
+    Main) and blank Fallbacks (no cross-model chain until chosen) — matching the setup
+    contract's ``direct-multi`` and ``local`` profiles — except a lane routed local while Main
+    is not, whose shipped id is then a route the install runs (for Fallbacks the only chain
+    entry). Otherwise the shipped defaults. Each proposal names its kind's
+    ``proposal_connection`` (the built-in key first, else the only named one). Several named
+    ones and no built-in: the key the owner's Main names; before that choice the shipped
+    spelling, which no key here runs, while Settings asks for it (``main_connection_choice``).
+    A proposal never replaces a saved value (DEVELOPMENT: Provider Independence).
     """
     from ouroboros.provider_connections import direct_provider_defaults
-    from ouroboros.provider_models import route_on_connection
+    from ouroboros.provider_models import direct_only_kinds, route_on_connection
 
     provider, kind, name = _proposal_connection(settings)
     def on_connection(value: str) -> str:  # Fallbacks is a chain: each entry on the connection
@@ -315,7 +318,8 @@ def provider_slot_proposals(settings: dict) -> dict:
         defaults = direct_provider_defaults(provider, settings, name)
         return {key: on_connection(defaults[role]) for role, key in _MODEL_ROLE_SETTING_KEYS.items() if role in defaults}
     proposals = {key: on_connection(_setting_text(SETTINGS_DEFAULTS, key)) for key in _ALL_MODEL_SLOT_KEYS}
-    if not has_remote_provider(settings) and _setting_text(settings, "LOCAL_MODEL_SOURCE"):
+    local_only = not has_remote_provider(settings) and bool(_setting_text(settings, "LOCAL_MODEL_SOURCE"))
+    if local_only or len(direct_only_kinds(settings)) > 1:
         local_main = _truthy_setting(settings.get("USE_LOCAL_MAIN"))
         proposals.update({key: "" for key, flag in _LOCAL_LANE_FLAG_FOR_SLOT.items()
                           if local_main or not _truthy_setting(settings.get(flag))})
@@ -539,3 +543,14 @@ async def ws_heartbeat_loop(
             "type": "heartbeat",
             "ts": utc_now_iso(),
         })
+
+
+def start_ws_heartbeat(
+    loop: asyncio.AbstractEventLoop,
+    bind_broadcast_loop: Callable[[asyncio.AbstractEventLoop], None],
+    has_clients_fn: Callable[[], bool],
+    broadcast_fn: Callable[[dict], Awaitable[None]],
+) -> asyncio.Task[None]:
+    """Bind thread-side broadcasts before starting this generation's heartbeat."""
+    bind_broadcast_loop(loop)
+    return asyncio.create_task(ws_heartbeat_loop(has_clients_fn, broadcast_fn), name="ws-heartbeat")

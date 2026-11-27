@@ -37,9 +37,7 @@ _SPAWN_ALLOWLIST = {
     # The pool's one ``ctx.Process``: the pool's _record_worker_processes ledgers it by measured birth.
     "supervisor/worker_process.py",
     "launcher.py",                        # custody host process (pre-runtime)
-    # exec_source_launcher spawns the next custody host and exits. Interactive OS
-    # installers keep Popen roots in launcher_bootstrap's live Panic stop list;
-    # unlike contained commands, they may outlive an ordinary setup-window close.
+    # exec_source_launcher spawns the next custody host and exits.
     "ouroboros/launcher_bootstrap.py",
     # The same one-shot launcher replacement, before package imports/adoption can wait.
     "ouroboros/launcher_windows_runtime.py",
@@ -177,8 +175,10 @@ _LAUNCH_FUNCTIONS = {"ouroboros/process_custody.py::spawn_supervised",  # the sh
 _PROCESS_KINDS = {
     "ouroboros/claudexor_daemon.py::OwnedClaudexorDaemon._spawn": "engine",
     "ouroboros/extension_companion.py::CompanionSupervisor.start": "companion",
+    "ouroboros/gateway/history_reader.py::HistoryReader._run": "room history reader",
     "ouroboros/local_model.py::LocalModelManager.start_server": "local model",
     "ouroboros/local_model.py::LocalModelManager._run_install": "local model",  # no ledger row: no next-start reap
+    "ouroboros/maintenance.py::MaintenanceChild._recover_dialogue": "maintenance child",
     "ouroboros/maintenance.py::MaintenanceChild._run": "maintenance child",
     "ouroboros/storage.py::StorageCounter._run": "storage count",
     "ouroboros/storage_free.py::FreeSpace._size": "free space sizing",
@@ -214,7 +214,6 @@ _PROCESS_KINDS = {
     "ouroboros/process_containment.py::ProcessContainer.spawn": "contained run",
     "ouroboros/test_bytecode.py::run": "contained run",
     "launcher.py::_hidden_popen": "server generation",
-    "ouroboros/launcher_bootstrap.py::spawn_bootstrap_command": "bootstrap command",
     "ouroboros/launcher_bootstrap.py::exec_source_launcher": "bootstrap command",  # the source launcher successor
     "ouroboros/platform_layer.py::open_path_external": "owner's program",
     "ouroboros/body_switch.py::_windows_handoff": "outside the server",
@@ -251,6 +250,12 @@ _STOPPERS = {
         "restart": ("teardown: maintenance_child.stop", "cleanup: stop_background_children"),
         "panic": ("panic: maintenance_child.stop",),
         "fault": ("teardown: maintenance_child.stop", "cleanup: stop_background_children"),
+    },
+    "room history reader": {
+        "quit": ("teardown: history_reader.stop",),
+        "restart": ("teardown: history_reader.stop", "cleanup: stop_background_children"),
+        "panic": ("panic: history_reader.stop",),
+        "fault": ("teardown: history_reader.stop", "cleanup: stop_background_children"),
     },
     "storage count": {
         "quit": ("lifeline: not asked; on POSIX its parent lifeline, under a Windows launcher the launcher's Job",
@@ -295,7 +300,8 @@ _STOPPERS = {
     "task service": {
         "quit": ("teardown: stop_owned_work", "owned stop: kill_all_services"),
         "restart": ("cleanup: stop_owned_work", "owner restart: stop_owned_work"),
-        "panic": ("panic: kill_all_services", "worker exit: ouroboros.tools.services.kill_all_services"),
+        "panic": ("panic: kill_all_services", "panic: panic_stop_kept",
+                  "worker exit: ouroboros.tools.services.kill_all_services"),
         "fault": ("teardown: stop_owned_work", "cleanup: stop_owned_work"),
     },
     "executor process": {
@@ -346,8 +352,7 @@ _STOPPERS = {
         "fault": ("exits: it exits 1 and the launcher starts it again",),
     },
     "bootstrap command": {
-        "quit": ("launcher close: stop_bootstrap_commands",
-                 "survives: an interactive OS installer keeps its terminal after its setup window closes"),
+        "quit": ("launcher close: stop_bootstrap_commands",),
         "restart": ("outside: the launcher runs it before any server generation",),
         "panic": ("launcher panic: stop_bootstrap_commands",),
         "fault": ("outside: the launcher runs it before any server generation",),
@@ -1011,6 +1016,207 @@ def test_live_kept_service_pids_reports_only_live_session_services(tmp_path):
         for p in (keep, task_svc, ws_keep, ws_task):
             p.kill()
             p.wait(timeout=5)
+
+
+_LOOPBACK_PAGE_CODE = (
+    "import functools, http.server, os, socketserver, sys, threading\n"
+    "h = functools.partial(http.server.SimpleHTTPRequestHandler, directory=sys.argv[1])\n"
+    "with socketserver.TCPServer(('127.0.0.1', 0), h) as s:\n"
+    "    threading.Timer(float(sys.argv[2]), os._exit, (124,)).start()\n"
+    "    print(f'http://127.0.0.1:{s.server_address[1]} READY', flush=True)\n"
+    "    s.serve_forever()\n"
+)
+
+
+def _forked_service_worker(root_str: str, fork_str: str, session_id: str, watchdog_sec: float, conn) -> None:
+    import threading
+    from ouroboros import config as cfg, launch_custody, process_scope, safety
+    from ouroboros.tools import registry, services
+
+    os.setsid()
+    timer = threading.Timer(watchdog_sec, os._exit, (124,))
+    timer.daemon = True
+    timer.start()
+    root, fork = pathlib.Path(root_str), pathlib.Path(fork_str)
+    cfg.DATA_DIR = root
+    cfg.reset_runtime_mode_baseline_for_tests()
+    process_custody.adopt_session_id(session_id)
+    process_scope.plant_installation_scope(root)
+    safety.check_safety = lambda *a, **k: (True, "")
+    reg = registry.ToolRegistry(repo_dir=root.parent / "repo", drive_root=fork)
+    reg._ctx.task_id, reg._ctx.budget_drive_root = "producer", str(root)
+    try:
+        for name, keep in (("kept-page", True), ("task-page", False)):
+            cmd = [sys.executable, "-u", "-c", _LOOPBACK_PAGE_CODE, str(root.parent / "pages" / name), str(watchdog_sec)]
+            raw = reg.execute("start_service", {
+                "name": name, "cwd": str(fork / "task_drives" / "producer"), "cmd": cmd,
+                "keep_alive": keep, "readiness": {"log_contains": "READY", "timeout_sec": 20}})
+            assert raw.lstrip().startswith("{"), raw
+            row = json.loads(raw)
+            conn.send((name, {**row, "address": launch_custody._log_address(row["log_path"])}))
+        conn.recv()
+        conn.send({i["name"]: (i["lifecycle"], i["state"], i["launch_id"]) for i in services.stop_task_services(reg._ctx)})
+    except BaseException:
+        services.kill_all_services(fork)
+        raise
+    while True:
+        time.sleep(60)
+
+
+def _run_panic_stop(root_str: str) -> None:
+    import logging
+    from ouroboros import config, server_control
+    from supervisor import state
+
+    os.setsid()
+    root = config.DATA_DIR = pathlib.Path(root_str)
+    state.init(root)
+    server_control.execute_panic_stop(None, lambda **kw: None, data_dir=root, panic_exit_code=99, log=logging.getLogger("panic-test"))
+
+
+def _wait_identity_gone(pid: int, birth: str, timeout: float = 10.0) -> bool:
+    from ouroboros.process_census import IDENTITY_ABSENT, IDENTITY_ALIVE, IDENTITY_ZOMBIE, read_identities
+
+    deadline = time.monotonic() + timeout
+    while True:
+        ident = read_identities([pid])[pid]
+        if ident.state in (IDENTITY_ABSENT, IDENTITY_ZOMBIE) or (
+            ident.state == IDENTITY_ALIVE and birth and ident.birth and ident.birth != birth):
+            return True
+        if time.monotonic() >= deadline:
+            return False  # preserves IDENTITY_UNREADABLE as unknown
+        time.sleep(0.05)
+
+
+@_POSIX_ONLY
+@pytest.mark.parametrize("door", ["restart", "panic"])
+def test_forked_kept_service_lifetime_across_worker_exit(tmp_path, monkeypatch, door):
+    """Secondary-drive ``start_service``: finalization stops task-page, real ``reap_idle_worker``
+    spares kept-page at its exact GET URL/body, and Restart or owner Panic then stops it."""
+    import contextlib, queue as stdqueue, socket, threading, urllib.request
+    from ouroboros import claudexor_daemon, config, launch_custody, owned_shutdown, server_restart
+    from ouroboros.process_census import canonical_birth, measure_birth
+    from supervisor import queue, task_reaper, workers, worker_pool_lifecycle as lifecycle
+    from tests._launch_stop_shared import _end, _same_process_alive
+    from tests.test_claudexor_custody_lifetime import _supervisor_rows
+    from tests.test_manual_restart_execution import _ctx
+
+    watchdog = 300
+    root = tmp_path / "data"
+    fork = root / "state" / "headless_tasks" / "producer" / "data"
+    (tmp_path / "repo").mkdir()
+    (fork / "task_drives" / "producer").mkdir(parents=True)
+    for name, body in (("kept-page", "kept-page-ok"), ("task-page", "task-page-ok")):
+        (page_dir := tmp_path / "pages" / name).mkdir(parents=True)
+        (page_dir / "page.txt").write_text(body, encoding="utf-8")
+    for key in ("OUROBOROS_CLAUDEXOR_ATTACH_HOME", "CLAUDEXOR_DAEMON_SOCK", "CLAUDEXOR_CONTROL_PORT", config.BOOT_RUNTIME_MODE_ENV_KEY):
+        monkeypatch.delenv(key, raising=False)
+    for key, val in (("OUROBOROS_DATA_DIR", root), ("OUROBOROS_APP_ROOT", root), ("CLAUDEXOR_CONFIG_DIR", root / "claudexor"),
+                     ("OUROBOROS_SETTINGS_PATH", root / "state" / "settings.json"), ("OUROBOROS_RUNTIME_MODE", "advanced")):
+        monkeypatch.setenv(key, str(val))
+    for mod, attr, val in ((config, "DATA_DIR", root), (server_restart, "DATA_DIR", root), (claudexor_daemon, "_MANAGER", None),
+                           (queue, "DRIVE_ROOT", root), (queue, "RETURNS_NAMED", {}), (workers, "DRIVE_ROOT", root)):
+        monkeypatch.setattr(mod, attr, val)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    def get_page(url: str) -> bytes:
+        with opener.open(url, timeout=5) as resp:
+            assert resp.status == 200
+            return resp.read()
+    def assert_refused(port: int) -> None:
+        with pytest.raises(ConnectionRefusedError), socket.create_connection(("127.0.0.1", port), timeout=1):
+            pass
+
+    mp = multiprocessing.get_context("spawn")
+    parent_conn, child_conn = mp.Pipe()
+    started_monotonic = time.monotonic()
+    worker = mp.Process(target=_forked_service_worker,
+                        args=(str(root), str(fork), process_custody.current_custody_session_id(), watchdog, child_conn))
+    worker.start()
+    child_conn.close()
+    launches: dict[str, tuple[int, str]] = {}
+    panic_proc = None
+    try:
+        worker_birth = measure_birth(worker.pid)
+        rows = {}
+        for _ in range(2):
+            assert parent_conn.poll(30.0), f"worker timed out (exitcode={worker.exitcode})"
+            name, row = parent_conn.recv()
+            pid, lid = int(row["pid"]), str(row.get("launch_id") or "")
+            saved = [e for e in process_custody._read_ledger(fork)
+                     if process_custody.custody_record_id(e) == lid and int(e.get("pid") or 0) == pid]
+            birth = canonical_birth(saved[0].get("scope_birth") or "") if len(saved) == 1 else ""
+            assert birth and _same_process_alive(pid, birth)
+            launches[name], rows[name] = (pid, birth), row
+        kept, task = rows["kept-page"], rows["task-page"]
+        (kept_pid, kept_birth), (task_pid, task_birth) = launches["kept-page"], launches["task-page"]
+        assert worker_birth
+        assert kept["address"].startswith("http://127.0.0.1:") and task["address"].startswith("http://127.0.0.1:")
+        kept_port, task_port = int(kept["address"].rsplit(":", 1)[1]), int(task["address"].rsplit(":", 1)[1])
+        kept_url, task_url = f"{kept['address']}/page.txt", f"{task['address']}/page.txt"
+        assert kept_port != task_port
+        assert process_custody._read_ledger(root) == []
+        assert get_page(kept_url) == b"kept-page-ok"
+        assert get_page(task_url) == b"task-page-ok"
+
+        parent_conn.send("finalize")
+        assert parent_conn.poll(30.0), f"worker timed out during finalization (exitcode={worker.exitcode})"
+        assert parent_conn.recv() == {
+            "task-page": ("stopped", "exited", task["launch_id"]), "kept-page": ("kept", "running", kept["launch_id"])}
+        assert _wait_identity_gone(task_pid, task_birth), "task-scoped page must stop at finalization"
+        assert_refused(task_port)
+        assert _same_process_alive(kept_pid, kept_birth)
+        assert get_page(kept_url) == b"kept-page-ok"
+
+        assert worker.is_alive() and _same_process_alive(worker.pid, worker_birth)
+        slot = workers.Worker(1, worker, stdqueue.Queue(), process_birth=worker_birth)
+        slot.retiring, slot.quiescence_token = True, "idle-ack"
+        for attr, val in (("WORKERS", {0: object(), 1: slot}), ("RUNNING", {}), ("_WORKER_POOL_DISABLED_REASON", "")):
+            monkeypatch.setattr(workers, attr, val)
+        job = {"worker": slot, "token": "idle-ack", "drive_root": str(root), "first_stop": True}
+        reap_deadline = time.monotonic() + 10.0
+        while True:
+            try:
+                lifecycle.reap_idle_worker(job)
+                break
+            except task_reaper.TerminalFileRecoveryPending:
+                assert time.monotonic() < reap_deadline, "idle worker retirement did not confirm death"
+                time.sleep(0.05)
+        assert 1 not in workers.WORKERS
+        assert worker.exitcode is not None and worker.exitcode < 0
+        assert _wait_identity_gone(worker.pid, worker_birth)
+        retired, = _supervisor_rows(root, "worker_retired")
+        assert (retired["worker_id"], retired["pid"], retired["process_birth"], retired["replaced"]) == (1, worker.pid, worker_birth, False)
+        assert _same_process_alive(kept_pid, kept_birth)
+        assert get_page(kept_url) == b"kept-page-ok"
+        assert [s["launch_id"] for s in launch_custody.kept_services(root)["services"]] == [kept["launch_id"]]
+
+        if door == "restart":
+            for mod, attr, val in ((server_restart, "_OWNER_STOP_BEGAN", threading.Event()), (server_restart, "_LAST_RETURNING", set()),
+                                   (server_restart, "_LAST_RETURN_TX", {"id": ""}), (owned_shutdown, "_GENERATION_STOP", owned_shutdown._Stop())):
+                monkeypatch.setattr(mod, attr, val)
+            ctx = _ctx([], kill=lambda **kw: True)
+            ctx.PENDING = []
+            server_restart._stop_owned_work(ctx)
+        else:
+            panic_proc = mp.Process(target=_run_panic_stop, args=(str(root),))
+            panic_proc.start()
+            panic_proc.join(timeout=15)
+            assert panic_proc.exitcode == 99
+        assert _wait_identity_gone(kept_pid, kept_birth), f"{door} left secondary-drive kept page alive"
+        assert_refused(kept_port)
+        assert launch_custody.kept_services(root) == {"services": [], "complete": True, "note": ""}
+        assert (time.monotonic() - started_monotonic) < (watchdog - 5)
+    finally:
+        parent_conn.close()
+        for proc in (p for p in (worker, panic_proc) if p is not None):
+            if proc.is_alive():
+                proc.kill()
+            proc.join(timeout=10)
+        for pid, birth in launches.values():
+            if _same_process_alive(pid, birth):
+                with contextlib.suppress(ProcessLookupError):
+                    _end(pid, birth)
+                _wait_identity_gone(pid, birth, timeout=5.0)
 
 
 def test_installed_skill_names_is_disk_derived_and_none_on_failure(monkeypatch):

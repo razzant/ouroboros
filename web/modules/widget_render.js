@@ -8,6 +8,7 @@
 // (a rendered component adds its key to `visibleKeys`). Every host that mounts the markup reconciles it in place with
 // `patchWidgetChildren` (a data update never detaches a retained control) and keeps its charts with `syncWidgetCharts`.
 import { cleanExtensionRoute } from './api_client.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { chartConfig, formatNumber, getPath, renderChartDataTable, renderTableCell } from './widget_chart.js';
 import { applyChartTheme, paintChartSeries } from './theme_palette.js';
 import { escapeHtmlAttr as escapeHtml, renderMarkdownSafe } from './utils.js';
@@ -119,6 +120,11 @@ export function renderComponent(ctx, component, view, treePath, inheritedTarget 
     return markup.replace(/^(\s*)<([a-z][a-z0-9-]*)/, `$1<$2 data-widget-component="${escapeHtml(componentIdentity(component, treePath))}"`);
 }
 
+export function renderWidgetJson(value, label = 'JSON') {
+    const name = escapeHtml(label);
+    return `<details class="widget-json"><summary>${name}</summary><pre class="scroll-fade-y" data-widget-scroll-region="${name}"><code>${escapeHtml(JSON.stringify(value, null, 2))}</code></pre></details>`;
+}
+
 function renderActionFeedback(componentState, key) {
     const feedback = componentState[`feedback:${key}`];
     if (!feedback) return '';
@@ -224,7 +230,7 @@ function renderComponentBody(ctx, component, view, treePath, inheritedTarget = '
         const rows = getPath(data, component.path || '', []);
         const cols = component.columns || [];
         if (!Array.isArray(rows)) return '<div class="muted">No rows.</div>';
-        return `<div class="widget-table-wrap"><table class="widget-table"><thead><tr>${cols.map((c) => `<th>${escapeHtml(c.label || c.path || '')}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${cols.map((c) => `<td data-label="${escapeHtml(c.label || c.path || '')}">${renderTableCell(row, c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+        return `<div class="widget-table-wrap scroll-fade-x" data-widget-scroll-region="${escapeHtml(component.label || 'Table')}"><table class="widget-table"><thead><tr>${cols.map((c) => `<th>${escapeHtml(c.label || c.path || '')}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${cols.map((c) => `<td data-label="${escapeHtml(c.label || c.path || '')}">${renderTableCell(row, c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
     }
     if (type === 'markdown') {
         const value = component.text ?? getPath(data, component.path || '', '');
@@ -232,12 +238,14 @@ function renderComponentBody(ctx, component, view, treePath, inheritedTarget = '
     }
     if (type === 'json') {
         const value = component.path ? getPath(data, component.path, {}) : data;
-        return `<details class="widget-json"><summary>${escapeHtml(component.label || 'JSON')}</summary><pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre></details>`;
+        return renderWidgetJson(value, component.label || 'JSON');
     }
     if (type === 'code') {
         const value = component.text ?? getPath(data, component.path || '', '');
         const label = component.label ? `<div class="widget-code-label">${escapeHtml(component.label)}</div>` : '';
-        return `<div class="widget-code">${label}<pre><code>${escapeHtml(value)}</code></pre></div>`;
+        // The tray paints the code's backing; the scrollport inside carries no paint of its own, so the shared fade
+        // disappears text into that backing instead of lightening it at a waiting edge.
+        return `<div class="widget-code">${label}<div class="widget-code-tray"><pre class="scroll-fade-x" data-widget-scroll-region="${escapeHtml(component.label || 'Code')}"><code>${escapeHtml(value)}</code></pre></div></div>`;
     }
     if (type === 'chart') {
         const config = chartConfig(component, component.path ? getPath(data, component.path, {}) : data);
@@ -410,8 +418,13 @@ function patchWidgetNode(current, desired) {
         }
     }
     const field = current.matches('input, textarea, select') && current.closest('[data-widget-form]');
+    const scrollRegion = desired.hasAttribute('data-widget-scroll-region')
+        || desired.classList.contains('scroll-fade-x') || desired.classList.contains('scroll-fade-y');
+    const readOnly = desired.classList.contains('ui-control-readonly');
     const preserve = (name) => (field && ['value', 'checked', 'selected'].includes(name))
-        || (current.tagName === 'DETAILS' && name === 'open');
+        || (current.tagName === 'DETAILS' && name === 'open')
+        || (scrollRegion && /^(data-scroll-|tabindex$|role$|aria-label$)/.test(name))
+        || (readOnly && /^data-scroll-/.test(name));
     for (const attr of Array.from(current.attributes)) {
         if (!preserve(attr.name) && !desired.hasAttribute(attr.name)) current.removeAttribute(attr.name);
     }
@@ -422,6 +435,31 @@ function patchWidgetNode(current, desired) {
     // textarea children or select options during a composition/native popup.
     // Passwords remain only in their live control, outside saved formValues.
     if (!field) patchWidgetChildren(current, desired);
+}
+
+// A mount reconciles only its own marked scrollers and read-only value bodies after a render; a retained node keeps its scroll and binder.
+export function createWidgetScrollFades(mount) {
+    const bindings = new Map();
+    return {
+        sync() {
+            const live = new Set(mount.querySelectorAll('[data-widget-scroll-region], .ui-readonly-body'));
+            for (const [node, { dispose }] of bindings) {
+                if (!live.has(node)) { dispose(); bindings.delete(node); }
+            }
+            for (const node of live) {
+                const axis = node.classList.contains('scroll-fade-x') ? 'x' : 'y';
+                const region = node.dataset?.widgetScrollRegion || '';
+                const prior = bindings.get(node);
+                if (prior?.axis === axis && prior.region === region) continue;
+                prior?.dispose();
+                bindings.set(node, { axis, region, dispose: bindScrollFade(node, { axis, region }) });
+            }
+        },
+        dispose() {
+            for (const { dispose } of bindings.values()) dispose();
+            bindings.clear();
+        },
+    };
 }
 
 // The mounted charts follow the patched declarations: a canvas whose type and options are unchanged keeps its

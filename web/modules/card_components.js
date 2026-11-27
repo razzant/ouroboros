@@ -8,7 +8,7 @@
 import { apiFetch } from './api_client.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
 import { collectSafeFieldValues } from './ui_helpers.js';
-import { indexComponentTree, patchWidgetChildren, renderComponent, syncWidgetCharts } from './widget_render.js';
+import { createWidgetScrollFades, indexComponentTree, patchWidgetChildren, renderComponent, syncWidgetCharts } from './widget_render.js';
 
 /** Where a card's markup lives: no skill owns it, so there is no route and no extension URL from data. */
 export const CARD_RENDER_CONTEXT = Object.freeze({ routePath: () => '', routePrefix: '' });
@@ -146,6 +146,7 @@ export function mountCardComponents(mount, card, { presses = createCardPresses({
     const pendingActions = new Set();
     const charts = new Map();
     const chartShapes = new Map();
+    const scrollFades = createWidgetScrollFades(mount);
     const interactions = new AbortController();
     let current = card;
     let index = indexComponentTree(card.components);
@@ -184,6 +185,7 @@ export function mountCardComponents(mount, card, { presses = createCardPresses({
             .map((component, idx) => renderComponent(CARD_RENDER_CONTEXT, component, view, `components.${idx}`)).join('');
         patchWidgetChildren(mount, desired.content);
         syncWidgetCharts(mount, charts, chartShapes);
+        scrollFades.sync();
     };
     const send = async (key, values) => {
         const spec = index.byKey.get(key)?.component;
@@ -233,6 +235,7 @@ export function mountCardComponents(mount, card, { presses = createCardPresses({
             if (disposed) return;
             disposed = true;
             interactions.abort();
+            scrollFades.dispose();
             unsubscribeTheme();
             charts.forEach((chart) => chart.destroy());
             charts.clear();

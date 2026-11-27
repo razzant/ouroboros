@@ -10,7 +10,8 @@ short callback token and the sent message to that identity: Telegram caps
 ``callback_data`` at 64 bytes, too short for the ids themselves. A card also
 remembers its settled lifecycle state and the host's recorded answer, so the
 host's ``chat.quiz_state`` facts edit it forward only. Nothing here parses the
-owner's words; a reply is delivered verbatim as their own answer.
+owner's words; a reply is delivered verbatim as their own answer, and a reply's
+file (or the fact of why it never arrived) rides that same answer, downloaded first.
 
 The card is the answer's receipt. It shows what the host recorded, never what this
 bridge sent: the winning option and/or the owner's words, and under them how the
@@ -41,18 +42,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
-import pathlib
 import weakref
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
-from .telegram_api import _TELEGRAM_TEXT_LIMIT, _u16len, message_chunks
+from .telegram_api import _LOCALIZED_TEXTS, _TELEGRAM_TEXT_LIMIT, TelegramBindingChanged, _u16len
 from .telegram_i18n import Index
 from .telegram_state import _data_dir, _message_ref, _read_json_file, _state_file
 
 _QUIZ_STATE_FILE = "quiz_state.json"
 _MAX_REMEMBERED = 50
-_MAX_SECRET_MESSAGES = 5000
 _CALLBACK_PREFIX = "qz:"
 _BUTTON_LABEL_MAX = 40
 _ANSWER_ECHO_MAX = 200
@@ -86,6 +84,9 @@ _TEXTS_EN = {
     "failed": "Could not deliver the answer (HTTP {status}). Try again.",
     "answered_line": "Answered: {answer}",
     "answered_plain": "Answered.",
+    "answer_file": "📎 {name}",
+    "answer_file_too_large": "📎 {name}: not received, too large",
+    "answer_file_download_failed": "📎 {name}: not received, the download failed",
     "resumed": "The task continued; an answer is still accepted.",
     "expired_terminal": "The task finished; a late answer is accepted as your message.",
     "superseded": "Replaced by a newer question.",
@@ -104,7 +105,9 @@ _TEXTS = Index("quiz", _TEXTS_EN, "the question cards sent to the owner's phone:
 _LIFECYCLE_RANK = {"open": 0, "expired_terminal": 1, "superseded": 2, "answered": 3, "closed": 3}
 _FINAL_STATES = ("answered", "closed")
 # The host's facts about an answer that a card remembers beside its state.
-_ANSWER_FACTS = ("answered_index", "comment", "question_delivery")
+_ANSWER_FACTS = ("answered_index", "comment", "attachments", "question_delivery")
+# What a card keeps of each recorded file (``chat_uploads.answer_files``): its name, size, digest or why not received.
+_FILE_FACTS = ("name", "size", "sha256", "unavailable", "limit_bytes")
 # Every host fact a settled card's edit shows: a card sent again for its question gets the same edit.
 _SETTLED_FACTS = (*_ANSWER_FACTS, "closed_reason")
 _TOAST_MAX = 200  # Telegram's callback answer limit
@@ -230,9 +233,7 @@ def answered_edit_reserve(lang: str) -> int:
 
 
 async def send_quiz_card(client, chat_id: int, *, body: str, compact: str, hint_text: str,
-                         keyboard: List[List[dict]], reserve: int = _ANSWERED_EDIT_RESERVE,
-                         sent_ids: Optional[List[int]] = None,
-                         on_part: Optional[Callable[[int], None]] = None) -> Tuple[int, bool]:
+                         keyboard: List[List[dict]], reserve: int = _ANSWERED_EDIT_RESERVE) -> Tuple[int, bool]:
     """Send the card; return the keyboard message id and whether it overflowed.
 
     A card that fits Telegram's per-message limit (UTF-16 units) WITH room for
@@ -240,63 +241,27 @@ async def send_quiz_card(client, chat_id: int, *, body: str, compact: str, hint_
     keyboard. A longer one is sent as ordered plain parts through the client's
     chunker, then the compact keyboard message; nothing authored is truncated.
     """
-    def _record_mid(mid: int) -> None:
-        val = int(mid or 0)
-        if sent_ids is not None:
-            sent_ids.append(val)
-        if val > 0 and callable(on_part):
-            on_part(val)
-
     async def send(text: str) -> int:
         # An open question (no options) carries no keyboard: a plain message
         # the owner replies to, remembered exactly like a keyboard message.
         if keyboard:
-            mid = int(await client.send_message_with_inline_keyboard(
+            return int(await client.send_message_with_inline_keyboard(
                 chat_id, text, keyboard, parse_mode="") or 0)
-        else:
-            mid = int(await client.send_message(chat_id, text, parse_mode="") or 0)
-        _record_mid(mid)
-        return mid
+        return int(await client.send_message(chat_id, text, parse_mode="") or 0)
 
     full = f"{body}\n{hint_text}"
     if _u16len(full) + reserve <= _TELEGRAM_TEXT_LIMIT:
         return await send(full), False
-    limit = int(getattr(client, "text_limit", _TELEGRAM_TEXT_LIMIT) or _TELEGRAM_TEXT_LIMIT)
-    for part in (message_chunks(body, "", limit=limit) or [body]):
-        part_id = int(await client.send_message(chat_id, part, parse_mode="") or 0)
-        _record_mid(part_id)
+    await client.send_message(chat_id, body, parse_mode="")
     return await send(f"{compact}\n{hint_text}"), True
 
 
-from .telegram_owner_auth import owner_matches_live
-from .telegram_secret_guard import (
-    SecretGuardUnreadable,
-    lookup_secret_message,
-    record_secret_message,
-)
-
-
-class QuizStateUnreadable(RuntimeError):
-    """quiz_state.json exists but cannot be read or parsed; callers must fail closed."""
-
-
-def _load(api, *, strict: bool = False) -> Dict[str, Any]:
-    path = _state_file(api, _QUIZ_STATE_FILE)
-    if strict and path.exists():
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise QuizStateUnreadable(f"quiz_state.json unreadable ({type(exc).__name__})") from exc
-        if not isinstance(raw, dict):
-            raise QuizStateUnreadable("quiz_state.json is not a JSON object")
-        data = raw
-    else:
-        data = _read_json_file(path)
-        data = data if isinstance(data, dict) else {}
-    quizzes, bots, secrets = data.get("quizzes"), data.get("bots"), data.get("secret_messages")
+def _load(api) -> Dict[str, Any]:
+    data = _read_json_file(_state_file(api, _QUIZ_STATE_FILE))
+    data = data if isinstance(data, dict) else {}
+    quizzes, bots = data.get("quizzes"), data.get("bots")
     return {"quizzes": dict(quizzes) if isinstance(quizzes, dict) else {},
-            "bots": dict(bots) if isinstance(bots, dict) else {},
-            "secret_messages": dict(secrets) if isinstance(secrets, dict) else {}}
+            "bots": dict(bots) if isinstance(bots, dict) else {}}
 
 
 def _bot_cards(data: Dict[str, Any], bot: str) -> Tuple[Dict[str, Any], str]:
@@ -328,70 +293,18 @@ def _forward_only(held: Any, record: Dict[str, Any]) -> Dict[str, Any]:
 
 def remember_quiz(api, bot: str, token: str, record: Dict[str, Any]) -> None:
     """Bounded token → card mapping: the newest ``_MAX_REMEMBERED`` cards (``_bot_cards``),
-    whose lifecycle only moves forward (``_forward_only``). Secret-card message IDs are
-    retained separately so split or older secret cards never lose local reply refusal."""
+    whose lifecycle only moves forward (``_forward_only``)."""
     data = _load(api)
     quizzes, prefix = _bot_cards(data, bot)
     key = f"{prefix}{token}"
-    stored = _forward_only(quizzes.pop(key, None), record)
-    quizzes[key] = stored
+    quizzes[key] = _forward_only(quizzes.pop(key, None), record)
     for stale in list(quizzes)[:-_MAX_REMEMBERED]:
         quizzes.pop(stale, None)
-    if stored.get("secret"):
-        secrets = data.setdefault("secret_messages", {})
-        cid = int(stored.get("chat_id") or 0)
-        all_ids = [int(x or 0) for x in [stored.get("message_id"), *(stored.get("message_ids") or [])]]
-        for mid in dict.fromkeys(x for x in all_ids if x > 0):
-            record_secret_message(
-                api, bot, cid, mid, kind="card",
-                task_id=str(stored.get("task_id") or ""), quiz_id=str(stored.get("quiz_id") or ""),
-            )
-            skey = f"{prefix}{cid}:{mid}"
-            secrets.pop(skey, None)
-            secrets[skey] = {
-                "task_id": str(stored.get("task_id") or ""), "quiz_id": str(stored.get("quiz_id") or ""),
-                "chat_id": cid, "message_id": mid, "options": [], "secret": True,
-            }
-        for stale in list(secrets)[:-_MAX_SECRET_MESSAGES]:
-            secrets.pop(stale, None)
-    _write_quiz_state(_state_file(api, _QUIZ_STATE_FILE), data)
-
-
-def _write_quiz_state(path: pathlib.Path, data: Dict[str, Any]) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = _state_file(api, _QUIZ_STATE_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    raw = json.dumps(data).encode("utf-8")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(raw)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
-def remember_secret_message(api, bot: str, chat_id: int, message_id: int,
-                            task_id: str = "", quiz_id: str = "") -> None:
-    """Persist one sent secret-card message ID immediately so partial multi-chunk sends never leak replies."""
-    mid, cid = int(message_id or 0), int(chat_id or 0)
-    if mid <= 0:
-        return
-    record_secret_message(api, bot, cid, mid, kind="card", task_id=str(task_id or ""), quiz_id=str(quiz_id or ""))
-    data = _load(api)
-    _, prefix = _bot_cards(data, bot)
-    secrets = data.setdefault("secret_messages", {})
-    skey = f"{prefix}{cid}:{mid}"
-    secrets.pop(skey, None)
-    secrets[skey] = {
-        "task_id": str(task_id or ""), "quiz_id": str(quiz_id or ""),
-        "chat_id": cid, "message_id": mid, "options": [], "secret": True,
-    }
-    for stale in list(secrets)[:-_MAX_SECRET_MESSAGES]:
-        secrets.pop(stale, None)
-    _write_quiz_state(_state_file(api, _QUIZ_STATE_FILE), data)
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    tmp.replace(path)
 
 
 def quiz_for_token(api, bot: str, token: str) -> Optional[Dict[str, Any]]:
@@ -433,67 +346,169 @@ def quiz_for_message(api, bot: str, chat_id: int, message_id: int) -> Optional[D
     """
     if not message_id:
         return None
-    try:
-        durable_secret = lookup_secret_message(api, bot, chat_id, message_id)
-        if durable_secret is not None:
-            return durable_secret
-    except SecretGuardUnreadable:
-        return {"chat_id": int(chat_id), "message_id": int(message_id), "options": [], "secret": True, "unreadable": True}
 
     def sent_as_this(record: Any) -> bool:
-        if not isinstance(record, dict) or int(record.get("chat_id") or 0) != int(chat_id):
-            return False
-        if int(record.get("message_id") or 0) == int(message_id):
-            return True
-        return int(message_id) in [int(x or 0) for x in (record.get("message_ids") or [])]
+        return (isinstance(record, dict) and int(record.get("chat_id") or 0) == int(chat_id)
+                and int(record.get("message_id") or 0) == int(message_id))
 
-    try:
-        data = _load(api, strict=True)
-    except QuizStateUnreadable:
-        return {"chat_id": int(chat_id), "message_id": int(message_id), "options": [], "secret": True, "unreadable": True}
+    data = _load(api)
     quizzes, prefix = _bot_cards(data, bot)
     for key, record in quizzes.items():
         if key.startswith(prefix) and sent_as_this(record):
             return dict(record)
-    secrets = data.get("secret_messages") or {}
-    direct_secret = secrets.get(f"{prefix}{int(chat_id)}:{int(message_id)}")
-    if isinstance(direct_secret, dict):
-        return dict(direct_secret)
     if bot and not _message_ref(api, bot, chat_id, message_id):
         for record in data["quizzes"].values():
             if sent_as_this(record):
                 return {**record, "message_id": 0, "ambiguous": True}
-        legacy_secret = secrets.get(f"{int(chat_id)}:{int(message_id)}")
-        if isinstance(legacy_secret, dict):
-            return {**legacy_secret, "message_id": 0, "ambiguous": True}
     return None
+
+
+def _decision_ref(record: Mapping[str, Any], request_key: str, bot: str) -> Dict[str, str]:
+    """This very tap or reply's request and its question. The host answers a repeated request id with its recorded
+    answer, before reading this one. So it names this very tap or reply (``update_key``, the same on every server);
+    an update id is one server's queue number, and nothing here is unique across bots without the bot."""
+    return {"request_id": f"tg:{f'{bot}:' if bot else ''}{request_key}",
+            "decision_id": f"quiz:{record.get('task_id')}:{record.get('quiz_id')}"}
 
 
 async def _deliver(
     api, post: HostPost, record: Dict[str, Any], *,
-    option_index: Optional[int], comment: str, request_key: str, bot: str,
+    option_index: Optional[int], comment: str, request_key: str, bot: str, attachments: Optional[list] = None,
 ) -> Tuple[int, Dict[str, Any]]:
-    body: Dict[str, Any] = {
-        # The host answers a repeated request id with its recorded answer, before reading this one. So it
-        # names this very tap or reply (``update_key``, the same on every server); an update id is one
-        # server's queue number, and nothing here is unique across bots without the bot.
-        "request_id": f"tg:{f'{bot}:' if bot else ''}{request_key}",
-        "decision_id": f"quiz:{record.get('task_id')}:{record.get('quiz_id')}",
-    }
+    body: Dict[str, Any] = _decision_ref(record, request_key, bot)
     if bot and record.get("chat_id"):  # where the owner answered: a late answer's turn replies there (the host's check)
         body["surface"] = {"kind": "telegram", "conversation_id": str(record["chat_id"]), "bot_id": bot}
     if option_index is not None:
         body["option_index"] = int(option_index)
     if comment:
         body["comment"] = comment
+    if attachments:  # the Reply's one file, parked here, or the fact of why it never arrived
+        body["attachments"] = list(attachments)
     return await post(api, "/chat/decision", body)
 
 
 def _winner(fact: Mapping[str, Any]) -> Dict[str, Any]:
-    """The recorded answer a host fact names: its option index and/or the owner's own words."""
-    index, comment = fact.get("answered_index"), fact.get("comment")
+    """The recorded answer a host fact names: its option index, the owner's own words and/or its Reply's files."""
+    index, comment, files = fact.get("answered_index"), fact.get("comment"), fact.get("attachments")
+    files = [{key: item[key] for key in _FILE_FACTS if key in item}
+             for item in (files if isinstance(files, list) else []) if isinstance(item, dict)]
     return {**({"answered_index": index} if isinstance(index, int) and not isinstance(index, bool) else {}),
-            **({"comment": comment} if isinstance(comment, str) and comment else {})}
+            **({"comment": comment} if isinstance(comment, str) and comment else {}),
+            **({"attachments": files} if files else {})}
+
+
+def _accepted_answer_receipt(status: int, payload: Mapping[str, Any]) -> bool:
+    """Only an HTTP 2xx naming ``ok=True`` and ``state="answered"`` confirms an accepted answer."""
+    return 200 <= status < 300 and payload.get("ok") is True and str(payload.get("state") or "") == "answered"
+
+
+# The host's own per-skill throttle (``gateway/host_service.py`` answers ``429 rate limit exceeded`` before it
+# reads the request): a fact of that one read, never a verdict about the owner's answer.
+_RATE_LIMIT_STATUS = 429
+
+
+async def _rejoin(api, post: HostPost, record: Dict[str, Any], request_key: str, bot: str) -> Tuple[str, Dict[str, Any]]:
+    """The host's read of whether THIS request is the question's recorded answer (``/chat/decision`` ``rejoin``:
+    nothing is sent or delivered again): ``recorded`` with its valid 2xx receipt; ``absent`` only on the
+    authoritative 404 ``request_not_recorded`` (carrying ``state`` when known so another request's answer or
+    closure avoids a download, while ``expired_terminal`` still takes the late-answer path); ``unreadable`` on
+    5xx, the host's ``429`` throttle or malformed/non-JSON 2xx; ``refused`` on other 4xx (``status`` in
+    payload). The one proof a file answer is this Reply's own; equal words or bytes from another request never
+    are. A failed request raises."""
+    status, payload = await post(api, "/chat/decision", {**_decision_ref(record, request_key, bot), "rejoin": True})
+    if _accepted_answer_receipt(status, payload):
+        return "recorded", payload
+    if status == 404 and payload.get("reason_code") == "request_not_recorded":
+        return "absent", payload
+    if status < 400 or status >= 500 or status == _RATE_LIMIT_STATUS:
+        return "unreadable", {**payload, "status": status}
+    return "refused", {**payload, "status": status}
+
+
+async def _read_back(api, post: HostPost, record: Dict[str, Any], request_key: str, bot: str) -> Tuple[str, Dict[str, Any]]:
+    """After an unknown outcome of a file answer, the one exact read: ``("recorded", receipt)`` when this request
+    is the recorded answer, ``("absent", payload)`` when the host says not recorded (carrying ``state`` if final), or
+    ``("unknown", {})`` when this read could not settle it. A binding change or cancellation passes through."""
+    try:
+        return await _rejoin(api, post, record, request_key, bot)
+    except TelegramBindingChanged:
+        raise
+    except Exception:
+        return "unknown", {}
+
+
+def _final_absent_outcome(
+    payload: Mapping[str, Any], prior: Optional[Mapping[str, Any]] = None,
+) -> Optional[Tuple[int, Dict[str, Any], str]]:
+    """When authoritative 404 ``request_not_recorded`` names a final state (another request answered, or explicitly
+    closed — never ``expired_terminal``), return the terminal outcome without downloading or submitting again."""
+    state = str(payload.get("state") or "")
+    if state == "answered":
+        facts = dict(payload)
+        if isinstance(prior, Mapping) and str(prior.get("state") or "") == "answered" and not _winner(facts):
+            facts = {**facts, **merge_answer_facts(prior, facts)}
+        return 409, facts, "conflict"
+    if state == "closed":
+        return 409, dict(payload), "closed"
+    return None
+
+
+def _resolve_read_back(
+    read_kind: str, receipt: Mapping[str, Any], prior: Optional[Mapping[str, Any]] = None,
+) -> Optional[Tuple[int, Dict[str, Any], str]]:
+    """Turn a conclusive read-back (``recorded`` or final ``absent``) into its terminal outcome."""
+    if read_kind == "recorded":
+        return 200, dict(receipt), "accepted"
+    if read_kind == "absent":
+        return _final_absent_outcome(receipt, prior)
+    return None
+
+
+async def _answer_with_file(api, post: HostPost, record: Dict[str, Any], answer_text: str, receive, *,
+                            request_key: str, bot: str) -> Tuple[int, Dict[str, Any], str]:
+    """``(status, payload, outcome)`` of a Reply that carries a file: received only once the host said this request
+    has no answer (``request_not_recorded``) and the question is not already answered or closed (``expired_terminal``
+    still takes the late-answer path), sent with the caption as ONE answer, then read back once by request after a
+    raised send, a 5xx, or an invalid 2xx. An unconfirmed initial read never sends, downloads, asks to resend, or
+    strands later updates; the send is never repeated; equal content proves nothing."""
+    try:
+        kind, payload = await _rejoin(api, post, record, request_key, bot)
+    except TelegramBindingChanged:
+        raise
+    except Exception as exc:
+        api.log("warning", f"Telegram quiz rejoin failed ({type(exc).__name__}).")
+        return 0, {}, "unreachable"
+    if kind == "recorded":
+        return 200, payload, "accepted"
+    if kind == "unreadable":
+        return 0, {}, "unreachable"
+    if kind == "refused":
+        status = int(payload.get("status") or 400)
+        return status, payload, _outcome(status, payload, None)
+    if final := _final_absent_outcome(payload):
+        return final
+    fields, parked = await receive()
+    try:
+        status, payload = await _deliver(api, post, record, option_index=None, comment=answer_text,
+                                         request_key=request_key, bot=bot, attachments=fields.get("attachments"))
+    except TelegramBindingChanged:
+        raise
+    except Exception:
+        read_kind, receipt = await _read_back(api, post, record, request_key, bot)
+        if resolved := _resolve_read_back(read_kind, receipt):
+            return resolved
+        raise
+    finally:
+        if parked is not None:
+            parked.cleanup()  # the host's copy, if it recorded one, is its own
+    if _accepted_answer_receipt(status, payload):
+        return status, payload, "accepted"
+    if 400 <= status < 500:
+        return status, payload, _outcome(status, payload, None)
+    read_kind, receipt = await _read_back(api, post, record, request_key, bot)
+    if resolved := _resolve_read_back(read_kind, receipt, payload if status >= 500 else None):
+        return resolved
+    return 0, {}, "unreachable"
 
 
 def _delivery(fact: Mapping[str, Any]) -> Dict[str, Any]:
@@ -541,44 +556,91 @@ def _receipt(facts: Mapping[str, Any], late: bool, lang: str) -> str:
 
 
 def _echo(answer: str) -> str:
-    return answer if len(answer) <= _ANSWER_ECHO_MAX else answer[:_ANSWER_ECHO_MAX] + "…"
+    return _clip_u16(answer, _ANSWER_ECHO_MAX, content=True)
 
 
-def _clip_u16(text: str, units: int) -> str:
-    """``text`` within ``units`` UTF-16 units, an ellipsis marking a cut."""
+def _clip_u16(text: str, units: int, *, content: bool = False) -> str:
+    """``text`` within ``units`` UTF-16 units, an ellipsis marking a cut.
+
+    By default ``units`` is the whole result, so a cut pays for its marker out of them;
+    with ``content`` the units are the kept text and the marker stands outside, which is
+    how a plain preview has always cut: ``units`` of it, then the ellipsis.
+    """
+    if units <= 0:
+        return ""
     if _u16len(text) <= units:
         return text
-    budget, kept = units - 1, []
+    budget, kept = units - (0 if content else 1), []
     for char in text:
-        budget -= _u16len(char)
-        if budget < 0:
+        if budget < _u16len(char):
             break
+        budget -= _u16len(char)
         kept.append(char)
     return "".join(kept) + "…"
 
 
-def _answer_echo(record: Mapping[str, Any], facts: Mapping[str, Any]) -> str:
+def _format_attachment(item: Mapping[str, Any], texts: Mapping[str, str], *, max_u16: Optional[int] = None) -> str:
+    key = {"too_large": "answer_file_too_large", "download_failed": "answer_file_download_failed"}.get(
+        str(item.get("unavailable") or ""), "answer_file")
+    raw_name = str(item.get("name") or "attachment")
+    rendered = texts.format(key, name=_echo(raw_name))
+    if max_u16 is not None and _u16len(rendered) > max_u16:
+        # Keep the file glyph and refusal reason intact by clipping the file name first.
+        chrome = _u16len(texts.format(key, name=""))
+        name_budget = max_u16 - chrome
+        if name_budget >= 2:
+            return texts.format(key, name=_clip_u16(raw_name, name_budget))
+        return _clip_u16(rendered, max(1, max_u16))
+    return rendered
+
+
+def _answer_echo(record: Mapping[str, Any], facts: Mapping[str, Any], lang: str, *, room: Optional[int] = None) -> str:
+    """The recorded answer: the option and/or owner's words, with each host file/limit fact on its
+    own line (``📎 ...`` — never a link) so host facts stay visually distinct from any caption.
+    When ``room`` (UTF-16 units) is tight, the caption gives way before the file/result fact."""
     options = list(record.get("options") or [])
-    index, parts = facts.get("answered_index"), []
-    if index is not None:
-        parts.append(f"{index + 1}. {options[index]}" if 0 <= index < len(options) else f"{index + 1}.")
-    if facts.get("comment"):
-        parts.append(_echo(str(facts["comment"])))
-    return " — ".join(parts)
+    index = facts.get("answered_index")
+    option_part = (f"{index + 1}. {options[index]}" if 0 <= index < len(options) else f"{index + 1}.") if index is not None else ""
+    comment = str(facts.get("comment") or "")
+    words = " — ".join(part for part in (option_part, _echo(comment) if comment else "") if part)
+    texts = _texts(lang)
+    items = [item for item in (facts.get("attachments") or ()) if isinstance(item, Mapping)]
+    file_parts = [_format_attachment(item, texts) for item in items]
+    files_block = "\n".join(file_parts)
+    joined = "\n".join(part for part in (words, files_block) if part)
+    if room is None or _u16len(joined) <= room:
+        return joined
+    fixed = "\n".join(part for part in (option_part, files_block) if part)
+    if items and _u16len(fixed) > room:
+        opt_cost = _u16len(option_part) + _u16len("\n") if option_part else 0
+        avail = max(1, room - opt_cost - max(0, len(items) - 1))
+        per_item = max(1, avail // len(items))
+        file_parts = [_format_attachment(item, texts, max_u16=per_item) for item in items]
+        files_block = "\n".join(file_parts)
+        fixed = "\n".join(part for part in (option_part, files_block) if part)
+    if comment:
+        comment_sep = _u16len(" — ") if option_part else (_u16len("\n") if files_block else 0)
+        comment_budget = room - _u16len(fixed) - comment_sep
+        if comment_budget >= 2 or (not fixed and comment_budget >= 1):
+            clipped_comment = _clip_u16(_echo(comment), comment_budget)
+            words = " — ".join(part for part in (option_part, clipped_comment) if part)
+            assembled = "\n".join(part for part in (words, files_block) if part)
+            return _clip_u16(assembled, max(1, room))
+    return _clip_u16(fixed or joined, max(1, room))
 
 
 def _answered_text(record: Mapping[str, Any], facts: Mapping[str, Any], lang: str) -> str:
-    """The settled card: its text, the recorded answer and the delivery line. The answer's
-    echo gives way first, so the edit always fits one Telegram message."""
+    """The settled card: its text, the recorded answer and the delivery line. The caption gives
+    way first, reserving visible room for any file/result fact so the edit fits one Telegram message."""
     texts = _texts(lang)
     base = str(record.get("text") or "")
     status = _status_line(facts, lang)
     tail = f"\n{status}" if status else ""
-    answer = _answer_echo(record, facts)
-    if not answer:
+    if not _answer_echo(record, facts, lang):
         return f"{base}\n{texts['answered_plain']}{tail}"
     room = _TELEGRAM_TEXT_LIMIT - _u16len(f"{base}\n{texts.format('answered_line', answer='')}{tail}")
-    return f"{base}\n{texts.format('answered_line', answer=_clip_u16(answer, max(1, room)))}{tail}"
+    answer = _answer_echo(record, facts, lang, room=max(1, room))
+    return f"{base}\n{texts.format('answered_line', answer=answer)}{tail}"
 
 
 def lifecycle_edit(
@@ -606,7 +668,7 @@ def lifecycle_edit(
     texts = _texts(lang)
     base = str(record.get("text") or "")
     if state == "closed":
-        reason = str(event.get("closed_reason") or "").strip()
+        reason = str(event.get("closed_reason") or record.get("closed_reason") or "").strip()
         return f"{base}\n{texts['closed']}" + (f"\n{_echo(reason)}" if reason else ""), []
     if state == "answered" and not record.get("secret"):
         return _answered_text(record, merge_answer_facts(record, event), lang), []
@@ -642,13 +704,10 @@ def lifecycle_target(
     if state == "answered":
         facts = merge_answer_facts(record, event)
     elif state == "closed":  # its stated reason too: a card sent again is closed in the same words
-        reason = str(event.get("closed_reason") or "").strip()
+        reason = str(event.get("closed_reason") or record.get("closed_reason") or "").strip()
         facts = {"closed_reason": reason} if reason else {}
     remember_state(api, bot, token, record, state, facts)
-    target_chat = int(record.get("chat_id") or 0)
-    if not owner_matches_live(api.get_state_dir(), target_chat):
-        return None
-    return target_chat, message_id, edit[0], edit[1]
+    return int(record.get("chat_id") or 0), message_id, edit[0], edit[1]
 
 
 def card_lock(token: str) -> asyncio.Lock:
@@ -768,8 +827,6 @@ async def apply_retained_fact(api, token: str, lang: str, *, client_factory, pub
     client = client_factory()
     record = quiz_for_token(api, client.bot_id, token)
     for target in (record or {}).get("creation_edits") or []:
-        if target and not owner_matches_live(api.get_state_dir(), int(target[0] or 0)):
-            return
         await client.edit_message_text_with_inline_keyboard(*target, parse_mode="")
     outran = _RETAINED_FACTS.pop(token, None)
     held = _settled_fact(record)
@@ -783,20 +840,21 @@ async def apply_retained_fact(api, token: str, lang: str, *, client_factory, pub
         await _apply_fact(api, token, event, lang, client_factory, creation=True)
 
 
-def _outcome(status: int, payload: Mapping[str, Any], attempted: Mapping[str, Any]) -> str:
+def _outcome(status: int, payload: Mapping[str, Any], attempted: Optional[Mapping[str, Any]]) -> str:
     """``accepted``, ``conflict``, ``closed``, ``unconfirmed`` or ``refused``: the host's state and
     recorded winner outrank the HTTP code. A 409 or a 5xx naming the recorded winner is accepted
     when that winner is this very answer (sent again after an unconfirmed one, or recorded with its
     delivery still owed) and a conflict otherwise: before refusing a later answer the host retries
     the owed delivery of the earlier winner, and that retry can fail with a 503 carrying the earlier
-    winner. A 5xx naming no winner leaves the outcome unknown."""
+    winner. A 5xx naming no winner leaves the outcome unknown. ``attempted=None`` (a Reply's file):
+    no equal content makes a winner this answer; only the host's record of this request does (``_rejoin``)."""
     state, winner = str(payload.get("state") or ""), _winner(payload)
     if status < 400:
         return "accepted"
     if status == 409 and state == "closed":
         return "closed"
     if (status == 409 and (state == "answered" or winner)) or (status >= 500 and state == "answered" and winner):
-        return "accepted" if winner == dict(attempted) else "conflict"
+        return "accepted" if attempted is not None and winner == dict(attempted) else "conflict"
     return "unconfirmed" if status >= 500 else "refused"
 
 
@@ -809,7 +867,7 @@ def _refusal_text(status: int, lang: str) -> str:
 
 
 def _lost(record: Mapping[str, Any], facts: Mapping[str, Any], lang: str) -> str:
-    answer = _answer_echo(record, facts)
+    answer = _answer_echo(record, facts, lang)
     return _texts(lang).format("lost", answer=answer) if answer else _texts(lang)["already"]
 
 
@@ -829,11 +887,10 @@ async def _settle_answer(api, client, record: Dict[str, Any], payload: Dict[str,
         if edit is None:
             return True, facts
         remember_state(api, client.bot_id, token, record, "answered", facts)
-        target_chat = int(record.get("chat_id") or 0)
-        if not message_id or not owner_matches_live(api.get_state_dir(), target_chat):
+        if not message_id:
             return True, facts
         settled = await client.edit_message_text_with_inline_keyboard(
-            target_chat, message_id, edit[0], edit[1], parse_mode="")
+            int(record.get("chat_id") or 0), message_id, edit[0], edit[1], parse_mode="")
     if not settled:
         api.log("warning", "Telegram quiz card edit failed (answered).")
     return bool(settled), facts
@@ -857,10 +914,17 @@ async def _tell_outcome(api, client, record: Dict[str, Any], status: int, payloa
         lines = [_lost(record, facts, lang)] if outcome == "conflict" else []
         if not settled:
             lines = (lines or [_receipt(facts, payload.get("answered_after_terminal") is True, lang)]) + [texts["not_updated"]]
+    elif outcome == "unreachable":
+        lines = [_LOCALIZED_TEXTS[lang]["update_failed"]]
     else:
         lines = [texts["closed"] if outcome == "closed" else _refusal_text(status, lang)]
-    if lines and owner_matches_live(api.get_state_dir(), int(chat_id or 0)):
-        await client.send_message(chat_id, "\n".join(lines), parse_mode="")
+    if lines:
+        try:
+            await client.send_message(chat_id, "\n".join(lines), parse_mode="")
+        except TelegramBindingChanged:
+            raise
+        except Exception as exc:
+            api.log("warning", f"Telegram quiz notice failed ({type(exc).__name__}).")
     if outcome == "closed":
         await _settle_closed(api, client, record, payload, lang)
 
@@ -898,18 +962,26 @@ async def answer_from_callback(
 
 async def answer_from_reply(
     api, client, record: Dict[str, Any], answer_text: str, *,
-    chat_id: int, request_key: str, lang: str, post: HostPost,
+    chat_id: int, request_key: str, lang: str, post: HostPost, receive=None,
 ) -> None:
     """A reply to the card → the owner's own verbatim answer (comment-only). The settled card is
     its receipt; one message comes only for a problem (``_tell_outcome``). A reply to a secret
-    request is answered here and posted nowhere."""
+    request is answered here and posted nowhere. ``receive``: the Reply carries a file, received
+    and parked by this callable (``(fields, parked)``) only when the host holds no answer of this
+    very request yet; it then goes with the caption as ONE answer, and a file alone answers
+    without words. Telegram delivering the same update again rejoins its recorded answer instead."""
     if record.get("secret"):
         await client.send_message(chat_id, _texts(lang)["secret_reply"], parse_mode="")
         return
     if record.get("ambiguous"):
         await client.send_message(chat_id, _texts(lang)["reply_held"], parse_mode="")
         return
-    status, payload = await _deliver(api, post, record, option_index=None, comment=answer_text, request_key=request_key,
-                                     bot=client.bot_id)
-    outcome = _outcome(status, payload, {"comment": answer_text} if answer_text else {})
+    if receive is None:
+        status, payload = await _deliver(api, post, record, option_index=None, comment=answer_text,
+                                         request_key=request_key, bot=client.bot_id)
+        outcome = _outcome(status, payload, {"comment": answer_text} if answer_text else {})
+        await _tell_outcome(api, client, record, status, payload, outcome, chat_id, lang)
+        return
+    status, payload, outcome = await _answer_with_file(api, post, record, answer_text, receive,
+                                                       request_key=request_key, bot=client.bot_id)
     await _tell_outcome(api, client, record, status, payload, outcome, chat_id, lang)

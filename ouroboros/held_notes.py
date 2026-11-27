@@ -134,22 +134,35 @@ def can_replay_frame(core: Any, saved: list, current: list, receipts: Mapping) -
 
 
 def restored_capture(state: Mapping) -> dict:
-    capture = state.get(CAPTURE_KEY) or {"entries": state.get("held_note_sections", [])}
+    """The continuation's held-note capture, with the book maps its Low projection or last accepted Low view held as
+    chapter lists (``book_maps``: receipts ``memory_floor.replay_book_maps`` keeps at their current full map)."""
+    from ouroboros.memory_floor import BOOK_MAPS
+
+    capture = dict(state.get(CAPTURE_KEY) or {"entries": state.get("held_note_sections", [])})
+    if "book_maps" not in capture:
+        observed = (state.get("context_observations") or {}).get("_last_context_observation") or {}
+        if observed.get("memory_mode") == "low":
+            rows = (observed.get("memory_facts") or {}).get("host_sections_addressed") or ()
+            capture["book_maps"] = [row for row in rows if row.get("section_id") in BOOK_MAPS]
     if capture["entries"]:
         return {**capture, "messages": state.get("messages"), "tool_schemas": state.get("tool_schemas")}
     return capture
 
 
 def continuation_capture(plan: Any, mode: str | None) -> dict:
-    """Carry the sent forms and their captured index and overview in the ordinary continuation. An entry holds only
-    the fields a build since P1 restores, which refuses any other key; carriage stands beside the entries, only where
-    a head is carried, so a work saved here still resumes after a Rollback."""
+    """Carry the sent forms, their captured index and overview, and ``low_projection``'s chapter-list receipts in the
+    ordinary continuation. An entry holds only the fields a build since P1 restores, which refuses any other key;
+    carriage stands beside the entries, only where a head is carried, so a work saved here still resumes after a Rollback."""
     from ouroboros.context_budget import context_mode_limits
+    from ouroboros.memory_floor import BOOK_MAPS
 
     core = getattr(plan, "core", None)
     entries = [part for part in getattr(core, "dynamic_sections", ()) if isinstance(part, HeldNoteSection)]
+    low_facts = getattr(getattr(plan, "low_projection", None), "memory_facts", None) or {}
+    book_maps = [row for row in low_facts.get("host_sections_addressed", ())
+                 if row.get("section_id") in BOOK_MAPS and not row.get("predicted")]
     if not entries:
-        return {}
+        return {CAPTURE_KEY: {"entries": [], "book_maps": book_maps}} if book_maps else {}
     mode = mode if mode in {"max", "low", "nano"} else plan.initial_mode
     companions = {}
     if any(part.topic == knowledge.OVERVIEW_TOPIC for part in entries):
@@ -162,7 +175,8 @@ def continuation_capture(plan: Any, mode: str | None) -> dict:
     carried = {part.section_id: list(part.carried_by) for part in entries if part.carried_by}
     return {CAPTURE_KEY: {
         "entries": [{key: value for key, value in asdict(part).items() if key != "carried_by"} for part in entries],
-        **({"carried": carried} if carried else {}), "companions": companions,
+        **({"carried": carried} if carried else {}), **({"book_maps": book_maps} if book_maps else {}),
+        "companions": companions,
         "frame": frame_key(mode, plan.preferred_mode, plan.window_tokens, plan.window_record, reserve,
                            projection.calibration_ratio, request_tokens) if request_tokens is not None else None,
         "receipts": [row for row in facts.get("host_sections_addressed", ())

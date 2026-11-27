@@ -390,7 +390,8 @@ class _ScopeRefused(ValueError):
 
 def resolve_source(ctx: Any, address: Any) -> TextSource:
     """A source address as memory_read names it: identity and the map on the canonical root; a workpad through the
-    project read scope (``project_journal._project_scope(write=False)``), on the page's own root."""
+    project read scope under the page's own policy (``_project_scope(write=False, journal=False)``, the one
+    ``workpad_read`` applies), on the page's own root: a version read decides as the page reader does."""
     if address in ("identity", "world"):
         from ouroboros.tool_access import canonical_data_root
 
@@ -399,7 +400,7 @@ def resolve_source(ctx: Any, address: Any) -> TextSource:
     if isinstance(address, str) and (address == "workpad" or address.startswith("workpad:")):
         from ouroboros.tools.project_journal import _project_scope
 
-        pid, refusal, code = _project_scope(ctx, address[len("workpad:"):], write=False)
+        pid, refusal, code = _project_scope(ctx, address[len("workpad:"):], write=False, journal=False)
         if refusal:
             raise _ScopeRefused(code, refusal)
         if not pid:

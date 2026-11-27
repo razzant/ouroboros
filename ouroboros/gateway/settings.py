@@ -48,7 +48,7 @@ from ouroboros.gateway.owner_settings import (
 from ouroboros.onboarding_wizard import render_onboarding_html
 from ouroboros.platform_layer import is_container_env
 from ouroboros.provider_connections import (
-    connection_references, connections_meta, normalize_connections, seed_new_api_surfaces,
+    canonical_builtin_consent, connection_references, connections_meta, normalize_connections, seed_new_api_surfaces,
 )
 from ouroboros.provider_models import CONNECTIONS_KEY, normalize_builtin_choices
 from ouroboros.gateway.secret_rows import (
@@ -265,6 +265,7 @@ def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Di
         if key in SECRET_SETTING_KEYS and looks_masked_settings_secret(key, body[key]):
             continue
         merged[key] = body[key]
+    canonical_builtin_consent(merged, body)
     if "OUROBOROS_CONTEXT_MODE" in body and "OUROBOROS_CONTEXT_MODE" not in skipped:
         from ouroboros.config import normalize_context_mode
         merged["OUROBOROS_CONTEXT_MODE"] = normalize_context_mode(body["OUROBOROS_CONTEXT_MODE"])
@@ -354,6 +355,10 @@ async def _run_settings_writer(fn: Any, context: Any, body: Any) -> JSONResponse
     be honest. Later writers keep getting ``settings_busy`` meanwhile.
     """
     from ouroboros.config import get_settings_document_lock_timeout_sec
+    from ouroboros.gateway.onboarding_host import _reset_interrupted_response
+
+    if (refusal := _reset_interrupted_response(context, settings_write=True)) is not None:
+        return refusal
 
     bound_sec = get_settings_document_lock_timeout_sec()
     # The body runs in its own task so a timeout of the WAIT can be told apart from a
@@ -920,6 +925,9 @@ async def api_onboarding(request: Request) -> Response:
     that ``/onboarding`` and ``/api/onboarding/bootstrap`` serve, so this body shows
     the consciousness control as the state does too."""
     from ouroboros.gateway import onboarding_host
+
+    if (refusal := onboarding_host._reset_interrupted_response(request)) is not None:
+        return refusal
 
     settings, bootstrap = onboarding_host._live_setup(request)
     if has_startup_ready_provider(settings):

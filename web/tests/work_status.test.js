@@ -9,7 +9,7 @@ import test from 'node:test';
 import { applyPayload, CODE_PREFIX, currentPayload, setMissTransport } from '../modules/i18n.js';
 import {
     ACTION_FINALIZE, ACTION_HURRY, ACTION_PAUSE, ACTION_RESUME, ACTION_STOP_EARLIER, ACTION_STOP_NOW,
-    TASK_CONTROL_LABELS, requestStopAll,
+    TASK_CONTROL_LABELS, requestStopAll, taskControlTriggerLabel,
 } from '../modules/task_control_menu.js';
 import {
     censusTaskPhase, desiredLiveCardPhase, observeChildPhase, pausePhaseLabel, taskActivityPresentation,
@@ -17,12 +17,12 @@ import {
 import { markView } from '../modules/status_mark.js';
 import { summarizeRoom } from '../modules/project_activity.js';
 import {
-    OUTCOME_TONES, activityWord, amberNote, applyCardWorkViews, behindWords, cardControls, cardMenuActions, cardWorkView, clock,
-    emptyWorkState, memberPaused, memberState, ownStopPress, promoteChildCard, reasonText, reconcileWorkState, resumeAttemptClause,
+    OUTCOME_TONES, activityWord, amberNote, applyCardWorkViews, behindWords, cardControlGuard, cardControls, cardMenuActions, cardWorkView, clock,
+    emptyWorkState, indexDeadlineExpired, memberDeadlineExpired, memberPaused, memberState, ownStopPress, promoteChildCard, reasonText, reconcileWorkState, resumeAttemptClause,
     resumeAttemptWords,
     resumeTargets, roomAmber, roomStatusView, workControls, workLine, workMenuActions, workQuestion, workRowView,
 } from '../modules/work_status.js';
-import { SERVER_REASONS, SERVER_SLEEPS, room, serverMark, work as builtWork } from './work_fixture.js';
+import { SERVER_REASONS, SERVER_SLEEPS, projection, room, serverMark, work as builtWork } from './work_fixture.js';
 
 setMissTransport(() => Promise.resolve(null));
 const CASES = JSON.parse(readFileSync(new URL('./fixtures/work_projection_cases.json', import.meta.url), 'utf8')).cases;
@@ -317,6 +317,80 @@ test('a held Continue with three helpers of its failed earlier attempt: one work
     assert.equal(workRowView(many).tone, row.tone);
 });
 
+test('a waiting Continue the server lets the owner check offers one Resume at its own card, in its menu beside Stop', () => {
+    const waiting = builtWork({ activity_id: 'c', chat_id: 42, kind: 'managed_task' }, {
+        activity: 'waiting',
+        because: [{ code: 'earlier_work_unconfirmed', text: "Continue starts when the earlier attempt's work is confirmed finished" }],
+        controls: [{ action: 'resume', target: 'c' }, { action: 'stop', target: 'c', scope: 'cascade' }] });
+    assert.equal(workRowView(waiting).word, 'Waiting');
+    const grouped = workControls(waiting);
+    assert.deepEqual(grouped, { stop: ['c'], stopEarlier: [], pause: '', resume: 'c', hurry: '', wrapUp: '', model: '' });
+    assert.deepEqual(workMenuActions(grouped), [ACTION_STOP_NOW], 'Resume stands as its own button');
+    assert.deepEqual(workMenuActions(grouped, { resume: true }), [ACTION_RESUME, ACTION_STOP_NOW]);
+    assert.deepEqual([...resumeTargets({ works: [waiting] })], ['c']);
+    const state = { episodes: new Map([['c', waiting]]) };
+    const card = cardControls(state, 'c');
+    assert.deepEqual([card.resume, card.menu, Boolean(card.work)], [true, true, true]);
+    assert.equal(cardControls(state, 'other').resume, false, 'only its own card carries the button');
+});
+
+test('an ended work whose latest episode is an answered Continue lays its card on that episode and keeps one Stop at the earlier root', () => {
+    const ended = builtWork({ activity_id: 'p', chat_id: 42, kind: 'managed_task' }, {
+        episode: { task_id: 's', live: false }, outcome: 'completed', members: { ids: [] }, unbound_start: true,
+        controls: [{ action: 'stop', target: 'p', scope: 'cascade' }] });
+    const state = reconcileWorkState(emptyWorkState(), { supervisor_ready: true, ...projection(42, [ended], room('working')) }, 42);
+    assert.equal(state.episodes.get('s')?.work_id, 'p', 'the answered Continue is the work\'s episode');
+    assert.equal(state.episodes.has('p'), false, 'the earlier root is no card of this work');
+    const card = cardControls(state, 's');
+    assert.deepEqual([card.resume, card.menu, card.work?.work_id], [false, true, 'p']);
+    const grouped = workControls(ended);
+    assert.deepEqual(grouped, { stop: ['p'], stopEarlier: [], pause: '', resume: '', hurry: '', wrapUp: '', model: '' });
+    assert.deepEqual(cardMenuActions(state, { groupId: 's' }), [ACTION_STOP_NOW]);
+    assert.equal(taskControlTriggerLabel(workMenuActions(grouped)), TASK_CONTROL_LABELS[ACTION_STOP_NOW],
+        'one Stop stays a direct trigger so its addressed confirmation remains intact');
+});
+
+test('answered Continue action composition keeps exact server targets, earlier Pause, independent stops and no invented targets', () => {
+    // Proven working earlier helper/run: card sits on `s`, Pause and Stop both address `p`, no duplicate Stop earlier.
+    const withEarlierPause = builtWork({ activity_id: 'p', chat_id: 42, kind: 'managed_task' }, {
+        episode: { task_id: 's', live: false }, outcome: 'completed', members: { ids: [] },
+        controls: [{ action: 'pause', target: 'p' }, { action: 'stop', target: 'p', scope: 'cascade' }] });
+    const pauseState = reconcileWorkState(emptyWorkState(),
+        { supervisor_ready: true, ...projection(42, [withEarlierPause], room('working')) }, 42);
+    assert.deepEqual(workControls(withEarlierPause),
+        { stop: ['p'], stopEarlier: [], pause: 'p', resume: '', hurry: '', wrapUp: '', model: '' });
+    assert.deepEqual(cardMenuActions(pauseState, { groupId: 's' }), [ACTION_PAUSE, ACTION_STOP_NOW]);
+    const pauseGuard = cardControlGuard({ groupId: 's' }, (rec) => cardControls(pauseState, rec.groupId));
+    assert.deepEqual([pauseGuard(ACTION_PAUSE), pauseGuard(ACTION_STOP_NOW), pauseGuard(ACTION_STOP_EARLIER), pauseGuard(ACTION_RESUME)],
+        ['p', ['p'], '', ''], 'card guard dispatches Pause and Stop strictly to proven target p, never inventing s');
+
+    // Unknown outcome behind an ended episode holding nothing: never declared Done, single Stop with no duplicate.
+    const unknownOutcome = builtWork({ activity_id: 'p', chat_id: 42, kind: 'managed_task' }, {
+        episode: { task_id: 's', live: false }, activity: 'unknown', members: { ids: [] }, unbound_start: true,
+        controls: [{ action: 'stop', target: 'p', scope: 'cascade' }] });
+    assert.equal(workRowView(unknownOutcome).word, 'Activity unconfirmed');
+    assert.deepEqual(workMenuActions(workControls(unknownOutcome)), [ACTION_STOP_NOW]);
+    assert.equal(taskControlTriggerLabel(workMenuActions(workControls(unknownOutcome))), TASK_CONTROL_LABELS[ACTION_STOP_NOW]);
+
+    // Independent targets stay independent when the latest episode owns its own tail beside the earlier root.
+    const independent = builtWork({ activity_id: 'p', chat_id: 42, kind: 'managed_task' }, {
+        episode: { task_id: 's', live: false }, outcome: 'completed', members: { ids: [] },
+        controls: [
+            { action: 'pause', target: 's' },
+            { action: 'stop', target: 's', scope: 'cascade' },
+            { action: 'stop', target: 'p', scope: 'cascade' },
+            { action: 'stop_earlier', target: 'p', scope: 'cascade' },
+        ] });
+    const bothState = reconcileWorkState(emptyWorkState(),
+        { supervisor_ready: true, ...projection(42, [independent], room('working')) }, 42);
+    assert.deepEqual(workControls(independent),
+        { stop: ['s', 'p'], stopEarlier: ['p'], pause: 's', resume: '', hurry: '', wrapUp: '', model: '' });
+    assert.deepEqual(cardMenuActions(bothState, { groupId: 's' }), [ACTION_PAUSE, ACTION_STOP_EARLIER, ACTION_STOP_NOW]);
+    const bothGuard = cardControlGuard({ groupId: 's' }, (rec) => cardControls(bothState, rec.groupId));
+    assert.deepEqual([bothGuard(ACTION_PAUSE), bothGuard(ACTION_STOP_EARLIER), bothGuard(ACTION_STOP_NOW)],
+        ['s', ['p'], ['s', 'p']]);
+});
+
 test('rows: their word, the line beside it, tone, mark and the owner\'s move from the work alone', () => {
     const row = (name, index = 0) => workRowView(work(name, index));
     const quiet = { owner: false, outcome: '', focus: '' };
@@ -522,6 +596,76 @@ test('a member is paused only where a confirmed work in any room says so', () =>
     assert.equal(memberPaused(emptyWorkState(), 'o'), false);
     const unconfirmed = { episodes: new Map([['o', { ...work('paused_by_owner'), confirmed: false }]]) };
     assert.equal(memberPaused(unconfirmed, 'o'), false, 'an unconfirmed work proves nothing');
+});
+
+test('per-member expiry clears memberPaused and sets memberDeadlineExpired only from confirmed member state', () => {
+    const expired = { code: 'deadline_expired', text: 'Deadline expired' };
+    const paused = { code: 'paused_by_owner', text: 'You paused it' };
+    const state = reconcileWorkState(emptyWorkState(), {
+        supervisor_ready: true, works_complete: true, rooms: {},
+        works: [{
+            work_id: 'root', room: 2, confirmed: true, episode: { task_id: 'root', live: true },
+            activity: 'paused', because: [expired, paused],
+            members: {
+                ids: ['root', 'healthy', 'unconfirmed-member', 'missing-confirmed'],
+                states: {
+                    root: { confirmed: true, activity: 'paused', because: [expired, paused] },
+                    healthy: { confirmed: true, activity: 'paused', because: [paused] },
+                    'unconfirmed-member': { confirmed: false, activity: 'paused', because: [expired] },
+                    'missing-confirmed': { activity: 'paused', because: [expired] },
+                },
+            },
+        }],
+    }, 1);
+    assert.deepEqual([memberPaused(state, 'root'), memberDeadlineExpired(state, 'root')], [false, true]);
+    // Work-level expiry never leaks onto a sibling member whose own state is resumable paused.
+    assert.deepEqual([memberPaused(state, 'healthy'), memberDeadlineExpired(state, 'healthy')], [true, false]);
+    // Unconfirmed / unknown member states prove neither paused nor expired.
+    assert.deepEqual([memberPaused(state, 'unconfirmed-member'), memberDeadlineExpired(state, 'unconfirmed-member')], [false, false]);
+    assert.equal(memberDeadlineExpired(state, 'missing-confirmed'), false);
+    assert.deepEqual([memberPaused(state, 'absent'), memberDeadlineExpired(state, 'absent')], [false, false]);
+    // A confirmed expired member survives an unrelated unknown sibling making the aggregate work unconfirmed.
+    const mixedBody = {
+        supervisor_ready: true, works_complete: true, rooms: {},
+        works: [{
+            work_id: 'mixed', room: 2, confirmed: false, episode: { task_id: 'mixed', live: true },
+            activity: 'unknown', because: [],
+            members: {
+                ids: ['mixed', 'expired-helper', 'unknown-sibling', 'healthy-helper'],
+                states: {
+                    mixed: { confirmed: true, activity: 'paused', because: [paused] },
+                    'expired-helper': { confirmed: true, activity: 'paused', because: [expired, paused] },
+                    'unknown-sibling': { confirmed: false, activity: 'unknown', because: [] },
+                    'healthy-helper': { confirmed: true, activity: 'paused', because: [paused] },
+                },
+            },
+        }],
+    };
+    const mixed = reconcileWorkState(emptyWorkState(), mixedBody, 1);
+    assert.equal(memberDeadlineExpired(mixed, 'expired-helper'), true);
+    assert.equal(memberDeadlineExpired(mixed, 'unknown-sibling'), false);
+    assert.equal(memberDeadlineExpired(mixed, 'healthy-helper'), false);
+    // Disconnected, unready, partial-omitted, synthetic-without-memberStates or failed reads never carry stale expiry.
+    assert.equal(memberDeadlineExpired(reconcileWorkState(mixed, mixedBody, 1, false), 'expired-helper'), false);
+    assert.equal(memberDeadlineExpired(reconcileWorkState(mixed, { ...mixedBody, supervisor_ready: false }, 1, true), 'expired-helper'), false);
+    assert.equal(memberDeadlineExpired(reconcileWorkState(mixed, { supervisor_ready: true, works_complete: false, rooms: {}, works: [] }, 1, true), 'expired-helper'), false);
+    const unconfirmedWork = { episodes: new Map([['root', { ...state.episodes.get('root'), confirmed: false }]]) };
+    assert.deepEqual([memberPaused(unconfirmedWork, 'root'), memberDeadlineExpired(unconfirmedWork, 'root')], [false, false]);
+    const failedRead = reconcileWorkState(mixed, null, 1, true);
+    assert.deepEqual([memberPaused(failedRead, 'expired-helper'), memberDeadlineExpired(failedRead, 'expired-helper')], [false, false]);
+    assert.deepEqual([memberPaused(reconcileWorkState(state, null, 1, true), 'healthy'), memberDeadlineExpired(reconcileWorkState(state, null, 1, true), 'healthy')], [false, false]);
+
+    // indexDeadlineExpired matches per-source authority independently of Close tokens.
+    const indexed = indexDeadlineExpired({
+        active_chat_activities: [{ activity_id: 'act-exp', deadline_expired: true }, { activity_id: 'act-close-only', close_expired: { action: 'close', target: 'act-close-only', close_expired: 'a'.repeat(64) } }],
+        main_attention: [{ task_id: 'attn-exp', attention_reason: 'deadline_expired' }],
+        works: [
+            ...mixedBody.works,
+            { work_id: 'ep-exp', room: 1, confirmed: true, episode: { task_id: 'ep-exp', live: true }, activity: 'paused', because: [expired] },
+            { work_id: 'ep-unconf', room: 1, confirmed: false, episode: { task_id: 'ep-unconf', live: true }, activity: 'paused', because: [expired] },
+        ],
+    });
+    assert.deepEqual([...indexed].sort(), ['act-exp', 'attn-exp', 'ep-exp', 'expired-helper']);
 });
 
 test('controls group by action with exact targets; Resume is a button, a pending Stop leaves its escalation', () => {

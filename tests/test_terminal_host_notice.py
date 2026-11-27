@@ -575,9 +575,13 @@ def test_presence_preserves_authored_speech_and_keeps_host_notice_in_task(tmp_pa
     class Agent:
         def handle_task(self, task):
             task["_skip_post_task_synthesis"] = True
-            ctx = SimpleNamespace(_presence_completion={"outcome": outcome, "message": ANSWER},
-                                  _presence_completion_accepted=True,
-                                  _swarm_handoff_attempt={"status": "scheduled", "task_id": "next-task"})
+            ctx = SimpleNamespace(
+                drive_root=tmp_path, task_id=task["id"], task_metadata=dict(task["metadata"]),
+                task_contract=task["task_contract"],
+                _presence_completion={"outcome": outcome, "message": ANSWER},
+                _presence_completion_accepted=True,
+                _swarm_handoff_attempt={"status": "scheduled", "task_id": "next-task"},
+            )
             pending = []
             pipeline.emit_task_results(
                 SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path), None, None,

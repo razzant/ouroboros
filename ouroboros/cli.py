@@ -135,6 +135,7 @@ class OuroborosHTTPClient:
 
 def _server_command(args: argparse.Namespace) -> int:
     old_argv = sys.argv[:]
+    reexec_argv: list[str] = []
     try:
         import json
         import __main__
@@ -154,18 +155,33 @@ def _server_command(args: argparse.Namespace) -> int:
             reexec_argv = ["-m", "ouroboros.cli", *old_argv[1:]]
         os.environ["OUROBOROS_SERVER_REEXEC_ARGV_JSON"] = json.dumps(reexec_argv)
     except Exception:
-        pass
+        reexec_argv = []
     if args.host:
         os.environ["OUROBOROS_SERVER_HOST"] = args.host
     if args.port:
         os.environ["OUROBOROS_SERVER_PORT"] = str(args.port)
     import server
+    from ouroboros.launch_roots import same_location
+    from ouroboros.server_entrypoint import CliResetReplay, cli_reset_scope
 
-    try:
-        sys.argv = [old_argv[0]]
-        return server.executable_main()
-    finally:
-        sys.argv = old_argv
+    script = pathlib.Path(__file__).resolve().parents[1] / "server.py"
+    loaded = getattr(server, "__file__", "")
+    replay = None
+    if (reexec_argv[:2] == ["-m", "ouroboros.cli"] and loaded
+            and script.is_file() and same_location(script, loaded)):
+        host = (args.host or "").strip()
+        tail = [str(script)]
+        if host:
+            tail.append(f"--host={host}")
+        if args.port:
+            tail.append(f"--port={args.port}")
+        replay = CliResetReplay(tuple(reexec_argv), tuple(tail), host)
+    with cli_reset_scope(replay):
+        try:
+            sys.argv = [old_argv[0]]
+            return server.executable_main()
+        finally:
+            sys.argv = old_argv
 
 
 def _status_command(args: argparse.Namespace) -> int:
@@ -335,11 +351,64 @@ def _tasks_watch_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _note_flags(tokens: List[str]) -> tuple[List[str], List[str]]:
+    """Pull exact ``--from-agent`` flags out of the words before ``--``.
+
+    ``argparse.REMAINDER`` keeps a flag placed after the text as a word; parsing it here means an
+    option-order mistake names the agent instead of becoming the owner's words. The separator
+    and words after it never enter this scan.
+    """
+    labels: List[str] = []
+    rest: List[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--from-agent":
+            index += 1
+            if index >= len(tokens) or tokens[index] == "--from-agent" or tokens[index].startswith("--from-agent="):
+                raise CLIError("--from-agent needs a label (flags go before the text, then --)")
+            labels.append(tokens[index])
+        elif token.startswith("--from-agent="):
+            labels.append(token.split("=", 1)[1])
+        else:
+            rest.append(token)
+        index += 1
+    return labels, rest
+
+
 def _chat_send_command(args: argparse.Namespace) -> int:
-    text = " ".join(args.text).strip()
-    if not text:
+    words = list(args.text)
+    if "--" in words:
+        split = words.index("--")
+        head, tail = words[:split], words[split + 1:]
+    else:
+        head, tail = words, []
+    labels, head = _note_flags(head)
+    labels = (args.from_agent or []) + labels
+    if len(labels) > 1:
+        raise CLIError("--from-agent given twice; name the agent once, before the text")
+    if not labels:
+        # The owner's own words, exactly as the ordinary 7.x line sent them: a `--` the text already
+        # contains is not a separator here and stays in it.
+        text = " ".join(args.text).strip()
+        if not text:
+            raise CLIError("chat send requires text")
+        _print_json(_client(args).request("POST", "/api/command", {"cmd": text}))
+        return 0
+    label = labels[0]
+    if not label.strip():
+        raise CLIError("--from-agent needs a non-empty label")
+    # An agent's note: literal text (each word's own whitespace kept, no strip), never retried as a
+    # command, so a host that refuses it can never record it as the owner's words.
+    text = " ".join(head + tail)
+    if not text.strip():
         raise CLIError("chat send requires text")
-    _print_json(_client(args).request("POST", "/api/command", {"cmd": text}))
+    data = _client(args).request("POST", "/api/command", {"text": text, "author": {"kind": "agent", "label": label}})
+    if not (isinstance(data, dict) and data.get("accepted") is True and data.get("row_address")
+            and isinstance(data.get("author"), dict) and data["author"].get("kind") == "agent"):
+        raise CLIError("this Ouroboros did not acknowledge the agent note (it may predate agent notes); "
+                       "acceptance is unconfirmed and it was not resent as the owner's words")
+    _print_json(data)
     return 0
 
 
@@ -639,7 +708,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat = subparsers.add_parser("chat", help="send chat messages and read history")
     chat_sub = chat.add_subparsers(dest="chat_command", required=True)
-    chat_send = chat_sub.add_parser("send")
+    chat_send = chat_sub.add_parser("send", allow_abbrev=False)
+    chat_send.add_argument(
+        "--from-agent", action="append", metavar="LABEL",
+        help="leave the text as a note from this agent (not your own words); flags go before the text, then --")
     chat_send.add_argument("text", nargs=argparse.REMAINDER)
     chat_send.set_defaults(func=_chat_send_command)
     chat_history = chat_sub.add_parser("history")

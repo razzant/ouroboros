@@ -839,12 +839,14 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
         body.querySelector('[data-caption]').textContent = caption(model, view.key);
     }
 
-    // "Show more" only while the excerpt is actually cut, or while it is open; a narrower window can start cutting it.
+    // "Show more" and the lower fade only while the excerpt is actually cut; a narrower window can start cutting it.
     function syncShowMore() {
-        const host = body.querySelector('[data-detail]');
-        const more = host?.querySelector('[data-full]');
-        const text = host?.querySelector('[data-body]');
-        if (more && text) more.hidden = !view.full && text.scrollHeight <= text.clientHeight + 1;
+        const text = body.querySelector('[data-body]');
+        if (!text) return;
+        const clipped = !view.full && text.scrollHeight > text.clientHeight + 1;
+        text.toggleAttribute('data-fold-clipped', clipped);
+        const more = body.querySelector('[data-full]');
+        if (more) more.hidden = !view.full && !clipped;
     }
 
     function paintDetail() {

@@ -76,7 +76,7 @@ def _attach_origin_from_metadata(ctx: ToolContext, evt: Dict[str, Any]) -> None:
 
 
 def _attach_drafted_objective(ctx: ToolContext, evt: Dict[str, Any], source: Optional[Dict[str, Any]] = None,
-                              *, owner_basis: Optional[Dict[str, Any]] = None) -> None:
+                              *, owner_basis: Optional[Dict[str, Any]] = None, own: bool = False) -> None:
     """Keep the routed objective's author separate from the ingress owner corpus.
 
     A routing run with neither owner-door stamp opens the new root with this drafted
@@ -86,7 +86,7 @@ def _attach_drafted_objective(ctx: ToolContext, evt: Dict[str, Any], source: Opt
 
     The corpus is persisted with the start (its receipt, the queue snapshot, the running
     record): the one owner-corpus projection (``owner_words.carried_owner_corpus``);
-    ``source``: the held row ``owner_source`` selected to open the start.
+    ``source``: the held or verified row (``owner_source`` or private ``owner_quote``) selected to open the start.
     """
     from ouroboros.owner_words import carried_owner_corpus, merged_corpus
 
@@ -94,7 +94,7 @@ def _attach_drafted_objective(ctx: ToolContext, evt: Dict[str, Any], source: Opt
     if not (evt.get("source_ref") or evt.get("origin_suppressed")):
         evt["origin_message_absent"] = True
     words = "" if (evt.get("origin_message_snapshot") or {}).get("placeholder_text") else evt.get("source_text")
-    evt["owner_corpus"] = carried_owner_corpus(ctx, words, source=source)
+    evt["owner_corpus"] = [] if own else carried_owner_corpus(ctx, words, source=source)  # declared: none of theirs
     if owner_basis:  # the cited words ride into the new root alone, never back into this run's own corpus
         if owner_basis["source"] in ("owner_press", "owner_quiz_answer") or (owner_basis.get("reply_to") or {}).get("card_id"):
             evt["owner_corpus"] = merged_corpus(evt.get("owner_corpus"), [owner_basis])
@@ -151,7 +151,8 @@ def _selected_source_fields(ctx: ToolContext, row: Dict[str, Any]) -> Dict[str, 
     (``owner_relay.owner_row_source``), its client id, its files from the root it was read from, its sending
     surface, each or its absence. The caller's chat, project and workspace stay the call's addressing. The files
     are a held row's (``inherited``): staging names one it cannot copy and refuses nothing, unlike a turn's own."""
-    from ouroboros.owner_relay import origin_snapshot, owner_row_source, upload_specs
+    from ouroboros.chat_uploads import upload_specs
+    from ouroboros.owner_relay import origin_snapshot, owner_row_source
     from ouroboros.tool_access import canonical_data_root
 
     ref, words = owner_row_source(row)
@@ -416,8 +417,9 @@ def _task_card_title_arg(title: str, verb: str) -> tuple[str, str]:
 
 
 def _start_destination(ctx: ToolContext, carrier: Dict[str, Any], destination: Any,
-                       owner_quote: Any) -> tuple[Dict[str, Any], str]:
-    """``(private start's event fields, refusal)`` of a start's named destination, read before any effect.
+                       owner_quote: Any) -> tuple[Dict[str, Any], Dict[str, Any], str]:
+    """``(private start's event fields, verified Main answer row, refusal)`` of a start's named destination, read
+    before any effect.
 
     A caller holding Presence authority (``carrier``) names where each new work belongs; omitted, unknown
     or contradictory choices refuse and the mind chooses again. Work without one has nothing to choose.
@@ -426,24 +428,89 @@ def _start_destination(ctx: ToolContext, carrier: Dict[str, Any], destination: A
         DESTINATION_OWNER,
         DESTINATION_PLACE,
         ContactRequestInvalid,
-        private_start_fields,
+        private_start_source,
     )
 
     refused = "⚠️ TOOL_ARG_ERROR (start_task): {} Nothing was scheduled."
     if not carrier:
-        return {}, (refused.format("destination and owner_quote apply only to a start from a Presence "
-                                   "conversation or work acting for a place.")
-                    if destination not in (None, "") or owner_quote not in (None, "") else "")
+        return {}, {}, (refused.format("destination and owner_quote apply only to a start from a Presence "
+                                       "conversation or work acting for a place.")
+                        if destination not in (None, "") or owner_quote not in (None, "") else "")
     if destination not in (DESTINATION_PLACE, DESTINATION_OWNER):
-        return {}, refused.format(
+        return {}, {}, refused.format(
             f"destination must be {DESTINATION_PLACE!r} (this place's work) or {DESTINATION_OWNER!r} (the owner's "
             "private work, with owner_quote naming their held answer to a private question).")
     if destination == DESTINATION_PLACE:
-        return {}, refused.format("owner_quote belongs to destination='owner'.") if owner_quote not in (None, "") else ""
+        return {}, {}, (refused.format("owner_quote belongs to destination='owner'.")
+                        if owner_quote not in (None, "") else "")
     try:
-        return private_start_fields(ctx, owner_quote), ""
+        fields, verified = private_start_source(ctx, owner_quote)
+        return fields, verified, ""
     except ContactRequestInvalid as exc:
-        return {}, refused.format(str(exc))
+        return {}, {}, refused.format(str(exc))
+
+
+def own_time_on(ctx: Any) -> bool:
+    """Whether the switch lets declared own work run now: the dispatch hold's own reading (Off or Panic hold it)."""
+    from ouroboros.consciousness_authority import CONSCIOUSNESS_INITIATOR, WORK_KIND_CONSCIOUSNESS
+    from supervisor.consciousness_carriers import autonomous_work_enabled
+
+    own = {"initiator": CONSCIOUSNESS_INITIATOR, "work_kind": WORK_KIND_CONSCIOUSNESS}
+    try:
+        return autonomous_work_enabled({"metadata": own}, canonical_data_root(ctx))
+    except Exception:
+        log.debug("own_time_on: the switch could not be read; it is not on", exc_info=True)
+        return False
+
+
+_MINE_NOTE = (" Started as your own work (consciousness kind, {level} autonomy): it draws on the consciousness "
+              "allowance and own-task cap, and the Off switch stops it.")
+# What a declaration refused by own time, the cap or the allowance may do instead (one sentence for every caller).
+MINE_WAY_FORWARD = ("Do it inside this work; if your human asked for it, it is theirs: cite their words with owner_words "
+                    "(in their own turn, omitting mine is enough).")
+OWN_TIME_WAIT_NOTE = (" It is your own work and own time is off: it is kept and fires only once the consciousness switch "
+                      "is on. If your human asked for it, an update citing their words (owner_words) makes it theirs.")
+
+
+def _declare_own_start(ctx: ToolContext, evt: Dict[str, Any], metadata: Dict[str, Any]) -> None:
+    """Declared own work (``mine``): the consciousness stamp, and nothing of my human's message or its files."""
+    from ouroboros.consciousness_authority import declared_own_origin
+
+    evt.update(declared_own_origin({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")}),
+               client_message_id="", attachment_uploads=[])
+
+
+def _start_refusal(ctx: ToolContext, mine: Any, *, owner_words: Any, owner_source: Any, destination: Any) -> str:
+    """start_task's published typed refusals, read before any effect; ``""`` when it may proceed: work a linked
+    Ouroboros's letter began starts no separate root (``peer_letters.separate_work_refusal``), and a ``mine``
+    declaration is one and meets its switch."""
+    from ouroboros.peer_letters import separate_work_refusal
+
+    if refusal := separate_work_refusal(getattr(ctx, "task_metadata", None), "start_task's new root"):
+        return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=refusal))
+    if mine is None or mine is False:
+        return ""
+    if mine is not True or str(owner_words or "").strip() or str(owner_source or "").strip() or destination == "owner":
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+            "⚠️ TOOL_ARG_ERROR (start_task): mine must be true or omitted. Nothing was scheduled." if mine is not True
+            else "⚠️ TOOL_ARG_ERROR (start_task): mine declares the work your own; owner_words, owner_source and "
+                 "destination='owner' make it your human's. Choose one. Nothing was scheduled.")))
+    if not own_time_on(ctx):
+        return publish_no_effect(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED", text=(
+            "⚠️ OWN_TIME_OFF (start_task): your own work runs only while your human's consciousness switch is on (and "
+            "no Panic holds); it is not on now. Nothing was staged or queued. " + MINE_WAY_FORWARD)))
+    return ""
+
+
+def _focus_start_note(metadata, private, owner_basis) -> str:
+    from ouroboros.consciousness_authority import is_focus_wake
+
+    if is_focus_wake(metadata) and not private:  # a place turn's start: whose work it is, in one plain sentence
+        return (" Started as your human's work on their pressed choice." if owner_basis and owner_basis["source"] == "owner_press"
+                      else " Started as your human's work on their cited words." if owner_basis else
+                     " Started as your own work (consciousness kind): it draws on the consciousness allowance, and "
+                     "the Off switch stops it.")
+    return ""
 
 
 def _start_task(
@@ -466,6 +533,7 @@ def _start_task(
     owner_words: str = "",
     review_answer: bool = False,
     owner_source: str = "",
+    mine: Optional[bool] = None,
 ) -> str:
     """Start separate new work; the caller keeps its identity and obligations."""
     from ouroboros.owner_words import cited_owner_basis
@@ -476,6 +544,8 @@ def _start_task(
     goal = str(objective or "").strip()
     if not goal:
         return "⚠️ TOOL_ARG_ERROR (start_task): objective is required"
+    if refused := _start_refusal(ctx, mine, owner_words=owner_words, owner_source=owner_source, destination=destination):
+        return refused
     model_basis, cite_error = cited_owner_basis(ctx, owner_words, call_speech=bool(model))
     owner_basis = model_basis if model_basis and model_basis["source"] != "live_call" else None
     if cite_error and model:
@@ -492,7 +562,7 @@ def _start_task(
         return title_error
     metadata = getattr(ctx, "task_metadata", {})
     presence_carrier = presence_root_carrier(metadata, task_contract=getattr(ctx, "task_contract", None))
-    private, destination_error = _start_destination(ctx, presence_carrier, destination, owner_quote)
+    private, private_row, destination_error = _start_destination(ctx, presence_carrier, destination, owner_quote)
     if destination_error:
         return destination_error
     chosen: Dict[str, Any] = {"destination": destination} if presence_carrier else {}
@@ -638,13 +708,6 @@ def _start_task(
             # focus keeps ordinary workspace admission and its return carrier.
             evt.update({key: "" for key in ("project_id", "project_name", "workspace_root", "workspace", "source")})
             repo_root_note = ""
-        if "presence" in presence_carrier:
-            from ouroboros.presence_context import PRESENCE_FINAL_ROUTE_KEY, handoff_fact
-
-            # ``_finish_swarm_handoff`` holds the first attempt whatever its status; start_task runs
-            # serially. A candidate written before submission: only what the source publishes decides.
-            evt[PRESENCE_FINAL_ROUTE_KEY] = handoff_fact(getattr(ctx, "task_id", ""), tid, held=not isinstance(
-                getattr(ctx, "_swarm_handoff_attempt", None), dict))
     else:
         # The owner's own work related to a place (#2482): an ordinary owner start
         # with its own contract; only the relation the place reads it by rides along.
@@ -655,7 +718,9 @@ def _start_task(
     # stripping, the wake chooses project/workspace like any Main turn (В9').
     from ouroboros.consciousness_authority import consciousness_origin_metadata, is_focus_wake
 
-    if not private:  # a private owner start carries its own owner contract (#2795); a place start, its writer's kind
+    if mine and not private:
+        _declare_own_start(ctx, evt, metadata)
+    elif not private:  # a private owner start carries its own owner contract (#2795); a place start, its writer's kind
         evt.update(consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")},
                                                  started_root=True, owner_basis=owner_basis))
         if source_row:  # the selected row opens the start in place of the run's own: its identity, files and surface
@@ -669,19 +734,18 @@ def _start_task(
 
             if transported := reply_transport_from_metadata(canonical_data_root(ctx), metadata):
                 evt[TURN_ADDRESS] = transported
-    # An ordinary owner-word start settles its source's files; a private start and a place's work keep their own doors.
-    files = None if private or presence_carrier else _source_files(ctx, evt, selected=bool(source_row))
-    _attach_drafted_objective(ctx, evt, source_row or None, owner_basis=owner_basis)
+    # An ordinary owner-word start settles its source's files; a private start carries its answer's files alone.
+    files = (([], False) if private and evt.get("attachment_uploads")
+             else None if private or presence_carrier or mine else _source_files(ctx, evt, selected=bool(source_row)))
+    _attach_drafted_objective(ctx, evt, private_row or source_row or None, owner_basis=owner_basis, own=bool(mine))
     kind_note = " " + model_note if model_note else ""
     source_note = (_source_note(ctx, evt, selected if source_row else "") if isinstance(evt.get("source_ref"), dict)
                    and evt["source_ref"] and not private and not presence_carrier else "")
     kind_note += source_note
-    if is_focus_wake(metadata) and not private:  # a place turn's start: whose work it is, in one plain sentence
-        kind_note += (" Started as your human's work on their pressed choice." if owner_basis and owner_basis["source"] == "owner_press"
-                      else " Started as your human's work on their cited words." if owner_basis else
-                     " Started as your own work (consciousness kind): it draws on the consciousness allowance, and "
-                     "the Off switch stops it.")
-    mode, confirmation = _emit_and_wait_for_routing(ctx, evt)
+    kind_note += (_MINE_NOTE.format(level=evt.get("consciousness_autonomy")) if mine
+                  else _focus_start_note(metadata, private, owner_basis))
+    replyable = not private and not presence_carrier and _routing_issuer(ctx)["kind"] == ISSUER_OWNER_TURN
+    mode, confirmation = _emit_and_wait_for_routing(ctx, evt, **({"about_work": tid} if replyable else {}))
     confirmation_status = str(confirmation.get("status") or "unconfirmed")
     reason = str(confirmation.get("reason") or "")
     detail = str(confirmation.get("detail") or "")
@@ -700,6 +764,9 @@ def _start_task(
                "and it is not this turn's deferred work." if private else "")
             + (f"\n{effort_note}" if effort_note else "")
         )
+        if replyable:
+            ctx._confirmed_reply_works = {*getattr(ctx, "_confirmed_reply_works", ()), tid}
+            response += f"\nFor a reply confirming this handoff, use finish_task(about_work={tid!r}, …) so Replies address it."
         return _finish_swarm_handoff(ctx, evt, response, status="scheduled")
     if confirmation_status in {"rejected", "needs_manual_target", "not_started"}:
         shown_reason = (
@@ -709,7 +776,7 @@ def _start_task(
             shown_reason = f"{shown_reason}: {detail}" if shown_reason else detail
         response = (
             f"⚠️ PROMOTE_REJECTED: task {tid} was not scheduled"
-            f"{f' ({shown_reason})' if shown_reason else ''}{_cause_words(reason)}. "
+            f"{f' ({shown_reason})' if shown_reason else ''}{_cause_words(reason, mine=bool(mine))}. "
             "Do not report this task as created."
         )
         return _finish_swarm_handoff(ctx, evt, response, status="rejected", reason=shown_reason or "admission_rejected")
@@ -856,8 +923,8 @@ def _closing_page(ctx: ToolContext, root: Any, project: Dict[str, Any], note: st
         if author is None:
             return f" No page: a {role} drafts no project's last page."
         newest = chat_chain.format_address(max(entries, key=lambda entry: entry[2])[0])
-        result, covers, _facts, _stamp = publish_covered_page(root, _activated(root), author, room, note, {"to": newest},
-                                                              closes_project=str(project["id"]), closure_delivery=notice)
+        result, covers, _facts, _stamp, _rows = publish_covered_page(
+            root, _activated(root), author, room, note, {"to": newest}, closes_project=str(project["id"]), closure_delivery=notice)
     except _NotActivated:
         return " No page: my memory is not active yet; the closure stands."
     except Exception as exc:  # a store refusal path or an unreadable room never undoes the closure
@@ -917,7 +984,7 @@ def _manage_project_folder(ctx: ToolContext, project_id: str, action: str = "vie
     return json.dumps({"ok": outcome["status"] in ("changed", "view"), **outcome}, ensure_ascii=False, default=str)
 
 
-def _cause_words(code: str) -> str:
+def _cause_words(code: str, *, mine: bool = False) -> str:
     """``": <words>"`` for a refusal code the host cause table explains, else "".
 
     The machine prefix and the code stay exactly where readers parse them; the
@@ -928,6 +995,9 @@ def _cause_words(code: str) -> str:
     from ouroboros.project_dialogue import ROUTING_REFUSAL_CAUSES
 
     phrase = ROUTING_REFUSAL_CAUSES.get(str(code or "").strip(), "")
+    if mine and str(code or "").startswith("consciousness_"):
+        way = MINE_WAY_FORWARD.rstrip(".")  # the caller ends the sentence
+        phrase = f"{phrase}. {way}" if phrase else way
     return f": {phrase}" if phrase else ""
 
 

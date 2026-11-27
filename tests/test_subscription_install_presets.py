@@ -249,24 +249,36 @@ def test_unresolvable_model_refuses_typed_and_emits_nothing():
     assert preset.settings_keys() == {}
 
 
-def test_codex_takes_6_1_sol_when_discovered_else_5_6_sol_with_the_reason_said():
-    """Codex prefers gpt-6.1-sol; only live discovery without it takes gpt-5.6-sol, and the receipt
-    and the preview's diagnostics say which and why. Neither discovered is a typed refusal."""
-    def codex(*extra):
-        return compile_install_preset([HarnessDiscovery("codex", (*LIVE_MODELS["codex"], *extra))])
+@pytest.mark.parametrize(("listed", "chosen"), [
+    (("gpt-6.1-sol", "gpt-6.2-sol"), "gpt-6.2-sol"),
+    (("gpt-6.1-sol", "gpt-6.2-sol-fast", "gpt-6.2-astra"), "gpt-6.1-sol"),  # an exact id only
+    (("gpt-6.2-sol-fast", "gpt-6.1-sol-fast"), "gpt-5.6-sol"),
+], ids=["6.2", "6.1", "5.6"])
+def test_codex_takes_6_2_sol_then_6_1_sol_then_5_6_sol_with_the_reason_said(listed, chosen):
+    """Codex prefers gpt-6.2-sol, then gpt-6.1-sol, then gpt-5.6-sol from its eligible catalog alone (owner
+    2026-11-22); a successor is said in the receipt and diagnostics, scoped to that catalog."""
+    preset = compile_install_preset([HarnessDiscovery("codex", (*LIVE_MODELS["codex"], *listed))])
+    assert preset.ok, preset.refusal
+    assert {row["model"] for rows in preset.receipt["surfaces"].values() for row in rows} == {chosen}
+    notes = [note for note in preset.diagnostics if note["code"] == "model_preference_successor"]
+    if chosen == "gpt-6.2-sol":
+        assert notes == []
+        return
+    [note] = notes
+    assert (note["preference"], note["chosen_preference"], note["model"]) == ("gpt-6.2-sol", chosen, chosen)
+    assert note["message"] == (
+        f"codex's eligible catalog has no 'gpt-6.2-sol'; this seat uses the next preference, {chosen!r}.")
+    assert note in preset.receipt["diagnostics"]
+    assert all(row["reason"] == note["message"] for rows in preset.receipt["surfaces"].values() for row in rows)
 
-    newest = codex("gpt-6.1-sol")
-    assert {row["model"] for rows in newest.receipt["surfaces"].values() for row in rows} == {"gpt-6.1-sol"}
-    assert not any(note["code"] == "model_preference_successor" for note in newest.diagnostics)
-    older = codex()
-    [note] = [note for note in older.diagnostics if note["code"] == "model_preference_successor"]
-    assert (note["preference"], note["chosen_preference"], note["model"]) == ("gpt-6.1-sol", "gpt-5.6-sol", "gpt-5.6-sol")
-    assert note in older.receipt["diagnostics"]
-    assert note["message"] == "codex discovery has no 'gpt-6.1-sol'; this seat uses the next preference, 'gpt-5.6-sol'."
-    assert all(row["reason"] == note["message"] for rows in older.receipt["surfaces"].values() for row in rows)
-    refused = compile_install_preset([HarnessDiscovery("codex", ("gpt-5.6", "gpt-5.5"))])
-    assert refused.refusal.code == "model_not_in_discovery"
-    assert refused.refusal.candidates == ("gpt-6.1-sol", "gpt-5.6-sol")
+
+def test_codex_without_any_sol_in_its_eligible_catalog_refuses_typed():
+    refused = compile_install_preset([HarnessDiscovery("codex", ("gpt-5.6", "gpt-5.5", "gpt-6.2-sol-fast"))])
+    assert refused.refusal is not None and refused.refusal.code == "model_not_in_discovery"
+    assert refused.refusal.candidates == ("gpt-6.2-sol", "gpt-6.1-sol", "gpt-5.6-sol")
+    assert refused.refusal.message.startswith(
+        "codex's eligible catalog has none of gpt-6.2-sol, gpt-6.1-sol, gpt-5.6-sol, so the ")
+    assert refused.available_subagents == "" and refused.settings_keys() == {}
 
 
 def test_cursor_without_grok_refuses_instead_of_using_a_costlier_model():
@@ -488,7 +500,7 @@ def test_agy_old_catalog_takes_flash_high_with_its_successor_reason_receipted():
     assert (note["harness"], note["preference"], note["chosen_preference"], note["model"]) == (
         "agy", "gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.8-flash-high")
     assert note["message"] == (
-        "agy discovery has no 'gemini-4-hydrogen'; this seat uses the next preference, 'gemini-3.8-flash-high'.")
+        "agy's eligible catalog has no 'gemini-4-hydrogen'; this seat uses the next preference, 'gemini-3.8-flash-high'.")
     assert seat["reason"] == note["message"] and note in preset.receipt["diagnostics"]
     [actor] = json.loads(preset.available_subagents)["items"]
     assert (actor["route"]["target_id"], actor["effort"]) == ("agy=gemini-3.8-flash-high", "high")

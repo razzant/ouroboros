@@ -21,16 +21,18 @@
  * portal's successor's frames, so that successor's census row is its whole present there.
  */
 import { apiClient, fetchTaskDetailStrict } from './api_client.js';
+import { tr } from './i18n.js';
 import { showToast } from './toast.js';
-import { isTerminalTaskDetail, normalizeLogTs } from './log_events.js';
+import { isTerminalTaskDetail, normalizeLogTs, taskPresentation } from './log_events.js';
 import { censusTaskFacts, liveCardLabel, syncParkedPhase } from './task_phase_chip.js';
-import { boundActivityPreview, projectIdFromTask, refitCollapsedActivity, renderCollapsedActivity, taskCostProjection } from './chat_activity.js';
+import { boundActivityPreview, refitCollapsedActivity, renderCollapsedActivity, taskCostProjection } from './chat_activity.js';
 import { DURABLE_RECEIPTS, receiptNotice } from './project_handoff.js';
 import { nameProjectReference, projectReference } from './project_reference.js';
 import { admittedSuccessor } from './task_episodes.js';
 import { noteOrigin } from './task_origin.js';
-import { continueControlSuccessor } from './task_continue.js';
-import { closingLine, readCardDetail } from './settled_card.js';
+import { continueControlSuccessor, READ_EPOCH } from './task_continue.js';
+import { attemptOf, closingLine, observePortalOutcome, readCardDetail } from './settled_card.js';
+import { applyPortalWorkView, noteControlQueue } from './work_status.js';
 
 const key = (value) => String(value || '').trim();
 const MAIN_CHAT_ID = 1;  // contracts/chat_id_policy WEB_UI_CHAT_ID (task_reference.js, notifications.js)
@@ -125,7 +127,7 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
     append, remember = () => {}, actionsOf }) {
     const census = new Map();
     let censusComplete = false;
-    let censusRead = false;
+    let projectedEpisodes = null;
     let bindings = {};
     let bindingsKnown = false;  // the first `task_bindings` is the baseline, not news
     const projects = new Map();
@@ -138,8 +140,72 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
     // `predecessor|root` pairs whose record already said whether that root is its Continue.
     const asked = new Set();
 
-    /** The live activity a card's controls act on when its work runs in another chat (its room). */
-    const activity = (record) => (isPortal(record) ? record.portalActivity || undefined : undefined);
+    // Keep the last positively matched address, not activity, across missing bindings. A queue row with no Project
+    // can still have the work's original pre-move address. The registry and known Project both outrank that row.
+    function currentRoom(record, row, work) {
+        const project = record.root.dataset.projectId;
+        if (!project) return null;
+        const binding = bindings[record.groupId];
+        const addressed = [binding?.project_id === project && !binding.origin_bound && binding.chat_id,
+            projects.get(project)?.chat_id, record.portalRoom,
+            row?.project_id === project && row.chat_id, work?.project_id === project && work.room];
+        return addressed.find((room) => Number.isInteger(room) && room > MAIN_CHAT_ID) || null;
+    }
+    function presentSources(record) {
+        const id = record.groupId;
+        let row = census.get(id), work = projectedEpisodes?.get(id);
+        const room = currentRoom(record, row, work);
+        const matches = (address, project) => room !== null && address === room && (!project || project === record.root.dataset.projectId);
+        if (row?._activityUnconfirmed || !matches(row?.chat_id, row?.project_id)) row = null;
+        if (!matches(work?.room, work?.project_id)) work = null;
+        const rowAttempt = attemptOf(row), memberAttempt = work?.members?.states?.[id]?.queue_attempt;
+        const attempt = [record.controlQueueAttempt, rowAttempt, memberAttempt].filter(Number.isSafeInteger);
+        const latest = attempt.length ? Math.max(...attempt) : undefined;
+        return { room, attempt: latest, row: rowAttempt < latest ? null : row, work: memberAttempt < latest ? null : work };
+    }
+    const activity = (record) => isConnected() ? presentSources(record).row : null;
+    const workOf = (record) => isConnected() ? presentSources(record).work : null;
+
+    // An unknown helper cannot disown the separately confirmed phase of this episode's root.
+    function liveProjection(work, id) {
+        if (!work?.episode?.live) return null;
+        if (work.confirmed && work.activity !== 'unknown') return work;
+        const member = work.members?.states?.[id];
+        return member?.confirmed && member.activity !== 'unknown' ? { ...member, episode: work.episode } : null;
+    }
+
+    function phaseFacts(record, row, finalizing, outcome) {
+        // Only a census outcome of the same lifecycle can enrich the work's bare word.
+        const status = row?.outcome_axes?.lifecycle?.status || row?.task_terminal_status || row?.status;
+        const source = outcome && outcome !== status ? { status: outcome } : row;
+        const facts = censusTaskFacts(finalizing ? { ...source, phase: 'finalizing' } : source);
+        return { ...facts, outcome: observePortalOutcome(record, source, facts.outcome) };
+    }
+
+    // Both actual task-detail readers share this GET epoch. Omission cannot roll back the barrier.
+    const acceptsDetail = (record, detail, epoch = detail?.[READ_EPOCH]) => epoch > (record.portalProof?.epoch ?? 0)
+        && (!detail || (attemptOf(detail) ?? 1) >= (record.cardAttempt ?? 0));
+
+    // A terminal projection proves the author ended, not what it ended with. A live helper's
+    // changing census is not a newer result of the already-ended parent.
+    function missingEnding(record) {
+        if (!record.replayedEnding && record.settledDetailAttempt == null && record.root.isConnected) card.missing(record.groupId);
+    }
+
+    function observeDetail(record, detail) {
+        if (!isPortal(record) || !detail?.status) return false;
+        const row = activity(record), restored = card.restore(record, row?.project_admission_hold);
+        const facts = censusTaskFacts(detail);
+        if (!facts.outcome) return restored;
+        facts.outcome = observePortalOutcome(record, detail, facts.outcome);
+        return syncParkedPhase(record, facts.finalizing ? 'finalizing' : record.censusPhase, row || undefined, facts) || restored;
+    }
+
+    function summary(record, source, view) {
+        if (!isPortal(record) || !view.observedOutcome) return view;
+        const observedOutcome = observePortalOutcome(record, source, view.observedOutcome);
+        return { ...view, observedOutcome, ...(view.terminal ? taskPresentation(observedOutcome, view.quietEffective) : {}) };
+    }
 
     // Replace the live census line with the closing sentence or held cause, as on the finished card.
     function dropLine(record) {
@@ -156,32 +222,56 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
 
     function present(record) {
         if (!isPortal(record)) return false;
-        if (record.finished) return dropLine(record);
-        relabel(record);
-        const row = census.get(record.groupId);
-        if (!row) {
-            const had = Boolean(record.portalActivity);
-            record.portalActivity = null;
-            let dropped = false;
-            if (censusComplete && record.root?.isConnected) {
-                dropped = dropLine(record);
-                card.missing(record.groupId);
-            }
-            return Boolean(card.controls(record) || had || dropped);
+        const { room, row, work: projected, attempt } = presentSources(record);
+        const moved = room !== null && record.portalRoom != null && record.portalRoom !== room;
+        if (moved) record.controlEpisode = {};
+        if (room !== null) record.portalRoom = room;
+        const work = liveProjection(projected, record.groupId);
+        const projectedEnding = projected?.episode?.live === false && isTerminalTaskDetail({ status: projected.outcome });
+        // Remember the source, not a repaint of the same body or a later gap, as the GET's freshness boundary.
+        const source = row || (work && (work === projected ? work : projected.members.states[record.groupId])) || (projectedEnding && projected);
+        const sameEnding = projectedEnding && record.portalProof?.ended && attempt === record.controlQueueAttempt;
+        if (moved || (source && source !== record.portalProof?.source && !sameEnding)) {
+            record.portalProof = { source, epoch: record.readEpoch ?? 0, ended: projectedEnding };
         }
-        const facts = censusTaskFacts(row);
-        if (facts.ended) {
-            record.portalActivity = null;
-            const changed = card.finish(record.groupId, facts.outcome);
+        record.portalActivity = record.finished ? null : row;  // scalar count for the attempt fold, not authority
+        noteControlQueue(record, attempt);
+        if (record.finished) {
+            if (projectedEnding || censusComplete) missingEnding(record);
+            const controls = card.controls(record);
+            return dropLine(record) || controls;
+        }
+        relabel(record);
+        const finalizing = !projectedEnding && (work?.transition === 'finalizing' || row?.phase === 'finalizing');
+        // An explicit immediate cancellation wins even beside older upkeep.
+        const stopped = row?.status === 'cancelled';
+        const facts = phaseFacts(record, row, finalizing, (finalizing || projectedEnding) && projected?.outcome);
+        record.finalizingHold = Boolean(finalizing);
+        if (stopped || projectedEnding || (facts.ended && !finalizing)) {
+            const changed = card.finish(record.groupId, stopped ? 'cancelled' : facts.outcome);
+            if (projectedEnding) missingEnding(record);
             return dropLine(record) || changed;
         }
-        record.portalActivity = row;
-        const startedSec = Number(row.started_at);
-        if (Number.isFinite(startedSec) && startedSec > 0) record.startedAt = startedSec * 1000;
-        card.restore(record, row.project_admission_hold);
+        let changed = applyPortalWorkView(record, work, Boolean(row));
+        const phase = finalizing ? 'finalizing' : row?.phase || (work ? '' : 'unknown');
+        if (row || work || !record.historicalUnavailable || record.reviewAnchor) {
+            changed = card.restore(record, row?.project_admission_hold) || changed;
+        }
+        changed = syncParkedPhase(record, phase, row || undefined, facts) || changed;
+        if (!row) {
+            if (!work && censusComplete && record.root?.isConnected) {
+                changed = dropLine(record) || changed;
+                card.missing(record.groupId);
+            }
+            changed = card.meta(record) || changed;
+            return Boolean(card.controls(record) || changed);
+        }
+        // Only a managed task's row a worker holds dates its start (worker_assignment._bind_running); any other row's
+        // started_at may be when it was queued (gateway/state.py), so the card keeps its first row's time instead.
+        const startedSec = row.kind === 'managed_task' && row.carrier === 'worker' ? Number(row.started_at) : 0;
+        record.startedAt = Number.isFinite(startedSec) && startedSec > 0 ? startedSec * 1000 : 0;
         // Its census row also says which place called the work (task_origin.js): a portal has no frame to say it.
-        let changed = noteOrigin(record, row);
-        changed = Boolean(syncParkedPhase(record, row.phase, row)) || changed;
+        changed = noteOrigin(record, row) || changed;
         const now = portalPresent(row);
         if (now.line) {
             record.collapsedActivity = boundActivityPreview(now.line);
@@ -211,16 +301,24 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
             return false;
         }
         completions.delete(id);
-        if (record.finished) return false;
         if (row.outcome_axes) return card.summary({ ...row, outcome_final: true });
-        card.missing(id);
+        if (!record.finished) card.missing(id);
+        else missingEnding(record);
         return false;
     }
 
     /** One door for every binding source; true when the DOM changed. */
     function bind(record, project = {}) {
         if (!isMain || !record || record.isSubagent || !project?.id) return false;
+        delete record.root.dataset.projectCreating;
         const fresh = !isPortal(record);
+        if (record.root.dataset.projectId !== project.id) {
+            if (!fresh) {
+                record.controlEpisode = {};
+                record.portalProof = { epoch: record.readEpoch ?? 0 };
+            }
+            record.portalRoom = null;
+        }
         let changed = bindWorkPortal(record, { id: project.id, name: project.name || projects.get(project.id)?.name || '' });
         if (!fresh) return changed;
         refitCollapsedActivity(record);  // a portal shows two lines, not three
@@ -338,16 +436,20 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
     }
 
     /** `/api/state`: the census of EVERY chat (a portal's work runs in its room's chat), bindings and names (Main). */
-    function sync(data) {
-        if (!data || typeof data !== 'object') return;
-        if (Array.isArray(data.active_chat_activities)) {
-            censusRead = true;
-            census.clear();
+    function sync(data, episodes = null) {
+        if (!data || typeof data !== 'object') return retire();
+        const current = isConnected() && data.supervisor_ready !== false;
+        // Retire only this consumer's current evidence, not the room's retained projection or durable bindings.
+        census.clear();
+        projectedEpisodes = current ? episodes : null;
+        censusComplete = false;
+        if (current && Array.isArray(data.active_chat_activities)) {
             for (const row of data.active_chat_activities) {
                 const id = key(row?.activity_id);
                 if (id) census.set(id, row);
             }
-            censusComplete = data.active_chat_activities_complete === true && data.supervisor_ready === true && isConnected();
+            const workReadComplete = data.works_complete === true || (!Array.isArray(data.works) && data.works_complete == null);
+            censusComplete = data.active_chat_activities_complete === true && data.supervisor_ready === true && workReadComplete;
         }
         if (!isMain) return askContinued();  // a room has no portals; its cards still follow a Continue
         if (Array.isArray(data.projects)) for (const project of data.projects) if (project?.id) projects.set(project.id, project);
@@ -357,7 +459,7 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
             bindings = data.task_bindings;
             bindingsKnown = true;
         }
-        reconcile();
+        reconcile({ retry: current });
         for (const id of fresh) if (!records.get(id)?.root?.isConnected) askAbout(id, key(bindings[id]?.project_id));
         askContinued();
     }
@@ -370,7 +472,8 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
             for (const record of records.values()) {
                 if (record.isSubagent || !record.root?.isConnected) continue;
                 const row = census.get(record.groupId);
-                const projectId = key(bindings[record.groupId]?.project_id) || rowRoomProject(row);
+                const binding = bindings[record.groupId];
+                const projectId = key(!binding?.origin_bound && binding?.project_id) || rowRoomProject(row);
                 if (!isPortal(record) && projectId) {
                     changed = bind(record, { id: projectId, name: key(row?.project_name) }) || changed;
                 } else changed = present(record) || changed;
@@ -388,7 +491,6 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
      * path, which stays quiet while away.
      */
     function refresh() {
-        if (!censusRead) return;
         if (isMain) reconcile({ retry: false });
     }
 
@@ -397,9 +499,10 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
      * until the next one.
      */
     function retire() {
-        censusRead = false;
         censusComplete = false;
+        projectedEpisodes = null;
         census.clear();
+        refresh();
     }
 
     /**
@@ -427,12 +530,16 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         });
     }
 
+    // The typed refusals that leave the work in Main. Their one sentence is the server's 409 `error`
+    // (``project_placement.NAMING_REFUSALS``), shown as written; this card only picks its translation key.
+    const NAMING_REFUSALS = new Set(['project_name_source_unavailable', 'project_name_unavailable',
+        'continuation_pending', 'continuation_family_too_long']);
+
     // Conversion keeps the card: the same node becomes the work's portal (status, latest line, meta,
     // its controls and the Project reference), so the work never disappears from Main. The timeline
     // lives in the room from now on; the task keeps running and keeps its Stop.
     function converted(record, { project, handoff_receipt }) {
         return onDomWrite(() => {
-            delete record.root.dataset.projectCreating;
             const changed = bind(record, project || {});
             // A binding whose Main receipt is not durable keeps its visible gap mark (the toast says why).
             if (handoff_receipt && !DURABLE_RECEIPTS.has(handoff_receipt)) record.root.dataset.receipt = handoff_receipt;
@@ -451,9 +558,8 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         const btn = record.turnProjectBtn;
         if (btn) { btn.disabled = true; btn.textContent = liveCardLabel.creatingProject(); }
         try {
-            // One-click convert (owner P1): no name prompt, no extra LLM call. The SERVER names the
-            // project and adopts the project the task's owner message already has.
-            const payload = await apiClient.projectFromTask(taskId, projectIdFromTask(taskId), '');
+            // The server owns the destination id, reuses a proven title or tries Light once; task controls stay independent.
+            const payload = await apiClient.projectFromTask(taskId);
             const project = payload?.project;
             if (!project?.id || payload?.binding?.project_id !== project.id) {
                 throw new Error('Project binding response is unconfirmed; check the Project list before retrying.');
@@ -464,9 +570,19 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
             const notice = receiptNotice(payload.handoff_receipt);
             if (notice) showToast(notice, 'warn');
         } catch (exc) {
-            showToast(`Project conversion not confirmed: ${exc.message || exc}`, 'error');
+            if (isPortal(record)) return; // A concurrent reply may already have bound the card.
+            const reason = exc?.body?.reason_code;
+            const detail = NAMING_REFUSALS.has(reason)
+                ? tr(`task.card.project_refused.${reason}`, exc.message)
+                : `Project conversion not confirmed: ${exc.message || exc}`;
+            showToast(detail, 'error', { dismissLabel: tr('toast.dismiss', 'Dismiss notice') });
+        } finally {
             delete record.root.dataset.projectCreating;
-            if (btn) { btn.disabled = false; btn.textContent = liveCardLabel.turnIntoProject(); }
+            const current = record.turnProjectBtn;
+            if (!isPortal(record) && current) {
+                current.disabled = false;
+                current.textContent = liveCardLabel.turnIntoProject();
+            }
         }
     }
 
@@ -484,7 +600,8 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         btn.type = 'button';
         btn.className = 'btn btn-sm btn-default ui-hit-area';
         btn.dataset.turnIntoProject = '1';
-        btn.textContent = liveCardLabel.turnIntoProject();
+        btn.disabled = record.root.dataset.projectCreating === '1';
+        btn.textContent = btn.disabled ? liveCardLabel.creatingProject() : liveCardLabel.turnIntoProject();
         btn.addEventListener('click', (event) => {
             event.stopPropagation();
             turnIntoProject(record);
@@ -509,5 +626,6 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         return added;
     }
 
-    return { activity, bind, bindRow, follow, present, refresh, relabel, retire, row, settle, sync, syncConvert, turnIntoProject };
+    return { activity, workOf, acceptsDetail, observeDetail, summary, bind, bindRow, follow, present, refresh, relabel, retire, row, settle,
+        sync, syncConvert, turnIntoProject };
 }

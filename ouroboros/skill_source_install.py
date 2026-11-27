@@ -101,8 +101,15 @@ def _select_check(plan: Dict[str, Any], **options: Any) -> None:
 
 def plan_install(drive_root: pathlib.Path, item_id: str, *, replace: bool = False,
                  rows: Optional[List[Dict[str, Any]]] = None,
-                 repo_dir: Optional[pathlib.Path] = None) -> Dict[str, Any]:
-    """Resolve an install from local data and refuse what cannot happen; nothing is written."""
+                 repo_dir: Optional[pathlib.Path] = None,
+                 expected_source_key: str = "", expected_digest: str = "") -> Dict[str, Any]:
+    """Resolve an install from local data and refuse what cannot happen; nothing is written.
+
+    ``expected_source_key``/``expected_digest`` are the selectors the shown card holds: when present, the
+    resolved item must still be that source view and release, else ``candidate_changed`` and the caller
+    re-plans from a fresh card. The same check runs before queueing and again in the lane on selection.
+    A registry item carries no digest at plan time; its landed bytes are checked against
+    ``expected_digest`` at landing."""
     try:
         row, item, snapshot = find_item(drive_root, item_id, rows=rows, repo_dir=repo_dir)
     except LookupError as exc:
@@ -115,6 +122,23 @@ def plan_install(drive_root: pathlib.Path, item_id: str, *, replace: bool = Fals
         raise SkillInstallError("withdrawn", f"{item['name']} was withdrawn by {row['name']}: {reason}.")
     if row["kind"] != "registry" and not item.get("digest"):
         raise SkillInstallError("no_release", f"{item['name']} cannot be installed: its files could not be read.")
+    expected_key = str(expected_source_key or "").strip()
+    if expected_key and str(item.get("source_key") or "") != expected_key:
+        raise SkillInstallError("candidate_changed",
+                                f"{row['name']} now presents {item.get('name') or item_id} from another source view; "
+                                "look at the card again.",
+                                candidate={"version": str(item.get("version") or ""),
+                                           "digest": str(item.get("digest") or ""),
+                                           "source_key": str(item.get("source_key") or "")})
+    expected_release = str(expected_digest or "").strip()
+    if (expected_release and row["kind"] != "registry" and item.get("digest")
+            and str(item["digest"]) != expected_release):
+        raise SkillInstallError("candidate_changed",
+                                f"{row['name']} now offers a different release of {item.get('name') or item_id}; "
+                                "look at the card again.",
+                                candidate={"version": str(item.get("version") or ""),
+                                           "digest": str(item["digest"]),
+                                           "source_key": str(item.get("source_key") or "")})
     plan = {"row": row, "item": item, "snapshot": snapshot, "name": item.get("name", ""), "basis": row["trust"],
             "occupant": None, "already_installed": False}
     occupant = installed_index(drive_root).get(item["name"]) if item.get("name") else None
@@ -309,7 +333,8 @@ def _land_release(drive_root: pathlib.Path, plan: Dict[str, Any], record: Dict[s
 
 def _install_registry(drive_root: pathlib.Path, plan: Dict[str, Any], *, actor: str, reason: str, task_id: str,
                       turn_on_when_ready: bool, repo_dir: Optional[pathlib.Path],
-                      progress: Optional[Callable[[str], None]]) -> Dict[str, Any]:
+                      progress: Optional[Callable[[str], None]], expected_digest: str = "",
+                      version: str = "") -> Dict[str, Any]:
     from ouroboros.config import REPO_DIR
     from ouroboros.marketplace.install import install_skill
 
@@ -321,8 +346,10 @@ def _install_registry(drive_root: pathlib.Path, plan: Dict[str, Any], *, actor: 
     if plan.get("check"):
         record["check"] = plan["check"]
     result = install_skill(pathlib.Path(drive_root), pathlib.Path(repo_dir or REPO_DIR),
-                           slug=item["registry_slug"], auto_review=False, progress_callback=progress,
-                           install_record=record)
+                           slug=item["registry_slug"], version=str(version or "") or None, auto_review=False,
+                           progress_callback=progress,
+                           install_record=record, registry_url=row.get("url") or None,
+                           expected_digest=str(expected_digest or ""))
     if not result.ok:
         raise SkillInstallError("registry_install_failed", result.error or "install failed",
                                 int(result.error_status or 400))
@@ -485,13 +512,23 @@ def start_review(drive_root: pathlib.Path, name: str, *, repo_dir: Optional[path
 
 
 def settle_pending_updates_at_startup(drive_root: pathlib.Path) -> None:
+    """At startup, in the lane: settle each kept update, then what a restart left of the secret form's allows (a
+    claimed grant step is recorded unknown and never runs again; an unclaimed consent whose exact files are already
+    admitted finishes once; a known result is published to its card)."""
+    from ouroboros.skill_grant_follow import consents_to_recover, recover_consent
+
     root = pathlib.Path(drive_root) / "state" / "skills"
     for path in sorted(root.glob("*/update_backup.json")):
         name = path.parent.name
         try:
-            run_in_lane(drive_root, "update_settle", name, lambda: settle_pending_update(drive_root, name))
+            run_in_lane(drive_root, "update_settle", name, lambda name=name: settle_pending_update(drive_root, name))
         except Exception:
             log.warning("Pending update settlement failed for %s; kept evidence at %s", name, path, exc_info=True)
+    for name in consents_to_recover(drive_root):
+        try:
+            run_in_lane(drive_root, "grant", name, lambda name=name: recover_consent(drive_root, name))
+        except Exception:
+            log.warning("The allow a restart left for %s was not settled", name, exc_info=True)
 
 
 def settle_before_replacement(drive_root: pathlib.Path, name: str) -> None:
@@ -513,9 +550,16 @@ def install_item(drive_root: pathlib.Path, item_id: str, *, replace: bool = Fals
                  reason: str = "", task_id: str = "", turn_on_when_ready: bool = True,
                  rows: Optional[List[Dict[str, Any]]] = None, repo_dir: Optional[pathlib.Path] = None,
                  progress: Optional[Callable[[str], None]] = None,
-                 check: str = "review", check_notes: str = "") -> Dict[str, Any]:
-    """Install one catalog item (inside the lane). A ``review`` result carries ``needs_review``."""
-    plan = plan_install(drive_root, item_id, replace=replace, rows=rows, repo_dir=repo_dir)
+                 check: str = "review", check_notes: str = "",
+                 expected_source_key: str = "", expected_digest: str = "",
+                 version: str = "") -> Dict[str, Any]:
+    """Install one catalog item (inside the lane). A ``review`` result carries ``needs_review``.
+
+    ``expected_source_key``/``expected_digest`` re-check the card's selectors here, on actual selection,
+    after the same check before queueing. ``version`` pins a registry offer's disclosed release (registry
+    rows only; empty keeps the previous latest-release behavior)."""
+    plan = plan_install(drive_root, item_id, replace=replace, rows=rows, repo_dir=repo_dir,
+                        expected_source_key=expected_source_key, expected_digest=expected_digest)
     row, item = plan["row"], plan["item"]
     base = {"ok": True, "id": item["id"], "source": _source_fields(row), "basis": plan["basis"],
             "official": bool(item.get("official"))}
@@ -530,7 +574,8 @@ def install_item(drive_root: pathlib.Path, item_id: str, *, replace: bool = Fals
         settle_before_replacement(drive_root, plan["name"])
     if row["kind"] == "registry":
         record = _install_registry(drive_root, plan, actor=actor, reason=reason, task_id=task_id,
-                                   turn_on_when_ready=turn_on_when_ready, repo_dir=repo_dir, progress=progress)
+                                   turn_on_when_ready=turn_on_when_ready, repo_dir=repo_dir, progress=progress,
+                                   expected_digest=expected_digest, version=version)
     else:
         record = _land_release(drive_root, plan, _install_record(plan, actor=actor, reason=reason, task_id=task_id,
                                                                  turn_on_when_ready=turn_on_when_ready),
@@ -612,8 +657,7 @@ def _merge_instructions(name: str, item: Dict[str, Any], payload_root: str, tree
 
 def _start_merge(drive_root: pathlib.Path, name: str, record: Dict[str, Any], plan: Dict[str, Any],
                  loaded: Any, repo_dir: Optional[pathlib.Path], *, actor: str) -> Dict[str, Any]:
-    """The owner's request becomes a selected-skill task through the owner's door (the same door as
-    Repair), so its edits are owner edits; Ouroboros asking for itself merges in its own task."""
+    """An owner-initiated Merge is selected-skill work, not a Skills Repair press for key continuity."""
     item = plan["item"]
     trees = _merge_trees(drive_root, name, record, plan, repo_dir)
     try:
@@ -715,6 +759,7 @@ def _update_registry(drive_root: pathlib.Path, name: str, *, mode: str, digest: 
 
     rejected = (read_install_record(drive_root, name) or {}).get("update_rejected") or {}
     version = rejected.get("version") if digest and rejected.get("digest") == digest else None
+    # The registry is the one the copy's own provenance pins (``update_skill``), never the record's address alone.
     result = update_skill(pathlib.Path(drive_root), pathlib.Path(repo_dir or REPO_DIR), sanitized_name=name,
                           version=version, expected_digest=digest, progress_callback=progress,
                           auto_review=False, acceptance_options=acceptance_options)

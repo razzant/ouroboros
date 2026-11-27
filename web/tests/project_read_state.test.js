@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { historyNodeIsProtected } from '../modules/chat_history_replay.js';
 import { createProjectReadReceipt, feedScale, isAtNewestMessage, newestMessageOffset } from '../modules/project_read_state.js';
-import { ElementStub } from './chat_dom_fixture.js';
+import { ElementStub, PREVIEW_SCOPE } from './chat_dom_fixture.js';
 import { TS, row, late, room, placeAtTop, until, quiet } from './project_read_state_fixture.js';
 
 test('a history read already in flight cannot acknowledge a newer revision', async (t) => {
@@ -528,15 +528,30 @@ test('the read band is the viewport less the header above and the composer below
     assert.equal(ends(69.5, { ...chrome, header: scaled }), true, 'the edge is measured in the page\'s scale');
     assert.equal(ends(69, { ...chrome, header: scaled }), false, 'and still hides what lies under it');
     // WebKit before 16.4 has no @property: the typing reach (style.css, a clamp over --vvh) reads back as its tokens. The
-    // edge material's own box (`::before`, the bar's padding box plus the reach) is measured instead.
-    const drawn = (height) => ({ getComputedStyle: (node, pseudo) => (pseudo === '::before' ? { height } : {
-        getPropertyValue: (name) => (name === '--edge-reach' ? 'clamp(0px, 508px - 47px - 250px, 32px)' : '') }) });
-    const typing = (height) => Object.assign(el(0, 40), { clientHeight: 40, ownerDocument: { defaultView: drawn(height) } });
+    // edge's own box (its tint node, the bar's padding box plus the reach) is measured instead; a bar's pseudo-element is
+    // not the edge and never vouches for it.
+    const TINT = ':scope > .room-edge[data-edge="tint"]';
+    const tint = { tint: true };
+    const drawn = (height) => ({ getComputedStyle: (node, pseudo) => (node === tint ? { height } : pseudo === '::before'
+        ? { height: '72px' } : { getPropertyValue: (name) => (name === '--edge-reach' ? 'clamp(0px, 508px - 47px - 250px, 32px)' : '') }) });
+    const typing = (height, edge = tint) => Object.assign(el(0, 40), { clientHeight: 40,
+        querySelector: (selector) => (selector === TINT ? edge : null), ownerDocument: { defaultView: drawn(height) } });
     assert.equal(at(50, { ...chrome, header: typing('72px') }), false, 'under the drawn edge, its reach unresolved');
     assert.equal(at(80, { ...chrome, header: typing('72px') }), true, 'below it');
     assert.equal(at(50, { ...chrome, header: typing('40px') }), true, 'a low typing room gives the edge up');
     assert.equal(at(50, { ...chrome, header: typing('auto') }), true, 'no drawn edge and no resolved reach: the bar alone');
-    const scaledTyping = { ...scaled, clientHeight: 40, ownerDocument: { defaultView: drawn('72px') } };
+    assert.equal(at(50, { ...chrome, header: typing('72px', null) }), true,
+        'a bar without the edge\'s node has no edge, whatever its ::before measures');
+    // The read decision itself, as a reviewer witnessed it in the browser: a row at y 72-84 under a 66 px bar with a
+    // 32 px edge whose reach reads back unresolved is under the edge, not read; one below the edge is.
+    const bar66 = Object.assign(el(0, 66), { clientHeight: 66, querySelector: (selector) => (selector === TINT ? tint : null),
+        ownerDocument: { defaultView: drawn('98px') } });
+    const row = (top, bottom) => isAtNewestMessage({ history_id: 'chat:9', out_of_order: true }, {
+        delivered: () => true, nodes: () => [el(top, bottom)], viewport: el(0, 300), atBottom: () => true, ...chrome, header: bar66 });
+    assert.equal(row(72, 84), false, 'a row under the edge is not read while the reach reads back unresolved');
+    assert.equal(row(100, 112), true, 'a row below the edge is read');
+    const scaledTyping = { ...scaled, clientHeight: 40, querySelector: (selector) => (selector === TINT ? tint : null),
+        ownerDocument: { defaultView: drawn('72px') } };
     assert.deepEqual([ends(69.5, { ...chrome, header: scaledTyping }), ends(69, { ...chrome, header: scaledTyping })],
         [true, false], 'the drawn edge in the drawer\'s scale');
 });
@@ -1021,7 +1036,7 @@ test('the recent page read again keeps the newest message an older page found re
     const r = room(t, { fetchHistory: async (url) => {
         const cursor = new URL(url, 'http://local').searchParams.get('cursor'), k = cursor ? Number(cursor.slice(1)) : 0;
         cursors.push(cursor ?? 'recent');
-        return { ok: true, json: async () => ({ ...pages[k], window: cursor === 'p0' ? { latest_message: null } : pages[k].window,
+        return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, ...pages[k], window: cursor === 'p0' ? { latest_message: null } : pages[k].window,
             page_cursor: `p${k}`, next_cursor: k < 3 ? `p${k + 1}` : null, has_more: k < 3 }) };
     } });
     const rect = ElementStub.prototype.getBoundingClientRect;

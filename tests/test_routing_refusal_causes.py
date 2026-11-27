@@ -41,6 +41,7 @@ REFUSAL_REASONS = (
     "invalid_skill_repair_constraint", "skill_repair_payload_missing",
     "skill_repair_payload_unreadable", "skill_repair_admission_unwritable",
     "repair_promotion_failed", "task_acceptance_fence", "invalid_task_depth",
+    "letter_work_starts_no_separate_root",
     # a private start's owner origin (presence_owner_contact.private_start_refusal)
     "private_owner_source_invalid", "private_owner_source_unavailable",
     # the unconfirmed family (handler crash, receipt persistence, routing_wait)
@@ -50,7 +51,7 @@ REFUSAL_REASONS = (
     # steer (supervisor/steering.py)
     "target_unknown", "direct_chat_turn", "subagent_target",
     "cancel_pending", "target_closed", "target_finished", "acceptance_fence_sealed",
-    "mailbox_write_failed", "presence_author_closed", "presence_author_elsewhere", "presence_author_unreadable",
+    "mailbox_write_failed", "mailbox_write_unconfirmed", "presence_author_closed", "presence_author_elsewhere", "presence_author_unreadable",
     # ensure_project_scope (worker_promotion, events_project_routing)
     "project_scope_conflict", "missing_task_or_project", "ensure_project_scope_failed",
     # the parallel receipt producer (ouroboros/server_owner_routing.py), the owner bot's Reply included
@@ -259,3 +260,25 @@ def test_the_parallel_receipt_producer_reads_the_same_host_table(tmp_path):
     )
     assert "cause" not in latest_chat_annotations(tmp_path)["owner-ok"]
     assert "cause" not in acks[1][1]
+
+
+def test_unconfirmed_mailbox_write_tells_the_message_not_the_task_start(tmp_path):
+    """An addressed Reply whose mailbox write could not be verified (`server_owner_routing._route_owner_message`)
+    is neither saved nor refused: the host's own receipt says the MESSAGE may not have arrived, never that a task
+    may or may not have started, on the durable annotation and on the live ack alike."""
+    import types
+
+    from ouroboros.project_dialogue import latest_chat_annotations
+    from ouroboros.server_owner_routing import _record_routing_receipt
+
+    acks = []
+    bridge = types.SimpleNamespace(send_routing_ack=lambda chat_id, **kw: acks.append((chat_id, kw)))
+    ctx = types.SimpleNamespace(DRIVE_ROOT=tmp_path)
+    _record_routing_receipt(
+        bridge, ctx, chat_id=1, client_message_id="owner-reply",
+        action="mailbox_delivery", target="work-1", status="unconfirmed", reason="mailbox_write_unconfirmed",
+    )
+    sentence = "Not confirmed: the message may not have reached the task"
+    assert latest_chat_annotations(tmp_path)["owner-reply"]["cause"] == sentence
+    assert acks[0][1]["cause"] == sentence
+    assert "start" not in sentence

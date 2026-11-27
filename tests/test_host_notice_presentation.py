@@ -398,7 +398,10 @@ try {
     const painted = live.map((row) => {
         const view = summarizeChatLiveEvent(row);
         const toast = showTaskIncidentToast(row);
-        const shown = toast && { text: toast.textContent, children: toast.children.length };
+        // The words keep their own box beside the close every toast has (owner 26.11, A): inert text, no markup.
+        const words = toast?.querySelector('.toast-words');
+        const shown = toast && { text: words?.textContent, children: words?.children.length,
+            close: Boolean(toast.querySelector('.toast-dismiss')) };
         toast?.dispose();
         return { full: view.fullHeadline, promote: view.promote, toast: shown,
             line: buildTimelineItemHtml({ ...view, lineKey: 'k' }, { expandedLineKeys: new Set(['k']), groupId: 'g' }) };
@@ -525,7 +528,8 @@ def test_each_fallback_notice_reaches_the_card_in_its_own_routes_words(tmp_path,
     assert run.returncode == 0, run.stdout + run.stderr
     painted = json.loads(run.stdout)
     assert [view["full"] for view in painted["live"]] == expected == painted["replay"]
-    assert [view["toast"] for view in painted["live"]] == [{"text": text, "children": 0} for text in expected[:3]] + [None]
+    assert [view["toast"] for view in painted["live"]] == [
+        {"text": text, "children": 0, "close": True} for text in expected[:3]] + [None]
     assert not any(view["promote"] for view in painted["live"]), "a host note never claims the card title"
     assert all("<img" not in view["line"] for view in painted["live"])
     assert "Field &lt;img src=x onerror=alert(1)&gt; is not allowed" in painted["live"][2]["line"]
@@ -569,15 +573,16 @@ def test_an_old_late_row_replays_its_evidence_pointer_through_history(tmp_path):
     assert "late_evidence" not in rows["Open delegated execution: run-x."], "only the stored late row carries the pointer"
 
 
-def test_the_gateway_contract_names_the_pointer_in_both_mirrors():
-    import pathlib
-    from typing import get_type_hints
-
+def test_the_published_history_schema_still_names_the_late_evidence_pointer():
+    """The late-review evidence pointer stays a declared chat-history field: history replays
+    it on the stored late row (the replay test above), and the published schema keeps naming
+    it for a client that reads the contract."""
     from ouroboros.gateway.contracts import ChatOutbound
+    from ouroboros.gateway.schema import json_schema_for
 
-    assert "late_evidence" in get_type_hints(ChatOutbound, include_extras=True)
-    text = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js").read_text(encoding="utf-8")
-    assert "@property {Object=} late_evidence" in text
+    schema = json_schema_for(ChatOutbound)
+    assert schema["properties"]["late_evidence"] == {"type": "object"}
+    assert "late_evidence" not in schema.get("required", []), "the pointer stays additive-optional"
 
 
 def test_the_record_route_serves_only_this_tasks_own_old_acceptance_record(tmp_path):

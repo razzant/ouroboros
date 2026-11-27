@@ -5,7 +5,7 @@ import { createChatInstance } from '../modules/chat.js';
 import { stampNodeTimestamp } from '../modules/chat_activity.js';
 import { createMainWaiting } from '../modules/main_waiting.js';
 import { fixture as mediaFixture, NodeStub } from './helpers/media_dom.js';
-import { ElementStub, installDom, restoreDom } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom } from './chat_dom_fixture.js';
 
 const turn = () => new Promise(resolve => setTimeout(resolve, 0));
 const find = (node, predicate) => predicate(node) ? node : node.children.reduce((found, child) => found || find(child, predicate), null);
@@ -221,5 +221,73 @@ test('through the real Main wiring, a gap withholds only what it names: an omitt
         census([kept], { current_questions_complete: false, current_questions_gaps: [elsewhere, { reason: 'question_index_unavailable' }] });
         assert.deepEqual([card('leaving').dataset.state, count()], ['unknown', '2'], 'a gap naming no task withholds everything');
         await settle();
+    } finally { instance.destroy(); restoreDom(env.prior); }
+});
+
+// A full read of Main's history builds each Project question's copy from that question's record as it then is
+// (project_dialogue.project_question_pointer): its delivery, or none. A mounted copy takes the one or loses the words
+// of the other, except a delivery a live frame stated since that read began; a partial live pointer erases nothing.
+test('through the real Main wiring, each history read gives a mounted copy its question\'s delivery as of that read', async t => {
+    const priorCss = globalThis.CSS;
+    globalThis.CSS = { escape: value => String(value) };
+    t.after(() => { globalThis.CSS = priorCss; });
+    let history = { messages: [] }, reads = 0;
+    const env = installDom(async url => {
+        if (!String(url).startsWith('/api/chat/history')) return { ok: true, json: async () => ({}) };
+        reads += 1;
+        const data = await history;
+        return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, window: { complete: true }, ...data }) };
+    });
+    const handlers = new Map();
+    const instance = createChatInstance({
+        ws: { on(type, fn) { handlers.set(type, [...(handlers.get(type) || []), fn]); return () => {}; },
+            isConnected: () => true, send() {} },
+        state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 }, updateUnreadBadge() {},
+        stateSnapshots: { begin: () => ({}), gate() { return Promise.resolve({}); }, isCurrent: () => true,
+            apply() {}, fail() {}, latest: () => null },
+        chatId: 1, idPrefix: 'chat', mountEl: env.mount });
+    const emit = (type, msg) => (handlers.get(type) || []).forEach(fn => fn(msg));
+    const settle = async () => { for (let i = 0; i < 8; i += 1) await turn(); };
+    const later = async () => { const at = Date.now(); while (Date.now() <= at) await new Promise(resolve => setTimeout(resolve, 1)); };
+    const unknown = { kind: 'answer', state: 'owed', reason_code: 'late_answer_delivery_unknown' };
+    const saved = { kind: 'answer', state: 'owed', reason_code: 'awaiting_recipient_read' };
+    // The pointer to a Project's answered question as the server writes it into Main's history and its live frame.
+    const pointer = delivery => ({ role: 'system', system_type: 'project_question_pointer', task_id: 'task-1', quiz_id: 'q1',
+        quiz_state: 'answered', project_id: 'project-1', project_name: 'Build', project_chat_id: 12, chat_id: 1,
+        ts: '2026-10-13T10:00:00Z', text: 'You answered in Build', is_progress: false, markdown: false,
+        question: 'Choose?', options: ['Yes', 'No'], answered_index: 0, history_id: 'chat:7',
+        history_position: { source: 'chat:rotation-1', offset: 7 }, ...(delivery ? { question_delivery: { ...delivery } } : {}) });
+    const read = async rows => { history = { messages: rows }; await instance.refreshHistory({ revision: reads + 1 }); await settle(); };
+    const card = () => find(env.mount, node => node.classList.contains('chat-quiz-card') && node.dataset.quizId === 'q1');
+    const shown = () => [card().querySelector('.chat-quiz-status-text').textContent, Boolean(card().querySelector('.chat-quiz-dismiss'))];
+    try {
+        await settle();
+        await read([pointer(unknown)]);
+        assert.deepEqual(shown(), ['Answer recorded · delivery unknown', true]);
+        // The live pointer is partial: without the fact it erases nothing.
+        emit('chat', { ...pointer(), type: 'chat' });
+        assert.deepEqual(shown(), ['Answer recorded · delivery unknown', true]);
+        // The next read finds the record states no delivery: the words it no longer states go, Remove from pending with
+        // them; the answer stays recorded, never called delivered.
+        await read([pointer()]);
+        assert.deepEqual(shown(), ['You answered', false], 'a mounted copy keeps no delivery words its record dropped');
+        assert.equal(card().dataset.state, 'answered');
+        // A read asked for before a live frame says the delivery is unknown again answers late with its older fact: the
+        // newer fact stays, Remove from pending with it.
+        let answer;
+        history = new Promise(resolve => { answer = resolve; });
+        const asked = reads;
+        const reading = instance.refreshHistory({ revision: reads + 1 });
+        while (reads === asked) await turn();
+        emit('quiz_state', { type: 'quiz_state', task_id: 'task-1', quiz_id: 'q1', state: 'answered', answered_index: 0,
+            question_delivery: { ...unknown } });
+        assert.deepEqual(shown(), ['Answer recorded · delivery unknown', true]);
+        answer({ messages: [pointer(saved)] });
+        await reading; await settle();
+        assert.deepEqual(shown(), ['Answer recorded · delivery unknown', true], 'the late read replaces no newer live fact');
+        // One asked for after that frame is the newer fact itself.
+        await later();
+        await read([pointer(saved)]);
+        assert.deepEqual(shown(), ['Answer saved · the task reads it when it continues', false]);
     } finally { instance.destroy(); restoreDom(env.prior); }
 });

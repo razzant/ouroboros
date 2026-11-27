@@ -8,12 +8,14 @@ another test module (docs/development/02-naming-and-boundaries.md).
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from ouroboros import dialogue_store
 from tests import _dialogue as dialogue_test
 from tests._dialogue import advance_room_revision
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _SETTLE_RESTORE_FRAMES
+from tests.settings_section_helpers import press_nav
 
 
 def _seed_room(data, project_id, name, rows, archives=()):
@@ -104,7 +106,7 @@ def _read_older(page, pid):
 
 
 def _nav(page, name):
-    page.locator(f'[data-nav-page="{name}"]').evaluate("el => el.click()")
+    press_nav(page, name)  # Extensions through Settings' door (owner 24.11)
     page.wait_for_function("name => document.getElementById(`page-${name}`)?.classList.contains('active')", arg=name)
     page.evaluate(_SETTLE_RESTORE_FRAMES)
 
@@ -125,15 +127,20 @@ def recording_chat_bridge(tmp_path, monkeypatch):
     return bridge, frames
 
 
-def serve_chat_history(page, data_root):
-    """The real history endpoint over the same data root (Playwright's routes run in its loop)."""
+def serve_chat_history(page, data_root, scope=""):
+    """The real history endpoint over the same data root (Playwright's routes run in its loop). It answers as the host
+    does, from the profile its app proves (``ServedUI.serving_profile_scope``): a document that proves a profile reads
+    only an answer naming it (web/modules/api_client.js ``chatHistory``), so ``scope`` is the proof the page's document
+    carries; ``""`` is an app that applied none."""
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient
 
     from ouroboros.gateway.history import make_chat_history_endpoint
 
-    client = TestClient(Starlette(routes=[Route("/api/chat/history", make_chat_history_endpoint(data_root))]))
+    app = Starlette(routes=[Route("/api/chat/history", make_chat_history_endpoint(data_root))])
+    app.state.served_ui = SimpleNamespace(serving_profile_scope=lambda: scope)
+    client = TestClient(app)
 
     def history(route):
         url = urlsplit(route.request.url)

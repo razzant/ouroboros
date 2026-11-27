@@ -3,7 +3,7 @@ import test from 'node:test';
 import { reviewGateLine, syncReviewGateItem } from '../modules/review_gate_card.js';
 import { renderLiveCardMeta } from '../modules/chat_activity.js';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const LONG = `[CRITICAL] [triad] tests_affected: ${'the changed contract has no test of its refusal; '.repeat(8)}`.trim();
 const WHY = `The lock order is intended: ${'the writer takes the store first and the counter second; '.repeat(5)}`.trim();
@@ -164,7 +164,7 @@ test('a page load shows the field from its history row, before Details and witho
     const reads = [];
     const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () => {
         if (String(url).startsWith('/api/tasks/')) reads.push(String(url));
-        return String(url).startsWith('/api/chat/history') ? { messages: rows } : { active_direct_turns: [] };
+        return String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: rows } : { active_direct_turns: [] };
     } }));
     let instance;
     try {

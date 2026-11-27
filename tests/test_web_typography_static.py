@@ -271,14 +271,28 @@ FOCUS_TOKENS = ("var(--focus-accent-border)", "var(--focus-accent-ring)")
 
 
 # A selector that only REACTS to another element's keyboard focus paints no focus of its own: the ring is on the
-# focused element's own selector, named here beside it. The Pin of a Project row hides the row's time while it has
-# keyboard focus, so the time never shows through the Pin that stands in its place, and the row's mark, so the Pin's
-# ring never lies on it.
+# focused element's own selector, named here beside the exact non-ring declaration it may apply (hiding overlapping
+# time/mark content and keeping the drawn Pin's room, or revealing the row's resting-hidden ⋯). No colour, background,
+# border or outline may enter.
 FOCUS_REACTIONS = {
-    "web/style.css: .nav-project-pin:focus-visible ~ .nav-project-row .nav-project-time":
-        "web/style.css: .nav-project-pin:focus-visible",
-    "web/style.css: .nav-project-pin:focus-visible ~ .nav-project-row .nav-mark-slot":
-        "web/style.css: .nav-project-pin:focus-visible",
+    "web/style.css: .nav-project-pin:focus-visible ~ .nav-project-row .nav-project-time": (
+        "web/style.css: .nav-project-pin:focus-visible", {"visibility": "hidden", "min-inline-size": "var(--pin-room)"},
+    ),
+    "web/style.css: .nav-project-pin:focus-visible ~ .nav-project-row .nav-mark-slot": (
+        "web/style.css: .nav-project-pin:focus-visible", {"visibility": "hidden"},
+    ),
+    "web/style.css: .nav-project-row:focus-visible .nav-mark-slot": (
+        "web/style.css: .nav-row:focus-visible", {"visibility": "hidden"},
+    ),
+    "web/style.css: .nav-project-row:has(~ .nav-project-kebab:focus-visible)": (
+        "web/style.css: .nav-project-kebab:focus-visible", {"--nav-row-mark": "hidden"},
+    ),
+    "web/style.css: .nav-project-pin:focus-visible ~ .nav-project-kebab": (
+        "web/style.css: .nav-project-pin:focus-visible", {"opacity": "1"},
+    ),
+    "web/style.css: .nav-project-row:focus-visible ~ .nav-project-kebab": (
+        "web/style.css: .nav-row:focus-visible", {"opacity": "1"},
+    ),
 }
 
 
@@ -294,8 +308,9 @@ def test_every_focus_visible_selector_gets_the_canonical_ring() -> None:
     dedicated `:focus-visible` rule beside it, so a selector passes when ANY of
     its blocks names a focus token. The one kind of exception is a selector that
     reacts to another element's focus (`FOCUS_REACTIONS`): it passes only while
-    the focused element's own selector is ringed, and an entry no sheet holds
-    any more fails."""
+    the focused element's own selector is ringed, its declarations match its
+    pinned non-ring visibility/reveal change, and an entry no sheet holds any
+    more fails."""
     per_selector: dict[str, list[bool]] = {}
     for rel in FOCUS_FILES:
         source = _decommented(_read(rel))
@@ -309,12 +324,11 @@ def test_every_focus_visible_selector_gets_the_canonical_ring() -> None:
     assert per_selector, "no :focus-visible rules found; is the parse broken?"
     stale = sorted(set(FOCUS_REACTIONS) - set(per_selector))
     assert not stale, f"FOCUS_REACTIONS names selectors no sheet holds: {stale}"
-    for reaction in FOCUS_REACTIONS:
+    for reaction, (ringed, allowed_paint) in FOCUS_REACTIONS.items():
         rel, selector = reaction.split(": ", 1)
         paint = _declarations(_decommented(_read(rel)), selector)
-        assert paint == {"visibility": "hidden"}, f"a focus reaction must only hide the overlapping content: {reaction}: {paint}"
-    unfocused = sorted(s for s, ringed in FOCUS_REACTIONS.items() if not any(per_selector.get(ringed, [])))
-    assert not unfocused, f"the element these selectors react to has no ring of its own: {unfocused}"
+        assert paint == allowed_paint, f"a focus reaction must only apply its pinned non-ring change: {reaction}: {paint}"
+        assert any(per_selector.get(ringed, [])), f"the element {reaction!r} reacts to has no ring of its own: {ringed}"
     unringed = sorted(
         selector for selector, hits in per_selector.items()
         if not any(hits) and selector not in FOCUS_REACTIONS
@@ -443,10 +457,9 @@ def test_the_cards_quiet_label_keeps_its_words_in_a_narrow_sidebar() -> None:
 
 
 def test_every_mask_keeps_its_webkit_companion() -> None:
-    """A fade is a mask (`.scroll-fade-y`, the sideways table fade): each rule that
-    sets `mask-image` also sets `-webkit-mask-image`, as the file's first fade does,
-    so a WebKit view that reads only the prefixed property still fades and unfades."""
-    css = _decommented(_read("web/style.css"))
-    unpaired = [selector.strip() for selector, body in RULE.findall(css)
-                if re.search(r"(?<![-\w])mask-image\s*:", body) and "-webkit-mask-image" not in body]
-    assert not unpaired, f"mask-image without its -webkit- companion: {unpaired}"
+    """Mask and composition keep their prefixed declarations for older WebKit views."""
+    for path in ("web/ui.css", "web/style.css"):
+        for selector, body in RULE.findall(_decommented(_read(path))):
+            for prop in ("mask-image", "mask-composite"):
+                if re.search(rf"(?<![-\w]){prop}\s*:", body):
+                    assert f"-webkit-{prop}" in body, (path, selector.strip(), prop)

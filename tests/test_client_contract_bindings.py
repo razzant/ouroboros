@@ -3,17 +3,15 @@
 Every request below goes through the real router (``collect_routes``) on a disposable data root.
 Each answer must use a status its contract entry lists, and its body must match one of the
 shapes bound to that status. A success body must also carry no key its shape does not declare,
-so a shape can never claim to be complete while the producer says more. Every published shape
-has exactly one field-identical JSDoc twin among the browser modules.
+so a shape can never claim to be complete while the producer says more. The wire fields are
+declared once, in the gateway contracts.
 """
 
 from __future__ import annotations
 
-import importlib
 from datetime import datetime, timedelta, timezone
 import json
 import pathlib
-import re
 import threading
 import typing
 
@@ -22,8 +20,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from ouroboros.gateway.router import collect_routes
-from ouroboros.gateway.schema import CONTRACT_MODULES, contract_document, contract_typed_dict, validate_ingress
-from tests.test_gateway_parity import _js_typedef_fields
+from ouroboros.gateway.schema import contract_document, contract_typed_dict, validate_ingress
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 DOCUMENT = contract_document()
@@ -106,7 +103,7 @@ def test_the_project_journey_answers_its_published_shapes(client):
     # The complete list and the exact id answer the same published rows.
     complete = client.get("/api/projects?all=1")
     assert assert_bound("GET /api/projects", complete) == "ProjectListResponse"
-    assert complete.json() == listed.json()
+    assert complete.json() == {**listed.json(), "complete": True}  # its registry read covered every row
     exact = client.get(f"/api/projects?id={project['id']}")
     assert assert_bound("GET /api/projects", exact) == "ProjectListResponse"
     assert [row["chat_id"] for row in exact.json()["projects"]] == [project["chat_id"]]
@@ -258,15 +255,36 @@ def test_the_update_status_review_pool_and_spend_answer_their_published_shapes(c
     assert spend.json()["accounting"]["authority"] == "physical_attempt_ledger"
 
 
-# --- the browser mirror ----------------------------------------------------------------------
+def test_spend_project_days_keeps_early_ledger_refusal_bound_to_the_requested_selector(client, monkeypatch):
+    from ouroboros import usage_store
+    from ouroboros.usage_ledger import UsageLockUnavailable
 
-def _owned_names() -> dict:
-    names = {name: contract_typed_dict(name) for name in DOCUMENT["schemas"]}
-    for module_name in ("ouroboros.gateway.client_contracts", "ouroboros.gateway.management_contracts",
-                        "ouroboros.gateway.history_contracts"):
-        module = importlib.import_module(module_name)
-        names.update({name: getattr(module, name) for name in module.__all__})
-    return names
+    token, path = "GET /api/cost-breakdown", "/api/cost-breakdown"
+    selected = client.get(path, params={"project_days": "unassigned"})
+    assert assert_bound(token, selected) == "CostBreakdownResponse"
+    assert selected.json()["project_days"]["total"]["settled_usd"] is None
+    # The room card's read: the same view alone, its own published shape.
+    alone = client.get(path, params={"view": "project_days", "project_days": "unassigned"})
+    assert assert_bound(token, alone) == "CostProjectDaysResponse" and set(alone.json()) == {"project_days"}
+    assert alone.json()["project_days"]["total"] == selected.json()["project_days"]["total"]
+
+    def unavailable(*_args, **_kwargs):
+        raise UsageLockUnavailable("synthetic contention at the ledger read")
+
+    monkeypatch.setattr(usage_store, "read", unavailable)
+    plain = client.get(path)
+    assert plain.status_code == 503 and assert_bound(token, plain) == "CostBreakdownUnavailableResponse"
+    # The 503's fields and values before the room view existed, unchanged.
+    assert plain.json() == {"error": "Physical-attempt accounting unavailable", "accounting": {
+        "available": False, "authority": "physical_attempt_ledger", "cost_final": False, "error_code": "ledger_unavailable"}}
+    selected = client.get(path, params={"project_days": "project:fixture", "days": "30"})
+    assert selected.status_code == 503 and assert_bound(token, selected) == "CostBreakdownUnavailableResponse"
+    assert selected.json() == {**plain.json(), "project_days": {
+        "available": False, "selector": "project:fixture", "error_code": "ledger_unavailable"}}
+    # Alone, the view's own refusal answers 200: no totals were asked, so none failed.
+    alone = client.get(path, params={"view": "project_days", "project_days": "main", "days": "30"})
+    assert alone.status_code == 200 and assert_bound(token, alone) == "CostProjectDaysResponse"
+    assert alone.json() == {"project_days": {"available": False, "selector": "main", "error_code": "ledger_unavailable"}}
 
 
 @pytest.mark.parametrize("outcome", ["unlisted", "failed", "unpublished"])
@@ -305,29 +323,6 @@ def test_mcp_listing_evidence_matches_published_contracts(client, monkeypatch, t
         assert attempt["ok"] is (outcome != "failed")
         invalid = {**row, "latest_attempt": {**attempt, "partial": "not a boolean"}}
         assert validate_ingress(invalid, contract_typed_dict("McpServerStatus"))
-
-
-def test_every_published_and_owned_shape_has_one_field_identical_browser_twin():
-    from ouroboros.review import is_gated_js_module
-
-    texts = {path.name: path.read_text(encoding="utf-8") for path in (REPO / "web" / "modules").glob("*.js")
-             if is_gated_js_module(path.relative_to(REPO).as_posix())}
-    assert len(DOCUMENT["schemas"]) > 150, "the contract lost its published shapes"
-    for name, cls in sorted(_owned_names().items()):
-        homes = [file for file, text in texts.items() if re.search(rf"@typedef \{{Object\}} {name}\b", text)]
-        assert len(homes) == 1, f"{name} needs exactly one JSDoc twin, found {homes}"
-        assert _js_typedef_fields(texts[homes[0]], name) == set(typing.get_type_hints(cls, include_extras=True)), name
-    assert all(module in CONTRACT_MODULES for module in (
-        "ouroboros.gateway.management_contracts", "ouroboros.gateway.history_contracts"))
-
-
-@pytest.mark.parametrize("name", ["WorkLead", "WorkPrimaryRoute", "WorkPendingRoute", "CitedModelWords", "WorkProcessing", "ProcessingReceipt",
-                                  "ProcessingTiers", "WorkMembers", "WorkMemberState", "WorkReason", "QueuedBehind"])
-def test_nested_work_contracts_have_a_field_identical_browser_twin(name):
-    # Inline schemas do not appear in the published document's top-level name list.
-    text = (REPO / "web" / "modules" / "work_types.js").read_text(encoding="utf-8")
-    assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"work contract twins lack {name}"
-    assert _js_typedef_fields(text, name) == set(typing.get_type_hints(contract_typed_dict(name), include_extras=True)), name
 
 
 def test_every_request_and_header_fact_is_published_for_the_journeys():
@@ -462,8 +457,8 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     circle = created.json()["circle"]
     assert not validate_ingress(circle, contract_typed_dict("CircleSummary")) and set(circle) == _declared("CircleSummary")
     assert circle["text_author"] == "owner" and circle["name"] == "Team" and circle["model"] == "circle/model"
-    connect = {"connector": "bridge", "account_id": "account", "conversation_id": "room", "label": "Room",
-               "note": "The team's room: answer when asked.", "description": "Where the team asks",
+    connect = {"connector": "bridge", "contribution_id": "chat", "account_id": "account", "conversation_id": "room",
+               "label": "Room", "note": "The team's room: answer when asked.", "description": "Where the team asks",
                "circle_id": circle["circle_id"]}
     assert BY_TOKEN["POST /api/places"]["request"]["schemas"] == ["PlaceConnectRequest"]
     assert _declared("PlaceConnectRequest") == set(connect)
@@ -484,6 +479,10 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     quiet = {"cause": "off", "word": "Hears only · consciousness off", "note": "…", "door": "consciousness"}
     assert not validate_ingress({**place, "quiet": quiet}, contract_typed_dict("PlaceSummary"))
     assert validate_ingress({**place, "quiet": "consciousness_off"}, contract_typed_dict("PlaceSummary"))
+    assert "wake_review" in _declared("PlaceSummary") and "wake_review" not in place
+    for state in ("pending", "ambiguous"):
+        assert not validate_ingress({**place, "wake_review": state}, contract_typed_dict("PlaceSummary"))
+    assert validate_ingress({**place, "wake_review": "completed"}, contract_typed_dict("PlaceSummary"))
     assert [(n["text"], n["author"]) for n in place["notes"]] == [(connect["note"], "owner")]
     assert place["circle"]["circle_id"] == circle["circle_id"] and place["circle"]["placed_by"] == "owner"
     assert not validate_ingress(place["circle"], contract_typed_dict("PlaceCircleChoice"))
@@ -511,7 +510,8 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     assert place["owner_accounts"][0]["platform_actor_id"] == "person"
     remove = {"remove_note": place["notes"][1]["note_id"], "revoke_owner_account": "person",
               "circle_id": "", "description": "", "expected_revision": place["revision"]}
-    assert _declared("PlaceUpdateRequest") == set(change) | set(remove)
+    # ``peer`` belongs to a linked Ouroboros's place only: tests/test_peer_caller_gate.py writes it here.
+    assert _declared("PlaceUpdateRequest") == set(change) | set(remove) | {"peer"}
     assert not validate_ingress(remove, update_type)
     removed = client.post(path, json=remove)
     assert removed.status_code == 200, removed.text

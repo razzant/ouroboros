@@ -854,6 +854,40 @@ def test_forced_retained_candidate_notice_preserves_unchanged_revision(
     assert returned_trace["delivery_candidate"]["content_sha256"] == candidate.content_sha256
 
 
+def test_forced_accepting_exit_carries_the_confirmed_reply_target(tmp_path, monkeypatch):
+    """A deadline/budget wrap-up that accepted finish_task(about_work=…) keeps the addressee in
+    usage exactly as the ordinary exit does (loop_delivery's _completion_selected transfer), and the
+    terminal send event then addresses that confirmed work — never a fresher id. The confirmed-at-
+    call-time branch never enters unconfirmed_routing_acts, so this is the forced rail's own carry."""
+    loop, registry, ctx, trace = _forced_test_context(tmp_path)
+    tool_ctx = registry._ctx
+    # An owner turn that confirmed starting this work (is_direct_chat + owner ingress).
+    tool_ctx.is_direct_chat = True
+    tool_ctx.task_metadata = {**tool_ctx.task_metadata, "origin_suppressed": True}
+    tool_ctx._confirmed_reply_works = {"work-confirmed"}
+
+    answer = "Wrap-up: the first probe is green; the second one is still unread."
+    request = {"action": "finish", "answer": answer, "about_work": "work-confirmed"}
+    monkeypatch.setattr(loop, "call_llm_with_retry",
+                        lambda *_a, **_k: ({"role": "assistant", "content": json.dumps(request)}, 0.0))
+
+    text, usage, returned_trace = loop._forced_final_answer(
+        ctx, prompt="finalize", fallback_text="host fallback", reason_code="deadline_local")
+
+    assert text == answer
+    assert returned_trace["forced_completion_request"]["status"] == "selected"
+    assert usage.get("about_work_task_id") == "work-confirmed"
+    # The terminal projection addresses the confirmed work (the ordinary rail's same consumer).
+    from ouroboros.task_finalization import TERMINAL_ORIGIN_MODEL_FINAL, prepare_terminal_send_event
+
+    event = prepare_terminal_send_event(
+        tmp_path, {"id": "parent1", "chat_id": 1, "_is_direct_chat": True}, text,
+        {**usage, "terminal_origin": TERMINAL_ORIGIN_MODEL_FINAL},
+        {"type": "send_message", "chat_id": 1, "task_id": "parent1", "text": text},
+        presence=False, custody_audit={})
+    assert event["progress_meta"]["about_work_task_id"] == "work-confirmed"
+
+
 def test_forced_finalization_stops_services_before_model_and_binds_evidence(
     tmp_path, monkeypatch,
 ):
@@ -2184,3 +2218,270 @@ def test_a_received_codex_denial_buys_the_two_attempt_forced_rail_no_second_send
     assert calls == (1 if denied else 2)  # the ordinary kind keeps today's refresh
     assert text == "fallback"
     assert ("Codex content-policy denial" in usage.get("terminal_host_notice", "")) is denied
+
+
+def _seed_work_reply_rows(root, *texts, start=0):
+    from ouroboros import dialogue_store
+    from ouroboros.chat_chain import format_address
+    from ouroboros.owner_relay import owner_row_identity
+
+    out = []
+    for idx, text in enumerate(texts, start=start):
+        row = {
+            "chat_id": 1, "direction": "in", "ts": f"2026-11-24T12:{idx:02d}:00Z",
+            "text": text, "client_message_id": f"wr-msg-{idx}", "attachments": [],
+        }
+        dialogue_store.append(root, "chat", row)
+        out.append((row, format_address(owner_row_identity(row))))
+    return out
+
+
+@pytest.mark.parametrize("mode", ["fresh_answer", "retained_sha256"])
+def test_forced_valid_completion_with_unapplied_subject_dispatches_exact_work_reply(tmp_path, monkeypatch, mode):
+    """An unapplied acceptance_subject degrades candidate acceptance reporting only: a genuinely selected
+    JSON-text completion at the forced boundary still returns its exact keyed work_reply via send_user_message."""
+    from ouroboros.loop_messages import _record_owner_directive, capture_acceptance_observation
+    from ouroboros.owner_relay import owner_quote, write_relay
+    from supervisor.terminal_delivery import pending_deliveries
+
+    loop, registry, ctx, trace = _forced_test_context(tmp_path, incoming=queue.Queue())
+    ctx.tool_schemas = registry.schemas()
+    registry._ctx.current_chat_id = 1
+    registry._ctx.event_queue = ctx.event_queue = queue.Queue()
+    _record_owner_directive(registry._ctx, source="initial_user", content="Deliver verified report.", msg_id="init")
+    capture_acceptance_observation(registry._ctx, trace, ctx.incoming_messages)
+
+    (row1, addr1), (row2, addr2), (row_tell, addr_tell) = _seed_work_reply_rows(
+        tmp_path, "Can you answer this Reply?", "Leave this second Reply open", "Forwarded by teller",
+    )
+    r1, r2, rtell = f"work-reply:{addr1}", f"work-reply:{addr2}", f"tell:{addr_tell}"
+    for rid, row, addr, is_wr in ((r1, row1, addr1, True), (r2, row2, addr2, True), (rtell, row_tell, addr_tell, False)):
+        write_relay(
+            tmp_path, ctx.task_id, relay_id=rid, note="" if is_wr else "teller", chat_id=1,
+            teller_task_id="" if is_wr else "teller-1", quotes=[owner_quote(tmp_path, row, address=addr)],
+            canonical_root=tmp_path, work_reply=is_wr,
+        )
+
+    retained = None
+    if mode == "fresh_answer":
+        from ouroboros.cancel_intents import STOP_POLICY_FINALIZE, active_intent, request_cancel
+        from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
+        from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
+        from ouroboros.task_results import write_task_result
+        from supervisor.owner_stop import owner_stop_control_id
+
+        write_task_result(tmp_path, ctx.task_id, "running", chat_id=1, root_task_id=ctx.task_id)
+        intent = request_cancel(tmp_path, ctx.task_id, requested_stop_policy=STOP_POLICY_FINALIZE)
+        write_owner_message(
+            tmp_path, REASON_OWNER_REQUESTED_FINALIZATION, ctx.task_id,
+            msg_id=owner_stop_control_id(intent), kind=KIND_FINALIZE_NOW,
+        )
+    else:
+        loop._drain_forced_owner_directives(ctx, trace)
+        retained = loop._replace_delivery_candidate(
+            registry, ctx, trace, "Retained verified report.", control="awaiting_control",
+        )
+        registry._ctx._delivery_control_required = True
+
+    def _reply(_llm, _messages, *_a, **_kw):
+        observed_sha = registry._ctx._acceptance_observation["owner_source_sha256"]
+        bad_subject = (
+            {"owner_source_sha256": "not-the-observed-owner-source"}
+            if mode == "fresh_answer"
+            else {"owner_source_sha256": observed_sha, "material_tool_indices": [99]}
+        )
+        payload = {
+            "action": "finish",
+            **({"answer": "Fresh verified report."} if mode == "fresh_answer" else {"answer_sha256": retained.content_sha256}),
+            "acceptance_subject": bad_subject,
+            "relay_replies": {r1: "Exact answer to first Reply", rtell: "Must not steal tell_task"},
+        }
+        return {"role": "assistant", "content": json.dumps(payload)}, 0.0
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", _reply)
+    text, usage, returned_trace = loop._forced_final_answer(
+        ctx, prompt="[ROUND_LIMIT]", fallback_text="host fallback", reason_code="round_limit",
+    )
+    if mode == "fresh_answer":
+        assert active_intent(tmp_path, ctx.task_id).get("control_drained_at")
+        assert not returned_trace.get("_forced_direct_stop_now") and not hasattr(registry._ctx, "_forced_direct_stop_now")
+
+    assert text == ("Fresh verified report." if mode == "fresh_answer" else "Retained verified report.")
+    assert usage["terminal_origin"] == "model_final" and usage.get("owner_message_sent") is True
+    assert returned_trace["forced_completion_request"]["status"] == "selected"
+    assert returned_trace["forced_acceptance_subject"]["applied"] is False
+    assert returned_trace["delivery_candidate"]["degraded"] is True
+    assert returned_trace["delivery_candidate"]["degraded_reason"] == "delivery_control_degraded"
+    assert returned_trace["delivery_candidate"]["acceptance_binding"]["authoritative"] is False
+    assert not any("invalid delivery-control object" in str(n) for n in returned_trace.get("reasoning_notes", []))
+
+    sent = [
+        e for e in iter(lambda: ctx.event_queue.get_nowait() if not ctx.event_queue.empty() else None, None)
+        if e.get("type") == "send_message" and not e.get("is_progress")
+    ]
+    assert len(sent) == 1
+    [event] = sent
+    assert (
+        event["chat_id"], event["system_type"], event["progress_meta"]["reply_to_relay"],
+        event["progress_meta"]["reply_to"]["address"], event["text"],
+    ) == (1, "relay_reply", r1, addr1, "Exact answer to first Reply")
+    assert event.get("delivery_id")
+    assert [row["delivery_id"] for row in pending_deliveries(tmp_path)] == [event["delivery_id"]]
+    by_relay = {row["relay_id"]: row for row in returned_trace["forced_work_replies"]}
+    assert set(by_relay) == {r1, rtell}
+    assert by_relay[r1]["status"] == "ok" and by_relay[r1]["code"] == "OK"
+    if "delivery_id" in by_relay[r1]:
+        assert by_relay[r1]["delivery_id"] == event["delivery_id"]
+    assert by_relay[rtell] == {
+        "relay_id": rtell, "status": "blocked", "code": "ACCESS_BLOCKED", "reason_code": "RELAY_RETURN_UNRESOLVED",
+    }
+    assert set(registry._ctx._open_relays) == {r2, rtell}
+
+
+@pytest.mark.parametrize("case", [
+    "duplicate_key_refused", "invalid_argument_refused",
+    "mailbox_stop_before_call", "mailbox_stop_after_call", "presence_stop_now",
+])
+def test_forced_refused_or_stopped_completion_never_dispatches_work_reply(tmp_path, monkeypatch, case):
+    """Refused outer completion requests and immediate Stop never dispatch a staged work_reply and leave open Replies untouched."""
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, KIND_OWNER_TEXT, write_owner_message
+    from ouroboros.owner_relay import owner_quote, write_relay
+    from ouroboros.task_results import write_task_result
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+    from supervisor.terminal_delivery import pending_deliveries
+
+    loop, registry, ctx, trace = _forced_test_context(tmp_path, incoming=queue.Queue())
+    ctx.tool_schemas = registry.schemas()
+    registry._ctx.current_chat_id = 1
+    registry._ctx.event_queue = ctx.event_queue = queue.Queue()
+    [(row, addr)] = _seed_work_reply_rows(tmp_path, f"Question for {case}")
+    r1 = f"work-reply:{addr}"
+    write_relay(
+        tmp_path, ctx.task_id, relay_id=r1, note="", chat_id=1, teller_task_id="",
+        quotes=[owner_quote(tmp_path, row, address=addr)], canonical_root=tmp_path, work_reply=True,
+    )
+
+    kept = None
+    calls = 0
+    prepared = False
+    prompt = "[ROUND_LIMIT]"
+    if case == "duplicate_key_refused":
+        loop._drain_forced_owner_directives(ctx, trace)
+        kept = _arm_latch_with_candidate(loop, registry, ctx, trace)
+        body = f'{{"action":"finish","action":"stop","answer":"Bad","relay_replies":{{"{r1}":"Leak"}}}}'
+        monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: ({"role": "assistant", "content": body}, 0.0))
+    elif case == "invalid_argument_refused":
+        body = json.dumps({
+            "action": "finish", "answer": "Try", "about_work": "unconfirmed",
+            "acceptance_subject": {"owner_source_sha256": "wrong"}, "relay_replies": {r1: "Leak"},
+        })
+        monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: ({"role": "assistant", "content": body}, 0.0))
+    elif case == "mailbox_stop_before_call":
+        write_owner_message(
+            tmp_path, REASON_OWNER_STOPPED_DIRECT_TURN, ctx.task_id, msg_id="stop-ctrl-before", kind=KIND_FINALIZE_NOW,
+        )
+        prompt = loop._prepare_forced_prompt(ctx, "[BUDGET_LIMIT]", trace)
+        prepared = True
+        assert "stop-ctrl-before" in ctx.owner_msg_seen and trace.get("_forced_direct_stop_now") is True
+        assert ctx._forced_direct_stop_now is True and not hasattr(registry._ctx, "_forced_direct_stop_now")
+        write_owner_message(tmp_path, "Unrelated later note", ctx.task_id, msg_id="note-after-stop", kind=KIND_OWNER_TEXT)
+        monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: pytest.fail("Stop sent a forced model call"))
+    elif case == "mailbox_stop_after_call":
+        def _stop_during_call(*_a, **_k):
+            nonlocal calls
+            calls += 1
+            write_owner_message(tmp_path, REASON_OWNER_STOPPED_DIRECT_TURN, ctx.task_id, kind=KIND_FINALIZE_NOW)
+            write_owner_message(tmp_path, "Simultaneous late note", ctx.task_id, kind=KIND_OWNER_TEXT)
+            return {"role": "assistant", "content": json.dumps({
+                "action": "finish", "answer": "Draft before stop",
+                "acceptance_subject": {"owner_source_sha256": "wrong"},
+                "relay_replies": {r1: "Must not send on Stop"},
+            })}, 0.0
+
+        monkeypatch.setattr(loop, "call_llm_with_retry", _stop_during_call)
+    else:
+        write_task_result(tmp_path, ctx.task_id, "running", chat_id=1, root_task_id=ctx.task_id)
+        registry._ctx.model_wait_context = SimpleNamespace(
+            task={"_presence_turn": True}, worker_slot_held=False, task_id=ctx.task_id, canonical_root=tmp_path,
+        )
+        monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: (
+            request_cancel(tmp_path, ctx.task_id, reason="owner_stop", source="owner_ui") and None
+            or {"role": "assistant", "content": json.dumps({
+                "action": "finish", "answer": "Draft before stop",
+                "acceptance_subject": {"owner_source_sha256": "wrong"},
+                "relay_replies": {r1: "Must not send on Stop"},
+            })}, 0.0,
+        ))
+
+    text, usage, out_trace = loop._forced_final_answer(
+        ctx, prompt=prompt, fallback_text="Host fallback.", reason_code="round_limit", _prompt_prepared=prepared,
+    )
+    if case == "duplicate_key_refused":
+        assert text.startswith(kept.full_text) and out_trace["forced_completion_request"]["status"] == "refused"
+        assert any("invalid delivery-control object" in str(n) for n in out_trace.get("reasoning_notes", []))
+    elif case == "invalid_argument_refused":
+        assert text == "Host fallback." and out_trace["forced_completion_request"]["status"] == "refused"
+    elif case == "mailbox_stop_before_call":
+        assert "note-after-stop" in ctx.owner_msg_seen and out_trace.get("_forced_direct_stop_now") is True
+        assert text == "⏹ The owner stopped this chat turn; no further work was done."
+        assert usage["reason_code"] == "owner_requested_finalization"
+        assert out_trace["forced_finalization"]["source"] == "owner_stopped_direct_turn"
+        assert registry._ctx._skip_post_task_synthesis is True
+    else:
+        if case == "mailbox_stop_after_call":
+            assert calls == 1 and registry._ctx._skip_post_task_synthesis is True
+        assert text == "Draft before stop" and usage["reason_code"] == "owner_requested_finalization"
+    assert "forced_work_replies" not in out_trace and getattr(registry._ctx, "_forced_work_replies_pending", None) is None
+    assert set(registry._ctx._open_relays) == {r1}
+    sent = [
+        e for e in iter(lambda: ctx.event_queue.get_nowait() if not ctx.event_queue.empty() else None, None)
+        if e.get("type") == "send_message" and not e.get("is_progress")
+    ]
+    assert not sent and not registry._ctx.pending_events and not pending_deliveries(tmp_path)
+
+    if case in {"mailbox_stop_before_call", "mailbox_stop_after_call"}:
+        from tests.test_loop_acceptance_gate import _seed_acceptance_root
+
+        assert not hasattr(registry._ctx, "_forced_direct_stop_now")
+        _seed_acceptance_root(tmp_path, "parent2", SimpleNamespace())
+        loop._reset_turn_state(registry._ctx)
+        registry._ctx.task_id = "parent2"
+        registry._ctx.task_metadata = {"budget_drive_root": str(tmp_path), "root_task_id": "parent2"}
+        registry._ctx._skip_post_task_synthesis = False
+        registry._ctx._open_relays = {}
+        [(next_row, next_addr)] = _seed_work_reply_rows(tmp_path, f"Next turn Reply after {case}", start=1)
+        r_next = f"work-reply:{next_addr}"
+        write_relay(
+            tmp_path, "parent2", relay_id=r_next, note="", chat_id=1, teller_task_id="",
+            quotes=[owner_quote(tmp_path, next_row, address=next_addr)], canonical_root=tmp_path, work_reply=True,
+        )
+        next_trace = {"tool_calls": [], "reasoning_notes": []}
+        next_ctx = loop._RoundLimitContext(
+            [{"role": "user", "content": "next independent turn"}], SimpleNamespace(), "test-model", "medium",
+            1, tmp_path / "logs", "parent2", 2, queue.Queue(), {}, "", False, 10,
+            drive_root=tmp_path, incoming_messages=queue.Queue(), owner_msg_seen=set(), tool_schemas=registry.schemas(),
+        )
+        loop._finalize_limit_ctx(next_ctx, registry, next_trace)
+        registry._ctx.event_queue = next_ctx.event_queue
+        loop._initialize_owner_directives(registry._ctx, next_ctx.messages)
+        next_calls = 0
+
+        def _healthy_turn(*_a, **_k):
+            nonlocal next_calls
+            next_calls += 1
+            return {"role": "assistant", "content": json.dumps({
+                "action": "finish", "answer": "Healthy next turn.",
+                "relay_replies": {r_next: "Healthy next Reply"},
+            })}, 0.0
+
+        monkeypatch.setattr(loop, "call_llm_with_retry", _healthy_turn)
+        next_text, next_usage, next_out_trace = loop._forced_final_answer(
+            next_ctx, prompt="[ROUND_LIMIT]", fallback_text="Host fallback.", reason_code="round_limit",
+        )
+        assert next_calls == 1 and next_text == "Healthy next turn."
+        assert next_usage["reason_code"] == "round_limit" and next_usage["terminal_origin"] == "model_final"
+        assert not next_out_trace.get("_forced_direct_stop_now")
+        assert next_out_trace["forced_finalization"]["source"] == "model"
+        assert [row["status"] for row in next_out_trace["forced_work_replies"]] == ["ok"]
+        assert not registry._ctx._open_relays

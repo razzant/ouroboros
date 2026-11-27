@@ -100,11 +100,17 @@ _SCHEMA = {
     "description": (
         "Ask the owner to enter an integration secret (a bot token, an API key a skill needs) in a protected "
         "in-chat form instead of the chat. pluginName is the installed skill; fields are ids its manifest "
-        "declares in secret_fields (e.g. telegram: botToken). The value is saved to Settings and is not sent "
-        "in this conversation; you then receive only secret_filled or secret_replaced {pluginName, fields}, "
-        "or secret_cancelled. The owner sees whether a key is already set and may explicitly replace it. Root "
-        "tasks only; the task waits after this tool batch. Saving grants and enables nothing; enabled skills may apply new values automatically: "
-        "afterwards check the skill's grant and status. Never ask for a secret in chat instead."
+        "declares in secret_fields (e.g. telegram: botToken). The value is saved to Settings and never enters "
+        "this conversation; you then receive only secret_filled or secret_replaced {pluginName, fields}, or "
+        "secret_cancelled. The owner sees whether a key is already set and may explicitly replace it. Root tasks "
+        "only; the task waits after this tool batch. A plain Save or Replace, like any older client, only saves: "
+        "it grants and enables nothing, though enabled skills granted a key may apply its new value automatically. "
+        "While this skill cannot read these keys, the form may also offer the owner a separate explicit 'Save and "
+        "allow': only this skill may then read only these fields' keys, once the files the form showed are "
+        "admitted, and the skill turns on only if that button says so. The secret_filled or secret_replaced "
+        "message then states what actually happened to that access (granted, waiting for admission, refused or "
+        "unknown) and to the switch. Check the skill's grant and status before relying on it. Never ask for a "
+        "secret in chat instead."
     ),
     "parameters": {
         "type": "object",

@@ -4,12 +4,16 @@ import asyncio
 import inspect
 import json
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from starlette.responses import JSONResponse
 
 from ouroboros.gateway import control, update_progress as progress
+from supervisor import update_merge as _update_merge
+
+_ACTIVE_UPDATE_TX = _update_merge.active_update_tx  # the real reader, before a fixture stands in for it
 
 
 @pytest.fixture(autouse=True)
@@ -752,6 +756,7 @@ def test_the_client_phase_readings_mirror_the_supervisor_phases():
     import pathlib
     import re
 
+    from ouroboros.server_restart import _RESTARTABLE_UPDATE_PHASES
     from supervisor import update_merge
 
     modules = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules"
@@ -762,3 +767,220 @@ def test_the_client_phase_readings_mirror_the_supervisor_phases():
         update_merge.MARKER_CLEANUP_RETRY_PHASE)
     updates = (modules / "updates.js").read_text(encoding="utf-8")
     assert "includes('assisted')" not in updates and "assistedUpdatePhase(txPhase)" in updates
+    # The restart readiness: the phase the restart admits, read with the two check values every lane writes and the
+    # status projects, by one reader both surfaces call.
+    assert re.search(r"const RESTART_READY_PHASE = '([a-z_]+)';", source).group(1) in _RESTARTABLE_UPDATE_PHASES
+    reader = re.search(r"export function updateRestartReadiness\(tx\) \{(.*?)\n\}", source, re.S).group(1)
+    checks = (update_merge._PRE_RESTART_SMOKE_PENDING, update_merge._PRE_RESTART_SMOKE_PASSED)
+    assert set(re.findall(r"smoke === '([a-z]+)'", reader)) == set(checks)
+    assert f'in ("{checks[0]}", "{checks[1]}")' in inspect.getsource(control._managed_update_payload)
+    assert "updateRestartReadiness(data.update_tx)" in updates and "updateRestartReadiness(bound)" in source
+
+
+# R4 (Astra, rl-20261125T100917-7711b6c1fd40): every lane records pending_boot_smoke BEFORE its dependency and import
+# check and a failed check rolls the update back, so the phase alone made the rail say Restart needed and Dashboard →
+# Updates offer Restart now while the check still ran. Only the attempt's own passed check, or its apply's own
+# restart_required answer, makes the restart the next step.
+
+_BASE, _TARGET, _COMMIT = "a" * 40, "b" * 40, "c" * 40
+_PLAN = {"available": True, "kind": "clean", "base_sha": _BASE, "target_sha": _TARGET, "merge_commit": _COMMIT,
+         "target_ref": "refs/ouroboros-managed/tags/v7.13.0", "update_channel": "stable", "local_dirty_count": 0}
+_CONSUMERS = """
+import { readFileSync } from 'node:fs';
+import { updateAttemptView } from './modules/update_status.js';
+import { updateVerdict } from './modules/updates.js';
+const seen = {};
+for (const [label, status] of Object.entries(JSON.parse(readFileSync(process.argv[1], 'utf8')))) {
+    const rail = updateAttemptView(status.update_progress, status.update_tx);
+    const panel = updateVerdict(status, '');
+    seen[label] = { rail: rail && { pill: rail.pill, says: rail.says, headline: rail.headline },
+        panel: { state: panel.state, headline: panel.headline, action: panel.action?.id || '' } };
+}
+process.stdout.write(JSON.stringify(seen));
+"""
+
+
+@pytest.fixture
+def real_marker(isolated_progress, tmp_path, monkeypatch):
+    """The transaction carrier as the lanes write it and the status reads it: the real marker writer, strict reader
+    and active reader over a disposable checkout's .git and data root. Each test stands in only for the repository's
+    Git steps, the dependency and import check, and the restart request (it answers that none could be requested)."""
+    import ouroboros.update_letter as update_letter
+    from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV
+    from supervisor import git_ops, update_merge
+
+    monkeypatch.delenv(PLANNED_RESTART_TRANSACTION_ENV, raising=False)  # an unrequested restart disarms it
+    repo, data = tmp_path / "repo", tmp_path / "data"
+    (repo / ".git").mkdir(parents=True)
+    (data / "logs").mkdir(parents=True)
+    monkeypatch.setattr(git_ops, "REPO_DIR", repo)
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", data)
+    monkeypatch.setattr(update_merge, "active_update_tx", _ACTIVE_UPDATE_TX)
+    monkeypatch.setattr(git_ops, "compute_managed_update_status", lambda fetch: {
+        "managed": True, "available": False, "current_sha": _BASE, "latest_sha": "", "update_channel": "stable"})
+    monkeypatch.setattr(update_letter, "runtime_status", lambda status: status)
+    monkeypatch.setattr(update_letter, "project_letter_for_panel", lambda status: None)
+    monkeypatch.setattr(control, "_request_restart", lambda *_args, **_kwargs: False)
+    statuses = {}
+
+    def status(label):
+        """The status read the server serves now, checked against its published shape."""
+        from ouroboros.gateway.schema import contract_typed_dict, validate_ingress
+
+        payload = control._managed_update_payload(fetch=False, include_tags=False)
+        assert validate_ingress(payload, contract_typed_dict("UpdateStatusResponse")) == [], label
+        statuses[label] = json.loads(json.dumps(payload))
+        return statuses[label]
+
+    def checked(ok):
+        """The dependency and import check, read while it runs: the server's status at that moment."""
+        def run():
+            status(f"checking:{len(statuses)}")
+            return {"ok": ok}
+        return run
+
+    def consumers():
+        """Both readers of each status, as production JS: the rail's capsule and Dashboard → Updates."""
+        from ouroboros.preflight_node import resolve_node
+        from tests.group_run import run_in_group
+
+        node = resolve_node()
+        assert node, "Node is required for the real rail and Dashboard readings"
+        path = tmp_path / "statuses.json"
+        path.write_text(json.dumps(statuses), encoding="utf-8")
+        result = run_in_group([node, "--input-type=module", "-e", _CONSUMERS, str(path)],
+                              cwd=Path(__file__).resolve().parents[1] / "web", timeout=60)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    return SimpleNamespace(update_merge=update_merge, status=status, checked=checked, consumers=consumers,
+                           statuses=statuses)
+
+
+def _executor(attempt, body):
+    """One admitted executor bound to ``attempt``; ``body`` is its own remaining work and returns its answer."""
+    @progress.observe_result
+    def execute():
+        progress.begin(base_sha=_BASE, target_sha=_TARGET)
+        progress.link({"attempt_id": attempt})
+        return body()
+
+    return execute()
+
+
+def test_ordinary_and_replace_lanes_offer_the_restart_only_after_their_own_check(real_marker, monkeypatch):
+    from ouroboros import store_switch
+    from supervisor import git_ops, update_merge
+
+    monkeypatch.setattr(git_ops, "_create_rescue_snapshot", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(git_ops, "_collect_repo_sync_state", lambda: {})
+    monkeypatch.setattr(update_merge, "destructive_apply_guard", lambda *_args: "")
+    monkeypatch.setattr(update_merge, "apply_managed_merge_update", lambda *_args: (True, ""))
+    monkeypatch.setattr(update_merge, "update_restart_smoke", real_marker.checked(True))
+    # The ordinary clean merge, from the clean-tree prologue's transaction (control._stash_local_work_fenced).
+    prologue = {"phase": "stashing_local_work", "pre_update_sha": _BASE, "pre_update_branch": "ouroboros",
+                "base_sha": _BASE, "target_sha": _TARGET, "target_ref": _PLAN["target_ref"], "update_channel": "stable",
+                "attempt_id": "tx-merge", "stash_sha": "", "local_work_carrier": "none", "requested_at": "2026-11-25"}
+    answer = _executor("tx-merge", lambda: control._apply_clean_merge_fenced(None, dict(_PLAN), dict(prologue)))
+    assert json.loads(answer.body)["status"] == "restart_required"
+    real_marker.status("merge:after")
+    # The Replace lane, its check before the restart and its store-less form whose check waits for the next start.
+    monkeypatch.setattr(control, "_index_lock_precondition", lambda: None)
+    monkeypatch.setattr(update_merge, "plan_managed_update_merge", lambda **_kwargs: dict(_PLAN))
+    monkeypatch.setattr(update_merge, "acquire_update_lock", lambda **_kwargs: object())
+    monkeypatch.setattr(update_merge, "release_update_lock", lambda _fh: None)
+    monkeypatch.setattr(control, "_quiesce_repo_writers", lambda _reason: [])
+    monkeypatch.setattr(git_ops, "prepare_managed_update", lambda *_args, **_kwargs: (
+        True, {"update_intent": {"strategy": "replace"}, "keep_branch": "local-keep-x"}))
+    monkeypatch.setattr(git_ops, "_write_update_intent", lambda _intent: None)
+    for deferred in (False, True):
+        update_merge.clear_update_tx()
+        monkeypatch.setattr(store_switch, "switch_or_reset", lambda *_args, deferred=deferred, **_kwargs: (
+            True, "checked out", deferred))
+        answer = control._apply_replace_recovery_fenced(None, expected_base_sha=_BASE, expected_target_sha=_TARGET)
+        assert json.loads(answer.body)["status"] == "restart_required"
+        real_marker.status(f"replace:{'deferred' if deferred else 'checked'}")
+    statuses, seen = real_marker.statuses, real_marker.consumers()
+    checking = [label for label in statuses if label.startswith("checking:")]
+    assert len(checking) == 2, "the merge and the checked Replace each ran their check once; the deferred one none"
+    for label in checking:
+        # While the check runs the transaction is pending_boot_smoke, its check pending, and the executor's stage
+        # says so in both places: nobody is asked to restart.
+        assert statuses[label]["update_tx"]["phase"] == "pending_boot_smoke", label
+        assert statuses[label]["update_tx"]["pre_restart_smoke"] == "pending", label
+        assert seen[label]["rail"]["says"] == "stage" and seen[label]["rail"]["pill"] == "Checking update…", label
+        assert seen[label]["panel"]["headline"] == "Checking the update and dependencies…", label
+        assert seen[label]["panel"]["action"] != "restart", label
+    for label in ("merge:after", "replace:checked", "replace:deferred"):
+        expected = "pending" if label == "replace:deferred" else "passed"
+        assert statuses[label]["update_tx"]["pre_restart_smoke"] == expected, label
+        assert statuses[label]["update_progress"]["result"] == "restart_required", label
+        # The apply's own answer that its restart could not be requested: the restart, in both places.
+        assert (seen[label]["rail"]["says"], seen[label]["rail"]["pill"]) == ("restart", "Restart needed"), label
+        assert (seen[label]["panel"]["state"], seen[label]["panel"]["action"]) == ("restart_required", "restart"), label
+
+
+@pytest.mark.parametrize("passes", [True, False], ids=["check-passes", "check-fails"])
+def test_a_reviewed_merge_is_the_check_at_work_until_its_own_check_passed(real_marker, monkeypatch, passes):
+    update_merge = real_marker.update_merge
+    monkeypatch.setattr(update_merge, "update_restart_smoke", real_marker.checked(passes))
+    monkeypatch.setattr(update_merge, "_log_supervisor", lambda _row: True)
+
+    def rollback(reason, **_kwargs):  # the restored checkout's end state: the transaction is gone
+        assert update_merge.clear_update_tx() is True
+        return True, f"restored the previous version ({reason})"
+
+    monkeypatch.setattr(update_merge, "rollback_managed_update", rollback)
+    _executor("tx-assisted", lambda: JSONResponse({"status": "assisted_started", "task_id": "update_assisted_merge_1"}))
+    update_merge.write_update_tx({"phase": "committing_assisted", "attempt_id": "tx-assisted", "pre_update_sha": _BASE,
+                                  "target_sha": _TARGET, "task_id": "update_assisted_merge_1"})
+    ok, message = update_merge.managed_assisted_postcommit(update_merge.read_update_tx(), _COMMIT)
+    assert ok is passes, message
+    real_marker.status("after")
+    statuses, seen = real_marker.statuses, real_marker.consumers()
+    during = statuses["checking:0"]
+    assert (during["update_tx"]["phase"], during["update_tx"]["pre_restart_smoke"]) == ("pending_boot_smoke", "pending")
+    assert during["update_progress"]["result"] == "assisted_started"
+    assert seen["checking:0"]["rail"] == {"pill": "Checking update…", "says": "stage",
+                                          "headline": "Checking the update and dependencies…"}
+    assert seen["checking:0"]["panel"] == {"state": "resolving", "headline": "Checking the update and dependencies…",
+                                           "action": "check"}
+    if passes:
+        assert statuses["after"]["update_tx"]["pre_restart_smoke"] == "passed"
+        assert seen["after"]["rail"]["says"] == "restart" and seen["after"]["rail"]["pill"] == "Restart needed"
+        assert seen["after"]["panel"]["action"] == "restart"
+        assert seen["after"]["rail"]["headline"] == seen["after"]["panel"]["headline"], "the panel's own sentence"
+    else:
+        # Rolled back in this generation: no transaction, the start's outcome unconfirmed (CLIENT_CONTRACT §15), and
+        # nothing anywhere says restart.
+        assert statuses["after"]["update_tx"] == {"active": False}
+        rail = seen["after"]["rail"]
+        assert (rail["says"], rail["pill"]) == ("outcome", "Update outcome unconfirmed")
+        assert seen["after"]["panel"]["action"] != "restart"
+
+
+def test_an_older_or_newer_record_is_ready_only_on_its_own_answer(real_marker):
+    """A marker an older updater wrote (unstamped, no check recorded) and one a newer release wrote (its stamp above
+    this version's) are not made ready by their phase; the apply's own restart_required answer still is."""
+    update_merge = real_marker.update_merge
+    path = update_merge._update_tx_marker_path()
+    older = {"phase": "pending_boot_smoke", "attempt_id": "tx-older", "pre_update_sha": _BASE, "merge_commit": _COMMIT}
+    path.write_text(json.dumps(older), encoding="utf-8")
+    assert update_merge.read_update_tx_strict() == ("valid", older)
+    _executor("tx-older", lambda: JSONResponse({"status": "assisted_started"}))
+    real_marker.status("older:started")
+    _executor("tx-older", lambda: control._restart_response(None, strategy="auto_merge", plan=dict(_PLAN)))
+    real_marker.status("older:answered")
+    newer = {"_schema_version": update_merge.UPDATE_TX_SCHEMA_VERSION + 1, "phase": "pending_boot_smoke",
+             "pre_restart_smoke": "passed", "attempt_id": "tx-newer"}
+    path.write_text(json.dumps(newer), encoding="utf-8")
+    assert update_merge.read_update_tx_strict()[0] == "future"
+    _executor("tx-newer", lambda: JSONResponse({"status": "assisted_started"}))
+    real_marker.status("newer:started")
+    statuses, seen = real_marker.statuses, real_marker.consumers()
+    for label in statuses:
+        assert "pre_restart_smoke" not in statuses[label]["update_tx"], label
+        assert statuses[label]["update_tx"]["phase"] == "pending_boot_smoke", label
+    for label in ("older:started", "newer:started"):
+        assert seen[label]["rail"]["says"] == "unresolved" and seen[label]["panel"]["action"] != "restart", label
+    assert (seen["older:answered"]["rail"]["says"], seen["older:answered"]["panel"]["action"]) == ("restart", "restart")

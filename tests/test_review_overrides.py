@@ -67,11 +67,13 @@ def _evolution_notice(monkeypatch, data_dir, sha):
     sent: list = []
     monkeypatch.setattr("supervisor.queue.DRIVE_ROOT", data_dir)
     monkeypatch.setattr("supervisor.state.load_state", lambda: {"owner_chat_id": 7})
-    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda chat, text, **kw: sent.append(text))
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda chat, text, **kw: sent.append((text, kw)))
     evolution_lifecycle.notify_owner_cycle_outcome({"objective": "Sharpen"}, {"cycle_outcome": "absorbed",
                                                                               "commit_sha": sha})
-    assert len(sent) == 1 and "reviewed" not in sent[0] and "PASS" not in sent[0], sent
-    return sent[0]
+    assert len(sent) == 1, sent
+    (text, kwargs), = sent
+    assert "reviewed" not in text and "PASS" not in text, text  # how the review ended, never a PASS
+    return text, kwargs["progress_meta"]["notice"]
 
 
 def test_each_decision_counts_on_its_work_card_beside_the_event_and_the_counter(tmp_path, monkeypatch):
@@ -190,6 +192,7 @@ def test_a_commit_lands_over_a_decision_only_from_its_call_or_the_attempt_it_con
         note_override_landing(ctx, sha)
         assert sha[:12] in landed_line(ctx.repo_dir, install, base=base, target=sha, running=False)
         assert "landed" not in read_json_dict(ctx.drive_root / COUNTER_REL), "the task drive keeps no landing"
+        assert "count" not in (read_json_dict(install / COUNTER_REL) or {}), "the count stays on the drive that decided"
 
 
 def test_an_open_wave_counts_nothing_yet_and_a_collected_outcome_counts_once(tmp_path, monkeypatch):
@@ -205,7 +208,10 @@ def test_an_open_wave_counts_nothing_yet_and_a_collected_outcome_counts_once(tmp
     assert _fact(ctx.drive_root, "root-1") == {} and _events(ctx) == [] and read_json_dict(ctx.drive_root / COUNTER_REL) is None
     note_override_landing(ctx, "a" * 40)  # Cyber Pro: the same call commits over the open wave
     assert [row["reason"] for row in read_json_dict(ctx.drive_root / COUNTER_REL)["landed"]] == ["review_late_result_pending"]
-    assert landed_outcome(ctx.drive_root, "a" * 40) == "no review verdict when it landed: review late result pending"
+    text, notice = _evolution_notice(monkeypatch, ctx.drive_root, "a" * 40)
+    assert text.endswith("it landed despite a failed review or check, or without a review verdict.")
+    assert notice["details"] == (f"commit {'a' * 12}; review: no review verdict when it landed: "
+                                 "review late result pending; objective: Sharpen")
     ctx._review_override_this_call, ctx._review_reconcile_only = "", True  # later calls collect that wave
     ctx._pending_review_attempt = SimpleNamespace(review_override_reason="review_late_result_pending")
     _decide(ctx, "critical_findings")  # it ended in FAIL
@@ -492,7 +498,12 @@ def test_the_author_continuation_lands_over_its_attempts_decision_in_any_context
         assert "continued" not in work and "landed" not in work and card_line(work) == (
             "" if case == "clean" else "Review: FAIL or no verdict 1× (latest: critical findings)")
         assert landed_line(ctx.repo_dir, ctx.drive_root, base=base, target=sha, running=False) == ""
-        assert "no landing over a FAIL or missing verdict is recorded for it." in _evolution_notice(monkeypatch, ctx.drive_root, sha)
+        text, notice = _evolution_notice(monkeypatch, ctx.drive_root, sha)
+        assert text == ("After restart, the running version's history included the evolution commit; "
+                        "it is not on the recent list of commits that landed despite a failed review or check, "
+                        "or without a review verdict.")
+        assert notice == {"code": "evolution_cycle_absorbed", "step": "reply_to_revert",
+                          "details": f"commit {sha[:12]}; objective: Sharpen"}
         return
     said_by = f'rejected — "{WHY}"'
     assert work["continued"]["count"] == 1 and work["continued"]["latest"]["reason"] == "critical_findings", said
@@ -510,8 +521,12 @@ def test_the_author_continuation_lands_over_its_attempts_decision_in_any_context
     named = f"{sha[:12]} (review FAIL: critical findings; author continued: {said_by})"
     assert landed_line(ctx.repo_dir, ctx.drive_root, base=base, target=sha, running=False) == (
         f"Committed {GATE}: {named}; deployment unconfirmed, as no record yet binds a running process to them.")
-    assert (f"now live (restart verified); it landed over a FAIL or no verdict (review FAIL: critical findings; "
-            f"author continued: {said_by}).") in _evolution_notice(monkeypatch, ctx.drive_root, sha)
+    text, notice = _evolution_notice(monkeypatch, ctx.drive_root, sha)
+    assert text == ("After restart, the running version's history included the evolution commit; "
+                    "it landed despite a failed review or check, or without a review verdict.")
+    assert notice == {"code": "evolution_cycle_absorbed", "step": "reply_to_revert",
+                      "details": f"commit {sha[:12]}; review: review FAIL: critical findings; "
+                                 f"author continued: {said_by}; objective: Sharpen"}
 
 
 def test_the_restart_line_names_only_landed_commits_of_its_range_and_says_running_only_when_adopted(tmp_path):
@@ -571,19 +586,37 @@ def test_a_settled_adoption_names_its_landed_commits_running_only_when_adopted(t
     previous = _commit(ctx.repo_dir, "previous")
     candidate = _commit(ctx.repo_dir, "candidate")
     _landed(ctx, (candidate, "critical_findings", "rejected", WHY))
+    adoption_note = f"Adoption note ({outcome})."
     monkeypatch.setattr(body_adoption, "finalize_on_boot", lambda *a, **k: {
-        "outcome": outcome, "note": f"Adoption note ({outcome}).", "adoption_id": "a1", "task_id": "",
+        "outcome": outcome, "note": adoption_note, "adoption_id": "a1", "task_id": "", "sha": candidate,
         "candidate": candidate, "previous": previous, "branch": "ouroboros", "tests": {"tier": "smoke"}})
-    monkeypatch.setattr("supervisor.git_ops_reset._record_checkout_facts", lambda facts: None)
+    checkout_facts = []
+    monkeypatch.setattr("supervisor.git_ops_reset._record_checkout_facts", checkout_facts.append)
+    monkeypatch.setattr("supervisor.git_ops.push_to_remote",
+                        lambda *a, **k: pytest.fail("smoke evidence must not publish"))
     sent: list = []
     monkeypatch.setattr("supervisor.state.load_state", lambda: {"owner_chat_id": 7})
-    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda chat, text, **kw: sent.append(text))
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda chat, text, **kw: sent.append((chat, text, kw)))
     result = body_adoption.settle_on_boot(ctx.drive_root, ctx.repo_dir, supervisor_ready=True)
+    [(chat, text, kw)] = sent
+    # Every settlement has one System row; its Details keep the full outcome, not a green result by implication.
+    assert (chat, kw) == (7, {"role": "system", "system_type": "restart_notice", "progress_meta": {"notice": {
+        "code": f"body_adoption_{outcome}", "details": result["note"]}}})
     named = f'{candidate[:12]} (review FAIL: critical findings; author continued: rejected — "{WHY}")'
     if said is None:
-        assert named not in result["note"] and named not in "".join(sent)
+        assert text == ("A change Ouroboros prepared for its own code was not applied; "
+                        "the running code is unchanged.")
+        assert result["note"] == adoption_note  # no claim that the candidate or its commits are running
     else:
-        assert f"{said} {GATE}: {named}" in result["note"] and f"{said} {GATE}: {named}" in sent[0]
+        assert f"{said} {GATE}: {named}" in result["note"]
+        assert text == ("A change Ouroboros prepared for its own code is now running." if outcome == "adopted"
+                        else "A change Ouroboros prepared for its own code is not confirmed yet.")
+    if outcome == "adopted":
+        assert checkout_facts == [{"current_branch": "ouroboros", "current_sha": candidate}]
+        assert result["publication"] == {"status": "withheld", "branch": "ouroboros", "sha": candidate, "tier": "smoke"}
+        assert "so nothing was pushed." in result["note"]
+    else:
+        assert checkout_facts == [] and "publication" not in result
 
 
 def test_a_failing_join_or_store_never_fails_the_gate_the_commit_or_the_notice(tmp_path, monkeypatch):
@@ -608,6 +641,11 @@ def test_a_failing_join_or_store_never_fails_the_gate_the_commit_or_the_notice(t
     note_override_landing(ctx, "a" * 40)  # Git already succeeded: the landing's failure is logged, never raised
     assert "landed" not in read_json_dict(ctx.drive_root / COUNTER_REL)
     assert _fact(ctx.drive_root, "t1")["landed"]["count"] == 1, "the card counts the landing the counter lost"
+    text, notice = _evolution_notice(monkeypatch, ctx.drive_root, "a" * 40)
+    assert text == ("After restart, the running version's history included the evolution commit; "
+                    "it is not on the recent list of commits that landed despite a failed review or check, "
+                    "or without a review verdict.")
+    assert notice["details"] == f"commit {'a' * 12}; objective: Sharpen"
 
     def no_store(*_args, **_kwargs):
         raise OSError("task store unwritable")
@@ -619,10 +657,19 @@ def test_a_failing_join_or_store_never_fails_the_gate_the_commit_or_the_notice(t
     assert landed_line(ctx.repo_dir, None, base="a", target="b", running=False) == "", "an unreadable counter names nothing"
     (ctx.drive_root / COUNTER_REL).write_text("{not json", encoding="utf-8")
     assert landed_outcome(ctx.drive_root, "a" * 40) is landed_outcome(None, "a" * 40) is None, "unread is not absent"
-    assert "whether it landed over a FAIL or no verdict could not be read." in _evolution_notice(monkeypatch, ctx.drive_root, "a" * 40)
+    text, notice = _evolution_notice(monkeypatch, ctx.drive_root, "a" * 40)
+    assert text == ("After restart, the running version's history included the evolution commit; "
+                    "the recent landing records could not be read to check its review outcome.")
+    assert notice == {"code": "evolution_cycle_absorbed", "step": "reply_to_revert",
+                      "details": f"commit {'a' * 12}; objective: Sharpen"}
     (ctx.drive_root / COUNTER_REL).unlink()
-    assert landed_outcome(ctx.drive_root, "a" * 40) == "", "no counter: nothing recorded, never PASS"
-    assert "no landing over a FAIL or missing verdict is recorded for it." in _evolution_notice(monkeypatch, ctx.drive_root, "a" * 40)
+    assert landed_outcome(ctx.drive_root, "a" * 40) == "", "no counter: no matching row available, never PASS"
+    text, notice = _evolution_notice(monkeypatch, ctx.drive_root, "a" * 40)
+    assert text == ("After restart, the running version's history included the evolution commit; "
+                    "it is not on the recent list of commits that landed despite a failed review or check, "
+                    "or without a review verdict.")
+    assert notice == {"code": "evolution_cycle_absorbed", "step": "reply_to_revert",
+                      "details": f"commit {'a' * 12}; objective: Sharpen"}
 
 
 _TWIN = """
@@ -691,14 +738,14 @@ def test_the_app_line_is_the_python_line_for_every_recorded_part_and_for_none():
 
 
 _CARD_ON_LOAD = """
-import { installDom, restoreDom, walkCard } from '%(fixture)s';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from '%(fixture)s';
 import { createChatInstance } from '%(chat)s';
 let input = ''; for await (const chunk of process.stdin) input += chunk;
 const messages = JSON.parse(input);
 const reads = [];
 const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () => {
     if (String(url).startsWith('/api/tasks/')) reads.push(String(url));
-    return String(url).startsWith('/api/chat/history') ? { messages } : { active_direct_turns: [] };
+    return String(url).startsWith('/api/chat/history') ? { messages, profile_scope: PREVIEW_SCOPE } : { active_direct_turns: [] };
 } }));
 const instance = createChatInstance({ ws: { on() { return () => {}; }, isConnected: () => true, send() {} },
     state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 }, updateUnreadBadge() {},
@@ -775,3 +822,78 @@ def test_a_page_load_shows_a_works_field_from_the_history_endpoint(tmp_path, fin
     assert painted["finished"] == [finished, finished], "the works' cards are in their real phase"
     carried = {(m["task_id"], m["review_overrides"]["count"]) for m in messages if "review_overrides" in m}
     assert carried == {("gate-work", 1)}, "only the work with a decision carries its fact, on its history row"
+
+
+@pytest.mark.parametrize("drive_state", ["retired", "custody_locked", "present"])
+def test_foreign_attempt_stamp_honors_custody_lock_and_never_recreates_retired_drive(tmp_path, monkeypatch, drive_state):
+    """Trigger 3 (#2901): stamping a Continue predecessor's attempt row honors ``task_custody_lock`` + existence check
+    (never under a nested successor review-state lock), never recreates a retired predecessor drive, and never loses
+    the deciding successor's own count, event, counter or ``continued`` decision."""
+    import contextlib
+    import shutil
+
+    from ouroboros import review_ledger as rl, task_custody
+    from ouroboros.review_state import CommitAttemptRecord, load_state, make_repo_key, update_state
+
+    ctx = _make_ctx(tmp_path)
+    canonical = tmp_path / "canonical"
+    pred, succ = "synthetic-pred-p", "synthetic-succ-s"
+    pred_root = canonical / "state" / "headless_tasks" / pred / "data"
+    succ_root = canonical / "state" / "headless_tasks" / succ / "data"
+    for path in (canonical, pred_root, succ_root):
+        path.mkdir(parents=True, exist_ok=True)
+    seed_result(canonical, pred, {"status": "completed", "root_task_id": pred})
+    seed_result(canonical, succ, {"status": "running", "root_task_id": pred})
+    ctx.task_id, ctx.drive_root, ctx.budget_drive_root = succ, succ_root, canonical
+    ctx.task_metadata = {"root_task_id": pred}
+    repo_key = make_repo_key(ctx.repo_dir)
+    record_id = "rl-pred-fail"
+    rl.write_record(canonical, {
+        "record_id": record_id, "surface": "commit_gate", "state": "settled", "task_id": pred, "root_task_id": pred,
+        "ts": "2026-11-20T10:00:00+00:00", "subject": {"root": str(ctx.repo_dir)},
+        "verdict": {"aggregate": "FAIL", "reason": "critical_findings", "per_row": {"s1": "FAIL"}},
+        "rows": [{"seat_id": "s1", "operation_id": "op-1", "status": "responded"}],
+    })
+    source = CommitAttemptRecord(
+        ts="2026-11-20T10:00:00+00:00", commit_message="pred attempt", status="reviewed", phase="review_only",
+        repo_key=repo_key, tool_name="commit_reviewed", task_id=pred, root_task_id=pred, attempt=1, paid=True,
+        review_record_id=record_id, review_override_reason="review_late_result_pending",
+    )
+    update_state(pred_root, lambda state: state.record_attempt(source))
+    ctx._author_commit_source = source
+    ctx._author_commit_source_root = pred_root
+
+    lock_calls = []
+    real_lock = task_custody.task_custody_lock
+
+    @contextlib.contextmanager
+    def observed_lock(root, task_id, *, timeout_sec=5.0):
+        lock_calls.append((root.resolve(strict=False), task_id))
+        assert not (succ_root / "locks" / "advisory_review.lock").exists(), "never under S's review-state lock"
+        if drive_state == "custody_locked":
+            yield False
+            return
+        with real_lock(root, task_id, timeout_sec=timeout_sec) as locked:
+            yield locked
+
+    monkeypatch.setattr(task_custody, "task_custody_lock", observed_lock)
+    if drive_state == "retired":
+        shutil.rmtree(pred_root)
+
+    decision = {"disposition": "accepted", "rationale": WHY}
+    note_author_continuation(ctx, decision)
+
+    assert lock_calls == [(canonical.resolve(strict=False), pred)]
+    fact = _fact(canonical, pred)
+    assert fact["count"] == 1 and fact["latest"]["reason"] == "critical_findings"
+    assert fact["continued"]["count"] == 1 and fact["continued"]["latest"]["disposition"] == "accepted"
+    assert len(_events(ctx)) == 1 and _events(ctx)[0]["block_reason"] == "critical_findings"
+    assert read_json_dict(succ_root / COUNTER_REL)["count"] == 1
+    if drive_state == "retired":
+        assert not pred_root.exists(), "retired predecessor directory must never be recreated"
+    elif drive_state == "custody_locked":
+        kept = load_state(pred_root).attempts[-1]
+        assert kept.review_override_reason == "review_late_result_pending", "skipped while custody lock held"
+    else:
+        kept = load_state(pred_root).attempts[-1]
+        assert kept.review_override_reason == "critical_findings", "stamped when predecessor drive is live and unlocked"

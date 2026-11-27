@@ -385,12 +385,13 @@ def test_an_interrupt_while_the_warm_waits_for_memory_ends_the_whole_battery(tmp
     assert "decides nothing" not in out and "=== parallel" not in out and not list(ledger.glob("*.json")), out
 
 
-@pytest.mark.parametrize("interrupted, diagnostic, expected", [
-    (False, "overload_stop: largest pid=123 rss=456", 1),
-    (True, "", 130),
+@pytest.mark.parametrize("child_code, interrupted, diagnostic, expected", [
+    (0, False, "overload_stop: largest pid=123 rss=456", 1),
+    (1, False, "overload_stop: largest pid=123 rss=456", 2),
+    (0, True, "", 130),
 ])
 def test_runner_never_greens_an_overload_or_interrupt(
-    run_tests, monkeypatch, capsys, interrupted, diagnostic, expected,
+    run_tests, monkeypatch, capsys, child_code, interrupted, diagnostic, expected,
 ):
     from ouroboros import process_containment
 
@@ -407,7 +408,7 @@ def test_runner_never_greens_an_overload_or_interrupt(
             if interrupted and timeout is None:
                 raise KeyboardInterrupt
             events.extend([f"wait {timeout}"] if timeout is not None else [])
-            return 0
+            return child_code
 
         def interrupt_root(self):
             events.append("interrupted")
@@ -424,7 +425,7 @@ def test_runner_never_greens_an_overload_or_interrupt(
             events.append("closed")
 
     monkeypatch.setattr(process_containment, "ProcessContainer", Owner)
-    assert run_tests._run("x", [run_tests.sys.executable, "-c", "pass"], REPO) == expected
+    assert run_tests._run("parallel", [run_tests.sys.executable, "-c", "pass"], REPO) == expected
     # The export wait and TERM grace are allotted inside safe_test's window; its deadline bounds the reap.
     assert run_tests._INTERRUPT_EXPORT_SEC + run_tests._INTERRUPT_TERM_SEC < SAFE_TEST_INT_WINDOW_SEC
     stop = ["interrupted", "wait 7", "terminate 2"] if interrupted else []
@@ -540,6 +541,119 @@ def test_the_node_option_runs_only_the_owned_node_lane(run_tests, monkeypatch):
             run_tests.main(combined)
 
 
+@pytest.mark.parametrize("node_exit, cleanup, expected", [
+    (0, "", 0), (1, "", 1),  # a test pass and a test failure each leave their record
+    (0, "reap incomplete", 2), (1, "reap incomplete", 2),  # an unconfirmed cleanup is the launcher's, never a test result
+    (None, "", 2),  # no Node: NOT_RUN, nothing ran
+    (2, "", 2), (137, "", 137),  # any other exit of a Node that ran is no test result either
+])
+def test_node_evidence_requires_the_test_process_and_its_cleanup(
+        run_tests, monkeypatch, tmp_path, standalone_budget, node_exit, cleanup, expected):
+    from ouroboros import preflight_node, process_containment
+
+    monkeypatch.setattr(preflight_node, "candidate_node_tests", lambda root: ["tests/one.test.js"])
+    monkeypatch.setattr(preflight_node, "resolve_node", lambda: "inert-node" if node_exit is not None else None)
+    monkeypatch.setattr(preflight_node, "probe_node_version", lambda node: "24.0.0")
+    proc = types.SimpleNamespace(wait=lambda **kwargs: node_exit)
+    monkeypatch.setattr(process_containment, "ProcessContainer", lambda **options: types.SimpleNamespace(
+        spawn=lambda *args, **kw: proc, reap=lambda: cleanup, close=lambda: None))
+    receipt = tmp_path / "node" / "node.json"
+    assert run_tests.main(["--node", "--evidence-dir", str(receipt.parent)]) == expected
+    if expected in (0, 1):
+        assert json.loads(receipt.read_text(encoding="utf-8")) == {"exit": expected}
+    else:
+        assert not receipt.exists()
+
+
+def test_node_receipt_is_written_after_the_lane_and_never_inherited(run_tests, monkeypatch, tmp_path):
+    receipt = tmp_path / "node" / "node.json"
+    receipt.parent.mkdir()
+    receipt.write_text('{"exit": 0}', encoding="utf-8")  # an earlier run's
+    during = []
+    monkeypatch.setattr(run_tests, "_node_lane", lambda: during.append(receipt.exists()) or (1, "/lane/node"))
+    assert run_tests.main(["--node", "--evidence-dir", str(receipt.parent)]) == 1
+    assert during == [False] and json.loads(receipt.read_text(encoding="utf-8")) == {"exit": 1}
+    monkeypatch.setattr(run_tests, "_node_lane", lambda: (1, ""))  # a run that leaves no result
+    assert run_tests.main(["--node", "--evidence-dir", str(receipt.parent)]) == 2 and not receipt.exists()
+
+
+def test_node_receipt_needs_the_explicit_evidence_dir_and_a_place_to_keep_it(run_tests, monkeypatch, tmp_path):
+    from tests import ci_verdicts
+
+    lanes = []
+    monkeypatch.setattr(run_tests, "_node_lane", lambda: lanes.append("lane") or (0, "/lane/node"))
+    monkeypatch.setenv("OUROBOROS_TEST_EVIDENCE_ROOT", str(tmp_path / "root"))
+    assert run_tests.main(["--node"]) == 0
+    assert not list(tmp_path.rglob("node.json"))  # the environment's evidence root asks for no receipt
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where the evidence directory should be", encoding="utf-8")
+    assert run_tests.main(["--node", "--evidence-dir", str(blocker / "node")]) == 2
+    assert lanes == ["lane"]  # refused before Node started
+    monkeypatch.setattr(ci_verdicts, "write_json", lambda path, value: (_ for _ in ()).throw(OSError("disk full")))
+    assert run_tests.main(["--node", "--evidence-dir", str(tmp_path / "full")]) == 2 and lanes == ["lane", "lane"]
+
+
+def test_a_lane_pass_is_the_batterys_pass_over_the_callers_paths(run_tests, monkeypatch, tmp_path):
+    """CI's form: the lane brings the gate's -m and flags, the caller its paths (or a retry's argument file) and
+    output options; a caller that sets what the lane sets, or mixes the lane with another mode, is refused."""
+    monkeypatch.delenv("OUROBOROS_TEST_EVIDENCE_ROOT", raising=False)
+    calls = []
+    monkeypatch.setattr(run_tests, "_node_lane", lambda: pytest.fail("a lane pass runs no Node lane"))
+    monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: calls.append((label, argv)) or 0)
+    battery = dict((label, argv[4:]) for label, argv in run_tests.battery_commands())  # after `tests/`
+    argsfile = tmp_path / "retry targets.txt"
+    argsfile.write_text("tests/test_a.py::test_case[x@y::z]\n", encoding="ascii")
+    for lane, label in (("parallel", "parallel"), ("exclusive", "serial")):
+        for paths in (["tests/"], ["tests/test_a.py", "tests/test_b.py"], [f"@{argsfile}"]):
+            calls.clear()
+            assert run_tests.main(["--lane-pass", lane, *paths, "-q", "--tb=short"]) == 0
+            assert calls == [("focused", [run_tests.sys.executable, "-m", "pytest", *battery[label], *paths,
+                                          "-q", "--tb=short"])]
+    for refused in (["--lane-pass", "parallel", "tests/", "-m", "slow"], ["--lane-pass", "parallel", "-n", "2"],
+                    ["--lane-pass", "parallel", "tests/", "-n4"],
+                    ["--lane-pass", "parallel", "tests/", "--numprocesses=4"],
+                    ["--lane-pass", "exclusive", "--timeout=5"], ["--lane-pass", "exclusive", "--dist", "load"],
+                    ["--lane-pass", "exclusive", "tests/", "--timeout-method=thread"],
+                    ["--lane-pass", "exclusive", "-q", "--tb=short"],
+                    ["--lane-pass", "serial", "tests/"], ["--lane-pass", "parallel", "--selected"],
+                    ["--lane-pass", "parallel", "--node"]):
+        with pytest.raises(SystemExit):
+            run_tests.main(refused)
+    argsfile.write_text("tests/test_a.py\n-n4\n", encoding="ascii")
+    with pytest.raises(SystemExit):
+        run_tests.main(["--lane-pass", "parallel", f"@{argsfile}"])
+
+
+def test_lane_pass_retry_file_uses_the_external_callers_directory(tmp_path):
+    """The real CLI changes to the checkout in safe_test, not before locating the caller's list."""
+    from ouroboros.test_evidence import diagnostic_directory
+    from tests.ci_verdicts import final
+
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    argsfile = caller / "retry targets.txt"
+    targets = [f"tests/test_test_environment.py::{name}" for name in (
+        "test_pytest_cache_belongs_to_session_boundary", "test_static_settings_scrub_covers_runtime_vocabulary",
+    )]
+    argsfile.write_text("\n".join(targets) + "\n", encoding="ascii")
+    evidence = diagnostic_directory(tmp_path / "evidence", "lane-pass-retry-path")
+    env = {**os.environ, "OUROBOROS_TEST_EVIDENCE_ROOT": str(evidence), "OUROBOROS_PREFLIGHT_TEST_WORKERS": "1"}
+    for spelling, path in (("absolute", argsfile), ("relative", argsfile.name)):
+        report_dir = evidence / spelling
+        result = subprocess.run(
+            [sys.executable, str(REPO / "scripts/run_tests.py"), "--lane-pass", "parallel", f"@{path}",
+             "-q", "--tb=short", f"--ci-evidence-dir={report_dir}"],
+            cwd=caller, env=env, capture_output=True, encoding="utf-8", timeout=90,
+        )
+        assert result.returncode == 0, f"{spelling}:\n{result.stdout}\n{result.stderr}"
+        report, error = final(report_dir)
+        assert not error, error
+        assert report["session_exit_code"] == 0 and report["tests_collected"] == len(targets)
+        assert sorted((row["nodeid"], row["outcome"]) for row in report["reports"] if row["phase"] == "call") == [
+            (target, "passed") for target in sorted(targets)
+        ]
+
+
 @pytest.mark.parametrize("tier", ["full", "selected"])
 def test_a_deferred_full_escalation_runs_the_floor_and_says_so(run_tests, monkeypatch, tmp_path, tier):
     from ouroboros import test_selection
@@ -581,6 +695,7 @@ def test_a_deferred_full_escalation_keeps_what_the_other_changes_select(run_test
 
     from ouroboros import test_selection
 
+    real_select = test_selection.select_from_paths  # the selector itself, for the fixture tree at the end
     changed = ("ouroboros/utils.py", "tests/_store_journal_shared.py", "tests/test_jsonl_lock_budget.py")
     chosen = test_selection.TestSelection(
         "full", "b" * 40, ("tests/test_everything.py",), (("tests/_store_journal_shared.py", "verification apparatus changed"),
@@ -599,12 +714,17 @@ def test_a_deferred_full_escalation_keeps_what_the_other_changes_select(run_test
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    github = {"sha": "c" * 40, "run_id": "5", "run_attempt": "2"}
+    for name, value in github.items():  # the record names the commit, run and attempt that wrote it
+        monkeypatch.setenv("GITHUB_" + name.upper(), value)
     run_tests.main(["--selected", "--defer-full", "--evidence-dir", str(tmp_path / "kept")])
     record = json.loads((tmp_path / "kept" / "selection.json").read_text(encoding="utf-8"))
     # The escalating helper is left to the matrix; the other two changes are selected as if alone.
     assert asked == [(["ouroboros/utils.py", "tests/test_jsonl_lock_budget.py"], "b" * 40)]
     assert record["deferred_full"] is True and record["files"] == sorted(
         {*test_selection.FLOOR_TESTS, "tests/test_importer.py", "tests/test_jsonl_lock_budget.py"})
+    assert "selection_problem" not in record  # a genuine deferral selects what the other changes select
+    assert (record["github"], record["system"]) == (github, run_tests._system())  # the typed origin that wrote it
     assert "2 module(s) the other changes select" in summary.read_text(encoding="utf-8")
 
     def unavailable(*args, **kwargs):
@@ -614,6 +734,9 @@ def test_a_deferred_full_escalation_keeps_what_the_other_changes_select(run_test
     run_tests.main(["--selected", "--defer-full", "--evidence-dir", str(tmp_path / "floor")])
     record = json.loads((tmp_path / "floor" / "selection.json").read_text(encoding="utf-8"))
     assert record["files"] == sorted(test_selection.FLOOR_TESTS)  # the floor still runs, and the note says why
+    assert record["selection_problem"] == run_tests._DEFER_FALLBACK  # fixed text, so no reader promotes the floor
+    assert "test_broken" not in json.dumps(record)  # the scan's own thrown path stays out of the public evidence
+    assert (record["github"], record["system"]) == (github, run_tests._system())
     assert "the other changes could not be selected: import scan unavailable" in summary.read_text(encoding="utf-8")
 
     # The other changes escalate too (a reason this leg does not name): the floor alone, never the whole suite.
@@ -622,7 +745,59 @@ def test_a_deferred_full_escalation_keeps_what_the_other_changes_select(run_test
     run_tests.main(["--selected", "--defer-full", "--evidence-dir", str(tmp_path / "again")])
     record = json.loads((tmp_path / "again" / "selection.json").read_text(encoding="utf-8"))
     assert record["files"] == sorted(test_selection.FLOOR_TESTS)
+    assert record["selection_problem"] == run_tests._DEFER_FALLBACK  # the floor alone, never the whole suite
+    assert (record["github"], record["system"]) == (github, run_tests._system())
     assert "the other changes escalate too (a renamed escalation)" in summary.read_text(encoding="utf-8")
+
+    # Mixed escalations through the selector itself, on a fixture tree. It names a changed helper (one that pytest
+    # configuration loads, or that no test imports) only while nothing else already forces full, so the window's
+    # own answer shows the cutover, the apparatus change and the author's request alone: each answer that is still
+    # full is read for what it names and asked again without it, until the independent changes select.
+    fixture_repo = tmp_path / "fixture"
+    tree = {path: "def test_ok(): pass\n" for path in (*test_selection.FLOOR_TESTS, "tests/test_changed.py",
+                                                       "tests/test_extra.py")}
+    tree.update({"tests/conftest.py": "from tests._guard import guard\n", "tests/_guard.py": "guard = 1\n",
+                 "tests/_orphan.py": "orphan = 1\n", "tests/test_guarded.py": "from tests._guard import guard\n",
+                 "tests/test_leaf_user.py": "from ouroboros import leaf\n", "tests/fixtures/rows.json": "{}\n",
+                 "ouroboros/leaf.py": "value = 1\n"})
+    for path, text in tree.items():
+        (fixture_repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (fixture_repo / path).write_text(text, encoding="utf-8")
+    window = ("server.py", "ouroboros/leaf.py", "tests/_guard.py", "tests/_orphan.py", "tests/fixtures/rows.json",
+              "tests/test_changed.py")
+    first = real_select(fixture_repo, window, base="d" * 40, extra_tests=("tests/test_extra.py",), full_tests=True,
+                        test_reason="reads rows by path")
+    named = {path for path, reason in first.reasons if reason == "verification apparatus changed"}
+    assert first.tier == "full" and named == {"tests/fixtures/rows.json"}, "no helper is named while others force full"
+    layers = []
+    monkeypatch.setattr(test_selection, "select_tests", lambda *a, **k: first)
+    monkeypatch.setattr(test_selection, "select_from_paths", lambda repo, paths, **kwargs: (
+        layers.append(list(paths)) or real_select(fixture_repo, paths, **kwargs)))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "mixed.md"))
+    run_tests.main(["--selected", "--defer-full", "--evidence-dir", str(tmp_path / "mixed")])
+    record = json.loads((tmp_path / "mixed" / "selection.json").read_text(encoding="utf-8"))
+    note = (tmp_path / "mixed.md").read_text(encoding="utf-8")
+    assert layers == [["ouroboros/leaf.py", "tests/_guard.py", "tests/_orphan.py", "tests/test_changed.py"],
+                      ["ouroboros/leaf.py", "tests/_orphan.py", "tests/test_changed.py"],
+                      ["ouroboros/leaf.py", "tests/test_changed.py"]]
+    # The floor, the changed test module, the importer of the changed module and the author's extra run; the importer
+    # of the helper that forces full stays with the landed matrix, and the note names every cause.
+    assert record["deferred_full"] is True and record["files"] == sorted(
+        {*test_selection.FLOOR_TESTS, "tests/test_changed.py", "tests/test_extra.py", "tests/test_leaf_user.py"})
+    for cause in ("server.py: body cutover/recovery changed", "author requested full: reads rows by path",
+                  "tests/fixtures/rows.json: verification apparatus changed",
+                  "tests/_guard.py: verification apparatus changed", "tests/_orphan.py: verification apparatus changed"):
+        assert cause in note
+    assert "2 module(s) the other changes select, plus 1 extra test module(s) named by the author" in note
+
+    # An unreadable selection stays reported, and the floor and the author's extra test still run.
+    (fixture_repo / "tests/test_broken.py").write_text("not python !!!", encoding="utf-8")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "unreadable.md"))
+    run_tests.main(["--selected", "--defer-full", "--evidence-dir", str(tmp_path / "unreadable")])
+    record = json.loads((tmp_path / "unreadable" / "selection.json").read_text(encoding="utf-8"))
+    assert record["files"] == sorted({*test_selection.FLOOR_TESTS, "tests/test_extra.py"})
+    assert "the other changes could not be selected: import scan unavailable for tests/test_broken.py" in (
+        tmp_path / "unreadable.md").read_text(encoding="utf-8")
 
 
 def test_a_bare_call_never_means_a_subset(run_tests, monkeypatch):
@@ -678,6 +853,7 @@ def test_a_missing_node_is_a_red_not_run_never_a_silent_skip(run_tests, monkeypa
     monkeypatch.setattr(preflight_node, "resolve_node", lambda: None)
     monkeypatch.setattr(preflight_node, "candidate_node_tests", lambda repo: ["tests/x.test.js"])
     assert run_tests.main([]) == 1
+    assert run_tests.main(["--node"]) == 2  # a retry could not run any of them
 
 
 def test_a_red_lane_stops_the_battery_and_an_empty_battery_is_red(run_tests, monkeypatch):
@@ -762,9 +938,10 @@ def test_lane_groups_are_inert_outside_the_one_xdist_pass():
     assert [item.nodeid for item in items] == ["tests/test_s.py::test_one", "tests/test_a.py::test_one"]
 
 
-def test_a_real_xdist_pass_runs_a_resources_tests_in_its_group_on_one_worker(tmp_path):
+@pytest.mark.parametrize("workers", [1, 2])
+def test_a_real_xdist_pass_runs_a_resources_tests_in_its_group_on_one_worker(tmp_path, workers, run_tests, monkeypatch):
     """The groups are pinned where items are collected, inside xdist's workers, so they are witnessed there: a
-    real two-worker `--dist loadgroup` session under this conftest. The controller schedules by the group each
+    real `--dist loadgroup` session under this conftest and the inventory plugin. The controller schedules by the group each
     worker's collection report carries (`id@group`): one resource's tests in two files ran on one worker, an
     unmarked test rides its file's group. A test, and so every result, lane proof, inventory and retry, keeps
     its plain id, a parameter's own `@` included; every worker holds the controller's reading of the durations
@@ -772,14 +949,20 @@ def test_a_real_xdist_pass_runs_a_resources_tests_in_its_group_on_one_worker(tmp
     import subprocess
     import sys
 
+    from ouroboros import test_selection
+    from ouroboros.preflight_inventory import read_inventory
+    from ouroboros.preflight_probe import probe_dir
     from ouroboros.test_environment import isolated_environment
     from ouroboros.test_parallelism import NESTED_WORKERS_ENV
+    from scripts import post_merge_check as pmc
     from tests.ci_verdicts import TEST_DURATIONS_ENV, platform_name
 
     assert [conftest._plain_id(nodeid) for nodeid in ("t.py::test_a@serial:port", "t.py::test_a[x@y]@t.py",
                                                       "t.py::test_a[x@y]", "t.py::test_a")] == [
         "t.py::test_a", "t.py::test_a[x@y]", "t.py::test_a[x@y]", "t.py::test_a"]
-    suite, seen, owner = tmp_path / "suite", tmp_path / "seen", tmp_path / "owner"
+    # The child's scratch is not where its evidence goes: diagnostics a session finds inside its own scratch keep
+    # that scratch on purpose (tests/conftest.py pytest_configure), which here would be this test's own folder.
+    suite, seen, owner, scratch = tmp_path / "suite", tmp_path / "seen", tmp_path / "owner", tmp_path / "scratch"
     (suite / "tests").mkdir(parents=True)
     seen.mkdir()
     seconds = {"tests/test_a.py": 10, "tests/test_b.py": 5000}
@@ -804,15 +987,37 @@ def test_a_real_xdist_pass_runs_a_resources_tests_in_its_group_on_one_worker(tmp
             "    @pytest.mark.parametrize('who', ['x@y', 'x::y', 'x@y::z'])\n"
             "    def test_free(self, request, who):\n"
             f"        note(request, {name + '-class-'!r} + who.replace('::', '-').replace('@', '-at-'))\n", encoding="utf-8")
-    env = {**isolated_environment(owner, REPO), "OUROBOROS_TEST_TEMP_ROOT": str(owner), NESTED_WORKERS_ENV: "2",
+    # Exercise the selected CLI on this two-module tree. Supply the changed path and the floor,
+    # then let both real pytest processes produce the inventory and the public reports.
+    base = "b" * 40
+    monkeypatch.setattr(run_tests, "REPO", suite)
+    monkeypatch.setattr(test_selection, "FLOOR_TESTS", {"tests/test_a.py": "fixture floor"})
+    monkeypatch.setattr(test_selection, "changed_paths", lambda repo, ref, *, each_commit: (base, ["tests/test_b.py"]))
+    monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(owner / "outputs"))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(owner / "summary"))
+    env = {**isolated_environment(scratch, REPO), "OUROBOROS_TEST_TEMP_ROOT": str(scratch),
+           NESTED_WORKERS_ENV: str(workers),
+           "PYTHONPATH": os.pathsep.join((str(probe_dir(owner)), str(REPO))),
            TEST_DURATIONS_ENV: str(tmp_path / "durations.json")}
-    run = subprocess.run([sys.executable, "-m", "pytest", "-p", "tests.conftest", "--rootdir", str(suite), "--confcutdir",
-                          str(suite), "-o", "addopts=", "-q", "-p", "no:cacheprovider", "-n", "2", "--dist", "loadgroup",
-                          str(suite / "tests")], cwd=REPO, env=env, text=True, capture_output=True, timeout=300)
-    assert run.returncode == 0, run.stdout + run.stderr
+
+    def run(label, command, cwd):
+        if label == "warm":
+            return 0
+        argv = _started(command, workers)
+        if "-n" in argv:
+            argv[argv.index("-n") + 1] = str(workers)
+        child = subprocess.run([*argv, "-p", "tests.conftest", "--rootdir", str(suite), "--confcutdir", str(suite),
+                                "-o", "addopts=", "-p", "no:cacheprovider"], cwd=cwd, env=env, text=True,
+                               capture_output=True, timeout=300)
+        assert child.returncode in ((0, 5) if label == "serial" else (0,)), child.stdout + child.stderr
+        return child.returncode
+
+    monkeypatch.setattr(run_tests, "_run", run)
+    assert run_tests.main(["--selected", "--keep-going", "--base", base, "--evidence-dir", str(owner)]) == 0
     ran = {path.name: json.loads(path.read_text(encoding="utf-8")) for path in seen.iterdir()}
     reported = [ran.pop(name) for name in sorted(ran) if name.startswith("reported-")]
-    assert len(reported) == 2 and reported[0] == reported[1], "two workers reported two collections"
+    assert len(reported) == workers and all(ids == reported[0] for ids in reported)
     # Longest group first: the resource's (its two files' 5010 ms), then b's (5000), then a's (10).
     expected = {f"{name}-shared": f"tests/test_{name}.py::test_shared" for name in ("a", "b")}
     collection = [node + "@serial:port" for node in expected.values()]
@@ -825,8 +1030,184 @@ def test_a_real_xdist_pass_runs_a_resources_tests_in_its_group_on_one_worker(tmp
                 expected[f"{name}-{kind}-" + value.replace("::", "-").replace("@", "-at-")] = plain
     assert reported[0] == collection
     assert {name: row[0] for name, row in ran.items()} == expected
+    inventory, problem = read_inventory(owner, "parallel")
+    assert not problem and inventory["collection_reports"] == workers
+    assert sorted(inventory["expected"]) == sorted(inventory["executed"]) == sorted(expected.values())
     assert ran["a-shared"][1] == ran["b-shared"][1], "one resource's tests ran on two workers"
     assert [row[2] for row in ran.values()] == [seconds] * 14
+    classify = ["classify", "--evidence-dir", str(owner), "--head", "f" * 40, "--base", base]
+    summary = ["summary", "--evidence-dir", str(owner), "--os", "windows"]
+    assert pmc.main(classify) == pmc.main(summary) == 0
+    record = json.loads((owner / "classification.json").read_text(encoding="utf-8"))
+    assert record["selection_executed"] and record["not_run"] == {}
+    assert record["failed"] == record["flaky"] == []
+    assert "parallel 14, serial empty" in (owner / "summary").read_text(encoding="utf-8")
+    # The same completed run, losing only the parallel export. Its inventory and phases still agree.
+    (owner / "parallel" / "results.json").unlink()
+    assert pmc.main(classify) == 0 and pmc.main(summary) == 1
+    record = json.loads((owner / "classification.json").read_text(encoding="utf-8"))
+    assert record["diagnostics_incomplete"] == ["parallel"] and record["selection"]["calls"] == {"serial": 0}
+    assert not record["selection_executed"] and any("no valid results.json" in why for why in record["problems"])
+    journal = owner / "parallel" / "events.jsonl"
+    rows = journal.read_bytes().splitlines(keepends=True)
+    del rows[next(i for i, line in enumerate(rows) if json.loads(line).get("phase") == "call")]
+    journal.write_bytes(b"".join(rows))
+    assert pmc.main(classify) == 0 and pmc.main(summary) == 1
+    assert not json.loads((owner / "classification.json").read_text(encoding="utf-8"))["selection_executed"]
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_the_selected_xdist_retry_distinguishes_persistent_and_flaky_ids(tmp_path, workers, run_tests, monkeypatch):
+    """Keep each exact public ID through loadgroup, the ordinary retry, attribution and the red summary. The pass
+    holds two groups (the resource's repeated red; the file's fail-once test and its healthy control), so two
+    workers each run one, as the tests themselves record; the retry is one session without workers."""
+    from ouroboros import test_selection
+    from ouroboros.preflight_probe import observed_worker_ids
+    from ouroboros.test_evidence import diagnostic_directory
+    from ouroboros.test_parallelism import NESTED_WORKERS_ENV, WORKERS_ENV
+    from scripts import post_merge_check as pmc
+    from tests.ci_verdicts import TEST_DURATIONS_ENV
+
+    # Every child here inherits this run's scratch, and evidence inside it would keep that whole root on purpose
+    # (tests/conftest.py pytest_configure): under an owner the evidence goes with the owner's.
+    suite, ran = tmp_path / "suite", tmp_path / "ran"
+    evidence = diagnostic_directory(tmp_path / "evidence", "selected-retry-" + tmp_path.name)
+    ran.mkdir()
+    module = "tests/test_retry_case.py"
+    persistent = f"{module}::test_persistent[persistent@case::red]"
+    transient = f"{module}::test_transient[transient@case::once]"
+    control = f"{module}::test_transient[control@case::green]"
+    for directory in ("tests", "scripts"):
+        (suite / directory).mkdir(parents=True)
+    (suite / "pytest.ini").write_text("[pytest]\naddopts = -p tests.conftest -p no:cacheprovider\n", encoding="utf-8")
+    (suite / "tests/conftest.py").write_text("# The real test plugins are loaded by pytest.ini.\n", encoding="utf-8")
+    # Two groups the pass can run side by side: the resource's and the file's. Each test names the process that ran it.
+    (suite / module).write_text(textwrap.dedent(f'''
+        import os
+        from pathlib import Path
+        import pytest
+
+        def note(request):
+            who = os.environ.get("PYTEST_XDIST_WORKER", "main")
+            with Path({str(ran)!r}, who).open("a", encoding="utf-8") as stream:
+                stream.write(request.node.nodeid + "\\n")
+
+
+        @pytest.mark.serial("retry-case")
+        @pytest.mark.parametrize("case", ["persistent@case::red"])
+        def test_persistent(request, case):
+            note(request)
+            assert not Path("broken").is_file(), "synthetic persistent failure"
+
+
+        @pytest.mark.parametrize("case", ["transient@case::once", "control@case::green"])
+        def test_transient(request, case):
+            note(request)
+            if case == "control@case::green":
+                return
+            try:
+                Path("transient-seen").touch(exist_ok=False)
+            except FileExistsError:
+                return
+            raise AssertionError("synthetic first-call failure")
+        '''), encoding="utf-8")
+    # The ordinary retry/probe subprocess finds its normal entry point in each miniature checkout.
+    # The adapter changes only the root; the real runner handles argv, process exit and pytest evidence.
+    (suite / "scripts/run_tests.py").write_text(
+        "import runpy, sys\nfrom pathlib import Path\n"
+        f"main = runpy.run_path({str(REPO / 'scripts/run_tests.py')!r})['main']\n"
+        "main.__globals__['REPO'] = Path(__file__).resolve().parents[1]\n"
+        "raise SystemExit(main(sys.argv[1:]))\n", encoding="utf-8")
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=suite, check=True, capture_output=True,
+                              text=True, encoding="utf-8", timeout=30).stdout.strip()
+
+    git("init", "-q", "--template=")
+    identity = ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"]
+    git("add", ".")
+    git(*identity, "commit", "--no-gpg-sign", "-qm", "passing base")
+    base = git("rev-parse", "HEAD")
+    (suite / "broken").touch()
+    git("add", "broken")
+    git(*identity, "commit", "--no-gpg-sign", "-qm", "break one test")
+    head = git("rev-parse", "HEAD")
+
+    monkeypatch.setattr(run_tests, "REPO", suite)
+    monkeypatch.setattr(pmc, "REPO_ROOT", suite)
+    monkeypatch.setattr(test_selection, "FLOOR_TESTS", {module: "fixture floor"})
+    for key in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD", "OUROBOROS_PREFLIGHT_SERIAL",
+                "POST_MERGE_CLASSIFY_OUTCOME", "POST_MERGE_ATTRIBUTE_OUTCOME", "POST_MERGE_ROUTE_OUTCOME"):
+        monkeypatch.delenv(key, raising=False)
+    summary = tmp_path / "summary.md"
+    for key, value in (("PYTHONPATH", REPO), (NESTED_WORKERS_ENV, workers), (WORKERS_ENV, workers),
+                       (TEST_DURATIONS_ENV, tmp_path / "durations.json"), ("GITHUB_OUTPUT", tmp_path / "outputs"),
+                       ("GITHUB_STEP_SUMMARY", summary)):
+        monkeypatch.setenv(key, str(value))
+    where = ["--evidence-dir", str(evidence)]
+    window = ["--base", base, "--head", head]
+    exit_code = run_tests.main(["--selected", "--base", base, "--each-commit", "--keep-going", *where])
+    assert exit_code == pytest.ExitCode.TESTS_FAILED
+    selection = json.loads((evidence / "selection.json").read_text(encoding="utf-8"))
+    inventory = selection["inventory"]["parallel"]
+    assert selection["tier"] == "selected" and selection["files"] == [module]
+    assert selection["outcomes"] == {"parallel": "failure", "serial": "success"}
+    assert inventory["collection_reports"] == len(observed_worker_ids(evidence)) == workers
+    assert sorted(inventory["expected"]) == sorted(inventory["executed"]) == sorted([persistent, transient, control])
+    assert sorted(inventory["failed"]) == sorted([persistent, transient])
+
+    def executed():
+        """{process: the ids it ran since the last reading}: an xdist worker's id, "main" for a session without workers."""
+        rows = {path.name: sorted(path.read_text(encoding="utf-8").splitlines()) for path in ran.iterdir()}
+        for name in rows:
+            (ran / name).unlink()
+        return rows
+
+    # Every worker that reported also ran tests: with two, each ran one whole group and nothing of the other's.
+    first = executed()
+    assert set(first) == observed_worker_ids(evidence) and len(first) == workers
+    assert sorted(first.values()) == ([[persistent], sorted([transient, control])] if workers == 2
+                                      else [sorted([persistent, transient, control])])
+
+    def checked_session(label, calls, *, session_id=None):
+        session = pmc.read_session(evidence / label, session_id=session_id)
+        assert session["final"] and session["exit"] == 1 and session["collected"] == len(calls)
+        assert not (session["running"] or session["collection"] or session["collection_skips"])
+        rows = session["rows"]
+        assert not any(row.get("is_subtest") or row.get("wasxfail") for row in rows)
+        assert sorted((row["nodeid"], row["phase"], row["outcome"]) for row in rows) == sorted(
+            (node, phase, result if phase == "call" else "passed")
+            for node, result in calls.items() for phase in ("setup", "call", "teardown"))
+        assert all(row.get("error_type") == "AssertionError" for row in rows if row["outcome"] == "failed")
+        return session
+
+    checked_session("parallel", {persistent: "failed", transient: "failed", control: "passed"},
+                    session_id=inventory["session"])
+    assert pmc.main(["classify", *where, *window, "--selected-outcome", "failure"]) == 0
+    retry = checked_session("retry", {persistent: "failed", transient: "passed"})
+    assert retry["selected"] is not None and sorted(retry["selected"]) == sorted([persistent, transient])
+    # The retry is one focused session without workers (post_merge_check.run_pytest): both groups' reds, once each.
+    assert executed() == {"main": sorted([persistent, transient])}
+    classified = json.loads((evidence / "classification.json").read_text(encoding="utf-8"))
+    assert classified["complete"] and classified["selection_executed"]
+    assert classified["not_run"] == {} and classified["problems"] == []
+    assert classified["selection"]["calls"] == {"parallel": 3, "serial": 0}
+    assert [(row["id"], row["pass"], row["retry"]) for row in classified["failed"]] == [(persistent, "parallel", "failed")]
+    assert [(row["id"], row["pass"], row["retry"]) for row in classified["flaky"]] == [(transient, "parallel", "passed")]
+
+    assert pmc.main(["attribute", *where, *window, "--work-dir", str(tmp_path)]) == 0
+    attribution = json.loads((evidence / "attribution.json").read_text(encoding="utf-8"))
+    [probe] = attribution["probes"]
+    assert probe["sha"] == base and probe["ids"] == [persistent] and probe["answers"] == {persistent: "pass"}
+    assert attribution["verdicts"] == [{"id": persistent, "verdict": "culprit", "culprit": head, "last_good": base}]
+    # Use the Windows-shaped, test-only summary on both hosts: this fixture does not run Linux's extra gates.
+    assert pmc.main(["summary", *where, "--os", "windows"]) == 1
+    text = summary.read_text(encoding="utf-8")
+    failed_text, _, flaky_text = text.partition("### Flaky (1)")
+    assert text.startswith("## Post-merge check on Windows — RED\n") and "parallel 3, serial empty" in text
+    assert "### Failed checks (1)" in failed_text and f"`{persistent}`" in failed_text and transient not in failed_text
+    assert f"`{transient}`" in flaky_text and persistent not in flaky_text
+    assert "The check is incomplete" not in text and "never ran" not in text
 
 
 def test_the_documented_command_is_the_script():
@@ -842,7 +1223,9 @@ def test_runner_evidence_stays_with_its_controller_across_nested_and_sequential_
     import subprocess
     import sys
     import textwrap
-    from tests.test_ci_evidence import _results, _started
+    from scripts.post_merge_check import read_session
+    from tests._shared import retire_injected_export_fault
+    from tests.ci_verdicts import final
 
     outer, inner = tmp_path / "outer", tmp_path / "inner"
     outer.mkdir()
@@ -850,7 +1233,7 @@ def test_runner_evidence_stays_with_its_controller_across_nested_and_sequential_
     (inner / "test_child.py").write_text("def test_child():\n    assert True\n", encoding="utf-8")
     evidence, child_evidence = tmp_path / "diagnostics", tmp_path / "child-diagnostics"
     public = evidence / "focused"
-    public.mkdir(parents=True)
+    break_export = tmp_path / "break-export"
     child_args = ["-p", "tests.conftest", "-o", "addopts=", "--rootdir", str(inner),
                   "--confcutdir", str(inner), "-q", str(inner)]
     (outer / "test_parent.py").write_text(textwrap.dedent(f"""
@@ -859,13 +1242,22 @@ def test_runner_evidence_stays_with_its_controller_across_nested_and_sequential_
         def test_parent():
             assert "--ci-evidence-dir" not in os.environ.get("PYTEST_ADDOPTS", "")
             public = Path({str(public)!r})
-            before = {{name: (public / name).read_bytes() for name in ("events.jsonl", "results.json")}}
+            assert not (public / "results.json").exists()
+            if Path({str(break_export)!r}).exists():
+                replace = os.replace
+                def refuse_final(src, dst, *args, **kwargs):
+                    if Path(dst) == public / "results.json":
+                        raise PermissionError("synthetic final export fault")
+                    return replace(src, dst, *args, **kwargs)
+                os.replace = refuse_final
+                return
+            before = {{path: path.read_bytes() for path in public.iterdir() if path.is_file()}}
             for explicit in ([], ["--ci-evidence-dir", {str(child_evidence)!r}]):
                 result = subprocess.run([sys.executable, "-m", "pytest", *{child_args!r}, *explicit],
                                         cwd={str(REPO)!r}, capture_output=True, text=True,
                                         encoding="utf-8", timeout=60)
                 assert result.returncode == 0, result.stdout + result.stderr
-                assert {{name: (public / name).read_bytes() for name in before}} == before
+                assert {{path: path.read_bytes() for path in before}} == before
         """), encoding="utf-8")
     arguments = ["--evidence-dir", str(evidence), "-p", "tests.conftest", "-o", "addopts=",
                  "--rootdir", str(outer), "--confcutdir", str(outer), "-q", str(outer)]
@@ -876,22 +1268,39 @@ def test_runner_evidence_stays_with_its_controller_across_nested_and_sequential_
         f"raise SystemExit(runner['main']({arguments!r}))\n", encoding="utf-8")
     command = [sys.executable, "-I", "-S", str(REPO / "scripts/safe_test.py"),
                "--temp-parent", str(tmp_path), "--", sys.executable, str(entry)]
-    # Reuse after the preceding controller exited is valid, without stale ownership locks.
-    for previous in range(2):
-        (public / "results.json").write_text(json.dumps({"previous": previous}), encoding="utf-8")
+    # Reuse only after the preceding controller exited. The third run reaches pytest but loses its final export.
+    history = set()
+    for failed_export in (False, False, True):
+        if failed_export:
+            break_export.touch()
         result = subprocess.run(command, cwd=REPO, capture_output=True, text=True,
                                 encoding="utf-8", timeout=180)
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert _results(public)["tests_collected"] == 1
-        assert _results(public)["session_exit_code"] == 0
-        assert {row["nodeid"] for row in _results(public)["reports"]} == {"test_parent.py::test_parent"}
-        raw = (public / "events.jsonl").read_text(encoding="utf-8")
-        assert "\x00" not in raw
-        rows = [json.loads(line) for line in raw.splitlines()]
-        assert _started(rows) == ["test_parent.py::test_parent"]
-        assert rows[-1]["event"] == "finish"
-        assert _results(child_evidence)["session_exit_code"] == 0
-        assert {row["nodeid"] for row in _results(child_evidence)["reports"]} == {"test_child.py::test_child"}
+        try:
+            assert result.returncode == 0, result.stdout + result.stderr
+            current = read_session(public)
+            assert {row["nodeid"] for row in current["rows"]} == {"test_parent.py::test_parent"}
+            raw = (public / "events.jsonl").read_bytes()
+            assert b"\x00" not in raw and all(raw != old for _, old in history)
+            rows = [json.loads(line) for line in raw.splitlines()]
+            assert [row["nodeid"] for row in rows if row.get("event") == "start"] == ["test_parent.py::test_parent"]
+            assert rows[-1]["event"] == "finish"
+            archived = {(path.read_bytes(), path.with_name(path.name.replace("results", "events", 1) + "l").read_bytes())
+                        for path in public.glob("results.previous*.json")}
+            assert archived == history
+            if failed_export:
+                assert not (public / "results.json").exists()
+                assert not current["final"] and current["journal_intact"]
+                assert "safe result export failed (PermissionError)" in result.stdout
+            else:
+                assert current["final"] and current["collected"] == 1 and current["exit"] == 0
+                assert rows[0]["session"] == final(public)[0]["session"]
+                history.add(((public / "results.json").read_bytes(), raw))
+                child, error = final(child_evidence)
+                assert not error and child["session_exit_code"] == 0
+                assert {row["nodeid"] for row in child["reports"]} == {"test_child.py::test_child"}
+        finally:
+            if failed_export:
+                retire_injected_export_fault(result, "PermissionError")
 
 
 _DRIVER_KEYS = ("PLAYWRIGHT_NODEJS_PATH", "OUROBOROS_PLAYWRIGHT_NODE_SELECTED", "OUROBOROS_PINNED_NODE_CARRIED")

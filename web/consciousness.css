@@ -71,8 +71,9 @@ textarea.ui-control.consciousness-owner-words {
 }
 .cx-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
 .cx-head-words { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cx-head-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); flex: none; }
 /* The switch keeps its words on one line beside the state, whatever the state's words take ("Turn off"). */
-.cx-toggle { flex: none; white-space: nowrap; }
+.cx-panic-choice, .cx-toggle { flex: none; white-space: nowrap; }
 .cx-kicker, .cx-wakes-title { margin: 0; font-size: var(--type-meta); line-height: var(--line-meta); color: var(--text-meta); }
 .cx-state { margin: 0; font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; color: var(--text-primary); }
 .cx-money, .cx-state-note, .cx-wakes-note, .cx-wakes-coverage { margin: 0; font-size: var(--type-body); line-height: var(--line-body); color: var(--text-secondary); }
@@ -132,7 +133,7 @@ textarea.ui-control.consciousness-owner-words {
 .available-subagent-recheck {
     display: inline-flex;
     align-items: center;
-    gap: var(--space-1);
+    gap: var(--checkbox-gap);
     min-height: 34px;
     color: var(--text-primary);
     font-size: var(--type-body);
@@ -278,13 +279,19 @@ textarea.ui-control.consciousness-owner-words {
 }
 .place-wake-list, .place-note-list { display: flex; flex-direction: column; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
 .place-wake-item { display: flex; flex-wrap: nowrap; align-items: center; min-height: 32px; gap: var(--space-2); color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-.place-wake-toggle { display: flex; align-items: center; flex: 1 1 auto; min-width: 0; gap: var(--space-2); cursor: pointer; }
+.place-wake-toggle { display: flex; align-items: center; flex: 1 1 auto; min-width: 0; gap: var(--checkbox-gap); cursor: pointer; }
+.place-wake-toggle:has(> :disabled) { cursor: default; }
 .place-wake-toggle > span { min-width: 0; overflow-wrap: anywhere; }
 .place-wake-item > .ui-chip { flex: 0 0 auto; margin-inline-start: auto; }
 .place-wake-offers { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .place-accounts { display: flex; flex-direction: column; gap: var(--space-2); }
 .place-account .harness-account-meta, .place-connector-row .harness-account-meta { color: var(--text-meta); }
 .place-connector-row .harness-account-main { align-items: center; }
+.place-connector-row .btn[data-connect-act="tg-branch"][aria-pressed="true"] { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
+.place-connect-group { display: flex; flex-direction: column; gap: var(--space-2); }
+.place-connect-subheading { margin: var(--space-1) 0 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-title); font-weight: 600; }
+.place-connect-steps { margin: 0; padding-inline-start: var(--space-5); display: flex; flex-direction: column; gap: var(--space-1); color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
+a.btn.place-connect-link { display: inline-flex; align-items: center; text-decoration: none; }
 /* Fields top-aligned, each with its own help under its input (the Settings form grid's way). */
 .place-account-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: var(--space-2) var(--space-3); align-items: start; }
 .place-account-form .place-sheet-actions { grid-column: 1 / -1; }

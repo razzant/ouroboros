@@ -29,6 +29,7 @@ import {
     startLogin,
     unreadFacets,
     harnessFamilyMarkup,
+    refreshHarnessStatus,
     verificationBadge,
     wakeDaemon,
 } from '../modules/harness_accounts.js';
@@ -55,6 +56,8 @@ import {
     preserveCardFocus,
     submitLoginInput,
 } from '../modules/harness_login_cards.js';
+import { setup } from './dashboard_dom_fixture.js';
+import { Stub, settle } from './helpers/settings_dom.js';
 
 test('account actions stack at the app shell compact breakpoint', () => {
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8')
@@ -2311,4 +2314,180 @@ test('daemon status appends observed stop and measured heap without changing rea
     // The host writes utc_now_iso(), i.e. an explicit +00:00 offset.
     payload.daemon.last_exit.observed_at = '2026-10-08T13:55:07.625130+00:00';
     assert.match(daemonStatusLine(payload).text, /seen 2026-10-08 13:55 UTC/);
+});
+
+// ---------------------------------------------------------------------------
+// A provider's page as Settings mounts it (settings_accounts.js draws this frame): the family's rows through their keyed
+// repaint (harness_account_rows.js). Where the engine cannot install the program a current read finds absent, a saved
+// account's Sign in leaves its row and the family's Add with it (docs/DESIGN.md §7: Check status, the switch and Remove
+// stay); once the program is read installed again the same row gets its Sign in back, and the press starts that account.
+// ---------------------------------------------------------------------------
+
+test('a provider\'s page drops Sign in while its program cannot be installed, and gives it back wired once it is installed', async (t) => {
+    // Put away while the fixture's document still stands: its own teardown, registered next, restores the globals.
+    let store = null;
+    t.after(() => { destroyHarnessAccounts(); store?.dispose(); });
+    const env = setup(t);
+    env.document.createElement = (tag) => new Stub(tag);
+    env.document.querySelector = (selector) => env.document.body.querySelector(selector);
+    const page = new Stub('div');
+    page.innerHTML = `<div id="agents-service-banner"></div>
+        <div class="settings-toolbar"><button type="button" id="btn-harness-refresh">Refresh</button></div>
+        <div id="harness-accounts-error" hidden></div><div id="harness-model-marks-note" hidden></div>
+        <div id="harness-accounts-groups" class="agent-family-list"></div><div id="harness-login-card"></div>`;
+    env.document.body.appendChild(page);
+    page.querySelector('#harness-accounts-groups').offsetParent = page;  // shown: this text-only DOM has no layout
+    let installed = true;
+    const logins = [];
+    const reply = (body) => ({ ok: true, status: 200, json: async () => structuredClone(body) });
+    const status = {
+        daemon: { state: 'running', engine_version: '3.8.0', runtime: {} }, config_dir: '/tmp/fixture',
+        harnesses: [{ id: 'agy', display_name: 'Antigravity' }], quota: [],
+        reads: { catalog: 'ok', accounts: 'ok', quota: 'ok' },
+        profiles: { profiles: [
+            { profile: { harness_id: 'agy', profile_id: 'work', display_name: 'work' }, status: { verification: 'failed' } },
+            { profile: { harness_id: 'agy', profile_id: 'home', display_name: 'home' },
+                status: { availability: 'unknown', verification: 'not_run' } },
+        ] },
+    };
+    globalThis.fetch = async (url, init = {}) => {
+        const path = String(url).split('?')[0];
+        if (path === '/api/claudexor/maintenance/harnesses') {
+            return reply({ harnesses: [{ harness: 'agy', updateAvailable: 'cannot_tell', newest: { status: 'not_read' },
+                operation: null, selection: installed ? { path: '/vendor/agy', version: '1.2.0' } : { path: null, version: null },
+                actions: { install: { available: false, reason: 'agy has no installer for this system.', commands: [] } } }] });
+        }
+        if (path === '/api/claudexor/login' && init.method === 'POST') {
+            logins.push(JSON.parse(init.body));
+            return reply({ job_id: 'agy-job', job: { state: 'running', phase: 'awaiting_user' } });
+        }
+        if (path.startsWith('/api/claudexor/login/')) return reply({ job: { state: 'running', phase: 'awaiting_user' } });
+        throw new Error(`Unexpected request ${init.method || 'GET'} ${url}`);
+    };
+    store = createClaudexorStatusStore({ fetchImpl: async () => reply(status), doc: env.document });
+    const row = (profile) => page.querySelector(`[data-profile="${profile}"]`);
+    const press = (profile) => row(profile)?.querySelector('[data-harness-login]') || null;
+    const reread = async () => { await refreshHarnessStatus(); await settle(); };
+
+    await initHarnessAccounts({ store, family: 'agy', path: 'accounts/agy' });
+    await reread();
+    const work = row('work');
+    assert.equal(press('work')?.textContent, 'Sign in', 'a saved account that needs it offers Sign in');
+    assert.equal(press('home')?.textContent, 'Check status');
+    assert.equal(page.querySelector('[data-family-add]')?.textContent, 'Add account');
+
+    installed = false;
+    await reread();
+    assert.equal(row('work'), work, 'the keyed repaint keeps the row the owner reads');
+    assert.equal(press('work'), null, 'no new Sign in for a program the engine cannot install here');
+    assert.ok(work.querySelector('[data-harness-toggle]') && work.querySelector('[data-harness-remove]'), 'its switch and Remove stay');
+    assert.equal(press('home')?.textContent, 'Check status', 'Check status stays: it is the shared Refresh path');
+    assert.equal(page.querySelector('[data-family-add]'), null, 'nor does the family promise a new account');
+    // A press that raced the repaint is the card's to refuse: nothing is sent, and its reason is said where it stands.
+    await startLogin('agy', 'work');
+    assert.deepEqual(logins, []);
+    assert.match(page.querySelector('[data-family-login="agy"]').textContent, /cannot be installed here/);
+
+    installed = true;
+    await reread();
+    const restored = press('work');
+    assert.equal(restored?.textContent, 'Sign in', 'the program read installed gives the same row its Sign in back');
+    assert.equal(row('work'), work);
+    assert.equal(work.querySelector('.harness-account-extra').children[0], restored, 'in its place, before Remove');
+    assert.equal(page.querySelector('[data-family-add]')?.textContent, 'Add account');
+    restored.onclick({});
+    await settle();
+    assert.deepEqual(logins.map((body) => [body.harness, body.profile_id]), [['agy', 'work']], 'and its press signs that account in');
+});
+
+test('a provider whose own install is already under way starts no second one, and signs in as before once the program is installed', async (t) => {
+    // Put away while the fixture's document still stands: its own teardown, registered next, restores the globals.
+    let store = null;
+    t.after(() => { destroyHarnessAccounts(); store?.dispose(); });
+    const env = setup(t);
+    env.document.createElement = (tag) => new Stub(tag);
+    env.document.querySelector = (selector) => env.document.body.querySelector(selector);
+    const page = new Stub('div');
+    page.innerHTML = `<div id="agents-service-banner"></div>
+        <div class="settings-toolbar"><button type="button" id="btn-harness-refresh">Refresh</button></div>
+        <div id="harness-accounts-error" hidden></div><div id="harness-model-marks-note" hidden></div>
+        <div id="harness-accounts-groups" class="agent-family-list"></div><div id="harness-login-card"></div>`;
+    env.document.body.appendChild(page);
+    page.querySelector('#harness-accounts-groups').offsetParent = page;  // shown: this text-only DOM has no layout
+    let installed = false;
+    let underway = true;
+    let refuseRead = false;
+    const logins = [];
+    const reply = (body) => ({ ok: true, status: 200, json: async () => structuredClone(body) });
+    const status = {
+        daemon: { state: 'running', engine_version: '3.8.0', runtime: {} }, config_dir: '/tmp/fixture',
+        harnesses: [{ id: 'agy', display_name: 'Antigravity' }], quota: [],
+        reads: { catalog: 'ok', accounts: 'ok', quota: 'ok' },
+        profiles: { profiles: [
+            { profile: { harness_id: 'agy', profile_id: 'work', display_name: 'work' }, status: { verification: 'failed' } },
+        ] },
+    };
+    globalThis.fetch = async (url, init = {}) => {
+        const path = String(url).split('?')[0];
+        if (path === '/api/claudexor/maintenance/harnesses') {
+            if (refuseRead) return { ok: false, status: 503, json: async () => ({ error: { code: 'daemon_unreachable', message: 'The engine is not running.' } }) };
+            return reply({ harnesses: [{ harness: 'agy', updateAvailable: 'cannot_tell', newest: { status: 'not_read' },
+                operation: underway ? { id: 'op-1', state: 'running' } : null,
+                selection: installed ? { path: '/vendor/agy', version: '1.2.0' } : { path: null, version: null },
+                actions: { install: { available: true, commands: [] } } }] });
+        }
+        if (path === '/api/claudexor/login' && init.method === 'POST') {
+            logins.push(JSON.parse(init.body));
+            return reply({ job_id: 'agy-job', job: { state: 'running', phase: 'awaiting_user' } });
+        }
+        if (path.startsWith('/api/claudexor/login/')) return reply({ job: { state: 'running', phase: 'awaiting_user' } });
+        throw new Error(`Unexpected request ${init.method || 'GET'} ${url}`);
+    };
+    store = createClaudexorStatusStore({ fetchImpl: async () => reply(status), doc: env.document });
+    const row = (profile) => page.querySelector(`[data-profile="${profile}"]`);
+    const press = (profile) => row(profile)?.querySelector('[data-harness-login]') || null;
+    const reread = async () => { await refreshHarnessStatus(); await settle(); };
+
+    await initHarnessAccounts({ store, family: 'agy', path: 'accounts/agy' });
+    await reread();
+    // The install of this very program is already under way: nothing here may start a second one.
+    assert.equal(press('work'), null, 'no Sign in while the program is still being installed');
+    assert.equal(page.querySelector('[data-family-add]'), null, 'nor does the family promise a new account');
+    assert.ok(row('work').querySelector('[data-harness-toggle]') && row('work').querySelector('[data-harness-remove]'),
+        'the row keeps its switch and Remove');
+    // A press that raced the repaint is the card's to refuse: nothing is sent, and its reason names the receipt.
+    await startLogin('agy', 'work');
+    assert.deepEqual(logins, [], 'the sign-in starts no install of its own');
+    assert.match(page.querySelector('[data-family-login="agy"]').textContent, /An installation for .* is unresolved/,
+        'and it names the unresolved install, not an installer it cannot see');
+    assert.doesNotMatch(page.querySelector('[data-family-login="agy"]').textContent, /cannot be installed here/,
+        'an install under way is not a platform that cannot install');
+
+    // A refused inventory proves no current absence to install by, and this program's install is still unresolved:
+    // the page may not start a second one, and its sentence promises no installer it cannot see.
+    refuseRead = true;
+    await reread();
+    assert.equal(press('work'), null, 'a refused read does not re-open the sign-in');
+    assert.equal(page.querySelector('[data-family-add]'), null, 'nor does the family promise a new account');
+    assert.ok(row('work').querySelector('[data-harness-toggle]') && row('work').querySelector('[data-harness-remove]'),
+        'the row keeps its switch and Remove through the refusal');
+    await startLogin('agy', 'work');
+    assert.deepEqual(logins, [], 'a press raced into a refused read starts no second install');
+    assert.match(page.querySelector('[data-family-login="agy"]').textContent, /An installation for .* is unresolved/,
+        'and the refusal names the unresolved install');
+    assert.match(page.querySelector('[data-family-login="agy"]').textContent, /program row/,
+        'with the program row as where its result is read');
+    assert.doesNotMatch(page.querySelector('[data-family-login="agy"]').textContent, /still being installed/,
+        'the sentence claims no installer this page cannot see');
+
+    // The program is installed and the read answers again: an ordinary sign-in is still allowed.
+    refuseRead = false;
+    installed = true;
+    await reread();
+    const restored = press('work');
+    assert.equal(restored?.textContent, 'Sign in', 'an installed program keeps its Sign in');
+    restored.onclick({});
+    await settle();
+    assert.deepEqual(logins.map((body) => [body.harness, body.profile_id]), [['agy', 'work']],
+        'and its press signs that account in');
 });

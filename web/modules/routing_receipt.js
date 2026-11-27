@@ -52,6 +52,8 @@ export function routingAnnotationText(annotation, chatId = 0) {
         return targetLabel ? `${notRouted} · ${targetLabel}` : notRouted;
     }
     if (status === 'project_unavailable') return tr('routing.project_unavailable', 'Project is unavailable');
+    // An unverifiable write is neither saved nor refused: say so, never claim it landed (owner: hide no real uncertainty).
+    if (status === 'unconfirmed') return tr('routing.unconfirmed', 'Delivery not confirmed');
     const labels = {
         mailbox_delivery: 'Message saved for task',  // a recorded mailbox write, never a read receipt
         steer_task: 'Steered task',

@@ -32,8 +32,8 @@ function removeOverlay() {
 
 /**
  * Mount the blocking shell. Called BEFORE the readiness probe, because the
- * decision this app is blocked on has not been made yet: until a 204 proves the
- * install is configured, the ordinary UI must not be reachable. Mounting only
+ * decision this app is blocked on has not been made yet: only a configured
+ * install or a Reset needing Settings should pass the overlay. Mounting only
  * after a successful probe meant a transport failure — a headless first run, a
  * server still coming up, a dropped connection — left the owner in the ordinary
  * UI with no onboarding and no way back to it, which contradicts what the
@@ -152,7 +152,7 @@ function showRestartRequiredOverlay(runtimeLabel) {
     });
 }
 
-export async function initOnboardingOverlay() {
+export async function initOnboardingOverlay({ onReady } = {}) {
     function handleMessage(event) {
         // Same-origin only: any web page can postMessage into this window;
         // without the origin check a foreign page could dismiss onboarding or
@@ -171,7 +171,7 @@ export async function initOnboardingOverlay() {
 
     // Blocked first, answered second. The shell exists before the request, so
     // no outcome of the request can leave the app unblocked by accident — only
-    // a verified 204 takes it down.
+    // a verified 204 or the host's explicit Reset recovery response takes it down.
     const overlay = mountOverlayShell();
     let retryTimer = null;
     let retryDelay = READINESS_RETRY_MS;
@@ -195,6 +195,7 @@ export async function initOnboardingOverlay() {
             if (disposed) return;
             if (response.status === 204) {
                 removeOverlay();
+                onReady?.();
                 return;
             }
             // Only the core's network gate answers 401 here: this page reached
@@ -202,6 +203,13 @@ export async function initOnboardingOverlay() {
             // expired session). Its sign-in returns to this page.
             if (response.status === 401) {
                 openSignIn();
+                return;
+            }
+            if (response.status === 409 && (await response.json()).reason_code === 'reset_interrupted') {
+                if (!disposed) {
+                    removeOverlay();
+                    onReady?.();
+                }
                 return;
             }
             if (!response.ok) throw new Error(`HTTP ${response.status}`);

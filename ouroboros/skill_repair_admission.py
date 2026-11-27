@@ -20,16 +20,18 @@ blocked here — the repair verifies its known frontier, and later drift surface
 on its next check instead of gating everyone else's authority
 (AGENTS.md proportionality).
 
-This is also the owner-edit seam (``skill_acceptance``): when the admitted task's
-run was started by the owner's own door (``owner_request``, captured at admission),
-each observed revision is recorded as an owner edit of those exact bytes, so the
-skill keeps running as Modified. Edits from anywhere else leave it unreviewed.
+This is also the owner-edit seam (``skill_acceptance``): a direct file-tool edit by
+the admitted, owner-started task can record acceptance only when its predicted
+text edit matches the observed transition. Unverified writes only advance the
+observed frontier. An explicit grant receipt can independently follow that same
+proof in a Repair started from Skills; only the next review may rebind its keys.
 """
 
 from __future__ import annotations
 
 import logging
 import pathlib
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from ouroboros.utils import atomic_write_json, utc_now_iso
@@ -65,8 +67,8 @@ def record_repair_admission(drive_root: Any, skill_name: str, *,
     """Bind one repair task to the exact payload state it was admitted against.
 
     ``owner_request`` is the host's owner-ingress fact of the promoted run
-    (``dialogue_provenance.run_origin``): only then do this task's observed
-    revisions become owner edits.
+    (``dialogue_provenance.run_origin``): only then can direct file-tool edits be
+    recorded as owner edits.
 
     The newest admission owns the record: a fresh repair for the same skill
     replaces a stale predecessor's binding (its writes then fail the ownership
@@ -185,8 +187,55 @@ def repair_write_cas_error(drive_root: Any, constraint: Any, *, task_id: str = "
     return ""
 
 
+@dataclass(frozen=True)
+class _LocalTextEdit:
+    before: str
+    after: str
+    installation: dict | None = None
+
+    def matches(self, previous: str, observed: str) -> bool:
+        return bool(previous and observed != previous and self.before == previous and self.after == observed)
+
+
+def confirm_local_text_edit(ctx: Any, binding: Any, changes: list) -> _LocalTextEdit | None:
+    """Predict a direct owner-started edit without relying on any grant receipt."""
+    from ouroboros.dialogue_provenance import run_origin
+    from ouroboros.skill_grant_follow import installation_of
+    from ouroboros.skill_identity import text_edit_release_hashes
+    from ouroboros.skill_loader import SkillPayloadUnreadable, load_skill
+
+    drive, name, payload = binding.state_drive_root, binding.skill_name, binding.base_path
+    record = load_repair_admission(drive, name) or {}
+    if (record.get("owner_request") is not True or record.get("task_id") != ctx.task_id
+            or record.get("status") != STATUS_ADMITTED):
+        return None
+    try:
+        skill = load_skill(payload, drive)
+        if (skill is None or skill.load_error or not skill.content_hash
+                or record.get("expected_content_hash") != skill.content_hash):
+            return None
+        anchor = record.get("verified_edit_hash", record.get("base_content_hash"))
+        if anchor != skill.content_hash:
+            gate = skill.review.gate_for(skill.content_hash)
+            if gate["stale"] or gate.get("preflight_failed") or gate["status"] not in {"clean", "warnings"}:
+                return None
+        hashes = text_edit_release_hashes(skill, changes)
+        if not hashes or hashes[0] != skill.content_hash or hashes[0] == hashes[1]:
+            return None
+        metadata = getattr(ctx, "task_metadata", None)
+        metadata = metadata if isinstance(metadata, dict) else {}
+        press, origin = metadata.get("ui_control"), run_origin({"metadata": metadata})
+        from_skills = (isinstance(press, dict) and press.get("name") == "skill_repair" and press.get("pressed_at")
+                       and origin["owner_ingress"] and not origin.get("presence") and not origin.get("parent_task_id"))
+        return _LocalTextEdit(*hashes, installation_of(drive, name, payload) if from_skills else None)
+    except (OSError, ValueError, SkillPayloadUnreadable):
+        log.debug("Could not verify a direct Repair text edit for %s", name, exc_info=True)
+        return None
+
+
 def advance_repair_expected_hash(
     drive_root: Any, constraint: Any, *, task_id: str = "", attribution: str = "file_tool",
+    local_edit: _LocalTextEdit | None = None,
 ) -> None:
     """Record the observed frontier, retaining how the operation was observed."""
     skill_name = str(getattr(constraint, "skill_name", "") or "")
@@ -196,21 +245,39 @@ def advance_repair_expected_hash(
     owner = str(record.get("task_id") or "")
     if not task_id or not owner or owner != str(task_id):
         return
+    previous = str(record.get("expected_content_hash") or "")
     try:
         payload_dir = _payload_dir(drive_root, constraint)
-        record["expected_content_hash"] = _payload_hash(payload_dir)
+        observed = _payload_hash(payload_dir)
+        record["expected_content_hash"] = observed
         record["revision_attribution"] = attribution
     except Exception:
         log.warning("Failed to advance repair hash chain for %s", skill_name, exc_info=True)
         return
+    verified = (record.get("owner_request") is True and attribution == "file_tool"
+                and local_edit is not None and local_edit.matches(previous, observed))
+    if verified:
+        record["verified_edit_hash"] = observed
     try:
         _save(drive_root, skill_name, record)
     except Exception:
         log.warning("Failed to persist repair hash chain for %s", skill_name, exc_info=True)
-    if record.get("owner_request") is True:
-        from ouroboros.skill_acceptance import record_owner_edit
+        return
+    if not verified or local_edit is None:
+        return
+    from ouroboros.skill_acceptance import record_owner_edit
 
-        record_owner_edit(pathlib.Path(drive_root), payload_dir, task_id=str(task_id), attribution=attribution)
+    accepted = record_owner_edit(pathlib.Path(drive_root), payload_dir, expected_digest=observed,
+                                 task_id=str(task_id), attribution=attribution)
+    if accepted:  # these files are admitted now: an allow waiting for the earlier ones can never be granted
+        from ouroboros.skill_grant_follow import end_superseded_consent
+
+        end_superseded_consent(drive_root, skill_name, observed)
+    if accepted and local_edit.installation is not None:
+        from ouroboros.skill_grant_follow import extend_verified_edit, installation_of
+
+        if installation_of(drive_root, skill_name, payload_dir) == local_edit.installation:
+            extend_verified_edit(drive_root, skill_name, local_edit.installation, previous, observed)
 
 
 __all__ = [

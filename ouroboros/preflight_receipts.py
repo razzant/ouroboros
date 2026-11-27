@@ -40,10 +40,11 @@ import json
 import logging
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import threading
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,11 @@ _SOURCE_FILES = ("server.py", "launcher.py")
 
 _baseline_lock = threading.Lock()
 _baseline: Optional[str] = None  # None: never captured; "": unavailable for this memory image
+_precommit_reader = None  # Bound with the executing generation, never imported by a gate attempt.
+
+
+def precommit_reader():
+    return _precommit_reader
 
 
 def canonical_data_root(ctx: Any) -> Optional[pathlib.Path]:
@@ -115,7 +121,7 @@ def capture_executing_source_baseline() -> str:
     because its PID changed. An unreadable inventory leaves this image permanently without
     a baseline — a later disk read is not the loaded generation.
     """
-    global _baseline
+    global _baseline, _precommit_reader
     if _baseline is None:
         with _baseline_lock:
             if _baseline is None:
@@ -125,6 +131,12 @@ def capture_executing_source_baseline() -> str:
                     log.warning("Executing-source baseline unavailable; durable test receipts are off",
                                 exc_info=True)
                     _baseline = ""
+                try:
+                    from ouroboros import preflight_reading
+
+                    _precommit_reader = preflight_reading
+                except Exception:  # Optional diagnostics cannot stop this generation from booting.
+                    log.warning("The executing generation's pre-commit diagnostic reader is unavailable", exc_info=True)
     return _baseline
 
 
@@ -415,10 +427,17 @@ class GateReceipt:
 # past. Each names its source and how it relates to the subject; none is ever proof.
 # A runner diagnosis or a finding is frozen whole, credentials redacted: the runner
 # already bounds its diagnosis (``max_output``, tail kept), so no second cut drops
-# the failing test it names; the run's result.json keeps the unredacted text.
+# the failing test it names; the run's result.json keeps the unredacted text. Unless
+# the run's own record names a post-commit run, the seat-visible text of a run shows
+# the run's known locations as markers (``_PRIVATE``) and says so; nothing else is masked.
 EXHIBIT_KEY = "preflight_execution"
 UNOBSERVED = {"status": "unobserved"}
 _LISTED_FAILED = 10
+_PRIVATE = {"<test evidence>": "the run's evidence folder", "<test scratch>": "the gate's disposable test root",
+            "<repository>": "the author's checkout"}
+_READING_CLASSES = ("leak", "worker_lost", "collection_error", "failed", "in_flight", "not_run")
+_FAILURES = {"failed": ("failed_tests", "failed_listed"), "worker_lost": ("worker_lost_tests", "worker_lost_listed"),
+             "unclassified": ("unclassified_failed", "unclassified_listed")}
 
 
 def execution_exhibit(ctx: Any, *, otherwise: str = "") -> dict:
@@ -519,11 +538,98 @@ def _green_run(ctx: Any, proof: Any) -> dict:
             **({"evidence": event["evidence"]} if event.get("evidence") else {}), **_live_relation(ctx, tested, proof)}
 
 
+def _spellings(root: Any) -> list:
+    """``(spelling, windows)`` for each way a diagnosis spells the absolute ``root``: as
+    recorded and, on this host, resolved; a Windows path also as Git prints it (forward
+    slashes) and as Python quotes it (doubled backslashes). A bare drive or filesystem root
+    is none: it would match every path."""
+    root = str(root or "")
+    windows = bool(pathlib.PureWindowsPath(root).drive)
+    if not (pathlib.PureWindowsPath(root).is_absolute() if windows else os.path.isabs(root)):
+        return []
+    spelled = set()
+    for path in {root, os.path.realpath(root)} if os.path.isabs(root) else {root}:
+        if windows or os.name == "nt":
+            native = pathlib.PureWindowsPath(path)
+            if len(native.parts) > 1:
+                spelled |= {(str(native), True), (native.as_posix(), True), (str(native).replace("\\", "\\\\"), True)}
+        elif len(pathlib.PurePosixPath(path).parts) > 1:
+            spelled.add((str(pathlib.PurePosixPath(path)), False))
+    return sorted(spelled)
+
+
+def _masker(roots: list) -> tuple[Callable[[str], str], set]:
+    """``(mask, used)``: ``mask`` replaces each whole occurrence of a ``(root, marker)``
+    spelling by its marker, the longest first and never inside a longer name (a Windows
+    spelling in any case); ``used`` collects the markers it placed."""
+    spelled = sorted({(spelling, windows, marker) for root, marker in roots for spelling, windows in _spellings(root)},
+                     key=lambda item: (-len(item[0]), item))
+    used: set = set()
+    if not spelled:
+        return (lambda text: text), used
+    pattern = re.compile(r"(?<![\w~.-])(?:" + "|".join(
+        "(" + (f"(?i:{re.escape(spelling)})" if windows else re.escape(spelling)) + ")"
+        for spelling, windows, _marker in spelled) + r")(?![\w~-]|\.\w)")
+
+    def place(match: "re.Match") -> str:
+        used.add(spelled[match.lastindex - 1][2])
+        return spelled[match.lastindex - 1][2]
+
+    return (lambda text: pattern.sub(place, text)), used
+
+
+def _pass_reading(terminal: Optional[dict], clean: Callable[[Any], str]) -> Optional[dict]:
+    """A pre-commit run's account of its blocked pass (``result.json`` ``reading``): the
+    gate's cause beside the reading's coverage and the gap that limits it, and the counts it
+    keeps (``None``: unknown, never zero). A pre-commit record without one says
+    ``not_recorded``; any other record carries none."""
+    from ouroboros.preflight_runner import PRE_COMMIT_PHASE
+
+    if terminal is None or terminal.get("phase") == "post_commit":
+        return None
+    reading = terminal.get("reading")
+    if not isinstance(reading, dict):
+        return {"coverage": "not_recorded"} if terminal.get("phase") == PRE_COMMIT_PHASE else None
+    counts = reading.get("counts") if isinstance(reading.get("counts"), dict) else {}
+    text = {name: clean(value) if isinstance(value := reading.get(name), str) else None
+            for name in ("pass", "cause", "coverage", "gap")}
+    return {**text, "coverage": text["coverage"] or "unknown",
+            "counts": {name: counts[name] for name in _READING_CLASSES
+                       if name in counts and (counts[name] is None or type(counts[name]) is int)}}
+
+
+def _failures(row: dict, reading: Any, clean: Callable[[Any], str]) -> dict:
+    """Prefer the blocked pass's usable reading, else the selection inventory's raw phases.
+
+    The reading's unknown counts stay unknown. Legacy inventory ids have no phase evidence.
+    """
+    from ouroboros.preflight_inventory import failed_reports
+
+    if isinstance(reading, dict) and reading.get("coverage") in ("final", "partial"):
+        counts = reading.get("counts") if isinstance(reading.get("counts"), dict) else {}
+        source, totals = "pass_reading", {kind: counts.get(kind) for kind in ("failed", "worker_lost")}
+        classes = {kind: [case["nodeid"] for case in reading.get(kind) or ()
+                          if isinstance(case, dict) and isinstance(case.get("nodeid"), str)] for kind in totals}
+    else:
+        source, classes = "inventory", failed_reports(row.get("inventory"))
+        totals = {kind: len(ids) for kind, ids in classes.items()}
+    found = {}
+    for kind, (key, listed) in _FAILURES.items():
+        if ids := classes.get(kind):
+            found.update({key: [clean(node) for node in ids[:_LISTED_FAILED]],
+                          listed: totals[kind] if type(totals.get(kind)) is int else None})
+    return {"failures_from": source, **found} if found else {}
+
+
 def _latest_run(ctx: Any) -> Optional[dict]:
     """The latest hermetic run of this process, which minted no green proof: the runner's
     attempt row (``preflight_inventory.record_failed_attempt``) and the terminal record
     the runner wrote beside its evidence (``result.json``). ``None`` when this process
-    holds no run, or its latest run returned without a failure (skipped, no suite)."""
+    holds no run, or its latest run returned without a failure (skipped, no suite).
+
+    Every text a seat reads is credential-redacted and, unless that record names a
+    post-commit run, shows the run's evidence folder, the gate's scratch root and the
+    author's checkout as markers (``masked_locations`` names the ones placed)."""
     from ouroboros.preflight_inventory import attempt_outcome
 
     latest = str(getattr(ctx, "_preflight_test_evidence", "") or "")
@@ -553,12 +659,23 @@ def _latest_run(ctx: Any) -> Optional[dict]:
         run.update(_live_relation(ctx, run["tested"]))
     else:
         run.update(relation="unknown", differs=[], compared_with="no tested checkout was bound before the run stopped")
-    failed = [node for lane in (row.get("inventory") or {}).values() if isinstance(lane, dict)
-              for node in lane.get("failed") or []]
-    if failed:
-        run.update(failed_tests=failed[:_LISTED_FAILED], failed_listed=len(failed))
+    post_commit = terminal is not None and terminal.get("phase") == "post_commit"
+    mask, used = _masker([] if post_commit else [(latest, "<test evidence>"), (run["repository"], "<repository>"),
+                                                 ((terminal or {}).get("scratch"), "<test scratch>")])
+
+    def clean(text: Any) -> str:
+        return _redacted(mask(str(text if text is not None else "")))
+
+    run.update(_failures(row, terminal.get("reading") if terminal is not None and not post_commit else None, clean))
+    if (account := _pass_reading(terminal, clean)) is not None:
+        run["pass_reading"] = account
     if terminal is not None and str(terminal.get("verdict") or ""):
-        run.update(diagnosis=_redacted(terminal["verdict"]))
+        run["diagnosis"] = clean(terminal["verdict"])
+    if not post_commit:
+        run["lanes"] = [{**lane, "containment_error": clean(lane["containment_error"])}
+                        if isinstance(lane, dict) and lane.get("containment_error") else lane for lane in run["lanes"]]
+    if used:
+        run["masked_locations"] = [marker for marker in _PRIVATE if marker in used]
     return run
 
 
@@ -665,17 +782,68 @@ def _observation_lines(entry: dict) -> list:
     line += (". Not proof here: the status above is the only proof claim." if entry.get("outcome") == "passed" else
              ". Evidence about those bytes, not a result of this candidate." if entry.get("relation") == "other_bytes"
              else ".")
-    lines = [line]
-    if entry.get("failed_tests"):
-        lines.append(f"  Failed tests ({len(entry['failed_tests'])} of {entry.get('failed_listed')} the run listed): "
-                     + json.dumps(entry["failed_tests"]))
+    lines = [line, *_reading_lines(entry.get("pass_reading")), *_failure_lines(entry)]
+    masked = [marker for marker in entry.get("masked_locations") or () if marker in _PRIVATE]
+    if masked:
+        lines.append("  The run's own locations are shown as "
+                     + "; ".join(f"{marker} ({_PRIVATE[marker]})" for marker in masked) + ".")
     if entry.get("lanes"):
         lines.append("  Lanes: " + json.dumps(entry["lanes"], sort_keys=True))
     if entry.get("diagnosis"):  # the run's evidence path stays the author's; no seat is granted it
-        lines += ["  Runner diagnosis (whole, as the runner recorded it; credentials redacted):",
-                  *_quoted(entry["diagnosis"])]
+        how = ("whole; credentials redacted, the run's own locations as named above" if masked
+               else "whole, as the runner recorded it; credentials redacted")
+        lines += [f"  Runner diagnosis ({how}):", *_quoted(entry["diagnosis"])]
     elif str(entry.get("terminal") or "").startswith("unavailable"):
         lines.append(f"  Runner diagnosis: none shown, its result.json is {entry['terminal']}.")
+    return lines
+
+
+def _reading_lines(reading: Any) -> list:
+    """The blocked pass as its reading recorded it: the gate's cause, then the reading's
+    coverage and gap beside it; a count the reading does not know is named unknown."""
+    if not isinstance(reading, dict):
+        return []
+    coverage = str(reading.get("coverage") or "unknown")
+    if coverage == "not_recorded":
+        return ["  No structured reading of the blocked pass was recorded with this run: none of its counts is known."]
+    counts = reading.get("counts") if isinstance(reading.get("counts"), dict) else {}
+
+    def quoted(value: Any) -> str:  # the record's own words stay JSON-quoted data
+        return json.dumps(value) if isinstance(value, str) and value else "unknown"
+
+    def count(name: str) -> str:
+        value = counts.get(name)
+        bound = "at least " if coverage == "partial" and name not in ("leak", "not_run") else ""
+        return f"{bound}{value}" if type(value) is int else "unknown"
+
+    known = coverage.upper() if coverage in ("final", "partial", "unavailable") else quoted(coverage)
+    gap = f", gap {quoted(reading['gap'])}" if reading.get("gap") else ""
+    return [f"  Blocked pass {quoted(reading.get('pass'))}, the gate's cause {quoted(reading.get('cause'))}; "
+            f"structured reading {known}{gap}; counts: "
+            + ", ".join(f"{name.replace('_', ' ')} {count(name)}" for name in _READING_CLASSES) + "."]
+
+
+def _failure_lines(entry: dict) -> list:
+    """Failed reports by what they are; an exhibit frozen before reports kept their phase
+    lists the inventory's ids as ``failed_tests`` with no ``failures_from``: unclassified."""
+    source = entry.get("failures_from")
+    reading = entry.get("pass_reading") if isinstance(entry.get("pass_reading"), dict) else {}
+    bound = "at least " if source == "pass_reading" and reading.get("coverage") == "partial" else ""
+    whose = {"pass_reading": "the blocked pass's reading counted",
+             "inventory": "the selection inventory listed"}.get(str(source), "the record listed")
+    kinds = (("failed_tests", "failed_listed", "Failed tests", ""),
+             ("worker_lost_tests", "worker_lost_listed", "Tests a worker was running when it died",
+              " These reports do not themselves establish a test failure."),
+             ("unclassified_failed", "unclassified_listed", "Failed reports of unknown phase",
+              " No recorded phase distinguishes a test failure from worker loss here."))
+    if source is None:
+        kinds = (("failed_tests", "failed_listed", *kinds[2][2:]),)
+    lines = []
+    for key, listed, title, note in kinds:
+        if ids := entry.get(key):
+            total = entry.get(listed)
+            count = f"of {bound}{total} {whose}" if type(total) is int else "shown; total unknown"
+            lines.append(f"  {title} ({len(ids)} {count}): {json.dumps(ids)}.{note}")
     return lines
 
 
@@ -731,14 +899,23 @@ def execution_section(exhibit: Any) -> str:
 def execution_material() -> list:
     """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): the seat-visible test
     exhibit over fixed placeholder records in these branches (each evidence kind, lane and tier wording, NOT_RUN with
-    and without observations, each observation kind and outcome). The recorded facts are data."""
+    and without observations, each observation kind and outcome, each reading coverage and failure source, masked
+    and unmasked diagnosis). The recorded facts are data."""
     tested = {"head": "⟨head⟩", "tree": "⟨tree⟩", "index_tree": "⟨index⟩"}
+    failures = {key: value for keys in _FAILURES.values() for key, value in zip(keys, (["⟨test⟩"], 1))}
     observed = [{"source": "review_preparation", "continued_under": "⟨enforcement⟩", "message": "⟨message⟩"},
                 *({"relation": relation, "differs": ["⟨field⟩"], "outcome": outcome, "tier": "⟨tier⟩", "selected_modules": 1,
                    "tested": tested, "failed_tests": ["⟨test⟩"], "failed_listed": 1, "lanes": {"⟨lane⟩": "⟨state⟩"},
                    "compared_with": "⟨checkout⟩", "terminal": "unavailable ⟨why⟩"}
                   for relation in ("same_bytes", "unknown", "other_bytes") for outcome in ("passed", *_OUTCOMES)),
-                {"relation": "same_bytes", "outcome": "failed", "diagnosis": "⟨diagnosis⟩"}]
+                {"relation": "same_bytes", "outcome": "failed", "diagnosis": "⟨diagnosis⟩"},
+                *({"relation": "same_bytes", "outcome": "failed", "diagnosis": "⟨diagnosis⟩", "masked_locations": masked,
+                   "pass_reading": {"pass": "⟨pass⟩", "cause": "⟨cause⟩", "coverage": coverage, "gap": "⟨gap⟩",
+                                    "counts": {"failed": 1, "not_run": None}}, "failures_from": source,
+                   **{**failures, "failed_listed": None if coverage == "partial" else 1}}
+                  for coverage, source, masked in (("final", "pass_reading", list(_PRIVATE)), ("partial", "pass_reading", []),
+                                                   ("unavailable", "inventory", list(_PRIVATE)), ("not_recorded", "inventory", []),
+                                                   ("⟨coverage⟩", "⟨source⟩", [])))]
     passed = [{"status": "passed", "evidence": evidence, "tested": tested, "receipt": "⟨receipt⟩",
                "receipt_origin": {"⟨key⟩": "⟨value⟩"}, "lanes": lanes, "empty_lanes": ["⟨lane⟩"], "tier": "selected",
                "files": ["⟨file⟩"], "omitted_files": 1, "rule": "⟨rule⟩"}

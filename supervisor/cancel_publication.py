@@ -34,6 +34,10 @@ CANCEL_NOT_FOUND = "not_found"
 CANCEL_FAILED = "failed"
 _CANCEL_TERMINALIZED = frozenset({CANCEL_CANCELLED, CANCEL_ALREADY_SETTLED, CANCEL_NOT_FOUND})
 
+# The one spelling of a linked Ouroboros's cancel of its own letter (``gateway/peer_letters_api``), for its
+# producer and every reader of the source; never my human's Stop.
+PEER_CANCEL_SOURCE = "peer_letter_cancel"
+
 # Transport is recorded fact, never proof that an HTTP caller was the owner.
 # The browser twin is ``web/modules/cancel_presentation.js``; both
 # tables must name the same sources, because one stored ``cancel_origin`` is
@@ -52,11 +56,14 @@ CANCEL_SOURCE_PHRASES = {
     "snapshot_restore": "The server stopped while this task was still running",
     # ``join_ledger`` cancel_task, Ouroboros's own tool; the asking run is below.
     "agent_tool": "Stopped by Ouroboros",
+    # ``peer_letters_api`` cancel: the linked Ouroboros that wrote the letter (its link in ``request_origin``).
+    PEER_CANCEL_SOURCE: "Stopped by the Ouroboros that sent this letter",
     # Historical rows of the retired silence diagnostic (#1376, removed 09.11.2026):
     # a silence check whose observed work moved on, settled or stopped.
     "silence_resolved": "Silence check withdrawn: the observed work no longer needed it",
     # ``ended_work_helpers``: a helper still paused when the work it helped truly ended.
     "work_finished": "Closed with the work it helped",
+    "deadline_close": "Closed after deadline expired",
 }
 # The fixed label a producer writes as ``reason`` restates its phrase, so that
 # exact label is not repeated beside it; any other reason text still shows.
@@ -65,6 +72,7 @@ CANCEL_SOURCE_LABELS = {
     "owner_restart": "Owner restart",
     "snapshot_restore": "server_shutdown",
     "work_finished": "the work it helped has ended",
+    "deadline_close": "the deadline expired",
 }
 # A recorded cause is producer free text; bound it before it joins an owner line.
 # The bound is a PREVIEW of a reason the record keeps whole, and says so.
@@ -87,7 +95,10 @@ def cancel_cause_clauses(
     parent or ancestor, the line states that relation. Only a typed
     ``request_origin`` proves an actor; ``requested_by`` alone never does.
     Ouroboros's own cancel_task stamps the run that asked, not a swept root,
-    so there the relation is the asker's, and it names that same actor.
+    so there the relation is the asker's, and it names that same actor. A
+    deadline Close is never "with" its parent: only its typed actor, the
+    record's own parent, proves "Requested by its parent task"; otherwise it
+    states no relation.
     """
     from ouroboros.utils import strip_markdown
 
@@ -98,18 +109,19 @@ def cancel_cause_clauses(
         else ""
     )
     source = str(origin.get("source") or "")
-    asker = source == "agent_tool"
     asked = str(origin.get("requested_by") or "")
+    closed = source == "deadline_close"
     record = {**event, **result}
     self_id = str(record.get("task_id") or record.get("id") or record.get("subagent_task_id") or "")
     parent = str(record.get("parent_task_id") or "")
     root = str(record.get("root_task_id") or "")
+    asker = source == "agent_tool" or closed and bool(actor) and actor == asked == parent  # Close: direct parent only
     relation = ""
     if asked and asked != self_id:
         if asked == parent:
-            relation = "Requested by its parent task" if asker else "Stopped with its parent task"
+            relation = "Requested by its parent task" if asker else "" if closed else "Stopped with its parent task"
         elif parent and asked == root:
-            relation = "Requested by an ancestor task" if asker else "Stopped with an ancestor task"
+            relation = "Requested by an ancestor task" if asker else "" if closed else "Stopped with an ancestor task"
     stated = str(origin.get("reason") or "")
     reason = ("" if " ".join(stated.split()) == CANCEL_SOURCE_LABELS.get(source)
               else " ".join(strip_markdown(stated).split()))

@@ -1,14 +1,36 @@
-"""Typed maintenance transport over the existing owned Claudexor HTTP client.
-
-The engine owns installation and job facts. This mixin only negotiates the four
-routes, preserves their bodies and marks an unconfirmed create for same-key rejoin;
-the retention record's read is a fifth, read-only route, and the project list's strict read
-(``project_registrations``, for the historical walk) a sixth.
-"""
+"""Claudexor maintenance and project registry transport over the owned HTTP client."""
 from __future__ import annotations
 
 import time
+import uuid
 from urllib.parse import quote, urlencode
+
+from ouroboros.gateways.claudexor_metadata import STORE_IDENTITY
+
+
+def bound_registration_supported(gateway) -> bool:
+    catalog = getattr(gateway, "operations", None)
+    if not callable(catalog):
+        return False
+    routes = [(op.get("method"), op.get("path")) for op in catalog() if isinstance(op, dict)]
+    return ("POST", "/v2/projects/:id/release") in routes and ("GET", "/v2/projects/:id/registration") in routes
+
+
+def registration_receipt_matches(body, project_id, store_id, root, states):
+    """The same bound answer may arrive on the wire or in a persisted walk receipt."""
+    return (isinstance(body, dict) and isinstance(root, str) and bool(root)
+            and body.get("projectId") == project_id and body.get("storeId") == store_id
+            and body.get("root") == root and body.get("state") in states)
+
+
+CANDIDATE_MATCHES = ("same", "different", "unknown")
+
+
+def candidate_match(body) -> str:
+    """The engine's word on a ``candidate`` folder beside a ``present`` bound read: ``same`` or ``different`` in
+    its own domain, else ``unknown`` (no field from an engine that ignores the query, or any other value)."""
+    value = body.get("candidateMatch") if isinstance(body, dict) and body.get("state") == "present" else None
+    return value if value in CANDIDATE_MATCHES else "unknown"
 
 
 def supports_program_maintenance(gateway) -> bool:
@@ -175,6 +197,38 @@ class ClaudexorMaintenanceGateway:
                 or not isinstance(body["commands"], list)
                 or any(body[key] is not None and not _selected_program(body[key]) for key in ("before", "after"))):
             raise ClaudexorUnavailable("malformed_response", "Claudexor vendor program receipt is unavailable")
+        return body
+
+    def project_registration_receipt(self, root: str) -> dict:
+        """Keep the canonical folder and store from this POST, including on adoption."""
+        from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+        body = self._request("POST", "/v2/projects", json_body={"root": str(root)},
+                             headers={"Idempotency-Key": uuid.uuid4().hex, **STORE_IDENTITY})
+        if not isinstance(body, dict) or not isinstance(body.get("id"), str) or not body["id"]:
+            raise ClaudexorUnavailable("malformed_response", "Project registration returned no id")
+        return {"id": body["id"], "created": body.get("created") if isinstance(body.get("created"), bool) else None,
+                "registration_root": body.get("root"), "registration_store_id": body.get("storeId")}
+
+    def bound_registration(self, project_id: str, store_id: str, root: str, *, release: bool = False,
+                           candidate: str = "") -> dict:
+        """The addressed read or release of one registration bound by store and root. A read may name a
+        ``candidate`` execution folder exactly as a start sends it; the engine compares it with this
+        registration's folder in its own domain (``candidate_match``). The release never carries one."""
+        from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+        if not all(isinstance(value, str) and value for value in (project_id, store_id, root)):
+            raise ClaudexorUnavailable("registration_unproven", "The registration binding is incomplete")
+        path = "/v2/projects/" + quote(project_id, safe="")
+        fields = {"expectedStoreId": store_id, "expectedRoot": root}
+        if release:
+            body = self._request("POST", path + "/release", json_body=fields)
+        else:
+            query = {**fields, **({"candidate": candidate} if candidate else {})}
+            body = self._request("GET", path + "/registration?" + urlencode(query))
+        states = ("released", "absent") if release else ("present", "absent")
+        if not registration_receipt_matches(body, project_id, store_id, root, states):
+            raise ClaudexorUnavailable("receipt_unverified", "Claudexor did not confirm the addressed registration")
         return body
 
     def project_registrations(self) -> list:

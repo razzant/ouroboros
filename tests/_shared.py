@@ -76,6 +76,15 @@ def retire_synthetic_retention(directory, *reasons, release=None) -> bool:
     return True
 
 
+def retire_injected_export_fault(result, error):
+    """An injected export fault proves no process: retire only the producer's own exact marker."""
+    for line in result.stderr.splitlines():
+        if line.startswith("SAFE_TEST_RETAINED "):
+            root = pathlib.Path(line.split(" ", 1)[1])
+            retire_synthetic_retention(root, f"test diagnostics incomplete: {error}",
+                                       f"retention marker or unreadable subtree: {root / 'OUROBOROS_RETAINED.txt'}")
+
+
 def retire_synthetic_gate_hold(repo, temp_root, reason) -> bool:
     """Undo a hermetic gate's hold over a lane this test stubbed or faulted, by its exact reason.
 

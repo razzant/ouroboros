@@ -3,6 +3,7 @@
 The real Skills page in Chromium and WebKit: the Official mark's explanation (a ``role="dialog"`` popup, which once had
 no background and no shadow because the popup material was selected by ``role="menu"``) is compared with a real
 menu of the same page, in both themes at a window and at a phone's width. The oracle is falsified in-test so it can fail.
+On a short screen the same explanation scrolls only its body, from the Close it opens on back to its first words.
 """
 from __future__ import annotations
 
@@ -132,3 +133,138 @@ def test_official_explanation_wears_the_same_material_as_a_menu(skills_browser, 
             skills.close(browser)
         else:
             browser.close()
+
+
+# Only a popup's body scrolls (DESIGN principle 9: fade bodies, not shells); its shell clips. A body the shell does not
+# bound grows past it, and the words it hides cannot be scrolled to.
+_REACH = """(popup) => { const body = popup.querySelector(':scope > .ui-popup-body'), s = getComputedStyle(popup);
+    const box = popup.getBoundingClientRect(), close = popup.querySelector('[data-popup-close]');
+    const inner = { top: box.top + parseFloat(s.borderTopWidth) + parseFloat(s.paddingTop),
+                    bottom: box.bottom - parseFloat(s.borderBottomWidth) - parseFloat(s.paddingBottom) };
+    return { ...inner, boxTop: box.top, boxBottom: box.bottom, vh: innerHeight, shellScrolled: popup.scrollTop,
+             bodyBottom: body ? body.getBoundingClientRect().bottom : null, sideways: body ? body.scrollWidth - body.clientWidth : null,
+             bodyScrolled: body ? body.scrollTop : null, range: body ? body.scrollHeight - body.clientHeight : null,
+             wordsTop: popup.querySelector('p').getBoundingClientRect().top,
+             closeTop: close.getBoundingClientRect().top, closeBottom: close.getBoundingClientRect().bottom,
+             closeFocused: document.activeElement === close }; }"""
+
+
+@pytest.mark.parametrize("browser_name", ["chromium", "webkit"])
+@pytest.mark.parametrize("width,height", [(667, 320), (390, 244)])
+def test_official_explanation_on_a_short_screen_scrolls_its_words_to_close(skills_browser, browser_name, width, height):
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    skills = None
+    tag = f"{browser_name}-{width}x{height}"
+    out = os.environ.get("OUROBOROS_UI_EVIDENCE_DIR")
+
+    def shot(page, state):
+        if out:
+            Path(out).mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(Path(out) / f"official-short-{tag}-{state}.png"))
+
+    try:
+        page = browser.new_page(viewport={"width": width, "height": height})
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        listing = fixture("extensions_v4.json")["skills"]
+        skills = open_skills(page, extensions=listing, sources=CONFIRMED_SOURCES, catalog=fixture("skill_catalog.json"))
+        page.goto(URL, wait_until="networkidle")
+        mark = page.locator('.skills-card[data-skill="weather"] [data-official-mark]')
+        mark.wait_for()
+        # The mark in the middle of its list: the explanation has the half of the window it opens into.
+        mark.evaluate("el => el.scrollIntoView({block: 'center'})")
+        mark.click()
+        explanation = page.locator('.skills-mark-popup:not([data-leaving])')
+        explanation.wait_for()
+        page.wait_for_function(_SETTLED)
+        opened = explanation.evaluate(_REACH)
+        shot(page, "opened")
+        assert opened["closeFocused"], ("it opens on Close, its one item", tag, opened)
+        assert opened["boxTop"] >= 0 and opened["boxBottom"] <= opened["vh"], ("inside the window", tag, opened)
+        assert opened["shellScrolled"] == 0, ("the shell never scrolls: what it moved out cannot come back", tag, opened)
+        assert opened["bodyBottom"] is not None and opened["bodyBottom"] <= opened["bottom"] + 0.5, (
+            "the shell bounds its body", tag, opened)
+        assert opened["range"] > 0, ("the words want more room than the short window gives: the body scrolls", tag, opened)
+        assert opened["sideways"] <= 0, ("its rows wrap inside its own scrollbar (WebKit's is 6px): no sideways scroll", tag, opened)
+        # From the focus it opened with, back to the first words and through to Close, by the wheel over it.
+        box = explanation.bounding_box()
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.wheel(0, -2000)
+        page.wait_for_function("el => el.querySelector(':scope > .ui-popup-body').scrollTop === 0", arg=explanation.element_handle())
+        top = explanation.evaluate(_REACH)
+        shot(page, "top")
+        assert top["wordsTop"] >= top["top"] - 0.5, ("the first words show", tag, top)
+        page.mouse.wheel(0, 2000)
+        page.wait_for_function("""el => { const body = el.querySelector(':scope > .ui-popup-body');
+            return body.scrollTop >= body.scrollHeight - body.clientHeight - 1; }""", arg=explanation.element_handle())
+        end = explanation.evaluate(_REACH)
+        assert end["closeTop"] >= end["top"] - 0.5 and end["closeBottom"] <= end["bottom"] + 0.5, ("Close shows whole", tag, end)
+        explanation.locator("[data-popup-close]").click()
+        explanation.wait_for(state="detached")
+        # The shell lays out its body only while it shows: a hidden popup and a closed dialog holding one stay hidden.
+        shown = page.evaluate("""() => ['hidden', 'closed', 'open'].map((kind) => {
+            const el = document.body.appendChild(document.createElement(kind === 'hidden' ? 'div' : 'dialog'));
+            el.className = 'ui-popup'; el.hidden = kind === 'hidden'; el.innerHTML = '<div class="ui-popup-body">probe</div>';
+            if (kind === 'open') el.show();
+            const out = getComputedStyle(el).display; el.remove(); return out; })""")
+        assert shown == ["none", "none", "flex"], (tag, shown)
+        assert errors == [], errors
+        if out:
+            (Path(out) / f"official-short-{tag}.json").write_text(
+                json.dumps({"opened": opened, "top": top, "end": end, "shown": shown}, indent=1), encoding="utf-8")
+    finally:
+        if skills:
+            skills.close(browser)
+        else:
+            browser.close()
+
+
+# The author kit (ouroboros/server_web.py read_author_kit_assets) is ui.css with no host script: a popup an author
+# draws keeps its rows directly in the shell, and the shell scrolls them; a shell holding a body clips, and the body
+# scrolls. Both in the kit's own stylesheet bytes, by the wheel a person uses.
+_KIT_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>{css}</style></head><body style="margin:0">
+<div class="ui-popup" role="menu" aria-label="Author menu" data-direct
+     style="--ui-popup-top:16px;--ui-popup-left:16px;--ui-popup-max-height:88px;--ui-popup-max-width:280px">{rows}</div>
+<div class="ui-popup" role="menu" aria-label="Wrapped menu" data-wrapped
+     style="--ui-popup-top:16px;--ui-popup-left:320px;--ui-popup-max-height:88px;--ui-popup-max-width:280px">
+<div class="ui-popup-body">{rows}</div></div></body></html>"""
+_KIT_SCROLL = """(el) => { const body = el.querySelector(':scope > .ui-popup-body'); const s = getComputedStyle(el);
+    return { shell: el.scrollTop, body: body ? body.scrollTop : null, height: el.getBoundingClientRect().height,
+             overflow: s.overflowY, color: s.backgroundColor, shadow: s.boxShadow, radius: s.borderTopLeftRadius,
+             range: (body || el).scrollHeight - (body || el).clientHeight }; }"""
+
+
+@pytest.mark.parametrize("browser_name", ["chromium", "webkit"])
+def test_author_kit_popup_scrolls_its_direct_rows_and_a_wrapped_one_only_its_body(skills_browser, browser_name, tmp_path):
+    from ouroboros.server_web import read_author_kit_assets
+
+    css = read_author_kit_assets(Path(__file__).resolve().parents[1])["css"]
+    rows = "".join(f'<button type="button" role="menuitem">Author row {n}</button>' for n in range(1, 13))
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    seen = {}
+    try:
+        page = browser.new_page(viewport={"width": 640, "height": 320})
+        page.set_content(_KIT_PAGE.format(css=css, rows=rows))
+        page.wait_for_function(_SETTLED)
+        for name in ("direct", "wrapped"):
+            popup = page.locator(f"[data-{name}]")
+            seen[f"{name}-opened"] = before = popup.evaluate(_KIT_SCROLL)
+            assert before["height"] <= 88.5 and before["range"] > 100, (name, browser_name, before)
+            box = popup.bounding_box()
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            page.mouse.wheel(0, 200)
+            page.wait_for_function(
+                "el => (el.querySelector(':scope > .ui-popup-body') || el).scrollTop > 0", arg=popup.element_handle())
+            seen[f"{name}-wheeled"] = after = popup.evaluate(_KIT_SCROLL)
+            assert after["color"] not in {"rgba(0, 0, 0, 0)", "transparent"} and after["shadow"] != "none", (name, after)
+            assert after["radius"] == "18px", (name, after)
+        direct, wrapped = seen["direct-wheeled"], seen["wrapped-wheeled"]
+        assert direct["overflow"] == "auto" and direct["shell"] > 0, ("the author's rows scroll in their shell", seen)
+        assert wrapped["overflow"] == "hidden" and wrapped["shell"] == 0 and wrapped["body"] > 0, (
+            "a shell holding a body clips and its body scrolls", seen)
+        out = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(tmp_path)))
+        out.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(out / f"author-kit-popups-{browser_name}.png"))
+        (out / f"author-kit-popups-{browser_name}.json").write_text(json.dumps(seen, indent=1), encoding="utf-8")
+    finally:
+        browser.close()

@@ -116,8 +116,8 @@ class PreparedConnection:
             error = self.host._connection_ledger.failures.get(str(self.view.connection_number))
         if error is not None and hasattr(self, 'connection'):
             self.connection['cleanup_failure'] = type(error).__name__
-            self.view.observe('host', canonical_json({'type': 'call.connection_cleanup_failed',
-                                                     'error_class': type(error).__name__}))
+            (getattr(self, 'view', None) or self._fit_source).observe('host', canonical_json({
+                'type': 'call.connection_cleanup_failed', 'error_class': type(error).__name__}))
 
     async def run(self, consume):
         # The adopted consumer polls before this connection declares its rates. Capture stays in the hub from
@@ -148,9 +148,19 @@ class PreparedConnection:
             raise ledger.failures[key]
 
     async def _fit(self, credentials, *, rebound=False):
+        from ouroboros.capability_breakage import _TOLD
         from ouroboros.observability import persist_physical_candidate
         from ouroboros.realtime_setup import session_candidate
-        view = self.view
+
+        # Both credential trials start with the lease's capture, not the first trial's projected view.
+        source = self._fit_source
+        view = self.view = copy.copy(source)
+        view.ctx = copy.copy(source.ctx)
+        view.messages, view.schemas = copy.deepcopy(self.source), copy.deepcopy(self.source_schemas)
+        view.ctx.messages, view.tools = view.messages, source.tools.copy_for(view.ctx)
+        view.ctx._actor_loaded_tool_names = set(source.ctx._actor_loaded_tool_names)
+        setattr(view.ctx, _TOLD, copy.deepcopy(getattr(source.ctx, _TOLD, None)))
+
         def fit():
             with credentials.activate():
                 return session_candidate(view, self.provider['session'], self.options, observation_fp=credentials.scope)
@@ -179,6 +189,7 @@ class PreparedConnection:
         view._prepared_view = evidence, receipt['manifest_ref']
 
     async def _adopt(self):
+        from ouroboros.capability_breakage import adopt_told
         from ouroboros.live_context_view import record_session_view
         from ouroboros.realtime_setup import measure_session_wire, text_input_estimate, rows_for_engine
         from ouroboros.llm_attempt import main_context_fit_refusal
@@ -202,7 +213,8 @@ class PreparedConnection:
                 _, request, evidence, _ = await joined(asyncio.to_thread(measure_session_wire,
                     view, view.plan, [*rows_for_engine(view.messages, vision=host.model.vision,
                         fresh=not self.options.resume_handle, owner_mode=view.plan.preferred_mode, schemas=view.schemas), *tail], view.schemas, self.provider['session'], self.options,
-                    _room_fact=False, fresh=False))
+                    _room_fact=False, fresh=False, opening_allowance_tokens=(
+                        self.session.output_bound_tokens or self.session.selected.output_allowance_tokens)))
                 if main_context_fit_refusal(request) is not None:
                     raise RealtimeSetupError('prepared_stale', 'new canonical rows need the ordinary ladder again')
                 measured = evidence['fit']['measurement']
@@ -224,7 +236,7 @@ class PreparedConnection:
                 evict_stale_image_blocks(host.messages, owner_mode=view.plan.preferred_mode, readable_only=True, reader_available=False)
             host.schemas[:] = view.schemas
             from ouroboros.tools.tool_discovery import bind_resident_schemas
-            enabled = set(host.ctx._actor_loaded_tool_names) | set(view.ctx._actor_loaded_tool_names)
+            enabled = view.ctx._actor_loaded_tool_names
             host.ctx._actor_loaded_tool_names = bind_resident_schemas(host.tools, host.schemas)
             host.ctx._actor_loaded_tool_names.update(enabled)
             host._context_changed()
@@ -235,6 +247,7 @@ class PreparedConnection:
             if host._prepared_successor is self:
                 host._prepared_successor = None
             publish(host, view)
+            adopt_told(host.ctx, view.ctx)  # the capability notices this connection's rows told
             record_session_view(host, evidence, manifest)
             self.host.timing_event('switched')
             self.connection['switched_at'] = time.time()
@@ -265,26 +278,26 @@ class PreparedConnection:
                 raise RealtimeSetupError('provider_changed', 'selected loaded generation changed; start a new call')
             work = _LoopWork(); work.task = asyncio.current_task()
             scope.enter_context(extension_work_scope(self.provider, work))
+            from ouroboros.capability_breakage import _TOLD
             from ouroboros.live_context_view import drain_exposure
             await drain_exposure(host)
             async with host._tools_lock:
                 self.source_revision = host._history_version
                 self.source, self.source_schemas = copy.deepcopy(host.messages), copy.deepcopy(host.schemas)
-                view = self.view = copy.copy(host)
-                view._connection_owner, view._connection_view = host, None
-                view.ctx = copy.copy(host.ctx)
-                view.ctx._last_context_observation = copy.deepcopy(getattr(host.ctx, '_last_context_observation', None))
-                view.messages, view.schemas = copy.deepcopy(self.source), copy.deepcopy(self.source_schemas)
-                # The fit may rebind discovery to its own schemas; the serving catalog keeps its binding.
-                view.ctx.messages, view.tools = view.messages, host.tools.copy_for(view.ctx)
-                view.ctx._actor_loaded_tool_names = set(getattr(host.ctx, '_actor_loaded_tool_names', ()))
+                source = self._fit_source = copy.copy(host)
+                source._connection_owner, source._connection_view = host, None
+                source.ctx = copy.copy(host.ctx)
+                source.ctx._last_context_observation = copy.deepcopy(getattr(host.ctx, '_last_context_observation', None))
+                source.ctx._actor_loaded_tool_names = set(getattr(host.ctx, '_actor_loaded_tool_names', ()))
+                setattr(source.ctx, _TOLD, copy.deepcopy(getattr(host.ctx, _TOLD, None)))
+                source.tools = host.tools.copy_for(source.ctx)
                 host._connection_sequence += 1
-                view.connection_number = host._connection_sequence
-                view._connection_accounting = False
-                view._connection_quote = None
-                view._caption_dirty = False
-                view._history_cached_version = -1
-                self.connection = {'number': view.connection_number, 'prepared_ahead': self.ahead}
+                source.connection_number = host._connection_sequence
+                source._connection_accounting = False
+                source._connection_quote = None
+                source._caption_dirty = False
+                source._history_cached_version = -1
+                self.connection = {'number': source.connection_number, 'prepared_ahead': self.ahead}
                 host.timing['connections'].append(self.connection)
             limit = resolve_response_limit(host.ctx.drive_root, provider=host.turn.route.accounting_provider,
                 model=host.turn.model, base_url=host.turn.route.endpoint, allow_fetch=False)
@@ -302,12 +315,18 @@ class PreparedConnection:
                 await host.check()
                 latest = capture_session_credentials(host.turn, self.provider)
                 if latest.scope != credentials.scope:
-                    await joined(self.session.close())
+                    discarded, self.session = self.session, None
+                    await joined(discarded.close())
                     credentials = latest
                     await self._fit(credentials, rebound=True)
                     if not admit(self.request):
                         raise PhysicalAttemptPreconditionFailed('context_capacity')
                     await host.check()
+                if host.hub.ended_by_owner and not host._session_opened:  # the owner's End came during the first fit
+                    self.ready.set_result(None)
+                    self.result.set_result(None)
+                    return
+                view = self.view
                 view._connection_quote = copy.deepcopy(host.quote)
                 view._connection_accounting = True
                 self.credentials = credentials
@@ -341,6 +360,7 @@ class PreparedConnection:
         except BaseException as exc:
             if isinstance(exc, RealtimeSetupError) and exc.code == 'context_capacity':
                 exc.source_revision = getattr(self, 'source_revision', None)
+                exc.proposed_schemas = getattr(self, 'source_schemas', None)  # the refused proposal, compared by value
             for future in (self.ready, self.result):
                 if not future.done():
                     future.set_exception(exc)

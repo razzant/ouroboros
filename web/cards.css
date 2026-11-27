@@ -35,9 +35,19 @@
     max-height: var(--widget-frame-height);
     overflow: hidden;
 }
-/* The renderer spaces components from each other; the first one starts at the card's own rhythm. */
+/* Past the frame ceiling an open declarative box scrolls (card_frames.js): a real scrollport wearing the shared live
+   edge fade, its travel contained so the feed behind it keeps its reading place. A collapsed or fitting box stays cut. */
+.chat-card-widget[data-fold-scroll] {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+/* The renderer spaces components from each other; the first one starts at the card's own rhythm. A skill's widget draws
+   them inside a measured wrapper (chat_cards.js fits the cap to that wrapper's height): the wrapper keeps that measure,
+   so a margin inside the first component — a Markdown heading's own token spacing, one level below the zeroed component
+   box — stays in its height instead of collapsing past it and being cut. */
 .chat-card-components > :first-child,
-.chat-card-widget > :first-child { margin-top: 0; }
+.chat-card-widget > :first-child > :first-child { margin-top: 0; }
+.chat-card-widget > :first-child { display: flow-root; }
 
 /* The plain words of the card: shown while the body loads, when it cannot be read, and on a frame's face. */
 .chat-card-fallback {

@@ -6,10 +6,18 @@ its title, its body and "Ouroboros made this" inside the column with no horizont
 component card reaches /api/decisions as the card's decision (answered by a stub here: the server side is covered by
 the living-cards suites) and says Sent; the app runs in an opaque frame without network, and its submit lands in the
 owner's draft without sending; Keep on Widgets puts the card on the Widgets page, where Remove takes it off again.
+
+A second case needs no server: it draws two declarative widget cards on a static page from synthetic input — one
+opening with a group, one with a Markdown heading — and walks the cap, Expand, Collapse and a window that holds the
+whole body (what fades, what stays clear of the fade, and that an open box holds every margin of its content).
 """
 from __future__ import annotations
 
 import json
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from threading import Thread
 
 import pytest
 
@@ -67,6 +75,96 @@ FACTS = """() => {
     const column = document.querySelector('#page-chat .chat-messages, #page-chat #chat-messages')?.getBoundingClientRect();
     return { cards, overflow: document.documentElement.scrollWidth - window.innerWidth, view: window.innerWidth,
         column: column ? { left: column.left, right: column.right } : null };
+}"""
+
+
+CUT = """card => {
+    const host = card.querySelector('.chat-card-widget');
+    const mask = (el) => { const s = getComputedStyle(el); return s.maskImage || s.webkitMaskImage || 'none'; };
+    const bubble = card.closest('.chat-bubble') || card;
+    const outside = [bubble, ...bubble.querySelectorAll('*')].filter((el) => el !== host && !host.contains(el) && mask(el) !== 'none');
+    return { cut: host.scrollHeight > host.clientHeight + 1, clipped: host.hasAttribute('data-fold-clipped'), mask: mask(host),
+             outside: outside.map((el) => el.className || el.tagName) };
+}"""
+
+WEB = Path(__file__).resolve().parents[1] / "web"
+
+# A skill's declarative widget as a message draws it, from synthetic input: static components only, so the page needs
+# nothing but the card's body and the live widget list, which the fixture page answers itself. A group comes first
+# (the renderer gives every component a 10 px top margin) and enough rows follow it to pass the 70 % cap of a 900 px window.
+SYNTHETIC_WIDGET = [
+    {"type": "group", "id": "overview", "title": "Operations overview", "description": "Synthetic rows under the cap.",
+     "layout": "grid", "columns": 2, "components": [
+         {"type": "metric", "id": f"hit-{i}", "label": f"Cache hit {i}", "value": f"{80 + i}.5 %"} for i in range(4)]},
+    {"type": "action", "id": "top-pick", "label": "Top pick", "submit": {"id": "top_pick"}},
+    {"type": "callout", "id": "note", "tone": "warning", "text": "The cap cuts this card where its box ends."},
+    {"type": "group", "id": "telemetry", "title": "Live telemetry", "layout": "stack", "components": [
+        {"type": "metric", "id": f"row-{i}", "label": f"Stream row {i}", "value": str(i * 17)} for i in range(14)]},
+    {"type": "action", "id": "tail-pick", "label": "Tail pick", "submit": {"id": "tail_pick"}},
+]
+
+# A third body tall enough that Expand meets the 8192 px frame ceiling and still cuts: the open box must become a real
+# scrollport (named, focusable, live edge cues) rather than a static fold over unreachable rows. A trailing action sits
+# past the ceiling so reaching it by scroll is observable.
+SYNTHETIC_TALL_WIDGET = [
+    {"type": "group", "id": "deep", "title": "Deep telemetry", "layout": "stack", "components": [
+        {"type": "metric", "id": f"deep-{i}", "label": f"Deep row {i}", "value": str(i * 7)} for i in range(260)]},
+    {"type": "action", "id": "deep-tail", "label": "Deep tail", "submit": {"id": "deep_tail"}},
+]
+
+# The same page's second body: a Markdown heading opens the card. Its `h3` keeps the renderer's token margin inside
+# `.widget-markdown`, one level below the component box the first-child rule zeroes, so the wrapper the fit measures
+# is what must hold that margin. The rows after it pass the 70 % cap as the group-first body does.
+SYNTHETIC_HEADING_WIDGET = [
+    {"type": "markdown", "id": "glimpse", "text": "### Cache health at a glance\n\nThe rows below are synthetic."},
+    {"type": "group", "id": "telemetry", "title": "Live telemetry", "layout": "stack", "components": [
+        {"type": "metric", "id": f"row-{i}", "label": f"Stream row {i}", "value": str(i * 17)} for i in range(14)]},
+]
+
+SYNTHETIC_PAGE = """<!doctype html><html lang="en" class="ouro-ui"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="data:,">
+<link rel="stylesheet" href="/ui.css"><link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/model_wait.css"><link rel="stylesheet" href="/room_work.css"><link rel="stylesheet" href="/cards.css">
+</head><body><div id="app"><main id="content"><div id="page-chat" class="page active"><div id="chat-messages" class="chat-messages"></div></div></main></div>
+<script src="/marked.min.js"></script><script src="/purify.min.js"></script>
+<script type="module">
+import { createChatCards } from '/modules/chat_cards.js';
+const tab = (tabId, title, components) => ({ skill: 'synthetic_cache', tab_id: tabId, title, revision: 1,
+    render: { kind: 'declarative', schema_version: 1, components } });
+const tabs = [tab('main', 'Cache health', __GROUP_COMPONENTS__), tab('heading', 'Heading first', __HEADING_COMPONENTS__), tab('tall', 'Deep telemetry', __TALL_COMPONENTS__)];
+const body = (cardId, title, tabId) => ({ card_id: cardId, revision: 1, kind: 'widget', title,
+    widget: { skill: 'synthetic_cache', tab_id: tabId } });
+const bodies = { synthetic: body('synthetic', 'Cache health', 'main'), 'synthetic-heading': body('synthetic-heading', 'Heading first', 'heading'), 'synthetic-tall': body('synthetic-tall', 'Deep telemetry', 'tall') };
+document.documentElement.dataset.theme = new URLSearchParams(location.search).get('theme') || 'light';
+const answer = (data) => Promise.resolve(new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (url, options) => { const path = String(url);
+    const card = /^\\/api\\/cards\\/([^/?]+)/.exec(path);
+    return card ? answer(bodies[decodeURIComponent(card[1])]) : path.startsWith('/api/widgets') ? answer({ ui_tabs: tabs })
+        : path.startsWith('/api/') ? answer({}) : nativeFetch(url, options); };
+const feed = document.getElementById('chat-messages');
+const cards = createChatCards({ frameNode: (message, node) => {
+    const bubble = document.createElement('div'); bubble.className = 'chat-bubble assistant'; bubble.append(node); feed.append(bubble); return bubble; } });
+cards.buildCard({ card: { card_id: 'synthetic', kind: 'widget', title: 'Cache health', revision: 1 }, text: 'Cache hit 87.5 %' });
+cards.buildCard({ card: { card_id: 'synthetic-heading', kind: 'widget', title: 'Heading first', revision: 1 }, text: 'Cache health at a glance' });
+cards.buildCard({ card: { card_id: 'synthetic-tall', kind: 'widget', title: 'Deep telemetry', revision: 1 }, text: 'Deep row 0' });
+window.ready = true;
+</script></body></html>"""
+
+# What the owner sees of the mounted card in one state: the text tray's fade and cut, whether anything else wears a mask,
+# the Expand door, and the box's own numbers (how far its content runs past it, where that content starts in it, and
+# where its last component ends).
+TRAY = """card => {
+    const host = card.querySelector('.chat-card-widget'), content = host.firstElementChild, door = card.querySelector('.chat-card-expand');
+    const mask = (el) => { const s = getComputedStyle(el); return s.maskImage || s.webkitMaskImage || 'none'; };
+    const bubble = card.closest('.chat-bubble') || card;
+    const outside = [bubble, ...bubble.querySelectorAll('*')].filter((el) => el !== host && !host.contains(el) && mask(el) !== 'none');
+    const last = content.lastElementChild;
+    return { clipped: host.hasAttribute('data-fold-clipped'), mask: mask(host), outside: outside.map((el) => el.className || el.tagName),
+             door: door.hidden ? '' : door.textContent, expanded: door.getAttribute('aria-expanded'), iframes: card.querySelectorAll('iframe').length,
+             height: host.getBoundingClientRect().height, past: host.scrollHeight - host.clientHeight,
+             inset: content.getBoundingClientRect().top - host.getBoundingClientRect().top,
+             tail: last ? host.getBoundingClientRect().bottom - last.getBoundingClientRect().bottom : null };
 }"""
 
 
@@ -157,6 +255,11 @@ def test_living_cards_render_press_submit_and_keep(direct_server_with_data, engi
                     capped = widget_card.locator(".chat-card-widget").bounding_box()["height"]
                     assert capped <= 900 * 0.7 + 1, (where, capped)
                     assert widget_card.locator(".chat-card-expand").is_visible(), where
+                    # Where that cap cuts the text, the cut fades (the shared clipped-body fade) on the widget's own box alone:
+                    # the Expand door, the title and the bubble that paints the card stay outside the mask.
+                    cut = widget_card.evaluate(CUT)
+                    print(f"LIVING_CARD_CUT {where} {json.dumps(cut)}")
+                    assert cut["cut"] and cut["clipped"] and cut["mask"] != "none" and cut["outside"] == [], (where, cut)
                     for kind in ("components", "widget"):
                         page.locator(f'.chat-card-bubble[data-card-id="{ids[kind]}"]').screenshot(
                             path=str(evidence / f"living-cards-{engine}-{theme}-{width}-{kind}.png"), animations="disabled")
@@ -165,7 +268,21 @@ def test_living_cards_render_press_submit_and_keep(direct_server_with_data, engi
                     widget_card.locator(".chat-card-expand").click()
                     assert widget_card.locator(".chat-card-widget").bounding_box()["height"] > capped + 50, "Expand lifts the cap"
                     assert widget_card.locator(".chat-card-expand").inner_text() == "Collapse"
+                    lifted = widget_card.evaluate(CUT)
+                    assert not lifted["cut"] and not lifted["clipped"] and lifted["mask"] == "none", (where, "Expand lifts the fade with the cap", lifted)
                     widget_card.locator(".chat-card-expand").click()
+                    recut = widget_card.evaluate(CUT)
+                    assert recut["cut"] and recut["clipped"] and recut["mask"] != "none" and recut["outside"] == [], (where, "Collapse cuts and fades again", recut)
+                    page.locator(f'.chat-card-bubble[data-card-id="{ids["widget"]}"]').screenshot(
+                        path=str(evidence / f"living-cards-{engine}-{theme}-{width}-widget-collapsed.png"), animations="disabled")
+                    # A window tall enough to hold the whole widget has nothing to fade or expand; the owner's window gives both back.
+                    page.set_viewport_size({"width": width, "height": 3200})
+                    page.wait_for_function("id => document.querySelector(`.chat-card[data-card-id=\"${id}\"] .chat-card-expand`).hidden", arg=ids["widget"])
+                    fits = widget_card.evaluate(CUT)
+                    assert not fits["cut"] and not fits["clipped"] and fits["mask"] == "none", (where, "a whole widget is not faded", fits)
+                    page.set_viewport_size({"width": width, "height": 900})
+                    page.wait_for_function("id => !document.querySelector(`.chat-card[data-card-id=\"${id}\"] .chat-card-expand`).hidden", arg=ids["widget"])
+                    assert widget_card.evaluate(CUT)["clipped"], (where, "the cut fades again at the owner's window")
 
                     # A press is the owner's: it goes to the card's decision and says Sent.
                     pressed = []
@@ -233,6 +350,227 @@ def test_living_cards_render_press_submit_and_keep(direct_server_with_data, engi
                     page.close()
         finally:
             browser.close()
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_declarative_card_fades_its_text_tray_alone_while_capped_on_a_static_page(engine, tmp_path):
+    """The mounted host card of a skill's declarative widget, from synthetic input, with no server behind it: the real
+    `createChatCards` on a static page that answers the card's body and the widget list itself. Two bodies share it:
+    one opens with a group, one with a Markdown heading (whose own token margin sits inside the measured wrapper).
+    The text tray alone wears the fade while its box cuts it (the title, the Expand door and the bubble stay clear, no
+    frame appears); Expand lifts both the cap and the fade, Collapse brings them back with the same fade, a window that
+    holds the whole body has neither the fade nor the door. Open or whole, the box holds all of its content — every
+    margin included, down to its last component: nothing runs past it. These are the claims the live scenario above
+    makes of a skill's real widget, here for a host where its server does not come up."""
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import sync_playwright
+
+    page_html = (SYNTHETIC_PAGE.replace("__HEADING_COMPONENTS__", json.dumps(SYNTHETIC_HEADING_WIDGET))
+                 .replace("__GROUP_COMPONENTS__", json.dumps(SYNTHETIC_WIDGET))
+                 .replace("__TALL_COMPONENTS__", json.dumps(SYNTHETIC_TALL_WIDGET)))
+
+    class Handler(SimpleHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_GET(self):
+            if not self.path.startswith("/fixture"):
+                return super().do_GET()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(page_html.encode())
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, directory=str(WEB)))
+    Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as pw:
+            browser, page = _launch(pw, engine, viewport={"width": 1280, "height": 900})
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            try:
+                page.goto(f"http://127.0.0.1:{server.server_port}/fixture?theme=light", wait_until="domcontentloaded")
+                page.wait_for_function("window.ready === true", timeout=30_000)
+                cards = {card_id: page.locator(f'.chat-card[data-card-id="{card_id}"]')
+                         for card_id in ("synthetic", "synthetic-heading")}
+                for card in cards.values():
+                    card.locator(".chat-card-expand").wait_for(state="visible", timeout=30_000)
+                # The heading body is the real Markdown path (its `h3`), never the renderer's `<pre>` fallback.
+                assert cards["synthetic-heading"].evaluate(
+                    "card => Boolean(card.querySelector('.widget-markdown h3'))"), (engine, "the heading body renders as Markdown")
+                states = {}
+
+                def look(card_id, name):
+                    states[(card_id, name)] = cards[card_id].evaluate(TRAY)
+                    print(f"STATIC_CARD_TRAY {engine} {card_id} {name} {json.dumps(states[(card_id, name)])}")
+                    return states[(card_id, name)]
+
+                def doors_hidden(hidden):
+                    page.wait_for_function(
+                        "(hidden) => [...document.querySelectorAll('.chat-card[data-card-id=\"synthetic\"] .chat-card-expand,"
+                        " .chat-card[data-card-id=\"synthetic-heading\"] .chat-card-expand')]"
+                        ".every((door) => door.hidden === hidden)", arg=hidden, timeout=30_000)
+
+                for card_id in cards:
+                    where = (engine, card_id)
+                    capped = look(card_id, "capped")
+                    assert capped["clipped"] and capped["mask"] != "none" and capped["outside"] == [], \
+                        (*where, "the cap fades the tray alone", capped)
+                    assert capped["door"] == "Expand" and capped["expanded"] == "false" and capped["iframes"] == 0, (*where, capped)
+                    assert capped["height"] <= 900 * 0.7 + 1, (*where, "the cap is 70 % of the window", capped)
+
+                    cards[card_id].locator(".chat-card-expand").click()
+                    expanded = look(card_id, "expanded")
+                    assert expanded["height"] > capped["height"] + 50, (*where, "Expand lifts the cap", expanded)
+                    assert not expanded["clipped"] and expanded["mask"] == "none" and expanded["outside"] == [], \
+                        (*where, "Expand lifts the fade", expanded)
+                    assert expanded["past"] <= 1, (*where, "an open card holds all of its content: no cut without a fade", expanded)
+                    assert expanded["tail"] >= -1, (*where, "an open box holds its last component", expanded)
+                    assert expanded["door"] == "Collapse" and expanded["expanded"] == "true" and expanded["iframes"] == 0, \
+                        (*where, expanded)
+
+                    cards[card_id].locator(".chat-card-expand").click()
+                    collapsed = look(card_id, "collapsed")
+                    assert collapsed["clipped"] and collapsed["mask"] == capped["mask"] and collapsed["outside"] == [], \
+                        (*where, "Collapse cuts and fades again, with the same fade", collapsed)
+                    assert collapsed["door"] == "Expand" and abs(collapsed["height"] - capped["height"]) <= 1, (*where, collapsed)
+
+                # A window that holds the whole body has nothing to fade or expand; the owner's window gives both back.
+                page.set_viewport_size({"width": 1280, "height": 3200})
+                doors_hidden(True)
+                for card_id in cards:
+                    fits = look(card_id, "fits")
+                    assert not fits["clipped"] and fits["mask"] == "none" and fits["door"] == "" and fits["outside"] == [], \
+                        (engine, card_id, "a whole body is not faded", fits)
+                    assert fits["past"] <= 1 and fits["tail"] >= -1, \
+                        (engine, card_id, "a whole body fits its box: no cut without a fade", fits)
+                page.set_viewport_size({"width": 1280, "height": 900})
+                doors_hidden(False)
+                for card_id in cards:
+                    recut = look(card_id, "recut")
+                    assert recut["clipped"] and recut["mask"] == states[(card_id, "capped")]["mask"] and recut["door"] == "Expand" \
+                        and recut["iframes"] == 0, (engine, card_id, recut)
+                # A collapsed card keeps its fully hidden stops out of sequential Tab order; the ones the cap still
+                # shows keep their place. Expand gives every stop back in its original order; Collapse folds again.
+                fold = """card => {
+                    const host = card.querySelector('.chat-card-widget');
+                    const buttons = [...host.querySelectorAll('button')].map((b) => ({
+                        label: b.textContent.trim(), stopped: b.hasAttribute('data-fold-stop'), tab: b.getAttribute('tabindex') }));
+                    const reachable = [...host.querySelectorAll('a[href],button,input,select,textarea,summary,[tabindex]')]
+                        .filter((el) => el.getAttribute('tabindex') !== '-1').length;
+                    return { buttons, reachable };
+                }"""
+                group = cards["synthetic"]
+                folded_stops = group.evaluate(fold)
+                print(f"STATIC_CARD_FOLD {engine} collapsed {json.dumps(folded_stops)}")
+                tail = next(b for b in folded_stops["buttons"] if b["label"] == "Tail pick")
+                top = next(b for b in folded_stops["buttons"] if b["label"] == "Top pick")
+                assert tail["stopped"] and tail["tab"] == "-1", (engine, "a wholly hidden action leaves Tab order", folded_stops)
+                assert not top["stopped"] and top["tab"] is None, (engine, "a shown action keeps its order", folded_stops)
+                evidence = _evidence_dir(tmp_path)
+                group.screenshot(path=str(evidence / f"group-folded-{engine}.png"), animations="disabled")
+                group.locator(".chat-card-expand").click()
+                open_stops = group.evaluate(fold)
+                assert all(not b["stopped"] and b["tab"] is None for b in open_stops["buttons"]), \
+                    (engine, "Expand returns every stop in its original order", open_stops)
+                group.locator(".chat-card-expand").click()
+                refolded = group.evaluate(fold)
+                assert next(b for b in refolded["buttons"] if b["label"] == "Tail pick")["stopped"], \
+                    (engine, "Collapse folds the hidden stop away again", refolded)
+
+                # A body taller than the frame ceiling: Expand meets 8192 px and still cuts, so the open box is a real
+                # named scrollport with the live shared edge fade, not a static fold over unreachable rows.
+                tall = page.locator('.chat-card[data-card-id="synthetic-tall"]')
+                tall.locator(".chat-card-expand").wait_for(state="visible", timeout=30_000)
+                scroll = """card => {
+                    const host = card.querySelector('.chat-card-widget'), door = card.querySelector('.chat-card-expand');
+                    const s = getComputedStyle(host);
+                    return { scroll: host.hasAttribute('data-fold-scroll'), fadeY: host.classList.contains('scroll-fade-y'),
+                        clipped: host.hasAttribute('data-fold-clipped'), overflowY: s.overflowY, role: host.getAttribute('role'),
+                        label: host.getAttribute('aria-label'), tab: host.getAttribute('tabindex'),
+                        above: host.hasAttribute('data-scroll-above'), below: host.hasAttribute('data-scroll-below'),
+                        scrollTop: host.scrollTop, inset: host.firstElementChild.getBoundingClientRect().top - host.getBoundingClientRect().top,
+                        door: door.hidden ? '' : door.textContent, expanded: door.getAttribute('aria-expanded'),
+                        past: host.scrollHeight - host.clientHeight, height: host.getBoundingClientRect().height,
+                        mask: s.maskImage || s.webkitMaskImage || 'none' };
+                }"""
+                tall_capped = tall.evaluate(scroll)
+                print(f"STATIC_CARD_SCROLL {engine} capped {json.dumps(tall_capped)}")
+                assert tall_capped["clipped"] and not tall_capped["scroll"] and tall_capped["overflowY"] == "hidden", \
+                    (engine, "the tall card folds while capped", tall_capped)
+                assert tall_capped["scrollTop"] == 0 and abs(tall_capped["inset"]) <= 1, \
+                    (engine, "the tall card starts at its top", tall_capped)
+                tall.locator(".chat-card-expand").click()
+                page.wait_for_function("() => document.querySelector('.chat-card[data-card-id=\"synthetic-tall\"] .chat-card-widget').hasAttribute('data-scroll-below')", timeout=30_000)
+                tall_open = tall.evaluate(scroll)
+                print(f"STATIC_CARD_SCROLL {engine} expanded {json.dumps(tall_open)}")
+                assert tall_open["scroll"] and tall_open["fadeY"] and not tall_open["clipped"], (engine, "past the ceiling it scrolls, not folds", tall_open)
+                assert tall_open["overflowY"] in ("auto", "scroll") and tall_open["past"] > 1, (engine, "a real scrollport with travel", tall_open)
+                assert tall_open["height"] <= 8192 + 1, (engine, "the exact ceiling holds", tall_open)
+                assert tall_open["mask"] != "none" and tall_open["below"], (engine, "the live shared fade names the edge below", tall_open)
+                assert tall_open["role"] == "region" and tall_open["label"] and tall_open["tab"] == "0", \
+                    (engine, "the scrollport is named and focusable", tall_open)
+                tall.screenshot(path=str(evidence / f"tall-scrollport-{engine}.png"), animations="disabled")
+                # Scrolling to the end brings the trailing action into the box and turns the cue to the edge above.
+                tall.evaluate("card => { const h = card.querySelector('.chat-card-widget'); h.scrollTop = h.scrollHeight; }")
+                page.wait_for_function("() => document.querySelector('.chat-card[data-card-id=\"synthetic-tall\"] .chat-card-widget').hasAttribute('data-scroll-above')", timeout=30_000)
+                reached = tall.evaluate("""card => {
+                    const host = card.querySelector('.chat-card-widget'); const box = host.getBoundingClientRect();
+                    const last = [...host.querySelectorAll('button')].at(-1).getBoundingClientRect();
+                    return { above: host.hasAttribute('data-scroll-above'), below: host.hasAttribute('data-scroll-below'),
+                        scrollTop: host.scrollTop, inset: host.firstElementChild.getBoundingClientRect().top - box.top,
+                        visible: last.top >= box.top - 1 && last.bottom <= box.bottom + 1 };
+                }""")
+                print(f"STATIC_CARD_SCROLL {engine} scrolled_end {json.dumps(reached)}")
+                assert reached["above"] and not reached["below"] and reached["visible"] and reached["scrollTop"] > 0, \
+                    (engine, "the end of the scrollport is reachable and cued", reached)
+                page.screenshot(path=str(evidence / f"tall-end-{engine}.png"), full_page=False, animations="disabled")
+                tall.locator(".chat-card-expand").click()
+                tall_refold = tall.evaluate(scroll)
+                print(f"STATIC_CARD_SCROLL {engine} collapsed {json.dumps(tall_refold)}")
+                assert tall_refold["clipped"] and not tall_refold["scroll"] and tall_refold["overflowY"] == "hidden", \
+                    (engine, "Collapse folds the tall card again", tall_refold)
+                assert tall_refold["scrollTop"] == 0 and abs(tall_refold["inset"]) <= 1, \
+                    (engine, "Collapse returns the tall card to its real start", tall_refold)
+                assert tall_refold["door"] == "Expand" and tall_refold["expanded"] == "false" \
+                    and tall_refold["role"] is None and tall_refold["label"] is None and tall_refold["tab"] is None \
+                    and not tall_refold["above"] and not tall_refold["below"], \
+                    (engine, "Collapse keeps Expand and clears scrollport attributes", tall_refold)
+                tall_refold_stops = tall.evaluate(fold)
+                assert tall_refold_stops["reachable"] == 0 and all(b["stopped"] and b["tab"] == "-1" for b in tall_refold_stops["buttons"]), \
+                    (engine, "Collapse returns hidden controls out of Tab order", tall_refold_stops)
+                tall.screenshot(path=str(evidence / f"tall-collapsed-{engine}.png"), animations="disabled")
+                # Keyboard Collapse from a scrolled scrollport keeps the parent's scroll place and focus on the door.
+                tall.locator(".chat-card-expand").click()
+                page.wait_for_function("() => document.querySelector('.chat-card[data-card-id=\"synthetic-tall\"] .chat-card-widget').hasAttribute('data-scroll-below')", timeout=30_000)
+                parent_before = tall.evaluate("""card => {
+                    const host = card.querySelector('.chat-card-widget'), feed = document.getElementById('chat-messages');
+                    host.scrollTop = host.scrollHeight;
+                    feed.scrollTop = 200;
+                    card.querySelector('.chat-card-expand').focus({ preventScroll: true });
+                    return { feed: feed.scrollTop, win: window.scrollY, inner: host.scrollTop };
+                }""")
+                page.keyboard.press("Enter")
+                tall_kb = tall.evaluate("""card => {
+                    const host = card.querySelector('.chat-card-widget'), door = card.querySelector('.chat-card-expand');
+                    const feed = document.getElementById('chat-messages');
+                    return { scrollTop: host.scrollTop, inset: host.firstElementChild.getBoundingClientRect().top - host.getBoundingClientRect().top,
+                        feed: feed.scrollTop, win: window.scrollY, focused: document.activeElement === door,
+                        door: door.hidden ? '' : door.textContent, expanded: door.getAttribute('aria-expanded') };
+                }""")
+                print(f"STATIC_CARD_SCROLL {engine} kb_collapse {json.dumps({'before': parent_before, 'after': tall_kb})}")
+                assert parent_before["inner"] > 0 and tall_kb["scrollTop"] == 0 and abs(tall_kb["inset"]) <= 1, \
+                    (engine, "keyboard Collapse returns to the real start", parent_before, tall_kb)
+                assert abs(tall_kb["feed"] - parent_before["feed"]) <= 1 and abs(tall_kb["win"] - parent_before["win"]) <= 1, \
+                    (engine, "Collapse does not shift parent scroll", parent_before, tall_kb)
+                assert tall_kb["focused"] and tall_kb["door"] == "Expand" and tall_kb["expanded"] == "false", \
+                    (engine, "keyboard Collapse keeps focus on Expand", tall_kb)
+                assert errors == [], (engine, "the page raised", errors)
+            finally:
+                browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
@@ -391,6 +729,73 @@ def test_chat_repaint_keeps_place_across_face_switch_and_temp_rows(direct_server
                         f"{engine}: wheel {delta} (steps={steps}) shifted visible message by {shift:.2f}px "
                         f"(expected {expected_next_top:.2f}, got {after['nextMsgTop']:.2f})"
                     )
+
+                # 1b. Smooth-animated keyboard scroll (PageUp) across the offloaded card: exercises WebKit's
+                #     multi-frame scroll animation on both macOS and Linux (unlike macOS wheel, which jumps in 1 frame).
+                wait_at_rest = """() => new Promise(done => {
+                    const feed = document.querySelector('#chat-messages');
+                    let last = feed.scrollTop, still = 0;
+                    const tick = () => {
+                        still = feed.scrollTop === last ? still + 1 : 0;
+                        last = feed.scrollTop;
+                        if (still >= 8) done(last);
+                        else requestAnimationFrame(tick);
+                    };
+                    requestAnimationFrame(tick);
+                })"""
+                page.evaluate("""() => {
+                    const feed = document.querySelector('#chat-messages');
+                    feed.scrollTop = 4000;
+                    feed.dispatchEvent(new Event('scroll'));
+                }""")
+                page.evaluate(_SETTLE_RESTORE_FRAMES)
+                page.mouse.click(550, 400)
+                plain_before = page.evaluate("() => document.querySelector('#chat-messages').scrollTop")
+                page.keyboard.press("PageUp")
+                page.wait_for_function("b => document.querySelector('#chat-messages').scrollTop !== b", arg=plain_before, timeout=10_000)
+                plain_page_up = plain_before - page.evaluate(wait_at_rest)
+                page.evaluate("""() => {
+                    const feed = document.querySelector('#chat-messages');
+                    feed.scrollTop = feed.scrollHeight;
+                    feed.dispatchEvent(new Event('scroll'));
+                }""")
+                page.wait_for_function(
+                    """(cardId) => {
+                        const card = document.querySelector(`.chat-card-bubble[data-card-id="${cardId}"]`);
+                        return Boolean(card?.querySelector('.chat-card-face')) && !card.querySelector('iframe');
+                    }""",
+                    arg=app_card["card_id"],
+                    timeout=10_000,
+                )
+                page.evaluate(_SETTLE_RESTORE_FRAMES)
+                before_page_up = page.evaluate("""(cardId) => {
+                    const feed = document.querySelector('#chat-messages');
+                    const card = document.querySelector(`.chat-card-bubble[data-card-id="${cardId}"]`);
+                    return card.nextElementSibling.getBoundingClientRect().top - feed.getBoundingClientRect().top;
+                }""", app_card["card_id"])
+                page.locator("#chat-messages .chat-bubble:not(.typing-bubble) .message").last.click()
+                page.keyboard.press("PageUp")
+                page.wait_for_function(
+                    """(cardId) => Boolean(document.querySelector(`.chat-card-bubble[data-card-id="${cardId}"] iframe`))""",
+                    arg=app_card["card_id"],
+                    timeout=10_000,
+                )
+                page.evaluate(wait_at_rest)
+                after_page_up = page.evaluate("""(cardId) => {
+                    const feed = document.querySelector('#chat-messages');
+                    const card = document.querySelector(`.chat-card-bubble[data-card-id="${cardId}"]`);
+                    return {
+                        hasIframe: Boolean(card.querySelector('iframe')),
+                        nextMsgTop: card.nextElementSibling.getBoundingClientRect().top - feed.getBoundingClientRect().top,
+                    };
+                }""", app_card["card_id"])
+                expected_page_up_top = before_page_up + plain_page_up
+                page_up_shift = abs(after_page_up["nextMsgTop"] - expected_page_up_top)
+                assert after_page_up["hasIframe"], f"{engine}: card should stay mounted as live frame after PageUp"
+                assert page_up_shift <= 2.0, (
+                    f"{engine}: PageUp shifted visible message by {page_up_shift:.2f}px "
+                    f"(expected {expected_page_up_top:.2f}, got {after_page_up['nextMsgTop']:.2f})"
+                )
 
                 # 2. Temporary / progress rows collapsing or disappearing above and below a reference row in history.
                 ref_info = page.evaluate("""() => {

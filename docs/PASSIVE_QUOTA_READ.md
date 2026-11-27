@@ -31,8 +31,7 @@ Legacy facts do not prove honored model/kind filters: missing or mismatched
 ## Response contract
 
 `ClaudexorQuotaResponse` / `ClaudexorPassiveReadError` live in
-`gateway/claudexor_contracts.py`, are re-exported by `contracts.py`, and have
-JSDoc twins in `web/modules/api_types.js`.
+`gateway/claudexor_contracts.py` and are re-exported by `contracts.py`.
 
 | Field | Meaning |
 | --- | --- |
@@ -58,7 +57,11 @@ An unread roster is never authoritative removal or an empty account set.
 
 Full Accounts adds `profiles.login_capable_harnesses`: login-eligible IDs (the
 catalog's `setupLogin`, or the manifests when the catalog is not current evidence),
-or `null` for its unread fail-open. The shared browser retains this
+or `null` for its unread fail-open. That list is the capability and nothing else:
+a saved subscription account does NOT make its harness login-eligible, so an
+api_key profile of the same harness gains no sign-in from its neighbour. A saved
+subscription keeps its OWN row (the engine's `credential_kind`), whether its
+program is missing or the roster read failed. The shared browser retains this
 policy when projecting raw passive rows, independently of catalog membership and
 read completion order. Before the first full policy, raw rows wait; legacy full
 answers retain fail-open behavior. The passive endpoint's envelope stays unchanged.

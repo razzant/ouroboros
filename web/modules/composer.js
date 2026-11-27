@@ -7,6 +7,7 @@
 // namespaces its ids and shows in its feed what was sent.
 import { bindComposerFileTargets, cleanupUploadedAttachments } from './chat_media.js';
 import { composerText, createComposerAttachments } from './chat_attachments.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { loadChatInputHistory, saveChatInputHistory, sendPanic } from './chat_activity.js';
 import { isPanicFrame } from './panic.js';
 import { clientSurfaceField } from './client_surface.js';
@@ -23,8 +24,8 @@ import { bindComposerChips } from './composer_chips.js';
 import { bindVoiceControls } from './voice_controls.js';
 import { bindConversationControls } from './conversation_controls.js';
 import { draftPlace, flySent } from './send_flight.js';
+import { createSavedDraft } from './composer_draft.js';
 
-const CHAT_DRAFT_KEY = 'ouro_chat_draft';
 const CHAT_DRAFT_VERSION_KEY = 'ouro_chat_draft_version';
 const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
 // The host icons a "+" item may name (`icon`); other names draw from the control glyphs a skill may name.
@@ -38,7 +39,7 @@ const PLUS_ICONS = {
  * text row with "+", the words, the mic slot and Send. */
 export function composerMarkup() {
     return `
-                <div id="chat-attachment-preview" class="chat-attachment-preview"></div>
+                <div id="chat-attachment-preview" class="chat-attachment-preview scroll-fade-y"></div>
                 <div class="chat-toolbar-row">
                     ${renderMobileNavToggle({ inComposer: true })}
                     <div class="chat-model-mode" id="chat-model-mode"></div>
@@ -172,14 +173,14 @@ export function createPlusMenu({ button, hostItems = [] }) {
  * Wires one room's composer once chat.js has mounted `composerMarkup()` and namespaced its ids. `byId(suffix)`
  * resolves a namespaced id; `page` is the room (the drop target and the capsules' docking box); `ws` the shared
  * socket; `replies` the room's reply controller, whose reference rides the frame; `storeKey(base)` the room's
- * sessionStorage key. `refreshState()` re-reads the room's settings after a capsule saves, `openSettings(tab)` opens a
+ * storage key; `durableDraft` requires a proven profile. `refreshState()` re-reads settings, `openSettings(tab)` opens a
  * Settings tab (the Subagents capsule's way to Agents, the Model capsule's to Accounts), `onLayout()` re-measures
  * the room's dock, `onSent({ text, frame, result, views })` shows an accepted send in the feed and returns the row it
  * added (the sent draft rises into it, send_flight.js), and `readingBack()`
  * says whether the owner's own gesture took the room off its newest row (the phone fold reads it: composer_fold.js).
  */
 export function createComposer({ page, byId, ws, replies, chatSessionId, isMain, chatId, projectId, storeKey,
-    refreshState, openSettings = null, onLayout, onSent, readingBack }) {
+    durableDraft = false, refreshState, openSettings = null, onLayout, onSent, readingBack }) {
     const input = byId('input');
     const sendBtn = byId('send');
     const plusBtn = byId('plus');
@@ -194,7 +195,9 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
     globalThis.addEventListener?.('ouro:panic', onPanicStop);
     const versionKey = storeKey(CHAT_DRAFT_VERSION_KEY);
     const newVersion = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    const savedDraft = createSavedDraft({ storeKey, durable: durableDraft });
     let draftVersion = newVersion();
+    let textEdits = 0;
     let savedUploads;
     try {
         const kept = sessionStorage.getItem(versionKey);
@@ -217,10 +220,18 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         draftVersion = newVersion();
         keepDraftVersion();
     }
+    function changeComposition() {
+        savedDraft.fork(input.value);
+        invalidateDraft();
+    }
 
     // Staged files, their thumbnails and object URLs, and the upload on Send ("+" waits while it runs).
     const attachments = createComposerAttachments({ preview: byId('attachment-preview'), attachBtn: plusBtn, fileInput,
-        input, showToast, onChange: invalidateDraft, onLayout: () => requestAnimationFrame(() => onLayout()) });
+        input, showToast, onChange: changeComposition, onLayout: () => requestAnimationFrame(() => onLayout()) });
+    // Staged badges scroll inside their own bounded strip when many files wait; the cue follows them.
+    const attachmentPreview = byId('attachment-preview');
+    let disposePreviewFade = () => {};
+    if (attachmentPreview) disposePreviewFade = bindScrollFade(attachmentPreview);
 
     // Search this chat is the pointer's way to the room's search (Ctrl+F or Cmd+F on a keyboard; chat_search.js).
     const plusMenu = createPlusMenu({ button: plusBtn, hostItems: [
@@ -255,8 +266,8 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         if (inputHistorySeededFromServer) return;
         const serverTexts = [];
         for (const msg of messages) {
-            if (msg.role !== 'user') continue;
-            let text = (msg.text || '').trim();
+            if (msg.role !== 'user' || msg.declared_author) continue; // the host's program signature outranks the skin
+            const text = (msg.text || '').trim();
             if (text) serverTexts.push(text);
         }
         const deduped = [...new Set([...serverTexts, ...inputHistory].reverse())].reverse();
@@ -278,11 +289,13 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         if (!inputHistory.length) return;
         if (step < 0) {
             if (input.selectionStart !== 0 || input.selectionEnd !== 0) return;
+            if (inputHistoryIndex === 0 && input.value === inputHistory[0]) return;
             if (inputHistoryIndex === inputHistory.length) inputDraft = input.value;
             inputHistoryIndex = Math.max(0, inputHistoryIndex - 1);
             input.value = inputHistory[inputHistoryIndex] || '';
         } else {
             if (input.selectionStart !== input.value.length || input.selectionEnd !== input.value.length) return;
+            if (inputHistoryIndex === inputHistory.length) return;
             inputHistoryIndex = Math.min(inputHistory.length, inputHistoryIndex + 1);
             input.value = inputHistoryIndex === inputHistory.length ? inputDraft : (inputHistory[inputHistoryIndex] || '');
         }
@@ -297,26 +310,24 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         if (isPanicFrame({ type: 'chat', content: text })) {
             // Emergency input precedes settings saves, uploads and their disabled Send state.
             const frame = { type: 'chat', content: text, ...clientSurfaceField() };
-            const sentDraft = draftValue;
+            const sentEdit = textEdits;
             sendPanic({ ws, frame, onAccepted: () => {
                 // Only the accepted command text is consumed. Replies, files and
                 // any newer edit belong to the next message.
-                if (input.value !== sentDraft) return;
-                if (!destroyed) {
-                    input.value = inputDraft = '';
-                    inputHistoryIndex = inputHistory.length;
-                    resizeChatInput();
-                }
-                try {
-                    if (sessionStorage.getItem(storeKey(CHAT_DRAFT_KEY)) === sentDraft) clearInputDraft();
-                } catch {}
+                if (input.value !== draftValue || textEdits !== sentEdit) return;
+                savedDraft.clearTab(draftValue);
+                if (destroyed) return;
+                input.value = inputDraft = '';
+                inputHistoryIndex = inputHistory.length;
+                invalidateDraft();
+                resizeChatInput();
             } });
             return;
         }
         if (sendBtn.disabled) return;  // guard against Enter re-entry during async upload
         const generation = panicGeneration, stopped = () => destroyed || generation !== panicGeneration;
         // Submit owns one draft, even if the next draft is made during a save or upload.
-        const version = draftVersion, reply = replies.echoRow();
+        const version = draftVersion, sentEdit = textEdits, revision = savedDraft.revision(), reply = replies.echoRow();
         const staged = replies.frameField(reply?.reply_to || null);
         const files = attachments.snapshot(), hasAttachments = files.length > 0;
         if (!text && !hasAttachments) return;
@@ -366,21 +377,25 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         };
         const requireConnection = hasAttachments;
         const result = ws.send(frame, requireConnection ? { queue: false } : undefined);
-        if (requireConnection && result?.status !== 'sent') {
+        if (result?.status !== 'sent' && (requireConnection || result?.status !== 'queued')) {
             await cleanupUploadedAttachments(uploadedAttachments.filter(item => !item.reused));
-            showToast('Connection lost before send. Reconnect and try again.', 'error');
+            showToast(requireConnection ? 'Connection lost before send. Reconnect and try again.' : 'Message not sent.', 'error');
             return;
         }
         // Fly from the sent draft, not the one that took its place during an await.
         const current = !destroyed && version === draftVersion && input.value === draftValue;
         const draft = current ? draftPlace(input.closest('.chat-field'), input) : null;
         rememberInput(text);
+        // Keep a staged next composition's own backing. A fork of borrowed words has its own tab
+        // buffer already; the older Send consumes only the revision it originally took.
+        if (current || textEdits !== sentEdit || savedDraft.revision() !== revision) savedDraft.release(revision);
         if (current) {
             // The socket or its queue took the frame: the field is free for the next message. What was sent (words, quote,
             // files, id) waits in its bubble's unconfirmed row (`onSent`), where Send again and Send as new find it.
             if (hasAttachments) attachments.clear();
             input.value = '';
-            clearInputDraft();
+            savedDraft.clearTab();
+            invalidateDraft();
             replies.clear();
         } else if (hasAttachments) {
             // The submitted message went out with the files it snapshotted; the newer draft
@@ -436,36 +451,24 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         }
     });
 
-    // Per-thread drafts survive room closure; Send clears them.
-    function saveInputDraft() {
-        try {
-            if (input.value) sessionStorage.setItem(storeKey(CHAT_DRAFT_KEY), input.value);
-            else sessionStorage.removeItem(storeKey(CHAT_DRAFT_KEY));
-        } catch {}
+    // Only mount reads; no other window can paint into this field.
+    const restored = !input.value && !ws.foreignProfile?.() && savedDraft.restore({
+        ordinary: !replies.echoRow() && !savedUploads?.length,
+    });
+    if (restored) {
+        input.value = inputDraft = restored;
+        resizeChatInput();
     }
-
-    function clearInputDraft() {
-        invalidateDraft();
-        try { sessionStorage.removeItem(storeKey(CHAT_DRAFT_KEY)); } catch {}
-    }
-
-    try {
-        const savedDraft = sessionStorage.getItem(storeKey(CHAT_DRAFT_KEY)) || '';
-        if (savedDraft && !input.value) {
-            input.value = savedDraft;
-            inputDraft = savedDraft;
-            resizeChatInput();
-        }
-    } catch {}
     attachments.restoreUploads(savedUploads);
 
     // Typing, and every change this module makes on another's behalf, keeps the recall's draft, the height and the
     // room's draft current.
     function onInput() {
+        textEdits += 1;
+        savedDraft.save(input.value);
         invalidateDraft();
         if (inputHistoryIndex === inputHistory.length) inputDraft = input.value;
         resizeChatInput();
-        saveInputDraft();
     }
     input.addEventListener('input', onInput);
 
@@ -479,7 +482,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         chipsSlot: page.querySelector('[data-composer-chips]'),
         focus: () => input.focus({ preventScroll: true }),
         getDraft: () => input.value,
-        invalidateDraft,
+        invalidateDraft: changeComposition,
         prepareNewMessage(words, ref) {
             // A delivery doubt never borrows a draft's quote or files, or appends typed words under its own quote.
             if (sendBtn.disabled || attachments.count || replies.echoRow() || (ref?.excerpt && input.value)) {
@@ -536,6 +539,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
             for (const dispose of contributed) dispose();
             plusMenu.destroy();
             attachments.destroy();
+            disposePreviewFade();
             ownerControls.destroy();
             inputSizing.dispose();
         },

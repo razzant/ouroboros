@@ -27,7 +27,7 @@ import {
     syncParkedPhase,
     taskActivityPresentation,
 } from '../modules/task_phase_chip.js';
-import { ElementStub, TextStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, PREVIEW_SCOPE, TextStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 // A chip as the page has it: the shared status mark first, its words one text node beside it.
 const chipDoc = { createElement: (tag) => new ElementStub(tag, chipDoc), createTextNode: (data) => new TextStub(data) };
@@ -598,24 +598,44 @@ test('#1110 inert history cannot retain a floating Finalizing chip', () => {
 
 
 test('ordinary early-final handler consumes producer status without ending lifecycle', () => {
-    const body = chatSource.slice(chatSource.indexOf('    function markLiveCardFinalizing('),
-        chatSource.indexOf('    // Durable cancel state wins', chatSource.indexOf('    function markLiveCardFinalizing(')));
-    for (const [fact, expected] of [
-        [{ task_terminal_status: 'failed' }, 'error'],
-        [{ task_terminal_status: 'completed', outcome_axes: { execution: { status: 'degraded' } } }, 'warn'],
-        [{}, 'working'],
-        [{ type: 'tool_error', status: 'running' }, 'working'],
-    ]) {
-        const record = { phaseEl: {}, title: 'Stable task name', finished: false };
-        const handler = new Function('liveCardRecords', 'taskKey', 'withStableViewport',
-            'markReviewAnchor', 'taskTerminalSummary', 'desiredLiveCardPhase', 'setLiveCardPhase',
-            `${body}; return markLiveCardFinalizing;`)(new Map([['t', record]]), x => x, fn => fn(),
-            () => false, taskTerminalSummary, desiredLiveCardPhase, () => true);
-        handler('t', { ...fact, task_phase: 'finalizing' });
-        assert.equal(desiredLiveCardPhase(record).phase, expected);
-        assert.equal(record.finalizingHold, true);
-        assert.equal(record.finished, false);
-        assert.equal(record.title, 'Stable task name');
+    const { prior, mount } = installDom();
+    const handlers = new Map();
+    const instance = createChatInstance({
+        ws: { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); }, isConnected: () => true, send() {} },
+        state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 }, updateUnreadBadge() {},
+        stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
+            gate() { return Promise.resolve(this.begin()); }, isCurrent: () => true, apply() {} },
+        chatId: 1, idPrefix: 'chat', mountEl: mount,
+    });
+    try {
+        for (const [kind, fact, expectedPhase, label, tail] of [
+            ['failure', { task_terminal_status: 'failed' }, 'error', 'Failed', 'Finalizing…'],
+            ['warning', { task_terminal_status: 'completed', outcome_axes: { execution: { status: 'degraded' } } },
+                'warn', 'Done with warnings', 'Finalizing…'],
+            ['no-outcome', {}, 'working', 'Finalizing…', ''],
+            ['tool-error', { type: 'tool_error', status: 'running' }, 'working', 'Finalizing…', ''],
+        ]) {
+            const frame = { chat_id: 1, task_id: `early-${kind}`, role: 'assistant', ts: '2026-11-11T10:00:00Z' };
+            const receive = handlers.get('chat');
+            receive({ ...frame, is_progress: true, content: 'Reading the brief.', suggested_name: 'Stable task name' });
+            const messages = globalThis.document.getElementById('chat-messages');
+            const card = walkCard(messages, frame.task_id);
+            assert.ok(card, kind);
+            assert.equal(card.querySelector('[data-live-title]').textContent, 'Stable task name', kind);
+            receive({ ...frame, ...fact, ts: '2026-11-11T10:00:01Z', task_phase: 'finalizing', content: 'The answer is ready.' });
+            assert.equal(walkCard(messages, frame.task_id), card, kind);
+            const phase = card.querySelector('[data-live-phase]');
+            assert.equal(phase.dataset.phase, expectedPhase, kind);
+            assert.equal(phase.textContent, label, kind);
+            const secondary = card.querySelector('[data-live-phase-secondary]');
+            assert.equal(secondary.hidden, !tail, kind);
+            assert.equal(secondary.textContent, tail, kind);
+            assert.equal(card.dataset.finished, '0', kind);
+            assert.equal(card.querySelector('[data-live-title]').textContent, 'Stable task name', kind);
+        }
+    } finally {
+        instance.destroy();
+        restoreDom(prior);
     }
 });
 
@@ -792,7 +812,7 @@ test('an ending whose only remark is a held call keeps the collapsed line of no 
                 system_type: 'task_summary', text: 'Done', history_id: `end-${taskId}`, ts: `2026-11-11T10:0${index + 2}:00Z` })),
         ];
         const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () => (String(url).startsWith('/api/chat/history')
-            ? { messages: rows, window: { complete: true } } : { active_direct_turns: [] }) }));
+            ? { profile_scope: PREVIEW_SCOPE, messages: rows, window: { complete: true } } : { active_direct_turns: [] }) }));
         const instance = createChatInstance({ ws: { on() { return () => {}; }, isConnected: () => true, send() {} },
             state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 }, updateUnreadBadge() {},
             stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from tests import _dialogue as dialogue_test
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 
 import asyncio
 import json
@@ -155,7 +156,7 @@ def test_answers_survive_eighteen_quizzes_mailbox_gc_and_rotation(runtime):
     assert not [frame for frame in runtime.frames if frame.get("type") == "chat"]
 
 
-def test_a_late_answer_keeps_its_evidence_row_and_also_enters_dialogue(runtime, monkeypatch):
+def test_a_late_answer_keeps_its_evidence_row_and_also_enters_dialogue(healthy_main, runtime, monkeypatch):
     """В17a=A sibling: a card answered after its task finished keeps the SAME
     durable quiz_answer evidence row, and because no mailbox will be drained the
     answer additionally becomes the owner's own message in the card's chat."""
@@ -220,7 +221,7 @@ def test_same_request_retry_after_rotation_preserves_winning_source(runtime, ini
 
 
 @pytest.mark.parametrize("force_overlap", [False, True])
-def test_competing_answers_preserve_only_the_recorded_winner(runtime, monkeypatch, force_overlap):
+def test_competing_answers_preserve_only_the_recorded_winner(healthy_main, runtime, monkeypatch, force_overlap):
     from ouroboros.dialogue_evidence import read_room_source
     from ouroboros.gateway.history import make_chat_history_endpoint
 
@@ -336,7 +337,7 @@ def test_answer_history_uses_canonical_root_and_project_binding(runtime):
     assert mailbox["text"] == _letter(fact) and MAILBOX_ROUTE_FACT not in fact["text"]
 
 
-def test_history_recovers_evicted_answer_without_an_extra_bubble(runtime):
+def test_history_recovers_evicted_answer_without_an_extra_bubble(healthy_main, runtime):
     import json
     from ouroboros.gateway.history import make_chat_history_endpoint
 
@@ -615,3 +616,67 @@ def test_selected_garden_answer_and_its_comment_survive_a_competing_page_row(run
             "answered", address, 1, "Gold for beans")
         assert result["coverage"]["spans"]["chat"]["to"] < entry.seq
         assert not any(m.get("system_type") == "quiz_answer" for m in result["messages"])
+
+
+@pytest.mark.parametrize("room", ["main", "project"])
+def test_settled_cards_show_no_saved_delivery_once_their_blocks_are_evicted(runtime, room):
+    """Reviews of the question quote, on the production path: ``send_quiz`` stores its card while the publication is
+    still owed (``mark_published`` follows the write), and the answer and closure rows freeze the delivery they still
+    owed. While a block holds the question, its card and Main's pointer to a Project's card show that block's delivery,
+    an unread answer's real owed included. Once the asker reads its answer and later questions evict both settled
+    blocks, the cards keep the recorded answer and closure and name no delivery, nor does the evidence those rows
+    replay."""
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.owner_quiz import OWNER_CLOSE_REASON
+    from ouroboros.projects_registry import create_project
+
+    chat = create_project(runtime.root, "planning", name="Planning")["chat_id"] if room == "project" else 1
+
+    def read(chat_id, **params):
+        response = asyncio.run(make_chat_history_endpoint(runtime.root)(
+            SimpleNamespace(query_params={"chat_id": str(chat_id), **params})))
+        assert response.status_code == 200, response.body
+        return json.loads(response.body)
+
+    def shown():  # the room's cards, and Main's pointers to them when the room is a Project
+        cards = {row["quiz"]["quiz_id"]: row["quiz"] for row in read(chat)["messages"] if row.get("msg_type") == "quiz"}
+        return cards, {row["quiz_id"]: row for row in read(1)["messages"]
+                       if row.get("system_type") == "project_question_pointer"}
+
+    _ask(runtime, "answered", chat_id=chat)
+    _ask(runtime, "closed", chat_id=chat)
+    published = [row["quiz"] for row in dialogue_test.chat_rows(runtime.root) if row.get("type") == "quiz"]
+    assert [quiz["question_delivery"] for quiz in published] == [{"kind": "publication", "state": "owed"}] * 2
+    assert shown()[0]["answered"]["question_delivery"] == {"kind": "publication", "state": "delivered"}  # the block's
+    cursor = read(chat)["after_cursor"]
+    assert _answer(runtime, "answered", request_id="pick", index=1)[0] == 200
+    owed = {"kind": "answer", "state": "owed", "reason_code": "awaiting_recipient_read"}
+    cards, pointers = shown()
+    assert cards["answered"]["question_delivery"] == owed  # its asker has not read it yet
+    if room == "project":
+        assert pointers["answered"]["question_delivery"] == owed
+    status, closed = asyncio.run(answer_decision(runtime.root, {
+        "request_id": "close", "decision_id": f"quiz:{runtime.task['id']}:closed", "action": "close"}))
+    assert status == 200, closed
+    _read(runtime, "answered")
+    for index in range(16):  # the asker asks on: the cap evicts both settled blocks
+        record_asked(runtime.root, runtime.task["id"], quiz_id=f"later-{index}", question=f"Later {index}?",
+                     options=["Yes"])
+    assert {"answered", "closed"}.isdisjoint(quiz_states(runtime.root, runtime.task["id"]))
+    decisions = {row["quiz"]["quiz_id"]: row for row in dialogue_test.chat_rows(runtime.root)
+                 if row.get("type") in {"quiz_answer", "quiz_closed"}}
+    assert {quiz_id: row["quiz"]["delivery"]["state"] for quiz_id, row in decisions.items()} == {
+        "answered": "owed", "closed": "owed"}  # what each row froze when it was written
+    cards, pointers = shown()
+    assert (cards["answered"]["state"], cards["answered"]["answered_index"], cards["answered"]["answer_row_address"]) == (
+        "answered", 1, format_address(row_address(decisions["answered"])))
+    assert (cards["closed"]["state"], cards["closed"]["closed_reason"]) == ("closed", OWNER_CLOSE_REASON)
+    evidence = [row["quiz"] for row in read(chat, cursor=cursor)["messages"]
+                if row.get("system_type") in {"quiz_answer", "quiz_closed"}]
+    assert sorted(quiz["quiz_id"] for quiz in evidence) == ["answered", "closed"]
+    for quiz in (cards["answered"], cards["closed"], *evidence):
+        assert not {"question_delivery", "delivery"} & set(quiz), quiz
+    if room == "project":
+        assert {quiz_id: row["quiz_state"] for quiz_id, row in pointers.items()} == {"answered": "answered", "closed": "closed"}
+        assert not any("question_delivery" in row for row in pointers.values()), pointers

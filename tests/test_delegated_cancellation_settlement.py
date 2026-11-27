@@ -205,12 +205,16 @@ def test_a_retirement_that_landed_is_not_replayed_as_still_owned(tmp_path, monke
     import ouroboros.usage_accounting as ua
     from ouroboros.gateways import claudexor as gw
 
+    from tests._bound_registration import BoundRegistry, owner_facts
+
     removed = []
 
-    class _Stub(_LiveRunStub):
+    class _Stub(BoundRegistry, _LiveRunStub):
         def get_run(self, rid, **_kw):
             return {"lastSeq": 9, "summary": {"state": "succeeded", "spendUsd": 0.0}}
-        def remove_project(self, pid): removed.append(pid)
+        def release_registered(self, pid):
+            removed.append(pid)
+            return "released"
 
     def _boom(*a, **k):
         raise ua.UsageAccountingError("usage accounting lock unavailable")
@@ -220,7 +224,7 @@ def test_a_retirement_that_landed_is_not_replayed_as_still_owned(tmp_path, monke
     delegate._CUSTODY.clear()
     dc.record_started(tmp_path, delegate._RunCustody(
         run_id="run-1", task_id="t-a", route_id="r", model="m", source="review_substrate",
-        project_id="prj-ours", project_owned=True, root_task_id="t-a", ledger_root=str(tmp_path)))
+        project_id="prj-ours", project_owned=True, **owner_facts(), root_task_id="t-a", ledger_root=str(tmp_path)))
     dc.settle_run(tmp_path, _Stub(), dc.replay(tmp_path)["run-1"], _Stub().get_run("run-1"))
     delegate._CUSTODY.clear()          # the worker restarts
 

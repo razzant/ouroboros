@@ -4,10 +4,14 @@ No authority is stored here. The supervisor binds the requesting mind for one
 control call; the existing fence/grant/CAS records retain who requested it.
 A call may also carry the caller's named decision to go on past held calls
 whose outcome is unknown (``accepting_unknown``); the addressed action's own
-census applies it to its tree and records it (``local_custody_repair``).
+census applies it to its tree and records it (``local_custody_repair``); a mind's list call
+binds each of its rows as such (``list_row``).
 The owner's own Resume door binds itself (``owner_door``) for the grant decisions that
 need positive owner provenance, which an unbound call never supplies. The host's
 own act unbinds all of these (``host_control``), even when a door's call reaches it.
+After Panic a mind's Resume may stand on my human's own later action, which the host verified
+for that one call (``panic_release``): it lifts the owner-only bar of the named Panic hold and
+carries no other owner provenance.
 """
 
 from contextlib import contextmanager
@@ -35,6 +39,25 @@ def accepting_unknown(ids, text: str = ""):
 def accepted_unknown() -> dict:
     """The bound decision, ``{}`` when the call named none."""
     return dict(_ACCEPT_UNKNOWN.get() or {})
+
+
+_LIST_ROW = ContextVar("lifecycle_list_row", default="")
+
+
+@contextmanager
+def list_row(call_id: str):
+    """Bind, for this one call, that it is one row of a mind's list call (its ``list_call``, a general Resume): a
+    choice that must be addressed alone (``delegate_resume.selects``) is never taken there."""
+    token = _LIST_ROW.set(str(call_id or ""))
+    try:
+        yield
+    finally:
+        _LIST_ROW.reset(token)
+
+
+def list_row_call() -> str:
+    """The list call this control call is one row of; ``""`` for a call addressed alone."""
+    return str(_LIST_ROW.get() or "")
 
 
 PAUSE_AUTHORS = ("owner", "ouroboros")
@@ -116,15 +139,38 @@ def resume_author() -> dict:
     return control_actor() or owner_door_bound()
 
 
+_PANIC_RELEASE = ContextVar("lifecycle_panic_release", default=None)
+
+
+@contextmanager
+def panic_release(basis: dict):
+    """Bind, for this one call, my human's own action after the last Panic that the host verified
+    (``supervisor.panic_choice``: consciousness they turned on in the app to let Ouroboros choose). Read only where a
+    Panic hold asks for the owner (``panic_release_bound``); the call stays the mind's everywhere else."""
+    token = _PANIC_RELEASE.set(dict(basis) if basis else None)
+    try:
+        yield
+    finally:
+        _PANIC_RELEASE.reset(token)
+
+
+def panic_release_bound() -> dict:
+    """The verified action this call releases a Panic hold on; ``{}`` when none is bound."""
+    return dict(_PANIC_RELEASE.get() or {})
+
+
 @contextmanager
 def host_control():
     """Bind, for this one call, the host's own act: an automatic path a door's call can reach
     (``continuation_admission.release_settled_continuations``) runs as the host, not as that door, so neither
     the caller's authorship, the owner's door nor the caller's named decision reads through it."""
-    tokens = _ACTOR.set(None), _OWNER_DOOR.set(None), _ACCEPT_UNKNOWN.set(None)
+    tokens = (_ACTOR.set(None), _OWNER_DOOR.set(None), _ACCEPT_UNKNOWN.set(None), _LIST_ROW.set(""),
+              _PANIC_RELEASE.set(None))
     try:
         yield
     finally:
+        _PANIC_RELEASE.reset(tokens[4])
+        _LIST_ROW.reset(tokens[3])
         _ACCEPT_UNKNOWN.reset(tokens[2])
         _OWNER_DOOR.reset(tokens[1])
         _ACTOR.reset(tokens[0])

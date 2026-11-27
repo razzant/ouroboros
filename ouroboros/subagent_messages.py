@@ -23,6 +23,8 @@ SUBAGENT_MESSAGE_FIELDS: tuple[str, ...] = (
     "effective_model_lane",
     "model",
     "executor_route",
+    # The executor the delegation selected, frozen at scheduling (``requested_executor_route``).
+    "requested_executor_route",
     "parent_cognitive_route",
     "coordinator_route",
     "coordinator_billing",
@@ -65,6 +67,75 @@ def is_task_card_message(meta: Mapping[str, Any] | None) -> bool:
     source = meta if isinstance(meta, Mapping) else {}
     return (source.get("card_row") in CARD_ROW_PLACEMENTS
             or str(source.get("delegation_role") or "").strip().lower() == "subagent")
+
+
+def _display_api_model_target(target: str) -> str:
+    """Drop any local API connection name (``kind@name::model`` -> ``kind::model``) for display.
+
+    The head's grammar is ``provider_models.parse_model_route``'s, read on the head alone, while the
+    text after ``::`` is shown as written. So bare/opaque ids and ``@`` inside model names stay
+    intact, one trailing `` (local)`` suffix survives (a repeated mark no longer hides the head
+    behind it), and malformed or model-less named heads return ``""`` without leaking the
+    connection name or fabricating a model.
+    """
+    from ouroboros.provider_models import parse_model_route
+
+    text = target.strip()
+    if not text:
+        return ""
+    suffix = ""
+    if text.endswith(" (local)"):
+        suffix = " (local)"
+        text = text[:-len(" (local)")].strip()
+    head, sep, model = text.partition("::")
+    if not sep:
+        return f"{text}{suffix}"
+    parts = parse_model_route(f"{head}::")
+    if not parts.valid:
+        return ""
+    if "@" in head and head.partition("@")[0] == parts.kind:
+        model = model.strip()
+        return f"{parts.kind}::{model}{suffix}" if model else ""
+    return f"{text}{suffix}"
+
+
+def requested_executor_route(record: Mapping[str, Any] | None) -> Dict[str, str]:
+    """The executor a delegation selected: ``{kind, target_id}`` of the row snapshot frozen when the
+    child was scheduled (``configured_subagent.route``, top-level then legacy ``metadata``), else
+    its saved display copy. A snapshot with no route identity yields to it; one that supplies an
+    identity takes priority even if the identity cannot be displayed.
+
+    A request, not a receipt: what ran stays the run's evidence. Only the kind and display target travel —
+    never the row's account pin, local API connection name, or other settings; ``{}`` when neither names
+    a known kind and a target.
+    """
+    source = record if isinstance(record, Mapping) else {}
+    nested = source.get("metadata")
+    metadata = nested if isinstance(nested, Mapping) else {}
+    for container in (source, metadata):
+        snapshot = container.get("configured_subagent")
+        route = snapshot.get("route") if isinstance(snapshot, Mapping) else None
+        if route and (not isinstance(route, Mapping) or "kind" in route or "target_id" in route):
+            break
+    else:
+        route = source.get("requested_executor_route") or metadata.get("requested_executor_route")
+    if not isinstance(route, Mapping):
+        return {}
+    kind, target = route.get("kind"), route.get("target_id")
+    if kind not in ("api_model", "agent_session") or not isinstance(target, str):
+        return {}
+    cleaned = _display_api_model_target(target) if kind == "api_model" else target.strip()
+    if not cleaned:
+        return {}
+    return {"kind": kind, "target_id": cleaned}
+
+
+def show_requested_executor_route(row: Dict[str, Any]) -> None:
+    """Leave a row's saved ``requested_executor_route`` as ``requested_executor_route`` shows it, in place: a copy that
+    names nothing displayable is dropped, and a row without the field is never read."""
+    if "requested_executor_route" in row:
+        if shown := requested_executor_route({"requested_executor_route": row.pop("requested_executor_route")}):
+            row["requested_executor_route"] = shown
 
 
 def executor_observation_meta(
@@ -224,6 +295,8 @@ def subagent_message_meta(
         "effort_requested": first("effort_requested"),
         "effort_source": first("effort_source"),
     }
+    if selected := requested_executor_route(source):
+        meta["requested_executor_route"] = selected
     cognitive = source.get("parent_cognitive_route") or metadata.get("parent_cognitive_route")
     if isinstance(cognitive, Mapping):
         meta["parent_cognitive_route"] = dict(cognitive)
@@ -237,8 +310,11 @@ def subagent_message_meta(
                                                  use_local=local, cost=cost)
     meta.update(use_local_model=bool(local), coordinator_route=route,
                 coordinator_billing=first("coordinator_billing", "nanny_billing") or billing)
-    if first("coordinator_provenance"):
-        meta["coordinator_provenance"] = first("coordinator_provenance")
+    from ouroboros.supervisor_route import cognitive_route_provenance
+
+    # A recorded word, else the snapshot's choice in the words dispatch tells the nanny, as the queued card names it.
+    if provenance := first("coordinator_provenance") or cognitive_route_provenance(dict(cognitive)):
+        meta["coordinator_provenance"] = provenance
     if event:
         meta["subagent_event"] = str(event)
     return meta

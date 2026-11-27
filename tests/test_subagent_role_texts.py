@@ -113,14 +113,13 @@ def test_schedule_subagent_tells_the_parent_children_write_signed_memory_and_dra
     from ouroboros.tools.control import get_tools
 
     description = next(entry.schema for entry in get_tools() if entry.name == "schedule_subagent")["description"]
-    # Addressed to the parent, so "their own name" where the child's assignment says "your own name".
-    # One statement covers read-only and mutative children alike (#502 merged its two former copies).
-    assert "Children may write knowledge notes, memory marks and chronicle drafts in their own name" in description
-    assert "(the integrating mind accepts or rejects drafts: chronicle_write kind=decision)" in description
-    assert "no child commits, grants itself tools or writes identity/scratchpad" in description
-    assert description.startswith("Start a child on one objective; it returns task_id and reports back.")
-    assert ("Default native READ-ONLY children inspect repo/data/history and web/browser; no "
-            "other writes or shell/review/runtime/skills") in description
+    # These rights belong to the child by name, independently of the write surface it gets.
+    assert "own knowledge notes, memory marks, chronicle drafts" in description
+    assert "accept/reject: chronicle_write" in description
+    assert "no commits, tool self-grants or identity/scratchpad" in description
+    assert "one objective" in description and "read the handoff (task_id)" in description
+    assert "Default native READ-ONLY: repo/data/history, web/browser" in description
+    assert "no other writes or shell/review/runtime/skills" in description
     # Which records a child drafts is said once, by the tool that writes them, in the same catalog.
     chronicle = next(entry.schema for entry in chronicle_tools() if entry.name == "chronicle_write")["description"]
     assert "A delegated child or nanny publishes pages and parts only as drafts" in chronicle

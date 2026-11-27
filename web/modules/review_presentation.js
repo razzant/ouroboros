@@ -4,6 +4,7 @@ import { setInertCardPresentation } from './task_phase_chip.js';
 import { escapeHtmlAttr, sinceLocalTime } from './utils.js';
 import { isStoreMigrating, taskSourceDownloadUrl } from './api_client.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
+import { bindScrollFade, replaceScrollFade, restoreFocusWithoutReveal } from './scroll_fade.js';
 import { reconcileReviewMarkup } from './review_dom_patch.js';
 import { noticeLine } from './host_notice_text.js';
 import {
@@ -1422,8 +1423,21 @@ export function createReviewPresentationController({
 } = {}) {
     const groups = new Map();
     const state = disclosure || {};
+    let destroyed = false;
     if (!(state.expandedGroups instanceof Set)) state.expandedGroups = new Set();
     if (state.sectionExpanded !== true) state.sectionExpanded = false;
+
+    // Only the toggled facts and the open boxes a render retired need work. Keyed survivors keep their binding.
+    const factsFades = new Set();
+    const releaseFacts = (body) => { replaceScrollFade(body); factsFades.delete(body); };
+    const onFactsToggle = ({ target }) => {
+        if (!target?.matches?.('.review-facts')) return;
+        const body = target.querySelector(':scope > .review-facts-body');
+        if (!body) return;
+        if (target.open) { bindScrollFade(body); factsFades.add(body); }
+        else releaseFacts(body);
+    };
+    host?.addEventListener?.('toggle', onFactsToggle, true);
 
     // Keyed reconciliation keeps a focused control in place; a node an update had to replace hands
     // focus to its successor (the same group, source, facts or action), never to the page.
@@ -1440,10 +1454,10 @@ export function createReviewPresentationController({
         if (!focused || focused.node?.isConnected) return;
         const value = String(focused.value ?? '').replaceAll('"', '\\"');
         const target = host.querySelector?.(focusSelector(focused.key, value));
-        (focused.summary ? target?.querySelector?.('summary') || target : target)?.focus?.();
+        restoreFocusWithoutReveal(focused.summary ? target?.querySelector?.('summary') || target : target);
     };
 
-    const render = () => onDomWrite(() => {
+    const render = () => !destroyed && onDomWrite(() => {
         if (!host || !summary) return;
         const focused = focusedControl();
         const { activeCount } = reviewGroupCounts(groups);
@@ -1467,14 +1481,15 @@ export function createReviewPresentationController({
         }
         reconcileReviewMarkup(host, renderReviewsSection(groups, state));
         restoreFocus(focused);
+        for (const body of factsFades) if (!host.contains(body)) releaseFacts(body);
     });
 
-    summary?.addEventListener?.('click', () => {
+    const onSummary = () => {
         state.sectionExpanded = !state.sectionExpanded;
         render();
         if (state.sectionExpanded) onHydrate();
-    });
-    host?.addEventListener('click', async (event) => {
+    };
+    const onClick = async (event) => {
         const read = event.target?.closest?.('[data-review-read-url]');
         if (read) {
             const url = read.dataset.reviewReadUrl;
@@ -1492,11 +1507,12 @@ export function createReviewPresentationController({
             state.historyLoading = true; state.historyError = false; render();
             try {
                 const page = await getTaskReviewHistory(state.historyTask, state.historyOffset || 0);
+                if (destroyed) return;
                 const incoming = reviewGroupsFromTaskDetail(page, state.historyTask);
                 for (const group of incoming) mergeReviewGroup(groups, group);
                 state.historyOffset = page.next_offset;
                 state.historyMore = page.next_offset !== null && page.next_offset !== undefined;
-            } catch { state.historyError = true; }
+            } catch { if (destroyed) return; state.historyError = true; }
             state.historyLoading = false; render(); return;
         }
         const hydrateRetry = event.target?.closest?.('[data-review-hydrate-retry]');
@@ -1519,7 +1535,9 @@ export function createReviewPresentationController({
         else state.expandedGroups.add(groupId);
         render();
         if (state.expandedGroups.has(groupId)) onHydrate();
-    });
+    };
+    summary?.addEventListener?.('click', onSummary);
+    host?.addEventListener('click', onClick);
 
     return {
         groups,
@@ -1552,6 +1570,14 @@ export function createReviewPresentationController({
             const isVisible = statusVisible(status);
             if (wasVisible || isVisible) render();
             return wasVisible || isVisible;
+        },
+        destroy() {
+            destroyed = true;
+            state.historyLoading = false;
+            summary?.removeEventListener?.('click', onSummary);
+            host?.removeEventListener?.('click', onClick);
+            host?.removeEventListener?.('toggle', onFactsToggle, true);
+            for (const body of factsFades) releaseFacts(body);
         },
     };
 }

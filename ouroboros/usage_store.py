@@ -39,9 +39,10 @@ from ouroboros._usage_money import (
     render_cash, rounded_cash,
 )
 from ouroboros._usage_rows import (
-    REVIEW_ATTRIBUTION_KEYS, BindingIndex, Bucket, row_ts_epoch, summary_delta,
+    REVIEW_ATTRIBUTION_KEYS, ROOT_CAP_SCOPE, WORK_CAP_SCOPE, BindingIndex, Bucket, row_ts_epoch, summary_delta,
+    valid_work_cap,
 )
-from ouroboros.usage_origin import bind_root_attribution
+from ouroboros.usage_origin import backfill_root_caps, bind_root_attribution, root_caps_backfill_pending
 from ouroboros import store as _core, store_timing
 from ouroboros.store import (
     TIER_ENFORCED, TIER_NAME, busy as _busy, file_identity as _identity, fsync_directory as _fsync_directory,
@@ -148,6 +149,11 @@ _DERIVED = ("revision", "seq_first", "ts_reserved", "ts_dispatched", "ts_final",
             "weight", "has_root_limit", "has_group_limit", "extra")
 _COLUMNS = tuple(dict.fromkeys((*_FIELDS.values(), *_DERIVED)))
 _ATTEMPT_CAPTURE = ("extra", "revision", *dict.fromkeys(_FIELDS.values()))  # what ``_decode`` reads: no REAL column
+_DAY_COST_MAPPED = ("cost_usd", "reservation_upper_bound_usd", "cost_final", "pricing_known")
+_DAY_COST_EXTRA = (*_DAY_COST_MAPPED, "cost_partial", "cost_estimated", _NONE_KEY)
+_DAY_COST_FIELDS = {key: _FIELDS[key] for key in ("attempt_id", "kind", "state", *_DAY_COST_MAPPED)}
+_DAY_COST_COLUMNS = tuple(_DAY_COST_FIELDS.values())
+_DAY_COST_PATHS = ", ".join(f"'$.{key}'" for key in _DAY_COST_EXTRA)
 
 
 def _encode(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -187,16 +193,29 @@ def decode_attempts(captured: Captured) -> List[Dict[str, Any]]:
 
 
 def _decode(record: Any) -> Dict[str, Any]:
-    row = json.loads(record["extra"], parse_float=LiteralFloat)
-    for key in row.pop(_NONE_KEY, ()):
+    row = _apply_columns(json.loads(record["extra"], parse_float=LiteralFloat), record, _FIELDS)
+    row["revision"] = record["revision"]
+    return row
+
+
+def _apply_columns(row: dict, record: Any, fields: dict) -> dict:
+    for key in row.pop(_NONE_KEY, ()) or ():
         row[key] = None
-    for key, column in _FIELDS.items():
+    for key, column in fields.items():
         value = record[column]
         if value is None:
             continue
         row[key] = bool(value) if key in _BOOL else LiteralFloat(value) if key in _MONEY else value
-    row["revision"] = record["revision"]
     return row
+
+
+def decode_daily_cost_rows(captured: Captured) -> Iterator[Dict[str, Any]]:
+    """Decode only spend inputs after the read ends, with the attempt codec's column precedence."""
+    for record in captured.rows():
+        extra = dict(zip(_DAY_COST_EXTRA, json.loads(record["cost_extra"], parse_float=LiteralFloat)))
+        if explicit_nones := extra.get(_NONE_KEY):
+            extra[_NONE_KEY] = [key for key in explicit_nones if key in extra]
+        yield _apply_columns(extra, record, _DAY_COST_FIELDS)
 
 
 # ---- summary scopes ---------------------------------------------------------
@@ -541,6 +560,46 @@ class Txn:
             f"FROM attempts WHERE {_PERIOD_WHERE} AND state='settled' AND (cache_write_tokens>0 OR cost_usd IS NOT NULL)",
             (int(first), int(end), str(since_iso)))]
 
+    def daily_cost_bounds(self) -> Tuple[int, List[Optional[str]]]:
+        """Return a high-water rowid and the category/time index's prefixes by seeks, not a DISTINCT scan."""
+        highest = self.conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM attempts").fetchone()[0]
+        categories: List[Optional[str]] = [None]
+        prefix = "SELECT category FROM attempts INDEXED BY attempts_category_time WHERE "
+        suffix = " ORDER BY category LIMIT 1"
+        row = self.conn.execute(prefix + "category IS NOT NULL" + suffix).fetchone()
+        while row is not None:
+            categories.append(row[0])
+            row = self.conn.execute(prefix + "category>?" + suffix, (row[0],)).fetchone()
+        return highest, categories
+
+    def daily_cost_addresses(self, category: Optional[str], highest: int, after: Tuple[float, int],
+                             limit: int) -> list:
+        """Seek a short page of dated candidates: no receipts, blobs, tariff data or task bodies here.
+
+        A last stamp makes a candidate, never decides the date of a regular call; its start stamps do.
+        Folded and pre-ledger import rows lack a trustworthy per-call start by construction.
+        """
+        epoch, rowid = after
+        return self.conn.execute(
+            "SELECT ts_last_epoch, rowid, attempt_id, root_task_id, kind, ts_reserved, ts_dispatched "
+            "FROM attempts INDEXED BY attempts_category_time "
+            "WHERE category IS ? AND ts_last_epoch>=? AND (ts_last_epoch, rowid)>(?, ?) AND rowid<=? "
+            "AND COALESCE(NULLIF(kind, ''), 'attempt') IN ('attempt', 'subscription_session', 'external_unmetered') "
+            "AND state!='released' ORDER BY ts_last_epoch, rowid LIMIT ?",
+            (category, epoch, epoch, rowid, highest, limit),
+        ).fetchall()
+
+    def daily_cost_rows(self, attempt_ids: Sequence[str]) -> Captured:
+        """Only spend inputs of one matched address page, never whole receipts.
+
+        Multi-path JSON extraction returns an array of JSON literals; scalar SQLite REAL conversion
+        would lose the original monetary literal. Keep the array as text across the capture.
+        """
+        return capture(self.conn, f"SELECT {', '.join(_DAY_COST_COLUMNS)}, "
+                       f"'' || json_extract(extra, {_DAY_COST_PATHS}) AS cost_extra FROM attempts "
+                       "WHERE attempt_id IN (SELECT value FROM json_each(?))",
+                       (json.dumps(list(attempt_ids)),), (*_DAY_COST_COLUMNS, "cost_extra"))
+
     def bucket(self, scope: str, key: str = "") -> Bucket:
         address = (scope, str(key))
         if address not in self._buckets:
@@ -594,6 +653,11 @@ class Txn:
         record = self.conn.execute("SELECT binding FROM bindings WHERE scope=? AND key=?", (scope, key)).fetchone()
         return None if record is None else json.loads(record["binding"], parse_float=LiteralFloat)
 
+    def bindings(self, scope: str) -> Dict[str, Dict[str, Any]]:
+        """Read a whole binding axis once, for projections that already enumerate every root."""
+        return {row["key"]: json.loads(row["binding"], parse_float=LiteralFloat) for row in
+                self.conn.execute("SELECT key, binding FROM bindings WHERE scope=?", (scope,))}
+
     def meta(self, key: str) -> Any:
         record = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return None if record is None else json.loads(record["value"])
@@ -646,6 +710,18 @@ class Txn:
         extra.update(fields)
         return self.conn.execute("UPDATE attempts SET extra=?, revision=revision+1 WHERE attempt_id=? AND revision=?",
                                  (_json(extra), str(attempt_id), expected_revision)).rowcount == 1
+
+    def set_work_cap(self, group_id: str, record: Dict[str, Any]) -> None:
+        """Replace one work's cap (``WORK_CAP_SCOPE``), the binding a later record replaces; rows, money and
+        projection debt stay as they are."""
+        if not self.writable or self.committed:
+            raise UsageAccountingError("usage store transaction is not writable")
+        if work_caps_reconcile_pending(self.meta("import")) and self.binding(WORK_CAP_SCOPE, str(group_id)) is None:
+            raise UsageAccountingError("exported work-cap reconciliation is pending")
+        if not valid_work_cap(record) or record.get("billing_group_id") != str(group_id):
+            raise UsageAccountingError("invalid work-cap record")
+        self.conn.execute("INSERT OR REPLACE INTO bindings (scope, key, binding) VALUES (?, ?, ?)",
+                          (WORK_CAP_SCOPE, str(group_id), _json(durable_literals(record))))
 
     def ack_dirty_owner(self, owner_id: str, revision: int) -> bool:
         """A concurrent receipt with a later revision keeps its projection debt."""
@@ -713,7 +789,7 @@ class Txn:
                     f"VALUES ({','.join('?' * len(_SUMMARY_COLUMNS))})", _bucket_record(scope, key, bucket))
             else:
                 self.conn.execute("DELETE FROM summaries WHERE scope=? AND key=?", (scope, key))
-        bind_root_attribution(self.conn, stored)
+        bind_root_attribution(self.conn, stored, materialize_root_cap=not root_caps_backfill_pending(self.meta("import")))
         for owner in dict.fromkeys((str(stored.get("task_id") or ""), str(stored.get("root_task_id") or ""))):
             if owner:
                 self._receipt_tasks.add(owner)
@@ -839,7 +915,8 @@ def store_tier(root: pathlib.Path, *, wait_sec: float, migrate: bool = True, rem
         lock.release()
 
 
-def _stored_meta(path: pathlib.Path, tier: str, wait_sec: float, *, remaining_sec=None) -> Dict[str, Any]:
+def _stored_meta(path: pathlib.Path, tier: str, wait_sec: float, *, remaining_sec=None,
+                 include_work_caps: bool = False) -> Dict[str, Any]:
     """``meta.import`` and ``meta.export`` of a store file (``{}`` for one that cannot be read)."""
     with contextlib.ExitStack() as stack:
         if tier == TIER_NAME:
@@ -853,6 +930,8 @@ def _stored_meta(path: pathlib.Path, tier: str, wait_sec: float, *, remaining_se
             conn.execute(f"PRAGMA busy_timeout = {int(_remaining_wait(wait_sec, remaining_sec) * 1000)}")
         try:
             records = conn.execute("SELECT key, value FROM meta WHERE key IN ('import', 'export')").fetchall()
+            caps = (conn.execute("SELECT key, binding FROM bindings WHERE scope=?", (WORK_CAP_SCOPE,)).fetchall()
+                    if include_work_caps else ())
         except sqlite3.OperationalError as exc:
             if _busy(exc):
                 error = UsageLockUnavailable(f"usage store busy: {exc}", reason="contention")
@@ -861,7 +940,10 @@ def _stored_meta(path: pathlib.Path, tier: str, wait_sec: float, *, remaining_se
             return {}
         except sqlite3.DatabaseError:
             return {}
-        return {record["key"]: json.loads(record["value"]) for record in records}
+        out = {record["key"]: json.loads(record["value"]) for record in records}
+        if include_work_caps:
+            out[WORK_CAP_SCOPE] = {row["key"]: json.loads(row["binding"], parse_float=LiteralFloat) for row in caps}
+        return out
 
 
 def _sha256_file(path: pathlib.Path) -> Optional[str]:
@@ -951,10 +1033,10 @@ def read(root: pathlib.Path | str, *, allow_stale: bool = False):
 
     if allow_stale:
         root, events = pathlib.Path(root), pathlib.Path(root) / "logs" / "events.jsonl"
-        waiting = (root / LEDGER_REL).is_file() or (completed_legacy_watermark(root) is None
-                                                    and events.is_file() and events.stat().st_size > 0)
-        return hold(root, timeout_sec=USAGE_DISPLAY_LOCK_TIMEOUT_SEC, write=False,
-                    migrate=_identity(root / STORE_REL) is not None or not waiting)
+        waiting = _identity(root / STORE_REL) is None and ((root / LEDGER_REL).is_file() or (
+            (_had_usage_export(root) or (events.is_file() and events.stat().st_size > 0))
+            and completed_legacy_watermark(root) is None))
+        return hold(root, timeout_sec=USAGE_DISPLAY_LOCK_TIMEOUT_SEC, write=False, migrate=not waiting)
     return hold(root, timeout_sec=USAGE_LOCK_TIMEOUT_SEC, write=False)
 
 
@@ -1011,10 +1093,13 @@ def migrate_from_journal(root: pathlib.Path | str, *, initialize_journal: bool =
                 if not status or status.get("status") != "completed":
                     raise UsageLedgerCorrupt(f"usage store unreadable or without a completed import: {path}")
                 report = {"status": "already_completed", **_retire_journal(root, status)}
-                if initialize_journal and not stored.get("export"):  # an exporting store stays as it is handed off
-                    report["journal_selected"] = _select_journal(root, path, tier)
-                    report["window_index"] = _ensure_read_index(root, path, tier, "attempts_root_time", ROOT_TIME_INDEX)
-                    report["dirty_owner_index"] = _ensure_read_index(root, path, tier, "dirty_owners_revision", DIRTY_REVISION_INDEX)
+                if not stored.get("export"):  # an exporting store stays as it is handed off
+                    if initialize_journal:
+                        report["journal_selected"] = _select_journal(root, path, tier)
+                        report["window_index"] = _ensure_read_index(root, path, tier, "attempts_root_time", ROOT_TIME_INDEX)
+                        report["dirty_owner_index"] = _ensure_read_index(root, path, tier, "dirty_owners_revision", DIRTY_REVISION_INDEX)
+                    report.update(_reconcile_exported_work_caps(root, status))
+                    report.update(_backfill_root_caps(root, status))
             else:
                 tier = TIER_ENFORCED if kernel_file_locks_enforced(root / LOCK_REL) else TIER_NAME
                 report = _import(root, path, tier)
@@ -1056,15 +1141,84 @@ def _select_journal(root: pathlib.Path, path: pathlib.Path, tier: str) -> bool:
         return configure_journal(path, tier, wait_sec=USAGE_LOCK_TIMEOUT_SEC)
 
 
+_SETTLED_WORK_CAPS_EXPORT = frozenset({"verified", "partial", "unverified"})
+
+
+def work_caps_reconcile_pending(import_meta: Any) -> Optional[str]:
+    """Pending reason while exported work-cap reconciliation has not completed; ``None`` once settled."""
+    if not isinstance(import_meta, dict) or import_meta.get("status") != "completed":
+        return None
+    if "work_caps_export" not in import_meta:
+        return "reconcile_not_run"
+    state = import_meta["work_caps_export"]
+    if state is None or (isinstance(state, dict) and state.get("status") in _SETTLED_WORK_CAPS_EXPORT):
+        return None
+    if isinstance(state, dict) and state.get("status") == "pending" and isinstance(state.get("reason"), str) and state["reason"]:
+        return state["reason"]
+    raise UsageLedgerCorrupt("invalid work_caps_export metadata in usage store")
+
+
+def _reconcile_exported_work_caps(root: pathlib.Path, status: Dict[str, Any]) -> Dict[str, Any]:
+    """One-time repair for a completed store imported without ``exported_work_caps``: insert
+    missing ``work_cap`` bindings, or record pending status when the watermark cannot be verified."""
+    from ouroboros import usage_journal as journal
+
+    if not work_caps_reconcile_pending(status):
+        return {}
+    pending, watermark, work_caps = journal.plan_work_caps_reconcile(root, status, had_export=_had_usage_export(root))
+    if pending and status.get("work_caps_export") == pending:
+        return {"work_caps_reconcile": pending["reason"]}
+    try:
+        with hold(root, timeout_sec=USAGE_LOCK_TIMEOUT_SEC, migrate=False) as txn:
+            current = txn.meta("import")
+            if not work_caps_reconcile_pending(current):
+                return {}
+            if pending:
+                if current.get("work_caps_export") != pending:
+                    txn.set_meta("import", {**current, "work_caps_export": pending})
+                return {"work_caps_reconcile": pending["reason"]}
+            restored = unverified = preserved = 0
+            for group, record in work_caps.items():
+                if txn.conn.execute("INSERT OR IGNORE INTO bindings (scope, key, binding) VALUES (?, ?, ?)",
+                                    (WORK_CAP_SCOPE, str(group), _json(durable_literals(record)))).rowcount:
+                    unverified, restored = (unverified + 1, restored) if "unverified_export" in record else (unverified, restored + 1)
+                else:
+                    preserved += 1
+            export_meta = journal.work_caps_export_meta(
+                watermark, work_caps, restored=restored, unverified=unverified, preserved=preserved)
+            txn.set_meta("import", {**current, "work_caps_export": export_meta})
+    except UsageExportInProgress:
+        return {}
+    return {k: v for k, v in (("work_caps_restored", restored), ("unverified_work_caps", unverified),
+                              ("work_caps_preserved", preserved)) if v}
+
+
+def _backfill_root_caps(root: pathlib.Path, status: Dict[str, Any]) -> Dict[str, Any]:
+    if not root_caps_backfill_pending(status):
+        return {}
+    try:
+        with hold(root, timeout_sec=USAGE_LOCK_TIMEOUT_SEC, migrate=False) as txn:
+            return backfill_root_caps(txn)
+    except UsageExportInProgress:
+        return {}
+
+
 def _import(root: pathlib.Path, path: pathlib.Path, tier: str) -> Dict[str, Any]:
     from ouroboros import usage_journal as journal
 
     # The pre-ledger source snapshot (I/O, archive copies) runs before the
     # journal lock is taken; only the journal read and rename hold it.
-    snapshot = journal.legacy_snapshot(root) if journal.completed_legacy_watermark(root) is None else None
+    watermark = journal.completed_legacy_watermark(root)
+    if watermark is None and _had_usage_export(root):
+        raise UsageLedgerCorrupt("the legacy usage watermark is missing after an export; keep the export and its watermark together")
+    snapshot = journal.legacy_snapshot(root) if watermark is None else None
     with _named_lock(root, LOCK_REL.name, timeout_sec=USAGE_LOCK_TIMEOUT_SEC, stale_sec=90.0):
         journal_present = (root / LEDGER_REL).is_file()
         records, source = journal.read_journal_records(root)
+        work_caps = journal.exported_work_caps(root, watermark, records, source, present=journal_present)
+        unverified = sum("unverified_export" in cap for cap in work_caps.values())
+        export_meta = journal.work_caps_export_meta(
+            watermark, work_caps, restored=len(work_caps) - unverified, unverified=unverified)
         legacy_watermark = None
         if snapshot is not None:
             missing, legacy_watermark = journal.legacy_candidates(
@@ -1076,10 +1230,11 @@ def _import(root: pathlib.Path, path: pathlib.Path, tier: str) -> Dict[str, Any]
         try:
             counts = _build(tmp, tier, records, {
                 "status": "completed", "imported_at": utc_now_iso(), "schema_version": SCHEMA_VERSION,
-                "lock_tier": tier, "retired_as": retired, "legacy": legacy_watermark,
-                "quarantine_present": (root / QUARANTINE_REL).is_file(),
+                "lock_tier": tier, "retired_as": retired, "legacy": legacy_watermark or journal.import_completion(watermark),
+                "quarantine_present": (root / QUARANTINE_REL).is_file(), "work_caps_export": export_meta,
+                "root_caps": {"status": "completed"},
                 "source": {"path": LEDGER_REL.as_posix(), "present": journal_present, "size": len(source),
-                           "sha256": hashlib.sha256(source).hexdigest(), "rows": len(records)}})
+                           "sha256": hashlib.sha256(source).hexdigest(), "rows": len(records)}}, work_caps=work_caps)
             os.replace(tmp, path)
         finally:
             with contextlib.suppress(FileNotFoundError):
@@ -1090,10 +1245,12 @@ def _import(root: pathlib.Path, path: pathlib.Path, tier: str) -> Dict[str, Any]
 
             atomic_write_json(root / journal.IMPORT_REL, legacy_watermark, trailing_newline=True, fsync=True)
             append_jsonl(root / "logs" / "events.jsonl", {"type": "usage_import_completed", **legacy_watermark})
-    return {"status": "completed", "lock_tier": tier, "journal_rows": len(records), "retired_as": retired, **counts}
+    return {"status": "completed", "lock_tier": tier, "journal_rows": len(records), "retired_as": retired, **counts,
+            **({"unverified_work_caps": unverified} if unverified else {})}
 
 
-def _build(tmp: pathlib.Path, tier: str, records: Sequence[Dict[str, Any]], provenance: Dict[str, Any]) -> Dict[str, int]:
+def _build(tmp: pathlib.Path, tier: str, records: Sequence[Dict[str, Any]], provenance: Dict[str, Any], *,
+           work_caps: Optional[dict] = None) -> Dict[str, int]:
     last: Dict[str, Dict[str, Any]] = {}
     first: Dict[str, int] = {}
     stamps: Dict[str, Dict[str, str]] = {}
@@ -1141,7 +1298,8 @@ def _build(tmp: pathlib.Path, tier: str, records: Sequence[Dict[str, Any]], prov
                          f"VALUES ({','.join('?' * len(_SUMMARY_COLUMNS))})",
                          [_bucket_record(scope, key, bucket) for (scope, key), bucket in buckets.items() if bucket.rows])
         bound = [(scope, key, _json(durable_literals(binding))) for scope, index in (
-            ("root", bindings.roots), ("group", bindings.groups), ("consciousness", causes))
+            ("root", bindings.roots), ("group", bindings.groups), (ROOT_CAP_SCOPE, bindings.root_caps),
+            ("consciousness", causes), (WORK_CAP_SCOPE, work_caps or {}))
                  for key, binding in index.items()]
         conn.executemany("INSERT INTO bindings (scope, key, binding) VALUES (?, ?, ?)", bound)
         # The visible one-time import also seeds stale completed projections.
@@ -1188,11 +1346,14 @@ def _export_rows(txn: Txn, provenance: Dict[str, Any]) -> Tuple[list, int, int]:
                   if record["kind"] == "usage_baseline_group"]
     attempts = [(_decode(record), record["ts_reserved"], record["ts_dispatched"]) for record in records
                 if record["kind"] != "usage_baseline_group"]
-    bindings = {record["key"]: json.loads(record["binding"], parse_float=LiteralFloat) for record in
-                txn.conn.execute("SELECT key, binding FROM bindings WHERE scope='root'")}
-    rows = journal.export_rows(provenance.get("header"), aggregates, attempts, bindings)
+    rows = journal.export_rows(provenance.get("header"), aggregates, attempts, txn.bindings("root"))
     journal._validate_records(rows)
     return rows, len(attempts), len(aggregates)
+
+
+def _had_usage_export(root: pathlib.Path) -> bool:
+    path = root / STORE_REL
+    return next(path.parent.glob(path.name + ".exported-*"), None) is not None
 
 
 def _retired_for(root: pathlib.Path, journal_sha256: Optional[str]) -> Optional[Tuple[pathlib.Path, Dict[str, Any]]]:
@@ -1215,33 +1376,51 @@ def _retired_for(root: pathlib.Path, journal_sha256: Optional[str]) -> Optional[
     return None
 
 
-def export_refusal(root: pathlib.Path | str, *, resume: bool = False) -> str:
-    """Why ``export_journal`` would refuse now; ``""`` when it can run (or, ``resume``, complete
-    an interrupted run whose rename already landed). A kept journal must be absent, the one the
-    import kept unchanged (the import's recorded digest) or this export's own: the mark's digest,
-    or a partial write of this export once the mark shows the kept one already set aside
-    (``_own_partial``); sizes prove nothing."""
-    root = pathlib.Path(root)
+def _export_error(root: pathlib.Path, *, resume: bool = False) -> Optional[UsageAccountingError]:
+    from ouroboros import usage_journal as journal
+
     path, kept = root / STORE_REL, root / LEDGER_REL
     kept_sha = _sha256_file(kept)
     if _identity(path) is None:
         if kept_sha is None:
-            return f"no usage store to export: {path}"
-        if resume and _retired_for(root, kept_sha):
-            return ""
-        return f"refusing to overwrite an existing journal without a store: {kept}"
-    if kept_sha is None:
-        return ""
+            return UsageAccountingError(f"no usage store to export: {path}")
+        return None if resume and _retired_for(root, kept_sha) else UsageAccountingError(
+            f"refusing to overwrite an existing journal without a store: {kept}")
     tier = _header_tier(path)
     if tier is None:
-        return f"usage store unreadable: {path}"
-    stored = _stored_meta(path, tier, USAGE_LOCK_TIMEOUT_SEC)
-    mark = stored.get("export") or {}
-    if kept_sha in {((stored.get("import") or {}).get("source") or {}).get("sha256"), (mark.get("journal") or {}).get("sha256")}:
-        return ""
-    if mark and _own_partial(root, mark):
-        return ""
-    return f"the money journal changed after the import; move it aside to export: {kept}"
+        return UsageAccountingError(f"usage store unreadable: {path}")
+    try:
+        stored = _stored_meta(path, tier, USAGE_LOCK_TIMEOUT_SEC, include_work_caps=True)
+    except (UsageAccountingError, ValueError) as exc:
+        return exc if isinstance(exc, UsageAccountingError) else UsageLedgerCorrupt(f"usage store unreadable: {path}")
+    provenance = stored.get("import")
+    if not isinstance(provenance, dict) or provenance.get("status") != "completed":
+        return UsageLedgerCorrupt(f"usage store unreadable or without a completed import: {path}")
+    mark = stored.get("export")
+    if kept_sha is not None and kept_sha not in {
+        (provenance.get("source") or {}).get("sha256"), ((mark or {}).get("journal") or {}).get("sha256")
+    } and not (mark and _own_partial(root, mark)):
+        return UsageAccountingError(f"the money journal changed after the import; move it aside to export: {kept}")
+    try:
+        if mark is None:
+            journal.plan_work_caps_export(
+                root, provenance.get("legacy"), stored.get(WORK_CAP_SCOPE) or {},
+                reconcile_pending=bool(work_caps_reconcile_pending(provenance)), had_export=_had_usage_export(root))
+        elif "work_caps_watermark" in mark:
+            journal.work_caps_stamp(mark["work_caps_watermark"])
+            if journal.completed_legacy_watermark(root) is None and not mark.get("legacy"):
+                raise UsageAccountingError("usage export requires its completed legacy import watermark")
+    except UsageAccountingError as exc:
+        return exc
+    return None
+
+
+def export_refusal(root: pathlib.Path | str, *, resume: bool = False) -> str:
+    """Why ``export_journal`` would refuse now; ``""`` when it can run (or, ``resume``, complete
+    an interrupted run whose rename already landed). Shares watermark and work-cap prerequisites
+    with ``export_journal``, which rechecks them under its write lock before freezing."""
+    err = _export_error(pathlib.Path(root), resume=resume)
+    return "" if err is None else str(err)
 
 
 def _own_partial(root: pathlib.Path, mark: Dict[str, Any]) -> bool:
@@ -1276,9 +1455,9 @@ def export_journal(root: pathlib.Path | str, *, resume: bool = False) -> Dict[st
 
     root = pathlib.Path(root)
     path, kept = root / STORE_REL, root / LEDGER_REL
-    refusal = export_refusal(root, resume=resume)
-    if refusal:
-        raise UsageAccountingError(refusal)
+    err = _export_error(root, resume=resume)
+    if err is not None:
+        raise err
     if _identity(path) is None:  # the rename already landed: complete from the retired copy's mark
         retired, mark = _retired_for(root, _sha256_file(kept))
         return {"status": "exported", **_export_result(mark, retired.name)}
@@ -1295,6 +1474,11 @@ def export_journal(root: pathlib.Path | str, *, resume: bool = False) -> Dict[st
                     "pre_export_as": f"{kept.name}.pre-export-{_core.utc_stamp()}" if kept.exists() else None,
                     "store_retired_as": f"{path.name}.exported-{_core.utc_stamp()}", "legacy": provenance.get("legacy"),
                     "state_marker_before": (state or {}).get("usage_ledger_high_water_seq") if isinstance(state, dict) else None}
+            mark["legacy"], export_caps, prior = journal.plan_work_caps_export(
+                root, provenance.get("legacy"), txn.bindings(WORK_CAP_SCOPE), journal_id=mark["journal"],
+                reconcile_pending=bool(work_caps_reconcile_pending(provenance)), had_export=_had_usage_export(root))
+            if export_caps is not None:
+                mark.update(work_caps_watermark=export_caps, work_caps_before=prior)
             txn.set_meta("export", mark)
         elif hashlib.sha256(payload).hexdigest() != mark["journal"]["sha256"]:
             raise UsageLedgerCorrupt(f"the frozen usage store no longer reproduces its export mark: {path}")
@@ -1307,7 +1491,9 @@ def export_journal(root: pathlib.Path | str, *, resume: bool = False) -> Dict[st
         written = journal.write_journal(root, rows)
         if written["sha256"] != mark["journal"]["sha256"]:
             raise UsageLedgerCorrupt(f"the exported journal does not match its mark: {kept}")
-    if mark.get("legacy") and journal.completed_legacy_watermark(root) is None:
+    if "work_caps_watermark" in mark:
+        journal.write_exported_work_caps(root, mark["work_caps_watermark"], fallback=mark.get("legacy"))
+    elif mark.get("legacy") and journal.completed_legacy_watermark(root) is None:
         atomic_write_json(root / journal.IMPORT_REL, mark["legacy"], trailing_newline=True, fsync=True)
     state = _state_document(root)
     if isinstance(state, dict) and "usage_ledger_high_water_seq" in state:
@@ -1322,7 +1508,8 @@ def export_journal(root: pathlib.Path | str, *, resume: bool = False) -> Dict[st
 
 def _export_result(mark: Dict[str, Any], retired_name: str) -> Dict[str, Any]:
     return {"journal": {"path": None, **mark["journal"]}, "marker": mark["marker"], "store_retired_as": retired_name,
-            "pre_export_as": mark.get("pre_export_as"), "attempts": mark["attempts"], "aggregates": mark["aggregates"]}
+            "pre_export_as": mark.get("pre_export_as"), "attempts": mark["attempts"], "aggregates": mark["aggregates"],
+            **({"work_caps_watermark": "state/usage_import_watermark.json"} if mark.get("work_caps_watermark") else {})}
 
 
 def _state_document(root: pathlib.Path) -> Optional[Dict[str, Any]]:
@@ -1339,6 +1526,7 @@ def abandon_export(root: pathlib.Path | str, *, retired_as: Optional[str] = None
     ONE atomic replace over this export's own (no window without a journal), the
     ``state.json`` marker the export lowered put back, the mark cleared LAST so a death
     in between resumes here. Returns what moved (``{}`` when nothing of this export's is found)."""
+    from ouroboros import usage_journal as journal
     from ouroboros.utils import atomic_write_json
 
     root = pathlib.Path(root)
@@ -1361,6 +1549,10 @@ def abandon_export(root: pathlib.Path | str, *, retired_as: Optional[str] = None
     mark = _stored_meta(path, tier, USAGE_LOCK_TIMEOUT_SEC).get("export") if tier else None
     if mark is None:
         return moved
+    if "work_caps_watermark" in mark:
+        watermark = journal.completed_legacy_watermark(root)
+        if watermark is None or watermark.get(journal.EXPORTED_WORK_CAPS) == mark["work_caps_watermark"]:
+            journal.write_exported_work_caps(root, mark["work_caps_before"], fallback=mark.get("legacy"))
     kept_sha = _sha256_file(kept)
     pre_export = kept.with_name(mark["pre_export_as"]) if mark.get("pre_export_as") else None
     if kept_sha is None or kept_sha == mark["journal"]["sha256"] or _own_partial(root, mark):  # absent or this export's own

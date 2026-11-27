@@ -18,7 +18,6 @@ from .telegram_api import (
     next_telegram_retry_delay,
     _LOCALIZED_TEXTS,
 )
-from .telegram_owner_auth import api_base_matches_live, owner_matches_live
 from .telegram_poll_binding import bot_id
 from .telegram_token import accepted_token, binding_for
 from .telegram_state import (
@@ -32,6 +31,7 @@ from .telegram_state import (
     TelegramDestinationUnavailable,
 )
 from ..scripts.telegram_settings import telegram_api_base, telegram_files_dir, telegram_proxy
+from ouroboros.chat_uploads import DELIVERY_FAILURES
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_project_chat_id
 from ouroboros import i18n_memory as _memory
 from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, routing_option_label
@@ -59,8 +59,7 @@ def _save_notif_state(api, data: Dict[str, Any]) -> None:
 def _pinned_chat_id(settings: Dict[str, Any]) -> int:
     raw = str(settings.get("TELEGRAM_CHAT_ID") or "").strip()
     try:
-        cid = int(raw)
-        return cid if cid > 0 else 0
+        return int(raw)
     except ValueError:
         return 0
 
@@ -86,17 +85,13 @@ async def _push_notification(
     try:
         if not token:
             raise TelegramTokenMissing("TELEGRAM_BOT_TOKEN is missing")
-        api_base = telegram_api_base(state_dir)
         client = TelegramClient(
             token, trust_env=trust_env,
             proxy=telegram_proxy(state_dir),
             **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
-            api_base_url=api_base,
+            api_base_url=telegram_api_base(state_dir),
             files_dir=telegram_files_dir(state_dir),
             binding=binding, generation=generation,
-            binding_guard=lambda sdir=state_dir, cid=int(chat_id), base=api_base: (
-                owner_matches_live(sdir, cid) and api_base_matches_live(sdir, base)
-            ),
         )
         await client.send_message(int(chat_id), text, parse_mode="")
         return "sent", None
@@ -276,8 +271,11 @@ def _routing_notice_text(event: Dict[str, Any], lang: str) -> Tuple[str, bool]:
         if len(options) > len(labels):
             lines.append(texts.format("routing_more_targets", count=len(options) - len(labels)))
         lines.append(texts["routing_reply_with_number"])
+    # After confirmed mailbox delivery, the original message already carries the transport failure.
+    delivered = event.get("action") == "mailbox_delivery" and event.get("status") == "delivered"
     names = [str(row.get("label") or "file") for row in event.get("attachment_manifest") or []
-             if isinstance(row, dict) and row.get("status") == "rejected"]
+             if isinstance(row, dict) and row.get("status") == "rejected"
+             and not (delivered and row.get("reason") in DELIVERY_FAILURES)]
     if names:
         lines.append(texts.format("attachments_not_attached", names=", ".join(names)))
     return "\n".join(lines), bool(labels)
@@ -292,22 +290,15 @@ def _routing_notice_text(event: Dict[str, Any], lang: str) -> Tuple[str, bool]:
 _ROOT_SUMMARY_KIND = "terminal_root_projection"
 
 
-from .telegram_mirror import PRESENCE_CHAT_ID_MIN, is_presence_room_event
-
-
 def _announce_summary(row: Dict[str, Any], *, notify_all: bool) -> bool:
     """The existing toggle controls every extra finish notice, never ordinary replies."""
     if str(row.get("summary_kind") or "") != _ROOT_SUMMARY_KIND:
         return False
     if row.get("quiet_effective") is True:
         return False
-    if is_presence_room_event(row) or (isinstance(row.get("presence_provenance"), dict) and row.get("presence_provenance")):
-        return False
     try:
         chat_id = int(row.get("chat_id") or 0)
     except (TypeError, ValueError):
-        return False
-    if chat_id >= PRESENCE_CHAT_ID_MIN:
         return False
     if chat_id != WEB_UI_CHAT_ID and not is_project_chat_id(chat_id):
         return False

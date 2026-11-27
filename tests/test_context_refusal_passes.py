@@ -42,6 +42,346 @@ def _refused_size(ctx):
     return size
 
 
+def test_start_refusals_and_useful_answers_keep_their_own_size_and_order(tmp_path, monkeypatch):
+    """A warm density is not a window. Raw witnesses can clear older equal/smaller refusals, not later ones."""
+    from dataclasses import asdict, replace
+    from datetime import timedelta
+    from ouroboros import context_window as cw
+    from ouroboros import capability_evidence as ce
+    from ouroboros import usage_accounting as ua
+    from ouroboros.context_anchor import record_refused_input
+    from ouroboros.response_limits import dispatch_target
+    from tests.test_first_contact_seams import stamped
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    model, cap, r = "openai-compatible::mock-model", 65_536, "turn:round:1"
+    target = dispatch_target(model, {"OPENAI_COMPATIBLE_BASE_URL": "http://127.0.0.1:1/v1",
+                                    "OPENAI_COMPATIBLE_API_KEY": "fixture-not-a-credential"})
+    scope = cw.first_contact_scope(target, cap)
+    assert scope
+    plan = SimpleNamespace(route_fp="r", window_witness_bound=True, provider="openai-compatible", model=model)
+    physical = ua.PhysicalAttemptContext("owner_max", "max", "fresh_model_usage", "not-the-scope", r,
+        None, None, False, False, first_contact_scope=scope, view_kind="owner_turn", preferred_mode="max",
+        first_contact_plan=(scope, False))
+    payload = {"model": target["resolved_model"], "messages": [{"role": "user", "content": "sample"}],
+               "tools": [{"type": "function", "function": {"name": "inspect_fixture",
+                          "parameters": {"type": "object", "properties": {}}}}]}
+    assert cw.signed_first_contact(physical, target, payload, cap).first_contact_scope == scope
+    assert not cw.signed_first_contact(physical, target, {**payload, "tools": []}, cap).first_contact_scope
+    for ineligible in ({**target, "provider": "local"}, {**target, "provider": "claudexor"},
+                       {**target, "provider": "gigachat"}, {**target, "api_key": ""},
+                       {**target, "provider": "openai", "api_surface": "responses"}):
+        assert not cw.signed_first_contact(physical, ineligible, payload, cap).first_contact_scope
+    image = {**payload, "messages": [{"role": "user", "content": [{"type": "image_url"}]}]}
+    assert not cw.signed_first_contact(physical, target, image, cap).first_contact_scope
+    assert not any(name.startswith("first_contact_") for name in asdict(physical))
+
+    def capture(order, raw, status=None):
+        return ua.PhysicalAttemptCapture(str(order), model, plan.provider, "settled", "canonical_json_v1",
+            max_completion_tokens=cap, physical_context=replace(physical, first_contact_dispatch=(order, ce.utc_now_iso())),
+            candidate_manifest_ref={"fixture": True}, prompt_tokens_bounded_estimate=raw, provider_status_code=status)
+
+    def refuse(candidate, round_id=r):
+        usage = {"_last_llm_failure": {"physical_attempt_id": candidate.attempt_id, "failure_code": "context_overflow"},
+                 **stamped()}
+        record_refused_input(usage, plan, candidate.prompt_tokens_bounded_estimate + 11_000,
+                             measured=True, candidate=candidate, round_id=round_id)
+
+    def answer(candidate, **fields):
+        cw.record_start_answer({"execution_id": "turn", "_last_llm_call_meta": {
+            "physical_attempt_id": candidate.attempt_id, "round_id": r, **fields}}, candidate, 1)
+
+    f0, f1, ok = capture(1, 548_000, 400), capture(3, 410_000, 400), capture(4, 420_000)
+    refuse(f0)
+    refuse(f1)
+    answer(capture(2, 420_000))  # older than F1, although it publishes later
+    assert cw.first_contact_limits(target, cap) == (410_000, 0, 410_000)
+    answer(ok, provider_body_error=True)
+    assert cw.first_contact_limits(target, cap) == (410_000, 0, 410_000)
+    answer(ok)
+    assert cw.first_contact_limits(target, cap) == (548_000, 0, 548_000)
+    answer(capture(7, 410_000))  # no new 410k refusal has reached the store yet
+    refuse(capture(6, 410_000, 400))  # older on the wire, despite publishing after the covering answer
+    assert cw.first_contact_limits(target, cap) == (548_000, 0, 548_000)
+    evidence = ce.CapabilityEvidence(0, "unprobeable", "none", "r")
+    assert cw.resolve_window(evidence, cap, root=tmp_path).usable is None
+    wrote = ce._store_path(tmp_path).read_bytes()
+    refuse(f1)
+    answer(ok)
+    assert ce._store_path(tmp_path).read_bytes() == wrote  # replay neither teaches nor refreshes TTL
+    assert cw.first_contact_limits(target, cap - 1) == (0, 0, 0)
+    assert cw.first_contact_limits({**target, "api_key": "another-synthetic-key"}, cap) == (0, 0, 0)
+    answer(capture(8, 548_000))  # same raw input suffices to disprove a refusal
+    assert cw.first_contact_limits(target, cap) == (0, 0, 0)
+    assert not cw.record_start_refusal({"_last_llm_failure": {"physical_attempt_id": "3",
+        "failure_code": "context_overflow"}, **stamped()}, replace(f1, state="released"), r)
+    later = capture(9, 550_000, 400)
+    refuse(later)
+    assert cw.first_contact_limits(target, cap) == (550_000, 0, 550_000)
+    written, future = ce._store_path(tmp_path).read_bytes(), ce.utc_now() + timedelta(hours=25)
+    monkeypatch.setattr(ce, "utc_now", lambda: future)
+    refuse(later)  # exact replay after expiry supplies neither a fresh write nor a hint
+    assert ce._store_path(tmp_path).read_bytes() == written
+    assert cw.first_contact_limits(target, cap) == (0, 0, 0)
+
+
+def test_a_saturated_start_log_still_proves_the_live_refusal(tmp_path, monkeypatch):
+    """Traffic may bound the set, never erase a live 548k refusal nor revive one already answered (R5)."""
+    from dataclasses import replace
+    from ouroboros import context_window as cw
+    from ouroboros import capability_evidence as ce
+    from ouroboros import usage_accounting as ua
+    from ouroboros.context_anchor import record_refused_input
+    from ouroboros.response_limits import dispatch_target
+    from tests.test_first_contact_seams import stamped
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    model, cap, r = "openai-compatible::mock-model", 65_536, "turn:round:1"
+    target = dispatch_target(model, {"OPENAI_COMPATIBLE_BASE_URL": "http://127.0.0.1:1/v1",
+                                    "OPENAI_COMPATIBLE_API_KEY": "fixture-not-a-credential"})
+    scope = cw.first_contact_scope(target, cap)
+    plan = SimpleNamespace(route_fp="r", window_witness_bound=True, provider="openai-compatible", model=model)
+    physical = ua.PhysicalAttemptContext("owner_max", "max", "fresh_model_usage", "not-the-scope", r,
+        None, None, False, False, first_contact_scope=scope, view_kind="owner_turn", preferred_mode="max",
+        first_contact_plan=(scope, False))
+
+    def capture(order, raw, status=None):
+        return ua.PhysicalAttemptCapture(str(order), model, plan.provider, "settled", "canonical_json_v1",
+            max_completion_tokens=cap, physical_context=replace(physical, first_contact_dispatch=(order, ce.utc_now_iso())),
+            candidate_manifest_ref={"fixture": True}, prompt_tokens_bounded_estimate=raw, provider_status_code=status)
+
+    def refuse(order, raw):
+        candidate = capture(order, raw, 400)
+        usage = {"_last_llm_failure": {"physical_attempt_id": candidate.attempt_id, "failure_code": "context_overflow"},
+                 **stamped()}
+        record_refused_input(usage, plan, raw + 11_000, measured=True, candidate=candidate, round_id=r)
+
+    def answer(order, raw):
+        candidate = capture(order, raw)
+        cw.record_start_answer({"execution_id": "turn", "_last_llm_call_meta": {
+            "physical_attempt_id": candidate.attempt_id, "round_id": r}}, candidate, 1)
+
+    def stored():
+        return ce._read(tmp_path).get(cw._START_HINTS, {}).get(scope, [])
+
+    refuse(1, 548_000)
+    for index in range(20):
+        refuse(2 + index, 100_000 + 1_000 * index)  # the churn a recency-only bound used to answer with
+    assert cw.first_contact_limits(target, cap) == (100_000, 0, 100_000)
+    answer(22, 420_000)  # a legitimate smaller start lands: it answers those refusals, not the 548k one
+    assert cw.first_contact_limits(target, cap) == (548_000, 0, 548_000)
+    assert len(stored()) <= 3 * cw._START_ROWS + 1
+    for index in range(30):
+        answer(24 + index, 90_000)  # unrelated traffic carries the 420k answer out of the set
+    assert cw.first_contact_limits(target, cap) == (548_000, 0, 548_000)  # an answered refusal does not come back
+    assert len(stored()) <= 3 * cw._START_ROWS + 1
+    answer(54, 548_000)  # the refused size itself is proven acceptable on this same route
+    assert cw.first_contact_limits(target, cap) == (0, 0, 0)
+
+
+def test_the_bound_start_set_keeps_its_extrema_and_their_proofs():
+    """The trimming rule alone: what the reader derives survives; replies past the newest sixteen fold into one cover
+    that still answers what they answered, so an answered row never outlives its answer."""
+    from ouroboros import context_window as cw
+
+    def row(order, raw, *, answered=False, form="ordinary", rnd="r1"):
+        return {"attempt": str(order), "order": order, "at": "2026-11-21T00:00:00+00:00", "round": rnd,
+                "raw": raw, "form": form, "accepted": answered}
+
+    big, rung, proof = row(1, 548_000), row(3, 500_000, rnd="r3"), row(4, 380_000, answered=True, form="maps", rnd="r3")
+    lower, lower_proof = row(5, 470_000, rnd="r5"), row(6, 300_000, form="maps", rnd="r5")  # the maps send refused too
+    ordered = ([big, rung, proof, lower, lower_proof] + [row(10 + index, 100_000 + 1_000 * index) for index in range(20)]
+               + [row(30, 420_000, answered=True)] + [row(40 + index, 90_000, answered=True) for index in range(30)])
+    trimmed = cw._trim_start_rows(ordered)
+
+    assert {kept["raw"]: maps for kept, maps in cw._pending_starts(trimmed)} == {
+        548_000: False, 500_000: True, 470_000: True}
+    orders = {kept["order"] for kept in trimmed}
+    assert {proof["order"], lower_proof["order"]} <= orders  # each rung keeps its proof, even a refused maps send
+    assert not orders & ({30} | set(range(10, 30)))  # answered refusals and their folded answer leave
+    (cover,) = [kept for kept in trimmed if kept["form"] == "cover"]
+    assert (cover["order"], cover["raw"], cover["at"], cover["accepted"]) == (53, 420_000, ordered[0]["at"], True)
+    assert all(any(source is kept for source in ordered) for kept in trimmed if kept is not cover)  # TTL intact
+    assert trimmed == sorted(trimmed, key=lambda kept: kept["order"])
+    assert len(trimmed) <= 3 * cw._START_ROWS + 1
+
+
+def test_the_wire_profile_still_names_every_transport():
+    """Only the start hint draws the transport line: pricing and finalization still get a wire name (R6)."""
+    from ouroboros.llm_fallback import _wire_surface
+    from ouroboros.provider_models import OPENAI_API_SURFACES as SURFACES
+
+    for provider in ("local", "claudexor", "gigachat", "openai-compatible", ""):
+        assert _wire_surface({"provider": provider}) == SURFACES["chat_completions"]
+    assert _wire_surface({"provider": "openai", "api_surface": "responses"}) == SURFACES["responses"]
+    assert _wire_surface({"provider": "anthropic"}) == "messages"
+
+
+@pytest.mark.parametrize("scenario", ["enough", "maps", "none"])
+def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, monkeypatch, scenario):
+    """Real fitting, loop, attempt settlement and Chat HTTP; the second chat has no provider-usage anchor."""
+    import json
+    import re
+    import shutil
+    from pathlib import Path
+    from ouroboros import capability_evidence as ce, context, context_fit as cf, context_window as cw, dialogue_store
+    from ouroboros.chronicle_lead import LEAD_RULE_VERSION
+    from ouroboros import review_body_fact
+    from ouroboros.memory import Memory
+    from ouroboros.owner_relay import owner_row_source
+    from ouroboros.response_limits import dispatch_target
+    from ouroboros.tool_policy import initial_tool_schemas
+    from ouroboros.tools.registry import ToolRegistry
+    from tests import _turn_shapes
+    from tests._first_contact import ANSWER, _episode, _run
+    from tests._stand import lay_rooms, room_needle, FIRST_ROOM
+    from tests.system_e2e.harness import ScriptedStubModel, StubHttpError
+
+    class Numberless(ScriptedStubModel):
+        def __init__(self):
+            super().__init__(final_answer=ANSWER)
+            self.window_tokens, self.limit, self.wire = 0, None, []
+            original = self._server.RequestHandlerClass
+
+            class Handler(original):
+                def _send(self, payload, *, stream=False, status=200):
+                    if status == 400:
+                        payload = {"error": {"code": "1261", "message": "Prompt too long",
+                                             "type": "invalid_request_error"}}
+                    super()._send(payload, stream=stream, status=status)
+
+            self._server.RequestHandlerClass = Handler
+
+        def _completion(self, body):
+            if body.get("tools"):
+                raw = cf.bounded_prompt_tokens_for_payload(body, 0)
+                text = json.dumps(body["messages"], ensure_ascii=False)
+                if self.limit is None:
+                    # E refuses the uncut view, but can hold its ordinary telling plus a real required book.
+                    self.limit = {"enough": raw - 1_000, "maps": raw - 120_000, "none": 100_000}[scenario]
+                rooms = tuple(i for i in range(16) if room_needle(FIRST_ROOM + i) in text)
+                self.wire.append(dict(raw=raw, status=400 if raw >= self.limit else 200,
+                    books="sweep_cancel_intents" in text, bible="owed on body changes" in text,
+                    development="Hermetic preflight isolation" in text, story=len(rooms), rooms=rooms,
+                    cap=body.get("max_tokens"), owner="fixture 3896" in text,
+                    facts=re.findall(r"\[CONTEXT_FACTS\][^|]+\| mode ([^|]+)", text)))
+                if raw >= self.limit:
+                    raise StubHttpError(400, "Prompt too long")
+            result = super()._completion(body)
+            result["usage"] = None
+            return result
+
+    with Numberless() as server:
+        seed = _episode(tmp_path, monkeypatch, server)
+        drive, repo = seed.drive, seed.tools._ctx.repo_dir
+        shutil.copytree(Path(__file__).resolve().parents[1] / "docs/development", repo / "docs/development")
+        page = _turn_shapes._page
+        def told_page(room, ids, text):
+            return {**page(room, ids, f"Room {room} settled its mock work.\n\n{text}"),
+                    "metadata": {"lead_rule": LEAD_RULE_VERSION}}
+        # Fixture input, not a patched fit: the whole page has a genuine shorter telling beside its address.
+        with monkeypatch.context() as shapes:
+            shapes.setattr(_turn_shapes, "_page", told_page)
+            lay_rooms(drive, 16, 143_000 if scenario == "enough" else 100_000)
+        memory = Memory(drive_root=drive, repo_dir=repo)
+        env = SimpleNamespace(repo_dir=repo, drive_root=drive, repo_path=lambda p: repo / p, drive_path=lambda p: drive / p)
+        if scenario == "enough":
+            # The same foreign subject is normally served with the Development map. Mock only the Git fact;
+            # a directly required handbook then adds its real chapters to both the projection and physical send.
+            foreign = tmp_path / "foreign"
+            foreign.mkdir()
+            body_fact = review_body_fact.body_fact
+            monkeypatch.setattr(review_body_fact, "body_fact", lambda root, **kw: (
+                review_body_fact.BodyFact(review_body_fact.BODY_FALSE, "remote_chain", "fixture foreign subject")
+                if Path(root) == foreign else body_fact(root, **kw)))
+
+        def keyed(key):
+            settings_path = drive / "settings.json"
+            settings = {**json.loads(settings_path.read_text()), "OPENAI_COMPATIBLE_API_KEY": key}
+            settings_path.write_text(json.dumps(settings))
+            monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", key)
+            return settings
+
+        def send(room, key, *, required=False, dispatch_key=None):
+            settings = keyed(key)
+            # M/N use a short A2 to exercise the just-under-refusal trap. In E only memory may pay the difference.
+            short = scenario != "enough" and room in {7102, 7105, 7106}
+            task = {**seed.task, "id": f"first-contact-{room}", "chat_id": room, "_is_direct_chat": True,
+                    "text": f"fixture 3896 {room} " + "synthetic titles " * (4 if short else 300)}
+            if scenario == "enough":
+                task["workspace_root"] = str(foreign)
+            row = dialogue_store.append(drive, "chat", {"direction": "in", "source": "web", "user_id": 1,
+                "chat_id": room, "client_message_id": task["id"], "ts": ce.utc_now_iso(), "text": task["text"]}).row
+            task["origin_message_ref"], _ = owner_row_source(row)
+            if required:
+                task["task_contract"] = {"context_requires_development": True}
+            registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+            registry._ctx.task_metadata = task
+            registry._ctx.task_id, registry._ctx.budget_drive_root = task["id"], drive
+            registry._ctx.is_direct_chat, registry._ctx.current_chat_id = True, room
+            start = len(server.wire)
+            context.build_llm_messages(env, memory, task, ctx=registry._ctx, tool_registry=registry,
+                tool_schemas=initial_tool_schemas(registry, context_mode="max"))
+            plan = registry._ctx.context_fit_plan
+            if dispatch_key:  # the key rotates between this fit and the first real POST
+                keyed(dispatch_key)
+            text, usage, _ = _run(SimpleNamespace(plan=plan, task=task, drive=drive, tools=registry))
+            assert (ANSWER in str(text)) is (scenario != "none"), (server.wire, usage.get("_last_llm_error"))
+            sends[room] = registry._ctx.context_fit_plan
+            return plan, server.wire[start:], dispatch_target(task["model"], settings)
+
+        sends = {}
+
+        first, a1, target_a = send(7101, "synthetic-a-3896")
+        refused, before_maps, _any = cw.first_contact_limits(target_a, a1[0]["cap"])
+        assert refused == a1[0]["raw"], (a1, ce._read(drive).get("main_first_contact"))
+        assert before_maps == (a1[1]["raw"] if scenario != "enough" else 0), (a1, ce._read(drive).get("main_first_contact"))
+        second, a2, _ = send(7102, "synthetic-a-3896")
+        if scenario == "enough":  # the handbook a chat requires is no memory's debt: the same tellings fold
+            required, with_handbook, _ = send(7106, "synthetic-a-3896", required=True)
+            assert required.core.development_required and with_handbook[0]["development"], with_handbook
+            assert not a2[0]["development"] and required.core.required_book_tokens("max") > 0
+            assert [row["status"] for row in with_handbook] == [200], with_handbook
+            assert with_handbook[0]["books"] and with_handbook[0]["story"] == a2[0]["story"], (a2, with_handbook)
+            assert with_handbook[0]["rooms"] == a2[0]["rooms"], (a2, with_handbook)
+            print({"required A2": with_handbook})
+        other, b1, _ = send(7103, "synthetic-b-3896")
+        if scenario == "maps":
+            required, with_handbook, _ = send(7104, "synthetic-a-3896", required=True)
+            assert required.initial_mode == "low" and required.core.development_required
+            assert len(with_handbook) == 1 and with_handbook[0]["development"] and not with_handbook[0]["books"]
+        # A's fact shaped the fit; B resolved at dispatch: B's first POST is the ordinary view, one plan, no extra call.
+        hinted, rotated, _ = send(7105, "synthetic-a-3896", dispatch_key="synthetic-b-3896")
+        assert hinted.first_contact_normal is not None, scenario
+        assert rotated[0]["books"] and rotated[0]["story"] == a1[0]["story"], (a1, rotated)
+        # Its own facts only: the unsent hinted preparation's row is gone, the ordinary view's row is B1's.
+        assert len(rotated[0]["facts"]) == 1 and rotated[0]["facts"] == b1[0]["facts"], (b1, rotated)
+        assert scenario == "enough" or rotated[0]["facts"] != a2[0]["facts"], (a2, rotated)  # A2 sent chapter maps
+        assert sends[7105].first_contact_normal is None
+        assert not sends[7105].projection(sends[7105].initial_mode).memory_facts.get("first_contact_preference")
+        if scenario == "none":  # a refused hinted maps send is no Max bound, and the next start keeps its tellings
+            _third, a3, _ = send(7106, "synthetic-a-3896")
+            assert a3[0]["story"] == a2[0]["story"] and not a3[0]["books"], (a2, a3)
+            assert a3[0]["raw"] <= a2[0]["raw"] + 2_000, (a2, a3)
+        keyed("synthetic-a-3896")
+    print({"limit": server.limit, "A1": a1, "A2": a2, "B1": b1})
+    if scenario == "none":
+        assert a1 and a2 and b1 and all(row["status"] == 400 for row in a1 + a2 + b1), (a1, a2, b1)
+        assert a2[0]["raw"] >= min(row["raw"] for row in a1) - 2_000, (a1, a2)
+    else:
+        assert [row["status"] for row in a1] == ([400, 400, 200] if scenario == "maps" else [400, 200]), a1
+        assert [row["status"] for row in a2] == [200], (a1, a2)
+    if scenario == "maps":  # the actual alternate A2 Max is just under F1, not past its margin
+        alternate = cf.bounded_prompt_tokens_for_payload({"messages": second.messages_for("max"),
+            "tools": json.loads(second.start_tool_schemas_json)}, 0)
+        assert before_maps - cf.reclaim_low_water_margin(None, before_maps) < alternate < before_maps
+    assert b1[0]["status"] == 400 and b1[0]["books"] and b1[0]["story"] == a1[0]["story"], (a1, b1)
+    assert a2[0]["books"] is (scenario == "enough") and a2[0]["story"] < a1[0]["story"]
+    assert all(row["bible"] and row["owner"] and row["cap"] == a1[0]["cap"] for row in a1 + a2 + b1)
+    assert all(plan.window_record.usable is None and plan.preferred_mode == "max" for plan in (first, second, other))
+    assert second.projection(second.initial_mode).memory_facts["first_contact_preference"]
+
+
 def test_the_target_is_measured_on_this_conversation_or_stays_unknown():
     ctx = _ctx()
     # 86aa r1482: E = its raw 848,751 at its own density 874,829/795,458; A = the largest input Codex accepted.
@@ -58,6 +398,13 @@ def test_the_target_is_measured_on_this_conversation_or_stays_unknown():
         assert lmc._refusal_target(_ctx(), inside) == (240_000 + 65_536 - 300_000 + 37_500, 37_500)
     assert lmc._refusal_target(_ctx(), _fit(240_000, anchor=160_000, accepted=160_000)) == (
         240_000 - 160_000 + 20_000, 20_000)  # outside any reservation: E - A and the eighth of A, as before
+    # Outside the reservation band, an anchored refusal can still measure E - A. Only THAT recovery uses the
+    # physical window's eighth; an unsized refusal keeps the established admission-frame slack and order.
+    for anchor, accepted, target, slack in ((250_000, 250_000, 53_000, 50_000),
+                                           (None, 250_000, None, 57_168), (250_000, 254_000, None, 57_168)):
+        fit = _fit(253_000, anchor=anchor, accepted=accepted)
+        fit.measurement.capacity_total_tokens, fit.measurement.window_boundary_tokens = 457_344, 400_000
+        assert lmc._refusal_target(_ctx(), fit) == (target, slack)
     stated = _ctx("This model's maximum context length is 400,000 tokens.")
     assert _target(stated, _fit(390_000, accepted=None, reply=20_000)) == 10_000 + 50_000
     # Anthropic and Gemini wordings state both numbers; the provider's own count beats the estimate,
@@ -257,7 +604,7 @@ def test_a_numberless_first_refusal_drops_the_slack_and_a_further_one_the_rest(t
     return-after-fold slack, ceil(W/8): a strictly smaller retry that keeps most of memory's detail, never the
     shortest view at once; after a further refusal memory's rest takes everything it can give."""
     import ouroboros.loop as loop
-    from ouroboros import context_fit as cf, memory_view as mv
+    from ouroboros import context_fit as cf, loop_messages, memory_view as mv
     from tests import _memory_view_synthetic as syn
 
     words = [syn.conversation(i, words=40, word_chars=2_000) for i in range(30)]
@@ -269,7 +616,7 @@ def test_a_numberless_first_refusal_drops_the_slack_and_a_further_one_the_rest(t
         preferred_mode="max", route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "synthetic"}, evidence))
     ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=plan.initial_mode, tool_schemas=[], task_id="a2",
         tools=SimpleNamespace(_ctx=SimpleNamespace()), messages=plan.messages_for(plan.initial_mode),
-        event_queue=None, drive_logs=tmp_path, round_idx=1)
+        event_queue=None, drive_logs=tmp_path, round_idx=1, accumulated_usage={})
 
     def facts():
         shown = ctx.context_fit_plan.projection(ctx.active_context_mode)
@@ -278,6 +625,7 @@ def test_a_numberless_first_refusal_drops_the_slack_and_a_further_one_the_rest(t
     fit = SimpleNamespace(measurement=SimpleNamespace(capacity_total_tokens=1_000_000, measurement_density=1.0,
         reprojection_input_tokens=None, estimated_input_tokens=0, capacity_deficit_tokens=0, route_fp="probe"))
     monkeypatch.setattr(loop, "_measure_round_main_fit", lambda *_a, **_kw: fit)
+    monkeypatch.setattr(loop_messages, "append_context_facts", lambda _trial: False)  # this stub prices no refresh
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
     folded, room = facts()
     assert folded == 0 and room > 500_000  # the start held every word
@@ -394,17 +742,16 @@ def test_bodies_shed_only_what_the_host_copies_left_of_the_measured_excess(monke
     assert lmc._apply_refusal_pass(_ctx(), first, _fit(1), 126_830, 115_230) is False  # nothing changed, no retry
 
 
-def test_bodies_pay_the_excess_memory_the_slack_and_books_wait_for_a_further_refusal(monkeypatch):
-    """Owner order 7A with the 06.11 sizing: superseded host rows, shown bodies for the measured excess,
-    memory's detail for the rest and the return-after-fold slack; books and unseen bodies only in the
-    second pass, after a further refusal."""
+def test_bodies_pay_the_excess_and_the_measured_floor_owns_the_books_decision(monkeypatch):
+    """Shown bodies pay only the excess; the measured first floor gets the rest and the slack.
+    Unsized recovery and the second pass keep the ordinary ladder."""
     import ouroboros.loop as loop
 
     calls, sizes = [], []
-    monkeypatch.setattr(lmc, "_coarsen_memory_view", lambda _ctx, _fit, *, saving=None, slack=0: (
-        calls.append(("floor", saving, slack)) or True))
+    monkeypatch.setattr(lmc, "_coarsen_memory_view", lambda _ctx, _fit, *, saving=None, slack=0, telling_floor=False: (
+        calls.append(("floor", saving, slack, telling_floor)) or True))
     monkeypatch.setattr(lmc, "_reproject_actual_overflow_low",
-                        lambda ctx: calls.append(("books",)) or setattr(ctx, "active_context_mode", "low"))
+                        lambda ctx, **_kw: calls.append(("books",)) or setattr(ctx, "active_context_mode", "low"))
     monkeypatch.setattr(loop, "_measure_round_main_fit", lambda _ctx, **_kw: _fit(sizes.pop(0)))
     monkeypatch.setattr(lmc, "_run_emergency_address_pass", lambda _ctx, _fit, *, rung, goal_tokens=None: (
         calls.append((rung, goal_tokens)) or SimpleNamespace(status="applied", reclaimed_tokens=goal_tokens or 0)))
@@ -413,8 +760,8 @@ def test_bodies_pay_the_excess_memory_the_slack_and_books_wait_for_a_further_ref
     stated = _ctx("This model's maximum context length is 400,000 tokens.")  # slack 50,000
     sizes[:] = [830_000]  # after memory narrowed
     assert lmc._apply_refusal_pass(stated, first, _fit(900_000, accepted=None), 70_000, 50_000) is True
-    assert calls == [("host_copies", None), ("bodies", 20_000), ("floor", 0, 50_000)]  # slack alone: no excess
-    assert stated.active_context_mode == "max"  # books stay through the first pass
+    assert calls == [("host_copies", None), ("bodies", 20_000), ("floor", 0, 50_000, True)]
+    assert stated.active_context_mode == "max"  # the ordinary ladder didn't decide to replace its books
     calls.clear()
     sizes[:] = [880_000, 830_000]  # before and after the books step
     assert lmc._apply_refusal_pass(stated, second, _fit(900_000, accepted=None), 70_000, 50_000) is True
@@ -425,17 +772,17 @@ def test_bodies_pay_the_excess_memory_the_slack_and_books_wait_for_a_further_ref
     sizes[:] = [800_000]
     assert lmc._apply_refusal_pass(_ctx(), first, unsized, None) is True
     # Unknown: memory's detail pays all it can, a whole-or-outline section nothing without a measured excess.
-    assert calls == [("host_copies", None), ("bodies", None), ("floor", 0, lmc.WHOLE_CATEGORY)]
+    assert calls == [("host_copies", None), ("bodies", None), ("floor", 0, lmc.WHOLE_CATEGORY, False)]
     calls.clear()
     sizes[:] = [800_000, 790_000, 780_000]  # the books step's before and after, then memory's rest
     assert lmc._apply_refusal_pass(_ctx(), second, unsized, None) is True
     # After a further refusal memory's rest may take everything, whole-or-outline sections included.
-    assert calls == [("books",), ("unseen_bodies", None), ("floor", lmc.WHOLE_CATEGORY, 0)]
+    assert calls == [("books",), ("unseen_bodies", None), ("floor", lmc.WHOLE_CATEGORY, 0, False)]
     calls.clear()
     sizes[:] = [800_000]
     known = SimpleNamespace(measurement=SimpleNamespace(**{**vars(unsized.measurement), "capacity_deficit_tokens": 18_887}))
     assert lmc._apply_refusal_pass(_ctx(), first, known, None) is True
-    assert calls[-1] == ("floor", 18_887, 0)  # no target, but a known window's deficit sizes memory (no slack here)
+    assert calls[-1] == ("floor", 18_887, 0, False)  # a capacity estimate alone doesn't change unsized refusal order
 
 
 def test_a_failed_candidates_walk_keeps_the_rounds_refusal_and_the_conversation_facts():
@@ -467,7 +814,7 @@ def test_books_pay_remaining_room_before_any_unseen_body(monkeypatch):
 
     calls, sizes, unseen = [], [], {}
     monkeypatch.setattr(lmc, "_reproject_actual_overflow_low",
-                        lambda ctx: calls.append(("books",)) or setattr(ctx, "active_context_mode", "low"))
+                        lambda ctx, **_kw: calls.append(("books",)) or setattr(ctx, "active_context_mode", "low"))
     monkeypatch.setattr(loop, "_measure_round_main_fit", lambda _ctx, **_kw: _fit(sizes.pop(0)))
     monkeypatch.setattr(lmc, "_run_emergency_address_pass", lambda _ctx, _fit, *, rung, goal_tokens=None: (
         calls.append((rung, goal_tokens)) or SimpleNamespace(status=unseen.get("status", "no_eligible"),
@@ -484,6 +831,42 @@ def test_books_pay_remaining_room_before_any_unseen_body(monkeypatch):
     sizes[:] = [880_000, 860_000]
     assert lmc._apply_refusal_pass(paid, second, _fit(900_000, accepted=None), 70_000) is True
     assert calls == [("books",), ("unseen_bodies", 50_000)]  # then only what the books left
+
+
+@pytest.mark.parametrize("useful", [False, True], ids=["larger-maps", "useful-maps"])
+def test_a_measured_second_pass_cannot_hide_an_unhelpful_book_switch(tmp_path, monkeypatch, useful):
+    from ouroboros import context_fit as cf, loop, memory_view as mv
+    from tests import _memory_view_synthetic as syn
+    from tests._context_fit_fixtures import _refusal_ctx
+
+    core = cf.ContextCore("Core", "", "# Runtime\n\n" + "Whole book material. " * (4_000 if useful else 1),
+                          "", "", "", '"Assignment"', False, memory_view_json=mv.snapshot_json(syn.snapshot()))
+    evidence = SimpleNamespace(route_fp="books", status="confirmed", stale=False, window_tokens=200_000)
+    plan = cf.build_context_fit_plan(None, core, {"type": "task"}, preferred_mode="max",
+        route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "test"}, evidence))
+    ctx = _refusal_ctx(tmp_path, plan)
+    ctx.accumulated_usage = {}
+    shown = ctx.messages[0]
+
+    def measure(ctx, **_kw):
+        return cf.measure_main_fit(ctx.context_fit_plan, ctx.messages, [],
+            profile=lmc._main_context_profile(ctx.context_fit_plan, ctx.active_context_mode),
+            rendered_mode=ctx.active_context_mode, round_id="books")
+
+    monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
+    unseen = []
+    def shed_unseen(current, _fit, *, rung, goal_tokens=None):
+        unseen.append((rung, current.active_context_mode, goal_tokens))
+        return SimpleNamespace(status="applied", reclaimed_tokens=goal_tokens)
+
+    monkeypatch.setattr(lmc, "_run_emergency_address_pass", shed_unseen)
+    assert lmc._apply_refusal_pass(ctx, lmc.REFUSAL_PASSES[1], measure(ctx), 2_000, 1_000)
+    if useful:
+        assert ctx.active_context_mode == "low" and ctx.messages[0] != shown and not unseen
+    else:
+        assert unseen == [("unseen_bodies", "max", 2_000)]
+        assert ctx.context_fit_plan is plan and ctx.messages[0] == shown
 
 
 @pytest.mark.parametrize("refused", [False, True])

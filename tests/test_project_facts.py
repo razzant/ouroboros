@@ -165,6 +165,37 @@ def test_generic_tools_deny_project_store_live(tmp_path, monkeypatch):
     assert "ACCESS_DENIED" in core._data_write(ctx, "projects/proj_x/k.md", "data")
 
 
+@pytest.mark.parametrize("mode", ["light", "advanced", "pro"])
+def test_read_list_and_search_refuse_shelves_an_owner_reset_set_aside(tmp_path, monkeypatch, mode):
+    """Reset keeps earlier Project notes in a dot folder of ``projects/`` for the owner's own reading. Real
+    dispatch of ``read_file``, ``list_files`` and ``search_code`` refuses it like any shelf."""
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    data, repo = tmp_path / "data", tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", data)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+    folder = "projects/.before-reset-20260101-0123abcd"
+    kept = data / folder / "alpha" / "knowledge" / "fact.md"
+    kept.parent.mkdir(parents=True)
+    kept.write_text("SETASIDEMARKER an invented earlier fact", encoding="utf-8")
+    (data / "memory").mkdir()
+    (data / "memory" / "g.md").write_text("GLOBALMARKER", encoding="utf-8")
+    registry = ToolRegistry(repo_dir=repo, drive_root=data)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=data, task_id="reader"))
+    rel = kept.relative_to(data).as_posix()
+    for tool, args in [("read_file", {"path": rel}), ("read_file", {"path": str(kept)}),
+                       ("list_files", {"path": folder}), ("list_files", {"path": f"{folder}/alpha"}),
+                       ("search_code", {"path": folder, "query": "SETASIDEMARKER"})]:
+        refused = registry.execute_result(tool, {"root": "runtime_data", **args})
+        assert refused.status == "blocked" and "ACCESS_DENIED" in refused.text and "SETASIDEMARKER" not in refused.text
+    assert "projects" not in registry.execute("list_files", {"root": "runtime_data", "path": "."})
+    assert "GLOBALMARKER" in registry.execute("search_code", {"root": "runtime_data", "query": "GLOBALMARKER"})
+    whole = registry.execute("search_code", {"root": "runtime_data", "query": "SETASIDEMARKER"})
+    assert "No matches" in whole and "project_store_scoped=1" in whole
+    assert sanitize_project_id(".before-reset-20260101-0123abcd") != ".before-reset-20260101-0123abcd"  # no id spells it
+
+
 @pytest.mark.parametrize(("path", "hint", "wrong"), [
     ("projects/proj_x/workpad.md", "workpad_read(project_id='proj_x') reads it and "
      "workpad_write(project_id='proj_x', mode=..., expected_revision=...) writes it (edit changes parts", "knowledge_read"),

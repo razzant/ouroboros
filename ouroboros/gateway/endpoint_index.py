@@ -1,9 +1,8 @@
 """Human/test-visible HTTP endpoint index for the browser gateway ABI.
 
 Routers own the executable Route objects; this tuple is the reviewable
-contract index consumed by the parity/reliability suites. It lives beside
-``gateway/contracts.py`` (which re-exports it) so the mirror file keeps its
-TypedDict envelopes within the module size gate.
+contract index consumed by the parity/reliability suites. It lives apart from
+the TypedDict envelopes in ``gateway/contracts.py``, which re-exports it.
 
 ``HTTP_SHAPES`` and ``WS_SHAPES`` bind contract TypedDicts (by name) to entries
 of the two frozen index tuples; ``GET /api/contract`` derives the published
@@ -58,6 +57,17 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/circles",
     "POST /api/circles/{circle_id}",
     "DELETE /api/circles/{circle_id}",
+    "POST /api/letters",
+    "GET /api/letters/{letter_id}",
+    "GET /api/letters/{letter_id}/state",
+    "GET /api/letters/{letter_id}/result",
+    "POST /api/letters/{letter_id}/cancel",
+    "POST /api/peer-links/invite",
+    "POST /api/peer-links/accept",
+    "POST /api/peer-links/introduce",
+    "GET /api/peer-links/{link_id}",
+    "POST /api/peer-links/{link_id}/confirm",
+    "POST /api/peer-links/{link_id}/revoke",
     "POST /api/skills/{skill}/publish-preflight",
     "GET /api/model-catalog",
     "POST /api/tasks",
@@ -87,7 +97,9 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/schedules/{schedule_id}/action",
     "DELETE /api/schedules/{schedule_id}",
     "POST /api/command",
+    "GET /api/reset",
     "POST /api/reset",
+    "POST /api/reset/v1",
     "GET /api/git/log",
     "POST /api/git/rollback",
     "POST /api/git/promote",
@@ -118,6 +130,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/chat/history",
     "GET /api/chat/search",
     "GET /api/recall",
+    "GET /api/chat/archive",
     "GET /api/logs/{name}",
     "GET /api/logs/{name}/raw",
     "POST /api/chat/upload",
@@ -132,6 +145,8 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/mcp/status",
     "POST /api/mcp/refresh",
     "POST /api/mcp/sign-in",
+    "POST /api/sign-in",
+    "GET /api/sign-in/status",
     "POST /api/mcp/test",
     "POST /api/mcp/import/preview",
     "GET /api/review-pool",
@@ -252,7 +267,7 @@ _MAINTENANCE = "400,409,503:ClaudexorMaintenanceProblem"
 _CLAWHUB_ERRORS = "400,404,429,502:ErrorResponse"
 _INSTALL = "200:MarketplaceInstallResponse 400:MarketplaceInstallResponse|ErrorResponse 404,429:MarketplaceInstallResponse"
 _IN_LANE = "runs in the one skill lifecycle lane until it settles (watch GET /api/skills/lifecycle-queue)"
-_SOURCES_WRITE = "503:SettingsWriteRefusal"
+_SOURCES_WRITE = "409,503:SettingsWriteRefusal"
 _INSTALL_REFUSAL = "404,409,429,502:SkillCatalogInstallResponse"
 _ENGINE = "relays the bundled Claudexor engine"
 
@@ -262,21 +277,24 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/contract": Shape("200:GatewayContractResponse"),
     "GET /api/state": Shape("200:StateResponse 500:ErrorResponse", query="bindings_since"),
     "GET /api/consciousness": Shape("200:json 503:json", query="switch", note="?switch=on|off: SwitchPreview {to, lines, places[{place_id, label, state, people, people_capped?}] | places null when unread} read at the press; else status/detail, position/gloss, appointment_at, live_wake_held, live_wake_hold, allowance_status/open_rows/room_after, model_route, spend by cause, places_brief; RecentWakesView: recent_wakes: RecentWake[] | null, recent_wakes_coverage names the shared 50-wake/48 h cap or read failure; full Places use /api/places"),
-    "GET /onboarding": Shape("200:html", query="builtin", note="selected setup or builtin wizard; builtin=1 forces builtin"),
-    "GET /api/onboarding": Shape("200:html 204:empty", note="204: a ready provider exists, no setup needed"),
-    "GET /api/onboarding/bootstrap": Shape("200:OnboardingBootstrapResponse", note="read-only; writes nothing"),
+    "GET /onboarding": Shape("200:html 303:empty", query="builtin",
+                             note="selected setup or builtin wizard; builtin=1 forces builtin; interrupted Reset redirects to the selected main interface"),
+    "GET /api/onboarding": Shape("200:html 204:empty 409:ErrorResponse",
+                                note="204: a ready provider exists; 409 reset_interrupted: finish Reset in Settings"),
+    "GET /api/onboarding/bootstrap": Shape("200:OnboardingBootstrapResponse 409:ErrorResponse",
+                                           note="read-only; writes nothing; 409 reset_interrupted: finish Reset in Settings"),
     "POST /api/onboarding/subagents/preview": Shape(
-        "200:OnboardingSubagentsPreviewResponse 400,503:SettingsWriteRefusal", "OnboardingCompleteRequest",
+        "200:OnboardingSubagentsPreviewResponse 400,409,503:SettingsWriteRefusal", "OnboardingCompleteRequest",
         note="read-only actor draft for the same payload completion would save"),
     "POST /api/onboarding/model-catalog": Shape(
-        "200:ModelCatalogResponse 400:SettingsWriteRefusal", "OnboardingCompleteRequest", query="provider_id",
+        "200:ModelCatalogResponse 400,409:SettingsWriteRefusal", "OnboardingCompleteRequest", query="provider_id",
         note="read-only; the model catalog of the access an unsaved setup draft names (its access fields alone)"),
     "POST /api/onboarding/connection/identity": Shape(
         "200:ConnectionIdentityResponse 400,404,500,503:ConnectionIdentityResponse", "ConnectionIdentityRequest",
         note="writes nothing; the declared function of a built-in skill's connection card names the token's account"),
     "POST /api/onboarding/complete": Shape(
         "200:OnboardingCompleteResponse 400,403,409,500,503:SettingsWriteRefusal|OnboardingPresetFailureResponse",
-        "OnboardingCompleteRequest", note="the one atomic setup writer; a 503 with can_skip offers completion without agent presets"),
+        "OnboardingCompleteRequest", note="the one atomic setup writer; 409 reset_interrupted: finish Reset first; a 503 with can_skip offers completion without agent presets"),
     "GET /api/onboarding/complete": Shape(
         "200:OnboardingAttemptResponse 400:ErrorResponse", query="attempt",
         note="read-only; what became of the completion attempt whose attempt_id is given"),
@@ -285,7 +303,7 @@ HTTP_SHAPES: dict[str, Shape] = {
         note="masked secrets read back as placeholders; sending a placeholder keeps the stored value"),
     "POST /api/settings": Shape(
         f"200:SettingsSaveResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "SettingsSaveRequest",
-        note="partial setting keys; if_unchanged checks per-key tokens; unset restores omission; restart_state includes running values"),
+        note="partial setting keys; if_unchanged checks per-key tokens; unset restores omission; restart_state includes running values; 409 reset_interrupted: finish Reset first"),
     "POST /api/settings/secret": Shape("200:SettingsSecretResponse 400,404,409:ErrorResponse", "SettingsSecretRequest",
                                        note="reveals one stored secret, no-store; writes nothing"),
     "GET /api/ui/preferences": Shape("200:UiPreferencesResponse"),
@@ -338,6 +356,50 @@ HTTP_SHAPES: dict[str, Shape] = {
     "DELETE /api/places/{place_id}": Shape("200:json 400,409:json", "PlaceDisconnectRequest", note="disconnect with optional revision; room history stays"),
     "POST /api/circles": Shape("200:json 400:json", "CircleCreateRequest", note="a new circle last in the order; owner-authored words"),
     "POST /api/circles/{circle_id}": Shape("200:json 400,409:json", "CircleUpdateRequest", note="rename or reword with optional revision"),
+    "POST /api/letters": Shape(
+        "200:json 400,401,403,404,409,429,503:json",
+        headers="X-Ouroboros-Link! X-Ouroboros-Install! X-Ouroboros-Protocol!",
+        note="gateway/peer_contracts.py LetterCreateRequest -> LetterStatus (a work letter) | LetterAnswerReceipt "
+             "(in_reply_to, once its mailbox row is proven) | PeerMessageReceipt (kind='message') | LetterRefusal: a "
+             "linked Ouroboros's work letter starts ordinary work, an answer wakes the asking letter, and kind='message' "
+             "captures a standalone note in the link's Presence room (no task, no may_start required; received != read; "
+             "429 asks for the same letter later); "
+             "one letter id is one outcome on its link, and 503 is not known now: retry"),
+    "GET /api/letters/{letter_id}": Shape("200:json 400,401,403,404,503:json",
+                                          headers="X-Ouroboros-Link! X-Ouroboros-Install! X-Ouroboros-Protocol!",
+                                          note="LetterStatus, also while the link is paused: state, an addressed "
+                                               "question (or its held code without its words), a short failure; a "
+                                               "delivered answer's id reads its letter"),
+    "GET /api/letters/{letter_id}/state": Shape("200:json 400,401,403,404,503:json",
+                                                headers="X-Ouroboros-Link! X-Ouroboros-Install! X-Ouroboros-Protocol!",
+                                                note="LetterStateView {letter_id, state, view: 'state', phase?}: "
+                                                     "what a sender's Stop reads back, also across a Pause; never a "
+                                                     "question, failure text or result"),
+    "GET /api/letters/{letter_id}/result": Shape("200:json 400,401,403,404,409,503:json",
+                                                 headers="X-Ouroboros-Link! X-Ouroboros-Install! X-Ouroboros-Protocol!",
+                                                 note="LetterResult only when done (result_available says whether an "
+                                                      "addressed answer was kept, result_held names a hold of one "
+                                                      "that was); otherwise 409 not_done with the state"),
+    "POST /api/letters/{letter_id}/cancel": Shape("200:json 400,401,403,404,503:json",
+                                                  headers="X-Ouroboros-Link! X-Ouroboros-Install! X-Ouroboros-Protocol!",
+                                                  note="the link's own Stop of the letter's root and its helpers (never "
+                                                       "my human's); the Stop's owner decides what of a settled root runs"),
+    "POST /api/peer-links/invite": Shape("200:json 400,503:json",
+                                         note="owner door {own_url?, label?, own_label?, note?, may_start}: a one-time "
+                                              "invitation (15 minutes); its key leaves with it unless a link takes it"),
+    "POST /api/peer-links/accept": Shape("200:json 400,409,410,502,503:json",
+                                         note="owner door {invite, preview?, own_url?, label?, own_label?, note?, "
+                                              "may_start}: preview or accept; one acceptance per link at a time"),
+    "POST /api/peer-links/introduce": Shape("200:json 400,401,403,503:json", headers="X-Ouroboros-Invite!",
+                                            note="the accepting side's call {link_id, install_id, url, key_sha256, "
+                                                 "label?, may_start?, protocol?} under the one-time invitation token"),
+    "GET /api/peer-links/{link_id}": Shape("200,403,503:json", note="owner only: link null or {link_id, place_id, peer_label, peer_install_id, code, code_check, revoked_at}"),
+    "POST /api/peer-links/{link_id}/confirm": Shape("200:json 400,401,503:json",
+                                                    note="owner door: the six digits match here; the link's place starts"),
+    "POST /api/peer-links/{link_id}/revoke": Shape("200:json 400,401,503:json",
+                                                   note="owner door: the key, the link's answer and message receipts and "
+                                                        "the replies owed there leave, the place pauses; revoking "
+                                                        "again returns the revoked link"),
     "DELETE /api/circles/{circle_id}": Shape("200:json 400,409:json", "CircleDeleteRequest", note="its places stay connected and leave it atomically; returns its words and the detached places"),
     "POST /api/skills/{skill}/publish-preflight": Shape(
         "200,400,404,409,503:SkillPublishPreflightResponse", "SkillPublishPreflightRequest",
@@ -355,14 +417,18 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/tasks": Shape("200:TaskListResponse 503:ErrorResponse", query="status limit queue_only"),
     "GET /api/tasks/{task_id}": Shape("200:TaskDetailResponse 400,404,503:ErrorResponse"),
     "GET /api/tasks/{task_id}/artifacts/{name}": Shape(
-        "200,206:file 400,404,409,410,500,503:ErrorResponse", query="relpath archive source", headers="Range",
-        note="Range supported; x-ouroboros-artifact-sha256 when the bytes are verified"),
+        "200,206:file 400,404,409,410,500,503:ErrorResponse", query="relpath archive source letter", headers="Range",
+        note="Range supported; x-ouroboros-artifact-sha256 when the bytes are verified; ?letter=<letter id> with "
+             "{letter_id}.letter.txt or .answer.txt: the whole words of that letter of this task as text, read on "
+             "demand from this side's records (409 reply_not_given: never a reply not given to this sender)"),
     "GET /api/tasks/{task_id}/events": Shape(
         "200:sse/TaskEvent 400,404:sse", query="cursor wait",
         note="resume with ?cursor=<last event id>; a 400/404 stream carries one error event"),
     "GET /api/tasks/{task_id}/reviews": Shape(
         "200:TaskReviewHistoryResponse 400,503:ErrorResponse", query="offset limit",
         note="passive paged ledger history for this exact task, with per-record gaps; no-store"),
+    # Both text exports carry X-Review-Export-SHA256 (delivered redacted bytes).
+    # The exact ledger/plan source export also carries X-Review-Source-SHA256 (saved original bytes).
     "GET /api/tasks/{task_id}/reviews/skill/{job_id}": Shape(
         "200:text 400,404,503:ErrorResponse", query="skill format",
         note="task-bound saved skill detail export; complete safe normalized text, no-store; existing desktop bridge prefix"),
@@ -384,7 +450,8 @@ HTTP_SHAPES: dict[str, Shape] = {
                                                 note="a timeout is not a refusal: retry with the same action_nonce"),
     "POST /api/tasks/{task_id}/resume": Shape("200:TaskResumeResponse 400,404,409,503:ErrorResponse", "TaskResumeRequest",
                                               note="a budget-paused task; not idempotent: a repeat is refused; "
-                                                   "a 409 may list acceptable_unknown ids to name in the body"),
+                                                   "a 409 may list acceptable_unknown ids to name in the body; "
+                                                   "an owner Resume at an own wake's allowance may include consciousness_resume"),
     "POST /api/decisions": Shape(
         "200,202:DecisionResponse 400,404:ErrorResponse 409:DecisionResponse|ErrorResponse 501,503:ErrorResponse",
         "DecisionRequest", note="request_id is the idempotency key; the first answer wins (a card press: unless once)"),
@@ -398,8 +465,9 @@ HTTP_SHAPES: dict[str, Shape] = {
         "200:CardPinResponse 404,409,503:ErrorResponse", note="component cards only; broadcasts extension_lifecycle"),
     "DELETE /api/cards/{card_id}/pin": Shape("200:CardPinResponse 503:ErrorResponse", note="a repeat answers pinned false"),
     "GET /api/chat/history": Shape(
-        "200,400,409,503:ChatHistoryResponse", query="chat_id cursor around n_human n_progress limit",
-        note="an error page echoes the cursor sent, so the same request can be repeated"),
+        "200,400,409,503:ChatHistoryResponse", query="chat_id cursor around n_human n_progress limit reason mode decision detail",
+        note="an error page echoes the cursor sent, so the same request can be repeated; "
+             "reason, mode, decision and detail only say why the read was made (counted, never a selector)"),
     "GET /api/chat/search": Shape(
         "200,400,409,503:ChatSearchResponse", query="chat_id q cursor",
         note="read-only; one bounded read of the room's saved messages as candidates, newest first; the cursor continues older"),
@@ -408,6 +476,9 @@ HTTP_SHAPES: dict[str, Shape] = {
         query="words room_id voice order date_from date_to count offset snapshot row",
         note="read-only neighbour door: a raw loopback peer without forwarding headers only (403 recall_peer_closed "
              "before any read, whatever the password); words (repeatable) or one row; no model turn"),
+    "GET /api/chat/archive": Shape(
+        "200:ChatArchiveResponse 400,404,409,503:ErrorResponse", query="room before",
+        note="read-only, no read credit; while Main's history refuses for the Project registry: rows evidence places, oldest first"),
     "POST /api/chat/upload": Shape("200:UploadResponse 400:ErrorResponse", "multipart", note="form field file"),
     "DELETE /api/chat/upload": Shape("200:ChatUploadDeleteResponse 400,404,409:ErrorResponse", "ChatUploadDeleteRequest",
                                      note="pending uploads only; a repeat answers 404"),
@@ -415,7 +486,8 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/projects": Shape("200:ProjectCreateResponse 400,401,409,500:ErrorResponse", "ProjectCreateRequest",
                                 note="401 error_code auth_required: the git clone needs credentials (not the network gate)"),
     "POST /api/projects/from-task": Shape("200:ProjectFromTaskResponse 400,409,500:ErrorResponse", "ProjectFromTaskRequest",
-                                          note="409: the task already belongs to another project"),
+                                          note="409 reason_code: a naming refusal that leaves the work in Main (error is its one "
+                                               "sentence), stale routing, or the task belongs to another project"),
     "POST /api/projects/{project_id}/update": Shape("200:ProjectUpdateResponse 400,404,409,500:ErrorResponse",
                                                     "ProjectUpdateRequest"),
     "POST /api/projects/{project_id}/delete": Shape("200:ProjectDeleteResponse 404,500:ErrorResponse"),
@@ -527,10 +599,14 @@ HTTP_SHAPES: dict[str, Shape] = {
                                                       "ScheduleActionRequest"),
     "DELETE /api/schedules/{schedule_id}": Shape("200:ScheduleActionResponse 400:ErrorResponse"),
     "POST /api/command": Shape(
-        "200:CommandResponse 400,409:CommandRefusal 503:ErrorResponse", "CommandRequest",
-        note="queued, not done, except /panic: accepted immediately, never queued; /panic and /restart may end the connection before or after the answer"),
-    "POST /api/reset": Shape("200:ResetResponse 409:ErrorResponse",
-                             note="irreversible: deletes data and settings, then restarts; never resend"),
+        "200:CommandResponse|AgentNoteResponse 400,409:CommandRefusal 503:ErrorResponse|CommandRefusal",
+        "CommandRequest|AgentNoteRequest",
+        note="queued, not done, except /panic: accepted immediately, never queued; /panic and /restart may end the connection before or after the answer; an agent note is saved, then queued, and never a command"),
+    "GET /api/reset": Shape("200:ResetResponse"),
+    "POST /api/reset": Shape("400,409:ErrorResponse", "ResetRequest",
+                             note="legacy path: refused; the versioned request is POST /api/reset/v1"),
+    "POST /api/reset/v1": Shape("200:ResetResponse 400,409:ErrorResponse", "ResetRequest",
+                                note="confirm reset_all_data:v1 through the live restart coordinator; read GET /api/reset for the outcome; never resend"),
     "GET /api/git/log": Shape("200:GitLogResponse 500:ErrorResponse"),
     "POST /api/git/rollback": Shape("200:GitRollbackResponse 400,403:ErrorResponse 409,500:UpdateApplyErrorResponse",
                                     "GitRollbackRequest", note="interrupts running work and restarts the core; no check, not safe to repeat"),
@@ -548,9 +624,12 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/update/apply": Shape(
         "200:UpdateApplySuccessResponse 400,403:ErrorResponse 409,500:UpdateApplyErrorResponse", "UpdateApplyRequest",
         note="200: inspect status (manual, assisted_started, restart_required, or ok with restarting); adoption requires the landed transaction/merge identity and running_sha after startup"),
-    "GET /api/cost-breakdown": Shape("200:CostBreakdownResponse 503:ErrorResponse", query="period",
+    "GET /api/cost-breakdown": Shape("200:CostBreakdownResponse|CostProjectDaysResponse 503:CostBreakdownUnavailableResponse",
+                                     query="period project_days days view",
                                      note="503: the ledger is unavailable (accounting.available false); spend is unknown, not zero; "
-                                          "?period=24h|7d|30d adds that period's view"),
+                                          "?period=24h|7d|30d adds a rolling view; project_days=main|unassigned|project:<id> "
+                                          "adds a calendar view (days=7|30, default 7), or a selector-bound refusal even on 503; "
+                                          "view=project_days answers CostProjectDaysResponse, that view alone, its refusal too"),
     "GET /api/storage": Shape("200:StorageResponse", query="count",
                               note="passive; ?count=<finished_at> omits a count the client already holds"),
     "POST /api/storage/measure": Shape("202:StorageResponse", note="starts one count in a child, or joins the running one"),
@@ -584,7 +663,14 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/mcp/status": Shape("200:McpStatusResponse"),
     "POST /api/mcp/refresh": Shape("200:McpRefreshResponse 400:ErrorResponse", "McpRefreshRequest", note="safe to repeat"),
     "POST /api/mcp/sign-in": Shape("200:McpSignInResponse 400,404:ErrorResponse", "McpSignInRequest",
-                                   note="begin answers the provider page; a refused step is 200 with ok false"),
+                                   note="begin answers the provider page; a refused step is 200 with ok false (not_sent: repeat "
+                                        "it once fixed)"),
+    "POST /api/sign-in": Shape("200:SignInResponse 400,404:ErrorResponse", "SignInRequest",
+                               note="a skill's service sign-in; begin answers the provider page; a refused step "
+                                    "is 200 with ok false"),
+    "GET /api/sign-in/status": Shape("200:SignInStatusResponse 503:SignInStatusProblem",
+                                     note="503: a saved sign-in, client or account list cannot be read (reason "
+                                          "sign_in_storage_unavailable); the answer is never an empty list"),
     "POST /api/mcp/test": Shape("200:McpTestResponse 400,404,409:ErrorResponse", "McpTestRequest",
                                 note="connects once and saves nothing; a failed test is 200 with ok false"),
     "POST /api/mcp/import/preview": Shape("200,400:MCPImportPreviewResponse", "MCPImportPreviewRequest",
@@ -671,6 +757,7 @@ WS_SHAPES: dict[str, tuple[str, str]] = {
     "chat": ("ChatInbound", "ChatOutbound"),
     "command": ("CommandInbound", ""),
     "conversation_finished": ("", "ConversationFinishedOutbound"),
+    "connection_profile": ("", "ConnectionProfileOutbound"),
     "panic_accepted": ("", "PanicAcceptedOutbound"),
     "photo": ("", "PhotoOutbound"),
     "video": ("", "VideoOutbound"),

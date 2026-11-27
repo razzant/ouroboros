@@ -98,17 +98,29 @@ def test_onboarding_previews_and_commits_the_visible_owner_draft() -> None:
 
 
 def test_preview_contract_and_task_only_agy_copy_are_explicit() -> None:
+    from ouroboros.gateway.schema import contract_document
+
+    schemas = contract_document()["schemas"]
+    preview = schemas["OnboardingSubagentsPreviewResponse"]
+    preview_fields = {"ok": "boolean", "available_subagents": "object", "diagnostics": "array"}
+    assert set(preview_fields) <= set(preview["required"])
+    assert {key: preview["properties"][key]["type"] for key in preview_fields} == preview_fields
+    assert preview["properties"]["diagnostics"]["items"]["type"] == "object"
+
     types = _read(MODULES / "api_types.js")
     step = _read(MODULES / "onboarding_agents_step.js")
-    assert "@typedef {Object} OnboardingSubagentsPreviewResponse" in types
-    assert "@property {boolean} ok" in types
-    assert "@property {AvailableSubagentsSetting} available_subagents" in types
-    assert "@property {Object[]} diagnostics" in types
-    assert "{ harness: 'agy' }" in step
+    harnesses = _read(MODULES / "harness_accounts.js")
+    # The bootstrap families (agy included, task-only) live in the one shared list; the wizard
+    # compiles its families from it and lets familyLabel resolve each product name.
+    assert "export const BOOTSTRAP_HARNESSES = ['codex', 'claude', 'cursor', 'agy'];" in harnesses
+    assert "AGENT_FAMILIES = BOOTSTRAP_HARNESSES.map((harness) => ({ harness }))" in step
     assert "familyLabel(family.harness" in step
     assert "{ harness: 'agy', label:" not in step
     assert "@typedef {Object} SubagentLastDelegation" in types
-    assert "@property {SubagentLastDelegation=} subagent_last_delegation" in types
+    status = schemas["ClaudexorStatusResponse"]
+    assert status["properties"]["subagent_last_delegation"]["type"] == "object"
+    assert "subagent_last_delegation" not in status.get("required", ())
+    assert "snapshot?.subagent_last_delegation" in _read(MODULES / "subagent_status_primitives.js")
 
 
 def test_generated_preview_is_background_and_whole_draft_clean_gated() -> None:

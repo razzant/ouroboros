@@ -235,11 +235,11 @@ def test_transfer_period_is_stated_with_and_without_ready_units_across_readers(t
 def test_transfers_follow_the_activation_records_in_publication_order_and_fold_by_it(tmp_path):
     rooms = shared.world(tmp_path)
     store = ChronicleStore(tmp_path)
-    before = [pointer["node_id"] for pointer in store.legacy_pointer_rows()]
+    before = [pointer["node_id"] for pointer in mi.legacy_pointer_rows(store)]
     _publish(tmp_path, _moved(tmp_path, "t-c", "Published first, room-less."),
              _moved(tmp_path, "t-a", "In Main.", room="1"), _moved(tmp_path, "t-b", "In Alpha.", room=str(rooms["alpha"])))
     _publish(tmp_path, _moved(tmp_path, "t-d", "Published later, in Main.", room="1"))
-    assert [pointer["node_id"] for pointer in store.legacy_pointer_rows()] == [*before, "t-c", "t-a", "t-b", "t-d"]
+    assert [pointer["node_id"] for pointer in mi.legacy_pointer_rows(store)] == [*before, "t-c", "t-a", "t-b", "t-d"]
     units = [unit.record_id for unit in mi.legacy_units(store, tmp_path)]
     assert units[-4:] == ["t-c", "t-a", "t-b", "t-d"] and units[:-4] == before
     part = store.publish_part(room_id="1", text="Two chapters, told once.", member_ids=["t-a", "t-d"],
@@ -355,7 +355,7 @@ def test_the_floor_keeps_a_mixed_rooms_retelling_and_its_transfers_apart_each_on
     shared.world(tmp_path, flat="An old flat summary.")  # the helper retold Main and, with no room, the flat file
     _publish(tmp_path, _moved(tmp_path, "t-main", "Words told in Main.", room="1"),
              _moved(tmp_path, "t-roomless", "Words of no room."))
-    pointers = ChronicleStore(tmp_path).legacy_pointer_rows()
+    pointers = mi.legacy_pointer_rows(ChronicleStore(tmp_path))
     flat = next(p["node_id"] for p in pointers if p["node_id"].startswith("legacy-flat-"))
     snapshot, level = _view(tmp_path), mv.FloorLevel((("F3", ("1", "legacy")),))
     folded = mv.render_story(snapshot, level)

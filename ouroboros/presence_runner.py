@@ -51,6 +51,9 @@ class PresenceTurnResult:
     continuation_version: int = 0
     # Version 2: ``{source_event_id, message}`` of the last input this output covers.
     reply_anchor: Mapping[str, Any] | None = None
+    # A heard answer's recorded decision, ``{decision: "heard", reason}`` (``place_arrivals.heard_replay``); a
+    # negotiated answer projects it (``place_intake.attention_view``), every other answer leaves it None.
+    attention: Mapping[str, Any] | None = None
 
 
 def _presence_delivery(outcome: str, text: str, terminal_origin: str, *, legacy: bool = False) -> tuple[str, str]:
@@ -127,7 +130,7 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
     from ouroboros.presence_continuation import _handoff_ref, terminal_output
     from ouroboros.task_finalization import HOST_AUTHORED_TERMINAL_ORIGINS, schedule_report_run
 
-    from ouroboros.place_reply import prepare_focus_reply, reply_carrier
+    from ouroboros.place_reply import carrier_now, prepare_focus_reply
     if schedule_report_run(task):
         # A legacy schedule's report is retained in the result only. Host facts alone decide whether work is owed;
         # neither the forced declaration nor a finish note may carry its text to the next turn.
@@ -149,10 +152,14 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
             "type": "presence_result", "task_id": str(task.get("id") or ""), "outcome": outcome,
             "text": "", "message": "", "work_ref": work_ref, "output_ref": "", "ts": utc_now_iso(),
         }
-    carrier = reply_carrier(task.get("metadata") or {})
+    # A new selection meets the place a retained legacy binding resolves to; a frozen-ceiling run keeps its forced
+    # declaration (``place_reply.carrier_now``). A hold before any body ends with no run (``ctx`` None): no selection.
+    carrier = carrier_now(ctx, task.get("metadata") or {}) if ctx is not None else {}
     if carrier:
         # Ordinary exits have already returned flags to the mind. Forced exits cannot buy a
         # new round: preserve the flag as a held reply instead of releasing unchecked speech.
+        # No round reads a record note now, so a records-only finish is simply the record.
+        ctx._records_only_noted = True
         allowed, refusal = prepare_focus_reply(ctx, str(text or ""), quiet=terminal_origin != "model_final" or silent)
         if not allowed:
             from ouroboros.place_reply import record_notice
@@ -175,6 +182,10 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
         # when owed work below turns the outcome into deferred.
         text = str(completion.get("message") or "") if completion.get("outcome") in {"message", "deferred"} else ""
     note = str(completion.get("message") or "") if completion.get("outcome") == "tool_delivered" else ""
+    if silent and not completion.get("quiet") and completion.get("outcome") != "tool_delivered":
+        # An accepted silent finish is never words, whatever the carrier read returned (none from an unreadable
+        # store): the quiet outcome its selection gives it (``place_reply.prepare_focus_reply``), no outward body.
+        completion = {**completion, "outcome": "deferred" if _handoff_ref(ctx) else "silent", "quiet": True}
     if completion.get("quiet"):
         # Not speech, so an owed handoff below polls with an empty body; the mind's own
         # silent words stay its finish note, host text never becomes one.
@@ -223,6 +234,12 @@ _GATES_LOCK = threading.Lock()
 _GATES: dict[tuple[str, int], PresenceTurnGate] = {}
 _LIVE_LOCK = threading.Lock()
 _LIVE_PRESENCE_TASKS: set[tuple[str, str]] = set()
+
+
+def snapshot_local_presence_tasks() -> list:
+    """Positive (root, task) liveness observations for a reader outside this process."""
+    with _LIVE_LOCK:
+        return sorted(_LIVE_PRESENCE_TASKS)
 
 
 def presence_turn_is_live(task_id: str, *, drive_root: Path | None = None) -> bool:
@@ -1310,13 +1327,14 @@ def run_presence_turn(
                 and not any(row.get("direction") == "in" for row in prior_rows)):
             log_dialogue(direction="in", user_id=actor_id, text=event.text or task["text"])
         if admission.place is not None:
-            from ouroboros.place_intake import decide_attention, settle_heard
+            from ouroboros.place_intake import WAKE_IMPORT_PENDING, decide_attention, settle_heard
             decision, allowance = decide_attention(Path(drive_root), admission, event)
             if decision == "silent":
                 return settle_heard(Path(drive_root), task, event, allowance["reason"],
                                     captured_task_id=_task_id(admission, event))
             if decision == "retry":
-                error = PresenceTurnError("consciousness_allowance_exhausted", "allowance")
+                error = (PresenceTurnError(WAKE_IMPORT_PENDING, "place") if allowance.get("reason") == WAKE_IMPORT_PENDING
+                         else PresenceTurnError("consciousness_allowance_exhausted", "allowance"))
                 error.disposition, error.retry_after = "retry", allowance["retry_after"]
                 raise error
             task["metadata"]["focus_allowance"] = allowance

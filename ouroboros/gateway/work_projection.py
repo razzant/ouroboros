@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import threading
+import time
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
@@ -93,6 +94,8 @@ class _Observations:
         # on a live row as its gap, and as a deferral (no row at all) for a tail-only group.
         self.unreadable: set[str] = set()
         self.unverified: set[str] = set()
+        # A claimed later Continue episode whose record a read failed to open (``_latest_episode``).
+        self.episode_unread = False
 
     def result(self, task_id: str) -> Optional[dict]:
         """The task's stored result: the last projection's when its row has not moved since, else one read."""
@@ -238,9 +241,12 @@ def tree_review_operation(drive_root: Any, task_id: str, *, sent_only: bool = Fa
     """Whether a review ``task_id`` launched still runs (``sent_only``: one it already sent): the tree census's
     review read for ``/api/state``, beside ``tree_model_handoffs``."""
     from ouroboros import review_operation
+    from ouroboros.gateway.history_live import LIVE
 
+    live = LIVE.get()
+    observed = {} if live is None else {"live_owners": live["review_operations"], "observer": live["controller"]}
     return review_operation.task_has_live_review_operation(drive_root, task_id, sent_only=sent_only,
-                                                           result_loader=result_loader)
+                                                           result_loader=result_loader, **observed)
 
 
 def tree_review_reads(drive_root: Any, root_id: str):
@@ -365,6 +371,95 @@ def _work_of(root_id: str, raw: Mapping[str, Mapping[str, Any]], obs: _Observati
     for task_id in chain:
         memo[task_id] = (work_id or root_id, name)
     return memo[root_id]
+
+
+def _latest_episode(task_id: str, obs: _Observations) -> Tuple[str, bool]:
+    """``(the latest episode this read can prove, whether what the work ended with is unknown)`` for the work an ended
+    episode ``task_id`` belongs to.
+
+    Only a recorded edge moves it: the predecessor's hash-bound claim names a successor whose own record carries the
+    same admission (``delegate_resume.verified_successor``, pure over the two records), and the claim is marked
+    admitted or the successor is positively terminal (the mark is a best-effort mirror and may lag; a scheduled row
+    is never taken for an admitted one). A claim not confirmed admitted is no episode yet. A link that is malformed,
+    or names a successor this read cannot read or verify, and a chain past the bound, leave the work at the last
+    proven episode with its outcome unknown, never the stale one's; the gap is named."""
+    from ouroboros.delegate_resume import verified_successor
+    from ouroboros.owner_continue import WORK_CHAIN_MAX_HOPS, continued_by_binding
+
+    seen = {task_id}
+    gap = "episode_record_unavailable"
+    while True:
+        prior = obs.result(task_id) or {}
+        link = prior.get("continued_by")
+        if not link:
+            return task_id, not prior
+        claim = link if isinstance(link, dict) else {}
+        successor = claim.get("successor_task_id") if isinstance(claim.get("successor_task_id"), str) else ""
+        row = obs.result(successor) if successor else None
+        proven = bool(successor) and verified_successor(prior, row, task_id, successor)
+        if proven and (claim.get("state") == "admitted" or (row or {}).get("status") in _TRULY_TERMINAL_STATUSES):
+            if successor in seen:
+                gap = "episode_chain_cycle"
+                break
+            if len(seen) >= WORK_CHAIN_MAX_HOPS:  # keep the same durable-member bound as admission
+                gap = "episode_chain_depth_exceeded"
+                break
+            task_id = successor
+            seen.add(task_id)
+        elif (successor and claim.get("state") != "admitted" and continued_by_binding(prior)
+              and (row is not None or successor not in obs.unreadable)
+              and (proven or not (row or {}).get("continuation_admission"))):
+            return task_id, False  # claimed, not confirmed admitted: the Continue is still its predecessor's to retry
+        else:
+            break
+    named = successor or task_id
+    obs.gaps.append({"reason": gap, "task_id": named})
+    obs.episode_unread = obs.episode_unread or named in obs.unreadable
+    return task_id, True
+
+
+def _earlier_check_barred(drive_root: Any, current: Mapping[str, Any], members: List[Dict[str, Any]],
+                          runs: List[Mapping[str, Any]], obs: _Observations) -> bool:
+    """What outranks a waiting Continue's Resume check in this read (``work_status.earlier_starts``): earlier work
+    observed at work (another member of the work, or a bound run of its tree, which the door's census would name), the
+    Continue's own recorded Stop or end, or its passed deadline. A Pause, Panic or Restart has already replaced the wait."""
+    from ouroboros.cancel_intents import cancel_pending
+    from supervisor.queue_timeouts import _task_deadline_ts
+
+    task_id = str(current.get("task_id") or "")
+    stored = obs.result(task_id) or {}
+    return (any(member is not current and member["activity"] in {"working", "queued", "waiting"} for member in members)
+            or any(run["kind"] == "run" and not run.get("unbound") for run in runs)
+            or stored.get("status") in _TRULY_TERMINAL_STATUSES or owner_stopped(stored)
+            or cancel_pending(drive_root, task_id)
+            or _task_deadline_ts(stored, missing=float("inf")) <= time.time())
+
+
+def _ended_pause_target(current_id: str, earlier: List[str], roots: set[str],
+                        owners_by_root: Mapping[str, List[Dict[str, Any]]],
+                        ordinary_run_roots: set[str], obs: _Observations) -> str:
+    """The ended tree root the owner's Pause reaches (``owner_pause_control._late_work`` / ``_ended_tail``).
+
+    A root may take Pause for a living helper or a bound ordinary run on a non-owner-stopped terminal record,
+    unless a Stop is already pending there. Only the latest episode's own tree may take Pause while it holds
+    custody; otherwise one unambiguous pausable earlier root keeps its Pause at its own target."""
+    def pausable(root_id: str) -> bool:
+        if root_id not in roots:
+            return False
+        if not any(m["activity"] in {"working", "queued", "waiting"} for m in owners_by_root.get(root_id, ())):
+            if root_id not in ordinary_run_roots:
+                return False
+            stored_root = obs.result(root_id) or {}
+            if stored_root.get("status") not in _TRULY_TERMINAL_STATUSES or owner_stopped(stored_root):
+                return False
+        # The ended root need not have a census row. Read the same durable Stop intents as the Pause door,
+        # once for the whole projection; a pending parked Close is not a Stop.
+        return root_id not in obs.task_reads.cancel_intents(obs.drive_root)
+
+    if current_id in roots:
+        return current_id if pausable(current_id) else ""
+    earlier_pausable = [root for root in earlier if pausable(root)]
+    return earlier_pausable[0] if len(earlier_pausable) == 1 else ""
 
 
 def _episode_row(row: Mapping[str, Any], raw: Mapping[str, Any], root_id: str) -> bool:
@@ -598,13 +693,15 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
     obs.prime_model_handoffs(root_id for entry in groups.values() for row, facts, root_id in entry["rows"]
                              if row.get("phase") in {"budget_paused", "budget_pausing"}
                              and not facts.get("budget_drive_root"))
-    member_runs = {}
+    member_runs, ordinary_run_roots = {}, set()
     for root_id, runs in held.items():
         work_id, name = _work_of(root_id, raw, obs, memo)
         entry = group(work_id)
         for run in runs:
             typed = _typed_run(run, obs, raw)
             entry["runs"].append(typed)
+            if typed["kind"] == "run":
+                ordinary_run_roots.add(root_id)
             task_id = typed["task_id"]
             if typed["kind"] == "run" and task_id in member_work:
                 if member_work[task_id] != work_id:
@@ -678,10 +775,11 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
                                 if word in _TRULY_TERMINAL_STATUSES), "")
             room_row, current_row, current_state = row, row, member
         else:
-            episode_id = sorted(entry["roots"])[-1] if entry["roots"] else work_id
+            # The word names the latest episode its Continue claims prove; what is left keeps its custody owners' doors.
+            episode_id, unproven = _latest_episode(sorted(entry["roots"])[-1] if entry["roots"] else work_id, obs)
             stored = obs.result(episode_id) or {}
             episode = {"task_id": episode_id}
-            outcome = ws.shown_outcome(stored)
+            outcome = "" if unproven else ws.shown_outcome(stored)
             # A tail-only work (open runs, review or upkeep, no member row) lives where its binding puts it.
             room_row = next((item[0] for item in entry["rows"]), None) or _bound_room(stored, episode_id, bindings)
             facts = raw.get(episode_id) or stored
@@ -709,35 +807,50 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         current_id = str(episode["task_id"])
         # The root owns a queue/direct row, an open run or an accepted lookup-only start: the cascade Stop
         # already reaches each (queue_transitions.task_subtree_is_live). No other unknown start adds a Stop target.
-        # Every other root is the earlier attempt; a retry attempt's own original stands for the same episode.
+        # Every other root is the earlier attempt; a retry attempt's own original stands for the same episode. An
+        # answered later episode that holds nothing itself is no Stop target: its older custody owners keep theirs.
         earlier = sorted(root for root in entry["roots"] if root not in {current_id, current_root})
         # Stop ends the whole work: a retry's logical original carries its tree too (never an earlier attempt).
         logical = [current_root] if current_root and current_root != current_id else []
-        ended = [] if current_state is not None else [current_id]
+        ended = [] if current_state is not None or current_id not in entry["roots"] else [current_id]
         presence_turn = bool((raw.get(current_id) or {}).get("_presence_turn"))
-        controls = ws.controls_for(current_state, current_row, earlier_live=earlier, live_roots=ended + logical + earlier,
-                                   presence_turn=presence_turn)
+        checkable = bool(current_state is not None and current_state.get("check")
+                         and not _earlier_check_barred(drive_root, current_state, members, entry["runs"], obs))
+        controls = ws.controls_for(current_state, current_row, earlier_live=earlier,
+                                   live_roots=ended + logical + earlier, presence_turn=presence_turn,
+                                   earlier_check=checkable)
         from ouroboros.owner_model import eligibility
 
         durable = obs.result(current_id) if current_row is not None else None
         if (durable and current_state["activity"] in {"working", "queued", "waiting"}
                 and not eligibility(durable) and durable.get("status") not in _TRULY_TERMINAL_STATUSES):
             controls.append({"action": "model", "target": current_id})
-        if (raw.get(current_id) or {}).get("nothing_to_stop"):
-            controls = [control for control in controls if control["action"] != "stop"]  # its door has nothing to reach
+        # A Stop whose own target's door has nothing to reach is no control; every other target keeps its Stop.
+        controls = [control for control in controls if not (
+            control["action"] in {"stop", "stop_earlier"} and (raw.get(control["target"]) or {}).get("nothing_to_stop"))]
+        # Offer `stop_earlier` only when it governs a strict subset of Stop's proven targets: identical target sets
+        # would draw a duplicate Stop control (regardless of whether the latest episode's outcome is known) and break
+        # single-action direct Stop confirmation.
+        stop_targets = {control["target"] for control in controls if control["action"] == "stop"}
+        earlier_targets = {control["target"] for control in controls if control["action"] == "stop_earlier"}
+        if earlier_targets and earlier_targets == stop_targets:
+            controls = [control for control in controls if control["action"] != "stop_earlier"]
         # An ended author's tree takes the owner's Pause while a helper lives, or an ordinary run its members left
         # may still execute (the door reads the same ended task: ``owner_pause_control._ended_tail``).
-        stored_root = obs.result(current_id) or {} if current_state is None else {}
-        if current_state is None and (any(m["activity"] in {"working", "queued", "waiting"} for m in members) or (
-                any(run["kind"] == "run" and not run.get("unbound") for run in entry["runs"])
-                and stored_root.get("status") in _TRULY_TERMINAL_STATUSES and not owner_stopped(stored_root))):
-            controls.insert(0, {"action": "pause", "target": current_id})
+        if current_state is None:
+            pause_target = _ended_pause_target(current_id, earlier, entry["roots"], owners_by_root,
+                                               ordinary_run_roots, obs)
+            if pause_target:
+                controls.insert(0, {"action": "pause", "target": pause_target})
         if current_state is None:
             # An ended author is never run again. Each held helper has its own
             # addressed Resume in Activity; a work-level press selects none.
             controls.extend({"action": "resume", "target": member["task_id"], "scope": "single"}
                             for member in members if member["activity"] == "paused" and member.get("resumable")
                             and member.get("stop", {}).get("scope") != "tree")
+        closes = {member["task_id"]: member["close_expired"] for member in members if member.get("close_expired")}
+        controls = [*closes.values(), *(control for control in controls  # Close replaces Resume; a granted Stop stays
+                                        if control["target"] not in closes or control["action"] != "resume")]
         work.update(kind="direct" if str(room_row.get("kind") or "") == "direct_chat" else "task",
                     project_id=str(room_row.get("project_id") or ""), since=_since(room_row), controls=controls)
         if presence_turn or (current_row or {}).get("kind") == "presence":
@@ -754,10 +867,10 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         works.append(work)
     works.sort(key=lambda work: (str(work.get("room") or ""), ws._rank(work["activity"]),
                                  -float(work.get("since") or 0.0), work["work_id"]))
-    # A standing-in address this read could not verify is an incompleteness of the whole projection, even when
-    # the row it belongs to survives on census facts: readers keep what they hold and do not read a deferred
-    # or gap-marked row as settled (#3428).
-    complete = complete and not obs.unverified
+    # A standing-in address this read could not verify, or a later episode it could not open, is an incompleteness of
+    # the whole projection, even when the row it belongs to survives: readers keep what they hold and do not read a
+    # deferred or gap-marked row as settled (#3428).
+    complete = complete and not obs.unverified and not obs.episode_unread
     # What waits for the owner is one set: a current question is its room's turn, in its work's when one holds it.
     loose = ws.place_actions(ws.place_questions(works, questions), moved)
     obs.gaps.extend({"reason": "owner_action_unconfirmed", "task_id": task_id} for task_id in dict.fromkeys(unconfirmed))

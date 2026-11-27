@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 from ouroboros import chat_chain, dialogue_store, store
+from ouroboros.dialogue_provenance import MACHINE_ORIGIN
 
 _PLACE = "json_extract(body, '$.place_id')"
 _ARRIVAL = "stream='chat' AND kind='place_arrival'"
@@ -52,10 +53,11 @@ _RECENT = f"FROM dialogue INDEXED BY dialogue_place_recent WHERE {_ARRIVAL} AND 
 _NEWEST = f"SELECT ts {_RECENT} LIMIT 1"
 _NEWEST_BEFORE = (f"SELECT ts FROM dialogue INDEXED BY dialogue_place_recent WHERE {_ARRIVAL} AND {_PLACE}=? AND ts<? "
                   "ORDER BY ts DESC LIMIT 1")
-_CANDIDATES = ("SELECT json_extract(body,'$.sender_session_id') AS actor, "
-               "json_extract(body,'$.sender_label') AS label, json_extract(body,'$.transport.actor.is_bot') AS bot, "
-               "json_extract(body,'$.transport.actor.kind') AS kind, "
-               f"json_extract(body,'$.historical_import.authorship') AS authorship {_RECENT} LIMIT 50")
+_PEOPLE_FIELDS = ("json_extract(body,'$.sender_session_id') AS actor, json_extract(body,'$.sender_label') AS label, "
+                  "json_extract(body,'$.transport.actor.is_bot') AS bot, json_extract(body,'$.transport.actor.kind') AS kind, "
+                  "json_extract(body,'$.transport.actor.origin') AS origin, "
+                  "json_extract(body,'$.historical_import.authorship') AS authorship")
+_CANDIDATES = f"SELECT {_PEOPLE_FIELDS} {_RECENT} LIMIT 50"
 
 
 def _place_rooms(conn, place_id):
@@ -124,9 +126,29 @@ def heard_replay(root, task_id, identity="", continuation_version=0):
         return None
     if identity and body.get('presence_event_identity') != identity:
         raise PresenceTurnError('presence_event_identity_conflict', 'source_event_id', turn_ref=task_id)
+    # The stored decision, even after the place's settings changed; an import records none (no claim).
+    attention = {'decision': 'heard', 'reason': str(facts.get('reason') or '')} if facts.get('decision') == 'heard' else None
     return PresenceTurnResult(outcome='silent', text='', task_id=task_id,
                               delivery_reporting_version=0 if imported else facts.get('delivery_reporting_version', 0),
-                              continuation_version=continuation_version)
+                              continuation_version=continuation_version, attention=attention)
+
+
+def admitted_facts(root, task_id, identity):
+    """The facts the Host admitted with a settled arrival, as its settlement keeps them: a heard arrival's attention
+    record, else its turn's own record (``presence_runner._build_task``); () when neither names them. A turn record
+    proves its identity as it is read (``presence_runner._stored_turn``), a heard one in the replay that follows."""
+    from ouroboros.presence_runner import _stored_turn
+    if dialogue_store.present(root):
+        with dialogue_store.transaction(root, write=False) as conn:
+            row = _record(conn, task_id)
+        attention = json.loads(row['dispatch_input'] or '{}').get('place_attention', {}) if row is not None else {}
+        if attention.get('decision') == 'heard':
+            return tuple(attention.get('facts') or ())
+    metadata = _stored_turn(root, task_id, identity).get('metadata')
+    presence = metadata.get('presence') if isinstance(metadata, dict) else None
+    event = presence.get('event') if isinstance(presence, dict) else None
+    facts = event.get('facts') if isinstance(event, dict) else None
+    return tuple(facts) if isinstance(facts, list) else ()
 
 
 def heard_attention(root, seqs):
@@ -184,7 +206,8 @@ def pin_recipient(root, captured_task_id, conversation_key, pin, *, expect, admi
 
     The caller holds its mailbox lock. Check admission after all potentially blocking acquisition,
     before the first claim or a retry: a final close may have timed out while capture held intake.
-    A lost answer or a crash keeps the claimed holder; a pre-claim refusal changes nothing.
+    Each arrival has one holder, pinned on its room row before any mail is appended: a lost answer or a
+    crash keeps the claimed holder, so a retry goes to it alone; a pre-claim refusal changes nothing.
     """
     with intake_lock(root, conversation_key), dialogue_store.transaction(root, write=True) as conn:
         row = _record(conn, captured_task_id)
@@ -465,7 +488,7 @@ def account_candidates(root, place_id):
 
     This is a recent UI suggestion, never owner identity evidence or a history
     scan. It uses the existing place/time index and stores no second actor list.
-    The connected account's own imported messages among them suggest no person; nor does a reaction's
+    Program actors and the connected account's own imported messages suggest no person; nor does a reaction's
     chat or anonymous aggregate actor.
     """
     if not _dialogue_indexes(root):
@@ -475,11 +498,9 @@ def account_candidates(root, place_id):
     return _people(rows)
 
 
-_SINCE = ("SELECT json_extract(body,'$.sender_session_id') AS actor, json_extract(body,'$.sender_label') AS label, "
-          "json_extract(body,'$.transport.actor.is_bot') AS bot, "
-          "json_extract(body,'$.transport.actor.kind') AS kind, "
-          "json_extract(body,'$.transport.message.reaction.schema_version') AS reaction, json_extract(body,'$.text') AS text, "
-          f"json_extract(body,'$.historical_import.authorship') AS authorship FROM dialogue INDEXED BY dialogue_place_recent "
+_SINCE = (f"SELECT {_PEOPLE_FIELDS}, "
+          "json_extract(body,'$.transport.message.reaction.schema_version') AS reaction, json_extract(body,'$.text') AS text "
+          "FROM dialogue INDEXED BY dialogue_place_recent "
           f"WHERE {_ARRIVAL} AND {_PLACE}=? AND ts>=? ORDER BY ts DESC LIMIT ?")
 PEOPLE_ROW_CAP = 2000  # per place: a busier week says «at least»
 
@@ -489,7 +510,7 @@ def recent_people(root, place_ids, *, days: int, now: float | None = None, servi
     lately»): ``{"by_place": {id: n}, "total": distinct across places, "capped": bool, "capped_places": [id]}``, or
     ``None`` when the index is unreadable. A reaction with no words is no writing (``dialogue_provenance``). ``services`` (place id → its service) keeps the same raw sender id on two services two people. One
     index range per place, at most ``PEOPLE_ROW_CAP`` newest rows each (``capped`` then); the same filter as
-    ``account_candidates``: no bots, no connected account's own imports, no chat or anonymous actor."""
+    ``account_candidates``: no bots, programs, connected account's own imports, chat or anonymous actor."""
     import time as _time
     from datetime import datetime, timezone
 
@@ -515,7 +536,8 @@ def _people(rows, limit=20):
     people = {}
     for row in rows:
         actor = str(row['actor'] or '')
-        if (actor and not row['bot'] and row['authorship'] != 'platform_account' and actor not in people
+        if (actor and not row['bot'] and row['origin'] != MACHINE_ORIGIN
+                and row['authorship'] != 'platform_account' and actor not in people
                 and row['kind'] not in {'chat', 'anonymous'}):
             people[actor] = {'platform_actor_id': actor, 'label': str(row['label'] or actor)}
     return list(people.values())[:limit]

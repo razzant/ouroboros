@@ -257,28 +257,76 @@ test('a mounted chart is re-tinted in place and keeps its data', async () => {
     } finally { dom.restore(); }
 });
 
-test('a palette switch mid-render drops the SVG drawn in the old palette', async () => {
+test('a palette switch mid-render keeps selected Mermaid source until its replacement can mount', async () => {
     const dom = installDom();
     let release;
     const gate = { promise: new Promise((resolve) => { release = resolve; }) };
     const mermaid = installMermaid({ gate });
     const { enhanceChatMarkdown } = await import(`../modules/chat_markdown.js?race=${Date.now()}`);
     try {
-        const root = mountRoot(dom, mermaidFence('graph TD; A-->B'));
+        const raw = mermaidFence('');
+        const selected = new El(); selected.textContent = 'graph TD; A-->B'; raw.append(selected);
+        const doc = raw.ownerDocument = new EventTarget();
+        let held = true;
+        doc.getSelection = () => ({ isCollapsed: !held, rangeCount: 1,
+            getRangeAt: () => ({ intersectsNode: node => node === raw }) });
+        const root = mountRoot(dom, raw);
         const dispose = enhanceChatMarkdown(root);
         await flush(2);
         assert.equal(mermaid.runs.length, 1, 'the first render is still in flight');
         dom.setTheme('light');
         dom.announce();
         await flush(2);
-        // The switch reset the node and started a second pass; now let the FIRST,
+        assert.equal(raw.childNodes[0], selected, 'theme must not reset textContent on the mounted source');
+        // The switch started a second pass; now let the FIRST,
         // dark-palette render finish. Its result must be thrown away.
         gate.promise = Promise.resolve();
         release();
         await flush();
+        assert.equal(root.childNodes[0], raw, 'rendered SVG waits for the selection to finish');
+        held = false;
+        doc.dispatchEvent(new Event('selectionchange'));
         const mounted = root.childNodes[0];
         assert.equal(mounted.dataset.paintedWith, 'light',
             'a stale render must not install an old-palette diagram');
+        dispose();
+    } finally { dom.restore(); }
+});
+
+test('a theme switch while an oversized Mermaid fallback waits on a selection still mounts the fallback', async () => {
+    const dom = installDom();
+    installMermaid();
+    const { enhanceChatMarkdown } = await import(`../modules/chat_markdown.js?oversized-theme=${Date.now()}`);
+    try {
+        // A fence past the rich-block cap that the reader has selected: the
+        // degrade waits in the bounded selection deferral instead of painting.
+        const oversize = mermaidFence(`graph TD;${'A-->B;'.repeat(7000)}`);
+        const doc = oversize.ownerDocument = new EventTarget();
+        let held = true;
+        doc.getSelection = () => ({ isCollapsed: !held, rangeCount: 1,
+            getRangeAt: () => ({ intersectsNode: (node) => node === oversize }) });
+        const root = mountRoot(dom, oversize);
+        const dispose = enhanceChatMarkdown(root);
+        await flush(2);
+        // The guarded degrade parks its source so the repaint selector still finds it.
+        assert.equal(oversize.dataset.mermaidSource, oversize._text,
+            'the oversized fence parks the source before its guarded fallback');
+        assert.equal(root.childNodes[0], oversize, 'the selected oversized fence keeps its text while selected');
+
+        dom.setTheme('light');
+        dom.announce();
+        await flush(2);
+        // A palette move during the deferral must not take the fallback with it.
+        assert.equal(root.childNodes[0], oversize, 'a theme event cannot drop a waiting oversized fence');
+
+        held = false;
+        doc.dispatchEvent(new Event('selectionchange'));
+        const mounted = root.childNodes[0];
+        assert.ok(/(?:^|\s)md-mermaid-error(?:\s|$)/.test(mounted.className)
+            && /(?:^|\s)md-code-block(?:\s|$)/.test(mounted.className),
+            'the oversized diagram degrades to its readable source block once the selection clears');
+        assert.ok(mounted.textContent.includes(oversize._text),
+            'the fallback keeps the diagram source readable as its code text');
         dispose();
     } finally { dom.restore(); }
 });

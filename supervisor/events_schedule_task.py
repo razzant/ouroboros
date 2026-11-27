@@ -35,6 +35,7 @@ from ouroboros.tools.control_delegation import durable_direct_child_count
 from ouroboros.tools.control_delegation import stamp_depth_provenance
 from supervisor.events_subagent_admission import _active_subagent_count
 from supervisor.events_subagent_admission import _compose_subagent_text
+from supervisor.events_subagent_admission import _named_notes_admission_refusal
 from supervisor.events_subagent_admission import _record_delegation_constraint
 from supervisor.events_subagent_admission import _resolve_subagent_constraint
 from supervisor.events_subagent_admission import _subagent_cap_blocks
@@ -137,7 +138,7 @@ def _reject_schedule_task(
                             **preparation.refusal_fields())
         persist_result = True
     never_admitted = write_fields.get("admission_outcome") == "never_admitted"
-    refusal_confirmed = False
+    refusal_confirmed, stored = False, None
     if persist_result and not never_admitted:
         _cleanup_rejected_worktree(tid, result_fields)
     if reason_code:
@@ -152,12 +153,12 @@ def _reject_schedule_task(
             if preparation is not None:
                 # Rejoin only the chosen receipt. A closing generation must
                 # still settle it; copy disposal and notice are not retried.
-                preparation.store_gate(functools.partial(
+                stored = preparation.store_gate(functools.partial(
                     persist_never_admitted_refusal, ctx.DRIVE_ROOT, tid,
                     admission_token=preparation.token, **receipt), controls=False)
             else:
                 write_refusal = persist_never_admitted_refusal if never_admitted else write_task_result
-                write_refusal(ctx.DRIVE_ROOT, tid, **({} if never_admitted else {"status": status}), **receipt)
+                stored = write_refusal(ctx.DRIVE_ROOT, tid, **({} if never_admitted else {"status": status}), **receipt)
             refusal_confirmed = True
         except Exception as exc:
             from supervisor.workspace_preparation import store_contention
@@ -183,6 +184,7 @@ def _reject_schedule_task(
             if delegation_role == "subagent":
                 # The stored result keeps ``detail`` for the parent model; the card
                 # shows the producer's owner sentence when it wrote one (#1403).
+                recorded = stored if isinstance(stored, dict) else {}
                 _send_subagent_rejection(
                     ctx,
                     chat_id,
@@ -192,6 +194,11 @@ def _reject_schedule_task(
                     role=role,
                     status=status,
                     detail=fallback_message.removeprefix("⚠️ ") or detail,
+                    # Selection and cognition carried by the request or its confirmed refusal receipt.
+                    configured_subagent=result_fields.get("configured_subagent")
+                    or recorded.get("configured_subagent"),
+                    parent_cognitive_route=result_fields.get("parent_cognitive_route")
+                    or recorded.get("parent_cognitive_route"),
                 )
             elif fallback_message:
                 ctx.send_with_budget(chat_id, fallback_message, role="system", system_type="task_admission_notice")
@@ -367,7 +374,9 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any, preparation: Any = None
             reject(
                 ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
                 parent_id=parent_id, root_task_id=root_task_id, role=role,
-                result_fields={"project_id": project_id, "child_drive_root": child_drive_root},
+                result_fields={"project_id": project_id, "child_drive_root": child_drive_root,
+                               "configured_subagent": configured_subagent,
+                               "parent_cognitive_route": parent_cognitive_route},
                 detail=f"Task not scheduled: Project state could not be checked: {exc}",
                 reason_code=getattr(exc, "reason", "project_routing_fence_lookup_failed"),
                 extra_fields={"admission_outcome": "never_admitted"})
@@ -694,14 +703,9 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
     # Assignment, not admission, proves achieved depth.
     admitted_task_contract, admitted_depth_provenance = stamp_depth_provenance(
         r.task_contract, attempted_depth=r.depth, max_depth=r.max_depth, achieved_depth=None)
-    text = _compose_subagent_text(
-        r.desc, role=role, expected_output=r.expected_output, constraints=r.constraints, context=r.task_context,
-        task_constraint=r.task_constraint, selected_inputs=r.intent.get("prepared_input_files"),
-        delegation_budget=admitted_task_contract.get("delegation_budget") if isinstance(admitted_task_contract, dict) else None,
-    ) if delegation_role == "subagent" else r.desc
     evt = r.evt
     task = _build_scheduled_task_payload({
-        "tid": tid, "chat_id": r.chat_id, "text": text, "desc": r.desc, "expected_output": r.expected_output,
+        "tid": tid, "chat_id": r.chat_id, "desc": r.desc, "expected_output": r.expected_output,
         "constraints": r.constraints, "role": role, "task_context": r.task_context, "depth": r.depth,
         "root_task_id": root_task_id, "session_id": r.session_id, "actor_id": r.actor_id,
         "delegation_role": delegation_role, "memory_mode": r.memory_mode, "drive_root": r.drive_root,
@@ -721,6 +725,17 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
         **({"presence_binding_authority": evt["presence_binding_authority"]}
            if "presence_binding_authority" in evt else {}),
     })
+    if delegation_role == "subagent" and (detail := _named_notes_admission_refusal(ctx, task)):
+        r.reject(ctx, tid=tid, chat_id=r.chat_id, delegation_role=delegation_role, parent_id=parent_id,
+                 root_task_id=root_task_id, role=role, result_fields=r.result_fields, detail=detail,
+                 reason_code="knowledge_note_unresolved")
+        return
+    task["text"] = _compose_subagent_text(  # the first input names the notes only after that check
+        r.desc, role=role, expected_output=r.expected_output, constraints=r.constraints, context=r.task_context,
+        task_constraint=r.task_constraint, selected_inputs=r.intent.get("prepared_input_files"),
+        named_notes=r.intent.get("knowledge_notes"), session=r.intent.get("requested_executor") == "harness",
+        delegation_budget=admitted_task_contract.get("delegation_budget") if isinstance(admitted_task_contract, dict) else None,
+    ) if delegation_role == "subagent" else r.desc
     if r.project_basis is not None:
         task["_project_admission"] = r.project_basis
     direct_child_count = r.direct_child_count
@@ -836,9 +851,23 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
             task_group_id=r.task_group_id, requested_model_lane=r.requested_model_lane,
             active_subagent_count=_active_subagent_count(
                 root_task_id, getattr(view, "PENDING", pending_ref), getattr(view, "RUNNING", running_view)),
-            max_active_subagents=max_active,
+            max_active_subagents=max_active, configured_subagent=r.configured_subagent,
         ))
         progress_meta["parent_cognitive_route"] = cognitive_route
+        from ouroboros.supervisor_route import cognitive_route_provenance
+
+        # The choice in the words dispatch tells the nanny, so the queued card and every later frame name it alike.
+        if provenance := cognitive_route_provenance(cognitive_route):
+            progress_meta["coordinator_provenance"] = provenance
+        coordinator_model = cognitive_route.get("model")
+        if isinstance(coordinator_model, str) and coordinator_model.strip():
+            from ouroboros.subagent_runtime import cognitive_route_billing_basis
+
+            # A queued card can name the stamped route's basis, but has no accepted call or amount.
+            coordinator, billing = cognitive_route_billing_basis(
+                coordinator_model, use_local=cognitive_route.get("use_local_model", False),
+            )
+            progress_meta.update(coordinator_route=coordinator, coordinator_billing=billing)
         if queued_behind_active_cap:
             progress_meta["queued_behind_active_cap"] = True
     else:

@@ -90,6 +90,11 @@ def billing_group_key(row: dict) -> str:
     return str(row.get("billing_group_id") or monetary_scope_key(row))
 
 
+def cash_is_confirmed(row: dict) -> bool:
+    """Basis of a known settled amount; a partial receipt may have an exact subtotal."""
+    return bool(row.get("cost_final") or (row.get("cost_partial") is True and row.get("cost_estimated") is False))
+
+
 def cash_contribution(row: dict) -> tuple[Decimal, ...]:
     if row.get("kind") in {"usage_baseline", "legacy_metadata"}:
         return ZERO_CASH
@@ -97,9 +102,7 @@ def cash_contribution(row: dict) -> tuple[Decimal, ...]:
     bound = amount(row.get("reservation_upper_bound_usd")) or Decimal(0)
     state = row.get("state")
     if state == "settled" and cost is not None:
-        # Partial receipts declare the subtotal's precision separately from the
-        # missing remainder. Older rows retain their cost_final grammar.
-        exact = row.get("cost_final") or (row.get("cost_partial") is True and row.get("cost_estimated") is False)
+        exact = cash_is_confirmed(row)
         return (cost, cost if exact else Decimal(0),
                 Decimal(0) if exact else cost, Decimal(0), Decimal(0))
     if state == "reserved":
@@ -128,6 +131,12 @@ def rounded_cash(total: tuple) -> tuple:
 
 def render_cash(total: tuple) -> dict:
     return dict(zip((*CASH_KEYS, "accounted_usd"), map(float, rounded_cash(total))))
+
+
+def known_room(limit, known) -> Decimal:
+    """Room above the ledger's known spend without rounding the authored limit or the difference."""
+    with exact_money():
+        return decimal_of(limit) - decimal_of(known)
 
 
 def exceeds_limit(total: tuple, limit) -> bool:

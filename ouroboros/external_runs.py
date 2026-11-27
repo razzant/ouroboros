@@ -235,20 +235,21 @@ def _reread_requested_stop(root: Any, gateway: Any, run: Any) -> Dict[str, Any]:
     keeps the earlier ``requested`` fact, and an unreachable read is unknown.
     """
     from ouroboros import delegate_custody as custody
-    from ouroboros.delegate_resume import recovered_cancel_detail, recovered_cancel_store
+    from ouroboros.delegate_resume import recovered_cancel_detail, recovered_cancel_store, stop_read_run
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     recovered = getattr(run, "resume_start_state", None) is not None
-    if recovered and not recovered_cancel_store(gateway, run):
+    if recovered and not recovered_cancel_store(gateway, run, for_stop=True):
         return {"outcome": "unverified", "detail": "The run's owning store was not verified."}
     try:
-        detail = gateway.get_run(run.run_id)
+        detail = stop_read_run(gateway, run.run_id)
     except ClaudexorUnavailable as exc:
         if custody.daemon_says_absent(exc, gateway=gateway, run=run):
             custody.close_absent_run(pathlib.Path(root), gateway, run, "get_run_absent", absence=exc)
             return {"outcome": custody.CANCEL_CONFIRMED, "detail": "absent"}
         return {"outcome": "unverified", "detail": f"{exc.code}: {exc}"}
-    if custody.names_another_run(detail, run.run_id) or recovered and not recovered_cancel_detail(gateway, run, detail):
+    if (custody.names_another_run(detail, run.run_id)
+            or recovered and not recovered_cancel_detail(gateway, run, detail, for_stop=True)):
         return {"outcome": "unverified", "detail": "read-back belongs to another run"}
     if custody.is_terminal(detail):
         custody.settle_run(pathlib.Path(root), gateway, run, detail)
@@ -274,14 +275,14 @@ def task_owned_runs_open(external: Dict[str, Any]) -> bool:
                for run in (external or {}).get("runs") or [])
 
 
-def tree_owned_custody(root: Any, tree: str, *, bound_only: bool = False) -> set:
+def tree_owned_custody(root: Any, tree: str, *, bound_only: bool = False, transaction=None) -> set:
     """The tasks of ``tree`` holding ordinary delegated work that may still execute: a bound run custody has not
     settled (a cascade Stop's search, ``delegate_custody_reconcile.tree_open_runs``) or, unless ``bound_only``, a start
     with no run bound yet, which that search cannot see. A review panel's is never named. One read; unreadable
     raises."""
     from ouroboros.delegate_custody_current import tree_closure
 
-    closure = tree_closure(root, str(tree))
+    closure = tree_closure(root, str(tree), transaction=transaction)
     runs = {run.task_id for run in closure["unfinished"].values() if not run.settled and not run.review_owned}
     starts = () if bound_only else (str(row.get("task_id") or "") for row in closure["pending"]
                                     if not review_owned_source(row.get("source")))

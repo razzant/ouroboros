@@ -153,7 +153,7 @@ def test_a_tool_that_fits_whole_keeps_its_field_prose_and_a_larger_one_sends_str
     field = function["parameters"]["properties"]["marker"]
     field.update({"default": "ok", "x-note": "kept", "description": ""})
     structure = copy.deepcopy(function["parameters"])
-    for annotation in ("default", "x-note", "description"):
+    for annotation in ("default", "x-note", "description", "type"):  # an all-string enum already says string
         del structure["properties"]["marker"][annotation]
     room = MAX_CUSTOM_DESCRIPTION_CHARS - len(lead + "\n" + _SCHEMA_CLAUSE + _schema_text(function["parameters"]))
 
@@ -171,6 +171,28 @@ def test_a_tool_that_fits_whole_keeps_its_field_prose_and_a_larger_one_sends_str
     assert projected("я" * (room + 1)) == lead + "\n" + _SCHEMA_CLAUSE + canonical_json(structure)
     # A tool without a lead is its schema alone, under the same bound.
     assert projected("p", description=None) == _SCHEMA_CLAUSE + _schema_text(function["parameters"])
+
+
+def test_compaction_drops_only_the_string_type_an_all_string_enum_already_states():
+    """The structure-only form is what an over-bound tool spends its room on (schedule_subagent sat 2
+    characters under the bound): a non-empty all-string enum validates exactly the same without its
+    ``"type":"string"``, so the compact form leaves that out; any other enum keeps its type, and the
+    schema bound for argument validation keeps everything."""
+    from ouroboros.openai_chat_custom import _compact_schema
+
+    strings = {"type": "string", "enum": ["a", "b"], "description": "d"}
+    assert _compact_schema(strings) == {"enum": ["a", "b"]}
+    for kept in ({"type": "string", "enum": []}, {"type": "string", "enum": ["a", 1]},
+                 {"type": "integer", "enum": [1, 2]}, {"type": ["string", "null"], "enum": ["a", None]}):
+        assert _compact_schema(kept)["type"] == kept["type"], kept
+    for value, valid in (("a", True), ("c", False), (1, False), (None, False)):
+        assert Draft202012Validator(_compact_schema(strings)).is_valid(value) is valid
+        assert Draft202012Validator(strings).is_valid(value) is valid
+    tool = {"type": "function", "function": {"name": "probe", "description": "x" * 4000, "parameters": {
+        "type": "object", "properties": {"mode": strings}, "required": ["mode"]}}}
+    catalog = project_function_tools_to_openai_custom([tool])
+    assert '"mode":{"enum":["a","b"]}' in catalog.wire_tools()[0]["custom"]["description"]
+    assert catalog.schema_binding("probe").schema() == tool["function"]["parameters"]
 
 
 def test_compaction_preserves_literal_enum_and_const_objects_exactly():
@@ -868,6 +890,45 @@ def test_knowledge_tools_project_whole_where_parameter_prose_does_not_arrive(nam
               "summary", "expected_revision", "names the note's enduring scope and when to open it",
               "not a dated log of the latest edit", "Text a write removes stays in the note's history",
               "view='history' or version=", "put back (mode='revert')"])
+    assert all(word in lead for word in words), [word for word in words if word not in lead]
+
+
+_DELEGATION_LEAD_WORDS = {
+    # Runtime data as a write_surface is SYSTEM's, resident in every mode (tests/test_tool_description_schemas.py).
+    "schedule_subagent": ["knowledge_notes", "knowledge_read", "whole", "even declared", "addresses", "reselect",
+                          "none", "READ-ONLY", "self_worktree", "external_workspace", "genesis",
+                          "integrate_subagent_patch", "integrate_delegated_patch",
+                          "Omit input_sources: normally shares room context, inherits declared",
+                          "deliberate blind starts only",
+                          "access='readonly'", "prefix write", "continue_from", "subagent_id", "input_files",
+                          "first session start", "message any task in their tree", "interim reports", "when to stop"],
+    "delegate_start": ["knowledge_notes", "knowledge_read", "whole", "declared", "reselect",
+                       "retry_of without selectors", "look up or replay the saved request and receipt",
+                       "reselect or send none", "does not erase history",
+                       "Read-only", "PRIVATE SNAPSHOT", "in_place", "integrate_delegated_patch",
+                       "workspace_capture", "Only integrate_delegated_patch applies copies", "reject there too",
+                       "continue_from", "subagent_id", "Subscription is requested",
+                       "skill_payload", "may not see owner sessions", "starts the leaf before the first round",
+                       "fallback may bill", "zero, billed, estimated, undisclosed", "host verification receipts are yours"],
+}
+
+
+@pytest.mark.parametrize("name", sorted(_DELEGATION_LEAD_WORDS))
+def test_delegation_leads_carry_named_notes_and_floor_semantics(name):
+    """On the custom wire only the lead and the bare schema structure arrive (parameter prose is stripped),
+    so the named-notes choice and the pre-call floor — access, writable surfaces, shared/isolated mutation
+    and its integration tool, cost, recovery lookup-vs-continuation, data — must live in the lead itself,
+    unclipped. Semantic word/phrase checks, not exact sentences, so a faithful rephrase still passes."""
+    from ouroboros.tools.control import get_tools as control_tools
+    from ouroboros.tools.delegate import get_tools as delegate_tools
+
+    entry = next(e for e in [*control_tools(), *delegate_tools()] if e.name == name)
+    projected = project_function_tools_to_openai_custom([{"type": "function", "function": entry.schema}]).wire_tools()
+    description = projected[0]["custom"]["description"]
+    lead = " ".join(entry.schema["description"].split())
+    assert len(description) <= MAX_CUSTOM_DESCRIPTION_CHARS
+    assert description.startswith(lead + "\n" + _SCHEMA_CLAUSE), f"{name} lead clipped on the custom route"
+    words = _DELEGATION_LEAD_WORDS[name]
     assert all(word in lead for word in words), [word for word in words if word not in lead]
 
 

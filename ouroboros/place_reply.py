@@ -39,6 +39,67 @@ def reply_carrier(metadata) -> dict:
             "destination": event.get("destination") or {}}
 
 
+def _legacy_binding(metadata) -> str:
+    """The old ``binding_id`` that pre-migration task bytes keep in place of a ``place_id``, beside their conversation."""
+    presence = metadata.get("presence") if isinstance(metadata, dict) else None
+    event = presence.get("event") if isinstance(presence, dict) else None
+    if not isinstance(event, dict) or not event.get("conversation_key") or reply_carrier(metadata):
+        return ""
+    return str(presence.get("binding_id") or "")
+
+
+def resolved_carrier(root, metadata) -> dict:
+    """``reply_carrier``, or for a legacy binding (``_legacy_binding``) the place the existing store resolves it to,
+    its id itself when no place names it. Isolated legacy readers without place state resolve nothing."""
+    binding_id = _legacy_binding(metadata) if root is not None else ""
+    if not binding_id:
+        return reply_carrier(metadata) if isinstance(metadata, dict) else {}
+    from pathlib import Path
+    from ouroboros.places import load_places, places_path
+    from ouroboros.presence_bindings import PRESENCE_BINDINGS_FILENAME
+    if not (places_path(root).exists() or (Path(root) / "state" / PRESENCE_BINDINGS_FILENAME).exists()):
+        return {}
+    event = metadata["presence"]["event"]
+    place = next((p for p in load_places(root) if binding_id in (p.place_id, *p.legacy_binding_ids)), None)
+    return {"place_id": place.place_id if place else binding_id, "conversation_key": event["conversation_key"],
+            "destination": event.get("destination") or {}}
+
+
+def carrier_now(ctx, metadata=None) -> dict:
+    """The carrier a run selects its finish by (``resolved_carrier`` at its canonical root), with the connector whose
+    doors it reads (``transport_skill``): a new selection of a retained legacy binding meets its place like any other,
+    and retained bytes that never named their connector read the resolved place's own, as the work poll authenticates
+    it; a stored result replays as it was selected. A run under a frozen Presence ceiling keeps its own outward
+    choice, the forced declaration (owner Q4). An unreadable store resolves nothing, as ``_place_connector`` reads
+    no door: the metadata carrier stands (none for a legacy binding), never an exception."""
+    if metadata is None:
+        metadata = getattr(ctx, "task_metadata", None) or {}
+    if not isinstance(metadata, dict):
+        return {}
+    presence = metadata.get("presence") if isinstance(metadata.get("presence"), dict) else {}
+    connector, carrier = str(presence.get("transport_skill") or ""), reply_carrier(metadata)
+    frozen = isinstance((getattr(ctx, "task_contract", None) or {}).get("capability_ceiling"), dict)
+    if not frozen and (_legacy_binding(metadata) or (carrier and not connector)):
+        from ouroboros.tool_access import canonical_data_root
+        root = canonical_data_root(ctx)
+        try:
+            carrier = resolved_carrier(root, metadata)
+        except Exception:  # an unreadable store (``places_unreadable``): no resolved carrier
+            carrier = reply_carrier(metadata)
+        connector = connector or (_place_connector(root, carrier["place_id"]) if carrier else "")
+    return {**carrier, "transport_skill": connector} if carrier else {}
+
+
+def _place_connector(root, place_id) -> str:
+    """The connector of the place a carrier resolves to; ``""`` when the store names none or cannot be read (no door:
+    the held path says so). A root without place state is not migrated by this read."""
+    from ouroboros.places import places_path
+    try:
+        return get_place(root, place_id).connector if places_path(root).exists() else ""
+    except Exception:
+        return ""
+
+
 def reply_addresses(metadata, anchor=None) -> tuple:
     """The selected input's further reply addresses as ``{"source_event_id", "reply_targets"}`` (its
     ``message.reply_targets``), and why they cannot be read (``""`` when they can). ``anchor`` is this turn's selected
@@ -63,35 +124,35 @@ def reply_addresses(metadata, anchor=None) -> tuple:
     return {"source_event_id": str(anchor.get("source_event_id") or ""), "reply_targets": [dict(row) for row in found]}, ""
 
 
-def reply_hold(root, metadata, task_id, text: str, *, anchor=None) -> str:
-    """Current host facts only: never generate or buy another safety check on replay. The reply's further addresses
-    (``reply_addresses`` of ``anchor``) are resolved now, as its dispatch would meet them."""
-    carrier = reply_carrier(metadata)
-    if not carrier and text:
-        from pathlib import Path
-        from ouroboros.places import load_places, places_path
-        from ouroboros.presence_bindings import PRESENCE_BINDINGS_FILENAME
-        presence = metadata.get("presence") or {}
-        event = presence.get("event") or {}
-        binding_id = presence.get("binding_id")
-        # Pre-migration task bytes retain the old id. Resolve it through the
-        # existing place store; isolated legacy readers have no place state.
-        if (binding_id and event.get("conversation_key") and
-                (places_path(root).exists() or (Path(root) / "state" / PRESENCE_BINDINGS_FILENAME).exists())):
-            place = next((p for p in load_places(root) if binding_id in (p.place_id, *p.legacy_binding_ids)), None)
-            carrier = {"place_id": place.place_id if place else binding_id,
-                       "conversation_key": event["conversation_key"], "destination": event.get("destination") or {}}
-    if not carrier or not text:
-        return ""
-    from ouroboros.consciousness_authority import is_observe_origin
-    from ouroboros.place_guard import reply_address_hold
+_UNREAD = object()  # no read of the place given: read the store now
+
+
+def _place_read(root, place_id):
+    """One read of a place: the Place, or None when the store names none (``disconnected``); an unreadable store
+    raises."""
     try:
-        place = get_place(root, carrier["place_id"])
-        state, label = place.state, place.label
+        return get_place(root, place_id)
     except PlaceError as exc:
         if exc.code != "place_not_found":
             raise
-        place, state, label = None, "disconnected", carrier["place_id"]
+        return None
+
+
+def reply_hold(root, metadata, task_id, text: str, *, anchor=None, place=_UNREAD) -> str:
+    """Current host facts only: never generate or buy another safety check on replay. The reply's further addresses
+    (``reply_addresses`` of ``anchor``) are resolved now, as its dispatch would meet them. Pre-migration task bytes
+    retain the old binding id, resolved through the existing place store (``resolved_carrier``). ``place`` is a
+    selection's one read of the place (``_place_read``, or the error that read raised), which its records decision
+    read too; replay and the poll read the store now."""
+    carrier = resolved_carrier(root, metadata) if text else {}
+    if not carrier:
+        return ""
+    from ouroboros.consciousness_authority import is_observe_origin
+    from ouroboros.place_guard import reply_address_hold
+    place = _place_read(root, carrier["place_id"]) if place is _UNREAD else place
+    if isinstance(place, Exception):
+        raise place
+    state, label = (place.state, place.label) if place is not None else ("disconnected", carrier["place_id"])
     message = (f"Reply held: {label} is {state.title()}" if state in {"silent", "paused", "disconnected"}
                else "Reply held: autonomy is Advises" if is_observe_origin(metadata) else "")
     addresses, problem = reply_addresses(metadata, anchor)
@@ -193,28 +254,60 @@ def conversation_gesture_tools(connector: str) -> list:
 
 
 def records_only(metadata) -> bool:
-    """A place focus whose own connector speaks through such a tool: its finish is its record and people hear only
-    what it sends (owner 06.11, 2A). A connector without one (a peer URL, mail recipients) keeps the final as its reply."""
+    """A place-bound root (a focus turn, a root it handed off, a schedule's run) whose own connector speaks through
+    such a tool: its finish is its record and people hear only what it sends (owner 06.11 «2A», 21.11 «1A»). A
+    connector without one (a peer URL) keeps the final as its reply. A run's selection reads the same fact with a
+    retained legacy binding resolved (``records_only_now``, ``prepare_focus_reply``)."""
     metadata = metadata if isinstance(metadata, dict) else {}
     presence = metadata.get("presence") or {}
-    return (metadata.get("wake_cause") == "focus" and bool(reply_carrier(metadata))
-            and bool(conversation_send_tools(str(presence.get("transport_skill") or ""))))
+    return bool(reply_carrier(metadata)) and bool(conversation_send_tools(str(presence.get("transport_skill") or "")))
 
 
-def records_only_now(ctx) -> bool:
+def _focus_turn(metadata) -> bool:
+    """The place's own focus turn: only its records-only finish owes my human's reply first (R3) and ends its wake
+    quiet; a root it handed off keeps the final its Project reads."""
+    return isinstance(metadata, dict) and metadata.get("wake_cause") == "focus"
+
+
+def final_is_speech(metadata) -> bool:
+    """Whether this run's non-silent final is offered to its place as words (place state and Safety still apply): it
+    carries a place conversation, is no schedule's run (no connector follows one) and its connector declares no door
+    (``records_only``). The receipts, the forced contract and the refusal facts name a final's fate by it."""
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return (isinstance(metadata.get("presence"), dict) and bool(metadata["presence"])
+            and not metadata.get("schedule_occurrence") and not records_only(metadata))
+
+
+def final_followed(metadata) -> bool:
+    """Whether a connector is known to read this run's speech final (``final_is_speech``): the place's own turn,
+    whose caller awaits it. A root it handed off is read only if its connector follows that work (a turn names one
+    handoff); the host does not trace that back through the lineage, so such a root is told the condition."""
+    return final_is_speech(metadata) and _focus_turn(metadata)
+
+
+def records_only_now(ctx, place=_UNREAD) -> bool:
     """``records_only`` for an Active place under Acts or Evolves. A Silent or Paused place and Advises keep today's
-    held draft (the owner's rehearsal before activating a place); an unreadable place keeps it too."""
+    held draft (the owner's rehearsal before activating a place); an unreadable place keeps it too. ``place`` is a
+    selection's one read of it (``prepare_focus_reply``); otherwise the store is read now."""
     metadata = getattr(ctx, "task_metadata", {}) or {}
-    if not records_only(metadata):
-        return False
     from ouroboros.consciousness_authority import is_observe_origin
     from ouroboros.tool_access import canonical_data_root
     if is_observe_origin(metadata):
         return False
     try:
-        return get_place(canonical_data_root(ctx), reply_carrier(metadata)["place_id"]).state == "active"
+        carrier = carrier_now(ctx, metadata)
+        if not _door_declared(carrier):
+            return False
+        place = get_place(canonical_data_root(ctx), carrier["place_id"]) if place is _UNREAD else place
+        return getattr(place, "state", "") == "active"
     except Exception:  # a missing or unreadable place: the held path says so, as it does for every final
         return False
+
+
+def _door_declared(carrier) -> bool:
+    """Whether the run's own connector (``carrier_now``'s ``transport_skill``) declares an in-conversation message door:
+    ``records_only`` with the carrier a selection resolves."""
+    return bool(carrier) and bool(conversation_send_tools(str(carrier.get("transport_skill") or "")))
 
 
 def riding_sends(ctx, calls) -> list:
@@ -228,8 +321,8 @@ def riding_sends(ctx, calls) -> list:
     from ouroboros.tool_effects import EFFECT_GESTURE, EFFECT_MESSAGE, retained_descriptor
 
     metadata = getattr(ctx, "task_metadata", {}) or {}
-    carrier = reply_carrier(metadata)
-    connector = str((metadata.get("presence") or {}).get("transport_skill") or "")
+    carrier = carrier_now(ctx, metadata)
+    connector = str(carrier.get("transport_skill") or "")
     sends, gestures = dict(conversation_send_tools(connector)), dict(conversation_gesture_tools(connector))
     delivered = (getattr(ctx, "_presence_completion", None) or {}).get("outcome") == "tool_delivered"
     riding = []
@@ -259,6 +352,73 @@ def riding_sends(ctx, calls) -> list:
     return riding
 
 
+def _could_be_record_send(call, connector: str, *, include_gestures: bool = False) -> bool:
+    """Historical connector calls without their own declaration are unknown, not today's sends or reads."""
+    from ouroboros.extension_surface_names import extension_name_prefix
+    from ouroboros.tool_effects import EFFECT_GESTURE, EFFECT_MESSAGE, bound_declaration, effect_of, retained_descriptor
+
+    name = str(call.get("tool") or "")
+    descriptor = retained_descriptor(call)
+    if bound_declaration(descriptor) is not None:
+        effects = (EFFECT_MESSAGE, EFFECT_GESTURE) if include_gestures else (EFFECT_MESSAGE,)
+        return (descriptor["skill"] == connector
+                and effect_of(name, ext_tool=descriptor, args=call.get("args")).effect in effects)
+    return name.startswith(extension_name_prefix(connector))
+
+
+def restore_send_facts(ctx, trace, messages) -> None:
+    """Read an interrupted batch before its pending calls get synthetic results. Never resolve its old targets anew."""
+    carrier = carrier_now(ctx)
+    connector = str(carrier.get("transport_skill") or "")
+    if not _door_declared(carrier) and not conversation_gesture_tools(connector):
+        return
+    from ouroboros.budget_pause import pending_tool_call_ids
+
+    legacy = trace.get("presence_no_send") or {}
+    if legacy.get("noted") is True:  # this work already read the old record-only reminder
+        ctx._records_only_noted = True
+    pending = set(pending_tool_call_ids(messages))
+    batch = next((row for row in reversed(messages)
+                  if isinstance(row, dict) and row.get("role") == "assistant"), {}) if pending else {}
+    prefix_calls = ({"tool": fn.get("name")} for call in batch.get("tool_calls") or ()
+                    if isinstance(call, dict) and str(call.get("id") or "") in pending
+                    and isinstance(fn := call.get("function"), dict))
+    prior_calls = trace.get("tool_calls") or () if getattr(ctx, "_place_message_calls", None) is None else ()
+    ctx._restored_send_unknown = bool(
+        getattr(ctx, "_restored_send_unknown", False) or legacy.get("sends") == "possible"
+        or any(_could_be_record_send(call, connector, include_gestures=True) for call in prefix_calls)
+        or any(isinstance(call, dict) and _could_be_record_send(call, connector, include_gestures=True) for call in prior_calls))
+
+
+def restored_riding_send(ctx, calls) -> bool | None:
+    """Fallback when the saved selection lacks a riding-send fact. Do not credit a send to a newly resolved audience."""
+    carrier = carrier_now(ctx)
+    if not _door_declared(carrier):
+        return bool(riding_sends(ctx, calls))  # reply-mode connectors keep their own behavior
+    from ouroboros.presence_context import confirmed_delivery_receipts
+
+    possible, confirmed = False, None
+    for call in calls:
+        if not isinstance(call, dict) or not _could_be_record_send(call, carrier["transport_skill"]):
+            continue
+        possible = True
+        receipts = call.get("presence_delivery_confirmed") or (call.get("result_meta") or {}).get("presence_delivery_confirmed")
+        if not isinstance(receipts, (list, tuple)) or not receipts:
+            continue
+        if confirmed is None:
+            try:
+                confirmed = confirmed_delivery_receipts(ctx)
+            except Exception:  # the transport evidence is unreadable, not negative
+                confirmed = frozenset()
+        if all(isinstance(pair, (tuple, list)) and len(pair) == 2
+               and all(isinstance(part, str) for part in pair) and tuple(pair) in confirmed for pair in receipts):
+            return True
+    if possible:
+        ctx._restored_send_unknown = True
+        return None  # no extra round inviting a new send; no claim that the old one arrived
+    return False
+
+
 def _gesture_on_waking_message(metadata, effect, args) -> bool:
     """A gesture door that need not name a thread lands in this turn's conversation only by its exact message:
     the waking message's id, conversation and (where targeted) account. Any other message stays a result to read."""
@@ -276,6 +436,7 @@ def _waking_event_place(ctx, metadata, connector) -> str:
     the message's own thread does, through the same matcher dispatch uses."""
     from ouroboros.place_guard import _drive_root
     from ouroboros.places import PlaceError, place_for_target
+    from ouroboros.telegram_owner_bot import owner_bot_of
 
     event = (metadata.get("presence") or {}).get("event") or {}
     root = _drive_root(ctx)
@@ -284,7 +445,8 @@ def _waking_event_place(ctx, metadata, connector) -> str:
         return ""
     try:
         place, _known = place_for_target(root, connector=connector, targets=targets, conversation="conversation_id",
-                                         thread="thread_id", provider=str(event.get("provider") or ""))
+                                         thread="thread_id", provider=str(event.get("provider") or ""),
+                                         **({"owner_bot": owner} if (owner := owner_bot_of(root, connector)) else {}))
     except PlaceError:
         return ""
     return place.place_id if place is not None else ""
@@ -297,20 +459,29 @@ def waking_message_id(event) -> str:
     return str(value).strip() if isinstance(value, (str, int)) and not isinstance(value, bool) else ""
 
 
-def speak_line(metadata) -> str:
+def place_state_now(root, metadata):
+    """The bound place's state in the store now, for a line outside the FOCUS frame (whose snapshot is the event's);
+    None when it cannot be read, so the snapshot stands."""
+    try:
+        return get_place(root, resolved_carrier(root, metadata)["place_id"]).state
+    except Exception:
+        return None
+
+
+def speak_line(metadata, *, state=None, connector=None) -> str:
     """How words and declared gestures reach this place: every declared door with its own arguments, ids prefilled
     from the event (the host picks none: a pick would be a verdict), and the finish's fate. A connector with a send
-    door makes the finish a record; one with only gesture doors keeps posting a non-silent finish as words."""
+    door makes the finish a record; one with only gesture doors keeps posting a non-silent finish as words. ``state``
+    is the place's state now (``place_state_now``); the FOCUS frame keeps the event's snapshot. ``connector`` is the one
+    a selection resolved (``carrier_now``), else the event's."""
     from ouroboros.consciousness_authority import is_observe_origin
 
     metadata = metadata if isinstance(metadata, dict) else {}
     presence = metadata.get("presence") or {}
     event, place = presence.get("event") or {}, presence.get("place") or {}
     label = place.get("label") or place.get("provider") or presence.get("place_id") or "this place"
-    connector = str(presence.get("transport_skill") or "")
-    focus = metadata.get("wake_cause") == "focus"
-    tools = conversation_send_tools(connector) if focus else []
-    gestures = conversation_gesture_tools(connector) if focus else []
+    connector = str(presence.get("transport_skill") or "") if connector is None else connector
+    tools, gestures = conversation_send_tools(connector), conversation_gesture_tools(connector)
     if not tools and not gestures:
         return f"Your non-silent finish is posted in {label} as your words."
     message_id = waking_message_id(event)
@@ -328,7 +499,7 @@ def speak_line(metadata) -> str:
     doors = [door(name, effect, "words") for name, effect in tools] + [door(name, effect, "gesture") for name, effect in gestures]
     through = ("one of " if len(doors) > 1 else "") + "; ".join(doors)
     act = "send or gesture" if gestures else "send"
-    state = str(place.get("state") or "")
+    state = str(place.get("state") or "") if state is None else str(state)
     held = (f" ({label} is {state.title()}: a {act} is refused and your finish is held for your human, not posted)"
             if state in {"silent", "paused"} else
             f" (autonomy is Advises: a {act} is refused and your finish is held for your human, not posted)"
@@ -350,48 +521,66 @@ def speak_line(metadata) -> str:
 
 def record_note(ctx) -> str:
     """The one return of a records-only finish that posted nothing and sent nothing in its response: the facts (where
-    words go, what this turn already sent there, how to send) and the two choices. The mind decides; once per run."""
+    words go, what this run already sent there, how to send) and how to proceed without duplicating a send. Once per run."""
     from ouroboros.place_guard import this_turn_sends
     from ouroboros.presence_context import _source_conversation
 
     metadata = getattr(ctx, "task_metadata", {}) or {}
-    carrier = reply_carrier(metadata)
+    carrier = carrier_now(ctx, metadata)
     label, route = _source_conversation(metadata.get("presence") or {})
     sends = this_turn_sends(ctx, carrier["conversation_key"])
     pending = "; ".join(f"{row.get('tool')} at {row.get('at')}" + (f": {json.dumps(row['text'], ensure_ascii=False)}" if "text" in row else "")
                         for row in sends["calls_without_receipt"]) or "none"
-    return (f"[FOCUS_FINISH_IS_A_RECORD] Nothing was posted: in {label} (route {route}) your finish is your record, and "
-            f"people hear only what you send. Confirmed sent there by this turn: {sends['confirmed']}. Your own send calls "
-            f"there without a receipt yet: {pending}. {speak_line(metadata)} Send it now, or finish again to keep this "
-            "text as your record.")
+    doors = speak_line(metadata, state="active", connector=carrier["transport_skill"])
+    recovered = getattr(ctx, "_restored_send_unknown", None)
+    next_step = ("An earlier send may have landed. Check its original receipt; do not send it again while its "
+                 "outcome is unknown."
+                 if recovered or (recovered is not None and sends["calls_without_receipt"]) else
+                 "If an earlier attempt to send these words may have run, check its original receipt; do not resend "
+                 "while its outcome is unknown. Send these words explicitly only if you know they were not sent here "
+                 "and you mean to post them.")
+    return (f"[FOCUS_FINISH_IS_A_RECORD] This finish was not posted: in {label} (route {route}) your finish is your record, "
+            f"and people hear only what you send. Confirmed sent there by this run: {sends['confirmed']}. Your own send calls "
+            f"there without a receipt yet: {pending}. {doors} {next_step} Finish again to keep this text as your record.")
 
 
 def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, str]:
     """Speech follows the mind's selection, never delivery receipts: where the place has no in-conversation send
     tool an answer is new speech even after a tool sent an acknowledgement, while ``quiet`` (an explicit silent
     finish or a host-authored final) says nothing new. Where the place speaks by tool (``records_only_now``) the
-    finish is the record: nothing is posted; a finish with words that sent nothing in its own response returns
-    once with the facts (``record_note``), the next is accepted. An admitted handoff stays deferred either way;
-    words that are not speech never ride it (``quiet`` in the completion)."""
+    finish of every root bound to it is the record: nothing is posted; a finish with words that sent nothing in its
+    own response returns once with the facts (``record_note``), the next is accepted. Only the focus turn also owes
+    my human's reply first (R3) and ends its wake quiet; a root it handed off keeps the final its Project reads. An
+    admitted handoff stays deferred either way; words that are not speech never ride it (``quiet`` in the completion).
+    A door connector's final is never words (``door``). The selection reads its place once: the records decision, the
+    note and the hold meet the same state, so a reactivation meanwhile changes only the next selection. A run with no
+    carrier may be a letter's root, whose final is offered to the linked Ouroboros that wrote it across the same
+    boundary (``peer_letters.prepare_letter_reply``)."""
     metadata = getattr(ctx, "task_metadata", {}) or {}
-    carrier = reply_carrier(metadata)
+    carrier = carrier_now(ctx, metadata)
     if not carrier:
-        return True, ""
+        from ouroboros.peer_letters import prepare_letter_reply
+
+        return prepare_letter_reply(ctx, text, quiet=quiet)
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.presence_continuation import _handoff_ref, reply_anchor, selection_for
-    records = records_only_now(ctx)
-    if records and text and not quiet:
+    root = canonical_data_root(ctx)
+    try:
+        place = _place_read(root, carrier["place_id"])
+    except Exception as exc:  # unreadable: no record (``records_only_now``), and the hold raises it as before
+        place = exc
+    door, records, focus = _door_declared(carrier), records_only_now(ctx, place), _focus_turn(metadata)
+    if records and focus and text and not quiet:
         from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed
-        if owner_reply_owed(ctx):  # R3 at the common exit: a records-only finish owes my human's reply as a silent one does
+        if owner_reply_owed(ctx):  # R3 at the common exit: a focus's record owes my human's reply as a silent one does
             return False, OWNER_REPLY_OWED_REFUSAL
     if (records and text and not quiet and getattr(ctx, "_completion_riding_send", None) is False
             and not getattr(ctx, "_records_only_noted", False)):
         ctx._records_only_noted = True  # once: the mind then sends, or finishes again to keep its record
         return False, record_note(ctx)
-    if records:
-        ctx._focus_record_only = True  # the loop's wake_silent usage follows the transport (R7)
+    if records and focus:
+        ctx._focus_record_only = True  # the focus's wake_silent usage follows the transport (R7); a root keeps its final
     quiet = quiet or records
-    root = canonical_data_root(ctx)
     held = ""
     if not quiet and text:
         # The selected input this reply answers names its further addresses: the hold, Safety and the digest read
@@ -400,11 +589,13 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
         addresses, _problem = reply_addresses(metadata, anchor)
         subject = _reply_subject(carrier, text, addresses)
         digest = _reply_digest(carrier, text, addresses)
-        held = reply_hold(root, metadata, ctx.task_id, text, anchor=anchor)
+        held = reply_hold(root, metadata, ctx.task_id, text, anchor=anchor, place=place)
         if held:
             ctx._focus_reply_hold = held
-        elif getattr(ctx, "_focus_checked_reply", None) != digest:
+        elif not door and getattr(ctx, "_focus_checked_reply", None) != digest:
+            from ouroboros.peer_letters import note_reply_approved, reply_basis
             from ouroboros.safety import check_safety
+            before = reply_basis(root, place, metadata)  # a linked Ouroboros's rules, read ahead of this reading
             allowed, message = check_safety("place_reply", subject, ctx=ctx)
             if not allowed:
                 return False, message
@@ -413,39 +604,76 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
                               task_id=ctx.task_id, text="Safety note on this turn's reply: " + message,
                               identity=f"{ctx.task_id}:{digest}:safety-note")
             ctx._focus_checked_reply = digest
-    outcome = "deferred" if _handoff_ref(ctx) else "silent" if quiet or held else "message"
+            if before is not None:  # its words leave later only under the rules this reading met
+                note_reply_approved(root, place, ctx.task_id, text, before, reply_basis(root, place, metadata))
+    record = quiet or bool(held) or door
+    outcome = "deferred" if _handoff_ref(ctx) else "silent" if record else "message"
     old = getattr(ctx, "_presence_completion", {}) or {}
     selection = old.get("selection") if old.get("message") == text else None
     ctx._presence_completion = {"outcome": outcome, "message": text,
                                 "selection": selection or selection_for(ctx, hashlib.sha256(text.encode()).hexdigest()),
-                                **({"quiet": True} if quiet or held else {})}
+                                **({"quiet": True} if record else {})}
     ctx._presence_completion_accepted = True
     return True, ""
 
 
+def accept_focus_completion(ctx, usage: dict, terminal_origin: str) -> None:
+    """At the loop's common accepted exit, record the selected Presence outcome. Explicit silence is the
+    model's own silent selection, not a transport's record-only reply, a hold, delivery by a tool, or the
+    host-set quiet of a planned report. A response sent or still possible in this conversation is not silence."""
+    completion = getattr(ctx, "_presence_completion", None)
+    if not isinstance(completion, dict):
+        return
+    ctx._presence_completion_accepted = True
+    usage.update(presence_completion_outcome=completion["outcome"], terminal_origin=terminal_origin)
+    selected = getattr(ctx, "_completion_selected", None) or {}
+    from ouroboros.loop_completion_schema import SCHEDULE_DOOR
+    if (completion["outcome"] != "silent" or selected.get("wake_silent") is not True
+            or selected.get("source") == SCHEDULE_DOOR  # the schedule door's wake_silent is the host's plan, never the model's own choice
+            or any(getattr(ctx, key, None) for key in ("_focus_reply_hold", "_owner_message_sent",
+                                                        "_completion_riding_send", "_restored_send_unknown"))):
+        return
+    try:
+        carrier = carrier_now(ctx, getattr(ctx, "task_metadata", None) or {})
+        if not carrier or _conversation_has_response(ctx, carrier["conversation_key"]):
+            return
+    except Exception:
+        return  # unreadable evidence cannot strengthen the neutral attention projection
+    usage["presence_explicit_silence"] = True
+
+
+def _conversation_has_response(ctx, conversation_key: str) -> bool:
+    """Both possible calls and typed receipts of this task count; receipts in another conversation do not."""
+    from ouroboros.presence_runner import _latest_receipts, _live_task_rows
+    from ouroboros.tool_access import canonical_data_root
+
+    if any(isinstance(row, dict) and conversation_key in (row.get("conversation_keys") or ())
+           for row in getattr(ctx, "_place_message_calls", None) or ()):
+        return True
+    rows = _live_task_rows(canonical_data_root(ctx), str(ctx.task_id), conversation_key)
+    return any(row["transport"]["delivery"]["state"] in {"accepted", "delivered", "uncertain"}
+               for row in _latest_receipts(rows, same_generation=True) or ())
+
+
 def refusal_facts(ctx) -> str:
     """Host facts beside a refused automatic reply, for the round that follows: where a non-silent finish would be
-    posted and to whom (only where ``final_route`` reads a route; routeless or unsettled, it says that instead), what
-    this turn already sent there (receipts and its own receipt-less calls), and that a silent finish is valid. Facts
-    only; whether to post, rewrite or stay silent is the mind's decision."""
+    posted and to whom (``final_is_speech``; a schedule's run says no connector reads it), what this turn already sent
+    there (receipts and its own receipt-less calls), and that a silent finish is valid. Facts only; whether to post,
+    rewrite or stay silent is the mind's decision."""
     from ouroboros.place_guard import this_turn_sends
-    from ouroboros.presence_context import ROUTED, ROUTELESS, UNKNOWN, _source_conversation, final_route
-    from ouroboros.tool_access import canonical_data_root
+    from ouroboros.presence_context import _source_conversation
     metadata = getattr(ctx, "task_metadata", {}) or {}
-    carrier = reply_carrier(metadata)
+    carrier = carrier_now(ctx, metadata)
     if not carrier or records_only_now(ctx):  # a records-only place posts no finish: the record note says so
         return ""
     label, route = _source_conversation(metadata.get("presence") or {})
-    try:
-        state, why = final_route(canonical_data_root(ctx), metadata, getattr(ctx, "task_id", ""))
-    except Exception:
-        state, why = UNKNOWN, "its route could not be read now"
-    posted = f"posted as a new message in {label} (route {route}) to the people there, in your own voice"
-    fate = {ROUTED: f"A non-silent finish_task answer is {posted}.",
-            ROUTELESS: f"No connector reads this run's final in {label} (route {route}): {why}. A non-silent finish_task "
-                       "answer stays this work's record; only a connector tool reaches the people there.",
-            }.get(state, f"Whether a connector reads this run's final is not settled ({why}); if one does, a non-silent "
-                         f"finish_task answer is {posted}.")
+    posted = (f"a non-silent finish_task answer is posted as a new message in {label} (route {route}) to the people "
+              "there, in your own voice")
+    fate = (posted[0].upper() + posted[1:] + "." if final_followed(metadata) else
+            f"If a connector follows this work, {posted}; otherwise it stays this work's record and only a connector "
+            "tool reaches them." if final_is_speech(metadata) else
+            f"No connector reads this run's final in {label} (route {route}): a non-silent finish_task answer stays "
+            "this work's record; only a connector tool reaches the people there.")
     sends = this_turn_sends(ctx, carrier["conversation_key"])
     pending = "; ".join(f"{row.get('tool')} at {row.get('at')}" + (f": {json.dumps(row['text'], ensure_ascii=False)}" if "text" in row else "")
                         for row in sends["calls_without_receipt"]) or "none"
@@ -454,273 +682,66 @@ def refusal_facts(ctx) -> str:
             "finish_task(action=\"finish\", silent=true) keeps the answer as your internal note; summary reaches your human only.")
 
 
-# What this work's lineage may already have said in its place conversation, kept in the loop's trace (which every
-# continuation serializes whole, a new execution ID included): ``{"sends": "none"}`` only from a positively fresh first
-# execution (``seed_no_send``), ``"possible"`` from the first call that might speak, set before that call starts
-# (``note_possible_sends``), and ``noted`` once the routeless reminder was shown. Absent is unknown, never none.
-NO_SEND_KEY = "presence_no_send"
-ROUTELESS_MARK = "[ROUTELESS_FINAL]"
-# Calls whose words go to another task: what it does with them is that task's, so they may still reach the place.
-_HANDED_TO_ANOTHER_TASK = frozenset({"tell_task", "forward_to_worker"})
-
-
-def seed_no_send(ctx, trace) -> None:
-    """A place-carrying root's positively fresh first execution has said nothing there yet: no earlier attempt,
-    working recovery (``_working_recovery_lost``: a locator its loader could not read), park, timeout retry or
-    Continue precedes it. Every other start leaves the fact absent: an unknown lineage is not a silent one."""
-    metadata = getattr(ctx, "task_metadata", None)
-    if not isinstance(trace, dict) or not isinstance(metadata, dict) or not reply_carrier(metadata):
-        return
-    if (int(getattr(ctx, "task_attempt", None) or 1) > 1 or getattr(ctx, "_working_recovery_lost", False)
-            or getattr(ctx, "working_recovery", None) is not None
-            or getattr(ctx, "owner_wait_resume", None) or getattr(ctx, "budget_pause_resume", None)
-            or metadata.get("continuation") or metadata.get("timeout_retry_from")):
-        return
-    if metadata.get("original_task_id") not in (None, "", getattr(ctx, "task_id", "")):
-        return
-    trace[NO_SEND_KEY] = {"sends": "none"}
-
-
-def may_speak(ctx, call, *, ext_tool=None) -> bool:
-    """Whether one model tool call might put words into the place conversation, read before it starts. Known not to:
-    the completion controls and schema bookkeeping, the known pure reads, this mind's own memory, the Ouroboros-side
-    delivery family (the local room, never the place: ``named_delivery_receipt``), receipt writes of its own record, a
-    connector's declared read or gesture (an act, not words), and a declared message whose every attributable target is
-    another conversation (``call_place_facts``). Every other call might, an opaque command or browser action included;
-    a failed or timed-out call proves nothing either way."""
-    from ouroboros.place_guard import call_place_facts
-    from ouroboros.tool_capabilities import (
-        COGNITIVE_MEMORY_TOOL_NAMES,
-        COMPLETION_RECEIPT_TOOLS,
-        OWNER_DELIVERY_TOOL_NAMES,
-        PURE_READ_TOOLS,
-        completion_control_call,
-    )
-    from ouroboros.tool_effects import EFFECT_GESTURE, EFFECT_MESSAGE, EFFECT_READ, effect_of
-    from ouroboros.tools.tool_discovery import resolve_gateway_call
-
-    function = resolve_gateway_call(call).get("function") or {}
-    name = str(function.get("name") or "").strip()
-    if (completion_control_call(name) or name in {"enable_tools", "list_available_tools"}
-            or name in PURE_READ_TOOLS | COGNITIVE_MEMORY_TOOL_NAMES | OWNER_DELIVERY_TOOL_NAMES
-            or name in COMPLETION_RECEIPT_TOOLS - _HANDED_TO_ANOTHER_TASK):
-        return False
-    raw = function.get("arguments")
-    args = raw if isinstance(raw, dict) else json.loads(raw or "{}")
-    effect = effect_of(name, ext_tool=ext_tool, ctx=ctx, args=args if isinstance(args, dict) else None)
-    if effect.declared and effect.effect in (EFFECT_READ, EFFECT_GESTURE):
-        return False
-    if effect.effect != EFFECT_MESSAGE or not isinstance(args, dict):
-        return True
-    own = reply_carrier(getattr(ctx, "task_metadata", {}) or {}).get("conversation_key")
-    facts = call_place_facts(ctx, name, args, ext_tool=ext_tool)
-    rows = facts.get("places") or []
-    return not (facts.get("attributable") and rows and all(own not in (row.get("conversation_keys") or ()) for row in rows))
-
-
-def note_dispatch(ctx, trace, call, *, bound: bool = False) -> None:
-    """Monotonically retain possible speech before submission, using the timeout-bound descriptor when present.
-    This is observational: an unreadable declaration suppresses the optional note, never the tool call."""
-    state = trace.get(NO_SEND_KEY) if isinstance(trace, dict) else None
-    if not isinstance(state, dict) or state.get("sends") != "none":
-        return
+def _sending_place(root, skill: str, payload: dict):
+    """The place a Telegram receipt's own sending task ran in, else None. The owner's bot and the connector's own share
+    the connector, and a receipt names its bot and chat but not which sent it. Neither today's bridge bot nor the places
+    left today say it: a disconnect removes a place, so the one left is no proof of the sender. Only what the sending
+    task kept does. The receipt's origin names a stored task of this connector (the proof its canonical row's
+    provenance takes), and the receipt's address, as ``conversation_key`` writes it, is the route the Host admitted that
+    task for: an account- or chat-wide place covers other bots, chats and topics, so its scope alone ties nothing. The
+    task's place must still exist and cover the address by its own scope and kind, and the task ran under its
+    connection as it stands: ``presence.place.revision`` (the place's revision at admission) is not older than the
+    place's ``connected_revision``, which a disconnect and a new connection move past every earlier admission."""
+    origin = payload.get("origin")
+    task_id = origin.get("task_id", "") if isinstance(origin, dict) else ""
+    if not task_id:
+        return None  # an automatic reply names no task
+    from ouroboros.dialogue_provenance import presence_provenance_from_task
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.store import StoreError
+    from ouroboros.task_results import load_task_result
     try:
-        ext_tool = None
-        if bound:
-            from ouroboros.tools.extension_dispatch import bound_dispatch_candidate
-            name = str((call.get("function") or {}).get("name") or "").strip()
-            ext_tool, _unavailable = bound_dispatch_candidate(ctx, name, consume=False)
-        speaking = may_speak(ctx, call, ext_tool=ext_tool)
-    except Exception:
-        speaking = True
-    if speaking:
-        state["sends"] = "possible"
-
-
-def note_possible_sends(ctx, trace, messages, *, interrupted: bool = False) -> None:
-    """Before the last batch's first effect: the first of its unanswered calls that might speak (``may_speak``) turns
-    a known silent lineage into a possibly speaking one. The ``pre_effect`` checkpoint carries it, so a call that times
-    out before its handler runs, or a restart after any of them, never reads as none. An unreadable call might."""
-    state = trace.get(NO_SEND_KEY) if isinstance(trace, dict) else None
-    if not isinstance(state, dict) or state.get("sends") != "none":
-        return
-    from ouroboros.budget_pause import pending_tool_call_ids
-
-    pending = set(pending_tool_call_ids(messages))
-    if interrupted and pending:
-        # The saved declaration may predate dispatch. Today's read declaration cannot exonerate an unanswered call.
-        state["sends"] = "possible"
-        return
-    batch = next((row for row in reversed(messages) if isinstance(row, dict) and row.get("role") == "assistant"), {})
-    for call in batch.get("tool_calls") or []:
-        if not isinstance(call, dict) or call.get("id") not in pending:
-            continue
-        note_dispatch(ctx, trace, call)
-        if state.get("sends") != "none":
-            return
-
-
-def routeless_note(ctx, limit_ctx, trace, text: str, candidate, origin: str = "prose") -> str:
-    """The one host fact a voluntary wordy finish returns with when nobody would receive it (owner 03.11, option 3),
-    or ``""``. Only for a final ``final_route`` reads ROUTELESS now, in an Active place under Acts or Evolves whose
-    connector declares a send door, from a lineage known to have sent nothing there (``NO_SEND_KEY``), once, with room
-    for one more round. Silence, empty words, a stop and every unsettled or legacy case get nothing. The mind decides;
-    the host sends nothing."""
-    state = trace.get(NO_SEND_KEY) if isinstance(trace, dict) else None
-    if (not isinstance(state, dict) or state.get("sends") != "none" or state.get("noted") or not str(text or "").strip()
-            or candidate is None or getattr(candidate, "quiet", False)):
-        return ""
-    try:
-        return _routeless_note(ctx, limit_ctx, str(text), origin)
-    except Exception:  # an optional hint: an unreadable fact shows nothing and the finish proceeds
-        import logging
-        logging.getLogger(__name__).warning("routeless final facts unavailable", exc_info=True)
-        return ""
-
-
-def note_rows(content: str, note: str, origin: str) -> list:
-    """The rows the note's round adds: the final it answers (a selection is already its own row), then the note."""
-    return ([] if origin == "selection" else [{"role": "assistant", "content": content}]) + [{"role": "user", "content": note}]
-
-
-def _routeless_note(ctx, limit_ctx, text: str, origin: str) -> str:
-    from ouroboros.consciousness_authority import is_observe_origin
-    from ouroboros.place_guard import this_turn_sends
-    from ouroboros.presence_context import ROUTELESS, _source_conversation, final_route
-    from ouroboros.tool_access import canonical_data_root
-
-    metadata = getattr(ctx, "task_metadata", {}) or {}
-    carrier = reply_carrier(metadata)
-    connector = str((metadata.get("presence") or {}).get("transport_skill") or "")
-    doors = [name for name, _effect in conversation_send_tools(connector)] if carrier else []
-    if not doors or is_observe_origin(metadata):
-        return ""
-    root = canonical_data_root(ctx)
-    route, why = final_route(root, metadata, getattr(ctx, "task_id", ""))
-    if route != ROUTELESS or get_place(root, carrier["place_id"]).state != "active":
-        return ""
-    label, source = _source_conversation(metadata["presence"])
-    confirmed = this_turn_sends(ctx, carrier["conversation_key"])["confirmed"]
-    # A gesture is no words, so it leaves this lineage silent, but the mind sees what it did beside the fact, each
-    # call read by the declaration it ran with (``_ran_as``).
-    from ouroboros.tool_effects import EFFECT_GESTURE
-    gestures = dict(conversation_gesture_tools(connector))
-    made = [f"{row['tool']} on message {(row.get('args') or {}).get(gesture.message, '?')}"
-            + (" (failed)" if row.get("is_error") else "")
-            for row in (getattr(limit_ctx, "llm_trace", None) or {}).get("tool_calls") or []
-            if isinstance(row, dict) and (gesture := _ran_as(row, connector, EFFECT_GESTURE, gestures)) is not None]
-    note = (f"{ROUTELESS_MARK} Nobody receives this text: no connector reads this run's final in {label} ({why}), and "
-            f"the host sends nothing for you. People there hear only what a connector tool sends: {', '.join(doors)} "
-            f"(source route {source}). Confirmed sent there by this run: {confirmed}. Gestures you made there, which "
-            f"are not words: {'; '.join(made) or 'none'}. Send it that way now, or finish again: finish_task with "
-            "silent=true sends nothing, and a final with words stays only this work's record.")
-    # The round is priced as the exact request it would send: this transcript with the answer and the note.
-    probe = [*(getattr(limit_ctx, "messages", None) or []), *note_rows(text, note, origin)]
-    return note if _round_affordable(ctx, limit_ctx, probe_messages=probe) else ""
-
-
-def routeless_note_pending(trace, candidate, messages) -> bool:
-    """A shown routeless note no model response has followed yet: its round exists only for the note. Read from the
-    transcript and the candidate's own control, so a restored attempt reads the same fact."""
-    from ouroboros.loop_delivery import ROUTELESS_NOTED_CONTROL
-
-    state = trace.get(NO_SEND_KEY) if isinstance(trace, dict) else None
-    if (not isinstance(state, dict) or not state.get("noted")
-            or getattr(candidate, "finalization_control", "") != ROUTELESS_NOTED_CONTROL):
-        return False
-    shown = [index for index, row in enumerate(messages or []) if isinstance(row, dict) and row.get("role") == "user"
-             and str(row.get("content") or "").startswith(ROUTELESS_MARK)]
-    return bool(shown) and not any(isinstance(row, dict) and row.get("role") == "assistant"
-                                   for row in messages[shown[-1] + 1:])
-
-
-def _round_affordable(ctx, limit_ctx, *, ahead: bool = True, probe_messages=None) -> bool:
-    """Whether a round meets none of the rails that would end the work there instead: its round limit (``ahead``: the
-    round after this one; the loop checked the current one), a live execution control, the supervisor's or the task's
-    own deadline (``local_deadline_remaining``) inside the finalization reserve, or a money stop
-    (``_optional_round_stops``, for the request ``probe_messages`` would send, else the transcript now). A round the
-    existing rails would turn into a forced wrap-up or a pause is not bought."""
-    from ouroboros.deadline_utils import dispatch_window_remaining_sec
-    from ouroboros.loop_round_limits import local_deadline_remaining
-    from ouroboros.task_pacing import effective_finalization_reserve_sec
-
-    rounds = getattr(limit_ctx, "max_rounds", None)
-    waiter = getattr(ctx, "model_wait_context", None)
-    reserve = effective_finalization_reserve_sec(ctx)
-    window = dispatch_window_remaining_sec(deadline_ts=getattr(limit_ctx, "deadline_ts", None), reserve_sec=reserve)
-    local = local_deadline_remaining(ctx)
-    return not ((ahead and rounds is not None and int(limit_ctx.round_idx) >= rounds)
-                or (waiter is not None and waiter.control_reason())
-                or (window is not None and window <= 0) or (local is not None and local <= reserve)
-                or _optional_round_stops(limit_ctx, getattr(ctx, "_cost_ceiling", None), probe_messages))
-
-
-def _optional_round_stops(ctx, ceiling, probe_messages=None) -> bool:
-    """Whether a round only an optional host hint asks for would meet a money stop now: authored-completion exhaustion,
-    a soft-landing ceiling, a reached ceiling, or, under an explicit profile, a next request (``probe_messages``, its
-    exact transcript) whose reservation, or room for it and one more, does not fit as ``_check_budget_limits`` prices
-    it, or whose balances, price or second fit are unknown (an owner Resume's relaxed last fit excepted). Read on a
-    copy of the usage: nothing is stamped, paused, finalized or reserved."""
-    import copy
-    import logging
-
-    from ouroboros import task_pacing
-    from ouroboros.loop_budget import (
-        _ceiling_reached,
-        _exact_reservations,
-        _loop,
-        _wrapup_global_remaining,
-        authored_completion_budget_exhausted,
-    )
-
-    probe = copy.copy(ctx)
-    probe.accumulated_usage = dict(ctx.accumulated_usage)
-    if authored_completion_budget_exhausted(probe, None, ceiling):
-        return True
-    state = getattr(ceiling, "state", None)
-    if state == task_pacing.COST_CEILING_EXHAUSTED_SOFT_LAND:
-        return True
-    if state != task_pacing.COST_CEILING_ACTIVE:
-        return False
-    tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
-    authority = task_pacing.COST_STOP_EXPLICIT if tool_ctx is None else task_pacing.cost_stop_authority(tool_ctx)
-    tree = _loop()._loop_tree_accounting(refresh=True, max_age_sec=_loop()._TREE_ACCOUNTING_MAX_STALE_SEC)
-    deciding, _basis = task_pacing.resolve_deciding_spend(tree_cost_usd=(tree or {}).get("settled_usd"),
-        task_cost_usd=ctx.accumulated_usage.get("cost"), root_cap_usd=ceiling.root_cap_usd)
-    global_remaining = None if ctx.active_use_local else _wrapup_global_remaining()
-    if authority == task_pacing.COST_STOP_EXPLICIT:
-        if global_remaining is None and (ceiling.root_cap_usd is None or deciding is None):
-            return True  # no balance the profile's reservations could be priced against: unknown, not funded
-        balances = dict(root_cap_usd=ceiling.root_cap_usd, deciding_usd=deciding, global_remaining_usd=global_remaining)
-        # Only the owner's Resume relaxation may leave the second fit undecided; its own stamp says it did.
-        probe.accumulated_usage.pop("budget_resume_last_fit_admitted", None)
-        try:
-            fits, two_fit = _exact_reservations(
-                probe, list(probe_messages if probe_messages is not None else ctx.messages), balances,
-                int(ctx.accumulated_usage.get("_context_prompt_estimate") or 0),
-                bool(getattr(tool_ctx, "_budget_resume_last_fit_relaxed", False)),
-                _loop()._server_web_allowed_by_task(tool_ctx))
-        except Exception:
-            logging.getLogger(__name__).debug("The optional round could not be priced", exc_info=True)
-            return True
-        relaxed = "budget_resume_last_fit_admitted" in probe.accumulated_usage
-        if fits is not True or two_fit is False or (two_fit is None and not relaxed):
-            return True
-    return _ceiling_reached(deciding, ceiling.ceiling_usd, authority)
+        task = load_task_result(root, task_id, strict=True) or {}
+    except (OSError, ValueError, StoreError):
+        return None
+    provenance, admitted = presence_provenance_from_task(task), task
+    for step in ("metadata", "presence", "place"):
+        admitted = admitted.get(step) if isinstance(admitted, dict) else None
+    revision = admitted.get("revision") if isinstance(admitted, dict) else None
+    route = conversation_key(*(payload[key] for key in ("provider", "account_id", "conversation_id", "thread_id")))
+    if (provenance.get("transport_skill") != skill or provenance.get("conversation_key") != route
+            or type(revision) is not int):
+        return None
+    from ouroboros.places import places_of_connector
+    from ouroboros.telegram_owner_bot import is_owner_bot_place
+    place = next((p for p in places_of_connector(root, skill) if p.place_id == provenance.get("place_id")), None)
+    if place is None or revision < place.connected_revision:
+        return None
+    account = payload["account_id"]
+    # ``owner_bot`` fences by the place's own kind, never by the bot the bridge holds today
+    return resolve_place(root, connector=skill, places=[place], binding_id=place.place_id, provider=payload["provider"],
+                         account_id=account, conversation_id=payload["conversation_id"],
+                         thread_id=payload["thread_id"], owner_bot=account if is_owner_bot_place(place) else "")
 
 
 def record_late_delivery(root, skill: str, payload: dict, client_id: str):
-    """Receipts are evidence even when the destination is now closed to writes."""
+    """Receipts are evidence even when the destination is now closed to writes. The canonical receipt is stored before
+    this runs and never depends on what it finds. A Telegram receipt's note stays with the place its own sending task
+    proves (``_sending_place``) and is not written without that proof; every other connector finds it by the address."""
     if payload["state"] not in {"accepted", "delivered"}:
         return
-    place = resolve_place(root, connector=skill, provider=payload["provider"], account_id=payload["account_id"],
-                          conversation_id=payload["conversation_id"], thread_id=payload["thread_id"])
-    if place is None:
-        from ouroboros.places import places_of_connector
-        place = next((p for p in places_of_connector(root, skill) if p.destination and
-                      all(p.destination.get(key, "") in (payload[source], "*") for key, source in
-                          (("transport", "provider"), ("account_id", "account_id"),
-                           ("conversation_id", "conversation_id"), ("thread_id", "thread_id")))), None)
+    from ouroboros.telegram_owner_bot import FEED_CONNECTOR
+    if skill == FEED_CONNECTOR:
+        place = _sending_place(root, skill, payload)
+    else:
+        place = resolve_place(root, connector=skill, provider=payload["provider"], account_id=payload["account_id"],
+                              conversation_id=payload["conversation_id"], thread_id=payload["thread_id"])
+        if place is None:
+            from ouroboros.places import places_of_connector
+            place = next((p for p in places_of_connector(root, skill) if p.destination and
+                          all(p.destination.get(key, "") in (payload[source], "*") for key, source in
+                              (("transport", "provider"), ("account_id", "account_id"),
+                               ("conversation_id", "conversation_id"), ("thread_id", "thread_id")))), None)
     if place is None or place.state not in {"silent", "paused"}:
         return
     from ouroboros.presence_bindings import conversation_key

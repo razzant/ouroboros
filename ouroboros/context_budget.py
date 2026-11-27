@@ -36,6 +36,7 @@ HOST_CONTEXT_KIND_KEY = "_host_context_kind"
 OWNER_WORDS_KIND = "owner_words"
 OWNER_ROW_KINDS = frozenset({OWNER_WORDS_KIND, "owner_dialogue"})
 REPLY_CITATION_KIND = "reply_citation"  # Context immediately before the owner words that select it, not owner speech.
+PROGRAM_HISTORY_KIND = "program_history"  # Selected conversation memory, not an independently foldable turn.
 # The host's facts beside my human's words reaching running work (``return_facts``): one line of that run, never a word.
 RETURN_FACTS_KIND = "return_facts"
 
@@ -93,10 +94,14 @@ RECLAIM_LOW_WATER_DIVISOR = 8
 #: An unknown reclaim target: the step takes everything its category can give (the refusal passes).
 WHOLE_CATEGORY = 2**31 - 1
 # The owner's order (7A, 09.10.2026), sized step by step: superseded host rows, then bodies already shown, oldest
-# first, for the measured excess only, then memory detail for the rest and the return-after-fold slack (its floor
-# lowers the books only where memory cannot make room, BIBLE P1); books and unseen bodies after a further refusal,
+# first, for the measured excess only, then memory for the rest and slack (tellings, useful maps, then the remainder
+# at a measured Max wall, BIBLE P1). Any books still held and unseen bodies yield after a further refusal,
 # then memory's rest and a just-chosen body last (owner 2A, ``loop_model_call._apply_refusal_pass``).
 REFUSAL_PASSES = (("host_copies", "bodies", "floor"), ("books", "unseen_bodies"))
+# After them a directly required handbook's excess on the refused view takes one yield per further refusal: optional
+# maps, then the book's own map, then ARCHITECTURE's (owner 23.11.2026, 1), each offered on the view the provider or the
+# final sender actually refused (``loop_round_limits.book_yield_due``), so a Max start the passes lowered reaches them.
+BOOK_YIELD_PASSES = (("book_yield:1",), ("book_yield:2",), ("book_yield:3",))
 # A physical unfit of a directly required handbook is its owner's or caller's to resolve; the host switches nothing.
 # ``{}`` takes "; a Continue keeps it" exactly where that terminal's cause offers Continue (``owner_continue``).
 REQUIRED_BOOK_CHOICES = ("The choices are a route with a larger window, the owner's Context mode, or a new task "
@@ -138,6 +143,7 @@ def _reply_floor(caller_max_tokens: int, nano: bool) -> Tuple[int, int]:
 def reply_allowance_tokens(
     *, caller_max_tokens: int, nano: bool, owner_nano: bool, input_tokens: int,
     raw_input_tokens: Optional[int] = None, window_tokens: Optional[int] = None, exact: bool = False,
+    window_record: Any = None,
 ) -> int:
     """The one reply allowance of a prepared Main candidate (the wire ``max_tokens``).
 
@@ -148,10 +154,16 @@ def reply_allowance_tokens(
     and leaves a slack of ``W / RECLAIM_LOW_WATER_DIVISOR`` for estimate error; an
     exact count (the local server's tokenizer) needs no slack and may raise an
     over-cautious estimate. Without a window the owner's Nano target stands in for
-    it. Continuous in the input, never below ``R``, never above ``C``: a ceiling below
+    it. A known input-only limit leaves the entire reply ceiling; when both limits are
+    known only the total sizes the reply. Continuous in the input, never below ``R``, never above ``C``: a ceiling below
     the floor (a local lane's 2,048 or quarter window) is never raised.
     """
     ceiling, floor = _reply_floor(caller_max_tokens, nano)
+    if window_record is not None:
+        if window_record.total is not None:
+            window_tokens = window_record.total.tokens
+        elif window_record.input is not None:
+            return ceiling
     if window_tokens is not None and int(window_tokens) > 0:
         window = int(window_tokens)
         measured = int(input_tokens) if exact else max(int(input_tokens), int(raw_input_tokens or input_tokens))
@@ -306,7 +318,7 @@ def context_overflow_message(text: Any) -> bool:
     return any(marker in low for marker in CONTEXT_OVERFLOW_MESSAGE_MARKERS) or _parse_ctx_limit_number(low, server_forms=False) > 0
 
 
-LOCAL_CONTEXT_CODES = frozenset({"exceed_context_size_error"})  # llama.cpp n_ctx / n_prompt_tokens
+LOCAL_CONTEXT_CODES = frozenset({"exceed_context_size_error", "ollama_context_length_exceeded"})  # native adapters
 SIZE_REFUSAL_STATUSES = frozenset({400, 413, 422})
 _PLAIN_INTEGER = re.compile(r"(?<![\w.,-])\d+(?![\w]|[.,]\d)")
 

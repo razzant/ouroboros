@@ -85,7 +85,7 @@ class _BotServer:
         self.calls.append((method, form))
         result: object = {"message_id": 555}
         if method == "getMe":
-            result = {"id": int(_TOKEN.split(":")[0]), "is_bot": True, "username": "loopback_bot"}
+            result = {"id": 1, "is_bot": True, "username": "loopback_bot"}
         elif method in ("setMyCommands", "sendChatAction", "answerCallbackQuery"):
             result = True
         elif method == "getUpdates":

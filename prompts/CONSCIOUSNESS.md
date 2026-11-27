@@ -19,4 +19,4 @@ Wake facts:
 - install cache writes: {cache_writes}
 - counted roots: {counted_roots}
 - places: {places}
-- memory: Main is my room, my other conversations in view; round facts measure my window, unfolded pages and what awaits my decision.
+- memory: Main is my room, my other conversations in view; round facts measure my window, unfolded pages, what awaits my decision and, when measured, what my shortest telling is made of.

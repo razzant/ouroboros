@@ -1135,3 +1135,130 @@ test('a page whose socket never opened is not reloaded by the fuse; after its fi
         await teardown(ws);
     }
 });
+
+// ---------------------------------------------------------------------------
+// The serving profile of the current socket owns the chat queue.
+// ---------------------------------------------------------------------------
+
+function installProfileEnv(docScope) {
+    const env = installEnv([{ body: { sha: 'abc' } }]);
+    globalThis.document = {
+        getElementById: () => null,
+        querySelector: (sel) => (docScope && sel.includes('ouroboros-chat-preview-scope') ? { content: docScope } : null),
+    };
+    return env;
+}
+
+function servingProfile(socket, profile_scope) {
+    socket.onmessage({ data: JSON.stringify({ type: 'connection_profile', profile_scope }) });
+}
+
+const SCOPE_A = 'a'.repeat(16);
+const SCOPE_B = 'b'.repeat(16);
+
+test('a matching socket sends chat with the document scope; controls stay independent', async () => {
+    installProfileEnv(SCOPE_A);
+    const ws = new WS('ws://unused');
+    ws.connect();
+    const sock = FakeSocket.instances.at(-1);
+    sock.readyState = FakeSocket.OPEN;
+    try {
+        ws.send({ type: 'command', cmd: '/status' });
+        assert.equal('profile_scope' in JSON.parse(sock.sent[0]), false, 'controls carry no profile claim');
+        servingProfile(sock, SCOPE_A);
+        assert.equal(ws.send({ type: 'chat', content: 'hi' }).status, 'sent');
+        const frame = JSON.parse(sock.sent[1]);
+        assert.equal(frame.profile_scope, SCOPE_A);
+        assert.ok(frame.client_message_id);
+    } finally { await teardown(ws); }
+});
+
+test('the same profile releases the queued chat and delivers ordinary frames on reconnect', async () => {
+    const env = installProfileEnv(SCOPE_A);
+    const ws = new WS('ws://unused');
+    const seen = [];
+    ws.on('chat', frame => seen.push(frame.content));
+    try {
+        ws.send({ type: 'chat', content: 'queued while down' });
+        const sock = FakeSocket.instances.at(-1);
+        sock.readyState = FakeSocket.OPEN;
+        sock.onopen();
+        assert.equal(ws.send({ type: 'chat', content: 'queued until profile proof' }).status, 'queued');
+        assert.equal(sock.sent.length, 0);
+        servingProfile(sock, SCOPE_A);
+        await waitFor(() => sock.sent.length === 2, 'the matching scope released both messages');
+        assert.equal(env.replaced.length, 0);
+        assert.ok(sock.sent.every(frame => JSON.parse(frame).profile_scope === SCOPE_A));
+        sock.onmessage({ data: JSON.stringify({ type: 'chat', content: 'same profile reply' }) });
+        assert.deepEqual(seen, ['same profile reply']);
+    } finally { await teardown(ws); }
+});
+
+test('a confirmed successor drops the previous profile queue and reloads a clean document', async () => {
+    const env = installProfileEnv(SCOPE_A);
+    const ws = new WS('ws://unused');
+    const dropped = [];
+    ws.on('outbound_dropped', (d) => dropped.push(d));
+    try {
+        ws.send({ type: 'chat', content: 'old profile words' });
+        const sock = FakeSocket.instances.at(-1);
+        sock.readyState = FakeSocket.OPEN;
+        sock.onopen();
+        servingProfile(sock, SCOPE_B);
+        await waitFor(() => env.replaced.length === 1, 'reload on the profile change');
+        assert.match(env.replaced[0], /_ouro_reason=profile-change/);
+        assert.equal(sock.sent.length, 0, 'nothing of the old profile was sent into the new one');
+        assert.equal(ws._pendingMessages.length, 0, 'the queue was dropped, not kept');
+        assert.equal(dropped.length, 1);
+        assert.ok(dropped[0].clientMessageId, 'each dropped message is announced by its id');
+    } finally {
+        await teardown(ws);
+    }
+});
+
+test('a page that proves no profile scope flushes on open without any index read', async () => {
+    const env = installEnv([{ body: { sha: 'abc' } }]);  // document without the meta: no querySelector hit
+    let rootReads = 0;
+    env.setFetch(async (url) => {
+        if (String(url) === '/') { rootReads += 1; return { ok: true, text: async () => '' }; }
+        return { ok: true, json: async () => ({ sha: 'abc' }) };
+    });
+    const ws = new WS('ws://unused');
+    try {
+        ws.send({ type: 'chat', content: 'q' });
+        const sock = FakeSocket.instances.at(-1);
+        sock.readyState = FakeSocket.OPEN;
+        sock.onopen();
+        await waitFor(() => sock.sent.length === 1, 'flushed immediately');
+        assert.equal(rootReads, 0, 'no profile read without a document scope');
+        assert.equal('profile_scope' in JSON.parse(sock.sent[0]), false, 'no claim invented');
+        assert.equal(env.replaced.length, 0);
+    } finally {
+        await teardown(ws);
+    }
+});
+
+test('the replacement socket uses its own scope, not a late frame from the previous socket', async () => {
+    installProfileEnv(SCOPE_A);
+    const ws = new WS('ws://unused');
+    try {
+        assert.equal(ws.canShowSavedProfile(), true, 'the fresh document is eligible from serving metadata');
+        ws.connect();
+        const first = FakeSocket.instances.at(-1);
+        first.readyState = FakeSocket.OPEN;
+        servingProfile(first, SCOPE_A);
+        first.readyState = FakeSocket.CLOSED;
+        first.onclose();
+        assert.equal(ws.canShowSavedProfile(), false, 'disconnect ends preview eligibility');
+        ws.connect();
+        const next = FakeSocket.instances.at(-1);
+        next.readyState = FakeSocket.OPEN;
+        ws.send({ type: 'chat', content: 'after reconnect' });
+        servingProfile(first, SCOPE_A);
+        assert.equal(next.sent.length, 0);
+        assert.equal(ws.canShowSavedProfile(), false, 'the new socket still owes its own proof');
+        servingProfile(next, SCOPE_A);
+        assert.equal(next.sent.length, 1);
+        assert.equal(ws.canShowSavedProfile(), true, 'the current matching socket restores preview eligibility');
+    } finally { await teardown(ws); }
+});

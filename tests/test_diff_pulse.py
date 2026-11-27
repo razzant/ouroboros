@@ -5,11 +5,14 @@ reviewer's brief of a body subject; never a threshold, a warning or a block
 
 from __future__ import annotations
 
+import ast
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
 
+import pytest
 
 from ouroboros.review import DIFF_PULSE_QUESTION, diff_pulse
 from ouroboros.tools.registry import ToolContext
@@ -111,6 +114,84 @@ def test_with_no_readable_diff_the_touched_books_keep_their_balance(tmp_path):
     note = book_balance_note(repo, [CHAPTER])
     assert "n/a vs HEAD; contribution unknown" in note
     assert diff_pulse(repo, [CHAPTER]) == note and diff_pulse(repo) == ""  # unshown, no book is known to be touched
+
+
+def test_a_staged_pulse_sizes_modules_and_books_from_the_index_not_later_worktree_edits(tmp_path):
+    """The staged pulse diffs the index, so its module sizes and book balance read the index too: an
+    unstaged edit made after staging (more lines, more prose, or a revert of the staged growth) must
+    neither mask nor inflate what the commit would hold."""
+    from tests._reference_book_fixtures import _book_repo
+
+    repo = _book_repo(tmp_path / "body")
+    staged_prose, unstaged = "Staged reason.\n", "Unstaged worktree prose, much longer than the staged line.\n"
+    (repo / CHAPTER).write_text(BODY + staged_prose, encoding="utf-8", newline="\n")
+    _write(repo, "ouroboros/loop.py", 4)
+    _git(repo, "add", CHAPTER, "ouroboros/loop.py")
+    (repo / CHAPTER).write_text(BODY + staged_prose + unstaged, encoding="utf-8", newline="\n")
+    _write(repo, "ouroboros/loop.py", 40)
+
+    staged = diff_pulse(repo, [CHAPTER, "ouroboros/loop.py"], staged=True)
+    assert f"+{len(staged_prose)} B vs HEAD" in staged
+    assert f"+{len(staged_prose) + len(unstaged)} B vs HEAD" not in staged
+    assert "ouroboros/loop.py 4 (+3/-0)" in staged and "ouroboros/loop.py 40" not in staged
+    worktree = diff_pulse(repo, [CHAPTER, "ouroboros/loop.py"])
+    assert f"+{len(staged_prose) + len(unstaged)} B vs HEAD" in worktree and "ouroboros/loop.py 40 (+39/-0)" in worktree
+
+    # An unstaged revert cannot hide staged growth either.
+    (repo / CHAPTER).write_text(BODY, encoding="utf-8", newline="\n")
+    assert f"+{len(staged_prose)} B vs HEAD" in diff_pulse(repo, [CHAPTER], staged=True)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a literal backslash cannot be part of a Windows file name")
+def test_a_staged_name_the_module_inventory_rejects_is_counted_not_sized_and_never_raises(tmp_path):
+    """The staged pulse is a fact: a valid POSIX file name the gated-module inventory rejects (a literal
+    backslash) is counted in the change and left unsized, as the worktree pulse does, and the commit's
+    preflight carries on."""
+    repo = _body(tmp_path / "body")
+    for name in ("ordinary.md", "notes\\draft.md", "odd\\module.py"):
+        (repo / name).write_text("A note\n", encoding="utf-8", newline="\n")
+        _git(repo, "add", "--", name)
+    staged = diff_pulse(repo, staged=True)
+    assert "files 3," in staged and "odd\\module.py 1" not in staged
+    worktree = diff_pulse(repo)
+    assert "files 3," in worktree
+
+
+def test_staged_constitution_and_prompts_are_sized_from_the_index_and_a_conflict_is_unmeasured(tmp_path):
+    """The ruled texts (BIBLE.md and prompts/) follow the index like the books: an unstaged edit after staging
+    neither hides nor inflates the staged balance; during an unresolved merge the prompts are unmeasured, never a
+    false deletion, and they are measured again once the conflict is staged resolved."""
+    from ouroboros.reference_books import book_balance_note, ruled_text_sizes
+
+    repo = _body(tmp_path / "body")
+    (repo / "prompts").mkdir()
+    for name, text in (("BIBLE.md", "# Bible\n"), ("prompts/base.md", "kept\n"), ("prompts/other.md", "base\n")):
+        (repo / name).write_text(text, encoding="utf-8", newline="\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "ruled texts")
+    _git(repo, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
+    (repo / "BIBLE.md").write_text("# Bible\nStaged.\n", encoding="utf-8", newline="\n")
+    _git(repo, "add", "BIBLE.md")
+    (repo / "BIBLE.md").write_text("# Bible\n", encoding="utf-8", newline="\n")  # an unstaged revert
+    assert "+8 B vs HEAD" in book_balance_note(repo, ["BIBLE.md"], staged=True)
+    assert "+8 B vs HEAD" not in book_balance_note(repo, ["BIBLE.md"])
+    _git(repo, "commit", "-qm", "bible")
+
+    branch = _git(repo, "branch", "--show-current")
+    _git(repo, "checkout", "-qb", "theirs")
+    (repo / "prompts/other.md").write_text("theirs\n", encoding="utf-8", newline="\n")
+    _git(repo, "commit", "-qam", "theirs")
+    _git(repo, "checkout", "-q", branch)
+    (repo / "prompts/other.md").write_text("ours\n", encoding="utf-8", newline="\n")
+    _git(repo, "commit", "-qam", "ours")
+    merged = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "merge", "theirs"], cwd=repo,
+                            capture_output=True)
+    assert merged.returncode == 1 and _git(repo, "ls-files", "-u", "--", "prompts/other.md")
+    assert ruled_text_sizes(repo, "prompts", staged=True) is None
+    assert "balance unavailable" in book_balance_note(repo, ["prompts/other.md"], staged=True)
+    (repo / "prompts/other.md").write_text("resolved\n", encoding="utf-8", newline="\n")
+    _git(repo, "add", "prompts/other.md")
+    assert ruled_text_sizes(repo, "prompts", staged=True) == {"prompts/base.md": 5, "prompts/other.md": 9}
 
 
 def test_one_shape_and_one_question_for_any_size(tmp_path):
@@ -317,7 +398,8 @@ def test_a_changed_python_source_adds_its_code_shape_and_an_unparsed_one_is_unkn
 def test_an_unread_side_is_unknown_never_a_deletion_and_a_deleted_module_returns_from_no_handle(
         tmp_path, monkeypatch):
     """A side Git does not give, on a delete-only or mode-only edit, is unknown, not removals; a module
-    the change deletes is no module its handles return; a source too deep to parse is unknown too."""
+    the change deletes is no module its handles return; an ordinary source parses to known counts while
+    MemoryError or RecursionError from ast.parse leaves both suite and shape unknown."""
     from ouroboros import review
 
     repo = _body(tmp_path / "body")
@@ -342,13 +424,34 @@ def test_an_unread_side_is_unknown_never_a_deletion_and_a_deleted_module_returns
     _git(repo, "add", "-A")
     assert "Code shape: module handles +0/-1, calls through them +0/-1, re-exported names +0/-0." in diff_pulse(
         repo, staged=True)
-    _write(repo, "tests/test_deep.py", 1, "x = " + " + ".join(["1"] * 20_000) + "\n")
-    _write(repo, "ouroboros/deep.py", 1, "X = " + "-" * 200_000 + "1\n")
-    pulse = diff_pulse(repo, ["tests/test_deep.py", "ouroboros/deep.py"])
-    assert "items +0/-0 (1 unreadable)" in pulse
-    assert ("Code shape: module handles, calls through them, re-exported names unknown (1 unreadable: "
-            "ouroboros/deep.py); tests: patched product-module names, git init call sites unknown (1 unreadable: "
-            "tests/test_deep.py).") in pulse
+
+    test_src, product_src = "def test_ok():\n    pass\n", "X = 1\n"
+    _write(repo, "tests/test_sample.py", 1, test_src)
+    _write(repo, "ouroboros/sample.py", 1, product_src)
+    known_fact, known_shape, _ = diff_pulse(repo, ["tests/test_sample.py", "ouroboros/sample.py"]).split("\n")
+    assert "tests: items +1/-0," in known_fact and "unreadable" not in known_fact
+    assert known_shape == (
+        "Code shape: module handles +0/-0, calls through them +0/-0, re-exported names +0/-0; "
+        "tests: patched product-module names +0/-0, git init call sites +0/-0.")
+
+    real_parse = ast.parse
+
+    def fail_parse(*args, **kwargs):
+        source = args[0] if args else kwargs.get("source")
+        if source == product_src:
+            raise MemoryError("simulated parse memory limit")
+        if source == test_src:
+            raise RecursionError("simulated parse recursion limit")
+        return real_parse(*args, **kwargs)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(ast, "parse", fail_parse)
+        unknown_fact, unknown_shape, _ = diff_pulse(repo, ["tests/test_sample.py", "ouroboros/sample.py"]).split("\n")
+    assert "tests: items +0/-0 (1 unreadable)," in unknown_fact
+    assert unknown_shape == (
+        "Code shape: module handles, calls through them, re-exported names unknown (1 unreadable: "
+        "ouroboros/sample.py); tests: patched product-module names, git init call sites unknown (1 unreadable: "
+        "tests/test_sample.py).")
 
 
 def test_the_suite_reads_the_same_side_presence_as_the_shape_line(tmp_path, monkeypatch):

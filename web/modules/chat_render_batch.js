@@ -1,14 +1,13 @@
 // Chat timeline ordering, keyed item reconciliation and reading anchors.
 // These helpers own no history source, navigation or task authority.
-import { compareHistoryPosition, timelineReadFields } from './chat_history_replay.js';
+import { adoptsCardRowAddress, timelineReadFields } from './chat_history_replay.js';
 import { foldWaitRow } from './task_checkpoints.js';
 import { measure } from './layout_batch.js';
 import { appendDelegatedItem, reconcileDelegatedItems } from './delegated_activity.js';
 import { isStoreMigrating } from './api_client.js';
 import { tr } from './i18n.js';
-
-const nodePosition = node => node?.dataset?.historySource
-    ? { source: node.dataset.historySource, offset: Number(node.dataset.historyOffset) } : null;
+import { replaceScrollFade, restoreFocusWithoutReveal } from './scroll_fade.js';
+import { compareTimelineOrder } from './chat_timeline_order.js';
 
 // A feed holding only chrome has no conversation: the history control, the typing
 // indicator, Main's empty-state greeting and an ephemeral notice (Restart
@@ -33,8 +32,8 @@ const gapNoticeDocs = new WeakSet();
  */
 export function createHistoryControls(messagesDiv, statusHost = null, {
     // The gap's fact stands at the edge of history it concerns (the note at the feed's start); a room announces nothing
-    // over its newest rows (U021). A caller with a place for a one-time announcement passes it here.
-    onGapNotice = null, isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
+    // over its newest rows (U021). Main's archive uses the effective refusal and hears newest restoration separately.
+    onGapNotice = null, archive = null, isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
 } = {}) {
     const doc = messagesDiv.ownerDocument;
     const root = doc.createElement('div');
@@ -65,7 +64,7 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
     return {
         olderButton: button,
         showNotice,
-        destroy() { pendingNotice = false; notice?.dispose?.(); notice = null; },
+        destroy() { pendingNotice = false; notice?.dispose?.(); notice = null; archive?.dispose(); },
         // Only an EMPTY feed (or a failure already on screen) gets the loading
         // state: an ordinary refresh never puts chrome over a painted transcript.
         // Returns whether there is a state to draw, so a painted feed costs nothing.
@@ -78,24 +77,23 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
         },
         // A failure is shown where the loading state was; elsewhere the reader
         // keeps the transcript they have and the next sync reconciles it. A migrating store has not failed.
-        endRecent(error = null, partial = false) { recent = error ? { error, partial } : null; },
+        endRecent(error = null, partial = false, page = null) { recent = error ? { error, partial } : null; archive?.recent(partial ? null : error, page); },
         recentFailed: () => Boolean(recent?.error && !recent.partial && !isStoreMigrating(recent.error)),
         render(snapshot, coverage = {}, approximate = false) {
-            const error = recent?.error || snapshot.error;
-            const retry = recent?.error && !recent.partial || snapshot.error;
+            const retry = (!recent?.partial && recent?.error) || snapshot.error;
+            const archiveNote = archive?.refusalNote(retry);
+            const error = archiveNote ? retry : recent?.error || snapshot.error;
             const migrating = isStoreMigrating(error);
             const hydrating = Boolean(recent?.loading);
             const loading = hydrating || Boolean(snapshot.loading);
             const changedView = error?.body?.reason_code === 'history_view_changed';
             const incomplete = coverage.gaps === true;
-            pendingNotice = snapshot.initialized && !migrating && !error
-                && !(hydrating && feedIsEmpty(messagesDiv)) && incomplete;
+            const emptyLoading = hydrating && feedIsEmpty(messagesDiv);
+            pendingNotice = snapshot.initialized && !migrating && !error && !emptyLoading && incomplete;
             showNotice();
             const gapText = incomplete ? tr('history.gap', GAP_NOTE) : '';
-            let noteText = migrating ? 'Saved history is being upgraded…' : error ? 'Some saved history could not be loaded.'
-                : hydrating && feedIsEmpty(messagesDiv) ? ''
-                : incomplete ? gapText
-                : !hydrating && coverage.complete ? 'Beginning of saved history' : '';
+            let noteText = migrating ? 'Saved history is being upgraded…' : archiveNote || (error ? 'Some saved history could not be loaded.' : '');
+            if (!error && !emptyLoading) noteText = incomplete ? gapText : !hydrating && coverage.complete ? 'Beginning of saved history' : '';
             if (approximate) noteText = `${error ? `${noteText} ` : ''}Saved position could not be restored exactly.`;
             // Failure and approximate restoration move into persistent chrome when it describes the reading
             // window; the gap explanation and ordinary beginning marker belong at the feed's start.
@@ -103,8 +101,7 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
             if (note.parentNode !== host) host.appendChild(note);
             note.classList.toggle('chat-history-status', host === statusHost);
             // A concurrent read/position problem must not consume the persistent gap explanation.
-            const separateGap = incomplete && Boolean(error || approximate)
-                && !(hydrating && feedIsEmpty(messagesDiv));
+            const separateGap = incomplete && Boolean(error || approximate) && !emptyLoading;
             // A grown room's exhausted chain offers the way on (it rebases to the present); a chain a navigation
             // began ends at its older end: ↓ is the way to the present.
             const buttonHidden = migrating || (!retry && !snapshot.canOlder
@@ -117,6 +114,7 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
                 [gapNote, { textContent: separateGap ? gapText : '', hidden: !separateGap }],
                 [root, { hidden: buttonHidden && (host !== root || !noteText) && !separateGap }],
             ];
+            archive?.offer(button, buttonHidden || loading ? null : retry);
             for (const [node, values] of fields) {
                 for (const [key, value] of Object.entries(values)) if (node[key] !== value) node[key] = value;
             }
@@ -186,7 +184,7 @@ export function createHistoryResyncScheduler({
     isReplayActive, run, debounceMs = 700,
     setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (id) => clearTimeout(id),
 }) {
-    let timer = null;
+    let timer = null, why = null;  // `why`: the tags of the first schedule the pending run serves (its read's record)
     return {
         /**
          * @param {boolean} keepPending an armed full rebuild is a DEADLINE, not a
@@ -200,13 +198,13 @@ export function createHistoryResyncScheduler({
          * window fetched before the arm, so the caller re-arms when such a run settles
          * with the bound still armed.
          */
-        schedule(keepPending = false) {
+        schedule(keepPending = false, tags = null) {
             if (isReplayActive()) return false;
             if (timer != null) {
                 if (keepPending) return true;
                 clearTimer(timer);
-            }
-            timer = setTimer(() => { timer = null; run(); }, debounceMs);
+            } else why = tags;
+            timer = setTimer(() => { timer = null; run(why); }, debounceMs);
             return true;
         },
         cancel() { if (timer != null) { clearTimer(timer); timer = null; } },
@@ -215,7 +213,7 @@ export function createHistoryResyncScheduler({
 
 /**
  * Insert a top-level timeline node chronologically while keeping typing last.
- * Equal timestamps preserve arrival order; timestamp-free nodes append.
+ * Equal timestamps use saved position, then arrival order; timestamp-free nodes append.
  * (Moved from chat.js — that module sits at its byte ceiling.)
  */
 // A focused text control keeps its own caret; Chromium mirrors it into the
@@ -254,22 +252,33 @@ export function keepSelection(doc) {
         const range = selection.getRangeAt(index);
         return [range.startContainer, range.startOffset, range.endContainer, range.endOffset];
     });
-    return { active, caret, selection, ranges };
+    const endpoints = ranges.length === 1 && selection.anchorNode && selection.focusNode
+        ? [selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset] : null;
+    return { active, caret, selection, ranges, endpoints };
+}
+
+const intactRange = ([start, , end]) => start.isConnected && end.isConnected;
+function restoreSelection(doc, scope, { active, caret, selection, ranges, endpoints }, partial = false) {
+    if (active && scope.contains?.(active) && doc.activeElement !== active) restoreFocusWithoutReveal(active);
+    if (caret) restoreTextControlCaret(active, caret);
+    const connected = partial ? ranges.filter(intactRange) : ranges.every(intactRange) ? ranges : [];
+    if (!connected.length) return;
+    if (endpoints && typeof selection.setBaseAndExtent === 'function') return selection.setBaseAndExtent(...endpoints);
+    selection.removeAllRanges();
+    for (const [start, from, end, to] of connected) {
+        const range = doc.createRange();
+        range.setStart(start, from); range.setEnd(end, to); selection.addRange(range);
+    }
 }
 
 export function insertTimelineNode(messages, node, typing = null, kept = null) {
-    const rawNodeTs = node?.dataset?.ts;
-    const nodeTs = rawNodeTs == null || rawNodeTs === '' ? NaN : Number(rawNodeTs);
     let before = null;
-    if (Number.isFinite(nodeTs)) {
+    if (node?.dataset?.ts) {
         const children = messages?.children || [];
         for (let index = 0; index < children.length; index += 1) {
             const child = children[index];
             if (child === node || child === typing) continue;
-            const rawChildTs = child?.dataset?.ts;
-            const childTs = rawChildTs == null || rawChildTs === '' ? NaN : Number(rawChildTs);
-            if (Number.isFinite(childTs) && (childTs > nodeTs
-                    || childTs === nodeTs && compareHistoryPosition(nodePosition(child), nodePosition(node)) > 0)) {
+            if (compareTimelineOrder(child.dataset, node.dataset) > 0) {
                 before = child;
                 break;
             }
@@ -280,18 +289,10 @@ export function insertTimelineNode(messages, node, typing = null, kept = null) {
     const doc = messages.ownerDocument;
     // Only a mounted row that moves can lose the focus, caret or selection in it; a new row is just inserted. A page
     // that moves many rows passes the selection it read once (`kept`).
-    const { active, caret, selection, ranges } = node.isConnected ? kept || keepSelection(doc) : { ranges: [] };
+    const saved = node.isConnected ? kept || keepSelection(doc) : null;
     if (target) messages.insertBefore(node, target);
     else messages.appendChild(node);
-    if (active && node.contains?.(active) && doc.activeElement !== active) active.focus({ preventScroll: true });
-    if (caret) restoreTextControlCaret(active, caret);
-    if (ranges.length && ranges.every(([start, , end]) => start.isConnected && end.isConnected)) {
-        selection.removeAllRanges();
-        for (const [start, startOffset, end, endOffset] of ranges) {
-            const range = doc.createRange();
-            range.setStart(start, startOffset); range.setEnd(end, endOffset); selection.addRange(range);
-        }
-    }
+    if (saved) restoreSelection(doc, node, saved);
     return { before };
 }
 
@@ -382,8 +383,10 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
         if (current.nodeType !== 1) {
             current.nodeValue = next.nodeValue;
         } else {
+            const keptOutput = current.matches?.('.chat-live-line-body-full') && next.matches?.('.chat-live-line-body-full');
             for (const attr of Array.from(current.attributes)) {
-                if (!next.hasAttribute(attr.name)) current.removeAttribute(attr.name);
+                if (!next.hasAttribute(attr.name) && !attr.name.startsWith('data-scroll-')
+                    && !(keptOutput && ['tabindex', 'role', 'aria-label'].includes(attr.name))) current.removeAttribute(attr.name);
             }
             for (const attr of Array.from(next.attributes)) {
                 if (current.getAttribute(attr.name) !== attr.value) current.setAttribute(attr.name, attr.value);
@@ -423,7 +426,7 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
             const at = owed.get(el) || before || { scroll: timelineScroll(record) };
             const { scroll } = at;
             const byKey = new Map(Array.from(el.children).map((node) => [node.dataset.liveLineKey, node]));
-            const { active, caret, selection, ranges } = scroll ? at.kept || keepSelection(el.ownerDocument) : { ranges: [] };
+            const saved = scroll ? at.kept || keepSelection(el.ownerDocument) : null;
             let changed = false;
             let moved = false;
             record.items.forEach((item, index) => {
@@ -431,10 +434,9 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
                 if (!next) return;
                 const current = byKey.get(String(item.lineKey || ''));
                 const node = current || remember(next);
-                if (current) {
-                    byKey.delete(String(item.lineKey || ''));
-                    changed = patchNode(current, next) || changed;
-                }
+                const before = innerBox(current);
+                if (current) byKey.delete(String(item.lineKey || ''));
+                if (!current || patchNode(current, next)) { updateInnerFade(before, node); changed = true; }
                 if (el.children[index] !== node) {
                     moved = moved || node.parentNode === el;
                     el.insertBefore(node, el.children[index] || null);
@@ -442,23 +444,11 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
                 }
             });
             for (const node of byKey.values()) {
+                replaceScrollFade(innerBox(node));
                 node.remove();
                 changed = true;
             }
-            if (moved) {
-                if (el.contains(active) && el.ownerDocument.activeElement !== active) active.focus({ preventScroll: true });
-                if (caret) restoreTextControlCaret(active, caret);
-                const intact = ranges.filter(([start, , end]) => start.isConnected && end.isConnected);
-                if (intact.length) {
-                    selection.removeAllRanges();
-                    for (const [start, startOffset, end, endOffset] of intact) {
-                        const range = el.ownerDocument.createRange();
-                        range.setStart(start, startOffset);
-                        range.setEnd(end, endOffset);
-                        selection.addRange(range);
-                    }
-                }
-            }
+            if (moved && saved) restoreSelection(el.ownerDocument, el, saved, true);
             // Only a new newest line keeps a pinned timeline at its end; a disclosure
             // or late full output keeps the line being read where it is. The scroll is
             // written once the batch's writes are done, with every other card's (layout_batch.js).
@@ -480,6 +470,7 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
         const node = nodeFor(item, record);
         if (!node) return false;
         record.timelineEl.appendChild(remember(node));
+        updateInnerFade(null, node);
         if (record.root.dataset.expanded === '1' && pinned) {
             record.timelineEl.scrollTop = record.timelineEl.scrollHeight;
         }
@@ -489,7 +480,9 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
         if (defer(record)) return false;
         if (record._timelineDirty || !current) return render(record);
         const node = nodeFor(item, record);
+        const before = innerBox(current);
         if (!node || !patchNode(current, node)) return false;
+        updateInnerFade(before, current);
         return Boolean(record.timelineEl.isConnected);
     };
     // A room away draws nothing (room_retire.js): a timeline that a late read changed meanwhile is owed, and drawn once
@@ -498,6 +491,10 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
     return {
         renderLiveCardTimeline: render,
         oweTimeline: (record) => { owedAway.add(record); },
+        releaseTimeline(record) {
+            owedAway.delete(record);
+            for (const line of record.timelineEl.children) replaceScrollFade(innerBox(line));
+        },
         drawOwedTimelines: () => { const owed = [...owedAway]; owedAway.clear(); owed.forEach((record) => render(record)); },
         appendTimelineItem: append,
         patchLastTimelineItem: (item, record) => replace(
@@ -511,14 +508,12 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
     };
 }
 
-// A live card's header chrome: a saved role inside its owner card.
 const CARD_HEADER = [
     '[data-live-summary-button]', '[data-live-title]', '[data-live-activity]',
     '[data-live-meta]', '.chat-live-actions', '.chat-live-project-card-btn',
 ];
 
-// The feed's bounded, separately scrolling boxes: a card timeline, a fetched
-// full output, a Reviews group's Record facts. Each clips what it holds.
+// Each separately scrolling box clips only its own content.
 const BOUNDED_BOX = '[data-live-timeline], .chat-live-line-body-full, [data-review-attempt-detail]';
 const TRANSIENT_NOTE = '.msg-routing-annotation, .msg-routing-actions, .msg-pending, [data-ingress-unconfirmed]';
 
@@ -532,23 +527,23 @@ export function revealTimelineNode(node, feed, clearance) {
     feed.scrollTop += node.getBoundingClientRect().top - feed.getBoundingClientRect().top - clearance;
 }
 
-// A node's own bounded reading box: an expanded line's fetched full output or
-// a Reviews group's Record facts. The owner card timeline is found from the node.
 function innerBox(node) {
     if (node?.matches?.('[data-review-attempt-detail]')) return node;
     return node?.matches?.('.chat-live-line') ? node.querySelector?.(':scope > .chat-live-line-body-full') || null : null;
 }
 
+function updateInnerFade(previous, line) {
+    const next = innerBox(line);
+    replaceScrollFade(previous, next, next?.matches?.('.chat-live-line-body-full')
+        ? { region: tr('chat.live.full_output_region', 'Full task output') } : undefined);
+}
+
 /**
- * Timeline viewport anchors (extracted verbatim from chat.js at the byte ratchet): capture the first timestamped
- * node in the read band (`band()`, project_read_state.js readBand) and restore its exact offset after a mutation.
- * Pure over the passed feed element.
+ * Capture the first timestamped node in the read band and restore its exact offset after a mutation.
  */
 export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () => null }) {
     function captureVisibleTimelineAnchor(excludeNode = null, { inPlace = true } = {}) {
-        // The Load-older control is excluded like .typing-bubble [GPT#13]:
-        // anchoring must land on the first visible TIMESTAMPED node, or a
-        // Load-older restore would pin the button itself and drift the view.
+        // Anchor a timestamped message, not Load older or a typing bubble.
         const nodes = Array.from(messagesDiv.children).filter(
             (node) => node !== excludeNode && !excludeNode?.contains?.(node)
                 && !node.classList.contains('typing-bubble') && !node.classList.contains('chat-load-older'),
@@ -922,9 +917,13 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
         const it = record.items[existingIdx];
         if (Number.isSafeInteger(it.cardRowRevision)
             && (!Number.isSafeInteger(summary.cardRowRevision) || summary.cardRowRevision <= it.cardRowRevision)) {
-            return { timelineUpdate: 'duplicate-skip', patchIndex };
+            if (!adoptsCardRowAddress(it, summary)) return { timelineUpdate: 'duplicate-skip', patchIndex };
+            Object.assign(it, { replyAddress: summary.replyAddress, replyRole: summary.replyRole });
+            return { timelineUpdate: 'patch-at', patchIndex: existingIdx };
         }
         const patch = {
+            replyAddress: summary.replyAddress,
+            replyRole: summary.replyRole,
             cardRowRevision: summary.cardRowRevision, phase: summary.phase || it.phase,
             headline: headline || it.headline, fullHeadline: summary.fullHeadline || headline || it.fullHeadline,
             body: summary.body || '', fullBody: summary.fullBody || summary.body || it.fullBody || '',
@@ -956,6 +955,8 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
     } else {
         const lineKey = `line-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         record.items.push({
+            replyAddress: summary.replyAddress,
+            replyRole: summary.replyRole,
             cardRowRevision: summary.cardRowRevision, phase: summary.phase || 'working',
             headline: headline || 'Update', fullHeadline: summary.fullHeadline || headline || 'Update',
             body: summary.body || '', fullBody: summary.fullBody || summary.body || '',
@@ -970,14 +971,9 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
     return { timelineUpdate, patchIndex };
 }
 
-/** The block's folded tool evidence row. Live frames and the host's metrics
- * reach it through the same keyed in-place upsert, so neither route can mint a
- * second row, and the row keeps the position and timestamp of its first frame.
- */
+/** Live frames and host metrics upsert one folded tool row, keeping its first position and time through a burst. */
 export function upsertToolFoldRow(record, view, ts, rawTs) {
     const syntheticKey = `tools|${record.groupId}`;
-    // Stationary: the row keeps the place and the time of the first frame it
-    // counted, so a burst of calls never walks it down the timeline.
     const first = !record.items.some((item) => item.dedupeKey === syntheticKey);
     return updateLiveTimelineItem(record, view, {
         ts: first ? ts : '', rawTs, syntheticKey, headline: view.headline, inPlaceByKey: true,

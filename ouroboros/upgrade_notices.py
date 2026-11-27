@@ -258,6 +258,7 @@ def legacy_memory_facts(root: Any) -> Optional[Dict[str, Any]]:
     writer wrote (in period order). A model is never asked.
     """
     from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.memory_inventory import legacy_pointer_rows
 
     root = pathlib.Path(root)
     store = ChronicleStore(root)
@@ -265,7 +266,7 @@ def legacy_memory_facts(root: Any) -> Optional[Dict[str, Any]]:
         return None
     if store.ensure_activated().get("kind") != "activation":
         return None
-    pieces = [pointer for pointer in store.legacy_pointer_rows()
+    pieces = [pointer for pointer in legacy_pointer_rows(store)
               if pointer.get("kind") == "legacy" and pointer.get("legacy_type") not in _NOT_PIECES
               and not pointer.get("transfer")]
     spans = [((pointer.get("covers") or {}).get("raw_range") or {}).get("ts_span") or {} for pointer in pieces]

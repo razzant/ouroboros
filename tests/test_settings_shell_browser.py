@@ -70,18 +70,19 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
     ui = subscription_ui
     page = ui["new_page"](viewport={"width": width, "height": height}, has_touch=width < 720)
     # The section switches at 40rem of its own box, not the window's width. A stored, supported sidebar width
-    # keeps the docked case in one column too: 1087 - 460 = 627px. The wide case below guards both panes.
+    # keeps the docked case in one column too: 1087 - 460 - 40 = 587px, the stored width being the column's and the
+    # rail beside it the room's to give (owner 24.11). The wide case below guards both panes.
     if width == 1087:
         page.route("**/api/ui/preferences", lambda route: route.fulfill(json={"sidebar_width": 460}))
     page.goto(ui["url"] + "/#settings")
     if width == 1087:
-        page.wait_for_function("() => document.querySelector('#page-settings')?.clientWidth === 627")
+        page.wait_for_function("() => document.querySelector('#page-settings')?.clientWidth === 587")
         open_settings(page)  # A page opened before stored widths arrived survives the narrowing; start at the list.
     page.locator(HOME).wait_for(state="visible")
     page.evaluate(TEST_PAGE)
     assert _layout(page) == ("stack" if width < 720 else "docked")
     content_width = page.locator("#page-settings").bounding_box()["width"]
-    assert content_width == (627 if width == 1087 else width if width < 720 else page.locator("#content").bounding_box()["width"])
+    assert content_width == (587 if width == 1087 else width if width < 720 else page.locator("#content").bounding_box()["width"])
     assert _menu_visible(page)
     if width == 320:
         # A phone's home has one band; Search starts the list right under it, where the band's second row stood.
@@ -239,8 +240,9 @@ def test_a_wide_page_box_shows_the_home_beside_the_page_with_no_layer(subscripti
     assert len(page.evaluate(SETTINGS_LAYERS)) == 1, "beside the home only the deeper level is a layer"
     assert go_back(page) == "test-shell"
     assert first.is_visible() and back.count() == 0 and page.evaluate(SETTINGS_LAYERS) == []
-    # A jump from Skills has the same named return in the wide header.
-    page.evaluate("document.querySelector('[data-nav-page=\"skills\"]').click()")
+    # A jump from Skills has the same named return in the wide header. Extensions opens through its door in Settings'
+    # list (owner 24.11), itself a jump, so the page reached from it returns there.
+    page.locator(f'{HOME} [data-settings-open="page:skills"]').click()
     page.wait_for_selector('#page-skills [data-extensions-open="installed"][aria-current="page"]')
     page.evaluate("() => window.__ouroSettings.open('test-shell')")
     back.wait_for(state="visible")

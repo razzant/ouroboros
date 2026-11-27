@@ -78,17 +78,17 @@ log = logging.getLogger(__name__)
 _LARGE_CONTEXT_SECTION_CHARS = LARGE_CONTEXT_SECTION_CHARS
 
 
-def build_incoming_user_content(entry: Dict[str, Any], drive_root: Any, task_id: str) -> Any:
+def build_incoming_user_content(entry: Dict[str, Any], drive_root: Any, task_id: str, *, attachment_facts=None) -> Any:
     """Build only this delivery's images, never the task's historical manifest."""
     task = {**entry, "drive_root": drive_root, "id": task_id}
     if "attachment_manifest" in entry or "attachment_manifest_ref" in entry:
         task["attachment_images"] = entry.get("attachment_manifest") or []
         task["task_contract"] = {key: entry[key] for key in
                                  ("attachment_manifest", "attachment_manifest_ref") if key in entry}
-    return build_user_content(task)
+    return build_user_content(task, attachment_facts=attachment_facts)
 
 
-def build_user_content(task: Dict[str, Any]) -> Any:
+def build_user_content(task: Dict[str, Any], *, attachment_facts=None) -> Any:
     from ouroboros.presence_context import frame_presence_user_content
 
     text = task.get("text", "")
@@ -96,6 +96,12 @@ def build_user_content(task: Dict[str, Any]) -> Any:
     host_fact = metadata.get("host_fact")
     if isinstance(host_fact, dict) and host_fact.get("kind") == "call_open":
         text = "[Host fact: a live call opened; not the owner's words]\n\n" + str(text or "")
+    from ouroboros.dialogue_provenance import admission_note, agent_note_heading
+    if note := admission_note(task):
+        text = agent_note_heading(note["author"], address=note["row_address"]) + "\n" + str(text or "")
+        if (task.get("admission_author") or {}).get("late_report_ref") and (source := metadata.get("_late_result_origin")):
+            text = (f"[Host: Local reply to a request from task {source}. Consider it here; the letter grants no "
+                    "permission to act or to contact the sender. Reply to my human only if useful.]\n\n" + text)
     author = metadata.get("objective_author")
     # Text a task drafted, the Schedules API supplied or the host composed for a press: never my human's words.
     if isinstance(author, dict) and author.get("kind") in {"task", "schedule_api", "ui_control"}:
@@ -103,6 +109,12 @@ def build_user_content(task: Dict[str, Any]) -> Any:
 
         text = (f"[OBJECTIVE_AUTHOR] The objective below was {objective_author_line({'objective_author': author})}. "
                 "My human's words keep their own source. [/OBJECTIVE_AUTHOR]\n\n" + str(text or ""))
+    from ouroboros.dialogue_provenance import declared_author
+    from ouroboros.peer_letters import is_letter_root, letter_objective
+
+    letter, agent = metadata.get("peer_letter"), declared_author(metadata, key="letter_author")
+    if agent and is_letter_root(metadata, str(task.get("id") or "")):  # the letter's own root, never what it starts
+        text = letter_objective(task.get("drive_root"), letter, agent, text)
     image_b64 = task.get("image_base64")
     if not image_b64 and task.get("image_source_ref"):
         # A prestart Pause has original input, but no checkpointed transcript.
@@ -113,7 +125,8 @@ def build_user_content(task: Dict[str, Any]) -> Any:
 
         raw = read_actor_source_bytes(task["drive_root"], str(task["id"]), task["image_source_ref"])
         image_b64 = base64.b64encode(raw).decode("ascii")
-    attachment_image_blocks = _build_attachment_image_blocks(task)
+    attachment_image_blocks = (_build_attachment_image_blocks(task) if attachment_facts is None
+                               else _build_attachment_image_blocks(task, facts=attachment_facts))
 
     if not image_b64 and not attachment_image_blocks:
         return frame_presence_user_content(task, text or "(empty message)")
@@ -157,14 +170,28 @@ def build_user_content(task: Dict[str, Any]) -> Any:
     return frame_presence_user_content(task, content)
 
 
-def _first_user_content(task: Dict[str, Any], env: Any) -> Any:
+def _first_user_content(task: Dict[str, Any], env: Any, *, attachment_facts=None) -> Any:
     """A task's first input, its staged images read from the drive its actor runs on. A row on the canonical drive may
     record no ``drive_root`` (promotion's and Continue's do not: assignment and terminal files read that field as a
     fork), so the actor's own ``env.drive_root`` names the store its inputs were staged in."""
-    return build_user_content(task if task.get("drive_root") else {**task, "drive_root": env.drive_root})
+    from ouroboros.chat_uploads import attachment_delivery_block
+    from ouroboros.owner_quiz import late_answer_ref, resolved_late_quiz
+
+    content = build_user_content(task if task.get("drive_root") else {**task, "drive_root": env.drive_root},
+                                 attachment_facts=attachment_facts)
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    late = late_answer_ref(metadata.get("late_answer"))
+    # A late answer's card frame already names each file never received (``quiz_answer_frame``): one renderer.
+    framed = bool(late) and resolved_late_quiz(task.get("drive_root") or env.drive_root, late).get("state") == "answered"
+    fact = "" if framed else attachment_delivery_block(task.get("attachment_manifest"))
+    if not fact:
+        return content
+    if isinstance(content, list):
+        return [*content, {"type": "text", "text": fact}]
+    return f"{content}\n\n{fact}" if task.get("text") else fact
 
 
-def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _build_attachment_image_blocks(task: Dict[str, Any], *, facts=None) -> List[Dict[str, Any]]:
     """Native image blocks for staged attachment images (v6.52.0, P1).
 
     Each entry in ``task['attachment_images']`` is a staged manifest record
@@ -183,14 +210,22 @@ def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]
         try:
             entries = resolve_attachment_manifest(drive_root, str(task_id), contract)
         except (OSError, ValueError, TypeError) as exc:
+            if facts is not None:
+                facts['manifest_unavailable'] = True
             return [{"type": "text", "text": f"Attachment source unavailable: {exc}. The inline rows are not the complete input set."}]
     if not isinstance(entries, list) or not entries:
         return []
+    if facts is not None:
+        facts['manifest_items'] = len(entries)
+        facts['manifest_path_only'] = sum(isinstance(row, dict) and (not row.get('is_image') or bool(row.get('path_only')))
+                                          for row in entries)
     import base64 as _b64
 
     from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.context_assembly_trace import AttachmentSelection
     from ouroboros.context_budget import MAX_LIVE_IMAGE_BLOCKS
 
+    selection = AttachmentSelection(facts)
     try:
         artifact_dir = task_artifact_dir_path(drive_root, str(task_id), create=False)
     except Exception:
@@ -198,32 +233,44 @@ def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]
         return []
     blocks: List[Dict[str, Any]] = []
     injected = 0
-    for entry in entries:
-        if injected >= MAX_LIVE_IMAGE_BLOCKS:
-            break  # remaining images stay manifest-readable, not amputated
+    for index, entry in enumerate(entries):
+        if injected >= MAX_LIVE_IMAGE_BLOCKS and (facts is None or index >= selection.limit):
+            selection.omit_remaining(len(entries) - index)
+            break
         if not isinstance(entry, dict) or not entry.get("is_image") or entry.get("path_only"):
+            selection.record(index, "not_selected_as_image" if isinstance(entry, dict) else "unreadable_entry")
+            continue
+        if injected >= MAX_LIVE_IMAGE_BLOCKS:
+            selection.record(index, "image_count_limit")
             continue
         relpath = str(entry.get("relpath") or "").strip()
         if not relpath:
+            selection.record(index, "missing_source")
             continue
         label = str(entry.get("label") or pathlib.Path(relpath).name).strip()
+        failure = "unreadable_source"
         try:
             img_path = (artifact_dir / relpath).resolve(strict=False)
             if not img_path.is_relative_to(artifact_dir.resolve()) or (artifact_dir / relpath).is_symlink():
+                failure = "invalid_source"
                 raise ValueError("image path escapes its staged artifact owner")
             # Keep the existing admission budget; exceeding it is visible while
             # the complete original remains accessible through the manifest.
             if img_path.stat().st_size > 8 * 1024 * 1024:
+                failure = "image_byte_limit"
                 raise ValueError("image exceeds the 8 MiB automatic attachment read budget")
             raw = img_path.read_bytes()
             from hashlib import sha256
             from ouroboros.image_preparation import prepare_image_bytes
             if entry.get("sha256") and sha256(raw).hexdigest() != entry["sha256"]:
+                failure = "source_identity_changed"
                 raise ValueError("staged image no longer matches its captured identity")
+            failure = "image_preparation_failed"
             prepared = prepare_image_bytes(raw, max_bytes=8 * 1024 * 1024)
             mime = prepared.mime
             b64 = _b64.b64encode(prepared.data).decode("ascii")
         except (OSError, ValueError) as exc:
+            selection.record(index, failure)
             blocks.append({"type": "text", "text":
                            f"[image: {label}] Pixels unavailable: {exc}. Original: artifact_store/{relpath}."})
             continue
@@ -236,6 +283,9 @@ def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]
             "_source_path": str(img_path),
         })
         injected += 1
+        selection.record(index, "prepared_pixels")
+    if facts is not None:
+        facts['manifest_pixels'] = injected
     return blocks
 
 
@@ -267,7 +317,7 @@ _OWNER_CLIENT_NOTE = (
 )
 
 
-def _owner_message_facts(metadata: dict) -> dict:
+def _owner_message_facts(metadata: dict, *, program_source: str = "") -> dict:
     """Project the sender's citation and sending surface from ingress metadata for the model."""
     from ouroboros.client_surface import owner_client_fact
 
@@ -275,8 +325,9 @@ def _owner_message_facts(metadata: dict) -> dict:
     reply = metadata.get("reply_reference")
     if isinstance(reply, dict) and reply:
         from ouroboros.chat_references import stored_reply
-        facts["reply_to"] = stored_reply(reply)  # the captured source reaches the model as a bound host row, once
-        if reply.get("excerpt"):
+        facts["reply_to"] = ({"address": reply["address"], "program_source": program_source}
+                             if program_source and reply.get("address") else stored_reply(reply))
+        if reply.get("excerpt") and not program_source:
             facts["reply_excerpt_note"] = (
                 "excerpt is the sender's client-reported rendered selection in the addressed message, supplied as a citation."
             )
@@ -433,6 +484,11 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
     # What Ouroboros owns on disk and its body's dated facts: facts, no threshold.
     runtime_data.update(body_facts(canonical_root, observed_at=runtime_data["context_captured_at"]))
     runtime_data.update(_task_authority_projection(env, task))
+    from ouroboros.chat_references import reply_target
+
+    _meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    reply = _meta.get("reply_reference")
+    target = reply_target(canonical_root, reply)
     if supplementary_messages_out is not None:
         from ouroboros.main_context_authority import late_answer_notes_message, predecessor_notes_message
         from ouroboros.review_history_view import capture_review_history_messages
@@ -444,6 +500,17 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
         notes = [] if declared else [row for row in (predecessor_notes_message(task, drive_root=canonical_root),
                                                      late_answer_notes_message(task, drive_root=canonical_root)) if row]
         supplementary_messages_out.extend([*notes, *supplemental])
+        from ouroboros.chat_uploads import attachment_reply_context
+        from ouroboros.context_budget import REPLY_CITATION_KIND, bound_host_row
+        from ouroboros.dialogue_provenance import program_reply_text
+
+        source = program_reply_text(target, root=canonical_root, room=task.get("chat_id"),
+                                    owner_row=_fresh_reply_owner(task, _meta, canonical_root)
+                                    if target.get("program_source") == "late_result" else None)
+        if not source and isinstance(reply, dict) and reply.get("attachment_failures") and not reply.get("excerpt"):
+            source = attachment_reply_context(target)
+        if source:
+            supplementary_messages_out.append(bound_host_row(REPLY_CITATION_KIND, source))
     if declared:
         runtime_data["task_constraint"] = task.get("task_constraint") or getattr(ctx, "task_constraint", {})
     runtime_data["operational_reality_rule"] = (
@@ -544,11 +611,10 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
         if scheduled_tasks_digest_out is not None:
             scheduled_tasks_digest_out.update(schedule_digest)
     # Surface running tasks so a busy-chat turn can steer instead of duplicating it.
-    _meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     if ctx is not None and _meta.get("delegation_role") != "subagent":  # a helper has no verb that takes a handle
         from ouroboros.owner_relay import held_owner_messages
         runtime_data["owner_quote_handles"] = list(held_owner_messages(ctx))
-    runtime_data.update(_owner_message_facts(_meta))
+    runtime_data.update(_owner_message_facts(_meta, program_source=target.get("program_source", "")))
     _current_chat = _meta.get("current_chat") if isinstance(_meta.get("current_chat"), dict) else None
     if not declared:
         from ouroboros.live_works import context_present
@@ -643,6 +709,24 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
     except Exception:
         log.debug("Failed to inject task-tree ledger digest", exc_info=True)
     return runtime_host_section(runtime_data, out)
+
+
+def _fresh_reply_owner(task: dict, metadata: dict, root: Any) -> Any:
+    """Only a direct turn's accepted source row can supply a new owner selection of a late letter."""
+    from ouroboros.dialogue_provenance import admission_note
+    from ouroboros.owner_relay import quotable_owner_row
+    from ouroboros.project_dialogue import owner_message_ref_is_valid, resolve_owner_message_source
+    from ouroboros.store import StoreError
+
+    ref = metadata.get("origin_message_ref") or task.get("origin_message_ref")
+    if not (task.get("_is_direct_chat") and not admission_note(task)
+            and owner_message_ref_is_valid(ref) and ref.get("row_sha256")):
+        return None
+    try:
+        row = resolve_owner_message_source(root, ref)
+        return row if row and row.get("direction") == "in" and quotable_owner_row(row, root) else None
+    except (OSError, StoreError, ValueError):
+        return None
 
 
 from ouroboros.context_sections import (  # noqa: E402,F401 — existing public builder surface
@@ -759,7 +843,9 @@ def _section_root_for(env: Any, ctx: Any) -> str:
     A section-floor pointer is a ``read_file(root='artifact_store', ...)``. A Presence
     turn runs under its binding's capability ceiling; when that ceiling does not grant
     ``read_file`` the pointer would name a source the actor cannot resolve, so its host
-    sections stay whole instead (BIBLE P1: a disclosure names a resolvable source).
+    sections stay whole instead (BIBLE P1: a disclosure names a resolvable source), all
+    but the optional attachments (``memory_floor.OPTIONAL_STEPS``): short of room, one
+    keeps its heading, named unavailable to this actor, with no path to read.
     """
     try:
         from ouroboros.presence_authority import presence_ceiling_allows_tool, presence_ceiling_from_context
@@ -791,77 +877,36 @@ def _connections(tool_registry: Any, task: Dict[str, Any]) -> Tuple[str, str]:
 
 
 _BASE_PROMPT_PATH = "prompts/SYSTEM.md"
+_BASE_PROMPT_FALLBACK = "You are Ouroboros. Your base prompt could not be loaded."
 
 
-def _read_base_prompt(env: Any) -> Tuple[str, Optional[Tuple[str, str, int, str]]]:
-    """The base prompt as this capture reads it, and the witness the send seal checks it by.
+def _read_governance_source(env: Any, path: str, fallback: str = "") -> Tuple[str, Optional[Tuple[str, str, int, str]]]:
+    """Read a governance file once, keeping the witness of that exact capture for the send seal.
 
     The witness is ``(path, file SHA-256, normalized length, normalized SHA-256)``
     (``model_send_seal._file_trace``). An empty prompt has none; one that cannot be
     read or decoded has none and the capture uses the fallback text.
     """
     try:
-        raw = env.repo_path(_BASE_PROMPT_PATH).read_bytes()
+        raw = env.repo_path(path).read_bytes()
         text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except (OSError, UnicodeError) as exc:
         if not isinstance(exc, FileNotFoundError):  # a missing prompt stays quiet, as ``safe_read`` left it
-            log.warning("Base prompt %s could not be read (%s); using fallback", _BASE_PROMPT_PATH, type(exc).__name__)
-        return "You are Ouroboros. Your base prompt could not be loaded.", None
+            log.warning("Governance source %s could not be read (%s); using fallback", path, type(exc).__name__)
+        return fallback, None
     if not text:
         return text, None
-    return text, (_BASE_PROMPT_PATH, hashlib.sha256(raw).hexdigest(), len(text),
+    return text, (path, hashlib.sha256(raw).hexdigest(), len(text),
                   hashlib.sha256(text.encode("utf-8")).hexdigest())
 
 
-def _capture_context_core(
-    env: Any,
-    memory: Memory,
-    task: Dict[str, Any],
-    review_context_builder: Optional[Any],
-    ctx: Any,
-    tool_registry: Any = None,
-) -> _ContextCore:
-    """Read each context source once before producing route-specific views."""
-    declared = task_input_sources(task) == "declared"
-    connections = _connections(tool_registry, task)
-    if declared:
-        _validate_declared_input_task(task)
-    captured_at = utc_now_iso()  # one capture instant for the runtime fact and every snapshot label
-    supplementary_messages: List[Dict[str, Any]] = []
-    base_prompt, base_prompt_source = _read_base_prompt(env)
-    bible_md = safe_read(env.repo_path("BIBLE.md"))
-    from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
+def _canonical_memory(env: Any, memory: Memory, task: Dict[str, Any]) -> Tuple[pathlib.Path, Memory]:
+    """``(canonical root, its Memory)``: the root whose identity, dialogue and memory a start reads.
 
-    books = []
-    book_text = {}
-    book_errors = []
-    for book_id, entrypoint in BOOK_ENTRYPOINTS.items():
-        try:
-            book = load_reference_book(env.repo_dir, book_id, read_bytes=lambda path: env.repo_path(path).read_bytes())
-            books.append(book)
-            book_text[book_id] = compose_book(book)
-        except (OSError, ValueError) as exc:
-            log.warning("Reference book unavailable (%s): %s", entrypoint, exc)
-            book_errors.append(f"Reference book source unavailable: {entrypoint}. {exc}. Full context is not established.")
-            book_text[book_id] = ""
-    architecture_md = book_text["architecture"]
-    development_md = book_text["development"]
-    from ouroboros.context_layout import task_design_navigation
-
-    # DESIGN follows the selected body, not document names or task prose. Capture
-    # it once for every mode; its root belongs after the shared cache prefix.
-    design_ctx = ctx if ctx is not None else SimpleNamespace(
-        repo_dir=env.repo_dir, system_repo_dir=getattr(env, "system_repo_dir", None),
-        drive_root=env.drive_root, budget_drive_root=getattr(env, "budget_drive_root", None),
-        workspace_root=task.get("workspace_root"), workspace_mode=task.get("workspace_mode", ""),
-        task_metadata=task.get("metadata") or task, project_id=task.get("project_id", ""),
-        is_direct_chat=bool(task.get("_is_direct_chat")),
-    )
-    design_nav = task_design_navigation(design_ctx, task)
-
-    # A fork is an execution boundary, not a second mind.  Keep the agent's
-    # writable Memory object task-local, but capture identity/dialogue from the
-    # already-existing canonical budget root for promoted roots and subagents.
+    A fork is an execution boundary, not a second mind.  Keep the agent's
+    writable Memory object task-local, but capture identity/dialogue from the
+    already-existing canonical budget root for promoted roots and subagents.
+    """
     canonical_root = pathlib.Path(
         task.get("budget_drive_root")
         or getattr(env, "budget_drive_root", None)
@@ -872,17 +917,66 @@ def _capture_context_core(
         if canonical_root.resolve(strict=False) == memory.drive_root.resolve(strict=False)
         else Memory(drive_root=canonical_root, repo_dir=memory.repo_dir)
     )
+    return canonical_root, context_memory
+
+
+def _capture_context_core(
+    env: Any,
+    memory: Memory,
+    task: Dict[str, Any],
+    review_context_builder: Optional[Any],
+    ctx: Any,
+    tool_registry: Any = None,
+    connections: Optional[Tuple[str, str]] = None,
+) -> _ContextCore:
+    """Read each context source once before producing route-specific views (``connections``: already read)."""
+    declared = task_input_sources(task) == "declared"
+    connections = _connections(tool_registry, task) if connections is None else connections
+    if declared:
+        _validate_declared_input_task(task)
+    captured_at = utc_now_iso()  # one capture instant for the runtime fact and every snapshot label
+    supplementary_messages: List[Dict[str, Any]] = []
+    base_prompt, base_prompt_source = _read_governance_source(env, _BASE_PROMPT_PATH, _BASE_PROMPT_FALLBACK)
+    bible_md, bible_source = _read_governance_source(env, "BIBLE.md")
+    from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
+
+    books, book_text, book_errors = [], {}, []
+    for book_id, entrypoint in BOOK_ENTRYPOINTS.items():
+        try:
+            book = load_reference_book(env.repo_dir, book_id, read_bytes=lambda path: env.repo_path(path).read_bytes())
+            books.append(book)
+            book_text[book_id] = compose_book(book)
+        except (OSError, ValueError) as exc:
+            log.warning("Reference book unavailable (%s): %s", entrypoint, exc)
+            book_errors.append(f"Reference book source unavailable: {entrypoint}. {exc}. Full context is not established.")
+            book_text[book_id] = ""
+    from ouroboros.context_layout import task_design_navigation
+
+    # DESIGN follows the selected body, not document names or task prose. Capture its
+    # bible once, ahead of fitting in any mode; its root belongs after the shared cache prefix.
+    design_ctx = ctx if ctx is not None else SimpleNamespace(
+        repo_dir=env.repo_dir, system_repo_dir=getattr(env, "system_repo_dir", None),
+        serving_repo_dir=getattr(env, "serving_repo_dir", None),
+        drive_root=env.drive_root, budget_drive_root=getattr(env, "budget_drive_root", None),
+        workspace_root=task.get("workspace_root"), workspace_mode=task.get("workspace_mode", ""),
+        task_metadata=task.get("metadata") or task, project_id=task.get("project_id", ""),
+        is_direct_chat=bool(task.get("_is_direct_chat")),
+    )
+    design_nav = task_design_navigation(design_ctx, task)
+
+    canonical_root, context_memory = _canonical_memory(env, memory, task)
     context_memory.ensure_files()
     context_env = SimpleNamespace(
         repo_dir=env.repo_dir,
         drive_root=canonical_root,
         budget_drive_root=canonical_root,
         branch_dev=getattr(env, "branch_dev", "ouroboros"),
-        repo_path=env.repo_path,
+        repo_path=env.repo_path, task=task,  # whose context this is (``_drive_state_section``: a wake's own facts)
         drive_path=lambda rel: (canonical_root / safe_relpath(rel)).resolve(),
     )
 
     from ouroboros.context_sections import helper_navigation_sections  # this builder's own read, not a facade name
+    from ouroboros.dialogue_provenance import admission_note
     from ouroboros.project_facts import resolve_project_id
 
     task_metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
@@ -990,7 +1084,7 @@ def _capture_context_core(
 
     bound = normalize_task_constraint(task.get("task_constraint") or getattr(ctx, "task_constraint", None))
     installed_skills = "" if declared else _build_installed_skills_section(
-        context_env, skills=skills, selected_skill=bound.skill_name if bound and bound.has_selected_skill else "")
+        context_env, skills=skills, first_view=ctx, selected_skill=bound.skill_name if bound and bound.has_selected_skill else "")
     if installed_skills:
         dynamic_parts.append(installed_skills)
     dynamic_parts.extend([
@@ -1054,24 +1148,23 @@ def _capture_context_core(
                          for section in recent)
     try:
         from ouroboros.consciousness_authority import is_focus_wake
-        from ouroboros.place_reply import reply_carrier
-        from ouroboros.presence_context import ROUTELESS, UNKNOWN, build_presence_context_section, final_route
+        from ouroboros.place_reply import place_state_now, records_only, reply_carrier, speak_line
+        from ouroboros.presence_context import build_presence_context_section
 
         inline = bool(task.get("_presence_turn")) or is_focus_wake(task_metadata)
         scheduled = bool(task_metadata.get("schedule_occurrence")) and not task.get("_presence_turn")
-        # The same carrier that speaks this root's final names its audience, as far as the published
-        # references settle whether a connector reads it (FOCUS does inline).
+        # The same carrier that speaks this root's final names its audience; where its connector declares a door
+        # the finish is a record and the doors are named instead (FOCUS does both inline).
         spoken = not inline and not scheduled and bool(reply_carrier(task_metadata))
-        route, why = final_route(canonical_root, task_metadata, str(task.get("id") or "")) if spoken else ("", "")
+        records = spoken and records_only(task_metadata)
         presence_section = build_presence_context_section(
             pathlib.Path(env.drive_root),
             task_metadata.get("presence"),
             str(task.get("id") or ""),
             status_root=canonical_root,  # a forked promoted root finds its binding's work canonically
             scheduled=scheduled,
-            answers_conversation=spoken and route != ROUTELESS,
-            unsettled=why if route == UNKNOWN else "",
-            routeless=why if spoken and route == ROUTELESS else "",
+            answers_conversation=spoken and not records,
+            record_line=speak_line(task_metadata, state=place_state_now(canonical_root, task_metadata)) if records else "",
             inline=inline,
         )
         if presence_section:
@@ -1079,27 +1172,31 @@ def _capture_context_core(
     except Exception:
         log.debug("Failed to inject presence context", exc_info=True)
     if not is_child:  # the facts beside my human's word that started this turn (``return_facts``), else nothing
-        from ouroboros.return_facts import turn_sections
+        from ouroboros.own_time_seed import offer_section  # and, once, the seed an older install never wrote
+        from ouroboros.return_facts import heard_word, turn_sections
 
-        dynamic_parts.extend(turn_sections(task, canonical_root, ctx, seen=seen))
+        word = heard_word(task, canonical_root)
+        dynamic_parts.extend([*turn_sections(task, canonical_root, ctx, seen=seen, word=word),
+                              *offer_section(task, view_spec, canonical_root, word)])
     held = held_notes.turn_sections(canonical_root, task, view_spec, global_knowledge, ctx=ctx)
     dynamic_parts.extend([*held, held_notes.HELPER_NOTE] if held and helper else held)
 
+    attachment_facts: dict = {}
     return _ContextCore(
         base_prompt=base_prompt,
         base_prompt_source=base_prompt_source,
-        bible_md=bible_md,
-        architecture_md=architecture_md,
-        development_md=development_md,
+        bible_source=bible_source, bible_md=bible_md,
+        architecture_md=book_text["architecture"],
+        development_md=book_text["development"],
         semi_stable_text=semi_stable_text,
         dynamic_text="\n\n".join(dynamic_parts),
         semi_stable_sections=capture_sections(semi_stable_parts, prefix="stable"),
         dynamic_head_sections=capture_sections(head_parts, prefix="head"),
         dynamic_sections=capture_sections(dynamic_parts, prefix="dynamic"),
         section_root=_section_root_for(env, ctx), section_task_id=str(task.get("id") or ""),
-        user_content_json=json.dumps(
-            _first_user_content(task, env), ensure_ascii=False, sort_keys=True,
-        ),
+        user_content_json=json.dumps(_first_user_content(task, env, attachment_facts=attachment_facts),
+                                     ensure_ascii=False, sort_keys=True),
+        initial_attachment_facts=attachment_facts,
         docs_need_development=docs_need_development, development_required=required,
         reference_books=tuple(books),
         reference_book_errors=tuple(book_errors),
@@ -1107,6 +1204,7 @@ def _capture_context_core(
         dynamic_head_text="\n\n".join(head_parts),
         memory_view_json=view_json, memory_view_sequence=view.chronicle_sequence,
         supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),
+        opening_program_address=admission_note(task).get("row_address", ""),
         connections=connections,
         held_note_resume=held_resume,
     )
@@ -1149,14 +1247,52 @@ def _capture_memory_view(task: Dict[str, Any], canonical_root: pathlib.Path, ctx
     """``(ViewSpec, MemoryViewSnapshot, its canonical JSON)``, captured once from the canonical root.
 
     A declared request's spec is the role's with its omissions (``_declared_omissions``)."""
-    from ouroboros.memory_view import capture_memory_view, snapshot_json, view_spec_for_task
+    from ouroboros.memory_view import capture_memory_view, snapshot_json
 
-    view_ctx = ctx if isinstance(getattr(ctx, "task_metadata", None), dict) else None
-    spec = view_spec_for_task(task, canonical_root, ctx=view_ctx)
+    spec = _view_spec(task, canonical_root, ctx)
     if declared:
         spec = _declared_omissions(task, spec)
     snapshot = capture_memory_view(canonical_root, task, spec)
     return spec, snapshot, snapshot_json(snapshot)
+
+
+def _view_spec(task: Dict[str, Any], canonical_root: pathlib.Path, ctx: Any) -> Any:
+    """The role's ``ViewSpec`` for this start, read with the focus's metadata where it has any."""
+    from ouroboros.memory_view import view_spec_for_task
+
+    return view_spec_for_task(task, canonical_root, ctx=ctx if isinstance(getattr(ctx, "task_metadata", None), dict) else None)
+
+
+def _start_frame_texts(env: Any, memory: Memory, ctx: Any, spec: Any, connections: Tuple[str, str]) -> List[Tuple[str, str]]:
+    """The named texts an undeclared, non-child start's every request holds whole (the start bound's reads).
+
+    Each is read by its own producer, as the capture reads it: SYSTEM and BIBLE; the tier-0 sections (identity, the
+    scratchpad and, where the view holds knowledge, the overview); the ordinary marks this view keeps, from an active
+    chronicle only, without the room names a capture reads; the connections form of fewer escaped characters.
+    """
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.memory_view import json_chars
+    from ouroboros.context_layout import TIER0_ALWAYS_FULL
+    from ouroboros.context_sections import _shared_understanding
+    from ouroboros.knowledge import OVERVIEW_TOPIC, resolve_knowledge_address
+
+    root = memory.drive_root
+    texts = [("system prompt", _read_governance_source(env, _BASE_PROMPT_PATH, _BASE_PROMPT_FALLBACK)[0]),
+             ("constitution", "## BIBLE.md\n\n" + _read_governance_source(env, "BIBLE.md")[0])]
+    sections = [*build_memory_sections(memory, partition="stable", ctx=ctx), *build_memory_sections(memory, partition="volatile", ctx=ctx)]
+    if spec.knowledge:
+        sections.append(_shared_understanding(resolve_knowledge_address(root, OVERVIEW_TOPIC, "global"))[0])
+    names = {"shared_understanding": "overview"}
+    texts += [(names.get(part.section_id, part.section_id), part.full_text) for part in sections
+              if isinstance(part, HostSection) and part.section_id in TIER0_ALWAYS_FULL]
+    store = ChronicleStore(root)
+    if (store.activation() or {}).get("kind") == "activation":
+        from ouroboros.memory_view import _capture_marks, _marks_text
+
+        ordinary = [mark for mark in _capture_marks(store, spec, lambda *_a, **_kw: "") if not mark.get("late_review")]
+        if ordinary:
+            texts.append(("marks", _marks_text(ordinary)))
+    return [*texts, ("connections", min(connections, key=json_chars))]
 
 
 def _context_fit_route(
@@ -1182,13 +1318,24 @@ def build_context_fit_plan(
     reasoning_effort: str = "",
     nano_base: Optional[Tuple[str, ...]] = None,
 ) -> ContextFitPlan:
-    """Compatibility wrapper over the cohesive context-fit implementation."""
-    core = _capture_context_core(env, memory, task, review_context_builder, ctx, tool_registry)
+    """Compatibility wrapper over the cohesive context-fit implementation; a start whose always-whole core cannot fit
+    its known window is refused before the capture (``context_start_bound``)."""
+    from ouroboros import context_start_bound
+
+    preferred = str(preferred_mode or get_context_mode() or "max")
+    connections = _connections(tool_registry, task)
+    canonical_root, context_memory = _canonical_memory(env, memory, task)
+    timed("start_bound", context_start_bound.refuse_before_capture, task, ctx,
+          spec=lambda: _view_spec(task, canonical_root, ctx),
+          frame_texts=lambda spec: _start_frame_texts(env, context_memory, ctx, spec, connections),
+          route_resolver=route_resolver or _context_fit_route, tool_schemas=tool_schemas, nano_base=nano_base,
+          reasoning_effort=reasoning_effort, preferred=preferred)
+    core = _capture_context_core(env, memory, task, review_context_builder, ctx, tool_registry, connections=connections)
     return _build_context_fit_plan(
         env,
         core,
         task,
-        preferred_mode=str(preferred_mode or get_context_mode() or "max"),
+        preferred_mode=preferred,
         route_resolver=route_resolver or _context_fit_route,
         tool_schemas=tool_schemas,
         reasoning_effort=reasoning_effort,
@@ -1235,7 +1382,7 @@ def build_llm_messages(
 
     No model is called on this path: my memory is rendered, never prepared by a paid pass;
     a window too small for it addresses lines and pages instead. ``reasoning_effort`` is the first send's,
-    which shapes the request on a direct OpenAI reasoning route (``context_fit._request_shapes``).
+    which shapes the request on a direct OpenAI reasoning route (``context_measurement._request_shapes``).
     """
     # Keep the legacy public shape while publishing the immutable plan on the
     # existing ToolContext for the ordinary loop.  Commit/scope reviewers do not
@@ -1254,8 +1401,15 @@ def build_llm_messages(
         nano_base=nano_base,
     )
     if ctx is not None:
+        from ouroboros.dialogue_provenance import admission_note
+
+        ctx._admission_author = admission_note(task)
         ctx.context_fit_plan = plan
     messages = plan.messages_for(plan.initial_mode)
+    if captured := getattr(plan.core, "initial_attachment_facts", None):
+        from ouroboros.context_assembly_trace import note_contribution
+
+        note_contribution(ctx, messages[1], "attachment_manifest", form="opening_input", observation=captured)
     cap_info: Dict[str, Any] = {"context_fit": {
         "core_sha256": plan.core_sha256,
         "preferred_mode": plan.preferred_mode,

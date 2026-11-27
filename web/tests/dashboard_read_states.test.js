@@ -779,8 +779,8 @@ test('Costs reads the allowance from the consciousness snapshot, /api/state when
     assert.equal(mount.querySelector('[data-costs-consciousness]').getAttribute('aria-label'), 'Open Consciousness');
     const state = mount.querySelector('#costs-allowance-state');
     // The fixture reads a node's own text before its children's: the order in the page is the browser lane's.
-    assert.match(state.textContent, /The consciousness wake-up is paused at the allowance it had left when it started \(\$2\.99\)\./);
-    assert.match(state.querySelector('.costs-allowance-note').textContent, /^Resume keeps that limit, so it pauses again/,
+    assert.match(state.textContent, /The consciousness wake-up is paused at its allowance \(\$2\.99\)\./);
+    assert.match(state.querySelector('.costs-allowance-note').textContent, /^No spending estimate is available for Resume\./,
         'what follows from the fact is quieter than the fact');
     const door = state.querySelector('[data-open-task]');
     assert.equal(door.dataset.openTask, 'wake-1', 'the held wake\'s card in Main');
@@ -891,6 +891,10 @@ test('Logs keeps the executor chip quiet and prints its detail sentence as text 
         content: 'done', executor_route: 'codex', execution_evidence: evidence } });
     // An ungrouped row keeps the same pair: a quiet chip and its sentence beside it.
     ws.emit('log', { data: { type: 'executor_note', executor_route: 'claude', ts: '2026-09-16T12:00:01Z' } });
+    // A live child's sentence keeps its coordinator's route, provenance and billing beside the executor's.
+    ws.emit('log', { data: { type: 'executor_note', executor_route: 'codex', task_id: 'child-c', subagent_task_id: 'child-c',
+        delegation_role: 'subagent', coordinator_route: 'openai/gpt-6-astra', coordinator_billing: 'measured',
+        coordinator_provenance: 'parent_fallback', ts: '2026-09-16T12:00:02Z' } });
     await settle();
     const entries = mount.querySelector('#log-entries');
     const card = entries.children.find((node) => node.dataset.taskGroup === 'child-x');
@@ -905,6 +909,10 @@ test('Logs keeps the executor chip quiet and prints its detail sentence as text 
     const standalone = entries.children.find((node) => !node.dataset.taskGroup);
     assert.match(standalone.querySelector('.log-executor-chip').textContent, /Claude Code$/);
     assert.match(standalone.querySelector('.log-executor-detail').textContent, /^Dispatched to Claude Code/);
+    assert.doesNotMatch(standalone.querySelector('.log-executor-detail').textContent, /Coordinator/, 'no route, no coordinator clause');
+    const coordinated = [...entries.children].find((node) => node.querySelector('.log-executor-detail')?.textContent.includes('Codex —'));
+    assert.equal(coordinated.querySelector('.log-executor-detail').textContent, 'Dispatched to Codex — run evidence arrives with the '
+        + "terminal receipt. Coordinator: gpt-6-astra (parent's fallback) · bills as measured");
 });
 
 test('Activity treats skill provenance as an ordinary paused schedule', async (t) => {

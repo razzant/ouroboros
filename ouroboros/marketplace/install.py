@@ -110,6 +110,8 @@ class PayloadRollbackSnapshot:
     state_provenance: Optional[Dict[str, Any]] = None
     lifecycle_state: Dict[str, Optional[bytes]] = field(default_factory=dict)
     payload_restored: bool = False
+    # The installation the secret form's own keys in that ``grants.json`` were granted for (``skill_grant_follow``).
+    prior_form_installation: str = ""
 
 
 # Only state that install/review/dependency reconciliation may replace. Owner
@@ -171,6 +173,11 @@ def snapshot_payload_state(
     drive_root = pathlib.Path(drive_root)
     target_dir = pathlib.Path(target_dir)
     lifecycle_state = snapshot_lifecycle_state(drive_root, skill_name)
+    prior_form_installation = ""
+    if b'"form"' in (lifecycle_state.get("grants.json") or b""):
+        from ouroboros.skill_grant_follow import installation_token
+
+        prior_form_installation = installation_token(drive_root, skill_name, target_dir)
     backup_dir: Optional[pathlib.Path] = None
     if target_dir.exists():
         rollback_root = target_dir.parent / ".rollback"
@@ -190,6 +197,7 @@ def snapshot_payload_state(
         backup_dir=backup_dir,
         state_provenance=read_provenance(drive_root, skill_name) if include_state_provenance else None,
         lifecycle_state=lifecycle_state,
+        prior_form_installation=prior_form_installation,
     )
 
 
@@ -205,12 +213,42 @@ def _write_deps_state(drive_root: pathlib.Path, skill_name: str, state: Dict[str
     atomic_write_json(_deps_state_path(drive_root, skill_name), state, trailing_newline=True)
 
 
+def _same_registry(first: Any, second: Any) -> bool:
+    """Two registry addresses ('' or ``None`` is the configured default) name one origin: the base URL the client
+    resolves both to, or, when either cannot be resolved, the same address."""
+    from ouroboros.skill_sources import effective_registry_url
+
+    one, two = effective_registry_url(first), effective_registry_url(second)
+    if one and two:
+        return one == two
+    return str(first or "").strip().rstrip("/") == str(second or "").strip().rstrip("/")
+
+
+def _pinned_registry_origin(previous: Dict[str, Any], provenance: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The registry a copy's bytes came from: the one its real installer recorded in provenance, else its install
+    record's source url; ``''`` when neither names one, ``None`` when they name different registries (the record's
+    address is then a later setting, not where these bytes came from)."""
+    recorded = str((provenance or {}).get("registry_url") or "").strip()
+    hinted = str((previous.get("source") or {}).get("url") or "").strip()
+    if recorded and hinted and not _same_registry(recorded, hinted):
+        return None
+    return recorded or hinted
+
+
+def _archive_sha_disagrees(sha256: Any, *reports: Dict[str, Any]) -> bool:
+    """A retained report (payload sidecar, provenance) records an archive SHA-256 other than ``sha256``; a report
+    recording none is compatible."""
+    return any(r.get("sha256") and str(r["sha256"]) != str(sha256 or "") for r in reports)
+
+
 def _valid_existing_clawhub_provenance(
     drive_root: pathlib.Path,
     skill_name: str,
     target_dir: pathlib.Path,
     *,
     slug: str,
+    route_url: Optional[str] = None,
+    release: Optional[tuple] = None,
 ) -> Optional[Dict[str, Any]]:
     sidecar = read_json_dict(pathlib.Path(target_dir) / ".clawhub.json") or {}
     durable = read_provenance(drive_root, skill_name) or {}
@@ -226,16 +264,57 @@ def _valid_existing_clawhub_provenance(
         or str(durable.get("sanitized_name") or "") != skill_name
     ):
         return None
+    # The same copy is identified by its recorded origin too: a provenance naming a different registry
+    # is a same-slug lookalike, not this install. An absent recorded origin (legacy) is truly unknown and
+    # keeps the ordinary slug compatibility; it is never claimed to match a known source. An ordinary
+    # default-registry install passes route_url=None; the effective route is the configured default then.
+    recorded = str(durable.get("registry_url") or "").strip()
+    if recorded and not _same_registry(recorded, route_url):
+        return None
+    if release is not None:
+        # Claiming it as this install (``release``: the selected version, archive and digest) needs exactly that
+        # release from this registry on record; a copy recording less or other is not shown to be this one.
+        version, sha256, digest = release
+        if not recorded or str(durable.get("version") or "") != str(version or "") or (
+                _archive_sha_disagrees(sha256, sidecar, durable)):
+            return None
+        from ouroboros.skill_install_record import read_install_record
+
+        if digest and ((read_install_record(drive_root, skill_name) or {}).get("release") or {}).get("digest") != digest:
+            return None
     return durable
 
 
-def _has_repairable_clawhub_partial(drive_root: pathlib.Path, skill_name: str, target_dir: pathlib.Path) -> bool:
+def _has_repairable_clawhub_partial(drive_root: pathlib.Path, skill_name: str, target_dir: pathlib.Path, *,
+                                    slug: str = "", route_url: Optional[str] = None, version: str = "",
+                                    sha256: str = "", digest: str = "") -> bool:
+    """An interrupted copy a retry of this offer repairs in place: it holds a partial install's traces, and nothing
+    it records names another offer — its sidecar and provenance name this slug, local name and version where they
+    record one, a recorded registry is this route's, and no install record names another entry or release."""
     target = pathlib.Path(target_dir)
-    return (
-        (_deps_state_path(drive_root, skill_name)).is_file()
-        or (target / ".ouroboros_env").exists()
-        or (target / ".clawhub.json").is_file()
-    )
+    if not ((_deps_state_path(drive_root, skill_name)).is_file() or (target / ".ouroboros_env").exists()
+            or (target / ".clawhub.json").is_file()):
+        return False
+    from ouroboros.skill_install_record import read_install_record
+
+    durable = read_provenance(drive_root, skill_name) or {}
+    wanted = {"source": "clawhub", "slug": slug, "sanitized_name": skill_name, "version": version}
+    sidecar = read_json_dict(target / ".clawhub.json") or {}
+    for marks in (sidecar, durable):
+        if any(str(marks.get(key) or "") not in ("", str(value or "")) for key, value in wanted.items()):
+            return False
+    record = read_install_record(drive_root, skill_name) or {}
+    origin = _pinned_registry_origin(record, durable)
+    if origin is None or (origin and not _same_registry(origin, route_url)):
+        return False
+    # Known release evidence must agree too: a recorded archive hash or payload digest that differs from the
+    # selected one names other bytes; absent evidence stays compatible.
+    release = record.get("release") or {}
+    if (sha256 and _archive_sha_disagrees(sha256, sidecar, durable)) or (
+            digest and release.get("digest") and str(release["digest"]) != str(digest)):
+        return False
+    return not record or (str(record.get("entry") or slug) == slug
+                          and str(release.get("version") or version) == version)
 
 
 def restore_payload_state(snapshot: PayloadRollbackSnapshot, *, restore_state_provenance: bool = False) -> None:
@@ -260,6 +339,11 @@ def restore_payload_state(snapshot: PayloadRollbackSnapshot, *, restore_state_pr
             delete_provenance(snapshot.drive_root, snapshot.skill_name)
         else:
             write_provenance(snapshot.drive_root, snapshot.skill_name, snapshot.state_provenance)
+    if snapshot.prior_form_installation:  # the restored copy is a new folder: the restored form grant follows it
+        from ouroboros.skill_grant_follow import rebind_restored_form_grant
+
+        rebind_restored_form_grant(snapshot.drive_root, snapshot.skill_name, target_dir,
+                                   snapshot.prior_form_installation)
 
 
 def discard_payload_snapshot(snapshot: PayloadRollbackSnapshot) -> None:
@@ -456,6 +540,7 @@ def install_skill(
     install_record: Optional[Dict[str, Any]] = None,
     retain_update: bool = False,
     expected_digest: str = "",
+    registry_url: Optional[str] = None,
 ) -> InstallResult:
     """Install one skill; ``overwrite=True`` is required for replacement.
 
@@ -463,6 +548,9 @@ def install_skill(
     re-install stays in its existing directory instead of re-deriving via dedupe).
     ``install_record`` carries the source fields of the install record written after
     landing; without it the ClawHub source row of the current list supplies them.
+    ``registry_url`` is the route-supplied registry origin (a source row's ``url``): every
+    metadata and archive fetch below uses it, so it stays consistent with the search that
+    offered the item; absent, the configured default registry is used as before.
 
     ``progress_callback`` receives worker-thread stage labels for the UI and
     must stay cheap/non-throwing.
@@ -482,10 +570,11 @@ def install_skill(
     if not cleaned_slug:
         return fail("slug must be non-empty")
 
+    route_url = str(registry_url or "").strip() or None
     requested_version = (version or "").strip()
 
     try:
-        summary = _registry_info(cleaned_slug)
+        summary = _registry_info(cleaned_slug, registry_url=route_url)
     except ClawHubClientError as exc:
         return fail(f"Registry lookup failed: {exc}", error_status=_registry_error_status(exc))
 
@@ -501,7 +590,7 @@ def install_skill(
 
     _progress(f"Downloading v{target_version}…")
     try:
-        archive = _registry_download(cleaned_slug, version=target_version)
+        archive = _registry_download(cleaned_slug, version=target_version, registry_url=route_url)
     except ClawHubClientError as exc:
         return fail(f"Download failed: {exc}", summary=summary, error_status=_registry_error_status(exc))
 
@@ -575,11 +664,8 @@ def install_skill(
     if target_dir.exists() and not overwrite and auto_specs:
         deps_state = read_deps_state(drive_root, adapter_result.sanitized_name, target_dir)
         existing_provenance = _valid_existing_clawhub_provenance(
-            drive_root,
-            adapter_result.sanitized_name,
-            target_dir,
-            slug=cleaned_slug,
-        )
+            drive_root, adapter_result.sanitized_name, target_dir, slug=cleaned_slug, route_url=route_url,
+            release=(target_version, archive.sha256, expected_digest))
         if (
             str(deps_state.get("status") or "") == "installed"
             and str(deps_state.get("specs_hash") or "") == install_specs_hash(auto_specs)
@@ -599,11 +685,11 @@ def install_skill(
                 deps_fingerprint=deps_state,
                 provenance=existing_provenance,
             )
+        # Neither claimed nor repairable (another slug, registry or release holds it): the landing declines as
+        # for any occupied folder, and the copy stays as it is.
         repair_partial_existing = _has_repairable_clawhub_partial(
-            drive_root,
-            adapter_result.sanitized_name,
-            target_dir,
-        )
+            drive_root, adapter_result.sanitized_name, target_dir, slug=cleaned_slug, route_url=route_url,
+            version=target_version, sha256=archive.sha256, digest=expected_digest)
     from ouroboros.skill_install_record import (keep_previous_payload, retain_update_snapshot,
                                                restore_update_snapshot, write_install_record)
 
@@ -617,7 +703,8 @@ def install_skill(
 
     try:
         landed_record = _registry_install_record(drive_root, adapter_result.sanitized_name, staged.staging_dir,
-                                                 slug=cleaned_slug, version=target_version, record=install_record)
+                                                 slug=cleaned_slug, version=target_version, record=install_record,
+                                                 route_url=route_url)
         if expected_digest and landed_record["release"]["digest"] != expected_digest:
             staged.cleanup()
             return fail("ClawHub now offers different bytes; look at the release again.",
@@ -639,15 +726,7 @@ def install_skill(
         )
     # Do not repoint staged.staging_dir to target_dir: cleanup() rmtrees it.
     # Persist provenance before review so reviewers can cross-check origin.
-    from ouroboros.config import get_clawhub_registry_url
-    provenance = dict(adapter_result.provenance)
-    provenance.update({
-        "registry_url": get_clawhub_registry_url(),
-        "version": target_version,
-        "homepage": summary.homepage,
-        "license": summary.license,
-        "primary_env": summary.primary_env,
-    })
+    provenance = _registry_install_provenance(adapter_result, summary, route_url, cleaned_slug, target_version)
     try:
         write_provenance(drive_root, adapter_result.sanitized_name, provenance)
     except Exception:
@@ -737,19 +816,50 @@ def install_skill(
     )
 
 
+def _registry_install_provenance(adapter_result: AdapterResult, summary: ClawHubSkillSummary,
+                                 route_url: Optional[str], cleaned_slug: str, target_version: str) -> Dict[str, Any]:
+    """Combine adapted payload facts with metadata from the registry already read."""
+    from ouroboros.config import get_clawhub_registry_url
+    from ouroboros.skill_sources import effective_registry_url
+
+    provenance = dict(adapter_result.provenance)
+    provenance.update({
+        "registry_url": effective_registry_url(route_url) or get_clawhub_registry_url(),
+        "version": target_version,
+        "homepage": summary.homepage,
+        "license": summary.license,
+        "primary_env": summary.primary_env,
+    })
+    # The registry's name for people from the info read above (it falls back to the slug): a search name of the
+    # installed copy, never its identity or an approval; a failed landing restores the previous record whole.
+    display = str(summary.display_name or "").strip()
+    if display and display not in {cleaned_slug, summary.slug}:
+        provenance["display_name"] = display
+    return provenance
+
+
 def _registry_install_record(drive_root: pathlib.Path, name: str, target_dir: pathlib.Path, *,
-                             slug: str, version: str, record: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+                             slug: str, version: str, record: Optional[Dict[str, Any]],
+                             route_url: Optional[str] = None) -> Dict[str, Any]:
     """The install record of a registry install: the adapted payload is the release."""
     from ouroboros.skill_source_catalog import tree_release_digest
 
     fields = dict(record or {})
     if not fields:
-        from ouroboros.skill_sources import load_sources
+        from ouroboros.skill_sources import effective_registry_url, load_sources
 
-        row = next((r for r in load_sources() if r["kind"] == "registry"), None) or {
-            "id": "clawhub", "kind": "registry", "name": "ClawHub", "trust": "review"}
+        # Only a configured registry row that names the registry actually used lends its identity and trust;
+        # otherwise the record names that actual origin with the ordinary review basis.
+        row = next((r for r in load_sources() if r["kind"] == "registry" and _same_registry(r.get("url"), route_url)),
+                   None)
+        if row is None:
+            row = {"id": "clawhub", "kind": "registry", "name": "ClawHub", "trust": "review"}
+        # The registry actually used is recorded by its resolved URL, also for a matching row that names none.
+        used = effective_registry_url(route_url)
         fields = {"source": {key: row[key] for key in ("id", "kind", "name", "url") if row.get(key)},
                   "basis": row["trust"], "official": False, "installed_by": "owner", "turn_on_when_ready": False}
+        if used:
+            fields["source"]["url"] = used
     digest = tree_release_digest(target_dir, bucket="clawhub")  # its sidecar is a note of that bucket
     fields.update(entry=slug, release={"version": version, "digest": digest}, base_digest=digest)
     fields.pop("installed_at", None)
@@ -844,11 +954,13 @@ def update_skill(
     auto_review: bool = True,
     acceptance_options: Optional[Dict[str, Any]] = None,
     expected_digest: str = "",
+    registry_url: Optional[str] = None,
 ) -> InstallResult:
     """Reinstall by resolving the original slug from persisted provenance.
 
     The install record keeps its source fields; the new release and the source's current trust
-    replace the old ones. ``auto_review=False`` leaves the review to the caller."""
+    replace the old ones. ``auto_review=False`` leaves the review to the caller. ``registry_url``
+    (the record's source ``url``) is passed to the reinstall as its registry origin."""
     from ouroboros.deployment_extensions import change_refusal
     from ouroboros.skill_loader import _skill_location_conflict_error
 
@@ -899,6 +1011,12 @@ def update_skill(
                              error_code="restore_failed", error_status=409)
 
     previous = read_install_record(drive_root, sanitized_name) or {}
+    pinned = _pinned_registry_origin(previous, record)
+    if pinned is None or (pinned and registry_url and not _same_registry(pinned, registry_url)):
+        # A copy updates from the registry its bytes came from; records naming another one are not followed.
+        return InstallResult(False, sanitized_name, error_status=409, error="This skill's records name different "
+                             "registries, so it is not updated from either; reinstall it from the one you want.")
+    registry_url = pinned or registry_url or None
     carried = {key: previous[key] for key in ("source", "official", "installed_by", "turn_on_when_ready",
                                                "reason", "task_id") if key in previous}
     if carried.get("source"):
@@ -935,6 +1053,7 @@ def update_skill(
         install_record=carried if carried.get("source") else None,
         retain_update=True,
         expected_digest=expected_digest,
+        registry_url=registry_url,
     )
     if auto_review:
         settle_pending_update(drive_root, sanitized_name)

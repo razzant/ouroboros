@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
@@ -10,6 +11,105 @@ from typing import Any, Callable, Collection, Iterable, List, Literal, Tuple
 
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID
 from ouroboros.host_notice import mind_text as notice_text
+
+# A recorded author who is not my human (#3873), written only by ``recorded_author``, the host's one constructor:
+# on the canonical row (``declared_author``) and on the turn that row starts (the task's top-level
+# ``admission_author``), from a host-only argument that no request body or metadata reaches, so no copy a caller put
+# in metadata ever attests anything. ``self_declared``: the program's own statement, shown as declared and never
+# verified; ``link_key`` is reserved for a host-attested key (an immutable, non-secret key id), not issued yet.
+AGENT_AUTHOR, SELF_DECLARED, LINK_KEY = "agent", "self_declared", "link_key"
+AUTHOR_LABEL_MAX = 120
+MACHINE_ORIGIN = "machine"  # the connector's typed actor origin, not a declared Main-note author
+PROGRAM_REPLY_SOURCES = ("agent_note", "late_result", "place_machine")
+
+
+def recorded_author(label: Any, *, basis: str = SELF_DECLARED, key_id: str = "") -> dict[str, str]:
+    """The one constructor of a non-owner author record: ``label`` with control and format characters (line breaks,
+    bidirectional overrides) made spaces and runs collapsed, 1 to ``AUTHOR_LABEL_MAX`` characters; ValueError
+    otherwise, never a cut label."""
+    clean = " ".join("".join(" " if unicodedata.category(char)[0] == "C" else char for char in label).split()) \
+        if isinstance(label, str) else ""
+    if not 0 < len(clean) <= AUTHOR_LABEL_MAX:
+        raise ValueError(f"author.label must be text of 1 to {AUTHOR_LABEL_MAX} characters")
+    if basis not in (SELF_DECLARED, LINK_KEY) or (basis == LINK_KEY) != bool(key_id):
+        raise ValueError("an author's basis is the host's, never a caller's")
+    return {"kind": AGENT_AUTHOR, "label": clean, "basis": basis, **({"key_id": str(key_id)} if key_id else {})}
+
+
+def declared_author(record: Any, key: str = "declared_author") -> dict[str, str]:
+    """The author ``record[key]`` holds when it is exactly what ``recorded_author`` builds, else ``{}``."""
+    author = record.get(key) if isinstance(record, Mapping) else None
+    try:
+        rebuilt = recorded_author(author.get("label"), basis=str(author.get("basis") or ""),
+                                  key_id=str(author.get("key_id") or "")) if isinstance(author, Mapping) else {}
+    except ValueError:
+        return {}
+    return rebuilt if rebuilt and dict(author) == rebuilt else {}
+
+
+def author_words(author: Mapping[str, Any]) -> str:
+    """How a recorded author is named everywhere it is shown: its label, never verified, and the agent role."""
+    if author.get("basis") == LINK_KEY:
+        return f"holder of key «{author['label']}» (agent)"
+    return f'agent "{author["label"]}" (declared, not verified)'
+
+
+def late_program_locator(address: str) -> str:
+    """What an automatic later reader can see of a restricted letter."""
+    return f"[{address or 'address not recorded'}] Late program message retained; read by address."
+
+
+def unread_mail_line(entry: Mapping[str, Any], *, preview_chars: int, default_source: str, program: bool) -> str:
+    """An automatic unread-mail notice is not an exact source reader."""
+    source = str(entry.get("source_task_id") or default_source)
+    if program:
+        note = _mapping(entry.get("agent_note"))
+        address = _text(note.get("row_address"))
+        if note.get("late_result") is True or note.get("late_report_ref") or note.get("late_result_origin"):
+            return "- " + late_program_locator(address)
+        source = author_words(declared_author(note, "author") or {"label": "not recorded"})
+        if address:
+            source += f"; source {address}"
+    text = str(entry.get("text") or "")
+    extra = f" [... {len(text) - preview_chars} more chars]" if len(text) > preview_chars else ""
+    return f"- {entry.get('ts') or '?'} {entry.get('kind') or 'owner_text'} from {source}: {text[:preview_chars]}{extra}"
+
+
+def non_owner_author(row: Any) -> bool:
+    """The downward exclusion every owner reader shares: a row whose recorded author is an agent is never my human's,
+    whatever door it came through (each reader keeps its own positive conditions)."""
+    return bool(declared_author(row))
+
+
+def admission_note(record: Any) -> dict:
+    """The host-only opening note of a direct conversation, independent of the owner door's stamp."""
+    note = _mapping(_mapping(record).get("admission_author"))
+    author = declared_author(note, "author")
+    return {"author": author, "row_address": _text(note.get("row_address"))} if author else {}
+
+
+def agent_note_heading(author: Mapping[str, Any], *, ts: str = "", address: str = "") -> str:
+    """The line over an agent's note wherever a focus reads it (a running reader's mail, the turn it opens)."""
+    who = (f"holder of key «{author['label']}»" if author.get("basis") == LINK_KEY
+           else f'declared author "{author["label"]}", not verified')
+    parts = [f"Agent note quoted verbatim; {who}; not my human's words", ts, f"handle {address}" if address else ""]
+    return "[" + "; ".join(part for part in parts if part) + "]"
+
+
+def agent_note_text(row: Mapping[str, Any]) -> str:
+    """The literal body of an agent's note as program DATA, the one projection every reader shares
+    (history, Reply, context, the model). The canonical host row (``system_type='agent_note_received'``,
+    a valid ``declared_author``) keeps the body in ``agent_note_text``; its ``text`` is only the neutral
+    receipt fact old readers show. Fail-closed: a typed received note whose body is absent or not a string
+    reads ``''`` — never the receipt fact as the program's words. The pre-release author format (a valid
+    ``declared_author`` with the body in ``text``) falls back to ``text``. A row without a valid
+    ``declared_author`` is not a note: ``''``. The author is ``declared_author``/``row_author``, never here."""
+    if not declared_author(row):
+        return ""
+    if row.get("system_type") == "agent_note_received":
+        body = row.get("agent_note_text")
+        return body if isinstance(body, str) else ""
+    return str(row.get("text") or "")
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -421,7 +521,9 @@ def run_origin(record: Mapping[str, Any] | None) -> dict[str, Any]:
     names the correspondent only for a Presence turn itself (the transport's display
     name or username; the platform id rides in ``presence.actor_id``); a follow-up or
     promoted root that inherits ``metadata.presence`` carries the room, not an author,
-    because a model wrote its text. Booleans are always written, empty values never.
+    because a model wrote its text. ``letter_author`` is the agent author of a linked
+    Ouroboros's letter (``declared_author``), on its root and all that root began: an agent,
+    never my human. Booleans are always written, empty values never.
     """
     source = _mapping(record)
     metadata = _mapping(source.get("metadata"))
@@ -429,13 +531,16 @@ def run_origin(record: Mapping[str, Any] | None) -> dict[str, Any]:
     # writes it there; the loop copies it into the live metadata) and the live
     # context in metadata: one reader accepts both shapes.
     ref = metadata.get("origin_message_ref") or source.get("origin_message_ref")
+    note = admission_note(source)
     origin: dict[str, Any] = {
         "task_type": _text(source.get("type")),
-        "owner_ingress": bool(metadata.get("origin_suppressed") or (isinstance(ref, Mapping) and ref)),
+        "owner_ingress": not note and bool(metadata.get("origin_suppressed") or (isinstance(ref, Mapping) and ref)),
         "source": _text(source.get("source") or metadata.get("source")),
     }
     for key in ("initiator", "origin_task_id", "schedule_id", "objective_author"):
         origin[key] = metadata.get(key)
+    # A linked Ouroboros whose letter began this work (its root, and all it started): the letter door's record only.
+    origin["letter_author"] = declared_author(metadata, key="letter_author")
     for key in ("delegation_role", "parent_task_id"):
         origin[key] = source.get(key) or metadata.get(key)
     presence = presence_provenance_from_task(source)
@@ -444,7 +549,13 @@ def run_origin(record: Mapping[str, Any] | None) -> dict[str, Any]:
     if origin["task_type"] == "presence":
         actor = _mapping(_mapping(_mapping(metadata.get("presence")).get("event")).get("actor"))
         origin["text_author"] = _text(actor.get("display_name") or actor.get("username"))
-        origin["actor_kind"] = _text(actor.get("kind"))
+        if actor.get("origin") == MACHINE_ORIGIN:
+            origin.update(text_author=program_speaker(origin["text_author"] or presence.get("actor_id", "")),
+                          actor_kind=AGENT_AUTHOR)
+        else:
+            origin["actor_kind"] = _text(actor.get("kind"))
+    elif note:
+        origin.update(text_author=author_words(note["author"]), actor_kind=AGENT_AUTHOR)
     return {
         key: value for key, value in origin.items()
         if isinstance(value, bool) or value not in (None, "", {}, [])
@@ -468,8 +579,29 @@ def recorded_speaker_name(entry: Mapping[str, Any]) -> str:
     )
 
 
+def place_machine_actor(row: Mapping[str, Any]) -> bool:
+    """An incoming Place actor the connector recorded as a program, never the actor an outgoing reply answered."""
+    return (_direction(row) == "in" and row_provenance(row) == "place"
+            and _mapping(_mapping(row.get("transport")).get("actor")).get("origin") == MACHINE_ORIGIN)
+
+
+def program_source(row: Any) -> str:
+    """The source of a canonical program row; the late-letter stamp is not an author or a delivery grant."""
+    if declared_author(row):
+        return "late_result" if row.get("late_report_sha256") else "agent_note"
+    return "place_machine" if isinstance(row, Mapping) and place_machine_actor(row) else ""
+
+
+def program_speaker(label: str) -> str:
+    """Sign the program separately and render the connector's label as single-line data, not a host instruction."""
+    return f'Program {json.dumps(" ".join(label.split()), ensure_ascii=False)}' if label.strip() else "Unnamed program"
+
+
 def dialogue_speaker(entry: Mapping[str, Any]) -> str:
-    return recorded_speaker_name(entry) or (
+    name = recorded_speaker_name(entry)
+    if place_machine_actor(entry):
+        return program_speaker(name)
+    return name or (
         "author not recorded" if row_provenance(entry) == "place" else "User")  # "User" is my human's own door
 
 
@@ -497,6 +629,9 @@ def dialogue_provenance(entry: Mapping[str, Any]) -> str:
     source = str(entry.get("source") or "").strip()
     if source and not facts:
         facts.append(f"source={source}")
+    if (entry.get("direction") == "in" and not declared_author(entry)  # only where the endpoint's own stamp says so
+            and _mapping(entry.get("client_surface")).get("channel") == "api_command"):
+        facts.append("sent through the API door, sender not recorded")
     imported = _mapping(entry.get("historical_import"))  # ``presence_history``: an earlier message, not an arrival
     if imported:
         facts.append("history=imported earlier message" + (
@@ -610,7 +745,7 @@ def _with_reaction(entry: Mapping[str, Any], text: str) -> str:
     return (f"{text}\n{note}" if text else note) if note else text
 
 
-def dialogue_text(entry: Mapping[str, Any]) -> str:
+def dialogue_text(entry: Mapping[str, Any], *, model_reply: bool = False) -> str:
     """Keep observed delivery metadata distinct from the quoted message body.
 
     A task summary without text is the host's typed facts row: its recorded facts are
@@ -618,7 +753,16 @@ def dialogue_text(entry: Mapping[str, Any]) -> str:
     memory rows. A host notice's step and raw details follow its phrase (``host_notice``)."""
     if entry.get("type") == "task_summary" and not _text(entry.get("text")):
         return _host_facts_text(entry)
-    text = _with_reaction(entry, str(entry.get("text", ""))) + notice_text(entry)
+    from ouroboros.chat_uploads import attachment_ref_delivery_block
+
+    delivery = attachment_ref_delivery_block(entry.get("attachments")) if entry.get("source") == "skill:telegram" else ""
+    if declared_author(entry):  # an agent's note: its literal body as program data, never the neutral receipt fact
+        content = agent_note_text(entry)
+    else:
+        content = "" if delivery and entry.get("text_placeholder") else str(entry.get("text", ""))
+    text = _with_reaction(entry, content) + notice_text(entry)
+    if delivery:
+        text = "\n\n".join(part for part in (text, delivery) if part)
     transport = _mapping(entry.get("transport"))
     message = _mapping(transport.get("message"))
     if entry.get("type") == "presence_delivery" and message:
@@ -634,7 +778,7 @@ def dialogue_text(entry: Mapping[str, Any]) -> str:
         text += ("\n[Context recorded with this event, not new speech or current provider truth: "
                  "memory_read(source_ref=" + json.dumps(locator, ensure_ascii=False, sort_keys=True,
                                                       separators=(",", ":")) + ")]")
-    return text + relation_text(entry) + private_contact_text(entry)
+    return text + relation_text(entry, model=model_reply) + private_contact_text(entry)
 
 
 def place_message_facts(entry: Mapping[str, Any]) -> str:
@@ -707,19 +851,68 @@ def excerpt_citation(ref: Mapping[str, Any]) -> str:
             + json.dumps(excerpt["text"], ensure_ascii=False))
 
 
-def relation_text(entry: Mapping[str, Any]) -> str:
+def program_reply_locator(ref: Mapping[str, Any]) -> str:
+    return f"[Reply to a program message at {ref['address']}; source retained by address]"
+
+
+def program_reply_text(target: Mapping[str, Any], *, root: Any = None,
+                       owner_row: Any = None, room: Any = None) -> str:
+    """A model data row, separate from the sender's own message. Only a new, exact owner selection in
+    the source room can cite a fragment of a late result. No automatic reader supplies its full body."""
+    kind, address = target.get("program_source"), target.get("address")
+    if kind not in PROGRAM_REPLY_SOURCES or not address:
+        return ""
+    if kind != "late_result":
+        return excerpt_citation(target) or (
+            f"[Program message from {target['author']} at {address}; reply preview, not owner words]\n{target['snippet']}"
+            if target.get("author") and target.get("snippet") else program_reply_locator(target))
+    accepted = _mapping(_mapping(owner_row).get("reply_to"))
+    selection, missing = _mapping(accepted.get("excerpt")), program_reply_locator(target)
+    if not (root is not None and type(room) is int and _mapping(owner_row).get("chat_id") == room
+            and accepted.get("address") == address and not accepted.get("unresolved") and selection):
+        return missing
+    from ouroboros.chat_chain import resolve_row, row_address
+    from ouroboros.store import StoreError
+
+    try:
+        row, _ = resolve_row(root, address)
+        if (program_source(row) != kind or row.get("chat_id") != room
+                or accepted.get("row_sha256") != row_address(row)["row_sha256"]):
+            return missing
+        # Programs' literal bubbles preserve text except the browser's newline normalization.
+        body = agent_note_text(row).replace("\r\n", "\n").replace("\r", "\n").encode("utf-16-le")
+        text, offset = selection.get("text"), selection.get("start_utf16")
+        if isinstance(text, str) and text.strip() and type(offset) is int and 0 <= offset <= len(body) // 2:
+            picked = text.encode("utf-16-le")
+            if body[2 * offset:2 * offset + len(picked)] == picked:
+                return excerpt_citation({"address": address, "author": author_words(declared_author(row)), "excerpt": selection})
+    except (OSError, StoreError, TypeError, ValueError):
+        pass  # An unavailable source cannot qualify a new quotation.
+    return missing
+
+
+def relation_text(entry: Mapping[str, Any], *, model: bool = False) -> str:
     """The relations the host resolved for a row, as labelled lines after its words: what it
     replies to and, on a relay, the owner's words it quotes, complete, with where they were said
-    and what they replied to. History keeps these fields; every text reader shows them too."""
+    and what they replied to. A quoted form adds the card it was entered on and, where the card retained them, the
+    fields it was submitted with, by name. History keeps these fields; every text reader shows them too."""
+    from ouroboros.answer_facts import submitted_fields_line
+
     def reference(ref: Mapping[str, Any]) -> str:
+        from ouroboros.chat_uploads import attachment_ref_delivery_block
+
+        if model and ref.get("program_source") in PROGRAM_REPLY_SOURCES and ref.get("address"):
+            return program_reply_locator(ref)
+        failure = attachment_ref_delivery_block(ref.get("attachment_failures"))
+        suffix = "\n" + failure if failure else ""
         if citation := excerpt_citation(ref):
-            return citation
+            return citation + suffix
         if ref.get("unresolved"):
             return f"[Reply to {_text(ref.get('address'))}: not resolved]"
         chars = ref.get("chars")  # a cut preview's whole length: the model reads how much the address holds
         size = f" [{chars} chars in full]" if isinstance(chars, int) and not isinstance(chars, bool) and chars else ""
         return (f"[Reply to {_text(ref.get('author_label')) or 'a message'} {_text(ref.get('address'))}"
-                f" ({_text(ref.get('kind')) or 'message'}): {_text(ref.get('snippet'))}{size}]")
+                f" ({_text(ref.get('kind')) or 'message'}): {_text(ref.get('snippet'))}{size}]" + suffix)
 
     lines = []
     if _mapping(entry.get("reply_to")):
@@ -727,14 +920,22 @@ def relation_text(entry: Mapping[str, Any]) -> str:
     for quote in relay_quotes(entry):
         place = _mapping(quote.get("source"))
         location = f"{_text(place.get('label')) or 'a chat'} {_text(place.get('address'))}"
-        text = str(quote.get("text") or "")
+        text, frame = str(quote.get("text") or ""), str(quote.get("question_frame") or "")
         # Older quiz envelopes kept the host question frame without a separate act/words type.
-        if quote.get("input_source") == "owner_press" or (quote.get("question_frame") and not quote.get("input_source")):
-            lines.append(f"[Owner card answer from {location}]\n{quote.get('question_frame') or text}")
+        if quote.get("input_source") == "owner_press" or (frame and not quote.get("input_source")):
+            lines.append(f"[Owner card answer from {location}]\n{frame or text}")
+            frame = ""  # shown above, as the act
         elif quote.get("input_source") == "owner_card_input":
             lines.append(f"[Owner card input from {location}]\n{text}")
         else:
             lines.append(f"[Owner words quoted from {location}]\n{text}")
+        # A quote that names its card is a submitted form: its words lose the field names and any empty field, so the
+        # fields (only where the card retained them) and then the card follow, each by its own fact. A quiz frame
+        # already quotes its answer's words, so it stands only as the act of a press.
+        if fields := submitted_fields_line(quote):
+            lines.append(fields)
+        if frame and quote.get("card_id"):
+            lines.append(f"[Host question frame]\n{frame}")
         if _mapping(quote.get("reply_to")):
             lines.append(reference(_mapping(quote.get("reply_to"))))
     return "".join("\n" + line for line in lines)
@@ -825,7 +1026,8 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
                lineage_lookup: Any = None, owner_accounts: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Who wrote one canonical chat row, as ``{"kind", "label", ...}``, read from its fields alone.
 
-    ``kind`` is ``human`` (``in`` rows and an owner's quiz answer), ``child`` (an
+    ``kind`` is ``human`` (ordinary inbound rows and an owner's quiz answer), ``agent`` (a program's note or
+    an incoming Place actor with recorded machine origin), ``child`` (an
     outgoing row with a delegated child's lineage), ``helper`` (the retired Light
     retelling), ``host`` (every other ``system`` row), ``ouroboros``, ``place_fact``
     (a wordless typed reaction or confirmed reaction receipt, ``actor_kind`` naming who acted) or
@@ -845,6 +1047,8 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
     (``ouroboros``, ``via="own_account"``): an event of my own account, never a person, and no work of mine is
     recorded as its sender, so its label is that fact alone (the turn its arrival woke wrote nothing).
     """
+    if author := declared_author(row):  # a program's note is its declared author's data, whichever role/direction it is stored under
+        return {"kind": AGENT_AUTHOR, "label": author_words(author), "basis": author["basis"]}
     if _mapping(row.get("host_fact")).get("kind") == "call_open":
         return {"kind": "host", "label": "host", "type": "call_open"}
     if row.get("type") in {"quiz_answer", "quiz_closed"} and (quiz := _mapping(row.get("quiz"))).get("secret_request") and isinstance(quiz.get("secret_outcome"), Mapping):
@@ -856,14 +1060,19 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
     if direction == "in":
         from ouroboros.places import forwarded_message  # D15->D20 is lazy-only
 
-        bot = {"is_bot": True} if _mapping(_mapping(row.get("transport")).get("actor")).get("is_bot") is True else {}
+        transport = _mapping(row.get("transport"))
+        actor = _mapping(transport.get("actor"))
+        bot = {"is_bot": True} if actor.get("is_bot") is True else {}
+        machine = place_machine_actor(row)
         if wordless_reaction(row):  # the actor's act, in the host's words: never quotable as theirs
             return {"kind": "place_fact", "label": dialogue_author(row),
-                    "actor_kind": _text(_mapping(_mapping(row.get("transport")).get("actor")).get("kind")), **bot}
+                    "actor_kind": AGENT_AUTHOR if machine else _text(actor.get("kind")), **bot}
         place = row_provenance(row) == "place"
         # A forward keeps who sent it (my human's account stays confirmed); its words are another author's.
-        forward = {"forwarded": True} if place and forwarded_message(_mapping(row.get("transport")).get("message")) else {}
+        forward = {"forwarded": True} if place and forwarded_message(transport.get("message")) else {}
         lead = "Forwarded by " if forward else ""
+        if machine:
+            return {"kind": AGENT_AUTHOR, "label": lead + dialogue_author(row), "via": "place_machine", **forward, **bot}
         fact = _place_speaker(row, owner_accounts) if place else ""
         if fact == "the account I send as" and owner_accounts is not None:  # my own account's event, no recorded
             return {"kind": "ouroboros", "label": f"{lead}{fact}: {dialogue_author(row)}", "via": "own_account",
@@ -902,18 +1111,18 @@ def recorded_person(author: Mapping[str, Any]) -> bool:
 def owner_speech(row: Mapping[str, Any], author: Mapping[str, Any]) -> bool:
     """My human's own words, from ``row_author``'s answer for ``row``: a person's row outside places (Main, a
     Project; a quiz answer), or a place row from an account its place confirms now (``owner_confirmed``) that
-    does not forward another author's words. The one definition of my human's words every view of my
-    conversations reads."""
-    return (recorded_person(author) and not author.get("forwarded")
+    does not forward another author's words, never an agent's (``non_owner_author``). The one definition of my
+    human's words every view of my conversations reads."""
+    return (not non_owner_author(row) and recorded_person(author) and not author.get("forwarded")
             and (row_provenance(row) != "place" or author.get("owner_confirmed") is True))
 
 
 def row_class(row: Mapping[str, Any], **lineage: Any) -> dict[str, Any]:
-    """``{"lane": 1|2, "author": row_author(...)}``: people, a room's reaction facts and my own words to them
-    are lane 1, an inbound row with no recorded speaker too (``unattributed: True``: shown whole, counted apart);
+    """``{"lane": 1|2, "author": row_author(...)}``: people, an agent's note, a room's reaction facts and my own words
+    to them are lane 1, an inbound row with no recorded speaker too (``unattributed: True``: shown whole, counted apart);
     children's reports, host facts, the legacy retelling and outgoing rows with no recorded author are lane 2."""
     author = row_author(row, **lineage)
-    spoken = author["kind"] in {"human", "ouroboros", "place_fact"} and row.get("type") not in _FACT_TYPES
+    spoken = author["kind"] in {"human", AGENT_AUTHOR, "ouroboros", "place_fact"} and row.get("type") not in _FACT_TYPES
     return {"lane": 1 if spoken else 2, "author": author}
 
 
@@ -1006,7 +1215,7 @@ def _detail_words(value: Any, sep: str = ", ") -> str:
     return str(value)
 
 
-def render_row_text(row: Mapping[str, Any]) -> str:
+def render_row_text(row: Mapping[str, Any], *, model_reply: bool = False) -> str:
     """The text of one chat row without JSON: quiz options and answers and a Presence delivery's
     details, as words (``chat_history`` keeps ``dialogue_text``, which also renders empty host facts)."""
     message = _mapping(_mapping(row.get("transport")).get("message"))
@@ -1020,8 +1229,8 @@ def render_row_text(row: Mapping[str, Any]) -> str:
     if row.get("type") == "quiz" and isinstance(quiz, dict):
         return _question_text(row, quiz) + private_contact_text(row)
     if row.get("type") == "card" and isinstance(row.get("card"), Mapping):  # its id lets a later turn replace it
-        return f"[card {_text(row['card'].get('card_id'))}] " + dialogue_text(row)
-    return dialogue_text(row)
+        return f"[card {_text(row['card'].get('card_id'))}] " + dialogue_text(row, model_reply=model_reply)
+    return dialogue_text(row, model_reply=model_reply)
 
 
 def quote_parts(row: Mapping[str, Any], root: Any = None) -> tuple[str, ...]:
@@ -1030,6 +1239,8 @@ def quote_parts(row: Mapping[str, Any], root: Any = None) -> tuple[str, ...]:
     else ``render_row_text``.
     Connector facts and delivery details shown beside those words are the host's labels, never the speaker's."""
     from ouroboros.answer_facts import living_card_input, word_spans
+    if declared_author(row):  # a program's note: its literal body alone, even when it itself quoted another row
+        return (agent_note_text(row),)
     if carried := _mapping(row.get("corpus_answer")):
         if carried.get("source") in ("owner_press", "owner_card_input"):
             return ()
@@ -1042,6 +1253,11 @@ def quote_parts(row: Mapping[str, Any], root: Any = None) -> tuple[str, ...]:
         quiz, _ = answered_card_source(row, row.get("_owner_source_root") or root)
         quiz = _mapping(quiz)
         return () if quiz.get("secret_request") else (str(quiz.get("comment") or ""),)
+    if row.get("source") == "skill:telegram":
+        from ouroboros.chat_uploads import delivery_failures
+
+        if delivery_failures(row.get("attachments")) or _mapping(row.get("reply_to")).get("attachment_failures"):
+            return () if row.get("text_placeholder") else (str(row.get("text") or ""),)
     if (_mapping(row.get("reply_to")).get("excerpt")
             or any(_mapping(quote.get("reply_to")).get("excerpt") for quote in relay_quotes(row))
             or row.get("direction") == "in" and row_provenance(row) == "place"
@@ -1069,13 +1285,17 @@ def memory_row_header(address: Mapping[str, Any], row: Mapping[str, Any], *, aut
 
 
 def render_memory_row(address: Mapping[str, Any], row: Mapping[str, Any], *, author: Mapping[str, Any],
-                      indent: str = "") -> str:
+                      indent: str = "", model_reply: bool = False) -> str:
     """One chat row in memory text: its header, a space, its words (``render_row_text``), never cut.
 
     Each later line of the words starts with ``indent``: the view indents them so a row's own
     ``## …`` lines never read as sections; ``memory_read`` prints them as they are.
     """
-    words = render_row_text(row)
+    if model_reply and program_source(row) == "late_result":
+        from ouroboros.chat_chain import format_address
+
+        return late_program_locator(format_address(dict(address)))
+    words = render_row_text(row, model_reply=model_reply)
     if indent:
         words = words.replace("\n", "\n" + indent)
     return memory_row_header(address, row, author=author) + " " + words
@@ -1341,6 +1561,7 @@ def source_continuation_note(spans: list[tuple[int, int, str]], offset: int, par
 
 
 __all__ = [
+    "agent_note_text",
     "dialogue_author",
     "dialogue_provenance",
     "dialogue_speaker",
