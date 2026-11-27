@@ -709,6 +709,9 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # #3981 control_storage._read_refusal: a task outside what the caller may read is refused before anything is read
     # or proposed. The bare line is a policy denial like every ACCESS_BLOCKED publication; the retired pair never saw it.
     "ACCESS_BLOCKED": (True, "blocked"),
+    # #4317 control_scheduling._left_claim_note: only ever a suffix after the scheduling refusal, saying the claimed
+    # id keeps a closed never-sent record. The leading refusal carries the verdict; the bare note is informational.
+    "SUBTASK_STATUS_NOTE": (False, "ok"),
 }
 
 

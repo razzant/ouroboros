@@ -427,8 +427,7 @@ def record_depth_limit_refusal(
     if not parent_contract and isinstance(getattr(ctx, "task_contract", None), dict):
         parent_contract = getattr(ctx, "task_contract")
     parent_id = str(getattr(ctx, "task_id", "") or metadata.get("parent_task_id") or "")
-    task_id = uuid.uuid4().hex[:8]
-    root_id = str(metadata.get("root_task_id") or parent_id or task_id)
+    root_id = str(metadata.get("root_task_id") or parent_id or "")  # a parentless attempt roots at its own id
     session_id = str(metadata.get("session_id") or "")
     status_root = pathlib.Path(str(
         metadata.get("budget_drive_root")
@@ -446,38 +445,46 @@ def record_depth_limit_refusal(
         intent_note=params.get("delegation_intent", ""),
         requested_depth=params.get("requested_depth", 0),
     )
-    from ouroboros.contracts.task_contract import build_task_contract
+    from functools import partial
 
-    child_contract = build_task_contract({
-        "objective": fields.get("objective"),
-        "expected_output": fields.get("expected_output"),
-        "constraints": fields.get("constraints"),
-        "context": fields.get("context"),
-        "parent_task_id": parent_id,
-        "root_task_id": root_id,
-        "session_id": session_id,
-        "delegation_role": "subagent",
-        "allowed_resources": parent_contract.get("allowed_resources", {}),
-        "delegation_budget": child_budget,
-    })
-    child_contract, provenance = stamp_depth_provenance(
-        child_contract,
-        attempted_depth=new_depth,
-        max_depth=max_depth,
-        achieved_depth=None,
+    from ouroboros.contracts.task_contract import build_task_contract
+    from ouroboros.task_id_claims import (
+        ClaimRefused, TaskIdTaken, TaskIdUnconfirmed, claim_failure_words, claim_id, release_task_claim,
+        retained_task_paths, same_request,
     )
+    from ouroboros.task_results import STATUS_FAILED, write_task_result
+
     reason_code = "subtask_depth_limit"
     detail = f"Subtask depth limit ({max_depth}) exceeded by attempted depth {new_depth}."
     role = str(fields.get("role") or "").strip()
-    try:
-        from ouroboros.task_results import STATUS_FAILED, write_task_result
+    token = uuid.uuid4().hex  # the attempt's own record: a strict claim of a fresh id, never a merge into another
 
-        saved = write_task_result(
+    def assigned(tid: str) -> Dict[str, Any]:  # what names the assigned id: the row's root and its contract's lineage
+        child_contract, provenance = stamp_depth_provenance(build_task_contract({
+            "objective": fields.get("objective"),
+            "expected_output": fields.get("expected_output"),
+            "constraints": fields.get("constraints"),
+            "context": fields.get("context"),
+            "parent_task_id": parent_id,
+            "root_task_id": root_id or tid,
+            "session_id": session_id,
+            "delegation_role": "subagent",
+            "allowed_resources": parent_contract.get("allowed_resources", {}),
+            "delegation_budget": child_budget,
+        }), attempted_depth=new_depth, max_depth=max_depth, achieved_depth=None)
+        return {"root_task_id": root_id or tid, "task_contract": child_contract, "depth_provenance": provenance,
+                "delegation_admission": {"status": "rejected", "reason_code": reason_code,
+                                         "attempted_depth": new_depth,
+                                         "permitted_depth": provenance.get("permitted_depth")}}
+
+    try:
+        task_id, saved = claim_id("", lambda tid: write_task_result(
             status_root,
-            task_id,
+            tid,
             STATUS_FAILED,
+            claim=partial(same_request, token=token),
+            request_claim={"token": token},
             parent_task_id=parent_id or None,
-            root_task_id=root_id,
             session_id=session_id,
             actor_id=f"subagent:{role}",
             delegation_role="subagent",
@@ -488,28 +495,28 @@ def record_depth_limit_refusal(
             constraints=str(fields.get("constraints") or ""),
             context=str(fields.get("context") or ""),
             depth=new_depth,
-            task_contract=child_contract,
-            depth_provenance=provenance,
             configured_subagent=dict(configured_subagent or {}),
             budget_drive_root=str(status_root),
             memory_mode=str(fields.get("memory_mode") or ""),
             reason_code=reason_code,
-            delegation_admission={
-                "status": "rejected",
-                "reason_code": reason_code,
-                "attempted_depth": new_depth,
-                "permitted_depth": provenance.get("permitted_depth"),
-            },
             result=f"Subagent rejected: {reason_code}: {detail}",
-        )
+            **assigned(tid),
+        ), lambda tid: release_task_claim(status_root, tid, partial(same_request, token=token)),
+            width=8, folders=lambda tid: retained_task_paths(status_root, tid))
         if not saved:
             raise RuntimeError("task result transition was not persisted")
-    except Exception:
+    except Exception as exc:
+        # An unconfirmed claim names its attempted id, ownership unknown; an id never claimed is not named.
+        held = (f" Whether task id {exc.task_id} holds this attempt is unknown; a record read under it is not its "
+                "evidence." if isinstance(exc, TaskIdUnconfirmed) else
+                f" No task id was claimed for it: {claim_failure_words(exc)}."
+                if isinstance(exc, (TaskIdTaken, ClaimRefused)) else "")
         return (
             "⚠️ TOOL_ERROR (schedule_subagent): depth_refusal_evidence_unavailable: "
             f"{detail} The child was not started, but durable attempt evidence could "
-            "not be written; treat attempted depth as unknown."
+            f"not be written; treat attempted depth as unknown.{held}"
         )
+    provenance = saved.get("depth_provenance") or {}
     return (
         f"⚠️ TOOL_ERROR (schedule_subagent): {reason_code}: {detail} "
         f"task_id={task_id}; depth_provenance="

@@ -92,6 +92,14 @@ _TASK_COLUMNS = ("task_id", "parent_task_id", "root_task_id", "subagent_task_id"
 _PASS_SLICE_SEC = 10.0
 
 
+def _public_row(drive_root: pathlib.Path, task_id: str) -> bool:
+    """Whether a task stands under the id for a public reader (a helper request still being prepared is none)."""
+    from ouroboros.task_id_claims import provisional_request
+
+    row = load_task_result(drive_root, task_id)
+    return bool(row) and not provisional_request(row)
+
+
 async def api_task_events(request: Request) -> StreamingResponse:
     try:
         task_id = validate_task_id(request.path_params.get("task_id"))
@@ -105,7 +113,7 @@ async def api_task_events(request: Request) -> StreamingResponse:
     cursor = max(0, coerce_int(request.query_params.get("cursor"), 0))
     wait_sec = max(0, min(coerce_int(request.query_params.get("wait"), 30), 120))
     drive_root = request_drive_root(request)
-    if not load_task_result(drive_root, task_id):
+    if not _public_row(drive_root, task_id):
         async def _missing():
             yield _sse({"type": "error", "error": "task not found", "task_id": task_id, "seq": 1}, event_id=1)
         return StreamingResponse(_missing(), media_type="text/event-stream", status_code=404)
@@ -354,9 +362,12 @@ class _TaskEventFollower:
         child = str(self.result.get("child_drive_root") or self.result.get("headless_child_drive_root") or "").strip()
         if child:
             candidates.append(pathlib.Path(child))
+        from ouroboros.task_id_claims import PROVISIONAL_ROWS
+
+        members = ("delegation_role='subagent' AND (parent_task_id=? OR root_task_id=?)"
+                   f" AND NOT ({PROVISIONAL_ROWS})")  # a helper still being prepared is no member: no view change
         try:
-            facts = task_facts(self.drive_root, where="delegation_role='subagent' AND (parent_task_id=? OR root_task_id=?)",
-                               params=(self.task_id, self.task_id))
+            facts = task_facts(self.drive_root, where=members, params=(self.task_id, self.task_id))
         except StoreError:
             if not self._lineage_unavailable:
                 self._lineage_notice = {"type": "history_gap", "source": "task_result",
@@ -851,7 +862,7 @@ async def _api_task_events_v2(request: Request, task_id: str):
     except (ValueError, TypeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     drive_root = request_drive_root(request)
-    if not load_task_result(drive_root, task_id):
+    if not _public_row(drive_root, task_id):
         return JSONResponse({"error": "task not found", "task_id": task_id}, status_code=404)
     follower = _TaskEventCursorFollower(drive_root, task_id, cursor)
 

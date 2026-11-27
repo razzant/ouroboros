@@ -101,9 +101,10 @@ def test_api_preparation_cleanup_keeps_ownership_until_resources_settle(room, mo
     if occupant == "ours":
         assert not child.exists() and not artifact.exists()
         assert tid not in room.queue.ADMISSION_RESERVATIONS
-    else:
+    else:  # a record holding the id keeps it and every file; only this attempt's own reservation goes (#4317)
         assert child.exists() and artifact.read_text(encoding="utf-8") == "owned input"
-        assert room.queue.ADMISSION_RESERVATIONS[tid] == ("foreign" if occupant == "foreign_reservation" else "ours")
+        held = {"foreign_reservation": "foreign", "foreign_result": None, "unreadable": "ours"}[occupant]
+        assert room.queue.ADMISSION_RESERVATIONS.get(tid) == held
 
 
 @pytest.mark.parametrize("phase", ["partial_drive", "staging", "composition"])
@@ -134,11 +135,16 @@ def test_real_api_known_preparation_exception_cleans_only_its_attempt(room, tmp_
     response = api._create_task_from_body(request, {
         "task_id": "prepare-failed", "description": "Use input", "project_id": "target",
         "memory_mode": "empty", "attachments": [{"path": str(source)}]})
-    assert response.status_code == 503 and not room.pending
+    # Its drive holds files another writer may share: it stays whole, nothing is queued, and its own recorded
+    # refusal now holds the id (its reservation released only once that refusal was written).
+    answer = json.loads(response.body)
+    assert response.status_code == 503 and not room.pending and answer["staging_retained"] is True, response.body
     assert "prepare-failed" not in room.queue.ADMISSION_RESERVATIONS
-    assert child_paths and not child_paths[0].exists()
+    assert child_paths and child_paths[0].is_dir()
     assert not task_artifacts_dir(room.root, "prepare-failed", create=False).exists()
-    assert load_task_result(room.root, "prepare-failed") is None
+    row = load_task_result(room.root, "prepare-failed")
+    assert row["status"] == "failed" and row["admission_outcome"] == "never_admitted"
+    assert row["admission_cleanup"] == {"staging_retained": True}
 
 
 @pytest.mark.parametrize("stage", ["before_scope", "before_ensure", "during_ensure"])
@@ -314,10 +320,12 @@ def test_api_acceptance_refusal_uses_the_same_exact_cleanup_boundary(room, monke
         assert response.status_code == 503 and child.exists()
         assert room.queue.ADMISSION_RESERVATIONS[tid] == "foreign"
         assert load_task_result(room.root, tid) is None
-    else:
-        assert response.status_code == 409 and not child.exists()
+    else:  # no folder of its own was named: the refusal row keeps the drive, for its retention
+        assert response.status_code == 409 and child.exists()
         assert tid not in room.queue.ADMISSION_RESERVATIONS
-        assert load_task_result(room.root, tid)["reason_code"] == "task_acceptance_fence"
+        row = load_task_result(room.root, tid)
+        assert row["reason_code"] == "task_acceptance_fence"
+        assert row["admission_cleanup"] == {"child_drive_removed": False}
 
 
 def test_promote_post_stage_lookup_failure_cleans_attachment(host, tmp_path, monkeypatch):  # noqa: F811

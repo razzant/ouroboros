@@ -380,9 +380,13 @@ def select_lineage(root: Any, parent: str, root_id: str, *, direct_only: bool = 
     """The child-lookup candidates in ``task_id`` order (``lineage_where``); the Python projection decides the rest.
     A candidate named in UNREAD that no retry or supersession pointer redirects (its effective row is its own) is not
     fetched: its id goes, in the same read, to SKIPPED, the set a caller passing UNREAD passes with it
-    (``task_status.find_child_tasks(settled=...)``)."""
+    (``task_status.find_child_tasks(settled=...)``). A helper's claim still being prepared is no child yet
+    (``task_id_claims.PUBLIC_TASKS``): every lineage reader is a public one, custody reads the rows itself."""
+    from ouroboros.task_id_claims import PUBLIC_TASKS
+
     where, params = lineage_where(str(parent or ""), str(root_id or ""), direct_only=direct_only,
                                   queue_members=queue_members)
+    where = f"({where}) AND t.task_id {PUBLIC_TASKS}"
     names = sorted({str(task_id) for task_id in unread if str(task_id or "")})
     if names and skipped is None:
         raise TypeError("select_lineage: UNREAD needs the SKIPPED set that receives the rows not fetched")
@@ -1071,10 +1075,13 @@ def plan_collection_candidates(root: Any, *, stop: Optional[Callable[[], bool]] 
 
 def inventory(root: Any) -> List[Dict[str, Any]]:
     """Every task's paging identity, newest write first: ``name`` (the task id), ``write_seq``
-    (changes with every write, the role the file size and mtime played) and ``updated_at``."""
+    (changes with every write, the role the file size and mtime played) and ``updated_at``. A helper's claim
+    still being prepared (``task_id_claims.PUBLIC_TASKS``) is no task yet: it takes no place on a page."""
+    from ouroboros.task_id_claims import PUBLIC_TASKS
+
     with open_store(root, write=False) as txn:  # ordered: the scan reads the ``tasks_updated`` index, not the table
-        captured = capture(txn.conn, "SELECT task_id, write_seq, updated_at FROM tasks ORDER BY updated_at DESC, "
-                           "task_id DESC", (), ("task_id", "write_seq", "updated_at"))
+        captured = capture(txn.conn, f"SELECT task_id, write_seq, updated_at FROM tasks WHERE task_id {PUBLIC_TASKS} "
+                           "ORDER BY updated_at DESC, task_id DESC", (), ("task_id", "write_seq", "updated_at"))
     return [{"name": record["task_id"], "write_seq": int(record["write_seq"] or 0),
              "updated_at": str(record["updated_at"] or "")}
             for record in captured.rows(key=_newest("updated_at"), reverse=True)]

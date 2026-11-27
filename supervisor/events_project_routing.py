@@ -487,13 +487,11 @@ def _persist_promote_rejection(
     )
     if never_admitted:
         from ouroboros.artifacts import remove_staged_attachments
-        from ouroboros.headless import remove_subagent_task_drive
-        from supervisor.queue import task_settlement_interlock, task_settlement_liveness
+        from supervisor.worker_promotion import remove_refused_start_drive
 
         if cleanup_manifest:
             remove_staged_attachments(cleanup_manifest)
-        remove_subagent_task_drive(ctx.DRIVE_ROOT, task_id, live=task_settlement_liveness,
-                                   guard=task_settlement_interlock, admission_rollback=True)
+        remove_refused_start_drive(evt, ctx.DRIVE_ROOT, task_id)
 
 
 def _prepare_promote_source_off_loop(evt: Dict[str, Any], ctx: Any) -> None:

@@ -45,7 +45,7 @@ REFUSAL_REASONS = (
     # a private start's owner origin (presence_owner_contact.private_start_refusal)
     "private_owner_source_invalid", "private_owner_source_unavailable",
     # the unconfirmed family (handler crash, receipt persistence, routing_wait)
-    "promotion_persistence_failed", "routing_receipt_persist_failed",
+    "promotion_persistence_failed", "intent_persist_failed", "routing_receipt_persist_failed",
     "routing_annotation_persist_failed", "source_continuation_publish_failed",
     "confirmation_timeout",
     # steer (supervisor/steering.py)

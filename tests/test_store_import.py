@@ -475,6 +475,23 @@ def test_export_overwrites_the_last_closed_registration_in_both_set_files(tmp_pa
     assert current.removal_status(tmp_path, "p", facts) == before and before[0] == ""
 
 
+def test_an_empty_export_of_id_claims_replaces_its_earlier_file_and_a_rebuild_brings_no_claim_back(tmp_path):
+    from ouroboros.store_switch import _retire
+    from ouroboros.task_id_claims import ID_CLAIMS, claim_provisional_id, provisional_claim, release_provisional_claim
+
+    ensure_current_store(tmp_path, with_children=False)
+    claim_provisional_id(tmp_path, "aaaa0001aaaa0001", "token-1")  # an imaginary admission's claim
+    export_facts(tmp_path)
+    carrier = set_file_path(tmp_path, ID_CLAIMS)
+    assert list(json.loads(carrier.read_bytes())) == ["aaaa0001aaaa0001"]
+    assert release_provisional_claim(tmp_path, "aaaa0001aaaa0001", "token-1")
+    export_facts(tmp_path)
+    assert json.loads(carrier.read_bytes()) == {}, "a drained set's old file is overwritten, not left behind"
+    _retire(tmp_path)
+    assert ensure_current_store(tmp_path, with_children=False)["status"] == "completed"
+    assert provisional_claim(tmp_path, "aaaa0001aaaa0001") is None
+
+
 def test_fresh_import_applies_registration_closures_only_to_the_addressed_store(tmp_path):
     from ouroboros import delegate_custody as c, delegate_custody_current as current
 

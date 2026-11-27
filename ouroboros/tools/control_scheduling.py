@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import time
 import uuid
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -41,7 +41,11 @@ from ouroboros.subagent_runtime import (
 )
 from ouroboros.subagent_work_order import ORIGINAL_INPUTS_FACT, TYPED_STAMPS_FACT, declared_words_fact
 from ouroboros.subagents import build_subagent_envelope
-from ouroboros.task_results import STATUS_REQUESTED, write_task_result
+from ouroboros.task_id_claims import (
+    TaskIdUnconfirmed, claim_failure_words, claim_id, close_unsent_claim, finish_request, make_own_folders, present,
+    release_task_claim, remove_own_paths, retained_task_paths, same_request, unsent_request,
+)
+from ouroboros.task_results import STATUS_REQUESTED, load_task_result, write_task_result
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.tools.control_delegation import (
     admitted_depth_cap,
@@ -63,7 +67,7 @@ from ouroboros.tools.control_subagent_spec import (
 from ouroboros.tool_access import canonical_data_root, folderless_scratch_dir
 from ouroboros.tools.registry import ToolContext, active_repo_dir_for, system_repo_dir_for
 from ouroboros.utils import append_jsonl, utc_now_iso
-from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, append_published_text
 
 
 def _publish_scheduling_refusal(ctx: Any, status: str, code: str, text: str, *, reason: str = "") -> str:
@@ -569,16 +573,144 @@ def _request_origin(ctx: ToolContext) -> Dict[str, Any]:
     return dict(_REQUEST_ORIGIN["facts"])
 
 
+def _child_paths(ctx: ToolContext, root: Path, tid: str) -> tuple:
+    """The folders a child's id keys (``task_id_claims.retained_task_paths``), the selection its parent retains
+    for it last: the one evidence a refusal leaves on purpose, which keeps the id from reuse."""
+    from ouroboros.delegate_readonly_inputs import scheduled_inputs_root
+
+    return retained_task_paths(root, tid, scheduled_inputs_root(ctx, tid))
+
+
+def _own_staging(ctx: ToolContext, root: Path, tid: str) -> tuple:
+    """``(own folders, refusal)``: the task-state folder this request stages into (its own drive and all it
+    stages land there; a helper always has one: ``VALID_SUBTASK_MEMORY_MODES``), made by exclusive creation
+    before anything is staged (``make_own_folders``), so its release may remove that folder alone, and only while
+    it holds nothing, never another folder under the id (a direct drive, the retained selection). One already
+    standing is another writer's: nothing is staged into it or removed from it, and the request is refused
+    unsent."""
+    try:
+        return make_own_folders(_child_paths(ctx, root, tid)[:1]), ""
+    except OSError as exc:
+        log.warning("Subagent request %s found its state folder unavailable before staging", tid, exc_info=True)
+        held = ("a folder another writer made stands under its task id" if isinstance(exc, FileExistsError)
+                else f"its task folder could not be made ({type(exc).__name__})")
+        return (), _publish_scheduling_refusal(ctx, "error", "TOOL_ERROR", (
+            f"⚠️ SUBTASK_DRIVE_ERROR: {held}; nothing was staged or removed. The subagent was not scheduled."),
+            reason="task_id_occupied" if isinstance(exc, FileExistsError) else "")
+
+
+def _claim_child_id(ctx: ToolContext, claim: Dict[str, Any], root: Path, facts: Dict[str, Any]) -> tuple[str, str]:
+    """Claim a fresh id for this request before any of its files exist: ``(id, "")`` or ``("", published refusal)``.
+
+    The REQUESTED row (its ``request_claim`` token, phase ``claimed``, the producer stamp and the lineage recovery
+    reads) is a strict claim in the canonical store (``claim_id``). An id another record holds, or whose folders an
+    earlier owner left, is minted again. A claim of unknown outcome refuses and names the attempted id: it never
+    moves to another id and grants nothing to release or remove (recovery refuses a row it did commit as unsent).
+    Only a proved claim enters ``claim``, which ``_release_unsent_child`` may undo."""
+    token = uuid.uuid4().hex
+    try:
+        tid = claim_id("", lambda tid: write_task_result(
+            root, tid, STATUS_REQUESTED, claim=partial(same_request, token=token), create_only=True,
+            requested_by=_request_origin(ctx), **facts, request_claim={"token": token, "phase": "claimed"},
+            result="Subagent request is being prepared; it has not been sent."),
+            lambda tid: release_task_claim(root, tid, partial(unsent_request, token=token)), width=8,
+            folders=partial(_child_paths, ctx, root))[0]
+    except TaskIdUnconfirmed as exc:
+        log.warning("The claim of a subagent request's task id is unconfirmed", exc_info=True)
+        return "", _publish_scheduling_refusal(ctx, "error", "TOOL_ERROR", (
+            f"⚠️ SUBTASK_STATUS_ERROR: the claim of task id {exc.task_id} is unconfirmed ({exc.detail}): whether this "
+            "request holds it is unknown, so a record read under it is not this request's. The subagent was not "
+            "scheduled."), reason="task_id_unconfirmed")
+    except Exception as exc:
+        log.warning("No task id could be claimed for a subagent request", exc_info=True)
+        return "", _publish_scheduling_refusal(ctx, "error", "TOOL_ERROR", (
+            f"⚠️ SUBTASK_STATUS_ERROR: no task id could be claimed for this request ({claim_failure_words(exc)}); "
+            "the subagent was not scheduled."))
+    claim.update(root=root, tid=tid, token=token)
+    return tid, ""
+
+
+def _release_unsent_child(ctx: ToolContext, claim: Dict[str, Any]) -> str:
+    """Undo a proved claim whose request was never sent: "" once nothing of it remains, or its own record already
+    ended (a Stop, recovery's refusal: that terminal stands, with its files), else what stays and why.
+
+    All under the owner's Keep gate, and only while the row is still this request's unsent REQUESTED one with no
+    Stop of it pending: once staging began, first the folders its staging created (``claim["own"]``,
+    ``_own_staging``; ``remove_own_paths``: only what holds nothing goes, never anything another writer may have
+    put there; any other folder under the id, the direct drive and the retained selection stay), then the row
+    (``release_task_claim``, rechecked in its transaction with any Stop that landed meanwhile, which keeps the row
+    its custody settles). What stays (its staged folder holding files, a selection retained for the parent) keeps
+    the row as its identity, closed as never sent (``close_unsent_claim``; ``claim["retained"]``), its files left
+    to that record's retention. Anything unproven stays: recovery refuses the row as unsent. An ordinary error here
+    is the answer, never raised over the caller's own outcome."""
+    if not claim or claim.get("sent"):
+        return ""
+    root, tid, token = claim["root"], claim["tid"], claim["token"]
+    try:
+        from ouroboros.cancel_intents import has_active_intent
+        from ouroboros.owner_keep import gate
+
+        with gate(root, tid, timeout_sec=0) as held:  # the owner's keep, and a publisher mid-flight
+            if held:
+                return f"it is held ({held})"
+            row = load_task_result(root, tid, strict=True)
+            if not unsent_request(row, token):
+                return "" if same_request(row, token) else "its record is gone or another's; nothing was removed"
+            if has_active_intent(root, tid, strict=True):
+                return "a Stop of it is pending"
+            if claim.get("staged"):
+                staged = not remove_own_paths(claim.get("own", ()))  # only what holds nothing goes
+                kept = [words for words, remains in (
+                    ("its staged folder stays under this task id with everything in it, since another writer may "
+                     "have written there too", staged),
+                    ("the inputs selected for it stay with the parent as evidence",
+                     present(_child_paths(ctx, root, tid)[3]))) if remains]
+                if kept:  # what stays is keyed by this record: it keeps the id, closed as never sent
+                    stays = ", and ".join(kept)
+                    claim["retained"] = close_unsent_claim(root, tid, token, result=(
+                        f"Subagent not scheduled: its request was never sent; {stays}."))
+                    return stays if claim["retained"] else f"{stays}; " + (
+                        "a Stop of it is pending" if has_active_intent(root, tid, strict=True)
+                        else "its record could not be closed")
+            if not release_task_claim(root, tid, partial(unsent_request, token=token)):
+                return ("a Stop of it is pending" if has_active_intent(root, tid, strict=True)
+                        else "its row could not be released")
+    except Exception as exc:
+        log.warning("Unsent subagent request %s keeps its claim", tid, exc_info=True)
+        return f"{type(exc).__name__}: {exc}"
+    return ""
+
+
+def _left_claim_note(claim: Dict[str, Any], left: str) -> str:
+    """What the caller is told when its unsent request's claim did not simply go (``_release_unsent_child``)."""
+    tid = claim["tid"]
+    if claim.get("retained"):
+        return (f"⚠️ SUBTASK_STATUS_NOTE: task id {tid} keeps this request's record, closed as never sent: {left}. "
+                "No subagent runs under it; do not wait for it.")
+    return (f"⚠️ SUBTASK_STATUS_ERROR: task id {tid} was claimed for this request and its release is unconfirmed "
+            f"({left}). The subagent was not scheduled; whether the id still holds this request is unknown, so a "
+            "record read under it is not a result of this request.")
+
+
+def _control_signals() -> tuple:
+    """Errors their readers know by type (a Pause, a model wait, accounting, a candidate refusal): never reworded."""
+    from ouroboros.body_candidate import CandidateRefused
+    from ouroboros.model_wait import ModelWaitInterrupted
+    from ouroboros.owner_pause import OwnerPauseRefused
+    from ouroboros.usage_accounting import UsageAccountingError
+
+    return (OwnerPauseRefused, ModelWaitInterrupted, UsageAccountingError, CandidateRefused)
+
+
 def _prepare_child_drive(tid, status_drive_root, memory_mode, parent_project_id):
-    """Prepare the forked/empty child drive. On failure clean up the drive + the
-    task-state dir and return ``(None, error_string)``; otherwise ``(drive, "")``.
+    """Prepare the forked/empty child drive: ``(drive, "")``, else ``(None, error_string)``. What a failed
+    preparation left is settled by the claim's gated release (``_release_unsent_child``).
     (Extracted from _schedule_task to keep it under the method gate.)"""
     if memory_mode not in {"forked", "empty"}:
         return None, ""
     try:
         return prepare_task_drive(status_drive_root, tid, memory_mode, project_id=parent_project_id), ""
     except Exception as exc:
-        shutil.rmtree(task_state_dir(status_drive_root, tid), ignore_errors=True)
         log.warning("Failed to prepare child drive for subtask %s", tid, exc_info=True)
         return None, f"⚠️ SUBTASK_DRIVE_ERROR: failed to prepare {memory_mode} child drive: {exc}"
 
@@ -820,6 +952,33 @@ def _route_refusal(fields: Dict[str, Any], route: Dict[str, Any]) -> tuple[str, 
 
 
 def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, **params: Any) -> str:
+    """``schedule_subagent``: one request under one claim of its id; every exit short of sending it releases
+    that claim's own state (``_release_unsent_child``), a refusal and an exception alike. A claim that did not
+    simply go is reported in the call's result beside the refusal or the original error (``_left_claim_note``)."""
+    claim: Dict[str, Any] = {}
+    try:
+        result = _schedule_request(ctx, claim, internal, **params)
+    except Exception as exc:
+        left = _release_unsent_child(ctx, claim)
+        if not left or isinstance(exc, _control_signals()):
+            raise
+        log.warning("Subagent scheduling failed and task id %s is not free", claim["tid"], exc_info=True)
+        return _publish_scheduling_refusal(ctx, "error", "TOOL_ERROR", (
+            f"⚠️ TOOL_ERROR (schedule_subagent): {type(exc).__name__}: {exc}\n{_left_claim_note(claim, left)}"),
+            reason="task_id_retained" if claim.get("retained") else "task_id_unconfirmed")
+    except BaseException:
+        _release_unsent_child(ctx, claim)
+        raise
+    if not (left := _release_unsent_child(ctx, claim)):
+        return result
+    if claim.get("retained"):  # by design: the refusal keeps its own typed outcome
+        return append_published_text(ctx, result, "\n" + _left_claim_note(claim, left))
+    return _publish_scheduling_refusal(ctx, "error", "TOOL_ERROR", f"{result}\n{_left_claim_note(claim, left)}",
+                                       reason="task_id_unconfirmed")
+
+
+def _schedule_request(ctx: ToolContext, claim: Dict[str, Any], internal: Dict[str, Any] | None = None, /,
+                      **params: Any) -> str:
     allowed_params = schedule_subagent_param_names() | HIDDEN_LEGACY_SCHEDULE_PARAMS
     unsupported = sorted(str(key) for key in params if key not in allowed_params)
     internal = dict(internal or {})
@@ -894,7 +1053,6 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     workspace_root, workspace_mode, parent_workspace, folder_error = _child_workspace(ctx, metadata, params)
     if folder_error:
         return folder_error
-    tid = uuid.uuid4().hex[:8]
     parent_project_id = str(getattr(ctx, "project_id", "") or "").strip()
     requested_surface = str(params.get("write_surface") or "").strip().lower()
     # The explicit read-only alias selects the same authority as omission.
@@ -915,6 +1073,12 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
                 "selected write root for this surface in the inherited capability ceiling."
             )
     resource_intent = _schedule_resource_intent(ctx, metadata, workspace_root)
+    tid, claim_refusal = _claim_child_id(ctx, claim, status_drive_root, {  # before any file the id keys
+        "parent_task_id": parent_task_id or None, **({"root_task_id": root_task_id_seed} if root_task_id_seed else {}),
+        "delegation_role": "subagent", "role": role, "chat_id": current_chat_id, "description": objective,
+        "configured_subagent": configured_subagent, "parent_cognitive_route": parent_cognitive_route})
+    if claim_refusal:
+        return claim_refusal
     named = (fields, (tid, status_drive_root, resource_intent), requested_executor == "harness")
     effective_write_root, caller_profile, task_constraint = _child_constraint(
         ctx, params, requested_surface, (workspace_root, workspace_mode), metadata, named)
@@ -939,6 +1103,10 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     # Dispatch resolves the exact actor later; scheduling records requested intent.
     created_at = utc_now_iso()
     root_task_id = root_task_id_seed or tid
+    own, own_refusal = _own_staging(ctx, status_drive_root, tid)  # its release removes only what this made, if empty
+    if own_refusal:
+        return own_refusal
+    claim.update(staged=True, own=own)
     child_drive, _drive_err = _prepare_child_drive(
         tid, status_drive_root, memory_mode, parent_project_id)
     if _drive_err:
@@ -951,8 +1119,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
             parent_contract, child_drive or status_drive_root, tid, owner_drive=Path(ctx.drive_root),
             owner_task_id=parent_task_id, custody_drive=canonical_data_root(ctx), selected=fields.get("attachment_paths"),
             declared=fields.get("input_sources") == "declared")
-    if attachment_error or input_error:
-        shutil.rmtree(task_state_dir(status_drive_root, tid), ignore_errors=True)
+    if attachment_error or input_error:  # its folders: settled by the claim's gated release (``_release_unsent_child``)
         return f"⚠️ SUBTASK_ATTACHMENT_ERROR: {attachment_error}" if attachment_error else input_error
 
     # C3.1: propagate and narrow the parent's typed delegation intent.
@@ -1034,6 +1201,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "type": "schedule_subagent",
         "description": objective,
         "task_id": tid,
+        "request_token": claim["token"],  # the claim's: admission proves its row is this request's
         "depth": new_depth,
         "ts": utc_now_iso(),
         "write_surface": requested_surface,
@@ -1048,11 +1216,14 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         workspace_root=workspace_root, workspace_mode=workspace_mode,
         executor_ref=executor_ref, context=context, parent_task_id=parent_task_id,
     )
+    completed = {"token": claim["token"], "phase": "requested"}
     try:
-        write_task_result(
+        stored = write_task_result(
             status_drive_root,
             tid,
             STATUS_REQUESTED,
+            _field_projector=finish_request(claim["token"]),  # only onto its own claimed row: a Stop's stands
+            request_claim=completed,
             created_at=created_at,
             requested_by=_request_origin(ctx),
             parent_task_id=parent_task_id or None,
@@ -1071,15 +1242,13 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         )
     except Exception:
         log.warning("Failed to persist requested task status for %s", tid, exc_info=True)
-        try:
-            from ouroboros.task_store import delete_document
-            delete_document(status_drive_root, tid)
-        except Exception:
-            pass
-        if child_drive is not None:
-            shutil.rmtree(child_drive, ignore_errors=True)
+        # Its drive and row are settled by the claim's gated release, only while the row is still this request's.
         return _publish_scheduling_refusal(ctx, "error", "TOOL_ERROR", f"⚠️ SUBTASK_STATUS_ERROR: failed to persist requested status for {tid}; subagent was not scheduled.")
-
+    if stored.get("request_claim") != completed or stored.get("status") != STATUS_REQUESTED:
+        return _publish_scheduling_refusal(ctx, "error", "TOOL_ERROR", (
+            f"⚠️ SUBTASK_STATUS_ERROR: the record of task {tid} ended or changed while its request was prepared "
+            f"(status: {stored.get('status') or 'absent'}); the subagent was not scheduled."))
+    claim["sent"] = True  # from the emission on, the event may arrive: the claim is the request's now
     return _finalize_schedule_emission(ctx, {
         "task_ids": [tid],
         "requested_model_lane": requested_model_lane,

@@ -756,11 +756,21 @@ def native_selection_block(rows: Any) -> str:
 
 def _retained_root(ctx: Any, folder: str) -> pathlib.Path:
     """This task's canonical retained home for one selection (``review_source_closure``'s snapshot pattern)."""
+    return _retained_address(ctx, folder, create=True)
+
+
+def _retained_address(ctx: Any, folder: str, *, create: bool = False) -> pathlib.Path:
     from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
     from ouroboros.tool_access import canonical_data_root
 
-    return (task_artifact_dir_path(canonical_data_root(ctx), task_id_for_artifacts(ctx), create=True)
+    return (task_artifact_dir_path(canonical_data_root(ctx), task_id_for_artifacts(ctx), create=create)
             / "source_handles" / CONTAINER / folder)
+
+
+def scheduled_inputs_root(ctx: Any, child_task_id: str) -> pathlib.Path:
+    """Where ``schedule_selected_inputs`` retains a child's selection, named without making it: a retained home
+    stays after a refusal, so an id that keys one is never claimed again."""
+    return _retained_address(ctx, f"scheduled-{child_task_id}")
 
 
 def _owned_container(base: pathlib.Path) -> pathlib.Path:

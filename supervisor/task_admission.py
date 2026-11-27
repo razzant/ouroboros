@@ -4,6 +4,8 @@ Ingress ids are guarded by token-owned reservations: ``reserve_task_admission``
 runs before the caller creates drives, attachments or workspace artifacts, a
 different token on a live id is refused as ``duplicate_task_id``, and only the
 owning token can release it. A retry cannot therefore create a second task.
+A helper's row and event carry its request token: another request's row under the
+id is refused loudly at the event's first step (``foreign_request_row``).
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from ouroboros.task_results import (
     write_task_result,
 )
 from ouroboros.store import StoreError, acquisition_budget
+from ouroboros.task_id_claims import same_request
 
 log = logging.getLogger(__name__)
 
@@ -606,6 +609,9 @@ def commit_dispatch_marks(task: dict, projections: list) -> Optional[bool]:
                 return None
             fields.update(projected)
         refused[0] = False
+        token = task.get("_admission_owner_token")  # this write may make the task's first row: it names the
+        if token and not current.get("_admission_owner_token"):  # admission whose receipt then lands on it (#4317)
+            fields["_admission_owner_token"] = token
         return fields
 
     try:
@@ -968,13 +974,20 @@ def persist_never_admitted_refusal(
     is required even if a writer raises after replacement. A token's own row is
     its emitted promote stub, the requested child its claim marks (or, before
     that marker, its reservation holds), or its own SCHEDULED receipt that was
-    never put (``own_unput_receipt``); any other row keeps its owner.
+    never put (``own_unput_receipt``); any other row keeps its owner. ``_only_if``
+    narrows this to rows it accepts, absence included, rechecked in the write;
+    ``_guard`` (a context manager factory, never one that takes Q) is held around
+    the store reads and the write, after the custody check under Q.
     """
+    import contextlib
+
     from supervisor import queue
     from ouroboros.routing_wait import is_own_admission_stub
 
     # The transition id of this admission's own SCHEDULED receipt whose put was refused (inline path).
     put_refused = str(fields.pop("_admission_receipt", "") or "")
+    only_if = fields.pop("_only_if", None)
+    guard = fields.pop("_guard", None) or contextlib.nullcontext
     receipt = str(fields.get("_admission_refusal_token") or "") if admission_token else ""
     receipt = receipt or uuid.uuid4().hex
     with queue._queue_lock:
@@ -984,6 +997,8 @@ def persist_never_admitted_refusal(
             raise RuntimeError("Refusal settlement lost task-id ownership; resources retained")
 
     def own(current: Dict[str, Any]) -> bool:
+        if only_if is not None and not only_if(current):
+            return False
         claim = fields.get(WORKSPACE_PREPARATION_FIELD)
         own_claim = bool(admission_token and isinstance(claim, dict) and claim.get("token") == admission_token
                          and (own_requested_child(current, admission_token, reservation)
@@ -1002,29 +1017,31 @@ def persist_never_admitted_refusal(
             incoming = {**incoming, "delegation_admission": {**admission, "status": "never_admitted"}}
         return incoming
 
-    with acquisition_budget(0):
+    with guard(), acquisition_budget(0):
         current = load_task_result(pathlib.Path(drive_root), task_id, strict=True) or {}
         recorded_claim = current.get(WORKSPACE_PREPARATION_FIELD)
-        if (admission_token and current.get("status") == STATUS_FAILED
-                and current.get("_admission_refusal_token") == receipt
-                and isinstance(recorded_claim, dict) and recorded_claim.get("token") == admission_token):
-            queue.release_task_admission(task_id, admission_token)
-            return current  # this same refusal committed before its contended readback
-        if not own(current):
-            raise RuntimeError("Refusal settlement found an existing result owner; resources retained")
-        try:
-            write_task_result(pathlib.Path(drive_root), task_id, STATUS_FAILED, _field_projector=project,
-                              **{**fields, "admission_outcome": "never_admitted",
-                                 "_admission_refusal_token": receipt, "strict_existing_dict": True})
-        except Exception as exc:
-            from supervisor.workspace_preparation import store_contention
-            if store_contention(exc):
-                raise
-            log.warning("Refusal write raised for %s; checking its exact receipt", task_id, exc_info=True)
-        stored = load_task_result(pathlib.Path(drive_root), task_id, strict=True) or {}
-        if stored.get("_admission_refusal_token") != receipt or stored.get("status") != STATUS_FAILED:
-            raise RuntimeError("Refusal persistence unconfirmed; resources retained")
-    queue.release_task_admission(task_id, admission_token)
+        same_owner = ((isinstance(recorded_claim, dict) and recorded_claim.get("token") == admission_token)
+                      or current.get("_admission_owner_token") == admission_token)
+        if (admission_token and same_owner and current.get("status") == STATUS_FAILED
+                and current.get("_admission_refusal_token") == receipt):
+            stored = current  # this same refusal committed before its contended readback
+        else:
+            if not own(current):
+                raise RuntimeError("Refusal settlement found an existing result owner; resources retained")
+            owner_field = {"_admission_owner_token": admission_token} if admission_token else {}
+            try:
+                write_task_result(pathlib.Path(drive_root), task_id, STATUS_FAILED, _field_projector=project,
+                                  **{**owner_field, **fields, "admission_outcome": "never_admitted",
+                                     "_admission_refusal_token": receipt, "strict_existing_dict": True})
+            except Exception as exc:
+                from supervisor.workspace_preparation import store_contention
+                if store_contention(exc):
+                    raise
+                log.warning("Refusal write raised for %s; checking its exact receipt", task_id, exc_info=True)
+            stored = load_task_result(pathlib.Path(drive_root), task_id, strict=True) or {}
+            if stored.get("_admission_refusal_token") != receipt or stored.get("status") != STATUS_FAILED:
+                raise RuntimeError("Refusal persistence unconfirmed; resources retained")
+    queue.release_task_admission(task_id, admission_token)  # memory only, after the guard
     return stored
 
 
@@ -1205,7 +1222,33 @@ def subagent_schedule_preflight(
     tid = str(evt.get("task_id") or "").strip()
     if not tid:
         return False
+    label = "Subagent" if delegation_role == "subagent" else "Task"
+
+    def refuse(detail: str, reason_code: str) -> bool:  # the notice alone: the row under the id stays as it is
+        from supervisor.events import _reject_schedule_task
+
+        _reject_schedule_task(
+            ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
+            parent_id=evt.get("parent_task_id"),
+            root_task_id=str(evt.get("root_task_id") or evt.get("parent_task_id") or tid),
+            role=str(evt.get("role") or "").strip(),
+            result_fields={key: evt[key] for key in ("configured_subagent", "parent_cognitive_route") if key in evt},
+            detail=detail, reason_code=reason_code, persist_result=False,
+        )
+        return True
+
     try:
+        if not admission_token and delegation_role == "subagent":
+            # Whose request this is, asked once at the event's first step from the one read that also decides the
+            # custody below (a claim's lane asks before its first marker).
+            with acquisition_budget(0):
+                current = load_task_result(ctx.DRIVE_ROOT, tid, strict=True) or {}
+            if current and not same_request(current, str(evt.get("request_token") or "")):
+                return refuse(f"{label} not scheduled: {TASK_ID_TAKEN}", "task_id_taken")
+            from supervisor import queue
+
+            with queue._queue_lock:
+                return queue_owned_elsewhere(ctx, tid, current)
         # A claim names its token; the historical call shape stays for every other caller.
         return subagent_schedule_owned(
             ctx, tid, **({"admission_token": admission_token} if admission_token else {}))
@@ -1213,22 +1256,27 @@ def subagent_schedule_preflight(
         from supervisor.workspace_preparation import store_contention
         if (admission_token or defer_contention) and store_contention(exc):
             raise  # the existing preparation owner waits only after Q unwinds
-        from supervisor.events import _reject_schedule_task
+        return refuse(f"{label} not scheduled: the existing durable result for this task id "
+                      "is unreadable, so its identity authority was preserved.", "scheduled_result_authority_unknown")
 
-        label = "Subagent" if delegation_role == "subagent" else "Task"
-        _reject_schedule_task(
-            ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
-            parent_id=evt.get("parent_task_id"),
-            root_task_id=str(evt.get("root_task_id") or evt.get("parent_task_id") or tid),
-            role=str(evt.get("role") or "").strip(),
-            result_fields={key: evt[key] for key in ("configured_subagent", "parent_cognitive_route") if key in evt},
-            detail=(
-                f"{label} not scheduled: the existing durable result for this task id "
-                "is unreadable, so its identity authority was preserved."
-            ),
-            reason_code="scheduled_result_authority_unknown", persist_result=False,
-        )
-        return True
+
+TASK_ID_TAKEN = ("its task id is held by another request's record, which was left unchanged; "
+                 "nothing was admitted under that id.")
+
+
+def foreign_request_row(ctx: Any, task_id: str, request: Any) -> bool:
+    """Whether the row under TASK_ID is another request's than ``request``, the helper event's token ("" for an
+    older helper's event, which only an older helper's row answers: ``task_id_claims.same_request``). Read at zero
+    wait: contention propagates; an unreadable row is no proof of another's, and the next step reports it."""
+    try:
+        with acquisition_budget(0):
+            current = load_task_result(ctx.DRIVE_ROOT, str(task_id), strict=True) or {}
+    except (OSError, ValueError, StoreError) as exc:
+        from supervisor.workspace_preparation import store_contention
+        if store_contention(exc):
+            raise
+        return False
+    return bool(current) and not same_request(current, str(request or ""))
 
 
 def enqueue_subagent_with_scheduled_result(
@@ -1435,8 +1483,12 @@ def reserve_task_admission(
     require_worker_pool: bool = False,
     drive_root: Any = None,
     worker_pool: Any = None,
+    stored_check: bool = True,
+    hold: bool = True,
 ) -> Dict[str, Any]:
-    """Atomically reserve one fresh user-ingress id before side effects."""
+    """Atomically reserve one fresh user-ingress id before side effects. ``stored_check=False``: the caller's
+    decisive store claim follows outside Q (the task API's), so only memory and the pool answer. ``hold=False``
+    asks without reserving (``available``)."""
     from supervisor import queue
 
     tid = str(task_id or "").strip()
@@ -1449,33 +1501,34 @@ def reserve_task_admission(
             if reserved == token:
                 return {"status": "already_reserved", "reason": ""}
             return {"status": "blocked", "reason": "duplicate_task_id"}
-        # A confirmed admission remains replayable while its task is still live.
-        # Only the durable token proves this is that same admission.
-        try:
-            from ouroboros.task_results import load_task_result
+        if stored_check:
+            # A confirmed admission remains replayable while its task is still live.
+            # Only the durable token proves this is that same admission.
+            try:
+                from ouroboros.task_results import load_task_result
 
-            existing = load_task_result(
-                pathlib.Path(drive_root or queue.DRIVE_ROOT), tid, strict=True,
-            ) or {}
-        except Exception:
-            return {"status": "blocked", "reason": "task_id_lookup_failed"}
-        from ouroboros.routing_wait import is_own_admission_stub
+                existing = load_task_result(
+                    pathlib.Path(drive_root or queue.DRIVE_ROOT), tid, strict=True,
+                ) or {}
+            except Exception:
+                return {"status": "blocked", "reason": "task_id_lookup_failed"}
+            from ouroboros.routing_wait import is_own_admission_stub
 
-        if existing and not is_own_admission_stub(existing, token):
-            # The emitted stub of THIS admission is its own pre-receipt (#1160), not
-            # another task owning the id: the request it belongs to still reserves.
-            admission = existing.get("promotion_admission")
-            if (
-                isinstance(admission, dict)
-                and str(admission.get("routing_token") or "") == token
-            ):
-                return {
-                    "status": "existing_same_token",
-                    "reason": "",
-                    "task_status": str(existing.get("status") or ""),
-                    "promotion_admission": dict(admission),
-                }
-            return {"status": "blocked", "reason": "duplicate_task_id"}
+            if existing and not is_own_admission_stub(existing, token):
+                # The emitted stub of THIS admission is its own pre-receipt (#1160), not
+                # another task owning the id: the request it belongs to still reserves.
+                admission = existing.get("promotion_admission")
+                if (
+                    isinstance(admission, dict)
+                    and str(admission.get("routing_token") or "") == token
+                ):
+                    return {
+                        "status": "existing_same_token",
+                        "reason": "",
+                        "task_status": str(existing.get("status") or ""),
+                        "promotion_admission": dict(admission),
+                    }
+                return {"status": "blocked", "reason": "duplicate_task_id"}
         if tid in queue.RUNNING or any(
             isinstance(row, dict) and str(row.get("id") or "") == tid
             for row in queue.PENDING
@@ -1494,6 +1547,8 @@ def reserve_task_admission(
                     "reason": "worker_pool_unavailable",
                     "worker_pool_disabled_reason": pool_state["disabled_reason"],
                 }
+        if not hold:
+            return {"status": "available", "reason": ""}
         queue.ADMISSION_RESERVATIONS[tid] = token
         return {"status": "reserved", "reason": ""}
 

@@ -39,14 +39,19 @@ periodic reconcile pass) settles ``queued``/``copying``/``ready`` as never admit
 only once the recorded owner positively ended; ``admitting`` on a REQUESTED row
 (no receipt) or unreadable authority stays unresolved on the existing
 ``unknowns`` carrier, never inferred unsent from an absent queue row. A SCHEDULED
-receipt still ``admitting`` whose owner ended and which the restored queue does
-not hold was never put (every put is preceded by a published locator snapshot
-naming the row), so it is refused never admitted once the saved queue is in this
-process's custody; ``admitted`` and absent is a gap on ``unknowns``. A REQUESTED
-row without any marker (its event died with its bus) is refused never admitted
-once the stamped producer and bus owner both provably ended, or, for a row that
-predates the stamp, once its parent is terminal; otherwise it stays held
-(``requested_by``: ``ouroboros/tools/control_scheduling.py``). Disposal is exact:
+receipt still ``admitting`` whose owner ended was never put (every put is preceded
+by a published locator snapshot naming the row) only once the saved queue in this
+process's custody, read whole, names no row of it (``_never_put``); then it is
+refused never admitted, else it stays there with its copy; ``admitted`` and absent
+is a gap on ``unknowns``. Before the
+first marker the lane refuses aloud a row another request holds. A REQUESTED row
+without a marker is refused never admitted once its request cannot arrive: an id
+claim whose producer ended or whose parent is terminal before it completed, a
+request whose producer and bus owner both ended, a row predating the stamp whose
+parent is terminal; otherwise it stays held (``requested_by``, ``request_claim``:
+``ouroboros/tools/control_scheduling.py``). A row a Stop is pending on is left to
+that Stop's custody. A recovery never recreates a row, nor announces a refusal
+for one retired or moved since it was judged. Disposal is exact:
 only the recorded handle of this token, only after its refusal receipt and the
 copy's return; anything else stays registered residue for the existing worktree
 retention. Recovery never re-copies or dispatches.
@@ -55,6 +60,7 @@ retention. Recovery never re-copies or dispatches.
 from __future__ import annotations
 
 import collections
+import contextlib
 import copy
 import functools
 import logging
@@ -66,6 +72,7 @@ import uuid
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional
 
+from ouroboros.task_id_claims import REQUEST_CLAIM, request_token_of, same_request
 from ouroboros.task_results import STATUS_REQUESTED, STATUS_SCHEDULED, load_task_result, write_task_result
 from ouroboros.store import StoreBusy
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE
@@ -82,9 +89,9 @@ INTERRUPTED_BY_RESTART = "preparation_interrupted_by_restart"
 INTERRUPTED_BY_GENERATION_EXIT = "preparation_interrupted_by_generation_exit"
 EXECUTOR_UNAVAILABLE = "preparation_executor_unavailable"
 ADMISSION_UNCERTAIN = "workspace_preparation_admission_uncertain"
-# A request whose event died with the bus that carried it, or whose parent ended first (no marker).
-REQUEST_LOST = "request_lost_with_server"
-REQUEST_ORPHANED = "request_orphaned_by_parent"
+# A request whose event died with the bus that carried it, or whose parent ended first (no marker); a claimed id
+# whose producer ended before it completed and sent the request.
+REQUEST_LOST, REQUEST_ORPHANED, REQUEST_UNSENT = "request_lost_with_server", "request_orphaned_by_parent", "request_unsent"
 _RESOURCE_KEYS = ("surface", "path", "branch", "created_at", "base_sha")
 _DETAILS = {
     MARKER_UNWRITABLE: ("Subagent not scheduled: its workspace preparation could not record its progress "
@@ -100,6 +107,8 @@ _DETAILS = {
                    "it was never admitted and is not retried automatically."),
     REQUEST_ORPHANED: ("Subagent not scheduled: its request was never admitted and its parent task has ended; "
                        "it is not retried automatically."),
+    REQUEST_UNSENT: ("Subagent not scheduled: the task that requested it stopped before sending the request; "
+                     "it was never admitted and is not retried automatically."),
 }
 _AUTHORITY_UNKNOWN = ("Subagent not scheduled: its durable result is unreadable, so its preparation was not "
                       "started and the existing authority was preserved.")
@@ -403,6 +412,13 @@ def _run(claim: "PreparationClaim", *, admission: Optional[Callable] = None) -> 
     from supervisor.events_schedule_task import _handle_schedule_task
 
     def step() -> None:
+        from supervisor.task_admission import TASK_ID_TAKEN, foreign_request_row
+
+        # Whose request this is, asked once before this lane's first effect: another request's row is refused aloud.
+        if claim.store_gate(functools.partial(
+                foreign_request_row, claim.ctx, claim.task_id, claim.event.get("request_token"))):
+            claim.refuse(f"Subagent not scheduled: {TASK_ID_TAKEN}", "task_id_taken", disclose_only=True)
+            return
         landed = claim.store_gate(functools.partial(
             _transition, claim.ctx.DRIVE_ROOT, claim.task_id, claim.token, claim.queued_marker, expected=None))
         if landed is not True:
@@ -547,6 +563,7 @@ class PreparationClaim:
 
         route = self.route
         root_task_id = str(route.get("root_task_id") or self.task_id)
+        recovered, stop = self.generation is None, {}  # an ended owner's custody yields to a Stop pending on its row
         return _reject_schedule_task(
             self.ctx, tid=self.task_id, chat_id=route.get("chat_id"),
             delegation_role=str(route.get("delegation_role") or "subagent"), parent_id=route.get("parent_id"),
@@ -556,7 +573,19 @@ class PreparationClaim:
                            **{key: self.event[key] for key in ("configured_subagent", "parent_cognitive_route")
                               if key in self.event}},
             detail=detail, reason_code=reason_code, extra_fields=extra_fields,
-            persist_result=persist_result and not disclose_only, preparation=None if disclose_only else self)
+            persist_result=persist_result and not disclose_only, preparation=None if disclose_only else self,
+            only_if=functools.partial(self._refusable, stop=stop if recovered else None),
+            guard=_stop_interlock(self.ctx.DRIVE_ROOT, self.task_id, stop) if recovered else None,
+            announce_turned_away=not recovered)
+
+    def _refusable(self, row: Dict[str, Any], stop: Optional[Dict[str, bool]] = None) -> bool:
+        """The rows this claim's refusal may write: a recovered claim (no generation) only one that is there and
+        no Stop is pending on (STOP, read with the write under ``_stop_interlock``), never one released meanwhile;
+        a live one also none yet, its marked row, or its request's, never another's."""
+        if self.generation is None:
+            return bool(row) and (stop or {}).get("pending") is False
+        marker = row.get(MARKER) if isinstance(row.get(MARKER), dict) else {}
+        return not row or marker.get("token") == self.token or same_request(row, self.event.get("request_token"))
 
     def disclose_unknown(self) -> None:
         """Unreadable authority before any claim: the existing notice only, nothing reserved or written."""
@@ -903,13 +932,17 @@ def _recover_one(root: pathlib.Path, row: Dict[str, Any], marker: Dict[str, Any]
             queued = meta.get("task") if isinstance(meta.get("task"), dict) else {"id": tid}
     if reserved and reserved != token:
         return "live"
+    from ouroboros.cancel_intents import has_active_intent
+
+    if has_active_intent(root, tid, strict=True):  # a pending Stop settles this row through its custody
+        return "live"
     phase, status = str(marker.get("phase") or ""), str(row.get("status") or "")
     if queued is not None:
         if phase == ADMITTING and str(queued.get("_admission_owner_token") or "") == token:
             _transition(root, tid, token, {**marker, "phase": ADMITTED, "updated_at": utc_now_iso(),
                                            "retired_by": "recovery"}, expected=(ADMITTING,), status=status)
         return "admitted"  # the queue owns admitted work
-    if phase in UNSENT_PHASES or _never_put(status, phase):
+    if phase in UNSENT_PHASES or _never_put(row, marker):
         reason = _interruption_reason(marker)
         confirmed = PreparationClaim.recovered(root, row, marker).refuse(_DETAILS[reason], reason)
         return "settled" if confirmed else "retained"
@@ -918,14 +951,30 @@ def _recover_one(root: pathlib.Path, row: Dict[str, Any], marker: Dict[str, Any]
     return "uncertain"
 
 
-def _never_put(status: str, phase: str) -> bool:
-    """A SCHEDULED receipt still ``admitting`` that the restored queue does not hold: every queue put is
-    preceded by a published locator snapshot naming the row, so once this process took the saved
-    queue into custody and found no row, the put was never entered. An unrestored saved queue proves
-    nothing (the row may be waiting in it)."""
-    from supervisor.queue_snapshot import saved_queue_unowned
+def _never_put(row: Dict[str, Any], marker: Dict[str, Any]) -> bool:
+    """A SCHEDULED receipt still ``admitting`` that memory (the caller's read under Q) and the saved queue a
+    restart would boot both lack: every put is preceded by a published locator snapshot naming the row. That queue
+    must be in this process's custody (``saved_queue_unowned``) and read whole now, naming no row of it: one that
+    names it (a barrier wrote it, then its confirmation failed) or cannot be read leaves it unknown. Work an earlier
+    process admitted also needs the queue this one found read whole at its restore (``queue_snapshot._RESTORED``):
+    one it could not read may have held, even launched, that row. A missing snapshot proves no queue was saved."""
+    from ouroboros.queue_observation import load_queue_document
+    from supervisor import queue
+    from supervisor.queue_snapshot import _RESTORED, saved_queue_unowned
 
-    return status == STATUS_SCHEDULED and phase == ADMITTING and not saved_queue_unowned()
+    if (str(row.get("status") or "") != STATUS_SCHEDULED or str(marker.get("phase") or "") != ADMITTING
+            or saved_queue_unowned()):
+        return False
+    saved = load_queue_document(queue.DRIVE_ROOT, fresh=True)
+    if saved.get("_snapshot_missing"):
+        return True
+    lanes, tid = [saved.get(lane) for lane in ("pending", "running")], str(row.get("task_id") or "")
+    if saved.get("_snapshot_invalid") or not all(isinstance(lane, list) for lane in lanes) or any(
+            not isinstance(item, dict) or str(item.get("id") or "") == tid for lane in lanes for item in lane):
+        return False
+    owner, here = marker.get("owner") if isinstance(marker.get("owner"), dict) else {}, _process_owner()
+    return ((owner.get("pid"), owner.get("birth")) == (here["pid"], here["birth"])
+            or str(pathlib.Path(queue.QUEUE_SNAPSHOT_PATH).absolute()) in _RESTORED)
 
 
 def _recover_unmarked(root: pathlib.Path, row: Dict[str, Any]) -> str:
@@ -934,6 +983,8 @@ def _recover_unmarked(root: pathlib.Path, row: Dict[str, Any]) -> str:
     from supervisor.events_schedule_task import _reject_schedule_task
 
     tid = str(row.get("task_id") or "")
+    if row.get("delegation_role") != "subagent":
+        return "live"  # another protocol's REQUESTED row (an intent, an API task): never this recovery's
     with _STATE_LOCK:
         claimed = any(claim.task_id == tid for claim in _LIVE.values())
     with queue._queue_lock:
@@ -942,30 +993,72 @@ def _recover_unmarked(root: pathlib.Path, row: Dict[str, Any]) -> str:
     if held:
         return "live"
     reason = _request_ended(root, row)
-    if not reason:
+    from ouroboros.cancel_intents import has_active_intent
+
+    if not reason or has_active_intent(root, tid, strict=True):  # a pending Stop settles this row through its custody
         return "live"
     claim = PreparationClaim.recovered(root, row, {})
     route = claim.route
+    token, phase = request_token_of(row), _claim_phase(row)
+    stop: Dict[str, bool] = {}
+
+    def unchanged(current: Dict[str, Any]) -> bool:  # the row this pass judged, still REQUESTED, unmarked, unstopped
+        return (str(current.get("status") or "") == STATUS_REQUESTED and MARKER not in current
+                and request_token_of(current) == token and _claim_phase(current) == phase
+                and stop.get("pending") is False)
+
     confirmed = _reject_schedule_task(
         claim.ctx, tid=tid, chat_id=route.get("chat_id"), delegation_role="subagent",
         parent_id=route.get("parent_id"), root_task_id=route["root_task_id"], role=route["role"],
         result_fields={"parent_task_id": route.get("parent_id"), "root_task_id": route["root_task_id"],
                        "delegation_role": "subagent", "role": route["role"], **claim.event},
-        detail=_DETAILS[reason], reason_code=reason, extra_fields={"admission_outcome": "never_admitted"})
+        detail=_DETAILS[reason], reason_code=reason, extra_fields={"admission_outcome": "never_admitted"},
+        # An unsent claim records no drive: only its producer knew the folder it made (``make_own_folders``), so
+        # recovery removes none of it (that producer may still be staging, or ended before making it).
+        only_if=unchanged, keep_files=phase == "claimed", announce_turned_away=False,  # a row retired or sent
+        guard=_stop_interlock(root, tid, stop))  # meanwhile was refused by nobody
     return "settled" if confirmed else "retained"
 
 
+def _stop_interlock(root: Any, tid: str, stop: Dict[str, bool]) -> Callable[[], Any]:
+    """A recovery refusal's guard: its reads and write under the lock every Stop records its intent under, with
+    STOP["pending"] read there (an unreadable Stop authority may hold one, so it reads as pending). No file is
+    touched under it: a refusal's cleanup runs after its receipt (``PreparationClaim.after_refusal``)."""
+    from ouroboros.cancel_intents import cancellation_projection_lock, has_active_intent
+
+    @contextlib.contextmanager
+    def interlock():
+        with cancellation_projection_lock(root):
+            try:
+                stop["pending"] = has_active_intent(root, tid, strict=True)
+            except Exception:
+                stop["pending"] = True
+            yield
+
+    return interlock
+
+
+def _claim_phase(row: Dict[str, Any]) -> Optional[str]:
+    claim = row.get(REQUEST_CLAIM)
+    return str(claim.get("phase") or "") if isinstance(claim, dict) else None
+
+
 def _request_ended(root: pathlib.Path, row: Dict[str, Any]) -> str:
-    """Why the request can no longer arrive: its stamped producer and bus owner both ended
-    (``requested_by``), or, for a row that predates the stamp, its parent is terminal; else ''."""
+    """Why the request can no longer arrive, else ''. A claimed id its producer never completed into a request
+    (``request_claim`` phase ``claimed``; only that producer sends it) once that producer ended or its parent task
+    is terminal, whose refusal the producer's final write then meets. A complete request once its producer and bus
+    owner both ended (``requested_by``). A row that predates the stamp, once its parent is terminal."""
     from ouroboros.local_custody_repair import owner_ended
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
 
     stamp = row.get("requested_by") if isinstance(row.get("requested_by"), dict) else None
     if stamp is not None:
-        ended = (owner_ended(stamp.get("pid"), stamp.get("birth"))
-                 and owner_ended(stamp.get("host_pid"), stamp.get("host_birth")))
-        return REQUEST_LOST if ended else ""
+        producer_ended = owner_ended(stamp.get("pid"), stamp.get("birth"))
+        if _claim_phase(row) != "claimed":
+            ended = producer_ended and owner_ended(stamp.get("host_pid"), stamp.get("host_birth"))
+            return REQUEST_LOST if ended else ""
+        if producer_ended:
+            return REQUEST_UNSENT
     parent = str(row.get("parent_task_id") or "")
     if not parent:
         return ""

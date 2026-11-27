@@ -566,11 +566,11 @@ def _peek_task(ctx: ToolContext, task_id: str, view: str = "summary") -> str:
     v = str(view or "summary").strip().lower()
     status_drive_root = _status_drive_root(ctx)
     if _is_delegated_task(ctx) and not _is_own_child(ctx, status_drive_root, tid):
-        return (
-            _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(f"⚠️ peek_task: {tid} is not a child of this task — a delegated task "
-            "may inspect only its own children.")))
-        )
-    data = load_effective_task_result(status_drive_root, tid) or {}
+        return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
+            f"⚠️ peek_task: {tid} is not a child of this task — a delegated task may inspect only its own children.")))
+    from ouroboros.task_id_claims import public_row  # a helper's claim still being prepared is no task yet
+
+    data = public_row(load_effective_task_result(status_drive_root, tid)) or {}
     status = str(data.get("status") or "unknown")
     # SSOT cost projection (C2): a missing/unknown cost says "unknown", never a
     # confident $0.00, and an open amount is labelled as the upper bound it is.

@@ -37,8 +37,16 @@ def promotion_intent_notice(task_id: str, result: dict) -> str:
             "elapsed time alone cannot prove this work was not started. A new start_task creates a NEW task id.")
 
 
-def prepare_promotion_intent(root: Any, event: dict) -> dict:
-    """Commit the complete replayable event before any emission; fail closed."""
+def own_intent(token: str) -> Any:
+    """Whether a stored row is the intent of routing TOKEN (the predicate of its claim and its release)."""
+    return lambda row: isinstance(row.get("promotion_admission"), dict) and row["promotion_admission"].get(
+        "routing_token") == token
+
+
+def prepare_promotion_intent(root: Any, event: dict, *, strict: bool = False) -> dict:
+    """Commit the complete replayable event before any emission; fail closed. ``strict`` (``claim_new_start``) makes
+    the write a strict claim of the id: only this routing token's own row replays, unchanged; another record under
+    the id raises ``task_id_claims.TaskIdTaken`` with nothing written."""
     from ouroboros.dialogue_provenance import presence_root_carrier, presence_root_relation
 
     intent = json.loads(json.dumps(event, ensure_ascii=False, allow_nan=False))
@@ -50,6 +58,7 @@ def prepare_promotion_intent(root: Any, event: dict) -> dict:
     relation = {} if carrier else presence_root_relation(intent)
     stored = write_task_result(
         root, tid, "requested", create_only=True, strict_existing_dict=True,
+        **({"claim": own_intent(token)} if strict else {}),
         project_id=str(intent.get("project_id") or ""), description=str(intent.get("objective") or ""),
         expected_output=str(intent.get("expected_output") or ""), suggested_name=str(intent.get("title") or ""),
         promotion_intent=intent,
@@ -65,6 +74,31 @@ def prepare_promotion_intent(root: Any, event: dict) -> dict:
     event.clear()
     event.update(saved)  # An explicit transport retry emits the original timestamp too.
     return stored
+
+
+def claim_new_start(root: Any, event: dict) -> dict:
+    """The one acquisition of ``start_task``'s id and its one intent write before emission: a fresh 16-hex id
+    claimed by ``prepare_promotion_intent(strict=True)`` (``task_id_claims.claim_id``), minted again only on a
+    proven occupancy, before anything is staged or emitted. The event names the id it owns; the returned row holds
+    the saved intent, which the emission sends exactly (``control_events.SAVED_INTENT``). An event that already
+    names an id claims that id only: its own intent replays exactly, another record refuses it (``TaskIdTaken``);
+    an unknown outcome raises ``TaskIdUnconfirmed``. Neither ever moves the start to another id."""
+    from ouroboros.task_id_claims import claim_id, release_task_claim, retained_task_paths
+
+    token, held = str(event.get("routing_token") or ""), str(event.get("task_id") or "")
+    owns = own_intent(token)
+    if held and owns(load_task_result(root, held, strict=True) or {}):
+        return prepare_promotion_intent(root, dict(event), strict=True)  # the same start, replayed exactly
+
+    def write(tid: str) -> dict:  # the one intent write before emission
+        event["task_id"], event["task_id_claimed"] = tid, True  # a refusal keeps its folders (``worker_promotion``)
+        return prepare_promotion_intent(root, dict(event), strict=True)
+
+    def unsent(row: dict) -> bool:
+        return owns(row) and row.get("status") == "requested" and row["promotion_admission"].get("phase") == "prepared"
+
+    return claim_id(held, write, lambda tid: release_task_claim(root, tid, unsent), width=16,
+                    folders=lambda tid: retained_task_paths(root, tid))[1]
 
 
 def claim_promotion_intent(root: Any, event: dict) -> None:
@@ -90,7 +124,12 @@ def claim_promotion_intent(root: Any, event: dict) -> None:
 
 
 def reconcile_promotion_intents(root: Any, *, protected: set[str]) -> dict:
-    """At boot with prior workers proved gone: settle only proven unadmitted intent."""
+    """At boot with prior workers proved gone: settle only proven unadmitted intent. An intent a Stop is pending
+    on is left to that Stop's custody, read with the write under the lock every Stop records its intent under, its
+    store wait there one short slice (``task_id_claims.stop_interlocked``: a Stop recorded meanwhile waits for the
+    write or is seen); an unreadable Stop authority defers the whole pass."""
+    from ouroboros.cancel_intents import has_active_intent
+    from ouroboros.task_id_claims import stop_interlocked
     from ouroboros.task_results import list_task_results
 
     report = {"not_started": [], "held": []}
@@ -117,7 +156,10 @@ def reconcile_promotion_intents(root: Any, *, protected: set[str]) -> dict:
                     "promotion_admission": {**actual, "status": status, "retry_available": unadmitted,
                                             "reconciled_at": utc_now_iso(), "detail": text}}
 
-        stored = write_task_result(root, tid, "requested", _field_projector=reconcile, strict_existing_dict=True)
+        stored = stop_interlocked(root, lambda: None if has_active_intent(root, tid, strict=True) else (
+            write_task_result(root, tid, "requested", _field_projector=reconcile, strict_existing_dict=True)))
+        if stored is None:  # a pending Stop's custody settles it
+            continue
         settled = (stored.get("promotion_admission") or {}).get("status")
         if settled in {"not_started", "unconfirmed"}:
             report["not_started" if settled == "not_started" else "held"].append(tid)

@@ -846,8 +846,9 @@ def export_facts(root: Any) -> Dict[str, Any]:
     with store.open_store(root, write=True, service=True) as txn:  # T1: the plan, durable before the first write
         baseline = txn.meta("baseline") or {}
         task_ids = txn.task_ids()
-        # A discharged set no longer has a SQL row naming it. Overwrite its old export with {}.
-        previous = {name for name in REGISTRATION_SETS if set_file_path(root, name).exists()}
+        # A discharged set no longer has a SQL row naming it. Overwrite its old export with {}: so too a drained set of
+        # provisional id claims (task_id_claims.ID_CLAIMS), whose old file would bring its claims back at a rebuild.
+        previous = {name for name in (*REGISTRATION_SETS, "task_id_claims") if set_file_path(root, name).exists()}
         names = sorted(set(txn.set_names()) | set(o.BOOT_SETS) | previous)
         stale = sorted(path.stem for path in task_results_dir(root, create=False).glob("*.json")
                        if path.stem not in task_ids and not (baseline.get(path.stem) or {}).get("refused"))

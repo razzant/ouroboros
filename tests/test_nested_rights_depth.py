@@ -1435,7 +1435,20 @@ def test_malformed_replay_rechecks_identity_after_initial_preflight(
             or any(str(row.get("id") or "") == tid for row in pending)
         )
 
-    monkeypatch.setattr(task_admission, "subagent_schedule_owned", raced_owned)
+    real_elsewhere = task_admission.queue_owned_elsewhere
+
+    def raced_elsewhere(ctx, task_id, current, **kwargs):  # a helper's first step asks this seam with its row
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            pending.append({"id": tid, "delegation_role": delegation_role})
+            return False
+        return real_elsewhere(ctx, task_id, current, **kwargs)
+
+    if delegation_role == "subagent":  # ``subagent_schedule_preflight`` reads a helper's row, then this under Q
+        monkeypatch.setattr(task_admission, "queue_owned_elsewhere", raced_elsewhere)
+    else:
+        monkeypatch.setattr(task_admission, "subagent_schedule_owned", raced_owned)
     enqueued = []
     ctx = _fake_ctx(tmp_path, enqueued)
     ctx.PENDING, ctx.RUNNING = pending, running

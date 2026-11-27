@@ -483,6 +483,7 @@ def write_task_result(
     _last_word: Optional[Callable[[Any, Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
     strict_existing_dict: bool = False,
     create_only: bool = False,
+    claim: Optional[Callable[[Dict[str, Any]], bool]] = None,
     _publication: Any = None,
     _terminal_observed: bool = False,
     _cancel_observed: bool = False,
@@ -501,12 +502,20 @@ def write_task_result(
     tasks in this transaction; a refusal leaves no write and no follow-up of one.
     ``strict_existing_dict`` is accepted for its callers: every stored row is a dict.
     ``create_only`` initializes only absence, before projection or timestamps.
+    ``claim`` (is CURRENT this request's own row?) makes the write a strict claim of the id in this same
+    transaction: CURRENT is absent and the id free (``task_id_claims.taken_in``) or a row ``claim`` accepts, else
+    ``TaskIdTaken`` and nothing is written; with ``create_only`` an accepted row stays as it is. That transaction
+    commits under the Stop interlock (``task_id_claims.stop_fenced``): a pending Stop of the id refuses it too.
     The body is one store transaction: the merge over CURRENT, the typed columns and
     obligation flags of the merged document, the custody and handoff riders, COMMIT.
     """
     path = f"task:{validate_task_id(task_id)}"
-    if create_only:
+    if create_only and claim is None:
         _refuse_occupied(results_drive_root, task_id, write=True)
+    if claim is not None:  # the volume is probed before the transaction: its checks only read (``taken_in``)
+        from ouroboros.task_id_claims import case_insensitive
+
+        folds = case_insensitive(results_drive_root)
     explicit_ts = str(fields.pop("ts", "") or "")
     from ouroboros.task_custody import capture_owner_mail, capture_unread_mail, merge_unread_mail
     from ouroboros.task_store import Reprepare, prepared_write
@@ -523,7 +532,14 @@ def write_task_result(
             prepared["mail"] = (capture_unread_mail(results_drive_root, task_id), capture_owner_mail(results_drive_root, task_id))
         write = partial(_publication, patch_document, wait=True) if _publication else patch_document
         return write(results_drive_root, task_id, lambda existing: _merge(existing, prepared),
-                     last_word=_judged if _last_word else None)
+                     last_word=_claimed if claim is not None else _judged if _last_word else None)
+
+    def _claimed(txn: Any, current: Dict[str, Any], document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not current:  # an absent CURRENT is free only when this transaction finds nothing else under the id
+            from ouroboros.task_id_claims import taken_in
+
+            taken_in(txn, str(task_id), folds=folds)
+        return _judged(txn, current, document) if _last_word else document
 
     def _judged(txn: Any, current: Dict[str, Any], document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         judged = _last_word(txn, current, document)
@@ -533,6 +549,10 @@ def write_task_result(
 
     def _merge(existing: Dict[str, Any], prepared: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         transition.clear()
+        if claim is not None and existing and not claim(existing):
+            from ouroboros.task_id_claims import TaskIdTaken
+
+            raise TaskIdTaken(task_id, "another_request")
         if strict_existing_dict and existing and (
             str(existing.get("task_id") or "") != str(task_id)
             or not isinstance(existing.get("status"), str)
@@ -654,7 +674,12 @@ def write_task_result(
             "updated_at": now,
         }))
 
-    stored = prepared_write(_write)
+    if claim is None:
+        stored = prepared_write(_write)
+    else:
+        from ouroboros.task_id_claims import stop_fenced
+
+        stored = stop_fenced(results_drive_root, task_id, partial(prepared_write, _write))
     if transition.get("admitted") and stored.get("project_id"):
         # The first committed admission, including a schedule receipt, opens the room once. Callers may
         # hold Q and the captured admission stays the address, so a lock-free display read only hints

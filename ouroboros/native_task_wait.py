@@ -111,6 +111,7 @@ def observe(ctx: Any, task_ids: Any) -> Tuple[Dict[str, Dict[str, Any]], Dict[st
     (``{id: why}``, each source read alone); ``contended`` is a store state for the next poll to retry
     (proven contention, an import in progress), a fact about the store and not about the task. Reads only."""
     from ouroboros.store import StoreBusy, StoreMigrating
+    from ouroboros.task_id_claims import public_row
     from ouroboros.task_status import (SETTLED_STATUSES, _load_queue_snapshot, _queue_task_status,
                                        load_effective_task_result)
     from ouroboros.tools.control_task_results import _status_root
@@ -122,7 +123,7 @@ def observe(ctx: Any, task_ids: Any) -> Tuple[Dict[str, Dict[str, Any]], Dict[st
     for task_id in map(str, task_ids):
         rows[task_id] = {}
         try:
-            row = load_effective_task_result(root, task_id, materialize_artifacts=False)
+            row = public_row(load_effective_task_result(root, task_id, materialize_artifacts=False))  # no task yet
         except Exception as exc:
             if isinstance(exc, StoreMigrating) or (isinstance(exc, StoreBusy) and exc.reason == "contention"):
                 contended = contended or exc

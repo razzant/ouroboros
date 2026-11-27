@@ -561,6 +561,8 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
             "project_lifecycle": str(admitted.get("_project_lifecycle") or ""),
             "never_admitted": bool(admitted.get("_admission_never_admitted")),
             "task_id": tid,
+            # The restart barrier's is unknown, never a refusal: the snapshot that may boot this row was not confirmed.
+            **({"admission_started": True} if admitted["_admission_blocked"] == "restart_admission_unconfirmed" else {}),
         }, attachment_manifest)
     if announce_project is not None:
         _pool()._announce_created_project(announce_project, tid, task=task)
@@ -851,3 +853,17 @@ def ensure_project_scope(evt: dict, ctx: Any) -> dict:
         _report_binding_failure(tid, pid, exc, path="ensure_project_scope")
         return {"status": "rejected", "reason": getattr(exc, "reason", "project_binding_failed"),
                 "project_id": pid, "detail": f"{type(exc).__name__}: {exc}"}
+
+
+def remove_refused_start_drive(evt: dict, drive_root: Any, task_id: str) -> None:
+    """A refused start's drive, by its id, through the one deletion owner (``headless.remove_subagent_task_drive``).
+    A start whose id ``start_task`` claimed (``promotion_intent.claim_new_start``: ``task_id_claimed``) keeps it:
+    the claim proves nothing about what a writer that claims nothing put under the same id, so its folders stay for
+    their ordinary retention. What the start staged itself goes by its own list (``remove_staged_attachments``)."""
+    if evt.get("task_id_claimed"):
+        return
+    from ouroboros.headless import remove_subagent_task_drive
+    from supervisor.queue import task_settlement_interlock, task_settlement_liveness
+
+    remove_subagent_task_drive(drive_root, task_id, live=task_settlement_liveness, guard=task_settlement_interlock,
+                               admission_rollback=True)
