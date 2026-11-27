@@ -1,0 +1,68 @@
+# Temporary verification branch only; never included in the product PR.
+name: QA harness installation
+on:
+  push:
+    branches: [qa/harness-install-discovery]
+permissions:
+  contents: read
+jobs:
+  focused:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          install-project: 'false'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.22.3'
+      - name: Program discovery, account evidence and install intent
+        shell: bash
+        run: >-
+          node --test web/tests/harness_maintenance.test.js web/tests/model_program.test.js
+          web/tests/harness_login_cards.test.js web/tests/harness_accounts.test.js web/tests/settings_accounts.test.js
+          web/tests/onboarding_agents_step.test.js web/tests/claudexor_status_store.test.js
+          web/tests/agents_tab.test.js web/tests/accounts_model_retirement.test.js
+      - name: Gateway and UI-text inventory
+        run: >-
+          python -m pytest -o addopts='' -q
+          tests/test_claudexor_owned_daemon.py tests/test_claudexor_status_freshness.py
+          tests/test_generated_inventories.py::test_ui_control_text_inventory_is_byte_identical
+          tests/test_design_system_css_static.py tests/test_available_subagents_ui_static.py tests/test_status_marks_static.py
+      - name: Install the test browsers
+        if: runner.os == 'Linux'
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/harness-install-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
+      - name: Real Settings and setup pages with synthetic engine replies
+        if: runner.os == 'Linux'
+        env:
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/harness-install-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: >-
+          python -m pytest -o addopts='' -m ui_browser -q
+          tests/test_onboarding_layout_browser.py::test_a_missing_program_installs_and_connects_from_its_row_in_the_setup_window
+          tests/test_onboarding_layout_browser.py::test_a_stopped_engine_is_asked_nothing_until_the_owner_starts_it_to_list_programs
+          tests/test_onboarding_layout_browser.py::test_an_ordinary_accounts_state_fits_the_setup_window
+          tests/test_settings_accounts_browser.py::test_a_missing_program_is_found_and_installed_from_its_head
+          tests/test_settings_accounts_browser.py::test_accounts_is_passive_and_provider_activation_is_explicit
+          tests/test_harness_maintenance_browser.py::test_missing_executable_is_one_explained_section_fact_until_a_real_fresh_read
+          tests/test_ui_smoke_playwright.py::test_ui_smoke_login_recovery_reconcile_detach_and_retry_are_explicit
+          tests/test_ui_smoke_playwright.py::test_ui_smoke_dismiss_overlapping_start_cannot_drop_a_live_job
+          tests/test_ui_smoke_playwright.py::test_ui_smoke_stale_get_cannot_overwrite_login_terminal_faces
+          tests/test_ui_smoke_playwright.py::test_ui_smoke_dismiss_overlapping_settle_never_freezes_the_card
+          --junitxml=harness-qa.xml
+      - name: Check that no addressed browser test was skipped
+        if: runner.os == 'Linux'
+        run: >-
+          python -c "import xml.etree.ElementTree as ET; cases=ET.parse('harness-qa.xml').findall('.//testcase');
+          assert cases and not any(case.find('skipped') is not None for case in cases)"
