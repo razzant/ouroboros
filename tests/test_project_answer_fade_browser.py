@@ -452,3 +452,8 @@ def test_a_rooms_edge_is_two_shared_blur_planes_under_its_tint_clearing_toward_t
         for piece in pieces:
             clears_upward = bool(re.search(r"to top|\b0deg", first(piece)))
             assert clears_upward is (name == "bottom"), (name, 'which end clears', piece)
+            # The ramp layer lies at the end that clears, the solid layer at the other: the top ramps out below the
+            # bar, the bottom ramps out above the composer, so no hard seam lands over the feed or the controls.
+            rows = [layer.split()[-1] for layer in piece["position"].split(",")]
+            ends = [1 if row == "100%" else 0 if row in ("0px", "0%") else None for row in rows]
+            assert ends == ([1, 0] if name == "top" else [0, 1]), (name, 'ramp and solid layers in place', piece)
