@@ -1296,6 +1296,90 @@ def test_update_asks_what_to_keep_and_skip_review_names_the_author(skills_browse
             skills.close(browser)
 
 
+# Every notice there is: where it stands (the sheet, the page), whether it can be seen, and whether a press at its × reaches it.
+NOTICES = """() => [...document.querySelectorAll('.toast:not(.is-hiding)')].map((toast) => {
+    const close = toast.querySelector('.toast-dismiss');
+    const r = close.getBoundingClientRect();
+    const at = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+    return { text: toast.querySelector('.toast-words').textContent,
+        where: toast.closest('#toast-stack') ? 'page' : toast.closest('dialog.skills-detail-sheet') ? 'sheet' : 'elsewhere',
+        visible: getComputedStyle(toast).visibility === 'visible', hit: close.contains(at) };
+})"""
+
+
+def _where(page):
+    return [(n["where"], n["visible"], n["hit"]) for n in page.evaluate(NOTICES)]
+
+
+@pytest.mark.parametrize("browser_name", ["chromium", "webkit"])
+@pytest.mark.parametrize("width", [1280, 390])
+def test_what_a_press_in_the_browse_sheet_answers_stands_in_the_sheet(skills_browser, browser_name, width):
+    """Install and an installed skill's Update, pressed in the detail sheet (a modal dialog: the page behind it is inert),
+    answer where they were pressed. The refusal of a name already taken is the one place the card says why; hidden until
+    the sheet closes it would be lost. A press on the board, outside any sheet, still answers on the page."""
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    skills = None
+    try:
+        page = browser.new_page(viewport={"width": width, "height": 844}, has_touch=width < 720)
+        # The notices' own six seconds are stretched: the case reads where they stand, across steps of a loaded machine.
+        page.add_init_script("(() => { const set = window.setTimeout.bind(window);"
+                             " window.setTimeout = (fn, ms, ...rest) => set(fn, ms === 6000 ? 120000 : ms, ...rest); })()")
+        skills = _open(page)
+        _tab(page, "browse")
+        sheet = page.locator("dialog.skills-detail-sheet[open]")
+        taken = (409, {"ok": False, "code": "name_taken",
+                       "error": "A skill named pdf_tools is already installed (My skills). Keep it, or replace it.",
+                       "occupant": {"name": "pdf_tools", "source": "My skills", "locations": ["user_repo"]}})
+
+        def open_sheet(item_id):
+            card = _card(page, item_id)
+            card.scroll_into_view_if_needed()
+            card.locator(".skills-card-name").click()
+            sheet.wait_for()
+
+        # Install, refused: said in the sheet, where its × is reached; the × hides it and nothing else.
+        skills.answers["/api/skill-catalog/install"] = taken
+        open_sheet("ouroboros/pdf_tools")
+        sheet.locator('[data-sheet-action="install"]').click()
+        sheet.locator(".toast", has_text="already installed (My skills)").wait_for()
+        capture(page, browser_name, width, "sheet-install-refused")
+        assert _where(page) == [("sheet", True, True)], "said in the sheet and nowhere else"
+        sheet.locator(".toast").get_by_role("button", name="Dismiss notice").click()
+        page.wait_for_function("() => !document.querySelector('.toast:not(.is-hiding)')")
+        assert sheet.count() == 1, "the × leaves the sheet open"
+        # Update of an installed skill, refused in the host's words: the same.
+        page.keyboard.press("Escape")
+        sheet.wait_for(state="detached")
+        skills.answers["/api/skills/weather/update"] = (409, {"ok": False, "code": "candidate_changed",
+            "error": "Ouroboros now offers a different release of weather; look at it again.",
+            "candidate": {"version": "0.3.3", "digest": "f" * 64}})
+        open_sheet("ouroboros/weather")
+        sheet.locator('[data-sheet-action="update"]').click()
+        sheet.locator(".toast", has_text="now offers a different release of weather").wait_for()
+        assert _where(page) == [("sheet", True, True)], "an installed skill's action answers in the sheet too"
+        # An answer that arrives after the sheet went is the page's.
+        skills.hold = {"/api/skills/weather/update"}
+        sheet.locator('[data-sheet-action="update"]').click()
+        skills.wait_for_request("/api/skills/weather/update")
+        page.keyboard.press("Escape")
+        sheet.wait_for(state="detached")
+        skills.hold.clear()
+        skills.release("/api/skills/weather/update")
+        page.locator("#toast-stack .toast", has_text="now offers a different release of weather").wait_for()
+        assert _where(page) == [("page", True, True)], "the page's, once the sheet has left"
+        page.locator("#toast-stack .toast").get_by_role("button", name="Dismiss notice").click()
+        # No sheet: the board's own press answers on the page, as before.
+        skills.answers["/api/skill-catalog/install"] = taken
+        pdf = _card(page, "ouroboros/pdf_tools")
+        pdf.scroll_into_view_if_needed()
+        pdf.locator('[data-browse-action="install"]').click()
+        page.locator("#toast-stack .toast", has_text="already installed (My skills)").wait_for()
+        assert _where(page) == [("page", True, True)]
+    finally:
+        if skills:
+            skills.close(browser)
+
+
 @pytest.mark.parametrize("browser_name", ["webkit"])
 def test_publish_destination_reaches_the_preflight_and_the_task(skills_browser, browser_name):
     browser = getattr(skills_browser, browser_name).launch(headless=True)

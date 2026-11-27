@@ -12,11 +12,14 @@
  * (DESIGN §10 "Layers and dismissal"): a press on the scrim closes it and only it, at the press's own click, so the
  * tap that dismisses reaches nothing beneath; Back gives it its Escape first (layers.js `back()`). Being modal, it
  * holds the focus (bindDialogFocus): opened by a finger the sheet itself takes it, so no keyboard rises, and Tab and
- * Shift+Tab wrap inside it, never reaching what lies under the scrim.
+ * Shift+Tab wrap inside it, never reaching what lies under the scrim. The page's notices wait behind it (toast.js), so
+ * what a Pin or a tier answers while it stays open is said in it (`modalNotice(handle.el, page)`, named at the press) and
+ * leaves with it; the desktop's floating sheet is not modal and its answers stay the page's.
  */
 import { routeKey } from './chat_model_routes.js';
 import { createModelList, modelSearchField } from './model_list.js';
 import { createTierStrip, pinDecides } from './processing_choice.js';
+import { disposeNotices } from './toast.js';
 import { bindDialogFocus } from './ui_interactions.js';
 
 let serial = 0;
@@ -98,7 +101,10 @@ export function openModelSheet({ anchor, label = 'Model', head = null, list, tie
     // A press outside closes it (the anchor's own press is its caller's: it toggles); Escape from anywhere closes it
     // (inside, the field's Escape comes first); focus leaving for the page closes it. The scrim is the sheet's own:
     // its click closes it, so a finger lifting there never lands on what lies under it.
-    const inside = (node) => sheet.contains(node) || Boolean(scrim?.contains(node)) || Boolean(anchor?.contains?.(node));
+    // A page notice beside the floating sheet is still usable: its × only hides the notice, never the sheet.
+    // The bottom sheet is modal and keeps its own trap; nothing outside it is exempt.
+    const inside = (node) => sheet.contains(node) || Boolean(scrim?.contains(node)) || Boolean(anchor?.contains?.(node))
+        || (!bottom && Boolean(node?.closest?.('.toast')));
     const onOutside = (event) => { if (!inside(event.target)) close({ focus: false }); };
     const onScrim = (event) => { event.preventDefault?.(); close({ focus: false }); };
     const onPageKey = (event) => {
@@ -122,6 +128,7 @@ export function openModelSheet({ anchor, label = 'Model', head = null, list, tie
         disposeFocus?.({ restoreFocus: false });  // the focus goes back below, once, as it does for the floating sheet
         rows.destroy();
         strip.destroy();
+        disposeNotices(sheet);
         sheet.remove();
         scrim?.remove();
         if (current === handle) current = null;

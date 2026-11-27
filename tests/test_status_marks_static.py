@@ -77,7 +77,7 @@ warning | web/style.css | .model-fallback | color
 warning | web/style.css | .msg-attachment-outcome | color
 warning | web/style.css | .new-project-trust-note | background, color
 warning | web/style.css | .skills-skip-glyph | color
-warning | web/style.css | .toast-warn | border-color, color
+warning | web/style.css | .toast-warn | color
 warning | web/style.css | .widget-callout[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-metric[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-table-status[data-tone="warn"] | color

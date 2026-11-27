@@ -908,38 +908,39 @@ export function initSkills(ctx = {}) {
     }
 
     // A slow owner action answers its running job: the toast is the job's own message, the card follows the queue.
-    function stillWorking(name, result) {
+    // `say` is the press's own notice (toast.js `modalNotice`): a press in Browse's detail sheet is answered in the sheet.
+    function stillWorking(name, result, say = showToast) {
         if (!result?.pending) return false;
-        showToast(`${name}: ${result.message || 'still working…'} It finishes in the background; you can leave this page.`, 'muted');
+        say(`${name}: ${result.message || 'still working…'} It finishes in the background; you can leave this page.`, 'muted');
         readInstalled({ quiet: true });
         return true;
     }
 
     const missingGrantItems = (grants) => [...(grants.missing_keys || grants.requested_keys || []), ...(grants.missing_permissions || grants.requested_permissions || [])];
 
-    async function toggleSkillEnabled(name, wantsEnabled) {
+    async function toggleSkillEnabled(name, wantsEnabled, say = showToast) {
         const result = await postWithFeedback(`/api/skills/${encodeURIComponent(name)}/toggle`, { enabled: wantsEnabled });
-        if (stillWorking(name, result)) return result;
+        if (stillWorking(name, result, say)) return result;
         const failed = result.extension_action === 'extension_load_error';
-        showToast(`${name} ${wantsEnabled ? 'is on' : 'is off'}${failed ? ' — it couldn’t start' : ''}`, failed ? 'warn' : 'ok');
+        say(`${name} ${wantsEnabled ? 'is on' : 'is off'}${failed ? ' — it couldn’t start' : ''}`, failed ? 'warn' : 'ok');
         emitSkillLifecycle(wantsEnabled ? 'enable' : 'disable', name, result);
         return result;
     }
 
     // The server's typed refusal says why a skill cannot turn on; nothing is pre-judged here.
-    async function turnOn(name, browseItem = null) {
+    async function turnOn(name, browseItem = null, say = showToast) {
         const skill = await currentSkill(name, browseItem);
         if (grantBlocks(skill)) {  // only access the host says stops it asks for a grant first
             const granted = await requestMissingKeyGrants(name, blockingGrantItems(skill.grants || {}), skill.content_hash, true);
-            if (stillWorking(name, granted)) return granted;  // its single job also owns the requested Enable
+            if (stillWorking(name, granted, say)) return granted;  // its single job also owns the requested Enable
             if (granted?.setup_error) throw new Error(`Access granted, but ${granted.setup_error}`);
             if (granted?.enabled === true) {
-                showToast(`${name} is on`, 'ok');
+                say(`${name} is on`, 'ok');
                 emitSkillLifecycle('enable', name, granted);
                 return granted;
             }
         }
-        return toggleSkillEnabled(name, true);
+        return toggleSkillEnabled(name, true, say);
     }
 
     /** A new review of the current bytes, or (`body`: `SkillReviewRequest`) the continuation of a stopped one. */
@@ -960,7 +961,7 @@ export function initSkills(ctx = {}) {
         }
     }
 
-    async function attest(name, browseItem = null) {
+    async function attest(name, browseItem = null, say = showToast) {
         const skill = await currentSkill(name, browseItem);
         if (!skill.content_hash) throw new Error('Skill revision is unavailable. Refresh and retry.');
         const blocked = skill.review_status === 'blockers' && !reviewReady(skill);
@@ -974,8 +975,8 @@ export function initSkills(ctx = {}) {
         if (browseItem) await currentSkill(name, browseItem);
         // Skip review skips only the model review: the deterministic file check still runs server-side.
         const result = await postWithFeedback(`/api/owner/skills/${encodeURIComponent(name)}/attest-review`, { expected_content_hash: skill.content_hash });
-        if (stillWorking(name, result)) return true;
-        showToast(`${name}: ${blocked ? 'turned on anyway' : 'review skipped'}. Your choice is recorded.`, 'warn');
+        if (stillWorking(name, result, say)) return true;
+        say(`${name}: ${blocked ? 'turned on anyway' : 'review skipped'}. Your choice is recorded.`, 'warn');
         emitSkillLifecycle('attest_review', name, result);
         return true;
     }
@@ -1008,12 +1009,12 @@ export function initSkills(ctx = {}) {
         return true;
     }
 
-    async function updateSkill(name, skipReview = false, browseItem = null) {
+    async function updateSkill(name, skipReview = false, browseItem = null, say = showToast) {
         const skill = await currentSkill(name, browseItem);
         if (skipReview) {
             const result = await updateWithoutReview(skill);
             if (!result) return false;
-            showToast(`${name}: updating to ${skill.install.update_rejected.version} without review`, 'warn');
+            say(`${name}: updating to ${skill.install.update_rejected.version} without review`, 'warn');
             emitSkillLifecycle('update', name, result);
             return true;
         }
@@ -1041,7 +1042,7 @@ export function initSkills(ctx = {}) {
             ? 'Ouroboros is merging your changes into the update without the original version — see chat'
             : 'Ouroboros is updating it and keeping your changes — see chat';
         const words = { replace: `updating to ${versionText(update.version)}`, merge, keep: `you keep your version; ${versionText(update.version) || 'this version'} isn’t offered again` };
-        showToast(`${name}: ${words[mode] || 'updated'}`, 'ok');
+        say(`${name}: ${words[mode] || 'updated'}`, 'ok');
         emitSkillLifecycle('update', name, result);
         return true;
     }
@@ -1165,7 +1166,8 @@ export function initSkills(ctx = {}) {
         sheetPending = job ? { key: pendingKey, job } : null;
     }
 
-    /** One installed-skill action by name (cards, the menu, Browse and the sheet share it). */
+    /** One installed-skill action by name (cards, the menu, Browse and the sheet share it); `options.notice` answers a
+     *  press made in a detail sheet there. */
     async function runInstalledAction(name, action, options = {}) {
         if (action === 'toggle_contribution') {
             const key = String(options.contributionKey || '');
@@ -1226,15 +1228,15 @@ export function initSkills(ctx = {}) {
             });
             return true;
         }
-        if (action === 'attest_review') return attest(name, options.browseItem);
+        if (action === 'attest_review') return attest(name, options.browseItem, options.notice);
         if (action === 'repair') return repair(name);
-        if (action === 'update') return updateSkill(name, false, options.browseItem);
-        if (action === 'update_without_review') return updateSkill(name, true);
+        if (action === 'update') return updateSkill(name, false, options.browseItem, options.notice);
+        if (action === 'update_without_review') return updateSkill(name, true, null, options.notice);
         if (action === 'uninstall') return uninstall(name);
         if (action === 'delete') return deleteLocal(name, options.payloadRoot);
         if (action === 'submit_hub') return publish(name);
         if (action === 'forget_publication') return forgetPublication(name);
-        if (action === 'turn_on') return turnOn(name, options.browseItem);
+        if (action === 'turn_on') return turnOn(name, options.browseItem, options.notice);
         if (action === 'connect_tools') {
             const result = await connectSkillTools(await currentSkill(name));
             if (stillWorking(name, result)) return true;  // not confirmed yet: the card follows its job
@@ -1413,7 +1415,7 @@ export function initSkills(ctx = {}) {
                 const changed = await runInstalledAction(name, action, options);
                 if (changed !== false) await readInstalled({ quiet: true });
             } catch (err) {
-                if (!err.cancelled) showToast(`${name}: ${err.message || err}`, 'danger');
+                if (!err.cancelled) (options?.notice || showToast)(`${name}: ${err.message || err}`, 'danger');
             }
         },
         confirmFirstStart: async (sourceId, canOpen = () => true) => {

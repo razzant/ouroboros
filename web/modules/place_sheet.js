@@ -2,6 +2,7 @@
 // section is the place's context: its circle (a choice: the place moves when another is chosen), the circle's words
 // with who wrote them and who placed the place there, the place's own notes in brief and its optional description;
 // its conversations follow. Connect is separate in place_connect.js; the body stays here for the place-room integration.
+import { disposeNotices } from './toast.js';
 import { bindDialogFocus } from './ui_interactions.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
@@ -383,6 +384,7 @@ export function showSheet(dialog, { returnFocus, onClose, onBack }) {
     const close = () => {
         if (closed) return;
         closed = true;
+        disposeNotices(dialog);  // what a link pressed in the sheet answered (toast.js `modalNotice`) leaves with it
         if (dialog.open && typeof dialog.close === 'function') dialog.close();
         disposeFade();
         disposeFocus?.();

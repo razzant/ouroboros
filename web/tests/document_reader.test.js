@@ -338,7 +338,7 @@ class FakeElement {
     }
     click() { return this.dispatch('click'); }
     showModal() { this.open = true; }
-    close() { this.open = false; this.dispatch('close'); }
+    close() { if (!this.open) return; this.open = false; this.dispatch('close'); }  // as a real dialog: shut, it is silent
 }
 
 function fakeDocument() {

@@ -770,14 +770,14 @@ Status, owner action, and urgent notification are separate product concepts:
   task as a proxy.
 
 A status names who or what ends it; needed facts stay in their owning view. A toast announces news once:
-its timer pauses on hover or focus, and a non-expiring toast has a visible keyboard-reachable close, whatever its tone.
+its words ignore presses, its visible keyboard-reachable × only hides it, and hover or focus pauses its timer.
 The problem, needed restart or unconfirmed outcome stays in its authoritative view (a card, Updates record or
 in-feed history edge) until it changes or the owner resolves it. Dismissing a notice hides it per browser,
 never its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
 place may end by itself, but where the line is its fact's only home (a setting's row) an error, a warning or a
 needed restart stays until the row's next result, an edit or leaving its page. A current fact ends with its fact; unread ends when the message
 is shown; a retained record (Updates, history, `Input saved`) lives with its record, with
-no timer. Toasts and statuses older than this rule are checked against it when touched.
+no timer. Older toasts and statuses are checked against this when touched.
 
 Activity rows separate schedule lifecycle (`active`, `disabled`, `consumed once ·
 history`, `withdrawn`, `deletion pending · work in flight`) from actions
@@ -881,7 +881,7 @@ card in another chat keeps the excerpt.
 
 | Role | Foreground | Background | Border |
 | --- | --- | --- | --- |
-| Success / connected | `--status-ok-fg` | `--status-ok-bg` | `--status-ok-border` |
+| Success / connected | `--status-ok-fg` | `--status-ok-bg` | none |
 | The owner's attention: the owner's move, or a warning worth reading | `--status-warn-fg` | `--status-warn-bg` | `--status-warn-border` |
 | Error / failed | `--status-error-fg` | `--status-error-bg` | `--status-error-border` |
 | Neutral / classification | `--status-neutral-fg` | `--status-neutral-bg` | `--status-neutral-border` |
@@ -942,9 +942,8 @@ Surfaces whose tone is a class suffix rather than `data-tone`
 (`.chat-live-phase`) keeps its phase classes as facts, its tone in the
 `data-chip-tone` its painter writes; Logs reuses it for a failure alone (owner 14.11, «переиспользуются»). A surface that
 paints only its edge (a card tinted by its state, a callout's left rule) takes
-the border and leaves its own background alone; a toast keeps its glass
-background, because a translucent status fill over live page content costs the
-text its contrast.
+the border and leaves its own background alone; a toast inks only its words: fills
+over live content cost contrast.
 
 Adopting these tokens applies the semantic status contract, which already
 governs every surface; it is not a token migration of those surfaces and does
@@ -3397,8 +3396,8 @@ tab — are two clients and can each notify for the same event. That is the
 honest consequence of per-client settings, not a bug we have hidden.
 
 **Click goes to the source.** A notification opens the question or the result it
-is about — the Project room and the exact question when it has one, otherwise
-the conversation. Project identity comes from the full registry, including rooms
+is about (a toast: Open) — the Project room and the exact question when it
+has one, otherwise the conversation. Project identity comes from the full registry, including rooms
 outside the sidebar. An unavailable destination leaves the view in place and says
 so. A Main-transport notice opens Main, including Telegram; numeric addresses
 never imply a Project. A system notification first opens the window, hidden or not,

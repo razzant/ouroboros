@@ -769,6 +769,28 @@ for (const streaming of [false, true]) {
     });
 }
 
+test('a shell with neither file method hands an Open to the notice its caller names; a browser opens its own tab', async () => {
+    const prior = { window: globalThis.window, document: globalThis.document };
+    try {
+        const copied = [];
+        const opened = [];
+        globalThis.document = { createElement: () => ({ setAttribute() {}, select() {}, remove() {} }), body: { appendChild() {} } };
+        globalThis.window = { location: { href: BASE }, navigator: { clipboard: { writeText: async (text) => { copied.push(text); } } },
+            pywebview: { api: {} }, open: (...args) => { opened.push(args); return null; } };
+        const heard = [];
+        const result = await openViaHostBridge('/api/tasks/t/artifacts/chat-media-aa.png', 'a.png',
+            { browserUrl: '/api/tasks/t/artifacts/chat-media-aa.png', toast: (message, tone) => heard.push({ message, tone }) });
+        assert.deepEqual(result, { ok: false, native: false, degraded: 'copy-link' });
+        assert.deepEqual(copied, [`${BASE}api/tasks/t/artifacts/chat-media-aa.png`]);
+        assert.deepEqual(heard, [{ message: 'Link copied — open it in your browser.', tone: 'info' }], 'said where it was asked');
+        assert.deepEqual(opened, [], 'no tab in a shell that has none');
+        delete globalThis.window.pywebview;
+        assert.deepEqual(await openViaHostBridge('/api/tasks/t/artifacts/chat-media-aa.png', 'a.png', { toast: () => assert.fail('quiet') }),
+            { ok: true, native: false });
+        assert.deepEqual(opened, [['/api/tasks/t/artifacts/chat-media-aa.png', '_blank', 'noopener']]);
+    } finally { Object.assign(globalThis, prior); }
+});
+
 test('direct old-shell download propagates an unavailable copy fallback', async () => {
     const prior = { window: globalThis.window, document: globalThis.document, fetch: globalThis.fetch };
     try {
