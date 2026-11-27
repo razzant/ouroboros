@@ -20,9 +20,9 @@ once in its header, and a tool's first sentence is taken after them.
 Nano (text and voice, Main and helpers) reads every tool name by namespace under each server's header, as a
 ``HostSection`` (``nano_connections_type``). A server's own instructions stay behind their exact reader,
 ``list_available_tools(namespace="mcp_<server>")``, where this actor can call it and ``enable_tools`` too, and
-reach the mind raw before the server's first use (``tools.tool_discovery.handed_guides``: with the load that
-first brings its schemas, by ``enable_tools`` or ``compact_context(schema_names=...)``, or before its first gateway
-call). They stay in the map where the actor lacks either
+reach the mind raw before any call of that server is sent (``tools.tool_discovery``: with the load that first
+brings its schemas, by ``enable_tools`` or ``compact_context(schema_names=...)``, or as the no-effect answer to its
+first direct or gateway call, held by the executor until the mind has read them). They stay in the map where the actor lacks either
 selector, and for a server whose schemas the start's own tool list carries (``start_tools``), which no load
 precedes. The form is a pure function of the start, so it is chosen once and kept for the run.
 """

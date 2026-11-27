@@ -172,37 +172,152 @@ def test_the_gateway_hands_the_guide_over_before_its_first_call(tmp_path, monkey
 
 
 
+def _call(call_id, name, args):
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+
+
+def _gw(call_id, tool, args):
+    return _call(call_id, "call_mcp_tool", {"name": tool, "arguments": args})
+
+
+class _Mind:
+    """Responses through the executor (``loop_tool_execution.execute_tool_batch``) whose rows are recorded by the real
+    recorder (``process_tool_results``) into one trace and transcript, as the loop and a call's tool lane record them;
+    ``record=False`` is a batch cut short whose rows were never recorded."""
+
+    def __init__(self, registry, tmp_path):
+        self.registry, self.logs, self.trace, self.messages = registry, tmp_path / "logs", {"tool_calls": []}, []
+        self.logs.mkdir(exist_ok=True)
+
+    def respond(self, calls, *, record=True):
+        from ouroboros.loop_tool_execution import execute_tool_batch, process_tool_results
+
+        rows, control = execute_tool_batch(calls, self.registry, self.logs, "guide-hold", None, self.trace)
+        assert control is None
+        if record:
+            process_tool_results(rows, self.messages, self.trace, lambda *_a, **_k: None, tools=self.registry)
+        return [str(row["result"]) for row in rows]
+
+
+def _responses(guide, texts):
+    return sum(text.count(guide) for text in texts)
+
+
+SHAPES = {  # one response's calls touching one owed server; the next response repeats them with new ids
+    "two gateway calls": lambda n: [_gw(f"a{n}", "mcp_srv03__tool_00", {"id": "a"}), _gw(f"b{n}", "mcp_srv03__tool_01", {"id": "b"})],
+    "enable then call": lambda n: [_call(f"e{n}", "enable_tools", {"tools": "mcp_srv03"}),
+                                   _gw(f"g{n}", "mcp_srv03__tool_00", {"id": "a"})],
+    "compact then call": lambda n: [_call(f"c{n}", "compact_context", {"working_note": "",
+                                                                       "schema_names": ["mcp_srv03__tool_00"]}),
+                                    _gw(f"g{n}", "mcp_srv03__tool_00", {"id": "a"})],
+    "two direct calls": lambda n: [_call(f"d{n}", "mcp_srv03__tool_00", {"id": "a"}),
+                                   _call(f"f{n}", "mcp_srv03__tool_01", {"id": "b"})],
+}
+
+
 @pytest.mark.parametrize("mode", ["nano", "low", "max"])
-def test_a_gateway_call_in_a_real_batch_waits_for_its_servers_guide_only_in_nano(tmp_path, monkeypatch, mode):
-    """Through the executor (``loop_tool_execution.execute_tool_batch``), not the handler alone: in a Nano view the
-    first gateway call of a server sends nothing and returns its guide and that tool's schema, and the next call runs;
-    in Low and Max, whose maps hold the guide, the call runs at once as the MCP call it names."""
-    from ouroboros.loop_tool_execution import execute_tool_batch
+@pytest.mark.parametrize("shape", list(SHAPES))
+def test_calls_of_an_owed_server_in_one_response_wait_for_the_next(tmp_path, monkeypatch, mode, shape):
+    """K6's hand-over before the first send on every entry path (pr2rev1 G01, G02): in a Nano view no call of a server
+    whose guide the mind has not read is sent in the response that touches it; the guide is returned once, a later use
+    in the same response says it was returned earlier, and loads still load. The next response sends. In Low and Max,
+    whose maps hold the guide, every call is sent at once and no guide is returned."""
+    from ouroboros.tools.compact_context import record_context_view
 
     registry, guides = scale.mcp_registry(tmp_path, monkeypatch)
-    _nano_actor(registry, mode=mode, gateway=True)
+    ctx, resident = _nano_actor(registry, mode=mode, gateway=True)
+    record_context_view(ctx, [{"role": "user", "content": "hi"}], resident)
     sent = _gateway_sends(monkeypatch)
-    (tmp_path / "logs").mkdir(exist_ok=True)
+    mind = _Mind(registry, tmp_path)
+    calls = [call for call in SHAPES[shape](1) if call["function"]["name"] != "enable_tools"
+             and call["function"]["name"] != "compact_context"]
+    first = mind.respond(SHAPES[shape](1))
+    if mode != "nano":
+        assert len(sent) == len(calls) and _responses(guides["srv03"], first) == 0
+        return
+    assert sent == [] and _responses(guides["srv03"], first) == 1 and guides["srv03"] in first[0]
+    assert "returned earlier in this response" in first[1] and "Nothing was sent to mcp_srv03__tool_0" in first[1]
+    if shape == "enable then call":
+        assert "Call schemas for call_mcp_tool" in first[0]  # the load still loads (here: shows) its schemas
+    second = mind.respond(SHAPES[shape](2))
+    assert len(sent) == len(calls) and _responses(guides["srv03"], second) == 0
 
-    def batch(call_id):
-        calls = [{"id": call_id, "type": "function", "function": {"name": "call_mcp_tool", "arguments": json.dumps(
-            {"name": "mcp_srv03__tool_00", "arguments": {"id": call_id}})}}]
-        (row,), control = execute_tool_batch(calls, registry, tmp_path / "logs", "gateway-guide", None, {})
-        assert control is None and row["is_error"] is False
-        return row
 
-    first = batch("1")
-    if mode == "nano":
-        assert sent == [] and first["fn_name"] == "call_mcp_tool"
-        text = str(first["result"])
-        assert guides["srv03"] in text and "Nothing was sent to mcp_srv03__tool_00" in text and '"description": "An id"' in text
-        second = batch("2")
-        assert sent == [("mcp_srv03__tool_00", {"id": "2"})] and second["fn_name"] == "mcp_srv03__tool_00"
-        assert guides["srv03"] not in str(second["result"])
-    else:
-        assert sent == [("mcp_srv03__tool_00", {"id": "1"})] and first["fn_name"] == "mcp_srv03__tool_00"
-        assert guides["srv03"] not in str(first["result"])
+def test_a_direct_call_of_a_restored_schema_and_after_a_switch_into_nano_waits_for_its_guide(tmp_path, monkeypatch):
+    """A schema the saved tool list restores (pr2rev1 G02) is called directly with no load in this process; a work
+    that starts in Low and is rebound to Nano reads Nano's map from then on. Both hold the first call until the mind
+    has read the guide; in Low the same call was sent at once."""
+    registry, guides = scale.mcp_registry(tmp_path, monkeypatch)
+    ctx, schemas = _nano_actor(registry, mode="low", gateway=True)
+    bind_resident_schemas(registry, [*schemas, registry.get_schema_by_name("mcp_srv03__tool_00")], gateway=True)
+    sent = _gateway_sends(monkeypatch)
+    mind = _Mind(registry, tmp_path)
+    mind.respond([_call("l1", "mcp_srv03__tool_00", {"id": "low"})])
+    assert sent == [("mcp_srv03__tool_00", {"id": "low"})]
+    ctx.active_context_mode = "nano"  # what bind_round_route leaves after a rebind into Nano
+    (held,) = mind.respond([_call("n1", "mcp_srv03__tool_00", {"id": "nano"})])
+    assert len(sent) == 1 and guides["srv03"] in held and "Call schema of mcp_srv03__tool_00" in held
+    mind.respond([_call("n2", "mcp_srv03__tool_00", {"id": "nano"})])
+    assert sent[-1] == ("mcp_srv03__tool_00", {"id": "nano"})
 
+
+def test_a_held_resume_whose_saved_list_carries_a_server_holds_its_first_direct_call(tmp_path, monkeypatch):
+    """pr2rev1 G03: the map of a held-note resume is captured with the caller's base, so a server the saved list makes
+    resident stays behind the reader; its first direct call returns the guide and sends nothing."""
+    from ouroboros import context, context_fit as fit, context_start_bound as bound
+
+    monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)
+    monkeypatch.setattr(bound, "refuse_before_capture", lambda *_a, **_kw: None)
+    registry, guides = scale.mcp_registry(tmp_path / "mcp", monkeypatch)
+    ctx = registry._ctx
+    env, memory = scale.env_on(scale.install(tmp_path / "drive"))
+    saved = [*scale.tools(), registry.get_schema_by_name("mcp_srv02__tool_00")]
+    ctx._held_note_capture = {"entries": [], "tool_schemas": saved}
+    ctx.context_fit_plan = context.build_context_fit_plan(
+        env, memory, {"id": "held-1", "type": "task", "chat_id": 1, "text": "resume", "_is_direct_chat": True},
+        preferred_mode="nano", ctx=ctx, tool_schemas=scale.tools(), tool_registry=registry,
+        route_resolver=scale.route_resolver(1_000_000, "provider", None))
+    ctx.active_context_mode = "nano"
+    assert "mcp_srv02__tool_00" in ctx.context_fit_plan.start_nano_base and "srv02" in ctx.context_fit_plan.core.connections[1].guides
+    bind_resident_schemas(registry, saved, gateway=False)
+    sent = _gateway_sends(monkeypatch)
+    mind = _Mind(registry, tmp_path)
+    (held,) = mind.respond([_call("r1", "mcp_srv02__tool_00", {"id": "1"})])
+    assert sent == [] and guides["srv02"] in held
+    mind.respond([_call("r2", "mcp_srv02__tool_00", {"id": "1"})])
+    assert sent == [("mcp_srv02__tool_00", {"id": "1"})]
+
+
+def test_an_unrecorded_response_still_owes_the_guide_and_a_restart_says_only_what_is_true(tmp_path, monkeypatch):
+    """A batch cut short whose rows never reached the transcript (the loop raises its control before recording) leaves
+    the guide owed: the next response returns it again rather than send. A fresh context after a restart (nothing is
+    persisted) returns it again too, and the wording never claims a first use (pr2rev1 G04)."""
+    registry, guides = scale.mcp_registry(tmp_path, monkeypatch)
+    ctx, _ = _nano_actor(registry, gateway=True)
+    sent = _gateway_sends(monkeypatch)
+    mind = _Mind(registry, tmp_path)
+    (cut,) = mind.respond([_gw("x1", "mcp_srv04__tool_00", {"id": "1"})], record=False)
+    (again,) = mind.respond([_gw("x2", "mcp_srv04__tool_00", {"id": "1"})])
+    assert sent == [] and guides["srv04"] in cut and guides["srv04"] in again
+    mind.respond([_gw("x3", "mcp_srv04__tool_00", {"id": "1"})])
+    assert sent == [("mcp_srv04__tool_00", {"id": "1"})]
+    ctx._mcp_guides_handed, ctx._mcp_guides_pending = set(), {}  # a new ToolContext after a restore
+    (restarted,) = mind.respond([_gw("x4", "mcp_srv04__tool_00", {"id": "4"})])
+    assert len(sent) == 1 and guides["srv04"] in restarted
+    assert "first use" not in restarted and restarted.startswith("Nothing was sent to mcp_srv04__tool_00")
+
+
+def test_an_actor_whose_map_keeps_the_guides_sends_at_once_in_nano(tmp_path, monkeypatch):
+    """The other direction at the executor's seam: an actor that cannot call the reader keeps every guide in its Nano
+    map, so nothing is owed and its first direct and gateway calls are sent in the response that makes them."""
+    registry, guides = scale.mcp_registry(tmp_path, monkeypatch)
+    registry._ctx.task_contract = {"disabled_tools": ["list_available_tools"]}
+    _nano_actor(registry, gateway=True)
+    sent = _gateway_sends(monkeypatch)
+    texts = _Mind(registry, tmp_path).respond([_call("d", "mcp_srv03__tool_00", {"id": "d"}),
+                                              _gw("g", "mcp_srv05__tool_00", {"id": "g"})])
+    assert sent == [("mcp_srv03__tool_00", {"id": "d"}), ("mcp_srv05__tool_00", {"id": "g"})]
+    assert not any(guide in text for guide in guides.values() for text in texts)
 
 
 @pytest.mark.parametrize("mode", ["nano", "low", "max"])
