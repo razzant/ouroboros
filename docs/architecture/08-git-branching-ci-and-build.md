@@ -1,6 +1,6 @@
 # 8. Git Branching, CI, and Build
 
-This part gives me how my code travels: branches and update feeds, CI trust boundaries, keyless E2E, builds, dependency locks and release proof: seven required desktop assets and an optional Android pair. Before touching CI, packaging or a release carrier I read it with [DEVELOPMENT §14](../development/14-build-and-ci.md). Guarantees govern published claims.
+This part gives me how my code travels: branches and update feeds, CI trust boundaries, keyless E2E, builds, dependency locks and release proof: eight required desktop assets and an optional Android pair. Before touching CI, packaging or a release carrier I read it with [DEVELOPMENT §14](../development/14-build-and-ci.md). Guarantees govern published claims.
 
 `ouroboros` is the local working branch; `managed` tracks official updates and optional `origin` holds personal work. Official feeds (`update_channels.py`): Stable = newest plain release tag reachable from `main` and `ouroboros-stable`; QA = `ouroboros-stable` tip; Development = `ouroboros` tip (QA/Development skip version comparison). Promotion and Restore bind exact SHAs (Restore keeps rescue/keep refs, never pushes), explicit update owns fetch/validation/rescue/apply/rollback, Desktop/Colab targets need nonempty `BIBLE.md`, and external PRs target `ouroboros` leaving versions untouched (CONTRIBUTING.md).
 
