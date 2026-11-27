@@ -135,7 +135,7 @@ Files routes (`/api/files/*`, `gateway/files.py::file_browser_routes()`; parity:
 | POST | `/api/ui/preferences` | |
 | POST | `/api/ui/holds` | |
 | GET | `/api/ui/i18n` | language, translation memory; never generates |
-| POST | `/api/ui/i18n/language` | writes `OUROBOROS_UI_LANGUAGE`; broadcasts `ui_language_changed` |
+| POST | `/api/ui/i18n/language` | writes `OUROBOROS_UI_LANGUAGE` through the locked owner-settings writer (`gateway/ui_i18n.py`); broadcasts `ui_language_changed` |
 | POST | `/api/ui/i18n/missing` | |
 | POST | `/api/ui/i18n/import` | |
 | GET | `/api/ui/i18n/export` | |

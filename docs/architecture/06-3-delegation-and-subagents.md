@@ -123,7 +123,7 @@ Host-derived **mutation authority** (`tools/delegate_integration._mutation_autho
 | `readonly` | active root (nothing to write) | `none` |
 | `investigation` | active root, provenance only | `evidence` |
 
-`subagent_worktrees.provision_payload_snapshot` gives Git-free payloads private Git snapshots; undisposed captures never cap starts. `integrate_payload_patch` locks target CAS, apply and publication. Drift conflicts, equality is idempotent, `blocked_reserved_paths` refuses all, baseline-equal `apply_no_op` proves no write, other hashes keep ambiguity. Success calls `request_extension_reconcile` and stales review; mode-only changes refuse `unreviewable_metadata_change`.
+A genesis acting child's project (`ouroboros/genesis_project.py`) is a durable, standalone directory under `OUROBOROS_SUBAGENT_PROJECTS_ROOT`: not a checkout, not in the private-copy records and never pruned by age. `subagent_worktrees.provision_payload_snapshot` gives Git-free payloads private Git snapshots; undisposed captures never cap starts. `integrate_payload_patch` locks target CAS, apply and publication. Drift conflicts, equality is idempotent, `blocked_reserved_paths` refuses all, baseline-equal `apply_no_op` proves no write, other hashes keep ambiguity. Success calls `request_extension_reconcile` and stales review; mode-only changes refuse `unreviewable_metadata_change`.
 
 #### Snapshots, capture and disposition
 
