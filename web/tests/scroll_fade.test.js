@@ -322,7 +322,7 @@ function gradientsIn(value) {
     return found;
 }
 // A colour that is not fully opaque: `transparent`, or an alpha below 1 in any notation (0, 0.5, .5, 50%).
-const alphaBelowOne = (alpha) => (alpha.endsWith('%') ? parseFloat(alpha) < 100 : parseFloat(alpha) < 1);
+const alphaBelowOne = (alpha) => /^var\(--edge-a\d\)$/.test(alpha) || (alpha.endsWith('%') ? parseFloat(alpha) < 100 : parseFloat(alpha) < 1);
 function fades(stops) {
     if (/\btransparent\b/.test(stops)) return true;
     for (const [, args] of stops.matchAll(/(?:rgba?|hsla?)\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g)) {
@@ -355,7 +355,7 @@ function edgeRecipes(css, sheet) {
         .flatMap(({ rule }) => [...subjectKeys(rule)]));
     for (const { rule, decls } of rules) {
         for (const [prop, value] of decls) {
-            if (/^--edge-(curve|blur-)/.test(prop) && !(sheet === 'ui.css' && rule === ':root')) found.push(`${rule} defines ${prop}`);
+            if (/^--edge-(curve|blur-|a\d)/.test(prop) && !(sheet === 'ui.css' && rule === ':root')) found.push(`${rule} defines ${prop}`);
             if (prop.startsWith('--') && !SHARED_EDGE_IMAGES.has(prop) && gradientsIn(value).some(fades)) found.push(`${rule} ${prop}`);
             if (SHARED_EDGE_IMAGES.has(prop) && sheet !== 'ui.css') found.push(`${rule} redefines ${prop}`);
             if (isMask(prop)) {
@@ -407,17 +407,28 @@ test('every edge in every sheet is the one shared edge', () => {
 });
 
 test('the shared scroller masks and the curve are one curve, and a room edge is two blur steps under its tint', () => {
-    const ui = readFileSync(new URL('../ui.css', import.meta.url), 'utf8');
-    const alphas = (text) => [...text.matchAll(/rgb\(0 0 0 \/ (\.\d+)\)/g)].map((m) => Number(m[1]));
-    const curve = alphas(ui.match(/--edge-curve:([^;]+);/)[1]);
-    assert.equal(curve.length, 9);
-    curve.forEach((alpha, i) => {
-        const t = 1 - (i + 1) / 10;
+    // The curve's shape lives once, in nine :root alpha tokens; --edge-curve and both scroller masks read them and
+    // spell no alpha of their own. Substituting another shape in those tokens changes all three the same way.
+    const rootDecls = rulesOf(readFileSync(new URL('../ui.css', import.meta.url), 'utf8'))
+        .filter(({ rule }) => rule === ':root').flatMap(({ decls }) => decls);
+    const value = (name) => rootDecls.find(([p]) => p === name)?.[1]
+        ?? rulesOf(readFileSync(new URL('../ui.css', import.meta.url), 'utf8')).flatMap(({ decls }) => decls).find(([p]) => p === name)?.[1];
+    const shape = Array.from({ length: 9 }, (_, i) => Number(value(`--edge-a${i + 1}`)));
+    shape.forEach((alpha, i) => {
+        const t = (i + 1) / 10;
         assert.ok(Math.abs(alpha - t * t * (3 - 2 * t)) < 0.001, 'smoothstep: flat at both ends, so neither draws a line');
     });
-    for (const image of ['--scroll-fade-y-image', '--scroll-fade-x-image']) {
-        const stops = alphas(ui.match(new RegExp(`${image}:([^;]+);`))[1]);
-        assert.deepEqual(stops, [...[...curve].reverse(), ...curve], `${image} lays the curve over both ends`);
+    const resolved = (text, tokens) => [...text.matchAll(/rgb\(0 0 0 \/ ([^)]*\)?)\)/g)].map(([, alpha]) => {
+        const token = alpha.match(/^var\(--edge-a(\d)\)$/);
+        assert.ok(token, `an alpha read from the curve's tokens, not spelled out: ${alpha}`);
+        return tokens[Number(token[1]) - 1];
+    });
+    const consumers = ['--edge-curve', '--scroll-fade-y-image', '--scroll-fade-x-image'].map(value);
+    for (const tokens of [shape, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]]) {
+        const [curve, y, x] = consumers.map((text) => resolved(text, tokens));
+        assert.deepEqual(curve, [...tokens].reverse(), 'the curve, opaque to clear');
+        assert.deepEqual(y, [...tokens, ...[...tokens].reverse()], 'the vertical mask: the same curve at both ends');
+        assert.deepEqual(x, [...tokens, ...[...tokens].reverse()], 'the horizontal mask: the same curve at both ends');
     }
     // A room's edge, read from the parsed sheet (whitespace and line breaks do not matter).
     const rules = rulesOf(readFileSync(new URL('../style.css', import.meta.url), 'utf8'));

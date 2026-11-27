@@ -202,8 +202,19 @@
     /* The one edge of everything that scrolls (DESIGN "One edge"): its length, its curve (smoothstep, from opaque to
        clear, flat at both ends so neither end draws a line) and a room edge's two blur steps, in both themes. */
     --edge-length: 32px;
-    --edge-curve: #000, rgb(0 0 0 / .972) 10%, rgb(0 0 0 / .896) 20%, rgb(0 0 0 / .784) 30%, rgb(0 0 0 / .648) 40%,
-        rgb(0 0 0 / .5) 50%, rgb(0 0 0 / .352) 60%, rgb(0 0 0 / .216) 70%, rgb(0 0 0 / .104) 80%, rgb(0 0 0 / .028) 90%,
+    /* The curve's shape, once: its alpha at each tenth of an end (smoothstep). --edge-curve and the scrollers' masks
+       read these, so a new shape here changes every edge. */
+    --edge-a1: .028;
+    --edge-a2: .104;
+    --edge-a3: .216;
+    --edge-a4: .352;
+    --edge-a5: .5;
+    --edge-a6: .648;
+    --edge-a7: .784;
+    --edge-a8: .896;
+    --edge-a9: .972;
+    --edge-curve: #000, rgb(0 0 0 / var(--edge-a9)) 10%, rgb(0 0 0 / var(--edge-a8)) 20%, rgb(0 0 0 / var(--edge-a7)) 30%, rgb(0 0 0 / var(--edge-a6)) 40%,
+        rgb(0 0 0 / var(--edge-a5)) 50%, rgb(0 0 0 / var(--edge-a4)) 60%, rgb(0 0 0 / var(--edge-a3)) 70%, rgb(0 0 0 / var(--edge-a2)) 80%, rgb(0 0 0 / var(--edge-a1)) 90%,
         transparent;
     --edge-blur-soft: blur(4px);
     --edge-blur-deep: blur(11.3px);  /* over the soft step it compounds to 12 px: sqrt(4² + 11.3²) */
@@ -983,17 +994,17 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
     --scroll-fade-bottom: 0px;
     --scroll-fade-y-depth: min(var(--scroll-fade-edge), max(0px, (100% - var(--scroll-fade-inset)) * var(--scroll-fade-limit)));
     --scroll-fade-y-image: linear-gradient(to bottom, transparent var(--scroll-fade-inset),
-        rgb(0 0 0 / .028) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .1), rgb(0 0 0 / .104) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .2),
-        rgb(0 0 0 / .216) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .3), rgb(0 0 0 / .352) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .4),
-        rgb(0 0 0 / .5) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .5), rgb(0 0 0 / .648) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .6),
-        rgb(0 0 0 / .784) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .7), rgb(0 0 0 / .896) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .8),
-        rgb(0 0 0 / .972) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .9), #000 calc(var(--scroll-fade-inset) + var(--scroll-fade-top)),
+        rgb(0 0 0 / var(--edge-a1)) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .1), rgb(0 0 0 / var(--edge-a2)) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .2),
+        rgb(0 0 0 / var(--edge-a3)) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .3), rgb(0 0 0 / var(--edge-a4)) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .4),
+        rgb(0 0 0 / var(--edge-a5)) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .5), rgb(0 0 0 / var(--edge-a6)) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .6),
+        rgb(0 0 0 / var(--edge-a7)) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .7), rgb(0 0 0 / var(--edge-a8)) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .8),
+        rgb(0 0 0 / var(--edge-a9)) calc(var(--scroll-fade-inset) + var(--scroll-fade-top) * .9), #000 calc(var(--scroll-fade-inset) + var(--scroll-fade-top)),
         #000 calc(100% - var(--scroll-fade-bottom)),
-        rgb(0 0 0 / .972) calc(100% - var(--scroll-fade-bottom) * .9), rgb(0 0 0 / .896) calc(100% - var(--scroll-fade-bottom) * .8),
-        rgb(0 0 0 / .784) calc(100% - var(--scroll-fade-bottom) * .7), rgb(0 0 0 / .648) calc(100% - var(--scroll-fade-bottom) * .6),
-        rgb(0 0 0 / .5) calc(100% - var(--scroll-fade-bottom) * .5), rgb(0 0 0 / .352) calc(100% - var(--scroll-fade-bottom) * .4),
-        rgb(0 0 0 / .216) calc(100% - var(--scroll-fade-bottom) * .3), rgb(0 0 0 / .104) calc(100% - var(--scroll-fade-bottom) * .2),
-        rgb(0 0 0 / .028) calc(100% - var(--scroll-fade-bottom) * .1), transparent 100%);
+        rgb(0 0 0 / var(--edge-a9)) calc(100% - var(--scroll-fade-bottom) * .9), rgb(0 0 0 / var(--edge-a8)) calc(100% - var(--scroll-fade-bottom) * .8),
+        rgb(0 0 0 / var(--edge-a7)) calc(100% - var(--scroll-fade-bottom) * .7), rgb(0 0 0 / var(--edge-a6)) calc(100% - var(--scroll-fade-bottom) * .6),
+        rgb(0 0 0 / var(--edge-a5)) calc(100% - var(--scroll-fade-bottom) * .5), rgb(0 0 0 / var(--edge-a4)) calc(100% - var(--scroll-fade-bottom) * .4),
+        rgb(0 0 0 / var(--edge-a3)) calc(100% - var(--scroll-fade-bottom) * .3), rgb(0 0 0 / var(--edge-a2)) calc(100% - var(--scroll-fade-bottom) * .2),
+        rgb(0 0 0 / var(--edge-a1)) calc(100% - var(--scroll-fade-bottom) * .1), transparent 100%);
 }
 :where(.scroll-fade-y[data-scroll-above]) {
     --scroll-fade-inset: min(100%, var(--scroll-fade-top-clear));
@@ -1011,17 +1022,17 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
     --scroll-fade-start: 0px;
     --scroll-fade-end: 0px;
     --scroll-fade-x-image: linear-gradient(to var(--scroll-fade-inline-to), transparent 0,
-        rgb(0 0 0 / .028) calc(var(--scroll-fade-start) * .1), rgb(0 0 0 / .104) calc(var(--scroll-fade-start) * .2),
-        rgb(0 0 0 / .216) calc(var(--scroll-fade-start) * .3), rgb(0 0 0 / .352) calc(var(--scroll-fade-start) * .4),
-        rgb(0 0 0 / .5) calc(var(--scroll-fade-start) * .5), rgb(0 0 0 / .648) calc(var(--scroll-fade-start) * .6),
-        rgb(0 0 0 / .784) calc(var(--scroll-fade-start) * .7), rgb(0 0 0 / .896) calc(var(--scroll-fade-start) * .8),
-        rgb(0 0 0 / .972) calc(var(--scroll-fade-start) * .9), #000 var(--scroll-fade-start),
+        rgb(0 0 0 / var(--edge-a1)) calc(var(--scroll-fade-start) * .1), rgb(0 0 0 / var(--edge-a2)) calc(var(--scroll-fade-start) * .2),
+        rgb(0 0 0 / var(--edge-a3)) calc(var(--scroll-fade-start) * .3), rgb(0 0 0 / var(--edge-a4)) calc(var(--scroll-fade-start) * .4),
+        rgb(0 0 0 / var(--edge-a5)) calc(var(--scroll-fade-start) * .5), rgb(0 0 0 / var(--edge-a6)) calc(var(--scroll-fade-start) * .6),
+        rgb(0 0 0 / var(--edge-a7)) calc(var(--scroll-fade-start) * .7), rgb(0 0 0 / var(--edge-a8)) calc(var(--scroll-fade-start) * .8),
+        rgb(0 0 0 / var(--edge-a9)) calc(var(--scroll-fade-start) * .9), #000 var(--scroll-fade-start),
         #000 calc(100% - var(--scroll-fade-end)),
-        rgb(0 0 0 / .972) calc(100% - var(--scroll-fade-end) * .9), rgb(0 0 0 / .896) calc(100% - var(--scroll-fade-end) * .8),
-        rgb(0 0 0 / .784) calc(100% - var(--scroll-fade-end) * .7), rgb(0 0 0 / .648) calc(100% - var(--scroll-fade-end) * .6),
-        rgb(0 0 0 / .5) calc(100% - var(--scroll-fade-end) * .5), rgb(0 0 0 / .352) calc(100% - var(--scroll-fade-end) * .4),
-        rgb(0 0 0 / .216) calc(100% - var(--scroll-fade-end) * .3), rgb(0 0 0 / .104) calc(100% - var(--scroll-fade-end) * .2),
-        rgb(0 0 0 / .028) calc(100% - var(--scroll-fade-end) * .1), transparent 100%);
+        rgb(0 0 0 / var(--edge-a9)) calc(100% - var(--scroll-fade-end) * .9), rgb(0 0 0 / var(--edge-a8)) calc(100% - var(--scroll-fade-end) * .8),
+        rgb(0 0 0 / var(--edge-a7)) calc(100% - var(--scroll-fade-end) * .7), rgb(0 0 0 / var(--edge-a6)) calc(100% - var(--scroll-fade-end) * .6),
+        rgb(0 0 0 / var(--edge-a5)) calc(100% - var(--scroll-fade-end) * .5), rgb(0 0 0 / var(--edge-a4)) calc(100% - var(--scroll-fade-end) * .4),
+        rgb(0 0 0 / var(--edge-a3)) calc(100% - var(--scroll-fade-end) * .3), rgb(0 0 0 / var(--edge-a2)) calc(100% - var(--scroll-fade-end) * .2),
+        rgb(0 0 0 / var(--edge-a1)) calc(100% - var(--scroll-fade-end) * .1), transparent 100%);
 }
 :where(.scroll-fade-x[data-scroll-rtl]) { --scroll-fade-inline-to: left; }
 :where(.scroll-fade-x[data-scroll-start]) { --scroll-fade-start: var(--scroll-fade-x-depth); }
