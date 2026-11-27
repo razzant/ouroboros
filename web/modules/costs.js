@@ -210,7 +210,7 @@ export function allowancePresentation(snapshot, { now = Date.now(), timeZone } =
     return { spend, lines, meter };
 }
 
-/** The Total budget card's line about its own wake held by that budget (its proven cause, consciousness_view.hold_cause),
+/** The Total budget card's line about its own wake held by that budget (its proven cause, consciousness_hold.hold_cause),
  *  with its card's door, or null: raising the budget alone does not resume a paused wake, so the line says what does.
  *  Read-only: Resume and Stop now stay on its card and its block (consciousness_held_wake.js). */
 export function totalBudgetHoldLine(snapshot) {

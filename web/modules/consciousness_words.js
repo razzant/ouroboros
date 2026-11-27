@@ -233,11 +233,11 @@ const HELD_WORDS = Object.freeze({ owner: PAUSED, sleep: ['task.phase.waiting', 
     queued: ['task.phase.queued', 'Queued'], technical: PAUSED, technical_resume: PAUSED });
 
 /** The task id of its own wake while it is held and consciousness is on, else '': the one wake the clock waits for,
- *  whatever holds it (consciousness_view.held_sentence says what). */
+ *  whatever holds it (consciousness_hold.held_sentence says what). */
 export const heldWake = (snapshot) => (snapshot?.enabled === true && snapshot.status === 'wake_paused'
     && snapshot.liveWakeHeld === true ? snapshot.liveWakeTaskId : '');
 
-/** Whether its own wake is held, proven, at the allowance it started with (consciousness_view.hold_cause): the
+/** Whether its own wake is held, proven, at the allowance it started with (consciousness_hold.hold_cause): the
  *  status word stays `wake_paused`; the cause is its own fact. */
 export const allowanceHold = (snapshot) => Boolean(heldWake(snapshot)) && ALLOWANCE_HOLDS.has(snapshot.holdCause);
 

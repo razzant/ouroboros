@@ -253,7 +253,7 @@ export function normalizeConsciousness(raw, { enabled } = {}) {
         lastWakeOutcome: text(bg.last_wake_outcome),
         liveWakeTaskId: text(bg.live_wake_task_id),
         liveWakeHeld: bg.live_wake_held === true,
-        // What holds that wake, as far as its records prove it (consciousness_view.hold_cause; '' proves nothing), and
+        // What holds that wake, as far as its records prove it (consciousness_hold.hold_cause; '' proves nothing), and
         // its own start as its pause record keeps it (ISO; '' when none is recorded): its block names it in this clock.
         holdCause: text(object(bg.live_wake_hold)?.cause),
         liveWakeStartedAt: text(object(bg.live_wake_hold)?.started_at),
