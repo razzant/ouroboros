@@ -20,6 +20,7 @@ from tests.candidate_checkout import VERSION_PATH
 from tests.test_reconnect_feed_browser import HISTORY_LANDED
 from tests.test_ui_smoke_playwright import _store_rows
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
+from tests.test_ui_smoke_playwright import settle_first_launch
 from tests.test_version_labels_browser import CARET, DRAFT, FACTS, HEALTH_READS, MAIN, PIN, about_label, settle_labels
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
@@ -55,6 +56,7 @@ def test_a_kept_page_follows_the_restarted_core_to_its_new_version(direct_server
     from playwright.sync_api import sync_playwright
 
     server = direct_server_with_data
+    settle_first_launch(server)  # the restart below is an ordinary one, not a new folder's first
     old = server["candidate_version"]
     new = _next_version(old)
     evidence = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", server["data_dir"].parent)) / "version-labels-restart"
