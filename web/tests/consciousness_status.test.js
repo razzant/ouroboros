@@ -24,7 +24,7 @@ const answer = (bg = {}, extra = {}) => ({
 });
 const shapeOf = (view) => `${view.mark.shape}/${view.mark.hue}`;
 
-test('a due chip names its appointment with a still mark; a held wake has a pause mark and no time', () => {
+test('a due chip names its appointment with a still mark; a held wake has no time, its mark its cause\'s', () => {
     const due = chipView(answer({ status: 'due', detail: 'Due since 13:10; the wake-up has not started yet.',
         next_wake_at: at(13, 50), appointment_at: at(13, 10) }));
     assert.deepEqual([due.word, shapeOf(due)], ['since 13:10', 'still/ink']);
@@ -32,7 +32,8 @@ test('a due chip names its appointment with a still mark; a held wake has a paus
     const legacy = chipView(answer({ status: 'due', next_wake_at: at(13, 50) }));
     assert.deepEqual([legacy.word, shapeOf(legacy)], ['due', 'still/ink']);
     const held = chipView(answer({ status: 'wake_paused', live_wake_task_id: 'own', live_wake_held: true,
-        detail: 'Wake-up own is paused or waiting in the queue.', next_wake_at: at(13, 50), appointment_at: at(13, 10) }));
+        detail: 'Its own wake-up is paused or waiting in the queue; its card shows why.', next_wake_at: at(13, 50),
+        appointment_at: at(13, 10), live_wake_hold: { cause: 'owner', ceiling_usd: null } }));
     assert.deepEqual([held.word, shapeOf(held)], ['', 'pause/ink']);
     assert.doesNotMatch(held.said, /13:|14:|since/);
 });
@@ -77,15 +78,23 @@ test('amber only for the owner\'s move; a failure is the outcome\'s red dot, an 
     for (const status of ['wake_outcome_unknown', 'allowance_unknown', 'owner_chat_unknown']) {
         assert.equal(shapeOf(chipView(answer({ status }))), 'ring/ink', status);
     }
-    assert.equal(shapeOf(chipView(answer({ status: 'wake_paused' }))), 'pause/ink');
-    // A wake held at the allowance it started with, proven by its records, is the owner's move; the chip keeps no time.
+    assert.equal(shapeOf(chipView(answer({ status: 'wake_paused' }))), 'pause/ink', 'a wake that returned while paused');
+    // A wake held by any spending limit its records prove is the owner's move; the chip keeps no time.
     const held = { status: 'wake_paused', live_wake_task_id: 'w1', live_wake_held: true,
-        detail: 'Wake-up w1 stopped at the allowance it had left when it started ($2.99).' };
+        detail: 'Its own wake-up stopped at its allowance ($2.99).' };
     const allowance = chipView(answer({ ...held, live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99 } }));
     assert.deepEqual([allowance.word, shapeOf(allowance)], ['', 'dot/owner']);
     assert.equal(allowance.said, `Consciousness: ${held.detail} · waits for you`);
-    for (const cause of ['per_task_cap', 'launch_ceiling', 'owner', '']) {
-        assert.equal(shapeOf(chipView(answer({ ...held, live_wake_hold: { cause, ceiling_usd: null } }))), 'pause/ink', cause);
+    // The total budget that stopped it is amber too, never the two bars of a Pause someone chose (owner 27.11).
+    for (const cause of ['allowance_and_cap', 'per_task_cap', 'launch_ceiling', 'total_budget', 'per_task_fence']) {
+        const view = chipView(answer({ ...held, live_wake_hold: { cause, ceiling_usd: null } }));
+        assert.deepEqual([shapeOf(view), view.said.endsWith(' · waits for you')], ['dot/owner', true], cause);
+    }
+    // A Pause is two bars; a sleep or a wake queued for a worker goes on by itself (still); an unproven hold a ring.
+    for (const [cause, shape] of [['owner', 'pause/ink'], ['sleep', 'still/ink'], ['queued', 'still/ink'],
+        ['technical', 'ring/ink'], ['', 'ring/ink']]) {
+        const view = chipView(answer({ ...held, live_wake_hold: { cause, ceiling_usd: null } }));
+        assert.deepEqual([shapeOf(view), view.said.includes('waits for you')], [shape, false], cause);
     }
     // An unknown control is never Off: a ring and no word.
     const unknown = chipView({ bg_consciousness_state: {}, bg_consciousness_enabled: null });
@@ -202,39 +211,186 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
     }
 });
 
-test('while the allowance is the next step the Shade offers Costs, and its door opens Costs', async () => {
+test('the Costs door stands where its limit is the next step: under the Shade while new starts wait, in a held wake\'s block', async () => {
     const env = installDom();
     try {
         const bar = document.createElement('div');
         const tabs = [];
         const status = createConsciousnessStatus({ bar, ws: { send() {}, isConnected: () => true },
-            openDashboardTab: (tab) => tabs.push(tab), read: async () => normalizeConsciousness({ recent_wakes: [] }) });
-        const held = { status: 'wake_paused', live_wake_task_id: 'w1', live_wake_held: true,
-            detail: 'Wake-up w1 stopped at the allowance it had left when it started ($2.99).',
-            live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99 } };
-        status.update(answer(held));
+            openDashboardTab: (tab, options) => tabs.push([tab, options?.row || '']),
+            read: async () => normalizeConsciousness({ recent_wakes: [] }) });
+        status.update(answer({ status: 'allowance_exhausted', detail: 'Daily allowance spent.' }));
         status.chip.click();
         await new Promise((resolve) => setTimeout(resolve, 0));
         const costs = status.shade.querySelectorAll('.cx-door').find((door) => door.textContent === 'Costs ›');
-        assert.equal(costs.hidden, false, 'a wake held at its allowance');
-        assert.equal(status.shade.querySelector('.cx-state').textContent, held.detail, 'the host\'s reason, no clock added');
-        const note = status.shade.querySelector('.cx-state-note');
-        assert.equal(note.hidden, true, 'no note without one');
-        status.update(answer({ ...held, detail_note: 'Resume keeps that limit.' }));
-        assert.deepEqual([note.textContent, note.hidden], ['Resume keeps that limit.', false]);
-        for (const [bg, shown] of [[{ status: 'allowance_exhausted', detail: 'Daily allowance spent.' }, true],
-            [{ ...held, live_wake_hold: { cause: 'per_task_cap', ceiling_usd: 10 } }, false],
-            [{ ...held, live_wake_hold: { cause: 'owner', ceiling_usd: null } }, false],
-            [{ status: 'sleeping' }, false]]) {
-            status.update(answer(bg));
-            assert.equal(costs.hidden, !shown, JSON.stringify(bg.live_wake_hold || bg.status));
+        const block = status.shade.querySelector('.cx-held');
+        assert.deepEqual([costs.hidden, block.hidden], [false, true], 'new starts wait for the allowance: the Shade\'s own door');
+        const held = { status: 'wake_paused', live_wake_task_id: 'w1', live_wake_held: true, position: 'Also on its own and in places',
+            detail: 'Its own wake-up stopped at its allowance ($2.99).', live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99 } };
+        const blockCosts = () => status.shade.querySelector('.cx-held-actions').children
+            .find((node) => node.classList.contains('cx-held-costs')) || null;
+        // A wake held by a limit Costs edits: the door is its block's, the Shade's own gives way; a limit raised elsewhere
+        // (the work's own cap, a fence of its own work) or a Pause has none.
+        for (const [cause, shown] of [['allowance', true], ['allowance_and_cap', true], ['launch_ceiling', true],
+            ['total_budget', true], ['per_task_cap', false], ['per_task_fence', false], ['owner', false], ['sleep', false]]) {
+            status.update(answer({ ...held, live_wake_hold: { cause, ceiling_usd: null } }));
+            assert.deepEqual([costs.hidden, block.hidden, Boolean(blockCosts())], [true, false, shown], cause);
         }
         status.update(answer({ status: 'allowance_exhausted', detail: 'Daily allowance spent.' }, { bg_consciousness_enabled: false }));
-        assert.equal(costs.hidden, true, 'Off is no allowance step');
+        assert.deepEqual([costs.hidden, block.hidden], [true, true], 'Off is no allowance step and holds no block');
         status.update(answer(held));
-        costs.parentElement.listeners.get('click')[0]({ target: { closest: () => costs } });
-        assert.deepEqual(tabs, ['costs']);
+        blockCosts().click();
+        assert.deepEqual(tabs, [['costs', 'OUROBOROS_CONSCIOUSNESS_DAILY_USD']], 'the allowance\'s own row');
         assert.equal(status.isOpen(), false, 'the door closes the Shade');
+        status.update(answer({ status: 'allowance_exhausted', detail: 'Daily allowance spent.' }));
+        status.chip.click();
+        costs.parentElement.listeners.get('click')[0]({ target: { closest: () => costs } });
+        assert.deepEqual(tabs.at(-1), ['costs', '']);
+        status.destroy();
+    } finally {
+        restoreDom(env.prior);
+    }
+});
+
+// The held own wake as its own block (owner 27.11, «Блок с кнопками»): what the switch's header says, what holds the wake
+// and what the owner can do about it are two objects.
+const WAKE = 'e629aa8e';
+const wakeWork = (controls) => ({ work_id: WAKE, room: 1, episode: { task_id: WAKE, live: true }, activity: 'paused',
+    confirmed: true, mark: 'pause', controls });
+const OFFERED = [{ action: 'resume', target: WAKE }, { action: 'stop', target: WAKE, scope: 'cascade' }];
+const heldBy = (cause, controls = OFFERED, bg = {}) => answer({ status: 'wake_paused', live_wake_task_id: WAKE,
+    live_wake_held: true, position: 'Also on its own and in places', detail: `Its own wake-up is held (${cause}).`,
+    detail_note: 'What follows from it.', live_wake_hold: { cause, ceiling_usd: null, started_at: at(13, 20) }, ...bg },
+{ works: controls === null ? [] : [wakeWork(controls)] });
+
+test('a held own wake is its own block under the switch: its start, mark and word, the host\'s cause and next step', async () => {
+    const env = installDom();
+    try {
+        const bar = document.createElement('div');
+        const status = createConsciousnessStatus({ bar, ws: { send() {}, isConnected: () => true },
+            read: async () => normalizeConsciousness({ recent_wakes: [] }) });
+        status.update(heldBy('total_budget'));
+        status.chip.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const shade = status.shade;
+        const body = shade.querySelector('.cx-body');
+        const block = shade.querySelector('.cx-held');
+        assert.equal(body.children.indexOf(block), body.children.indexOf(shade.querySelector('.cx-head')) + 1,
+            'directly under the switch\'s header');
+        assert.equal(block.getAttribute('aria-labelledby'), block.querySelector('.cx-held-name').id);
+        assert.equal(block.querySelector('.cx-held-name').textContent, 'Own time · 13:20', 'its start in the viewer\'s clock');
+        const mark = block.querySelector('.cx-held-mark');
+        assert.deepEqual([mark.dataset.shape, mark.dataset.hue, block.querySelector('.cx-held-word').textContent],
+            ['dot', 'owner', 'Paused'], 'a spending limit is the owner\'s move');
+        assert.deepEqual([block.querySelector('.cx-held-text').textContent, block.querySelector('.cx-held-note').textContent],
+            ['Its own wake-up is held (total_budget).', 'What follows from it.']);
+        // The header keeps the switch: its position, money and Turn off; the hold is said once, in the block.
+        assert.equal(shade.querySelector('.cx-state').textContent, 'Also on its own and in places');
+        assert.equal(shade.querySelector('.cx-state-note').hidden, true);
+        assert.equal(shade.querySelector('.cx-toggle').textContent, 'Turn off');
+        for (const [cause, shape, word] of [['owner', 'pause', 'Paused'], ['sleep', 'still', 'Waiting'],
+            ['queued', 'still', 'Queued'], ['technical', 'ring', 'Paused'], ['', 'ring', 'State unknown']]) {
+            status.update(heldBy(cause));
+            assert.deepEqual([mark.dataset.shape, mark.dataset.hue, block.querySelector('.cx-held-word').textContent],
+                [shape, 'ink', word], cause || 'unproven');
+        }
+        // A wake with no start recorded (only queued) is named alone; no held wake, no block, and the state is the
+        // header's again.
+        status.update(heldBy('queued', OFFERED, { live_wake_hold: { cause: 'queued', ceiling_usd: null } }));
+        assert.equal(block.querySelector('.cx-held-name').textContent, 'Own time');
+        status.update(answer({ position: 'Also on its own and in places' }));
+        assert.deepEqual([block.hidden, shade.querySelector('.cx-state-note').textContent], [true, 'Sleeping until 14:20.']);
+        status.destroy();
+    } finally {
+        restoreDom(env.prior);
+    }
+});
+
+test('the held wake\'s block offers exactly its work\'s controls on the shared task controls, Costs leading for the total budget', async () => {
+    const posts = [];
+    const env = installDom(async (url, init = {}) => {
+        if (init.method === 'POST') posts.push(String(url));
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    });
+    try {
+        const bar = document.createElement('div');
+        let online = true;
+        let refreshed = 0;
+        const status = createConsciousnessStatus({ bar, ws: { send() {}, isConnected: () => online },
+            refreshState: () => { refreshed += 1; }, read: async () => normalizeConsciousness({ recent_wakes: [] }) });
+        const actions = () => status.shade.querySelector('.cx-held-actions').children.map((node) => node.classList.contains('cx-held-door')
+            ? `door:${node.querySelector('[data-open-task]')?.dataset.openTask}` : node.textContent);
+        const button = (label) => status.shade.querySelector('.cx-held-actions').children.find((node) => node.textContent === label);
+        status.update(heldBy('total_budget'));
+        status.chip.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        // The total budget holds it: raising that budget leads, and Resume stays pressable, neutral (the server refuses
+        // honestly while nothing is left).
+        assert.deepEqual(actions(), ['Costs ›', 'Resume', 'Stop now', `door:${WAKE}`]);
+        assert.deepEqual([button('Costs ›').classList.contains('btn-primary'), button('Resume').classList.contains('btn-primary'),
+            button('Resume').classList.contains('btn-default'), button('Resume').disabled], [true, false, true, false]);
+        assert.equal(button('Stop now').dataset.taskControlDirect, '1', 'its one action after the shared confirmation');
+        // Held at its allowance: Resume is the one primary, Costs follows the controls.
+        status.update(heldBy('allowance'));
+        assert.deepEqual(actions(), ['Resume', 'Stop now', 'Costs ›', `door:${WAKE}`]);
+        assert.deepEqual([button('Resume').classList.contains('btn-primary'), button('Costs ›').classList.contains('btn-primary')],
+            [true, false]);
+        // Only what the server offers: a Pause someone chose with a Stop alone, then nothing but the door, then no work at all.
+        status.update(heldBy('owner', [OFFERED[1]]));
+        assert.deepEqual(actions(), ['Stop now', `door:${WAKE}`]);
+        status.update(heldBy('owner', []));
+        assert.deepEqual(actions(), [`door:${WAKE}`]);
+        status.update(heldBy('owner', null));
+        assert.deepEqual(actions(), [`door:${WAKE}`], 'a work the answer does not project offers no control');
+        // A passed deadline offers its exact Close, never Resume.
+        const token = 'a'.repeat(64);
+        status.update(heldBy('owner', [{ action: 'close', target: WAKE, close_expired: token }, OFFERED[1]]));
+        assert.deepEqual(actions(), ['Close', 'Stop now', `door:${WAKE}`]);
+        // A closed socket leaves every control in place, disabled; the door still leads to the card.
+        online = false;
+        status.update(heldBy('allowance', [...OFFERED, { action: 'close', target: WAKE, close_expired: token }]));
+        assert.deepEqual(['Resume', 'Close', 'Stop now'].map((label) => button(label).disabled), [true, true, true]);
+        online = true;
+        status.update(heldBy('allowance'));
+        assert.equal(button('Resume').disabled, false);
+        // The press is the shared Resume: the work's own task, once, then the room's state is read again.
+        await button('Resume').listeners.get('click')[0]({ target: button('Resume'), stopPropagation() {} });
+        assert.deepEqual(posts, [`/api/tasks/${WAKE}/resume`]);
+        assert.ok(refreshed >= 1, 'the settling read');
+        status.destroy();
+    } finally {
+        restoreDom(env.prior);
+    }
+});
+
+test('own wakes are doors to their cards in Main, like the wakes in places to their sheets; the block\'s door too', async () => {
+    const env = installDom();
+    const events = [];
+    globalThis.window.dispatchEvent = (event) => events.push([event.type, event.detail]);
+    try {
+        const bar = document.createElement('div');
+        const status = createConsciousnessStatus({ bar, ws: { send() {}, isConnected: () => true },
+            read: async () => normalizeConsciousness({ recent_wakes: [
+                { task_id: 'own-1', chat_id: 1, summary: 'Read the notes', started_at: at(13, 5), phase: 'done', ended_at: at(13, 6) },
+                { task_id: 'own-2', summary: 'An older row without its room', started_at: at(12, 5), phase: 'done', ended_at: at(12, 6) },
+            ] }) });
+        status.update(heldBy('owner'));
+        status.chip.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const own = status.shade.querySelector('[data-wakes="own"]');
+        const doors = own.querySelectorAll('.cx-wake-door');
+        assert.equal(doors.length, 1, 'a row whose room is unknown stays words');
+        assert.equal(doors[0].getAttribute('aria-label'), 'Open in Main: 13:05 · Read the notes · Done');
+        doors[0].click();
+        assert.deepEqual(events, [['ouro:open-task', { task_id: 'own-1', chat_id: 1 }]]);
+        assert.equal(status.isOpen(), false, 'the Shade gives way to Main');
+        status.chip.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const door = status.shade.querySelector('.cx-held-door');
+        const link = door.querySelector('[data-open-task]');
+        door.listeners.get('click')[0]({ target: { closest: () => link }, stopPropagation() {} });
+        assert.deepEqual(events.at(-1), ['ouro:open-task', { task_id: WAKE, chat_id: 1 }]);
+        assert.equal(status.isOpen(), false);
         status.destroy();
     } finally {
         restoreDom(env.prior);

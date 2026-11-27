@@ -7,18 +7,21 @@
  * ring while unconfirmed, two bars for a paused wake, a still mark when due. Its accessible name says the state and time.
  *
  * Pressing the chip opens the Shade and switches nothing: the host's state line (consciousness_dashboard.headlineView),
- * Start or Stop (the `/bg` command the Dashboard sends), the money of the last 24 hours, three own wakes and three wakes
- * in places in the Dashboard's phase words (one `GET /api/consciousness` per opening), `Dashboard ›`, `Costs ›` while
- * the allowance is the next step (new starts refused by it, or its wake held at the allowance it started with) and,
+ * Start or Stop (the `/bg` command the Dashboard sends), the money of the last 24 hours, the held own wake's block
+ * (consciousness_held_wake.js: its cause, its own Resume, Stop now or Close and its doors, from the same answer's work
+ * projection), three own wakes and three wakes in places in the Dashboard's phase words (one `GET /api/consciousness`
+ * per opening), `Dashboard ›`, `Costs ›` while the allowance is the next step and no held wake's block says so, and,
  * while evolving, `Evolution ›`. A wake in a place is a door to that place's sheet (its Active · Silent · Paused one press
- * away), read from `/api/places` at the press. The Shade is the room's work list material and gestures (room_work.js):
- * it hangs under the bar's capsules; an outside press, Escape or focus leaving it close it. The facts are the
- * `/api/state` snapshot the room already reads.
+ * away), read from `/api/places` at the press; an own wake is a door to its card in Main. The Shade is the room's work
+ * list material and gestures (room_work.js): it hangs under the bar's capsules; an outside press, Escape or focus leaving
+ * it close it. The facts are the `/api/state` snapshot the room already reads.
  */
 import { headlineView } from './consciousness_dashboard.js';
 import { switchActionWords, switchReadingWords, turnConsciousness } from './consciousness_switch.js';
 import { failureText, normalizeConsciousness, readConsciousness, readPlaces } from './consciousness_api.js';
-import { allowanceMove, allowanceText, clockText, consciousnessMark, deadlineWords, splitWakes, wakePhaseText } from './consciousness_words.js';
+import { allowanceText, clockText, consciousnessMark, costsMove, deadlineWords, splitWakes, wakePhaseText } from './consciousness_words.js';
+import { createHeldWake, heldWakeView } from './consciousness_held_wake.js';
+import { openTask } from './task_reference.js';
 import { fmt, tr } from './i18n.js';
 import { openPlaceSheet } from './place_sheet.js';
 import { controlIcon } from './page_icons.js';
@@ -58,13 +61,15 @@ export function chipView(data = {}) {
 }
 
 /** The three last wakes, newest first: time, its one short line, and its phase in the Dashboard's words; a wake in a
- *  place also names that place (`placeId`, `place`), whose sheet its row opens. */
+ *  place also names that place (`placeId`, `place`), whose sheet its row opens, and an own wake of Main its task
+ *  (`taskId`), whose card in Main its row opens. */
 export function wakeRows(wakes) {
     return (Array.isArray(wakes) ? wakes : []).slice(0, WAKES_SHOWN).map((wake) => ({
         time: clockText(wake.startedAt) || '—',
         text: wake.summary || (wake.cause === 'focus' ? wake.placeLabel || 'A place' : 'Own time'),
         outcome: wakePhaseText(wake),
         ...(wake.cause === 'focus' && wake.placeId ? { placeId: wake.placeId, place: wake.placeLabel || 'A place' } : {}),
+        ...(wake.cause !== 'focus' && wake.taskId && wake.chatId === 1 ? { taskId: wake.taskId } : {}),
     }));
 }
 
@@ -145,6 +150,13 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         wakes.setAttribute('data-i18n-authored', '');  // its own words, never the overlay's
         return { key, empty, heading, wakes, note: element('p', 'cx-wakes-note') };
     });
+    // The held own wake's block, right under the switch's header (owner 27.11, «Блок с кнопками»).
+    const held = createHeldWake(doc, {
+        current: () => (view ? heldWakeView(view.snapshot, lastData) : null), connected: () => connected(),
+        refresh: () => refreshState(true),
+        openCosts: (row) => { close({ restoreFocus: false }); openDashboardTab?.('costs', row ? { row } : undefined); },
+        leave: () => close({ restoreFocus: false }),
+    });
     const doors = element('div', 'cx-doors');
     const door = (label, tab) => {
         const button = element('button', 'cx-door ui-hit-area', label);
@@ -156,7 +168,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     const costsDoor = door('Costs ›', 'costs');
     const evolutionDoor = door('Evolution ›', 'evolution');
     doors.append(dashboardDoor, costsDoor, evolutionDoor);
-    body.append(head, coverageNote, ...groups.flatMap((group) => [group.heading, group.wakes, group.note]), doors);
+    body.append(head, held.element, coverageNote, ...groups.flatMap((group) => [group.heading, group.wakes, group.note]), doors);
     scroll.append(body);
     shade.append(scroll);
     anchor.append(shade);
@@ -164,6 +176,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     const disposeShadeFade = bindScrollFade(scroll);
 
     let view = null;
+    let lastData = null;  // the `/api/state` answer `view` was made from: its work projection holds the held wake's controls
     let open = false;
     let destroyed = false;
     let readSeq = 0;
@@ -188,10 +201,14 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     function paintShade() {
         if (!view) return;
         const { snapshot, headline } = view;
-        // Its position by meaning, then the host's state line and what follows from it (owner 15.11, 5A).
+        const heldView = heldWakeView(snapshot, lastData);
+        // Its position by meaning, then the host's state line and what follows from it (owner 15.11, 5A); a held own
+        // wake's state is its block's, said there once.
         stateLine.textContent = headline.position || headline.text;
-        stateNote.textContent = [headline.position ? headline.text : '', headline.note].filter(Boolean).join(' ');
+        stateNote.textContent = heldView && headline.position ? ''
+            : [headline.position ? headline.text : '', headline.note].filter(Boolean).join(' ');
         stateNote.hidden = !stateNote.textContent;
+        held.paint(heldView);
         const allowance = allowanceText(snapshot);
         money.textContent = allowance;
         money.hidden = !allowance;
@@ -206,7 +223,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         toggle.hidden = snapshot.enabled === null;
         toggle.textContent = pending === 'read' ? switchReadingWords() : switchActionWords(on);
         toggle.disabled = Boolean(pending) || !ws?.send || !connected();
-        costsDoor.hidden = !allowanceMove(snapshot);
+        costsDoor.hidden = !costsMove(snapshot) || Boolean(heldView);
         evolutionDoor.hidden = !view.evolving;
     }
 
@@ -220,11 +237,22 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         for (const group of groups) {
             const rows = wakeRows(split[group.key]);
             group.wakes.replaceChildren(...rows.map((row) => {
-                const item = element('li', row.placeId ? 'cx-wake-item' : 'cx-wake');
+                const item = element('li', row.placeId || row.taskId ? 'cx-wake-item' : 'cx-wake');
                 const time = element('span', 'cx-wake-time', row.time);
                 const text = element('span', 'cx-wake-text', row.text);
                 const outcome = element('span', 'cx-wake-outcome', row.outcome);
                 outcome.hidden = !row.outcome;
+                if (row.taskId) {
+                    // An own wake is a door to its card in Main, as a place's wake is to its sheet.
+                    const door = element('button', 'cx-wake cx-wake-door');
+                    door.type = 'button';
+                    door.setAttribute('aria-label', fmt('Open in Main: {facts}', {
+                        facts: [row.time, row.text, row.outcome].filter(Boolean).join(' · ') }));
+                    door.append(time, text, outcome);
+                    door.addEventListener('click', () => { close({ restoreFocus: false }); openTask(row.taskId); });
+                    item.append(door);
+                    return item;
+                }
                 if (!row.placeId) {
                     item.append(time, text, outcome);
                     return item;
@@ -396,6 +424,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         update(data) {
             if (destroyed || !carriesFacts(data)) return;
             view = chipView(data);
+            lastData = data;
             if (pending && Date.now() - pendingAt >= COMMAND_SETTLE_MS) pending = '';
             paintChip();
             if (open) paintShade();
@@ -408,6 +437,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
             readSeq += 1;
             for (const dispose of disposers.splice(0)) dispose();
             folding?.cancel();
+            held.destroy();
             bar.removeAttribute('data-cx-shade');
             chip.remove();
             anchor.remove();

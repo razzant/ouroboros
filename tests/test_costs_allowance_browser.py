@@ -403,20 +403,22 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                 window.addEventListener('ouro:open-task', (event) => seen.push(event.detail)); return seen; }""")
             page.locator(".costs-allowance-line [data-open-task]").click()
             assert opened.json_value() == [{"task_id": "wake-held", "chat_id": 1}]
-            # ... said on the Consciousness tab with the owner's mark and its allowance door, which opens that row in
-            # Costs, and in the Shade.
+            # ... said on the Consciousness tab with the owner's mark, in the held wake's own block under the headline
+            # (its allowance door there opens that row in Costs), and in the Shade.
+            note = ("No spending estimate is available for Resume. Raising the limit alone resumes nothing. "
+                    "Stop now ends it and frees the clock for its next check.")
             for (width, _height, theme), page in pages.items():
                 _costs(page, url)
                 page.locator("[data-costs-consciousness]").click()
                 headline = page.locator(".consciousness-headline")  # the switch's position and the owner's mark
-                expect(page.locator(".consciousness-headline-state")).to_contain_text(
-                    "Its own wake-up stopped at its allowance ($2.99).", timeout=30_000)
+                block = page.locator("[data-cx-held] .cx-held")
+                expect(block.locator(".cx-held-text")).to_have_text("Its own wake-up stopped at its allowance ($2.99).",
+                                                                    timeout=30_000)
                 assert headline.locator(".status-mark").get_attribute("data-hue") == "owner"
-                expect(page.locator(".consciousness-headline-note")).to_have_text(
-                    "No spending estimate is available for Resume. Raising the limit alone resumes nothing. "
-                    "Stop now ends it and frees the clock for its next check.")
+                expect(block.locator(".cx-held-note")).to_have_text(note)
+                expect(page.locator(".consciousness-headline-state")).to_have_count(0)  # said once, in the block
                 if (shot := _evidence(f"{engine}-{width}-{theme}-held-consciousness.png")) is not None:
-                    page.locator("[data-cx-summary]").screenshot(path=str(shot))
+                    page.locator("#page-dashboard [aria-label='Consciousness']").first.screenshot(path=str(shot))
                 page.locator('#page-dashboard [data-setting-row="consciousness-allowance"]').click()
                 expect(page.locator(FIELD)).to_be_focused(timeout=30_000)
                 _nav(page, "chat")
@@ -426,10 +428,12 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                 chip.click()
                 shade = page.locator("#page-chat .cx-shade")
                 expect(shade.locator(".cx-state")).to_have_text("Also on its own")  # the switch's position
-                expect(shade.locator(".cx-state-note")).to_contain_text("stopped at its allowance")
-                expect(shade.locator(".cx-state-note")).to_contain_text("No spending estimate is available for Resume.")
-                costs = shade.locator(".cx-door", has_text="Costs ›")
+                expect(shade.locator(".cx-state-note")).to_be_hidden()  # the hold is the block's, said once
+                expect(shade.locator(".cx-held-text")).to_contain_text("stopped at its allowance")
+                expect(shade.locator(".cx-held-note")).to_contain_text("No spending estimate is available for Resume.")
+                costs = shade.locator(".cx-held-costs")
                 expect(costs).to_be_visible()
+                expect(shade.locator(".cx-door", has_text="Costs ›")).to_be_hidden()
                 page.wait_for_function("""() => [...document.querySelectorAll('#page-chat .cx-shade')].every((shade) =>
                     shade.getAnimations({ subtree: true }).every((animation) => animation.playState !== 'running'))""")
                 page.wait_for_timeout(250)  # the material's own fade-in, whatever drives it, settles before the frame

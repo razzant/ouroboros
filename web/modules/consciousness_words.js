@@ -210,18 +210,40 @@ export function allowanceText(snapshot) {
     return `${formatLimitUsd(spentUsd, dailyUsd)}${sofar} of ${formatLimitUsd(dailyUsd, dailyUsd, 'limit')} in the last 24 hours${out}${degraded}`;
 }
 
-// The owner's move (DESIGN "Status marks", amber): consciousness stopped by its spending limit (new starts refused, or
-// its own wake held at the allowance it started with). A failure is an outcome's red dot, an unconfirmed outcome or an
-// unreadable owner chat a ring, any other paused wake two bars, a due wake the still mark.
+// The owner's move (DESIGN "Status marks", amber): consciousness stopped by a spending limit (new starts refused by
+// its allowance, or its own wake held by a limit its records prove). A failure is an outcome's red dot, an unconfirmed
+// outcome or an unreadable owner chat a ring, a due wake the still mark. A held wake's own mark follows its cause.
 const OWNER_MOVE = new Set(['allowance_exhausted']);
 const FAILED = new Set(['wake_failed', 'wake_rejected', 'stopped']);
 const UNCONFIRMED = new Set(['wake_outcome_unknown', 'allowance_unknown', 'owner_chat_unknown']);
 const ALLOWANCE_HOLDS = new Set(['allowance', 'allowance_and_cap']);
+// Every limit the host proves held the wake: only the owner raises one, or ends the wake.
+const SPENDING_HOLDS = new Set([...ALLOWANCE_HOLDS, 'per_task_cap', 'launch_ceiling', 'total_budget', 'per_task_fence']);
+// The limits edited in Costs. A running work's own cap (per_task_cap) is raised in chat, and a fence of its own work
+// is that work's, so neither is a Costs step.
+const COSTS_HOLDS = new Set([...ALLOWANCE_HOLDS, 'launch_ceiling', 'total_budget']);
+// A held wake by its cause: a spending limit is the owner's amber dot; the owner's or Ouroboros's Pause two bars; a
+// sleep that ends by itself and a wake only queued for a worker the still mark; an unreadable or unproven hold a ring.
+const HELD_MARKS = Object.freeze({ owner: 'pause', sleep: 'still', queued: 'still' });
+const HELD_WORDS = Object.freeze({ owner: ['task.phase.paused', 'Paused'], sleep: ['task.phase.waiting', 'Waiting'],
+    queued: ['task.phase.queued', 'Queued'], technical: ['task.phase.paused', 'Paused'] });
+
+/** The task id of its own wake while it is held and consciousness is on, else '': the one wake the clock waits for,
+ *  whatever holds it (consciousness_view.held_sentence says what). */
+export const heldWake = (snapshot) => (snapshot?.enabled === true && snapshot.status === 'wake_paused'
+    && snapshot.liveWakeHeld === true ? snapshot.liveWakeTaskId : '');
 
 /** Whether its own wake is held, proven, at the allowance it started with (consciousness_view.hold_cause): the
  *  status word stays `wake_paused`; the cause is its own fact. */
-export const allowanceHold = (snapshot) => snapshot.enabled === true && snapshot.status === 'wake_paused'
-    && snapshot.liveWakeHeld === true && ALLOWANCE_HOLDS.has(snapshot.holdCause);
+export const allowanceHold = (snapshot) => Boolean(heldWake(snapshot)) && ALLOWANCE_HOLDS.has(snapshot.holdCause);
+
+/** The held wake's one mark (DESIGN "Status marks") and its status word, from the cause its records prove. */
+export function heldWakeState(snapshot) {
+    const cause = snapshot.holdCause;
+    if (SPENDING_HOLDS.has(cause)) return { mark: { shape: 'dot', hue: 'owner' }, word: tr('task.phase.paused', 'Paused') };
+    const [key, fallback] = HELD_WORDS[cause] || ['task.phase.unknown', 'State unknown'];
+    return { mark: { shape: HELD_MARKS[cause] || 'ring', hue: 'ink' }, word: tr(key, fallback) };
+}
 
 /** What Resume of a wake held at its daily share may add, as the host estimates it now
  *  (`live_wake_hold.resume_additional_usd`, consciousness_api.js `holdAdditionalUsd`), in one action's money (`formatUsd`:
@@ -242,9 +264,10 @@ export function wakeResumeRoomWords(snapshot) {
     return `Estimated room on Resume: ${words}`;
 }
 
-/** Whether the next step is the allowance, edited in Costs: new starts refused by it, or a wake held at it. */
-export const allowanceMove = (snapshot) => snapshot.enabled === true
-    && (snapshot.status === 'allowance_exhausted' || allowanceHold(snapshot));
+/** Whether the next step is a limit edited in Costs: new starts refused by the allowance, or its own wake held by the
+ *  allowance, the limit it started with or the total budget. */
+export const costsMove = (snapshot) => snapshot.enabled === true
+    && (snapshot.status === 'allowance_exhausted' || (Boolean(heldWake(snapshot)) && COSTS_HOLDS.has(snapshot.holdCause)));
 
 /** The one status mark of a consciousness state, for the bar's chip and the Dashboard's headline alike; `owner` adds
  *  an owner's move the caller knows of (an Evolution campaign that waits for the owner). */
@@ -252,11 +275,14 @@ export function consciousnessMark(snapshot, { owner = false } = {}) {
     const off = snapshot.enabled === false;
     const unknown = snapshot.enabled === null;
     const status = snapshot.status;
-    if (owner || (!off && !unknown && (OWNER_MOVE.has(status) || allowanceHold(snapshot)))) return { shape: 'dot', hue: 'owner' };
+    const held = heldWake(snapshot) ? heldWakeState(snapshot).mark : null;
+    if (owner || (!off && !unknown && (OWNER_MOVE.has(status) || held?.hue === 'owner'))) return { shape: 'dot', hue: 'owner' };
+    if (held) return held;
     if (status === 'thinking') return { shape: 'moving', hue: 'ink' };
     if (off) return { shape: 'none', hue: 'ink' };
     if (FAILED.has(status)) return { shape: 'dot', hue: 'failed' };
     if (unknown || UNCONFIRMED.has(status)) return { shape: 'ring', hue: 'ink' };
+    // A wake that returned while paused or pausing (no wake held now) keeps the two bars.
     if (status === 'wake_paused') return { shape: 'pause', hue: 'ink' };
     return status === 'due' ? { shape: 'still', hue: 'ink' } : { shape: 'none', hue: 'ink' };
 }

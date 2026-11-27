@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 import { setup, NodeStub } from './dashboard_dom_fixture.js';
+import { installDom, restoreDom } from './chat_dom_fixture.js';
 import { clock, observe } from './state_read_fixture.js';
 import * as api from '../modules/api_client.js';
 
@@ -9,7 +10,7 @@ import { normalizeConsciousness, normalizePlacesResponse, normalizeWake } from '
 import { createContributionsStore } from '../modules/contributions.js';
 import {
     countedRootsText, headlineView, initConsciousnessDashboard, liveWake,
-    paintWakeRows, spendDetails, summaryHtml, wakeRowHtml, wakesCardHtml,
+    paintWakeRows, spendDetails, summaryDetailsHtml, summaryHtml, wakeRowHtml, wakesCardHtml,
 } from '../modules/consciousness_dashboard.js';
 import { consciousnessMark, wakeCheckChip, wakeCheckText, wakeCostText } from '../modules/consciousness_words.js';
 import { applyPayload, setMissTransport } from '../modules/i18n.js';
@@ -100,8 +101,9 @@ test('server status alone owns the headline even with finished or active rows in
 
 test('the headline card says the money of the last 24 hours alone; where it went is the card\'s Details', () => {
     const snapshot = fromState();
-    const html = summaryHtml(snapshot);
-    const [main, details] = [html.split('<details')[0], html.slice(html.indexOf('<details'))];
+    const html = summaryHtml(snapshot) + summaryDetailsHtml(snapshot);
+    const [main, details] = [summaryHtml(snapshot), summaryDetailsHtml(snapshot)];
+    assert.doesNotMatch(main, /<details/, 'the Details follow the held wake\'s block, apart from the head');
     // The fixture's $2.32 of a $20 limit: whole dollars, the spend rounded up, like the limit cards of Costs.
     assert.match(strip(main), /\$3 of \$20 in the last 24 hours/, 'one money line, written like Costs');
     assert.doesNotMatch(main, /Slack · Acme \$|Started work|Some calls have no price|on its own clock/, 'no run-on of causes on the card');
@@ -126,7 +128,8 @@ test('the headline card says the money of the last 24 hours alone; where it went
     assert.match(summaryHtml(snapshot), /data-cx-act="toggle" data-enabled="1">Turn off</);
     assert.match(summaryHtml({ ...snapshot, enabled: false }), /data-cx-act="toggle" data-enabled="0">Turn on</);
     assert.doesNotMatch(summaryHtml(normalizeConsciousness({})), /data-cx-act="toggle"/);
-    assert.match(summaryHtml(snapshot, { detailsOpen: true }), /consciousness-details" open>/, 'an opened Details stays open');
+    assert.match(summaryDetailsHtml(snapshot, { detailsOpen: true }), /consciousness-details" open>/, 'an opened Details stays open');
+    assert.equal(summaryDetailsHtml(normalizeConsciousness({})), '', 'nothing to detail, no Details');
 });
 
 test('a state that cannot wake wears its failure mark and offers Restart; starting is said without alarm', () => {
@@ -145,19 +148,26 @@ test('a state that cannot wake wears its failure mark and offers Restart; starti
     assert.deepEqual(consciousnessMark({ ...stopped, status: 'allowance_exhausted' }), { shape: 'dot', hue: 'owner' });
     assert.deepEqual(consciousnessMark({ ...stopped, status: 'thinking' }), { shape: 'moving', hue: 'ink' });
     assert.deepEqual(consciousnessMark({ ...stopped, enabled: false }), { shape: 'none', hue: 'ink' });
-    // A held wake keeps the word `wake_paused`; only a proven allowance hold is the owner's move (amber), every other
-    // or unproven cause keeps the pause bars.
+    // A held wake keeps the word `wake_paused`; its mark follows the cause its records prove: every spending limit is
+    // the owner's move (amber), an explicit Pause two bars, a sleep or a wake only queued the still mark, and an
+    // unreadable or unproven hold a ring (owner 27.11: honest marks per cause).
     const held = normalizeConsciousness({ enabled: true, status: 'wake_paused', live_wake_task_id: 'w1', live_wake_held: true,
-        detail: 'Wake-up w1 stopped at the allowance it had left when it started ($2.99).', live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99 } });
-    for (const cause of ['allowance', 'allowance_and_cap']) {
-        assert.deepEqual(consciousnessMark({ ...held, holdCause: cause }), { shape: 'dot', hue: 'owner' }, cause);
-    }
-    for (const cause of ['per_task_cap', 'launch_ceiling', 'per_task_fence', 'total_budget', 'owner', 'sleep', 'technical', '']) {
-        assert.deepEqual(consciousnessMark({ ...held, holdCause: cause }), { shape: 'pause', hue: 'ink' }, cause);
+        detail: 'Its own wake-up stopped at its allowance ($2.99).', live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99 } });
+    for (const [causes, mark] of [
+        [['allowance', 'allowance_and_cap', 'per_task_cap', 'launch_ceiling', 'per_task_fence', 'total_budget'], { shape: 'dot', hue: 'owner' }],
+        [['owner'], { shape: 'pause', hue: 'ink' }], [['sleep', 'queued'], { shape: 'still', hue: 'ink' }],
+        [['technical', '', 'a cause of a newer host'], { shape: 'ring', hue: 'ink' }]]) {
+        for (const cause of causes) assert.deepEqual(consciousnessMark({ ...held, holdCause: cause }), mark, cause);
     }
     assert.deepEqual(consciousnessMark({ ...held, enabled: false }), { shape: 'none', hue: 'ink' }, 'Off wins');
+    // A wake that returned while paused (none held now) keeps the two bars.
     assert.deepEqual(consciousnessMark({ ...held, liveWakeHeld: false }), { shape: 'pause', hue: 'ink' }, 'a hold needs the held wake');
-    assert.match(summaryHtml(held), /consciousness-headline">Wake-up w1 stopped at the allowance.*data-hue="owner"/);
+    assert.match(summaryHtml(held), /consciousness-headline">Its own wake-up stopped at its allowance.*data-hue="owner"/);
+    // With the switch's position as its figure, the head leaves a held wake's state to that wake's block below it; any
+    // other state keeps its line.
+    const placed = { ...held, position: 'Also on its own and in places', detailNote: 'Resume keeps that limit.' };
+    assert.doesNotMatch(summaryHtml(placed), /consciousness-headline-(state|note)|Its own wake-up/);
+    assert.match(summaryHtml({ ...placed, liveWakeHeld: false }), /consciousness-headline-state">Its own wake-up stopped/);
     // What follows from the hold is said beneath the headline, quieter; no other state has a note.
     const noted = normalizeConsciousness({ ...held, detail_note: 'Resume keeps that limit.' });
     assert.match(summaryHtml(noted), /<p class="dashboard-hero-meta consciousness-headline-note">Resume keeps that limit\.<\/p>/);
@@ -692,4 +702,57 @@ test('already-on consciousness offers Allow Panic resume only when unchosen Pani
     assert.equal(off.panicChoiceAvailable, false);
     assert.doesNotMatch(summaryHtml(off), /data-cx-act="panic-choice"/);
     assert.doesNotMatch(summaryHtml(fromState()), /data-cx-act="panic-choice"/);
+});
+
+test('a held own wake is its own block under the headline, its controls those of the page\'s latest state', async () => {
+    // The same block as the chip's Shade (consciousness_held_wake.js): its words are this tab's read, its controls the
+    // work the page's latest /api/state projects, repainted when that snapshot changes.
+    const env = installDom();
+    const mount = fakeMount();
+    const holder = document.createElement('div');
+    mount.regions.set('[data-cx-held]', holder);
+    const work = (controls) => ({ work_id: 'e629aa8e', room: 1, episode: { task_id: 'e629aa8e', live: true }, confirmed: true, controls });
+    let latest = { works: [work([{ action: 'resume', target: 'e629aa8e' }, { action: 'stop', target: 'e629aa8e', scope: 'cascade' }])] };
+    const watchers = new Set();
+    const stateSnapshots = { latest: () => latest, gate: async () => null,
+        watch: (watcher) => { watchers.add(watcher); return () => watchers.delete(watcher); } };
+    const tabs = [];
+    const held = normalizeConsciousness({ enabled: true, status: 'wake_paused', position: 'Also on its own and in places',
+        live_wake_task_id: 'e629aa8e', live_wake_held: true, detail: 'Its own wake-up is paused: the total budget was spent.',
+        detail_note: 'Raising Total budget in Costs alone resumes nothing: raise it, then Resume.',
+        live_wake_hold: { cause: 'total_budget', ceiling_usd: null, started_at: '2026-11-27T17:20:16+00:00' } });
+    let snapshot = held;
+    const controller = initConsciousnessDashboard({ mount, ws: { send() {}, isConnected: () => true },
+        state: { activePage: 'chat' }, stateSnapshots, read: async () => snapshot,
+        openDashboardTab: (tab, options) => tabs.push([tab, options?.row || '']) });
+    try {
+        await controller.refresh();
+        const block = holder.querySelector('.cx-held');
+        assert.equal(block.hidden, false);
+        assert.match(block.querySelector('.cx-held-name').textContent, /^Own time · \d\d:\d\d$/);
+        assert.equal(block.querySelector('.cx-held-text').textContent, held.detail);
+        const summary = mount.regions.get('[data-cx-summary]').innerHTML;
+        assert.doesNotMatch(summary, /total budget|consciousness-headline-(state|note)/, 'the head says the hold no second time');
+        assert.match(summary, /consciousness-headline">Also on its own and in places.*data-hue="owner"/);
+        const labels = () => block.querySelector('.cx-held-actions').children
+            .map((node) => (node.classList.contains('cx-held-door') ? 'door' : node.textContent));
+        assert.deepEqual(labels(), ['Costs ›', 'Resume', 'Stop now', 'door']);
+        // The page's snapshot changes (its Resume or Stop pressed elsewhere): the block follows it, no read of its own.
+        latest = { works: [work([])] };
+        watchers.forEach((watcher) => watcher());
+        assert.deepEqual(labels(), ['Costs ›', 'door']);
+        block.querySelector('.cx-held-actions').children[0].click();
+        assert.deepEqual(tabs, [['costs', 'TOTAL_BUDGET']], 'Costs at the total budget\'s row');
+        // No held wake: no block, and the head says the state again.
+        snapshot = normalizeConsciousness({ enabled: true, status: 'sleeping', position: 'Also on its own and in places',
+            detail: 'Sleeping until 13:00.' });
+        await controller.refresh();
+        assert.equal(block.hidden, true);
+        assert.match(mount.regions.get('[data-cx-summary]').innerHTML, /consciousness-headline-state">Sleeping until 13:00\.</);
+    } finally {
+        controller.destroy();
+        restoreDom(env.prior);
+    }
+    assert.equal(watchers.size, 0, 'its watch ends with the tab');
+    assert.equal(holder.children.length, 0);
 });

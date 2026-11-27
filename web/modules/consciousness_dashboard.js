@@ -3,8 +3,9 @@
 // included), the own tasks MAX_TASKS counts, its settings card (rows of settings_rows.js that save themselves) and the
 // recent wakes with their cause, where, how fast it answered, what the Safety Supervisor did and what each cost. The
 // places themselves live on the Circles page; this tab reads `/api/places` only to open a wake's captured conversation
-// in its place sheet. Facts come from `GET /api/consciousness`, with `/api/state` as the status fallback. Wakes say
-// when they are not reported; unknown money is never zero.
+// in its place sheet. Facts come from `GET /api/consciousness`, with `/api/state` as the status fallback; a held own
+// wake's block (consciousness_held_wake.js) takes that wake's controls from the page's latest `/api/state` snapshot.
+// Wakes say when they are not reported; unknown money is never zero.
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { statusMarkHtml } from './status_mark.js';
 import { controlIcon } from './page_icons.js';
@@ -12,7 +13,9 @@ import { chipHtml } from './skill_presentation.js';
 import { tr, fmt } from './i18n.js';
 import { failureText, readConsciousness, readConsciousnessFromState, readPlaces } from './consciousness_api.js';
 import { autonomyOf } from './consciousness_autonomy.js';
-import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, modelRouteWords, safetyLevelOf, splitWakes, durationText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
+import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, heldWake, modelRouteWords, safetyLevelOf, splitWakes, durationText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
+import { createHeldWake, heldWakeView } from './consciousness_held_wake.js';
+import { readStateSnapshot } from './state_snapshots.js';
 import { mountChatMarkdown, enhanceChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { confirmAndSendRestart, costPresentationDetail } from './chat_activity.js';
 import { openConfirmDialog } from './confirm_dialog.js';
@@ -108,11 +111,14 @@ export function countedRootsText(snapshot) {
 
 /** The tab's headline card on the Dashboard tab body: the state in the host's words with its one status mark, the money
  *  of the last 24 hours and the own-task count as its meta, Start/Stop (and Restart when it cannot wake) beside them,
- *  and while it is on, that Stop also ends a running wake; where the money went, the unpriced caveat and the own tasks'
- *  names are the card's Details. Its doors (Costs, Models, Circles) are rows of the settings cards under it.
- *  `toggling` is the command just sent (its button says so until the next read). */
-export function summaryHtml(snapshot, { hasSocket = true, toggling = '', detailsOpen = false } = {}) {
+ *  and while it is on, that Stop also ends a running wake. A held own wake's state is its block's, under this head
+ *  (consciousness_held_wake.js), so the head does not say it again; the card's Details follow (`summaryDetailsHtml`).
+ *  Its doors (Costs, Models, Circles) are rows of the settings cards under it. `toggling` is the command just sent (its
+ *  button says so until the next read). */
+export function summaryHtml(snapshot, { hasSocket = true, toggling = '' } = {}) {
     const headline = headlineView(snapshot);
+    const state = !headline.position ? '' : heldWake(snapshot) ? '' : headline.text;
+    const note = headline.position && heldWake(snapshot) ? '' : headline.note;
     // The switch's gloss over its position by meaning; the host's state line beneath (owner 15.11, 5A).
     const kicker = snapshot.gloss ? `Consciousness · ${snapshot.gloss[0].toLowerCase()}${snapshot.gloss.slice(1)}` : 'Consciousness';
     const money = allowanceText(snapshot);
@@ -126,22 +132,28 @@ export function summaryHtml(snapshot, { hasSocket = true, toggling = '', details
     // It cannot wake until Ouroboros starts again: the next step is beside the words that say so.
     const restart = snapshot.enabled && snapshot.status === 'stopped'
         ? `<button type="button" class="btn btn-default btn-sm" data-cx-act="restart"${hasSocket ? '' : ' disabled'}>Restart</button>` : '';
+    return `<div class="dashboard-hero">
+            <p class="dashboard-hero-kicker">${escapeHtml(kicker)}</p>
+            <p class="dashboard-hero-figure consciousness-headline">${escapeHtml(headline.position || headline.text)}${markHtml}</p>
+            ${state ? `<p class="dashboard-hero-meta consciousness-headline-state">${escapeHtml(state)}</p>` : ''}
+            ${note ? `<p class="dashboard-hero-meta consciousness-headline-note">${escapeHtml(note)}</p>` : ''}
+            ${money ? `<p class="dashboard-hero-meta">${escapeHtml(money)}</p>` : ''}
+            ${roots ? `<p class="dashboard-hero-meta">${escapeHtml(roots.head)}</p>` : ''}
+            ${toggle || panicChoice || restart ? `<div class="dashboard-hero-actions">${restart}${panicChoice}${toggle}</div>` : ''}
+        </div>`;
+}
+
+/** The headline card's Details, after the held wake's block: where the money went, the unpriced caveat and the own
+ *  tasks' names. */
+export function summaryDetailsHtml(snapshot, { detailsOpen = false } = {}) {
     const spend = spendDetails(snapshot);
+    const roots = countedRootsParts(snapshot);
     const details = [
         spend.rows.length ? `<dl class="dashboard-facts">${spend.rows.map((row) => `<dt data-i18n-authored>${escapeHtml(row.words)}</dt><dd>${escapeHtml(row.amount)}</dd>`).join('')}</dl>` : '',
         spend.unpriced ? `<p class="consciousness-foot">${escapeHtml(tr('consciousness.unpriced', 'Some calls have no price'))}.</p>` : '',
         roots?.names.length ? `<p class="consciousness-foot" data-i18n-authored>${escapeHtml(roots.names.join(' · '))}</p>` : '',
     ].join('');
-    return `<div class="dashboard-hero">
-            <p class="dashboard-hero-kicker">${escapeHtml(kicker)}</p>
-            <p class="dashboard-hero-figure consciousness-headline">${escapeHtml(headline.position || headline.text)}${markHtml}</p>
-            ${headline.position ? `<p class="dashboard-hero-meta consciousness-headline-state">${escapeHtml(headline.text)}</p>` : ''}
-            ${headline.note ? `<p class="dashboard-hero-meta consciousness-headline-note">${escapeHtml(headline.note)}</p>` : ''}
-            ${money ? `<p class="dashboard-hero-meta">${escapeHtml(money)}</p>` : ''}
-            ${roots ? `<p class="dashboard-hero-meta">${escapeHtml(roots.head)}</p>` : ''}
-            ${toggle || panicChoice || restart ? `<div class="dashboard-hero-actions">${restart}${panicChoice}${toggle}</div>` : ''}
-        </div>
-        ${details ? `<details class="ui-disclosure consciousness-details"${detailsOpen ? ' open' : ''}><summary>Details</summary>${details}</details>` : ''}`;
+    return details ? `<details class="ui-disclosure consciousness-details"${detailsOpen ? ' open' : ''}><summary>Details</summary>${details}</details>` : '';
 }
 
 /** One view of the card: authored line, whole note on request, factual phase and cost. */
@@ -275,20 +287,22 @@ function mountSettingsCards(host, { state, openSettings, openDashboardTab, route
 }
 
 /** Mount the tab into its Dashboard panel. */
-export function initConsciousnessDashboard({ mount, ws, state, openSettings, openDashboardTab, read = readConsciousness,
-    readFallback = readConsciousnessFromState, readPlacesFn = readPlaces, openSheet = openPlaceSheet,
+export function initConsciousnessDashboard({ mount, ws, state, openSettings, openDashboardTab, stateSnapshots = null,
+    read = readConsciousness, readFallback = readConsciousnessFromState, readPlacesFn = readPlaces, openSheet = openPlaceSheet,
     markdown = { mount: mountChatMarkdown, enhance: enhanceChatMarkdown, destroy: destroyChatMarkdown } } = {}) {
     if (!mount) return { refresh: () => {}, destroy() {} };
     // The tab's one root and scroller (style.css "The Dashboard tab body"); the settings cards are drawn once, and a
     // repaint of the tab only paints their rows' words again (the Model door reads the route this read published).
     mount.innerHTML = `<div class="dashboard-body scroll-fade-y consciousness-root">
             <p class="ui-status consciousness-read-status" role="status" data-cx-status></p>
-            <section class="ui-card" aria-label="Consciousness" data-cx-summary><p class="consciousness-copy">Reading…</p></section>
+            <section class="ui-card" aria-label="Consciousness"><div data-cx-summary><p class="consciousness-copy">Reading…</p></div>
+                <div class="consciousness-held" data-cx-held></div><div data-cx-summary-details></div></section>
             <div class="dashboard-settings-cards" data-cx-settings></div>
             <section class="ui-card consciousness-card" aria-label="Recent wakes" data-cx-wakes></section>
         </div>`;
     const regions = {
         status: mount.querySelector('[data-cx-status]'), summary: mount.querySelector('[data-cx-summary]'),
+        held: mount.querySelector('[data-cx-held]'), details: mount.querySelector('[data-cx-summary-details]'),
         wakes: mount.querySelector('[data-cx-wakes]'),
     };
     let snapshot = null;
@@ -322,9 +336,33 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
     let toggling = '';
     let toggledAt = 0;
     let detailsOpen = false;  // the headline card's Details stays as its reader left it across repaints
+    // The held own wake's block, made at the first held wake: its words are this read's, its controls the work the
+    // page's latest `/api/state` snapshot projects; a press re-checks them and reads both again once it settles.
+    let held = null;
+    const heldNow = () => (snapshot ? heldWakeView(snapshot, stateSnapshots?.latest?.() || null) : null);
+    async function readState() {
+        const request = await stateSnapshots?.gate?.(true);
+        if (request) await readStateSnapshot(stateSnapshots, request);
+    }
+    function paintHeld() {
+        const view = heldNow();
+        if (!view && !held) return;
+        if (!held) {
+            held = createHeldWake(regions.held.ownerDocument || document, { current: heldNow,
+                connected: () => ws?.isConnected?.() !== false, refresh: () => Promise.all([readState(), refresh()]),
+                openCosts: (row) => openDashboardTab?.('costs', row ? { row } : undefined) });
+            regions.held.append(held.element);
+        }
+        held.paint(view);
+    }
+    const unwatchState = stateSnapshots?.watch?.(() => { if (!destroyed) paintHeld(); }) || (() => {});
     function paint() {
         cards.paint();  // the Model door says the route this read published
-        if (snapshot) put(regions.summary, summaryHtml(snapshot, { hasSocket: Boolean(ws?.send), toggling, detailsOpen }));
+        if (snapshot) {
+            put(regions.summary, summaryHtml(snapshot, { hasSocket: Boolean(ws?.send), toggling }));
+            put(regions.details, summaryDetailsHtml(snapshot, { detailsOpen }));
+        }
+        paintHeld();
         const wakes = snapshot?.recentWakes ?? null;
         const coverage = snapshot?.coverage || '';
         if (!regions.wakes.querySelector('[data-cx-wake-group]')) { put(regions.wakes, wakesCardHtml(wakes, coverage)); return; }
@@ -459,6 +497,8 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
         refresh,
         destroy() {
             destroyed = true;
+            unwatchState();
+            held?.destroy();
             cards.dispose();
             releaseNotes(mount);
             clearTimeout(timer);

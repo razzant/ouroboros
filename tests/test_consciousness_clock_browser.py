@@ -99,7 +99,7 @@ def test_deadline_and_both_lists_refresh_without_reload_or_hover(subscription_ui
     assert chip.get_attribute("aria-label") == "Consciousness: Sleeping until 14:20."
     assert page.locator(".cx-state").inner_text() == "Sleeping until 14:20."
     assert "17:20" not in page.locator("[data-cx-summary]").inner_text()
-    page.evaluate("async () => { raw.live_wake_task_id = 'held'; raw.live_wake_held = true; raw.status = 'wake_paused'; raw.detail = 'Wake-up held is paused or waiting in the queue; its card shows why. The next wake-up follows it.'; await repaint(); }")
+    page.evaluate("async () => { raw.live_wake_task_id = 'held'; raw.live_wake_held = true; raw.status = 'wake_paused'; raw.detail = 'Its own wake-up is paused or waiting in the queue; its card shows why.'; await repaint(); }")
     assert "since" not in chip.get_attribute("aria-label")
     assert page.locator(".cx-chip-word").is_hidden()
     assert "paused" in page.locator(".cx-state").inner_text()

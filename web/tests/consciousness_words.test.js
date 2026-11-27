@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { normalizeConsciousness } from '../modules/consciousness_api.js';
-import { deadlineWords, splitWakes } from '../modules/consciousness_words.js';
+import { costsMove, deadlineWords, heldWake, heldWakeState, splitWakes } from '../modules/consciousness_words.js';
 import { applyPayload, setMissTransport } from '../modules/i18n.js';
 import { initActivity } from '../modules/activity.js';
 import { setup } from './dashboard_dom_fixture.js';
@@ -83,7 +83,7 @@ test('Activity refresh keeps the host sentence as its only clock and names own t
     for (const override of [
         { detail: 'Due since 11:30; the wake-up has not started yet.' },
         { live_wake_task_id: 'own', detail: 'Wake-up own is running.' },
-        { live_wake_held: true, detail: 'Wake-up own is paused or waiting in the queue; its card shows why. The next wake-up follows it.' },
+        { live_wake_held: true, detail: 'Its own wake-up is paused or waiting in the queue; its card shows why.' },
         { appointment_at: '', detail: 'Due; the wake-up has not started yet.' },
         { next_wake_at: '2027-01-15T13:00:00Z', detail: 'Sleeping until 13:00.' },
     ]) {
@@ -97,4 +97,25 @@ test('Activity refresh keeps the host sentence as its only clock and names own t
         assert.doesNotMatch(text.replace(said, ''), /\d\d:\d\d|[Dd]ue|since|[Nn]ext wake/);
         assert.match(text, /own tasks 1\/2/);
     }
+});
+
+test('a held own wake: its mark and word by the cause its records prove, and Costs only for a limit Costs edits', () => {
+    const held = (cause, bg = {}) => normalizeConsciousness({ enabled: true, status: 'wake_paused', live_wake_task_id: 'w1',
+        live_wake_held: true, live_wake_hold: { cause, ceiling_usd: null }, ...bg });
+    assert.equal(heldWake(held('owner')), 'w1');
+    for (const bg of [{ enabled: false }, { live_wake_held: false }, { live_wake_task_id: '' }, { status: 'thinking' }]) {
+        assert.equal(heldWake(held('owner', bg)), '', JSON.stringify(bg));
+    }
+    const said = (cause) => { const { mark, word } = heldWakeState(held(cause)); return `${mark.shape}/${mark.hue} ${word}`; };
+    assert.deepEqual(['total_budget', 'per_task_cap', 'owner', 'sleep', 'queued', 'technical', ''].map(said),
+        ['dot/owner Paused', 'dot/owner Paused', 'pause/ink Paused', 'still/ink Waiting', 'still/ink Queued',
+            'ring/ink Paused', 'ring/ink State unknown']);
+    // The allowance, the limit it started with and the total budget are edited in Costs; a work's own cap is raised in
+    // chat and a fence of its own work is that work's, so neither leads to Costs.
+    for (const [cause, move] of [['allowance', true], ['allowance_and_cap', true], ['launch_ceiling', true],
+        ['total_budget', true], ['per_task_cap', false], ['per_task_fence', false], ['owner', false], ['', false]]) {
+        assert.equal(costsMove(held(cause)), move, cause);
+    }
+    assert.equal(costsMove(normalizeConsciousness({ enabled: true, status: 'allowance_exhausted' })), true);
+    assert.equal(costsMove(held('total_budget', { enabled: false })), false, 'Off holds no Costs step');
 });
