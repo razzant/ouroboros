@@ -30,8 +30,8 @@ screen or a refused apply writes nothing, so nothing is reserved there; geometry
 measured returns the window to the ordinary bar rather than leave a transparent one over the page.
 
 WKWebView takes the clicks under a transparent bar, so AppKit's title bar never sees them: the script
-reports a plain left press inside the page's band (the lights' row, or the measured band without a centre), off any control and any text the page declares
-selectable (``cursor: text``). The report arrives after AppKit dequeued later events (a Force Touch trackpad
+reports a plain left press inside the page's band (the lights' row, or the measured band without a centre), off any
+control and any text the page declares selectable (``cursor: text``). The report arrives after AppKit dequeued later events (a Force Touch trackpad
 sends pressure events within half a millisecond of a press; one was AppKit's current event at 17 of 19 band
 reports, owner's probe 17.11), so it acts on the mouse-down a local monitor kept, when in this window's band. A first
 press, while the button is down, goes back to AppKit's ``performWindowDragWithEvent:``. A second cannot go back:
