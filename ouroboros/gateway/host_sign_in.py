@@ -145,7 +145,7 @@ async def api_sign_in_token(request: Request) -> JSONResponse:
             except ValueError as exc:
                 return _json_error(_masked(str(exc)), 400)
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 429 or exc.response.status_code >= 500:
+                if exc.response.status_code in (408, 429) or exc.response.status_code >= 500:
                     return _unreachable(skill, service, exc)
                 return await asyncio.to_thread(_provider_refused, skill, service, account, exc)
             except httpx.HTTPError as exc:
@@ -172,8 +172,8 @@ def _provider_refused(skill: str, service: str, account: str, exc: Any) -> JSONR
             f"block it, and repeating will not help. The owner can check the skill's card in {CARD_PLACE} and sign in "
             "again once the provider allows the client.")
     return JSONResponse({"ok": False, "code": "SIGN_IN_REQUIRED", "reason": "provider_refused", "service": service,
-                         "account": account, "error": code, "note": declared.notes.get("refused", "") if declared else "",
-                         "hint": hint}, status_code=409)
+                         "account": getattr(exc, "account", "") or account, "error": code,
+                         "note": declared.notes.get("refused", "") if declared else "", "hint": hint}, status_code=409)
 
 
 def _required_response(skill: str, service: str, account: str, exc: Any) -> JSONResponse:

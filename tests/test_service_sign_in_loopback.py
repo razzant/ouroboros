@@ -271,8 +271,8 @@ def test_an_administrators_refusal_of_a_renewal_is_named_never_repeated_as_an_ou
     monkeypatch.setattr(provider, "handle", policy)
     refused = _token(host, CAL)
     body = refused.json()
-    assert refused.status_code == 409 and (body["code"], body["reason"], body["error"]) == (
-        "SIGN_IN_REQUIRED", "provider_refused", "admin_policy_enforced")
+    assert refused.status_code == 409 and (body["code"], body["reason"], body["error"], body["account"]) == (
+        "SIGN_IN_REQUIRED", "provider_refused", "admin_policy_enforced", key)  # the account chosen for the skill
     assert "repeating will not help" in body["hint"]
     saved = oauth_engine.load(grant)
     assert saved["tokens"]["refresh_token"] and saved["last_error"]["reason"] == "provider_refused"

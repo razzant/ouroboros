@@ -447,12 +447,14 @@ async def current_grant(grant: Grant, rejected: Optional[str] = None, *, min_val
             response.raise_for_status()
         except httpx.HTTPError as exc:
             status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else 0
-            if marked and on_refresh is not None and (isinstance(exc, NOT_SENT) or status == 429 or status >= 500):
-                on_refresh(doc, "unsent")  # it never left, or the provider said it did not serve it: lift the mark
+            if marked and on_refresh is not None and (isinstance(exc, NOT_SENT) or 400 <= status < 500 or status == 503):
+                # It never left, or the provider answered without issuing a token (a refusal, 408, 429, 503): lift the
+                # mark. 500/502/504 may come after the exchange happened, so they stay unconfirmed like a lost answer.
+                on_refresh(doc, "unsent")
             if qualify is not None:
                 # A provider's own refusal (an administrator's policy, a client it no longer allows) is not an
                 # outage: it is named, and the grant is kept, as for any answer that does not prove it ended.
-                refused = 400 <= status < 500 and status != 429
+                refused = 400 <= status < 500 and status not in (408, 429)
                 fact = {"reason": "provider_refused", "error": _refusal_code(exc.response)} if refused else \
                     {"reason": "provider_unreachable"}
                 _save_sign_in(grant, {**doc, "last_error": {**fact, "at": utc_now_iso()}})

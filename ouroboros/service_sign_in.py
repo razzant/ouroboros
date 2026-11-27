@@ -770,7 +770,7 @@ async def token(skill: str, service_id: str, account: str = "", *, rejected: Opt
                 break
         else:
             raise SignInRequired("sign_in_storage_unavailable", "the sign-in changed while its account was being confirmed")
-    except SignInRequired as exc:
+    except (SignInRequired, httpx.HTTPStatusError) as exc:  # a refusal names the account it was about, chosen or not
         exc.account = grant.path.stem
         with contextlib.suppress(SignInRequired):
             exc.account_label = (_load_account(grant).get("account") or {}).get("label", "")

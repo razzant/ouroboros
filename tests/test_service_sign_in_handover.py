@@ -801,26 +801,33 @@ def test_a_new_sign_in_finishes_an_interrupted_withdrawal_without_waiting_for_an
     assert [(entry["account"], entry["subject"]) for entry in rows] == [(ended, "sub-1")] and not grant.path.exists()
 
 
-@pytest.mark.parametrize("fault", ["token_503", "userinfo_503_then_stale"])
+@pytest.mark.parametrize("fault", ["token_503", "token_408", "token_admin_policy", "userinfo_503_then_stale"])
 def test_a_moved_grant_whose_first_renewal_met_an_outage_renews_again(world, monkeypatch, fault):  # noqa: F811
-    """A 503 answer is not a lost answer, and a saved renewal that went stale before its identity read is renewed
-    again from what was saved: neither strands a moved sign-in as ``handover_unconfirmed``."""
+    """An answer that issued no token (503, 408, a provider's refusal) is not a lost answer, and a saved renewal that
+    went stale before its identity read is renewed again from what was saved: none strands a moved sign-in as
+    ``handover_unconfirmed``."""
     provider, _owner, host = world
     key = _handover(host, provider)[0]["grants"][0]["account"]["key"]
     grant = service_sign_in._grant(CAL, "google", key)
     saved = oauth_engine.load(grant)
     oauth_engine.save(grant, {**saved, "tokens": {**saved["tokens"], "expires_at": 1}})
     served, outage = provider.handle, [fault]
+    answers = {"token_503": (503, {"error": "temporarily_unavailable"}), "token_408": (408, {}),
+               "token_admin_policy": (400, {"error": "admin_policy_enforced"}),
+               "userinfo_503_then_stale": (503, {"error": "temporarily_unavailable"})}
 
     def once(request):
-        if outage and request.url.path == ("/token" if fault == "token_503" else "/userinfo"):
+        if outage and request.url.path == ("/userinfo" if fault == "userinfo_503_then_stale" else "/token"):
             outage.clear()
-            return httpx.Response(503, json={"error": "temporarily_unavailable"})
+            status, body = answers[fault]
+            return httpx.Response(status, json=body)
         return served(request)
 
     monkeypatch.setattr(provider, "handle", once)
     first = host.post("/sign-in/token", headers={"x-skill-token": "cal-token"}, json={"service": "google"})
-    assert first.status_code == 503
+    assert first.status_code == (409 if fault == "token_admin_policy" else 503)
+    if fault == "token_408":  # a request timeout is an outage, never an administrator's refusal
+        assert first.json()["reason"] == oauth_engine.load(grant)["last_error"]["reason"] == "provider_unreachable"
     if fault == "userinfo_503_then_stale":  # the saved renewal outlives its access token before the next read
         renewed = oauth_engine.load(grant)
         assert renewed["origin"]["first_refresh"] == "renewed"
@@ -830,7 +837,10 @@ def test_a_moved_grant_whose_first_renewal_met_an_outage_renews_again(world, mon
     assert "first_refresh" not in oauth_engine.load(grant)["origin"]
 
 
-def test_a_moved_grants_first_renewal_whose_answer_was_lost_is_never_repeated(world, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize("loss", ["read_timeout", "gateway_504"])
+def test_a_moved_grants_first_renewal_whose_answer_was_lost_is_never_repeated(world, monkeypatch, loss):  # noqa: F811
+    """A timeout after sending, or a 504 a gateway may give after the exchange happened (and a provider that rotates
+    refresh tokens may have rotated it): never repeated, so a working sign-in is not spent on a second exchange."""
     provider, _owner, host = world
     key = _handover(host, provider)[0]["grants"][0]["account"]["key"]
     grant = service_sign_in._grant(CAL, "google", key)
@@ -840,6 +850,8 @@ def test_a_moved_grants_first_renewal_whose_answer_was_lost_is_never_repeated(wo
 
     def lost(request):
         if request.url.path == "/token":
+            if loss == "gateway_504":
+                return httpx.Response(504)
             raise httpx.ReadTimeout("the answer never came back", request=request)
         return served(request)
 
