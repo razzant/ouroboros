@@ -2500,7 +2500,8 @@ pagehide, device loss, unload and a successful Calls-off read end them. A call
 the room's context cannot fit into the selected engine's window leaves one System
 line and nothing else: the engine, what the room needs (or at least needs, when
 memory was not measured) and what the engine takes; the stage, window and
-reserve behind Details, with the parts when the room's own context was refused,
+reserve behind Details (the catalogue is credited only with the number it declares,
+any other window with its own source and date, or as unrecorded), with the parts when the room's own context was refused,
 and the request measured whole with the call's instructions and tools when the
 call's setup was; the Calls (beta) settings as its step. Its sheet says so
 calmly with Open Calls. An End pressed while the call prepared stays the
