@@ -877,6 +877,7 @@ def _connections(tool_registry: Any, task: Dict[str, Any]) -> Tuple[str, str]:
 
 
 _BASE_PROMPT_PATH = "prompts/SYSTEM.md"
+_BASE_PROMPT_FALLBACK = "You are Ouroboros. Your base prompt could not be loaded."
 
 
 def _read_governance_source(env: Any, path: str, fallback: str = "") -> Tuple[str, Optional[Tuple[str, str, int, str]]]:
@@ -899,6 +900,26 @@ def _read_governance_source(env: Any, path: str, fallback: str = "") -> Tuple[st
                   hashlib.sha256(text.encode("utf-8")).hexdigest())
 
 
+def _canonical_memory(env: Any, memory: Memory, task: Dict[str, Any]) -> Tuple[pathlib.Path, Memory]:
+    """``(canonical root, its Memory)``: the root whose identity, dialogue and memory a start reads.
+
+    A fork is an execution boundary, not a second mind.  Keep the agent's
+    writable Memory object task-local, but capture identity/dialogue from the
+    already-existing canonical budget root for promoted roots and subagents.
+    """
+    canonical_root = pathlib.Path(
+        task.get("budget_drive_root")
+        or getattr(env, "budget_drive_root", None)
+        or memory.drive_root
+    )
+    context_memory = (
+        memory
+        if canonical_root.resolve(strict=False) == memory.drive_root.resolve(strict=False)
+        else Memory(drive_root=canonical_root, repo_dir=memory.repo_dir)
+    )
+    return canonical_root, context_memory
+
+
 def _capture_context_core(
     env: Any,
     memory: Memory,
@@ -906,16 +927,16 @@ def _capture_context_core(
     review_context_builder: Optional[Any],
     ctx: Any,
     tool_registry: Any = None,
+    connections: Optional[Tuple[str, str]] = None,
 ) -> _ContextCore:
-    """Read each context source once before producing route-specific views."""
+    """Read each context source once before producing route-specific views (``connections``: already read)."""
     declared = task_input_sources(task) == "declared"
-    connections = _connections(tool_registry, task)
+    connections = _connections(tool_registry, task) if connections is None else connections
     if declared:
         _validate_declared_input_task(task)
     captured_at = utc_now_iso()  # one capture instant for the runtime fact and every snapshot label
     supplementary_messages: List[Dict[str, Any]] = []
-    base_prompt, base_prompt_source = _read_governance_source(
-        env, _BASE_PROMPT_PATH, "You are Ouroboros. Your base prompt could not be loaded.")
+    base_prompt, base_prompt_source = _read_governance_source(env, _BASE_PROMPT_PATH, _BASE_PROMPT_FALLBACK)
     bible_md, bible_source = _read_governance_source(env, "BIBLE.md")
     from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
 
@@ -943,19 +964,7 @@ def _capture_context_core(
     )
     design_nav = task_design_navigation(design_ctx, task)
 
-    # A fork is an execution boundary, not a second mind.  Keep the agent's
-    # writable Memory object task-local, but capture identity/dialogue from the
-    # already-existing canonical budget root for promoted roots and subagents.
-    canonical_root = pathlib.Path(
-        task.get("budget_drive_root")
-        or getattr(env, "budget_drive_root", None)
-        or memory.drive_root
-    )
-    context_memory = (
-        memory
-        if canonical_root.resolve(strict=False) == memory.drive_root.resolve(strict=False)
-        else Memory(drive_root=canonical_root, repo_dir=memory.repo_dir)
-    )
+    canonical_root, context_memory = _canonical_memory(env, memory, task)
     context_memory.ensure_files()
     context_env = SimpleNamespace(
         repo_dir=env.repo_dir,
@@ -1238,14 +1247,52 @@ def _capture_memory_view(task: Dict[str, Any], canonical_root: pathlib.Path, ctx
     """``(ViewSpec, MemoryViewSnapshot, its canonical JSON)``, captured once from the canonical root.
 
     A declared request's spec is the role's with its omissions (``_declared_omissions``)."""
-    from ouroboros.memory_view import capture_memory_view, snapshot_json, view_spec_for_task
+    from ouroboros.memory_view import capture_memory_view, snapshot_json
 
-    view_ctx = ctx if isinstance(getattr(ctx, "task_metadata", None), dict) else None
-    spec = view_spec_for_task(task, canonical_root, ctx=view_ctx)
+    spec = _view_spec(task, canonical_root, ctx)
     if declared:
         spec = _declared_omissions(task, spec)
     snapshot = capture_memory_view(canonical_root, task, spec)
     return spec, snapshot, snapshot_json(snapshot)
+
+
+def _view_spec(task: Dict[str, Any], canonical_root: pathlib.Path, ctx: Any) -> Any:
+    """The role's ``ViewSpec`` for this start, read with the focus's metadata where it has any."""
+    from ouroboros.memory_view import view_spec_for_task
+
+    return view_spec_for_task(task, canonical_root, ctx=ctx if isinstance(getattr(ctx, "task_metadata", None), dict) else None)
+
+
+def _start_frame_texts(env: Any, memory: Memory, ctx: Any, spec: Any, connections: Tuple[str, str]) -> List[Tuple[str, str]]:
+    """The named texts an undeclared, non-child start's every request holds whole (the start bound's reads).
+
+    Each is read by its own producer, as the capture reads it: SYSTEM and BIBLE; the tier-0 sections (identity, the
+    scratchpad and, where the view holds knowledge, the overview); the ordinary marks this view keeps, from an active
+    chronicle only, without the room names a capture reads; the connections form of fewer escaped characters.
+    """
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.memory_view import json_chars
+    from ouroboros.context_layout import TIER0_ALWAYS_FULL
+    from ouroboros.context_sections import _shared_understanding
+    from ouroboros.knowledge import OVERVIEW_TOPIC, resolve_knowledge_address
+
+    root = memory.drive_root
+    texts = [("system prompt", _read_governance_source(env, _BASE_PROMPT_PATH, _BASE_PROMPT_FALLBACK)[0]),
+             ("constitution", "## BIBLE.md\n\n" + _read_governance_source(env, "BIBLE.md")[0])]
+    sections = [*build_memory_sections(memory, partition="stable", ctx=ctx), *build_memory_sections(memory, partition="volatile", ctx=ctx)]
+    if spec.knowledge:
+        sections.append(_shared_understanding(resolve_knowledge_address(root, OVERVIEW_TOPIC, "global"))[0])
+    names = {"shared_understanding": "overview"}
+    texts += [(names.get(part.section_id, part.section_id), part.full_text) for part in sections
+              if isinstance(part, HostSection) and part.section_id in TIER0_ALWAYS_FULL]
+    store = ChronicleStore(root)
+    if (store.activation() or {}).get("kind") == "activation":
+        from ouroboros.memory_view import _capture_marks, _marks_text
+
+        ordinary = [mark for mark in _capture_marks(store, spec, lambda *_a, **_kw: "") if not mark.get("late_review")]
+        if ordinary:
+            texts.append(("marks", _marks_text(ordinary)))
+    return [*texts, ("connections", min(connections, key=json_chars))]
 
 
 def _context_fit_route(
@@ -1271,13 +1318,24 @@ def build_context_fit_plan(
     reasoning_effort: str = "",
     nano_base: Optional[Tuple[str, ...]] = None,
 ) -> ContextFitPlan:
-    """Compatibility wrapper over the cohesive context-fit implementation."""
-    core = _capture_context_core(env, memory, task, review_context_builder, ctx, tool_registry)
+    """Compatibility wrapper over the cohesive context-fit implementation; a start whose always-whole core cannot fit
+    its known window is refused before the capture (``context_start_bound``)."""
+    from ouroboros import context_start_bound
+
+    preferred = str(preferred_mode or get_context_mode() or "max")
+    connections = _connections(tool_registry, task)
+    canonical_root, context_memory = _canonical_memory(env, memory, task)
+    timed("start_bound", context_start_bound.refuse_before_capture, task, ctx,
+          spec=lambda: _view_spec(task, canonical_root, ctx),
+          frame_texts=lambda spec: _start_frame_texts(env, context_memory, ctx, spec, connections),
+          route_resolver=route_resolver or _context_fit_route, tool_schemas=tool_schemas, nano_base=nano_base,
+          reasoning_effort=reasoning_effort, preferred=preferred)
+    core = _capture_context_core(env, memory, task, review_context_builder, ctx, tool_registry, connections=connections)
     return _build_context_fit_plan(
         env,
         core,
         task,
-        preferred_mode=str(preferred_mode or get_context_mode() or "max"),
+        preferred_mode=preferred,
         route_resolver=route_resolver or _context_fit_route,
         tool_schemas=tool_schemas,
         reasoning_effort=reasoning_effort,

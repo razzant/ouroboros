@@ -121,7 +121,14 @@ def test_serving_price_uses_same_basis_as_receipt(host_world, record_property, v
                 await call.release_serving()  # the connection's delivery worker
             finally:
                 await call.close_preparation()
-            assert len(sent) == 1, 'already-held canonical pixels are not new delivery growth'
+            # One send carries the completed row and nothing else: already-held canonical pixels are not new
+            # delivery growth. The other send is the host's row that the refused catalogue was not loaded.
+            carrying = [c for c in sent if any(m.get('tool_call_id') == 'small' for m in c.messages)]
+            assert len(carrying) == 1 and [m.get('tool_call_id') for m in carrying[0].messages] == ['small'], \
+                'already-held canonical pixels are not new delivery growth'
+            others = [c for c in sent if c not in carrying]
+            assert len(others) == 1 and 'new_large_capability' in json.dumps(others[0].messages)
+            assert all(m.get('tool_call_id') != 'small' for m in others[0].messages)
         await host.session(consume, LiveOptions())
     asyncio.run(run())
 

@@ -272,6 +272,7 @@ D20 = "Presence"
 "ouroboros/arrival_notes.py" = "D03"  # the working-view notes in view, named when the owner's words or press arrive
 "ouroboros/context_source_view.py" = "D03"
 "ouroboros/context_fit.py" = "D03"
+"ouroboros/context_start_bound.py" = "D03"  # the lower bound of a start, refused before the memory capture
 "ouroboros/context_anchor.py" = "D03"  # this conversation's own size anchor and accepted-input floor
 "ouroboros/context_window.py" = "D03"  # typed route/account limits, acceptance and refusal observations
 "ouroboros/context_view_facts.py" = "D03"  # named window and largest selected view elements

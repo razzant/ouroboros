@@ -514,7 +514,7 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
             if previous_version != '0.1.38' or path == 'ui/call.css':
                 assert payload != (repo / "skills" / name / path).read_bytes()
     else:
-        version = {'live_conversation': '0.1.39', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.22', 'openai_realtime': '0.1.10',
+        version = {'live_conversation': '0.1.40', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.22', 'openai_realtime': '0.1.10',
                    'unix_computer_use': '0.9.2'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)
@@ -622,3 +622,38 @@ def test_conversion_without_seed_review_keeps_launcher_version_reseed(env, monke
     _write_skill(seed_dir, "weather", "2.0.0")
     assert skill_builtin.ensure_builtin_skills(drive) == 1
     assert "version: 2.0.0" in (installed / "SKILL.md").read_text(encoding="utf-8")
+
+
+def bundled_release_pairs(seed_root=None):
+    """Every bundled skill's ``{name: {"version", "content_hash"}}``: the manifest version reseeding compares and the
+    release digest an install records."""
+    from ouroboros.skill_builtin import _bundled_names, _version, bundled_skills_dir
+    from ouroboros.skill_loader import compute_content_hash
+
+    root = pathlib.Path(seed_root or bundled_skills_dir())
+    return {name: {"version": _version(root / name), "content_hash": compute_content_hash(root / name)}
+            for name in _bundled_names(root) or ()}
+
+
+def test_a_bundled_skill_payload_changes_only_with_its_version():
+    """An install reseeds a bundled skill only when its manifest version moves, so changed files under the same
+    version never reach installed copies. Every bundled skill is pinned to its recorded (version, digest) pair.
+    The digest is byte-exact over the payload (cache trees excluded); ``.gitattributes`` keeps text LF in every
+    checkout, so it does not depend on the OS. After a deliberate release, record the pairs from the repository root:
+
+    python -c "import json, pathlib; from tests.test_builtin_skill_source import bundled_release_pairs as p; pathlib.Path('tests/fixtures/builtin_skill_versions.json').write_text(json.dumps(p(pathlib.Path('skills')), indent=1, sort_keys=True) + '\\n', encoding='utf-8')"
+    """
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    recorded = json.loads((repo / "tests" / "fixtures" / "builtin_skill_versions.json").read_text(encoding="utf-8"))
+    current = bundled_release_pairs(repo / "skills")
+    problems = []
+    for name in sorted(current.keys() | recorded.keys()):
+        now, then = current.get(name), recorded.get(name)
+        if now == then:
+            continue
+        if now and then and now["version"] == then["version"]:
+            problems.append(f"the files of {name} changed and its manifest version did not: bump the version, "
+                            "then record the new pair")
+        else:
+            problems.append(f"record the new pair for {name}")
+    assert not problems, problems

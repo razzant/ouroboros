@@ -94,8 +94,9 @@ def test_host_notice_is_nested_and_optional_in_live_history_and_search(tmp_path)
     projected = host_notice.view({"text": said, **carried})
     projected_keys = set(projected["notice"])
     # Ingress accepts additional properties; check the actual producer and projection against the declared fields.
-    assert emitted_keys <= set(notice_hints) and "line" not in emitted_keys, emitted_keys
-    assert projected_keys == emitted_keys | {"line"} and projected_keys <= set(notice_hints), projected_keys
+    assert emitted_keys <= set(notice_hints) and not {"line", "phrase"} & emitted_keys, emitted_keys
+    assert projected_keys == emitted_keys | {"line", "phrase"} and projected_keys <= set(notice_hints), projected_keys
+    assert projected["notice"]["line"].startswith(projected["notice"]["phrase"]) and projected["notice"]["phrase"] == said
     row = {"text": said, "role": "system", "ts": "2026-11-23T04:00:00Z", "is_progress": False,
            "system_type": "origin_omission", "task_id": "", **projected}
     assert not validate_ingress(row, ChatHistoryMessage), validate_ingress(row, ChatHistoryMessage)

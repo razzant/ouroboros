@@ -210,9 +210,11 @@ def _context_capacity_terminal(unfit: Any) -> Tuple[str, Dict[str, Any], Dict[st
     # route's limit. The further room a start wants is no threshold (a start with less runs): named only as measured.
     # The paths named are the ones every surface keeps: the room's model button, Settings › Models, Context Length.
     # A window is a role's setting: a chat with its own model has none to correct, so only Main's is named.
-    limit, book = unfit.window_tokens, unfit.required_book_tokens
-    needs = -(-(unfit.estimated_input_tokens + unfit.response_reserve_tokens) // 1000) * 1000  # "about": rounded up
-    text = (f"⚠️ This model's context window is too small to start this work: the start needs about {needs:,} tokens "
+    # A refusal that priced no memory (``memory_measured`` False) knows a lower bound: "at least", never rounded down.
+    limit, book, measured = unfit.window_tokens, unfit.required_book_tokens, getattr(unfit, "memory_measured", True)
+    need = unfit.estimated_input_tokens + unfit.response_reserve_tokens
+    needs = f"about {-(-need // 1000) * 1000:,}" if measured else f"at least {need:,}"  # about: rounded up; at least: exact
+    text = (f"⚠️ This model's context window is too small to start this work: the start needs {needs} tokens "
             f"(its input plus the room kept for the reply and the work), and the model's limit here is {limit:,}.")
     if book:
         text += (f" This task directly requires the whole development handbook (~{book:,} tokens); without it the "
@@ -227,8 +229,8 @@ def _context_capacity_terminal(unfit: Any) -> Tuple[str, Dict[str, Any], Dict[st
                  "restart Ollama and reload the model so /api/ps reports its new window.")
     inside = [("core, request and tools", unfit.fixed_input_tokens - book), ("handbook", book),
               ("further memory", unfit.memory_view_tokens)]
-    text += (f"\n\nMeasured, in tokens: input {unfit.estimated_input_tokens:,} ("
-             + "; ".join(f"{name} {value:,}" for name, value in inside if value)
+    text += (f"\n\nMeasured, in tokens: input {'' if measured else 'at least '}{unfit.estimated_input_tokens:,} ("
+             + "; ".join([*(f"{name} {value:,}" for name, value in inside if value), *(() if measured else ("memory not measured",))])
              + f") · reserve for the reply and the work {unfit.response_reserve_tokens:,} · limit {limit:,}"
              + (f" · further room the start wanted {unfit.work_room_tokens:,}" if unfit.work_room_tokens else "") + ".")
     return _unstarted_terminal(text, "context_capacity", {"reasoning_notes": ["context_capacity"]})

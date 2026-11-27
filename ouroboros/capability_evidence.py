@@ -675,6 +675,38 @@ def _fresh_density_pairs(
     ]
 
 
+def _main_density_witnesses(store: Dict[str, Any], route_fp: str, model_id: str,
+                            view_kind: str) -> Tuple[List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
+    """Fresh ``MAIN_DENSITY_BASIS`` witnesses of one view kind, of any size: ``(this exact route's, its model
+    bucket's)``. Only a Claudexor model has a bucket: its accounts share one engine, serializer and tokenizer."""
+    route = str(route_fp or "").strip()
+
+    def same_view(item):
+        return str(item[0].get("view_kind") or "") == view_kind
+
+    route_pairs = [item for item in _fresh_density_pairs(store, basis=MAIN_DENSITY_BASIS)
+                   if route and str(item[0].get("route_fp") or "") == route and same_view(item)]
+    model_pairs = [item for item in _fresh_density_pairs(store, _normalized_density_model(model_id), basis=MAIN_DENSITY_BASIS)
+                   if str(model_id).startswith("claudexor::") and item[0].get("route_fp") and same_view(item)]
+    return route_pairs, model_pairs
+
+
+def lowest_main_token_density(drive_root: Any, route_fp: str, model_id: str, *, view_kind: str) -> Optional[float]:
+    """The lowest fresh witness of this route and view (and of a Claudexor model's bucket), whatever its size, capped
+    at 1.0; 1.0 without one; None when the store cannot be read.
+
+    A lower bound of every density a fit of this route applies: ``resolve_main_token_density`` takes one of these
+    witnesses, or a cold estimate of at least 1.0. The start bound (``context_start_bound``) multiplies by it.
+    """
+    try:
+        store = (json_snapshot(_store_path(drive_root), strict=True) or {}).get("token_density", {}) or {}
+        witnesses = _main_density_witnesses(store, route_fp, model_id, view_kind)
+    except Exception:
+        log.debug("Density witnesses unreadable; no lower bound", exc_info=True)
+        return None
+    return min([1.0, *(density for pairs in witnesses for _pair, density in pairs)])
+
+
 def resolve_main_token_density(
     drive_root: Any, route_fp: str, model_id: str, *, estimate_tokens: Optional[int] = None,
     view_kind: str = "",
@@ -690,23 +722,17 @@ def resolve_main_token_density(
     """
     try:
         store = _read(drive_root).get("token_density", {}) or {}
-        route = str(route_fp or "").strip()
 
         def comparable(item):
-            return str(item[0].get("view_kind") or "") == view_kind and (estimate_tokens is None
-                or estimate_tokens / 2 <= int(item[0]["prompt_chars"]) / 4 <= estimate_tokens * 2)
+            return estimate_tokens is None or estimate_tokens / 2 <= int(item[0]["prompt_chars"]) / 4 <= estimate_tokens * 2
 
         def newest(items):
             return max(enumerate(items), key=lambda item: (*_density_recency_key(item[1][0]), item[0]))[1][1]
 
-        route_pairs = [
-            item for item in _fresh_density_pairs(store, basis=MAIN_DENSITY_BASIS)
-            if route and str(item[0].get("route_fp") or "") == route and comparable(item)
-        ]
+        route_pairs, model_pairs = ([item for item in pairs if comparable(item)]
+                                    for pairs in _main_density_witnesses(store, route_fp, model_id, view_kind))
         if route_pairs:
             return newest(route_pairs), "fresh_route_usage"
-        model_pairs = [item for item in _fresh_density_pairs(store, _normalized_density_model(model_id), basis=MAIN_DENSITY_BASIS)
-                       if str(model_id).startswith("claudexor::") and item[0].get("route_fp") and comparable(item)]
         if model_pairs:
             return newest(model_pairs), "fresh_model_usage"
     except Exception:
