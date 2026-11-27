@@ -506,7 +506,11 @@ def test_the_collapse_is_remembered_on_this_device_and_only_there(nav_ui, tmp_pa
 
 
 STATUS = """menu => {
-    const line = menu.querySelector('.project-row-menu-status');  // the first row of the menu's scroll body
+    // The state is the FIRST element of the menu's scroll body (DESIGN: the row's state before its actions): a status
+    // line moved below the actions is a different menu, so the first element itself must be the status line.
+    const body = menu.querySelector(':scope > .ui-popup-body') || menu;
+    const line = body.firstElementChild;
+    if (!line?.matches('.project-row-menu-status')) throw new Error('the first element of the menu is not its status line: ' + line?.className);
     const mark = line.querySelector('.status-mark');
     return {role: line.getAttribute('role'), words: line.textContent, word: line.querySelector('.project-row-menu-word')?.textContent,
             shape: mark?.dataset.shape, hue: mark?.dataset.hue, name: menu.getAttribute('aria-label'),

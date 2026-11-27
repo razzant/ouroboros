@@ -1154,8 +1154,10 @@ def test_program_inspection_left_mid_read_is_replaced_on_return(resources_ui):
         if not query:
             # #4359: opening Accounts first reads the installable inventory without a query; it is answered at once
             # and is not the owner-requested inspection this test holds.
+            # It answers the plain installed row (newest not read, update undecided), so "2.1.0 available" below can
+            # only come from the explicit checkLatest inspection the reopened page asks for.
             passive.append(query)
-            return route.fulfill(json={"harnesses": [entry]})
+            return route.fulfill(json={"harnesses": [_inventory_row("claude")]})
         inspections.append(query)
         if len(inspections) == 1:
             held.append(route)  # still inspecting when the owner leaves
