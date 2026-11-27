@@ -89,8 +89,9 @@ def test_the_mature_fixture_is_refused_typed_before_any_socket_on_every_route(tm
     land. The positive assertion is added per route by the pull request that makes it true. This prices the ordinary
     builder with the fixture's synthetic schemas; the adapters' own session candidates are driven on the fresh drive
     (``tests/test_live_call_start_fit.py``). The mature drive holds no MCP servers, running works, nested account
-    changes or gist-bearing finished works (``install``), so its numbers are a lower bound, and OpenAI's 133,554-token
-    route is not asserted here either way."""
+    changes or gist-bearing finished works (``install``), so its numbers are a lower bound. OpenAI's route is asserted
+    on its real call path instead, through its own session candidate with the call's tools, where it admits the mature
+    and the rich install (``tests/test_live_call_start_fit.py``)."""
     from ouroboros import context, llm
 
     skill, _model, facts = route

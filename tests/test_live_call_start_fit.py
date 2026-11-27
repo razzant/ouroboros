@@ -143,8 +143,8 @@ def test_the_fresh_fixture_starts_on_every_shipped_call_model_and_on_hard_85k_te
     assert not shown.memory_facts.get("host_sections_addressed"), "no host section addressed for the window"
 
 
-def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window=None):
-    """The fresh drive's call start through the adapter's own setup: the real ``ToolRegistry``, the call feature's
+def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window=None, shape="fresh"):
+    """The ``shape`` drive's call start (``rich`` with its twelve MCP servers through the real manager) through the adapter's own setup: the real ``ToolRegistry``, the call feature's
     ``INITIAL_TOOLS``, ``call_tools`` and ``session_options``, the ordinary builder for the call's messages, then
     ``realtime_setup.session_candidate`` with the adapter's registered session factory and a ``connect`` that fails the
     test. ``window`` narrows the catalogue's window for the candidate only (the ordinary build keeps the declared one).
@@ -176,7 +176,10 @@ def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window
     turn.route, turn.catalog_model, turn.native_model = module.ROUTE, model, model_id
     turn.model = module.ROUTE.model_prefix + model_id
     turn.spec = replace(turn.spec, chat_id=1, model=model_id)
-    drive = scale.installed(tmp_path, "fresh")
+    drive = scale.installed(tmp_path, shape)
+    if shape == "rich":
+        monkeypatch.setenv("OUROBOROS_DATA_DIR", str(drive))
+        scale.mcp_registry(drive, monkeypatch)
     env, memory = scale.env_on(drive)
     turn.feature = dict(turn.feature, initial_tools=INITIAL_TOOLS, call_tools=call_tools(drive))
     task = dict(host_world.task, chat_id=1, model=turn.model,
@@ -189,7 +192,7 @@ def _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, *, window
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: drive)
     monkeypatch.setattr(context, "get_context_mode", lambda: "nano")
     monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)
-    scope = f"{skill}-fresh-start"
+    scope = f"{skill}-{shape}-start"
     route = dict(provider=turn.route.accounting_provider, model=turn.model, base_url=turn.route.endpoint,
                  use_local=False, model_role="main", options={})
     evidence = SimpleNamespace(route_fp=scope, status="confirmed", stale=False,
@@ -244,3 +247,36 @@ def test_a_window_too_small_for_the_native_candidate_is_refused_before_any_conne
     with pytest.raises(RealtimeSetupError) as raised:  # a connection attempt would fail the test instead
         _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, window=40_000)
     assert raised.value.code == "context_capacity"
+
+
+# What each shipped call model's own start does with a mature install (``mature``) and the same install with its 39
+# running works and twelve MCP servers (``rich``), on the shipped catalogue windows: OpenAI's window measured 27.11.2026
+# holds both; Gemini's (both selections) and Grok's still refuse both, typed, before any socket. A route whose window
+# comes to hold an install moves to ``ADMITS`` in the change that makes it true.
+ADMITS = {"openai_realtime"}
+
+
+@pytest.mark.parametrize("shape", ["mature", "rich"])
+@pytest.mark.parametrize("route", [pytest.param(route, id=f"{route[0]}:{route[1]}") for route in scale.call_routes()])
+def test_each_shipped_adapter_admits_or_refuses_a_mature_start_at_its_own_session_candidate(
+        tmp_path, monkeypatch, host_world, route, shape):
+    skill, model_id, facts = route
+    if skill not in ADMITS:
+        with pytest.raises(fit.MinimumViewUnfit) as raised:  # a connection attempt would fail the test instead
+            _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id, shape=shape)
+        assert raised.value.window_tokens == facts.conversation_window_tokens and raised.value.deficit_tokens > 0
+        return
+    (session, _request, proof), attempts = _adapter_start(tmp_path, monkeypatch, host_world, skill, model_id,
+                                                          shape=shape)
+    measured = proof["fit"]["measurement"]
+    assert not attempts and measured["capacity_deficit_tokens"] == 0
+    assert measured["capacity_total_tokens"] == facts.conversation_window_tokens
+    assert measured["estimated_input_tokens"] + measured["response_reserve_tokens"] <= facts.conversation_window_tokens
+    assert proof.get("work_room", {}).get("deficit_tokens") == 0  # the call starts with its eighth of work room
+    if shape == "rich":  # every MCP server's own guide reaches the engine whole, none folded for the window
+        rows = json.loads(session.selected.messages_json)
+        text = " ".join(" ".join(part.get("text", "").split() if isinstance(part, dict) else str(part).split())
+                        for row in rows for part in (row["content"] if isinstance(row.get("content"), list)
+                                                     else [row.get("content") or ""]))
+        _registry, guides = scale.mcp_registry(tmp_path / "guides", monkeypatch)  # the same synthetic guides again
+        assert all(" ".join(guide.split()) in text for guide in guides.values())
