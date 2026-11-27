@@ -127,11 +127,11 @@ def recording_chat_bridge(tmp_path, monkeypatch):
     return bridge, frames
 
 
-def serve_chat_history(page, data_root, scope=""):
-    """The real history endpoint over the same data root (Playwright's routes run in its loop). It answers as the host
-    does, from the profile its app proves (``ServedUI.serving_profile_scope``): a document that proves a profile reads
-    only an answer naming it (web/modules/api_client.js ``chatHistory``), so ``scope`` is the proof the page's document
-    carries; ``""`` is an app that applied none."""
+def history_client(data_root, scope=""):
+    """A client of the real history endpoint over ``data_root``. It answers as the host does, from the profile its app
+    proves (``ServedUI.serving_profile_scope``): a document that proves a profile reads only an answer naming it
+    (web/modules/api_client.js ``chatHistory``), so ``scope`` is the proof the page's document carries; ``""`` is an
+    app that applied none."""
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient
@@ -140,7 +140,13 @@ def serve_chat_history(page, data_root, scope=""):
 
     app = Starlette(routes=[Route("/api/chat/history", make_chat_history_endpoint(data_root))])
     app.state.served_ui = SimpleNamespace(serving_profile_scope=lambda: scope)
-    client = TestClient(app)
+    return TestClient(app)
+
+
+def serve_chat_history(page, data_root, scope=""):
+    """The real history endpoint over the same data root (Playwright's routes run in its loop), proving ``scope``
+    (:func:`history_client`)."""
+    client = history_client(data_root, scope)
 
     def history(route):
         url = urlsplit(route.request.url)

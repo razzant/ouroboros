@@ -30,7 +30,8 @@ class Transport(rw.Transport):
         source = f"chat:room-{chat_id}"
         messages = [{**row, "history_id": f"{source}:{offset}", "history_position": {"source": source, "offset": offset}}
                     for offset, row in enumerate(self.history.get(chat_id, []))]
-        route.fulfill(json={"messages": messages, "progress": [], "has_more": False, "next_cursor": None,
+        route.fulfill(json={"profile_scope": rw.setup_browser.PREVIEW_SCOPE,  # the profile this document proves
+                            "messages": messages, "progress": [], "has_more": False, "next_cursor": None,
                             "page_cursor": f"page:{chat_id}", "window": {"complete": True, "truncated_by": []},
                             "coverage": {"v": 1, "view": source, "upper": {"chat": len(messages), "progress": 0},
                                          "spans": {"chat": {"from": 0, "to": len(messages), "chain": source, "gaps": []},

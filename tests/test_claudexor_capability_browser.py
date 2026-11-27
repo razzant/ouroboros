@@ -64,6 +64,7 @@ def capability_ui(tmp_path, monkeypatch, replay):
         monkeypatch.setenv("OUROBOROS_UI_BROWSER_EXECUTABLE", os.environ["CAPABILITY_BROWSER_EXECUTABLE"])
     source = Path(__file__).resolve().parents[1]
     app = Starlette(routes=[Route("/api/chat/history", make_chat_history_endpoint(f.root))])
+    app.state.served_ui = SimpleNamespace(serving_profile_scope=lambda: pages.PREVIEW_SCOPE)  # the proof the page's scope meta names
     with TestClient(app) as history_client, \
             candidate_checkout(source, tmp_path / "candidate", origin_proof=True) as candidate:
         monkeypatch.setattr(pages, "WEB", candidate.path / "web")

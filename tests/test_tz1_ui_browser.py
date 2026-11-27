@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_subscription_setup_browser import subscription_ui as subscription_ui, capture
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, subscription_ui as subscription_ui, capture
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
 pytestmark = [pytest.mark.ui_browser]
@@ -28,7 +28,7 @@ def test_saved_input_and_starting_survive_reload(subscription_ui):
         }),
     ))
     page.route("**/api/chat/history*", lambda route: route.fulfill(
-        content_type="application/json", body=json.dumps({"messages": rows, "progress": []}),
+        content_type="application/json", body=json.dumps({"messages": rows, "progress": [], "profile_scope": PREVIEW_SCOPE}),
     ))
     page.goto(ui["url"])
     saved = page.locator('.chat-bubble.user[data-client-message-id="tz1-saved-message"] [data-ingress-saved]')
@@ -56,7 +56,7 @@ def test_failed_supervisor_init_never_paints_online(subscription_ui):
         }),
     ))
     page.route("**/api/chat/history*", lambda route: route.fulfill(
-        content_type="application/json", body=json.dumps({"messages": [], "progress": []}),
+        content_type="application/json", body=json.dumps({"messages": [], "progress": [], "profile_scope": PREVIEW_SCOPE}),
     ))
     page.goto(ui["url"])
     badge = page.locator("#chat-status")
@@ -154,6 +154,7 @@ def _history(rows):
     """The history answer's shape as the server sent it while starting: one complete dialog window."""
     span = {"chain": "dialog", "from": 0, "gaps": []}
     return {"messages": rows, "progress": [], "has_more": False, "next_cursor": None, "page_cursor": "m2",
+            "profile_scope": PREVIEW_SCOPE,
             "window": {"complete": True, "truncated_by": []},
             "coverage": {"v": 1, "view": "m2", "upper": {"chat": len(rows), "progress": 0},
                          "spans": {"chat": {**span, "to": len(rows)}, "progress": {**span, "to": 0}}}}

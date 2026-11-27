@@ -29,7 +29,7 @@ from ouroboros.llm_claudexor import _usage as managed_usage
 from supervisor.events_budget import _handle_llm_usage
 from tests.test_delegated_activity_browser import engine_ui as engine_ui
 from tests.test_design_system_gate_browser import open_nav
-from tests.test_subscription_setup_browser import capture
+from tests.test_subscription_setup_browser import PROFILE_FRAME, capture
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 from tests._usage_store_testing import root as root
 
@@ -136,7 +136,8 @@ def test_effort_facts_render_only_in_logs_live_and_after_reload(engine_ui, root,
     page.set_viewport_size({"width": width, "height": 900})
     running = {task: {"task": {"id": task, "chat_id": 1, "type": "task"}} for task in EXPECTED}
     ctx = SimpleNamespace(RUNNING=running, DRIVE_ROOT=root, bridge=SimpleNamespace(push_log=published.append))
-    page.route_web_socket("**/ws", lambda socket: sockets.append(socket))
+    # The serving socket proves the document's data profile first (gateway/ws.py), or the page drops every frame.
+    page.route_web_socket("**/ws", lambda socket: (sockets.append(socket), socket.send(PROFILE_FRAME)))
     app = Starlette(routes=[Route("/api/logs/{name}", api_logs_tail)])
     app.state.drive_root = root
     with TestClient(app) as client:

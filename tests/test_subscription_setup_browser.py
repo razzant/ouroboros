@@ -27,6 +27,10 @@ WEB = Path(__file__).resolve().parents[1] / "web"
 # before the app's scripts run; a document without it is no profile proof and opens on the canonical history.
 PREVIEW_SCOPE = "0123456789abcdef"
 PREVIEW_META = f'<meta name="ouroboros-chat-preview-scope" content="{PREVIEW_SCOPE}">'
+# The serving socket's first frame (ouroboros/gateway/ws.py `_register`): it proves the same profile. A page whose
+# document names a scope drops every frame until this proof arrives (web/modules/ws.js), and reads only history pages
+# that carry the same `profile_scope` (web/modules/api_client.js `chatHistory`).
+PROFILE_FRAME = json.dumps({"type": "connection_profile", "profile_scope": PREVIEW_SCOPE})
 
 
 def passive_status(status):

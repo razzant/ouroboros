@@ -56,6 +56,14 @@ _VP8_CLIP = base64.b64decode(
 )
 
 
+# Main's slot of a tab-kept value, under the page's profile scope when the document proves one (chat_preview.js
+# `roomStoreKey`), or null.
+_MAIN_SLOT = """(base) => {
+    const key = Object.keys(sessionStorage).find(k => k === base || k.startsWith(`${base}:`));
+    return key ? JSON.parse(sessionStorage.getItem(key)) : null;
+}"""
+
+
 def _png(width: int, height: int, rgb: tuple[int, int, int]) -> bytes:
     raw = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
     def chunk(kind: bytes, data: bytes) -> bytes:
@@ -663,7 +671,7 @@ def test_reply_selected_during_upload_belongs_to_the_next_draft(direct_server_wi
             assert saved['text'] == frame['content'] and [item['name'] for item in saved['attachments']] == ['lamp.txt']
             saved_reply = saved.get('reply_to') or {}
             assert (saved_reply.get('address'), saved_reply.get('excerpt')) == expected
-            kept = page.evaluate("JSON.parse(sessionStorage.getItem('ouro_chat_reply'))")
+            kept = page.evaluate(_MAIN_SLOT, "ouro_chat_reply")
             assert kept['address'] == addresses[1] and kept['excerpt']['text'] == 'blue lamp'
             expect(composer).to_have_value('Compare the other color.')
             expect(page.locator('.attach-name')).to_have_text(['other.txt'])
@@ -923,7 +931,7 @@ def test_an_attachment_frame_lost_after_send_is_recoverable_exactly_once(direct_
             actions = page.locator(f"{_BUBBLE} [data-unconfirmed-action]")
             assert actions.all_inner_texts() == ["Send as new"], "no Send again: it could only rejoin"
             for _ in range(2):
-                kept = page.evaluate("JSON.parse(sessionStorage.getItem('ouro_chat_unconfirmed'))")
+                kept = page.evaluate(_MAIN_SLOT, "ouro_chat_unconfirmed")
                 assert len(kept) == 1 and kept[0]["deliveryUnknown"] is True
                 assert kept[0]["frame"]["reply_excerpt"]["text"] == "second"
                 page.reload(wait_until="domcontentloaded")
