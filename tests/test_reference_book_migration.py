@@ -180,9 +180,11 @@ def test_entrypoint_keeps_its_h1_line_and_carries_only_the_membership(book_id):
     version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
     assert lines[0] == OLD_MONOLITHS[book_id]["h1"].replace("v7.0.0", f"v{version}")
     book = load_reference_book(REPO, book_id)
-    # One `## Chapters` heading and nothing else: the entrypoint orients, the
-    # chapters carry the book.
-    assert [h.title for h in book.entrypoint.headings] == [lines[0][2:], "Chapters"]
+    # One `## Chapters` heading (and, for Architecture, the Reference Atlas of the
+    # other books and specs) and nothing else: the entrypoint orients, the chapters
+    # carry the book.
+    atlas = ["Reference Atlas"] if book_id == "architecture" else []
+    assert [h.title for h in book.entrypoint.headings] == [lines[0][2:], "Chapters", *atlas]
     members = [chapter.source_path for chapter in book.chapters]
     assert members == sorted(members), "membership order must be the reading order"
     for chapter in book.chapters:
