@@ -486,8 +486,6 @@ html[data-layout="docked"] #primary-sidebar {
    than a control (a large Interface size), so nothing is clipped at the window's top. A shell that gives no centre
    leaves the whole band as the row. Content reaching the left edge (drawer layout, a project panel as
    wide as the window) starts past the lights. Without the shell's attribute nothing moves. */
-/* Registered, so its computed value is the rendered length the shell's band-press script reads as the window's handle. */
-@property --window-chrome-row { syntax: '<length>'; inherits: true; initial-value: 0px; }
 :root[data-window-chrome="integrated"] {
     --window-chrome-top: 0px;
     --window-chrome-start: 0px;
@@ -495,6 +493,9 @@ html[data-layout="docked"] #primary-sidebar {
     --window-chrome-row: max(var(--control-h-float), calc(2 * var(--window-chrome-mid, calc(var(--window-chrome-top) / 2))));
     --window-chrome-clearance: calc(var(--window-chrome-start) + var(--space-3));
     --page-header-row-h: var(--window-chrome-row);
+    /* The row as a used length the shell's band-press script reads for the window's handle (any engine resolves it,
+       with or without @property); the document never scrolls, so this padding moves nothing. */
+    scroll-padding-top: var(--window-chrome-row);
 }
 /* The sidebar's first row is the lights' row: Find a project and + stand on their line past the lights, and the
    card and the rail's first place start a small step under it (owner 27.11, «Вариант B»). An RTL page keeps the
@@ -503,6 +504,11 @@ html[data-layout="docked"] #primary-sidebar {
     --sidebar-top: calc(max(var(--window-chrome-row), var(--nav-item-h)) + var(--space-2));
 }
 :root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar:not([data-bars-crowd]) .sidebar-head { padding-top: 0; }
+/* The rail's first place stands on the card's line, measured (layout.js measurePinnedBars), so it follows the search row
+   when that wraps under the lights; before the first measure, the lights' row and a step. */
+:root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar:not([data-bars-crowd]) > .nav-rail {
+    padding-top: var(--sidebar-card-top, var(--sidebar-top));
+}
 :root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar:not([data-bars-crowd]) .sidebar-head > .nav-projects-header {
     min-height: var(--window-chrome-row);
 }

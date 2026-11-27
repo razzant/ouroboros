@@ -23,8 +23,8 @@ only after the first document loaded and declared, so the bar never flashes. The
 only for what is applied: this leaf measures the overlap (content height above ``contentLayoutRect``)
 and the traffic lights' far edge and vertical centre and writes them into that document (``data-window-chrome``,
 ``--window-chrome-top``, ``--window-chrome-start``, ``--window-chrome-mid``); the page stands its header row on the
-lights' centre and reserves only that row, and the band it renders is the window's handle: a press on the page below
-it, though still inside the native bar, is the page's. A centre that cannot be read inside the band is not written, and the page
+lights' centre and reserves only that row, and the band it renders (its root's ``scroll-padding-top``) is the window's
+handle: a press on the page below it, though still inside the native bar, is the page's. A centre that cannot be read inside the band is not written, and the page
 keeps the whole band as its row and handle. A browser, another OS, an older shell, full
 screen or a refused apply writes nothing, so nothing is reserved there; geometry that cannot be
 measured returns the window to the ordinary bar rather than leave a transparent one over the page.
@@ -196,9 +196,9 @@ DOCUMENT_SCRIPT = r"""(() => {
     // On the window, after every element's handler: a press the page took (a prevented mousedown, or a
     // cancelled pointerdown, which suppresses mousedown) stays the page's.
     window.addEventListener('mousedown', (event) => {
-        // The handle is the band the page renders (its registered --window-chrome-row, the lights' row), capped at the
-        // native bar; a page that reserves the whole bar (an older UI, an engine without @property) keeps all of it.
-        const row = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--window-chrome-row'));
+        // The handle is the band the page renders (the used length it publishes as its root's scroll-padding-top: the
+        // lights' row), capped at the native bar; an older page that publishes none reserves the whole bar and keeps it.
+        const row = parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop);
         const band = row > 0 ? Math.min(top, row) : top;
         if (!top || event.button !== 0 || event.defaultPrevented || event.clientY >= band) return;
         if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;

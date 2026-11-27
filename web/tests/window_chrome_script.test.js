@@ -56,10 +56,11 @@ function boot({ port = true, origin = 1_791_100_000_000.25, painted = { themeCho
         addEventListener: (type, fn) => listeners.set(type, fn),
         ...(port ? { webkit: { messageHandlers: { [HANDLER]: { postMessage: (message) => messages.push({ ...message }) } } } } : {}),
     };
-    // The page's rendered band (its registered --window-chrome-row); '' is a page that does not render one.
-    const rendered = { row: '' };
+    // The page's rendered band, the used length it publishes as the root's scroll-padding-top; 'auto' is a page that
+    // publishes none (an older UI).
+    const rendered = { row: 'auto' };
     const context = { window, document, MutationObserver, Element: FakeElement,
-        getComputedStyle: (el) => ({ cursor: el.cursor, getPropertyValue: (name) => (name === '--window-chrome-row' ? rendered.row : '') }) };
+        getComputedStyle: (el) => ({ cursor: el.cursor, scrollPaddingTop: rendered.row }) };
     vm.runInNewContext(source, context);
     const mutate = (kind) => observers.filter((o) => o.live && (kind === 'attributes' ? o.options.attributes : o.options.childList))
         .forEach((o) => o.callback([]));
@@ -156,9 +157,7 @@ test('the window\'s handle is the band the page renders, capped at the native ba
     assert.equal(page.press({ clientY: 25 }).prevented, true, 'the floor\'s strip is the window\'s too');
     page.rendered.row = '90px';  // a row taller than the native bar never widens the handle past it
     assert.equal(page.press({ clientY: 70 }).prevented, false);
-    page.rendered.row = '';  // an older page under this shell, or an engine without @property: the whole bar
-    assert.equal(page.press({ clientY: 60 }).prevented, true);
-    page.rendered.row = 'max(30px, calc(2 * 25.5px))';  // unresolved: not a length
+    page.rendered.row = 'auto';  // an older page under this shell publishes no band: it reserves the whole bar
     assert.equal(page.press({ clientY: 60 }).prevented, true);
 });
 
