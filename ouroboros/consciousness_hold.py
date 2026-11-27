@@ -109,7 +109,7 @@ def hold_cause(metadata: dict, own: dict, members=(), held: str | None = None, v
 
     ``own`` is the wake's pause row, ``members`` the pause rows of its paused tree members, ``held`` what its queue
     row holds it with (``queue_hold``; None: nothing), ``veto`` whether that row keeps a self-waking pause from going
-    on by itself (``queue_veto``, or a row gone at lookup). The wake paused at the
+    on by itself (``queue_veto``). The wake paused at the
     carried ceiling (initial or renewed), or, child first, its tree's latch refused it while a member
     holding that inherited number paused at it: the launch stamp (``consciousness_wake.wake_task_metadata``) names
     ``allowance``, ``allowance_and_cap`` or ``per_task_cap``, and a record from before the stamp is only
@@ -199,10 +199,11 @@ def held_wake_cause(drive_root, task_id: str, *, window=None) -> dict:
         with q._queue_lock:  # the pool's own row: its metadata and what it holds the wake with, decided in place
             row = next((task for task in q.PENDING if str(task.get("id") or "") == task_id), None)
             # A row gone since the clock listed the wake held (dispatch or removal won between the two locks) proves
-            # nothing: unknown, never a queue position.
-            metadata = dict((row or {}).get("metadata") or {})
-            held = "" if row is None else queue_hold(row, q.BUDGET_ROOT_FENCES)
-            veto = row is None or queue_veto(row, q.BUDGET_ROOT_FENCES)
+            # nothing: unknown, never a queue position, and no stored fact (an old pause, a fence) is read as its hold.
+            if row is None:
+                return {"cause": "", "ceiling_usd": None}
+            metadata = dict(row.get("metadata") or {})
+            held, veto = queue_hold(row, q.BUDGET_ROOT_FENCES), queue_veto(row, q.BUDGET_ROOT_FENCES)
         facts = controls(drive_root, task_id)
         own = facts.get("budget_pause") or {}
         started = _start_of(own)

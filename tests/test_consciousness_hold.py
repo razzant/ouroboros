@@ -283,6 +283,22 @@ def test_a_held_wake_whose_carrier_row_is_gone_at_lookup_is_unknown_never_queued
     assert hold.held_wake_cause(tmp_path, "wake-x")["cause"] == "queued"
 
 
+@pytest.mark.parametrize("durable", [
+    # An older, untyped technical pause still stored (it would say "Resume continues it").
+    {"budget_pause": {**_pause("authority_unreadable", reason="authority", scope="task", basis=None), "cause": ""}},
+    # A closed owner fence of its tree (it would say the owner's Pause).
+    {"budget_pause": _pause(), "owner_pause": {"state": "paused"}},
+])
+def test_a_gone_carrier_row_is_unknown_before_any_stored_fact_is_read(tmp_path, monkeypatch, durable):
+    """The stored facts outlive the row the clock saw: with the row gone, none of them is what holds it now."""
+    metadata = _launched()
+    seed_result(tmp_path, "wake-x", {"task_id": "wake-x", "status": "paused", "metadata": metadata, **durable})
+    monkeypatch.setattr("supervisor.queue.PENDING", [])
+    assert hold.held_wake_cause(tmp_path, "wake-x") == {"cause": "", "ceiling_usd": None}
+    monkeypatch.setattr("supervisor.queue.PENDING", [{"id": "wake-x", "metadata": metadata}])
+    assert hold.held_wake_cause(tmp_path, "wake-x")["cause"] != "", "with its row there the stored fact still speaks"
+
+
 WRITER_WAIT = {"_budget_pause_hold": {"reason": "continuation_writer_unsettled"}}
 
 
