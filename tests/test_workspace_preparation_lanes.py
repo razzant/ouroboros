@@ -239,8 +239,8 @@ def test_a_native_writing_child_source_in_runtime_data_hears_what_works_in_the_g
             workspace_root=path if surface == "self_worktree" else "", workspace_mode="", base_sha="",
             parent_task_id="parent")[3]
 
-    assert refusal("external_workspace", f"{tmp_path}/bad\x00name") == (
-        "Subagent rejected: invalid external workspace: embedded null byte")
+    nul = refusal("external_workspace", f"{tmp_path}/bad\x00name")  # the exception's own words differ by Python and OS
+    assert nul.startswith("Subagent rejected: invalid external workspace: ") and "null" in nul and "input_files" not in nul
     spaced = admission._validate_external_workspace(ctx, f"  {copy_}  ")  # the validator strips them: so does the hint
     assert "input_files" in spaced and spaced == admission._validate_external_workspace(ctx, str(copy_))
     assert admission._validate_external_workspace(ctx, str(runtime)) != spaced  # a folder holding the drive: its own words
