@@ -604,10 +604,13 @@ def _inspect(ctx, observed: dict, *, offset: int, not_applied=()) -> str:
     end = start + len(page)
     following = end if end < len(rows) else None
     whole = render(page, following)
-    if start or len(whole) <= limit:  # a later page's rows are small; only page one's shared fields can run over
+    if len(whole) <= limit:
         return whole
-    return render(page, following, f"This page runs over this tool's {limit:,}-character page ({len(whole):,}): the "
-                  "fields page one shares took the room. Later pages carry only units; continue at next_offset.")
+    # Page one runs over by the fields it shares; a later page only when its first unit alone is that long.
+    why = "the fields page one shares took the room" if not start else "its first unit alone is longer than a page"
+    return render(page, following, f"This page runs over this tool's {limit:,}-character page ({len(whole):,}): {why}."
+                  + (" Later pages carry only units; continue at next_offset." if following is not None else
+                     " It holds every remaining unit; there is no next page."))
 
 
 def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = False, offset: int = 0,
@@ -643,7 +646,8 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
         carried = (("working_note", working_note), ("keep_last_n", keep_last_n), ("keep_unit_ids", keep_unit_ids),
                    ("replace_note_ids", replace_note_ids), ("restore_unit_refs", restore_unit_refs),
                    ("schema_names", schema_names), ("review_transfers", review_transfers),
-                   ("review_notes", review_notes), ("view_address", view_address), ("fold_last_n", fold_last_n))
+                   ("review_notes", review_notes), ("view_address", view_address), ("fold_last_n", fold_last_n),
+                   ("expected_view_revision", expected_view_revision or None))  # it lists the producing send's view
         return _inspect(ctx, observed, offset=offset, not_applied=[name for name, value in carried if value is not None])
     if working_note is None and restore_unit_refs:
         if (any(value is not None for value in (keep_last_n, keep_unit_ids, replace_note_ids, schema_names, fold_last_n))

@@ -1043,6 +1043,33 @@ def test_an_inspection_names_the_note_and_selectors_it_did_not_apply(tmp_path, m
     seen = json.loads(_compact_context(ctx, inspect=True, **asked))
     assert seen["units"] == plain["units"] and getattr(ctx, "_pending_compaction", None) is None
     assert all(name in seen["not_applied"] for name in asked)
+    assert "expected_view_revision" not in seen["not_applied"]
+    pinned = json.loads(_compact_context(ctx, inspect=True, expected_view_revision="a-revision-it-does-not-pin"))
+    assert "expected_view_revision" in pinned["not_applied"] and pinned["units"] == plain["units"]
+
+
+def test_an_overlong_page_names_a_next_page_only_when_there_is_one(tmp_path, monkeypatch):
+    """A page over the tool's limit says so on any page, and names next_offset only when it returns one."""
+    from ouroboros import tool_capabilities
+
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: 6000)
+    schemas = [{"type": "function", "function": {"name": f"a_tool_with_a_long_descriptive_name_number_{n:04d}",
+                                                  "description": "Reads one thing.", "parameters": {"type": "object"}}}
+               for n in range(300)]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, [*_source()[:2], *_read("r0")], schemas)
+    text = _compact_context(ctx, inspect=True)
+    only = json.loads(text)
+    assert len(text) > 6000 and "next_offset" not in only and only["limitation"]
+    assert "next_offset" not in only["limitation"]
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, [*_source()[:2], *(row for index in range(20) for row in _read(f"r{index}"))], schemas)
+    first = json.loads(_compact_context(ctx, inspect=True))
+    assert "next_offset" in first and "next_offset" in first["limitation"]
+    monkeypatch.setattr(tool_capabilities, "tool_result_limit", lambda _name: 200)  # one unit outgrows a later page
+    later_text = _compact_context(ctx, inspect=True, offset=1)
+    later = json.loads(later_text)
+    assert len(later_text) > 200 and later["limitation"] and ("next_offset" in later) is ("next_offset" in later["limitation"])
 
 
 def test_an_inspection_page_stays_within_its_result_limit_or_says_what_it_could_not_show(tmp_path, monkeypatch):
