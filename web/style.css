@@ -447,8 +447,8 @@ html[data-layout="docked"] #primary-sidebar {
 }
 /* On a desk a room's bar (Main's, a docked Project's) is the band's row too, as every page's header is
    (.app-page-header[data-lead] below): its capsules are centred on the band at every Interface size, the insets
-   shrinking with a shorter band; the transcript's reserve and the history note follow the bar's measured height
-   (chat.js --chat-header-bar). */
+   shrinking with a shorter band; the transcript's reserve follows the bar's measured height (chat.js
+   --chat-header-bar). */
 :root[data-window-chrome="integrated"][data-layout="docked"] :is(.chat-page-header, .project-panel-bar) {
     box-sizing: border-box;
     min-height: var(--window-chrome-top);
@@ -1024,9 +1024,10 @@ html[data-layout="stack"] .resize-handle { display: none; }
 /* An owner-required action is a System message: the task, one sentence, the task's own controls. */
 .owner-action-body { display: flex; flex-direction: column; gap: var(--space-2); }
 .owner-action-reason { font-size: var(--type-meta); color: var(--text-meta); }
-/* A System row speaks at the size of every voice (owner decision 27.11.2026): its words, its title and its status
-   sentences at 16; its name, time and metadata (a place, a count, a row's answer) stay 12. */
-.chat-bubble.system :is(.owner-action-body > .ui-status, .owner-action-reason:not([data-panic-summary]), .model-wait-heading strong) {
+/* A System row speaks at the size of every voice: its words, its title and its status sentences (an owner action's, a
+   Project ending's outcome) at 16; its name, time and metadata (a place, a count, a row's answer) stay 12. */
+.chat-bubble.system :is(:is(.owner-action-body, .project-ending-head) > .ui-status,
+    .owner-action-reason:not([data-panic-summary]), .model-wait-heading strong) {
     font-size: var(--type-section);
     line-height: var(--line-body);
 }
@@ -5214,7 +5215,8 @@ html[data-layout="stack"] .chat-page-header > .app-page-actions {
     gap: 6px;
     padding: 4px 8px 4px 6px;
     background: var(--surface-float);
-    border: 1px solid transparent;
+    border: 1px solid transparent;  /* no rim; forced colours paint it */
+    box-shadow: var(--elev-rest);  /* its edge on a light room, as the composer chips beside it have */
     backdrop-filter: var(--glass);
     -webkit-backdrop-filter: var(--glass);
     border-radius: var(--radius-inner);
@@ -7577,8 +7579,11 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     max-width: min(420px, calc(100vw - 112px));
     padding: var(--space-3) var(--space-4);
     border-radius: var(--radius-object);
-    /* The shared float material (DESIGN principle 2, owner decision 27.11.2026): no rim, the float surface, the one
-       glass, the float shadow. A tone is its words' ink on that neutral body, never an edge. */
+    /* The shared float material (DESIGN principle 2): no rim, the float surface, the one glass, the float shadow. A
+       tone is its words' ink on that neutral body, never an edge. The transparent outline is the edge forced colours
+       paint, where the shadow is dropped. */
+    outline: 1px solid transparent;
+    outline-offset: -1px;
     background: var(--surface-float);
     color: var(--text-primary);
     box-shadow: var(--elev-float);
@@ -7610,8 +7615,9 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 .toast:has(> .toast-dismiss) { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-2); row-gap: var(--space-2); }
 .toast > .toast-words:has(~ .toast-dismiss) { min-width: 0; grid-column: 1; grid-row: 1; align-self: center; }
 .toast > .toast-action:has(~ .toast-dismiss) { grid-column: 1; grid-row: 2; margin-inline-start: 0; justify-self: start; }
-/* The close: a small plain × in the corner, no plate or shadow (owner 27.11.2026); its ink deepens on hover. Under a
-   finger its reach is the touch minimum (.ui-hit-area), wider than the glyph. A right-to-left interface mirrors the
+/* The close: a small plain × in the corner, no plate or shadow; its ink deepens on hover. Under a finger its reach is
+   the touch minimum (.ui-hit-area), wider than the glyph, and the columns part by that reach so it never lies over the
+   action's corner. A right-to-left interface mirrors the
    page and its stack with it: the stack keeps the room's top corner at its inline end (top right in a left-to-right
    interface) and the × the toast's. */
 .toast > .toast-dismiss {
@@ -7637,6 +7643,9 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     .toast > .toast-dismiss:hover { color: var(--text-primary); }
 }
 .toast > .toast-dismiss:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+@media (pointer: coarse) {
+    .toast:has(> .toast-dismiss) { column-gap: var(--space-3); }
+}
 /* The page's stack ends 18 px above the screen's bottom, as it keeps from its right, and the notices it keeps scroll
    there as one column: every word and close button is reached by wheel, touch or keyboard (toast.js names it a region
    once cut). A scrolling box clips what it holds, so its padding is the toasts' shadow room (0 18px 42px): left and
@@ -10104,10 +10113,10 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
         outline-offset: -2px;
     }
 }
-/* The note already reserves the floating bar. With a keyboard both are in flow. The bar holds only that note, and only
-   with text (chat_render_batch.js), so `:empty` answers. Never a :has() on the room: in WebKit, beside the rows' own
-   :has() rules, it made each live card's log frame cost 3 times as much, and more with each room kept away (measured;
-   tests/test_design_system_css_static.py guards it). */
+/* A Project's status bar, while it holds the room's status (before room_work.js adopts it), already reserves the
+   floating bar; with a keyboard both are in flow. Empty, it takes no room, so `:empty` answers. Never a :has() on the
+   room: in WebKit, beside the rows' own :has() rules, it made each live card's log frame cost 3 times as much, and more
+   with each room kept away (measured; tests/test_design_system_css_static.py guards it). */
 .project-panel .chat-panel-statusbar:not(:empty) ~ .chat-messages {
     --chat-feed-reserve: 8px;
 }
@@ -12727,6 +12736,8 @@ html[data-telegram-fullscreen] body.keyboard-open :is(#content, #page-chat.activ
 }
 /* The page's notices keep their 18 px from the right inset, and a notice as wide as it may be as much from the left. */
 html[data-telegram-fullscreen] #toast-stack { padding-inline-end: calc(18px + var(--inset-right)); }
+/* Mirrored, the stack stands at the physical left: that side's inset. */
+html[dir="rtl"][data-telegram-fullscreen] #toast-stack { padding-inline-end: calc(18px + var(--inset-left)); }
 html[data-telegram-fullscreen] #toast-stack .toast {
     max-width: min(420px, calc(100vw - 112px - var(--inset-left) - var(--inset-right)));
 }
@@ -12750,9 +12761,10 @@ html[data-telegram-fullscreen][data-layout="docked"] #primary-sidebar { --sideba
         rgba(0, 0, 0, 0.5) calc(100% - var(--edge-fade) * 0.52),
         rgba(0, 0, 0, 0.14) calc(100% - var(--edge-fade) * 0.22), transparent 100%;
 }
-/* What floats right under the bar lies over its edge, as its capsules do: Main's history note and a room's search sheet
-   come after the bar at its own level, so they paint over it, never blurred. A Project's status note stands in its flow
-   below the edge (its top reserve counts the edge, --chat-top-reserve below). Outside Telegram the keyboard puts both bars in flow. */
+/* What floats right under the bar lies over its edge, as its capsules do: a room's search sheet comes after the bar at
+   its own level, so it paints over it, never blurred. A Project's status bar, while it holds the room's status, stands in
+   its flow below the edge (its top reserve counts the edge, --chat-top-reserve below). Outside Telegram the keyboard puts
+   both bars in flow. */
 :where(html:not([data-telegram-fullscreen])) body.keyboard-open :is(#page-chat.active, .project-panel) {
     --edge-reach: 0px;
 }
@@ -12760,9 +12772,8 @@ html[data-telegram-fullscreen][data-layout="docked"] #primary-sidebar { --sideba
 html[data-telegram-fullscreen] body.keyboard-open :is(#page-chat.active, .project-panel) {
     --edge-reach: clamp(0px, var(--vvh) - var(--inset-top) - 250px, 32px);
 }
-/* The transcript's first row and a Project's status note stand below the bar and its edge, and below Main's note, which
-   floats over that edge: the room's measured reserve (the bar and the note, chat.js) or the bar and its edge, whichever
-   ends lower. Before chat.js first measures the bar a 56 px bar stands in, so a room's first row clears the edge of a
+/* The transcript's first row and a Project's status bar stand below the bar and its edge: the room's measured reserve
+   (the bar, chat.js) or the bar and its edge, whichever ends lower. Before chat.js first measures the bar a 56 px bar stands in, so a room's first row clears the edge of a
    bar that tall from the first frame (Telegram's taller row is reserved once measured); a room mounted without a bar has
    no edge (room_work.js), and its measured reserve stands alone. */
 :is(#page-chat, .chat-instance-panel) {
