@@ -214,6 +214,29 @@ def session_refusal_notice(host):
         window=measurement["capacity_total_tokens"], extra=str(refusal.get("detail") or ""), limit=measurement.get("window"))
 
 
+_REFUSED_INPUT = {True: "The call could not start on {engine}: the engine accepted the call's setup, then refused its "
+                         "input before its first answer.",
+                   False: "The call ended on {engine}: the engine accepted a renewed session's setup, then refused its "
+                          "input before answering. Its transcript is in this room."}
+
+
+def ending_notice(host, reason, detail):
+    """The one System line a refused call leaves (with its step and Details), or ``None`` for an ordinary ending."""
+    from ouroboros.host_notice import STEPS, phrase
+
+    if reason == "context_capacity":
+        return session_refusal_notice(host)
+    if reason != "input_refused":
+        return None
+    model = host.turn.native_model
+    details = "\n".join((f"Model: {model}.", f"The engine closed the connection after its setup: {detail.rstrip('.')}.",
+        "This close is the engine's generic invalid-argument code: it does not say the input was too large, so no "
+        "window was learned from it, and the call was not retried."))
+    text, said = phrase("input_refused", _REFUSED_INPUT[not host.completed], step="open_calls", details=details,
+                        engine=getattr(host.turn, "engine", "") or model)
+    return {"text": text, "record": f"{text} {STEPS['open_calls']}", **said}
+
+
 def call_ending(reason, status, detail="", notice=None, *, opened=True):
     """A call's terminal words and usage: one home for the ending every refusal and End share.
 

@@ -1,7 +1,7 @@
 ---
 name: gemini_live
 description: Gemini native Live audio and image provider for Live Conversation.
-version: 0.1.23
+version: 0.1.24
 type: extension
 runtime: python3
 entry: plugin.py
@@ -57,6 +57,9 @@ provider-token window (measured 2026-11-27; extended thinking on two sessions) w
 a 10,000 reserve. The provider's eviction trigger is the adapter's own wire setting,
 128,000 with a 118,000 sliding target, above the window; the documented 131,072
 input limit is a separate quantity.
+A close 1007 after setupComplete and before any generation on that connection is the
+engine refusing the input it accepted at setup: the call ends typed `input_refused`,
+with no retry and no window learned (1007 is Google's generic invalid-argument code).
 Every completed response reports modality usage, cached input and thinking units
 where Gemini supplies them, with raw evidence and status. Sparse modality lists
 prove omitted zeroes when their counts cover the reported total, or for an input

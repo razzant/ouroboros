@@ -241,6 +241,7 @@ class GeminiSession(JsonSession):
         if len(self.events) > 1:
             self.input_modalities.add('image')
         self.renewal_announced = False
+        self.generated = False  # this connection carried a generation (output or usage); not resumed state
         self.held_audio = self.audio_growth = 0
         self.prompt_peak = None
         self.interrupted = False
@@ -332,6 +333,12 @@ class GeminiSession(JsonSession):
             self.resume_requested = lost and bool(self.resume_handle)
             rcvd = getattr(exc, 'rcvd', None)  # Google's close code and sentence (billing, policy) for the owner
             detail = ' '.join(part for part in (str(rcvd.code) if rcvd else '', (rcvd.reason or '') if rcvd else '') if part)
+            if rcvd is not None and rcvd.code == 1007 and not self.generated:
+                # Recorded 27.11.2026 (m08): Gemini answers setupComplete even for a setup above the model's input
+                # limit, then closes 1007 at the first generation with no error event and no usage. The engine
+                # refused this input after accepting the setup: no retry. 1007 is Google's generic invalid-argument
+                # code, so this is not a measured window and nothing is learned from it.
+                raise RealtimeSetupError('input_refused', detail) from exc
             result = []
             if self.response and not self.response_complete and not self.resume_requested:
                 result.append(LiveEvent('response_done', {'response_id': self.response,
@@ -396,6 +403,7 @@ class GeminiSession(JsonSession):
                 self.seen_calls[cid] = identity
                 self.hold_tool_call(cid, call['name'], canonical_json(call.get('args', {})))
                 calls.append(call)
+        self.generated |= bool(event.get('serverContent') or event.get('toolCall') or 'usageMetadata' in event)
         native_response = event.get('responseId', '')
         replayed_response = native_response and native_response in self.completed_responses
         if replayed_response:
