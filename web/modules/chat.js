@@ -2798,19 +2798,29 @@ export function createChatInstance({
         }
     }
 
-    const historyVisible = () => isInstanceVisible() && !messagesDiv.closest('[inert]')
+    // The room is the one the person looks at: shown, not under the drawer, another room's panel, its own work or
+    // consciousness sheet, or the setup wizard. A notice it owes waits for that; one it showed leaves when it stops.
+    const coverHost = asPanel ? container?.closest?.('.project-panel') : pageHeader;
+    const historyCovered = () => Boolean(coverHost?.matches?.('[data-rw-open], [data-cx-shade]')
+        || pageHeader?.hasAttribute?.('data-cx-shade') || document.getElementById?.('onboarding-overlay'));
+    const historyVisible = () => isInstanceVisible() && !messagesDiv.closest('[inert]') && !historyCovered()
         && !document.body?.classList.contains('nav-drawer-open') && (asPanel || (!isProjectOpening?.()
         && !document.body?.classList.contains('project-panel-open')));
-    // What happened to this room's history (a failed read, an inexact return) is the page's one notice: a failure in
-    // the error's ink with the edge's Retry, standing until it ends or is closed; the rest in plain words, ending by
-    // themselves (chat_render_batch.js, room_archive.js).
-    const historyNotice = (text, action = null) => showToast(text, action ? 'danger' : 'info',
-        { action, ttl: action ? 0 : 6000, haptic: false, dismissLabel: tr('toast.dismiss', 'Dismiss notice') });
-    const archive = isMain && !asPanel ? archiveDoor({ notify: historyNotice, returnFocus: messagesDiv,
+    // What happened to this room's history is the page's ordinary notice, its tone the event's own: a failed read is a
+    // failure, an inexact return or a restored list plain news (chat_render_batch.js, room_archive.js).
+    const historyNotice = (text, kind) => showToast(text, kind === 'failed' ? 'danger' : 'info',
+        { haptic: false, dismissLabel: tr('toast.dismiss', 'Dismiss notice') });
+    const archive = isMain && !asPanel ? archiveDoor({ returnFocus: messagesDiv,
         readReceipt, syncHistory, isVisible: historyVisible }) : null;
     const historyControls = createHistoryControls(messagesDiv, {
         notify: historyNotice, archive, isVisible: historyVisible,
     });
+    const coverWatch = typeof MutationObserver === 'function' ? new MutationObserver(() => {
+        if (historyVisible()) historyControls.showNotice(); else historyControls.hideNotice();
+    }) : null;
+    for (const [node, options] of [[coverHost, { attributes: true, attributeFilter: ['data-rw-open', 'data-cx-shade'] }],
+        [pageHeader, { attributes: true, attributeFilter: ['data-cx-shade'] }],
+        [document.body, { attributes: true, attributeFilter: ['class'], childList: true }]]) if (node) coverWatch?.observe(node, options);
     const { olderButton: loadOlderBtn } = historyControls;
 
     // The first gate closed to arrivals ('' none: a hydrated, healthy window that needs no rebuild).
@@ -3414,7 +3424,8 @@ export function createChatInstance({
         hasPendingWork: () => composer.hasPendingWork() || unconfirmed.count > 0,
         // Another place covers the room: a reader or file dialog its card opened closes, its place is kept; `pause`
         // (another place replaces it) also pauses what plays. Staged files stay.
-        closeTransient: (pause) => { archive?.close(); roomWork?.leave(); keepPlace(); chatMedia.closeTransient(pause); },
+        closeTransient: (pause) => { archive?.close(); roomWork?.leave(); keepPlace(); chatMedia.closeTransient(pause);
+            historyControls.hideNotice(); },
         // Away keeps the place, pausing paint and reads (room_retire.js).
         forgetWindowReturn,
         leave: (windowHidden = false) => {
@@ -3425,7 +3436,7 @@ export function createChatInstance({
             // Left in an outage (down after the page's socket opened), it will not hear the reconnect that forgets a
             // readiness polled meanwhile. Before the first open there is none: that open keeps the boot read.
             if (ws.isConnected?.() === false && ws.previouslyConnected?.()) hostStart.forget();
-            roomWork?.leave(); keepPlace(); leaving = true; visit += 1;
+            roomWork?.leave(); keepPlace(); leaving = true; visit += 1; historyControls.hideNotice();
             readReceipt.cancel(); historyReadAbort?.abort(); historyPager.suspend(); historyResyncScheduler.cancel();
             rowSleep.destroy(); chatResizeObserver?.disconnect(); reviewHydrator.suspend(); replies.search.close();
         },
@@ -3463,7 +3474,7 @@ export function createChatInstance({
             }
             wsDisposers.length = 0;
             historyControls.endRecent();
-            historyControls.destroy();
+            historyControls.destroy(); coverWatch?.disconnect();
             window.removeEventListener('ouro:language-changed', handleHistoryLanguage);
             historyPager.destroy();
             disposeReadingGestures();

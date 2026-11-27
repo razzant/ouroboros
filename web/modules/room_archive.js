@@ -1,6 +1,6 @@
 // The read-only archive of saved rooms while Main's history refuses for the Project registry (#3294; the server's
-// rule: ouroboros/room_archive.py). Main's refused read carries `project_registry: "unavailable"`: its header note
-// says the project list cannot be read and the in-feed edge offers `Read saved messages` beside Retry.
+// rule: ouroboros/room_archive.py). Main's refused read carries `project_registry: "unavailable"`: its in-feed edge
+// says the project list cannot be read and offers `Read saved messages` beside Retry.
 // The history controls pass the effective refusal to `archiveDoor` and the newest restoration fact separately.
 // The reader (`openRoomArchive`) is a modal reading surface on
 // the document reader's shell (DESIGN "Document reading"): Main and each Project room the saved records name, one at
@@ -263,9 +263,9 @@ export function openRoomArchive({ doc = globalThis.document, read = apiClient.ch
 }
 
 /** The history edge owns when this door is offered; navigation owns its lifetime. */
-export function archiveDoor({ open = openRoomArchive, notify = null, returnFocus = null,
+export function archiveDoor({ open = openRoomArchive, returnFocus = null,
     readReceipt, syncHistory, isVisible } = {}) {
-    let door = null, hint = null, reader = null, disposed = false, restored = false;
+    let door = null, hint = null, reader = null, disposed = false, restored = false, owed = false;
     function clearHint() {
         hint?.dispose?.();
         hint = null;
@@ -312,11 +312,16 @@ export function archiveDoor({ open = openRoomArchive, notify = null, returnFocus
         },
         recent(error, page) {
             if (disposed) return;
-            if (error) { restored = false; clearHint(); return; }
-            // The restore happened: told once by the page's notice, which ends by itself (owner decision 27.11.2026).
-            if (restored || page?.project_registry !== 'restored' || typeof notify !== 'function') return;
-            restored = true;
-            hint = notify(RESTORED);
+            if (error) { restored = owed = false; clearHint(); return; }
+            // The restore happened: owed to the page's notice, told once while Main is the room shown (`announce`).
+            if (restored || page?.project_registry !== 'restored') return;
+            restored = owed = true;
+        },
+        get owed() { return owed && !disposed; },
+        announce(notify) {
+            if (!owed || disposed || typeof notify !== 'function') return;
+            owed = false;
+            hint = notify(RESTORED, 'restored');
         },
         close,
         dispose() { disposed = true; close(); clearHint(); door?.remove(); },

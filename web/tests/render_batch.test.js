@@ -13,9 +13,9 @@ import { ElementStub } from './chat_dom_fixture.js';
 
 const chatSource = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
 
-// Owner decision 27.11.2026: events speak through the page's one notice (toast.js), a state of a place is shown by the
-// place. A failed read and an inexact return are told once per outcome while the room shows, withdrawn when they end;
-// the gap, the beginning and an upgrading store stay at the feed's edge and never notify.
+// Events speak through the page's ordinary notice, a state of a place is shown by the place: a failed read and an inexact
+// return are told once per episode, as their own kind, only while the room is the one shown, withdrawn when it is left or
+// covered or the episode ends; the fact, its explanation and Retry stay at the feed's older edge while they are true.
 function noticeRig(visible = true) {
     const doc = { byId: new Map(), createElement: tag => new ElementStub(tag, doc) };
     const messages = new ElementStub('div', doc);
@@ -24,8 +24,8 @@ function noticeRig(visible = true) {
     const state = { visible };
     const controls = createHistoryControls(messages, {
         isVisible: () => state.visible,
-        notify: (text, action) => {
-            const notice = { text, action, disposed: false, dispose() { this.disposed = true; } };
+        notify: (text, kind) => {
+            const notice = { text, kind, disposed: false, dispose() { this.disposed = true; } };
             notices.push(notice);
             return notice;
         },
@@ -35,45 +35,55 @@ function noticeRig(visible = true) {
     return { messages, notices, state, controls, edge, note };
 }
 
-test('a failed read is one notice with Retry while the room shows, never a note of its own; it ends with the failure', () => {
+test('a failed read is one ordinary notice per episode while its room shows; the edge keeps the fact and Retry', () => {
     const r = noticeRig(false);
     const snapshot = { initialized: true, canOlder: true };
     r.controls.render(snapshot, { gaps: true });
     assert.deepEqual(r.notices, [], 'a gap is a state: it notifies nothing');
-    assert.match(r.note().textContent, /may have gaps/);
     r.controls.render({ ...snapshot, error: new Error('read failed') }, { gaps: true });
     assert.deepEqual(r.notices, [], 'a hidden room spends nothing');
     r.state.visible = true;
     r.controls.showNotice();
-    assert.deepEqual(r.notices.map(n => [n.text, n.action?.label]), [['Some saved history could not be loaded.', 'Retry']]);
-    assert.match(r.note().textContent, /may have gaps/, 'the failure never takes the gap\'s place at the edge');
-    assert.equal(r.controls.olderButton.textContent, 'Retry loading messages', 'the edge keeps its Retry');
-    assert.equal(r.messages.querySelectorAll?.('.chat-history-status')?.length ?? 0, 0);
-    // The same outcome read again (a re-read, a reconnect, the room shown again) says nothing more.
-    r.controls.render({ ...snapshot, error: new Error('read failed again') }, {});
+    assert.deepEqual(r.notices.map(n => [n.text, n.kind]), [['Some saved history could not be loaded.', 'failed']],
+        'the notice names its kind (a failure), and carries no action');
+    assert.equal(r.note().textContent, 'Some saved history could not be loaded.', 'the edge says the failure in words');
+    assert.equal(r.edge().querySelector('.chat-history-gap').hidden, false, 'with the gap beside it');
+    assert.equal(r.controls.olderButton.textContent, 'Retry loading messages', 'and keeps its Retry');
+    r.notices[0].dispose();  // the person closes it (or it times out): the fact is still found at the edge
+    assert.equal(r.note().textContent, 'Some saved history could not be loaded.');
+    // A reconnect begins a read (loading replaces the error) and fails again: the same episode, no news.
+    r.controls.beginRecent();
+    r.controls.render({ ...snapshot, loading: 'latest' }, {});
+    r.controls.endRecent(new Error('read failed again'));
+    r.controls.render(snapshot, {});
     r.controls.showNotice();
-    assert.equal(r.notices.length, 1, 'once per outcome');
-    let retried = 0;
-    r.controls.olderButton.addEventListener('click', () => { retried += 1; });
-    r.notices[0].action.run();
-    assert.equal(retried, 1, 'the notice\'s Retry is the edge\'s own');
+    assert.equal(r.notices.length, 1, 'once per episode');
+    // Leaving or a cover withdraws a shown notice; the room shown again owes nothing already told.
+    r.controls.endRecent();
     r.controls.render(snapshot, { complete: true });
-    assert.equal(r.notices[0].disposed, true, 'the notice ends with its failure');
-    assert.equal(r.note().textContent, 'Beginning of saved history');
     r.controls.render({ ...snapshot, error: new Error('failed later') }, {});
-    assert.equal(r.notices.length, 2, 'a new failure is a new outcome');
+    assert.equal(r.notices.length, 2, 'a read that succeeded ended the episode: a new failure is news');
+    r.controls.hideNotice();
+    assert.equal(r.notices[1].disposed, true, 'left or covered: withdrawn');
+    r.controls.showNotice();
+    assert.equal(r.notices.length, 2, 'told once in this episode');
+    r.controls.render(snapshot, { complete: true });
+    assert.equal(r.note().textContent, 'Beginning of saved history');
     r.controls.destroy();
-    assert.equal(r.notices[1].disposed, true);
 });
 
-test('an inexact return is told once without an action; an upgrading store stays at the edge and notifies nothing', () => {
+test('an inexact return is plain news told once; its explanation stays at the edge while true; states never notify', () => {
     const r = noticeRig();
     const snapshot = { initialized: true, canOlder: true };
-    r.controls.render(snapshot, { gaps: true }, true);
-    assert.deepEqual(r.notices.map(n => [n.text, n.action]), [['Saved position could not be restored exactly.', null]]);
-    assert.match(r.note().textContent, /may have gaps/);
-    r.controls.render(snapshot, { gaps: true }, false);
-    assert.equal(r.notices[0].disposed, true);
+    r.controls.render(snapshot, { complete: true }, true);
+    assert.deepEqual(r.notices.map(n => [n.text, n.kind]), [['Saved position could not be restored exactly.', 'approximate']]);
+    r.notices[0].dispose();
+    r.controls.render(snapshot, { complete: true }, true);
+    assert.equal(r.notices.length, 1);
+    assert.match(r.note().textContent, /^Saved position could not be restored exactly\./,
+        'after the notice is gone the edge still says why the place moved');
+    r.controls.render(snapshot, { complete: true }, false);
+    assert.equal(r.note().textContent, 'Beginning of saved history');
     const migrating = Object.assign(new Error('importing'), { status: 503, body: { reason_code: 'migrating' } });
     r.controls.render({ ...snapshot, error: migrating }, { gaps: true });
     assert.equal(r.notices.length, 1, 'an upgrade is a state of the place');

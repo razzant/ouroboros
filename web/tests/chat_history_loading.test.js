@@ -213,9 +213,10 @@ for (const [name, fail] of [['a dropped connection', read => read.drop()], ['an 
         assert.equal(f.button().textContent, 'Retry loading messages');
         assert.equal(f.button().hidden, false);
         assert.equal(f.button().disabled, false);
-        // The failure is an event: the page's one notice says it beside the edge's Retry (owner decision 27.11.2026).
+        // The failure is news, told once by the page's notice; the fact stays at the edge beside Retry while true.
         assert.deepEqual(toastMessages(document.body), ['Some saved history could not be loaded.']);
-        assert.doesNotMatch(f.note().textContent, /could not be loaded/, 'the edge keeps no second copy of it');
+        assert.equal(f.note().hidden, false);
+        assert.match(f.note().textContent, /^Some saved history could not be loaded/);
         assert.equal(f.instance.hasPaintedHistory(), false);
 
         const retry = f.clickRetry();

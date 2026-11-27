@@ -251,31 +251,37 @@ test('closing while a read is in flight drops its answer', async (t) => {
     assert.equal(r.restored(), 0);
 });
 
-test('the restoration is told once by the page\'s notice, beside independent partial-page and gap facts', (t) => {
+test('the restoration is told once, only while Main is the room shown, beside independent partial-page and gap facts', (t) => {
     const { doc, el } = domDouble();
     const messages = el('div');
     doc.body.append(messages);
     const told = [];
-    const notify = (text, action = null) => {
-        const notice = { text, action, disposed: false, dispose() { this.disposed = true; } };
+    const notify = (text, kind) => {
+        const notice = { text, kind, disposed: false, dispose() { this.disposed = true; } };
         told.push(notice);
         return notice;
     };
-    const archive = archiveDoor({ notify });
-    const controls = createHistoryControls(messages, { archive, notify, isVisible: () => true });
+    let shown = false;
+    const archive = archiveDoor({ isVisible: () => shown });
+    const controls = createHistoryControls(messages, { archive, notify, isVisible: () => shown });
     t.after(controls.destroy);
     controls.endRecent(null, false, { project_registry: 'restored' });
-    assert.deepEqual(told.map(n => n.text), ['Project list restored from its saved copy.']);
+    controls.render({ initialized: true, canOlder: false }, { complete: true });
+    assert.deepEqual(told, [], 'a hidden Main announces nothing: it is owed');
+    shown = true;
+    controls.showNotice();
+    assert.deepEqual(told.map(n => [n.text, n.kind]), [['Project list restored from its saved copy.', 'restored']]);
     controls.endRecent(new Error('Some saved history could not be loaded.'), true, { project_registry: 'restored' });
     const state = controls.render({ initialized: true, canOlder: false }, { gaps: true });
     assert.equal(state.note, 'Some saved history could not be loaded.', 'the failure is the window\'s note');
     assert.deepEqual(told.map(n => n.text), ['Project list restored from its saved copy.',
         'Some saved history could not be loaded.'], 'the failure is its own notice');
     assert.equal(told[0].disposed, false, 'and the restore notice stands beside it');
-    assert.equal(messages.querySelector('.chat-history-gap')?.hidden ?? true, true);
-    assert.match(messages.querySelector('.chat-load-older-note').textContent, /may have gaps/, 'the gap stays at the edge');
+    assert.equal(messages.querySelector('.chat-load-older-note').textContent, 'Some saved history could not be loaded.',
+        'the edge says the failure');
     controls.endRecent(null, false, {});
     controls.endRecent(null, false, { project_registry: 'restored' });
+    controls.showNotice();
     assert.equal(told.filter(n => n.text.startsWith('Project list')).length, 1, 'a later page does not repeat it');
     controls.endRecent(refusal());
     controls.render({ initialized: false });

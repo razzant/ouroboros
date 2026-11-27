@@ -28,10 +28,11 @@ const APPROXIMATE_NOTICE = 'Saved position could not be restored exactly.';
  * fact about the bounded page cache, not about what the reader can see, so it never drives this button: a released newer
  * page returns through a positive gesture at an unambiguous island edge, and the floating scroll-to-latest button
  * remains the only return-to-present control.
- * What the reading window IS (a gap, its beginning, a store being upgraded, a project list it cannot read) is a state
- * of the place, said at the feed's edge. What HAPPENED to it (a read failed, a return could not land exactly) is an
- * event, said once by the page's one notice (`notify`, toast.js; owner decision 27.11.2026): while the room shows,
- * once per outcome, withdrawn when the outcome ends; a failed read's notice carries the edge's own Retry.
+ * What happened to the window (a read failed, a return could not land exactly) is news: the page's one notice
+ * (`notify(text, kind)`, toast.js) tells it once per episode, only while the room is the one shown (`isVisible`), and
+ * withdraws it when the room is left or covered (`hideNotice`) or the episode ends. The fact itself, its explanation and
+ * its Retry stay at the feed's older edge for as long as they are true, as do the states (a gap, the beginning, a store
+ * being upgraded, a project list it cannot read).
  */
 export function createHistoryControls(messagesDiv, {
     notify = null, archive = null, isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
@@ -48,38 +49,35 @@ export function createHistoryControls(messagesDiv, {
     gapNote.className = 'chat-history-gap';
     gapNote.hidden = true;
     root.append(button, note, gapNote);
-    // The recent-window read is the chat's own request, not a pager page, so its
-    // in-flight and failed states are carried here and drawn by the same control
-    // (issue #1102: an empty feed under a green header read as a dead app, and a
-    // failed read looked identical to a slow one).
+    // The recent-window read is the chat's own request, not a pager page, so its in-flight and failed states are carried
+    // here and drawn by the same control (issue #1102: an empty feed under a green header read as a dead app).
     let recent = null;
-    // The event the window holds now ({text, retry}, or null), the words already said for it and their notice.
-    let event = null, said = '', notice = null;
-    const withdraw = () => { notice?.dispose?.(); notice = null; };
-    // A hidden room spends nothing: a room shown again (chat.js) says what is still owed.
+    // Per kind of event (its words): whether its episode is open, whether it was told in it, and its notice while shown.
+    // A failure's episode ends only with a read that succeeds (a read merely begun is no news either way).
+    const episodes = { failed: { words: FAILED_NOTICE }, approximate: { words: APPROXIMATE_NOTICE } };
+    const hideNotice = () => { for (const ep of Object.values(episodes)) { ep.notice?.dispose?.(); ep.notice = null; } };
+    const settle = (ep, open) => { if (!open) { ep.notice?.dispose?.(); ep.told = false; ep.notice = null; } ep.open = open; };
+    // A hidden or covered room spends nothing: a room shown again (chat.js) says what is still owed, once.
     function showNotice() {
-        if (!event || said === event.text || typeof notify !== 'function' || doc.hidden || !isVisible()) return;
-        withdraw();
-        said = event.text;
-        notice = notify(event.text, event.retry ? { label: 'Retry',
-            run: () => { if (!button.hidden && !button.disabled) button.click(); } } : null);
+        const owed = Object.entries(episodes).filter(([, ep]) => ep.open && !ep.told);
+        if (typeof notify !== 'function' || doc.hidden || !(owed.length || archive?.owed) || !isVisible()) return;
+        for (const [kind, ep] of owed) { ep.told = true; ep.notice = notify(ep.words, kind); }
+        archive?.announce(notify);
     }
     return {
         olderButton: button,
         showNotice,
-        destroy() { event = null; withdraw(); archive?.dispose(); },
-        // Only an EMPTY feed (or a failure already on screen) gets the loading
-        // state: an ordinary refresh never puts chrome over a painted transcript.
-        // Returns whether there is a state to draw, so a painted feed costs nothing.
-        // A migrating store read again is still `waiting` for its publication.
+        hideNotice,
+        destroy() { hideNotice(); archive?.dispose(); },
+        // Only an EMPTY feed (or a failure already on screen) gets the loading state: an ordinary refresh never puts
+        // chrome over a painted transcript; a migrating store read again is still `waiting` for its publication.
         beginRecent() {
             if (recent?.error || feedIsEmpty(messagesDiv)) {
                 recent = { loading: true, waiting: recent?.waiting || isStoreMigrating(recent?.error) };
             }
             return Boolean(recent);
         },
-        // A failure is shown where the loading state was; elsewhere the reader
-        // keeps the transcript they have and the next sync reconciles it. A migrating store has not failed.
+        // A failure is shown where the loading state was; elsewhere the reader keeps the transcript they have.
         endRecent(error = null, partial = false, page = null) { recent = error ? { error, partial } : null; archive?.recent(partial ? null : error, page); },
         recentFailed: () => Boolean(recent?.error && !recent.partial && !isStoreMigrating(recent.error)),
         render(snapshot, coverage = {}, approximate = false) {
@@ -97,12 +95,14 @@ export function createHistoryControls(messagesDiv, {
             // the beginning; an empty feed still loading says only its loading state.
             const edgeState = emptyLoading ? '' : gapText || (!error && !hydrating && coverage.complete ? 'Beginning of saved history' : '');
             const stateText = migrating ? 'Saved history is being upgraded…' : archiveNote || edgeState;
-            const separateGap = Boolean(gapText) && !emptyLoading && stateText !== edgeState;
             const failed = Boolean(error) && !migrating && !archiveNote;
-            const eventText = [failed && FAILED_NOTICE, approximate && APPROXIMATE_NOTICE].filter(Boolean).join(' ');
-            event = eventText ? { text: eventText, retry: failed && Boolean(retry) } : null;
-            if (!eventText) { said = ''; withdraw(); }
+            if (failed || (!error && !loading)) settle(episodes.failed, failed);
+            settle(episodes.approximate, Boolean(approximate));
             showNotice();
+            // The edge keeps the event's explanation while it is true, beside its Retry.
+            const edgeText = (failed ? [FAILED_NOTICE, approximate && APPROXIMATE_NOTICE]
+                : [approximate && APPROXIMATE_NOTICE, stateText]).filter(Boolean).join(' ');
+            const separateGap = Boolean(gapText) && !emptyLoading && !edgeText.includes(gapText);
             // A grown room's exhausted chain offers the way on (it rebases to the present); a chain a navigation
             // began ends at its older end: ↓ is the way to the present.
             const buttonHidden = migrating || (!retry && !snapshot.canOlder
@@ -111,9 +111,9 @@ export function createHistoryControls(messagesDiv, {
                 [button, { textContent: hydrating ? 'Loading saved history…' : loading ? 'Loading…'
                     : changedView ? 'Refresh history' : retry ? 'Retry loading messages' : 'Load more history',
                     disabled: loading, hidden: buttonHidden }],
-                [note, { textContent: stateText, hidden: !stateText }],
+                [note, { textContent: edgeText, hidden: !edgeText }],
                 [gapNote, { textContent: separateGap ? gapText : '', hidden: !separateGap }],
-                [root, { hidden: buttonHidden && !stateText && !separateGap }],
+                [root, { hidden: buttonHidden && !edgeText && !separateGap }],
             ];
             archive?.offer(button, buttonHidden || loading ? null : retry);
             for (const [node, values] of fields) {
