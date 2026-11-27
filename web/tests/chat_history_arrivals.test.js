@@ -795,3 +795,145 @@ test('walking into an older page does not mark its existing words as new activit
     assert.ok(s.reads.includes('older'));
     assert.equal(globalThis.document.byId.get('chat-scroll-bottom').getAttribute('aria-label'), 'Scroll to latest message');
 });
+
+test('a settled task\'s rows sent again come with what arrived: drawn together, only the arrivals counted', async () => {
+    const answer = { ...arrivedRows(['chat:3'], 'after:3'), repairs: [{ history_id: 'progress:1' }] };
+    const p = arrivalsPager({ fetch: async () => answer });
+    p.pager.acceptRecent(newestPage());
+    assert.equal(await p.pager.read({ reason: 'settled' }), true);
+    assert.deepEqual(p.arrivals.map(({ ids, repairs }) => [ids, repairs.map((row) => row.history_id)]), [[['chat:3'], ['progress:1']]]);
+    assert.deepEqual([p.calls, p.newest], [['after:1'], []], 'one read of arrivals, no newest page');
+    const plain = arrivalsPager({ fetch: async () => arrivedRows([], 'after:2') });
+    plain.pager.acceptRecent(newestPage());
+    await plain.pager.read();
+    assert.deepEqual(plain.arrivals[0].repairs, [], 'an answer with none draws none');
+    const bad = arrivalsPager({ fetch: async () => ({ ...arrivedRows([], 'after:2'), repairs: {} }) });
+    bad.pager.acceptRecent(newestPage());
+    await bad.pager.read({ reason: 'settled' });
+    assert.deepEqual(bad.newest, [{ fromReconnect: false, reason: 'settled', decision: 'after_rejected', detail: 'bad_messages' }]);
+});
+
+test('arrivals go on from an answer only once it is drawn', async () => {
+    let fail = true;
+    const p = arrivalsPager({ fetch: async (cursor) => arrivedRows(['chat:2'], cursor === 'after:1' ? 'after:2' : 'after:3'),
+        apply: () => { if (fail) throw new Error('a renderer failed'); } });
+    p.pager.acceptRecent(newestPage());
+    await p.pager.read({ reason: 'settled' });
+    assert.deepEqual(p.newest.map(({ decision }) => decision), ['after_rejected'], 'the newest page answers for it');
+    fail = false;
+    await p.pager.read({ reason: 'settled' });
+    // The newest read (mocked) brought no page: the answer that failed to draw names no cursor to go on from.
+    assert.deepEqual([p.calls, p.newest.map(({ decision }) => decision)], [['after:1'], ['after_rejected', 'no_cursor']]);
+});
+
+test('a read asked while a reconnect\'s whole read is still to come waits for it, then reads only what arrived', async (t) => {
+    // An unread room's receipt asks right after the socket opened, before the reconnect's own read (which waits for the
+    // preferences) is out: it no longer takes a second whole page; the reconnect's read stays the one recovery read.
+    const s = historyServer();
+    s.say(1);
+    const r = openRoom(t, s);
+    await r.instance.refreshHistory({ revision: 1 });
+    s.say(2);
+    r.reconnect();
+    assert.equal((await r.instance.refreshHistory({ revision: 2 })).read, true);
+    await until(() => r.shown().includes('chat:2'));
+    await quiet();
+    assert.deepEqual(s.reads, ['newest', 'newest', 'after'], 'one whole read for the reconnect, then only what arrived');
+    assert.deepEqual(s.tags.slice(1), [{ reason: 'reconnect', mode: 'newest', decision: 'explicit_whole' },
+        { reason: 'read_receipt', mode: 'after' }]);
+});
+
+test('a settled task\'s rows sent again with what arrived settle its card without the newest page', async (t) => {
+    const s = historyServer();
+    s.say(1);
+    s.work(2, 'task-7');
+    const repairs = [];
+    const r = openRoom(t, { ...s, fetchHistory: async (url) => {
+        const response = await s.fetchHistory(url);
+        if (!String(url).includes('cursor=after') || !repairs.length) return response;
+        const data = await response.json();
+        return { ok: true, status: 200, json: async () => ({ ...data, repairs: repairs.splice(0) }) };
+    } });
+    await r.instance.refreshHistory({ revision: 1 });
+    const card = () => r.messages.children.find((node) => node.classList?.contains('chat-live-card'));
+    assert.ok(card() && card().dataset.finished !== '1', 'the task is shown running');
+    repairs.push({ ...s.rows[1], task_terminal_status: 'completed', outcome_axes: { execution: 'ok' } });
+    s.say(3);
+    assert.equal((await r.instance.refreshHistory({ revision: 3 })).read, true);
+    await quiet();
+    assert.deepEqual(s.reads, ['newest', 'after'], 'what arrived and the settled rows, in one read');
+    assert.equal(card().dataset.finished, '1');
+    assert.deepEqual(s.tags.slice(1), [{ reason: 'read_receipt', mode: 'after' }], 'no newest page answered for it');
+});
+
+// The arrivals server above, its next `after` answers also carrying `repairs` handed in by the test.
+function repairingRoom(t, s) {
+    const repairs = [];
+    const r = openRoom(t, { ...s, fetchHistory: async (url) => {
+        const response = await s.fetchHistory(url);
+        if (!String(url).includes('cursor=after') || !repairs.length) return response;
+        const data = await response.json();
+        return { ok: true, status: 200, json: async () => ({ ...data, repairs: repairs.splice(0) }) };
+    } });
+    return { r, repairs };
+}
+
+for (const arrival of ['none', 'receipt', 'card row']) test(`a card only repairs settled marks no new activity (${arrival})`, async (t) => {
+    const s = historyServer();
+    s.say(1);
+    s.work(2, 'task-7');
+    const { r, repairs } = repairingRoom(t, s);
+    await r.instance.refreshHistory({ revision: 1 });
+    await quiet();
+    r.messages.scrollHeight = 1000;
+    r.readUp();
+    await quiet();
+    const button = globalThis.document.byId.get('chat-scroll-bottom');
+    assert.equal(button.getAttribute('aria-label'), 'Scroll to latest message');
+    const settled = { ...s.rows[1], task_terminal_status: 'completed', outcome_final: true, outcome_phase: 'done',
+        outcome_axes: { execution: { status: 'ok' }, lifecycle: { status: 'completed' } } };
+    repairs.push(settled);
+    if (arrival !== 'none') s.say(3, { role: 'system', text: '', is_progress: false, task_id: 'task-7',
+        system_type: 'task_summary', summary_kind: 'terminal_root_projection',
+        historical_terminal: { status: 'completed', phase: 'done', ts: ts(3), provenance: 'canonical_task_result_after_finalization' } });
+    if (arrival === 'card row') s.say(4, { role: 'system', text: 'Custody settled', is_progress: false, task_id: 'task-7',
+        system_type: 'custody_notice', card_row: 'timeline', card_row_id: 'final:task-7:abc:custody_notice' });
+    await r.instance.refreshHistory({ revision: 2 });
+    await quiet();
+    assert.deepEqual(s.reads, ['newest', 'after']);
+    const card = r.messages.children.find((node) => node.classList?.contains('chat-live-card'));
+    assert.equal(card.dataset.finished, '1', 'history settled the existing card');
+    assert.equal(button.getAttribute('aria-label'), arrival === 'card row'
+        ? 'New activity — scroll to latest message' : 'Scroll to latest message');
+    if (arrival === 'card row') return;
+    s.say(5);
+    await r.instance.refreshHistory({ revision: 3 });
+    await quiet();
+    assert.equal(button.getAttribute('aria-label'), 'New activity — scroll to latest message', 'a new message is');
+});
+
+test('arrivals are saved only once they are drawn', async (t) => {
+    const s = historyServer();
+    s.say(1);
+    const r = openRoom(t, s);
+    await r.instance.refreshHistory({ revision: 1 });
+    await quiet();
+    const key = previewEntryKey(PREVIEW_SCOPE, [2, 'room']);
+    const saved = () => JSON.parse(globalThis.localStorage.getItem(key)).rows.map((row) => row.id);
+    assert.deepEqual(saved(), ['chat:1']);
+    const append = r.messages.append.bind(r.messages), insertBefore = r.messages.insertBefore.bind(r.messages);
+    let fail = true, savedAtThrow = null;
+    const trap = (draw) => (...args) => {
+        if (!fail) return draw(...args);
+        fail = false;
+        savedAtThrow = saved();
+        throw new Error('a renderer failed');
+    };
+    r.messages.append = trap(append);
+    r.messages.insertBefore = trap(insertBefore);
+    s.say(2);
+    await r.instance.refreshHistory({ revision: 2 });
+    await quiet();
+    assert.deepEqual(savedAtThrow, ['chat:1'], 'nothing undrawn was saved when the draw failed');
+    assert.deepEqual(s.tags[2], { reason: 'read_receipt', mode: 'newest', decision: 'after_rejected', detail: 'apply_failed' });
+});

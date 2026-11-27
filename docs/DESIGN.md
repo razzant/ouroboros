@@ -3403,10 +3403,11 @@ Disturb still decide. macOS uses `UNUserNotificationCenter`, whose one permissio
 question is asked only from the owner's gesture — switching notifications on, or
 Test — never by an alert, which falls back while the question is unasked; Windows
 shows a balloon on Ouroboros's one notification-area icon, presented as a system
-notification on Windows 10/11; a source handoff can change the window/taskbar
-identity to Python. Handoff removes the old icon before its successor starts;
-a gap or Explorer ghost after a crash remains possible; Linux uses the freedesktop notification service when
-the desktop runs one. Not yet allowed, denied, unavailable or failed is a typed
+notification on Windows 10/11. The installed app shares its Start shortcut's
+identity; a portable copy's handoff can show as Python in the taskbar. Handoff
+removes the old tray icon first; a crash can leave a gap or Explorer ghost.
+Linux uses freedesktop notifications where available.
+Not yet allowed, denied, unavailable or failed is a typed
 answer, never silence (an error the system returns instead of asking is that
 error, not a denial): that alert falls back to the browser banner or the in-app
 toast. One the system took without answering in time may still appear, so

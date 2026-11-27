@@ -130,6 +130,21 @@ def explicit_source_fields(root, ref, room, message, fields, *, suppressed=False
     return {"source_row_address": ""}
 
 
+class InferredPlacement(dict):
+    """An older receipt (no ``source_row_address`` written with its act) placed by finding its client id among the
+    dialogue's rows: those rows can move it without the journal (``history_paging._held_rows``). The type is the
+    mark; the receipt reads and serializes as written, a stamped read's address included."""
+
+
+def owner_row_receipt(role, client_message_id, annotations, chat_id=None, address=""):
+    """The receipt an owner's row wears on a page, as its live frame painted it (#968), plus the row's ``detail``."""
+    annotation = annotations.get((chat_id, client_message_id, address) if chat_id is not None else client_message_id)
+    if role != "user" or not isinstance(annotation, dict):
+        return None
+    view = {key: annotation[key] for key in (*ROUTING_RECEIPT_FIELDS, "detail") if key in annotation}
+    return InferredPlacement(view) if isinstance(annotation, InferredPlacement) else view
+
+
 def _placed_annotations(root, *, by_token=False, message_ids=None, weak_readers=()):
     """Resolve all older id-only receipts and readers in one indexed lookup, preserving append order.
     A row that states an EMPTY ``source_row_address`` was decided unplaced when written: it is never an older receipt."""
@@ -149,8 +164,8 @@ def _placed_annotations(root, *, by_token=False, message_ids=None, weak_readers=
             address = ""  # stated unplaced: it stays in its own room, wearing no row
         elif not address:
             room, address = legacy.get((room, message)) or (room, "")
-            if address and row.get("action") == "steer_task" and row.get("status") == "read":
-                row = {**row, "source_row_address": address}
+            stamp = address and row.get("action") == "steer_task" and row.get("status") == "read"
+            row = InferredPlacement({**row, **({"source_row_address": address} if stamp else {})}) if address else row
         key = (room, message, address, *token)
         placed.pop(key, None)
         placed[key] = row

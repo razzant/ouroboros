@@ -159,7 +159,36 @@ export function messageIdentity(text, role, timestamp, isProgress, opts, chatId)
         deliveryKey: opts.deliveryId ? `delivery:${opts.deliveryId}` : '' };
 }
 
+/** The stable stem (`row:<chat>@<ts>`) before `#<sha12>`, invariant across `dialogue_store.revise_text`. */
+export function rowAddressStem(address) {
+    const value = String(address || '');
+    const hash = value.indexOf('#');
+    return hash > 0 && value.startsWith('row:') ? value.slice(0, hash) : '';
+}
+
+/** Stable caption identity for `live_call` rows whose words can be revised in place (`dialogue_store.revise_text`). */
+export function captionRevisionKey(row, role = row?.role, opts = {}) {
+    if (opts.originProjected || row?.origin_projected) return '';
+    const source = opts.source || row?.source || '';
+    if (source !== 'live_call') return '';
+    const cmid = opts.clientMessageId || row?.client_message_id || '';
+    const stem = rowAddressStem(row?.row_address) || String(row?.ts || opts.ts || '');
+    if (role === 'user' && cmid.startsWith('call:')) return `owner:${cmid}`;
+    const spoken = row?.spoken;
+    if (role === 'assistant' && spoken?.call_id && spoken?.item_id) return `spoken:${spoken.call_id}:${spoken.item_id}`;
+    const systemType = opts.systemType || row?.system_type || '';
+    const task = opts.taskId || row?.task_id || '';
+    if (role === 'assistant' && systemType === 'model_narration' && task && stem) return `spoken_ts:${task}:${stem}`;
+    if (role === 'system' && systemType === 'call_heard' && task && stem) return `heard:${task}:${stem}`;
+    return '';
+}
+
 export function priorHistoryBubble(bubbles, opts, keys, legacyKey, chatId) {
+    const caption = captionRevisionKey(opts.reply, opts.reply?.role, opts);
+    if (caption && (!keys || keys.caption.has(caption))) {
+        const exact = bubbles().find(({ dataset }) => !dataset.originProjected && dataset.captionKey === caption);
+        if (exact) return exact;
+    }
     const address = opts.reply?.role === 'assistant' && !opts.originProjected && opts.reply.row_address;
     if (address && (!keys || keys.address.has(address))) {
         const exact = bubbles().find(({ dataset }) => !dataset.originProjected && dataset.rowAddress === address);
@@ -174,6 +203,11 @@ export function priorHistoryBubble(bubbles, opts, keys, legacyKey, chatId) {
 export function livePriorBubble(bubbles, opts, keys, legacyKey, chatId) {
     if (opts.originId) return (!keys || keys.origin.has(opts.originId))
         ? bubbles().find(node => node.dataset.originId === opts.originId) : null;
+    const caption = captionRevisionKey(opts.reply, opts.reply?.role, opts);
+    if (caption && (!keys || keys.caption.has(caption))) {
+        const exact = bubbles().find(({ dataset }) => !dataset.originProjected && dataset.captionKey === caption);
+        if (exact) return exact;
+    }
     const row = opts.reply;
     const address = ['user', 'assistant'].includes(row?.role) ? row.row_address : '';
     const room = ownerRowRoom(row, chatId);
@@ -188,20 +222,29 @@ export function livePriorBubble(bubbles, opts, keys, legacyKey, chatId) {
     });
 }
 
+export function findPriorBubble(bubbles, historyNodes, opts, keys, legacyKey, chatId) {
+    if (opts.historyId) {
+        return keys && !keys.history.has(opts.historyId) ? null
+            : historyNodes(opts.historyId).find(node => node.classList.contains('chat-bubble')) || null;
+    }
+    return livePriorBubble(bubbles, opts, keys, legacyKey, chatId);
+}
+
 /** During a page replay, every identity key a mounted bubble carries (a superset: keys are only added, `note`): a row
  * looks for its prior bubble only when one could be mounted, not by scanning the feed per row (O(rows²) a page). */
 export function createReplayKeys() {
-    const keys = { history: new Set(), client: new Set(), origin: new Set(), legacy: new Set(), address: new Set() };
+    const keys = { history: new Set(), client: new Set(), origin: new Set(), legacy: new Set(), address: new Set(), caption: new Set() };
     keys.note = (node) => {
         if (!node) return;
         const nodes = node.classList?.contains('chat-bubble') ? [node] : [];
         for (const bubble of [...nodes, ...(node.querySelectorAll?.('.chat-bubble') || [])]) {
-            const { historyId, clientMessageId, originId, messageKey, rowAddress } = bubble.dataset || {};
+            const { historyId, clientMessageId, originId, messageKey, rowAddress, captionKey } = bubble.dataset || {};
             if (historyId) keys.history.add(historyId);
             if (clientMessageId) keys.client.add(clientMessageId);
             if (originId) keys.origin.add(originId);
             if (messageKey) keys.legacy.add(messageKey);
             if (rowAddress) keys.address.add(rowAddress);
+            if (captionKey) keys.caption.add(captionKey);
         }
     };
     return keys;

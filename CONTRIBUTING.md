@@ -381,7 +381,7 @@ Between releases they keep one development cycle (BIBLE P9;
    scripts/carrier_rebase_helper.py --prefer theirs` on the carrier conflicts, the marker
    in `VERSION`, a sync). The release's links and row stay: the one carrier move
    admitted with `VERSION` unchanged, on the author's reviewed claim; no tag proves it.
-   `sync_release_metadata(repo, published_version="X.Y.Z")` repairs links a merge dropped.
+   `sync_release_metadata(repo, published_version="X.Y.Z")` repairs links a merge dropped (deriving Windows installer presence from local tag `vX.Y.Z` or surviving `X.Y.Z` links, or pass `windows_installer=True`/`False` when neither exists).
 4. **Promote, after publication.** `scripts/promote_stable.py` refuses until `ouroboros`
    holds the tag and its links under a numerically greater marker, and never writes that
    branch. `main` stays the release tree plus its generated Cask, never the development

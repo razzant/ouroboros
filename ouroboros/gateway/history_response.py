@@ -22,7 +22,7 @@ def refusal(reason, cursor, detail=None):
                          "window": {"complete": False, "truncated_by": [reason]}}).body
 
 
-def assemble(build, data_dir, thread_id, n_human, n_progress, cursor, around, profile_scope, *, live=None):
+def assemble(build, data_dir, thread_id, n_human, n_progress, cursor, around, profile_scope, *, live=None, repair=""):
     decoded = DECODED_CURSOR.get()
     cursor_token = None
     if decoded is None:  # an interpreter without an HTTP observer owns its own decode result
@@ -31,7 +31,8 @@ def assemble(build, data_dir, thread_id, n_human, n_progress, cursor, around, pr
     try:
         try:
             body = build(data_dir, thread_id, n_human, n_progress, cursor, around, profile_scope,
-                         **({"live": live} if live is not None else {}))
+                         **({"live": live} if live is not None else {}),
+                         **({"repair": repair} if repair else {}))
         except (HistoryCursorError, OSError, StoreError) as exc:
             reason = (exc.reason if isinstance(exc, HistoryCursorError) else
                       "migrating" if isinstance(exc, StoreMigrating) else "history_source_unavailable")
@@ -65,7 +66,8 @@ def make_history_endpoint(data_dir, build, human_quota, progress_quota):
         # Place conversation ids exceed 32 bits but remain exact on the web client.
         thread_id = _int_param("chat_id", 1, 2**53 - 1) or 1
         selectors = dict(thread_id=thread_id, n_human=n_human, n_progress=n_progress, cursor=params.get("cursor"),
-                         around=params.get("around"), profile_scope=request_profile_scope(request))
+                         around=params.get("around"), profile_scope=request_profile_scope(request),
+                         repair=params.get("repair") or "")
         inline = partial(assemble, build, data_dir, **selectors)
         status, body, _kind = await history_reader.reader.read(reader_root, selectors, inline,
                                                                receive=getattr(request, "receive", None))

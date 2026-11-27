@@ -60,7 +60,11 @@ export function speechChunks(text, max = 240) {
  */
 export function registerReadAloud({ speech = getSpeech(), registry = getMessageActions(), win = globalThis.window,
     doc = globalThis.document } = {}) {
-    let current = null;  // { address, abort, provider }
+    let current = null;  // { address, content, abort, provider }
+    // The reply being read: its address, or its words element, which a correction rewrites in place while giving
+    // the same row its new version's address; Stop then stays on it and stops it.
+    const isReading = (row) => Boolean(current && row
+        && (current.address === row.address || (row.content && current.content === row.content)));
 
     function stop() {
         if (!current) return;
@@ -72,14 +76,14 @@ export function registerReadAloud({ speech = getSpeech(), registry = getMessageA
     }
 
     async function read(row) {
-        if (current?.address === row.address) { stop(); return; }
+        if (isReading(row)) { stop(); return; }
         stop();
         const provider = speech.readAloud();
         if (!provider) throw new Error(tr('read_aloud.none', 'No voice is available on this device.'));
         if (!provider.available) throw new Error(provider.reason);
         const chunks = speechChunks(readableText(row.content) || row.text);
         if (!chunks.length) return;
-        const run = { address: row.address, abort: new AbortController(), provider };
+        const run = { address: row.address, content: row.content || null, abort: new AbortController(), provider };
         current = run;
         registry.changed(READ_ALOUD);
         try {
@@ -147,7 +151,7 @@ export function registerReadAloud({ speech = getSpeech(), registry = getMessageA
     const offs = [
         registry.register({ key: READ_ALOUD, label: tr('read_aloud.label', 'Read aloud'), icon: 'volume', order: 10,
             applies: offered, run: (row) => read(row),
-            state: (row) => (current?.address === row.address ? { label: tr('read_aloud.stop', 'Stop'), icon: 'stop',
+            state: (row) => (isReading(row) ? { label: tr('read_aloud.stop', 'Stop'), icon: 'stop',
                 title: tr('read_aloud.stop_title', 'Stop reading aloud'), pressed: true } : null) }),
         // Only in the row menu: the bubble keeps one control for reading.
         registry.register({ key: `${READ_ALOUD}-voice`, label: tr('read_aloud.voice', 'Read aloud voice…'), order: 11,
