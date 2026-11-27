@@ -501,3 +501,52 @@ def test_end_during_the_session_candidate_stays_the_owners_end(host_world, monke
     assert state['reason'] == 'finished' and state['detail'] == 'Call ended before it started.'
     assert not state.get('action')
     assert 'fit_refusal' in host.trace
+
+
+@pytest.mark.parametrize('bye_at', ['fit', 'open'])
+def test_an_end_during_an_admitted_first_fit_never_opens_the_engine(host_world, monkeypatch, bye_at):
+    """The owner's bye reaches the hub while the first native session is measured, and that fit is admitted: the
+    engine is never opened and the call ends as the owner's End of a call that never started. The other direction
+    (``open``: the bye arrives only once the engine opened) opens it once and keeps the ended-call words."""
+    from ouroboros import realtime_setup
+    from ouroboros.realtime_setup import call_ending
+    from skills.live_conversation.driver import run as drive
+    from tests._live_world import FakeSession
+
+    hub = host_world.host.hub
+    hub.join(cp.PeerInfo('owner', cp.PEER_OWNER, True, True), 24000)
+    measure, opened_engine, opens = realtime_setup.measure_session_wire, FakeSession.open, []
+
+    def bye():
+        if not hub.ended_by_owner:
+            hub.receive_control('owner', {'type': 'bye'})
+
+    def measured(*args, **kwargs):
+        if bye_at == 'fit':
+            bye()
+        return measure(*args, **kwargs)
+
+    async def opened(self):
+        opens.append(hub.ended_by_owner)
+        await opened_engine(self)
+        if bye_at == 'open':
+            bye()
+
+    async def silent(self, *args, **kwargs):
+        return None
+    monkeypatch.setattr(realtime_setup, 'measure_session_wire', measured)
+    monkeypatch.setattr(FakeSession, 'open', opened)
+    monkeypatch.setattr(FakeSession, 'send', silent, raising=False)
+    monkeypatch.setattr(FakeSession, 'final_captions', lambda self: (), raising=False)
+
+    async def bounded(port):
+        await asyncio.wait_for(drive(port), timeout=30)
+    words, usage, host, state = _run_call(host_world, monkeypatch, bounded)
+    assert hub.ended_by_owner and state['reason'] == 'finished' and 'host_notice_row' not in usage
+    if bye_at == 'fit':
+        assert opens == [] and not host._session_opened
+        assert (words, usage) == call_ending('finished', 'ok', opened=False)
+        assert state['detail'] == 'Call ended before it started.' and not state.get('action')
+    else:
+        assert opens == [False] and host._session_opened
+        assert (words, usage) == call_ending('finished', 'ok', opened=True)
