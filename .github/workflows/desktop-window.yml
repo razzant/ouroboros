@@ -305,3 +305,10 @@ jobs:
           path: ${{ runner.temp }}/qa-run/publish
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Check compiler selection with inert inputs on native PowerShell
+        if: ${{ !cancelled() && matrix.mode == 'visible' && steps.build_env.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          & .\.venv\Scripts\python.exe -m pytest -q -o addopts= --noconftest tests/test_windows_signing_powershell.py -k 'inno_setup_verifies or setup_verifies_pinned_pair'
+          exit $LASTEXITCODE

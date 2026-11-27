@@ -1,5 +1,5 @@
 {
-  "candidate_sha": "88d6d83cdd7898cccc94ea8b45730a161ebf3f08",
+  "candidate_sha": "8df8f8c9738f0e337f27cde66eae97a46379f81e",
   "note": [
     "candidate_sha: the 40-character commit of the REVIEWED candidate (the product under test, with the corrected installer). It must be fetchable by that SHA from this repository. An empty or malformed value stops both accept legs before any build. The opt-in installer smoke reads no pin from here either: it consumes the Setup the visible leg packs from this candidate.",
     "Its VERSION may be a development marker (X.Y.Z-alpha.0): each accept job builds from a local carrier commit that differs only in VERSION, records both SHAs in projection.json, and the candidate's own unchanged release guard decides.",
