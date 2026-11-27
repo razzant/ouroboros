@@ -276,6 +276,29 @@ def test_the_passive_room_fact_names_the_largest_unit_by_id(host_world):
     assert unit.unit_id in fact and 'tool calls and results ×' in fact, fact
 
 
+def test_the_passive_room_fact_prices_the_schemas_in_its_routes_effort_shape(host_world, monkeypatch):
+    """The native room fact sizes the tool schemas in the shape its own measurement priced: the plan's route and the
+    host's effort (Astra rev3 C6, 27.11: the wrapper dropped the effort, so an OpenAI reasoning route's longer catalog
+    read as the plain one and could rank below a smaller part)."""
+    from ouroboros import context_view_facts
+    from ouroboros.context_measurement import tool_schema_tokens
+    from ouroboros.realtime_setup import measure_session_wire
+    host = host_world.host
+    host._session_opened = True
+    host.plan, host.effort = replace(host.plan, provider='openai'), 'high'  # a route whose effort lengthens the catalog
+    schemas = [{'type': 'function', 'function': {'name': f'tool_{i}', 'description': 'Read a fixture path.',
+        'parameters': {'type': 'object', 'properties': {'path': {'type': 'string'}}, 'required': ['path']}}} for i in range(60)]
+    shape = tool_schema_tokens(schemas, provider='openai', reasoning_effort='high')
+    assert shape > tool_schema_tokens(schemas, provider='openai')
+    views, real = [], context_view_facts.largest_parts
+    monkeypatch.setattr(context_view_facts, 'largest_parts', lambda view, **kw: views.append(view) or real(view, **kw))
+    rows = []
+    measure_session_wire(host, host.plan, host.messages, schemas, host_world.provider['session'], LiveOptions(),
+                         canonical_rows=rows)
+    density = views[0].accumulated_usage['_context_measurement_density']
+    assert f"tool schemas ~{int(shape * density):,}" in rows[-1]['content'], rows[-1]['content']
+
+
 def test_next_fresh_fit_retires_the_old_room_fact_before_memory(host_world):
     from ouroboros.context_budget import bound_host_row
     from ouroboros.realtime_setup import session_candidate

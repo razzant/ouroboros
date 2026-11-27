@@ -102,13 +102,13 @@ LARGEST_SINGLE = "largest single "  # the label of the largest single part when 
 def largest_parts(view, *, measured):
     """The view's three largest parts by producer kind and its largest single part, as ``[label, tokens]`` pairs: the
     named sizes the facts row, the size terminal and the native room fact each frame and calibrate as their own
-    (``measured``: the view's measured density, else raw estimates). Kinds come from typed metadata its producer's
-    binding vouches for (``_producer_kind``), system blocks keep their block labels and the route's tool schemas are one
-    part; ``kind ×N`` counts the transcript rows of a kind that spans several. The single part is a unit's id (else its
-    block or kind), said once: beside its kind when it is that kind's only part, else as a last pair labelled
-    ``LARGEST_SINGLE`` (pairs, the size terminal's stored form that a same-task checkpoint carries across versions).
-    Many small rows of one kind read as the one part they are, so a resident kind that only grows is visible (BIBLE
-    P1): facts, no advice (owner 09.10 5A)."""
+    (``measured``: the view's measured density, else raw estimates) in the request shape of the view's plan and
+    ``active_effort``. Kinds come from typed metadata its producer's binding vouches for (``_producer_kind``), system
+    blocks keep their block labels and the route's tool schemas are one part; ``kind ×N`` counts the transcript rows of
+    a kind that spans several. The single part is a unit's id (else its block or kind), said once: beside its kind when
+    it is that kind's only part, else as a last pair labelled ``LARGEST_SINGLE`` (pairs, the size terminal's stored form
+    that a same-task checkpoint carries across versions). Many small rows of one kind read as the one part they are, so
+    a resident kind that only grows is visible (BIBLE P1): facts, no advice (owner 09.10 5A)."""
     from ouroboros.context_compaction import context_units
     from ouroboros.context_measurement import estimate_context_prompt_tokens, tool_schema_tokens
 

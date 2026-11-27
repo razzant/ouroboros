@@ -295,7 +295,7 @@ def measure_session_wire(host, plan, messages, schemas, factory, options, *, _ro
                                                  opening_allowance_tokens=opening_allowance_tokens)
         parts = largest_parts(SimpleNamespace(messages=messages, tool_schemas=schemas,
             accumulated_usage={'_context_measurement_density': measured['fit']['measurement']['measurement_density']},
-            context_fit_plan=plan), measured=True)
+            context_fit_plan=plan, active_effort=host.effort), measured=True)
         rows = [*messages, room_fact(measured['fit']['measurement'], parts, source=source,
             memory=memory_facts(plan, plan.initial_mode, messages))]
         session, request, evidence, window = measure_session_wire(host, plan, rows, schemas, factory, options,

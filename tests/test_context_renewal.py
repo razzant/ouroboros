@@ -266,7 +266,8 @@ def test_renewal_and_presend_measure_the_same_provider_effort_shape(tmp_path, mo
     from ouroboros.context_renewal import renewal_view
     from ouroboros.context_window import WindowLimit, WindowRecord
     from ouroboros.loop_model_call import _measure_round_main_fit
-    from ouroboros.context_view_facts import largest_parts, largest_parts_text
+    from ouroboros.context_view_facts import largest_parts, largest_parts_text, refusal_frame_facts
+    from ouroboros.loop_round_limits import _RoundLimitContext
 
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
@@ -323,6 +324,18 @@ def test_renewal_and_presend_measure_the_same_provider_effort_shape(tmp_path, mo
         assert [(r["role"], r.get("content")) for r in messages] == [
             (r["role"], r.get("content")) for r in seed]  # publication also seals the last row
     assert json.loads(read_actor_source_bytes(tmp_path, "renewal", events[0]["source"])) == original
+    # The size terminal prices the same catalog in the same shape (Astra rev3 C6, 27.11): through the real wrapper, with
+    # the plan the renewal measured with and the round's effort, a reply sized between the two shapes ranks after the
+    # schemas exactly where this route's effort lengthens them.
+    reply = {"role": "assistant", "content": "Earlier evidence. " * 1000}
+    reply_tokens = cf.estimate_context_prompt_tokens([reply])
+    assert cf.tool_schema_tokens(schemas) < reply_tokens < cf.tool_schema_tokens(schemas, provider="openai", reasoning_effort="high")
+    limit = _RoundLimitContext([*original[:2], reply], None, plan.model, effort, 0, tmp_path / "logs", "renewal", 12, None,
+                               {"_context_refusal_round": 12}, "task", False, None, drive_root=tmp_path, tool_schemas=schemas)
+    assert renew_after_refusal(limit, SimpleNamespace(_ctx=SimpleNamespace(context_fit_plan=plan))) is False
+    frame = refusal_frame_facts(limit.accumulated_usage, 12)
+    assert re.search(rf"tool schemas ~{schema_shape:,}(?!,?\d)", frame), frame
+    assert frame.startswith("largest parts: tool schemas") is (schema_shape > reply_tokens), frame
 
 
 def test_content_blocks_beside_a_call_show_their_words_and_public_parts_never_their_route_reasoning():
