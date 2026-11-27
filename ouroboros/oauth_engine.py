@@ -448,10 +448,11 @@ async def current_grant(grant: Grant, rejected: Optional[str] = None, *, min_val
         except httpx.HTTPError as exc:
             status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else 0
             if marked and on_refresh is not None and (isinstance(exc, NOT_SENT) or 400 <= status < 500 or (
-                    status == 503 and not oauth_error(exc.response).startswith("HTTP "))):
+                    status == 503 and oauth_error(exc.response) == "temporarily_unavailable")):
                 # It never left, or the provider itself answered without issuing a token (a refusal, 408, 429, a 503
-                # with its OAuth error): lift the mark. A bare 5xx may come from a gateway after the exchange happened
-                # (and a provider that rotates refresh tokens may have rotated it): unconfirmed, like a lost answer.
+                # with the OAuth code temporarily_unavailable): lift the mark. Any other 5xx may come from a gateway
+                # after the exchange happened, its own "error" text included (and a provider that rotates refresh
+                # tokens may have rotated it): unconfirmed, like a lost answer.
                 on_refresh(doc, "unsent")
             if qualify is not None:
                 # A provider's own refusal (an administrator's policy, a client it no longer allows) is not an
