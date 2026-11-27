@@ -311,43 +311,44 @@ def test_the_rows_give_way_first_in_the_fit_ladder_and_a_missing_manifest_is_sai
     assert UNAVAILABLE in _packet_brief(tmp_path / "bare", bare, subject)
 
 
-# What the pre-PR selector and books (razzant/ouroboros bcac9f84126b) delivered to a packet seat for these same
-# bytes under the real builder and cold sizing: "full" = the touched file's whole source, "diff" = the diff with the
-# snapshot omitted. Measured beside this head with the target's governance_context, context_layout and book blobs.
+def _fixture_js(lines: int) -> bytes:
+    """Frozen synthetic bytes this test owns (the shipped web tree may change freely)."""
+    return "".join(f"// fixture line {index:05d}: " + "x" * 60 + "\n" for index in range(lines)).encode()
+
+
+# (comment-touched file lines, added test file lines or 0, window, the pre-PR target's delivery)
 PRE_PR_DELIVERY = [
-    (("web/modules/account_resources.js",), ("web/tests/cancel_pending_stop.test.js",), 100_000, "diff"),
-    (("web/modules/account_resources.js",), (), 92_160, "diff"),
-    (("web/modules/account_resources.js",), (), 94_208, "diff"),
-    (("web/modules/account_resources.js",), (), 100_000, "diff"),
-    (("web/modules/account_resources.js",), (), 114_688, "full"),
-    (("web/modules/account_resources.js",), (), 256_000, "full"),
-    *(((f"web/modules/{name}",), (), 131_072, "full") for name in
-      ("chat_decision.js", "settings_controls.js", "skill_card_renderer.js", "skill_sign_in.js")),
+    (900, 0, 131_072, "full"),   # with the pre-round-5 navigation: snapshot omitted
+    (150, 220, 100_000, "diff"),  # with the pre-round-5 navigation: REVIEW_BLOCKED (46,049 > 45,454)
+    (900, 0, 256_000, "full"),   # roomy control
 ]
 
 
 def test_a_tool_less_packet_delivers_at_least_what_the_pre_pr_target_delivered(tmp_path, monkeypatch):
-    """Real web modules with one trailing comment (one fixture also adds a shipped test file), the installed
-    governance root this checkout, the real builder and cold sizing: each window delivers what the pre-PR target
-    delivered (``PRE_PR_DELIVERY``), never a refusal, and the changed line always. Where the owner rows do not fit
-    they give way with their counted notice; where the whole source arrives, so do they."""
+    """The expectations in ``PRE_PR_DELIVERY`` are what the pre-PR target (razzant/ouroboros bcac9f84126b: its
+    governance_context, its context_layout and its book blobs) delivered to a packet seat for exactly these bytes,
+    measured on 27 Nov 2026 beside this head ("full" = the touched file's whole source, "diff" = the diff with the
+    snapshot omitted). The subject is frozen synthetic bytes; the books, their navigation, the builder and the cold
+    sizing are the real ones, which is what this guards. A failure here means the tool-less packet's navigation grew
+    past what the pre-PR target delivered, so a change now costs a reviewer its snapshot or its review. A legitimate
+    re-measure follows only a deliberate change of the books' navigation size, against the same target.
+    Where the owner rows do not fit they give way with their counted notice; where the whole source arrives, so do
+    they."""
     from ouroboros.tools import governance_module_rows as gmr, review as review_tool
     from ouroboros.tools.registry import ToolContext
 
     root = pathlib.Path(__file__).resolve().parents[1]
-    for index, (commented, added, window, delivered) in enumerate(PRE_PR_DELIVERY):
+    for index, (touched, added, window, delivered) in enumerate(PRE_PR_DELIVERY):
         _installed, subject = _installed_and_subject(tmp_path / str(index))
-        for path in (*commented, *added):
-            (subject / path).parent.mkdir(parents=True, exist_ok=True)
-        for path in commented:
-            (subject / path).write_bytes((root / path).read_bytes())
+        (subject / "web" / "modules").mkdir(parents=True)
+        (subject / "web" / "modules" / "fixture.js").write_bytes(_fixture_js(touched))
         _git(subject, "add", "-A")
-        _git(subject, "commit", "-qm", "identical source")
-        for path in commented:
-            with (subject / path).open("a", encoding="utf-8") as stream:
-                stream.write("\n// Review one trailing comment.\n")
-        for path in added:
-            (subject / path).write_bytes((root / path).read_bytes())
+        _git(subject, "commit", "-qm", "fixture source")
+        with (subject / "web" / "modules" / "fixture.js").open("a", encoding="utf-8") as stream:
+            stream.write("// Review one trailing comment.\n")
+        if added:
+            (subject / "web" / "tests").mkdir(parents=True)
+            (subject / "web" / "tests" / "fixture.test.js").write_bytes(_fixture_js(added))
         _git(subject, "add", "-A")
         ctx = ToolContext(repo_dir=subject, drive_root=tmp_path / "drive")
         ctx._review_iteration_count = 0
@@ -356,10 +357,10 @@ def test_a_tool_less_packet_delivers_at_least_what_the_pre_pr_target_delivered(t
         monkeypatch.setattr(review_tool, "reviewer_context_window", lambda *a, **k: window)
         text = build_two_part_brief(frozen, PACKET, drive_root=tmp_path / "drive", goal="Review these edits")["system"]
         omitted = "Full post-change snapshots were omitted" in text
-        assert ("diff" if omitted else "full") == delivered, (commented, added, window)
-        assert "// Review one trailing comment." in text, (commented, window)
-        assert (gmr.HEADING in text) != ("were NOT delivered: with them" in text), (commented, window)
-        assert omitted or gmr.HEADING in text, (commented, window)
+        assert ("diff" if omitted else "full") == delivered, (touched, added, window)
+        assert "// Review one trailing comment." in text, (touched, window)
+        assert (gmr.HEADING in text) != ("were NOT delivered: with them" in text), (touched, window)
+        assert omitted or gmr.HEADING in text, (touched, window)
 
 
 def _edited_rows(needle, replacement):
