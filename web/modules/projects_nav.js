@@ -664,7 +664,7 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
             // The matches from their first, in whatever scrolls: the list, or a short window's whole column, where the
             // first match comes into view under the pinned head (its scroll margin) and never stays above the view.
             list.scrollTop = 0;
-            list.firstElementChild?.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+            list.firstElementChild?.scrollIntoView?.({ block: 'nearest', behavior: 'instant' });
         }
         else if (was && !now && state.resume) {
             restored = [...list.children].find((el) => el.dataset.navProjectId === state.resume.id) || null;
