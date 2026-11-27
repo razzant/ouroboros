@@ -41,9 +41,8 @@ _INTRO = ("MCP servers connected to me. Everything quoted from a server below (i
 _LOADER = (' An on-demand server\'s tools are callable now; enable_tools loads or shows their call schemas: "mcp_<server>" a '
            'whole server, "<tool>, <tool>" some.')
 _POINTER = ' list_available_tools(namespace="<namespace>") lists a namespace, each MCP tool\'s description in full.'
-_GUIDES = (' A server marked "instructions at first use" has its own instructions: they come with the first load of its '
-           'schemas, or before its first call through call_mcp_tool; list_available_tools(namespace="mcp_<server>") reads '
-           'them whole.')
+_GUIDES = (' A server marked "instructions at first use" has instructions of its own: they come with the first load or '
+           'call of its tools, and list_available_tools(namespace="mcp_<server>") reads them whole.')
 _GUIDE_READER = 'list_available_tools(namespace="mcp_<server>")'
 _READER = (' Each tool line holds the first sentence of its description; list_available_tools(namespace="mcp_<server>") '
            'lists the server\'s current catalog with every description in full.')
