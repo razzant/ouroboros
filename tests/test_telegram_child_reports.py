@@ -154,8 +154,9 @@ def test_a_natural_final_reaches_telegram_only_from_a_root(bridge, monkeypatch, 
 
 
 def _host_terminal(cause):
-    """``(text, usage)`` of a task the host ended in its own words, from the real producers: a helper it could
-    not start (the reported shape, every configured alternative inline) or a budget stop."""
+    """``(text, usage)`` of a task the host ended in its own words, each stamped by its real producer: a helper
+    whose route could not start (the reported shape, every configured alternative inline) or a start refused before
+    any model ran (a window that cannot hold it)."""
     if cause == "unstartable":
         from ouroboros.agent_dispatch import executor_blocked_outcome
         from ouroboros.subagents import SubagentExecutorResolution
@@ -167,14 +168,14 @@ def _host_terminal(cause):
             SubagentExecutorResolution(requested="harness", executor="blocked", reason="registration_busy", reset_at=""),
             availability={"route_kind": "agent_session", "alternatives": alternatives,
                           "detail": "The workspace fence is busy: project retirement lock is unavailable."})
-    from ouroboros.agent_dispatch import _queued_budget_exhausted_message
-    from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE
+    from ouroboros.agent_dispatch import _unstarted_terminal
 
-    return _queued_budget_exhausted_message(), {"execution_status": "failed", "reason_code": "budget_exhausted",
-                                                "terminal_origin": TERMINAL_ORIGIN_HOST_NOTICE}
+    text, usage, _trace = _unstarted_terminal("⚠️ The context window of this model is too small to start this work.",
+                                              "context_capacity", {})
+    return text, usage
 
 
-@pytest.mark.parametrize("cause", ["unstartable", "budget"])
+@pytest.mark.parametrize("cause", ["unstartable", "refused-start"])
 @pytest.mark.parametrize("child", [True, False], ids=["child", "root-control"])
 def test_a_host_written_final_reaches_telegram_only_from_a_root(bridge, monkeypatch, child, cause):
     """The host's report for a helper is that helper's answer to its parent, an untyped System row: the web's card
@@ -197,7 +198,7 @@ def test_a_host_written_final_reaches_telegram_only_from_a_root(bridge, monkeypa
         assert bridge.posts == []
     else:
         sent = _sent_texts(bridge)
-        assert sent and {"unstartable": "SUBAGENT_UNAVAILABLE", "budget": "Resource limit reached"}[cause] in sent[0]
+        assert sent and " ".join(text.split()[1:4]) in sent[0]  # the producer's own opening words, whatever they are
 
 
 @pytest.mark.parametrize("child", [True, False], ids=["child", "root-control"])

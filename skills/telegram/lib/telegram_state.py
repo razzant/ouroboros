@@ -656,7 +656,7 @@ def _child_row_held_for_root(api, event: Dict[str, Any]) -> bool:
     try:
         stored = load_task_result(_data_dir(api), root)
     except Exception:
-        return True  # unreadable: unfinished, as promised above
+        return False
     status = str(stored.get("status") or "").strip().lower() if isinstance(stored, dict) else ""
     return status not in FINAL_STATUSES
 
