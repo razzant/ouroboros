@@ -1398,9 +1398,9 @@ def test_a_wake_held_at_the_allowance_it_started_with_is_said_so(clock, monkeypa
     described = describe_consciousness_state(snapshot, True)
     assert described["status"] == "wake_paused"
     # The fact is the headline; what follows from it is said beneath it.
-    assert described["detail"] == "Wake-up wake-held stopped at its allowance ($2.99)."
+    assert described["detail"] == "Its own wake-up stopped at its allowance ($2.99)."
     assert described["detail_note"] == ("No spending estimate is available for Resume. Raising the limit alone resumes "
-                                        "nothing. Stop now on its card ends it and frees the clock for its next check.")
+                                        "nothing. Stop now ends it and frees the clock for its next check.")
 
 
 def test_a_wake_held_at_a_per_task_cap_raised_before_its_resume_is_not_the_allowance(clock, monkeypatch):
@@ -1417,9 +1417,9 @@ def test_a_wake_held_at_a_per_task_cap_raised_before_its_resume_is_not_the_allow
     snapshot = clock.clock.status_snapshot()
     assert snapshot["live_wake_hold"]["cause"] == "per_task_cap"
     described = describe_consciousness_state(snapshot, True)
-    assert described["detail"] == ("Wake-up wake-held is paused at the per-task cost cap it started with; its card "
-                                   "shows why. The next wake-up follows it."), "never the allowance's words"
-    assert "detail_note" not in described
+    assert described["detail"] == "Its own wake-up is paused at the per-task cost cap it started with ($10.00).", \
+        "never the allowance's words"
+    assert described["detail_note"].startswith("Changing the setting in Costs does not raise it: raise this work's cap in chat")
 
 
 @pytest.mark.parametrize("next_attempt", [T0 - 100, T0 + 6000])

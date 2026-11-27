@@ -1,7 +1,7 @@
 """Read-only consciousness facts from places, current roots, durable results and the ledger's period view."""
 
 import contextlib
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 import pathlib
@@ -69,7 +69,7 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
     from ouroboros.deadline_utils import parse_deadline_ts
 
     outcome = str(snapshot.get("last_wake_outcome") or "")
-    note = ""  # what follows from the state, said beneath it (``detail_note``); only a proven allowance hold has one
+    note = ""  # what follows from the state, said beneath it (``detail_note``); only a held own wake has one
     next_at = _when(snapshot.get("next_wake_at"))
     deadline = parse_deadline_ts(str(snapshot.get("next_wake_at") or ""))
     wake = snapshot.get("live_wake_task_id")
@@ -83,7 +83,7 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
     elif not snapshot:
         status, detail = "starting", "Waits for Ouroboros to finish starting."
     elif wake and snapshot.get("live_wake_held"):
-        status, (detail, note) = "wake_paused", held_sentence(wake, snapshot.get("live_wake_hold"))
+        status, (detail, note) = "wake_paused", held_sentence(snapshot.get("live_wake_hold"))
     elif wake:
         status, detail = "thinking", f"Wake-up {wake} is running."
     elif outcome == "skipped:owner_chat_unknown":  # unknown, never empty: a known empty slot wakes in Main
@@ -248,11 +248,14 @@ def heard_sentence(places) -> str:
 
 
 def _running_line(running) -> str:
-    """What a turn off ends at once, from the state line it reads (``describe_consciousness_state``): its wake running now
-    and the own tasks it started; nothing when neither runs or the read failed."""
-    wake = bool((running or {}).get("live_wake_task_id")) and not (running or {}).get("live_wake_held")
+    """What a turn off ends at once, from the state line it reads (``describe_consciousness_state``): its own wake,
+    running now or waiting held (Off stops a held one too, ``BackgroundConsciousness.stop``), and the own tasks it
+    started; nothing when neither is there or the read failed."""
+    wake = bool((running or {}).get("live_wake_task_id"))
+    held = wake and (running or {}).get("live_wake_held")
     tasks = int((running or {}).get("tasks_running") or 0)
-    said = " and ".join((["the wake running now"] if wake else []) + ([f"its {_count(tasks, 'own task')}"] if tasks else []))
+    said = " and ".join(([("its waiting wake-up" if held else "the wake running now")] if wake else [])
+                        + ([f"its {_count(tasks, 'own task')}"] if tasks else []))
     if not said:
         return ""
     # The stop asks (a graceful end where there is room for one), so the words promise neither an instant end nor a
@@ -512,33 +515,51 @@ def mind_fact(places, *, enabled: Any, stop_source: str = "", panic: bool = Fals
 # A held wake the allowance it started with stopped: the owner's move (DESIGN "Status marks"), said in Costs too.
 ALLOWANCE_HOLDS = frozenset({"allowance", "allowance_and_cap"})
 _STAMPED_CAUSES = {"allowance": "allowance", "both": "allowance_and_cap", "per_task_cap": "per_task_cap"}
+# What holds my own held wake and what follows, by the cause its records prove (``hold_cause``), for the held wake's
+# block (DESIGN "Dashboard › Consciousness") and every /bg reply. The wake goes without its id and without a clock: the
+# block names it with its start in the viewer's zone. It holds back only my next OWN wake (``tick`` answers
+# ``wake_live``); wakes in places are separate, so no sentence says nothing wakes. ``{limit}``: the proven number.
+_FREES = "Stop now ends it and frees the clock for its next check."
+_NEXT_WAITS = "The next own wake waits until it ends."
+HELD_WORDS = {
+    "owner": ("Its own wake-up is paused; its card shows who paused it.",
+              "The next own wake waits until it is resumed or stopped."),
+    # The setting reaches only work that starts after it: this work's own cap is raised conversationally (pause_notices).
+    "per_task_cap": ("Its own wake-up is paused at the per-task cost cap it started with{limit}.",
+                     f"Changing the setting in Costs does not raise it: raise this work's cap in chat, then Resume. {_FREES}"),
+    "launch_ceiling": ("Its own wake-up is paused at the spending limit it started with{limit}.",
+                       f"Raising a limit alone resumes nothing; Resume checks what is left. {_FREES}"),
+    "total_budget": ("Its own wake-up is paused: the total budget was spent.",
+                     f"Raising Total budget in Costs alone resumes nothing: raise it, then Resume. {_FREES}"),
+    "per_task_fence": ("Its own wake-up is paused at a spending limit of its own work; its card shows which.",
+                       f"Resume once that limit has room. {_FREES}"),
+    "sleep": ("Its own wake-up sleeps until what it waits for happens, then goes on by itself; its card shows what.",
+              _NEXT_WAITS),
+    "technical": ("Its own wake-up is paused: a record it needs could not be read; its card shows which.",
+                  f"It goes on by itself once that record can be read. {_NEXT_WAITS}"),
+    "queued": ("Its own wake-up waits in the queue for a worker and starts by itself.", ""),
+    "": ("Its own wake-up is paused or waiting in the queue; its card shows why.", _NEXT_WAITS),
+}
 
 
-def held_sentence(wake: str, hold: Any) -> tuple:
-    """``(detail, note)`` of a held own wake: its proven cause (``hold_cause``) or the card's word for it, and what
-    follows from an allowance hold (``""`` otherwise). No clock: when room returns is Costs' forecast, in one zone."""
+def held_sentence(hold: Any) -> tuple:
+    """``(detail, note)`` of my held own wake: what holds it, its proven cause (``hold_cause``) in ``HELD_WORDS``, and
+    what follows from it. No clock: when room returns is Costs' forecast, in one zone."""
     hold = hold if isinstance(hold, dict) else {}
     cause, ceiling = hold.get("cause"), hold.get("ceiling_usd")
-    if cause == "owner":
-        return f"Wake-up {wake} is on an explicit pause; its card shows who paused it and how to continue.", ""
-    if cause in ALLOWANCE_HOLDS:
-        from ouroboros.cost_projection import usd_text
+    from ouroboros.cost_projection import usd_text
 
-        # The ceiling it stopped at, which an earlier Resume may have moved: said as the number it is, never "at start".
-        facts = [usd_text(float(ceiling))] if type(ceiling) in (int, float) else []
-        facts += ["the per-task cap too"] if cause == "allowance_and_cap" else []
-        said = f" ({', '.join(facts)})" if facts else ""
-        if "resume_additional_usd" in hold:
-            return (f"Wake-up {wake} stopped at its allowance{said}.",
-                    "Resume checks what is left now; if there is room, it continues this wake without resetting its spend. "
-                    "Stop now on its card ends it and frees the clock for its next check.")
-        return (f"Wake-up {wake} stopped at its allowance{said}.",
-                "No spending estimate is available for Resume. Raising the limit alone resumes nothing. "
-                "Stop now on its card ends it and frees the clock for its next check.")
-    # The limit it launched with, as far as its stamp names it (an older record names none).
-    limit = {"per_task_cap": "the per-task cost cap", "launch_ceiling": "the spending limit"}.get(cause)
-    said = f"paused at {limit} it started with" if limit else "paused or waiting in the queue"
-    return f"Wake-up {wake} is {said}; its card shows why. The next wake-up follows it.", ""
+    # The ceiling it stopped at, which an earlier Resume may have moved: said as the number it is, never "at start".
+    facts = [usd_text(float(ceiling))] if type(ceiling) in (int, float) else []
+    facts += ["the per-task cap too"] if cause == "allowance_and_cap" else []
+    limit = f" ({', '.join(facts)})" if facts else ""
+    if cause in ALLOWANCE_HOLDS:
+        room = ("Resume checks what is left now; if there is room, it continues this wake without resetting its spend."
+                if "resume_additional_usd" in hold
+                else "No spending estimate is available for Resume. Raising the limit alone resumes nothing.")
+        return f"Its own wake-up stopped at its allowance{limit}.", f"{room} {_FREES}"
+    detail, note = HELD_WORDS.get(cause) or HELD_WORDS[""]
+    return detail.format(limit=limit), note
 
 
 def hold_cause(metadata: dict, own: dict, members=()) -> dict:
@@ -549,7 +570,8 @@ def hold_cause(metadata: dict, own: dict, members=()) -> dict:
     holding that inherited number paused at it: the launch stamp (``consciousness_wake.wake_task_metadata``) names
     ``allowance``, ``allowance_and_cap`` or ``per_task_cap``, and a record from before the stamp is only
     ``launch_ceiling``. Otherwise the pause's own reason or rail: ``owner``, ``sleep``, ``technical``,
-    ``total_budget``, ``per_task_fence``. ``""`` proves nothing: no live pause, a Resume granted, a lifted allowance."""
+    ``total_budget``, ``per_task_fence``. No live pause (none recorded, a Resume granted or consumed) is ``queued``: the
+    held wake waits for a worker. ``""`` proves nothing: a money stop no limit explains (a lifted allowance)."""
     from ouroboros.budget_pause import (RAIL_DISPATCH_REFUSED, RAIL_GLOBAL_EXHAUSTED, REASON_AUTHORITY, REASON_OWNER,
                                         REASON_SLEEP, STATE_PAUSED, STATE_PAUSING)
     from ouroboros.consciousness_allowance import at_wake_ceiling
@@ -557,9 +579,8 @@ def hold_cause(metadata: dict, own: dict, members=()) -> dict:
 
     metadata = metadata if isinstance(metadata, dict) else {}
     own = own if isinstance(own, dict) else {}
-    unproven = {"cause": "", "ceiling_usd": None}
     if own.get("state") not in (STATE_PAUSED, STATE_PAUSING):
-        return unproven
+        return {"cause": "queued", "ceiling_usd": None}
     reason, rail = own.get("reason"), own.get("rail")
     other = {REASON_OWNER: "owner", REASON_SLEEP: "sleep", REASON_AUTHORITY: "technical"}.get(reason)
     if other or reason != "budget":
@@ -612,7 +633,8 @@ def held_wake_cause(drive_root, task_id: str, *, window=None) -> dict:
     unreadable record proves nothing, and only what it would have proven is lost: a pause the hot facts name as the
     owner's, a sleep or a technical one stays that, and a money stop whose task record is unreadable falls back to the
     launch stamp. ``window`` (the display's own read, given only while consciousness is on) asks for the room a Resume
-    would add now; the room is read afresh (``_resume_room``), never from that window."""
+    would add now; the room is read afresh (``_resume_room``), never from that window. ``started_at`` (ISO) is the
+    wake's own start as its pause row keeps it (a pause never moves it): its block names it in the viewer's clock."""
     from ouroboros.budget_pause import RAIL_DISPATCH_REFUSED, budget_pause_row
     from ouroboros.consciousness_allowance import allowance_stopped, fenced_allowance_members, wake_ceiling_metadata
     from ouroboros.owner_pause import fence_closed
@@ -625,10 +647,13 @@ def held_wake_cause(drive_root, task_id: str, *, window=None) -> dict:
     try:
         metadata = (live_task_rows([task_id]).get(task_id) or {}).get("metadata") or {}
         facts = controls(drive_root, task_id)
+        own = facts.get("budget_pause") or {}
+        started = own.get("started_at")
+        started = ({"started_at": datetime.fromtimestamp(started, tz=timezone.utc).isoformat()}
+                   if type(started) in (int, float) and started > 0 else {})
         fence = facts.get("owner_pause") or {}
         if fence_closed(fence) and task_id not in (fence.get("selected_members") or {}):
-            return {"cause": "owner", "ceiling_usd": None}
-        own = facts.get("budget_pause") or {}
+            return {"cause": "owner", "ceiling_usd": None, **started}
         witnesses = []
         members = []
         if own.get("rail") == RAIL_DISPATCH_REFUSED and own.get("scope") == "root":
@@ -647,7 +672,7 @@ def held_wake_cause(drive_root, task_id: str, *, window=None) -> dict:
                 metadata = wake_ceiling_metadata(load_task_result(drive_root, task_id, strict=True) or {}) or metadata
         except Exception:
             log.debug("The task record of held wake %s is unreadable; its launch stamp stands", task_id, exc_info=True)
-    result = hold_cause(metadata, own, members)
+    result = {**hold_cause(metadata, own, members), **started}
     if window is not None and allowance_stopped(metadata, own, witnesses):
         result.update(_resume_room(drive_root, task_id, metadata, own))
     return result

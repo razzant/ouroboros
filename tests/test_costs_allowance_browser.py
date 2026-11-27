@@ -410,11 +410,11 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                 page.locator("[data-costs-consciousness]").click()
                 headline = page.locator(".consciousness-headline")  # the switch's position and the owner's mark
                 expect(page.locator(".consciousness-headline-state")).to_contain_text(
-                    "Wake-up wake-held stopped at its allowance ($2.99).", timeout=30_000)
+                    "Its own wake-up stopped at its allowance ($2.99).", timeout=30_000)
                 assert headline.locator(".status-mark").get_attribute("data-hue") == "owner"
                 expect(page.locator(".consciousness-headline-note")).to_have_text(
                     "No spending estimate is available for Resume. Raising the limit alone resumes nothing. "
-                    "Stop now on its card ends it and frees the clock for its next check.")
+                    "Stop now ends it and frees the clock for its next check.")
                 if (shot := _evidence(f"{engine}-{width}-{theme}-held-consciousness.png")) is not None:
                     page.locator("[data-cx-summary]").screenshot(path=str(shot))
                 page.locator('#page-dashboard [data-setting-row="consciousness-allowance"]').click()
