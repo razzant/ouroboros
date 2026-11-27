@@ -363,7 +363,8 @@ def physical_window_cut(messages, *, drive_root, task_id, measure, usable):
 
 
 def _cannot_help(limit_ctx: Any) -> bool:
-    """Name the frame's largest parts for the named refusal (``loop_transport``), then decline."""
+    """Name the frame's largest parts for the named refusal (``loop_transport``), then decline: raw estimates, kept as
+    the ``[label, tokens]`` pairs a same-task checkpoint carries across versions."""
     from ouroboros.context_view_facts import largest_parts
 
     view = SimpleNamespace(messages=limit_ctx.messages, tool_schemas=getattr(limit_ctx, "tool_schemas", None) or [],

@@ -3,8 +3,8 @@
 A window's source and date, reserve, disagreement and retired history are shared by facts rows, Settings and size
 failures (``window_projection``); a size failure names its round's own refused request (``remember_size_refusal``).
 An integrating start's facts row also names the gate's shortest telling by kind (``start_facts``), its draw kept on
-the captured core. The view's largest parts by producer kind and its largest single part are one clause the facts row,
-the size terminal and the native room fact share (``largest_parts``)."""
+the captured core. The view's largest parts by producer kind and its largest single part are the facts row's, the size
+terminal's and the native room fact's one set of named sizes (``largest_parts``), said by ``largest_parts_text``."""
 from __future__ import annotations
 
 import pathlib
@@ -90,14 +90,19 @@ def _producer_kind(messages, index, first_user):
     return "assignment" if index == first_user else "other delivered rows"
 
 
+LARGEST_SINGLE = "largest single "  # the label of the largest single part when its kind does not already name it
+
+
 def largest_parts(view, *, measured):
-    """The view's three largest parts by producer kind and its largest single part: one clause the facts row, the
-    size terminal and the native room fact each frame and calibrate as their own (``measured``: the view's measured
-    density, else raw estimates). Kinds come from typed metadata only (``_producer_kind``), system blocks keep their
-    block labels and the route's tool schemas are one part; ``kind ×N`` counts the transcript rows of a kind that
-    spans several. The single part is a unit's id (else its block or kind), said once: beside its kind when it is
-    that kind's only part, else after the kinds. Many small rows of one kind read as the one part they are, so a
-    resident kind that only grows is visible (BIBLE P1): facts, no advice (owner 09.10 5A)."""
+    """The view's three largest parts by producer kind and its largest single part, as ``[label, tokens]`` pairs: the
+    named sizes the facts row, the size terminal and the native room fact each frame and calibrate as their own
+    (``measured``: the view's measured density, else raw estimates). Kinds come from typed metadata only
+    (``_producer_kind``), system blocks keep their block labels and the route's tool schemas are one part; ``kind ×N``
+    counts the transcript rows of a kind that spans several. The single part is a unit's id (else its block or kind),
+    said once: beside its kind when it is that kind's only part, else as a last pair labelled ``LARGEST_SINGLE``
+    (pairs, the size terminal's stored form that a same-task checkpoint carries across versions). Many small rows of
+    one kind read as the one part they are, so a resident kind that only grows is visible (BIBLE P1): facts, no advice
+    (owner 09.10 5A)."""
     from ouroboros.context_compaction import context_units
     from ouroboros.context_measurement import estimate_context_prompt_tokens, tool_schema_tokens
 
@@ -127,9 +132,17 @@ def largest_parts(view, *, measured):
     top = sorted(kinds.items(), key=lambda item: item[1][0], reverse=True)[:3]
     own_kind, name, _rows, tokens = max(parts, key=lambda part: part[3])
     alone = kinds[own_kind][2] == 1 and own_kind in dict(top)  # the largest part is a named kind's only part
-    said = [kind + (f" ×{len(rows)}" if len(rows) > 1 else "") + (f" ({name})" if alone and kind == own_kind != name else "")
-            + f" ~{total:,}" for kind, (total, rows, _parts) in top]
-    return ", ".join(said) + ("" if alone else f"; largest single {name} ~{tokens:,}")
+    named = [[kind + (f" ×{len(rows)}" if len(rows) > 1 else "") + (f" ({name})" if alone and kind == own_kind != name else ""),
+              total] for kind, (total, rows, _parts) in top]
+    return named if alone else [*named, [LARGEST_SINGLE + name, tokens]]
+
+
+def largest_parts_text(pairs):
+    """``largest_parts`` (or an older writer's ``[label, tokens]`` pairs) as one clause: the kinds, then the largest
+    single part after a semicolon."""
+    said = [(str(label).startswith(LARGEST_SINGLE), f"{label} ~{int(tokens):,}") for label, tokens in pairs]
+    return "; ".join(filter(None, (", ".join(text for single, text in said if not single),
+                                   *(text for single, text in said if single))))
 
 
 def memory_facts(plan, mode, messages=()):
@@ -420,7 +433,7 @@ def refusal_frame_facts(usage, round_idx):
 
     slot = size_refusal(usage, round_idx)
     refused = int((usage.get(REFUSED_INPUTS_KEY) or {}).get(slot.get("key") or "") or 0) if slot else 0
-    parts = usage.get("_context_refusal_frame") or ""
+    parts = largest_parts_text(usage.get("_context_refusal_frame") or ())
     return "; ".join(fact for fact in (f"smallest refused request ~{refused:,} tokens" if refused else "",
                                        f"largest parts: {parts} by raw estimate of the current view" if parts else "") if fact)
 

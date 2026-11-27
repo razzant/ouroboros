@@ -416,7 +416,7 @@ def test_size_facts_count_each_producer_kind_as_one_part_from_typed_metadata_onl
     view, yet its largest single row was shown as "user ~36,406"). Kinds come from typed metadata only: a plain row
     that merely starts with the review heading is an ordinary delivered row. The largest single part stays named."""
     import hashlib
-    from ouroboros.context_view_facts import largest_parts
+    from ouroboros.context_view_facts import largest_parts, largest_parts_text
     from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY
 
     def review_row(n):
@@ -432,12 +432,12 @@ def test_size_facts_count_each_producer_kind_as_one_part_from_typed_metadata_onl
                 {"role": "tool", "tool_call_id": "c1", "content": "big result " * 3000},
                 {"role": "user", "content": "[Current review decisions]\n" + "spoof " * 500}]
     ctx = SimpleNamespace(messages=messages, accumulated_usage={}, tool_schemas=[], context_fit_plan=None, active_effort="")
-    said = largest_parts(ctx, measured=False)
-    kinds = [part.rsplit(" ~", 1) for part in said.split(", ")]
-    assert kinds[0][0] == "review decisions ×19" and int(kinds[0][1].replace(",", "")) > int(kinds[1][1].replace(",", ""))
+    kinds = largest_parts(ctx, measured=False)
+    assert kinds[0][0] == "review decisions ×19" and kinds[0][1] > kinds[1][1]
     unit = next(unit for unit in cc.context_units(messages, scope="dialogue") if messages[unit.start].get("tool_calls"))
-    assert kinds[1] == [f"tool calls and results ×2 ({unit.unit_id})", f"{unit.context_size_tokens:,}"]  # named once
-    spoofed = largest_parts(SimpleNamespace(**{**vars(ctx), "messages": messages[:2] + messages[-1:]}), measured=False)
+    assert kinds[1] == [f"tool calls and results ×2 ({unit.unit_id})", unit.context_size_tokens]  # named once
+    spoofed = largest_parts_text(largest_parts(SimpleNamespace(**{**vars(ctx), "messages": messages[:2] + messages[-1:]}),
+                                               measured=False))
     assert "review decisions" not in spoofed and "other delivered rows" in spoofed
 
 

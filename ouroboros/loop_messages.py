@@ -885,7 +885,7 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
     from ouroboros.context_anchor import refused_input
     refused = refused_input(usage, getattr(ctx, "context_fit_plan", None)) if measured else None
     from ouroboros.lead_fact import model_fact_words
-    from ouroboros.context_view_facts import largest_parts, memory_facts, mode_words, window_fact
+    from ouroboros.context_view_facts import largest_parts, largest_parts_text, memory_facts, mode_words, window_fact
     mode = mode_words(getattr(ctx, "context_fit_plan", None), ctx.active_context_mode)  # Low for the window, by name
     parts = [_round_fact(ctx, tool_ctx), f"mode {mode}", model_fact_words(tool_ctx, ctx.active_model)]
     notes = [note for note in (f"largest accepted input {int(accepted):,}" if accepted else "",
@@ -918,7 +918,7 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
             excess = int(estimate) + floor - int(target) - book
             parts.append((f"over target {excess:,}" if excess > 0 else f"target room {-excess:,}")
                          + (f" (reply floor {floor:,})" if floor != int(reserve or 0) else ""))
-    parts.append("largest by kind " + largest_parts(ctx, measured=measured))
+    parts.append("largest by kind " + largest_parts_text(largest_parts(ctx, measured=measured)))
     from ouroboros.context_compaction import _capsule_metadata
     # The mind's own folds stay countable to it (17.10.2026: after 42 folds it told the owner it never folded).
     parts.append(f"own notes in view {sum(1 for row in ctx.messages if (_capsule_metadata(row)[1] or {}).get('authorship') == 'actor')}")
