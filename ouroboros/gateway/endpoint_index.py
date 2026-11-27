@@ -663,7 +663,8 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/mcp/status": Shape("200:McpStatusResponse"),
     "POST /api/mcp/refresh": Shape("200:McpRefreshResponse 400:ErrorResponse", "McpRefreshRequest", note="safe to repeat"),
     "POST /api/mcp/sign-in": Shape("200:McpSignInResponse 400,404:ErrorResponse", "McpSignInRequest",
-                                   note="begin answers the provider page; a refused step is 200 with ok false"),
+                                   note="begin answers the provider page; a refused step is 200 with ok false (not_sent: repeat "
+                                        "it once fixed)"),
     "POST /api/sign-in": Shape("200:SignInResponse 400,404:ErrorResponse", "SignInRequest",
                                note="a skill's service sign-in; begin answers the provider page; a refused step "
                                     "is 200 with ok false"),

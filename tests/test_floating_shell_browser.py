@@ -340,8 +340,8 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
         facts = page.evaluate("""() => {
             const header = document.querySelector('#page-chat .chat-page-header');
             return {background: getComputedStyle(header).backgroundColor,
-                edge: getComputedStyle(header, '::before').backgroundImage,
-                edgeEvents: getComputedStyle(header, '::before').pointerEvents};
+                edge: (t => t.maskImage || t.webkitMaskImage)(getComputedStyle(header.querySelector(':scope > .room-edge[data-edge="tint"]'))),
+                edgeEvents: getComputedStyle(header.querySelector(':scope > .room-edge[data-edge="tint"]')).pointerEvents};
         }""")
         # The bar paints nothing of its own; under its capsules lies the room's edge (DESIGN "A room's edges"), no press.
         assert facts["background"] == "rgba(0, 0, 0, 0)"

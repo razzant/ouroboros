@@ -859,24 +859,29 @@ test('a resting card stands as tall as the frame it will get: under the authorâ€
         'a return starts at the height the frame will be given, with no jump to it');
 });
 
-test('a card is named by its words, not by an id: keys that fold into one id name two cards, and so do overlapping revisions', async (t) => {
+test('each card is named by its own authored heading, including overlapping revisions of one key', async (t) => {
     const stops = [];
     const named = (key, title, revision = 'r1') => { const [skill, tab_id] = key.split(':'); return { ...placed(skill, { revision }), key, tab_id, title }; };
     const { state, host, ws, widgets } = stand(t, { tabs: [named('quota:work_day', 'Work day'), named('quota_work:day', 'Day')], mountTab: gatedStops(stops) });
-    const names = () => host.querySelectorAll('[data-widget-key]').map((node) => [node.dataset.widgetKey, node.getAttribute('aria-label'), node.querySelector('.costs-widget-title').textContent]);
+    const names = () => host.querySelectorAll('[data-widget-key]').map((node) => {
+        const heading = node.querySelector('.costs-widget-title');
+        const id = node.getAttribute('aria-labelledby');
+        assert.ok(id);
+        assert.equal(heading.getAttribute('id'), id);
+        assert.ok(heading.hasAttribute('data-i18n-authored'));
+        assert.equal(node.hasAttribute('aria-label'), false, 'no second translatable copy of the name');
+        assert.equal(node.querySelector('[data-costs-widget-open]').hasAttribute('data-i18n-authored'), false);
+        return [node.dataset.widgetKey, heading.textContent];
+    });
     widgets.show();
     await flush();
-    assert.deepEqual(names(), [['quota:work_day', 'Work day', 'Work day'], ['quota_work:day', 'Day', 'Day']]);
+    assert.deepEqual(names(), [['quota:work_day', 'Work day'], ['quota_work:day', 'Day']]);
     state.tabs = [named('quota:work_day', 'Work day', 'r2'), named('quota_work:day', 'Day')];
     ws.emit('extension_lifecycle', { skill: 'quota' });
     await flush();
-    assert.deepEqual(names(), [['quota:work_day', 'Work day', 'Work day'], ['quota:work_day', 'Work day', 'Work day'], ['quota_work:day', 'Day', 'Day']],
+    assert.deepEqual(names(), [['quota:work_day', 'Work day'], ['quota:work_day', 'Work day'], ['quota_work:day', 'Day']],
         'the old card and its fresh one are both named while the frame stops');
-    for (const node of host.querySelectorAll('[data-widget-key]')) {
-        assert.equal(node.hasAttribute('aria-labelledby'), false, 'no reference that two cards of one key could both claim');
-        assert.equal(node.querySelector('[id]'), null);
-    }
-    assert.equal(host.querySelectorAll('[id]').length, 0, 'no id on the page to collide on');
+    assert.equal(new Set(host.querySelectorAll('[id]').map((node) => node.getAttribute('id'))).size, 3);
 });
 
 test('Costs mounts through the boardâ€™s own dispatch: a kind it cannot draw is said, and nothing is left to stop', async (t) => {

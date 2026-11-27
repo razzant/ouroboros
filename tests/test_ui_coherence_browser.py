@@ -78,25 +78,38 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
         assert metrics["gap"] == pytest.approx(12, abs=0.5), metrics
         assert metrics["below"] == pytest.approx(12, abs=0.5), metrics
     header = page.locator(".chat-page-header")
-    edge = """el => { const s = getComputedStyle(el), b = getComputedStyle(el, '::before'), a = getComputedStyle(el, '::after');
+    # A room's edge (style.css "A room's edges", DESIGN "One edge"): three nodes in the bar and in the composer's area,
+    # the soft and the deep blur step and the tint over them, each masked on the shared edge curve.
+    edge = """el => { const s = getComputedStyle(el), a = getComputedStyle(el, '::after');
+        const pieces = Object.fromEntries([...el.querySelectorAll(':scope > .room-edge')].map(n => { const c = getComputedStyle(n);
+            return [n.dataset.edge, {blur: c.backdropFilter || c.webkitBackdropFilter || 'none', mask: c.maskImage || c.webkitMaskImage,
+                tint: c.backgroundColor, height: n.getBoundingClientRect().height, events: c.pointerEvents, shown: c.display !== 'none'}]; }));
         return {mask: s.maskImage, overflow: s.overflow, background: s.backgroundColor, bar: el.getBoundingClientRect().height,
-            darkening: b.backgroundImage, blur: b.backdropFilter, fade: b.maskImage, reach: parseFloat(b.height),
-            events: b.pointerEvents, strip: a.pointerEvents, stripHeight: parseFloat(a.height),
+            own: getComputedStyle(el, '::before').content, pieces, strip: a.pointerEvents, stripHeight: parseFloat(a.height),
             dark: document.documentElement.dataset.theme !== 'light'}; }"""
     paint = header.evaluate(edge)
     assert paint["mask"] == "none" and paint["overflow"] == "visible", paint
-    # Mask the decorative layer, never the bar or its menu. These reads check CSS, not rendered pixels.
-    assert paint["background"] == "rgba(0, 0, 0, 0)", paint
-    assert "linear-gradient" in paint["darkening"] and "0.72" in paint["darkening"], paint
-    assert "blur(12px)" in paint["blur"] and "linear-gradient" in paint["fade"] and paint["events"] == "none", paint
-    # Both gradients end transparent toward the transcript; 180deg is the default (omitted in computed CSS).
-    clear_end = ", rgba(0, 0, 0, 0) 100%)"
-    assert paint["fade"].startswith(("linear-gradient(rgb(", "linear-gradient(180deg,")) and paint["fade"].endswith(clear_end), paint
-    assert "0.5" in paint["fade"] and "0.14" in paint["fade"], paint
-    # The edge reaches one compact length below the bar on every layout, the desk included. Nothing hangs under the
-    # bar: a failed history read is the page's notice.
+    # Mask the decorative layers, never the bar or its menu. These reads check CSS, not rendered pixels.
+    assert paint["background"] == "rgba(0, 0, 0, 0)" and paint["own"] == "none", paint
+
+    def two_steps_under_a_tint(found):
+        pieces = found["pieces"]
+        assert list(pieces) == ["soft", "deep", "tint"], found
+        assert pieces["soft"]["blur"] == "blur(4px)" and pieces["deep"]["blur"] == "blur(11.3px)", found
+        assert pieces["tint"]["blur"] == "none" and "0.72" in pieces["tint"]["tint"], found
+        for piece in pieces.values():
+            assert piece["events"] == "none" and piece["mask"].count("linear-gradient") == 2, found
+            assert "rgba(0, 0, 0, 0.5) 50%" in piece["mask"], found  # the curve's middle: the shared --edge-curve
+        return pieces
+
+    pieces = two_steps_under_a_tint(paint)
+    # The edge reaches one edge length below the bar on every layout, the desk included; the deep step stops short of
+    # it by the part of the taper the soft step finishes alone. Nothing hangs under the bar: a failed history read is
+    # the page's notice.
     reach = 32
-    assert paint["reach"] == pytest.approx(paint["bar"] + reach, abs=1), paint
+    assert pieces["tint"]["height"] == pytest.approx(paint["bar"] + reach, abs=1), paint
+    assert pieces["soft"]["height"] == pytest.approx(paint["bar"] + reach, abs=1), paint
+    assert pieces["deep"]["height"] == pytest.approx(paint["bar"] + reach - (reach + 24) / 2, abs=1), paint
     # The transcript's first row clears the bar and its edge (style.css --chat-top-reserve), not only the bar and note.
     feed_top = page.locator("#chat-messages").evaluate("el => parseFloat(getComputedStyle(el).paddingTop)")
     assert feed_top >= paint["bar"] + reach - 1, (feed_top, paint)
@@ -106,23 +119,21 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
     page.evaluate("document.documentElement.dataset.windowChrome = 'integrated'")
     chrome = header.evaluate(edge)
     page.evaluate("delete document.documentElement.dataset.windowChrome")
-    assert chrome["reach"] == pytest.approx(chrome["bar"] + reach, abs=1), chrome
-    assert "blur" in chrome["blur"], chrome
-    assert chrome["strip"] == "auto" and chrome["events"] == "none", chrome
-    # The composer's edge mirrors the bar's: the same authored tail from below, a 12 px blur, and no press taken.
-    composer = page.locator("#chat-input-area").evaluate(
-        "el => { const b = getComputedStyle(el, '::before');"
-        " return {content: b.content, mask: b.maskImage, blur: b.backdropFilter, events: b.pointerEvents}; }")
-    assert composer["content"] == '""' and composer["events"] == "none", composer
-    assert composer["mask"].startswith("linear-gradient(0deg,") and composer["mask"].endswith(clear_end), composer
-    assert "blur(12px)" in composer["blur"] and "0.5" in composer["mask"] and "0.14" in composer["mask"], composer
+    assert two_steps_under_a_tint(chrome)["tint"]["height"] == pytest.approx(chrome["bar"] + reach, abs=1), chrome
+    assert chrome["strip"] == "auto", chrome
+    # The composer's edge mirrors the bar's inside its area: the same nodes, the same steps, no press taken.
+    area = page.locator("#chat-input-area")
+    composer = area.evaluate(edge)
+    assert composer["own"] == "none" and composer["background"] == "rgba(0, 0, 0, 0)", composer
+    assert all(piece["shown"] for piece in two_steps_under_a_tint(composer).values()), composer
+    assert composer["pieces"]["tint"]["height"] == pytest.approx(composer["bar"], abs=1), composer
     # With the keyboard up the top edge ends with the bar and the composer draws no edge at all (style.css).
     page.evaluate("document.body.classList.add('keyboard-open')")
     keyboard = header.evaluate(edge)
-    composer_gone = page.locator("#chat-input-area").evaluate("el => getComputedStyle(el, '::before').content")
+    composer_gone = area.evaluate(edge)
     page.evaluate("document.body.classList.remove('keyboard-open')")
-    assert keyboard["reach"] == pytest.approx(keyboard["bar"], abs=1), keyboard
-    assert composer_gone == "none", composer_gone
+    assert keyboard["pieces"]["tint"]["height"] == pytest.approx(keyboard["bar"], abs=1), keyboard
+    assert not any(piece["shown"] for piece in composer_gone["pieces"].values()), composer_gone
     backing = header.locator('.app-page-title-row').evaluate("""el => {
         const s = getComputedStyle(el), channels = s.backgroundColor.match(/[0-9.]+/g).map(Number);
         return {alpha: channels[3] ?? 1, blur: s.backdropFilter, shadow: s.boxShadow};

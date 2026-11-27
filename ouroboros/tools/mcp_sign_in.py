@@ -49,6 +49,8 @@ def _hand_on_listing(ctx: ToolContext, server_id: str) -> str:
 def _mcp_sign_in(ctx: ToolContext, action: str = "", server: str = "", returned_url: str = "") -> str:
     from ouroboros import mcp_oauth
     from ouroboros.mcp_client import _run_async, canonical_server_id, ensure_configured_from_settings, get_manager
+    from ouroboros.net_transport import ExtraCaBundleError
+    from ouroboros.oauth_engine import CertificateRefused
 
     if action not in ("begin", "complete", "sign_out"):
         return _no_effect(ctx, "error", "TOOL_ARG_ERROR", "TOOL_ARG_ERROR: action is begin, complete or sign_out.")
@@ -77,6 +79,13 @@ def _mcp_sign_in(ctx: ToolContext, action: str = "", server: str = "", returned_
         return _receipt(ctx, _run_async(lambda: mcp_oauth.sign_out(cfg)))
     except mcp_oauth.MCPAuthRequired as exc:  # refused before this step changed anything
         return _no_effect(ctx, "unavailable", "MCP_AUTH_REQUIRED", str(exc), sign_in_reason=exc.reason)
+    except (ExtraCaBundleError, CertificateRefused) as exc:  # stopped here before anything changed at the provider
+        words, detail = mcp_oauth.not_sent(exc)
+        if mcp_oauth.BUNDLE_PLACE in words:  # the owner's Save reaches this task only through a new one
+            words += (" A saved fix serves at once the owner's own sign-in (Settings, or Finish sign-in on the page the"
+                      " browser came back to) and new tasks; this task keeps the settings it started with.")
+        return _no_effect(ctx, "unavailable", "MCP_UNAVAILABLE", f"MCP_UNAVAILABLE: {words} Detail: {detail}",
+                          sign_in_reason=mcp_oauth.NOT_SENT)
     # Any other failure (an unreachable provider) is the registry's ordinary tool error: its effect is unknown.
 
 

@@ -32,6 +32,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from ouroboros import config, oauth_engine
+from ouroboros.net_transport import ExtraCaBundleError
 from ouroboros.oauth_engine import SIGN_IN_REQUIRED, SIGNED_IN
 from ouroboros.oauth_engine import parse_return  # noqa: F401 -- MCP's route, tool and tests read a paste here
 from ouroboros.utils import read_json_dict, utc_now_iso
@@ -51,6 +52,34 @@ class MCPAuthRequired(oauth_engine.SignInRequired):
             f"{': ' + detail if detail else ''}). Nothing ran there. The owner can press Sign in on its card in "
             f"Extensions → MCP servers, or remote_mcp_sign_in(server={server_id!r}, action='begin') (enable_tools loads it) issues "
             "a sign-in link to give them."))
+
+
+NOT_SENT = "not_sent"  # the reason of a sign-in step stopped here before anything changed at the provider
+_STOPPED = "Sign-in stopped before anything changed at the provider: "
+BUNDLE_PLACE = "Extra certificate bundle in Settings → This computer → Advanced"
+# OpenSSL verify codes of a chain that ends at an authority this computer lacks: what a certificate bundle can fix.
+_ISSUER_UNTRUSTED = frozenset({2, 18, 19, 20, 21})
+
+
+def not_sent(exc: Exception) -> tuple:
+    """``(words, detail)`` for a sign-in step stopped on this computer before anything changed at the provider: an
+    Extra certificate bundle that cannot serve, or a refused certificate (``oauth_engine.CertificateRefused``). The
+    same step, a returned address included, can run again. ``words`` is one of a few fixed sentences, the owner's next
+    step included. A configured proxy does not identify which TLS hop failed. ``detail`` holds what only this computer
+    should see (the file's path, the requested host, and OpenSSL's words)."""
+    if isinstance(exc, ExtraCaBundleError):
+        return (f"{_STOPPED}the Extra certificate bundle can't be used. Fix the file under {BUNDLE_PLACE}, then try "
+                "again."), str(exc)
+    detail = f"connecting to {exc.host or 'the provider'}: {exc.refusal}"
+    if getattr(exc.refusal, "verify_code", None) not in _ISSUER_UNTRUSTED:
+        return (f"{_STOPPED}a certificate didn’t pass its checks. Check the address and the certificate of the server "
+                "or proxy before trying again."), detail
+    untrusted = f"{_STOPPED}a certificate comes from an authority this computer doesn’t trust."
+    if exc.bundle:
+        return (f"{untrusted} If it is the provider’s private authority and you trust it, add its certificate under "
+                f"{BUNDLE_PLACE}. The connection to an HTTPS proxy uses separate trust. Then try again."), detail
+    return (f"{untrusted} The MCP address is http, so this sign-in doesn’t use the Extra certificate bundle. "
+            "Check the provider’s or proxy’s certificate before trying again."), detail
 
 
 def applies(cfg: Any) -> bool:
@@ -92,7 +121,10 @@ def drafting():
 def _grant(cfg: Any) -> oauth_engine.Grant:
     """The server's file as the engine's grant: bound to the server's address (a file written for another
     address of the same id is not its grant), refused with ``MCPAuthRequired``, and written unless a draft
-    would replace another address's grant (a saved address always writes: Save prunes)."""
+    would replace another address's grant (a saved address always writes: Save prunes). Its authorization
+    server is reached with the trust of the server itself (``mcp_headers.reads_trust``)."""
+    from ouroboros.mcp_headers import reads_trust
+
     path = _path(cfg.id)
 
     def may_write(_doc: Dict[str, Any]) -> bool:
@@ -101,7 +133,7 @@ def _grant(cfg: Any) -> oauth_engine.Grant:
 
     return oauth_engine.Grant(path=path, lock=f"mcp/oauth/server-{cfg.id}.lock", binding={"url": cfg.url},
                               refusal=functools.partial(MCPAuthRequired, cfg.id), may_write=may_write,
-                              format_version=_FORMAT, upgrade=_upgrade)
+                              format_version=_FORMAT, upgrade=_upgrade, extra_ca=reads_trust(cfg))
 
 
 def _load(cfg: Any) -> Dict[str, Any]:
@@ -190,10 +222,12 @@ class StoredBearer(httpx.Auth):
     Bearer ``401`` one refresh and one retry; a ``403 insufficient_scope`` (first answer or retried one)
     records the scope it needs; otherwise ``self.refusal``. A bare ``401`` (no Bearer challenge) passes
     through as today's error. A refusal also ends the connection (``clients``), so a session waiting on
-    another request (an SSE stream) fails at once instead of at its tool timeout."""
+    another request (an SSE stream) fails at once instead of at its tool timeout; so does a refresh that never left
+    (``_fresh``), which proves the call unsent only while ``reached`` is 0: no request of this connection is on its
+    way or got past the server's sign-in."""
 
     def __init__(self, cfg: Any) -> None:
-        self.cfg, self.refusal, self.clients = cfg, None, []
+        self.cfg, self.refusal, self.clients, self.reached = cfg, None, [], 0
 
     def _own_challenge(self, response: httpx.Response) -> Dict[str, Any]:
         from ouroboros.mcp_headers import origin_of
@@ -201,13 +235,30 @@ class StoredBearer(httpx.Auth):
         # The answering origin (a redirect may have left the server's): only the server's own challenge counts.
         return _challenge(response) if origin_of(response.request.url) == origin_of(self.cfg.url) else {}
 
-    async def _refused(self, exc: MCPAuthRequired) -> MCPAuthRequired:
-        exc.mcp_unsent_joined = True  # the server answered before running anything
+    def _answered(self, response: httpx.Response) -> Dict[str, Any]:
+        challenge = self._own_challenge(response)
+        if challenge:  # the server's own sign-in challenge: that request ran nothing there
+            self.reached -= 1
+        return challenge
+
+    async def _refused(self, exc: Exception) -> Exception:
+        if isinstance(exc, MCPAuthRequired) or not self.reached:
+            exc.mcp_unsent_joined = True  # the server answered before running anything, or nothing reached it
         self.refusal = exc
         for client in list(self.clients):
             with contextlib.suppress(Exception):
                 await client.aclose()
         return exc
+
+    async def _fresh(self, rejected: Optional[str] = None) -> str:
+        """``current_token``, refused (``_refused``) when sign-in is needed or the refresh never left: a bundle that
+        cannot serve, or the issuer's certificate refused while connecting. Any other failure passes as it is."""
+        try:
+            return await current_token(self.cfg, rejected)
+        except (MCPAuthRequired, ExtraCaBundleError, httpx.ConnectError) as exc:
+            if isinstance(exc, httpx.ConnectError) and not oauth_engine.certificate_refused(exc):
+                raise
+            raise await self._refused(exc) from None
 
     async def async_auth_flow(self, request: httpx.Request):
         from ouroboros.mcp_headers import origin_of
@@ -216,14 +267,12 @@ class StoredBearer(httpx.Auth):
         tokens = (_load(self.cfg).get("tokens") or {}) if own else {}
         token = tokens.get("access_token")
         if token and not oauth_engine.fresh(tokens, None):
-            try:
-                token = await current_token(self.cfg)
-            except MCPAuthRequired as exc:
-                raise await self._refused(exc) from None
+            token = await self._fresh()
         if token:
             request.headers["Authorization"] = f"Bearer {token}"
+        self.reached += 1
         response = yield request
-        challenge = self._own_challenge(response)
+        challenge = self._answered(response)
         if response.status_code == 401 and challenge:
             try:
                 async with _locked(self.cfg):
@@ -232,12 +281,13 @@ class StoredBearer(httpx.Auth):
                         raise _required(self.cfg, doc, (doc.get("sign_in") or {}).get("reason") or "not_signed_in",
                                         challenge=challenge)
                     _save(self.cfg, {**doc, "challenge": challenge})
-                token = await current_token(self.cfg, rejected=token)
             except MCPAuthRequired as exc:
                 raise await self._refused(exc) from None
+            token = await self._fresh(rejected=token)
             request.headers["Authorization"] = f"Bearer {token}"
+            self.reached += 1
             response = yield request
-            challenge = self._own_challenge(response)
+            challenge = self._answered(response)
             if response.status_code == 401 and challenge:
                 async with _locked(self.cfg):
                     exc = _required(self.cfg, _load(self.cfg), "token_rejected")
@@ -318,15 +368,23 @@ async def _client_for(cfg: Any, doc: Dict[str, Any], metadata: Any, issuer: str,
 
 
 async def begin(cfg: Any, *, return_base: str = "", client_id: str = "", client_secret: str = "") -> Dict[str, Any]:
-    """Start one sign-in; returns ``{server, url, redirect_uri}`` — the provider page the owner opens."""
+    """Start one sign-in; returns ``{server, url, redirect_uri}`` — the provider page the owner opens. Until the
+    pending sign-in is saved nothing here is written; a certificate refused while connecting (discovery reads only
+    metadata, and a registration that meets it never left) is ``oauth_engine.CertificateRefused``."""
     from mcp.client.auth.utils import get_client_metadata_scopes
 
     doc = _load(cfg)
-    async with oauth_engine.http_client() as http:
-        prm, metadata, endpoints, issuer = await _discover(cfg, doc, http)
-        stored = doc.get("client") or {}
-        redirect = stored["redirect_uri"] if stored.get("source") == "owner" and not client_id else redirect_uri(return_base)
-        client = await _client_for(cfg, doc, metadata, issuer, redirect, http, client_id, client_secret)
+    try:
+        async with oauth_engine.http_client(extra_ca=_grant(cfg).extra_ca) as http:
+            prm, metadata, endpoints, issuer = await _discover(cfg, doc, http)
+            stored = doc.get("client") or {}
+            redirect = (stored["redirect_uri"] if stored.get("source") == "owner" and not client_id
+                        else redirect_uri(return_base))
+            client = await _client_for(cfg, doc, metadata, issuer, redirect, http, client_id, client_secret)
+    except httpx.ConnectError as exc:
+        if refusal := oauth_engine.certificate_refused(exc):
+            raise oauth_engine.CertificateRefused(exc, refusal, bundle=_grant(cfg).extra_ca) from exc
+        raise  # any other failure keeps its own path: a registration may have reached the provider
     # A step-up keeps what the grant already allows and adds what the server asked for (MCP step-up flow).
     scope = oauth_engine.union(get_client_metadata_scopes((doc.get("challenge") or {}).get("scope"), prm, metadata),
                                (doc.get("tokens") or {}).get("scope"), doc.get("required_scope"))
@@ -360,6 +418,9 @@ async def sign_out(cfg: Any) -> Dict[str, Any]:
         if doc:
             doc["sign_in"] = oauth_engine.required_state(doc, "signed_out")
             _save(cfg, doc)
-    revoked = await oauth_engine.revoke((doc.get("metadata") or {}).get("revocation_endpoint"),
-                                        doc.get("client") or {}, tokens)
+    try:
+        revoked = await oauth_engine.revoke((doc.get("metadata") or {}).get("revocation_endpoint"),
+                                            doc.get("client") or {}, tokens, extra_ca=_grant(cfg).extra_ca)
+    except ExtraCaBundleError:  # the bundle cannot serve: no revocation was sent, the local sign-out stands
+        revoked = False
     return {"ok": True, "server": cfg.id, "revoked": revoked}

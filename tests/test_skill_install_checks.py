@@ -252,7 +252,7 @@ def registry_release(tmp_path, monkeypatch):
     monkeypatch.delenv("OUROBOROS_SKILLS_REPO_PATH", raising=False)
     storage = _patch_clawhub_install_pipeline(monkeypatch, tmp_path, auto_specs=[])
     registry = {"latest": "1.0.0", "changed": False, "staged_versions": []}
-    monkeypatch.setattr(storage, "_registry_info", lambda slug: ClawHubSkillSummary(
+    monkeypatch.setattr(storage, "_registry_info", lambda slug, *, registry_url=None: ClawHubSkillSummary(
         slug=slug, latest_version=registry["latest"]))
     original_stage = storage._stage_archive
     def stage(*args, **kwargs):
@@ -364,3 +364,61 @@ def test_an_expired_self_check_does_not_mask_a_matching_owner_edit(owner_digest_
                   "owner_edit_digest": current if owner_digest_matches else "e" * 64}
     assert acceptance_in_force(acceptance, current, cyber=False) == ("owner_edit" if owner_digest_matches else "")
     assert acceptance_in_force(acceptance, current, cyber=True) == "self_check"
+
+
+def test_a_registry_display_name_recorded_at_install_finds_the_installed_row_and_survives_a_rollback(
+        registry_release, monkeypatch):
+    """The registry's name for people, read by the install's own info call, joins the Installed row's search names
+    beside its unchanged slug identity; a failed update restores the record it had, and a release named only by its
+    slug records none."""
+    from ouroboros.gateway.extensions import _build_extensions_index
+    from ouroboros.marketplace.clawhub import ClawHubSkillSummary
+    from ouroboros.marketplace.provenance import read_provenance
+    from ouroboros.skill_loader import SkillReviewState, save_review_state
+
+    drive, storage, registry = registry_release
+    shown = {"name": "Weather Desk"}
+    monkeypatch.setattr(storage, "_registry_info", lambda slug, *, registry_url=None: ClawHubSkillSummary(
+        slug=slug, display_name=shown["name"], latest_version=registry["latest"]))
+
+    def listed():
+        return next(row for row in _build_extensions_index(drive, "")["skills"] if row["name"] == "demo")
+
+    def clean(drive_root, _repo, name):  # a review that settles the update, as an accepted one does
+        skill = find_skill(drive_root, name)
+        save_review_state(drive_root, name, SkillReviewState(status="clean", content_hash=skill.content_hash))
+        return "clean", [], ""
+
+    monkeypatch.setattr(storage, "_run_skill_review", clean)
+
+    def names():  # the row's extra search names; a confirmed source may add its own qualified slug beside them
+        return list(listed().get("search_names") or [])
+
+    assert "display_name" not in read_provenance(drive, "demo") and "Weather Desk" not in names()
+    registry["latest"] = "2.0.0"
+    assert storage.update_skill(drive, drive.parent, sanitized_name="demo").ok
+    assert read_provenance(drive, "demo")["display_name"] == "Weather Desk"
+    row = listed()
+    assert "Weather Desk" in row["search_names"]
+    assert (row["name"], row["provenance"]["slug"]) == ("demo", "demo")
+    assert set(row["search_names"]) <= {"Weather Desk", "clawhub/demo"}, "only the provider name and qualified slug"
+
+    from ouroboros.skill_install_record import write_install_record
+
+    def write(drive_root, name, record):
+        if record["release"]["version"] == "3.0.0":
+            raise OSError("injected record failure")
+        return write_install_record(drive_root, name, record)
+
+    monkeypatch.setattr("ouroboros.skill_install_record.write_install_record", write)
+    registry["latest"], shown["name"] = "3.0.0", "Renamed Desk"
+    assert not storage.update_skill(drive, drive.parent, sanitized_name="demo").ok
+    assert read_provenance(drive, "demo")["display_name"] == "Weather Desk", "the rollback restores the record"
+    monkeypatch.setattr("ouroboros.skill_install_record.write_install_record", write_install_record)
+    registry["latest"], shown["name"] = "4.0.0", "demo"
+    assert storage.update_skill(drive, drive.parent, sanitized_name="demo").ok
+    assert "display_name" not in read_provenance(drive, "demo")
+    final = listed()
+    assert not {"Weather Desk", "Renamed Desk"} & set(final.get("search_names") or []), "no stale provider name"
+    assert set(final.get("search_names") or []) <= {"clawhub/demo"}, "the ordinary qualified slug is all that may remain"
+    assert (final["name"], final["provenance"]["slug"]) == ("demo", "demo")

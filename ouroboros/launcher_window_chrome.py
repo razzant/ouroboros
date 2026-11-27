@@ -21,14 +21,17 @@ finished navigation) does too; messages name their document by ``performance.tim
 older document never undoes a newer one. The window starts integrated: pywebview adds the web view
 only after the first document loaded and declared, so the bar never flashes. The page reserves room
 only for what is applied: this leaf measures the overlap (content height above ``contentLayoutRect``)
-and the traffic lights' far edge and writes them into that document (``data-window-chrome``,
-``--window-chrome-top``, ``--window-chrome-start``). A browser, another OS, an older shell, full
+and the traffic lights' far edge and vertical centre and writes them into that document (``data-window-chrome``,
+``--window-chrome-top``, ``--window-chrome-start``, ``--window-chrome-mid``); the page stands its header row on the
+lights' centre and reserves only that row, and the band it renders (its root's ``scroll-padding-top``) is the window's
+handle: a press on the page below it, though still inside the native bar, is the page's. A centre that cannot be read inside the band is not written, and the page
+keeps the whole band as its row and handle. A browser, another OS, an older shell, full
 screen or a refused apply writes nothing, so nothing is reserved there; geometry that cannot be
 measured returns the window to the ordinary bar rather than leave a transparent one over the page.
 
 WKWebView takes the clicks under a transparent bar, so AppKit's title bar never sees them: the script
-reports a plain left press inside the measured band, off any control and any text the page declares
-selectable (``cursor: text``). The report arrives after AppKit dequeued later events (a Force Touch trackpad
+reports a plain left press inside the page's band (the lights' row, or the measured band without a centre), off any
+control and any text the page declares selectable (``cursor: text``). The report arrives after AppKit dequeued later events (a Force Touch trackpad
 sends pressure events within half a millisecond of a press; one was AppKit's current event at 17 of 19 band
 reports, owner's probe 17.11), so it acts on the mouse-down a local monitor kept, when in this window's band. A first
 press, while the button is down, goes back to AppKit's ``performWindowDragWithEvent:``. A second cannot go back:
@@ -174,10 +177,13 @@ DOCUMENT_SCRIPT = r"""(() => {
             root.dataset.windowChrome = '%(integrated)s';
             root.style.setProperty('--window-chrome-top', `${top}px`);
             root.style.setProperty('--window-chrome-start', `${state.start}px`);
+            if (state.mid > 0) root.style.setProperty('--window-chrome-mid', `${state.mid}px`);
+            else root.style.removeProperty('--window-chrome-mid');
         } else {
             delete root.dataset.windowChrome;
             root.style.removeProperty('--window-chrome-top');
             root.style.removeProperty('--window-chrome-start');
+            root.style.removeProperty('--window-chrome-mid');
         }
     };
     const CONTROLS = 'a[href], button, input, select, textarea, summary, label, iframe, video, audio, '
@@ -190,7 +196,11 @@ DOCUMENT_SCRIPT = r"""(() => {
     // On the window, after every element's handler: a press the page took (a prevented mousedown, or a
     // cancelled pointerdown, which suppresses mousedown) stays the page's.
     window.addEventListener('mousedown', (event) => {
-        if (!top || event.button !== 0 || event.defaultPrevented || event.clientY >= top) return;
+        // The handle is the band the page renders (the used length it publishes as its root's scroll-padding-top: the
+        // lights' row), capped at the native bar; an older page that publishes none reserves the whole bar and keeps it.
+        const row = parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop);
+        const band = row > 0 ? Math.min(top, row) : top;
+        if (!top || event.button !== 0 || event.defaultPrevented || event.clientY >= band) return;
         if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
         const target = event.target instanceof Element ? event.target : null;
         if (!target || target.closest(CONTROLS) || !PLAIN.includes(getComputedStyle(target).cursor)) return;
@@ -584,11 +594,11 @@ class WindowChrome:
             # A transparent bar over a page told to reserve nothing could cover its controls: the ordinary
             # bar returns for this window's lifetime, now or as full screen ends (its mask never changes there).
             log.warning("Title bar geometry unreadable; the window returns to the ordinary title bar.", exc_info=True)
-            state = {"top": 0, "start": 0}
+            state = {"top": 0, "start": 0, "mid": 0}
             self._refused = True
             if self._integrated and not self._fullscreen:
                 self._restore()
-        sent = (self._doc, state["top"], state["start"])
+        sent = (self._doc, state["top"], state["start"], state["mid"])
         if sent == self._sent:
             return
         script = f"window.__ouroWindowChrome && window.__ouroWindowChrome({json.dumps({'doc': self._doc, **state})})"
@@ -598,29 +608,39 @@ class WindowChrome:
             log.warning("The page could not be told the title bar geometry; the next change tells it again.", exc_info=True)
             return  # not delivered: the next publish of the same state is not a duplicate
         self._sent = sent
-        log.info("Title bar for document %.3f: %s (band %s, lights to %s CSS px; full screen %s)", self._doc,
-                 INTEGRATED if self._integrated else "ordinary", state["top"], state["start"], self._fullscreen)
+        log.info("Title bar for document %.3f: %s (band %s, lights to %s, centred at %s CSS px; full screen %s)",
+                 self._doc, INTEGRATED if self._integrated else "ordinary", state["top"], state["start"], state["mid"],
+                 self._fullscreen)
 
     def _measure(self) -> dict:
-        """CSS pixels the title bar covers: the band above ``contentLayoutRect`` and the traffic lights' far edge."""
+        """CSS pixels the title bar covers: the band above ``contentLayoutRect``, the traffic lights' far edge and
+        their vertical centre from the window's top (0 where the buttons give none inside the band)."""
         native = self._native
         if self._fullscreen or not native.styleMask() & _FULL_SIZE_CONTENT:
-            return {"top": 0, "start": 0}  # full screen hides the bar until the pointer reveals it
+            return {"top": 0, "start": 0, "mid": 0}  # full screen hides the bar until the pointer reveals it
+        height = native.contentView().frame().size.height
         layout = native.contentLayoutRect()
-        top = native.contentView().frame().size.height - (layout.origin.y + layout.size.height)
-        start = 0.0
+        top = height - (layout.origin.y + layout.size.height)
+        start, low, high = 0.0, math.inf, -math.inf
         for kind in _BUTTONS:
             button = native.standardWindowButton_(kind)
             if button is not None and not button.isHidden():
-                rect = button.convertRect_toView_(button.bounds(), None)
+                rect = button.convertRect_toView_(button.bounds(), None)  # window coordinates, origin bottom-left
                 start = max(start, rect.origin.x + rect.size.width)
+                low, high = min(low, rect.origin.y), max(high, rect.origin.y + rect.size.height)
+        mid = height - (low + high) / 2 if low < high else 0.0
         try:
             zoom = float(self._webview.pageZoom()) * float(self._webview.magnification())
         except Exception:
             zoom = 1.0
         zoom = zoom if zoom > 0 else 1.0
-        top = round(max(0.0, top) / zoom, 2)
-        return {"top": top, "start": round(start / zoom, 2) if top else 0}
+        top = max(0.0, top)
+        if not 0 < mid < top:
+            mid = 0.0  # no centre inside the band: the page keeps the whole band as its row
+        top = round(top / zoom, 2)
+        if not top:
+            return {"top": 0, "start": 0, "mid": 0}
+        return {"top": top, "start": round(start / zoom, 2), "mid": round(mid / zoom, 2)}
 
     def _observe_full_screen(self, native: Any) -> None:
         """The phase is known only once all four notifications are observed; a new window is not in full screen."""
