@@ -487,7 +487,7 @@ def test_a_chosen_read_keeps_its_whole_batch_with_an_image_before_its_result_at_
     for arguments, record, chosen in ((ranged, recorded, True), ({'path': 'facts.md'}, recorded, False),
                                       (ranged, make_not_started_tool_result_record('r', body), False)):
         rows = [{'role': 'system', 'content': 'Required core.'}, {'role': 'user', 'content': 'Assignment.'},
-                bound_host_row('owner_words', 'Read the range and look at the screenshot. ' * 40),
+                bound_host_row('owner_words', 'Read the range and look at the screenshot.'),
                 {'role': 'assistant', 'content': '', 'tool_calls': [
                     {'id': 'r', 'type': 'function', 'function': {'name': 'read_file',
                                                                  'arguments': json.dumps(arguments)}},
@@ -536,7 +536,7 @@ def test_a_chosen_read_too_large_for_the_window_leaves_with_its_image_batch_and_
         record = make_tool_result_record({'invocation_id': 'read-1', 'tool_call_id': 'r', 'execution_id': 'exec',
                                           'round_id': 'round', 'task_attempt': 1}, body)
         rows = [{'role': 'system', 'content': 'Required core.'}, {'role': 'user', 'content': 'Assignment.'},
-                bound_host_row('owner_words', 'Read the range and look at the screenshot. ' * 40),
+                bound_host_row('owner_words', 'Read the range and look at the screenshot.'),
                 {'role': 'assistant', 'content': '', 'tool_calls': [
                     {'id': 'r', 'type': 'function', 'function': {'name': 'read_file', 'arguments': json.dumps(
                         {'path': 'facts.md', 'start_line': 1, 'max_chars': 80000})}},
@@ -575,28 +575,6 @@ def _viewing_batch(owner, calls):
     return rows, rows.pop()
 
 
-def test_a_small_chosen_read_beside_a_large_plain_read_leaves_with_its_batch_when_the_batch_cannot_fit(tmp_path):
-    """A chosen read keeps its whole exchange, so the seed and the cut keep that exchange only while all its rows fit
-    the known usable input alone: a small range read beside a large plain read in an image batch leaves with the batch
-    and the view is renewed; a batch that fits stays whole and the refusal keeps the view."""
-    from ouroboros.context_renewal import _cut_units
-    price = estimate_context_prompt_tokens
-    for plain, renewed in ((3000, True), (60, False)):
-        rows, image = _viewing_batch('Read the range, the log and the screenshot. ' * 40, (
-            ('r', 'read_file', {'path': 'facts.md', 'start_line': 1, 'max_chars': 4000}),
-            ('p', 'read_file', {'path': 'run.log'})))
-        batch = [image, _recorded('r', 'Range line. ' * 60), _recorded('p', 'Log line. ' * plain),
-                 _recorded('v', 'Attached.')]
-        rows += [*batch, {'role': 'assistant', 'content': 'Working on the next check.'}]
-        window = price(rows) - (price([batch[2]]) // 2 if renewed else 200)
-        assert ({3, 4, 5, 6, 7} <= {i for group in _cut_units(rows, usable_input=window)[0] for i in group}) is renewed
-        ctx = SimpleNamespace(messages=rows, accumulated_usage={'_context_refusal_round': 1,
-            '_context_capacity_total_tokens': window, '_context_response_reserve_tokens': 0}, drive_root=tmp_path,
-            drive_logs=tmp_path / 'logs', task_id=f'sibling-{plain}', round_idx=1, event_queue=None, tool_schemas=[])
-        assert renew_after_refusal(ctx, SimpleNamespace(_ctx=SimpleNamespace(messages=rows))) is renewed
-        assert all(row in rows for row in batch) is not renewed
-
-
 def test_a_released_image_batch_is_named_in_the_renewal_index_and_takes_the_image_it_attached(tmp_path):
     """When the seed lets an image batch go (its chosen range cannot fit the window), the record's index names each of
     its calls with its typed facts, never shown to me without usable-send evidence, and the image its viewing call
@@ -629,6 +607,34 @@ def test_a_released_image_batch_is_named_in_the_renewal_index_and_takes_the_imag
     rows, _ = _viewing_batch('Read the page.', (('r', 'read_file', {'path': 'page.html'}),))
     rows += [_recorded('r', '<img src="data:image/png;base64,iVBORw0KGgo=">'), _recorded('v', 'Image attached.')]
     assert 'invocation inv-r' in units_since_note(rows, None), 'inline image data has no unit, yet its batch is named'
+
+
+def test_from_inside_a_leaving_batch_only_its_viewing_image_leaves_and_a_resume_notice_stays():
+    """The seed takes from inside a leaving batch only what its viewing call attached: image blocks, each beside the
+    caption block it records itself. Any row with other words stays: the Resume notice quoting my human's reason for
+    accepting an uncertain start, which the host writes before it closes the interrupted call
+    (``budget_pause._resume_disclosure``), as after a completed batch, and a caption row a reply was merged into.
+    The record's index still names the batch."""
+    from ouroboros.context_renewal import renewal_seed, units_since_note
+    from ouroboros.delegate_resume import risk_words
+    from ouroboros.working_checkpoint import close_unanswered_calls
+    notice = {'role': 'user', 'content': '[SYSTEM NOTICE]\n' + risk_words({  # as ``_resume_disclosure`` writes it
+        'by': {'actor': 'owner'}, 'invocation_id': 'start-1', 'task_id': 'child', 'root_task_id': 'root',
+        'resuming_task_id': 'resumed', 'reason': 'It only reads the archive; continue.'})}
+    for interrupted in (True, False):
+        rows = [{'role': 'system', 'content': 'Core.'}, {'role': 'user', 'content': 'Assignment.'},
+                bound_host_row('owner_words', 'Start the archive reader.'), {'role': 'assistant', 'content': '',
+                'tool_calls': [{'id': 'c', 'type': 'function', 'function': {'name': 'run_command',
+                                                                           'arguments': '{"cmd": ["reader"]}'}}]},
+                *([] if interrupted else [_recorded('c', 'Started.')]), copy.deepcopy(notice)]
+        close_unanswered_calls(rows, 'Pause')  # an interrupted call's result follows the notice
+        rows.append({'role': 'assistant', 'content': 'Checking the reader.'})
+        assert notice in renewal_seed(rows)[0] and 'run_command' in units_since_note(rows, None), interrupted
+    head, image = _viewing_batch('Look at the screenshot.', ())
+    merged = {**image, 'content': [*image['content'], {'type': 'text', 'text': '\n\n---\n\nAlso check the footer.'}]}
+    for row, leaves in ((image, True), ({**image, 'content': image['content'][1:]}, True), (merged, False)):
+        rows = [*head, row, _recorded('v', 'Attached.'), {'role': 'assistant', 'content': 'Seen.'}]
+        assert (row in renewal_seed(rows)[0]) is not leaves and 'view_image' in units_since_note(rows, None)
 
 
 def test_an_obsolete_mark_row_pays_before_the_owners_words_and_the_producer_sends_nothing_more(tmp_path):

@@ -14,9 +14,9 @@ any row written before host state was bound to its text, which may hold merged o
 Ouroboros's outward dialogue; the mind's authored notes (actor capsules) and a predecessor's
 notes; the current review decisions; the address records the refusal passes wrote since the
 newest note; and the mind's own prose since its newest note, including the visible text it wrote
-beside a tool call. Chosen reads (their whole exchange, when it fits known usable input alone) and explicitly restored
-sources stay whole; what a leaving batch attached before its results leaves with it. The record lists each removed
-tool exchange since the newest note with its typed facts, shown or never shown. Unasked tool units, replies
+beside a tool call. Chosen reads (their whole exchange) and explicitly restored sources stay whole; the image a leaving
+batch's viewing call attached before its results leaves with it. The record lists each removed tool exchange since the
+newest note with its typed facts, shown or never shown. Unasked tool units, replies
 the notes already cover, host state the host sends afresh (facts, clock, roster and skill snapshots,
 bound and unchanged), superseded review copies and earlier address records leave the view;
 one host record names the checkpoint that holds them exactly. Owner 29.10 Q1=A:
@@ -117,13 +117,28 @@ def _exchange_unit(messages, start, end):
     return unit
 
 
+def _image_attachment(row):
+    """An image the viewing tool attached while its batch ran (``tools/vision.attach_local_image_to_context``): an
+    untyped user row of image blocks, each beside the caption block it records itself (``_caption``). Any other key,
+    block or text makes it a row of its own that stays: a notice the host writes before closing an interrupted call
+    (a Resume's ``budget_pause._resume_disclosure``), a reply merged into the row, a row of another producer."""
+    content = row.get("content")
+    if row.get("role") != "user" or set(row) != {"role", "content"} or not isinstance(content, list):
+        return False
+    images = [block for block in content if isinstance(block, dict) and block.get("type") in ("image_url", "image")]
+    captions = {block.get("_caption") for block in images} - {None, ""}
+    return bool(images) and all(any(block is image for image in images) or (
+        isinstance(block, dict) and set(block) == {"type", "text"} and block["type"] == "text"
+        and isinstance(block["text"], str) and block["text"] in captions) for block in content)
+
+
 def renewal_seed(messages: Sequence[Dict[str, Any]], *, usable_input: Any = None,
                  density: float = 1.0) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    """``(kept rows in order, counts of the rows that leave the view)``; pure, no I/O. A chosen read's exchange stays
-    when it fits known usable input alone (any size when that is unknown); what a leaving exchange attached between its
-    call and its results (a viewing call's image) leaves with it, while a typed human row there stays."""
+    """``(kept rows in order, counts of the rows that leave the view)``; pure, no I/O. A chosen read stays when it fits
+    known usable input alone (every chosen read when that is unknown), as at the address rungs. From inside a leaving
+    exchange only the image its viewing call attached leaves with it (``_image_attachment``); any other row stays."""
     from ouroboros.anthropic_native_custody import custody_private_key
-    from ouroboros.context_budget import REPLY_CITATION_KIND, RETURN_FACTS_KIND, host_row_intact
+    from ouroboros.context_budget import host_row_intact
     from ouroboros.context_compaction import _capsule_metadata
     from ouroboros.llm_messages import DISPLAY_KEY, shown_content
     from ouroboros.loop_messages import _visible_round_text
@@ -135,9 +150,8 @@ def renewal_seed(messages: Sequence[Dict[str, Any]], *, usable_input: Any = None
 
     spans = _protocol_spans(messages)
     keep_read = chosen_read_rows(messages, spans, usable_input=usable_input, density=density)
-    words = OWNER_ROW_KINDS | {REPLY_CITATION_KIND, RETURN_FACTS_KIND}
     attached = {i for start, end in spans.items() if start not in keep_read for i in range(start + 1, end)
-                if messages[i].get("role") != "tool" and messages[i].get(HOST_CONTEXT_KIND_KEY) not in words}
+                if _image_attachment(messages[i])}
     resent = _restated_host_kinds() | {CONTEXT_FACTS_NAME, CLOCK_ROW_NAME, RENEWAL_RECORD_NAME}
 
     note = _is_note
@@ -169,7 +183,7 @@ def renewal_seed(messages: Sequence[Dict[str, Any]], *, usable_input: Any = None
         elif role == "assistant" and i <= newest_note:
             left["covered_replies"] += 1
         elif i in attached:
-            left["tool_rows"] += 1  # what a leaving batch attached before its results (a viewing call's image)
+            left["tool_rows"] += 1  # the image a leaving batch's viewing call attached before its results
         else:
             kept.append(row)  # every delivered message and my replies since my newest note
     return kept, left
@@ -340,11 +354,11 @@ def _cut_units(messages, *, usable_input=None, density=1.0):
     """Eligible whole units in the order a physical cut spends them (``_cut_tier``), oldest first within a tier.
 
     Protected: the core and assignment, the mind's and a predecessor's notes, chosen reads with their whole exchange
-    (when that exchange fits known usable input alone) and restored reads, current review decisions and feedback,
-    current host state its producer would send again unchanged (the roster chain, skill snapshots and mark changes no
-    later row states anew: cutting them frees nothing; an earlier facts row or clock pays, the next request samples its
-    own), earlier cut records (folded into the new one), the newest owner turn with the citation and return context
-    beside it, the newest exchange (the span holding the mind's last reply or tool result, or the batch the host's bound
+    (when they fit known usable input alone) and restored reads, current review decisions and feedback, current host
+    state its producer would send again unchanged (the roster chain, skill snapshots and mark changes no later row
+    states anew: cutting them frees nothing; an earlier facts row or clock pays, the next request samples its own),
+    earlier cut records (folded into the new one), the newest owner turn with the citation and return context beside
+    it, the newest exchange (the span holding the mind's last reply or tool result, or the batch the host's bound
     record of an outward message closed) and every row after that act, a batch nobody answered yet even when the owner
     spoke after it; before any act, every row after the newest owner turn (with no owner turn either, the last row).
     A call and all its results, complete or not, are one unit (``_protocol_spans``), and an exchange whose native

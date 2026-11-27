@@ -298,12 +298,9 @@ def chosen_read_units(messages, units, *, usable_input=None, density=1.0):
 
 def chosen_read_rows(messages, spans, *, usable_input=None, density=1.0) -> set[int]:
     """Every row of each physical exchange in ``spans`` (``{call row: last result row}``, whether or not the mind may
-    fold it) that holds an explicitly chosen body, at its original positions, when the whole exchange fits known usable
-    input alone (any size when that is unknown): its rows stay or leave together, so a small chosen read never holds a
-    large sibling the window cannot fit."""
-    return {i for start, end in spans.items() if _holds_chosen_read(messages, start, end) and (
-                usable_input is None
-                or compaction._context_tokens_for_messages(messages[start:end + 1], density) <= usable_input)
+    fold it) that holds an explicitly chosen body, by ``chosen_read_units``' rules, at its original positions."""
+    return {i for start, end in spans.items()
+            if _holds_chosen_read(messages, start, end, usable_input=usable_input, density=density)
             for i in range(start, end + 1)}
 
 
