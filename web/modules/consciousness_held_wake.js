@@ -107,7 +107,11 @@ export function createHeldWake(doc, { current = () => null, connected = () => tr
     const live = () => connected() && confirmed() && pending === 0;
     const repaint = () => { if (shown) paint(shown); };
     const begin = () => { pending += 1; repaint(); };
-    const settled = async () => { try { await refresh(); } finally { pending = Math.max(0, pending - 1); repaint(); } };
+    // The shared controls let go of their task's lease only after this returns (task_control_menu.js): the siblings it
+    // disabled (Stop now beside Close) are painted again once it is let go.
+    const settled = async () => {
+        try { await refresh(); } finally { pending = Math.max(0, pending - 1); repaint(); setTimeout(repaint, 0); }
+    };
 
     costs.addEventListener('click', (event) => {
         event.stopPropagation?.();

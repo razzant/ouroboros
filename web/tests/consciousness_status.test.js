@@ -802,3 +802,29 @@ test('a passed deadline keeps no detail that promises the wake goes on; a live o
         restoreDom(env.prior);
     }
 });
+
+test('after Close settles, a Stop its reconciling read still offers is pressable again once the shared lease is let go', async () => {
+    const token = 'd'.repeat(64);
+    const posts = [];
+    let status = null;
+    const opened = await openHeld(heldBy('owner', [{ action: 'close', target: WAKE, close_expired: token }, OFFERED[1]]), {
+        fetchImpl: async (url, init = {}) => {
+            if (init.method === 'POST') posts.push(String(url));
+            return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        },
+        // The reconciling read: the close is still being checked, so the work still offers Stop now.
+        refreshState: async () => { status.update(heldBy('owner', [OFFERED[1]])); } });
+    status = opened.status;
+    const { env, button } = opened;
+    try {
+        assert.deepEqual([button('Close').disabled, button('Stop now').disabled], [false, false]);
+        await press(button('Close'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(posts.length, 1, 'the close was sent');
+        assert.deepEqual([Boolean(button('Close')), button('Stop now').disabled], [false, false],
+            'Stop now is not left disabled by the lease Close held while it settled');
+        status.destroy();
+    } finally {
+        restoreDom(env.prior);
+    }
+});
