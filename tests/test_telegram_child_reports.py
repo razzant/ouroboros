@@ -197,8 +197,7 @@ def test_a_host_written_final_reaches_telegram_only_from_a_root(bridge, monkeypa
         assert finals[-1]["delegation_role"] == "subagent"
         assert bridge.posts == []
     else:
-        sent = _sent_texts(bridge)
-        assert sent and " ".join(text.split()[1:4]) in sent[0]  # the producer's own opening words, whatever they are
+        assert _sent_texts(bridge) == bridge.plugin.message_chunks(text)  # the producer's words, as Telegram gets them
 
 
 @pytest.mark.parametrize("child", [True, False], ids=["child", "root-control"])
