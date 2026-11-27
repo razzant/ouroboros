@@ -279,7 +279,7 @@ Project panels take chat, typing, media and log frames by `chat_id` or `also_roo
 
 Extension WS traffic namespaces via `extension_loader.extension_surface_name()` so extensions cannot shadow built-ins. Each inbound frame resolves its skill and rechecks desired/reviewed/granted/enabled/live state; out-of-process handlers run in their extension child off the event loop, in-process synchronous ones off the ASGI loop, trusted in-process async ones on it; handler failure never ends the socket loop.
 
-Each socket owns one writer and outbox (`ws._Connection`), so slow/half-open browsers delay only themselves; each broadcast is encoded once, for open sockets only, with one loop wake per burst (`ws.py`), and send failures retire the socket and log `broadcast_partial_failure` off-loop while durable producers keep their events.
+Each socket owns one writer and outbox (`ws._Connection`), so slow/half-open browsers delay only themselves; send failures retire the socket and log `broadcast_partial_failure` off-loop while durable producers keep their events.
 
 #### Reconnect and recovery
 

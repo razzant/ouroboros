@@ -6,21 +6,32 @@ import asyncio
 import collections
 import functools
 import inspect
+import itertools
 import json
 import logging
 import pathlib
+import re
 import threading
+import time
 from typing import Any
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ouroboros import chat_uploads
+from ouroboros.asgi_beat import ASGI_BEAT
 from ouroboros.config import DATA_DIR
 from ouroboros.gateway._helpers import run_sync_to_completion, settle_to_completion
 from ouroboros.gateway.completion_gist import short_gist_frame
 from ouroboros.utils import json_dumps_utf8, utc_now_iso
 
 log = logging.getLogger(__name__)
+
+# The close code of the browser's silence watchdog (``web/modules/ws.js``): an application code
+# (RFC 6455 4000-4999) whose reason carries only the fields below, each a bounded integer.
+WATCHDOG_CLOSE_CODE = 4408
+_WATCHDOG_REASON_FIELDS = {"silent_ms": re.compile(r"[0-9]{1,10}"), "tick_gap_ms": re.compile(r"[0-9]{1,10}"),
+                           "hidden": re.compile(r"[01]")}
+_SERIALS = itertools.count(1)
 
 
 class _Connection:
@@ -32,9 +43,16 @@ class _Connection:
     leaves the registry; its receive loop ends on its own) and its diagnostic row is written
     off the loop. Replies to the socket's own frames (notices, ``panic_accepted``) are sent by
     its receive loop directly, as before.
+
+    For its one disconnect line (``_close_facts``) it keeps, in memory only: an ephemeral
+    ``serial`` (this process's count), when it opened, when its writer last completed a send and
+    of which kind (``heartbeat`` or ``other``), since when a send is being awaited, the largest
+    ASGI loop lateness it lived through (``note_loop_lateness``) and a ``cause`` only the server
+    knows (its own close, a write error).
     """
 
-    __slots__ = ("ws", "outbox", "writer", "profile_scope")
+    __slots__ = ("ws", "outbox", "writer", "profile_scope", "serial", "opened", "sent", "sent_kind", "sending",
+                 "beat_late_max", "cause")
 
     def __init__(self, ws: Any, profile_scope: str = "") -> None:
         self.ws = ws
@@ -44,15 +62,25 @@ class _Connection:
         # via ServedUI.serving_profile_scope); "" when no generation was applied. Live chat
         # admission compares a frame's claim against it (#3294).
         self.profile_scope = profile_scope
+        self.serial, self.opened = next(_SERIALS), time.monotonic()
+        self.sent: float | None = None
+        self.sent_kind = ""
+        self.sending: float | None = None
+        self.beat_late_max = 0.0
+        self.cause = ""
 
     async def _write(self) -> None:
         while True:
             data, msg_type = await self.outbox.get()
+            self.sending = time.monotonic()
             try:
                 await self.ws.send_text(data)
             except Exception as exc:
+                self.sending = None
                 _retire(self, msg_type, exc)
                 return
+            self.sent, self.sending = time.monotonic(), None
+            self.sent_kind = "heartbeat" if msg_type == "heartbeat" else "other"
 
 
 _ws_clients: list[_Connection] = []
@@ -162,13 +190,23 @@ def has_ws_clients() -> bool:
         return bool(_ws_clients)
 
 
-async def close_all_ws(*, code: int = 1012, reason: str = "Server restarting") -> None:
-    """Close every connected browser websocket best-effort."""
+def note_loop_lateness(late_sec: float) -> None:
+    """On the loop, at every heartbeat (``server_runtime.ws_heartbeat_loop``): each open connection keeps the
+    largest ASGI loop lateness it lived through, so a gap survives until its disconnect line reports it."""
     with _ws_lock:
-        clients = [connection.ws for connection in _ws_clients]
-    for ws in clients:
+        connections = list(_ws_clients)
+    for connection in connections:
+        connection.beat_late_max = max(connection.beat_late_max, late_sec)
+
+
+async def close_all_ws(*, code: int = 1012, reason: str = "Server restarting") -> None:
+    """Close every connected browser websocket best-effort; each disconnect line names the server's close."""
+    with _ws_lock:
+        connections = list(_ws_clients)
+    for connection in connections:
+        connection.cause = f"server_close:{code}"
         try:
-            await ws.close(code=code, reason=reason)
+            await connection.ws.close(code=code, reason=reason)
         except Exception:
             pass
 
@@ -206,8 +244,11 @@ def _retire(connection: _Connection, msg_type: str, exc: BaseException) -> None:
 
     The ``broadcast_partial_failure`` row keeps its shape (one dead client per failed writer);
     it used to be appended synchronously inside the broadcast, a file lock and a write on the
-    event loop. The default executor takes it now; a full executor only delays the row."""
-    log.info("WebSocket send failed for msg type=%s; dropping client (%s)", msg_type, type(exc).__name__)
+    event loop. The default executor takes it now; a full executor only delays the row. The
+    connection's disconnect line, written when its receive loop ends, names the write error."""
+    connection.cause = f"write_error:{type(exc).__name__[:64]}"
+    log.info("WebSocket send failed for msg type=%s; dropping client %d (%s)", msg_type, connection.serial,
+             type(exc).__name__)
     with _ws_lock:
         total_clients = len(_ws_clients)
         if connection in _ws_clients:
@@ -490,6 +531,40 @@ async def _accept_chat_after(websocket: WebSocket, previous: asyncio.Task | None
             log.debug("WebSocket closed before its chat failure notice", exc_info=True)
 
 
+def watchdog_reason_fields(reason: Any) -> list[str]:
+    """The fields the browser's watchdog puts in its close reason (``silent_ms=<n> tick_gap_ms=<n> hidden=<0|1>``),
+    parsed strictly: only those keys, each once, with a bounded integer (``hidden``: 0 or 1). Anything else in the
+    reason is dropped, never echoed; the reason itself is at most 123 bytes (RFC 6455)."""
+    fields: dict[str, str] = {}
+    for token in str(reason or "").split():
+        key, sep, value = token.partition("=")
+        pattern = _WATCHDOG_REASON_FIELDS.get(key)
+        if sep and pattern is not None and key not in fields and pattern.fullmatch(value):
+            fields[key] = value
+    return [f"{key}={fields[key]}" for key in _WATCHDOG_REASON_FIELDS if key in fields]
+
+
+def _close_facts(connection: _Connection, code: int | None, reason: Any) -> str:
+    """One disconnect's facts, in a bounded line: the ASGI close code as received (no code at all is ``unknown``;
+    1005 and 1006 stay what they are, never read as an initiator), the watchdog's own fields when the code is
+    ours, and what the connection kept: age, last completed send and its kind, the age of a send still awaited,
+    the outbox depth, the largest loop lateness it lived through (a beat overdue right now included) and a cause
+    only the server knows."""
+    now = time.monotonic()
+    facts = [f"conn={connection.serial}", f"code={'unknown' if code is None else code}"]
+    if code == WATCHDOG_CLOSE_CODE:
+        facts += watchdog_reason_fields(reason)
+    facts += [f"age={now - connection.opened:.1f}s",
+              f"last_send={connection.sent_kind}:{now - connection.sent:.1f}s" if connection.sent is not None
+              else "last_send=none",
+              f"in_flight={now - connection.sending:.1f}s" if connection.sending is not None else "in_flight=none",
+              f"outbox={connection.outbox.qsize()}",
+              f"beat_late_max={max(connection.beat_late_max, ASGI_BEAT.overdue(now)):.1f}s"]
+    if connection.cause:
+        facts.append(f"cause={connection.cause}")
+    return " ".join(facts)
+
+
 async def ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     # This connection's data-profile scope is the serving generation's ONE scope, frozen at
@@ -502,11 +577,13 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     connection = _register(websocket, profile_scope)
     with _ws_lock:
         total = len(_ws_clients)
-    log.info("WebSocket client connected (total: %d)", total)
+    log.info("WebSocket client connected (total: %d) conn=%d", total, connection.serial)
     # Tail of this socket's chat acceptances: each waits for the one before it,
     # so its chat frames settle in receive order while the loop keeps receiving.
     accepting: asyncio.Task | None = None
     controls: set[asyncio.Task] = set()
+    close_code: int | None = None  # the ASGI disconnect's code; None: the loop ended without one
+    close_reason = ""
     try:
         while True:
             data = await websocket.receive_text()
@@ -646,13 +723,14 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                         bridge.ui_send(payload, **send_kwargs)
                 except Exception:
                     await websocket.send_text(_initialization_notice(str(msg.get("client_message_id") or ""), thread_id))
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as exc:
+        close_code, close_reason = (exc.code if isinstance(exc.code, int) else None), exc.reason
     except Exception as exc:
         log.warning("WebSocket error: %s", exc)
     finally:
         total = _unregister(connection)
-        log.info("WebSocket client disconnected (total: %d)", total)
+        log.info("WebSocket client disconnected (total: %d) %s", total,
+                 _close_facts(connection, close_code, close_reason))
         if accepting is not None:
             # Received chat frames keep custody through disconnect or cancellation:
             # the socket task returns only after each settled row → queue → echo.
@@ -662,11 +740,14 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
 
 __all__ = [
+    "WATCHDOG_CLOSE_CODE",
     "broadcast_ws",
     "broadcast_ws_sync",
     "close_all_ws",
     "has_ws_clients",
+    "note_loop_lateness",
     "notify_extension_health_changed",
     "set_event_loop",
+    "watchdog_reason_fields",
     "ws_endpoint",
 ]

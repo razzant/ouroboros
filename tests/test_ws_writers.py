@@ -6,14 +6,24 @@ its diagnostic row synchronously on the loop. Now a frame with no open socket is
 unencoded and wakes nothing; with sockets open it is encoded once, a burst reaches the loop in
 one flush, and each socket's single writer sends the identical bytes in order. E3: the frames
 the producer pushes are identical with 0 and 2 clients — only the encode and the sends differ.
+
+Each socket's one disconnect line says what is known about why it closed: the ASGI close code as
+received (none is ``unknown``), the browser watchdog's own allowlisted reason fields and nothing else
+of a reason, and what the connection kept (last send and kind, a send still awaited, outbox depth,
+the largest loop lateness it lived through, a write error or the server's own close).
 """
 from __future__ import annotations
 
 import asyncio
+import pathlib
+import re
 import threading
 import time
 
+import logging
+
 import pytest
+from starlette.websockets import WebSocketDisconnect
 
 from ouroboros.gateway import ws
 
@@ -133,3 +143,136 @@ def test_an_async_broadcast_on_the_loop_keeps_the_order_of_frames_queued_before_
     _until(lambda: len(socket.sent) == 2)
     assert [ws.json.loads(text)["type"] for text in socket.sent] == ["first", "second"]
     _on(server_loop, ws._unregister, connection)
+
+
+class _EndpointSocket(_Socket):
+    """A socket for ``ws_endpoint``: its receive loop ends the way ``ending`` says once ``end`` is set."""
+
+    app = None
+
+    def __init__(self, ending: BaseException, fail: bool = False) -> None:
+        super().__init__(fail)
+        self.ending, self.end, self.closed = ending, asyncio.Event(), []
+
+    async def accept(self):
+        return None
+
+    async def receive_text(self):
+        await self.end.wait()
+        raise self.ending
+
+    async def close(self, code=1000, reason=""):
+        self.closed.append(code)
+
+
+def _disconnect_lines(caplog, count: int = 1) -> list[str]:
+    def lines():
+        return [record.getMessage() for record in caplog.records
+                if record.getMessage().startswith("WebSocket client disconnected")]
+    _until(lambda: len(lines()) >= count)
+    return lines()
+
+
+def _serve(socket, during=None) -> None:
+    """Run ``ws_endpoint`` for ``socket`` on a fresh loop; ``during(connection)`` runs while it is open."""
+    async def main():
+        task = asyncio.create_task(ws.ws_endpoint(socket))
+        while not ws._ws_clients:
+            await asyncio.sleep(0)
+        if during is not None:
+            await during(ws._ws_clients[0])
+        socket.end.set()
+        await task
+
+    asyncio.run(main())
+
+
+@pytest.fixture
+def isolated_registry(monkeypatch, caplog):
+    monkeypatch.setattr(ws, "_ws_clients", [])
+    monkeypatch.setattr(ws, "_pending", ws.collections.deque())
+    monkeypatch.setattr(ws, "_flush_scheduled", False)
+    caplog.set_level(logging.INFO, logger=ws.log.name)
+
+
+def test_a_watchdog_close_logs_its_allowlisted_fields_and_drops_everything_else(isolated_registry, caplog):
+    reason = "silent_ms=46012 tick_gap_ms=93004 hidden=1 note=owner-words silent_ms=1 tick_gap_ms=99999999999 x"
+    _serve(_EndpointSocket(WebSocketDisconnect(ws.WATCHDOG_CLOSE_CODE, reason)))
+    [line] = _disconnect_lines(caplog)
+    assert " code=4408 silent_ms=46012 tick_gap_ms=93004 hidden=1 age=" in line
+    for dropped in ("note", "owner-words", "99999999999", "silent_ms=1 "):
+        assert dropped not in line, line
+    assert "last_send=none in_flight=none outbox=0 beat_late_max=0.0s" in line
+
+
+@pytest.mark.parametrize(("ending", "expected"), [
+    (RuntimeError("receive failed"), " code=unknown "),
+    (WebSocketDisconnect(1006, "silent_ms=5 hidden=1"), " code=1006 "),
+    (WebSocketDisconnect(1005), " code=1005 "),
+])
+def test_a_disconnect_without_our_code_logs_its_code_or_unknown_and_never_a_reason(isolated_registry, caplog,
+                                                                                    ending, expected):
+    _serve(_EndpointSocket(ending))
+    [line] = _disconnect_lines(caplog)
+    assert expected in line and "silent_ms" not in line and "hidden" not in line, line
+
+
+def test_the_line_carries_what_the_connection_kept(isolated_registry, caplog):
+    release = asyncio.Event()
+
+    class _Held(_EndpointSocket):
+        async def send_text(self, data):
+            if '"type": "held"' in data:
+                await release.wait()
+            self.sent.append(data)
+
+    socket = _Held(WebSocketDisconnect(1001))
+
+    async def during(connection):
+        await ws.broadcast_ws({"type": "heartbeat"})
+        while connection.sent is None:
+            await asyncio.sleep(0)
+        for kind in ("held", "queued", "queued"):
+            await ws.broadcast_ws({"type": kind})
+        ws.note_loop_lateness(2.5)
+        ws.note_loop_lateness(0.2)
+        while connection.sending is None:
+            await asyncio.sleep(0)
+
+    try:
+        _serve(socket, during)
+    finally:
+        release.set()
+    [line] = _disconnect_lines(caplog)
+    assert " code=1001 " in line and " last_send=heartbeat:" in line, line
+    assert " in_flight=0." in line and " outbox=2 " in line and " beat_late_max=2.5s" in line, line
+
+
+def test_a_writer_failure_and_the_servers_own_close_are_named_in_the_line(isolated_registry, caplog, monkeypatch):
+    monkeypatch.setattr(ws, "_record_failure", lambda root, row: None)
+    failing = _EndpointSocket(WebSocketDisconnect(1006), fail=True)
+
+    async def broken(connection):
+        await ws.broadcast_ws({"type": "log"})
+        while ws._ws_clients:  # the failed writer retired it
+            await asyncio.sleep(0)
+
+    _serve(failing, broken)
+    restarting = _EndpointSocket(WebSocketDisconnect(1012, "Server restarting"))
+
+    async def restart(connection):
+        await ws.close_all_ws()
+
+    _serve(restarting, restart)
+    first, second = _disconnect_lines(caplog, 2)
+    assert " code=1006 " in first and first.endswith(" cause=write_error:RuntimeError"), first
+    assert restarting.closed == [1012]
+    assert " code=1012 " in second and second.endswith(" cause=server_close:1012"), second
+
+
+def test_the_browser_watchdog_closes_with_the_code_and_fields_this_module_parses():
+    """Cross-language twins: ``web/modules/ws.js`` sends what ``watchdog_reason_fields`` keeps."""
+    source = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "ws.js").read_text(encoding="utf-8")
+    assert re.search(r"export const WATCHDOG_CLOSE_CODE = (\d+);", source).group(1) == str(ws.WATCHDOG_CLOSE_CODE)
+    builder = re.search(r"export function watchdogCloseReason\(.*?\n}\n", source, re.S).group(0)
+    assert re.findall(r"(\w+)=\$\{", builder) == list(ws._WATCHDOG_REASON_FIELDS)
