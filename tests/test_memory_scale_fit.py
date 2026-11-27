@@ -109,3 +109,27 @@ def test_the_mature_fixture_is_refused_typed_before_any_socket_on_every_route(tm
                                        nano_base=None if facts is None else ('list_available_tools', 'enable_tools'))
     if facts is not None and facts.basis == 'estimator':
         assert not captured and raised.value.memory_measured is False
+
+
+def test_the_rich_mature_fixture_brings_its_running_works_and_servers_to_a_nano_start(tmp_path, monkeypatch):
+    """``install(shape='rich')`` with ``mcp_registry`` is the mature install with what a real one also holds: 39
+    running works through the roster producers and twelve MCP servers with long instructions. Through the ordinary
+    build every work and every server reaches a Nano request on a window that holds them; ``mature`` keeps neither."""
+    import json
+
+    from ouroboros import context
+    from tests import _live_works_fixture as works
+
+    monkeypatch.setattr(cf, 'main_output_reserve_tokens', lambda **_kw: 16_384)
+    registry, guides = scale.mcp_registry(tmp_path / 'mcp', monkeypatch)
+    ids = [f'w{n:02d}{kind[:3]}' for n, kind in enumerate(works.KINDS)]
+    for shape, carried in (('rich', True), ('mature', False)):
+        env, memory = scale.env_on(scale.install(tmp_path / shape, shape))
+        plan = context.build_context_fit_plan(env, memory, {'id': 'rich-start', 'type': 'task', 'chat_id': 1,
+                                                            'text': 'hi', '_is_direct_chat': True},
+                                              preferred_mode='nano', tool_schemas=scale.tools(),
+                                              route_resolver=scale.route_resolver(2_000_000, 'provider', None),
+                                              tool_registry=registry)
+        flat = json.dumps(plan.messages_for('nano'), ensure_ascii=False)
+        assert [task_id for task_id in ids if task_id in flat] == (ids if carried else [])
+        assert all(f'mcp_{server}' in flat for server in guides)

@@ -46,11 +46,11 @@ def drive(tmp_path, monkeypatch):
     return scale.install(tmp_path / "drive")
 
 
-def build(drive, route_resolver, *, text="Continue in this room.", mode="nano", ctx=None, task=None):
+def build(drive, route_resolver, *, text="Continue in this room.", mode="nano", ctx=None, task=None, tool_registry=None):
     env, memory = scale.env_on(drive)
     task = task or {"id": "start", "type": "task", "chat_id": 1, "text": text, "_is_direct_chat": True}
     return context.build_context_fit_plan(env, memory, task, preferred_mode=mode, ctx=ctx, tool_schemas=scale.tools(),
-                                          route_resolver=route_resolver)
+                                          route_resolver=route_resolver, tool_registry=tool_registry)
 
 
 def capture_spy(monkeypatch, *, fail=False, before=None):
@@ -137,7 +137,9 @@ REVERSED = ('"' * 400_000, "a" * 400_100)  # the raw-shorter connections form is
 @pytest.mark.parametrize("mode", ["max", "low", "nano"])
 @pytest.mark.parametrize("row", [pytest.param(row, id=row[0]) for row in _distinct_routes()]
                          + [pytest.param(("witness", "gemini_live", "witness"), id="provider-witness-under-1"),
-                            pytest.param(("reversed", "synthetic", "reversed"), id="reversed-connections")])
+                            pytest.param(("reversed", "synthetic", "reversed"), id="reversed-connections"),
+                            pytest.param(("mcp", "synthetic", "mcp"), id="twelve-mcp-servers"),
+                            pytest.param(("keyless", "synthetic", "keyless"), id="key-less-text-question")])
 @pytest.mark.parametrize("shape", ["fresh", "mature"])
 def test_the_bound_never_exceeds_the_fitted_minimum(tmp_path, monkeypatch, shape, row, mode):
     """The identity ``bound <= fitted minimum`` on each route's own basis, working reserve and density: the bound's
@@ -145,8 +147,11 @@ def test_the_bound_never_exceeds_the_fitted_minimum(tmp_path, monkeypatch, shape
     alone fills (memory rendered beside it, or first the work room that core wants); and at the window that holds that
     minimum with its reserve the start with the bound enabled gets a plan. Rows: the shipped call routes' distinct
     cases and a hard 85k text route; a provider route with a fresh witness under 1.0 (the bound's density is no higher
-    than the fit's); and a connections pair whose raw-shorter form is the escape-heavier one."""
+    than the fit's); a connections pair whose raw-shorter form is the escape-heavier one; the owner-shaped twelve MCP
+    servers with long instructions (every map carries them); and a text route's
+    question with no key (read without fetching, decided on the fit's own read)."""
     label, provider, facts = row
+    registry, keyless = None, facts == "keyless"
     monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 16_384)
     evidence_root = tmp_path / "evidence"
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: evidence_root)
@@ -163,13 +168,20 @@ def test_the_bound_never_exceeds_the_fitted_minimum(tmp_path, monkeypatch, shape
     elif facts == "reversed":
         facts = None
         monkeypatch.setattr(context, "_connections", lambda *_a, **_kw: REVERSED)
+    elif facts in ("mcp", "keyless"):
+        facts = None
+        if not keyless:
+            registry = scale.mcp_registry(tmp_path / "mcp", monkeypatch)[0]
+        monkeypatch.setattr(fit, "_route_key", lambda _task: None)
     drive = scale.installed(tmp_path, shape)
 
     def outcome(window, *, bounded):
         with monkeypatch.context() as patch:
             if not bounded:
                 patch.setattr(bound, "refuse_before_capture", lambda *_a, **_kw: None)
-            return build(drive, route_at(provider, facts, window), mode=mode)
+            route = route_at(provider, facts, window)
+            return build(drive, fit.RouteQuestion({"id": "start"}, route) if keyless else route, mode=mode,
+                         tool_registry=registry)
 
     def refusal(window, *, bounded=False):
         with pytest.raises(fit.MinimumViewUnfit) as raised:
@@ -449,3 +461,113 @@ def test_a_history_import_under_an_older_long_title_never_raises_the_bound(tmp_p
         patch.setattr(context, "_capture_memory_view", lambda *_a, **_kw: pytest.fail("the memory capture ran"))
         tight = refusal(marks - 1, bounded=True)
     assert not tight.memory_measured and dict(tight.parts)["marks"] == marks
+
+
+def _keyless(monkeypatch, route):
+    """A text start's route question with no key (a direct provider, OpenRouter, a local server): no engine question."""
+    monkeypatch.setattr(fit, "_route_key", lambda _task: None)
+    question = fit.RouteQuestion({"id": "start", "chat_id": 1}, route)
+    assert question.key is None and question.peek() is None
+    return question
+
+
+def test_a_key_less_text_route_is_refused_before_the_capture_on_the_fits_own_read(drive, monkeypatch):
+    """DISPOSITIONS F06: the route's cached facts are read without fetching; a refusal stands on the second answer,
+    the fit's own read (``route_start_read``), and carries the serving program the fit's refusal would name (F08)."""
+    calls = []
+    plain = resolver(25_000, calls=calls)
+
+    def ollama(task, *, allow_fetch):
+        route, evidence = plain(task, allow_fetch=allow_fetch)
+        return {**route, "_resolved_target": {"ollama_record": {"protocol": "ollama"}}}, evidence
+    capture_spy(monkeypatch, fail=True)
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build(drive, _keyless(monkeypatch, ollama))
+    assert raised.value.memory_measured is False and raised.value.window_tokens == 25_000
+    assert calls == [(False, False, False), (True, True, False)]  # a cached read, then the fit's own read
+    assert raised.value.server_program == "ollama"
+
+
+def test_a_key_less_route_whose_own_read_holds_the_frame_is_not_refused_early(drive, monkeypatch):
+    """The other direction: a cached window that would refuse only triggers the question; the fit's own read names a
+    window the frame fits, so the start reaches the capture and the ordinary fit on that read."""
+    calls = []
+    seen = capture_spy(monkeypatch)
+    plan = build(drive, _keyless(monkeypatch, resolver(25_000, 1_000_000, calls=calls)))
+    assert seen and plan.window_tokens == 1_000_000
+    assert calls[0] == (False, False, False) and all(call == (True, True, False) for call in calls[1:])
+    unbounded = []
+    with monkeypatch.context() as patch:
+        patch.setattr(bound, "refuse_before_capture", lambda *_a, **_kw: None)
+        build(drive, _keyless(monkeypatch, resolver(None, calls=unbounded)))
+    calls.clear()
+    seen.clear()
+    build(drive, _keyless(monkeypatch, resolver(None, calls=calls)))  # no cached window: one cached read, nothing else
+    assert seen and calls == [(False, False, False), *unbounded]
+
+
+def test_the_early_refusal_names_the_window_in_effect_with_its_own_source_and_date(drive, monkeypatch):
+    """Both directions on the early bound's raise site (no capture runs): the refusal carries the projection of the
+    window it refused on; a call whose catalogue declares that number credits the catalogue (every shipped engine),
+    one whose catalogue declares none names the window's own source and date, never "not recorded"."""
+    from tests.test_context_minimum_view_unfit import _refused_call_window_line
+    from ouroboros.contracts.realtime import RouteFacts
+
+    def dated(task, *, allow_fetch):
+        route, answer = resolver(25_000)(task, allow_fetch=allow_fetch)
+        answer.source, answer.ts = "refusal", "2026-11-25T10:02:00+00:00"
+        return route, answer
+    capture_spy(monkeypatch, fail=True)
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build(drive, dated)
+    unfit = raised.value
+    assert unfit.memory_measured is False and unfit.window["source"] == "refusal" and unfit.window["tokens"] == 25_000
+    custom = _refused_call_window_line(unfit, RouteFacts(None, None, 10_000, "estimator", "No published window", "2026-10-21"))
+    assert "source: refusal" in custom and "2026-11-25 10:02" in custom and "declares no window" in custom
+    assert "not recorded" not in custom and "No published window" not in custom
+    shipped = _refused_call_window_line(unfit, RouteFacts(25_000, None, 10_000, "estimator", "the engine's catalogue",
+                                                          "2026-11-26"))
+    assert "source: the engine's catalogue; observed: 2026-11-26." in shipped and "refusal" not in shipped
+
+
+def _two_sources(input_tokens=12_000, total_tokens=25_000):
+    """A route with an input limit from a size refusal and a total from my human's confirmation: Nano's reserve
+    (10,000 when Max is preferred) leaves the input limit binding, Max's (16,384) the total."""
+    from ouroboros.context_window import WindowLimit, WindowRecord
+
+    return WindowRecord("synthetic-route", input=WindowLimit(input_tokens, "input", "refusal", "2026-11-25T10:02:00+00:00",
+                                                             basis="provider_stated"),
+                        total=WindowLimit(total_tokens, "total", "owner_ack", "2026-11-21T09:00:00+00:00"), reserve=16_384)
+
+
+@pytest.mark.parametrize("site", ["early bound", "fit"])
+@pytest.mark.parametrize("sources", ["two", "one"])
+def test_a_refusal_names_the_window_record_of_the_mode_that_binds(drive, monkeypatch, site, sources):
+    """pr2rev1 G17, G18 on both raise sites: a start preferring Max is refused at Nano, so the window it names is
+    Nano's record (Nano's reserve), whose binding limit can be another source than Max's; Details say that source
+    in a person's words and whether its number is an input limit or a total. With one source (the other direction)
+    the credit is that source, a total."""
+    from tests.test_context_minimum_view_unfit import _refused_call_window_line
+    from ouroboros.contracts.realtime import RouteFacts
+
+    record = _two_sources() if sources == "two" else replace(_two_sources(), input=None)
+    for module in (fit, bound):
+        monkeypatch.setattr(module, "route_window", lambda *_a, **_kw: (16_384, 10_000, "estimator", True, record))
+    if site == "fit":
+        monkeypatch.setattr(bound, "refuse_before_capture", lambda *_a, **_kw: None)
+    else:
+        capture_spy(monkeypatch, fail=True)
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build(drive, resolver(25_000), mode="max")
+    unfit = raised.value
+    assert str(unfit).startswith("Core, resident tools and reserve cannot fit before memory" if site == "early bound"
+                                 else "Core, assignment, resident control tools") and unfit.response_reserve_tokens == 10_000
+    line = _refused_call_window_line(unfit, RouteFacts(None, None, 10_000, "estimator", "No published window", "2026-10-21"))
+    if sources == "two":
+        assert (unfit.window["source"], unfit.window["kind"], unfit.window["tokens"]) == ("refusal", "input", 12_000)
+        assert ("an input limit of 12,000 plus the reserve; source: refusal (provider stated); observed: 2026-11-25 10:02"
+                in line), line
+    else:
+        assert (unfit.window["source"], unfit.window["kind"]) == ("owner_ack", "total")
+        assert "a total; source: owner confirmation; observed: 2026-11-21 09:00" in line, line
+    assert "owner_ack" not in line and "user_setting" not in line

@@ -23,7 +23,7 @@ def test_source_changes_on_numbered_refusal_and_later_acceptance(tmp_path, monke
     record_observation(tmp_path, "route", refused=128000)
     assert "128,000 total: refusal" in window_fact(p, 65536)
     record_observation(tmp_path, "route", accepted=210000)
-    assert "210,000 input: accepted" in window_fact(p, 65536)
+    assert "210,000 input: an accepted request of that size" in window_fact(p, 65536)
     other = replace(p, route_fp="other", window_record=resolve_window(replace(evidence, route_fp="other"), 65536))
     assert "metadata" in window_fact(other, 65536) and "accepted" not in window_fact(other, 65536)
 

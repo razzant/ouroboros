@@ -94,10 +94,10 @@ The desktop packages already contain an optional CLI installer. On macOS, after 
 
 ### Reinstall, move or remove
 
-`~/Ouroboros` (data, memory and the code Ouroboros runs) is the installation; the app is a replaceable host. To replace or move the app, quit Ouroboros, put the new copy in place and open it: your data and code stay, and skill packages and sign-in startup follow the new copy at its next start. A new app changes only the bundled Python, SQLite and Node, never the code in `~/Ouroboros/repo`; in-app Update changes the code. **Settings → This computer → About** and the Updates page show both versions, and Ouroboros sees them in its host facts. Quit also stops this installation's own Claudexor engine, ending any run on it; Restart and Update keep it running unless the code they start pins a different engine that is not older, which then replaces it and ends the runs on it.
+`~/Ouroboros` (data, memory and the code Ouroboros runs) is the installation; the app is a replaceable host. To replace or move the app, quit Ouroboros, put the new copy in place and open it: your data and code stay, skill packages follow the new copy, and sign-in startup follows it once the old copy is no longer at its previous path (if you keep both copies on disk, re-enable sign-in startup in Settings in the copy you want). A new app changes only the bundled Python, SQLite and Node, never the code in `~/Ouroboros/repo`; in-app Update changes the code. **Settings → This computer → About** and the Updates page show both versions, and Ouroboros sees them in its host facts. Quit also stops this installation's own Claudexor engine, ending any run on it; Restart and Update keep it running unless the code they start pins a different engine that is not older, which then replaces it and ends the runs on it.
 
 - **macOS:** drag the new `Ouroboros.app` onto Applications and choose Replace, then open it from Applications in Finder: Spotlight can take a while to list a new copy while it indexes. Do not run Ouroboros from the disk image.
-- **Windows:** keep the extracted folder in one permanent place and run it from there, never from inside the ZIP. To update, quit, remove the old folder and extract the new ZIP to the same place.
+- **Windows:** keep a portable ZIP folder in one permanent place and run it from there, never from inside the ZIP; to update, quit and replace it with the new extracted folder. With the per-user installer (on releases that ship `.exe`), quit Ouroboros and run the new installer to update, or remove it from Installed Apps (your `~/Ouroboros` data stays). Moving from a portable ZIP to the installer keeps your `~/Ouroboros` data; if you enabled sign-in startup or installed the optional CLI from the ZIP copy, re-enable sign-in startup in Settings in the installed copy and rerun `bin\install-ouroboros-cli.cmd --force` from it.
 - **AppImage:** keep one file at a fixed path and replace it under the same name. **tar.gz:** keep one fixed folder. **deb/rpm:** update with your package manager. **Homebrew:** `brew upgrade` or `brew reinstall` (above).
 - After moving the app, run Install CLI again: the `ouroboros` command points at one copy.
 - Before removing the app, turn off "Start Ouroboros on the host computer when you sign in" and delete the `ouroboros` command (`~/.local/bin/ouroboros`, or `%LOCALAPPDATA%\Ouroboros\bin\ouroboros.cmd` on Windows).
@@ -484,6 +484,8 @@ powershell -ExecutionPolicy Bypass -File build_windows.ps1
 ```
 
 Output: `dist\Ouroboros-<VERSION>-windows-x64.zip`, containing `Ouroboros\bin\install-ouroboros-cli.cmd` and a pinned MinGit that runs only where the computer has no working Git. Its source archive (about 380 MB) is written separately: `python scripts/download_git_standalone.py --sources dist --layout mingit`.
+
+For an unsigned local per-user installer (`Ouroboros-Setup-<VERSION>-windows-x64.exe`), stage the pinned Inno Setup compiler (`packaging/windows/inno_setup_pin.json`) with `scripts/download_inno_setup.ps1 -Destination <inno-dir>` and run `scripts/pack_windows_setup.ps1 -PayloadRoot <extracted>\Ouroboros -OutputDir <empty-dir> -Compiler <inno-dir>\ISCC.exe` (`-Compiler` is optional if the pinned `ISCC.exe` is already installed or on `PATH`).
 
 
 ## Architecture and Runtime Data

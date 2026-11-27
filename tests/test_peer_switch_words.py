@@ -3,6 +3,8 @@
 its other words wake nothing while Off, so its place is heard like any other place."""
 from __future__ import annotations
 
+import time
+
 from tests._peer_letters_shared import introduce
 
 
@@ -116,6 +118,7 @@ def test_a_place_or_link_write_moves_the_state_publication_that_carries_these_wo
     monkeypatch.setattr(utils, "_RACY_NS", 0)  # no clock tick to wait out: a file written before a stamp proves itself
 
     def settled() -> tuple:
+        time.sleep(0.1)  # a stamp is provable only once the wall clock passed the write: Windows' ticks last ~16 ms
         stamps = _file_stamps(files)
         assert stamps == _file_stamps(files), "an unchanged store keeps its key"
         return stamps

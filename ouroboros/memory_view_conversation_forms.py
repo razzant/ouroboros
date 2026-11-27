@@ -13,6 +13,14 @@ AUDIENCE = "Whether any of it belongs where I answer is my judgment of who reads
 _INTRO = ("One group per conversation, rooms oldest first: a recorded person or my reply makes a conversation; "
           "elsewhere arrivals stand as event facts. Whole forms keep notes and words; shorter forms below name their "
           "telling, host facts or recorded emergency. Tasks stand as lines.")
+# Said once for the block's address lines of my human's words (``owner_pointer``), each message still one line.
+OWNER_ADDRESSES = "A message of my human's shown only by its time, size and row address reads that way, its address as both endpoints."
+
+
+def owner_pointer(word: Mapping[str, Any]) -> str:
+    """One message of my human's in another room by its address: ``_row_pointer``'s date, size and address, without
+    the reading instruction each line repeated (``OWNER_ADDRESSES`` states it once for the block)."""
+    return f"{word['head']} (reaction)" if word.get("kind") == "place_fact" else f"{word['head']} (words, {word['chars']} chars)"
 
 # --- the floor's elements and the rendering --------------------------------------------------------
 
@@ -263,7 +271,7 @@ def floor_steps(groups: Iterable[Mapping[str, Any]], *, index=None) -> Dict[str,
                      for word, kind in others]
                     + [("bare:" + w["id"], _row_opening(w, "words"), _row_pointer(w, "words"))
                        for w, kind in others if kind == "untold"],
-            "F6g": lines, "F7": [(word["id"], word["line"], _row_pointer(word, "words")) for word, _group in owner],
+            "F6g": lines, "F7": [(word["id"], word["line"], owner_pointer(word)) for word, _group in owner],
             "F6a": counts
                     + ([("unread", "", "")] if any(kind == "unread" for _w, kind in others) else [])}
 
@@ -308,7 +316,7 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
     gone = gone | bare
     def held():
         return [line for room in group["rooms"] for word in data["rooms"][room["room_id"]]["owner"]
-                for line in emit([_row_pointer(word, "words") if word["id"] in owners_gone else word["line"]],
+                for line in emit([owner_pointer(word) if word["id"] in owners_gone else word["line"]],
                     "conversation_row", [word], "address" if word["id"] in owners_gone else "whole", room["room_id"])]
     if as_line:
         lines = emit([identity_line(group)], "conversation_identity", [group], "facts")
@@ -363,7 +371,7 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
             lines += emit([_unread_line(unread)], "conversation_unread", unread, "host_fact", room["room_id"])
         for word in room["words"]:
             if word["id"] in owners_gone:
-                lines += emit([_row_pointer(word, "words")], "conversation_row", [word], "address", room["room_id"])
+                lines += emit([owner_pointer(word)], "conversation_row", [word], "address", room["room_id"])
             elif word.get("again"):
                 lines += emit([word["line"]], "conversation_row", [word], "delivered_again", room["room_id"])
             elif word["id"] not in gone:
@@ -392,7 +400,7 @@ def counted_unread_lines(group, data, part=None):
 
 
 def _counted_text(groups, owners, aggregate_unread, *, index=None, part=None):
-    from ouroboros.memory_view import _rooms_line, _row_pointer
+    from ouroboros.memory_view import _rooms_line
     index = index if index is not None else {g["key"]: _sources(g) for g in groups}
     sources = {rid: data for g in groups for rid, data in index[g["key"]]["rooms"].items()}
     rooms = [room for group in groups for room in group["rooms"]]
@@ -420,7 +428,7 @@ def _counted_text(groups, owners, aggregate_unread, *, index=None, part=None):
             lines += counted_unread_lines(group, index[group["key"]], part=part)
     for room in rooms:
         for word in sources[room["room_id"]]["owner"]:
-            line = _row_pointer(word, "words") if word["id"] in owners else word["line"]
+            line = owner_pointer(word) if word["id"] in owners else word["line"]
             lines += part([line], "conversation_row", [word], "address" if word["id"] in owners else "whole", room["room_id"]) if part else [line]
     return "\n".join(lines)
 
@@ -446,8 +454,10 @@ def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
     counted = [group for group in groups if group["key"] in counts]
     states = [(group, local_key(group, choices, index[group["key"]])) for group in groups]
     reader = any(_has_compact_rows(group, index[group["key"]], state, "unread" in counts) for group, state in states)
-    parts = [piece(("conversations", "head", reader), lambda: "\n".join([
-        "## Other conversations", "", f"{AUTHORITY} {AUDIENCE}", _INTRO + (" " + row_reader() if reader else "")]))]
+    addressed = any(word["id"] in owners for group in groups for word in index[group["key"]]["owners"])
+    parts = [piece(("conversations", "head", reader, addressed), lambda: "\n".join([
+        "## Other conversations", "", f"{AUTHORITY} {AUDIENCE}", _INTRO + (" " + row_reader() if reader or addressed else "")
+        + (" " + OWNER_ADDRESSES if addressed else "")]))]
     if counted:
         ids = {w["id"] for g in counted for w in index[g["key"]]["owners"]}
         parts.append(piece(("conversations", "counted", tuple(g["key"] for g in counted), frozenset(ids & owners),

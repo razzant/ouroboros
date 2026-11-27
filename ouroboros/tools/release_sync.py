@@ -15,7 +15,9 @@ pack cut).
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Tuple
 
@@ -95,6 +97,9 @@ _UV_LOCK_ROOT_RE = re.compile(
 # them beside VERSION normalization gives README, the public install page, and
 # the proof builder one deterministic naming source instead of three strings
 # that can drift independently.
+WINDOWS_SETUP_PROOF_ID = "windows-setup-x64"
+WINDOWS_ZIP_PROOF_ID = "windows-x64"
+
 RELEASE_ASSET_TEMPLATES = {
     "macos-arm64": "Ouroboros-{version}.dmg",
     "linux-x86_64": "Ouroboros-{version}-linux-x86_64.tar.gz",
@@ -102,7 +107,8 @@ RELEASE_ASSET_TEMPLATES = {
     "linux-deb-amd64": "ouroboros_{version}_amd64.deb",
     "linux-rpm-x86_64": "ouroboros-{version}-1.x86_64.rpm",
     "linux-rpm-red80-x86_64": "ouroboros-{version}-1.red80.x86_64.rpm",
-    "windows-x64": "Ouroboros-{version}-windows-x64.zip",
+    WINDOWS_SETUP_PROOF_ID: "Ouroboros-Setup-{version}-windows-x64.exe",
+    WINDOWS_ZIP_PROOF_ID: "Ouroboros-{version}-windows-x64.zip",
     "android-arm64": "Ouroboros-{version}-android-arm64.tar.gz",
     "android-apk": "Ouroboros-{version}-android.apk",
 }
@@ -114,13 +120,167 @@ DESKTOP_DOWNLOAD_IDS = tuple(
     proof_id for proof_id in RELEASE_ASSET_TEMPLATES
     if proof_id not in ANDROID_DOWNLOAD_IDS
 )
+_WINDOWS_ZIP_ONLY_DESKTOP_IDS = tuple(
+    proof_id for proof_id in DESKTOP_DOWNLOAD_IDS
+    if proof_id != WINDOWS_SETUP_PROOF_ID
+)
 _PUBLIC_REPOSITORY = "razzant/ouroboros"
+# Existing Windows packaging scripts in a checkout tell whether that build ships Setup (.exe)
+# beside the portable ZIP (.zip), without parsing build files or hardcoding version cutoffs.
+_WINDOWS_ZIP_BUILD_PATH = "build_windows.ps1"
+_WINDOWS_SETUP_BUILD_PATH = "scripts/pack_windows_setup.ps1"
 # The release one direct-download link names: a README reference or a projection-owned anchor.
 _DOWNLOAD_LINK_RELEASE_RE = re.compile(
     r'(?:^\[download-[a-z0-9_-]+\]:\s*|<a\b(?=[^>]*\bdata-release-download=")[^>]*\bhref=")'
     r'[^\s"]*/releases/download/v([^/\s"]+)/',
     re.MULTILINE | re.IGNORECASE,
 )
+_WINDOWS_MD_REF_RE = re.compile(
+    rf'^\[download-({WINDOWS_SETUP_PROOF_ID}|{WINDOWS_ZIP_PROOF_ID})\]:([^\r\n]*)',
+    re.MULTILINE,
+)
+_WINDOWS_HTML_ANCHOR_RE = re.compile(
+    rf'<a\b[^>]*\sdata-release-download="({WINDOWS_SETUP_PROOF_ID}|{WINDOWS_ZIP_PROOF_ID})"[^>]*>',
+    re.IGNORECASE,
+)
+_HREF_ATTR_RE = re.compile(r'\s+href="([^"]*)"', re.IGNORECASE)
+_HTML_WINDOWS_CAPTIONS = (
+    "Download for Windows (.exe)",
+    "Download for Windows (.zip)",
+    "Portable ZIP (.zip)",
+)
+_HTML_WINDOWS_HELP = {
+    False: (
+        "<p>Extract the ZIP to a permanent folder, open the <code>Ouroboros</code> folder, "
+        "and run <code>Ouroboros.exe</code>.</p>"
+    ),
+    True: (
+        "<p>Run the signed per-user installer (<code>.exe</code>) and open Ouroboros from "
+        "the Start menu, or extract the portable ZIP (<code>.zip</code>) to a permanent "
+        "folder and run <code>Ouroboros.exe</code>.</p>"
+    ),
+}
+
+
+def _html_windows_anchor_re(proof_id: str, btn_class: str, caption: str) -> str:
+    return (
+        rf'<a\s+data-release-download="{proof_id}"\s+class="btn {btn_class}"\s+href="[^"]*">'
+        + re.escape(caption)
+        + r'</a>'
+    )
+
+
+# Case-sensitive span restricted strictly to the canonical release-owned Windows buttons
+# and optional canonical help <p>. User-authored captions (including case-only variants),
+# extra attributes, custom card prose and images stay outside the replaceable span.
+_HTML_WINDOWS_SPAN_RE = re.compile(
+    r'(?:<div class="download-actions">\s*'
+    + _html_windows_anchor_re(WINDOWS_SETUP_PROOF_ID, "btn-primary", _HTML_WINDOWS_CAPTIONS[0])
+    + r'\s*'
+    + _html_windows_anchor_re(WINDOWS_ZIP_PROOF_ID, "btn-quiet", _HTML_WINDOWS_CAPTIONS[2])
+    + r'\s*</div>|'
+    + _html_windows_anchor_re(WINDOWS_ZIP_PROOF_ID, "btn-primary", _HTML_WINDOWS_CAPTIONS[1])
+    + r')(?:\r?\n[ \t]*(?:'
+    + re.escape(_HTML_WINDOWS_HELP[True])
+    + r'|'
+    + re.escape(_HTML_WINDOWS_HELP[False])
+    + r'))?'
+)
+_README_WINDOWS_BADGE_RE = re.compile(
+    r'(\[!\[Windows\]\(https://img\.shields\.io/badge/Windows-x64-blue\.svg\)\]\[download-windows-)(?:setup-)?(x64\])'
+)
+_README_WINDOWS_BULLET_LINE_RE = re.compile(r'^- \*\*Windows x64:\*\* [^\r\n]*', re.MULTILINE)
+_README_WINDOWS_LINKS = {
+    False: "[**Download for Windows (.zip)**][download-windows-x64]",
+    True: (
+        "[**Download for Windows (.exe)**][download-windows-setup-x64] "
+        "or the [portable ZIP][download-windows-x64]"
+    ),
+}
+_README_WINDOWS_LINKS_RE = re.compile(
+    r'(?<=^- \*\*Windows x64:\*\* )'
+    r'(?:' + re.escape(_README_WINDOWS_LINKS[True]) + r'|' + re.escape(_README_WINDOWS_LINKS[False]) + r')',
+    re.MULTILINE,
+)
+_README_WINDOWS_QUICKSTART = {
+    False: (
+        "1. Click [**Download for Windows (.zip)**][download-windows-x64].",
+        "2. Extract the ZIP to a permanent folder.",
+        "3. Open the extracted `Ouroboros` folder and run `Ouroboros.exe`.",
+    ),
+    True: (
+        "1. Click [**Download for Windows (.exe)**][download-windows-setup-x64] and run the "
+        "signed per-user installer (no administrator rights required), then open Ouroboros "
+        "from the Start menu.",
+        "2. Or use the [portable ZIP][download-windows-x64]: extract it to a permanent "
+        "folder, open the extracted `Ouroboros` folder, and run `Ouroboros.exe`.",
+    ),
+}
+_README_WINDOWS_QUICKSTART_RE = re.compile(
+    r'^### Windows quick start\r?\n\r?\n(?:'
+    + r'\r?\n'.join(re.escape(line) for line in _README_WINDOWS_QUICKSTART[True])
+    + r'|'
+    + r'\r?\n'.join(re.escape(line) for line in _README_WINDOWS_QUICKSTART[False])
+    + r')',
+    re.MULTILINE,
+)
+
+
+def desktop_download_ids(*, windows_installer: bool = True) -> Tuple[str, ...]:
+    """Desktop proof IDs for a release with or without the Windows setup installer."""
+    return DESKTOP_DOWNLOAD_IDS if windows_installer else _WINDOWS_ZIP_ONLY_DESKTOP_IDS
+
+
+def _windows_link_version(proof_id: str, url: str) -> str:
+    """Return the release version iff *url* matches ``release_asset_download_url`` for *proof_id*."""
+    match = re.search(r'/releases/download/v([^/\s"]+)/', url)
+    if not match:
+        return ""
+    cand = match.group(1)
+    if not is_release_version(cand) or is_development_marker(cand):
+        return ""
+    return cand if url == release_asset_download_url(proof_id, cand) else ""
+
+
+def _windows_projection_observations(
+    *texts: str, version: str = "",
+) -> Tuple[set[Tuple[bool, str]], bool]:
+    """Return ``(observations, had_invalid)`` of ``(has_setup, version)`` across *texts*."""
+    observations: set[Tuple[bool, str]] = set()
+    invalid = False
+    for raw in texts:
+        text = str(raw or "")
+        links = [
+            (m.group(1), m.group(2).strip())
+            for m in _WINDOWS_MD_REF_RE.finditer(text)
+        ] + [
+            (m.group(1).lower(), hrefs[0] if len(hrefs := _HREF_ATTR_RE.findall(m.group(0))) == 1 else "")
+            for m in _WINDOWS_HTML_ANCHOR_RE.finditer(text)
+        ]
+        if not links:
+            continue
+        versions = {_windows_link_version(pid, url) for pid, url in links}
+        has_zip = any(pid == WINDOWS_ZIP_PROOF_ID for pid, _ in links)
+        if "" in versions or not has_zip or len(versions) != 1:
+            invalid = True
+            continue
+        found = next(iter(versions))
+        if version and found != version:
+            continue
+        observations.add((any(pid == WINDOWS_SETUP_PROOF_ID for pid, _ in links), found))
+    return observations, invalid
+
+
+def download_links_include_windows_installer(*texts: str, version: str = "") -> Optional[bool]:
+    """Whether canonical Windows download projections in *texts* include ``windows-setup-x64``.
+
+    Returns ``None`` when no canonical Windows projection is present, any Windows link is
+    empty/malformed or points elsewhere, or texts disagree on installer presence or version.
+    """
+    observations, invalid = _windows_projection_observations(*texts, version=version)
+    if invalid or len(observations) != 1:
+        return None
+    return next(iter(observations))[0]
 
 
 def release_asset_name(proof_id: str, version: str) -> str:
@@ -148,11 +308,16 @@ class VersionCarrierSpan(NamedTuple):
 
     ``pattern`` must match EXACTLY ONCE in a well-formed copy of ``path``:
     zero matches is a malformed anchor, more than one is a duplicate anchor.
+    Optional spans may be absent on both sides of a minimal fixture without error.
     """
 
     carrier_id: str
     path: str
     pattern: "re.Pattern[str]"
+    optional: bool = False
+
+
+_HTML_WINDOWS_SPAN = VersionCarrierSpan("windows_actions", "", _HTML_WINDOWS_SPAN_RE)
 
 
 def _install_page_spans(tag: str, path: str) -> Tuple[VersionCarrierSpan, ...]:
@@ -162,10 +327,14 @@ def _install_page_spans(tag: str, path: str) -> Tuple[VersionCarrierSpan, ...]:
 
     ``macos-arm64`` appears twice by design (the platform button and the
     quick-start step); the pair disambiguates on the step's literal ``Click ``
-    prefix. A page restructure that breaks either anchor degrades the file to
-    the ordinary assisted path (malformed/duplicate anchor) — never a guess."""
+    prefix. ``windows-x64`` owns only the bounded Windows download action
+    button(s) and their canonical help paragraph (ZIP-only or primary setup +
+    secondary ZIP action pair) so updates cross that boundary cleanly without
+    touching custom card prose or images."""
     spans: List[VersionCarrierSpan] = []
     for proof_id in DESKTOP_DOWNLOAD_IDS:
+        if proof_id == WINDOWS_SETUP_PROOF_ID:
+            continue
         if proof_id == "macos-arm64":
             spans.append(VersionCarrierSpan(
                 f"{tag}_download_{proof_id}_button", path,
@@ -175,6 +344,8 @@ def _install_page_spans(tag: str, path: str) -> Tuple[VersionCarrierSpan, ...]:
                 f"{tag}_download_{proof_id}_step", path,
                 re.compile(r'(?<=Click )<a data-release-download="macos-arm64"[^>]*>'),
             ))
+        elif proof_id == WINDOWS_ZIP_PROOF_ID:
+            spans.append(VersionCarrierSpan(f"{tag}_download_{proof_id}", path, _HTML_WINDOWS_SPAN_RE))
         else:
             spans.append(VersionCarrierSpan(
                 f"{tag}_download_{proof_id}", path,
@@ -194,8 +365,9 @@ def _install_page_spans(tag: str, path: str) -> Tuple[VersionCarrierSpan, ...]:
 # set is cut from THIS tree's carrier inventory — everything
 # ``sync_release_metadata`` writes and ``version_carrier_desyncs`` checks: the
 # classic carriers, README's badge + Version History + direct-download
-# reference block, uv.lock's editable root package, and the release-projection
-# anchors of the two public install pages.
+# reference block (and Windows download choice/quick-start spans), uv.lock's
+# editable root package, and the release-projection anchors of the two public
+# install pages.
 VERSION_CARRIER_SPANS: Tuple[VersionCarrierSpan, ...] = (
     VersionCarrierSpan(
         "version_file", "VERSION",
@@ -231,6 +403,9 @@ VERSION_CARRIER_SPANS: Tuple[VersionCarrierSpan, ...] = (
         "readme_download_refs", "README.md",
         re.compile(r'(?:^\[download-[a-z0-9_-]+\]:[^\n]*(?:\n|\Z))+', re.MULTILINE),
     ),
+    VersionCarrierSpan("readme_windows_badge", "README.md", _README_WINDOWS_BADGE_RE, optional=True),
+    VersionCarrierSpan("readme_windows_links", "README.md", _README_WINDOWS_LINKS_RE, optional=True),
+    VersionCarrierSpan("readme_windows_quickstart", "README.md", _README_WINDOWS_QUICKSTART_RE, optional=True),
     VersionCarrierSpan("architecture_header", "docs/ARCHITECTURE.md", _ARCH_HEADER_RE),
     # uv.lock mirrors the editable root package version (ARCHITECTURE "Version
     # carriers"); the descriptor rides the same structural regex sync_version
@@ -247,7 +422,10 @@ CARRIER_SPAN_PATHS = frozenset(span.path for span in VERSION_CARRIER_SPANS)
 # Under a development marker these spans carry the last published release, not VERSION.
 PUBLISHED_RELEASE_SPANS = frozenset(
     span.carrier_id for span in VERSION_CARRIER_SPANS
-    if span.carrier_id in ("readme_history", "readme_download_refs") or "_download_" in span.carrier_id
+    if span.carrier_id in (
+        "readme_history", "readme_download_refs",
+        "readme_windows_badge", "readme_windows_links", "readme_windows_quickstart",
+    ) or "_download_" in span.carrier_id
 )
 
 
@@ -268,8 +446,17 @@ def locate_carrier_span(
     ``("malformed_anchor", None)`` for zero and ``("duplicate_anchor", None)``
     for several — the two degradation reasons the update engine surfaces.
     """
-    matches = span.pattern.finditer(str(text or ""))
+    text_str = str(text or "")
+    matches = span.pattern.finditer(text_str)
     first = next(matches, None)
+    if span.pattern is _HTML_WINDOWS_SPAN_RE:
+        anchors = [m.group(1).lower() for m in _WINDOWS_HTML_ANCHOR_RE.finditer(text_str)]
+        if first is None:
+            dup = any(anchors.count(p) > 1 for p in (WINDOWS_SETUP_PROOF_ID, WINDOWS_ZIP_PROOF_ID))
+            return ("duplicate_anchor" if dup else "malformed_anchor"), None
+        if next(matches, None) is not None or len(anchors) != len(_WINDOWS_HTML_ANCHOR_RE.findall(first.group(0))):
+            return "duplicate_anchor", None
+        return "ok", (first.start(), first.end())
     if first is None:
         return "malformed_anchor", None
     if next(matches, None) is not None:
@@ -291,9 +478,11 @@ def substitute_carrier_spans(
     replacements: List[Tuple[Tuple[int, int], str]] = []
     for span in spans:
         preferred_status, preferred_loc = locate_carrier_span(preferred_text, span)
+        status, loc = locate_carrier_span(text, span)
+        if span.optional and preferred_status == "malformed_anchor" and status == "malformed_anchor":
+            continue
         if preferred_status != "ok" or preferred_loc is None:
             return None, f"{preferred_status}:{span.carrier_id}:preferred_side"
-        status, loc = locate_carrier_span(text, span)
         if status != "ok" or loc is None:
             return None, f"{status}:{span.carrier_id}"
         replacements.append((loc, preferred_text[preferred_loc[0]:preferred_loc[1]]))
@@ -325,82 +514,180 @@ def carrier_only_change(before_text: str, after_text: str, path: str) -> bool:
     return substituted is not None and substituted == str(before_text or "")
 
 
-def _sync_readme_download_urls(text: str, version: str) -> str:
-    """Rewrite named Markdown references without touching historical links."""
-    updated = text
+def _line_indent_at(text: str, offset: int) -> str:
+    prefix = text[text.rfind("\n", 0, offset) + 1:offset]
+    return prefix if prefix.strip() == "" else ""
+
+
+def _render_readme_windows_quickstart(windows_installer: bool, eol: str = "\n") -> str:
+    return f"### Windows quick start{eol}{eol}" + eol.join(_README_WINDOWS_QUICKSTART[windows_installer])
+
+
+def _render_html_windows_actions(
+    version: str, indent: str, eol: str = "\n", *, windows_installer: bool = True, include_help: bool = False,
+) -> str:
+    zip_url = release_asset_download_url(WINDOWS_ZIP_PROOF_ID, version)
+    if windows_installer:
+        setup_url, btn = release_asset_download_url(WINDOWS_SETUP_PROOF_ID, version), indent + "  "
+        block = eol.join((
+            '<div class="download-actions">',
+            f'{btn}<a data-release-download="{WINDOWS_SETUP_PROOF_ID}" class="btn btn-primary" href="{setup_url}">{_HTML_WINDOWS_CAPTIONS[0]}</a>',
+            f'{btn}<a data-release-download="{WINDOWS_ZIP_PROOF_ID}" class="btn btn-quiet" href="{zip_url}">{_HTML_WINDOWS_CAPTIONS[2]}</a>',
+            f"{indent}</div>",
+        ))
+    else:
+        block = (
+            f'<a data-release-download="{WINDOWS_ZIP_PROOF_ID}" class="btn btn-primary" '
+            f'href="{zip_url}">{_HTML_WINDOWS_CAPTIONS[1]}</a>'
+        )
+    return f"{block}{eol}{indent}{_HTML_WINDOWS_HELP[windows_installer]}" if include_help else block
+
+
+def _sync_readme_download_urls(text: str, version: str, *, windows_installer: bool = True) -> str:
+    """Rewrite named Markdown references and bounded Windows download carriers."""
+    if "[download-" not in text:
+        return text
+    eol = "\r\n" if "\r\n" in text else "\n"
+    updated, setup_ref = text, f"[download-{WINDOWS_SETUP_PROOF_ID}]:"
+    if windows_installer and not re.search(rf"^{re.escape(setup_ref)}", updated, re.MULTILINE):
+        setup_url = release_asset_download_url(WINDOWS_SETUP_PROOF_ID, version)
+        updated = re.sub(
+            rf"^(\[download-{WINDOWS_ZIP_PROOF_ID}\]:)",
+            lambda m: f"{setup_ref} {setup_url}{eol}{m.group(1)}",
+            updated, count=1, flags=re.MULTILINE,
+        )
+    elif not windows_installer:
+        updated = re.sub(rf"^{re.escape(setup_ref)}[^\n]*(?:\r?\n)?", "", updated, flags=re.MULTILINE)
     for proof_id in RELEASE_ASSET_TEMPLATES:
         expected = release_asset_download_url(proof_id, version)
-        pattern = re.compile(
+        updated = re.sub(
             rf"^(\[download-{re.escape(proof_id)}\]:\s*)\S+(\s*)$",
-            re.MULTILINE,
-        )
-        updated = pattern.sub(
             lambda match, url=expected: f"{match.group(1)}{url}{match.group(2)}",
-            updated,
+            updated, flags=re.MULTILINE,
         )
-    return updated
+    target = "setup-" if windows_installer else ""
+    updated = _README_WINDOWS_BADGE_RE.sub(lambda m: f"{m.group(1)}{target}{m.group(2)}", updated)
+    updated = _README_WINDOWS_LINKS_RE.sub(lambda _m: _README_WINDOWS_LINKS[windows_installer], updated)
+    return _README_WINDOWS_QUICKSTART_RE.sub(
+        lambda _m: _render_readme_windows_quickstart(windows_installer, eol), updated,
+    )
 
 
-def _sync_html_download_urls(text: str, version: str) -> str:
-    """Rewrite only anchors explicitly owned by the release projection."""
-    updated = text
+def _sync_html_download_urls(text: str, version: str, *, windows_installer: bool = True) -> str:
+    """Rewrite only release-owned download anchors and the bounded Windows action block."""
+    if 'data-release-download="' not in text:
+        return text
+    eol, updated = ("\r\n" if "\r\n" in text else "\n"), text
+    status, loc = locate_carrier_span(updated, _HTML_WINDOWS_SPAN)
+    if status == "ok" and loc is not None:
+        start, end = loc
+        indent = _line_indent_at(updated, start)
+        replacement = _render_html_windows_actions(
+            version, indent, eol,
+            windows_installer=windows_installer, include_help="<p>" in updated[start:end],
+        )
+        updated = updated[:start] + replacement + updated[end:]
     for proof_id in RELEASE_ASSET_TEMPLATES:
         expected = release_asset_download_url(proof_id, version)
-        pattern = re.compile(
-            rf'(<a\b(?=[^>]*\bdata-release-download="{re.escape(proof_id)}")'
-            rf'[^>]*\bhref=")[^"]*(")',
-            re.IGNORECASE,
-        )
-        updated = pattern.sub(
+        updated = re.sub(
+            rf'(<a\b(?=[^>]*\bdata-release-download="{re.escape(proof_id)}")[^>]*\bhref=")[^"]*(")',
             lambda match, url=expected: f"{match.group(1)}{url}{match.group(2)}",
-            updated,
+            updated, flags=re.IGNORECASE,
         )
     return updated
+
+
+def _html_windows_choice_ok(html: str, has_setup: bool) -> bool:
+    """Validate Windows anchor count, order, button hierarchy, and canonical help prose
+    without rejecting user-authored button captions."""
+    anchors = [(m.group(1).lower(), m) for m in _WINDOWS_HTML_ANCHOR_RE.finditer(html)]
+    zips = [m for pid, m in anchors if pid == WINDOWS_ZIP_PROOF_ID]
+    setups = [m for pid, m in anchors if pid == WINDOWS_SETUP_PROOF_ID]
+    if len(zips) != 1 or len(setups) != int(has_setup) or _HTML_WINDOWS_HELP[not has_setup] in html:
+        return False
+    zip_m = zips[0]
+    zip_tag = zip_m.group(0).lower()
+    if not has_setup:
+        return 'btn-' not in zip_tag or 'btn-primary' in zip_tag
+    setup_m = setups[0]
+    setup_tag = setup_m.group(0).lower()
+    return (
+        setup_m.start() < zip_m.start()
+        and ('btn-' not in setup_tag or 'btn-primary' in setup_tag)
+        and 'btn-primary' not in zip_tag
+        and re.fullmatch(r'(?:(?!</a>|<a\b).)*</a>\s*', html[setup_m.end():zip_m.start()], re.I | re.S) is not None
+    )
 
 
 def _download_url_desyncs(
-    version: str,
-    *,
-    readme_text: str = "",
-    site_install_text: str = "",
-    docs_install_text: str = "",
-    detailed: bool = False,
+    version: str, *, readme_text: str = "", site_install_text: str = "",
+    docs_install_text: str = "", detailed: bool = False,
+    windows_installer: Optional[bool] = None,
 ) -> List[str]:
-    """Return missing or stale direct-download projection labels."""
+    """Return missing, unexpected, or stale direct-download projection labels."""
     desync: List[str] = []
+
+    def note(base: str, detail: str) -> None:
+        desync.append(f"{base} ({detail})" if detailed else base)
+
+    # Never derive a numbered release's Setup expectation from the pages under test:
+    # callers resolve historical vs current releases through resolve_release_windows_installer(),
+    # and pure-text checks default to this tree's DESKTOP_DOWNLOAD_IDS (Setup + ZIP).
+    has_setup = True if windows_installer is None else bool(windows_installer)
+    expected_ids = desktop_download_ids(windows_installer=has_setup)
+    unexpected_ids = tuple(pid for pid in DESKTOP_DOWNLOAD_IDS if pid not in expected_ids)
+    choice_note = "installer + portable ZIP" if has_setup else "ZIP-only"
     readme_has_projection = "[download-" in readme_text
-    html_documents = (
-        ("site/install/index.html", site_install_text),
-        ("docs/install/index.html", docs_install_text),
-    )
-    for proof_id in DESKTOP_DOWNLOAD_IDS:
+    html_documents = (("site/install/index.html", site_install_text), ("docs/install/index.html", docs_install_text))
+
+    for proof_id in expected_ids:
         expected = release_asset_download_url(proof_id, version)
         if readme_has_projection:
-            reference_pattern = re.compile(
-                rf"^\[download-{re.escape(proof_id)}\]:\s*(\S+)\s*$",
-                re.MULTILINE,
-            )
-            references = reference_pattern.findall(readme_text)
-            if not references or any(url != expected for url in references):
-                desync.append(
-                    f"README.md download {proof_id} (expected {expected})"
-                    if detailed else f"README.md download {proof_id}"
-                )
+            refs = re.findall(rf"^\[download-{re.escape(proof_id)}\]:\s*(\S+)\s*$", readme_text, re.MULTILINE)
+            if not refs or any(url != expected for url in refs):
+                note(f"README.md download {proof_id}", f"expected {expected}")
         for label, html in html_documents:
-            if 'data-release-download="' not in html:
-                continue
-            anchor_pattern = re.compile(
-                rf'<a\b(?=[^>]*\bdata-release-download="{re.escape(proof_id)}")'
-                rf'[^>]*>',
-                re.IGNORECASE,
-            )
-            anchors = anchor_pattern.findall(html)
-            expected_href = f'href="{expected}"'
-            if not anchors or any(expected_href not in anchor for anchor in anchors):
-                desync.append(
-                    f"{label} download {proof_id} (expected {expected})"
-                    if detailed else f"{label} download {proof_id}"
+            if 'data-release-download="' in html:
+                anchors = re.findall(
+                    rf'<a\b(?=[^>]*\bdata-release-download="{re.escape(proof_id)}")[^>]*>',
+                    html, re.IGNORECASE,
                 )
+                if not anchors or any(f'href="{expected}"' not in anchor for anchor in anchors):
+                    note(f"{label} download {proof_id}", f"expected {expected}")
+    for proof_id in unexpected_ids:
+        if readme_has_projection and re.search(rf"^\[download-{re.escape(proof_id)}\]:", readme_text, re.MULTILINE):
+            note(f"README.md unexpected download {proof_id}", f"absent in {version}")
+        for label, html in html_documents:
+            if 'data-release-download="' in html and re.search(
+                rf'<a\b[^>]*\bdata-release-download="{re.escape(proof_id)}"', html, re.IGNORECASE
+            ):
+                note(f"{label} unexpected download {proof_id}", f"absent in {version}")
+    if readme_has_projection:
+        eol = "\r\n" if "\r\n" in readme_text else "\n"
+        badge = _README_WINDOWS_BADGE_RE.search(readme_text)
+        bullet = _README_WINDOWS_BULLET_LINE_RE.search(readme_text)
+        links = _README_WINDOWS_LINKS_RE.search(readme_text)
+        quickstart = _README_WINDOWS_QUICKSTART_RE.search(readme_text)
+        expected_badge = f"[download-{WINDOWS_SETUP_PROOF_ID if has_setup else WINDOWS_ZIP_PROOF_ID}]"
+        bullet_text = bullet.group(0) if bullet else ""
+        bullet_bad = bool(bullet) and (
+            (links is not None and links.group(0) != _README_WINDOWS_LINKS[has_setup])
+            or f"[download-{WINDOWS_ZIP_PROOF_ID}]" not in bullet_text
+            or (f"[download-{WINDOWS_SETUP_PROOF_ID}]" in bullet_text) != has_setup
+        )
+        if ((badge and not badge.group(0).endswith(expected_badge))
+                or bullet_bad
+                or (quickstart and quickstart.group(0) != _render_readme_windows_quickstart(has_setup, eol))
+                or (not has_setup and f"[download-{WINDOWS_SETUP_PROOF_ID}]" in readme_text)):
+            note("README.md Windows download choice", f"expected {choice_note} for {version}")
+    for label, html in html_documents:
+        if 'data-release-download="' not in html:
+            continue
+        if any(item.startswith((f"{label} download windows-", f"{label} unexpected download windows-"))
+               for item in desync):
+            continue
+        if not _html_windows_choice_ok(html, has_setup):
+            note(f"{label} Windows download choice", f"expected {choice_note} for {version}")
     return desync
 
 
@@ -422,12 +709,8 @@ def moves_published_release_forward(before_readme: str, after_readme: str) -> bo
 
 
 def _marker_download_desyncs(
-    version: str,
-    *,
-    readme_text: str = "",
-    site_install_text: str = "",
-    docs_install_text: str = "",
-    detailed: bool = False,
+    version: str, *, readme_text: str = "", site_install_text: str = "",
+    docs_install_text: str = "", detailed: bool = False, windows_installer: Optional[bool] = None,
 ) -> List[str]:
     """A marker builds no installers, so its links keep one published plain release below it."""
     texts = (readme_text, site_install_text, docs_install_text)
@@ -435,12 +718,18 @@ def _marker_download_desyncs(
         return []
     published = published_download_version(*texts)
     if _PLAIN_VERSION_RE.match(published) and not next_cycle_problem(published, version):
+        if windows_installer is None:
+            observations, invalid = _windows_projection_observations(*texts, version=published)
+            modes = {mode for mode, _ver in observations}
+            if len(modes) > 1:
+                return [
+                    f"Windows download projection (surfaces disagree on {WINDOWS_SETUP_PROOF_ID} for {published})"
+                    if detailed else "Windows download projection"
+                ]
+            windows_installer = next(iter(modes)) if (not invalid and len(modes) == 1) else True
         return _download_url_desyncs(
-            published,
-            readme_text=readme_text,
-            site_install_text=site_install_text,
-            docs_install_text=docs_install_text,
-            detailed=detailed,
+            published, readme_text=readme_text, site_install_text=site_install_text,
+            docs_install_text=docs_install_text, detailed=detailed, windows_installer=windows_installer,
         )
     return [f"direct-download links (expected one published plain release below {version})"
             if detailed else "direct-download links"]
@@ -547,6 +836,7 @@ def version_carrier_desyncs(
     download_readme_text: str = "",
     site_install_text: str = "",
     docs_install_text: str = "",
+    windows_installer: Optional[bool] = None,
     detailed: bool = False,
 ) -> List[str]:
     """Return release-carrier mismatch labels for already-read file contents."""
@@ -593,13 +883,16 @@ def version_carrier_desyncs(
             readme_text=download_readme_text,
             site_install_text=site_install_text,
             docs_install_text=docs_install_text,
+            windows_installer=windows_installer,
             detailed=detailed,
         )
     )
     return desync
 
 
-def release_metadata_findings(texts: dict[str, str]) -> List[str]:
+def release_metadata_findings(
+    texts: dict[str, str], *, windows_installer: Optional[bool] = None, check_downloads: bool = True,
+) -> List[str]:
     """All independently decidable release findings over one source's readable files.
 
     Reuse carrier grammar and P9 counters; unavailable files are absent from this
@@ -634,19 +927,16 @@ def release_metadata_findings(texts: dict[str, str]) -> List[str]:
         web_package_lock_text=texts.get("web/package-lock.json", ""),
         readme_text=readme or "", arch_text=texts.get("docs/ARCHITECTURE.md", ""),
         api_types_text=texts.get("web/modules/api_types.js", ""),
-        download_readme_text=readme or "", site_install_text=texts.get("site/install/index.html", ""),
-        docs_install_text=texts.get("docs/install/index.html", ""), detailed=True,
+        download_readme_text=(readme or "") if check_downloads else "",
+        site_install_text=texts.get("site/install/index.html", "") if check_downloads else "",
+        docs_install_text=texts.get("docs/install/index.html", "") if check_downloads else "",
+        windows_installer=windows_installer, detailed=True,
     ))
     return findings
 
 
 def check_worktree_version_sync(repo_dir) -> str:
-    """Return a non-fatal warning when release version carriers disagree.
-
-    Worktree-readiness form of ``version_carrier_desyncs``: reads the live
-    carrier files itself and never raises (moved here from
-    ``review_helpers.py`` — version-sync logic lives with its authority).
-    """
+    """Read live carriers; warn on mismatch. Inspection errors do not raise."""
     repo_dir = Path(repo_dir)
     try:
         version_path = repo_dir / "VERSION"
@@ -658,18 +948,25 @@ def check_worktree_version_sync(repo_dir) -> str:
 
         def _read(rel_path: str) -> str:
             return path.read_text(encoding="utf-8") if (path := repo_dir / rel_path).exists() else ""
+
+        readme = _read("README.md")
+        site_install = _read("site/install/index.html")
+        docs_install = _read("docs/install/index.html")
+        published = (
+            published_download_version(readme, site_install, docs_install)
+            if is_development_marker(version_str) else ""
+        )
+        win_installer = resolve_release_windows_installer(
+            repo_dir, version_str, published_version=published,
+        )
         desync = version_carrier_desyncs(
             version_str,
-            pyproject_text=_read("pyproject.toml"),
-            uv_lock_text=_read("uv.lock"),
-            web_package_text=_read("web/package.json"),
-            web_package_lock_text=_read("web/package-lock.json"),
-            readme_text=_read("README.md"),
-            arch_text=_read("docs/ARCHITECTURE.md"),
-            api_types_text=_read("web/modules/api_types.js"),
-            download_readme_text=_read("README.md"),
-            site_install_text=_read("site/install/index.html"),
-            docs_install_text=_read("docs/install/index.html"),
+            pyproject_text=_read("pyproject.toml"), uv_lock_text=_read("uv.lock"),
+            web_package_text=_read("web/package.json"), web_package_lock_text=_read("web/package-lock.json"),
+            readme_text=readme, arch_text=_read("docs/ARCHITECTURE.md"),
+            api_types_text=_read("web/modules/api_types.js"), download_readme_text=readme,
+            site_install_text=site_install, docs_install_text=docs_install,
+            windows_installer=win_installer,
         )
         if desync:
             return f"VERSION={version_str} but {', '.join(desync)} differ. Sync version carriers before committing."
@@ -678,144 +975,207 @@ def check_worktree_version_sync(repo_dir) -> str:
     return ""
 
 
-def sync_release_metadata(repo_dir: str, *, write: bool = True, published_version: str = "") -> List[str]:
+def _git_ro(root: Path, *args: str) -> Optional[str]:
+    """Run one read-only local git command without lazy fetch; None if non-repo or nonzero."""
+    if not (root / ".git").exists():
+        return None
+    try:
+        from ouroboros.git_selection import selected_git
+        git = selected_git()
+    except ImportError:
+        git = os.environ.get("OUROBOROS_GIT") or "git"
+    try:
+        proc = subprocess.run(
+            [git, *args], cwd=str(root), env={**os.environ, "GIT_NO_LAZY_FETCH": "1"},
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _git_ref_ships_windows_installer(root: Path, ref: str) -> Optional[bool]:
+    listing = _git_ro(
+        root, "ls-tree", "-r", "--name-only", f"{ref}^{{commit}}", "--",
+        _WINDOWS_SETUP_BUILD_PATH, _WINDOWS_ZIP_BUILD_PATH,
+    )
+    if listing is None:
+        return None
+    names = set(listing.splitlines())
+    if _WINDOWS_SETUP_BUILD_PATH in names:
+        return True
+    return False if _WINDOWS_ZIP_BUILD_PATH in names else None
+
+
+def _tagged_release_windows_installer(
+    root: Path, version: str, *, allow_readme_fallback: bool = False,
+) -> Optional[bool]:
+    if not version or not is_release_version(version) or is_development_marker(version):
+        return None
+    tag_ref = f"refs/tags/v{version}"
+    built = _git_ref_ships_windows_installer(root, tag_ref)
+    if built is not None or not allow_readme_fallback:
+        return built
+    tag_readme = _git_ro(root, "show", f"{tag_ref}:README.md") or ""
+    tag_has_setup = download_links_include_windows_installer(tag_readme, version=version) if tag_readme else None
+    return tag_has_setup if tag_has_setup is not None and published_download_version(tag_readme) == version else None
+
+
+def resolve_release_windows_installer(
+    repo_dir, version: str, *, published_version: str = "", target_ref: str = "", path_exists=None,
+) -> Optional[bool]:
+    """Resolve whether *version* in *repo_dir* ships ``windows-setup-x64``.
+
+    Markers inspect local tag ``refs/tags/v{published_version}`` (build inventory first, README fallback
+    only when the tag omits Windows build scripts). Numbered releases inspect the target's build inventory
+    (``target_ref`` when given, else local tag ``refs/tags/v{version}``, else ``path_exists``/worktree),
+    defaulting to ``True`` on minimal fixtures without Windows build scripts.
+    """
+    root, version = Path(repo_dir), str(version or "").strip()
+    if not is_release_version(version):
+        return None
+    if is_development_marker(version):
+        target = str(published_version or "").strip()
+        return _tagged_release_windows_installer(root, target, allow_readme_fallback=True) if target else None
+    if target_ref:
+        if (built := _git_ref_ships_windows_installer(root, target_ref)) is not None:
+            return built
+        return True if (tagged := _tagged_release_windows_installer(root, version)) is None else tagged
+    if (tagged := _tagged_release_windows_installer(root, version)) is not None:
+        return tagged
+    exists = path_exists if path_exists is not None else lambda rel: (root / rel).is_file()
+    if exists(_WINDOWS_SETUP_BUILD_PATH):
+        return True
+    return False if exists(_WINDOWS_ZIP_BUILD_PATH) else True
+
+
+def _resolve_marker_windows_installer(root: Path, published_version: str) -> bool:
+    """Determine Windows installer availability for exact release *published_version* on a marker.
+
+    Uses only evidence from *published_version* itself (local tag ``v{published_version}`` or
+    unambiguous local surfaces already naming *published_version*), never another version's files.
+    Refuses ambiguous repairs before modifying any carrier.
+    """
+    surfaces = [
+        path.read_text(encoding="utf-8")
+        for rel in ("README.md", "site/install/index.html", "docs/install/index.html")
+        if (path := root / rel).exists()
+    ]
+    if not any("[download-" in text or 'data-release-download="' in text for text in surfaces):
+        return True
+    tagged = _tagged_release_windows_installer(root, published_version, allow_readme_fallback=True)
+    if tagged is not None:
+        return tagged
+    observed = {
+        has_setup
+        for text in surfaces
+        if published_download_version(text) == published_version
+        and (has_setup := download_links_include_windows_installer(text, version=published_version)) is not None
+    }
+    if len(observed) == 1:
+        return observed.pop()
+    raise ValueError(
+        f"Cannot determine whether published release {published_version} ships "
+        f"{WINDOWS_SETUP_PROOF_ID}: no local tag v{published_version} or unambiguous "
+        f"{published_version} download projection found. Pass windows_installer=True "
+        f"or windows_installer=False explicitly (or ensure local tag v{published_version} exists)."
+    )
+
+
+def sync_release_metadata(
+    repo_dir: str, *, write: bool = True, published_version: str = "", windows_installer: Optional[bool] = None,
+) -> List[str]:
     """Sync VERSION into generated and author-facing release carriers.
 
     ``write=False`` changes nothing and names the carriers this sync would rewrite now.
     A development marker leaves the direct-download links alone unless the caller names
-    the published release they must carry (``published_version``: a managed update's
-    target); a release derives them from VERSION and ignores it.
+    the published release they must carry (``published_version``); a release derives them
+    from VERSION and ignores it. When ``windows_installer`` is omitted, a marker resolves
+    it from local tag ``v{published_version}`` or matching ``published_version`` links
+    (raising ``ValueError`` before writing if ambiguous), and a numbered release resolves
+    it through ``resolve_release_windows_installer`` (local tag ``v{VERSION}``, else the
+    tree's Windows build scripts, else ``True``).
     """
     root = Path(repo_dir)
-
-    def put(path: Path, text: str) -> None:
-        if write:
-            path.write_text(text, encoding="utf-8")
-
     version_file = root / "VERSION"
     if not version_file.exists():
         return []
-
     version = version_file.read_text(encoding="utf-8").strip()
     if not _VERSION_RE.match(version):
         return []
 
-    # pyproject must be PEP 440; author-facing carriers keep VERSION spelling.
     pyproject_version = _normalize_pep440(version)
     badge_url_version = _shields_escape(version)
-    download_version = published_version if is_development_marker(version) else version
+    is_marker = is_development_marker(version)
+    download_version = str(published_version or "").strip() if is_marker else version
+    if not download_version:
+        use_windows_installer = True
+    elif windows_installer is not None:
+        use_windows_installer = bool(windows_installer)
+    elif is_marker:
+        use_windows_installer = _resolve_marker_windows_installer(root, download_version)
+    else:
+        use_windows_installer = bool(resolve_release_windows_installer(root, version))
 
     changed: List[str] = []
 
-    pyproject = root / "pyproject.toml"
-    if pyproject.exists():
-        text = pyproject.read_text(encoding="utf-8")
-        new_text = re.sub(
-            r'^(version\s*=\s*")[^"]*(")',
-            lambda m: f'{m.group(1)}{pyproject_version}{m.group(2)}',
-            text,
-            flags=re.MULTILINE,
-        )
+    def rewrite(rel: str, transform) -> None:
+        path = root / rel
+        if not path.exists():
+            return
+        text = path.read_text(encoding="utf-8")
+        new_text = transform(text)
         if new_text != text:
-            put(pyproject, new_text)
-            changed.append("pyproject.toml")
+            if write:
+                path.write_text(new_text, encoding="utf-8")
+            changed.append(rel)
 
-    uv_lock = root / "uv.lock"
-    if uv_lock.exists():
-        text = uv_lock.read_text(encoding="utf-8")
-        new_text, replacements = _UV_LOCK_ROOT_RE.subn(
-            lambda m: f'{m.group(1)}{pyproject_version}{m.group(3)}',
-            text,
-            count=1,
+    def sync_uv_lock(text: str) -> str:
+        new_text, count = _UV_LOCK_ROOT_RE.subn(
+            lambda m: f"{m.group(1)}{pyproject_version}{m.group(3)}", text, count=1,
         )
-        if replacements == 1 and new_text != text:
-            put(uv_lock, new_text)
-            changed.append("uv.lock")
+        return new_text if count == 1 else text
 
-    web_package = root / "web" / "package.json"
-    if web_package.exists():
-        text = web_package.read_text(encoding="utf-8")
-        new_text = re.sub(
-            r'^(\s*"version"\s*:\s*")[^"]*(")',
-            lambda m: f'{m.group(1)}{version}{m.group(2)}',
-            text,
-            flags=re.MULTILINE,
-        )
-        if new_text != text:
-            put(web_package, new_text)
-            changed.append("web/package.json")
-
-    web_lock = root / "web" / "package-lock.json"
-    if web_lock.exists():
-        text = web_lock.read_text(encoding="utf-8")
-        new_text = _WEB_LOCK_VERSION_RE.sub(
-            lambda m: (f"{m.group(1)}{version}{m.group(3)}" if m.group(1) is not None
-                       else f"{m.group(4)}{version}{m.group(6)}"),
-            text,
-        )
-        if new_text != text:
-            put(web_lock, new_text)
-            changed.append("web/package-lock.json")
-
-    api_types = root / "web" / "modules" / "api_types.js"
-    if api_types.exists():
-        text = api_types.read_text(encoding="utf-8")
-        new_text = re.sub(
-            r"(GATEWAY_CONTRACT_VERSION\s*=\s*')[^']*(')",
-            lambda m: f"{m.group(1)}{version}{m.group(2)}",
-            text,
-        )
-        if new_text != text:
-            put(api_types, new_text)
-            changed.append("web/modules/api_types.js")
-
-    readme = root / "README.md"
-    if readme.exists():
-        text = readme.read_text(encoding="utf-8")
-        new_text = _README_BADGE_RE.sub(
-            lambda m: (
-                m.group(1) + version + m.group(3) + badge_url_version + m.group(5)
-            ),
-            text,
+    def sync_readme(text: str) -> str:
+        updated = _README_BADGE_RE.sub(
+            lambda m: m.group(1) + version + m.group(3) + badge_url_version + m.group(5), text,
         )
         if download_version:
-            new_text = _sync_readme_download_urls(new_text, download_version)
-        if new_text != text:
-            put(readme, new_text)
-            changed.append("README.md")
+            return _sync_readme_download_urls(updated, download_version, windows_installer=use_windows_installer)
+        return updated
 
-    for relative in (
-        Path("site/install/index.html"),
-        Path("docs/install/index.html"),
-    ):
-        install_page = root / relative
-        if not download_version or not install_page.exists():
-            continue
-        text = install_page.read_text(encoding="utf-8")
-        new_text = _sync_html_download_urls(text, download_version)
-        if new_text != text:
-            put(install_page, new_text)
-            changed.append(relative.as_posix())
-
-    arch = root / "docs" / "ARCHITECTURE.md"
-    if arch.exists():
-        text = arch.read_text(encoding="utf-8")
-        new_text = _ARCH_HEADER_RE.sub(
-            lambda m: m.group(1) + version + m.group(3),
-            text,
-        )
-        if new_text != text:
-            put(arch, new_text)
-            changed.append("docs/ARCHITECTURE.md")
-
+    rewrite("pyproject.toml", lambda text: re.sub(
+        r'^(version\s*=\s*")[^"]*(")', lambda m: f"{m.group(1)}{pyproject_version}{m.group(2)}",
+        text, flags=re.MULTILINE,
+    ))
+    rewrite("uv.lock", sync_uv_lock)
+    rewrite("web/package.json", lambda text: re.sub(
+        r'^(\s*"version"\s*:\s*")[^"]*(")', lambda m: f"{m.group(1)}{version}{m.group(2)}",
+        text, flags=re.MULTILINE,
+    ))
+    rewrite("web/package-lock.json", lambda text: _WEB_LOCK_VERSION_RE.sub(
+        lambda m: (f"{m.group(1)}{version}{m.group(3)}" if m.group(1) is not None
+                   else f"{m.group(4)}{version}{m.group(6)}"),
+        text,
+    ))
+    rewrite("web/modules/api_types.js", lambda text: re.sub(
+        r"(GATEWAY_CONTRACT_VERSION\s*=\s*')[^']*(')", lambda m: f"{m.group(1)}{version}{m.group(2)}", text,
+    ))
+    rewrite("README.md", sync_readme)
+    if download_version:
+        for rel in ("site/install/index.html", "docs/install/index.html"):
+            rewrite(rel, lambda text: _sync_html_download_urls(
+                text, download_version, windows_installer=use_windows_installer,
+            ))
+    rewrite("docs/ARCHITECTURE.md", lambda text: _ARCH_HEADER_RE.sub(
+        lambda m: m.group(1) + version + m.group(3), text,
+    ))
     return changed
 
 
 def check_history_limit(readme_text: str) -> List[str]:
     """Return advisory warnings when Version History exceeds P9 row limits."""
-    warnings: List[str] = []
     major_rows, minor_rows, patch_rows = 0, 0, 0
-
     for m in _VERSION_ROW_RE.finditer(readme_text):
         _, min_, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
         if min_ == 0 and patch == 0:
@@ -824,23 +1184,15 @@ def check_history_limit(readme_text: str) -> List[str]:
             minor_rows += 1
         else:
             patch_rows += 1
-
-    if major_rows > _MAX_MAJOR:
-        warnings.append(
-            f"Version History has {major_rows} major rows (limit {_MAX_MAJOR}): "
-            f"trim oldest major entries."
+    return [
+        f"Version History has {count} {label} rows (limit {limit}): trim oldest {label} entries."
+        for count, limit, label in (
+            (major_rows, _MAX_MAJOR, "major"),
+            (minor_rows, _MAX_MINOR, "minor"),
+            (patch_rows, _MAX_PATCH, "patch"),
         )
-    if minor_rows > _MAX_MINOR:
-        warnings.append(
-            f"Version History has {minor_rows} minor rows (limit {_MAX_MINOR}): "
-            f"trim oldest minor entries."
-        )
-    if patch_rows > _MAX_PATCH:
-        warnings.append(
-            f"Version History has {patch_rows} patch rows (limit {_MAX_PATCH}): "
-            f"trim oldest patch entries."
-        )
-    return warnings
+        if count > limit
+    ]
 
 
 def detect_numeric_claims(text: str) -> List[str]:
@@ -849,31 +1201,20 @@ def detect_numeric_claims(text: str) -> List[str]:
 
 
 def run_release_preflight(repo_dir: str) -> Tuple[List[str], List[str]]:
-    """Run idempotent carrier sync plus advisory release-history checks."""
+    """Run idempotent carrier sync; check history limits and numeric claims in the current VERSION row."""
     changed = sync_release_metadata(repo_dir)
-
     warnings: List[str] = []
     readme = Path(repo_dir) / "README.md"
     if readme.exists():
         readme_text = readme.read_text(encoding="utf-8")
         warnings.extend(check_history_limit(readme_text))
-
-        # Flag numeric claims only in the current VERSION row.
         version_file = Path(repo_dir) / "VERSION"
         if version_file.exists():
             version = version_file.read_text(encoding="utf-8").strip()
-            row_re = re.compile(
-                r'^\|\s*' + re.escape(version) + r'\s*\|[^|]*\|([^|]+)\|?\s*$',
-                re.MULTILINE,
-            )
-            m = row_re.search(readme_text)
-            if m:
-                claims = detect_numeric_claims(m.group(1))
-                if claims:
-                    warnings.append(
-                        f"Changelog row for {version} contains numeric claims that "
-                        f"may become stale: {claims!r}. Consider replacing with "
-                        f"descriptive language."
-                    )
-
+            m = re.search(rf"^\|\s*{re.escape(version)}\s*\|[^|]*\|([^|]+)\|?\s*$", readme_text, re.MULTILINE)
+            if m and (claims := detect_numeric_claims(m.group(1))):
+                warnings.append(
+                    f"Changelog row for {version} contains numeric claims that may become stale: "
+                    f"{claims!r}. Consider replacing with descriptive language."
+                )
     return changed, warnings

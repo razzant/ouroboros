@@ -588,6 +588,8 @@ def ensure_managed_repo(context: BootstrapContext) -> str:
     ``data/archive/managed_repo`` before the first clone. A manifest mismatch on
     a git checkout only refreshes the managed remote metadata; the checkout stays.
     """
+    if not (context.repo_dir.is_absolute() and context.data_dir.is_absolute()):
+        raise RuntimeError("OUROBOROS_REPO_DIR and OUROBOROS_DATA_DIR must be absolute paths; nothing was moved.")
     manifest = load_bundle_manifest(context)
     if not context.repo_dir.exists():
         return _install_managed_repo(context, manifest, reason="missing")
@@ -919,7 +921,11 @@ def exec_source_launcher(context: BootstrapContext, argv: list[str], *, release_
     handoff = source_handoff_argv(argv, keep_runtime_venv=entry is not None)
     if frozen:
         handoff += ["--seed-bundle", str(context.bundle_dir)]
-    command = [str(entry) if entry else context.embedded_python, str(context.repo_dir / "launcher.py"), *handoff]
+    # A Setup-owned Windows copy hosts any checkout's launcher under its Start identity; a portable copy does not.
+    from ouroboros.launcher_windows_runtime import windows_source_host
+    host = windows_source_host(context.bundle_dir) if IS_WINDOWS and desktop else None
+    command = [str(entry) if entry else context.embedded_python, *([str(host)] if host else []),
+               str(context.repo_dir / "launcher.py"), *handoff]
     context.log.info("Loading managed source launcher through %s", command[0])
     # The source shell needs the dependencies bootstrap installed in the userbase,
     # too. Do not export PYTHONHOME or change any child's process/bundle identity.
