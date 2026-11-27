@@ -209,6 +209,10 @@ def test_recovery_prices_the_prepared_input_not_the_canonical_image_proxy(tmp_pa
     room["notes"][0]["text"] = "Held note. " + "n" * 8000
     core = context_fit.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", '"Assignment"',
         memory_view_json=memory_view.snapshot_json(syn.snapshot(room_facts=room, story=[], conversations=[])))
+    if mode == "max":  # the books rung gives only a Body Map's step to its parts: a real Map, its parts and a reader
+        from tests._reference_book_fixtures import booked
+
+        core = booked(replace(core, section_root=str(tmp_path / "sections"), section_task_id="recovery"), tmp_path)
     plan = context_fit.build_context_fit_plan(None, core, {"id": "recovery", "_is_direct_chat": True},
         preferred_mode=mode, tool_schemas=[], route_resolver=lambda *_a, **_kw: (
             {"provider": "fixture", "model": "fixture"},

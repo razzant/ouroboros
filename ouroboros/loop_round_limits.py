@@ -1480,8 +1480,10 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
     if (selected_mode == mode and carried(after) == carried(before)
             and (trial is None or trial.schemas == ctx.tool_schemas and not trial.notice)):
         return False
+    from ouroboros.loop_model_call import _adopt_view_facts, _shown, map_at_parts
+
     maps_retry = mode == "max" and selected_mode == "low"
-    books_only = maps_retry and (
+    books_only = maps_retry and map_at_parts(after) and (  # named only where the Map really stepped
         (before.memory_facts.get("floor") or {}).get("runs") == (after.memory_facts.get("floor") or {}).get("runs"))
     mode = selected_mode
     ctx.active_context_mode = ctx.tools._ctx.active_context_mode = mode
@@ -1494,8 +1496,6 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
         trial.adopt(ctx.tools._ctx, ctx.tool_schemas, ctx.messages, by="memory_coarsened")
     rewrite_view(ctx.tools._ctx, ctx.task_id, "low_retry" if maps_retry else "memory_coarsened")
     ctx.tools._ctx.messages = ctx.messages
-    from ouroboros.loop_model_call import _adopt_view_facts, _shown
-
     _adopt_view_facts(ctx.tools._ctx, rebound, mode)  # the narrowed view's fact, read back as a memory shortage
     _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
         "checkpoint_kind": "context_fit_low_retry" if books_only else "context_memory_coarsened", "round": ctx.round_idx,

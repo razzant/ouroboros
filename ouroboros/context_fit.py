@@ -917,8 +917,10 @@ def _mode_host_receipts(selected: str, form_mode: str, rows: Iterable[Mapping[st
                         low_maps: Iterable[Mapping[str, Any]], book_maps: Iterable[str]) -> list:
     if form_mode != "low":
         return [row for row in rows if not row.get("held_note_form") and row.get("section_id") not in book_maps]
-    seen = {row.get("section_id") for row in rows} if selected == "low" else None
-    return [*rows, *(row for row in low_maps if row.get("section_id") not in seen)] if seen is not None else list(rows)
+    if selected == "max":  # Max carries the Body Map whole, a delegated focus's Max too
+        return [row for row in rows if row.get("section_id") not in book_maps]
+    seen = {row.get("section_id") for row in rows}  # below Max a Map already at its parts stays there
+    return [*rows, *(row for row in low_maps if row.get("section_id") not in seen)]
 
 
 def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...]], user_content_json: str, *, preferred: str,
@@ -954,7 +956,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     if core.development_required:
         core = replace(core, development_required=False)
         governance = {name: _governance_blocks(None, core, mode=name) for name in governance}
-    form = {m: "low" if core.delegated_focus or m == "nano" else m for m in floor.MODES}
+    form = {m: "low" if core.delegated_focus or m == "nano" else m for m in floor.MODES}  # held notes and receipts
+    shape = {m: "low" if m == "nano" else m for m in floor.MODES}  # governance: the Body Map steps only below Max
     snapshot = snapshot_from_json(core.memory_view_json) if core.memory_view_json else None
     held_heads = any(isinstance(part, HeldNoteSection) for part in core.dynamic_sections)
     cold_resume, saved = core.held_note_resume is not None, core.held_note_resume or {}
@@ -963,9 +966,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         nano_tools=nano_tools, tool_frames=tool_frames, window_record=window_record, window_tokens=window_tokens,
         admitted=admitted, preferred=preferred, output_reserve=output_reserve, working_reserve_tokens=working_reserve_tokens)
     sections = {m: (*core.semi_stable_sections, *core.dynamic_sections, *core.dynamic_head_sections,
-                    *(governance[form[m]][0] if not isinstance(governance[form[m]][0], str) else ())) for m in form}
+                    *(governance[shape[m]][0] if not isinstance(governance[shape[m]][0], str) else ())) for m in form}
     integrating = _integrating(core, snapshot.spec.role if snapshot else None)
-    start_frame = kept is None or start_work or unsent_start
     can_yield_maps = ((kept is None and not cold_resume) or start_work or unsent_start) and integrating
     book_maps = floor.replay_book_maps(sections["low"], saved if kept is None else {}, core, retain=retain)
     low_maps = book_maps if kept is None else [r for r in (kept_sections or {}).get("low", ()) if r.get("section_id") in floor.BOOK_MAPS]
@@ -977,7 +979,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     whole_memory = (story_chars(snapshot), room_chars(snapshot)) if snapshot and held_heads else (0, 0)
     story_before, room_before = (story_chars(snapshot, held), room_chars(snapshot, held)) if snapshot else (0, 0)
 
-    measure, complete_price = _wire_measure(core, governance, sections, form, user_content_json, current_messages,
+    measure, complete_price = _wire_measure(core, governance, sections, shape, user_content_json, current_messages,
         provider=provider, effort=reasoning_effort, sized=sized, overhead=envelope_overhead_tokens, tool_frames=tool_frames,
         required=(whole_core, whole_governance) if whole_core.development_required else None, snapshot=snapshot)
 
@@ -1038,15 +1040,14 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     if books_must_save and not books_save(held, window_tokens, window_record.boundary if window_record else None):
         return {}, shown_mode
-    if books_rung and select == "low":
-        low_maps = map_parts(low_maps)  # all that rung has left to give
+    low_maps = map_parts(low_maps) if books_rung else low_maps  # all that rung has to give; first contact prepares it too
 
-    def telling_fits(selected, sent, forms, window, boundary, reserve, *, start_room):
+    def telling_fits(selected, sent, window, boundary, reserve, forms, start_room=kept is None, budget=None):
         shown = view(selected, sent, forms, window, boundary, level=floor.telling_level(snapshot)) if snapshot else floor.NO_VIEW
         work = (math.ceil(min(boundary or window, window) / context_budget.RECLAIM_LOW_WATER_DIVISOR)
                 * (snapshot.spec.work_room_levels if snapshot else work_room_levels) if start_room else 0)
         price = measure(selected, sent, forms, shown.story_chars, shown.room_chars)
-        return math.ceil(price * ratio) + reserve + work <= window
+        return math.ceil(price * ratio) + reserve + work <= window and (budget is None or price <= budget)
 
     def frame(selected):
         nonlocal receipts
@@ -1075,8 +1076,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                 least_level[0] = shown.level
                 price = measure(selected, sent, forms, shown.story_chars, shown.room_chars)
             return price
-        def told(forms, start_room=kept is None):  # ``max_room_lost``'s own test beside these host forms: memory at my
-            return telling_fits(selected, sent, forms, window, boundary, reserve, start_room=start_room)  # shortest telling
+        told = partial(telling_fits, selected, sent, window, boundary, reserve)  # ``max_room_lost``'s test: my shortest telling
         goal = running_goal(window, reserve)
         host_saving = owed(measure(selected, sent, section_views(sections[selected], prior)), window, reserve) if asked else 0
         receipts, _ = floor._host_steps(available, prior,  # every frame starts from what was shown
@@ -1099,7 +1099,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             budget_mode=selected if kept is None and target and target < window else None,
             window_bound=host_allowances["window"], retain=retain,  # the window's own start bound, whatever target frames the start
             optional_walk=(lambda forms: view(selected, sent, forms, window, boundary)) if snapshot else None,
-            maps_told=(lambda forms: told(forms, selected != preferred)) if start_frame and known_window else None)  # the Map answers to the window alone
+            # The Map yields to the window, and before Nano's own target takes my memory below a telling (BIBLE P1).
+            maps_told=(lambda forms: told(forms, (kept is None or start_work or unsent_start) and selected != preferred,
+                                          host_allowances["budget"] if selected == "nano" else None)) if known_window else None)
         fixed = measure(selected, sent, section_views(sections[selected], receipts))
         allowances = floor.floor_allowances(window_tokens=window if known_window else None,
             output_reserve_tokens=reserve, non_memory_tokens=fixed, target_tokens=target if kept is None else None,
@@ -1117,13 +1119,13 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         def memory_price(level):
             shown = view(mode, sent, forms, window, boundary, level=level) if snapshot else floor.NO_VIEW
             return shown, measure(mode, sent, forms, shown.story_chars, shown.room_chars)
-        room_fact = _max_start_room(snapshot, rendered_texts(core, forms), render_governance(governance[form[mode]], forms),
+        room_fact = _max_start_room(snapshot, rendered_texts(core, forms), render_governance(governance[shape[mode]], forms),
             fixed=fixed, ratio=ratio, forms=forms, window=window, reserve=reserve, work=work(), allowances=allowances,
             schemas=tool_schema_tokens(list(sent.schemas), provider=provider, reasoning_effort=reasoning_effort),
             memory_price=memory_price)
     running_max_lost = (not running and mode == "max" and form[mode] == "max" and known_window and snapshot
                         and kept is not None and not start_work and held_heads and not telling_fits(
-                            mode, sent, section_views(sections[mode], receipts), window, boundary, reserve, start_room=False))
+                            mode, sent, window, boundary, reserve, section_views(sections[mode], receipts), False))
     if (room_fact and floor.max_room_lost(room_fact)) or running_max_lost:
         mode, low_maps = "low", map_parts(low_maps)  # Low for the window: the Map steps down before memory (BIBLE P1)
         sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
@@ -1216,7 +1218,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     for m in floor.MODES:
         rows = _mode_host_receipts(m, form[m], receipts, low_maps, floor.BOOK_MAPS)
         facts = {**receipt, "held_note_request_tokens": request_cost(mode, sent)} if held_heads and m == mode else receipt
-        system, observation = capture_system_projection(whole_core, whole_governance[form[m]], story, room, m,
+        system, observation = capture_system_projection(whole_core, whole_governance[shape[m]], story, room, m,
             section_views(sections[m], rows), rows, whole, shown=shown,
             facts={**facts, "host_sections_addressed": rows} if rows else facts)
         contents[m] = (system, observation, room_data)
@@ -1231,7 +1233,7 @@ def _whole_request(core, governance, mode, current_messages=None):
 
     snapshot = snapshot_from_json(core.memory_view_json) if core.memory_view_json else None
     story, room = (story_chars(snapshot), room_chars(snapshot)) if snapshot else (0, 0)
-    form = "low" if core.delegated_focus or mode == "nano" else mode
+    form = "low" if mode == "nano" else mode  # the governance a frame carries: the Body Map steps only below Max
     blocks = governance[form] if governance is not None else _governance_blocks(None, core, mode=form)
     messages = _request_rows(_system_blocks(core, blocks, "s" if story else "", "r" if room else "", mode),
                              core.user_content_json, core.supplementary_messages_json, current_messages,
@@ -1274,15 +1276,17 @@ def _prefer_first_contact(core, preferred, normal, forms, target, tool_schemas, 
 
     The start keeps its own mode (Max, or the Low a known window or the owner chose): ordinary memory folding
     pays what the ordinary view exceeds below the refused size of that wire (``first_contact_limits``); a directly
-    required handbook and its note are no memory's debt, though every physical comparison counts them. Nothing but
-    my own tellings pays this advice: no frame is traded for it (the chapter-maps rung went with the resident books;
-    a refused size an earlier maps send followed still bounds the fold). The chosen view must also save the ordinary
-    view's reclaim margin. The note names the planned connection, even if a later route keeps the shown view.
-    Unchanged returns ``normal``."""
+    required handbook and its note are no memory's debt, though every physical comparison counts them. Where my
+    human's Max at its folded tellings still stands above a refused Max size that a Body-Map-at-its-parts send
+    followed, the start is Low, temporarily, for the window: the same tellings, the Map at its parts and addresses,
+    every tool kept (BIBLE P1: the Map steps down before my memory goes below a telling). It is taken only below
+    every size this wire refused. A fold must also save the ordinary view's reclaim margin. The note names the
+    planned connection, even if a later route keeps the shown view. Unchanged returns ``normal``."""
     from ouroboros.context_measurement import BOOK_NOTE_KEY
     from ouroboros.context_window import text_chat_rows
     from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
     from ouroboros.llm_openai_compatible import _OpenAICompatibleLaneMixin, _project_openai_family_system
+    from ouroboros.memory_floor import TEMPORARY_LOW
     from ouroboros.tool_policy import select_tool_schemas
 
     def raw(contents, mode):
@@ -1295,14 +1299,16 @@ def _prefer_first_contact(core, preferred, normal, forms, target, tool_schemas, 
         return bounded_prompt_tokens_for_payload({"messages": _project_openai_family_system(dict(target), rows),
                                                   "tools": schemas}, 0) if schemas else 0
 
-    def noted(contents, mode):
+    def noted(contents, mode, maps=False):
         system, facts, data = contents[mode]
         tail = {**system[-1], "text": system[-1]["text"] + (
             "\n\n### First-send composition\nAn earlier request was refused on the connection this first send was "
-            "composed for, so this view is smaller than its ordinary form. The refusal stated no window.")}
-        facts = {**facts, "first_contact_preference": True}
+            "composed for, so this view is smaller than its ordinary form" + (
+                f": {TEMPORARY_LOW}, the body map at its parts and addresses" if maps else "")
+            + ". The refusal stated no window.")}
+        facts = {**facts, "first_contact_preference": "maps" if maps else True}
         if room := normal[0][mode][1].get("max_room"):
-            facts["max_room"] = room
+            facts["max_room"] = {**room, "cause": "first_contact", "cuts": []} if maps else room
         return {**contents, mode: ([*system[:-1], tail], facts, data)}
 
     def safe(size):
@@ -1322,17 +1328,25 @@ def _prefer_first_contact(core, preferred, normal, forms, target, tool_schemas, 
         return normal
     ordinary_whole = ordinary(whole, contents, initial)
     reclaim = safe(ordinary_whole)  # the ordinary request pays its own margin, not the required book's
-    selected = contents
+    selected, size, folds = contents, whole, False
+    lowers = initial == preferred == "max" and bool(before_maps) and not core.delegated_focus  # the Map's rung is proven
     if (saving := ordinary_whole - goal) > 0:
-        try:
-            folded, mode = forms(start_saving=saving)
+        try:  # with the rung in reach the walk also prepares its Low frame: the same level, the Map at its parts
+            folded, mode = forms(start_saving=saving, books_rung=lowers)
         except MinimumViewUnfit:  # the optional fold and its own receipt must not refuse an otherwise legal start
             folded, mode = normal
         if mode == initial and folded[mode][1].get("floor", {}).get("runs") != contents[mode][1].get("floor", {}).get("runs"):
             candidate = noted(folded, mode)
             if 0 < (smaller := raw(candidate, mode)) and ordinary(smaller, candidate, mode) <= reclaim:
-                selected = candidate
-    return normal if selected is contents else (selected, initial)
+                selected, size, folds = candidate, smaller, True
+    if lowers and ordinary(size, selected, initial) > safe(before_maps):
+        try:
+            lowered = noted(selected if folds else forms(books_rung=True)[0], "low", maps=True)
+        except MinimumViewUnfit:
+            lowered = None
+        if lowered and 0 < raw(lowered, "low") < min(size, any_form):
+            return lowered, "low"
+    return (selected, initial) if folds else normal
 
 
 @timed_section("fit")

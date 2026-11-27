@@ -635,7 +635,9 @@ def test_primary_voice_start_room_policy_pays_its_frames_keeps_opened_sessions_u
 
     bare, evidence = prepare(refused, unsent_start=False)  # the same preparation, only that argument removed
     assert [row['rung'] for row in evidence['recovery']] == ['floor']
-    assert not all(whole_map in bare for whole_map in maps)  # without it the Map is the first host form to yield
+    # Without it too (carbon B1, PR3 review): below Max the Map answers to the window in every frame, a sent view's
+    # reprojection included, so it stays whole while this window holds my tellings beside it.
+    assert all(whole_map in bare for whole_map in maps) and pages_of(bare)[1]
 
     for window, opened in ((whole + reserve, True), (None, False)):  # an open session whose request fits; an unknown window
         text, evidence = prepare(window, opened=opened)

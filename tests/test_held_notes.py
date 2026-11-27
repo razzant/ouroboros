@@ -1190,7 +1190,8 @@ def test_a_cold_return_replays_the_body_map_parts_it_sent_beside_whole_heads_and
     reader = original["reader"]
     source = read_actor_source_bytes(core.section_root, core.section_task_id, original["source_ref"]).decode()
     old_block = state["context_observations"]["_last_context_observation"]["messages"][0]["content"][0]["text"]
-    assert reader in old_block and "- Change:" in old_block and "Mechanism 599: its facts" in source
+    assert reader in old_block and "`docs/development/<name>.md`:\nchange: Change" in old_block  # the parts: folder, name, title
+    assert "Mechanism 599: its facts" in source
     assert source.startswith("## Body map\n") and PARTS in old_block
 
     restored = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
@@ -1239,7 +1240,7 @@ def test_a_cold_return_replays_the_body_map_parts_it_sent_beside_whole_heads_and
         updated = next(row for row in map_rows(plan) if row["section_id"] == "body_map")
         assert updated["reader"] != reader and updated["source_ref"] != original["source_ref"]
         assert reader not in block and updated["reader"] in block
-        assert "- Rework: `docs/development/change.md`" in block  # the current parts, still short
+        assert "`docs/development/<name>.md`:\nchange: Rework" in block  # the current parts, still short
         current_map = read_actor_source_bytes(core.section_root, core.section_task_id, updated["source_ref"]).decode()
         assert current_map.startswith("## Body map\n") and "- Rework: `docs/development/change.md`" in current_map
         assert ("Mechanism 611: its facts" in current_map) is (mismatch == "changed_chapter")
@@ -1249,7 +1250,7 @@ def test_a_cold_return_replays_the_body_map_parts_it_sent_beside_whole_heads_and
             "read_file", {"root": "artifact_store", "path": updated["source_ref"]["path"]})
         assert read_actor_source_bytes(core.section_root, core.section_task_id, original["source_ref"]).decode() == source
     else:
-        assert map_rows(plan) == originals and reader in block and "- Change: `docs/development/change.md`" in block
+        assert map_rows(plan) == originals and reader in block and "`docs/development/<name>.md`:\nchange: Change" in block
     payload = "\n".join(part["text"] for part in resumed[0]["content"])  # the restored request's whole system row
     assert "A held note. " * 1_500 in payload and "Another held note. " * 1_500 in payload  # both heads, whole
     notices = [row["content"] for row in resumed if "The tool set changed since this task's last request" in str(

@@ -437,8 +437,8 @@ def _no_memory_tokens(plan: Any, rendered_mode: str) -> Optional[int]:
 def mode_cause(plan: Any, rendered_mode: str) -> str:
     """Why a candidate renders below the plan's owner mode, from the plan's own facts: ``""`` when it does not; the
     start's own mode carries the start's cause (``ContextFitPlan.start``, ``memory_floor.start_cause``: ``memory``,
-    ``request``, ``route`` or ``window``), which no reprojection or route rebind replaces. A first-send preference
-    or an unmeasured Max is not a physical reason. Any other lower mode, or a start lowered by no mode switch,
+    ``request``, ``route`` or ``window``), which no reprojection or route rebind replaces. A first-send fold
+    or an unmeasured Max is not a physical reason; a first send its connection's recorded refusal lowered is ``window``. Any other lower mode, or a start lowered by no mode switch,
     is ``after_start`` (taken by the task after its start). A restored task whose start
     was not carried (``context_fit.UNKNOWN_START``) names no cause: ``""`` beside a lower mode is unknown."""
     from ouroboros.memory_floor import start_cause
@@ -452,7 +452,7 @@ def mode_cause(plan: Any, rendered_mode: str) -> str:
         started = str(getattr(plan, "initial_mode", "") or "")
         cause = start_cause(plan.projection(started).memory_facts) if started else ""
     if rendered_mode == started and cause in FIRST_CONTACT_START.values():
-        return ""
+        return "window" if cause == FIRST_CONTACT_START["maps"] else ""  # lowered by a recorded refusal: Max did not fit
     cause = "" if cause == "unmeasured" else cause
     return cause if rendered_mode == started and cause else "after_start"
 

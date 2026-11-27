@@ -581,6 +581,86 @@ def test_an_integrating_low_start_keeps_the_body_map_while_the_window_holds_it_b
     assert WHOLE_MAP in _text(child_plan, "low")
 
 
+def _repository_map(core):
+    """``core`` with the Body Map and its parts form as ``reference_books.body_map`` renders this repository's books."""
+    from ouroboros.reference_books import body_map, load_reference_book
+
+    repo = Path(__file__).resolve().parents[1]
+    view, parts = body_map(*(load_reference_book(repo, book) for book in ("architecture", "development")))
+    return dataclasses.replace(core, body_map=view.text, body_map_parts=parts)
+
+
+def test_a_delegated_focus_in_owner_max_carries_the_body_map_whole_or_runs_in_low_with_its_parts(tmp_path):
+    """carbon B2 (PR3 review): Max carries the Body Map whole in every focus, a delegated child's too. Its Max room is
+    measured with the Map whole (priced as an integrating root's is); where Max does not hold, the child runs in Low
+    with the Map at its parts like any focus. No window gives a Max frame with the Map at its parts."""
+    child = dataclasses.replace(_repository_map(_core(tmp_path, snapshot=syn.snapshot(role="child", story=syn.pages(6, 3_000)))),
+                                delegated_focus=True)
+    root = dataclasses.replace(child, delegated_focus=False)
+    probed = {}
+
+    def start(window):
+        plan = probed[window] = probed.get(window) or _plan(child, window, "max")
+        return plan.initial_mode == "max"
+
+    lost, held = 12_000, 40_000  # Low, Max: the boundary lies between
+    assert not start(lost) and start(held)
+    while held - lost > 1:
+        middle = (lost + held) // 2
+        lost, held = (lost, middle) if start(middle) else (middle, held)
+    kept, lowered = probed[held], probed[lost]
+    assert not _host_facts(kept, "max") and MAP_PARTS not in _text(kept, "max") and "## Body map\n" in _text(kept, "max")
+    price = dict(kept.max_projection.memory_facts["max_room"]["parts"])["body map"]
+    assert price == dict(_plan(root, held, "max").max_projection.memory_facts["max_room"]["parts"])["body map"]
+    assert lowered.initial_mode == "low" and "body_map" in [row["section_id"] for row in _host_facts(lowered, "low")]
+    assert MAP_PARTS in _text(lowered, "low") and "## Body map\n" not in _text(lowered, "low")
+    for window, plan in probed.items():  # never Max with the Map addressed, in the start or its Max projection
+        assert "body_map" not in [row["section_id"] for row in _host_facts(plan, "max")], window
+
+
+def _below_a_telling(plan, mode):
+    """How many memory items this projection shows below a telling (an address or less)."""
+    from ouroboros import memory_forms
+
+    snapshot = memory_view.snapshot_from_json(plan.core.memory_view_json)
+    level = memory_floor.kept_level(snapshot, plan.projection(mode).memory_facts)
+    return len({ident.removeprefix("bare:") for step, idents in level.addressed if not step.endswith("a")
+                for ident in idents if memory_forms.stage_of(snapshot, step, ident) not in memory_forms.TELLING_STAGES})
+
+
+def _mature_memory():
+    """fable's mature probe memory (PR3 review): 300 authored story pages, 2,400 replies, 100 other conversations."""
+    from ouroboros.chronicle_lead import LEAD_RULE_VERSION
+
+    story = [dict(page, lead_rule=LEAD_RULE_VERSION,
+                  text=(f"Room {i} " + "recorded understanding " * 38 + f"settled point {i}. ") + syn.prose(2_400))
+             for i, page in enumerate(syn.pages(300, 2_400))]
+    return syn.snapshot(role="integrator", story=story,
+                        room_facts=syn.room(lane1=[syn.spoken(i, "ouroboros", 400) for i in range(2_400)], lane2=2),
+                        conversations=[syn.conversation(i, engaged=False) for i in range(100)])
+
+
+def test_the_owners_nano_target_steps_the_body_map_before_it_takes_memory_below_a_telling(tmp_path):
+    """fable 2 (PR3 review): under the owner's own Nano, whose target takes a mature memory below a telling on any
+    window, the Map stands at its parts first, so fewer items go below a telling than with the Map held whole (a Map
+    with no parts form) and no fewer than with no Map at all; a small memory that fits the target keeps it whole. The
+    owner's own Low never takes memory below a telling by its target: on a window that holds both, the Map is whole."""
+    mature = _repository_map(_core(tmp_path / "mature", snapshot=_mature_memory()))
+    nano = _plan(mature, 872_000, "nano")
+    assert nano.initial_mode == "nano" and [row["section_id"] for row in _host_facts(nano, "nano")] == ["body_map"]
+    assert MAP_PARTS in _text(nano, "nano")
+    held_whole = _plan(dataclasses.replace(mature, body_map_parts=""), 872_000, "nano")
+    no_map = _plan(dataclasses.replace(mature, body_map="", body_map_parts=""), 872_000, "nano")
+    counts = [_below_a_telling(plan, "nano") for plan in (no_map, nano, held_whole)]
+    assert counts[0] <= counts[1] < counts[2], counts
+    small = _repository_map(_core(tmp_path / "small", snapshot=syn.snapshot(story=syn.pages(3, 2_000))))
+    roomy = _plan(small, 872_000, "nano")
+    assert not _host_facts(roomy, "nano") and "## Body map\n" in _text(roomy, "nano") and not _below_a_telling(roomy, "nano")
+    low = _plan(mature, 872_000, "low")
+    assert low.initial_mode == "low" and not _host_facts(low, "low") and "## Body map\n" in _text(low, "low")
+    assert _below_a_telling(low, "low") == 0
+
+
 def test_a_low_start_the_window_cannot_hold_steps_the_body_map_to_its_parts(tmp_path):
     """Past the physical window beside reply reserve and my shortest telling the Body Map steps to its parts and
     addresses beside its retained full text, named a step for the window (no ``start_room``)."""
@@ -592,7 +672,8 @@ def test_a_low_start_the_window_cannot_hold_steps_the_body_map_to_its_parts(tmp_
     assert plan.initial_mode == "low" and [row["section_id"] for row in rows] == ["body_map"], rows
     assert "start_room" not in rows[0] and MAP_PARTS in text and WHOLE_MAP not in text
     assert "omitted for the physical window; retained full text: read_file(root='artifact_store'" in text
-    assert "- Change: `docs/development/change.md`" in text  # the parts still name every chapter of both books
+    # The parts still name every chapter of both books: its folder and extension once, then its name with its title.
+    assert "`docs/architecture/<name>.md`:\ncore: Core" in text and "`docs/development/<name>.md`:\nchange: Change" in text
 
     # Without held heads, the cold fit prices the previously shown parts list.
     from ouroboros.artifacts import read_actor_source_bytes
@@ -671,8 +752,8 @@ def test_a_required_book_yields_optional_maps_then_the_body_map_and_never_one_th
 
 def test_unsent_start_reprojection_keeps_the_whole_body_map_distinct_from_sent_views(tmp_path):
     """Unsent start reprojection (e.g. first text rebind before any send) keeps the whole Body Map of a new Low start
-    while tellings fit the physical frame, independent of assistant/user message roles; an already-sent or
-    cold-restored view (unsent_start=False) keeps host forms before memory."""
+    while tellings fit the physical frame, independent of assistant/user message roles; an already-sent view
+    (unsent_start=False) keeps it whole too while the window holds my tellings beside it, and steps it only where not."""
     talk = [syn.conversation(i, words=8, word_chars=400) for i in range(40)]
     core = booked(_core(tmp_path, snapshot=syn.snapshot(conversations=talk)), tmp_path, body="Its practice. " * 20)
     roomy = _plan(core, 2_000_000, "low")
@@ -691,8 +772,20 @@ def test_unsent_start_reprojection_keeps_the_whole_body_map_distinct_from_sent_v
     assert WHOLE_MAP in _text(unsent, "low")
     assert any(unsent.low_projection.memory_facts["floor"]["steps"].values())
 
+    # A sent view (carbon B1, PR3 review): below Max the Map answers to the window in every frame, mid-run
+    # reprojections included. It stays whole while my shortest tellings fit the window beside it: here memory folds
+    # and the Map stands whole; it steps only where the window cannot hold my tellings beside it.
     sent = roomy.reproject_for_route(**args, unsent_start=False)
-    assert "body_map" in {row["section_id"] for row in _host_facts(sent, "low")}
+    assert "body_map" not in {row["section_id"] for row in _host_facts(sent, "low")}
+    assert WHOLE_MAP in _text(sent, "low") and any(sent.low_projection.memory_facts["floor"]["steps"].values())
+    shown = _plan(core, 400_000, "low")  # carbon's own numbers: a 300,000 window with a soft slack or a small refusal
+    for soft in ({"slack_tokens": 5_000}, {"refused_tokens": 1_000}):
+        rebound = shown.reproject_for_route(window_tokens=300_000, known_window=True, ratio=1.0, output_reserve=RESERVE,
+                                            tool_schemas=[], start_mode="low", current_messages=shown.messages_for("low"), **soft)
+        assert not _host_facts(rebound, "low") and WHOLE_MAP in _text(rebound, "low"), soft
+    narrow_sent = roomy.reproject_for_route(**{**args, "window_tokens": tight - 36_000}, unsent_start=False)
+    assert "body_map" in {row["section_id"] for row in _host_facts(narrow_sent, "low")}  # the window took it
+    assert MAP_PARTS in _text(narrow_sent, "low") and WHOLE_MAP not in _text(narrow_sent, "low")
 
     bare_core = booked(_core(tmp_path / "bare", snapshot=syn.snapshot()), tmp_path / "bare")
     bare = _plan(bare_core, 2_000_000, "low")

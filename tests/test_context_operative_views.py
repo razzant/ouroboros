@@ -13,9 +13,22 @@ def test_the_body_map_keeps_every_part_and_address_and_retains_the_whole_map(tmp
     assert isinstance(section, HostSection) and section.section_id == "body_map"
     assert (section.full_text, section.operative_view) == (view.text, parts)
     assert view.text.startswith("## Body map\n") and parts.startswith("## Body map (parts and addresses)")
-    for chapter in (*books[0].chapters, *books[1].chapters):  # every manual of both books keeps its address
-        assert f"`{chapter.source_path}`" in parts
-    assert "`docs/DESIGN.md`" in parts and "`docs/PERSISTENCE.md`" in parts  # the Reference Atlas addresses
+    # Each folder and shared extension is named once above its files (`docs/architecture/<name>.md`:): an address
+    # is that line with the row's name in place of <name>.
+    pattern, addresses = None, set()
+    for line in parts.splitlines():
+        if line.startswith("`") and line.endswith("`:") and "<name>" in line:
+            pattern = line[1:-2]
+        elif pattern is not None and line and not line.startswith(("- ", "#", "Each ")) and not line.endswith(":"):
+            addresses.add(pattern.replace("<name>", line.split(":", 1)[0]))
+        elif not line:
+            pattern = None
+    for chapter in (*books[0].chapters, *books[1].chapters):  # every manual of both books keeps its title and address
+        assert chapter.source_path in addresses, chapter.source_path
+        stem = chapter.source_path.rpartition("/")[2].removesuffix(".md")
+        assert f"\n{stem}: {chapter.headings[0].title}\n" in parts
+    assert {"docs/DESIGN.md", "docs/PERSISTENCE.md"} <= addresses  # the Reference Atlas addresses
+    assert parts.endswith('Each reads with `read_file(root="system_repo", path=...)`, its name in place of `<name>`.')
     assert len(parts) < len(view.text) / 4
     assert "## ARCHITECTURE.md" not in view.text and " lines " not in parts  # no whole book, no line ranges
     compact, development = context_layout.reference_doc_sections(

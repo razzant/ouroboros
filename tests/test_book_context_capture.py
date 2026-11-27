@@ -172,3 +172,37 @@ def test_authored_common_understanding_is_resident_with_every_note_summary(tmp_p
     assert "Details belong to their source" in sections
     assert "Detailed source." not in sections  # the body still belongs to its own note
     assert "scope='global'" in sections
+
+
+@pytest.mark.parametrize("ceiling", ["no-ceiling", "system-docs", "no-reader", "workspace-reader"])
+def test_a_presence_ceiling_that_cannot_follow_the_maps_addresses_is_not_told_to_read_them(tmp_path, ceiling):
+    """astra 2 (PR3 review): the Map names its reader only for an actor that can follow it. A Presence turn whose
+    positive capability ceiling holds no ``read_file``, or grants it for a workspace subtree only, gets
+    ``BODY_MAP_NO_READER`` in the whole Map and in its parts form, through the real capture; an actor with no ceiling
+    and a Presence whose ceiling admits the system repository's docs keep the reader line, and the registry's own
+    read of the Architecture entrypoint agrees with what the Map says. No access is widened."""
+    from ouroboros import reference_books
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+    from tests import test_presence_authority as pa
+
+    targets = {"no-ceiling": None, "no-reader": (),
+               "workspace-reader": (pa.PresenceToolTarget("builtin", "read_file"),
+                                    pa.PresenceResourceTarget("active_workspace", ("read",), "shared")),
+               "system-docs": (pa.PresenceToolTarget("builtin", "read_file"),
+                               pa.PresenceResourceTarget("system_repo", ("read",), "docs"))}[ceiling]
+    contract = {} if targets is None else {"capability_ceiling": pa.presence_ceiling_payload(
+        pa.build_presence_capability_ceiling(skill_name="moderator", skill_content_hash="c" * 64,
+                                             state_fingerprint="d" * 64, resolution=pa._resolution(*targets)))}
+    env, _plain, task = _capture(tmp_path, {"task_contract": contract} if contract else None)
+    ctx = ToolContext(repo_dir=env.repo_dir, drive_root=env.drive_root, task_contract=contract)
+    registry = ToolRegistry(repo_dir=env.repo_dir, drive_root=env.drive_root)
+    registry.set_context(ctx)
+    core = context._capture_context_core(env, Memory(drive_root=env.drive_root, repo_dir=env.repo_dir), task, None, ctx,
+                                         registry)
+    readable = ceiling in ("no-ceiling", "system-docs")
+    promise = 'read_file(root="system_repo"'
+    for form in (core.body_map, core.body_map_parts):
+        assert (promise in form) is readable and (reference_books.BODY_MAP_NO_READER in form) is not readable, form
+    assert (promise in _text(_plan(env, core, task, "max"), "max")) is readable
+    read = registry.execute_result("read_file", {"root": "system_repo", "path": "docs/ARCHITECTURE.md"})
+    assert (read.status == "ok") is readable, read.text[:200]

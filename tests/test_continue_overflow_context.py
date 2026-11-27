@@ -90,6 +90,11 @@ def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, fore
     from supervisor.continuation_admission import admit_continuation
 
     env, memory = _make_env_and_memory(tmp_path)
+    if required:  # the handbook is no memory's debt: the books rung pays, so the Map must have a step to give
+        chapter = env.repo_dir / "docs/architecture/01-section-a.md"
+        chapter.write_text(chapter.read_text(encoding="utf-8").replace(
+            "What section A gives me.", "What section A gives me. " + "Its mechanism and its reason. " * 200),
+            encoding="utf-8", newline="\n")
     _q, _state, workers = _install_queue(env.drive_root, monkeypatch)
     for key, value in {"OUROBOROS_CONTEXT_MODE": mode, "OUROBOROS_TASK_REVIEW_MODE": "off",
                        "OUROBOROS_SAFETY_MODE": "off", "OUROBOROS_MAX_ROUNDS": "12",
@@ -130,8 +135,12 @@ def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, fore
         # the Map whole (owner order 7A: memory before the books' step, which waits for a further refusal; 06.11).
         # The task's own requirement keeps the whole handbook in every request, in either mode; no flag adds it.
         assert "## Body map" in system_text
+        # With a required handbook memory owes nothing: the refusal's books rung steps the Map to its parts and
+        # addresses (Low, temporarily), the one thing it has to give (PR3 contract 5); the handbook stays whole.
+        stepped = required and index == 2
         if mode == "max":
-            assert core.body_map in system_text, index
+            assert (core.body_map in system_text) is not stepped, index
+            assert ("## Body map (parts and addresses)" in system_text) is stepped, index
         assert sum(block.get("text", "").startswith("## DEVELOPMENT.md\n")
                    for m in request["messages"] if m["role"] == "system"
                    for block in m["content"]) == int(required)

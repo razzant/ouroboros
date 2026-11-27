@@ -8,6 +8,8 @@ earlier steps left of that target: the gradual order the owner asked for, never 
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from types import SimpleNamespace
 import pytest
 
@@ -269,6 +271,7 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
                     books="## Body map\\n" in text, parts="## Body map (parts and addresses)" in text,
                     tools=sorted(tool["function"]["name"] for tool in body["tools"]), bible="owed on body changes" in text,
                     development="Hermetic preflight isolation" in text, story=len(rooms), rooms=rooms,
+                    leads=text.count("settled its mock work"),  # every room's telling lead (``told_page``)
                     cap=body.get("max_tokens"), owner="fixture 3896" in text,
                     facts=re.findall(r"\[CONTEXT_FACTS\][^|]+\| mode ([^|]+)", text)))
                 if raw >= self.limit:
@@ -343,7 +346,7 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
         sends = {}
 
         first, a1, target_a, _ = send(7101, "synthetic-a-3896")
-        refused, before_maps, _any = cw.first_contact_limits(target_a, a1[0]["cap"])
+        refused, before_maps, _any = cw.first_contact_limits(target_a, a1[0]["cap"])  # (Max wire, before maps, any form)
         assert refused == a1[0]["raw"], (a1, ce._read(drive).get("main_first_contact"))
         assert before_maps == (a1[1]["raw"] if scenario != "enough" else 0), (a1, ce._read(drive).get("main_first_contact"))
         second, a2, _, _ = send(7102, "synthetic-a-3896")
@@ -377,7 +380,13 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
         if scenario == "none":  # a refused Body-Map-parts send is no Max bound, and the next start keeps its tellings
             _third, a3, _, _ = send(7106, "synthetic-a-3896")
             assert a3[0]["story"] == a2[0]["story"] and a3[0]["books"] and not a3[0]["parts"], (a2, a3)
-            assert a3[0]["raw"] <= a2[0]["raw"] + 2_000, (a2, a3)
+            assert a3[0]["leads"] == a2[0]["leads"] == 16, (a2, a3)
+            # Max with A2's story: A2's size plus the Map's step back to whole (as A1's own sends measured it) plus
+            # what four more chats add to memory (the same Low form at the same level on both chats: their last sends).
+            step = max(a["raw"] - b["raw"] for a in a1 for b in a1 if a["books"] and b["parts"] and a["story"] == b["story"])
+            grown = a3[-1]["raw"] - a2[-1]["raw"]
+            assert a3[-1]["parts"] and a2[-1]["parts"] and a3[-1]["leads"] == a2[-1]["leads"], (a2, a3)
+            assert step > 0 and a2[0]["raw"] < a3[0]["raw"] <= a2[0]["raw"] + step + grown + 500, (a1, a2, a3, step, grown)
         keyed("synthetic-a-3896")
     print({"limit": server.limit, "A1": a1, "A2": a2, "B1": b1})
     if scenario == "none":
@@ -386,18 +395,21 @@ def test_first_contact_preference_reaches_the_next_real_chat_request(tmp_path, m
     else:
         assert [row["status"] for row in a1] == ([400, 400, 200] if scenario == "maps" else [400, 200]), a1
         # M: the books rung's Body Map at its parts is what A1's round finally sent; memory's pass was refused.
+        # That first numberless pass of the running view takes every telling (a1[1]["leads"] == 0) while the Map is
+        # still whole: base behaviour, razzant/ouroboros#4321, pinned neither away nor as desired here.
         assert scenario != "maps" or (a1[2]["parts"] and not a1[1]["parts"] and a1[2]["story"] == a1[1]["story"]), a1
-        # M: A2's folded Max, bounded by the followed maps refusal, is still over M's bound; memory's pass after
-        # that real refusal recovers on the same route and in Max, never by stepping to Low by preference.
-        assert [row["status"] for row in a2] == ([400, 200] if scenario == "maps" else [200]), (a1, a2)
-        assert all(row["books"] and not row["parts"] for row in a2), a2
-    if scenario != "enough":  # the followed maps refusal bounds the fold: every room at its telling (E keeps most whole)
-        sent = cf.bounded_prompt_tokens_for_payload({"messages": second.messages_for("max"),
-            "tools": json.loads(second.start_tool_schemas_json)}, 0)
-        assert a2[0]["story"] == 0 and sent < refused - cf.reclaim_low_water_margin(None, refused), (a2, sent, refused)
+        # M: one accepted send. My human's Max at its tellings still stood above the refused Max a parts send
+        # followed, so A2 starts Low, temporarily, for the window: the Map at its parts, every telling, A1's tools.
+        assert [row["status"] for row in a2] == [200], (a1, a2)
+    lowered = scenario != "enough"  # E's fold gets under its refusal (no parts send followed): Max, the Map whole
+    if lowered:  # every room at its telling, smaller than every size this wire refused
+        assert a2[0]["story"] == 0 and a2[0]["leads"] == 16 and a2[0]["raw"] < _any, (a1, a2, _any)
+        assert a2[0]["parts"] and not a2[0]["books"] and a2[0]["tools"] == a1[0]["tools"], (a1, a2)
+    else:
+        assert a2[0]["books"] and not a2[0]["parts"], a2
     assert b1[0]["status"] == 400 and b1[0]["books"] and b1[0]["story"] == a1[0]["story"], (a1, b1)
-    assert a2[0]["books"] and not a2[0]["parts"] and a2[0]["story"] < a1[0]["story"]  # Max, the Map whole
-    assert second.initial_mode == "max" and second.start == ("max", "first_contact")
+    assert a2[0]["story"] < a1[0]["story"]
+    assert second.start == (("low", "first_contact_maps") if lowered else ("max", "first_contact")), second.start
     assert all(row["bible"] and row["owner"] and row["cap"] == a1[0]["cap"] for row in a1 + a2 + b1)
     assert all(plan.window_record.usable is None and plan.preferred_mode == "max" for plan in (first, second, other))
     assert second.projection(second.initial_mode).memory_facts["first_contact_preference"]
@@ -924,36 +936,61 @@ def test_a_just_chosen_body_pays_last_and_only_what_a_providers_refusal_left(mon
         assert changed is bool(paid or chosen)
 
 
-@pytest.mark.parametrize("ceiling,mode", [(0, "low"), (200_000, "low"), (50_000, "nano")])
-def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_path, monkeypatch, ceiling, mode):
-    from ouroboros import capability_evidence as ce, context_fit as cf, memory_view as mv
-    from ouroboros.context_window import record_observation
+def _books_core(tmp_path, form="parts"):
+    """A Max core whose Body Map Max holds whole (``_reference_book_fixtures.booked``: the real renderer's Map and its
+    parts form) beside a reader for its full text; ``form`` takes the step away: no parts form, or no store to retain
+    the full text in."""
+    from ouroboros import context_fit as cf, memory_view as mv
     from tests import _memory_view_synthetic as syn
+    from tests._reference_book_fixtures import booked
+
+    snapshot = syn.snapshot(story=syn.pages(2, 200), room_facts=syn.room())
+    core = booked(cf.ContextCore("Core", "", "", "", "", "", '"Assignment"', memory_view_json=mv.snapshot_json(snapshot),
+                                 section_root=str(tmp_path / "sections"), section_task_id="books01"),
+                  tmp_path, body="Whole map material. " * 40)
+    return replace(core, **{"parts": {}, "no-parts": {"body_map_parts": ""}, "no-reader": {"section_root": ""}}[form])
+
+
+def _books_ctx(tmp_path, monkeypatch, core, *, mode="max", window=1_000_000):
+    from ouroboros import capability_evidence as ce, context_fit as cf
     import ouroboros.loop as loop
 
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
-    snapshot = syn.snapshot(story=syn.pages(2, 200), room_facts=syn.room())
-    core = cf.ContextCore("Core", "", "Whole books. " * 8_000, "", "", "", '"Assignment"',
-                          memory_view_json=mv.snapshot_json(snapshot))
-    plan = cf.build_context_fit_plan(None, core, {"type": "task"}, preferred_mode="max",
+    plan = cf.build_context_fit_plan(None, core, {"type": "task"}, preferred_mode=mode,
         route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "test"},
-            ce.CapabilityEvidence(1_000_000, "confirmed", "metadata", "books-route")))
-    assert plan.initial_mode == "max"
-    ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode="max", messages=plan.messages_for("max"),
+            ce.CapabilityEvidence(window, "confirmed" if window else "unprobeable", "metadata", "books-route")))
+    assert plan.initial_mode == mode
+    ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=mode, messages=plan.messages_for(mode),
         tools=SimpleNamespace(_ctx=SimpleNamespace()), tool_schemas=[], accumulated_usage={}, task_id="books01",
         event_queue=None, drive_logs=tmp_path / "logs", round_idx=2)
+
     def measure(ctx, **_kwargs):
         return cf.measure_main_fit(ctx.context_fit_plan, ctx.messages, [],
             profile=lmc._main_context_profile(ctx.context_fit_plan, ctx.active_context_mode),
             rendered_mode=ctx.active_context_mode, round_id="books")
+
+    events = []
     monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
-    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda _queue, _task, _logs, event, *_a, **_kw: events.append(event))
     monkeypatch.setattr(lmc, "invalidate_task_cache_splits", lambda *_a: None)
+    return ctx, measure, events
+
+
+@pytest.mark.parametrize("ceiling,mode", [(0, "low"), (200_000, "low"), (50_000, "nano")])
+def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_path, monkeypatch, ceiling, mode):
+    """The books rung from Max: the Body Map steps to its parts (a real Map, its parts form and a reader for its full
+    text), in the frame the refused window selects."""
+    from ouroboros.context_window import record_observation
+
+    ctx, measure, events = _books_ctx(tmp_path, monkeypatch, _books_core(tmp_path))
+    plan = ctx.context_fit_plan
     if ceiling:
         record_observation(tmp_path, plan.route_fp, refused=ceiling)
     lmc._reproject_actual_overflow_low(ctx)
     assert ctx.active_context_mode == ctx.tools._ctx.active_context_mode == mode
+    assert lmc.map_at_parts(ctx.context_fit_plan.projection(mode))
+    assert [event["checkpoint_kind"] for event in events] == ["context_fit_low_retry"]
     from ouroboros.transcript_prefix import SCOPED_SANCTION_ATTR  # the next send names this rebuild (C2 S4)
     assert getattr(ctx.tools._ctx, SCOPED_SANCTION_ATTR) == {"system": "low_retry"}
     assert ctx.messages[0] == ctx.context_fit_plan.projection(mode).system_message()
@@ -963,3 +1000,40 @@ def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_pa
     fit = measure(ctx).measurement
     assert fit.capacity_total_tokens - fit.response_reserve_tokens == (ceiling - fit.response_reserve_tokens if ceiling else 1_000_000 - 8_192)
     assert ctx.context_fit_plan.window_record.source.startswith("refusal" if ceiling else "metadata")
+
+
+@pytest.mark.parametrize("form", ["parts", "no-parts", "no-reader"])
+def test_a_books_rung_that_cannot_step_the_map_changes_and_counts_nothing(tmp_path, monkeypatch, form):
+    """astra (PR3 review): with no parts form or no reader for the Map's full text the rung has nothing to give: the
+    mode, the plan and the transcript stay, no ``context_fit_low_retry`` checkpoint tells the owner the Map was
+    shortened, and the step is no contribution; with both, the same refusal steps the Map and counts its saving."""
+    ctx, measure, events = _books_ctx(tmp_path, monkeypatch, _books_core(tmp_path, form))
+    plan, shown = ctx.context_fit_plan, json.dumps(ctx.messages)
+    shed = lmc._apply_refusal_step(ctx, "books", measure(ctx), None, 0)
+    if form == "parts":
+        assert ctx.active_context_mode == "low" and lmc.map_at_parts(ctx.context_fit_plan.projection("low"))
+        assert shed and shed > 0 and [event["checkpoint_kind"] for event in events] == ["context_fit_low_retry"]
+    else:
+        assert shed is None and events == []
+        assert ctx.active_context_mode == "max" and ctx.context_fit_plan is plan and json.dumps(ctx.messages) == shown
+
+
+@pytest.mark.parametrize("form", ["parts", "no-reader"])
+def test_an_already_low_frame_on_a_route_with_no_window_steps_the_map_at_a_numberless_refusal(tmp_path, monkeypatch, form):
+    """astra 1 (PR3 review): an owner-Low plan on a route that states no window meets a refusal that names no size; the
+    books rung works in that frame too: the Map steps to its parts, the mode stays Low, the saving counts and the
+    owner is told. With no reader for the Map's full text nothing steps, nothing is claimed."""
+    ctx, measure, events = _books_ctx(tmp_path, monkeypatch, _books_core(tmp_path, form), mode="low", window=0)
+    plan = ctx.context_fit_plan
+    assert plan.window_record is None or plan.window_record.usable is None  # no window known on this route
+    assert not lmc.map_at_parts(plan.projection("low"))  # an unknown window shortens nothing at the start
+    before = plan.projection("low").memory_facts["floor"].get("steps")
+    shed = lmc._apply_refusal_step(ctx, "books", measure(ctx), None, 0)
+    assert ctx.active_context_mode == "low"
+    if form == "parts":
+        rebound = ctx.context_fit_plan.projection("low")
+        assert lmc.map_at_parts(rebound) and shed and shed > 0
+        assert rebound.memory_facts["floor"].get("steps") == before  # only the Map stepped
+        assert [event["checkpoint_kind"] for event in events] == ["context_fit_low_retry"]
+    else:
+        assert shed is None and events == [] and ctx.context_fit_plan is plan

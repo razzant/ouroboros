@@ -858,6 +858,26 @@ def _section_root_for(env: Any, ctx: Any) -> str:
     return str(env.drive_root)
 
 
+def _manuals_readable(ctx: Any) -> bool:
+    """Whether this actor can follow the Body Map's addresses. Every actor reads the system repository's manuals but
+    a Presence turn under its binding's capability ceiling: it can only where the ceiling grants ``read_file`` and its
+    resource ceiling admits the books (the read path's own admission decides, ``core_file_tools.read_admission``).
+    A ceiling that cannot be read is not a reader: the Map then says so instead of naming a call that would be refused."""
+    try:
+        from ouroboros.presence_authority import presence_ceiling_allows_tool, presence_ceiling_from_context
+
+        if (ceiling := presence_ceiling_from_context(ctx)) is None:
+            return True
+        from ouroboros.reference_books import BOOK_ENTRYPOINTS
+        from ouroboros.tools.core_file_tools import read_admission
+
+        return (presence_ceiling_allows_tool(ceiling, "read_file")
+                and read_admission(ctx, "system_repo", BOOK_ENTRYPOINTS["architecture"])[2] is None)
+    except Exception:
+        log.debug("presence ceiling unreadable; the Body Map names no reader", exc_info=True)
+        return False
+
+
 def _connections(tool_registry: Any, task: Dict[str, Any]) -> Tuple[str, str]:
     """This actor's connections map (``tool_connections``): Low/Max form, then Nano form."""
     if tool_registry is None:
@@ -931,7 +951,8 @@ def _capture_context_core(
             book_errors.append(f"Reference book source unavailable: {entrypoint}. {exc}. Full context is not established.")
     body_map, body_map_parts = "", ""
     if "architecture" in books:
-        map_view, body_map_parts = reference_books.body_map(books["architecture"], books.get("development"))
+        map_view, body_map_parts = reference_books.body_map(books["architecture"], books.get("development"),
+                                                            readable=_manuals_readable(ctx))
         body_map = map_view.text
     development_md = reference_books.compose_book(books["development"]) if required and "development" in books else ""
     from ouroboros.context_layout import task_design_navigation

@@ -319,9 +319,10 @@ def test_a_host_step_that_grows_the_receipt_walks_the_shortest_view_again(tmp_pa
 def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path, monkeypatch):
     """Owner shape at 92K: Max and Low cannot hold even their least request, so neither walks (Max prices its ordinary
     memory and, for the gate's need it prints, its shortest telling); Nano walks once, then at each of its next three
-    host forms re-prices that level, misses the window (even its shortest view does not fit) and walks again; the
-    Body Map's parts (a fourth host form since 26.11.2026, which the old chapter maps were not) re-price without a
-    walk, and the knowledge index's outline after it misses and walks again."""
+    host forms re-prices that level, misses the window (even its shortest view does not fit) and walks again. The
+    Body Map, which this window cannot hold beside my tellings, steps to its parts first, before any memory goes below
+    a telling (BIBLE P1), first among the host forms; the walks stay those three. Every host form still ends addressed,
+    the Map at its parts."""
     render, probes = mf.render_view_for_mode, []
 
     def recorded(*args, **kwargs):
@@ -330,9 +331,12 @@ def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path
         return render(*args, **kwargs)
 
     monkeypatch.setattr(mf, 'render_view_for_mode', recorded)
-    assert scale.build(tmp_path, monkeypatch).initial_mode == 'nano'
-    assert probes == [('re-price', 'max')] * 2 + [('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3 + [
-        ('re-price', 'nano'), ('re-price', 'nano'), ('walk', 'nano')]
+    plan = scale.build(tmp_path, monkeypatch)
+    assert plan.initial_mode == 'nano'
+    assert probes == [('re-price', 'max')] * 2 + [('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3, (
+        ' '.join(f"{a}:{m}" for a, m in probes))
+    assert [row['section_id'] for row in plan.projection('nano').memory_facts['host_sections_addressed']] == [
+        'body_map', 'runtime', 'installed_skills', 'subagents', 'knowledge_index']
 
 
 @pytest.mark.parametrize("step, target, outlined", [

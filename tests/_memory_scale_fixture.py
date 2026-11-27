@@ -13,7 +13,7 @@ HOST = {'knowledge_index': 20000, 'runtime': 15200, 'subagents': 10400,
         'review_continuity': 7200, 'installed_skills': 3200, 'review_ledger': 3200}
 # The resident Body Map and its parts-and-addresses form as ``reference_books.body_map`` renders them from the
 # repository's books (26.11.2026); before it, the start carried the whole Architecture book (400,000 characters).
-BODY_MAP, BODY_MAP_PARTS = 14300, 3260
+BODY_MAP, BODY_MAP_PARTS = 14300, 2380
 
 
 def text(label, size):

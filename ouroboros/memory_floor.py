@@ -1534,7 +1534,7 @@ def counterfactual_lines(fit: Mapping[str, Any]) -> List[str]:
     if not fit.get("measured"):
         return ["", head, "not measured: this task's plan does not hold " + "; ".join(fit.get("missing") or ()) + "."]
     f = fit["frame"]
-    started = ("Max with chapter maps by first-send preference" if f.get("maps") and f.get("advised") else
+    started = (f"{TEMPORARY_LOW} after a refusal recorded on its connection" if f.get("maps") and f.get("advised") else
                TEMPORARY_LOW if f.get("maps") else "Max, window not measured at the start" if f.get("unmeasured")
                else f["started"])
     lines = ["", head, (

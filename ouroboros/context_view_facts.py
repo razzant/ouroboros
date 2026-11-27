@@ -100,7 +100,7 @@ def memory_facts(plan, mode, messages=()):
                 ", a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here"
                 if cause == "route" else "")
     if preference := receipt.get("first_contact_preference"):
-        form = "chapter maps" if preference == "maps" else "a smaller memory view"
+        form = "the body map at its parts and addresses" if preference == "maps" else "a smaller memory view"
         line += f"; first send chose {form} after a refusal on its planned connection; that refusal stated no window"
     shown = floor.addressed_text((receipt.get("floor") or {}).get("steps") or {})
     line += ((f"; shown only by address: {shown}" if shown else "") + held_heads_fact(plan, receipt)
@@ -135,8 +135,9 @@ def mode_words(plan, mode):
     (a cold restore's capture may have lowered for another), its shortfall on that cause's basis
     (``memory_floor.lowered_need``); Max says Max is not measured where the row's own window text knows no window
     (``row_window``), whatever its start, a rebind or restore onto an unknown window too, and a window learned later
-    (a rebind, a refusal) is a measured Max. First-send maps (a start recorded before the books left every prompt) were
-    a preference, not temporary Low due to the window."""
+    (a rebind, a refusal) is a measured Max. A first send that a refusal recorded on its connection lowered (the Body
+    Map at its parts, every telling kept) is the same Low, temporarily, for the window; its cause is that refusal, which
+    stated no window."""
     preferred = str(getattr(plan, "preferred_mode", "") or "")
     if mode == "low" and preferred == "max":
         from ouroboros.context_fit import FIRST_CONTACT_START
@@ -147,7 +148,7 @@ def mode_words(plan, mode):
         room = room if isinstance(room, dict) else {}
         saved_maps = getattr(plan, "start", None) == ("low", FIRST_CONTACT_START["maps"])
         if facts.get("first_contact_preference") == "maps" or (saved_maps and room.get("cause") not in ("crowded", "route")):
-            return "low (first-send chapter maps; my human's mode: max)"
+            return f"{floor.TEMPORARY_LOW.lower()} (my human's mode: max); cause {FIRST_SEND_REFUSED}"
         cause = mode_cause(plan, mode)
         same = cause in floor.LOWERED_CAUSES and room.get("cause") in ("crowded", "route") and floor.lowered_cause(room) == cause
         short = floor.lowered_need(room)[1] - room["window"] if same else 0
@@ -158,6 +159,8 @@ def mode_words(plan, mode):
     return mode
 
 
+#: Why a first send was lowered by what its connection refused before (``context_fit._prefer_first_contact``).
+FIRST_SEND_REFUSED = "a larger request was refused on this connection before, and the refusal stated no window"
 _LOW_START_WHY = {
     "memory": "my memory did not fit the window beside the work's room even in its shortest tellings",
     "request": "even with no memory, what the request itself carries tips this start over the window on {model}",
@@ -175,7 +178,12 @@ def low_start_line(plan, mode, task_id):
     window."""
     receipt = (plan.projection(mode).memory_facts or {}) if plan is not None else {}
     room = receipt.get("max_room")
-    if receipt.get("role") in DELEGATED_FOCUS_ROLES or not isinstance(room, dict) or room.get("cause") not in ("crowded", "route"):
+    if receipt.get("role") in DELEGATED_FOCUS_ROLES:
+        return ""
+    if mode == "low" and receipt.get("first_contact_preference") == "maps":  # lowered by a recorded refusal: no Max room
+        return (f"Task {task_id} runs in Low for now, not in your Max: {FIRST_SEND_REFUSED}; my memory keeps every "
+                "telling and the body map stands at its parts and addresses. Your setting stays Max.")
+    if not isinstance(room, dict) or room.get("cause") not in ("crowded", "route"):
         return ""
     ran = "Nano" if mode == "nano" else "Low"  # protected words the Low frame could not hold beside its reply reserve
     why = _LOW_START_WHY[floor.lowered_cause(room)].format(model=str(getattr(plan, "model", "") or "") or "this route")
@@ -205,7 +213,8 @@ def low_start_episode(root, plan, mode, task_id, send):
     levels = int(room.get("levels") or 1)  # the start's work room in eighths of its window
     place = room.get("room_id")
     line = low_start_line(plan, mode, task_id)
-    cause = floor.lowered_cause(room) if line else ""
+    refused = receipt.get("first_contact_preference") == "maps"  # a period of its own, by model, like the route's
+    cause = "refusal" if line and refused else floor.lowered_cause(room) if line else ""
     key = cause if cause == "memory" else f"{cause}:{str(getattr(plan, 'model', '') or '')}"
 
     def periods(bits):  # None leaves the file as it is

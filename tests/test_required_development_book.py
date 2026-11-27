@@ -1689,7 +1689,7 @@ def test_cold_return_without_held_heads_retains_the_updated_map_behind_a_fresh_r
     view = rebound[0]["content"][0]["text"]
     assert PARTS in view and current["reader"] in view
     # The parts of the CURRENT Map (its handbook chapter now titled Rework), never its whole text or the old reader.
-    assert "- Rework: `docs/development/change.md`" in view and "- Change: `docs/development/change.md`" not in view
+    assert "`docs/development/<name>.md`:\nchange: Rework" in view and "\nchange: Change" not in view
     assert original["reader"] not in view and "Mechanism 164: its facts." not in view
     current_bytes = read_actor_source_bytes(core.section_root, core.section_task_id, current["source_ref"]).decode()
     assert current_bytes == updated_core.body_map
